@@ -1708,3 +1708,41 @@ test('runner search: two hidden summary statuses with only chrome homonyms are O
   assert.equal(fixture.app.searchPresentationDiagnosticsForTest().rebuilds, 0,
     'a single card target is never rebuilt by Enter')
 })
+
+test('runner search: resize expires cached exact targets before the next step', async (t) => {
+  const runId = 'find-resize-workflow' as never
+  const events: SessionEvent[] = [event('turn/start', { turn: 0 }, 0), event('tool-workflow/run-start', { runId, name: 'audit' }, 1)]
+  let seq = 2
+  for (let index = 0; index < 2; index += 1) {
+    events.push(event('tool-workflow/agent-start', {
+      runId, seq: index, label: `needle ${'x'.repeat(50)}`, phase: 'P', childId: `find-resize-${index}` as never,
+    }, seq++))
+  }
+  events.push(event('tool-workflow/run-end', { runId, stopReason: 'completed' }, seq++))
+  events.push(event('turn/end', { turn: 0, reason: { kind: 'completed' } }, seq++))
+  const fixture = await mountSearchRunner(t, 1, [], 'needle', events)
+  fixture.vt.resize(120, 30)
+  await fixture.settleRender()
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'needle')
+  await fixture.settleRender()
+  assert.match(fullTitle(fixture), /1\/2/)
+  assert.equal(mountedSearchSelection(fixture.app, fixture.app.transcriptSearchPresentationForTest()!.message!)?.exact, true)
+  fixture.input('\r')
+  await fixture.settleRender()
+  assert.match(fullTitle(fixture), /2\/2/)
+  assert.equal(mountedSearchSelection(fixture.app, fixture.app.transcriptSearchPresentationForTest()!.message!)?.exact, true)
+
+  fixture.vt.resize(40, 30)
+  await fixture.settleRender()
+  fixture.input('\r')
+  await fixture.settleRender()
+  assert.match(fullTitle(fixture), /1\/1/,
+    `narrowing invalidates both cached exact targets and converges to one card:\n${fullTitle(fixture)}`)
+  const presented = fixture.app.transcriptSearchPresentationForTest()
+  assert.equal(mountedSearchSelection(fixture.app, presented!.message!)?.exact, false)
+  fixture.input('\r')
+  await fixture.settleRender()
+  assert.match(fullTitle(fixture), /1\/1/, 'the converged card target never recycles stale exact targets')
+})

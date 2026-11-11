@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   chooseSearchViewportTop,
+  selectReadableSearchCandidate,
   type PaintedTargetSegment,
   type PhysicalRect,
 } from '../../src/tui/components/transcript/search-viewport.ts'
@@ -241,4 +242,32 @@ test('search viewport: narrow and short viewports stay inside their real bounds'
   // Physical row = y + documentRow - scrollTop, and columns are viewport
   // relative: the left-side hit under the box row is still readable.
   assert.deepEqual(choice, { scrollTop: 0, visibleSegments: 1, fullyReadable: true })
+})
+
+
+test('search viewport: candidate visibility uses screen coordinates, not document rows', () => {
+  const viewport: PhysicalRect = { x: 0, y: 2, width: 80, height: 20 }
+  const overlay: PhysicalRect = { x: 48, y: 3, width: 32, height: 6 }
+  // scrollTop 20 puts document row 24 on screen row 6, INSIDE the overlay band;
+  // its document row alone (24) is outside the screen-space band. The right-side
+  // candidate is covered; the left-side word on the same physical row is not.
+  const chosen = selectReadableSearchCandidate({
+    viewport,
+    overlay,
+    scrollTop: 20,
+    candidates: [segment(24, 50, 56), segment(24, 0, 6)],
+  })
+  assert.equal(chosen?.startCol, 0, 'the unoccluded left-side word wins on the real screen row')
+})
+
+test('search viewport: candidate pick prefers an on-screen uncovered word over a closer covered one', () => {
+  const viewport: PhysicalRect = { x: 0, y: 0, width: 80, height: 20 }
+  const overlay: PhysicalRect = { x: 48, y: 1, width: 32, height: 8 }
+  const chosen = selectReadableSearchCandidate({
+    viewport,
+    overlay,
+    scrollTop: 0,
+    candidates: [segment(4, 50, 56), segment(3, 0, 6), segment(40, 0, 6)],
+  })
+  assert.equal(chosen?.documentRow, 3, 'the visible left word is preferred over the covered/off-screen ones')
 })

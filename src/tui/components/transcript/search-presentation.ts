@@ -147,6 +147,10 @@ export interface RenderedSearchSelection {
   readonly sourceDisposition?: 'not-painted' | 'unproven'
   /** Best-effort viewport geometry; never semantic occurrence proof. */
   readonly scrollRange?: RenderedSearchScrollRange
+  /** Every ELIGIBLE visible auxiliary candidate (block-relative cells) for a
+   * non-exact current target. Geometry uses these to prefer a candidate that is
+   * already inside the unpainted viewport instead of the first/last match. */
+  readonly candidateSegments?: readonly AltScreenSearchSegment[]
 }
 
 function isImageLine(line: string): boolean {

@@ -971,12 +971,22 @@ taking a transcript row away:
 - **Visible auxiliary text is a display hint, not source proof.** When the
   current card cannot prove its exact source cells but its mounted body really
   renders the query, those visible words are decorated as ordinary matches and
-  the viewport prefers a readable one. A card without an exact region but with a
-  real body (for example a Tool result) scopes that preference through a
+  the viewport prefers a candidate already inside the scroll viewport and not
+  covered by the Search box (screen-coordinate occlusion, never document-row
+  comparison); only when none qualifies does it fall back to the nearest
+  candidate and the existing placement solver. A card without an exact region but
+  with a real body (for example a Tool result) scopes that preference through a
   POSITION-ONLY body region; header chrome, status counters and other UI text are
-  never navigation evidence. The card's own visible header/anchor is marked in
-  the current-card role. Neither changes `selection.exact`, the
-  `not-painted`/`unproven` classification or the semantic occurrence ordinal.
+  never navigation evidence. The candidate pool stays inside the target's own
+  semantic source: delivered-file tails, PTC sub-calls and other declared field
+  regions are never borrowed as scroll evidence. The card's own visible
+  header/anchor is marked in the current-card role. Neither changes
+  `selection.exact`, the `not-painted`/`unproven` classification or the semantic
+  occurrence ordinal.
+- A layout change that can invalidate a proof (resize, theme/palette, display
+  preset, disclosure or content re-measure) expires the disposable navigation
+  qualifications before the next step; the projection and `N/M` re-derive from
+  the current frame. Ordinary search steps do not expire that cache.
 - The active scope and single query belong to the mounted `SurfaceRuntime`
   transaction. Scope changes keep the query, retire the old scope's selection
   and reveal, then select the destination scope's first result from its own

@@ -91,6 +91,44 @@ function isReadable(
   return endX <= overlay.x || startX >= overlay.x + overlay.width
 }
 
+/** Pick the best already-rendered auxiliary candidate for a NON-exact target.
+ * Visibility and occlusion use the SAME screen-space model as
+ * {@link chooseSearchViewportTop}: the document row is translated through the
+ * painted viewport and the overlay is a screen rectangle. Among unoccluded
+ * visible candidates the one nearest the viewport centre wins; an occluded
+ * visible candidate is preferred over an off-screen one only when nothing is
+ * unoccluded. */
+export function selectReadableSearchCandidate(input: {
+  readonly viewport: PhysicalRect
+  readonly overlay?: PhysicalRect
+  readonly scrollTop: number
+  readonly candidates: readonly PaintedTargetSegment[]
+}): PaintedTargetSegment | undefined {
+  if (input.candidates.length === 0) return undefined
+  const maxTop = Math.max(0, Math.trunc(input.scrollTop))
+  const viewport = input.viewport
+  const overlay = isValidRect(input.overlay) ? input.overlay : undefined
+  const visible = input.candidates.filter(segment => {
+    const screenY = viewport.y + segment.documentRow - maxTop
+    if (screenY < viewport.y || screenY >= viewport.y + viewport.height) return false
+    const startX = viewport.x + segment.startCol
+    const endX = viewport.x + segment.endCol
+    return endX > viewport.x && startX < viewport.x + viewport.width
+  })
+  const unoccluded = visible.filter(segment => {
+    if (overlay === undefined) return true
+    const screenY = viewport.y + segment.documentRow - maxTop
+    if (screenY < overlay.y || screenY >= overlay.y + overlay.height) return true
+    const startX = viewport.x + segment.startCol
+    const endX = viewport.x + segment.endCol
+    return endX <= overlay.x || startX >= overlay.x + overlay.width
+  })
+  const pool = unoccluded.length > 0 ? unoccluded : visible.length > 0 ? visible : input.candidates
+  const center = maxTop + (viewport.height - 1) / 2
+  return pool.reduce((best, segment) =>
+    Math.abs(segment.documentRow - center) < Math.abs(best.documentRow - center) ? segment : best, pool[0]!)
+}
+
 /** The conservative anchor rows used when the caller has no proven cells. */
 function anchorSegments(targetRows: { readonly start: number; readonly end: number }, width: number): PaintedTargetSegment[] {
   const segments: PaintedTargetSegment[] = []

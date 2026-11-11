@@ -2430,6 +2430,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    * target may represent its group by the FIRST occurrence, while the explicit
    * jump that created it presented a LATER occurrence; identity checks and
    * subsequent qualification must use the match actually on screen. */
+  /** Non-search structural epoch recorded with the cached qualifications. A
+   * resize/theme/preset/disclosure/remeasure moves it; an ordinary jump does not. */
+  let lastSearchQualificationEpoch = -1
   let presentedNavigationMatchKey: string | undefined
   let activeSearchScope: TranscriptSearchScope | undefined
   let activeSearchQuery = ''
@@ -2479,6 +2482,19 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       ? preferredIndex
       : recoverFullNavigationTargetIndex(previous, navigationTargets, previousIndex)
     publishNavigationTarget()
+  }
+  /** Expire cached grouping when the NON-search frame changed (resize, theme,
+   * display preset, disclosure, content remeasure). The cache is disposable and
+   * this runs once per structural epoch, never once per search step. */
+  const invalidateStaleNavigationQualifications = (folder: TranscriptFolder): void => {
+    const epoch = mounted().searchQualificationEpochForRuntime()
+    if (epoch === lastSearchQualificationEpoch) return
+    lastSearchQualificationEpoch = epoch
+    navigationQualifications.clear()
+    if (navigationTargets.length === 0) return
+    const previous = navigationTargets[navigationCurrent]
+    rebuildFullNavigationTargets(folder, previous, navigationCurrent)
+    displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
   }
   const sameMessageSet = (left: ReadonlySet<TranscriptMessage>, right: ReadonlySet<TranscriptMessage>): boolean => {
     if (left.size !== right.size) return false
@@ -2576,6 +2592,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     navigationTargets = []
     navigationCurrent = -1
     navigationQualifications.clear()
+    lastSearchQualificationEpoch = -1
     presentedNavigationMatchKey = undefined
     lastSearchQuery = ''
     lastSearchRevision = 0
@@ -2611,6 +2628,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // not move).
     refreshSearchMatchesIfStale()
     refreshSearchMatchMessages()
+    invalidateStaleNavigationQualifications(folder)
     const target = resolveSearchTarget()
     presentedNavigationMatchKey = target === undefined ? undefined : transcriptSearchMatchKey(target.match)
     return { matchMessages: resolveSearchMatchMessages(), target, grantReveal: false }
@@ -2721,6 +2739,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // the only authority used to resolve the visible representative.
     refreshSearchMatchesIfStale()
     refreshSearchMatchMessages()
+    invalidateStaleNavigationQualifications(activeFolder())
     const navigationTarget = navigationTargets[navigationCurrent]
     const match = navigationTarget?.match
     if (match === undefined) {
@@ -2944,6 +2963,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     )
     navigationCurrent = navigationTargets.length > 0 ? 0 : -1
     publishNavigationTarget()
+    lastSearchQualificationEpoch = mounted().searchQualificationEpochForRuntime()
     jumpToSearchMatch()
     searchProfiler.end()
   }
@@ -2959,6 +2979,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // fresh target, Prev on the LAST, never one step past it.
     const previousCurrent = navigationCurrent
     refreshSearchMatchesIfStale()
+    invalidateStaleNavigationQualifications(activeFolder())
     syncCurrentNavigationQualification(activeFolder())
     if (navigationTargets.length === 0) {
       jumpToSearchMatch()
@@ -2990,6 +3011,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     searchProfiler.start()
     const previousCurrent = navigationCurrent
     refreshSearchMatchesIfStale()
+    invalidateStaleNavigationQualifications(activeFolder())
     syncCurrentNavigationQualification(activeFolder())
     if (navigationTargets.length === 0) {
       jumpToSearchMatch()
