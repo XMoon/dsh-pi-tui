@@ -257,6 +257,11 @@ export interface SkillCatalogCapability {
    *  The returned disposer ends the subscription before its coordinator is
    *  disposed, and non-cancellation stream errors go to `onError`. */
   onSkillsChange(listener: () => void, onError: (error: unknown) => void): () => void
+  /** Re-establish the Host invalidation subscription after a reported stream
+   *  failure. Called ONLY by an explicit owner refresh (`/reload`, live owner
+   *  switch, surface rebuild) — adapters never retry on their own. Direct has
+   *  no stream gap and omits it. */
+  rearmSkillsChange?(): void
 }
 
 /** The catalog assembly — one narrow sub-interface per catalog domain.

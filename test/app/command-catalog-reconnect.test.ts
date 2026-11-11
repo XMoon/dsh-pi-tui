@@ -511,6 +511,46 @@ test('the official Workspace facts port crosses the command facade BY IDENTITY (
   }
 })
 
+/* ── live owner admission for the sessionless standing refresh ───────────── */
+
+test('a live Session refuses a sessionless standing refresh, so Add directory never replaces its catalog', async () => {
+  const source = controlledRemoteSource({})
+  let sessionId: string | undefined = 'session-live'
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => sessionId,
+  })
+  try {
+    harness.register()
+    assert.ok(harness.builtRunner() !== undefined, 'the runner facade must be built')
+    const readsBefore = source.reads.length
+    const live = await harness.surface.requestCatalogRefresh({
+      source: 'invalidation',
+      target: { kind: 'preset', presetId: 'code', workspaceId: 'ws-1' },
+    })
+    assert.equal(live.kind, 'superseded',
+      'a live Session owns the catalog: the standing (preset/workspace) target is refused')
+    assert.equal(source.reads.length, readsBefore,
+      'the refusal neither re-dispatches nor replaces the live official read')
+    // The SAME request from a sessionless owner reaches the standing path.
+    // There is no confirmed Workspace in this harness, so the coordinator
+    // applies the local incomplete projection (never a Host RPC and never a
+    // blank fabricated complete catalog).
+    sessionId = undefined
+    const sessionless = await harness.surface.requestCatalogRefresh({
+      source: 'invalidation',
+      target: { kind: 'preset', presetId: 'code' },
+    })
+    assert.equal(sessionless.kind, 'applied')
+    if (sessionless.kind === 'applied') {
+      assert.match(String(sessionless.notice), /Select a Host workspace/u,
+        'a sessionless Remote owner without a confirmed Workspace gets the explicit selection prompt')
+    }
+  } finally {
+    harness.dispose()
+  }
+})
+
 /* ── CCR-2 ────────────────────────────────────────────────────────────── */
 
 test('disconnect (A -> undefined) reads nothing, clears nothing, and keeps the Host-origin claim reserved', async () => {

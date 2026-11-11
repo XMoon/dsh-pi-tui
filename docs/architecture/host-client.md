@@ -105,7 +105,7 @@ runner and does not compose through that facade:
   profile through `runProfile()` with the Host-only overlay; it does NOT enter
   `app/bootstrap.ts`. The overlay's single built-in
   `@xmoon76/dsh-pi-tui/host-runtime` row owns the package's ONE private Typert
-  contribution and its three business services. Base/profile-owned Host
+  contribution and its five business services. Base/profile-owned Host
   services are reused, never remounted.
 - **Retired in-process carrier (test-only).** The former M3 in-process
   composition lives in `test/support/m3-inprocess/**`. It is not a real process

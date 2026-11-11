@@ -3937,6 +3937,9 @@ export function applyRunnerWithRuntime(
     if (remoteSources !== undefined && ownership.currentSessionId() === undefined) {
       runOwned('sessionless standing catalog refresh', async () => {
         await sessionRuntime.awaitWorkspacePreflight()
+        // A Session committed while the preflight awaited owns the live
+        // catalog: the standing read must never replace it.
+        if (ownership.currentSessionId() !== undefined) return undefined
         return command.runner().refreshStandingCatalog(
           command.runner().effectivePresetId,
           'invalidation',
@@ -3945,7 +3948,7 @@ export function applyRunnerWithRuntime(
         diag,
         sessionId: () => ownership.currentSessionId(),
         onResult: (outcome) => {
-          if (outcome.kind === 'applied' && outcome.notice !== undefined) {
+          if (outcome !== undefined && outcome.kind === 'applied' && outcome.notice !== undefined) {
             surface.display.notify(outcome.notice, 'error')
           }
         },

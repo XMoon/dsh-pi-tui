@@ -11,7 +11,8 @@
  *   commands + skills through the agent-scoped services);
  * - PRESET: the sessionless STANDING skill catalog of the effective preset
  *   — a skills-only install (no Agent, no session, no turn; the standing
- *   scope comes from `agentPresets.standingKeyFor`, never a probe).
+ *   scope comes from the official `agentPresets.acquireScope()` revision
+ *   lease, never a probe).
  *
  * Lifecycle rules:
  * - a TARGET CHANGE (agent ↔ preset, or a different owner) enters the

@@ -85,6 +85,12 @@ export class RemoteSkillCatalog implements SkillCatalogCapability {
   private readonly skills: RemoteSkillRemotes
   private readonly piTuiSkills: PiTuiSkillsRemotes
   private readonly generation: RemoteConnectionGenerationSource
+  private watchDisposed = true
+  private watchListener: (() => void) | undefined
+  private watchOnError: ((error: unknown) => void) | undefined
+  private watchGeneration: RemoteConnectionGeneration | undefined
+  private watchActive: { readonly generation: RemoteConnectionGeneration; readonly controller: AbortController } | undefined
+  private watchUnsubscribe: (() => void) | undefined
 
   constructor(
     skills: RemoteSkillRemotes,
@@ -197,56 +203,76 @@ export class RemoteSkillCatalog implements SkillCatalogCapability {
   }
 
   onSkillsChange(listener: () => void, onError: (error: unknown) => void): () => void {
-    let disposed = false
-    let observedGeneration = this.generation.getSnapshot()
-    let active: { readonly controller: AbortController } | undefined
-
-    const open = (generation: RemoteConnectionGeneration): void => {
-      const controller = new AbortController()
-      active = { controller }
-      const consume = async (): Promise<void> => {
-        const stream = this.piTuiSkills.watchInvalidations(controller.signal)
-        try {
-          for await (const value of stream) {
-            controller.signal.throwIfAborted()
-            if (!Object.is(generation, this.generation.getSnapshot())) return
-            parsePiTuiSkillsInvalidationFrame(value)
-            listener()
-          }
-          if (!controller.signal.aborted && Object.is(generation, this.generation.getSnapshot())) {
-            throw new Error('piTuiSkills/watchInvalidations ended unexpectedly')
-          }
-        } finally {
-          stream.dispose()
-        }
-      }
-      consume().catch(error => {
-        if (disposed || controller.signal.aborted || !Object.is(generation, this.generation.getSnapshot())) return
-        if (active?.controller === controller) active = undefined
-        onError(error)
-      })
-    }
-
-    const restart = (generation: RemoteConnectionGeneration | undefined): void => {
-      active?.controller.abort()
-      active = undefined
-      if (generation !== undefined && !disposed) open(generation)
-    }
-
-    if (observedGeneration !== undefined) open(observedGeneration)
-    const unsubscribe = this.generation.subscribe(() => {
+    this.disposeSkillsChange()
+    this.watchDisposed = false
+    this.watchListener = listener
+    this.watchOnError = onError
+    const observed = this.generation.getSnapshot()
+    this.watchGeneration = observed
+    if (observed !== undefined) this.openSkillsWatch(observed)
+    this.watchUnsubscribe = this.generation.subscribe(() => {
       const next = this.generation.getSnapshot()
-      if (Object.is(next, observedGeneration)) return
-      observedGeneration = next
-      restart(next)
+      if (Object.is(next, this.watchGeneration)) return
+      this.watchGeneration = next
+      this.restartSkillsWatch(next)
     })
-
-    return () => {
-      if (disposed) return
-      disposed = true
-      unsubscribe()
-      active?.controller.abort()
-      active = undefined
-    }
+    return () => { this.disposeSkillsChange() }
   }
+
+  /** Explicit owner refresh re-establishes a stream that a failure retired. */
+  rearmSkillsChange(): void {
+    if (this.watchDisposed || this.watchListener === undefined || this.watchActive !== undefined) return
+    const generation = this.generation.getSnapshot()
+    if (generation === undefined) return
+    this.watchGeneration = generation
+    this.openSkillsWatch(generation)
+  }
+
+  private restartSkillsWatch(generation: RemoteConnectionGeneration | undefined): void {
+    this.watchActive?.controller.abort()
+    this.watchActive = undefined
+    if (generation !== undefined && !this.watchDisposed) this.openSkillsWatch(generation)
+  }
+
+  private openSkillsWatch(generation: RemoteConnectionGeneration): void {
+    const controller = new AbortController()
+    this.watchActive = { generation, controller }
+    const listener = this.watchListener!
+    const onError = this.watchOnError!
+    const consume = async (): Promise<void> => {
+      const stream = this.piTuiSkills.watchInvalidations(controller.signal)
+      try {
+        for await (const value of stream) {
+          controller.signal.throwIfAborted()
+          if (!Object.is(generation, this.generation.getSnapshot())) return
+          parsePiTuiSkillsInvalidationFrame(value)
+          listener()
+        }
+        if (!controller.signal.aborted && Object.is(generation, this.generation.getSnapshot())) {
+          throw new Error('piTuiSkills/watchInvalidations ended unexpectedly')
+        }
+      } finally {
+        stream.dispose()
+      }
+    }
+    consume().catch(error => {
+      if (this.watchDisposed || controller.signal.aborted
+        || !Object.is(generation, this.generation.getSnapshot())) return
+      if (this.watchActive?.controller === controller) this.watchActive = undefined
+      onError(error)
+    })
+  }
+
+  private disposeSkillsChange(): void {
+    if (this.watchDisposed) return
+    this.watchDisposed = true
+    const unsubscribe = this.watchUnsubscribe
+    this.watchUnsubscribe = undefined
+    unsubscribe?.()
+    this.watchActive?.controller.abort()
+    this.watchActive = undefined
+    this.watchListener = undefined
+    this.watchOnError = undefined
+  }
+
 }

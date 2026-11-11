@@ -46,7 +46,12 @@ import {
 } from './features/terminal-progress.ts'
 import { PiTuiWebAccessHostService } from './features/web-access.ts'
 import { PiTuiHostUserShellService } from './features/host-user-shell.ts'
-import { PiTuiSkillsHostService } from './features/skills.ts'
+import {
+  PiTuiSkillsHostService,
+  type AgentPresetRegistryLike,
+  type SkillRegistryLike,
+  type WorkspaceRegistryLike,
+} from './features/skills.ts'
 
 /** Stable Cordis plugin name (the Loader row id in the Host-only overlay). */
 export const name = 'pi-tui-host-runtime'
@@ -169,7 +174,11 @@ export async function apply(ctx: Context, config: TuiConfigValue): Promise<void>
     fibers.push(hostUserShellFiber)
     await hostUserShellFiber
     const skillsFiber = ctx.inject(PiTuiSkillsHostService.inject, pluginCtx => {
-      new PiTuiSkillsHostService(pluginCtx)
+      new PiTuiSkillsHostService(pluginCtx, {
+        workspaces: () => ctx.reflect.get('workspaceRegistry') as WorkspaceRegistryLike | undefined,
+        skills: () => ctx.reflect.get('skills') as SkillRegistryLike | undefined,
+        agentPresets: () => ctx.reflect.get('agentPresets') as AgentPresetRegistryLike | undefined,
+      })
     })
     fibers.push(skillsFiber)
     await skillsFiber

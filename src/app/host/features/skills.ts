@@ -16,7 +16,7 @@ import {
   type PiTuiSkillsStandingResult,
 } from '../../../runtime/remote/pi-tui-skills-contract.ts'
 
-interface SkillRegistryLike {
+export interface SkillRegistryLike {
   snapshot(options: {
     readonly cwd: string
     readonly scope?: object
@@ -24,28 +24,33 @@ interface SkillRegistryLike {
   }): Promise<{ readonly skills: readonly SkillSummaryLike[]; readonly complete: boolean }>
 }
 
-interface WorkspaceRegistryLike {
+export interface WorkspaceRegistryLike {
   get(id: string): { readonly path: string } | undefined
 }
 
-interface AgentPresetRegistryLike {
+export interface AgentPresetRegistryLike {
   acquireScope(id?: string): Promise<{ readonly key: object } & AsyncDisposable>
+}
+
+/** The narrow Host services this row resolves PER CALL (the built-in Host
+ *  Runtime owns the `ctx.reflect` lookups, so this module has no direct Host
+ *  coupling of its own). */
+export interface PiTuiSkillsHostDeps {
+  workspaces(): WorkspaceRegistryLike | undefined
+  skills(): SkillRegistryLike | undefined
+  agentPresets(): AgentPresetRegistryLike | undefined
 }
 
 export class PiTuiSkillsHostService extends TypertRemoteService {
   static readonly inject = ['typert', 'workspaceRegistry', 'skills', 'agentPresets']
 
-  private readonly workspaces: WorkspaceRegistryLike
-  private readonly skills: SkillRegistryLike
-  private readonly agentPresets: AgentPresetRegistryLike
+  private readonly deps: PiTuiSkillsHostDeps
   private readonly activeWakes = new Set<() => void>()
   private disposed = false
 
-  constructor(ctx: Context) {
+  constructor(ctx: Context, deps: PiTuiSkillsHostDeps) {
     super(ctx, PI_TUI_SKILLS_NAMESPACE)
-    this.workspaces = ctx.workspaceRegistry as unknown as WorkspaceRegistryLike
-    this.skills = ctx.skills as unknown as SkillRegistryLike
-    this.agentPresets = ctx.agentPresets as unknown as AgentPresetRegistryLike
+    this.deps = deps
     ctx.effect(() => () => {
       this.disposed = true
       for (const wake of [...this.activeWakes]) wake()
@@ -57,15 +62,21 @@ export class PiTuiSkillsHostService extends TypertRemoteService {
     signal: AbortSignal,
   ): Promise<PiTuiSkillsStandingResult> {
     signal.throwIfAborted()
-    const workspace = this.workspaces.get(request.workspaceId)
+    const workspaces = this.deps.workspaces()
+    if (workspaces === undefined) throw new Error('Host workspace registry is unavailable')
+    const workspace = workspaces.get(request.workspaceId)
     if (workspace === undefined) throw new Error('Host workspace is unavailable')
+    const skills = this.deps.skills()
+    if (skills === undefined) throw new Error('Host skills registry is unavailable')
+    const agentPresets = this.deps.agentPresets()
+    if (agentPresets === undefined) throw new Error('Host preset registry is unavailable')
 
     let lease: Awaited<ReturnType<AgentPresetRegistryLike['acquireScope']>>
     try {
-      lease = await this.agentPresets.acquireScope(request.presetId)
+      lease = await agentPresets.acquireScope(request.presetId)
     } catch (error) {
       signal.throwIfAborted()
-      const snapshot = await this.skills.snapshot({ cwd: workspace.path, signal })
+      const snapshot = await skills.snapshot({ cwd: workspace.path, signal })
       signal.throwIfAborted()
       return {
         ...this.project(snapshot),
@@ -75,7 +86,7 @@ export class PiTuiSkillsHostService extends TypertRemoteService {
 
     try {
       signal.throwIfAborted()
-      const snapshot = await this.skills.snapshot({ cwd: workspace.path, scope: lease.key, signal })
+      const snapshot = await skills.snapshot({ cwd: workspace.path, scope: lease.key, signal })
       signal.throwIfAborted()
       return this.project(snapshot)
     } finally {
