@@ -608,10 +608,18 @@ test('a Host approval preempts Models input, abandons the workspace and never re
   const h = open()
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
-  await h.vt.waitForRender()
+  // The Enter below must open the masked editor: wait for the page's OWN
+  // actionable frame (the stored-state read answered and the selected
+  // Configure action is enabled), never a single render that can still be
+  // `Stored reading…` with a disabled action a fence would drop.
+  await waitForFrame(
+    h.view,
+    frame => /Stored\s+(?:Configured|Not set)/u.test(frame) && frame.includes('> Configure API Key…'),
+    () => h.vt.waitForRender(),
+    'the /login deeplink must reach the actionable API Key Reference page',
+  )
   // Enter the page-local masked API-key editor, then hand the seat to a Host
   // approval. The workspace must be abandoned at its own lease boundary.
-  await key(h, '\r')
   await key(h, '\r')
   assert.match(h.view(), /Enter the API key/u)
   const decision = h.app.showApprovalPrompt({ toolName: 'bash', reason: 'MA13 blocking-owner probe' })
@@ -646,7 +654,7 @@ test('a keyboard Esc between a bar press and release never cancels the embedded 
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
   await waitForFrame(
     h.view,
-    frame => frame.includes('API Key Reference') && frame.includes('Configure API Key'),
+    frame => /Stored\s+(?:Configured|Not set)/u.test(frame) && frame.includes('> Configure API Key…'),
     () => h.vt.waitForRender(),
     'the /login deeplink must reach the API Key Reference page',
   )
@@ -687,7 +695,7 @@ test('one fresh bar click runs exactly ONE Esc step of the embedded QuestionFlow
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
   await waitForFrame(
     h.view,
-    frame => frame.includes('API Key Reference') && frame.includes('Configure API Key'),
+    frame => /Stored\s+(?:Configured|Not set)/u.test(frame) && frame.includes('> Configure API Key…'),
     () => h.vt.waitForRender(),
     'the /login deeplink must reach the API Key Reference page',
   )
@@ -835,7 +843,7 @@ test('a 30x8 Settings workspace disables Enter for a clipped masked form; 40x16 
   // or provider frame under load).
   await waitForFrame(
     h.view,
-    frame => frame.includes('API Key Reference') && frame.includes('Configure API Key'),
+    frame => /Stored\s+(?:Configured|Not set)/u.test(frame) && frame.includes('> Configure API Key…'),
     () => h.vt.waitForRender(),
     'the /login deeplink must reach the API Key Reference page before Enter',
   )
