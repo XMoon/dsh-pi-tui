@@ -199,10 +199,13 @@ export class TspQueueManager {
     const edit = composer.applyKey(key)
     if (edit.kind === 'edited') {
       const text = composer.state().text
+      const safe = sanitizeDisplayText(text)
+      // A paste can carry ESC/OSC/C1: the live composer is normalized so the
+      // wire never receives raw terminal-control content, and a real edit
+      // stores the safe text. Only an UNTOUCHED raw Host draft keeps its bytes.
+      if (safe !== text) composer.setDraft(safe)
       const raw = this.deps.controller.view().draft ?? ''
-      // The composer renders a SANITIZED copy; keep the RAW Host text while it
-      // is untouched, and use the safe text only after a real edit.
-      this.deps.controller.setDraft(text === sanitizeDisplayText(raw) ? raw : text)
+      this.deps.controller.setDraft(safe === sanitizeDisplayText(raw) ? raw : safe)
     }
     void view
     return true
@@ -234,12 +237,14 @@ export class TspQueueManager {
     const view = this.deps.controller.view()
     if (view.mode === 'closed') return undefined
     const revision = this.revision
+    const editorState = this.editComposer?.state()
+    const safeEditorText = editorState === undefined ? undefined : sanitizeDisplayText(editorState.text)
     const layer = queueManagerLayer(view, {
       serial: this.serial,
       revision,
-      editor: this.editComposer === undefined
+      editor: editorState === undefined || safeEditorText === undefined
         ? undefined
-        : { text: this.editComposer.state().text, cursor: this.editComposer.state().cursor },
+        : { text: safeEditorText, cursor: Math.min(editorState.cursor, safeEditorText.length) },
       actionId: base => `${base}${ACTION_TOKEN}${revision}`,
       bind: intent => () => this.act(intent, revision),
     })

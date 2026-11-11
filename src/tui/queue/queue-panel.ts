@@ -491,7 +491,8 @@ export class QueuePanel implements Component, Focusable {
         // message preserves its bytes); after a real edit the safe text is the
         // new data. A Host control sequence is never rendered.
         const raw = this.controller.view().draft ?? ''
-        this.controller.setDraft(text === sanitizeDisplayText(raw) ? raw : text)
+        const safe = sanitizeDisplayText(text)
+        this.controller.setDraft(safe === sanitizeDisplayText(raw) ? raw : safe)
       }
       const safe = sanitizeDisplayText(view.draft ?? '')
       editor.setText(safe)
