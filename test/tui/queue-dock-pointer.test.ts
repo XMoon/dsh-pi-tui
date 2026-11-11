@@ -85,6 +85,7 @@ test('the Manage header is a real click target that opens Browse', () => {
   const x = plain(lines[0]!).indexOf('Manage')
   assert.ok(x > 0)
   dock.handleMouse(pointer(0, x, width, 'press'))
+  dock.handleMouse(pointer(0, x, width, 'release'))
   dock.handleMouse(pointer(0, x, width, 'click'))
   assert.deepEqual(opens, [undefined], 'Manage opens without an occurrence id')
 })
@@ -97,6 +98,7 @@ test('a Host row click opens the manager with that exact occurrence id', () => {
   assert.ok(row > 0)
   const x = plain(lines[row]!).indexOf('run the whole suite')
   dock.handleMouse(pointer(row, x, width, 'press'))
+  dock.handleMouse(pointer(row, x, width, 'release'))
   dock.handleMouse(pointer(row, x, width, 'click'))
   assert.deepEqual(opens, ['occ-2'], 'the Host occurrence id is the preselection hint')
 })
@@ -111,6 +113,7 @@ test('a client-local sending echo opens Browse without a fabricable occurrence i
   const row = lines.findIndex(line => plain(line).includes('queued locally'))
   assert.ok(row > 0)
   dock.handleMouse(pointer(row, 2, width, 'press'))
+  dock.handleMouse(pointer(row, 2, width, 'release'))
   dock.handleMouse(pointer(row, 2, width, 'click'))
   assert.deepEqual(opens, [undefined], 'no fabricated Host id from a local echo')
 })
@@ -122,6 +125,7 @@ test('a repaint between press and release cannot retarget the click', () => {
   const row = lines.findIndex(line => plain(line).includes('check the API compatibility'))
   assert.ok(row > 0)
   dock.handleMouse(pointer(row, 2, width, 'press'))
+  dock.handleMouse(pointer(row, 2, width, 'release'))
   // The Host queue changed and the pane repainted the same physical row.
   dock.setModel(model({
     rows: [{ id: 'occ-9', text: 'a different message', local: false }],
@@ -146,4 +150,18 @@ test('an empty queue paints nothing (no permanent chrome row)', () => {
   const { dock } = harness(model({ rows: [] }))
   assert.deepEqual(dock.render(80), [])
   assert.equal(dock.hasRows(), false)
+})
+
+
+test('the real press → release → click sequence activates exactly once', () => {
+  const { dock, opens } = harness(model())
+  const width = 80
+  const lines = dock.render(width)
+  const row = lines.findIndex(line => plain(line).includes('check the API compatibility'))
+  dock.handleMouse(pointer(row, 2, width, 'press'))
+  assert.deepEqual(opens, [], 'press alone never activates')
+  dock.handleMouse(pointer(row, 2, width, 'release'))
+  assert.deepEqual(opens, [], 'release alone never activates and never drops the press identity')
+  dock.handleMouse(pointer(row, 2, width, 'click'))
+  assert.deepEqual(opens, ['occ-1'], 'the synthesized click activates the pressed occurrence once')
 })

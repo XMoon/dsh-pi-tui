@@ -13,6 +13,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { registerQueueCommand } from '../../src/tui/commands/queue.ts'
+import { queueManagerCommandResult } from '../../src/app/queue/manager.ts'
 import {
   HOST_COMMAND_CATALOG,
   LOCAL_COMMANDS,
@@ -132,4 +133,13 @@ test('the TSP queue-open keys come from the SHARED effective keymap resolution',
     effectiveKeys({ leader: 'ctrl+x', bindings: { 'app.queue.open': '<leader>q' } }),
     [],
   )
+})
+
+
+test('the composed /queue result is an error when the manager refused to open', () => {
+  assert.deepEqual(queueManagerCommandResult({ opened: true }), { kind: 'success' })
+  assert.deepEqual(queueManagerCommandResult({ opened: false, message: 'Queue management is unavailable in a subagent viewer' }),
+    { kind: 'error', text: 'Queue management is unavailable in a subagent viewer' })
+  assert.deepEqual(queueManagerCommandResult({ opened: false }),
+    { kind: 'error', text: 'Queue management is unavailable' })
 })

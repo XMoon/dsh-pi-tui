@@ -2697,6 +2697,29 @@ test('the queue manager opens from the Alt+I action, paints its rows and closes 
   app.stop()
 })
 
+test('a real fullscreen SGR press → release → click opens the Dock row manager', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const opened: Array<string | undefined> = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onOpenQueue: initialItemId => { opened.push(initialItemId) },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  app.setQueueItems([{ id: 'occ-1', text: 'check the API compatibility', mode: 'followup' }], true)
+  await vt.waitForRender()
+  const row = vt.getViewport().findIndex(line => line.includes('check the API compatibility'))
+  assert.ok(row >= 0, `the Dock row must be painted:\n${vt.getViewport().join('\n')}`)
+  // The REAL SGR sequence the terminal sends: press, release, synthesized click.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  assert.deepEqual(opened, ['occ-1'], 'the synthesized click carries the pressed Host occurrence id')
+  app.stop()
+})
+
 test('alt+up with no overlay reaches the dequeue host', async () => {
   const vt = new VirtualTerminal(80, 24)
   let dequeued = 0

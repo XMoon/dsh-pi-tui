@@ -55,7 +55,7 @@ import { createStatusRuntime } from './surface/status-runtime.ts'
 import type { StatusRuntime } from './surface/status-runtime.ts'
 import { createInputHistory } from './surface/input-history.ts'
 import { createSettingsRuntime } from './surface/settings-runtime.ts'
-import { QueueManagerController } from './queue/manager.ts'
+import { QueueManagerController, queueManagerCommandResult } from './queue/manager.ts'
 import { createApplicationEvents, type ApplicationEventsOwner } from './surface/application-events.ts'
 import { createPastedImageIntakeOwner } from './surface/pasted-image-intake.ts'
 import { createClientActions } from './surface/client-actions.ts'
@@ -2041,8 +2041,7 @@ export function applyRunnerWithRuntime(
         openQueueManager: () => {
           const controller = queueManager
           if (controller === undefined) return { kind: 'error', text: 'Queue management is unavailable' }
-          controller.open()
-          return { kind: 'success' }
+          return queueManagerCommandResult(controller.open())
         },
         // Delivered files (PR1 / M2): the surface's own display-subject
         // decision, exposed as a function-type read capability. The runner

@@ -23,7 +23,7 @@ import type { Component, Focusable, TUI, TuiMouseEvent, TuiMouseEventResult } fr
 import { SearchablePicker, type SearchablePickerItem } from '../pickers/searchable-picker.ts'
 import { QUEUE_CHORDS, type QueueChordId } from '../keybindings/hints.ts'
 import { color, editorTheme, selectListTheme } from '../theme/runtime.ts'
-import type { QueueManagerController, QueueManagerRow, QueueManagerView } from '../../app/queue/manager.ts'
+import { attachmentCountLabel, type QueueManagerController, type QueueManagerRow, type QueueManagerView } from '../../app/queue/manager.ts'
 
 /** The One Wide Overlay geometry of the queue manager (design language D10). */
 export interface QueueOverlayGeometry {
@@ -262,10 +262,9 @@ export class QueuePanel implements Component, Focusable {
   }
 
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-    if (event.type === 'release') {
-      this.pressed = undefined
-      return undefined
-    }
+    // press → release → synthesized click: the release leaves the press
+    // identity intact for the click to validate and activate.
+    if (event.type === 'release') return undefined
     if (event.type !== 'press' && event.type !== 'click' && event.type !== 'wheel') return undefined
     if (event.button !== 'left' && event.type !== 'wheel') return undefined
     if (event.width !== this.lastRenderWidth) return undefined
@@ -497,12 +496,12 @@ export class QueuePanel implements Component, Focusable {
 
 /** One picker row: `value` IS the Host occurrence id. */
 function pickerItem(row: QueueManagerRow): SearchablePickerItem {
-  const attachments = row.fileCount + row.imageCount
+  const badge = attachmentCountLabel(row.fileCount, row.imageCount)
   return {
     value: row.id,
     label: singleLine(row.text),
     ...(row.attachments.length === 0 ? {} : { description: row.attachments.join(' · ') }),
-    ...(attachments === 0 ? {} : { badge: `${attachments} file${attachments === 1 ? '' : 's'}` }),
+    ...(badge === undefined ? {} : { badge }),
   }
 }
 

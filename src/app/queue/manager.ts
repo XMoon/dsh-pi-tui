@@ -270,6 +270,12 @@ export class QueueManagerController {
    * enter/exit, cold rehydrate). */
   retireIfStale(): void {
     if (this.mode === 'closed') return
+    // A subagent viewer is a NEWER display owner: the parent queue panel must
+    // retire even when the main Session owner did not change.
+    if (this.deps.isViewing()) {
+      this.close()
+      return
+    }
     if (this.deps.captureSessionId() === this.sessionId
       && this.deps.isSubjectCurrent(this.subject)) return
     this.close()
@@ -285,6 +291,10 @@ export class QueueManagerController {
    */
   view(): QueueManagerView {
     if (this.mode === 'closed') return CLOSED_VIEW
+    if (this.deps.isViewing()) {
+      this.reset()
+      return CLOSED_VIEW
+    }
     if (this.deps.captureSessionId() !== this.sessionId || !this.deps.isSubjectCurrent(this.subject)) {
       // The owner moved while the panel was open: retire internally. The
       // renderer's own next presentation commit closes the physical panel.
@@ -391,6 +401,11 @@ export class QueueManagerController {
    * `edit` mutation. */
   save(): void {
     if (this.mode !== 'edit' || this.pending) return
+    if (this.deps.isViewing()) {
+      this.reset()
+      this.changed()
+      return
+    }
     if (this.draft.trim() === '') {
       this.notice = { text: 'A queued message must contain non-whitespace text', kind: 'error' }
       this.changed()
@@ -428,8 +443,10 @@ export class QueueManagerController {
       let outcome: WriteOutcome | undefined
       try {
         outcome = await this.deps.withWriter(scope, async () => {
-          // The exact owner/scope fence after the barrier, BEFORE the write.
-          if (!this.deps.isSubjectCurrent(capturedSubject) || !this.deps.isScopeCurrent(scope)) {
+          // The exact owner/scope/viewer fence after the barrier, BEFORE the write.
+          if (this.deps.isViewing()
+            || !this.deps.isSubjectCurrent(capturedSubject)
+            || !this.deps.isScopeCurrent(scope)) {
             throw new SessionScopeSupersededError()
           }
           const current = this.deps.reader.snapshot(capturedSession)
@@ -523,6 +540,11 @@ export class QueueManagerController {
   /** Confirm the delete: ONE official `remove` mutation for the exact id. */
   confirmDelete(): void {
     if (this.mode !== 'confirm-delete' || this.pending) return
+    if (this.deps.isViewing()) {
+      this.reset()
+      this.changed()
+      return
+    }
     const id = this.selectedId
     if (id === undefined) {
       this.mode = 'browse'
@@ -556,7 +578,9 @@ export class QueueManagerController {
       let disappeared = false
       try {
         outcome = await this.deps.withWriter(scope, async () => {
-          if (!this.deps.isSubjectCurrent(capturedSubject) || !this.deps.isScopeCurrent(scope)) {
+          if (this.deps.isViewing()
+            || !this.deps.isSubjectCurrent(capturedSubject)
+            || !this.deps.isScopeCurrent(scope)) {
             throw new SessionScopeSupersededError()
           }
           const current = this.deps.reader.snapshot(capturedSession)
@@ -760,4 +784,24 @@ function settlementNotice(verb: 'update' | 'delete', outcome: WriteOutcome): str
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+
+/** Map one `open()` result to the truthful command result. */
+export function queueManagerCommandResult(
+  result: { readonly opened: boolean; readonly message?: string },
+): { readonly kind: 'success' } | { readonly kind: 'error'; readonly text: string } {
+  return result.opened
+    ? { kind: 'success' }
+    : { kind: 'error', text: result.message ?? 'Queue management is unavailable' }
+}
+
+/** The attachment count label of a queued occurrence, naming the real kinds:
+ *  image-only rows must never read as files, and a mixed row is generic. */
+export function attachmentCountLabel(fileCount: number, imageCount: number): string | undefined {
+  const total = fileCount + imageCount
+  if (total === 0) return undefined
+  if (fileCount === 0) return `${imageCount} image${imageCount === 1 ? '' : 's'}`
+  if (imageCount === 0) return `${fileCount} file${fileCount === 1 ? '' : 's'}`
+  return `${total} attachments`
 }
