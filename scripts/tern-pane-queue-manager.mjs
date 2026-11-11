@@ -10,6 +10,16 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+/** Poll the real tree for `text` (the GUI handle has no waitFor helper). */
+async function waitForText(h, text, { timeoutMs = 6000, intervalMs = 250 } = {}) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (h.has(h.snapshot(), text)) return true
+    await new Promise(resolve => setTimeout(resolve, intervalMs))
+  }
+  return false
+}
+
 function records(h) {
   try {
     return readFileSync(join(h.root, 'events.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
@@ -40,7 +50,7 @@ export default async function (h) {
   h.check('the Dock paints the effective Manage label', manage !== undefined)
   h.check('a control-injected click on Manage opens the sheet',
     manage !== undefined && await h.click(snap.chains, manage))
-  h.check('the native Browse sheet shows the queued count', await h.waitFor('2 queued', { timeoutMs: 5000 }))
+  h.check('the native Browse sheet shows the queued count', await waitForText(h, '2 queued', { timeoutMs: 5000 }))
 
   snap = h.snapshot()
   h.check('the Browse rows are the Host occurrences',
@@ -49,7 +59,7 @@ export default async function (h) {
   h.check('the picker action bar offers Edit', edit !== undefined)
   h.check('a control-injected click on Edit opens the Edit overlay',
     edit !== undefined && await h.click(snap.chains, edit))
-  h.check('the Edit page is visible', await h.waitFor('Edit queued message', { timeoutMs: 5000 }))
+  h.check('the Edit page is visible', await waitForText(h, 'Edit queued message', { timeoutMs: 5000 }))
 
   await h.key('X', 500)
   h.check('a real key reaches the controlled editor draft',
@@ -59,7 +69,7 @@ export default async function (h) {
     records(h).filter(record => record.write === 'edit').length === 1
       && records(h).some(record => record.write === 'edit' && record.itemId === 'occ-1'))
   h.check('the sheet returns to Browse after the edit commits',
-    await h.waitFor('2 queued', { timeoutMs: 5000 }))
+    await waitForText(h, '2 queued', { timeoutMs: 5000 }))
 
   snap = h.snapshot()
   const remove = nodeWithText(h, snap, 'Delete')
@@ -67,13 +77,13 @@ export default async function (h) {
   h.check('a control-injected click on Delete opens the confirmation',
     remove !== undefined && await h.click(snap.chains, remove))
   h.check('the confirmation states the consequence',
-    await h.waitFor('This queued message cannot be restored after deletion.', { timeoutMs: 5000 }))
+    await waitForText(h, 'This queued message cannot be restored after deletion.', { timeoutMs: 5000 }))
   snap = h.snapshot()
   const confirm = nodeWithText(h, snap, 'Confirm')
   h.check('the confirmation offers a native Confirm action', confirm !== undefined)
   h.check('a control-injected click on Confirm removes the occurrence',
     confirm !== undefined && await h.click(snap.chains, confirm)
-      && await h.waitFor('2 queued', { timeoutMs: 5000 })
+      && await waitForText(h, '2 queued', { timeoutMs: 5000 })
       && records(h).filter(record => record.write === 'remove').length === 1)
 
   await h.capture('queue-manager-1280x800', 'the native Queue sheet after one edit and one remove')
