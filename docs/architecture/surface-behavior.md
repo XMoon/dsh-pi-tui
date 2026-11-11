@@ -451,8 +451,6 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   never changes the Workspace cursor and `Esc` cancels back to the tree.
 - **Mouse is the last painted hit-map.** One render commits a frame revision and
   the REAL painted cell ranges of every tree row plus the Folder disclosure,
-- **Mouse is the last painted hit-map.** One render commits a frame revision and
-  the REAL painted cell ranges of every tree row plus the Folder disclosure,
   search results and the physical Action Bar's action segments. A click acts
   only on the SAME frame revision and SAME target range as its press; any
   scroll, resize, search, Activity or content change between press and release
