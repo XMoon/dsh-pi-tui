@@ -67,14 +67,3 @@ export function expandAttachmentPlaceholders(
   }
   return merged
 }
-
-/** Whether text contains a currently live GENERIC-FILE placeholder (a Host
- * command invocation cannot carry one: the command plane expects a receipt
- * this Client does not pass to command execution). */
-export function draftHasFiles(
-  text: string,
-  imageStore: DraftImageStoreLike,
-  fileStore?: DraftFileStoreLike,
-): boolean {
-  return expandAttachmentPlaceholders(text, imageStore, fileStore).some(segment => segment.type === 'file')
-}
