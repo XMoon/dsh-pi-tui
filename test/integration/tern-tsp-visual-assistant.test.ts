@@ -670,6 +670,10 @@ test('a generated but never published chart stays only in the tool card', async 
   try {
     replayEvents(harness, folder, session.session.snapshotEvents())
     await until('the tool card frame', () => nodesWhere(harness.tern, node => node.kind === 'tool').length > 0)
+    // PR2: the tool result settles in a later targeted Main op, which can be
+    // queued behind an ack. Wait for the actual chart fact, not for the frame
+    // that first introduced the running tool card.
+    await until('the tool card native chart', () => nodesWhere(harness.tern, node => node.kind === 'chart').length === 1)
     assert.equal(figureIds(harness.tern).length, 0, 'the Assistant owns no unpublished figure')
     assert.equal(copyButtonIds(harness.tern).length, 0)
     assert.equal(harness.tern.blobs.length, 0)

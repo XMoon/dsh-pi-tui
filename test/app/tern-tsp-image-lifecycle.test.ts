@@ -32,6 +32,7 @@ import type { TranscriptMessage, TurnActivity } from '../../src/domain/transcrip
 import type { SubmissionComposerPort } from '../../src/app/submission/composer-port.ts'
 import { createSurfaceDraftImageProjection } from '../../src/app/surface/runtime.ts'
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
+import { PENDING_IMAGE_BLOB_ID } from '../../src/tui/tsp/transcript-view.ts'
 import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 
 const ENCODER = new TextEncoder()
@@ -333,13 +334,26 @@ function drawnImageNodes(tern: ScriptedTern): { id: string; blob?: string }[] {
     }
     for (const child of node.c ?? []) walk(child as never)
   }
+  // Fold the wire like the client: the placeholder image is added once, then
+  // the ready blob replaces it with a `set` under the SAME node id.
+  const live = new Map<string, { id: string; blob?: string }>()
+  const put = (node: { readonly id: string; readonly k: string; readonly p?: Record<string, unknown>; readonly c?: readonly unknown[] }): void => {
+    if (node.k === 'image') {
+      const blob = node.p?.blob
+      live.set(node.id, { id: node.id, ...(typeof blob === 'string' ? { blob } : {}) })
+    }
+    for (const child of node.c ?? []) put(child as never)
+  }
   for (const frame of tern.frames()) {
     for (const op of frame.ops) {
-      if (op[0] !== 'add') continue
-      walk(op[4] as never)
+      if (op[0] === 'add') put(op[4] as never)
+      else if (op[0] === 'set' && typeof (op[2] as Record<string, unknown>).blob === 'string') {
+        const current = live.get(op[1])
+        if (current !== undefined) current.blob = (op[2] as { blob: string }).blob
+      } else if (op[0] === 'del') live.delete(op[1])
     }
   }
-  return drawn
+  return [...live.values()]
 }
 
 /** One live node of the pane's CURRENT tree. */
@@ -775,25 +789,35 @@ test('a blob-send failure is FATAL: reported once, no further blob or image load
 // ── T8: the source and the rehydration ──────────────────────────────────────
 
 test('a ready repaint of the SAME subject keeps the image node\'s identity', async () => {
-  const harness = await mountHarness()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const harness = await mountHarness({
+    read: async (ref, scope) => {
+      if ((scope as { scope: string }).scope === 'A') await gate
+      return { ref, data: new Uint8Array([1, 2, 3, 4]) }
+    },
+  })
   const source = {}
-  // The SAME carrier object: a repaint of one subject re-projects the very
-  // same transcript rows, so the presentation identity must not move.
   const messages = [toolRowWithImage()]
   commit(harness.renderer, messages, source)
-  await until('the image node to be drawn', () => drawnImageNodes(harness.tern).length > 0)
+  await until('the pending image node to be drawn', () => drawnImageNodes(harness.tern).length > 0)
   const first = drawnImageNodes(harness.tern).at(-1)
+  assert.equal(first?.blob, PENDING_IMAGE_BLOB_ID, 'the first frame draws the pending placeholder')
 
-  // A repaint that really CHANGES something: the SDK diffs the view, so a
-  // frame follows. An unchanged repaint would send nothing at all, and the
-  // identity assertion would be vacuous.
+  // A REAL same-source repaint: the authorized read settles, so the row's
+  // image state moves from loading to ready. The SAME node id must receive the
+  // content-addressed blob (an unchanged repaint sends no frame at all).
   const framesBefore = harness.tern.frames().length
-  ;(messages[0] as { args: string }).args = '{"path":"other.png"}'
-  commit(harness.renderer, messages, source)
-  await until('the changed repaint to reach the pane', () => harness.tern.frames().length > framesBefore)
+  release()
+  await until('the ready blob to reach the same node', () => {
+    const nodes = drawnImageNodes(harness.tern)
+    return harness.tern.frames().length > framesBefore
+      && nodes.length === 1
+      && nodes[0]?.blob === harness.tern.blobIds()[0]
+  })
   const second = drawnImageNodes(harness.tern).at(-1)
-
   assert.equal(first?.id, second?.id, 'the image node keeps its id across a repaint')
+  assert.equal(second?.blob, harness.tern.blobIds()[0], 'the same node carries the real blob')
   await harness.dispose()
 })
 

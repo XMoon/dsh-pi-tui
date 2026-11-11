@@ -1020,8 +1020,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     notify: (text, kind) => { display.notify(text, kind) },
     setSettledQuestionAnswersLookup: (lookup) => {
       settledQuestionAnswers = lookup
-      // A settled Question repaints a row whose canonical message did not
-      // change, so the lookup's own version joins that row's display stamp.
+      // The lookup is a LIVE closure over the official `userQuestions`
+      // projection: a late answer settles AFTER installation, with no further
+      // callback. A projection change therefore has to re-derive the current
+      // descriptors so the question row's stamp reads the new payload.
       settledQuestionAnswersRevision += 1
       if (!rebuildLastMain()) return
       render()
@@ -1890,6 +1892,27 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     return true
   }
 
+  /**
+   * PR2: derive the frame's figure indexes from the CURRENT descriptors. The
+   * Dock's chord hint reads `visualOrder`, but the journal materializes a root
+   * only when its stamp changed; this pure derivation gives the dock the SAME
+   * figure order the Main will paint, without materializing unrelated history
+   * and without a second writer.
+   */
+  function previewFrameIndexes(): void {
+    if (lastMainBlocks.length === 0) return
+    const order: string[] = []
+    for (const block of lastMainBlocks) {
+      for (const owner of block.owners) {
+        if (owner.kind !== 'assistant' || owner.displayBlocks !== undefined) continue
+        const presentation = assistantVisualPresentation(owner)
+        for (const publication of presentation?.publications ?? []) order.push(publication.ref)
+      }
+    }
+    if (order.length === visualOrder.length && order.every((ref, index) => visualOrder[index] === ref)) return
+    visualOrder = order
+  }
+
   /** Re-render every region in ONE frame (the SDK diffs). The `layer` region is
    *  ALWAYS submitted (an omitted region would be deleted by the full-view
    *  diff, wiping an open modal on the next unrelated repaint). */
@@ -1926,6 +1949,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // subject's own commit re-enters through `syncImageSubscriptions` in
     // `setTranscript` and rebuilds the ledger from scratch.
     if (!hydrating) syncImageSubscriptions()
+    previewFrameIndexes()
     const draftStates = prepareDockDraftImageStates()
     if (imageProjectionAborted) return
     const dockNode = dockView(draftStates)
@@ -2664,7 +2688,6 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const committed = mainJournal.commit(lastMainBlocks, frameIndexer)
     for (const key of committed.removed) frameContributions.delete(key)
     let frame = mergeFrameIndexes()
-    if (process.env.PI_TUI_PR2_PROBE === '1') console.error('PROBE', JSON.stringify({ m: committed.materialized, r: committed.removed, order: mainJournal.order }))
     const reconciled = reconcileVisualSelection(selectedVisual, frame)
     if (!sameSelectedVisual(selectedVisual, reconciled)) {
       selectedVisual = reconciled

@@ -589,6 +589,12 @@ test('a Copy action from an older frame is refused after the subject scope chang
 
     const second = bothFiguresAnswer()
     harness.commit(second.messages, {})
+    // PR2: the new subject's Main roots are targeted raw ops that can be
+    // queued behind an ack. Wait for the NEW scope's button identity itself,
+    // not for the first frame of the source transition.
+    await until('the new scope to rename the visual copy button',
+      () => copyButtonIds(harness.tern)[0] !== oldButton
+        && copyButtonIds(harness.tern)[0] !== undefined)
     const newButton = copyButtonIds(harness.tern)[0] as string
     assert.notEqual(newButton, oldButton, 'the new scope renames the whole node tree')
 
