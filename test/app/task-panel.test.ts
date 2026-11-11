@@ -15,6 +15,7 @@ import { componentKeymap } from '../../src/tui/keybindings/component-keymap.ts'
 import { formatKeyId } from '../../src/tui/keybindings/hints.ts'
 import type { TaskPanelItem } from '../../src/app/surface/task-presentation.ts'
 import { MARQUEE_STEP_MS } from '../../src/tui/components/marquee.ts'
+import { color, setTheme } from '../../src/tui/theme/runtime.ts'
 
 const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
 
@@ -958,6 +959,35 @@ test('Regular Task Browser keeps its keyboard-only Stop hint and inert mouse row
   assert.ok(pending.includes('Y confirm stop · Esc cancel'))
   assert.ok(pending.includes('Stop bash · pnpm build?'))
   assert.ok(!pending.includes('Stop bash · pnpm build?  Y confirm'))
+  panel.dispose()
+})
+
+test('Fullscreen Task Action Bar uses quiet ink roles and muted keycaps', () => {
+  setTheme('dark')
+  const panel = new TaskBrowserPanel(
+    [runningJob({ value: 'job:a', canStop: true })],
+    10,
+    { mode: 'full', header: 'tasks', mouseActionsEnabled: () => true },
+    () => {},
+    () => {},
+    () => {},
+  )
+  const normal = panel.render(120).at(-1)!
+  assert.equal(visibleWidth(normal), visibleWidth(strip(normal)), 'ink must not change the painted cell width')
+  assert.ok(normal.includes(color.textDim('Stop')), `Stop is secondary ink:\n${normal}`)
+  assert.ok(normal.includes(color.textMuted(' [S]')), `the Stop keycap is muted:\n${normal}`)
+  assert.ok(normal.includes(color.textMuted('Enter open')) && normal.includes(color.textMuted('Esc close')),
+    `pure keyboard hints are muted:\n${normal}`)
+  assert.ok(normal.includes(color.textMuted(' · ')), `the separator is muted:\n${normal}`)
+  assert.ok(!normal.includes(color.primary('Stop')), `Stop is not flooded with primary ink:\n${normal}`)
+
+  panel.handleInput('s')
+  const pending = panel.render(120).at(-1)!
+  assert.ok(pending.includes(color.text('Confirm stop')) && pending.includes(color.textMuted(' [Y]')),
+    `Confirm stop is primary with a muted keycap:\n${pending}`)
+  assert.ok(pending.includes(color.textDim('Cancel')) && pending.includes(color.textMuted(' [Esc]')),
+    `Cancel is secondary with a muted keycap:\n${pending}`)
+  assert.ok(!pending.includes(color.primary('Confirm stop')), `Confirm is not flooded with primary ink:\n${pending}`)
   panel.dispose()
 })
 

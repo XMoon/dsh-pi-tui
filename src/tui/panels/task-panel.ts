@@ -1302,10 +1302,11 @@ export class TaskBrowserPanel implements Component, Focusable {
       action: TaskMouseAction
       value: string
       pendingValue: string | undefined
+      role: 'primary' | 'secondary'
     }>()
     const add = (
       segment: ActionBarSegment,
-      target?: { action: TaskMouseAction; value: string; pendingValue: string | undefined },
+      target?: { action: TaskMouseAction; value: string; pendingValue: string | undefined; role: 'primary' | 'secondary' },
     ): void => {
       const inputIndex = segments.length
       segments.push(segment)
@@ -1316,10 +1317,10 @@ export class TaskBrowserPanel implements Component, Focusable {
       const value = this.pendingStopValue
       if (this.options.mouseActionsEnabled?.() === true) {
         add({ text: 'Confirm stop [Y]', priority: 90, short: 'Confirm stop' }, {
-          action: 'confirm-stop', value, pendingValue: value,
+          action: 'confirm-stop', value, pendingValue: value, role: 'primary',
         })
         add({ text: 'Cancel [Esc]', priority: 1000, short: 'Cancel' }, {
-          action: 'cancel-stop', value, pendingValue: value,
+          action: 'cancel-stop', value, pendingValue: value, role: 'secondary',
         })
       } else {
         add({ text: 'Y confirm stop', priority: 90 })
@@ -1345,7 +1346,7 @@ export class TaskBrowserPanel implements Component, Focusable {
           const key = componentKeymap.keysFor('tasks.stop')[0]
           const text = key === undefined ? 'Stop' : `Stop [${formatKeyId(key)}]`
           add({ text, priority: 95 }, {
-            action: 'stop', value: selected!.value, pendingValue: undefined,
+            action: 'stop', value: selected!.value, pendingValue: undefined, role: 'secondary',
           })
         } else {
           add({ text: 's stop', priority: 60 })
@@ -1370,11 +1371,13 @@ export class TaskBrowserPanel implements Component, Focusable {
         const target = actionByInputIndex.get(span.inputIndex)
         if (target === undefined) return color.textMuted(span.text)
         actions.push({
-          ...target,
+          action: target.action,
+          value: target.value,
+          pendingValue: target.pendingValue,
           startCol: span.startCol + 2,
           endCol: span.endCol + 2,
         })
-        return color.primary(span.text)
+        return paintActionSpan(span.text, target.role)
       })
       const segmentWidth = layout.spans.reduce((sum, span) => sum + visibleWidth(span.text), 0)
         + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
@@ -1383,4 +1386,12 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
     return { line, hit: actions.length > 0 ? { kind: 'actions', actions } : { kind: 'inert' } }
   }
+}
+
+/** Owner Fullscreen dense Action Bar ink: primary verb `text`, secondary verb
+ *  `textDim`, keycap muted. Visible text and hit spans stay unchanged. */
+function paintActionSpan(text: string, role: 'primary' | 'secondary'): string {
+  const ink = role === 'primary' ? color.text : color.textDim
+  const match = /^(.*) \[([^\]]+)\]$/.exec(text)
+  return match === null ? ink(text) : `${ink(match[1]!)}${color.textMuted(` [${match[2]}]`)}`
 }

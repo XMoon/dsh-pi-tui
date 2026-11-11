@@ -261,7 +261,15 @@ function appendContentFirst(
   return Math.max(0, budget - used)
 }
 
-/** The current question's tab label: `Q{n}` or Submit. */
+/** Paint one action-bar segment: the verb carries the role ink and a trailing
+ *  `[Key]` cap is muted. The visible text and its layout span are unchanged. */
+function paintActionSpan(text: string, role: ActionInkRole): string {
+  const ink = role === 'primary' ? color.text : color.textDim
+  const match = /^(.*) \[([^\]]+)\]$/.exec(text)
+  return match === null ? ink(text) : `${ink(match[1]!)}${color.textMuted(` [${match[2]}]`)}`
+}
+
+/** The current question's stage tab: `Q{n}` or `Review`. */
 function tabLabel(index: number, total: number): string {
   return index === total ? 'Review' : `Q${index + 1}`
 }
@@ -289,6 +297,10 @@ interface Row {
 type QuestionPointerAction = 'back' | 'progress' | 'edit' | 'leave-edit' | 'cancel' | 'submit'
 
 type QuestionMouseHitKind = 'action' | 'option' | 'other' | 'marker' | 'inert'
+
+/** Owner Fullscreen dense Action Bar ink: primary verbs use `text`, secondary
+ *  verbs `textDim`; keycaps are muted. No bold and no `primary` flood. */
+type ActionInkRole = 'primary' | 'secondary'
 
 interface PaintedQuestionActionHit {
   row: number
@@ -1550,15 +1562,16 @@ export class QuestionFlow implements Component, Focusable {
 
   private pointerActionSegments(): {
     segments: ActionBarSegment[]
-    actionByInputIndex: Map<number, QuestionPointerAction>
+    actionByInputIndex: Map<number, { action: QuestionPointerAction; role: ActionInkRole }>
   } {
     const segments: ActionBarSegment[] = []
-    const actionByInputIndex = new Map<number, QuestionPointerAction>()
+    const actionByInputIndex = new Map<number, { action: QuestionPointerAction; role: ActionInkRole }>()
     const add = (
       action: QuestionPointerAction,
       label: string,
       key: 'question.previous' | 'question.next' | 'question.confirm' | 'question.cancel' | undefined,
       priority: number,
+      role: ActionInkRole,
     ): void => {
       const primaryKey = key === undefined ? undefined : componentKeymap.keysFor(key)[0]
       const keycap = primaryKey === undefined
@@ -1568,14 +1581,14 @@ export class QuestionFlow implements Component, Focusable {
           : primaryKey === 'right'
             ? '→'
             : formatKeyId(primaryKey)
-      actionByInputIndex.set(segments.length, action)
+      actionByInputIndex.set(segments.length, { action, role })
       segments.push({ text: keycap === '' ? label : `${label} [${keycap}]`, short: label, priority })
     }
     const addHint = (text: string, priority: number): void => {
       segments.push({ text, priority })
     }
     const addBack = (): void => {
-      if (this.tab > 0) add('back', 'Back', 'question.previous', 40)
+      if (this.tab > 0) add('back', 'Back', 'question.previous', 40, 'secondary')
     }
     const isLast = this.tab === this.questions.length - 1
     const progress = this.answered() ? (isLast ? 'Review' : 'Continue') : 'Skip'
@@ -1584,25 +1597,25 @@ export class QuestionFlow implements Component, Focusable {
       : ''
 
     if (this.editingOther) {
-      add('progress', isLast ? 'Review' : 'Next', 'question.confirm', 95)
-      add('cancel', 'Cancel flow', undefined, 90)
-      addHint('←→ edit', 25)
+      add('progress', isLast ? 'Review' : 'Next', 'question.confirm', 95, 'primary')
+      add('cancel', 'Cancel flow', undefined, 90, 'secondary')
       if (this.lastExpandable) addHint('PgUp/PgDn scroll', 10)
       if (browse !== '') addHint(browse, 1)
-      add('leave-edit', 'Leave edit', 'question.cancel', 1000)
+      add('leave-edit', 'Leave edit', 'question.cancel', 1000, 'secondary')
       return { segments, actionByInputIndex }
     }
 
     if (this.tab >= this.questions.length) {
-      add('submit', 'Submit', 'question.confirm', 95)
+      add('submit', 'Submit', 'question.confirm', 95, 'primary')
       addBack()
-      add('cancel', 'Cancel', 'question.cancel', 1000)
+      add('cancel', 'Cancel', 'question.cancel', 1000, 'secondary')
       return { segments, actionByInputIndex }
     }
 
-    add('progress', progress, 'question.next', 95)
+    // Skip is navigation, not the primary forward action; Continue/Review is.
+    add('progress', progress, 'question.next', 95, progress === 'Skip' ? 'secondary' : 'primary')
     if (this.isOptionless()) {
-      add('edit', 'Edit', 'question.confirm', 50)
+      add('edit', 'Edit', 'question.confirm', 50, 'secondary')
     }
     addBack()
     if (!this.isOptionless()) {
@@ -1622,7 +1635,7 @@ export class QuestionFlow implements Component, Focusable {
       }
     }
     if (browse !== '') addHint(browse, 1)
-    add('cancel', 'Cancel', 'question.cancel', 1000)
+    add('cancel', 'Cancel', 'question.cancel', 1000, 'secondary')
     return { segments, actionByInputIndex }
   }
 
@@ -1637,11 +1650,11 @@ export class QuestionFlow implements Component, Focusable {
     }
 
     const painted = layout.spans.map(span => {
-      const action = actionByInputIndex.get(span.inputIndex)
-      if (action === undefined) return color.textMuted(span.text)
+      const entry = actionByInputIndex.get(span.inputIndex)
+      if (entry === undefined) return color.textMuted(span.text)
       this.paintedActionHits.push({
         row,
-        action,
+        action: entry.action,
         startCol: span.startCol,
         endCol: span.endCol,
         tab: this.tab,
@@ -1649,7 +1662,7 @@ export class QuestionFlow implements Component, Focusable {
         editingOther: this.editingOther,
         width,
       })
-      return color.primary(span.text)
+      return paintActionSpan(span.text, entry.role)
     })
     const segmentWidth = layout.spans.reduce((sum, span) => sum + visibleWidth(span.text), 0)
       + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)

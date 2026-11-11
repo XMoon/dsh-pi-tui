@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { setKittyProtocolActive, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { QuestionFlow, setNoAnswerNavigationInstalled, type QuestionFlowQuestion } from '../../src/tui/interaction/question.ts'
+import { color, setTheme } from '../../src/tui/theme/runtime.ts'
 
 const BUDGETS = [8, 12, 22, 24]
 const WIDTHS = [50, 100]
@@ -1738,6 +1739,52 @@ test('question: inert press → repaint moves the marker onto the cell → relea
   assert.equal(state.bodyExpanded, before, 'the inert press must not toggle the expanded panel')
 })
 
+test('Fullscreen Action Bar uses quiet ink roles and muted keycaps without changing geometry', () => {
+  setTheme('dark')
+  const f = makeMouseFlow([
+    { id: 'q1', question: 'One?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Two?', multiSelect: true, options: [{ label: 'B' }] },
+    { id: 'q3', question: 'Three?', options: [{ label: 'C' }] },
+  ], 24)
+  f.handleInput('1') // answer q1 → q2
+  f.handleInput(' ') // answer q2 in place → Continue is now the progress action
+  const lines = f.render(100)
+  const row = lines.at(-1)!
+  assert.equal(visibleWidth(row), visibleWidth(strip(row)), 'ink must not change the painted cell width')
+  assert.ok(row.includes(color.text('Continue')), `Continue is the primary action ink:\n${row}`)
+  assert.ok(row.includes(color.textMuted(' [→]')), `the progress keycap is muted:\n${row}`)
+  assert.ok(row.includes(color.textDim('Back')), `Back is secondary ink:\n${row}`)
+  assert.ok(row.includes(color.textDim('Cancel')), `Cancel is secondary ink:\n${row}`)
+  assert.ok(row.includes(color.textMuted(' [←]')) && row.includes(color.textMuted(' [Esc]')), `secondary keycaps are muted:\n${row}`)
+  assert.ok(row.includes(color.textMuted('↑↓ select')), `pure keyboard hints are muted:\n${row}`)
+  assert.ok(row.includes(color.textMuted(' · ')), `the separator is muted:\n${row}`)
+  assert.ok(!row.includes(color.primary('Continue')) && !row.includes(color.primary('Back')),
+    `no action segment is flooded with primary ink:\n${row}`)
+  assert.ok(strip(row).includes('Continue [→] · Back [←] · ↑↓ select'), `the visible text/order is unchanged:\n${strip(row)}`)
+
+  // Review: Submit primary; Back/Cancel secondary; all keycaps muted.
+  f.handleInput('\r') // Continue → q3
+  f.handleInput('1') // answer q3 → Review
+  const review = f.render(100)
+  const reviewRow = review.at(-1)!
+  assert.ok(reviewRow.includes(color.text('Submit')) && reviewRow.includes(color.textMuted(' [Enter]')),
+    `Review Submit is primary with a muted keycap:\n${reviewRow}`)
+  assert.ok(reviewRow.includes(color.textDim('Back')) && reviewRow.includes(color.textDim('Cancel')),
+    `Review navigation actions are secondary:\n${reviewRow}`)
+  assert.ok(!reviewRow.includes(color.primary('Submit')), `Submit is not flooded with primary ink:\n${reviewRow}`)
+
+  // Edit: the cursor hint is gone; Review primary; Cancel flow/Leave edit secondary.
+  const edit = makeMouseFlow([{ id: 'q1', question: 'Name?' }], 24)
+  edit.handleInput('typed')
+  const editRow = edit.render(100).at(-1)!
+  assert.ok(!strip(editRow).includes('←→ edit'), `the edit bar omits ordinary cursor help:\n${strip(editRow)}`)
+  assert.ok(editRow.includes(color.text('Review')) && editRow.includes(color.textMuted(' [Enter]')),
+    `edit Review is primary with a muted keycap:\n${editRow}`)
+  assert.ok(editRow.includes(color.textDim('Cancel flow')) && editRow.includes(color.textDim('Leave edit')),
+    `Cancel flow and Leave edit are secondary:\n${editRow}`)
+  assert.ok(editRow.includes(color.textMuted(' [Esc]')), `Leave edit's keycap is muted:\n${editRow}`)
+})
+
 test('mouse action rows order progress, Back, hints and final cancellation by state', () => {
   const choices = makeMouseFlow([
     { id: 'q1', question: 'One?', options: [{ label: 'A' }] },
@@ -1764,10 +1811,11 @@ test('mouse action rows order progress, Back, hints and final cancellation by st
 
   const editing = makeMouseFlow([{ id: 'q1', question: 'Name?' }], 24)
   row = render(editing, 100).at(-1) ?? ''
-  const editPositions = ['Review [Enter]', 'Cancel flow', '←→ edit', 'Leave edit [Esc]'].map(label => row.indexOf(label))
+  const editPositions = ['Review [Enter]', 'Cancel flow', 'Leave edit [Esc]'].map(label => row.indexOf(label))
   assert.ok(editPositions.every(position => position >= 0), `edit row must expose its click-only cancel and Esc leave action:\n${row}`)
   assert.ok(editPositions.every((position, index) => index === 0 || position > editPositions[index - 1]!),
-    `edit order must be progress, Cancel flow, hints, Leave edit:\n${row}`)
+    `edit order must be progress, Cancel flow, Leave edit:\n${row}`)
+  assert.ok(!row.includes('←→ edit'), `the edit bar must not spend a segment on ordinary cursor help:\n${row}`)
 
   const review = makeMouseFlow([
     { id: 'q1', question: 'One?', options: [{ label: 'A' }] },
@@ -1875,7 +1923,7 @@ test('Edit, Leave edit, Next and Cancel flow use their distinct existing methods
   editing.handleInput('typed name')
   const editRow = render(editing, 100).at(-1) ?? ''
   assert.ok(editRow.includes('Review') && editRow.includes('Leave edit') && editRow.includes('Cancel flow'))
-  assert.ok(editRow.includes('Cancel flow · ←→ edit · Leave edit [Esc]'),
+  assert.ok(editRow.includes('Cancel flow · Leave edit [Esc]'),
     'Cancel flow is click-only while Esc remains the final Leave edit action')
 
   clickAction(editing, 'Leave edit')
