@@ -3808,6 +3808,100 @@ test('H04: manual collapse, Show more beyond the cap and a later shrink keep the
   assert.ok(!h.view().includes('Other 0'), 'the allocation never opened the collapsed Folder')
 })
 
+test('H07: the Sessionless Choose workspace chooser never grows the history watermark', async () => {
+  const history = Array.from({ length: 34 }, (_, index) => row(`session-h07-${index}`, 900 - index, { title: `H07 history ${index}` }))
+  const used: Array<[string, string]> = []
+  const chooser = harness({
+    columns: 120,
+    rows: 40,
+    currentSessionId: null,
+    initialDirectoryChooser: true,
+    onAddDirectory: () => {},
+    onNewSession: () => {},
+    onUseDirectory: (workspaceId, canonicalPath) => { used.push([workspaceId, canonicalPath]) },
+  })
+  chooser.handle.setSnapshot(snapshot({ rows: [row('session-h07-working', 10_000, { title: 'H07 working' }), ...history] }))
+  chooser.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-alpha', path: '/ws/alpha', title: 'Alpha', sessionIds: ['session-h07-working', ...history.map(item => item.id)] },
+  ] })
+  chooser.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      fact('session-h07-working', { running: true, attention: 'none', attentionSourceState: 'known' }),
+      ...history.map(item => fact(item.id, { running: false, attention: 'none', attentionSourceState: 'known' })),
+    ],
+    answerEligibility: [],
+  })
+  await chooser.paint()
+  const left = (lines: readonly string[]): string[] => lines.map(line => line.slice(0, 66))
+  let frame = panelFrame(chooser)
+  assert.ok(left(frame).some(line => line.includes('H07 working')),
+    `the confirmed Working row keeps the chooser Folder expanded:\n${frame.join('\n')}`)
+  assert.ok(!left(frame).some(line => /H07 history \d+/.test(line)),
+    `the chooser never fills its spare height with unrelated history:\n${frame.join('\n')}`)
+  assert.ok(left(frame).some(line => line.includes('Show more sessions · 34 remaining')),
+    `the chooser keeps the shared zero-history watermark:\n${frame.join('\n')}`)
+  // The chooser verbs are unchanged: the disclosure toggles, the title chooses.
+  await clickCell(chooser, 2, folderLineIndexOf(frame, 'Alpha'))
+  assert.ok(!chooser.view().includes('H07 working'), 'the disclosure only collapses the chooser Folder')
+  assert.deepEqual(used, [], 'the disclosure never chooses a Workspace')
+  assert.equal(chooser.closes, 0)
+  await clickCell(chooser, 5, folderLineIndexOf(panelFrame(chooser), 'Alpha'))
+  assert.deepEqual(used, [['ws-alpha', '/ws/alpha']], 'the Folder title click is the ONE choose action')
+  assert.equal(chooser.closes, 1, 'the chooser returns after the choose')
+  chooser.app.dispose()
+  started.delete(chooser.app)
+
+  // Positive control: the same roster and size in ORDINARY Browse still grows.
+  const browse = harness({ columns: 120, rows: 40 })
+  browse.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 10_000, { title: 'H07 current' }), ...history] }))
+  browse.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-alpha', path: '/ws/alpha', title: 'Alpha', sessionIds: [CURRENT, ...history.map(item => item.id)] },
+  ] })
+  browse.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      ...history.map(item => fact(item.id, { running: false, attention: 'none', attentionSourceState: 'known' })),
+    ],
+    answerEligibility: [],
+  })
+  await browse.paint()
+  const grown = browse.view().split('\n').map(line => line.slice(0, 66))
+  const count = grown.filter(line => /H07 history \d+/.test(line)).length
+  assert.ok(count > 1, `ordinary Browse at the same size still spends its spare rows on history:\n${grown.join('\n')}`)
+  assert.ok(count <= 20)
+})
+
+test('H08: the wide two-column list spends its own pane budget on history', async () => {
+  const history = Array.from({ length: 30 }, (_, index) => row(`session-h08-${index}`, 900 - index, { title: `H08 ${index}` }))
+  // 120x24 is the wide layout. Its global status line is charged by renderBody
+  // BEFORE renderListPane, so the list must charge it exactly once: 20 body rows
+  // - 1 head status = 19 list rows, i.e. a 17-row watermark (current + 16).
+  const h = harness({ columns: 120, rows: 24 })
+  h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'H08 current' }), ...history] }))
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-a', path: '/ws', title: 'Alpha', sessionIds: [CURRENT, ...history.map(item => item.id)] },
+  ] })
+  await h.paint()
+  let frame = panelFrame(h)
+  assert.ok(frame.join('\n').includes('Workspace: Alpha (ws-a)'),
+    `the wide layout paints the read-only preview:\n${frame.join('\n')}`)
+  let visible = frame.map(line => line.slice(0, 66)).filter(line => /H08 \d+/.test(line)).length
+  assert.equal(visible, 16,
+    `the wide pane budget grows to exactly 17 ordinary rows (16 history + current):\n${frame.join('\n')}`)
+  assert.ok(frame.map(line => line.slice(0, 66)).some(line => line.includes('Show more sessions · 14 remaining')),
+    'the remaining count matches the wide watermark')
+  h.vt.resize(160, 60)
+  await h.paint()
+  frame = panelFrame(h)
+  visible = frame.map(line => line.slice(0, 88)).filter(line => /H08 \d+/.test(line)).length
+  assert.equal(visible, 19,
+    `160x60 reaches the automatic 20-row watermark:\n${frame.join('\n')}`)
+  assert.ok(frame.map(line => line.slice(0, 88)).some(line => line.includes('Show more sessions · 11 remaining')),
+    'the remaining count matches the tall wide watermark')
+})
+
 test('H05: search, Peek, the Host editor and tiny frames never move the Browse watermark', async () => {
   const history = Array.from({ length: 30 }, (_, index) => row(`session-h05-${index}`, 900 - index, { title: `H05 ${index}` }))
   const h = harness({
