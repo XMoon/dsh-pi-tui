@@ -49,6 +49,7 @@ function surface(): SampledSurface {
     reportSwitch: record,
     clearUnpinnedDrafts: () => {},
     withdrawReplacedPresentation: () => {},
+    clearResumeFailure: () => {},
     retireStaleHistorySeat: () => {},
     beginInputHistoryScope: record,
     dropOutgoingActiveDraft: record,
@@ -200,4 +201,73 @@ test('a LAUNCH proposal keeps the historical Direct first-session flow', async (
   await runtime.preflightWorkspace()
   assert.equal(owner.snapshot().status, 'confirmed')
   assert.equal(owner.snapshot().provenance, 'launch')
+})
+
+test('review P1: a refused Add leaves the confirmed target intact for the first-session boundary', async () => {
+  const { runtime, owner, host } = bind({ launchCwd: undefined })
+  owner.setResolvedWorkspace('workspace-a', '/host/a')
+  // A DIFFERENT directory verifies and is REFUSED (the real Add entry's
+  // `beginPathVerification` → `rejectPathVerification` pair).
+  const verification = owner.beginPathVerification('/host/b')
+  owner.rejectPathVerification(verification, 'the Host refused the proposed workspace directory')
+  assert.equal(owner.snapshot().status, 'rejected')
+  assert.deepEqual(owner.capture()?.intent, { kind: 'workspace-id', workspaceId: 'workspace-a' },
+    'the confirmed create target survives the refused verification')
+
+  // The first-session boundary resolves the STILL-CONFIRMED target — never B,
+  // and without re-proposing any Host path. (The create below is stopped at
+  // the resolve boundary; the full commit flow is owned by the runner suites.)
+  await runtime.preflightWorkspace()
+  assert.deepEqual(owner.capture()?.intent, { kind: 'workspace-id', workspaceId: 'workspace-a' })
+  assert.deepEqual(host.resolves, [], 'a confirmed target needs no preflight resolution')
+  await runtime.ensureSession().catch(() => {})
+  assert.deepEqual(host.resolves, [{ kind: 'workspace-id' }],
+    'the first create consumes the confirmed WorkspaceId; the refused B path was never proposed')
+  assert.deepEqual(owner.capture()?.intent, { kind: 'workspace-id', workspaceId: 'workspace-a' },
+    'the refused verification did not replace the target')
+})
+
+test('review P2: a preflight-confirmed AUTO candidate is re-proved at the consumption boundary', async () => {
+  let current = true
+  const { runtime, owner, host } = bind({
+    launchCwd: '/client/cwd',
+    provenance: 'auto',
+    autoWorkspaceRevalidate: () => current,
+    resolve: async () => ({ workspaceId: 'workspace-auto', path: '/host/cwd' }),
+  })
+  // The mount preflight confirms the automatic candidate LONG before the user
+  // sends the first message.
+  await runtime.preflightWorkspace()
+  assert.equal(owner.snapshot().status, 'confirmed')
+  assert.equal(owner.snapshot().workspaceId, 'workspace-auto')
+  assert.deepEqual(host.resolves, [{ kind: 'host-path', path: '/client/cwd' }])
+
+  // The mount view changed in the preflight→first-create window.
+  current = false
+  await assert.rejects(runtime.ensureSession(), (error: unknown) =>
+    error instanceof WorkspaceSelectionError && error.code === 'workspace/not-selected')
+  assert.deepEqual(host.creates, [], 'no Session is created on a revoked auto proof')
+  assert.equal(owner.snapshot().status, 'unselected', 'the revoked candidate leaves the surface unselected')
+  assert.equal(owner.capture(), undefined)
+  // The consumption gate never re-proposed the auto path to the Host.
+  assert.deepEqual(host.resolves, [{ kind: 'host-path', path: '/client/cwd' }],
+    'the revoked window adds NO second Host resolution')
+})
+
+test('review P2: an explicit MANUAL selection needs no Client proof at the consumption boundary', async () => {
+  const resolveCalls: Array<{ readonly kind: string; readonly workspaceId?: string }> = []
+  const { runtime, owner } = bind({
+    launchCwd: undefined,
+    resolve: async (intent) => {
+      const record = intent as { kind: string; workspaceId?: string }
+      resolveCalls.push({ kind: record.kind, ...(record.workspaceId === undefined ? {} : { workspaceId: record.workspaceId }) })
+      // Stop at the resolve boundary: the consumption GATE is the fact under
+      // test, not the full create commit (owned by the runner suites).
+      throw new WorkspaceSelectionError('refused', 'stopped for the gate test', 'workspace/invalid-path')
+    },
+  })
+  owner.setResolvedWorkspace('workspace-manual', '/host/manual')
+  await runtime.ensureSession().catch(() => {})
+  assert.deepEqual(resolveCalls, [{ kind: 'workspace-id', workspaceId: 'workspace-manual' }],
+    'a manual workspace-id reaches the create boundary WITHOUT any Client-cwd proof')
 })

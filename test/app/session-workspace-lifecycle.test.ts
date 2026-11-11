@@ -287,6 +287,9 @@ function harness(options: {
   readonly frameRows?: number
   /** PR3: the intent owner whose commit ordering the case asserts. */
   readonly workspaceNextIntent?: TuiCommandRunner['workspaceNextIntent']
+  /** F5-B: the Host-file port the runner's `@` completion consumes (a spy in
+   *  the review-P1 identity-rule case). */
+  readonly hostFile?: TuiCommandRunner['hostFile']
 }): Harness {
   const vt = new VirtualTerminal(options.frameColumns ?? 100, options.frameRows ?? 30)
   const app = new TuiApp(
@@ -420,7 +423,7 @@ function harness(options: {
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as never,
     clientCommands: createClientCommandRegistry(parseCommand),
-    hostFile: new DirectHostFilePort(() => undefined),
+    hostFile: options.hostFile ?? new DirectHostFilePort(() => undefined),
     hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     requestExit: () => {},
     cwd: '/ws',
@@ -2501,5 +2504,137 @@ test('the /new recovery entry keeps the full tree at 120x40 and 80x24 and only e
     } finally {
       h.close()
     }
+  }
+})
+
+// ── M6-1/F5-B review P1: a refused Add must not disable the still-confirmed
+//    Workspace's `@file` discovery (the real /sessions Add entry → the real
+//    completion scope consumer) ─────────────────────────────────────────────
+
+test('review P1: after a REFUSED Add of another directory, @file still discovers the confirmed Workspace', async (t) => {
+  const nextIntent = createWorkspaceNextIntentOwner(undefined)
+  nextIntent.setResolvedWorkspace('workspace-a', '/host/a')
+  assert.equal(nextIntent.snapshot().status, 'confirmed')
+  const revisionBefore = nextIntent.snapshot().revision
+
+  // The Host-file port the runner's `@` completion consumes: a spy recording
+  // the scopes the REAL completionScope closure resolves.
+  const scopes: import('../../src/runtime/host-file-port.ts').HostFileScope[] = []
+  const hostFile: TuiCommandRunner['hostFile'] = {
+    listReferences: async (scope) => {
+      scopes.push(scope)
+      return { kind: 'ok', items: [{ path: 'alpha.ts', kind: 'file' }] }
+    },
+    resolveReference: async () => ({ kind: 'unavailable', reason: 'not under test' }),
+    canonicalizeMentions: async (_scope, text) => text,
+  }
+  const h = harness({
+    workspaceNextIntent: nextIntent,
+    hostFile,
+    hostDirectoryBrowse: {
+      list: async (path) => path === undefined
+        ? pr3Ready(pr3Listing(PR3_HOME, ['project-b']))
+        : pr3Ready(pr3Listing(path, [])),
+    },
+    agents: {
+      resolveWorkspace: (async () => {
+        throw new Error('the Host refused the proposed workspace directory')
+      }) as never,
+    },
+  })
+  try {
+    // The REAL Add entry: /sessions → Add → type B → Enter → Host REFUSES.
+    await h.runSessions('')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\x1b[H')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\r')
+    await h.vt.waitForRender()
+    await waitUntil(() => h.view().includes('project-b/'), 'the Add editor lists the Host level')
+    h.vt.sendInput('\r')
+    await waitUntil(() => nextIntent.snapshot().status === 'rejected',
+      'the refused verification marks the status rejected')
+    assert.equal(nextIntent.snapshot().revision, revisionBefore, 'a refusal commits nothing')
+    // THE IDENTITY RULE under review: the create target is still Workspace A.
+    assert.deepEqual(nextIntent.capture()?.intent, { kind: 'workspace-id', workspaceId: 'workspace-a' },
+      'the refused Add must not replace or disable the confirmed target')
+
+    // Back to the editor: the refused Add leaves the Browser's inline editor
+    // open (the two-layer Esc ladder: suggestions → editor → Browser). Walk
+    // the ladder until the editor surface is really back, then the REAL
+    // completion consumer types an `@` mention.
+    for (let escapes = 0; escapes < 5; escapes += 1) {
+      const view = h.view()
+      if (!view.includes('Sessions ·') && !view.includes('Add directory')) break
+      h.vt.sendInput('\x1b')
+      await h.vt.waitForRender()
+    }
+    h.vt.sendInput('@alpha')
+    try {
+      await waitUntil(() => scopes.length > 0, 'the @ mention reached the Host-file port', 6_000)
+    } catch (error) {
+      process.stderr.write(`[p1-frame]\n${h.view()}\n[/p1-frame]\nfull=${String(h.app.isFullscreen())}\n`)
+      throw error
+    }
+    const scope = scopes.at(-1)!
+    assert.deepEqual(scope, { kind: 'workspace', workspaceId: 'workspace-a', selectionRevision: revisionBefore },
+      'the still-confirmed Workspace answers @file despite the rejected Add (status is transient)')
+  } finally {
+    h.close()
+  }
+})
+
+test('review P1: a SUCCESSFUL Add replaces the target; the pre-Add target stops answering', async (t) => {
+  const nextIntent = createWorkspaceNextIntentOwner(undefined)
+  nextIntent.setResolvedWorkspace('workspace-a', '/host/a')
+  const revisionBefore = nextIntent.snapshot().revision
+  const scopes: import('../../src/runtime/host-file-port.ts').HostFileScope[] = []
+  const hostFile: TuiCommandRunner['hostFile'] = {
+    listReferences: async (scope) => {
+      scopes.push(scope)
+      return { kind: 'ok', items: [{ path: 'beta.ts', kind: 'file' }] }
+    },
+    resolveReference: async () => ({ kind: 'unavailable', reason: 'not under test' }),
+    canonicalizeMentions: async (_scope, text) => text,
+  }
+  const h = harness({
+    workspaceNextIntent: nextIntent,
+    hostFile,
+    hostDirectoryBrowse: {
+      list: async (path) => path === undefined
+        ? pr3Ready(pr3Listing(PR3_HOME, ['project-b']))
+        : pr3Ready(pr3Listing(path, [])),
+    },
+    agents: {
+      resolveWorkspace: (async () => ({ workspaceId: 'workspace-b', path: '/host/b' })) as never,
+    },
+  })
+  try {
+    await h.runSessions('')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\x1b[H')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\r')
+    await h.vt.waitForRender()
+    await waitUntil(() => h.view().includes('project-b/'), 'the Add editor lists the Host level')
+    h.vt.sendInput('\r')
+    await waitUntil(() => nextIntent.snapshot().status === 'confirmed'
+      && nextIntent.snapshot().revision > revisionBefore, 'the verified Add commits Workspace B')
+    assert.deepEqual(nextIntent.capture()?.intent, { kind: 'workspace-id', workspaceId: 'workspace-b' })
+
+    // Ordinary Add returns to the same Browser: close it back to the editor.
+    for (let escapes = 0; escapes < 5; escapes += 1) {
+      const view = h.view()
+      if (!view.includes('Sessions ·') && !view.includes('Add directory')) break
+      h.vt.sendInput('\x1b')
+      await h.vt.waitForRender()
+    }
+    h.vt.sendInput('@beta')
+    await waitUntil(() => scopes.length > 0, 'the @ mention reached the Host-file port', 6_000)
+    const scope = scopes.at(-1)!
+    assert.deepEqual(scope, { kind: 'workspace', workspaceId: 'workspace-b', selectionRevision: nextIntent.snapshot().revision },
+      'the committed replacement owns the completion scope')
+  } finally {
+    h.close()
   }
 })
