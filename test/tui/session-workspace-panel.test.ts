@@ -1747,10 +1747,6 @@ test('one-line header, truthful Current/Next, and a Footer of the live typed ver
   assert.ok(!lines[lines.length - 1]!.includes('Open [Enter]'),
     'the opened Session never advertises the deliberate no-op Enter')
   assert.ok(lines[lines.length - 1]!.includes('Peek [Space]'), 'the opened Session still advertises its Peek')
-  assert.ok(/^> ● current-/m.test(h.view()), 'Current is a row marker, not the selection')
-})
-
-  assert.ok(lines[lines.length - 1]!.includes('Space peek'), 'the opened Session still advertises its Peek')
   assert.ok(/^> {3}● current-/m.test(h.view()), 'Current is a row marker, not the selection')
   // A non-current Session advertises its real Open verb.
   h.vt.sendInput('\t') // Beta Folder
@@ -3616,7 +3612,7 @@ test('H01: the real list height drives ordinary history up to the automatic cap'
     const visible = frame.filter(line => /H01 \d+/.test(line)).length
     counts.push(visible)
     assert.ok(visible > 0 && visible <= 20, `${rows} rows: ordinary history stays within the automatic cap:\n${view}`)
-    assert.ok(frame[frame.length - 1]!.includes('Esc close'), `${rows} rows: the Footer keeps its last physical row`)
+    assert.ok(frame[frame.length - 1]!.includes('Close [Esc]'), `${rows} rows: the Footer keeps its last physical row`)
     const more = frame.find(line => line.includes('Show more sessions'))
     assert.ok(more !== undefined, `${rows} rows: the remaining history stays behind Show more:\n${view}`)
     const remaining = Number(/· (\d+) remaining/.exec(more)?.[1])
@@ -3686,7 +3682,7 @@ test('H02B: a growth that exhausts the selected Show more row keeps a painted cu
   assert.ok(/^> .*Alpha/m.test(grown),
     `the cursor re-anchored on its parent Folder instead of vanishing:\n${grown}`)
   const actionBar = panelFrame(h).at(-1)!
-  assert.ok(actionBar.includes('Enter Collapse'),
+  assert.ok(actionBar.includes('Collapse [Enter]'),
     `the Footer still advertises the re-anchored row's real verb:\n${actionBar}`)
   h.vt.sendInput('\r')
   await h.paint()
@@ -3718,7 +3714,7 @@ test('H02B: a growth that exhausts the selected Show more row keeps a painted cu
   const settled = status.view()
   assert.ok(!settled.includes('Show more sessions'), `the settled sample frees a row and exhausts the history:\n${settled}`)
   assert.ok(/^> .*Status/m.test(settled), `the cursor re-anchored on the parent Folder:\n${settled}`)
-  assert.ok(panelFrame(status).at(-1)!.includes('Enter Collapse'), 'the Footer advertises the painted row')
+  assert.ok(panelFrame(status).at(-1)!.includes('Collapse [Enter]'), 'the Footer advertises the painted row')
 })
 
 test('H03: spare rows fill the priority Workspace first and then the other expanded ones', async () => {
