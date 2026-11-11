@@ -1192,11 +1192,20 @@ test('a successful Ctrl+S steer retires the draft history (F3)', async () => {
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   const store = new DraftImageStore()
+  let finishBusinessSteer: (() => void) | undefined
   const { vt, app, businessPins } = startApp(100, 32, store, undefined, (text, probe) => {
-    // The business steer owner takes its synchronous pin, then a successful
-    // write consumes the referenced drafts.
-    probe.businessPins.push(store.pinReferenced(text))
-    consumeDraftAttachments(text, store)
+    // The business steer owner takes its synchronous pin INSIDE the dispatch.
+    // The app's own preview bridge still holds its reservation until the
+    // dispatch call stack returns, so the real owner settles asynchronously:
+    // it releases its OWN reservation and consumes afterwards (the pin-aware
+    // consumption then retires the draft; a draft still reserved by another
+    // accepted submission would survive instead).
+    const release = store.pinReferenced(text)
+    probe.businessPins.push(release)
+    finishBusinessSteer = () => {
+      release()
+      consumeDraftAttachments(text, store)
+    }
   })
   const image = addImage(store)
   app.setDraft('')
@@ -1206,6 +1215,9 @@ test('a successful Ctrl+S steer retires the draft history (F3)', async () => {
   assert.equal(store.size(), 1)
 
   vt.sendInput('\x13') // Ctrl+S
+  // The synchronous dispatch (and its preview bridge) has returned; the
+  // business owner's async success settles now.
+  finishBusinessSteer?.()
   await vt.waitForRender()
   assert.equal(app.getDraft(), '')
   assert.equal(store.size(), 0, 'the successful steer consumed the image')
