@@ -71,8 +71,10 @@ SurfaceRuntime.repaintTarget()  -- the ONE application writer
    +-> PiTui: folder.window(20 turns) -> TuiApp.setTranscript(...)
    +-> TSP: folder.messages() -> SurfaceDisplaySeam.setTranscript(...)
             -> projectTranscriptStructure()
-            -> Full / Compact / Focus mapper
-            -> official SDK Surface.render(Main)
+            -> Full / Compact / Focus block descriptors
+            -> ONE official SDK Surface:
+                 Main = renderer-local targeted ops (empty stable root)
+                 Dock / Layer / Welcome = SDK Surface.render()
             -> Tern native scroll / Follow
 ```
 
@@ -86,6 +88,29 @@ SurfaceRuntime.repaintTarget()  -- the ONE application writer
   row whose parent changes from standalone to Work-internal legitimately
   produces a local `del` of the old top-level card plus one `add` carrying the
   new Work subtree; Work and unrelated user/assistant node ids stay stable.
+- TSP keeps ONE `Surface` and ONE Main document. The transcript Main's
+  top-level children are maintained as targeted SDK ops from the block
+  descriptors (`describeTranscriptMainBlocksForPreset`), so a retained row is
+  never re-materialized for an unrelated change. `Surface.render()` keeps a
+  stable EMPTY Main root plus the Dock, the Layer and the formal Welcome Main;
+  it never receives the transcript history again. Source identity, input seat,
+  Fold ownership, Copy/Disclosure exact ids and image/blob authority are
+  unchanged by that split.
+- A row's display currency is derived from the Fold, not from node identity:
+  `transcriptDisplayRevisionOf()` tracks the in-place mutations a row really
+  underwent, and `assistantPresentationRevision()` / a tool's subtree revision
+  carry the live-body and nested-call changes. Descriptor stamps combine those
+  with the renderer-local disclosure, image/SVG and selection state, so a legal
+  late `tool/result`, PTC child or settled answer can still refresh a very old
+  row while unrelated history stays untouched.
+- `settle()` is a bounded hint, never a correctness mechanism: only a
+  top-level, currently mounted, pure User row whose owning turn is proven ended
+  (and that carries no image or pending publication) is settled. Assistant
+  stats/visuals, Work/Activity, Tool, Thinking, Context, Focus roots, Commands
+  and any streaming row deliberately stay unsettled. Tern's own document
+  retention may evict such a settled Main child and report `gone`; the evicted
+  id is retired from the renderer's operable set and is not re-fetched, because
+  bounded retention is a client fact, not a Host history loss.
 - PiTui keeps its existing `TranscriptWindowController` and bounded
   `folder.window()` projection. TSP uses `folder.messages()` from that same
   Folder for all Client-loaded rows and commits them through the same

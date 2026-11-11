@@ -110,7 +110,8 @@ import type { TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import type { TodoItem, TranscriptSearchPresentation } from '../../tui-app.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
-import { TranscriptNodeKeys, transcriptView, transcriptViewForPreset, visibleTranscriptMembers, toolRowImageBlocks, imageRefProblem, imageDisplayName, imageIdentityText, dockDraftImageNodes, DOCK_DRAFT_SINGLE_PREVIEW_COLS, DOCK_DRAFT_TWO_PREVIEW_COLS, MAX_IMAGE_BLOB_BYTES, type DockDraftImageEntry, type ToolSvgState } from './transcript-view.ts'
+import { TranscriptNodeKeys, transcriptView, transcriptViewForPreset, describeTranscriptMainBlocks, describeTranscriptMainBlocksForPreset, visibleTranscriptMembers, toolRowImageBlocks, imageRefProblem, imageDisplayName, imageIdentityText, dockDraftImageNodes, DOCK_DRAFT_SINGLE_PREVIEW_COLS, DOCK_DRAFT_TWO_PREVIEW_COLS, MAX_IMAGE_BLOB_BYTES, type DockDraftImageEntry, type ToolSvgState, type TranscriptMainBlockDescriptor } from './transcript-view.ts'
+import { ContinuousMainJournal, emptyTranscriptMain } from './continuous-main.ts'
 import { admitSvg, type SvgAdmission } from '../../domain/visual/svg-admission.ts'
 import { authorizeSvg, svgDigest } from '../../domain/visual/svg.ts'
 import { visualFactLine, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
@@ -630,6 +631,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   // promise inside this synchronous function.
   const surface: Surface = session.open({ mode: 'inline', title: 'dsh' })
   /**
+   * The ONE renderer-local Main journal: it owns the transcript Main's
+   * top-level children through the same Surface's public `send(ops)`, while
+   * every `Surface.render()` below keeps a stable EMPTY Main root plus the
+   * Dock/Layer (and the formal Welcome Main). Never a second Surface and never
+   * a second frame writer.
+   */
+  const mainJournal = new ContinuousMainJournal(surface)
+  /** The stable empty Main root the Surface always renders for the transcript. */
+  const EMPTY_TRANSCRIPT_MAIN = emptyTranscriptMain()
+  /**
    * The dock's draft-preview stylesheet role. The attribute VALUE may contain a
    * period; the sheet NAME may not (the client rejects a dotted sheet name).
    */
@@ -749,7 +760,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * available.
    */
   let hydrating = false
-  let lastMain: Node | undefined
+  /**
+   * The CURRENT projection's top-level Main blocks, derived by
+   * `rebuildLastMain()` and committed by `render()`. They are renderer-local
+   * descriptors, never a second transcript: each one only states its key, its
+   * semantic stamp and how to materialize that ONE block.
+   */
+  let lastMainBlocks: readonly TranscriptMainBlockDescriptor[] = []
   let modelPicker: TspModelPicker | undefined
   let queueManagerPresenter: TspQueueManager | undefined
   /** TSP-7 PR-G: the composer's anchored quick Model/Effort selector. A local
@@ -1003,6 +1020,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     notify: (text, kind) => { display.notify(text, kind) },
     setSettledQuestionAnswersLookup: (lookup) => {
       settledQuestionAnswers = lookup
+      // A settled Question repaints a row whose canonical message did not
+      // change, so the lookup's own version joins that row's display stamp.
+      settledQuestionAnswersRevision += 1
       if (!rebuildLastMain()) return
       render()
     },
@@ -1313,12 +1333,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let focusWorkOwnersByTurn: ReadonlyMap<number, ReadonlySet<TranscriptMessage>> = new Map()
   let focusToolKeysByTurn: ReadonlyMap<number, ReadonlySet<string>> = new Map()
   let focusInnerOwnersByTurn: ReadonlyMap<number, FocusInnerDisclosureOwners> = new Map()
+  /** Renderer-local version of the settled-answer lookup (see the mapper's
+   *  `settledQuestionAnswersRevision`): a settled Question changes a tool row
+   *  without a Folder mutation, so this version is part of that row's stamp. */
+  let settledQuestionAnswersRevision = 0
   /** The ONE renderer-local Compact Work disclosure owner set, keyed by the
    *  canonical span owner OBJECT identity. Never merged with expandedToolKeys
    *  (which owns SVG blob demand). Retired with the source/hydration/dispose. */
   const expandedWorkOwners = new Set<TranscriptMessage>()
   /** The CURRENT frame's Compact Activity node-key PATH → span owner. Rebuilt
-   *  from the real `lastMain` tree on every projection; empty in Full/Focus. */
+   *  from the per-root contributions on every projection; empty in Full/Focus. */
   const workDisclosureByPath = new Map<string, TranscriptMessage>()
   /**
    * The members the CURRENT projection actually materializes.
@@ -1908,9 +1932,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // TSP-7 Welcome D: the Main selection is strict and shares ONE predicate
     // with the Resume admission, so a frame and a click can never disagree
     // about whether the Welcome is the presented Main. The transcript
-    // projection `lastMain` is always kept (no fake row is ever inserted into
-    // the fold) and the Welcome never enters the Dock.
-    const mainNode = welcomeMainPresented()
+    // projection stays in the journal (no fake row is ever inserted into the
+    // fold) and the Welcome never enters the Dock.
+    //
+    // PR2: the Welcome is a FORMAL SDK Main. The journal therefore hands the
+    // region back BEFORE the Welcome is rendered, so the client never holds the
+    // journal's raw Main children and the Welcome tree at the same time; when
+    // the Welcome goes away the SDK render below deletes its children first and
+    // only then does the journal re-add the transcript roots.
+    const welcomeMain = welcomeMainPresented()
+    if (welcomeMain) mainJournal.detachAll()
+    const mainNode = welcomeMain
       ? welcomeView({
           tuiVersion: presentedStatus?.host.tuiVersion,
           whaleLines: welcomeWhalePlainLines(welcomeWhaleVariant),
@@ -1926,9 +1958,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           onChooseDirectory: welcomeChooseDirectoryClicked,
           onResume: welcomeResumeClicked,
         })
-      : lastMain
+      : EMPTY_TRANSCRIPT_MAIN
     surface.render({
-      ...(mainNode === undefined ? {} : { main: mainNode }),
+      main: mainNode,
       ...(dockNode === undefined ? {} : { dock: dockNode }),
       // Modal-first, then the four mutually-exclusive non-blocking presenters
       // in their frozen priority order; the empty seat layer is the fallback.
@@ -1955,6 +1987,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
             ?? queueManagerPresenter?.renderLayer()
             ?? seat.renderLayer(),
     })
+    // PR2: commit the Main journal AFTER the SDK view. On the Welcome →
+    // transcript boundary this is the exact contract order: the SDK render
+    // deleted the Welcome's children and restored the empty Main root, and only
+    // now are the transcript's raw Main roots added.
+    if (!welcomeMain) {
+      commitMainFrame()
+      settleImmutableUserRows()
+    }
     // The focus op is meaningful only for a node of a COMMITTED frame (the
     // SDK never validates it), so it always follows the render above.
     // TSP-7 PR-G: so does the quick menu's id indexing — the ids it hands to
@@ -2424,85 +2464,252 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   }
 
   /**
-   * PR3: index the COMMITTED main tree. The node ids come from the SDK's own
-   * `View.from` derivation over the exact tree this renderer paints, so a
-   * pointer action can be matched by the real button id of the current frame —
-   * never by a ref substring, a bare call id or a guessed path.
+   * PR2: ONE root's disposable frame contribution — everything the frame
+   * indexes need from that root's materialized subtree. It is computed when
+   * (and only when) the journal materializes that root, then merged in Main
+   * order; a retained root never walks its tree again.
    */
-  const indexVisualFrame = (
-    root: Node,
-    sources: ReadonlyMap<string, { readonly message: AssistantTranscriptRow; readonly publication: PublishedVisual }>,
-    transcriptCopyPayloads: ReadonlyMap<TranscriptMessage, string>,
-  ): VisualFrameIndex => {
-    const order: string[] = []
-    const nodeIds = new Map<string, string>()
-    const targets = new Map<string, VisualCopyTarget>()
-    const copyButtons = new Map<string, VisualCopyTarget>()
-    const transcriptCopyButtons = new Map<string, TranscriptCopyTarget>()
-    const source = projectionScope
-    if (source === undefined) return { order, nodeIds, targets, copyButtons, transcriptCopyButtons }
-    const messagesByKey = new Map<string, TranscriptMessage>()
-    for (const message of lastMessages) {
-      if (message.kind !== 'user' && message.kind !== 'assistant') continue
-      const key = scopeKeys.keyFor(message)
-      messagesByKey.set(key, message)
-      messagesByKey.set(`${scopePrefix}${key}`, message)
+  interface MainRootContribution {
+    readonly figures: readonly {
+      readonly ref: string
+      readonly nodeId: string
+      readonly target: VisualCopyTarget
+    }[]
+    readonly visualCopyButtons: readonly (readonly [string, VisualCopyTarget])[]
+    readonly transcriptCopyButtons: readonly (readonly [string, TranscriptCopyTarget])[]
+    readonly toolDisclosure: readonly (readonly [string, string])[]
+    readonly workDisclosure: readonly (readonly [string, TranscriptMessage])[]
+    readonly focusDisclosure: readonly (readonly [string, number])[]
+    readonly innerDisclosure: readonly (readonly [string, InnerDisclosurePathTarget])[]
+  }
+
+  /** The per-root contributions of the CURRENT frame, keyed by block key. */
+  const frameContributions = new Map<string, MainRootContribution>()
+  /**
+   * The indexer the journal calls for every root it materializes. It is
+   * replaced by each `rebuildLastMain()` (it closes over that rebuild's
+   * canonical lookup context) and never runs for a retained root.
+   */
+  let frameIndexer: ((key: string, node: Node, tree: Tree) => void) | undefined
+
+  /** Whether a disclosure path belongs to one top-level root key. */
+  const pathUnderRoot = (path: string, rootKey: string): boolean =>
+    path === rootKey || path.startsWith(`${rootKey}.`)
+
+  /** Index ONE materialized root: `node` is the root node, `tree` its root Tree
+   *  (the journal's single-root view child), so its ids are the wire ids. */
+  const collectRootContribution = (
+    rootKey: string,
+    node: Node,
+    tree: Tree,
+    context: {
+      readonly source: object
+      readonly messagesByKey: ReadonlyMap<string, TranscriptMessage>
+      readonly transcriptCopyPayloads: ReadonlyMap<TranscriptMessage, string>
+      readonly figureSources: ReadonlyMap<string, { readonly message: AssistantTranscriptRow; readonly publication: PublishedVisual }>
+      readonly focusRootTurnsBySectionKey: ReadonlyMap<string, number>
+      readonly workOwnersBySectionKey: ReadonlyMap<string, TranscriptMessage>
+      readonly focusWorkBySectionKey: ReadonlyMap<string, { readonly owner: TranscriptMessage; readonly turn: number }>
+      readonly innerOwnersByNodeKey: ReadonlyMap<string, InnerDisclosurePathTarget>
+      readonly compactWork: boolean
+      readonly focus: boolean
+    },
+  ): MainRootContribution => {
+    const figures: { ref: string; nodeId: string; target: VisualCopyTarget }[] = []
+    const visualCopyButtons: (readonly [string, VisualCopyTarget])[] = []
+    const transcriptCopyButtons: (readonly [string, TranscriptCopyTarget])[] = []
+    const toolDisclosure: (readonly [string, string])[] = []
+    const workDisclosure: (readonly [string, TranscriptMessage])[] = []
+    const focusDisclosure: (readonly [string, number])[] = []
+    const innerDisclosure: (readonly [string, InnerDisclosurePathTarget])[] = []
+    const recordDisclosures = (current: Node, path: string, parentTool: string | undefined): void => {
+      const nodeKey = (current.props as { key?: string }).key
+      let tool = parentTool
+      if (current.kind === 'tool' && (current.props as { collapsible?: boolean }).collapsible === true && nodeKey !== undefined) {
+        const own = nodeKey.startsWith(`${scopePrefix}msg-`)
+          ? nodeKey.slice(scopePrefix.length)
+          : nodeKey.startsWith('msg-') ? nodeKey : undefined
+        tool = own ?? (parentTool !== undefined ? `${parentTool}/${nodeKey}` : undefined)
+        if (tool !== undefined) toolDisclosure.push([path, tool])
+      }
+      if (current.kind === 'section' && (current.props as { collapsible?: boolean }).collapsible === true && nodeKey !== undefined) {
+        const inner = context.innerOwnersByNodeKey.get(nodeKey)
+        if (inner !== undefined) innerDisclosure.push([path, inner])
+        if (context.focus) {
+          const turn = context.focusRootTurnsBySectionKey.get(nodeKey)
+          if (turn !== undefined) focusDisclosure.push([path, turn])
+          const work = context.focusWorkBySectionKey.get(nodeKey)
+          if (work !== undefined) workDisclosure.push([path, work.owner])
+        } else if (context.compactWork) {
+          const owner = context.workOwnersBySectionKey.get(nodeKey)
+          if (owner !== undefined) workDisclosure.push([path, owner])
+        }
+      }
+      for (const [index, child] of current.children.entries()) {
+        const childKey = (child.props as { key?: string }).key
+        recordDisclosures(child, `${path}.${childKey ?? String(index)}`, tool)
+      }
     }
-    const visit = (tree: Tree, figure: VisualCopyTarget | undefined, assistant: AssistantTranscriptRow | undefined): void => {
-      const props = tree.props as Record<string, unknown>
+    recordDisclosures(node, rootKey, undefined)
+
+    const visit = (
+      current: Tree,
+      figure: VisualCopyTarget | undefined,
+      assistant: AssistantTranscriptRow | undefined,
+    ): void => {
+      const props = current.props as Record<string, unknown>
       const key = props['key']
-      const entry = typeof key === 'string' ? sources.get(key) : undefined
-      let current = figure
+      const entry = typeof key === 'string' ? context.figureSources.get(key) : undefined
+      let currentFigure = figure
       if (entry !== undefined) {
-        current = {
+        currentFigure = {
           message: entry.message,
           publication: entry.publication,
-          source,
+          source: context.source,
           scopePrefix,
         }
-        order.push(entry.publication.ref)
-        nodeIds.set(entry.publication.ref, tree.id)
-        targets.set(entry.publication.ref, current)
+        figures.push({ ref: entry.publication.ref, nodeId: current.id, target: currentFigure })
       }
-      if (current !== undefined && key === VISUAL_COPY_KEY) copyButtons.set(tree.id, current)
+      if (currentFigure !== undefined && key === VISUAL_COPY_KEY) visualCopyButtons.push([current.id, currentFigure])
 
       let currentAssistant = assistant
       if (props['role'] === 'dsh.transcript.assistant' && typeof key === 'string') {
-        const message = messagesByKey.get(key)
+        const message = context.messagesByKey.get(key)
         currentAssistant = message?.kind === 'assistant' ? message : undefined
       }
-      if (tree.kind === 'message' && props['role'] === 'dsh.transcript.user' && typeof key === 'string') {
-        const message = messagesByKey.get(key)
+      if (current.kind === 'message' && props['role'] === 'dsh.transcript.user' && typeof key === 'string') {
+        const message = context.messagesByKey.get(key)
         if (message?.kind === 'user') {
-          const payload = transcriptCopyPayloads.get(message)
+          const payload = context.transcriptCopyPayloads.get(message)
           const actions = props['actions']
           if (payload !== undefined && Array.isArray(actions)
             && actions.some(action => action !== null && typeof action === 'object'
               && (action as { readonly act?: unknown }).act === TRANSCRIPT_COPY_ACTION)) {
-            transcriptCopyButtons.set(tree.id, { message, payload, source, scopePrefix, nodeId: tree.id })
+            transcriptCopyButtons.push([current.id, { message, payload, source: context.source, scopePrefix, nodeId: current.id }])
           }
         }
-      } else if (tree.kind === 'button' && props['role'] === 'dsh.transcript.copy'
+      } else if (current.kind === 'button' && props['role'] === 'dsh.transcript.copy'
         && key === 'copy' && currentAssistant !== undefined) {
         const actions = props['actions'] as { readonly click?: unknown } | undefined
-        const payload = transcriptCopyPayloads.get(currentAssistant)
+        const payload = context.transcriptCopyPayloads.get(currentAssistant)
         if (actions?.click === TRANSCRIPT_COPY_ACTION && payload !== undefined) {
-          transcriptCopyButtons.set(tree.id, {
+          transcriptCopyButtons.push([current.id, {
             message: currentAssistant,
             payload,
-            source,
+            source: context.source,
             scopePrefix,
-            nodeId: tree.id,
-          })
+            nodeId: current.id,
+          }])
         }
       }
-      for (const child of tree.children) visit(child, current, currentAssistant)
+      for (const child of current.children) visit(child, currentFigure, currentAssistant)
     }
-    for (const region of View.from({ main: root }).regions) {
-      if (region !== undefined) visit(region, undefined, undefined)
-    }
-    return { order, nodeIds, targets, copyButtons, transcriptCopyButtons }
+    visit(tree, undefined, undefined)
+    return { figures, visualCopyButtons, transcriptCopyButtons, toolDisclosure, workDisclosure, focusDisclosure, innerDisclosure }
   }
+
+  /** Merge the current per-root contributions, in Main order, into the frame. */
+  const mergeFrameIndexes = (): VisualFrameIndex => {
+    const order: string[] = []
+    const nodeIds = new Map<string, string>()
+    const targets = new Map<string, VisualCopyTarget>()
+    const copyButtons = new Map<string, VisualCopyTarget>()
+    const transcriptCopies = new Map<string, TranscriptCopyTarget>()
+    const toolPaths = new Map<string, string>()
+    const workPaths = new Map<string, TranscriptMessage>()
+    const focusPaths = new Map<string, number>()
+    const innerPaths = new Map<string, InnerDisclosurePathTarget>()
+    for (const key of mainJournal.order) {
+      const contribution = frameContributions.get(key)
+      if (contribution === undefined) continue
+      for (const figure of contribution.figures) {
+        order.push(figure.ref)
+        nodeIds.set(figure.ref, figure.nodeId)
+        targets.set(figure.ref, figure.target)
+      }
+      for (const [id, target] of contribution.visualCopyButtons) copyButtons.set(id, target)
+      for (const [id, target] of contribution.transcriptCopyButtons) transcriptCopies.set(id, target)
+      for (const [path, tool] of contribution.toolDisclosure) toolPaths.set(path, tool)
+      for (const [path, owner] of contribution.workDisclosure) workPaths.set(path, owner)
+      for (const [path, turn] of contribution.focusDisclosure) focusPaths.set(path, turn)
+      for (const [path, target] of contribution.innerDisclosure) innerPaths.set(path, target)
+    }
+    visualOrder = order
+    figureNodeIds = nodeIds
+    visualTargets = targets
+    visualCopyButtons = copyButtons
+    transcriptCopyButtons = transcriptCopies
+    toolDisclosureByPath.clear()
+    for (const [path, tool] of toolPaths) toolDisclosureByPath.set(path, tool)
+    workDisclosureByPath.clear()
+    for (const [path, owner] of workPaths) workDisclosureByPath.set(path, owner)
+    focusDisclosureByPath.clear()
+    for (const [path, turn] of focusPaths) focusDisclosureByPath.set(path, turn)
+    innerDisclosureByPath.clear()
+    for (const [path, target] of innerPaths) innerDisclosureByPath.set(path, target)
+    return { order, nodeIds, targets, copyButtons, transcriptCopyButtons: transcriptCopies }
+  }
+
+  /**
+   * The ONE Main-frame commit point: after the SDK view is rendered, commit the
+   * current descriptors (materializing only new/changed roots), merge the
+   * per-root frame indexes in real Main order, and reconcile the selected
+   * figure against the CURRENT figure order the client will paint.
+   *
+   * The selection is part of every Assistant row's stamp, so a selection that
+   * has to be cleared is repaired by ONE rare second commit — never by
+   * re-materializing unrelated history.
+   */
+  function commitMainFrame(): VisualFrameIndex {
+    const committed = mainJournal.commit(lastMainBlocks, frameIndexer)
+    for (const key of committed.removed) frameContributions.delete(key)
+    let frame = mergeFrameIndexes()
+    if (process.env.PI_TUI_PR2_PROBE === '1') console.error('PROBE', JSON.stringify({ m: committed.materialized, r: committed.removed, order: mainJournal.order }))
+    const reconciled = reconcileVisualSelection(selectedVisual, frame)
+    if (!sameSelectedVisual(selectedVisual, reconciled)) {
+      selectedVisual = reconciled
+      if (rebuildLastMain()) {
+        const repaired = mainJournal.commit(lastMainBlocks, frameIndexer)
+        for (const key of repaired.removed) frameContributions.delete(key)
+        frame = mergeFrameIndexes()
+      }
+    }
+    return frame
+  }
+
+  /**
+   * PR2 SAFE SETTLE: the ONLY settle whitelist of this renderer.
+   *
+   * Only a top-level, currently attached, PURE User row whose owning turn is
+   * PROVEN ended may be settled: its body, its time and its Copy payload can no
+   * longer change, and it carries no image/blob or pending publication. Every
+   * other kind — Assistant (stats/visuals), Work/Activity, Tool, Thinking,
+   * Context cluster, Focus root, Command, Workflow, Compaction, any row with an
+   * image, any Preparing row — stays unsettled ON PURPOSE: those still accept
+   * late, legal updates and must never be frozen by a guess.
+   */
+  function settleImmutableUserRows(): void {
+    const activities = lastTurnActivities
+    if (activities === undefined) return
+    const eligible: string[] = []
+    for (const block of lastMainBlocks) {
+      if (block.owners.length !== 1) continue
+      const message = block.owners[0]!
+      if (message.kind !== 'user') continue
+      if (activities.get(message.turn)?.completed !== true) continue
+      if (message.content !== undefined && message.content.some(entry => entry.type === 'image')) continue
+      if (!mainJournal.isAttached(block.key)) continue
+      eligible.push(block.key)
+    }
+    if (eligible.length > 0) mainJournal.settle(eligible)
+  }
+
+  /** Retire one evicted root's contribution and every id it exposed. */
+  const retireRootContribution = (rootKey: string): void => {
+    frameContributions.delete(rootKey)
+    mergeFrameIndexes()
+  }
+  void pathUnderRoot
 
   /** Reconcile the previous selection with a frame's REAL figure order: a
    *  target that left the window clears the selection. */
@@ -2674,53 +2881,51 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       const payload = transcriptCopyPayload(message)
       if (payload !== undefined) transcriptCopyPayloads.set(message, payload)
     }
-    const build = (selection: SelectedVisualState | undefined): Node => {
-      const viewOptions = {
-        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-        scopePrefix,
-        ...(settledQuestionAnswers === undefined ? {} : { settledQuestionAnswersLookup: settledQuestionAnswers }),
-        ...(options.toolPresenter === undefined ? {} : { toolPresenter: options.toolPresenter }),
-        preparingPreviews: lastStreamingToolPreviews,
-        transcriptCopy: { action: TRANSCRIPT_COPY_ACTION } as const,
-        transcriptCopyPayloads,
-        chartKindsSupported: session.caps.kinds.includes('chart'),
-        ...(svgStates === undefined ? {} : { toolSvgStates: svgStates }),
-        expandedToolKeys,
-        ...(displayState === undefined ? {} : {
-          innerDisclosure: { expandedThinkingOwners, expandedContextRowOwners, expandedClusterOwners },
-        }),
-        imageStates,
-        nativeImagesSupported: nativeImagesSupported(),
-        requestPublishedSvgBlob,
-        ...(selection === undefined ? {} : { selectedVisual: selection }),
-      }
-      if (displayState === undefined) return transcriptView(projectTranscriptStructure(lastMessages), scopeKeys, viewOptions)
+    const messagesByKey = new Map<string, TranscriptMessage>()
+    for (const message of lastMessages) {
+      if (message.kind !== 'user' && message.kind !== 'assistant') continue
+      const key = scopeKeys.keyFor(message)
+      messagesByKey.set(key, message)
+      messagesByKey.set(`${scopePrefix}${key}`, message)
+    }
+    const viewOptions = {
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      scopePrefix,
+      ...(settledQuestionAnswers === undefined ? {} : { settledQuestionAnswersLookup: settledQuestionAnswers }),
+      settledQuestionAnswersRevision,
+      ...(options.toolPresenter === undefined ? {} : { toolPresenter: options.toolPresenter }),
+      preparingPreviews: lastStreamingToolPreviews,
+      transcriptCopy: { action: TRANSCRIPT_COPY_ACTION } as const,
+      transcriptCopyPayloads,
+      chartKindsSupported: session.caps.kinds.includes('chart'),
+      ...(svgStates === undefined ? {} : { toolSvgStates: svgStates }),
+      expandedToolKeys,
+      ...(displayState === undefined ? {} : {
+        innerDisclosure: { expandedThinkingOwners, expandedContextRowOwners, expandedClusterOwners },
+      }),
+      imageStates,
+      nativeImagesSupported: nativeImagesSupported(),
+      requestPublishedSvgBlob,
+      ...(selectedVisual === undefined ? {} : { selectedVisual }),
+    }
+    // ONE lightweight descriptor pass: keys, canonical ownership and the exact
+    // semantic stamps. Node materialization belongs to the journal, which only
+    // builds the blocks whose stamp changed.
+    lastMainBlocks = displayState === undefined
+      ? describeTranscriptMainBlocks(lastMessages, scopeKeys, viewOptions)
       // Read the LIVE authority at the commit point; never a mount-time copy.
-      return transcriptViewForPreset(lastMessages, scopeKeys, {
-        ...viewOptions,
-        preset: displayState.preset,
-        expandedWorkOwners,
-        expandedFocusTurns,
-        turnActivities: lastTurnActivities,
-        window: lastWindowState,
-        ...(focusPhase === undefined ? {} : { focusPhase }),
-        ...(focusElapsedMs === undefined ? {} : { focusElapsedMs }),
-      })
-    }
-    let selection = selectedVisual
-    let nextMain = build(selection)
-    let frame = indexVisualFrame(nextMain, figureSources, transcriptCopyPayloads)
-    const reconciled = reconcileVisualSelection(selection, frame)
-    if (!sameSelectedVisual(selection, reconciled)) {
-      selection = reconciled
-      nextMain = build(selection)
-      frame = indexVisualFrame(nextMain, figureSources, transcriptCopyPayloads)
-    }
-
-    const nextToolDisclosureByPath = new Map<string, string>()
-    const nextWorkDisclosureByPath = new Map<string, TranscriptMessage>()
-    const nextFocusDisclosureByPath = new Map<string, number>()
-    const nextInnerDisclosureByPath = new Map<string, InnerDisclosurePathTarget>()
+      : describeTranscriptMainBlocksForPreset(lastMessages, scopeKeys, {
+          ...viewOptions,
+          preset: displayState.preset,
+          expandedWorkOwners,
+          expandedFocusTurns,
+          turnActivities: lastTurnActivities,
+          window: lastWindowState,
+          ...(focusPhase === undefined ? {} : { focusPhase }),
+          ...(focusElapsedMs === undefined ? {} : { focusElapsedMs }),
+        })
+    const compactWork = displayState !== undefined && displayState.preset === 'compact'
+    const focus = displayState !== undefined && displayState.preset === 'focus'
     const innerOwnersByNodeKey = new Map<string, InnerDisclosurePathTarget>()
     const addInnerKey = (key: string, target: InnerDisclosurePathTarget): void => {
       innerOwnersByNodeKey.set(key, target)
@@ -2753,54 +2958,23 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         }
       }
     }
-    const compactWork = displayState !== undefined && displayState.preset === 'compact'
-    const focus = displayState !== undefined && displayState.preset === 'focus'
-    const recordDisclosures = (node: Node, path: string, parentTool: string | undefined): void => {
-      const nodeKey = (node.props as { key?: string }).key
-      let tool = parentTool
-      if (node.kind === 'tool' && (node.props as { collapsible?: boolean }).collapsible === true && nodeKey !== undefined) {
-        const own = nodeKey.startsWith(`${scopePrefix}msg-`)
-          ? nodeKey.slice(scopePrefix.length)
-          : nodeKey.startsWith('msg-') ? nodeKey : undefined
-        tool = own ?? (parentTool !== undefined ? `${parentTool}/${nodeKey}` : undefined)
-        if (tool !== undefined) nextToolDisclosureByPath.set(path, tool)
-      }
-      if (node.kind === 'section' && (node.props as { collapsible?: boolean }).collapsible === true && nodeKey !== undefined) {
-        const inner = innerOwnersByNodeKey.get(nodeKey)
-        if (inner !== undefined) nextInnerDisclosureByPath.set(path, inner)
-        if (focus) {
-          const turn = focusRootTurnsBySectionKey.get(nodeKey)
-          if (turn !== undefined) nextFocusDisclosureByPath.set(path, turn)
-          const work = focusWorkBySectionKey.get(nodeKey)
-          if (work !== undefined) nextWorkDisclosureByPath.set(path, work.owner)
-        } else if (compactWork) {
-          const owner = workOwnersBySectionKey.get(nodeKey)
-          if (owner !== undefined) nextWorkDisclosureByPath.set(path, owner)
+    const source = projectionScope
+    frameIndexer = source === undefined
+      ? undefined
+      : (key, node, tree) => {
+          frameContributions.set(key, collectRootContribution(key, node, tree, {
+            source,
+            messagesByKey,
+            transcriptCopyPayloads,
+            figureSources,
+            focusRootTurnsBySectionKey,
+            workOwnersBySectionKey,
+            focusWorkBySectionKey,
+            innerOwnersByNodeKey,
+            compactWork,
+            focus,
+          }))
         }
-      }
-      for (const [index, child] of node.children.entries()) {
-        const childKey = (child.props as { key?: string }).key
-        recordDisclosures(child, path === '' ? (childKey ?? String(index)) : `${path}.${childKey ?? String(index)}`, tool)
-      }
-    }
-    recordDisclosures(nextMain, '', undefined)
-    if (visualProjectionAborted) return false
-
-    lastMain = nextMain
-    selectedVisual = reconciled
-    visualOrder = frame.order
-    figureNodeIds = frame.nodeIds
-    visualTargets = frame.targets
-    visualCopyButtons = frame.copyButtons
-    transcriptCopyButtons = frame.transcriptCopyButtons
-    toolDisclosureByPath.clear()
-    for (const [path, owner] of nextToolDisclosureByPath) toolDisclosureByPath.set(path, owner)
-    workDisclosureByPath.clear()
-    for (const [path, owner] of nextWorkDisclosureByPath) workDisclosureByPath.set(path, owner)
-    focusDisclosureByPath.clear()
-    for (const [path, turn] of nextFocusDisclosureByPath) focusDisclosureByPath.set(path, turn)
-    innerDisclosureByPath.clear()
-    for (const [path, owner] of nextInnerDisclosureByPath) innerDisclosureByPath.set(path, owner)
     focusWorkTurnByOwner = focusWorkTurn
     focusWorkOwnersByTurn = focusWorksByTurn
     focusToolKeysByTurn = focusToolsByTurn
@@ -3034,7 +3208,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   }
 
   // ── The transcript projection (the ONLY writer is setTranscript) ──
-  const loadingMain = (): Node => ui.col({ key: 'transcript' }, ui.md({ key: 'loading', text: 'Loading session…' }))
+  /**
+   * The hydration Loading frame as ONE Main block: the same single row the
+   * previous full view held, expressed as a descriptor so the journal replaces
+   * the retired subject's rows with it through the same commit path.
+   */
+  const loadingMainBlocks = (): readonly TranscriptMainBlockDescriptor[] => [{
+    key: 'loading',
+    stamp: ['loading'],
+    owners: [],
+    materialize: () => ui.md({ key: 'loading', text: 'Loading session…' }),
+  }]
   const setTranscript = (
     messages: readonly TranscriptMessage[],
     activities?: ReadonlyMap<number, TurnActivity>,
@@ -3320,7 +3504,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       lastStreamingToolPreviews = []
       lastWindowState = undefined
       lastTurnActivities = undefined
-      lastMain = loadingMain()
+      lastMainBlocks = loadingMainBlocks()
       render()
     },
     clearActiveDraft() {
@@ -4525,6 +4709,25 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         }
         return false
       }
+      // PR2: the client's bounded retention reports the ids it dropped. A Main
+      // DIRECT child id is retired from this renderer's cache and from every
+      // frame index: the row is not re-fetched, not re-added by a mere
+      // projection, and never treated as permission to read Host history.
+      //
+      // An id that names THIS SURFACE keeps the SDK's own closed lifecycle: the
+      // SDK has already closed the surface above and the existing fatal/closed
+      // path owns the frame, so this renderer only observes the event.
+      if (input.event.ev === 'gone') {
+        if ((input.event.sf === undefined || input.event.sf === surface.id)
+          && !input.event.ids.includes(surface.id)) {
+          const retired = mainJournal.retireGone(input.event.ids)
+          if (retired.length > 0) {
+            for (const key of retired) retireRootContribution(key)
+            render()
+          }
+        }
+        return false
+      }
       // B3-A2 §7.3: while a temporary Screen exists its admission comes BEFORE
       // every base event branch. The fence does not depend on the client's
       // presentation: even a client that leaves the base on screen must not let
@@ -5019,6 +5222,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // frame index or retained projection input for a late event.
       lastWindowState = undefined
       lastTurnActivities = undefined
+      // PR2: the Main journal is renderer-local disposable state too. The
+      // surface is closing, so no `del` op is sent here.
+      mainJournal.reset()
+      lastMainBlocks = []
+      frameContributions.clear()
       // B3-A2 §9: the shared Promise's IDENTITY is latched BEFORE any cleanup
       // runs at all. Two separate hazards require this exact shape:
       //   1. the seat/Hub retirements call out to owner callbacks that may

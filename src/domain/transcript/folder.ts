@@ -146,6 +146,26 @@ function settleToolTiming(message: TranscriptMessage, endedAt: number): void {
 const assistantPresentationRevisions = new WeakMap<Extract<TranscriptMessage, { kind: 'assistant' }>, number>()
 const assistantStepIdentities = new WeakMap<Extract<TranscriptMessage, { kind: 'assistant' }>, number>()
 
+/**
+ * The display mutation revision of one folded row. Transcript rows are mutated
+ * IN PLACE (a streaming body, a settled tool result, a merged read group), so
+ * object identity alone never proves that a materialized row is still current.
+ * This WeakMap is the cheap per-row change stamp a lazy renderer diffs against
+ * its own last materialization; it stores no text, no copy of the row and no
+ * second projection, and it is never exported as a durable identity.
+ */
+const transcriptDisplayRevisions = new WeakMap<TranscriptMessage, number>()
+
+/** The current display mutation revision of one row (`0` when never bumped). */
+export function transcriptDisplayRevisionOf(message: TranscriptMessage): number {
+  return transcriptDisplayRevisions.get(message) ?? 0
+}
+
+/** Record one display-affecting mutation of a row (fold-internal). */
+function bumpTranscriptDisplayRevision(message: TranscriptMessage): void {
+  transcriptDisplayRevisions.set(message, transcriptDisplayRevisionOf(message) + 1)
+}
+
 /** Return the mutation revision of an Assistant's live indexed projection. */
 export function assistantPresentationRevision(message: TranscriptMessage): number {
   return message.kind === 'assistant' ? assistantPresentationRevisions.get(message) ?? 0 : 0
@@ -832,6 +852,11 @@ export class TranscriptFolder {
   /** PTC sub-call events whose parent is not yet mounted (an incomplete
    * replay fragment): start/settle facts are parked here and connected
    * when the parent appears — never promoted to top-level surface rows. */
+  /** The mounted TOP-LEVEL PTC card of every attached sub-call, recorded at
+   * attach time: after the parent call's own result left `pendingCalls` there
+   * is no other live path from a nested card back to the root it is painted
+   * inside, and a late child mutation must still invalidate that root. */
+  private readonly ptcRootByCard = new WeakMap<TranscriptToolMessage, TranscriptToolMessage>()
   private readonly orphanSubCalls = new Map<string, {
     start?: { rootCallId: string; parentCallId: string; name: string; arguments: unknown }
     settle?: { rootCallId: string; parentCallId: string; name: string; arguments: unknown; isError: boolean; content: readonly ContentBlock[] }
@@ -1149,6 +1174,9 @@ export class TranscriptFolder {
     }
     if (parent.subCalls === undefined) parent.subCalls = []
     parent.subCalls.push(child)
+    this.ptcRootByCard.set(child, parent.subCallId === undefined
+      ? parent
+      : this.ptcRootByCard.get(parent) ?? parent)
     this.pendingSubCalls.set(data.subCallId, child)
     this.subCallIndex.set(data.subCallId, child)
     this.subCallDepth.set(data.subCallId, depth)
@@ -1208,6 +1236,9 @@ export class TranscriptFolder {
       child.result = text
       child.resultBlocks = data.content
       this.pendingSubCalls.delete(subCallId)
+      // The nested card's own body changed in place; the rooted refresh below
+      // stamps the top-level card that the client actually materializes.
+      bumpTranscriptDisplayRevision(child)
       this.refreshActiveSubCallsFor(child)
       return
     }
@@ -1237,9 +1268,16 @@ export class TranscriptFolder {
   private refreshActiveSubCallsFor(child: TranscriptToolMessage): void {
     const root = child.rootCallId === undefined
       ? undefined
-      : this.pendingCalls.get(child.rootCallId)?.card ?? this.subCallIndex.get(child.rootCallId)
+      : this.pendingCalls.get(child.rootCallId)?.card
+        ?? this.subCallIndex.get(child.rootCallId)
+        // A child settled AFTER its parent call left `pendingCalls` still has a
+        // mounted top-level card: the card identity is recorded at attach time.
+        ?? this.ptcRootByCard.get(child)
     if (root === undefined) return
     root.subtreeRevision = (root.subtreeRevision ?? 0) + 1
+    // The focused renderer materializes the root card lazily, so the in-place
+    // child mutation must ALSO stamp the root row's display revision.
+    bumpTranscriptDisplayRevision(root)
     const rootEntry = child.rootCallId === undefined ? undefined : this.pendingCalls.get(child.rootCallId)
     if (rootEntry !== undefined) this.markSearchEntryDirty(rootEntry.index)
     const activity = this.activityFor(root.turn)
@@ -1572,6 +1610,14 @@ export class TranscriptFolder {
     if (entry === undefined) return
     this.dirtySearchEntries.add(index)
     this.searchRevisionCounter += 1
+    // The SAME real content mutation that makes the search corpus stale also
+    // stales the row's materialized display (and, for a merged read group, the
+    // group card that is actually emitted). The search side keeps owning its
+    // dirty set; this mirror only stamps the displayed row.
+    const item = this.items[index]
+    if (item !== undefined) bumpTranscriptDisplayRevision(item)
+    const group = this.groupOf.get(index)
+    if (group !== undefined) bumpTranscriptDisplayRevision(group)
   }
 
   /** Mark a raw-item range dirty (the DEFENSIVE reflow path — O(run), rare;
@@ -4468,6 +4514,9 @@ export class TranscriptFolder {
    * undefined. Consumers treat unknown as UNKNOWN, never zero. */
   private closeThinking(entry: Extract<TranscriptMessage, { kind: 'thinking' }>, endedAt?: number): void {
     entry.running = false
+    // The running flag is part of the rendered row (status/preview truncation)
+    // and does not itself touch the search corpus: stamp it here.
+    bumpTranscriptDisplayRevision(entry)
     const evidenceEnd = endedAt ?? thinkingLastEvidence.get(entry)
     const startedAt = transcriptTimingOf(entry)?.startedAt ?? evidenceEnd
     if (startedAt !== undefined) {
@@ -4627,6 +4676,7 @@ export class TranscriptFolder {
     if (entry === undefined || entry.kind !== 'compaction') return
     if (kind === 'compaction/start') {
       entry.running = true
+      bumpTranscriptDisplayRevision(entry)
     } else if (kind === 'compaction/summary') {
       const summary = data.summary
       const seqs = data.shadowedSeqs
@@ -4640,6 +4690,7 @@ export class TranscriptFolder {
       if (typeof tokens === 'number') entry.tokens = tokens
     } else if (kind === 'compaction/end') {
       entry.running = false
+      bumpTranscriptDisplayRevision(entry)
       const error = data.error
       if (typeof error === 'string' && error !== '') entry.error = error
       if (compactionId !== undefined) this.compacting.delete(compactionId)

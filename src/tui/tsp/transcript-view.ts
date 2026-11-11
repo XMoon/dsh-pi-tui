@@ -29,7 +29,13 @@ import type { StreamingToolPreview } from '../../app/surface/streaming-tool-prep
 import { contextFormOf } from '../../domain/transcript/context-semantics.ts'
 import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import { displayFailureText } from '../../domain/transcript/failure.ts'
-import { subCallDisplay, transcriptTimingOf, type SubCallTerminalFailure } from '../../domain/transcript/folder.ts'
+import {
+  assistantPresentationRevision,
+  subCallDisplay,
+  transcriptDisplayRevisionOf,
+  transcriptTimingOf,
+  type SubCallTerminalFailure,
+} from '../../domain/transcript/folder.ts'
 import { formatBytes } from '../../domain/media/format.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import type { RunPhase } from '../../domain/status/types.ts'
@@ -111,6 +117,12 @@ export interface TranscriptViewOptions {
    * transcript message is never rewritten.
    */
   readonly settledQuestionAnswersLookup?: SettledQuestionAnswersLookup
+  /**
+   * The renderer-local revision of the settled-answer lookup above. A settled
+   * Question repaints a row whose canonical message did not change, so the
+   * lookup's own version joins that row's display stamp.
+   */
+  readonly settledQuestionAnswersRevision?: number
   /**
    * PR-B1: the presentation bridge over the REGISTERED tool definitions
    * (the SAME bridge the PiTui renderer consumes). It is consulted ONLY to
@@ -1460,35 +1472,304 @@ function compactWorkHead(
   return ui.col({ key: 'head' }, ...rows)
 }
 
+/** One primitive a block descriptor's stamp is built from. */
+export type TranscriptMainStampPart = string | number | boolean | undefined
+
+/**
+ * ONE top-level Main block of the TSP transcript, in real Main order.
+ *
+ * This is the lazy half of the SAME mapper: the key is exactly the key the
+ * full `ui.col({key:'transcript'})` child carries, `materialize()` calls the
+ * existing node builders (never a second classifier), and `stamp` is the exact
+ * semantic input set that materialization reads. A renderer may keep an
+ * already materialized block while its stamp is unchanged, and must
+ * re-materialize when it differs.
+ */
+export interface TranscriptMainBlockDescriptor {
+  /** The top-level child key, byte-identical to the full-view child key. */
+  readonly key: string
+  /** The display inputs this block's node was built from. */
+  readonly stamp: readonly TranscriptMainStampPart[]
+  /** The canonical messages the block is derived from (never display text). */
+  readonly owners: readonly TranscriptMessage[]
+  /** Builds the node for this block. Called only when the block is new or dirty. */
+  materialize(): Node
+}
+
+/** The stable Preparing row key of one live tool-call preview. */
+function preparingKeyOf(preview: StreamingToolPreview): string {
+  return `preparing-${preview.callId === ''
+    ? `idx-${preview.turn}-${preview.step}-${preview.index}`
+    : preview.callId}`
+}
+
+/** The display stamp of one live Preparing row (its whole visible content). */
+function preparingStampOf(preview: StreamingToolPreview): readonly TranscriptMainStampPart[] {
+  return [preview.callId, preview.turn, preview.step, preview.index, preview.name, preview.summary, preview.argumentBytes]
+}
+
+/** The selected-figure state a published figure paints ('' when none). */
+function selectedVisualStampOf(selected: SelectedVisualState | undefined): string {
+  return selected === undefined ? '' : `${selected.ref}\u0001${selected.index}\u0001${selected.count}`
+}
+
+/**
+ * One image state's stable token. The state MAP is rebuilt on every commit, so
+ * the state OBJECT identity is never a change signal; the token is.
+ */
+function imageStateTokenOf(state: ToolImageState | undefined): string {
+  if (state === undefined) return '-'
+  return state.state === 'ready' ? `ready:${state.blobId}` : state.state
+}
+
+interface CachedImageRefIds {
+  readonly display: number
+  readonly assistant: number
+  readonly subtree: number
+  readonly ids: readonly string[]
+}
+
+const imageRefIdsCache = new WeakMap<TranscriptMessage, CachedImageRefIds>()
+
+/**
+ * The attachment ids one row's body/result projection reads, in the mapper's
+ * own order. Memoized on the row's mutation revisions: a row that did not
+ * change never re-scans its blocks, so the per-commit cost stays O(rows).
+ */
+function imageRefIdsOf(message: TranscriptMessage): readonly string[] {
+  const display = transcriptDisplayRevisionOf(message)
+  const assistant = message.kind === 'assistant' ? assistantPresentationRevision(message) : 0
+  const subtree = message.kind === 'tool' ? message.subtreeRevision ?? 0 : 0
+  const cached = imageRefIdsCache.get(message)
+  if (cached !== undefined && cached.display === display && cached.assistant === assistant && cached.subtree === subtree) {
+    return cached.ids
+  }
+  const ids: string[] = []
+  const pushBlocks = (blocks: readonly ContentBlock[] | undefined): void => {
+    if (blocks === undefined) return
+    for (const block of blocks) {
+      if (block.type !== 'image' || imageRefProblem(block.attachment) !== undefined) continue
+      ids.push(block.attachment.attachmentId)
+    }
+  }
+  const visitRow = (row: TranscriptToolMessage): void => {
+    pushBlocks(row.resultBlocks)
+    for (const child of row.subCalls ?? []) visitRow(child)
+  }
+  if (message.kind === 'user') pushBlocks(message.content)
+  else if (message.kind === 'assistant') {
+    if (message.displayBlocks !== undefined) {
+      for (const display of message.displayBlocks) {
+        if (display.kind === 'content') pushBlocks([display.block])
+      }
+    } else if (message.content !== undefined) pushBlocks(message.content)
+  } else if (message.kind === 'tool') visitRow(message)
+  imageRefIdsCache.set(message, { display, assistant, subtree, ids })
+  return ids
+}
+
+/** The prepared image states one row's projection reads. */
+function imageTokensOf(message: TranscriptMessage, options: TranscriptViewOptions): string {
+  const states = options.imageStates
+  if (states === undefined) return ''
+  const ids = imageRefIdsOf(message)
+  if (ids.length === 0) return ''
+  let out = ''
+  for (const id of ids) out += `${id}:${imageStateTokenOf(states.get(id))}\u0001`
+  return out
+}
+
+/** The prepared SVG states of a tool row and its nested calls. */
+function svgTokensOf(message: TranscriptMessage, options: TranscriptViewOptions): string {
+  const states = options.toolSvgStates
+  if (states === undefined) return ''
+  const visit = (row: TranscriptMessage): string => {
+    if (row.kind !== 'tool') return ''
+    let out = ''
+    if (row.name === SVG_TOOL_NAME) {
+      const state = states.get(row)
+      out = state === undefined
+        ? '-'
+        : state.state === 'ready' || state.state === 'unsupported'
+          ? `${state.state}:${state.fact.digest}`
+          : state.state
+    }
+    for (const child of row.subCalls ?? []) out += `|${visit(child)}`
+    return out
+  }
+  return visit(message)
+}
+
+/** Whether this row's Copy affordance exists for the CURRENT frame. */
+function copyTokenOf(message: TranscriptMessage, options: TranscriptViewOptions): number {
+  if (options.transcriptCopy === undefined) return -1
+  if (message.kind !== 'user' && message.kind !== 'assistant') return -1
+  if (options.transcriptCopyPayloads === undefined) return transcriptCopyPayload(message) === undefined ? 0 : 1
+  return options.transcriptCopyPayloads.has(message) ? 1 : 0
+}
+
+/**
+ * The disclosure inputs one row reads. The identity is derived exactly like the
+ * mapper derives it from the node key (the top-level key minus the scope
+ * prefix; a nested child is `parent/sub-<id>`), never re-interpreted.
+ */
+function disclosureTokenOf(
+  message: TranscriptMessage,
+  key: string,
+  options: TranscriptViewOptions,
+): TranscriptMainStampPart {
+  const inner = options.innerDisclosure
+  if (message.kind === 'thinking') {
+    return inner === undefined ? -1 : inner.expandedThinkingOwners.has(message) ? 1 : 0
+  }
+  if (message.kind === 'system' && message.context === true) {
+    return inner === undefined || !canCollapseContextRow(message)
+      ? -1
+      : inner.expandedContextRowOwners.has(message) ? 1 : 0
+  }
+  if (message.kind !== 'tool') return -1
+  const expanded = options.expandedToolKeys
+  if (expanded === undefined) return -1
+  const prefix = options.scopePrefix ?? ''
+  const own = prefix !== '' && key.startsWith(prefix) ? key.slice(prefix.length) : key
+  const subCalls = message.subCalls
+  // The overwhelmingly common row has no nested call: one membership bit.
+  if (subCalls === undefined || subCalls.length === 0) return expanded.has(own) ? 1 : 0
+  const parts: string[] = [`${own}:${expanded.has(own) ? 1 : 0}`]
+  const visit = (row: TranscriptToolMessage, path: string): void => {
+    parts.push(`${path}:${expanded.has(path) ? 1 : 0}`)
+    for (const child of row.subCalls ?? []) visit(child, `${path}/sub-${child.subCallId!}`)
+  }
+  for (const child of subCalls) visit(child, `${own}/sub-${child.subCallId!}`)
+  return parts.join('\u0001')
+}
+
+/** The exact display inputs of ONE row (no content copy, no hashing). */
+function messageStampOf(
+  message: TranscriptMessage,
+  key: string,
+  options: TranscriptViewOptions,
+): readonly TranscriptMainStampPart[] {
+  const parts: TranscriptMainStampPart[] = [message.kind, transcriptDisplayRevisionOf(message)]
+  switch (message.kind) {
+    case 'assistant':
+      parts.push(assistantPresentationRevision(message))
+      parts.push((options.transcriptStats?.get(message) ?? []).join('\u0001'))
+      parts.push(copyTokenOf(message, options))
+      parts.push(imageTokensOf(message, options))
+      parts.push(options.nativeImagesSupported === true ? 1 : 0)
+      parts.push(options.chartKindsSupported === true ? 1 : 0)
+      parts.push(selectedVisualStampOf(options.selectedVisual))
+      break
+    case 'tool':
+      parts.push(message.subtreeRevision ?? 0)
+      parts.push(disclosureTokenOf(message, key, options))
+      parts.push(svgTokensOf(message, options))
+      parts.push(imageTokensOf(message, options))
+      parts.push(options.settledQuestionAnswersRevision ?? 0)
+      break
+    case 'thinking':
+      parts.push(disclosureTokenOf(message, key, options))
+      parts.push(message.running === true ? 1 : 0)
+      break
+    case 'user':
+      parts.push(copyTokenOf(message, options))
+      parts.push(imageTokensOf(message, options))
+      break
+    case 'system':
+      parts.push(disclosureTokenOf(message, key, options))
+      break
+    default:
+      break
+  }
+  return parts
+}
+
+/** The display inputs of one canonical Context cluster. */
+function clusterStampOf(
+  cluster: ContextCluster,
+  keys: TranscriptNodeKeys,
+  options: TranscriptViewOptions,
+): readonly TranscriptMainStampPart[] {
+  const parts: TranscriptMainStampPart[] = ['ctx', cluster.members.length]
+  parts.push(options.innerDisclosure === undefined
+    ? -1
+    : options.innerDisclosure.expandedClusterOwners.has(cluster.owner) ? 1 : 0)
+  for (const member of cluster.members) parts.push(...messageStampOf(member, keys.keyFor(member), options))
+  return parts
+}
+
+function messageDescriptor(
+  message: TranscriptMessage,
+  key: string,
+  options: TranscriptViewOptions,
+  truncated = false,
+): TranscriptMainBlockDescriptor {
+  return {
+    key,
+    stamp: messageStampOf(message, key, options),
+    owners: [message],
+    materialize: () => messageNode(message, key, options, truncated),
+  }
+}
+
+function clusterDescriptor(
+  cluster: ContextCluster,
+  keys: TranscriptNodeKeys,
+  options: TranscriptViewOptions,
+  prefix: string,
+): TranscriptMainBlockDescriptor {
+  return {
+    key: `${prefix}ctx-${keys.keyFor(cluster.owner)}`,
+    stamp: clusterStampOf(cluster, keys, options),
+    owners: cluster.members,
+    materialize: () => clusterNode(cluster, keys, options, prefix),
+  }
+}
+
+function preparingDescriptor(
+  preview: StreamingToolPreview,
+  cwd: string | undefined,
+  keyPrefix: string,
+): TranscriptMainBlockDescriptor {
+  return {
+    key: `${keyPrefix}${preparingKeyOf(preview)}`,
+    stamp: ['preparing', ...preparingStampOf(preview)],
+    owners: [],
+    materialize: () => preparingRow(preview, cwd, keyPrefix),
+  }
+}
+
 /** Full materializes `projectTranscriptStructure` flat: canonical Work members
  *  keep their exact raw positions and no Work container is painted. */
-function fullView(
+function fullMainBlocks(
   structure: readonly TranscriptStructureBlock[],
   keys: TranscriptNodeKeys,
   options: TranscriptViewOptions,
   prefix: string,
   trailing: TranscriptStructureBlock | undefined,
   adopted: readonly StreamingToolPreview[],
-  standalone: readonly Node[],
-): Node {
-  const rows: Node[] = []
+  standalone: readonly TranscriptMainBlockDescriptor[],
+): TranscriptMainBlockDescriptor[] {
+  const rows: TranscriptMainBlockDescriptor[] = []
   for (const block of structure) {
     if (block.kind === 'message') {
-      rows.push(messageNode(block.message, `${prefix}${keys.keyFor(block.message)}`, options))
+      rows.push(messageDescriptor(block.message, `${prefix}${keys.keyFor(block.message)}`, options))
       continue
     }
     if (block.kind === 'context-cluster') {
-      rows.push(clusterNode(block.cluster, keys, options, prefix))
+      rows.push(clusterDescriptor(block.cluster, keys, options, prefix))
       continue
     }
     for (const part of block.span.parts) {
       rows.push(part.kind === 'message'
-        ? messageNode(part.message, `${prefix}${keys.keyFor(part.message)}`, options)
-        : clusterNode(part.cluster, keys, options, prefix))
+        ? messageDescriptor(part.message, `${prefix}${keys.keyFor(part.message)}`, options)
+        : clusterDescriptor(part.cluster, keys, options, prefix))
     }
-    if (block === trailing) for (const preview of adopted) rows.push(preparingRow(preview, options.cwd, prefix))
+    if (block === trailing) for (const preview of adopted) rows.push(preparingDescriptor(preview, options.cwd, prefix))
   }
-  return ui.col({ key: 'transcript', gap: 'none' }, ...rows, ...standalone)
+  rows.push(...standalone)
+  return rows
 }
 
 /** The Work owner of one projected member, from its canonical containerPath
@@ -1633,7 +1914,32 @@ function focusNestedWorkNode(
   )
 }
 
-function focusView(
+function focusNestedWorkDescriptor(
+  span: TranscriptWorkSpan,
+  keys: TranscriptNodeKeys,
+  options: TranscriptPresetViewOptions,
+  prefix: string,
+  lifetime: WorkLifetime | undefined,
+  preparing: readonly StreamingToolPreview[],
+): TranscriptMainBlockDescriptor {
+  const key = `${prefix}work-${keys.keyFor(span.owner)}`
+  const expanded = options.expandedWorkOwners?.has(span.owner) === true
+  const stamp: TranscriptMainStampPart[] = ['work', key, expanded ? 1 : 0, lifetime?.endedAt, span.parts.length]
+  for (const preview of preparing) stamp.push(...preparingStampOf(preview))
+  for (const part of span.parts) {
+    stamp.push(...(part.kind === 'message'
+      ? messageStampOf(part.message, keys.keyFor(part.message), options)
+      : clusterStampOf(part.cluster, keys, options)))
+  }
+  return {
+    key,
+    stamp,
+    owners: span.parts.flatMap(part => part.kind === 'message' ? [part.message] : part.cluster.members),
+    materialize: () => focusNestedWorkNode(span, keys, options, prefix, lifetime, preparing),
+  }
+}
+
+function focusMainBlocks(
   blocks: readonly FocusProjectedBlock[],
   keys: TranscriptNodeKeys,
   options: TranscriptPresetViewOptions,
@@ -1642,20 +1948,33 @@ function focusView(
   preparingByWorkOwner: ReadonlyMap<TranscriptMessage, readonly StreamingToolPreview[]>,
   standalonePreparing: readonly StreamingToolPreview[],
   workLifetimes: ReadonlyMap<TranscriptMessage, WorkLifetime>,
-): Node {
-  const slotsByOwner = new Map<TranscriptMessage, FocusSlot>()
+): TranscriptMainBlockDescriptor[] {
+  interface FocusRootSlot {
+    readonly draft: 'focus'
+    readonly owner: TranscriptMessage
+    readonly activity: TurnActivity
+    readonly actionStats: CompactActionStats
+    readonly action: CompactActionSource | undefined
+    readonly expanded: boolean
+    readonly preparing: readonly StreamingToolPreview[]
+    readonly children: TranscriptMainBlockDescriptor[]
+    workPreparing: boolean
+  }
+  const slotsByOwner = new Map<TranscriptMessage, FocusRootSlot>()
   const rootsWithWorkPreparing = new Set<TranscriptMessage>()
-  const rows: (Node | FocusSlot)[] = []
+  const rows: (FocusRootSlot | TranscriptMainBlockDescriptor)[] = []
   for (const block of blocks) {
     if (block.kind === 'activity') {
-      const slot: FocusSlot = {
+      const slot: FocusRootSlot = {
+        draft: 'focus',
         owner: block.owner,
         activity: block.activity,
         actionStats: block.actionStats,
         action: block.action,
-        children: [],
         expanded: options.expandedFocusTurns?.has(block.activity.turn) === true,
         preparing: preparingByRootOwner.get(block.owner) ?? [],
+        children: [],
+        workPreparing: false,
       }
       slotsByOwner.set(block.owner, slot)
       rows.push(slot)
@@ -1664,52 +1983,95 @@ function focusView(
     if (block.kind === 'message') {
       const owner = block.focusPresentationOwner
       const slot = owner === undefined ? undefined : slotsByOwner.get(owner)
-      if (slot !== undefined && slot.expanded) slot.children.push(focusMessageNode(block, keys, options))
-      else if (owner === undefined || slot === undefined) rows.push(focusMessageNode(block, keys, options))
+      const descriptor = messageDescriptor(block.message, keys.keyFor(block.message), options, block.truncated === true)
+      if (slot !== undefined && slot.expanded) slot.children.push(descriptor)
+      else if (owner === undefined || slot === undefined) rows.push(descriptor)
       continue
     }
     const owner = block.focusPresentationOwner
     const slot = owner === undefined ? undefined : slotsByOwner.get(owner)
     if (slot === undefined) {
       rows.push(...block.span.parts.map(part => part.kind === 'message'
-        ? messageNode(part.message, keys.keyFor(part.message), options)
-        : clusterNode(part.cluster, keys, options, prefix)))
+        ? messageDescriptor(part.message, keys.keyFor(part.message), options)
+        : clusterDescriptor(part.cluster, keys, options, prefix)))
       continue
     }
     if (slot.expanded) {
       if (preparingByWorkOwner.has(block.span.owner)) rootsWithWorkPreparing.add(slot.owner)
-      const child = focusNestedWorkNode(
+      slot.children.push(focusNestedWorkDescriptor(
         block.span,
         keys,
         options,
         prefix,
         workLifetimes.get(block.span.owner),
         preparingByWorkOwner.get(block.span.owner) ?? [],
-      )
-      slot.children.push(child)
+      ))
     }
   }
   for (const slot of slotsByOwner.values()) {
     if (!slot.expanded || slot.preparing.length === 0 || rootsWithWorkPreparing.has(slot.owner)) continue
-    slot.children.push(...slot.preparing.map(preview => preparingRow(preview, options.cwd, '')))
+    slot.children.push(...slot.preparing.map(preview => preparingDescriptor(preview, options.cwd, '')))
   }
-  const materialized = rows.map(row => {
-    if (!('activity' in row)) return row
-    return ui.section(
-      {
-        key: `${prefix}focus-${keys.keyFor(row.owner)}`,
-        head: focusRootHead(row, options),
-        collapsible: true,
-        collapsed: !row.expanded,
-      },
-      ...(row.expanded ? row.children : []),
-    )
-  })
-  return ui.col(
-    { key: 'transcript', gap: 'none' },
-    ...materialized,
-    ...standalonePreparing.map(preview => preparingRow(preview, options.cwd, prefix)),
-  )
+  const out = rows.map(row => 'draft' in row ? focusRootDescriptor(row, keys, options, prefix) : row)
+  return [
+    ...out,
+    ...standalonePreparing.map(preview => preparingDescriptor(preview, options.cwd, prefix)),
+  ]
+}
+
+/** The ONE Focus Activity root descriptor (canonical occurrence owner). */
+function focusRootDescriptor(
+  slot: {
+    readonly owner: TranscriptMessage
+    readonly activity: TurnActivity
+    readonly actionStats: CompactActionStats
+    readonly action: CompactActionSource | undefined
+    readonly expanded: boolean
+    readonly preparing: readonly StreamingToolPreview[]
+    readonly children: readonly TranscriptMainBlockDescriptor[]
+  },
+  keys: TranscriptNodeKeys,
+  options: TranscriptPresetViewOptions,
+  prefix: string,
+): TranscriptMainBlockDescriptor {
+  const key = `${prefix}focus-${keys.keyFor(slot.owner)}`
+  const stamp: TranscriptMainStampPart[] = [
+    'focus',
+    key,
+    slot.activity.turn,
+    slot.activity.revision,
+    slot.activity.totalTokens,
+    slot.expanded ? 1 : 0,
+    options.focusPhase ?? '',
+    options.focusElapsedMs?.get(slot.activity),
+  ]
+  for (const preview of slot.preparing) stamp.push(...preparingStampOf(preview))
+  for (const child of slot.children) stamp.push(...child.stamp)
+  return {
+    key,
+    stamp,
+    owners: [slot.owner, ...slot.children.flatMap(child => child.owners)],
+    materialize: () => {
+      const materialized: FocusSlot = {
+        owner: slot.owner,
+        activity: slot.activity,
+        actionStats: slot.actionStats,
+        action: slot.action,
+        children: slot.children.map(child => child.materialize()),
+        expanded: slot.expanded,
+        preparing: slot.preparing,
+      }
+      return ui.section(
+        {
+          key,
+          head: focusRootHead(materialized, options),
+          collapsible: true,
+          collapsed: !slot.expanded,
+        },
+        ...(slot.expanded ? materialized.children : []),
+      )
+    },
+  }
 }
 
 /** Preparing belongs either to the exact canonical trailing Work owner, to a
@@ -1880,7 +2242,7 @@ export function visibleTranscriptMembers(
  *  carried snapshot cluster's members under clusterHeader:false) become that
  *  section's children. Conversation/Attention/command/ambient Context stays in
  *  the main reading flow in raw order. */
-function compactView(
+function compactMainBlocks(
   blocks: readonly CompactProjectedBlock[],
   keys: TranscriptNodeKeys,
   options: TranscriptPresetViewOptions,
@@ -1888,49 +2250,62 @@ function compactView(
   tailWorkOwner: TranscriptMessage | undefined,
   adoptedPreviews: readonly StreamingToolPreview[],
   workLifetimes: ReadonlyMap<TranscriptMessage, WorkLifetime>,
-  standalone: readonly Node[],
-): Node {
-  /** One call-local assembly record per emitted Work header. Children are
-   *  collected from the projection's own flat member blocks, then the section
-   *  is built ONCE — no node is rebuilt or mutated after construction. */
+  standalone: readonly TranscriptMainBlockDescriptor[],
+): TranscriptMainBlockDescriptor[] {
+  /** One call-local assembly record per emitted Work header. Members arrive
+   *  from the projection's own flat member blocks, then the section is built
+   *  ONCE from the finished record — no node is rebuilt or mutated. */
   interface WorkSlot {
+    readonly draft: 'work'
+    readonly owner: TranscriptMessage
+    readonly span: TranscriptWorkSpan
     readonly key: string
-    readonly head: Node
     readonly expanded: boolean
-    readonly members: Node[]
-    readonly preparing: Node[]
+    readonly tail: boolean
+    readonly previews: readonly StreamingToolPreview[]
+    readonly members: TranscriptMainBlockDescriptor[]
+    readonly preparing: TranscriptMainBlockDescriptor[]
+    readonly activityCompleted: boolean | undefined
+    readonly lifetimeEndedAt: number | undefined
+    readonly hasNewer: boolean | undefined
   }
   const slots = new Map<TranscriptMessage, WorkSlot>()
-  const rows: (Node | WorkSlot)[] = []
+  const rows: (WorkSlot | TranscriptMainBlockDescriptor)[] = []
   const consumedClusterMembers = new Set<TranscriptMessage>()
   for (const block of blocks) {
     if (block.kind === 'work') {
-      const expanded = options.expandedWorkOwners?.has(block.span.owner) === true
+      const owner = block.span.owner
+      const expanded = options.expandedWorkOwners?.has(owner) === true
       // ONLY the projected TAIL Work may adopt the live Preparing rows: an
       // earlier Work of the same still-open turn is historical, and a turn key
       // is not an owner identity.
-      const isTail = tailWorkOwner === block.span.owner
+      const isTail = tailWorkOwner === owner
       const previews = isTail ? adoptedPreviews : []
-      const summary = summarizeWorkSpan(block.span)
-      const previewAdmitted = workPreviewAdmitted(block.span, isTail, previews.length > 0, options)
       const slot: WorkSlot = {
-        key: `${prefix}work-${keys.keyFor(block.span.owner)}`,
-        head: compactWorkHead(summary, workLifetimes.get(block.span.owner)?.endedAt, previewAdmitted, expanded, previews, options),
+        draft: 'work',
+        owner,
+        span: block.span,
+        key: `${prefix}work-${keys.keyFor(owner)}`,
         expanded,
+        tail: isTail,
+        previews,
         members: [],
-        preparing: expanded ? previews.map(preview => preparingRow(preview, options.cwd, '')) : [],
+        preparing: expanded ? previews.map(preview => preparingDescriptor(preview, options.cwd, '')) : [],
+        activityCompleted: options.turnActivities?.get(block.span.turn)?.completed,
+        lifetimeEndedAt: workLifetimes.get(owner)?.endedAt,
+        hasNewer: options.window?.hasNewer,
       }
-      slots.set(block.span.owner, slot)
+      slots.set(owner, slot)
       rows.push(slot)
       continue
     }
     if (block.kind === 'context-cluster') {
       if (options.innerDisclosure === undefined) continue
-      const node = clusterNode(block.cluster, keys, options, prefix)
+      const descriptor = clusterDescriptor(block.cluster, keys, options, prefix)
       const owner = workOwnerOf(block.containerPath)
       const slot = owner === undefined ? undefined : slots.get(owner)
-      if (slot === undefined) rows.push(node)
-      else slot.members.push(node)
+      if (slot === undefined) rows.push(descriptor)
+      else slot.members.push(descriptor)
       for (const member of block.cluster.members) consumedClusterMembers.add(member)
       continue
     }
@@ -1938,19 +2313,66 @@ function compactView(
     const owner = workOwnerOf(block.containerPath)
     const slot = owner === undefined ? undefined : slots.get(owner)
     if (slot === undefined) {
-      rows.push(messageNode(block.message, `${prefix}${keys.keyFor(block.message)}`, options))
+      rows.push(messageDescriptor(block.message, `${prefix}${keys.keyFor(block.message)}`, options))
       continue
     }
     // The member belongs to this Work by its canonical containerPath only.
-    slot.members.push(messageNode(block.message, keys.keyFor(block.message), options))
+    slot.members.push(messageDescriptor(block.message, keys.keyFor(block.message), options))
   }
-  return ui.col(
-    { key: 'transcript', gap: 'none' },
-    ...rows.map(row => 'key' in row
-      ? ui.section({ key: row.key, head: row.head, collapsible: true, collapsed: !row.expanded }, ...row.members, ...row.preparing)
-      : row),
-    ...standalone,
-  )
+  const out: TranscriptMainBlockDescriptor[] = rows.map(row => 'draft' in row
+    ? compactWorkDescriptor(row, options)
+    : row)
+  out.push(...standalone)
+  return out
+}
+
+/** The ONE Compact Activity section descriptor of one canonical Work span. */
+function compactWorkDescriptor(slot: {
+  readonly owner: TranscriptMessage
+  readonly span: TranscriptWorkSpan
+  readonly key: string
+  readonly expanded: boolean
+  readonly tail: boolean
+  readonly previews: readonly StreamingToolPreview[]
+  readonly members: readonly TranscriptMainBlockDescriptor[]
+  readonly preparing: readonly TranscriptMainBlockDescriptor[]
+  readonly activityCompleted: boolean | undefined
+  readonly lifetimeEndedAt: number | undefined
+  readonly hasNewer: boolean | undefined
+}, options: TranscriptPresetViewOptions): TranscriptMainBlockDescriptor {
+  const stamp: TranscriptMainStampPart[] = [
+    'work',
+    slot.key,
+    slot.expanded ? 1 : 0,
+    slot.tail ? 1 : 0,
+    slot.span.parts.length,
+    slot.activityCompleted === true ? 1 : slot.activityCompleted === false ? 0 : -1,
+    slot.hasNewer === false ? 1 : slot.hasNewer === true ? 0 : -1,
+    slot.lifetimeEndedAt,
+  ]
+  for (const preview of slot.previews) stamp.push(...preparingStampOf(preview))
+  for (const member of slot.members) stamp.push(...member.stamp)
+  return {
+    key: slot.key,
+    stamp,
+    owners: [slot.owner, ...slot.members.flatMap(member => member.owners)],
+    materialize: () => {
+      const previewAdmitted = workPreviewAdmitted(slot.span, slot.tail, slot.previews.length > 0, options)
+      const head = compactWorkHead(
+        summarizeWorkSpan(slot.span),
+        slot.lifetimeEndedAt,
+        previewAdmitted,
+        slot.expanded,
+        slot.previews,
+        options,
+      )
+      return ui.section(
+        { key: slot.key, head, collapsible: true, collapsed: !slot.expanded },
+        ...slot.members.map(member => member.materialize()),
+        ...(slot.expanded ? slot.preparing.map(member => member.materialize()) : []),
+      )
+    },
+  }
 }
 
 /**
@@ -2051,6 +2473,53 @@ export function transcriptViewForPreset(
   keys: TranscriptNodeKeys,
   options: TranscriptPresetViewOptions,
 ): Node {
+  return ui.col(
+    { key: 'transcript', gap: 'none' },
+    ...describeTranscriptMainBlocksForPreset(messages, keys, options).map(block => block.materialize()),
+  )
+}
+
+/**
+ * The lazy per-top-level-block half of the preset-less historical layout
+ * ({@link transcriptView}). Kept as the ONE production entry that layout's
+ * renderer calls, so no second classifier exists for it either.
+ */
+export function describeTranscriptMainBlocks(
+  messages: readonly TranscriptMessage[],
+  keys: TranscriptNodeKeys,
+  options: TranscriptViewOptions = {},
+): TranscriptMainBlockDescriptor[] {
+  for (const message of messages) keys.keyFor(message)
+  const structure = projectTranscriptStructure(messages)
+  const prefix = options.scopePrefix ?? ''
+  const groups = groupPreparingPreviews(options.preparingPreviews ?? [])
+  const trailing = structure.length === 0 ? undefined : structure[structure.length - 1]
+  const openTurn = trailing?.kind === 'work' ? trailing.span.turn : undefined
+  let adopted: readonly StreamingToolPreview[] = []
+  const standalone: TranscriptMainBlockDescriptor[] = []
+  for (const [turn, group] of groups) {
+    if (turn === openTurn) {
+      adopted = group
+      continue
+    }
+    for (const preview of group) standalone.push(preparingDescriptor(preview, options.cwd, prefix))
+  }
+  return legacyMainBlocks(structure, keys, options, prefix, trailing, adopted, standalone)
+}
+
+/**
+ * The lazy per-top-level-block half of {@link transcriptViewForPreset}: the
+ * SAME keys, the SAME canonical projections and the SAME node builders, with
+ * each top-level Main child described separately together with the exact
+ * semantic stamp it was built from. A renderer can therefore keep a retained
+ * block and materialize only the blocks whose stamp changed; the full view
+ * above is the byte-for-byte oracle of this function's concatenation.
+ */
+export function describeTranscriptMainBlocksForPreset(
+  messages: readonly TranscriptMessage[],
+  keys: TranscriptNodeKeys,
+  options: TranscriptPresetViewOptions,
+): TranscriptMainBlockDescriptor[] {
   // Allocate every row's presentation key in RAW order BEFORE materializing.
   // A collapsed Work builds no member nodes, so without this pass expanding it
   // would shift every later `msg-N` and remount unrelated rows: disclosure
@@ -2066,15 +2535,17 @@ export function transcriptViewForPreset(
   const trailing = structure.length === 0 ? undefined : structure[structure.length - 1]
   const openTurn = trailing?.kind === 'work' ? trailing.span.turn : undefined
   let adopted: readonly StreamingToolPreview[] = []
-  const standalone: Node[] = []
+  const standalone: TranscriptMainBlockDescriptor[] = []
   for (const [turn, group] of groups) {
     if (turn === openTurn) {
       adopted = group
       continue
     }
-    for (const preview of group) standalone.push(preparingRow(preview, options.cwd, prefix))
+    for (const preview of group) standalone.push(preparingDescriptor(preview, options.cwd, prefix))
   }
-  if (options.preset === 'full') return fullView(structure, keys, renderOptions, prefix, trailing, adopted, standalone)
+  if (options.preset === 'full') {
+    return fullMainBlocks(structure, keys, renderOptions, prefix, trailing, adopted, standalone)
+  }
   if (options.preset === 'compact') {
     const blocks = projectCompact(messages, {
       expandedWorkOwners: options.expandedWorkOwners ?? EMPTY_MESSAGE_SET,
@@ -2091,7 +2562,7 @@ export function transcriptViewForPreset(
     // Only the TRAILING open Work adopts its own turn's Preparing rows; every
     // other turn already failed open as standalone rows above. The adopted rows
     // belong to the projected TAIL Work alone — a turn key is not an owner.
-    return compactView(
+    return compactMainBlocks(
       blocks, keys, renderOptions, prefix,
       tailWork?.span.owner,
       adopted, workLifetimes, standalone,
@@ -2106,7 +2577,7 @@ export function transcriptViewForPreset(
     )
     const workLifetimes = resolveWorkLifetimes(structure, options.turnActivities ?? EMPTY_TURN_ACTIVITIES)
     const preparing = focusPreparingPlacement(messages, focusBlocks, options)
-    return focusView(
+    return focusMainBlocks(
       focusBlocks,
       keys,
       renderOptions,
@@ -2117,7 +2588,54 @@ export function transcriptViewForPreset(
       workLifetimes,
     )
   }
-  return transcriptView(structure, keys, renderOptions)
+  return legacyMainBlocks(structure, keys, renderOptions, prefix, trailing, adopted, standalone)
+}
+
+/** The preset-less historical layout, described for the SAME renderer. */
+function legacyMainBlocks(
+  structure: readonly TranscriptStructureBlock[],
+  keys: TranscriptNodeKeys,
+  options: TranscriptViewOptions,
+  prefix: string,
+  trailing: TranscriptStructureBlock | undefined,
+  adopted: readonly StreamingToolPreview[],
+  standalone: readonly TranscriptMainBlockDescriptor[],
+): TranscriptMainBlockDescriptor[] {
+  const rows: TranscriptMainBlockDescriptor[] = structure.map(block => {
+    switch (block.kind) {
+      case 'message':
+        return messageDescriptor(block.message, `${prefix}${keys.keyFor(block.message)}`, options)
+      case 'work':
+        return legacyWorkDescriptor(block.span, keys, options, prefix, block === trailing ? adopted : [])
+      case 'context-cluster':
+        return clusterDescriptor(block.cluster, keys, options, prefix)
+    }
+  })
+  rows.push(...standalone)
+  return rows
+}
+
+function legacyWorkDescriptor(
+  span: TranscriptWorkSpan,
+  keys: TranscriptNodeKeys,
+  options: TranscriptViewOptions,
+  prefix: string,
+  previews: readonly StreamingToolPreview[],
+): TranscriptMainBlockDescriptor {
+  const key = `${prefix}work-${keys.keyFor(span.owner)}`
+  const stamp: TranscriptMainStampPart[] = ['work', key, span.parts.length]
+  for (const preview of previews) stamp.push(...preparingStampOf(preview))
+  for (const part of span.parts) {
+    stamp.push(...(part.kind === 'message'
+      ? messageStampOf(part.message, keys.keyFor(part.message), options)
+      : clusterStampOf(part.cluster, keys, options)))
+  }
+  return {
+    key,
+    stamp,
+    owners: span.parts.flatMap(part => part.kind === 'message' ? [part.message] : part.cluster.members),
+    materialize: () => workNode(span, keys, options, prefix, previews),
+  }
 }
 
 /** A read-only empty disclosure set for this projection call (no search reveal
