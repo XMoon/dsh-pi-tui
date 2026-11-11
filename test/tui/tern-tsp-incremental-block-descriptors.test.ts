@@ -21,6 +21,7 @@ import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
+import type { TurnActivity } from '../../src/domain/transcript/types.ts'
 import type { TranscriptMessage } from '../../src/domain/transcript/types.ts'
 import {
   TranscriptNodeKeys,
@@ -308,4 +309,41 @@ test('lazy Main blocks equal the full view with CJK bodies and a settled image-b
   for (const preset of ALL_PRESETS) {
     assertLazyEqualsFull(messages, { preset, scopePrefix: 's1-', window: LATEST_WINDOW, imageStates })
   }
+})
+
+test('an EARLIER proven Preparing start changes the Work block stamp', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    ev('step/start', { turn: 1, step: 0 }, 1),
+    userMessage(2, 'user-1', 'run it'),
+    // The durable call materializes the card at its own settlement time...
+    ev('tool/call', { turn: 1, step: 0, callId: ToolCallId('call-timing'), name: 'bash', arguments: JSON.stringify({ command: 'ls' }) }, 3),
+  ])
+  const options = {
+    preset: 'compact',
+    scopePrefix: 's1-',
+    window: LATEST_WINDOW,
+    turnActivities: folder.turnActivities(),
+  } as const
+  const before = describeTranscriptMainBlocksForPreset(folder.messages(), new TranscriptNodeKeys(), options)
+  const workBefore = before.find(descriptor => descriptor.key.includes('work-'))
+  assert.ok(workBefore !== undefined, 'the running tool row projects one Activity section')
+
+  // ...and the attempt's embedded stream proves an EARLIER start for the SAME
+  // call, so the Activity lifetime (its duration input) really moves.
+  folder.apply([ev('assistant/attempt', {
+    turn: 1,
+    step: 0,
+    stream: [
+      { type: 'chunk', time: T0 + 50, chunk: { type: 'block-start', index: 0, blockType: 'tool-call' } },
+      { type: 'chunk', time: T0 + 100, chunk: { type: 'tool-call-delta', index: 0, id: 'call-timing', name: 'bash', argumentsDelta: '{}' } },
+    ],
+  }, 4)])
+  const after = describeTranscriptMainBlocksForPreset(folder.messages(), new TranscriptNodeKeys(), options)
+  const workAfter = after.find(descriptor => descriptor.key === workBefore.key)
+  assert.ok(workAfter !== undefined)
+  // Without the owning card's display stamp this comparison is equal and the
+  // journal would keep painting the stale Activity header.
+  assert.notDeepEqual(workAfter.stamp, workBefore.stamp, 'the earlier start changes the Work block stamp')
 })

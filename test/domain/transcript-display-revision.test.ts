@@ -14,7 +14,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { TranscriptFolder, transcriptDisplayRevisionOf } from '../../src/domain/transcript/folder.ts'
+import { assistantPresentationRevision, TranscriptFolder, transcriptDisplayRevisionOf, transcriptTimingOf } from '../../src/domain/transcript/folder.ts'
 import type { TranscriptMessage } from '../../src/domain/transcript/types.ts'
 
 const T0 = 1_700_000_000_000
@@ -234,4 +234,62 @@ test('a compaction card is stamped by its counts-only summary and by an end-seed
   folder.apply([ev('session/end-seed', {}, 3)])
   assert.equal(card.kind === 'compaction' ? card.running : undefined, false, 'the seed boundary settles the card')
   assert.ok(transcriptDisplayRevisionOf(card) > afterCounts, 'the settled card is stamped')
+})
+
+test('a proven EARLIER Preparing start stamps the materialized tool card', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    ev('step/start', { turn: 1, step: 0 }, 1),
+    userMessage(2, 1, 'user-1', 'run it'),
+    // The durable tool/call creates the card at the settlement time...
+    ev('tool/call', { turn: 1, step: 0, callId: ToolCallId('call-timing'), name: 'bash', arguments: JSON.stringify({ command: 'ls' }) }, 3),
+  ])
+  const card = findRow(folder, message => message.kind === 'tool' && message.callId === 'call-timing')
+  const before = transcriptDisplayRevisionOf(card)
+  const beforeTiming = transcriptTimingOf(card)?.startedAt
+  assert.ok(beforeTiming !== undefined)
+  // ...and the attempt's embedded stream proves an EARLIER start for the SAME
+  // call. The Work header duration is computed from that sidecar, so the card
+  // must be stamped or a lazy renderer keeps the stale duration.
+  folder.apply([ev('assistant/attempt', {
+    turn: 1,
+    step: 0,
+    stream: [
+      { type: 'chunk', time: T0 + 50, chunk: { type: 'block-start', index: 0, blockType: 'tool-call' } },
+      { type: 'chunk', time: T0 + 100, chunk: { type: 'tool-call-delta', index: 0, id: 'call-timing', name: 'bash', argumentsDelta: '{}' } },
+    ],
+  }, 4)])
+  const afterTiming = transcriptTimingOf(card)?.startedAt
+  assert.ok(afterTiming !== undefined && afterTiming < beforeTiming,
+    `the fold really moved the proven start earlier (${String(beforeTiming)} -> ${String(afterTiming)})`)
+  assert.ok(transcriptDisplayRevisionOf(card) > before, 'the earlier start stamps the owning card')
+})
+
+test('interruption evidence stamps the attempt row even when its visibility does not move', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 1, 'user-1', 'answer me'),
+    ev('step/start', { turn: 1, step: 0 }, 2),
+    ev('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'text-delta', index: 0, text: 'partial answer' } }, 3),
+    ev('assistant/attempt', {
+      turn: 1,
+      step: 0,
+      stream: [
+        { type: 'chunk', time: T0 + 400, chunk: { type: 'block-start', index: 0, blockType: 'text' } },
+        { type: 'chunk', time: T0 + 500, chunk: { type: 'text-delta', index: 0, text: 'partial answer' } },
+      ],
+    }, 4),
+  ])
+  const row = findRow(folder, message => message.kind === 'assistant')
+  const displayBefore = transcriptDisplayRevisionOf(row)
+  const presentationBefore = assistantPresentationRevision(row)
+  // The step fails: the attempt row keeps its visibility (it was already
+  // visible) but gains interruption evidence, which changes what it renders and
+  // disqualifies it as the turn's final Assistant.
+  folder.apply([ev('step/end', { turn: 1, step: 0, reason: { kind: 'error', error: { code: 'model_error', message: 'boom' } } }, 5)])
+  assert.equal(row.kind === 'assistant' ? row.interrupted : undefined, true, 'the row really carries interruption evidence')
+  assert.ok(transcriptDisplayRevisionOf(row) > displayBefore, 'the interrupted row is stamped for display')
+  assert.ok(assistantPresentationRevision(row) > presentationBefore, 'the Assistant presentation revision moves too')
 })
