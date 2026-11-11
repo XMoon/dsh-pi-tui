@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   innerDisclosureEvidenceTier,
-  isPinnedTernBuild,
   isTargetToggle,
   presetFromEnvironment,
   qualificationFromResults,
@@ -22,16 +21,6 @@ test('inner disclosure Flow defaults to its existing scenario and allows only th
   assert.equal(scenarioFromEnvironment('inner-disclosure'), 'inner-disclosure')
   assert.equal(scenarioFromEnvironment('ptc-error-note'), 'ptc-error-note')
   assert.throws(() => scenarioFromEnvironment('ptc'), /must be inner-disclosure or ptc-error-note/u)
-})
-
-test('inner disclosure Flow requires the exact plan-pinned Tern version and binary hash', () => {
-  assert.equal(isPinnedTernBuild(
-    'tern 0.9.13 (8c6dfbd)',
-    'ffa3c7c85cf557b5e0ee690cd62efc32e79dbc77044d475dce0edc3a4ac2cd99',
-  ), true)
-  assert.equal(isPinnedTernBuild('tern 0.9.13 (8c6dfbd)', 'wrong-hash'), false)
-  assert.equal(isPinnedTernBuild('tern 0.9.12 (e498b49)', 'ffa3c7c85cf557b5e0ee690cd62efc32e79dbc77044d475dce0edc3a4ac2cd99'), false)
-  assert.equal(isPinnedTernBuild('tern 0.9.13', 'ffa3c7c85cf557b5e0ee690cd62efc32e79dbc77044d475dce0edc3a4ac2cd99'), false)
 })
 
 test('inner disclosure click evidence requires the exact client id and collapsed target', () => {

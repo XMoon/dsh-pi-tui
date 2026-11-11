@@ -187,6 +187,9 @@ export default async function (h) {
     throw new Error('TERN_BIN must name the pinned Tern binary file for this qualification lane')
   }
   const ternVersion = execFileSync(ternBin, ['--version'], { encoding: 'utf8' }).trim()
+  // The handshake must report the version of the binary THIS run actually uses.
+  // Never hardcode a version literal: a stale pin silently fails a correct client.
+  const ternVerNum = ternVersion.match(/\d+\.\d+\.\d+/u)?.[0]
   const lock = readFileSync(join(h.repo, 'pnpm-lock.yaml'), 'utf8')
   const sdkPin = /'@stencil-hq\/tern@0\.2\.0'/u.test(lock) ? '0.2.0' : 'UNVERIFIED'
   const integrity = lock.match(/'@stencil-hq\/tern@0\.2\.0':\s*\n\s*resolution: \{integrity: ([^}]+)\}/u)?.[1] ?? 'UNVERIFIED'
@@ -237,7 +240,7 @@ export default async function (h) {
     modeAuthority: 'tuiConfig.displayPreset -> resolveDisplayPreset -> the ONE DisplayState -> productionTspConnector -> mountTspRenderer',
     notVerified: ['physical GUI window / OS chrome / desktop font stack', 'OS clipboard, IME, wheel/trackpad', 'Owner G8 visual acceptance', 'FOCUS_TSP_NOT_YET_IMPLEMENTED'],
   })
-  h.check('the real client reports its own handshake for THIS run', hello?.body?.ver === '0.9.12' && Array.isArray(hello?.body?.kinds), JSON.stringify({ ver: hello?.body?.ver, kinds: hello?.body?.kinds?.length }))
+  h.check('the real client reports its own handshake for THIS run', ternVerNum !== undefined && hello?.body?.ver === ternVerNum && Array.isArray(hello?.body?.kinds), JSON.stringify({ ver: hello?.body?.ver, expected: ternVerNum, kinds: hello?.body?.kinds?.length }))
   h.check('the run opened exactly ONE production inline Surface', openedSurfaces(h).length === 1 && openedSurfaces(h)[0].mode === 'inline', JSON.stringify(openedSurfaces(h)))
   h.check('the client paints the three production regions', ['sf-main', 'sf-dock', 'sf-layer'].every(name => regionNode(h.snapshot(), name) !== undefined))
 

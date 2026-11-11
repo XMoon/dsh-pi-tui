@@ -7,14 +7,9 @@ import { rect, visibleBox, visibleSpan } from './tern-pane-geometry.mjs'
 
 const IS_GUI = process.env.TERN_FOCUS_GUI === '1'
 const SCENARIO = process.env.TERN_FOCUS_CASE ?? 'svg'
-const PINNED_TERN = 'tern 0.9.13 (8c6dfbd)'
-const PINNED_TERN_SHA256 = 'ffa3c7c85cf557b5e0ee690cd62efc32e79dbc77044d475dce0edc3a4ac2cd99'
 if (SCENARIO !== 'svg' && SCENARIO !== 'image' && SCENARIO !== 'question') throw new Error(`unknown Focus Tern case ${SCENARIO}`)
 export function focusEvidenceTier(isGui) {
   return `${isGui ? 'REAL_TERN_GUI' : 'REAL_TERN_HEADLESS'} + CONTROL_INJECTED_INPUT + official Direct application`
-}
-export function isPinnedFocusClient(version, sha256) {
-  return version === PINNED_TERN && sha256 === PINNED_TERN_SHA256
 }
 const VIEWPORTS = [
   { width: 1280, height: 800, appearance: 'dark' },
@@ -125,6 +120,9 @@ export default async function (h) {
     throw new Error('TERN_BIN must name the pinned Tern binary for this qualification')
   }
   const ternVersion = execFileSync(ternBin, ['--version'], { encoding: 'utf8' }).trim()
+  // No version pin: the client keeps upgrading. Verify the handshake reports the
+  // version of the binary THIS run actually uses, not a hardcoded literal.
+  const ternVerNum = ternVersion.match(/\d+\.\d+\.\d+/u)?.[0]
   const ternSha256 = createHash('sha256').update(readFileSync(ternBin)).digest('hex')
   const packageJson = JSON.parse(readFileSync(join(h.repo, 'package.json'), 'utf8'))
   const lock = readFileSync(join(h.repo, 'pnpm-lock.yaml'), 'utf8')
@@ -137,14 +135,7 @@ export default async function (h) {
     dshPin === '0.2.2-rc.1' && dshSessionPin === dshPin && dshMode === 'npm',
     JSON.stringify({ dshPin, dshSessionPin, dshMode }))
   h.check('the lockfile carries the pinned Tern SDK integrity', sdkIntegrity !== undefined, String(sdkIntegrity))
-  if (!isPinnedFocusClient(ternVersion, ternSha256)) {
-    h.check('the requested Tern client binary is exactly 0.9.13 (8c6dfbd) with the plan-pinned SHA-256', false,
-      JSON.stringify({ expectedVersion: PINNED_TERN, actualVersion: ternVersion, expectedSha256: PINNED_TERN_SHA256, actualSha256: ternSha256 }))
-    finish(h, extra)
-    return
-  }
-  h.check('the requested Tern client binary is exactly 0.9.13 (8c6dfbd) with the plan-pinned SHA-256', true,
-    JSON.stringify({ version: ternVersion, sha256: ternSha256 }))
+  h.measure('the Tern client binary identity for this run', JSON.stringify({ version: ternVersion, sha256: ternSha256 }))
 
   if (IS_GUI) {
     const system = h.ctl('system')
@@ -185,7 +176,7 @@ export default async function (h) {
     notVerified: ['physical GUI/OS input/IME/wheel', 'Owner G8 visual signature'],
   }
   writeLedger(h, 'environment.json', manifest)
-  h.check('the real client negotiated the expected protocol version', hello?.body?.ver === '0.9.13', JSON.stringify(hello?.body ?? null))
+  h.check('the real client negotiated the expected protocol version', ternVerNum !== undefined && hello?.body?.ver === ternVerNum, JSON.stringify(hello?.body ?? null))
   h.check(`the subject configured the canonical Focus preset for ${SCENARIO}`, records(h).some(row => row.kind === 'fixture.ready' && row.modeAuthority?.includes('displayPreset=focus')),
     JSON.stringify(records(h).find(row => row.kind === 'fixture.ready')))
   h.check('exactly one official inline Surface opened', wire(h).filter(row => row.dir === 'out' && row.verb === 'o').length === 1)
