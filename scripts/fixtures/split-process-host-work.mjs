@@ -461,17 +461,19 @@ export async function apply(ctx) {
     ctx.skills.registerProvider(() => ({
       name: 'c1-skills-fault',
       list: async () => {
-        // A qualification-only slow read: it keeps the target-change
-        // revalidating state observable to the smoke without touching any
-        // production timing.
-        if (existsSync(join(skillsFaultDir, 'slow'))) {
-          await new Promise(resolve => setTimeout(resolve, 1_500))
-        }
+        const readsPath = join(skillsFaultDir, 'fault-reads.jsonl')
+        const record = (phase, incomplete) => appendFileSync(readsPath,
+          `${JSON.stringify({ phase, incomplete, time: Date.now() })}\n`, { mode: 0o600 })
         const incomplete = existsSync(join(skillsFaultDir, 'incomplete'))
-        // Causal barrier for the qualification case: one line per real
-        // discovery attempt, carrying the completeness it answered with.
-        appendFileSync(join(skillsFaultDir, 'fault-reads.jsonl'),
-          `${JSON.stringify({ incomplete, time: Date.now() })}\n`, { mode: 0o600 })
+        record('start', incomplete)
+        // A qualification-only HELD read: the smoke observes the painted
+        // target-change state while this discovery is provably in flight,
+        // then releases it explicitly. Production timing is untouched.
+        if (existsSync(join(skillsFaultDir, 'slow'))) {
+          const release = join(skillsFaultDir, 'release-slow')
+          while (!existsSync(release)) await new Promise(resolve => setTimeout(resolve, 20))
+        }
+        record('end', incomplete)
         return incomplete ? { candidates: [], complete: false } : { candidates: [], complete: true }
       },
       get: async () => undefined,

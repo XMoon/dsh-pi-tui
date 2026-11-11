@@ -227,30 +227,33 @@ export async function runSessionlessSkillsHot(context) {
     const staleDescription = 'F6 ALPHA MUST NOT REPLACE LAST-GOOD WHILE INCOMPLETE'
     const recoveredDescription = 'F6 ALPHA RECOVERED AFTER THE COMPLETE OBSERVATION'
     const readsPath = join(faultDir, 'fault-reads.jsonl')
-    const readCount = () => existsSync(readsPath)
-      ? readFileSync(readsPath, 'utf8').split('\n').filter(Boolean).length
-      : 0
-    const waitForFaultRead = async (after, label) => {
+    const faultReads = () => existsSync(readsPath)
+      ? readFileSync(readsPath, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+        try { return [JSON.parse(line)] } catch { return [] }
+      })
+      : []
+    const phaseCount = phase => faultReads().filter(entry => entry.phase === phase).length
+    const waitForFaultPhase = async (phase, after, label) => {
       const deadline = Date.now() + 60_000
       while (Date.now() < deadline) {
-        if (readCount() > after) return
+        if (phaseCount(phase) > after) return
         await sleep(100)
       }
-      throw new SplitSmokeAssertionError(`${label}: the Host never re-read the Skills catalog`)
+      throw new SplitSmokeAssertionError(`${label}: the Host never reached the ${phase} phase of a Skills read`)
     }
-    const readsBeforeIncomplete = readCount()
+    const endsBeforeIncomplete = phaseCount('end')
     writeFileSync(join(faultDir, 'incomplete'), 'incomplete\n', { mode: 0o600 })
     writeSkill(w1, 'f6-alpha', staleDescription)
-    await waitForFaultRead(readsBeforeIncomplete, 'F6 the incomplete observation')
+    await waitForFaultPhase('end', endsBeforeIncomplete, 'F6 the incomplete observation')
     const incompleteFrame = await completionFrame(clientA, '/f6-alpha', 'F6 A incomplete last-good')
     assert(incompleteFrame.includes(alphaDescription),
       `F6 the incomplete observation replaced the last-good catalog:\n${incompleteFrame}`)
     assert(!incompleteFrame.includes(staleDescription),
       `F6 an incomplete observation installed the new catalog instead of last-good:\n${incompleteFrame}`)
-    const readsBeforeRecovery = readCount()
+    const endsBeforeRecovery = phaseCount('end')
     rmSync(join(faultDir, 'incomplete'), { force: true })
     writeSkill(w1, 'f6-alpha', recoveredDescription)
-    await waitForFaultRead(readsBeforeRecovery, 'F6 the complete observation')
+    await waitForFaultPhase('end', endsBeforeRecovery, 'F6 the complete observation')
     await waitForPaintedSkills(clientA, '/f6-alpha', {
       visible: [recoveredDescription],
       absent: [staleDescription, alphaDescription],
@@ -340,6 +343,12 @@ export async function runSessionlessSkillsHot(context) {
     // qualification-only 1.5s read delay makes the transition frame
     // observable without changing production timing. ────────────────────────
     writeFileSync(join(faultDir, 'slow'), 'slow\n', { mode: 0o600 })
+    // Invalidate the official registry's completed-catalog cache with a REAL
+    // Host file change, and wait until the resulting discovery is PROVABLY in
+    // flight. The same switch then cannot be served from the cache.
+    const startsBeforeSwitch = phaseCount('start')
+    writeSkill(w1, 'f6-invalidate', 'F6 INVALIDATION MARKER FOR THE SWITCH')
+    await waitForFaultPhase('start', startsBeforeSwitch, 'F6 the pre-switch invalidation discovery')
     await submit(clientB, '/sessions', 'F6 B reopen the Session Workspace')
     await clientB.waitForScreen('Workspace: ', 'F6 B Workspace for the switch back', 60_000)
     clientB.send(END)
@@ -350,15 +359,22 @@ export async function runSessionlessSkillsHot(context) {
     await sleep(150)
     clientB.send('\r')
     await clientB.waitForScreenGone('Workspace: ', 'F6 B Use directory W1 closed the workspace', 60_000)
-    const transitionFrame = await completionFrame(clientB, '/f6-beta', 'F6 B transition frame')
-    // The target change clears the OLD scoped suggestions synchronously (and
-    // re-registers the old names as revalidating transition commands that are
-    // NOT advertised as suggestions), so the in-flight frame must carry the
-    // typed query but neither the old Workspace row nor a stale suggestion.
-    assert(transitionFrame.includes('/f6-beta'),
-      `F6 the transition frame did not carry the typed query:\n${transitionFrame}`)
-    assert(!transitionFrame.includes(betaDescription) && !transitionFrame.includes('[skill: revalidating] f6-beta'),
+    // CAUSAL BARRIER: the pre-switch discovery is still held; wait for the
+    // SECOND discovery (the W1 target-change read) to START, so the frame
+    // below is observed strictly while the target-change read is in flight.
+    await waitForFaultPhase('start', startsBeforeSwitch + 1, 'F6 the W1 target-change discovery')
+    // POSITIVE panel evidence: the transition keeps the GLOBAL completion view
+    // (the typed `/` query lists real global commands), and the OLD W2 scoped
+    // suggestion/description is NOT part of it.
+    const transitionFrame = await completionFrame(clientB, '/', 'F6 B transition frame')
+    assert(transitionFrame.includes('attach') && transitionFrame.includes('copy'),
+      `F6 the transition frame never painted the global completion rows:\n${transitionFrame}`)
+    assert(!transitionFrame.includes('f6-beta') && !transitionFrame.includes(betaDescription),
       `F6 the old W2 scoped suggestion was still advertised during the Workspace transition:\n${transitionFrame}`)
+    // Release the held W1 discovery and wait for the new catalog.
+    writeFileSync(join(faultDir, 'release-slow'), 'release\n', { mode: 0o600 })
+    await waitForFaultPhase('end', phaseCount('end'), 'F6 the released W1 discovery')
+    rmSync(join(faultDir, 'release-slow'), { force: true })
     rmSync(join(faultDir, 'slow'), { force: true })
     await waitForSurfaceStatus(clientB, sessionless, 'F6 B still sessionless after the W1 switch', 60_000)
     await waitForPaintedSkills(clientB, '/f6-', {
