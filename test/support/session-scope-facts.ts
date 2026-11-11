@@ -41,6 +41,7 @@ import type { CatalogRefreshOutcome, CatalogRefreshSource } from '../../src/app/
 import { computeStats, type SessionStats } from '../../src/domain/status/stats.ts'
 import type { SurfaceCommandSummary } from '../../src/domain/catalog/surface.ts'
 import type { SessionWorkspaceFactsPort } from '../../src/runtime/session-workspace-facts-port.ts'
+import type { HostDirectoryBrowsePort } from '../../src/runtime/host-directory-browse-port.ts'
 import { unconfiguredSessionWorkspaceFacts } from './session-workspace-facts-fake.ts'
 
 /** The subset of `TuiCommandRunner` the scope helper supplies: the CAPTURE
@@ -79,6 +80,9 @@ export interface SessionScopeFacts {
   ): Promise<PermissionPresetResult>
   setSessionApprovalPolicy(scope: LiveSessionScope, value: 'ask' | 'never'): 'applied' | 'superseded'
   sessionWorkspaceFacts: SessionWorkspaceFactsPort
+  /** The generic fail-closed Host directory browse stub: a suite that exercises
+   *  the inline Add editor overrides it after the spread. */
+  hostDirectoryBrowse: HostDirectoryBrowsePort
 }
 
 /** The permission-preset port the scope-bound write delegates to. */
@@ -142,6 +146,9 @@ export function sessionScopeFacts(
 
   return {
     sessionWorkspaceFacts: unconfiguredSessionWorkspaceFacts(),
+    hostDirectoryBrowse: {
+      list: async () => ({ kind: 'unavailable', reason: 'the Host directory browse capability is not composed in this stub' }),
+    },
     captureSessionScope: () => scopeAuthority.capture(),
     captureLiveSessionScope: () => scopeAuthority.captureLive(),
     isSessionScopeCurrent: (scope) => scopeAuthority.isCurrent(scope),

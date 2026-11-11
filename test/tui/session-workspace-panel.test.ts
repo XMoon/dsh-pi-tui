@@ -23,6 +23,8 @@ import type {
   SessionBrowserSubject,
 } from '../../src/app/command/session-browser-presentation.ts'
 import type { SessionActivityFact } from '../../src/runtime/session-workspace-facts-port.ts'
+import type { DirectoryEntry, DirectoryListing } from '@deepseek-ai/dsh-host-directory-picker/types'
+import type { HostDirectoryBrowseOutcome } from '../../src/runtime/host-directory-browse-port.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
@@ -63,6 +65,8 @@ interface Harness {
   view(): string
   raw(): string
   paint(): Promise<void>
+  /** Release THIS harness's TuiApp so another harness can own the process slot. */
+  dispose(): void
 }
 
 function harness(options: {
@@ -76,6 +80,7 @@ function harness(options: {
   readonly initialDirectoryEntry?: boolean
   readonly initialDirectoryPath?: string
   readonly onAddDirectory?: (path: string, settle: (outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => void
+  readonly onListDirectory?: import('../../src/runtime/host-directory-browse-port.ts').HostDirectoryBrowsePort['list']
   readonly onNewSession?: (workspaceId: string, settle?: (outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserNewSessionSettlement) => void) => void
   readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
   readonly isCurrent?: () => boolean
@@ -100,6 +105,7 @@ function harness(options: {
     onQueryChange: (raw) => { queries.push(raw) },
     onResume: (sessionId) => { resumes.push(sessionId) },
     ...(options.onAddDirectory === undefined ? {} : { onAddDirectory: options.onAddDirectory }),
+    ...(options.onListDirectory === undefined ? {} : { onListDirectory: options.onListDirectory }),
     ...(options.onNewSession === undefined ? {} : { onNewSession: options.onNewSession }),
     ...(options.onUseDirectory === undefined ? {} : { onUseDirectory: options.onUseDirectory }),
     onClose: () => { state.closes += 1 },
@@ -120,6 +126,7 @@ function harness(options: {
     view: () => vt.getViewport().map(stripTerminalSequences).join('\n'),
     raw: () => vt.writes.join(''),
     paint: async () => { await vt.waitForRender() },
+    dispose: () => { started.delete(app); app.dispose() },
   }
 }
 
@@ -250,9 +257,9 @@ test('a retained first-submit path enters Browser directly, submits once, and ex
   assert.ok(h.view().includes('could not start a session: the Host refused'),
     `the path editor keeps the originating failure notice:\n${h.view()}`)
   assert.ok(h.view().includes('Verify directory') && h.view().includes('Cancel'), 'the path mode paints its actual actions')
-  const actionLine = lineIndexOf(panelFrame(h), 'Verify directory')
+  const actionLine = lineIndexOf(panelFrame(h), 'Enter verify')
   await clickCell(h, 2, actionLine)
-  assert.deepEqual(submitted, ['/launch/failed', '/launch/failed'], 'clicking Verify directory submits the same retained proposal')
+  assert.deepEqual(submitted, ['/launch/failed', '/launch/failed'], 'clicking the painted Verify word submits the same retained proposal')
   outcomes[1]!({ kind: 'registered', workspaceId: 'ws-launch', path: '/host/canonical' })
   await h.paint()
   assert.equal(h.closes, 1, 'success returns through the existing chooser owner')
@@ -845,6 +852,37 @@ async function clickCell(h: Harness, x: number, y: number): Promise<void> {
   await h.paint()
   h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
   await h.paint()
+}
+
+async function waitUntil(predicate: () => boolean, label: string, timeoutMs = 3_000): Promise<void> {
+  const start = Date.now()
+  for (;;) {
+    if (predicate()) return
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`${label}: waitUntil timed out after ${timeoutMs}ms`)
+    }
+    await new Promise<void>(resolve => { setTimeout(resolve, 10) })
+  }
+}
+
+/** One official Host level built from display names (path = parent + name). */
+function hostListing(
+  parent: string,
+  home: string,
+  names: ReadonlyArray<string | [string, boolean]>,
+  truncated = false,
+): DirectoryListing {
+  const separator = home.includes('\\') ? '\\' : '/'
+  const entries: DirectoryEntry[] = names.map(item => {
+    const name = typeof item === 'string' ? item : item[0]
+    const hidden = typeof item === 'string' ? false : item[1]
+    return { name, path: `${parent.endsWith(separator) ? parent : `${parent}${separator}`}${name}`, hidden }
+  })
+  return { path: parent, home, crumbs: [], entries, truncated }
+}
+
+function readyHostLevel(value: DirectoryListing): HostDirectoryBrowseOutcome {
+  return { kind: 'ready', listing: value }
 }
 
 test('the per-open folder expansion and selection survive one global-search round trip', async () => {
@@ -2480,4 +2518,432 @@ test('a tiny frame never submits a Host path it did not paint', async () => {
   footer = panelFrame(h)[panelFrame(h).length - 1]!
   assert.ok(footer.includes('Enter Verify directory') && footer.includes('Esc Cancel'),
     'the editor verbs return after the refusal')
+})
+
+// ── PR3: the Host-directory inline chooser ──────────────────────────────────
+
+test('the inline Add editor prefills the Host home, paints official candidates and Tab completes one level', async () => {
+  const homeListing = hostListing('/host/home', '/host/home', [
+    'project-a',
+    'project-b',
+    ['.config', true],
+  ])
+  const projectListing = hostListing('/host/home/project-b', '/host/home', ['child'])
+  const listCalls: Array<string | undefined> = []
+  const submitted: string[] = []
+  const h = harness({
+    columns: 120,
+    rows: 40,
+    currentSessionId: null,
+    onAddDirectory: (path) => { submitted.push(path) },
+    onListDirectory: async (path) => {
+      listCalls.push(path)
+      if (path === undefined) return readyHostLevel(homeListing)
+      if (path === '/host/home/project-b/') return readyHostLevel(projectListing)
+      return readyHostLevel(hostListing(path, '/host/home', []))
+    },
+  })
+  h.handle.setSnapshot(snapshot({ rows: [] }))
+  await h.paint()
+  h.vt.sendInput('\x1b[H')
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  await waitUntil(() => h.view().includes('project-a/'), 'Home suggestions resolve')
+  const opened = h.view()
+  assert.ok(opened.includes('Host directory: /host/home/'), `the Host home prefills the real Input:\n${opened}`)
+  assert.ok(opened.includes('Suggestions (Host)'), `the Host source owns the block label:\n${opened}`)
+  assert.ok(opened.includes('> project-a/'), `the first candidate is the painted active row:\n${opened}`)
+  assert.ok(opened.includes('project-b/') && opened.includes('.config/'), 'every child directory is painted; hidden entries are not filtered')
+  assert.ok(opened.includes('Host home: /host/home'), 'the wide preview states the official Host home')
+  assert.ok(opened.includes('Host directories · read only'), 'the preview never claims a writable browser')
+  assert.ok(!opened.includes('/client/home'), 'no Client directory may enter the Host suggestion projection')
+  assert.deepEqual(listCalls, [undefined], 'the Home read is reused; list(home) is not issued twice')
+  assert.deepEqual(submitted, [], 'browsing registers nothing')
+
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  h.vt.sendInput('\t')
+  await h.paint()
+  await waitUntil(() => h.view().includes('child/'), 'the accepted candidate lists its next level')
+  const completed = h.view()
+  assert.ok(completed.includes('Host directory: /host/home/project-b/'), 'Tab writes the official entry.path plus the Host separator')
+  assert.deepEqual(listCalls, [undefined, '/host/home/project-b/'], 'the exact official path becomes the next Host level')
+  assert.deepEqual(submitted, [], 'Tab is a completion, never a registration')
+})
+
+test('a Home answer arriving after a real edit keeps raw/cursor, and clearing never restores Home', async () => {
+  let resolveHome!: (outcome: HostDirectoryBrowseOutcome) => void
+  let resolveQuery!: (outcome: HostDirectoryBrowseOutcome) => void
+  const calls: Array<string | undefined> = []
+  const h = harness({
+    columns: 100,
+    rows: 30,
+    initialDirectoryEntry: true,
+    onAddDirectory: () => {},
+    onListDirectory: (path) => {
+      calls.push(path)
+      return new Promise<HostDirectoryBrowseOutcome>((resolve) => {
+        if (path === undefined) resolveHome = resolve
+        else resolveQuery = resolve
+      })
+    },
+  })
+  await h.paint()
+  h.vt.sendInput('/srv/pr')
+  await h.paint()
+  assert.ok(h.view().includes('/srv/pr'), 'the user can type while the Home read is pending')
+  assert.deepEqual(calls, [undefined], 'no parent list is issued before the Host dialect is known')
+  resolveHome(readyHostLevel(hostListing('/host/home', '/host/home', ['unrelated'])))
+  await waitUntil(() => calls.length === 2, 'the Home dialect starts the latest raw query')
+  assert.equal(calls[1], '/srv')
+  const typed = h.view()
+  assert.ok(typed.includes('Host directory: /srv/pr'), `the Home answer never rewrites real input:\n${typed}`)
+  resolveQuery(readyHostLevel(hostListing('/srv', '/host/home', ['pr-one', 'other'])))
+  await waitUntil(() => h.view().includes('pr-one/'), 'the prefix-filtered candidates paint')
+  const filtered = h.view()
+  assert.ok(filtered.includes('pr-one/') && !filtered.includes('other/'),
+    `only official name prefixes match:\n${filtered}`)
+
+  h.vt.sendInput('\u0015')
+  await h.paint()
+  await waitUntil(() => h.view().includes('Host directory: ') && !h.view().includes('/srv/pr'),
+    'Ctrl+U clears the editor')
+  const cleared = h.view()
+  assert.ok(cleared.includes('Host directory: ') && !cleared.includes('/srv/pr'), `cleared input stays cleared:\n${cleared}`)
+  // reason: the 150ms debounce window is the contract that must not refire.
+  await new Promise<void>(resolve => { setTimeout(resolve, 220) })
+  assert.ok(h.view().includes('Host directory: ') && !h.view().includes('/srv/pr'), 'no late Home initialization restores the value')
+})
+
+test('a recovered initial path outranks Home and every refusal keeps the same raw value editable', async () => {
+  const submitted: string[] = []
+  const outcomes: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
+  const calls: Array<string | undefined> = []
+  const h = harness({
+    columns: 120,
+    rows: 30,
+    currentSessionId: null,
+    initialDirectoryChooser: true,
+    initialDirectoryEntry: true,
+    initialDirectoryPath: '/launch/failed',
+    onAddDirectory: (path, settle) => { submitted.push(path); outcomes.push(settle) },
+    onListDirectory: async (path) => {
+      calls.push(path)
+      if (path === undefined) return readyHostLevel(hostListing('/host/home', '/host/home', ['project']))
+      return readyHostLevel(hostListing('/launch', '/host/home', ['failed']))
+    },
+  })
+  await h.paint()
+  await waitUntil(() => h.view().includes('Host directory: /launch/failed'), 'the retained path is painted')
+  assert.equal(calls[0], undefined, 'the Host home is still read to learn the dialect')
+  assert.deepEqual(calls.slice(1), ['/launch'], 'the retained path starts its own level query')
+  assert.ok(!h.view().includes('Host directory: /host/home/'), 'Home never overwrites the retained path')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(submitted, ['/launch/failed'], 'Enter verifies the raw retained path')
+  outcomes[0]!({ kind: 'failed', message: 'not a directory on Host' })
+  await h.paint()
+  assert.ok(h.view().includes('Host directory: /launch/failed'), 'the refusal keeps the exact raw value')
+  assert.ok(h.view().includes('not a directory on Host'))
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(submitted, ['/launch/failed', '/launch/failed'], 'only an explicit second Enter issues the next Host write')
+})
+
+test('Enter is verify, Tab is completion and the first Esc only hides the painted candidates', async () => {
+  const submitted: string[] = []
+  const outcomes: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
+  const h = harness({
+    columns: 100,
+    rows: 30,
+    initialDirectoryEntry: true,
+    onAddDirectory: (path, settle) => { submitted.push(path); outcomes.push(settle) },
+    onListDirectory: async (path) => path === undefined || path === '/host/home'
+      ? readyHostLevel(hostListing('/host/home', '/host/home', ['project-a', 'project-b']))
+      : readyHostLevel(hostListing(path, '/host/home', ['child'])),
+  })
+  h.handle.setSnapshot(snapshot({ rows: [] }))
+  await h.paint()
+  await waitUntil(() => h.view().includes('project-a/'), 'Home candidates paint')
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  assert.ok(/^  > project-b\//m.test(h.view()), `Down moves the painted selection:\n${h.view()}`)
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(submitted, ['/host/home/'], 'Enter verifies the raw Input, never the highlighted candidate')
+  outcomes[0]!({ kind: 'failed', message: 'verification refused' })
+  await h.paint()
+  // A refused verification leaves the real Input editable; a new edit starts a
+  // fresh suggestion generation.
+  h.vt.sendInput('p')
+  await h.paint()
+  await waitUntil(() => h.view().includes('project-a/'), 'the edit reopens the suggestions')
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  const hidden = h.view()
+  assert.ok(hidden.includes('Host directory: /host/home/p'), 'the first Esc keeps the editor and raw value')
+  assert.ok(!hidden.includes('project-a/') && !hidden.includes('project-b/'), 'the first Esc hides the suggestion block')
+  assert.ok(hidden.includes('Esc cancel'), 'the remaining Esc verb is the real cancel verb')
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.ok(!h.view().includes('Host directory:'), 'the second Esc returns to the tree')
+  assert.equal(h.closes, 0, 'cancelling the inline editor never closes the surface')
+})
+
+test('a painted candidate click is a Tab, and an input click positions the private cursor', async () => {
+  const submitted: string[] = []
+  const calls: Array<string | undefined> = []
+  const h = harness({
+    columns: 100,
+    rows: 30,
+    initialDirectoryEntry: true,
+    onAddDirectory: (path) => { submitted.push(path) },
+    onListDirectory: async (path) => {
+      calls.push(path)
+      if (path === undefined) return readyHostLevel(hostListing('/host/home', '/host/home', ['project-a', 'project-b']))
+      return readyHostLevel(hostListing(path, '/host/home', []))
+    },
+  })
+  await h.paint()
+  await waitUntil(() => h.view().includes('project-b/'), 'Home candidates paint')
+  const candidateLine = lineIndexOf(panelFrame(h), 'project-b/')
+  await clickCell(h, 4, candidateLine)
+  await waitUntil(() => h.view().includes('Host directory: /host/home/project-b/'), 'the candidate click completes')
+  assert.deepEqual(submitted, [], 'a candidate click never registers a Workspace')
+  assert.equal(calls.at(-1), '/host/home/project-b/', 'the click accepts the official entry.path')
+
+  // The Input prompt is 16 columns; clicking five cells into the value lands
+  // the private cursor after the first five characters.
+  const inputLine = lineIndexOf(panelFrame(h), 'Host directory:')
+  await clickCell(h, 16 + 5, inputLine)
+  h.vt.sendInput('X')
+  await h.paint()
+  assert.ok(h.view().includes('Host directory: /hostX/home/project-b/'),
+    `the click-to-position contract accepts the real local cell:\n${h.view()}`)
+  assert.deepEqual(submitted, [], 'editing never writes a Workspace')
+})
+
+test('a press is invalidated when the painted candidate frame changes before release', async () => {
+  const submitted: string[] = []
+  const h = harness({
+    columns: 100,
+    rows: 30,
+    initialDirectoryEntry: true,
+    onAddDirectory: (path) => { submitted.push(path) },
+    onListDirectory: async (path) => path === undefined
+      ? readyHostLevel(hostListing('/host/home', '/host/home', ['project-a', 'project-b']))
+      : readyHostLevel(hostListing(path, '/host/home', [])),
+  })
+  await h.paint()
+  await waitUntil(() => h.view().includes('project-a/'), 'Home candidates paint')
+  const candidateLine = lineIndexOf(panelFrame(h), 'project-a/')
+  h.vt.sendInput(`\x1b[<0;4;${candidateLine + 1}M`)
+  await h.paint()
+  // A real selection move repaints the candidate block (new frame revision).
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  const beforeRelease = h.view()
+  h.vt.sendInput(`\x1b[<0;4;${candidateLine + 1}m`)
+  await h.paint()
+  assert.ok(h.view().includes('Host directory: /host/home/'), 'the stale release does not complete a candidate')
+  assert.ok(!beforeRelease.includes('Host directory: /host/home/project-a/'))
+  assert.deepEqual(submitted, [], 'a rejected stale gesture performs no write')
+})
+
+test('the editor paints distinct empty, refused, unavailable, truncated and hidden states', async () => {
+  const empty = harness({
+    columns: 100,
+    rows: 30,
+    initialDirectoryEntry: true,
+    onAddDirectory: () => {},
+    onListDirectory: async () => readyHostLevel(hostListing('/host/home', '/host/home', [])),
+  })
+  await empty.paint()
+  await waitUntil(() => empty.view().includes('No child directories'), 'the empty official level is stated')
+  assert.ok(!empty.view().includes('unreachable'), 'an empty Host level is not called unreachable')
+  empty.dispose()
+
+  const refused = harness({
+    columns: 100,
+    rows: 30,
+    initialDirectoryEntry: true,
+    initialDirectoryPath: '/srv/missing',
+    onAddDirectory: () => {},
+    onListDirectory: async (path) => {
+      if (path === undefined) return readyHostLevel(hostListing('/host/home', '/host/home', []))
+      return { kind: 'failed', reason: 'the directory does not exist', code: 'directory-picker/unreadable' }
+    },
+  })
+  await refused.paint()
+  await waitUntil(() => refused.view().includes('Directory unreadable: the directory does not exist'),
+    'the Host refusal is painted truthfully')
+  refused.dispose()
+
+  const unavailable = harness({
+    columns: 100,
+    rows: 30,
+    initialDirectoryEntry: true,
+    onAddDirectory: () => {},
+    onListDirectory: async () => ({ kind: 'unavailable', reason: 'transport disconnected', code: 'gateway/peer-disposed' }),
+  })
+  await unavailable.paint()
+  await waitUntil(() => unavailable.view().includes('Directory suggestions unavailable: transport disconnected'),
+    'the unavailable browse surface is stated')
+  assert.ok(!unavailable.view().includes('No child directories'), 'an unavailable surface never becomes an empty directory')
+  unavailable.vt.sendInput('/manual/absolute')
+  await unavailable.paint()
+  unavailable.vt.sendInput('\r')
+  await unavailable.paint()
+  assert.ok(unavailable.view().includes('Host directory: /manual/absolute'),
+    'manual absolute verification stays available when suggestions are unavailable')
+  unavailable.dispose()
+
+  const truncated = harness({
+    columns: 100,
+    rows: 30,
+    initialDirectoryEntry: true,
+    onAddDirectory: () => {},
+    onListDirectory: async () => readyHostLevel(hostListing('/host/home', '/host/home', ['alpha', 'beta'], true)),
+  })
+  await truncated.paint()
+  await waitUntil(() => truncated.view().includes('alpha/'), 'the truncated level still paints its rows')
+  truncated.vt.sendInput('zzz')
+  await truncated.paint()
+  await waitUntil(() => truncated.view().includes('No matching child directories'), 'the filtered level states the prefix result')
+  const truncatedFrame = truncated.view()
+  assert.ok(truncatedFrame.includes('Directory listing truncated; type a more specific path'),
+    `a truncated level never claims a complete no-match:\n${truncatedFrame}`)
+  truncated.dispose()
+
+  const hidden = harness({
+    columns: 100,
+    rows: 30,
+    initialDirectoryEntry: true,
+    onAddDirectory: () => {},
+    onListDirectory: async () => readyHostLevel(hostListing('/host/home', '/host/home', [['.config', true]])),
+  })
+  await hidden.paint()
+  await waitUntil(() => hidden.view().includes('.config/'), 'a hidden official child stays visible')
+})
+
+test('a pending verification owns the editor: no Tab/mouse/arrow write until the settlement returns', async () => {
+  const submitted: string[] = []
+  const outcomes: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
+  const h = harness({
+    columns: 100,
+    rows: 30,
+    initialDirectoryEntry: true,
+    onAddDirectory: (path, settle) => { submitted.push(path); outcomes.push(settle) },
+    onListDirectory: async (path) => path === undefined
+      ? readyHostLevel(hostListing('/host/home', '/host/home', ['project-a', 'project-b']))
+      : readyHostLevel(hostListing(path, '/host/home', [])),
+  })
+  await h.paint()
+  await waitUntil(() => h.view().includes('project-a/'), 'Home candidates paint')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(submitted, ['/host/home/'])
+  const pending = h.view()
+  assert.ok(pending.includes('Verifying directory…'), `the pending verification is visible:\n${pending}`)
+  const footer = panelFrame(h).at(-1)!
+  assert.ok(footer.includes('Verifying directory') && !footer.includes('Tab Complete') && !footer.includes('Enter Verify'),
+    `the footer advertises only the real pending state:\n${footer}`)
+  h.vt.sendInput('\t')
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(submitted, ['/host/home/'], 'no second write may start while the first is pending')
+  outcomes[0]!({ kind: 'failed', message: 'refused again' })
+  await h.paint()
+  assert.ok(h.view().includes('Host directory: /host/home/'), 'the settlement keeps the same raw input')
+  assert.ok(h.view().includes('Enter verify'), 'the explicit verbs return after the refusal')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(submitted, ['/host/home/', '/host/home/'], 'a deliberate new Enter is the only new write')
+  outcomes[1]!({ kind: 'registered', workspaceId: 'ws-new', path: '/host/home' })
+  await h.paint()
+  assert.ok(!h.view().includes('Host directory:'), 'a registered directory retires the inline editor')
+  assert.ok(h.view().includes('Directory added: /host/home'), 'the registered fact is stated in the tree status')
+})
+
+test('tiny and narrow frames paint only executable editor verbs', async () => {
+  const sizes: ReadonlyArray<{ readonly columns: number; readonly rows: number }> = [
+    { columns: 80, rows: 2 },
+    { columns: 80, rows: 3 },
+    { columns: 80, rows: 4 },
+    { columns: 80, rows: 10 },
+    { columns: 44, rows: 20 },
+    { columns: 80, rows: 24 },
+  ]
+  for (const size of sizes) {
+    const submitted: string[] = []
+    const h = harness({
+      columns: size.columns,
+      rows: size.rows,
+      initialDirectoryEntry: true,
+      onAddDirectory: (path) => { submitted.push(path) },
+      onListDirectory: async (path) => path === undefined
+        ? readyHostLevel(hostListing('/host/项目', '/host/项目', ['项目-one', '项目-two']))
+        : readyHostLevel(hostListing(path, '/host/项目', [])),
+    })
+    await h.paint()
+    const lines = panelFrame(h)
+    assert.equal(lines.length, size.rows, `${size.columns}x${size.rows} keeps the exact physical height`)
+    const visible = h.view()
+    if (size.rows === 2) {
+      assert.ok(!visible.includes('Host directory:'), '80x2 has no body row for an Input')
+      assert.ok(lines.at(-1)!.includes('Esc Cancel'), `80x2 advertises only the real cancel:\n${lines.at(-1)}`)
+      assert.ok(!lines.at(-1)!.includes('Enter Verify'), '80x2 never advertises an unpainted Enter')
+      h.vt.sendInput('\r')
+      await h.paint()
+      assert.deepEqual(submitted, [], '80x2 Enter is a NO-OP')
+      h.vt.sendInput('\x1b')
+      await h.paint()
+      assert.ok(!h.view().includes('Host directory:'))
+    } else {
+      assert.ok(visible.includes('Host directory: '), `${size.columns}x${size.rows} paints the real Input`)
+      const footer = lines.at(-1)!
+      assert.ok(!footer.includes('…'), `${size.columns}x${size.rows} action bar drops whole segments only:\n${footer}`)
+      if (footer.includes('Tab Complete')) {
+        assert.ok(/项目-(one|two)\//.test(visible), 'Tab Complete is advertised only when a candidate is really painted')
+      }
+      // Esc always reaches the tree within the two-layer ladder.
+      h.vt.sendInput('\x1b')
+      await h.paint()
+      if (h.view().includes('Host directory:')) {
+        h.vt.sendInput('\x1b')
+        await h.paint()
+      }
+      assert.ok(!h.view().includes('Host directory:'), `${size.columns}x${size.rows} Esc always exits the editor`)
+    }
+    h.dispose()
+  }
+})
+
+test('an absent Host browse capability keeps manual absolute verification and paints no fake suggestions', async () => {
+  const submitted: string[] = []
+  const outcomes: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
+  const h = harness({
+    columns: 100,
+    rows: 30,
+    initialDirectoryEntry: true,
+    onAddDirectory: (path, settle) => { submitted.push(path); outcomes.push(settle) },
+  })
+  await h.paint()
+  const opened = h.view()
+  assert.ok(opened.includes('Directory suggestions unavailable: Host directory browsing is unavailable in this session.'),
+    `the absent capability is an explicit unavailable state:\n${opened}`)
+  assert.ok(!opened.includes('Suggestions (Host)'), 'no fake Suggestions block is painted')
+  h.vt.sendInput('/srv/work')
+  await h.paint()
+  h.vt.sendInput('\t')
+  await h.paint()
+  assert.ok(h.view().includes('Host directory: /srv/work'), 'Tab is inert without a candidate')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(submitted, ['/srv/work'], 'the manual absolute path still reaches the ONE Host resolve owner')
+  outcomes[0]!({ kind: 'registered', workspaceId: 'ws-manual', path: '/srv/work' })
+  await h.paint()
+  assert.ok(h.view().includes('Directory added: /srv/work'))
 })

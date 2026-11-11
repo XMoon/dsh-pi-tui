@@ -288,14 +288,48 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   only AFTER the submission owner has restored the draft, directly in the inline
   Host absolute-path editor with the refused path prefilled for correction. The
   editor paints `Verify directory` and `Cancel` (the local Host-registration
-  verbs, not a Workspace selection), accepts only an absolute Host path
-  beginning with `/`, and dispatches at most one Host resolution until it
+  verbs, not a Workspace selection), rejects an empty value and a shape that is
+  definitely non-absolute for the known Host dialect while the Host resolve
+  remains the final judge, and dispatches at most one Host resolution until it
   settles; a rejection keeps the text and the previously confirmed intent, while
   a success commits the next-create intent. That chooser returns to the Welcome
   only after success; ordinary Browser Add returns to Browse and never creates a
   Session. `New session` on a Folder reuses the existing `/new` transaction with
   that `workspaceId`, keeps the old Session until the commit, reports a refusal,
   and retires the Browser only after a committed switch.
+- **The inline Host-directory editor completes official Host levels, never a
+  Client path.** Opening `Add directory`, or the refused-first-submit path
+  editor, starts ONE per-open editor controller with its own private Input.
+  Ordinary Add first reads `list(undefined)` and, unless a retained/recovered
+  path or a real user edit exists, prefills the official Host home plus the Host
+  separator and reuses that SAME listing as the first level. The Host home is
+  the only dialect fact; the Client's own homedir, cwd, platform and local
+  completion never answer here. A late home answer never rewrites real input or
+  its cursor, a cleared value stays blank without a request, and a retained
+  initial/recovered path always outranks the home prefill.
+  Prefix typing issues ONE debounced `list(parent)`. Candidates are only the
+  official child `name`s matching that prefix (case-insensitive for the Host's
+  Windows dialect), keep the Host's own order, show at most eight rows, keep
+  `hidden` children visible, and are identified ONLY by the official
+  `entry.path`. `Tab` or a candidate click writes that path plus the Host
+  separator and queries the next level; `Up`/`Down` cycle only rows the frame
+  really painted; `Enter` verifies the RAW Input through the existing
+  `onAddDirectory`/`resolveWorkspace` transaction and never accepts a
+  candidate; the first `Esc` hides a painted suggestion block and the next
+  leaves the editor. A candidate action, browse read or transport rollover
+  never registers a Workspace: only the explicit `Enter` reaches the ONE
+  existing resolution, which may then commit the next-create intent. A failed,
+  refused or unavailable read is stated as such (`Directory unreadable: …`,
+  `Directory suggestions unavailable: …`, or an observable unexpected read
+  failure); an empty official level is `No child directories`; a prefix with no
+  match is distinct; and `truncated` is never presented as a complete no-match.
+  While verification pends the editor advertises only the verifying state and
+  no completion, mouse or Tab action may start another read or write; a
+  settlement returns to editing with the same raw value. A frame too short to
+  paint the Input never submits, and 80×2 has no editor body and only the real
+  `Esc` action. The Input, home read, latest query generation and painted
+  candidate admission are disposed with the editor or the per-open lease, so a
+  late result can never repaint a newer open.
 - **A sessionless mount verifies its launch directory once.** The sessionless
   mount resolves the launch `host-path` proposal through the official Host
   Workspace lifecycle, so the Welcome states a Host-confirmed canonical

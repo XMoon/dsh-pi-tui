@@ -156,6 +156,10 @@ export interface SessionBrowserReadOwnerOptions {
   readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
   readonly onWorkspaceNewSession?: (workspaceId: string, closeAfterCommit: () => void, settle?: (outcome: import('./session-browser-presentation.ts').SessionBrowserNewSessionSettlement) => void) => void
   readonly onAddDirectory?: (path: string, settle: (outcome: import('./session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => void
+  /** Session Workspace PR3: the ONE read-only Host directory browse seam,
+   *  forwarded VERBATIM to the presentation. The read owner never calls or
+   *  caches a directory query itself — the inline editor owns that lifetime. */
+  readonly onListDirectory?: import('../../runtime/host-directory-browse-port.ts').HostDirectoryBrowsePort['list']
   /** PiTUI only: re-read the ONE roster on a single re-armed timer so the
    *  fullscreen Workspace does not paint a stale Session list. TSP leaves it
    *  undefined and keeps its historical single read. */
@@ -884,6 +888,9 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
           onAddDirectory: options.onAddDirectory === undefined
             ? undefined
             : (path, settle) => options.onAddDirectory?.(path, settle),
+          // The Host browse capability keeps its optionality: the presentation
+          // receives the SAME function only when this composition has one.
+          ...(options.onListDirectory === undefined ? {} : { onListDirectory: options.onListDirectory }),
           onResumeIntent: (intent) => {
             if (intent.source === 'direct') return
             requestResume(panel, intent, panel.rows)

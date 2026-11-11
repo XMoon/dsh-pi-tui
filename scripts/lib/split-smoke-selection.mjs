@@ -21,6 +21,7 @@ import { runDetachedTurnInteractions } from '../smoke/split-process/detached-tur
 import { runNonDestructiveClientLifecycle } from '../smoke/split-process/non-destructive-client-lifecycle.mjs'
 import { runReadAuthority } from '../smoke/split-process/read-authority.mjs'
 import { runHostDirectoryBrowse } from '../smoke/split-process/host-directory-browse.mjs'
+import { runHostDirectoryInlineChooser } from '../smoke/split-process/host-directory-inline-chooser.mjs'
 import { runInteractionNavigationFirst } from '../smoke/split-process/interaction-admission.mjs'
 import { runSessionWorkspaceActivity } from '../smoke/split-process/session-workspace-activity.mjs'
 import { runSessionWorkspaceEditorEntry } from '../smoke/split-process/session-workspace-editor-entry.mjs'
@@ -145,6 +146,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'interaction.workspace-editor-entry',
     title: 'two real PTY Left presses from the empty PiTUI Host Editor open the ONE All-workspaces Session Workspace without switching, stopping or answering',
     run: runSessionWorkspaceEditorEntry,
+  }),
+  Object.freeze({
+    suite: 'interaction',
+    id: 'interaction.host-directory-inline-chooser',
+    title: 'a real Sessionless Split Client completes a Host-only directory through the inline chooser and registers it through the ONE existing Workspace resolve without creating a Session',
+    run: runHostDirectoryInlineChooser,
   }),
   Object.freeze({
     suite: 'recovery',

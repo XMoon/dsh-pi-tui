@@ -5633,8 +5633,22 @@ test('a refused first Host path restores the draft before opening the same Brows
   assert.equal(mounted.app.getDraft(), 'preserve this first prompt')
   assert.equal(mounted.app.isFullscreen(), true)
   const frame = vt.getViewport().join('\n')
+  // A worktree cwd can exceed the visible Input width, so the Input's own
+  // horizontal scroll shows the VALUE TAIL; the prefilled path is still the
+  // full raw value (asserted through its visible tail, never a rewritten one).
+  const visiblePathTail = path.slice(-24)
   assert.ok(frame.includes('Host directory:'), `the existing Browser starts in the inline path editor:\n${frame}`)
-  assert.ok(frame.includes(path), `the refused Host proposal is prefilled for correction:\n${frame}`)
+  assert.ok(frame.includes(visiblePathTail), `the refused Host proposal is prefilled for correction:\n${frame}`)
+  // PR3: the SAME composition now reads the Host home through the real Direct
+  // browse port. This fixture mounts no directory-picker controller, so the
+  // truthful outcome is `unavailable`; the retained recovery path is NEVER
+  // overwritten by that (non-)home answer and the restored draft is untouched.
+  assert.equal(await drainUntil(() => vt.getViewport().join('\n')
+    .includes('Directory suggestions unavailable'), 5_000), true,
+  'the real Direct Host browse seam reaches the inline editor as an unavailable fact')
+  const afterHome = vt.getViewport().join('\n')
+  assert.ok(afterHome.includes(visiblePathTail), `the Home answer never replaces the refused path:\n${afterHome}`)
+  assert.equal(mounted.app.getDraft(), 'preserve this first prompt', 'the Home answer never touches the restored draft')
 })
 test('observational: the CWD-level skip spans Sessions while the recall window keeps every accepted input', async (t) => {
   // DEFERRED SEMANTICS (docs/architecture/input-history.md): the persistence dedupe anchor

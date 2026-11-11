@@ -149,6 +149,27 @@ export function createDualSurfaceSceneTools(context) {
     return { host, hostBefore, workRoot, clientA, clientB, aReady, bReady, sessionX, sessionY }
   }
 
+  /**
+   * Move the REAL painted cursor onto the row naming one Session. The tree's
+   * initial cursor is the current Session (or its Folder), so a case that
+   * needs a sibling Needs row must select it through the real arrow keys —
+   * never through a Wrapper/API shortcut.
+   */
+  const selectPaintedSessionRow = async (client, sessionId, label, timeoutMs = 60_000) => {
+    const short = String(sessionId).replace(/^session[-_]/i, '').slice(0, 8)
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const frame = await client.viewport()
+      const cursorIndex = frame.findIndex(line => line.startsWith('> '))
+      const targetIndex = frame.findIndex(line => line.includes(short))
+      if (cursorIndex >= 0 && targetIndex >= 0 && cursorIndex === targetIndex) return
+      if (targetIndex >= 0) client.send(targetIndex < cursorIndex ? '\x1b[A' : '\x1b[B')
+      else client.send('\x1b[B')
+      await sleep(120)
+    }
+    throw new SplitSmokeAssertionError(`${label}: the painted cursor never reached the ${short} row`)
+  }
+
   return {
     scene,
     startC1Host,
@@ -159,5 +180,6 @@ export function createDualSurfaceSceneTools(context) {
     submitPrompt,
     resumeSession,
     startDualSurfaceScene,
+    selectPaintedSessionRow,
   }
 }

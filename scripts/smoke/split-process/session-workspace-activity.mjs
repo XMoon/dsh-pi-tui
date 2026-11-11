@@ -33,7 +33,7 @@ const shortSessionId = id => id.replace(/^session[-_]/i, '').slice(0, 8)
 export async function runSessionWorkspaceActivity(context) {
   const { dshHome, trace } = context
   const tools = createDualSurfaceSceneTools(context)
-  const { submitPrompt, startDualSurfaceScene } = tools
+  const { submitPrompt, startDualSurfaceScene, selectPaintedSessionRow } = tools
   const viewportText = async client => (await client.viewport()).join('\n')
 
   const { workRoot, clientA, clientB, sessionX, sessionY } =
@@ -53,7 +53,9 @@ export async function runSessionWorkspaceActivity(context) {
 
   // ── The grouped list proves X as a Needs row, from the real sources ────────
   await submitPrompt(clientA, '/sessions', 'U-D open the Session Workspace')
-  await clientA.waitForScreen('Workspace: ', 'U-D Session Workspace frame', 60_000)
+  // The PR2 Session Workspace header is `Sessions · N`; the retired
+  // `Workspace:` scope header is not part of the surface any more.
+  await clientA.waitForScreen('Sessions ·', 'U-D Session Workspace frame', 60_000)
   const deadline = Date.now() + 60_000
   let frame = await viewportText(clientA)
   while (!frame.includes('Needs attention') && Date.now() < deadline) {
@@ -63,6 +65,10 @@ export async function runSessionWorkspaceActivity(context) {
   assert(frame.includes('Needs attention'), `U-D the workspace never proved a Needs row:\n${frame}`)
   assert(frame.includes(shortSessionId(sessionX)), `U-D the Needs row does not name Session X:\n${frame}`)
   assert(!frame.includes('[1] Proceed'), `U-D the workspace painted the answerable modal:\n${frame}`)
+  // The tree's initial cursor is the current Session; the Needs row is its
+  // sibling, so select it through the REAL arrow keys before the read-only
+  // Peek (the PR2 tree is Workspace-grouped, not a flat Needs section).
+  await selectPaintedSessionRow(clientA, sessionX, 'U-D select the Needs row')
   trace('ud-workspace-needs', { sessionX, sessionY, frame: frame.split('\n') })
 
   // ── Space Peek: read-only, no answer affordance, no Host write ────────────
@@ -75,7 +81,7 @@ export async function runSessionWorkspaceActivity(context) {
   assert(!/Allow|Deny|Proceed/.test(peek), `U-D the Peek carries an answer affordance:\n${peek}`)
   trace('ud-workspace-peek', { sessionX, frame: peek.split('\n') })
   clientA.send('\x1b')
-  // The Peek body must really be GONE before the next key: `Workspace:` is the
+  // The Peek body must really be GONE before the next key: `Sessions ·` is the
   // persistent header and would pass a vacuous wait, and an Enter delivered
   // while the Esc is still in the same chunk parses as Alt+Enter.
   await clientA.waitForScreenGone('Peek ·', 'U-D Peek back to the list', 30_000)

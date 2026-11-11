@@ -69,6 +69,7 @@ import type { SessionStatsFacts } from './domain/status/stats.ts'
 import type { SessionReader } from './runtime/session-reader-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { SessionWorkspaceFactsPort } from './runtime/session-workspace-facts-port.ts'
+import type { HostDirectoryBrowsePort } from './runtime/host-directory-browse-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
 import type {
   CreateSessionRequest,
@@ -435,6 +436,14 @@ export interface TuiCommandRunner {  ctx: Context
    *  follows Workspace membership per open and never writes a Workspace,
    *  never persists a registry and never guesses membership from a cwd. */
   readonly sessionWorkspaceFacts: SessionWorkspaceFactsPort
+  /**
+   * The official Host directory-browse READ port (Session Workspace PR3). The
+   * PiTUI inline Add editor is its only consumer: it lists the Host home and
+   * one Host level per typed prefix so the user can complete an absolute Host
+   * path. A listing is disposable editor projection, never a Workspace
+   * registration and never a Client-filesystem read.
+   */
+  readonly hostDirectoryBrowse: HostDirectoryBrowsePort
   /**
    * Split-Client only (G567's Client-root read view, consumed by M5-U-D): the
    * official forwarded Question/Approval invocations THIS Client still holds

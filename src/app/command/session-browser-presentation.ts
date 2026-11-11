@@ -1,6 +1,7 @@
 /** Internal read-only Session Browser contract shared by the app read owner and TSP presenter. */
 import type { SessionSummary } from '../../runtime/session-reader-port.ts'
 import type { SessionActivityFact, SessionWorkspaceFact } from '../../runtime/session-workspace-facts-port.ts'
+import type { HostDirectoryBrowsePort } from '../../runtime/host-directory-browse-port.ts'
 
 export interface SessionBrowserWorkspaceMetadata {
   readonly workspaceId: string
@@ -110,6 +111,11 @@ export interface SessionBrowserPanelRequest {
   readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
   readonly onNewSession?: (workspaceId: string, settle?: (outcome: SessionBrowserNewSessionSettlement) => void) => void
   readonly onAddDirectory?: (path: string, settle: (outcome: SessionBrowserDirectorySettlement) => void) => void
+  /** Session Workspace PR3: the ONE read-only Host directory browse seam.
+   *  Present ONLY when the composing renderer really supports the inline Host
+   *  completion; an absent callback is not wrapped into a fake reader. The
+   *  TSP native presentation never receives it. */
+  readonly onListDirectory?: HostDirectoryBrowsePort['list']
   readonly onClose: () => void
 }
 

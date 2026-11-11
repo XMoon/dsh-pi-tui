@@ -51,7 +51,7 @@ const composerDraftEmpty = composer => composer !== undefined
 export async function runSessionWorkspaceEditorEntry(context) {
   const { dshHome, trace } = context
   const tools = createDualSurfaceSceneTools(context)
-  const { submitPrompt, startDualSurfaceScene, exitC1Client, hostIdentityFacts } = tools
+  const { submitPrompt, startDualSurfaceScene, exitC1Client, hostIdentityFacts, selectPaintedSessionRow } = tools
   const viewportText = async client => (await client.viewport()).join('\n')
 
   const { host, hostBefore, workRoot, clientA, clientB, sessionX, sessionY } =
@@ -83,7 +83,11 @@ export async function runSessionWorkspaceEditorEntry(context) {
   clientA.send(LEFT)
   await sleep(120)
   clientA.send(LEFT)
-  await clientA.waitForScreen('Workspace: All workspaces', 'U-E All-scope workspace from two Lefts', 60_000)
+  // PR2 retired the scope header: the gesture's All browse intent only
+  // decides the one-time missing-Current notice; every entry browses the
+  // complete official Workspace tree. The visible proof is the ONE Sessions
+  // header plus the sibling Session content below, never a scope label.
+  await clientA.waitForScreen('Sessions ·', 'U-E Session Workspace from two Lefts', 60_000)
 
   const deadline = Date.now() + 60_000
   let frame = await viewportText(clientA)
@@ -92,7 +96,7 @@ export async function runSessionWorkspaceEditorEntry(context) {
     await sleep(100)
     frame = await viewportText(clientA)
   }
-  assert(frame.includes('Workspace: All workspaces'), `U-E the gesture did not ask for All workspaces:\n${frame}`)
+  assert(frame.includes('Sessions ·'), `U-E the ONE Sessions header did not paint:\n${frame}`)
   assert(frame.includes('Needs attention'), `U-E the workspace never proved a Needs row:\n${frame}`)
   assert(frame.includes(shortSessionId(sessionX)), `U-E the Needs row does not name Session X:\n${frame}`)
   assert(!frame.includes('[1] Proceed'), `U-E the workspace painted the answerable modal:\n${frame}`)
@@ -106,6 +110,9 @@ export async function runSessionWorkspaceEditorEntry(context) {
   })
 
   // ── Space Peek stays read-only; the root Esc restores the SAME editor ────
+  // The tree's initial cursor is the current Session Y; select the sibling
+  // Needs row X through the REAL arrow keys before the read-only Peek.
+  await selectPaintedSessionRow(clientA, sessionX, 'U-E select the Needs row')
   const eventsBeforePeek = (hostSessionEvents(dshHome, sessionX) ?? []).length
   clientA.send(' ')
   await clientA.waitForScreen('Peek ·', 'U-E read-only Peek', 30_000)
@@ -119,9 +126,9 @@ export async function runSessionWorkspaceEditorEntry(context) {
     'U-E Peek wrote a Host session event')
 
   clientA.send('\x1b')
-  await clientA.waitForScreenGone('Workspace: ', 'U-E workspace closed back to the main screen', 60_000)
+  await clientA.waitForScreenGone('Sessions ·', 'U-E workspace closed back to the main screen', 60_000)
   const afterClose = await viewportText(clientA)
-  assert(!afterClose.includes('Workspace: '), `U-E the workspace did not close:\n${afterClose}`)
+  assert(!afterClose.includes('Sessions ·'), `U-E the workspace did not close:\n${afterClose}`)
   assert(lastSurfaceStatus(clientA)?.openSessionId === sessionY,
     'U-E closing the workspace changed A\'s committed Session')
   assert(composerDraftEmpty(await clientA.composerText()),
@@ -141,7 +148,7 @@ export async function runSessionWorkspaceEditorEntry(context) {
   clientA.send(LEFT)
   await sleep(500)
   const withDraft = await viewportText(clientA)
-  assert(!withDraft.includes('Workspace: '),
+  assert(!withDraft.includes('Sessions ·'),
     `U-E a non-empty draft plus two Lefts opened the workspace:\n${withDraft}`)
   assert(!composerDraftEmpty(await clientA.composerText()), 'U-E the negative path changed the draft')
   // Clear the fixture draft through the REAL editor and WAIT for the empty
