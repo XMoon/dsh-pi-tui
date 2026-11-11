@@ -203,3 +203,35 @@ test('a pure projection never bumps anything, and a fresh Fold starts its own re
   assert.notEqual(freshRow, rows[0], 'the cold fold owns NEW objects')
   assert.equal(transcriptDisplayRevisionOf(freshRow), 0, 'a fresh row starts at revision 0')
 })
+
+test('a compaction card is stamped by its counts-only summary and by an end-seed settle', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([ev('compaction/start', { compactionId: 'cp-1' }, 0)])
+  const card = findRow(folder, message => message.kind === 'compaction')
+  assert.equal(card.kind === 'compaction' ? card.running : undefined, true, 'the card starts running')
+  const started = transcriptDisplayRevisionOf(card)
+
+  // Counts-only summary: no body text, but the rendered counts badge changes.
+  folder.apply([ev('compaction/summary', {
+    compactionId: 'cp-1',
+    shadowedSeqs: [1, 2, 3],
+    shadowedTokenCount: 4242,
+  }, 1)])
+  const afterCounts = transcriptDisplayRevisionOf(card)
+  assert.ok(afterCounts > started, 'a counts-only summary stamps the card')
+  assert.equal(card.kind === 'compaction' ? card.items : undefined, 3)
+  assert.equal(card.kind === 'compaction' ? card.tokens : undefined, 4242)
+
+  // A second identical summary is a no-op: nothing visible changed.
+  folder.apply([ev('compaction/summary', {
+    compactionId: 'cp-1',
+    shadowedSeqs: [1, 2, 3],
+    shadowedTokenCount: 4242,
+  }, 2)])
+  assert.equal(transcriptDisplayRevisionOf(card), afterCounts, 'an identical counts summary does not re-stamp')
+
+  // The resume seed boundary settles every card still open at it.
+  folder.apply([ev('session/end-seed', {}, 3)])
+  assert.equal(card.kind === 'compaction' ? card.running : undefined, false, 'the seed boundary settles the card')
+  assert.ok(transcriptDisplayRevisionOf(card) > afterCounts, 'the settled card is stamped')
+})
