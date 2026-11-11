@@ -580,7 +580,12 @@ function main() {
             + "if (!Array.isArray(m[7].inject)) throw new Error('visual-tools inject');"
             + "if (m[8].name !== 'pi-tui-host-runtime') throw new Error('host-runtime row');"
             + "if (typeof m[8].apply !== 'function') throw new Error('host-runtime apply');"
-            + "if (!Array.isArray(m[8].inject) || m[8].inject.join(',') !== 'typert,agents,fileReferences,workingDirectory,sessions,sandboxPolicy,sandbox,subprocess') throw new Error('host-runtime inject');"
+            // The built-in Host Runtime is a public entry, so the PACKED row must
+            // still export a valid dependency declaration. Its exact service set is
+            // a Host-composition fact owned by the Host composition/readiness tests,
+            // not by this packaging gate: a legitimate new inject must not force this
+            // historical list to be frozen here.
+            + "if (!Array.isArray(m[8].inject) || m[8].inject.length === 0 || m[8].inject.some(dep => typeof dep !== 'string' || dep === '') || new Set(m[8].inject).size !== m[8].inject.length) throw new Error('host-runtime inject');"
             + "if (m[9].name !== 'pi-tui-web-preferences') throw new Error('web-preferences row');"
             + "if (typeof m[9].Config !== 'function' && typeof m[9].Config !== 'object') throw new Error('web-preferences Config');"
             + "if (typeof m[9].apply !== 'function') throw new Error('web-preferences apply');"
