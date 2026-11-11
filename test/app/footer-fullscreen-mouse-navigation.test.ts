@@ -880,7 +880,7 @@ test('a synchronous recompose retires the release before the next repaint', asyn
     await h.vt.waitForRender()
     assert.equal(h.loads().length, 0, 'a pending recompose retires the release before any repaint')
     // After the repaint the same placement is still there: a fresh click acts.
-    await new Promise(resolve => setTimeout(resolve, 550))
+    await new Promise(resolve => setTimeout(resolve, 550)) // reason: the double-click window IS the contract — the fresh click must start a new gesture after it closes.
     click(h.vt, cell.x, cell.row)
     await h.vt.waitForRender()
     await h.vt.waitForRender()
