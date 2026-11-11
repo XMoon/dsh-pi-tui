@@ -1467,7 +1467,14 @@ test('short frames keep one Output row, the Action Bar last, and a Find only whe
   await vt.waitForRender()
   assert.match(view(vt), /Find Output:/)
   vt.resize(44, 3)
-  await vt.waitForRender()
+  // A frame that cannot host the SearchRow leaves the search in
+  // `onFramePainted`, which requests ONE more repaint. Wait for the frame that
+  // really carries the exited state instead of assuming a single render.
+  for (let frame = 0; frame < 20; frame += 1) {
+    await vt.waitForRender()
+    const text = view(vt)
+    if (!/Find Output:/.test(text) && /Back \[Esc\]/.test(text)) break
+  }
   const tiny = view(vt)
   assert.ok(!/Find Output:/.test(tiny), 'a frame with no SearchRow leaves the search')
   assert.match(tiny, /Back \[Esc\]/, 'the Action Bar survives the shrink')
