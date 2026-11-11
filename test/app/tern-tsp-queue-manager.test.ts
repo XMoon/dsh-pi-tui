@@ -16,7 +16,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { connect } from '@stencil-hq/tern'
+import { connect, View } from '@stencil-hq/tern'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 
 import { QueueManagerController } from '../../src/app/queue/manager.ts'
@@ -25,6 +25,7 @@ import type { PendingInputItem, PendingInputReader } from '../../src/runtime/pen
 import type { SessionWriter } from '../../src/runtime/session-writer-port.ts'
 import type { TspRenderer } from '../../src/tui/tsp/session.ts'
 import { mountTspRenderer } from '../../src/tui/tsp/session.ts'
+import { TspQueueManager } from '../../src/tui/tsp/queue-manager.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 import { settle, waitUntil } from '../support/tsp-runner-harness.ts'
 import {
@@ -569,4 +570,71 @@ test('native Queue: Host control sequences never reach picker/confirm/editor tex
   const editorText = String(sheetNode(m.pane, 'editor')?.p.text ?? '')
   assert.equal(editorText.includes('\u001b[2J'), false, 'the editor display never carries the Host CSI clear')
   assert.equal(m.controller.view().draft, evil, 'the controller keeps the RAW draft')
+})
+
+
+test('native Queue: a hostile PASTE in the live editor is sanitized before the wire', async (t) => {
+  const pane = installTspPane({ queueManager: true })
+  t.after(() => pane.restore())
+  const session = await connect({ timeout: 500, exitHooks: false })
+  assert.ok(session)
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit() {}, onFatal: (e) => assert.fail(String(e)) })
+  t.after(() => renderer.dispose())
+  renderer.bindInput({} as never)
+  const controller = new QueueManagerController({
+    reader: { snapshot: () => ({ running: true, items: [queued('occ-1', [{ type: 'text', text: 'safe' }])] }) },
+    writer: {
+      prompt: async () => ({ kind: 'committed', value: undefined }),
+      updateQueue: async () => ({ kind: 'committed', value: undefined }),
+      cancel: async () => ({ kind: 'committed', value: undefined }),
+      rename: async () => ({ kind: 'committed', value: { title: 't' } }),
+      refreshTitle: async () => ({ kind: 'unsupported', reason: 'none' }),
+    },
+    captureSessionId: () => 'session-a',
+    captureSubject: () => ({}),
+    isSubjectCurrent: () => true,
+    captureScope: () => ({ sessionId: 'session-a' } as never),
+    isScopeCurrent: () => true,
+    isViewing: () => false,
+    withWriter: async (_scope, task) => task(),
+    beginClientWrite: () => () => {},
+    runOwned: () => {},
+    refreshPendingInput: () => {},
+    notify: () => {},
+    textOf: content => queueTextOf(content as readonly ContentBlock[]),
+  })
+  const presenter = new TspQueueManager({
+    controller,
+    render: () => {},
+    canInteract: () => true,
+    queueOpenKeys: () => ['alt+i'],
+    notify: () => {},
+  })
+  controller.attach(presenter.presentation)
+  controller.open()
+  controller.startEdit('occ-1')
+  presenter.handleKey({
+    name: 'paste',
+    text: 'pasted\u001b[2J \u001b]52;c;ZXZpbA==\u0007 text',
+    ctrl: false,
+    alt: false,
+    shift: false,
+    meta: false,
+  } as never)
+  assert.equal(controller.view().draft?.includes('\u001b[2J'), false, 'the edited draft stores safe text')
+  assert.equal(controller.view().draft?.includes(']52;'), false)
+  const layer = presenter.renderLayer()
+  assert.ok(layer !== undefined)
+  let editorText = ''
+  for (const root of View.from({ layer }).regions) {
+    const walk = (node: typeof root): void => {
+      if (node === undefined) return
+      if (node.kind === 'editor' && typeof node.props['text'] === 'string') editorText = node.props['text']
+      for (const child of node.children) walk(child)
+    }
+    walk(root)
+  }
+  assert.notEqual(editorText, '', 'the editor node is present')
+  assert.equal(editorText.includes('\u001b[2J'), false, 'the editor wire text never carries a CSI clear')
+  assert.equal(editorText.includes(']52;'), false, 'the editor wire text never carries OSC 52')
 })
