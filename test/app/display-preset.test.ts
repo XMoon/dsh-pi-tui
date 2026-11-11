@@ -238,3 +238,113 @@ test('Compact and Focus fold the SAME proven relay while Full keeps the complete
   assert.deepEqual(folder.messages().map(message => message.kind), before,
     'the three presets consume the same untouched raw window')
 })
+
+/** One real window that carries a proven same-turn Agent relay AND a proven
+ * same-turn subagent settlement inside a single Work. */
+function mixedA2AWindow(): TranscriptFolder {
+  const relayMessage = {
+    id: MessageId('preset-mixed-relay'), role: 'user',
+    content: [{ type: 'text', text: 'PRESET_MIXED_RELAY_PAYLOAD' }],
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'session-preset-child' },
+  }
+  const settledMessage = {
+    id: MessageId('preset-mixed-settled'), role: 'user',
+    content: [{ type: 'text', text: 'PRESET_MIXED_SETTLED_PAYLOAD' }],
+    source: { kind: 'subagent-settled', form: 'notice', summary: 'PRESET_MIXED_SETTLED_SUMMARY', senderSessionId: 'session-preset-child' },
+  }
+  const folder = new TranscriptFolder()
+  folder.apply([
+    presetEvent('turn/start', { turn: 0 }, 0),
+    presetEvent('tool/call', { turn: 0, step: 0, callId: 'preset-mixed-c1', name: 'read', arguments: '{}' }, 1),
+    presetEvent('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('preset-mixed-r1'), role: 'tool', toolCallId: 'preset-mixed-c1', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'preset-mixed-c1' } },
+    }, 2),
+    presetEvent('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [relayMessage] }, 3),
+    presetEvent('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 4),
+    presetEvent('user/message', relayMessage, 5),
+    presetEvent('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [settledMessage] }, 6),
+    presetEvent('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 7),
+    presetEvent('user/message', settledMessage, 8),
+    presetEvent('tool/call', { turn: 0, step: 1, callId: 'preset-mixed-c2', name: 'bash', arguments: '{}' }, 9),
+    presetEvent('tool/result', {
+      turn: 0, step: 1,
+      message: { id: MessageId('preset-mixed-r2'), role: 'tool', toolCallId: 'preset-mixed-c2', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'preset-mixed-c2' } },
+    }, 10),
+    presetEvent('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('preset-mixed-final'), role: 'assistant', content: [{ type: 'text', text: 'PRESET_MIXED_FINAL_ANSWER' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 11),
+    presetEvent('turn/end', { turn: 0, reason: { kind: 'completed' } }, 12),
+  ])
+  return folder
+}
+
+test('Compact and Focus fold the proven relay AND settlement while Full keeps every raw Context row', async () => {
+  const folder = mixedA2AWindow()
+  const relay = folder.messages().find(message => message.kind === 'system' && message.text === 'PRESET_MIXED_RELAY_PAYLOAD')
+  const settled = folder.messages().find(message => message.kind === 'system' && message.text === 'PRESET_MIXED_SETTLED_PAYLOAD')
+  assert.ok(relay !== undefined && relay.kind === 'system')
+  assert.ok(settled !== undefined && settled.kind === 'system')
+  assert.equal(relay.contextPresentation?.sameTurnNextStep, true, 'fixture: proven Working relay')
+  assert.equal(settled.contextPresentation?.sameTurnNextStep, true, 'fixture: proven Working settlement')
+  const before = folder.messages().map(message => message.kind)
+  const render = async (preset: DisplayState['preset']): Promise<{ view: string; vt: VirtualTerminal; app: TuiApp }> => {
+    const vt = new VirtualTerminal(120, 40)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { displayState: { preset } })
+    app.start()
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    await vt.waitForRender()
+    return {
+      vt,
+      app,
+      view: vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n'),
+    }
+  }
+
+  const compact = await render('compact')
+  try {
+    assert.ok(!compact.view.includes('PRESET_MIXED_RELAY_PAYLOAD'), `Compact folds the proven relay:\n${compact.view}`)
+    assert.ok(!compact.view.includes('PRESET_MIXED_SETTLED_PAYLOAD'), `Compact folds the proven settlement:\n${compact.view}`)
+    compact.vt.sendInput('\x0f') // Ctrl+O
+    await compact.vt.waitForRender()
+    const expanded = compact.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+    assert.ok(expanded.includes('PRESET_MIXED_RELAY_PAYLOAD'), `opening the Work restores the relay:\n${expanded}`)
+    assert.ok(expanded.includes('PRESET_MIXED_SETTLED_PAYLOAD'), `opening the Work restores the settlement:\n${expanded}`)
+    assert.ok(expanded.indexOf('PRESET_MIXED_RELAY_PAYLOAD') < expanded.indexOf('PRESET_MIXED_SETTLED_PAYLOAD'),
+      'both carried Context rows keep their raw chronology')
+  } finally {
+    compact.app.dispose()
+  }
+
+  const focus = await render('focus')
+  try {
+    assert.ok(!focus.view.includes('PRESET_MIXED_RELAY_PAYLOAD'), `Focus hides the proven relay:\n${focus.view}`)
+    assert.ok(!focus.view.includes('PRESET_MIXED_SETTLED_PAYLOAD'), `Focus hides the proven settlement:\n${focus.view}`)
+    focus.vt.sendInput('\x0f')
+    await focus.vt.waitForRender()
+    const expanded = focus.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+    assert.ok(expanded.includes('PRESET_MIXED_RELAY_PAYLOAD'), `opening the Thought restores the relay:\n${expanded}`)
+    assert.ok(expanded.includes('PRESET_MIXED_SETTLED_PAYLOAD'), `opening the Thought restores the settlement:\n${expanded}`)
+    assert.ok(expanded.indexOf('PRESET_MIXED_RELAY_PAYLOAD') < expanded.indexOf('PRESET_MIXED_SETTLED_PAYLOAD'))
+    assert.ok(expanded.indexOf('PRESET_MIXED_SETTLED_PAYLOAD') < expanded.indexOf('PRESET_MIXED_FINAL_ANSWER'))
+  } finally {
+    focus.app.dispose()
+  }
+
+  const full = await render('full')
+  try {
+    assert.ok(full.view.includes('PRESET_MIXED_RELAY_PAYLOAD'), `Full keeps the relay card:\n${full.view}`)
+    // Full keeps the settlement CARD in raw order; its body stays behind the
+    // card's own ordinary disclosure (the same as any standalone Notice).
+    assert.ok(full.view.includes('PRESET_MIXED_SETTLED_SUMMARY'), `Full keeps the settlement card:\n${full.view}`)
+    assert.ok(!full.view.includes('PRESET_MIXED_SETTLED_PAYLOAD'))
+    assert.ok(full.view.indexOf('PRESET_MIXED_RELAY_PAYLOAD') < full.view.indexOf('PRESET_MIXED_SETTLED_SUMMARY'))
+    assert.ok(full.view.indexOf('PRESET_MIXED_SETTLED_SUMMARY') < full.view.indexOf('PRESET_MIXED_FINAL_ANSWER'))
+  } finally {
+    full.app.dispose()
+  }
+
+  assert.deepEqual(folder.messages().map(message => message.kind), before,
+    'the three presets consume the same untouched raw window')
+})
