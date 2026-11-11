@@ -16,7 +16,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { connect, View } from '@stencil-hq/tern'
+import { connect, View, type Node } from '@stencil-hq/tern'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 
 import { QueueManagerController } from '../../src/app/queue/manager.ts'
