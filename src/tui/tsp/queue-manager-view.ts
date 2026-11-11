@@ -103,8 +103,13 @@ function browseLayer(view: QueueManagerView, deps: QueueLayerDeps): Node {
 
 /** The Edit page: ONE native modal overlay with the controlled editor. */
 function editLayer(view: QueueManagerView, deps: QueueLayerDeps): Node {
-  const safeDraft = sanitizeDisplayText(view.draft ?? '')
-  const editor = deps.editor ?? { text: safeDraft, cursor: safeDraft.length }
+  // FINAL boundary: even a supplied live editor state (a paste handler may have
+  // committed a synchronous intermediate frame before the presenter normalizes
+  // its composer) is projected here, so no frame can carry terminal controls.
+  const rawText = deps.editor?.text ?? view.draft ?? ''
+  const safeText = sanitizeDisplayText(rawText)
+  const cursor = Math.min(Math.max(0, deps.editor?.cursor ?? safeText.length), safeText.length)
+  const editor = { text: safeText, cursor }
   return ui.overlay(
     {
       key: `queue-edit-${deps.serial}`,
