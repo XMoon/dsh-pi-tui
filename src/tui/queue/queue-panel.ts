@@ -23,6 +23,7 @@ import type { Component, Focusable, TUI, TuiMouseEvent, TuiMouseEventResult } fr
 import { SearchablePicker, type SearchablePickerItem } from '../pickers/searchable-picker.ts'
 import { QUEUE_CHORDS, type QueueChordId } from '../keybindings/hints.ts'
 import { color, editorTheme, selectListTheme } from '../theme/runtime.ts'
+import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { attachmentCountLabel, type QueueManagerController, type QueueManagerRow, type QueueManagerView } from '../../app/queue/manager.ts'
 
 /** The One Wide Overlay geometry of the queue manager (design language D10). */
@@ -355,7 +356,8 @@ export class QueuePanel implements Component, Focusable {
     record(editHeader(width, view), { kind: 'inert' })
     if (blanks > 0) record('', { kind: 'inert' })
     const editor = this.ensureEditor(view)
-    if (editor.getText() !== (view.draft ?? '')) editor.setText(view.draft ?? '')
+    const safeDraft = sanitizeDisplayText(view.draft ?? '')
+    if (editor.getText() !== safeDraft) editor.setText(safeDraft)
     const rendered = editor.render(width)
     // The fork editor paints its own top/bottom border; the overlay Frame is
     // the ONE frame, so only its content rows are painted. A short grant clips
@@ -395,7 +397,7 @@ export class QueuePanel implements Component, Focusable {
       for (const line of wrapLines(row.text, width, textRows)) record(line, { kind: 'inert' })
     }
     if (attachmentRow && row !== undefined) {
-      record(color.textDim(truncateToWidth(`  ${row.attachments.join(' · ')}`, width, '…')), { kind: 'inert' })
+      record(color.textDim(truncateToWidth(`  ${singleLine(row.attachments.join(' · '))}`, width, '…')), { kind: 'inert' })
     }
     if (spacer) record('', { kind: 'inert' })
     record(warning, { kind: 'inert' })
@@ -484,9 +486,15 @@ export class QueuePanel implements Component, Focusable {
       routed.requestRender = () => this.requestRender()
       const editor = new Editor(routed, editorTheme, { paddingX: 0 })
       editor.onChange = (text: string) => {
-        this.controller.setDraft(text)
+        // The editor shows a SANITIZED copy. While the user has not changed it,
+        // the controller keeps the RAW Host text (so saving an untouched queued
+        // message preserves its bytes); after a real edit the safe text is the
+        // new data. A Host control sequence is never rendered.
+        const raw = this.controller.view().draft ?? ''
+        this.controller.setDraft(text === sanitizeDisplayText(raw) ? raw : text)
       }
-      if (view.draft !== undefined) editor.setText(view.draft)
+      const safe = sanitizeDisplayText(view.draft ?? '')
+      editor.setText(safe)
       editor.focused = this.focusedFlag
       this.editor = editor
     }
@@ -500,7 +508,7 @@ function pickerItem(row: QueueManagerRow): SearchablePickerItem {
   return {
     value: row.id,
     label: singleLine(row.text),
-    ...(row.attachments.length === 0 ? {} : { description: row.attachments.join(' · ') }),
+    ...(row.attachments.length === 0 ? {} : { description: singleLine(row.attachments.join(' · ')) }),
     ...(badge === undefined ? {} : { badge }),
   }
 }
@@ -527,7 +535,7 @@ function confirmHeader(view: QueueManagerView): string {
 }
 
 function noticeLine(notice: { readonly text: string; readonly kind: 'info' | 'error' }, width: number): string {
-  const text = truncateToWidth(notice.text, width, '…')
+  const text = truncateToWidth(sanitizeDisplayText(notice.text), width, '…')
   return notice.kind === 'error'
     ? color.error(` ${text}`)
     : color.textDim(` ${text}`)
@@ -535,7 +543,7 @@ function noticeLine(notice: { readonly text: string; readonly kind: 'info' | 'er
 
 /** One line's display projection (never a control byte, never a newline). */
 function singleLine(text: string): string {
-  return text.replace(/\s+/gu, ' ').trim()
+  return sanitizeDisplayText(text).replace(/\s+/gu, ' ').trim()
 }
 
 /** Wrap `text` into at most `rows` single-line rows, ending with an ellipsis

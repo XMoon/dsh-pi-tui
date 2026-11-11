@@ -165,3 +165,23 @@ test('the real press → release → click sequence activates exactly once', () 
   dock.handleMouse(pointer(row, 2, width, 'click'))
   assert.deepEqual(opens, ['occ-1'], 'the synthesized click activates the pressed occurrence once')
 })
+
+
+test('Host control sequences in a queued row never reach the terminal', () => {
+  const evil = 'safe\u001b[2J \u001b]52;c;ZXZpbA==\u0007 \u009b31m file\u001b[31m.bin'
+  const { dock, opens } = harness(model({ rows: [{ id: 'evil', text: evil, local: false }] }))
+  const width = 80
+  const lines = dock.render(width)
+  const painted = lines.join('\n')
+  assert.equal(painted.includes('\u001b[2J'), false, 'a CSI clear sequence is removed')
+  assert.equal(painted.includes(']52;'), false, 'an OSC 52 payload is removed')
+  assert.equal(painted.includes('\u009b'), false, 'a C1 CSI is removed')
+  assert.equal(painted.includes('\u001b[31m'), false, 'a raw SGR from content is removed')
+  // The row stays a valid click target after sanitization.
+  const row = lines.findIndex(line => plain(line).includes('safe'))
+  assert.ok(row > 0)
+  dock.handleMouse(pointer(row, 2, width, 'press'))
+  dock.handleMouse(pointer(row, 2, width, 'release'))
+  dock.handleMouse(pointer(row, 2, width, 'click'))
+  assert.deepEqual(opens, ['evil'])
+})

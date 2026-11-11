@@ -18,6 +18,7 @@
 import { View, type Key, type Node, type TspEvent } from '@stencil-hq/tern'
 import type { QueueManagerController, QueueManagerPresentation, QueueManagerView } from '../../app/queue/manager.ts'
 import { createTspComposer, type TspComposer } from './editor.ts'
+import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { queueManagerLayer, type QueueManagerIntent } from './queue-manager-view.ts'
 
 /** What the presenter needs from the mounted renderer. */
@@ -196,7 +197,13 @@ export class TspQueueManager {
     const composer = this.editComposer
     if (composer === undefined) return true
     const edit = composer.applyKey(key)
-    if (edit.kind === 'edited') this.deps.controller.setDraft(composer.state().text)
+    if (edit.kind === 'edited') {
+      const text = composer.state().text
+      const raw = this.deps.controller.view().draft ?? ''
+      // The composer renders a SANITIZED copy; keep the RAW Host text while it
+      // is untouched, and use the safe text only after a real edit.
+      this.deps.controller.setDraft(text === sanitizeDisplayText(raw) ? raw : text)
+    }
     void view
     return true
   }
@@ -319,7 +326,7 @@ export class TspQueueManager {
         { entries: () => [], admitDraft: () => true },
         { enterInsertsNewline: true },
       )
-      composer.setDraft(view.draft ?? '')
+      composer.setDraft(sanitizeDisplayText(view.draft ?? ''))
       this.editComposer = composer
       this.editId = view.selectedId
       return
@@ -327,14 +334,15 @@ export class TspQueueManager {
     if (this.editId !== view.selectedId) {
       // A different occurrence (or a re-opened editor): the local draft is the
       // controller's captured text, never the previous occurrence's buffer.
-      this.editComposer.setDraft(view.draft ?? '')
+      this.editComposer.setDraft(sanitizeDisplayText(view.draft ?? ''))
       this.editId = view.selectedId
       return
     }
-    if (this.editComposer.state().text !== (view.draft ?? '')) {
+    const safe = sanitizeDisplayText(view.draft ?? '')
+    if (this.editComposer.state().text !== safe) {
       // The controller refused a write and kept the SAME draft; only a real
       // divergence (a programmatic replacement) resets the composer.
-      this.editComposer.setDraft(view.draft ?? '')
+      this.editComposer.setDraft(safe)
     }
   }
 

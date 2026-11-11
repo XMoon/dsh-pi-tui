@@ -29,7 +29,7 @@ const SCREEN = {
 interface Harness {
   readonly controller: QueueManagerController
   readonly panel: QueuePanel
-  readonly writes: Array<{ readonly id: string; readonly kind: 'edit' | 'remove' }>
+  readonly writes: Array<{ readonly id: string; readonly kind: 'edit' | 'remove'; readonly content?: readonly unknown[] }>
   readonly drain: () => Promise<void>
 }
 
@@ -42,13 +42,15 @@ function harness(
   outcome: WriteOutcome = { kind: 'committed', value: undefined },
   openInitial?: string,
 ): Harness {
-  const writes: Array<{ readonly id: string; readonly kind: 'edit' | 'remove' }> = []
+  const writes: Array<{ readonly id: string; readonly kind: 'edit' | 'remove'; readonly content?: readonly unknown[] }> = []
   const tasks: Promise<void>[] = []
   const reader: PendingInputReader = { snapshot: () => ({ running: true, items }) }
   const writer: SessionWriter = {
     prompt: async () => ({ kind: 'committed', value: undefined }),
     updateQueue: async (_sessionId, id, action) => {
-      writes.push({ id, kind: action.kind === 'edit' ? 'edit' : 'remove' })
+      writes.push(action.kind === 'edit'
+        ? { id, kind: 'edit', content: action.content }
+        : { id, kind: 'remove' })
       return outcome
     },
     cancel: async () => ({ kind: 'committed', value: undefined }),
@@ -179,7 +181,7 @@ test('Enter opens Edit, typing updates the controller draft, Enter inserts a new
   assert.ok(h.controller.view().draft?.includes('x\n'), 'Enter inserts a newline instead of saving')
   h.panel.handleInput('\x13')
   await h.drain()
-  assert.deepEqual(h.writes, [{ id: 'occ-1', kind: 'edit' }])
+  assert.deepEqual(h.writes, [{ id: 'occ-1', kind: 'edit', content: [{ type: 'text', text: 'hellox\n' }] }])
   assert.equal(h.controller.view().mode, 'browse')
 })
 
@@ -298,4 +300,34 @@ test('attachment counts name images, files and mixed attachments truthfully', ()
   ])])
   const mixedView = mixed.panel.render(84).join('\n')
   assert.ok(mixedView.includes('2 attachments'), `a mixed row is generic:\n${mixedView}`)
+})
+
+
+test('Host control sequences are removed from list/detail/confirm display, and the raw draft survives untouched', async () => {
+  const evilText = 'hello\u001b[2J world\u001b]52;c;ZXZpbA==\u0007'
+  const evilFile = 'report\u001b[31m.pdf'
+  const h = harness([item('occ-1', [
+    { type: 'text', text: evilText },
+    { type: 'file', attachment: { attachmentId: 'f1', name: evilFile, bytes: 1 } },
+  ])])
+  const browse = h.panel.render(84).join('\n')
+  assert.equal(browse.includes('\u001b[2J'), false, 'the list never paints a CSI clear')
+  assert.equal(browse.includes(']52;'), false, 'the list never paints OSC 52')
+  assert.equal(browse.includes('\u001b[31m'), false, 'the attachment name never paints raw SGR')
+  h.panel.handleInput('d')
+  const confirm = h.panel.render(84).join('\n')
+  assert.equal(confirm.includes('\u001b[2J'), false, 'the confirmation never paints the raw text')
+  assert.equal(confirm.includes('\u001b[31m'), false, 'the confirmation never paints the raw file name')
+  // A separate TEXT-ONLY occurrence for the editor path (a file-bearing row
+  // is correctly not editable).
+  const editorHarnessed = harness([item('occ-text', [{ type: 'text', text: evilText }])])
+  editorHarnessed.panel.handleInput('\r')
+  assert.equal(editorHarnessed.controller.view().mode, 'edit')
+  const edit = editorHarnessed.panel.render(84).join('\n')
+  assert.equal(edit.includes('\u001b[2J'), false, 'the editor never paints the Host CSI clear')
+  assert.equal(editorHarnessed.controller.view().draft, evilText, 'the controller keeps the RAW draft')
+  // An untouched save writes the ORIGINAL Host bytes, not the display copy.
+  editorHarnessed.panel.handleInput('\x13')
+  await editorHarnessed.drain()
+  assert.equal((editorHarnessed.writes[0] as { content?: Array<{ text: string }> }).content?.[0]?.text, evilText)
 })

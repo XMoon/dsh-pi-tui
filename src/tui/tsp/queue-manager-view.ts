@@ -13,6 +13,7 @@
 
 import { ui, type Node, type PickerAction, type PickerItem } from '@stencil-hq/tern'
 import { QUEUE_CHORDS } from '../keybindings/hints.ts'
+import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { attachmentCountLabel, type QueueManagerRow, type QueueManagerView } from '../../app/queue/manager.ts'
 
 /** One intent the sheet's nodes can raise. */
@@ -102,7 +103,8 @@ function browseLayer(view: QueueManagerView, deps: QueueLayerDeps): Node {
 
 /** The Edit page: ONE native modal overlay with the controlled editor. */
 function editLayer(view: QueueManagerView, deps: QueueLayerDeps): Node {
-  const editor = deps.editor ?? { text: view.draft ?? '', cursor: (view.draft ?? '').length }
+  const safeDraft = sanitizeDisplayText(view.draft ?? '')
+  const editor = deps.editor ?? { text: safeDraft, cursor: safeDraft.length }
   return ui.overlay(
     {
       key: `queue-edit-${deps.serial}`,
@@ -198,5 +200,5 @@ export function queueManagerLayer(view: QueueManagerView, deps: QueueLayerDeps):
 
 /** One line's display projection (no control bytes, no line break). */
 function singleLine(text: string): string {
-  return text.replace(/\s+/gu, ' ').trim()
+  return sanitizeDisplayText(text).replace(/\s+/gu, ' ').trim()
 }
