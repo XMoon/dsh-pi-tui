@@ -46,6 +46,7 @@ function harness(options: HarnessOptions = {}) {
   const writes: WriteRecord[] = []
   const notices: string[] = []
   let refreshes = 0
+  const dismissed: string[] = []
   const presents: number[] = []
   const tasks: Promise<void>[] = []
   let outcome: WriteOutcome = { kind: 'committed', value: undefined }
@@ -84,6 +85,7 @@ function harness(options: HarnessOptions = {}) {
     runOwned: (_label, task) => { tasks.push(task()) },
     refreshPendingInput: () => { refreshes += 1 },
     notify: (message) => { notices.push(message) },
+    dismissLocalSubmission: (rpcId) => { dismissed.push(rpcId) },
     textOf: content => queueTextOf(content as readonly ContentBlock[]),
   })
   const presentation: QueueManagerPresentation = {
@@ -106,6 +108,7 @@ function harness(options: HarnessOptions = {}) {
     setOutcome(next: WriteOutcome) { outcome = next },
     diag: DIAG,
     refreshes: () => refreshes,
+    dismissed: () => dismissed,
     holdWrites(): () => void {
       let release!: () => void
       const promise = new Promise<void>(resolve => { release = resolve })
@@ -298,6 +301,15 @@ test('cross-client deletion before confirmation reports no-longer-queued and nev
   assert.deepEqual(h.writes, [], 'the stale occurrence id is never re-pointed at the new row')
   assert.equal(h.controller.view().mode, 'browse')
   assert.equal(h.controller.view().notice?.text, 'This message is no longer queued')
+})
+
+test('removing a queued occurrence dismisses its client-local submission echo', async () => {
+  const h = harness({ items: [{ id: 'occ-1', placement: 'queued', content: [{ type: 'text', text: 'queued' }], rpcId: 'req-1' }] })
+  h.controller.open()
+  h.controller.startDelete()
+  h.controller.confirmDelete()
+  await h.drain()
+  assert.deepEqual(h.dismissed(), ['req-1'], 'the `sending…` echo of the removed occurrence is settled')
 })
 
 test('a session-owner change retires the panel and a stale result never notifies the new subject', async () => {

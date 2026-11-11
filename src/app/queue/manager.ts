@@ -50,6 +50,8 @@ export interface QueueManagerRow {
   readonly attachments: readonly string[]
   readonly fileCount: number
   readonly imageCount: number
+  /** The user-origin correlation id (the local submission echo's requestId). */
+  readonly rpcId?: string
 }
 
 /** One notice the panel paints (info or a failed operation). */
@@ -111,6 +113,9 @@ export interface QueueManagerDeps {
   readonly refreshPendingInput: () => void
   /** The renderer-neutral notice sink for a refused intent. */
   readonly notify: (message: string, kind: 'info' | 'error') => void
+  /** Dismiss the client-local submission echo a REMOVED queued occurrence
+   *  belongs to (the Host will never claim it, so `sending…` must not linger). */
+  readonly dismissLocalSubmission?: (rpcId: string) => void
   /** The occurrence's display text projection (text verbatim, image/file
    * markers for the summary). */
   readonly textOf: (content: readonly unknown[]) => string
@@ -540,6 +545,7 @@ export class QueueManagerController {
     }
     const capturedSubject = this.subject
     const capturedIndex = this.lastIndex
+    const rpcId = this.readRows().find(row => row.id === id)?.rpcId
     const token = ++this.writeToken
     this.pending = true
     this.notice = undefined
@@ -581,12 +587,16 @@ export class QueueManagerController {
         endWrite()
       }
       if (this.writeToken !== token) {
-        if (outcome?.kind === 'committed') this.deps.refreshPendingInput()
+        if (outcome?.kind === 'committed') {
+          if (rpcId !== undefined) this.deps.dismissLocalSubmission?.(rpcId)
+          this.deps.refreshPendingInput()
+        }
         return
       }
       this.pending = false
       if (outcome === undefined) return
       if (outcome.kind === 'committed') {
+        if (rpcId !== undefined) this.deps.dismissLocalSubmission?.(rpcId)
         if (this.deps.captureSessionId() === capturedSession && this.deps.isSubjectCurrent(capturedSubject)) {
           this.mode = 'browse'
           this.selectedId = undefined
@@ -728,6 +738,7 @@ function rowOf(item: PendingInputItem, textOf: (content: readonly unknown[]) => 
     attachments,
     fileCount,
     imageCount,
+    ...(item.rpcId === undefined ? {} : { rpcId: item.rpcId }),
   }
 }
 
