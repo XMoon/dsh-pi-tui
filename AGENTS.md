@@ -12,6 +12,14 @@ before editing. Read subsystem docs only when the task touches that subsystem.
   regressions caused by the current work and report them separately.
 - **Do not hide contradictions.** Prefer fast failure over silent defaults, broad catches, speculative fallbacks, or validation for states guaranteed by internal contracts. Validate at real system boundaries.
 - **Run the local pre-push gate.** Before requesting a push or opening a PR, run `mise run check` after the relevant targeted tests. Fix failing gates before reporting the change as ready. If a check cannot run because of an environment dependency, report it as `NOT_VERIFIED` with the concrete blocker. `mise run check` does not replace release qualification or subsystem-specific integration tests.
+- **Isolate all test and review probes.** Prefer repository-owned test
+  runners (`pnpm test:product`, `pnpm test:tooling`, etc.). When running
+  `node --test` directly, use `scripts/run-with-temp-root.mjs` with a
+  private, worktree-owned temporary base. Never run test fixtures or
+  delegated review probes against the shared `/tmp` root. Do not create
+  shared `/tmp/node_modules` links or other globally visible artifacts.
+  The delegating agent must pass these constraints to every subagent.
+  Clean up only resources owned by the current run.
 - **Never push or force-push without explicit user approval.** Local commits are allowed when appropriate; remote changes are not.
 
 ## Repository documentation policy (hard gate)
