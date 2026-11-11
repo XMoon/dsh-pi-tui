@@ -1221,49 +1221,60 @@ async function startSurfaceLocalClient(
                     truncated: outcome.listing.truncated,
                   }
                 : { kind: outcome.kind, reason: outcome.reason, ...(outcome.code === undefined ? {} : { code: outcome.code }) }
-            const record = (outcome: HostDirectoryBrowseOutcome): void => {
+            const record = (outcome: HostDirectoryBrowseOutcome, generationAtDispatch: number | null): void => {
               const current = status()
               emit({
                 phase: 'directory-browse',
                 mode,
                 outcome: listing(outcome),
-                generationId: current.generationId ?? null,
+                // The real Connection generation at dispatch and at delivery:
+                // a ready listing whose delivery generation differs from its
+                // dispatch generation is a stale-generation delivery.
+                generationAtDispatch,
+                generationAtDelivery: current.generationId ?? null,
                 sessionOpen: current.sessionOpen,
                 openSessionId: current.openSessionId ?? null,
                 listedSessions: domains.sessions.list.getSnapshot().ids.length,
               })
             }
+            const rejected = (error: unknown, generationAtDispatch: number | null): void => {
+              emit({
+                phase: 'directory-browse-rejected',
+                mode,
+                rejected: true,
+                generationAtDispatch,
+                generationAtDelivery: status().generationId ?? null,
+                errorName: error instanceof Error ? error.name : typeof error,
+              })
+            }
             if (request.abort === true) {
+              const generationAtDispatch = status().generationId ?? null
               const pending = backend.hostDirectoryBrowse.list(path, controller.signal)
               controller.abort()
               try {
-                record(await pending)
+                record(await pending, generationAtDispatch)
               } catch (error) {
-                emit({
-                  phase: 'directory-browse-rejected',
-                  mode,
-                  rejected: true,
-                  errorName: error instanceof Error ? error.name : typeof error,
-                })
+                rejected(error, generationAtDispatch)
               }
               return
             }
             if (request.abort === 'drop') {
+              // The carrier drop is dispatched SYNCHRONOUSLY after the read
+              // is created: the RPC response cannot have been delivered in the
+              // same task, so this read is provably in flight when the mux
+              // socket is dropped.
+              const generationAtDispatch = status().generationId ?? null
               const pending = backend.hostDirectoryBrowse.list(path, controller.signal)
               composition.transport?.dropWebSocketsForQualification()
               try {
-                record(await pending)
+                record(await pending, generationAtDispatch)
               } catch (error) {
-                emit({
-                  phase: 'directory-browse-rejected',
-                  mode,
-                  rejected: true,
-                  errorName: error instanceof Error ? error.name : typeof error,
-                })
+                rejected(error, generationAtDispatch)
               }
               return
             }
-            record(await backend.hostDirectoryBrowse.list(path, controller.signal))
+            const generationAtDispatch = status().generationId ?? null
+            record(await backend.hostDirectoryBrowse.list(path, controller.signal), generationAtDispatch)
             return
           }
           if (request.op === 'answer-continued') {
