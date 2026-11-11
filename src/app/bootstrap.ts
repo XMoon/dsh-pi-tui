@@ -2983,6 +2983,7 @@ export function applyRunnerWithRuntime(
       runOwned: (label, task) => { runOwned(label, task, { diag }) },
       refreshPendingInput: () => surface.refreshPendingInput(),
       notify: (message, kind) => surface.display.notify(message, kind),
+      dismissLocalSubmission: rpcId => submission.settleLocalSubmission(rpcId),
       textOf: content => queueTextOf(content as readonly import('@deepseek-ai/dsh-llm').ContentBlock[]),
     })
     surface.attachQueueManager(queueManager)
