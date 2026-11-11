@@ -1453,11 +1453,14 @@ async function bootCommandHarness(
         return { attachmentId: `file-${fileSaves.length}`, name: input.name ?? 'file', bytes }
       },
     } as never)
-    // The official Host file-upload service (`ctx.fileUploads`, the receipt
-    // resolver `commands.execute` consumes): a command FILE is staged through
-    // THIS service, exactly like the installed row. The fake drains the real
-    // staged stream and mints a receipt; it never substitutes the plain
-    // prompt `saveFileStream` return value for one.
+    // A STRUCTURAL stand-in for the Host `fileUploads` service: this mounted
+    // runner harness proves the controller's routing/settlement and the
+    // receipt-shaped command wire; it does not install the official receipt
+    // resolver, so it is not wire evidence. Official minting+resolution is
+    // proven by `test/app/host-command-port.test.ts` (real Cordis FileUploads +
+    // CommandRuntime) and the Split `surface.host-command-file-receipt` lane.
+    // The fake drains the real staged stream and mints a receipt id; it never
+    // substitutes the plain prompt `saveFileStream` return value for one.
     let stagedReceipts = 0
     context.provide('fileUploads', {
       uploadStream: async (input: { sessionId: string; data: AsyncIterable<Uint8Array>; name?: string }) => {
@@ -4236,7 +4239,7 @@ test('an unknown slash line that becomes a DECLARED host command delivers and co
   assert.deepEqual([...delivered.content], [{ type: 'text', text: staged.trim() }], 'the line stays plain text')
 })
 
-test('a late DECLARED host claim stages the frozen FILE snapshot and consumes it only on handler success', async (t) => {
+test('a late DECLARED host claim stages the frozen FILE snapshot as a receipt wire and consumes it only on handler success', async (t) => {
   // The submit-time standing view cannot classify the unknown name, so the
   // composer lets the FILE through. The session then commits a genuine Host
   // command that DECLARES `input.attachments`: the final Host branch must use
@@ -4266,7 +4269,7 @@ test('a late DECLARED host claim stages the frozen FILE snapshot and consumes it
   const call = harness.executed.find(entry => entry.line.startsWith('/deploy'))
   assert.equal(call?.outcome, 'executed', `the declared late claim is admitted: ${JSON.stringify(harness.executed)}`)
   assert.deepEqual(call?.attachments, [{ type: 'file', receiptId: 'receipt-1' }],
-    'the Host command wire cites the official staged receipt, never a path or durable ref')
+    'the command wire cites a receipt id, never a path or durable attachment ref')
   assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
   assert.ok(!mounted.app.getDraft().includes('[file #1'),
     `handler success consumes the submitted FILE draft: ${JSON.stringify(mounted.app.getDraft())}`)
@@ -4390,7 +4393,7 @@ test('an undeclared LEADING-INPUT host command refuses the attachment on its arg
   assert.match(mounted.app.getDraft(), /\[image #1/, 'with its attachment placeholder intact')
 })
 
-test('a declared HOST command stages its FILE as one official receipt and consumes it on success', async (t) => {
+test('a declared HOST command stages its FILE as one receipt wire and consumes it on success', async (t) => {
   // A genuine Host command declaring `input.attachments` carries the FILE as a
   // staged receipt: the Host mints it, the command wire cites it, and a
   // successful handler consumes exactly the submitted draft.
@@ -4412,7 +4415,7 @@ test('a declared HOST command stages its FILE as one official receipt and consum
   const call = harness.executed.find(entry => entry.line.startsWith('/goal '))
   assert.equal(call?.outcome, 'executed', `the declared command is dispatched: ${JSON.stringify(harness.executed)}`)
   assert.deepEqual(call?.attachments, [{ type: 'file', receiptId: 'receipt-1' }],
-    'the wire cites exactly the one Host-minted receipt')
+    'the wire cites exactly the one receipt id, never a path or durable ref')
   assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
   assert.ok(!mounted.app.getDraft().includes('[file #1'),
     `handler success consumes the submitted FILE draft: ${JSON.stringify(mounted.app.getDraft())}`)
