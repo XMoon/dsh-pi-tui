@@ -1746,3 +1746,33 @@ test('runner search: resize expires cached exact targets before the next step', 
   await fixture.settleRender()
   assert.match(fullTitle(fixture), /1\/1/, 'the converged card target never recycles stale exact targets')
 })
+
+test('runner search: ordinary paint after a jump does not expire navigation qualifications', async (t) => {
+  const fixture = await mountSearchRunner(t, 4, [0, 1, 2, 3])
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'needle')
+  await fixture.settleRender()
+  const epochBefore = fixture.app.searchQualificationEpochForRuntime()
+  assert.match(fullTitle(fixture), /1\/4/)
+
+  // The next real paint must not look like a layout change: the projection and
+  // its cached qualifications survive an ordinary Next.
+  fixture.input('\r')
+  await fixture.settleRender()
+  assert.match(fullTitle(fixture), /2\/4/)
+  assert.equal(fixture.app.searchQualificationEpochForRuntime(), epochBefore,
+    'an ordinary Search jump + paint must not expire navigation qualifications')
+
+  fixture.input('\r')
+  await fixture.settleRender()
+  assert.match(fullTitle(fixture), /3\/4/)
+  assert.equal(fixture.app.searchQualificationEpochForRuntime(), epochBefore,
+    'a second ordinary jump + paint still reuses the projection')
+
+  // A REAL layout change must still expire the cache before the next step.
+  fixture.vt.resize(88, 26)
+  await fixture.settleRender()
+  assert.notEqual(fixture.app.searchQualificationEpochForRuntime(), epochBefore,
+    'a terminal resize invalidates the stale qualification epoch')
+})

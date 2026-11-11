@@ -14092,7 +14092,6 @@ export class TuiApp {
    * Must measure at the SAME transcript content width the frame paints at
    * (the gutter contract), or the hit map drifts from the layout. */
   private refreshMessageRows(): void {
-    this.searchQualificationEpoch += 1
     this.searchPresentationDiagnostics.remeasures += 1
     const width = this.transcriptRenderWidth()
     // Measurement-only: the derived projection set is read once, and the
@@ -14329,6 +14328,7 @@ export class TuiApp {
    * `ImageThumbnail` render-request wiring MUST go through here. */
   private settleThumbnailRender(): void {
     this.fullscreenRowsDirty = true
+    this.searchQualificationEpoch += 1
     // A pixel settle changes an image body's painted geometry. On the
     // fullscreen surface the scroll view can otherwise consider the frame
     // unchanged, so force the repaint that publishes the new row map/hits.
@@ -14921,6 +14921,7 @@ export class TuiApp {
       // A resize re-wraps every block at the new width: the committed row
       // geometry cannot survive it even when no rebuild ran yet.
       this.fullscreenRowsDirty = true
+      this.searchQualificationEpoch += 1
     }
     const scroll = this.fullscreenScroll
     const paintedHeight = (component: Component): number => this.fullscreen?.getPaintedBox(component)?.height ?? 0
@@ -17558,6 +17559,7 @@ export class TuiApp {
     // inside the scroll content: `transcriptWelcomeHeight`, the fullscreen row
     // map and the scroll anchor all ride the measurement).
     if (this.welcomeCard.setHidden(presentation !== undefined)) {
+      this.searchQualificationEpoch += 1
       this.refreshMessageRows()
       this.requestRender()
     }
