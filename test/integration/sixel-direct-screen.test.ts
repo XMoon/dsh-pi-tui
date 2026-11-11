@@ -566,7 +566,6 @@ function assistantSvgVisual(svg: string, title = 'Service topology', description
     sourceIdentity: {},
     session: {},
     sessionId: 'session',
-    seq: 10,
     turn: 0,
     step: 1,
     text: '',

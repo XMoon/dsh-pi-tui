@@ -4251,7 +4251,7 @@ test('the real Ctrl+O key folds a process-bearing visual answer and keeps one in
   const assistant = folder.messages().find(message => message.kind === 'assistant')
   assert.ok(assistant !== undefined && assistant.kind === 'assistant')
   setAssistantVisualPresentation(assistant, {
-    subjectKind: 'main', subjectId: 'focus', sourceIdentity: {}, session: {}, sessionId: 'focus', seq: 6,
+    subjectKind: 'main', subjectId: 'focus', sourceIdentity: {}, session: {}, sessionId: 'focus',
     turn: 1, step: 1, text: assistant.text, content: undefined, assistantRevision: 0,
   }, [focusChartPublication(ref)])
 

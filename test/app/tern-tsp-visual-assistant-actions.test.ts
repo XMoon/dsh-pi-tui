@@ -250,7 +250,6 @@ function present(message: TranscriptMessage, publications: readonly PublishedVis
     sourceIdentity: {},
     session: {},
     sessionId: 'session-1',
-    seq: 1,
     turn: 1,
     step: 0,
     text: 'text' in message ? message.text : '',
@@ -573,6 +572,41 @@ test('a second Alt+C copies the newer selection, never the earlier figure', asyn
     harness.tern.input.type('\u001bc')
     await until('the SVG copy', () => harness.copies.length === 2)
     assert.equal(harness.copies[1]?.text, SVG_SOURCE)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('appending a figure refreshes the Dock selection count in the same commit', async () => {
+  const harness = await mountHarness()
+  try {
+    // ONE stable projection source: both commits speak for the SAME session,
+    // so the append is an ordinary same-subject delta (a fresh source object
+    // would model a subject switch, which owns the selection retirement).
+    const source = {}
+    // One figure, selected while it is the only one.
+    const chart = chartPublication()
+    const first = assistantRow(`Latency:\n\n${marker(chart.ref)}`)
+    present(first, [chart])
+    harness.commit([first], source)
+    harness.tern.input.type('\u001bv')
+    await until('the 1/1 badge', () => badgeTexts(harness.tern).includes('Selected · 1/1'))
+    await until('the 1/1 dock summary', () => textNodes(harness.tern).includes(`Selected 1/1 · ${CHART.title} (${CHART.unit})`))
+
+    // A later answer of the SAME session publishes a second figure. The
+    // selected figure's index stays 1, but the real count is now 2: the Dock
+    // summary (painted from the selection state) and the Main badge (from the
+    // committed row stamp) must agree within THIS commit, without any further
+    // input or repaint.
+    const svg = svgPublication()
+    const second = assistantRow(`Topology:\n\n${marker(svg.ref)}`)
+    present(second, [svg])
+    harness.commit([first, second], source)
+    await until('the appended figure', () => figureIds(harness.tern).length === 2)
+    await until('the 1/2 dock summary', () => textNodes(harness.tern).includes(`Selected 1/2 · ${CHART.title} (${CHART.unit})`))
+    await until('the 1/2 badge', () => badgeTexts(harness.tern).includes('Selected · 1/2'))
+    assert.equal(textNodes(harness.tern).includes(`Selected 1/1 · ${CHART.title} (${CHART.unit})`), false,
+      'no stale 1/1 dock summary survives the append')
   } finally {
     await harness.dispose()
   }

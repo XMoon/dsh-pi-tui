@@ -133,7 +133,7 @@ test('a published visual Copy projection omits consumed display-only definitions
   }
   setAssistantVisualPresentation(message, {
     subjectKind: 'main', subjectId: 'session', sourceIdentity: {}, session: {}, sessionId: 'session',
-    seq: 4, turn: 1, step: 1, text: message.text, content: message.content, assistantRevision: 0,
+    turn: 1, step: 1, text: message.text, content: message.content, assistantRevision: 0,
   }, [publication])
   const payload = transcriptCopyPayload(message)
   assert.equal(payload?.includes(marker), false)

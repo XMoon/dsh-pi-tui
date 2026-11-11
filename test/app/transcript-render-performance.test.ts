@@ -576,7 +576,7 @@ test('a stable inline visual Assistant repaint is a no-op with a stable mounted 
     },
   }
   setAssistantVisualPresentation(assistant, {
-    subjectKind: 'main', subjectId: 'perf', sourceIdentity: {}, session: {}, sessionId: 'perf', seq: 3,
+    subjectKind: 'main', subjectId: 'perf', sourceIdentity: {}, session: {}, sessionId: 'perf',
     turn: 1, step: 0, text: assistant.text, content: undefined, assistantRevision: 0,
   }, [publication])
   const { app } = startApp()

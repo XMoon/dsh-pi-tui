@@ -1950,6 +1950,23 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // `setTranscript` and rebuilds the ledger from scratch.
     if (!hydrating) syncImageSubscriptions()
     previewFrameIndexes()
+    // PR2: the Dock paints the selection badge from `selectedVisual`, but the
+    // authoritative reconciliation only ran in the PREVIOUS commitMainFrame.
+    // When this frame's descriptor-derived figure order differs (a figure was
+    // appended or withdrawn in the SAME session), reconcile FIRST and rebuild
+    // the descriptors, so the Dock and the committed Main agree within this
+    // frame. commitMainFrame stays the authoritative post-commit reconciliation
+    // against the real committed order (which also excludes `gone` roots).
+    if (selectedVisual !== undefined) {
+      const previewIndex = visualOrder.indexOf(selectedVisual.ref)
+      const previewed = previewIndex < 0
+        ? undefined
+        : { ref: selectedVisual.ref, index: previewIndex + 1, count: visualOrder.length }
+      if (!sameSelectedVisual(selectedVisual, previewed)) {
+        selectedVisual = previewed
+        rebuildLastMain()
+      }
+    }
     const draftStates = prepareDockDraftImageStates()
     if (imageProjectionAborted) return
     const dockNode = dockView(draftStates)

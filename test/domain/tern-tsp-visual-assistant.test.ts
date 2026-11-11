@@ -139,7 +139,6 @@ function present(message: TranscriptMessage, publications: readonly PublishedVis
     sourceIdentity: {},
     session: {},
     sessionId: 'session-1',
-    seq: 1,
     turn: 1,
     step: 0,
     text,

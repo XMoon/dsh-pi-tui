@@ -952,7 +952,6 @@ test('a REAL Assistant publication feeds the SAME app raster loader, Viewer Prev
     sourceIdentity: {},
     session: {},
     sessionId: 'session-1',
-    seq: 1,
     turn: 1,
     step: 0,
     text: (message as unknown as { text: string }).text,

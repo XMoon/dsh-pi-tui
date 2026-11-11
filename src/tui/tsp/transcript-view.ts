@@ -1681,12 +1681,15 @@ function messageStampOf(
       // The settled-answer lookup is a LIVE read keyed by callId: a late
       // official answer changes the rendered result body without mutating the
       // canonical tool row. Its current payload is therefore a display input,
-      // not merely the revision at which the lookup was installed.
-      parts.push(options.settledQuestionAnswersRevision ?? 0)
-      const answers = message.callId === undefined
-        ? undefined
-        : options.settledQuestionAnswersLookup?.(message.callId)
-      parts.push(answers === undefined ? -1 : JSON.stringify({ answers }))
+      // not merely the revision at which the lookup was installed. The read is
+      // scoped to EXACTLY the row that renders it (`shownToolResult` answers
+      // `ask_user_question` rows only), so an ordinary tool's stamp never
+      // costs a settled-questions lookup or a payload serialization.
+      if (message.name === 'ask_user_question' && message.callId !== undefined) {
+        parts.push(options.settledQuestionAnswersRevision ?? 0)
+        const answers = options.settledQuestionAnswersLookup?.(message.callId)
+        parts.push(answers === undefined ? -1 : JSON.stringify({ answers }))
+      }
       break
     case 'thinking':
       parts.push(disclosureTokenOf(message, key, options))
