@@ -4652,7 +4652,12 @@ export class TranscriptFolder {
     if (kind === 'session/end-seed') {
       for (const [id, openIndex] of this.compacting) {
         const open = this.items[openIndex]
-        if (open !== undefined && open.kind === 'compaction') open.running = false
+        if (open !== undefined && open.kind === 'compaction' && open.running !== false) {
+          open.running = false
+          // The card's status is rendered from `running`; a resumed session
+          // must not keep painting a forever-running Compaction card.
+          bumpTranscriptDisplayRevision(open)
+        }
         this.compacting.delete(id)
       }
       return
@@ -4686,8 +4691,18 @@ export class TranscriptFolder {
         // The summary body became searchable: mark the entry dirty (lazy).
         this.markSearchEntryDirty(index)
       }
-      if (Array.isArray(seqs)) entry.items = seqs.length
-      if (typeof tokens === 'number') entry.tokens = tokens
+      // The rendered counts badge reads these two fields, and a counts-only
+      // summary carries no body change to piggyback on.
+      let countsChanged = false
+      if (Array.isArray(seqs) && entry.items !== seqs.length) {
+        entry.items = seqs.length
+        countsChanged = true
+      }
+      if (typeof tokens === 'number' && entry.tokens !== tokens) {
+        entry.tokens = tokens
+        countsChanged = true
+      }
+      if (countsChanged && !Array.isArray(summary)) bumpTranscriptDisplayRevision(entry)
     } else if (kind === 'compaction/end') {
       entry.running = false
       bumpTranscriptDisplayRevision(entry)
