@@ -1767,18 +1767,21 @@ export class SessionWorkspacePanel implements Component {
   }
 
   /**
-   * Spend the REAL free rows of this Browse frame on ordinary history of the
-   * groups that are already expanded. ONE step raises ONE group by one row and
-   * is charged the rows it really adds: a Session the shared projection already
-   * forces visible (the selected/current one) costs nothing, and finishing a
-   * group also drops its `Show more` row. Rounds fill Current/Next first and
-   * then rotate the other expanded Folders in official order, so one large
-   * Workspace cannot take the whole spare of its siblings. Nothing here expands
-   * a collapsed Folder, lowers a watermark, persists state or issues IO: the
-   * grown tree is re-projected against the real budget and only then written
-   * into the ONE `workspaceHistoryLimit` map (monotone, per open). A cursor the
-   * grown tree no longer paints re-anchors through the existing fallback in the
-   * same frame, so no invisible target ever survives a growth.
+   * Spend the REAL free rows of this ORDINARY Browse frame on ordinary history
+   * of the groups that are already expanded. The Sessionless `Choose workspace`
+   * chooser never calls this: it selects an existing Workspace, so its spare
+   * height must not fill with unrelated Session rows. ONE step raises ONE group
+   * by one row and is charged the rows it really adds: a Session the shared
+   * projection already forces visible (the selected/current one) costs nothing,
+   * and finishing a group also drops its `Show more` row. Rounds fill
+   * Current/Next first and then rotate the other expanded Folders in official
+   * order, so one large Workspace cannot take the whole spare of its siblings.
+   * Nothing here expands a collapsed Folder, lowers a watermark, persists state
+   * or issues IO: the grown tree is re-projected against the real budget and
+   * only then written into the ONE `workspaceHistoryLimit` map (monotone, per
+   * open). A cursor the grown tree no longer paints re-anchors through the
+   * existing fallback in the same frame, so no invisible target ever survives a
+   * growth.
    */
   private growWorkspaceHistory(view: SessionWorkspaceView, listCapacity: number): void {
     if (listCapacity < 1) return
@@ -1855,11 +1858,12 @@ export class SessionWorkspacePanel implements Component {
 
   private renderListPane(width: number, budget: number, chrome: boolean): PaneRender {
     const view = this.frameView()
-    // The ONE automatic watermark growth happens HERE, on a real Browse list,
-    // before this frame's rows are decided: a Search/Peek/Host-editor frame
-    // never moves it, and the wide layout already charged its global status
-    // lines against the pane budget (so only the single column pays `chrome`).
-    if (!this.searchMode && this.focus === 'list' && !this.directoryEntryActive && !this.disposed && this.workspaces.proven) {
+    // The ONE automatic watermark growth happens HERE, on the ORDINARY Browse
+    // list, before this frame's rows are decided: the Sessionless Choose
+    // workspace chooser, Search, Peek and the Host editor never move it, and the
+    // wide layout already charged its global status lines against the pane
+    // budget (so only the single column pays `chrome`).
+    if (!this.searchMode && !this.chooserMode() && this.focus === 'list' && !this.directoryEntryActive && !this.disposed && this.workspaces.proven) {
       const listCapacity = Math.max(0, budget - (chrome ? this.renderStatusLines(width).length : 0))
       this.growWorkspaceHistory(view, listCapacity)
     }

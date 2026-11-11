@@ -260,10 +260,13 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   exhausted. Folder, Session and Show more are separate typed targets, not
   PickerGroup headers.
 - **PiTUI spends spare list rows on ordinary history, up to a per-group cap.**
-  In the real Browse list the panel raises the watermark of ALREADY EXPANDED
+  In the ORDINARY Browse list the panel raises the watermark of ALREADY EXPANDED
   groups by ONE ordinary row per step while this frame's actual list budget (the
   pane height the layout gave the list, less the status rows the list itself
-  paints) still has spare rows, up to twenty ordinary rows per group.
+  paints) still has spare rows, up to twenty ordinary rows per group. The
+  Sessionless `Choose workspace` chooser never grows: it selects an existing
+  Workspace, so its spare height stays free instead of filling with unrelated
+  Session rows.
   Current/Next groups fill first, then the other expanded groups rotate in
   official order, so one large Workspace cannot starve its siblings. A collapsed
   Folder is never expanded to use the space, and a frame whose base tree already
