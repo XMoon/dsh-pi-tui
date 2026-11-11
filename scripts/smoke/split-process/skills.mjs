@@ -332,6 +332,7 @@ export async function runSessionlessSkillsHot(context) {
 export async function runLiveSkillsHot(context) {
   const { workDir, trace } = context
   const tools = createDualSurfaceSceneTools(context)
+  const viewportText = async client => (await client.viewport()).join('\n')
   // Client A's launch directory is the installed profile (`base.cwd`), which
   // the Host preflight confirms as the Session's Workspace: the Live project
   // skill root is `<profileDir>/.agents/skills`.
@@ -353,6 +354,43 @@ export async function runLiveSkillsHot(context) {
 
     await waitForPaintedSkills(clientA, '/f6-live', { visible: [liveDescription] }, 'F6 live A initial catalog')
     await waitForPaintedSkills(clientB, '/f6-live', { visible: [liveDescription] }, 'F6 live B initial catalog')
+
+    // ── The two remaining Live human sinks: the `/skill` picker and the
+    // inline `/name` lexicon both read the SAME installed human catalog. ─────
+    await submit(clientA, '/skill', 'F6 live /skill picker')
+    await clientA.waitForScreen('f6-live-keep', 'F6 live /skill picker rows', 60_000)
+    // The picker's selected-row detail carries the SAME Host description.
+    {
+      const deadline = Date.now() + 30_000
+      let frame = await viewportText(clientA)
+      while (!frame.includes(keepDescription) && Date.now() < deadline) {
+        clientA.send('\x1b[B')
+        await sleep(120)
+        frame = await viewportText(clientA)
+      }
+      assert(frame.includes(keepDescription),
+        `F6 the /skill picker never painted the Host description:\n${frame}`)
+    }
+    clientA.send('\x1b')
+    await sleep(200)
+    clientA.send('\x1b')
+    await sleep(200)
+    await clearComposer(clientA, 'F6 live A after the picker')
+    // A plain prompt token still gets the inline lexicon suggestion (not a
+    // command invocation): the draft is not submitted.
+    clientA.send('please /f6-live-keep')
+    {
+      const deadline = Date.now() + 30_000
+      let frame = await viewportText(clientA)
+      while (!frame.includes(keepDescription) && Date.now() < deadline) {
+        await sleep(200)
+        frame = await viewportText(clientA)
+      }
+      assert(frame.includes(keepDescription),
+        `F6 the inline skill lexicon never suggested the live skill:\n${frame}`)
+    }
+    await clearComposer(clientA, 'F6 live A after the inline lexicon')
+    trace('f6-live-human-sinks', { session: sessionY, picker: true, inlineLexicon: true })
 
     // ── RFL-001 negative: Add directory from a LIVE Session Workspace must
     // NOT switch the catalog to a sessionless standing target. ──────────────
@@ -436,9 +474,47 @@ export async function runSkillsRecovery(context) {
     await waitForSurfaceStatus(first, sessionless, 'F6 recovery first client sessionless', 120_000)
     await waitForPaintedSkills(first, '/f6-recovery', { visible: [description] }, 'F6 recovery first client')
 
-    // The first Client is killed (its subscription dies with the process);
-    // the Host must stay alive with the same identity. A surface Client's
-    // signal goes to the BUSINESS PID the ready record published.
+    // ── Same-Client transport disconnect/reconnect: the qualification input
+    // drops the REAL physical mux socket; the official Connection clears the
+    // generation and replaces it. The re-armed private stream must refresh the
+    // current Sessionless target on the NEW generation (no /reload). ─────────
+    const beforeDrop = lastSurfaceStatus(first)
+    assert(typeof beforeDrop?.generationId === 'number', 'F6 recovery never observed an official generation')
+    const dropBoundary = first.records.length
+    first.signalBusiness('SIGUSR1')
+    await first.waitFor(
+      record => first.records.indexOf(record) >= dropBoundary
+        && record.m4b2s === 'surface-status'
+        && record.transport !== 'connected'
+        && record.generationId === undefined,
+      'F6 recovery lost the official generation',
+      60_000,
+    )
+    await first.waitFor(
+      record => first.records.indexOf(record) >= dropBoundary
+        && record.m4b2s === 'surface-status'
+        && record.transport === 'connected'
+        && typeof record.generationId === 'number'
+        && record.generationId !== beforeDrop.generationId
+        && record.sessionOpen === false
+        && record.surfaceMounted === true,
+      'F6 recovery reconnected on a new generation (Sessionless)',
+      120_000,
+    )
+    await waitForPaintedSkills(first, '/f6-recovery', { visible: [description] },
+      'F6 recovery standing after reconnect')
+    const afterReconnectDescription = 'F6 RECOVERY SKILL UPDATED AFTER RECONNECT'
+    writeSkill(root, 'f6-recovery', afterReconnectDescription)
+    await waitForPaintedSkills(first, '/f6-recovery', {
+      visible: [afterReconnectDescription],
+      absent: [description],
+    }, 'F6 recovery hot update after reconnect')
+    trace('f6-recovery-reconnect', { hostPid: hostFacts.hostPid, newGeneration: true, hotUpdate: true })
+
+    // ── Process replacement (the crash path): the first Client is killed; its
+    // subscription dies with the process and the Host must stay alive with the
+    // same identity. A surface Client's signal goes to the BUSINESS PID the
+    // ready record published.
     const firstStatus = lastSurfaceStatus(first)
     assert(Number.isInteger(firstStatus?.pid), 'F6 the first Client published no business PID')
     process.kill(firstStatus.pid, 'SIGKILL')
@@ -451,15 +527,16 @@ export async function runSkillsRecovery(context) {
 
     const { client: replacement } = await scene.startC1Client('F6 recovery replacement', {}, { cwd: root })
     await waitForSurfaceStatus(replacement, sessionless, 'F6 recovery replacement sessionless', 120_000)
-    await waitForPaintedSkills(replacement, '/f6-recovery', { visible: [description] }, 'F6 recovery replacement standing read')
+    await waitForPaintedSkills(replacement, '/f6-recovery', { visible: [afterReconnectDescription] },
+      'F6 recovery replacement standing read')
 
     // The replacement Client re-established observation: a new Host change is
     // still followed without `/reload`.
     writeSkill(root, 'f6-recovery', updatedDescription)
     await waitForPaintedSkills(replacement, '/f6-recovery', {
       visible: [updatedDescription],
-      absent: [description],
-    }, 'F6 recovery hot update')
+      absent: [afterReconnectDescription],
+    }, 'F6 recovery hot update after replacement')
 
     const hostAfter = await scene.hostIdentityFacts(host)
     assert(hostAfter.hostPid === hostFacts.hostPid, 'F6 the Host identity changed across the Client replacement')
