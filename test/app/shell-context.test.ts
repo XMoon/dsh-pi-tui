@@ -282,6 +282,36 @@ test('submitShellResult: a stale capture refuses stale, never as a frozen transi
     'a stale capture takes the stale refusal — the output stays on the card')
 })
 
+test('submitShell keeps the transition-fence info reason on the retained card', async () => {
+  const { submitShell } = await import('../../src/app/submission/runtime.ts')
+  const failureNotice = 'a session transition is in progress — the output stays on the card; re-run ! after it settles'
+  const failures: { kind: string; reason: string }[] = []
+  const notices: { message: string; kind: string }[] = []
+  submitShell({
+    command: 'pwd',
+    result: '/tmp\n[exit 0]',
+    scope: scopeOf('session-a'),
+    isDisposed: () => false,
+    isScopeCurrent: () => true,
+    terminalAck: () => {},
+    removeCommittedShellCard: () => { throw new Error('a fenced write must not remove the card') },
+    onSubmissionFailure: failure => { failures.push(failure) },
+    notify: (message, kind) => notices.push({ message, kind }),
+    markDispatch: () => {},
+    writerSection: async () => { throw new TransitionInProgressError() },
+    writer: { prompt: async () => { throw new Error('the fenced writer must not run') } },
+    createMessage: (text: string) => ({ text }),
+    diag: { debug: () => {}, warn: () => {}, error: () => {}, info: () => {} } as never,
+    onSettled: () => {},
+  })
+  for (let round = 0; round < 50 && failures.length === 0; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.equal(notices[0]?.kind, 'info', 'the transition fence is an INFO notice')
+  assert.deepEqual(failures, [{ kind: 'not-submitted', reason: failureNotice }],
+    'the retained card keeps the original fence reason, not a generic fallback')
+})
+
 test('submitShellResult delivers normally after the writer section drains', async () => {
   const agent = fakeAgent()
   const { deps, cleared } = makeDeps({ agent: () => agent })
