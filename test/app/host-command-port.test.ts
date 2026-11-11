@@ -179,6 +179,7 @@ function officialHost(t: TestContext): OfficialHost {
   const agents = new Map<string, OfficialAgent>()
   const stored = new Map<string, { readonly attachmentId: string; readonly name: string; readonly bytes: number; readonly data: Buffer }>()
   let nextAttachment = 0
+  let nextImage = 0
   const attachments = {
     imageLimits: {
       maxImageBytes: 20 * 1024 * 1024,
@@ -189,6 +190,18 @@ function officialHost(t: TestContext): OfficialHost {
       mediaTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
     },
     isAttachmentError: () => false,
+    async saveImages(inputs: readonly { mediaType: string; data: Uint8Array; name?: string }[]) {
+      return inputs.map((input) => {
+        nextImage += 1
+        return {
+          attachmentId: `sha256-image-${nextImage}`,
+          mediaType: input.mediaType,
+          bytes: input.data.byteLength,
+          width: 1,
+          height: 1,
+        }
+      })
+    },
     async saveFileStream(input: { data: AsyncIterable<Uint8Array>; name?: string; signal?: AbortSignal }) {
       const chunks: Buffer[] = []
       let bytes = 0
@@ -400,4 +413,55 @@ test('an aborted or changed Client source stages no receipt', async (t) => {
     /File changed since it was attached/,
   )
   assert.equal(host.handlerInvocations.length, 0)
+})
+
+test('the official handler receives IMAGE → FILE → IMAGE → FILE in submission order', async (t) => {
+  const life = testLifecycle(t)
+  const host = officialHost(t)
+  host.createAgent('session-a')
+  const firstBytes = Buffer.from('first file bytes')
+  const secondBytes = Buffer.from('second file bytes')
+  const first = await officialPreparedFile(life, 'first.bin', firstBytes)
+  const second = await officialPreparedFile(life, 'second.bin', secondBytes)
+  const signal = new AbortController().signal
+  const firstReceipt = await host.port.stageFileReceipt({ sessionId: 'session-a', file: first.file, signal })
+  const secondReceipt = await host.port.stageFileReceipt({ sessionId: 'session-a', file: second.file, signal })
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64',
+  )
+  const outcome = await host.port.execute({
+    sessionId: 'session-a',
+    line: '/files inspect ordered',
+    attachments: [
+      { type: 'image', mediaType: 'image/png', data: png.toString('base64'), name: 'shot.png' },
+      { type: 'file', receiptId: firstReceipt.receiptId },
+      { type: 'image', mediaType: 'image/png', data: png.toString('base64') },
+      { type: 'file', receiptId: secondReceipt.receiptId },
+    ],
+    signal,
+  })
+  assert.equal(outcome.kind, 'committed')
+  assert.equal(host.handlerInvocations.length, 1, 'the official executor invoked the handler exactly once')
+  const blocks = host.handlerInvocations[0]?.attachments as readonly {
+    readonly type: string
+    readonly attachment: { readonly attachmentId: string; readonly name?: string; readonly bytes: number; readonly mediaType?: string }
+  }[]
+  assert.deepEqual(blocks.map(block => block.type), ['image', 'file', 'image', 'file'],
+    'the handler receives the submitted IMAGE/FILE interleaving exactly')
+  assert.equal(blocks[0]?.attachment.mediaType, 'image/png')
+  assert.equal(blocks[2]?.attachment.mediaType, 'image/png')
+  assert.equal(blocks[0]?.attachment.bytes, png.byteLength)
+  assert.equal(blocks[1]?.attachment.name, 'first.bin')
+  assert.equal(blocks[1]?.attachment.bytes, firstBytes.byteLength)
+  assert.equal(blocks[3]?.attachment.name, 'second.bin')
+  assert.equal(blocks[3]?.attachment.bytes, secondBytes.byteLength)
+  const readHash = async (ref: unknown): Promise<string> => {
+    const digest = createHash('sha256')
+    const attachments = host.ctx.get('attachments') as { readFileStream(value: unknown): AsyncIterable<Uint8Array> }
+    for await (const chunk of attachments.readFileStream(ref)) digest.update(chunk)
+    return digest.digest('hex')
+  }
+  assert.equal(await readHash(blocks[1]?.attachment), createHash('sha256').update(firstBytes).digest('hex'))
+  assert.equal(await readHash(blocks[3]?.attachment), createHash('sha256').update(secondBytes).digest('hex'))
 })
