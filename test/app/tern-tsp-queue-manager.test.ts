@@ -549,3 +549,24 @@ test('native Queue: attachment badges name images, files and mixed attachments',
   assert.equal(badge('file'), '1 file')
   assert.equal(badge('mixed'), '2 attachments')
 })
+
+
+test('native Queue: Host control sequences never reach picker/confirm/editor text', async (t) => {
+  const evil = 'hello\u001b[2J world\u001b]52;c;ZXZpbA==\u0007'
+  const m = await mounted(t, [queued('evil', [{ type: 'text', text: evil }])])
+  m.controller.open()
+  await waitUntil('the Browse sheet', () => sheetPicker(m.pane) !== undefined)
+  const texts = sheetNodes(m.pane).map(node => String(node.p.text ?? '')).join('\n')
+  assert.equal(texts.includes('\u001b[2J'), false, 'the picker never carries a CSI clear')
+  assert.equal(texts.includes(']52;'), false, 'the picker never carries OSC 52')
+  m.pane.key('d')
+  await waitUntil('the Delete confirmation', () => sheetNode(m.pane, 'overlay') !== undefined)
+  const confirm = sheetNodes(m.pane).map(node => String(node.p.text ?? '')).join('\n')
+  assert.equal(confirm.includes('\u001b[2J'), false, 'the confirmation never carries the raw text')
+  m.controller.cancelBack()
+  m.controller.startEdit('evil')
+  await waitUntil('the Edit page', () => sheetNode(m.pane, 'editor') !== undefined)
+  const editorText = String(sheetNode(m.pane, 'editor')?.p.text ?? '')
+  assert.equal(editorText.includes('\u001b[2J'), false, 'the editor display never carries the Host CSI clear')
+  assert.equal(m.controller.view().draft, evil, 'the controller keeps the RAW draft')
+})

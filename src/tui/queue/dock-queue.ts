@@ -28,6 +28,7 @@
 import type { Component, TuiMouseDispatchResult, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import { color } from '../theme/runtime.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 
 /** One queued row this pane paints. */
 export interface DockQueueRow {
@@ -200,7 +201,9 @@ export class DockQueue implements Component {
   }
 }
 
-/** The pane's historical single-line display projection. */
+/** The pane's historical single-line display projection: terminal-control
+ *  content from the Host is removed BEFORE width measurement, so a queued ESC
+ *  sequence or OSC 52 can never reach the terminal through this chrome. */
 function sanitizeRowText(text: string): string {
-  return text.replace(/\s+/gu, ' ').trim()
+  return sanitizedPhysicalLine(text).replace(/\s+/gu, ' ').trim()
 }

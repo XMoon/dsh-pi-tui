@@ -52,6 +52,12 @@ function harness(options: HarnessOptions = {}) {
   const tasks: Promise<void>[] = []
   let outcome: WriteOutcome = { kind: 'committed', value: undefined }
   let writeGate: { readonly promise: Promise<void>; readonly release: () => void } | undefined
+  let writerAdmissionGate: {
+    readonly promise: Promise<void>
+    readonly entered: Promise<void>
+    readonly release: () => void
+    readonly markEntered: () => void
+  } | undefined
   const reader: PendingInputReader = {
     snapshot(id: string): PendingInputSnapshot | undefined {
       if (unavailable) return undefined
@@ -81,7 +87,16 @@ function harness(options: HarnessOptions = {}) {
     captureScope: () => (sessionId === undefined ? undefined : ({ sessionId } as never)),
     isScopeCurrent: () => true,
     isViewing: () => viewing,
-    withWriter: async (_scope, task) => task(),
+    withWriter: async (_scope, task) => {
+      // The writer admission can be held BEFORE the task runs, which is the
+      // only way to prove the post-barrier viewer re-check.
+      const gate = writerAdmissionGate
+      if (gate !== undefined) {
+        gate.markEntered()
+        await gate.promise
+      }
+      return task()
+    },
     beginClientWrite: () => () => {},
     runOwned: (_label, task) => { tasks.push(task()) },
     refreshPendingInput: () => { refreshes += 1 },
@@ -111,6 +126,20 @@ function harness(options: HarnessOptions = {}) {
     diag: DIAG,
     refreshes: () => refreshes,
     dismissed: () => dismissed,
+    holdWriterAdmission(): { readonly entered: Promise<void>; readonly release: () => void } {
+      let release!: () => void
+      let markEntered!: () => void
+      const promise = new Promise<void>(resolve => { release = resolve })
+      const entered = new Promise<void>(resolve => { markEntered = resolve })
+      writerAdmissionGate = { promise, entered, release, markEntered }
+      return {
+        entered,
+        release: () => {
+          writerAdmissionGate = undefined
+          release()
+        },
+      }
+    },
     holdWrites(): () => void {
       let release!: () => void
       const promise = new Promise<void>(resolve => { release = resolve })
@@ -324,16 +353,36 @@ test('entering a subagent viewer retires the open queue panel', () => {
   assert.equal(h.controller.view().mode, 'closed', 'the viewer is a newer display owner')
 })
 
-test('a viewer entered before a queued write blocks the parent queue mutation', async () => {
+test('a viewer entered AFTER writer admission still blocks the parent EDIT (post-barrier fence)', async () => {
   const h = harness({ items: [item('occ-1', [{ type: 'text', text: 'hello' }])] })
   h.controller.open()
   h.controller.startEdit()
   h.controller.setDraft('edited')
-  // The viewer opens in the window before the owned write reaches withWriter.
-  h.setViewing(true)
+  const gate = h.holdWriterAdmission()
+  // Start the owned task while the viewer is still absent: it enters
+  // withWriter and waits BEFORE the fence/body run.
   h.controller.save()
-  await h.drain()
-  assert.deepEqual(h.writes, [], 'no parent-session queue write is admitted while the viewer owns the screen')
+  const running = h.drain()
+  await gate.entered
+  h.setViewing(true)
+  gate.release()
+  await running
+  assert.deepEqual(h.writes, [], 'the post-barrier isViewing fence refuses the parent queue edit')
+  assert.equal(h.controller.view().mode, 'closed')
+})
+
+test('a viewer entered AFTER writer admission still blocks the parent REMOVE (post-barrier fence)', async () => {
+  const h = harness({ items: [item('occ-1', [{ type: 'text', text: 'hello' }])] })
+  h.controller.open()
+  h.controller.startDelete()
+  const gate = h.holdWriterAdmission()
+  h.controller.confirmDelete()
+  const running = h.drain()
+  await gate.entered
+  h.setViewing(true)
+  gate.release()
+  await running
+  assert.deepEqual(h.writes, [], 'the post-barrier isViewing fence refuses the parent queue remove')
   assert.equal(h.controller.view().mode, 'closed')
 })
 
