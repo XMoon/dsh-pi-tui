@@ -796,10 +796,27 @@ Invariants that hold at every size:
 
 ## 9. Theme and accessibility
 
-- **No new palette tokens in this contract.** The role table maps onto the existing
-  `ColorPalette`. If a genuine gap appears, re-valuing `borderFocus` or adding a
-  token requires dark + light + custom fallback + contrast review + live-theme
-  switch tests in the same PR.
+- **The transcript-search highlight roles are the frozen search tokens.** The
+  chrome role table maps onto the existing `ColorPalette`; the transcript Find
+  decoration is governed by its own frozen family of search tokens:
+  - `searchMatchFg` / `searchMatchBg` — every visible ordinary occurrence: an
+    explicit themed **yellow background block** with a readable foreground.
+  - `searchCurrentFg` / `searchCurrentBg` — the CURRENT occurrence: an explicit
+    **orange background block plus bold**. A Full scope uses it ONLY for a
+    source-proven occurrence; View's current mounted rendered occurrence uses
+    the same bold current style under its own mounted-batch authority (it is
+    not a Full source-cell proof).
+  - the same `searchCurrentFg`/`searchCurrentBg` pair **without bold** marks the
+    current card's real visible header/anchor when no exact cell is provable.
+    This is card-level emphasis, never a guessed exact word.
+  - `searchAnchorBg` — the weaker row wash retained for legacy anchor-only
+    diagnostics; it never replaces the yellow/orange occurrence roles.
+  Yellow means "this text is a visible match"; orange means "this is the current
+  unit" (a proven occurrence, or the current card when only the card is
+  provable). Weight distinguishes the two orange uses: exact is bold, a card
+  anchor is not. Adding any other search token, or changing these roles,
+  requires dark + light + custom fallback + contrast review + live-theme switch
+  tests in the same PR.
 - Never read the palette at module scope: styles come from `color.*` /
   `taskStatusColor()` / the theme factories at render time, so live theme
   switches (`setTheme`) keep working. `settingsListTheme()` is a function for
@@ -810,7 +827,9 @@ Invariants that hold at every size:
   setting. Switching it must not change cursor width, hit targets, or the
   chrome glyphs in the inventory (§4.4) — those are chrome, not icons.
 - Custom themes must not be able to break the frame: a palette missing the
-  optional search tokens is already filled by `withSearchCurrentTokens`.
+  optional search tokens is filled by `withSearchCurrentTokens` at every theme
+  apply boundary (the ordinary yellow pair plus the current orange pair and the
+  legacy anchor wash), while an explicitly supplied token is never overwritten.
 
 ## 10. Reuse map
 
@@ -819,7 +838,7 @@ Use these; do not build a parallel owner.
 | Need | Existing owner | Rule |
 |---|---|---|
 | Colours, bold/dim/italic | `src/tui/theme/runtime.ts` (`color`, `hexPaint`) | the only ink source |
-| Palette vocabulary, built-ins | `src/domain/display/theme.ts` | no new token in this contract |
+| Palette vocabulary, built-ins | `src/domain/display/theme.ts` | the §9 transcript-search role family is the authorized content-decoration addition; any further token needs an Owner amendment to this document |
 | Job status → colour | `taskStatusColor()` (`runtime.ts:116-128`) | extend the *wording* map next to it; do not fork the colour map |
 | Picker / settings-list / editor / markdown palettes | `selectListTheme`, `settingsListTheme()`, `editorTheme`, `markdownTheme` | restyle through these, never by re-painting their components. `SearchablePicker` reads its cursor through the same slot |
 | Semantic structural icons | `src/tui/icons.ts` (`iconFor`, `iconPrefix`, `iconLead`) + `src/domain/display/icons.ts` | chrome punctuation (cursor/brackets/rule) is **not** an icon and does not enter the registry |
@@ -875,7 +894,8 @@ Copy into every PR that changes a visible surface:
     (frozen matrix: 200×50, 120×40, 100×40, 80×24, 80×10, 72×24, 44×20)?
 [ ] Dark / light / custom, and icons symbols / minimal checked?
 [ ] No new shadow authority, focus owner, fork divergence, or duplicate layout
-    framework? No new palette token?
+    framework? No palette token beyond the §9 search role family (a new token
+    needs an Owner amendment)?
 [ ] before/after frames from the real VirtualTerminal included, plus a real
     terminal check per docs/guides/tmux-testing.md. Unrun items are marked NOT_RUN.
 ```

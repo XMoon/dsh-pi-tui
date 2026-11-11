@@ -9,7 +9,7 @@ import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
-const CURRENT_BG = 0xf5c542
+const CURRENT_BG = 0xe58a24
 
 const notificationPresentation = {
   handleFocusReport: () => {},

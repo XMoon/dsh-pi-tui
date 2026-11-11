@@ -941,13 +941,42 @@ taking a transcript row away:
   mounted occurrence set and cannot trigger Full semantic search or temporary
   disclosure.
 - **Full** searches the active `TranscriptFolder` semantic corpus and retains
-  semantic occurrence identity, virtual-window navigation and its existing
-  presentation proof/reveal rules. Direct has a complete Session fold. Remote
-  search is limited to the official Reader snapshot already loaded for the
+  the raw semantic occurrence identity, virtual-window navigation and its
+  existing presentation proof/reveal rules. Direct has a complete Session fold.
+  Remote search is limited to the official Reader snapshot already loaded for the
   current subject: label it `Loaded history`, and when that same current snapshot
   proves `hasMore`, say that earlier history was not searched. A missing or stale
   snapshot is never interpreted as complete coverage. Full never adopts a View
   occurrence ordinal or painted-row authority.
+- **Full `N/M` counts temporary navigation targets, not raw occurrences.** The
+  index still emits one match per non-overlapping semantic occurrence; the
+  overlay projects those matches into the units `Enter`/`Shift+Enter` can
+  actually reach. A source-proven occurrence stays its own target. A card that
+  has NO rendered query occurrence (a merged read card, or a card whose only
+  hits are hidden link destinations) is wholly unlocatable at this frame and
+  collapses ALL of its same-representative hits into ONE card target — never one
+  target per hidden hit. A card that still has a proving channel WITH a visible
+  query hit on it keeps its unvisited occurrences as separate candidates, so an
+  exact-capable visible cell beside a truncated/unproven sibling stays reachable;
+  repeated visits converge that card to the unresolved run. A card whose query
+  only appears in status-count / header chrome has no such proving hit and stays
+  one card target. Exact and unresolved runs on the same card
+  stay separate. The projection is derived inside the existing Search overlay
+  lifetime from the live Folder read-group membership and the current frame's
+  qualification; it is never persisted, never mutates the corpus and never
+  renders off-window history to stabilise counts. Each unvisited card may
+  re-qualify on its first visit, so the session total `M` can shrink more than
+  once as separate cards are visited; changes are published after the
+  qualification transaction, never as a flicker of a stale total.
+- **Visible auxiliary text is a display hint, not source proof.** When the
+  current card cannot prove its exact source cells but its mounted body really
+  renders the query, those visible words are decorated as ordinary matches and
+  the viewport prefers a readable one. A card without an exact region but with a
+  real body (for example a Tool result) scopes that preference through a
+  POSITION-ONLY body region; header chrome, status counters and other UI text are
+  never navigation evidence. The card's own visible header/anchor is marked in
+  the current-card role. Neither changes `selection.exact`, the
+  `not-painted`/`unproven` classification or the semantic occurrence ordinal.
 - The active scope and single query belong to the mounted `SurfaceRuntime`
   transaction. Scope changes keep the query, retire the old scope's selection
   and reveal, then select the destination scope's first result from its own
@@ -971,8 +1000,13 @@ taking a transcript row away:
 A Full hit's painted cells are either proven (`exact`), provably absent
 (`not-painted`), or not provable in the current render (`unproven`). The status
 is disposable presentation metadata for ONE render epoch: it never feeds the
-match corpus, `N/M`, the span proof or a stored match/geometry map, and an
-`exact` selection must carry none.
+match corpus or a stored match/geometry map, and an `exact` selection must carry
+none. While the current Full target is non-exact, the card's REAL visible
+header/anchor (or, for a card without a header, its first visible non-image text
+row) is marked in the current-card role. That anchor is presentation geometry
+only: it is never a source-cell proof, never participates in the exact-channel
+subtraction, and never upgrades the hit to `exact`. A visible homonym on that
+card remains an ordinary visible match, not the current source cell.
 
 `not-painted` is allowed only from real evidence that the matched source text
 has no visible cell: the vendored Markdown proof reporting `NOT_PAINTED` for a
@@ -1017,11 +1051,12 @@ keeps the existing viewport-only placement.
 The jump is committed from the current epoch's geometry, and one post-paint
 correction is allowed because the box that painted the jump may have been a
 frame old (the Source-only row can change the box height). That correction is
-bound to the same screen, overlay handle, scope, query, presentation revision,
-selected occurrence and terminal size and applies at most once; a passive
-projection, stream settle, wheel drag or ordinary repaint never re-aims an old
-target, and a resize only re-solves while the target still belongs to the
-current Search overlay. Retiring the overlay, leaving the scope, switching
+bound to the same screen, overlay handle, scope, query, presentation revision
+(which changes with the current navigation-target identity) and terminal size and
+applies at most once; a passive projection, stream settle, wheel drag or ordinary
+repaint never re-aims an old target, and a resize only re-solves while the target
+still belongs to the current Search overlay. Retiring the overlay, leaving the
+scope, switching
 session/subject or replacing the screen discards the pending correction with the
 current target geometry. Search navigation never re-centres an already visible
 target, never re-windows for the same target and never adds a second viewport or
@@ -1038,8 +1073,10 @@ SAME text/bubble constructor as the live card; a failed visible-row/width
 comparison, a collapsed or hidden body, a plugin renderer, or mixed/transformed
 content keeps the source-anchor degradation. The witness string never reaches
 the terminal, a mounted component, a log or a persisted field. Exactness never
-changes the search corpus, N/M identity, reveal ownership or viewport ownership;
-source-local offsets are ephemeral and never stable match identity. Any width,
+changes the search corpus, the raw occurrence identity or reveal ownership; a
+newly proven occurrence does split its temporary navigation projection (see
+Transcript Find scopes), which is derived presentation state. Source-local
+offsets are ephemeral and never stable match identity. Any width,
 source text or layout epoch change re-proves from scratch, and a proven
 selection must not re-enable a reveal the user collapsed.
 
@@ -1083,8 +1120,11 @@ static frame, a scroll-only frame and every other card never trigger a proof.
 A proven range is exact in the painter as well: an overlapping weak rendered
 occurrence keeps only the cells the proof did not claim, so a case-folding
 difference between the semantic corpus and the rendered matcher can never widen
-the strong block. Full N/M identity, View's mounted-occurrence authority,
-reveal ownership and viewport ownership are unchanged.
+the strong block. The raw semantic occurrence identity and the search corpus are
+unchanged; the overlay's `N/M` is the temporary navigation-target projection
+(one target per exact occurrence, one per unresolved card run), while View's
+mounted-occurrence authority, reveal ownership and viewport ownership stay
+unchanged.
 
 ## Hardening guarantees
 

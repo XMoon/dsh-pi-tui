@@ -188,7 +188,8 @@ function columnOf(line: string, needle: string, occurrence = 0): number {
   return visibleWidth(line.slice(0, index))
 }
 
-const STRONG_BG = 0xf5c542
+const STRONG_BG = 0xe58a24
+const WEAK_BG = 0xf5c542
 
 test('runner rolls back a Runtime scope committed before Search projection throws', async (t) => {
   const fixture = await mountSearchRunner(t, 1, [], 'needle', undefined, 'off')
@@ -862,12 +863,12 @@ test('runner search: sanitized Thinking bodies exclude title and hint from seman
   const hintRow = lines.findIndex(line => line.includes('click to expand'))
   const previewRow = lines.findIndex(line => line.includes('visible i preview'))
   assert.ok(titleRow >= 0 && hintRow >= 0 && previewRow >= 0, `all compact Thinking rows are painted:\n${lines.join('\n')}`)
-  assert.equal(vt.getCellUnderline(titleRow, lines[titleRow]!.indexOf('i')), false,
+  assert.notEqual(vt.getCellBgRgb(titleRow, lines[titleRow]!.indexOf('i')), WEAK_BG,
     'a non-current body-less Thinking title is not a weak message match')
-  assert.equal(vt.getCellUnderline(hintRow, lines[hintRow]!.indexOf('i')), false,
+  assert.notEqual(vt.getCellBgRgb(hintRow, lines[hintRow]!.indexOf('i')), WEAK_BG,
     'a compact disclosure hint is not part of the Thinking message source')
-  assert.equal(vt.getCellUnderline(previewRow, lines[previewRow]!.indexOf('i')), true,
-    'the visible compact preview remains weakly searchable')
+  assert.equal(vt.getCellBgRgb(previewRow, lines[previewRow]!.indexOf('i')), WEAK_BG,
+    'the visible compact preview remains a yellow ordinary match')
 
   fixture.input('\r')
   await fixture.settleRender()
@@ -886,8 +887,8 @@ test('runner search: sanitized Thinking bodies exclude title and hint from seman
   assert.equal(selection?.exact, false)
   const currentTitleRow = vt.getViewport().map(stripTerminalSequences).findIndex(line => line.includes('Thinking'))
   assert.ok(currentTitleRow >= 0)
-  assert.equal(vt.getCellUnderline(currentTitleRow, stripTerminalSequences(vt.getViewport()[currentTitleRow]!).indexOf('i')), false,
-    'the current body-less Thinking title is never underlined as a source match')
+  assert.notEqual(vt.getCellBgRgb(currentTitleRow, stripTerminalSequences(vt.getViewport()[currentTitleRow]!).indexOf('i')), WEAK_BG,
+    'the current body-less Thinking title is never painted as a visible source match')
 })
 
 test('runner search: expanded Thinking body starts after a wrapped title at narrow width', async (t) => {
@@ -1018,9 +1019,9 @@ test('runner search: Folder Workflow run status maps to the pill interior withou
   }).mountedTranscriptBlocks
   assert.equal(mounted.find(entry => entry.block.message?.kind === 'workflow')?.searchSelection?.exact, true,
     'the real Folder run-status range is proven at paint time')
-  assert.equal(fixture.vt.getCellBgRgb(row, status), 0xf5c542, 'the status text is the current cell')
-  assert.notEqual(fixture.vt.getCellBgRgb(row, status - 1), 0xf5c542, 'the opening bracket is outside the exact field')
-  assert.notEqual(fixture.vt.getCellBgRgb(row, status + visibleWidth('completed')), 0xf5c542, 'the closing bracket is outside the exact field')
+  assert.equal(fixture.vt.getCellBgRgb(row, status), STRONG_BG, 'the status text is the current cell')
+  assert.notEqual(fixture.vt.getCellBgRgb(row, status - 1), STRONG_BG, 'the opening bracket is outside the exact field')
+  assert.notEqual(fixture.vt.getCellBgRgb(row, status + visibleWidth('completed')), STRONG_BG, 'the closing bracket is outside the exact field')
 })
 
 test('runner search: Folder Workflow phase label maps to its exact painted cell', async (t) => {
@@ -1043,7 +1044,7 @@ test('runner search: Folder Workflow phase label maps to its exact painted cell'
   const row = lines.findIndex(line => line.includes('needle phase'))
   assert.ok(row >= 0, `the real Workflow phase label is painted:\n${lines.join('\n')}`)
   const column = lines[row]!.indexOf('needle')
-  assert.equal(fixture.vt.getCellBgRgb(row, column), 0xf5c542, 'the phase field is the current cell')
+  assert.equal(fixture.vt.getCellBgRgb(row, column), STRONG_BG, 'the phase field is the current cell')
 })
 
 test('runner search: Folder Workflow member occurrences map to separate painted cells', async (t) => {
@@ -1067,8 +1068,8 @@ test('runner search: Folder Workflow member occurrences map to separate painted 
   assert.ok(row >= 0, `the member label row is painted:\n${lines.join('\n')}`)
   let first = lines[row]!.indexOf('needle')
   let second = lines[row]!.lastIndexOf('needle')
-  assert.equal(fixture.vt.getCellBgRgb(row, first), 0xf5c542)
-  assert.equal(fixture.vt.getCellBgRgb(row, second), undefined)
+  assert.equal(fixture.vt.getCellBgRgb(row, first), STRONG_BG)
+  assert.equal(fixture.vt.getCellBgRgb(row, second), WEAK_BG, 'the other visible member hit stays yellow')
 
   fixture.input('\r')
   await fixture.settleRender()
@@ -1079,8 +1080,8 @@ test('runner search: Folder Workflow member occurrences map to separate painted 
   assert.ok(row >= 0)
   first = lines[row]!.indexOf('needle')
   second = lines[row]!.lastIndexOf('needle')
-  assert.equal(fixture.vt.getCellBgRgb(row, first), undefined)
-  assert.equal(fixture.vt.getCellBgRgb(row, second), 0xf5c542)
+  assert.equal(fixture.vt.getCellBgRgb(row, first), WEAK_BG, 'the previous occurrence stays yellow')
+  assert.equal(fixture.vt.getCellBgRgb(row, second), STRONG_BG)
 })
 
 test('runner search: Folder Workflow member status maps to its exact painted cell', async (t) => {
@@ -1105,7 +1106,7 @@ test('runner search: Folder Workflow member status maps to its exact painted cel
   const row = lines.findIndex(line => line.includes('worker — cancelled'))
   assert.ok(row >= 0, `the settled member status is painted:\n${lines.join('\n')}`)
   const column = lines[row]!.indexOf('cancelled')
-  assert.equal(fixture.vt.getCellBgRgb(row, column), 0xf5c542, 'the member status text is the current cell')
+  assert.equal(fixture.vt.getCellBgRgb(row, column), STRONG_BG, 'the member status text is the current cell')
 })
 
 test('runner search: Folder Workflow kind maps lowercase semantics to the painted title cell', async (t) => {
@@ -1125,7 +1126,7 @@ test('runner search: Folder Workflow kind maps lowercase semantics to the painte
   const row = lines.findIndex(line => line.includes('Workflow audit'))
   assert.ok(row >= 0, `the real Workflow header is painted:\n${lines.join('\n')}`)
   const column = visibleWidth(lines[row]!.slice(0, lines[row]!.indexOf('Workflow')))
-  assert.equal(fixture.vt.getCellBgRgb(row, column), 0xf5c542,
+  assert.equal(fixture.vt.getCellBgRgb(row, column), STRONG_BG,
     'the lowercase semantic kind proves its painted title cell')
 })
 
@@ -1163,9 +1164,9 @@ test('runner search: hidden Workflow member status proves the generated context-
   assert.ok(row >= 0, `the production renderer publishes the search-only context row:\n${lines.join('\n')}`)
   const label = lines[row]!.indexOf('worker-1')
   const status = lines[row]!.indexOf('completed')
-  assert.equal(fixture.vt.getCellBgRgb(row, visibleWidth(lines[row]!.slice(0, status))), 0xf5c542,
+  assert.equal(fixture.vt.getCellBgRgb(row, visibleWidth(lines[row]!.slice(0, status))), STRONG_BG,
     'the hidden member status maps to the exact context-row cell')
-  assert.notEqual(fixture.vt.getCellBgRgb(row, visibleWidth(lines[row]!.slice(0, label))), 0xf5c542,
+  assert.notEqual(fixture.vt.getCellBgRgb(row, visibleWidth(lines[row]!.slice(0, label))), STRONG_BG,
     'the neighboring context label is outside the status source')
 })
 
@@ -1187,7 +1188,7 @@ test('runner search: a Folder Workflow name range reaches its exact VirtualTermi
   const row = lines.findIndex(line => stripTerminalSequences(line).includes('needle-run'))
   assert.ok(row >= 0, `the Workflow header is painted:\n${lines.join('\n')}`)
   const column = stripTerminalSequences(lines[row]!).indexOf('needle')
-  assert.equal(fixture.vt.getCellBgRgb(row, column), 0xf5c542,
+  assert.equal(fixture.vt.getCellBgRgb(row, column), STRONG_BG,
     `the real semantic match range reaches the exact painted cell:\n${lines[row]}`)
   // A direct-field Workflow region is exact WITHOUT the dedicated
   // User/Thinking/Assistant proof channel, so the Source-only notice must be
@@ -1225,10 +1226,10 @@ function cellColumnOf(vt: VirtualTerminal, row: number, needle: string, occurren
 }
 
 /** The STRONG exact-match background of the production dark palette. */
-const F2_STRONG_BG = 0xf5c542
+const F2_STRONG_BG = STRONG_BG
 
 function strongRuns(vt: VirtualTerminal): Array<{ row: number; startCol: number; endCol: number; text: string }> {
-  return vt.getRgbBackgroundRuns(F2_STRONG_BG)
+  return vt.getRgbBackgroundRuns(F2_STRONG_BG).filter(run => vt.getCellBold(run.row, run.startCol))
 }
 
 function strongText(vt: VirtualTerminal): string {
@@ -1371,4 +1372,339 @@ test('runner search: Full proves visible Assistant Markdown cells and keeps a hi
     'the previous scope never leaves its Source-only row painted')
   assert.ok((app.renderedViewSearchStatus()?.count ?? 0) >= 1,
     'View returns to its own mounted rendered occurrence authority')
+})
+
+// ── Full navigation projection: real Folder read groups and card-level targets ──
+
+/** Fold one same-turn run of settled `read` calls whose results all contain
+ * `needle`. This is a REAL Folder event stream: grouping comes from the
+ * folder's own consecutive-read authority, never a fixture flag. */
+function mergedReadSession(count: number, extraTurns: readonly number[] = []): SessionEvent[] {
+  const events: SessionEvent[] = []
+  let seq = 0
+  events.push(event('turn/start', { turn: 0 }, seq++))
+  for (let index = 0; index < count; index += 1) {
+    const callId = ToolCallId(`g${index}`)
+    events.push(event('tool/call', { turn: 0, step: 0, callId, name: 'read', arguments: JSON.stringify({ file: `src/f${index}.ts` }) }, seq++))
+    events.push(event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId(`g-result-${index}`), role: 'tool', toolCallId: callId,
+        content: [{ type: 'text', text: `needle payload ${index}` }],
+        source: { kind: 'tool', callId },
+      },
+    }, seq++))
+  }
+  events.push(event('turn/end', { turn: 0, reason: { kind: 'completed' } }, seq++))
+  for (const turn of extraTurns) {
+    events.push(event('turn/start', { turn }, seq++))
+    events.push(event('user/message', {
+      id: MessageId(`extra-${turn}`), role: 'user',
+      content: [{ type: 'text', text: `needle in the next card ${turn}` }],
+      source: { kind: 'user' },
+    }, seq++))
+    events.push(event('turn/end', { turn, reason: { kind: 'completed' } }, seq++))
+  }
+  return events
+}
+
+function fullTitle(fixture: RunnerFixture): string {
+  return fixture.vt.getViewport().map(stripTerminalSequences).find(line => line.includes('[Full]')) ?? ''
+}
+
+test('runner search: a real 12-read group is ONE Full target and one Enter leaves it', async (t) => {
+  const fixture = await mountSearchRunner(t, 2, [], 'needle', mergedReadSession(12, [1]))
+  const originalSearch = TranscriptFolder.prototype.search
+  let rawMatches = 0
+  TranscriptFolder.prototype.search = function (this: TranscriptFolder, query: string, options?: Parameters<TranscriptFolder['search']>[1]) {
+    const matches = originalSearch.call(this, query, options)
+    if (query === 'needle') rawMatches = matches.length
+    return matches
+  }
+  t.after(() => { TranscriptFolder.prototype.search = originalSearch })
+
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'needle')
+  await fixture.settleRender()
+
+  assert.equal(rawMatches, 13, 'the Folder raw corpus keeps all 12 read occurrences plus the next card')
+  assert.match(fullTitle(fixture), /1\/2/, `the overlay counts navigable targets, not raw hits:\n${fullTitle(fixture)}`)
+  const first = fixture.app.transcriptSearchPresentationForTest()
+  assert.equal(first?.message?.kind, 'tool', 'the first target is the merged read card')
+
+  fixture.input('\r')
+  await fixture.settleRender()
+  assert.match(fullTitle(fixture), /2\/2/, `one Enter crosses to the next card:\n${fullTitle(fixture)}`)
+  const second = fixture.app.transcriptSearchPresentationForTest()
+  assert.equal(second?.message?.kind, 'user', 'the next card is the second target')
+  assert.ok(fixture.vt.getViewport().some(line => stripTerminalSequences(line).includes('needle in the next card 1')),
+    'the next card is the viewport destination')
+
+  fixture.input('\x1b[13;2u')
+  await fixture.settleRender()
+  assert.match(fullTitle(fixture), /1\/2/, `Shift+Enter returns to the read card:\n${fullTitle(fixture)}`)
+  assert.equal(fixture.app.transcriptSearchPresentationForTest()?.message?.kind, 'tool')
+  assert.equal(rawMatches, 13, 'navigation projection never mutates the Folder semantic hits')
+})
+
+test('runner search: one folded card with 100+ hits stays ONE target without repeated rebuilds', async (t) => {
+  const fixture = await mountSearchRunner(t, 1, [], 'needle', mergedReadSession(120))
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'needle')
+  await fixture.settleRender()
+  assert.match(fullTitle(fixture), /1\/1/, `a single unlocatable card is ONE target:\n${fullTitle(fixture)}`)
+
+  fixture.app.resetSearchPresentationDiagnosticsForTest()
+  fixture.projections.reset()
+  const target = fixture.app.transcriptSearchPresentationForTest()
+  for (let step = 0; step < 5; step += 1) {
+    fixture.input('\r')
+    await fixture.settleRender()
+    assert.match(fullTitle(fixture), /1\/1/, `repeated Next keeps 1/1 (step ${step})`)
+    assert.equal(fixture.app.transcriptSearchPresentationForTest()?.sourceKey, target?.sourceKey,
+      'the same card target survives repeated Next')
+  }
+  const diagnostics = fixture.app.searchPresentationDiagnosticsForTest()
+  assert.equal(diagnostics.rebuilds, 0, 'a single card target is never rebuilt by repeated Next')
+  assert.equal(diagnostics.occlusionCorrections, 0, 'a single card target never re-aims the viewport')
+  assert.equal(fixture.projections.count(), 0, 'a single card target never re-windows the transcript')
+
+  for (let step = 0; step < 3; step += 1) {
+    fixture.input('\x1b[13;2u')
+    await fixture.settleRender()
+    assert.match(fullTitle(fixture), /1\/1/, `repeated Prev keeps 1/1 (step ${step})`)
+  }
+  assert.equal(fixture.app.searchPresentationDiagnosticsForTest().rebuilds, 0,
+    'a single card target is never rebuilt by repeated Prev')
+})
+
+test('runner search: a folded same-turn subagent settlement is ONE card target and its reveal restores', async (t) => {
+  const payload = 'FOLDED_SETTLED_NEEDLE payload with the needle inside'
+  // The producer's exact wire shape: the fold reads it structurally, and the
+  // session-event fixture carries the same branded ids as the navigation test.
+  const settledMessage = {
+    id: MessageId('runner-folded-settled'), role: 'user',
+    content: [{ type: 'text', text: payload }],
+    source: { kind: 'subagent-settled', form: 'notice', summary: 'child completed', senderSessionId: 'runner-child' },
+  } as never
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('settled-c1'), name: 'read', arguments: '{}' }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('settled-r1'), role: 'tool', toolCallId: ToolCallId('settled-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('settled-c1') },
+      },
+    }, 2),
+    event('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [settledMessage] }, 3),
+    event('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 4),
+    event('user/message', settledMessage, 5),
+    event('tool/call', { turn: 0, step: 1, callId: ToolCallId('settled-c2'), name: 'bash', arguments: '{}' }, 6),
+    event('tool/result', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('settled-r2'), role: 'tool', toolCallId: ToolCallId('settled-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('settled-c2') },
+      },
+    }, 7),
+    event('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('settled-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 8),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'FOLDED_SETTLED_NEEDLE', events)
+  const view = (): string => fixture.vt.getViewport().map(stripTerminalSequences).join('\n')
+  fixture.app.setDisplayPreset('compact')
+  await fixture.settleRender()
+  assert.ok(!view().includes('FOLDED_SETTLED_NEEDLE'),
+    `precondition: Compact folds the qualified settlement under its Work:\n${view()}`)
+
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'FOLDED_SETTLED_NEEDLE')
+  await fixture.settleRender()
+  assert.match(fullTitle(fixture), /1\/1/, `the settlement owns ONE navigation target:\n${fullTitle(fixture)}`)
+  const target = fixture.app.transcriptSearchPresentationForTest()
+  assert.equal(target?.revealGranted, true, 'Full grants the temporary reveal for the folded owner')
+  assert.ok(view().includes('FOLDED_SETTLED_NEEDLE'),
+    `the reveal opens the owning Work and locates the settlement body:\n${view()}`)
+  const selection = target?.message === undefined ? undefined : mountedSearchSelection(fixture.app, target.message)
+  assert.equal(selection?.exact, false, 'the folded settlement body is not a proven source cell')
+  assert.equal(selection?.sourceDisposition, 'unproven', 'the honest Source-only classification survives')
+
+  fixture.input('\x1b')
+  await fixture.settleRender()
+  assert.equal(fixture.app.transcriptSearchPresentationForTest(), undefined,
+    'closing Search retires the temporary target')
+  assert.ok(!fullTitle(fixture).includes('[Full]'), 'the Search overlay is closed after Esc')
+  const closedMessage = target?.message
+  assert.ok(closedMessage !== undefined)
+  assert.equal(mountedSearchSelection(fixture.app, closedMessage), undefined,
+    'the temporary settlement selection and its card anchor are retired')
+})
+
+test('runner search: two hidden-only hits on one card are ONE target and one Enter crosses cards', async (t) => {
+  const previousCapabilities = getCapabilities()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  t.after(() => setCapabilities(previousCapabilities))
+  const events = [
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('hidden-only-assistant'), role: 'assistant',
+        content: [{ type: 'text', text: '[a](https://example.invalid/needle) [b](https://example.invalid/needle)' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, 1),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+    event('turn/start', { turn: 1 }, 3),
+    event('user/message', {
+      id: MessageId('hidden-only-next'), role: 'user',
+      content: [{ type: 'text', text: 'needle in the next card' }],
+      source: { kind: 'user' },
+    }, 4),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+  ]
+  const fixture = await mountSearchRunner(t, 2, [], 'needle', events)
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'needle')
+  await fixture.settleRender()
+  const first = fixture.app.transcriptSearchPresentationForTest()
+  assert.equal(first?.message?.kind, 'assistant')
+  const hiddenSelection = first?.message === undefined ? undefined : mountedSearchSelection(fixture.app, first.message)
+  assert.equal(hiddenSelection?.sourceDisposition, 'not-painted')
+  assert.deepEqual(hiddenSelection?.matches, [], 'the card renders no query occurrence at all')
+  assert.match(fullTitle(fixture), /1\/2/,
+    `both hidden hits collapse into ONE card target plus the next card:\n${fullTitle(fixture)}`)
+
+  fixture.input('\r')
+  await fixture.settleRender()
+  assert.match(fullTitle(fixture), /2\/2/, `one Enter crosses to the next card:\n${fullTitle(fixture)}`)
+  assert.equal(fixture.app.transcriptSearchPresentationForTest()?.message?.kind, 'user')
+})
+
+test('runner search: a truncated workflow member does not swallow its exact-capable neighbour', async (t) => {
+  const runId = 'find-truncated-workflow' as never
+  const events = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool-workflow/run-start', { runId, name: 'audit' }, 1),
+    event('tool-workflow/agent-start', {
+      runId, seq: 0, label: `needle ${'x'.repeat(400)}`, phase: 'P', childId: 'find-truncated-0' as never,
+    }, 2),
+    event('tool-workflow/agent-start', {
+      runId, seq: 1, label: 'needle short', phase: 'P', childId: 'find-truncated-1' as never,
+    }, 3),
+    event('tool-workflow/run-end', { runId, stopReason: 'completed' }, 4),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'needle', events)
+  fixture.vt.resize(72, 30)
+  await fixture.settleRender()
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'needle')
+  await fixture.settleRender()
+
+  const first = fixture.app.transcriptSearchPresentationForTest()
+  assert.ok(first?.sourceKey.includes('.0.label'), `the truncated member is the first target: ${first?.sourceKey}`)
+  const firstSelection = first?.message === undefined ? undefined : mountedSearchSelection(fixture.app, first.message)
+  assert.equal(firstSelection?.exact, false, 'the truncated label is honestly unproven')
+  assert.match(fullTitle(fixture), /1\/2/,
+    `the unproven member and its exact-capable neighbour are TWO targets:\n${fullTitle(fixture)}`)
+
+  fixture.input('\r')
+  await fixture.settleRender()
+  const second = fixture.app.transcriptSearchPresentationForTest()
+  assert.ok(second?.sourceKey.includes('.1.label'),
+    `Enter reaches the exact-capable visible member instead of leaving the card: ${second?.sourceKey}`)
+  assert.equal(mountedSearchSelection(fixture.app, second!.message!)?.exact, true)
+  assert.match(fullTitle(fixture), /2\/2/)
+})
+
+test('runner search: a hidden summary-phase status does not swallow an exact inline status', async (t) => {
+  const runId = 'find-cross-source-workflow' as never
+  const events: SessionEvent[] = [event('turn/start', { turn: 0 }, 0), event('tool-workflow/run-start', { runId, name: 'audit' }, 1)]
+  let seq = 2
+  for (let index = 0; index < 6; index += 1) {
+    events.push(event('tool-workflow/agent-start', {
+      runId, seq: index, label: `P member ${index}`, phase: 'P', childId: `find-cross-p-${index}` as never,
+    }, seq++))
+  }
+  events.push(event('tool-workflow/agent-end', { runId, seq: 0, outcome: 'cancelled' }, seq++))
+  events.push(event('tool-workflow/agent-start', {
+    runId, seq: 6, label: 'Q member', phase: 'Q', childId: 'find-cross-q-6' as never,
+  }, seq++))
+  events.push(event('tool-workflow/agent-end', { runId, seq: 6, outcome: 'cancelled' }, seq++))
+  events.push(event('tool-workflow/run-end', { runId, stopReason: 'completed' }, seq++))
+  events.push(event('turn/end', { turn: 0, reason: { kind: 'completed' } }, seq++))
+
+  const fixture = await mountSearchRunner(t, 1, [], 'cancelled', events)
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'cancelled')
+  await fixture.settleRender()
+
+  const first = fixture.app.transcriptSearchPresentationForTest()
+  assert.ok(first?.sourceKey.endsWith('.status'), `the hidden summary status is the first target: ${first?.sourceKey}`)
+  const firstSelection = first?.message === undefined ? undefined : mountedSearchSelection(fixture.app, first.message)
+  assert.equal(firstSelection?.exact, false, 'the hidden summary status is honestly unproven')
+  assert.equal(firstSelection?.selectedRow, 0,
+    'with only chrome homonyms the viewport stays on the card anchor, never a status count')
+  assert.match(fullTitle(fixture), /1\/2/,
+    `the card-wide proving channel keeps the inline exact-capable status as its own target:\n${fullTitle(fixture)}`)
+
+  fixture.input('\r')
+  await fixture.settleRender()
+  const second = fixture.app.transcriptSearchPresentationForTest()
+  assert.ok(second !== undefined && second.sourceKey !== first?.sourceKey,
+    'Enter reaches the different-source inline status on the same card')
+  assert.ok(second!.sourceKey.endsWith('.status'))
+  assert.equal(mountedSearchSelection(fixture.app, second!.message!)?.exact, true)
+  assert.match(fullTitle(fixture), /2\/2/)
+})
+
+test('runner search: two hidden summary statuses with only chrome homonyms are ONE card target', async (t) => {
+  const runId = 'find-chrome-only-workflow' as never
+  const events: SessionEvent[] = [event('turn/start', { turn: 0 }, 0), event('tool-workflow/run-start', { runId, name: 'audit' }, 1)]
+  let seq = 2
+  for (let index = 0; index < 6; index += 1) {
+    events.push(event('tool-workflow/agent-start', {
+      runId, seq: index, label: `P member ${index}`, phase: 'P', childId: `find-chrome-only-${index}` as never,
+    }, seq++))
+  }
+  events.push(event('tool-workflow/agent-end', { runId, seq: 0, outcome: 'cancelled' }, seq++))
+  events.push(event('tool-workflow/agent-end', { runId, seq: 1, outcome: 'cancelled' }, seq++))
+  events.push(event('tool-workflow/run-end', { runId, stopReason: 'completed' }, seq++))
+  events.push(event('turn/end', { turn: 0, reason: { kind: 'completed' } }, seq++))
+
+  const fixture = await mountSearchRunner(t, 1, [], 'cancelled', events)
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'cancelled')
+  await fixture.settleRender()
+
+  const first = fixture.app.transcriptSearchPresentationForTest()
+  assert.ok(first?.sourceKey.endsWith('.status'))
+  const selection = first?.message === undefined ? undefined : mountedSearchSelection(fixture.app, first.message)
+  assert.equal(selection?.exact, false)
+  assert.equal(selection?.selectedRow, 0,
+    'only status-count chrome renders the query, so the viewport stays at the card anchor')
+  assert.match(fullTitle(fixture), /1\/1/,
+    `both hidden summary statuses collapse into ONE card target:\n${fullTitle(fixture)}`)
+
+  fixture.app.resetSearchPresentationDiagnosticsForTest()
+  fixture.input('\r')
+  await fixture.settleRender()
+  assert.match(fullTitle(fixture), /1\/1/, 'the single card target never re-targets itself')
+  assert.equal(fixture.app.transcriptSearchPresentationForTest()?.sourceKey, first?.sourceKey)
+  assert.equal(fixture.app.searchPresentationDiagnosticsForTest().rebuilds, 0,
+    'a single card target is never rebuilt by Enter')
 })

@@ -9,6 +9,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import {
   darkColors,
   detectThemeFromBackground,
@@ -21,6 +22,7 @@ import {
 } from '../../src/client/theme/files.ts'
 import { detectThemeFromColorFgBg, themeOptOut } from '../../src/client/theme/environment.ts'
 import {
+  color,
   currentPalette,
   setTheme,
   settingsListTheme,
@@ -118,31 +120,91 @@ test('resolveCustomTheme merges overrides onto the base palette', () => {
 
 test('withSearchCurrentTokens inherits the matching family search block (perf plan S3)', () => {
   const withoutSearchTokens = (palette: typeof darkColors): typeof darkColors => {
-    const { searchCurrentFg: _fg, searchCurrentBg: _bg, searchAnchorBg: _anchor, ...legacy } = palette
+    const {
+      searchMatchFg: _matchFg,
+      searchMatchBg: _matchBg,
+      searchCurrentFg: _fg,
+      searchCurrentBg: _bg,
+      searchAnchorBg: _anchor,
+      ...legacy
+    } = palette
+    void _matchFg
+    void _matchBg
     void _fg
     void _bg
     void _anchor
     return legacy as typeof darkColors
   }
-  // A light-ink body text is a DARK-family palette: it must inherit the dark
-  // search block, not the light one (the polarity bug the review caught).
   const darkFamily = withSearchCurrentTokens(withoutSearchTokens(darkColors))
-  assert.equal(darkFamily.searchCurrentBg, darkColors.searchCurrentBg, 'light ink inherits the DARK search block')
+  assert.equal(darkFamily.searchMatchBg, darkColors.searchMatchBg, 'light ink inherits the dark-family ordinary block')
+  assert.equal(darkFamily.searchMatchFg, darkColors.searchMatchFg)
+  assert.equal(darkFamily.searchCurrentBg, darkColors.searchCurrentBg, 'light ink inherits the dark current block')
   assert.equal(darkFamily.searchCurrentFg, darkColors.searchCurrentFg)
   assert.equal(darkFamily.searchAnchorBg, darkColors.searchAnchorBg)
   const lightFamily = withSearchCurrentTokens(withoutSearchTokens(lightColors))
-  assert.equal(lightFamily.searchCurrentBg, lightColors.searchCurrentBg, 'dark ink inherits the LIGHT search block')
+  assert.equal(lightFamily.searchMatchBg, lightColors.searchMatchBg, 'dark ink inherits the light-family ordinary block')
+  assert.equal(lightFamily.searchMatchFg, lightColors.searchMatchFg)
+  assert.equal(lightFamily.searchCurrentBg, lightColors.searchCurrentBg, 'dark ink inherits the light current block')
   assert.equal(lightFamily.searchCurrentFg, lightColors.searchCurrentFg)
-  // An explicit token is never overwritten.
   const explicit = withSearchCurrentTokens({ ...withoutSearchTokens(darkColors), searchCurrentBg: '#123456' })
-  assert.equal(explicit.searchCurrentBg, '#123456')
-  assert.equal(explicit.searchCurrentFg, darkColors.searchCurrentFg, 'the omitted sibling tokens are still filled')
-  // The validator accepts 8-digit hex too, so the family heuristic must as well
-  // (alpha is ignored).
+  assert.equal(explicit.searchCurrentBg, '#123456', 'an explicit current token is never overwritten')
+  assert.equal(explicit.searchCurrentFg, darkColors.searchCurrentFg, 'the omitted current sibling is filled')
+  assert.equal(explicit.searchMatchBg, darkColors.searchMatchBg, 'custom Current colors do not replace normal tokens')
   const alphaLight = withSearchCurrentTokens({ ...withoutSearchTokens(darkColors), text: '#E0E0E0FF' })
-  assert.equal(alphaLight.searchCurrentBg, darkColors.searchCurrentBg, 'an 8-digit light-ink body text picks the dark family')
+  assert.equal(alphaLight.searchMatchBg, darkColors.searchMatchBg, '8-digit light-ink text picks the dark family')
   const alphaDark = withSearchCurrentTokens({ ...withoutSearchTokens(lightColors), text: '#1A1A1AFF' })
-  assert.equal(alphaDark.searchCurrentBg, lightColors.searchCurrentBg, 'an 8-digit dark-ink body text picks the light family')
+  assert.equal(alphaDark.searchMatchBg, lightColors.searchMatchBg, '8-digit dark-ink text picks the light family')
+})
+
+test('built-in search colors reach the VirtualTerminal as yellow and orange RGB cells', async () => {
+  const vt = new VirtualTerminal(16, 1)
+  try {
+    for (const [mode, palette] of [['dark', darkColors], ['light', lightColors]] as const) {
+      vt.reset()
+      setTheme(mode)
+      vt.write(`${color.searchMatch('match')}${color.searchCurrent('current')}`)
+      await vt.flush()
+      assert.equal(vt.getCellBgRgb(0, 0), Number.parseInt(palette.searchMatchBg!.slice(1), 16), `${mode} ordinary background`)
+      assert.equal(vt.getCellFgRgb(0, 0), Number.parseInt(palette.searchMatchFg!.slice(1), 16), `${mode} ordinary foreground`)
+      assert.equal(vt.getCellBold(0, 0), false, `${mode} ordinary match weight`)
+      assert.equal(vt.getCellBgRgb(0, 5), Number.parseInt(palette.searchCurrentBg!.slice(1), 16), `${mode} current background`)
+      assert.equal(vt.getCellFgRgb(0, 5), Number.parseInt(palette.searchCurrentFg!.slice(1), 16), `${mode} current foreground`)
+      assert.equal(vt.getCellBold(0, 5), true, `${mode} current weight`)
+    }
+  } finally {
+    vt.stop()
+    setTheme('dark')
+  }
+})
+
+test('custom search tokens survive validation, resolution, live theme apply and VirtualTerminal paint', async () => {
+  const file = validateCustomTheme({
+    name: 'find-colors',
+    base: 'light',
+    colors: {
+      searchMatchFg: '#112233',
+      searchMatchBg: '#234567',
+      searchCurrentFg: '#F0F0F0',
+      searchCurrentBg: '#765432',
+    },
+  })
+  assert.ok(file, 'the custom theme schema accepts both new search tokens')
+  const palette = resolveCustomTheme(file)
+  const vt = new VirtualTerminal(16, 1)
+  try {
+    setTheme('custom', palette)
+    vt.write(`${color.searchMatch('match')}${color.searchCurrent('current')}`)
+    await vt.flush()
+    assert.equal(vt.getCellBgRgb(0, 0), 0x234567, 'ordinary occurrence uses custom RGB background')
+    assert.equal(vt.getCellFgRgb(0, 0), 0x112233, 'ordinary occurrence uses custom RGB foreground')
+    assert.equal(vt.getCellBold(0, 0), false, 'ordinary occurrence is not bold')
+    assert.equal(vt.getCellBgRgb(0, 5), 0x765432, 'current occurrence uses custom RGB background')
+    assert.equal(vt.getCellFgRgb(0, 5), 0xF0F0F0, 'current occurrence uses custom RGB foreground')
+    assert.equal(vt.getCellBold(0, 5), true, 'current occurrence is bold')
+  } finally {
+    vt.stop()
+    setTheme('dark')
+  }
 })
 
 test('validateCustomTheme accepts a well-formed file and rejects malformed ones', () => {

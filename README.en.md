@@ -542,7 +542,7 @@ Settings and Plugins pages that TSP cannot host are refused explicitly.
 | `Ctrl+T`      | Toggle the todo panel                               |
 | `Ctrl+R`      | Search input history                                |
 | `Ctrl+F`      | Find in the **mounted rendered** Transcript (View)  |
-| `Ctrl+Shift+F` | Find in the available Session semantic history (Full, includes invisible source, reports `Source-only`; the Remote scope follows the Find box's Loaded/Entire hint) |
+| `Ctrl+Shift+F` | Find in the available Session semantic history (Full, includes invisible source, reports `Source-only`; `N/M` counts navigable targets; the Remote scope follows the Find box's Loaded/Entire hint) |
 | `Tab` in Find | Switch View / Full and keep the same query           |
 | `Ctrl+End`    | Jump to the latest Transcript output in fullscreen; a clickable `↓ Latest` appears after leaving the live tail |
 | `Ctrl+O`      | Expand / collapse Tool and System details and long user prompts in regular/fullscreen-non-Focus; in fullscreen Focus, bulk-toggle the Thought roots (expand long user prompts by clicking the marker) |
@@ -565,7 +565,26 @@ history; Remote covers the loaded snapshot only, exactly as the Find box's
 Visual marker or a position the current renderer cannot prove: the fourth row then
 says `Source-only · no visible cell` or `Source-only · position unverified`, and a
 safe snippet is only attached for a Host-owned single-text User message or an
-**expanded** Thinking body. A target hidden behind the top-right Find box is
+**expanded** Thinking body. Every visible ordinary match is a **yellow
+background block**; the current source-proven occurrence is an **orange block +
+bold**. When the current card cannot prove its exact characters, the card's own
+visible header/anchor is marked orange **without bold** (visible query words on
+that card stay yellow) and the honest `Source-only` classification is kept. One
+card with **no visible query occurrence at all** — a merged run of consecutive
+`read` cards, or a card whose only hits are hidden link destinations — is
+exactly **one** navigation target: one `Enter` leaves it whenever another target
+exists. A card that still has a proving source channel WITH a visible query hit keeps its
+unvisited occurrences as separate targets first, so an exact-capable visible cell
+beside a truncated/unproven sibling is never swallowed; it converges after those
+visits. A card whose query only appears in status-count / header chrome has no
+such hit and stays one target.
+The `N/M` denominator is the number of reachable targets, which can be smaller
+than the raw occurrence count. When it is the only target, repeated Next/Prev
+stay on `1/1` without jitter. When the current card cannot prove its exact
+characters but its BODY really paints the query, the viewport prefers a readable
+body word (a Tool result uses a position-only body region; header chrome and
+status counters are never navigation evidence). That word remains an ordinary
+yellow match and never changes the `Source-only` classification. A target hidden behind the top-right Find box is
 moved out from under it; an
 already-visible hit is never needlessly re-centred. Opening Find from Regular mode
 borrows the fullscreen Transcript for the search and returns afterwards.

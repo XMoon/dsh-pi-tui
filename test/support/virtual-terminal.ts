@@ -187,8 +187,9 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	/**
-	 * Whether one viewport cell carries the INVERSE attribute — the current
-	 * transcript-search occurrence highlight (the fork's `ESC[1;7m` style).
+	 * Whether one viewport cell carries the INVERSE attribute. Transcript search
+	 * no longer uses inverse for its highlight; the accessor stays available for
+	 * surfaces/tests that assert an inverse attribute of their own.
 	 */
 	getCellInverse(row: number, col: number): boolean {
 		const buffer = this.xterm.buffer.active;
@@ -209,8 +210,9 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	/**
-	 * Whether one viewport cell carries the UNDERLINE attribute — the WEAK
-	 * transcript-search occurrence highlight (the fork's `ESC[4m` style).
+	 * Whether one viewport cell carries the UNDERLINE attribute. Transcript
+	 * search uses themed background blocks, not underline; the accessor stays
+	 * available for surfaces/tests that assert an underline of their own.
 	 */
 	getCellUnderline(row: number, col: number): boolean {
 		const buffer = this.xterm.buffer.active;

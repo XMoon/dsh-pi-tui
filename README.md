@@ -453,7 +453,7 @@ Settings / Plugins 页面会明确拒绝。
 | `Ctrl+T`      | 切换 Todo 面板              |
 | `Ctrl+R`      | 搜索输入历史                 |
 | `Ctrl+F`      | 在**已挂载渲染文本**中查找 Transcript（View） |
-| `Ctrl+Shift+F` | 在当前可用的 Session 语义历史中查找 Transcript（Full，包含不可见源码，带 `Source-only` 提示；Remote 覆盖范围以查找框的 Loaded/Entire 提示为准） |
+| `Ctrl+Shift+F` | 在当前可用的 Session 语义历史中查找 Transcript（Full，包含不可见源码，带 `Source-only` 提示；`N/M` 统计的是可导航目标；Remote 覆盖范围以查找框的 Loaded/Entire 提示为准） |
 | Search 内 `Tab` | 在 View / Full 之间切换，保留同一 query |
 | `Ctrl+End`    | 全屏时跳到最新 Transcript 输出；离开 live tail 时底部显示可点击的 `↓ Latest` |
 | `Ctrl+O`      | 展开 / 折叠工具和系统详情；普通与全屏非 Focus 下展开/收起超长用户 Prompt；全屏 Focus 下整体切换 Thought root（超长用户 Prompt 用点击/搜索展开） |
@@ -472,8 +472,15 @@ Settings / Plugins 页面会明确拒绝。
 `Ctrl+Shift+F` 打开 Full（按当前可用的 Session 语义历史搜索;Remote 场景只覆盖已加载快照,覆盖范围以查找框的 `Loaded`/`Entire` 提示为准;`N/M` 与 View 各自独立）。全窗口的命中可能落在
 隐藏链接、被消费的图片标记或当前渲染无法确证的位置:此时第 4 行显示 `Source-only · no visible cell`
 或 `Source-only · position unverified`,并只对 Host 原生的单段 User 文本或**展开的** Thinking 正文附带安全片段。
-目标被右上角查找框遮住时会自动移出框外；已在框外可见的命中不会被无谓重居中。普通模式下打开查找会
-临时借用全屏 Transcript,关闭后返回原来的普通视图。
+所有真实可见的普通命中显示为黄色背景;当前**已证明来源**的命中显示为橙色背景并加粗。当前卡片无法证明具体字符时,
+卡片自己的标题/可见锚点用橙色标出(不加粗),同卡可见关键词仍为黄色,并保留 `Source-only` 的诚实分类。
+一张当前**没有任何可见命中**的卡片(例如合并后的连续 `read`,或命中只落在隐藏链接目标)整卡只算**一个**导航目标;
+只要还有别的目标,按一次 `Enter` 就离开它。若卡片仍有可证明的来源通道、且本次查询在真实可见词上有命中,同卡尚未访问的命中会先按各自目标保留,
+以免吞掉旁边可精确证明的可见词;首次访问后按需收敛。若查询只出现在状态计数/界面文案里,整卡仍只算一个目标。`N/M` 的分母是可逐次到达的目标数,可能小于底层原始出现次数;
+只有这一个目标时重复 Next/Prev 保持在 `1/1`,不会抖动。若当前卡片无法证明具体字符但正文真的画出了关键词,
+视口会优先移到一个可读的正文词(例如 Tool result 的位置型正文区域;header、状态计数等界面文案不算导航证据);
+该词仍只是普通黄色匹配,不改变 `Source-only` 分类。目标被右上角查找框遮住时会自动移出框外;
+已在框外可见的命中不会被无谓重居中。普通模式下打开查找会临时借用全屏 Transcript,关闭后返回原来的普通视图。
 
 完整按键和命令以 TUI 中的 `/help` 为准。表中的快捷键是默认值;用户自定义后,以 `/help` 和 `/keybindings` 显示的生效键位为准。
 

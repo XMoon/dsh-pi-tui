@@ -108,7 +108,7 @@ test('presentation: the current occurrence is strong, the others weak', () => {
   assert.equal(selection.selectedRow, 0)
   assert.equal(selection.exact, true)
   const decorated = highlightSearchLines(lines, selection)
-  assert.ok(decorated[0]!.includes('\x1b[4mfoo\x1b[24m'), 'first occurrence weak underline')
+  assert.ok(decorated[0]!.includes(color.searchMatch('foo')), 'first occurrence has the ordinary yellow block')
   assert.ok(decorated[0]!.includes(strong('foo')), 'second occurrence strong (themed block, no inverse)')
   assert.ok(!decorated[0]!.includes('\x1b[1;7m'), 'the strong style never uses the terminal inverse attribute')
   assert.equal(stripTerminalSequences(decorated[0]!), 'foo bar foo', 'stripped text preserved')
@@ -161,7 +161,7 @@ test('presentation: overlapping matches in one ZWJ grapheme paint once with the 
   assert.equal(stripTerminalSequences(decorated[0]!), lines[0], 'the shared grapheme is never duplicated')
   assert.equal(visibleWidth(decorated[0]!), visibleWidth(lines[0]!))
   assert.ok(decorated[0]!.includes(strong('👩‍👩‍👦')), 'the overlapping current hit wins over the weak hit')
-  assert.ok(!decorated[0]!.includes('\x1b[4m'), 'the merged interval is not also painted weak')
+  assert.ok(!decorated[0]!.includes(color.searchMatch('👩‍👩‍👦')), 'the merged interval is not also painted yellow')
 })
 
 test('presentation: the shared painter clamps overlapping Job-style ranges to original cells', () => {
@@ -441,7 +441,7 @@ test('presentation: weakOnly decorates every occurrence and selects none', () =>
   const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'foo'), { query: 'foo', sourceOccurrence: 0, weakOnly: true })
   assert.equal(selection.selectedIndex, -1, 'no occurrence is current')
   const decorated = highlightSearchLines(lines, selection)
-  assert.equal(decorated[0]!.split('\x1b[4m').length - 1, 2, 'both occurrences are weak')
+  assert.equal(decorated[0]!.split(color.searchMatch('foo')).length - 1, 2, 'both occurrences are weak')
   assert.ok(!decorated[0]!.includes('\x1b[1;7m'), 'no strong occurrence')
   assert.equal(stripTerminalSequences(decorated[0]!), 'foo bar foo')
   assert.equal(visibleWidth(decorated[0]!), visibleWidth(lines[0]!))
@@ -513,14 +513,14 @@ test('presentation: stale Thinking geometry suppresses title and hint matches af
       const component = new SearchHighlightComponent(child, selector, initialSelection, 40, sourceLines)
       const before = component.render(40)
       if (selector.weakOnly) {
-        assert.ok(before[1]!.includes('\x1b[4mthinking\x1b[24m'), 'the non-current body is weakly decorated')
+        assert.ok(before[1]!.includes(color.searchMatch('thinking')), 'the non-current body is yellow')
       } else {
         assert.ok(before[1]!.includes(color.searchAnchorBg('  ')), 'the current body source has its anchor wash')
       }
 
       const after = component.render(stale.width)
       assert.deepEqual(after.map(stripTerminalSequences), [...stale.lines], 'stale geometry preserves every rendered row verbatim')
-      assert.ok(after.every(line => !line.includes('\x1b[4m') && !line.includes('\x1b[1;7m')),
+      assert.ok(after.every(line => !line.includes(color.searchMatch('Thinking')) && !line.includes('\x1b[1;7m')),
         'stale Thinking geometry suppresses matches rather than highlighting title or hint chrome')
       assert.ok(after.every(line => !line.includes(color.searchAnchorBg('Thinking'))),
         'stale Thinking geometry cannot row-wash the wrapped title')
@@ -546,12 +546,11 @@ test('presentation: an anchor-only current washes ONLY the anchor row and keeps 
   assert.equal(selection.selectedIndex, -1, 'no occurrence is proven')
   assert.equal(selection.selectedRow, 0, 'the anchor row is the region row')
   const decorated = highlightSearchLines(lines, selection)
-  assert.ok(decorated[0]!.includes('\x1b[4m'), 'the anchor row occurrence is still only weak')
-  assert.ok(decorated[0]!.includes(color.searchAnchorBg('needle')), 'the anchor row carries the weaker current wash')
-  assert.ok(decorated[0]!.includes(color.searchAnchorBg(' A')), 'the wash covers the whole anchor row, not just the occurrence')
+  assert.ok(decorated[0]!.includes(color.searchMatch('needle')), 'the anchor row occurrence is still only yellow')
+  assert.ok(decorated[0]!.includes(color.searchAnchorBg(' A')), 'legacy callers retain the weaker row wash')
   assert.ok(!decorated[0]!.includes(strong('needle')), 'an anchor-only selection never strong-highlights a guess')
   assert.ok(!decorated[1]!.includes(color.searchAnchorBg('needle')), 'the other rows are untouched')
-  assert.ok(decorated[1]!.includes('\x1b[4m'), 'the other visible occurrence stays weak')
+  assert.ok(decorated[1]!.includes(color.searchMatch('needle')), 'the other visible occurrence stays yellow')
 })
 
 test('presentation: the exact occurrence is NOT row-washed', () => {
@@ -569,22 +568,61 @@ test('presentation: the exact occurrence is NOT row-washed', () => {
 })
 
 test('presentation: the current styles follow the active palette (light + custom)', () => {
-  const lines = ['alpha needle beta']
-  const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), wholeCardSelector(lines, 'needle'))
+  const lines = ['alpha needle and needle beta']
+  const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), wholeCardSelector(lines, 'needle', 1))
   try {
     setTheme('light')
+    assert.ok(highlightSearchLines(lines, selection)[0]!.includes(color.searchMatch('needle')),
+      'the light palette paints ordinary occurrences')
+    assert.ok(color.searchMatch('needle').includes('\x1b[48;2;255;230;138m'),
+      'the light ordinary block uses the pale yellow background')
     assert.ok(highlightSearchLines(lines, selection)[0]!.includes(color.searchCurrent('needle')),
       'the light palette paints the current occurrence')
-    assert.equal(color.searchCurrent('needle').includes('\x1b[48;2;245;197;66m'), false,
-      'the light current block is not the dark background')
+    assert.ok(color.searchCurrent('needle').includes('\x1b[48;2;174;80;5m'),
+      'the light current block uses the orange background')
     setTheme('custom', { ...darkColors, searchCurrentBg: '#123456' })
+    assert.ok(highlightSearchLines(lines, selection)[0]!.includes(color.searchMatch('needle')),
+      'a custom palette keeps its ordinary yellow block')
     assert.ok(highlightSearchLines(lines, selection)[0]!.includes(color.searchCurrent('needle')),
       'a custom palette override flows into the highlight')
     assert.ok(highlightSearchLines(lines, selection)[0]!.includes('\x1b[48;2;18;52;86m'),
-      'the custom background is the one actually painted')
+      'the custom current background is the one actually painted')
   } finally {
     setTheme('dark')
   }
+})
+
+test('presentation: a current card anchor is orange while visible query words stay yellow', () => {
+  const lines = ['Read result needle and needle']
+  const matches = findAltScreenSearchMatches(lines, 'needle')
+  const decorated = highlightSearchLines(lines, {
+    matches,
+    selectedIndex: -1,
+    selectedRow: undefined,
+    exact: false,
+    cardAnchor: { row: 0, startCol: 0, endCol: visibleWidth('Read result') },
+  })
+  const yellow = color.searchMatch('needle')
+  const orangeAnchor = color.searchCardAnchor('\x1b[22mRead result')
+  assert.ok(decorated[0]!.includes(yellow), 'every visible body match remains yellow')
+  assert.ok(decorated[0]!.includes(orangeAnchor), 'only the actual card header columns use the orange anchor')
+  assert.ok(!decorated[0]!.includes(color.searchCurrent('Read result')), 'the card anchor never claims the bold exact style')
+  assert.equal(stripTerminalSequences(decorated[0]!), lines[0])
+  assert.equal(visibleWidth(decorated[0]!), visibleWidth(lines[0]))
+})
+
+test('presentation: a bold first line never makes the card anchor bold', () => {
+  const lines = ['\x1b[1mHeading needle\x1b[22m']
+  const decorated = highlightSearchLines(lines, {
+    matches: [],
+    selectedIndex: -1,
+    selectedRow: 0,
+    exact: false,
+    cardAnchor: { row: 0, startCol: 0, endCol: 7 },
+  })
+  assert.equal(stripTerminalSequences(decorated[0]!), 'Heading needle', 'visible text is unchanged')
+  assert.ok(decorated[0]!.includes('\x1b[22mHeading'), 'the content bold is neutralised inside the anchor')
+  assert.ok(!decorated[0]!.includes('\x1b[1mHeading'), 'the anchor text itself never starts bold')
 })
 
 test('presentation: an anchor-only current with NO visible occurrence still washes its anchor row', () => {
@@ -602,21 +640,26 @@ test('presentation: an anchor-only current with NO visible occurrence still wash
 })
 
 test('presentation: a palette that predates the search tokens still paints an explicit themed block', () => {
-  const { searchCurrentFg: _fg, searchCurrentBg: _bg, searchAnchorBg: _anchor, ...legacy } = darkColors
+  const { searchMatchFg: _matchFg, searchMatchBg: _matchBg, searchCurrentFg: _fg, searchCurrentBg: _bg, searchAnchorBg: _anchor, ...legacy } = darkColors
+  void _matchFg
+  void _matchBg
   void _fg
   void _bg
   void _anchor
   try {
     setTheme('custom', legacy as never)
     const styled = color.searchCurrent('needle')
+    assert.ok(color.searchMatch('needle').includes('\x1b[48;2;245;197;66m'),
+      'a legacy dark palette inherits the ordinary yellow block')
     assert.ok(!styled.includes('\x1b[1;7m'), 'a legacy palette NEVER falls back to the terminal inverse attribute')
-    assert.ok(styled.includes('\x1b[48;2;'), 'the current occurrence has an explicit inherited background')
+    assert.ok(styled.includes('\x1b[48;2;229;138;36m'), 'the current dark occurrence inherits the orange block')
     assert.ok(color.searchAnchorBg('needle').includes('\x1b[48;2;'), 'the anchor wash also has an explicit background')
 
-    // The body-text luminance picks the inherited family.
     setTheme('custom', { ...legacy, text: '#1A1A1A' } as never)
-    assert.ok(color.searchCurrent('x').includes('\x1b[48;2;255;215;94m'),
-      'a light-family body text inherits the light search block')
+    assert.ok(color.searchMatch('x').includes('\x1b[48;2;255;230;138m'),
+      'a legacy light-family palette inherits the light ordinary block')
+    assert.ok(color.searchCurrent('x').includes('\x1b[48;2;174;80;5m'),
+      'a light-family palette inherits the orange current block')
   } finally {
     setTheme('dark')
   }
@@ -765,9 +808,9 @@ test('proof: a weak occurrence never widens the proven strong range', () => {
   })
   assert.equal(stripTerminalSequences(decorated[0]!), 'ſss', 'the painted text is unchanged')
   assert.equal(visibleWidth(decorated[0]!), 3, 'the painted width is unchanged')
-  assert.ok(decorated[0]!.includes(strong('ss')), 'only the two proven cells are strong')
-  assert.ok(!decorated[0]!.includes(strong('ſ')), 'the overlapping weak cell is never upgraded')
-  assert.ok(decorated[0]!.includes('\x1b[4mſ\x1b[24m'), 'the weak occurrence keeps its uncovered cell')
+  assert.ok(decorated[0]!.includes(color.searchCurrent('ss')), 'only the two proven cells are strong')
+  assert.ok(!decorated[0]!.includes(color.searchCurrent('ſ')), 'the overlapping weak cell is never upgraded')
+  assert.ok(decorated[0]!.includes(color.searchMatch('ſ')), 'the weak occurrence keeps its uncovered cell')
 
   // A weak occurrence fully covered by the proof disappears instead of
   // duplicating the strong style.
@@ -779,7 +822,7 @@ test('proof: a weak occurrence never widens the proven strong range', () => {
     exactPaintedSegments: [{ row: 0, startCol: 0, endCol: 2 }],
   })
   assert.ok(covered[0]!.includes(strong('ſs')), 'the proven cells stay strong')
-  assert.ok(!covered[0]!.includes('\x1b[4m'), 'a fully covered weak range paints nothing')
+  assert.ok(!covered[0]!.includes(color.searchMatch('ſs')), 'a fully covered weak candidate paints nothing')
 
   // The same rule on the other side: the proof starts first and the weak range
   // only keeps its tail.
@@ -791,7 +834,7 @@ test('proof: a weak occurrence never widens the proven strong range', () => {
     exactPaintedSegments: [{ row: 0, startCol: 1, endCol: 2 }],
   })
   assert.ok(tail[0]!.includes(strong('s')), 'the proven cell is strong')
-  assert.ok(tail[0]!.includes('\x1b[4ms\x1b[24m'), 'the unproven weak cell stays weak')
+  assert.ok(tail[0]!.includes(color.searchMatch('s')), 'the unproven weak cell stays yellow')
 })
 
 test('proof: exactPaintedSegments paints only the proven cell and never anchor-washes', () => {
@@ -808,7 +851,7 @@ test('proof: exactPaintedSegments paints only the proven cell and never anchor-w
   assert.equal(visibleWidth(selection[0]!), visibleWidth(lines[0]!), 'the painted width is unchanged')
   assert.ok(selection[0]!.includes(strong('needle')), 'the proven second occurrence is current')
   assert.equal(selection[0]!.split(strong('needle')).length - 1, 1, 'exactly ONE occurrence is current')
-  assert.ok(selection[0]!.includes('\x1b[4mneedle\x1b[24m'), 'the unproven first occurrence stays weak')
+  assert.ok(selection[0]!.includes(color.searchMatch('needle')), 'the unproven first occurrence stays yellow')
   assert.ok(!selection[0]!.includes(color.searchAnchorBg('alpha')), 'an exact selection is never row-washed')
 
   const overlapping = highlightSearchLines(lines, {
@@ -819,8 +862,8 @@ test('proof: exactPaintedSegments paints only the proven cell and never anchor-w
     exactPaintedSegments: [{ row: 0, startCol: 6, endCol: 12 }],
   })
   assert.ok(overlapping[0]!.includes(strong('needle')), 'the proven cell wins over its weak candidate')
-  assert.equal(overlapping[0]!.split('\x1b[4mneedle').length - 1, 1,
-    'the merged proven cell is not also painted weak (only the other occurrence is)')
+  assert.ok(overlapping[0]!.includes(color.searchMatch('needle')), 'the uncovered occurrence remains yellow')
+  assert.ok(!overlapping[0]!.includes('\x1b[4m'), 'the painted ranges do not use underline')
 
   const range = selectRenderedSearchScrollRange(matches, {
     matches,

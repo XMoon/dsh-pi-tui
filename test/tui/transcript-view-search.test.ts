@@ -12,8 +12,12 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { enterChildDisplaySubject, exitChildDisplaySubject } from '../support/display-subject.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
-const STRONG_BG = 0xf5c542
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
+
+const paletteRgb = (hex: string | undefined): number | undefined =>
+  hex === undefined ? undefined : Number.parseInt(hex.slice(1), 16)
+const strongBg = (): number | undefined => paletteRgb(currentPalette.searchCurrentBg)
+const weakBg = (): number | undefined => paletteRgb(currentPalette.searchMatchBg)
 
 afterEach(() => {
   disposeStartedApps()
@@ -81,7 +85,8 @@ function strongOccurrences(
   lines: readonly string[],
   query: string,
 ): Array<{ row: number; column: number }> {
-  return occurrences(lines, query).filter(({ row, column }) => vt.getCellBgRgb(row, column) === STRONG_BG)
+  return occurrences(lines, query).filter(({ row, column }) =>
+    vt.getCellBgRgb(row, column) === strongBg())
 }
 
 function weakOccurrences(
@@ -89,7 +94,8 @@ function weakOccurrences(
   lines: readonly string[],
   query: string,
 ): Array<{ row: number; column: number }> {
-  return occurrences(lines, query).filter(({ row, column }) => vt.getCellUnderline(row, column))
+  return occurrences(lines, query).filter(({ row, column }) =>
+    vt.getCellBgRgb(row, column) === weakBg())
 }
 
 async function paintTranscript(
@@ -364,10 +370,9 @@ test('rendered View counts painted Markdown text but excludes a hidden href with
     assert.equal(painted.length, 9, 'the mounted Markdown paints heading, prose, emphasis, quote, list, both code forms and link label')
     assert.deepEqual(strongOccurrences(vt, lines, 'needle'), [painted[0]],
       'the first painted occurrence is the one strong result')
-    const weakPainted = painted.filter(({ row, column }) =>
-      vt.getCellUnderline(row, column) && vt.getCellBgRgb(row, column) !== STRONG_BG)
+    const weakPainted = painted.filter(({ row, column }) => vt.getCellBgRgb(row, column) === weakBg())
     assert.deepEqual(weakPainted, painted.slice(1),
-      'every non-current painted occurrence has the weak-only underline style')
+      'every non-current painted occurrence has the ordinary yellow style')
     for (const paintedText of ['paragraph needle', 'italic needle', 'blockquote needle', 'list needle', 'inline needle', 'fenced = "needle"', 'label needle']) {
       assert.ok(lines.some(line => stripTerminalSequences(line).includes(paintedText)),
         `the real Markdown renderer paints ${paintedText}:\\n${lines.join('\\n')}`)
@@ -727,7 +732,7 @@ test('rendered View reflows CJK, emoji and combining graphemes at supported tran
       assert.equal(selected.length, 1, `width ${width} paints one selected occurrence`)
       const selectedCell = selected[0]!
       const styledColumns = Array.from({ length: width }, (_, column) => column)
-        .filter(column => vt.getCellBgRgb(selectedCell.row, column) === STRONG_BG)
+        .filter(column => vt.getCellBgRgb(selectedCell.row, column) === strongBg())
       assert.ok(styledColumns.length > 0,
         `width ${width} paints the unique selected grapheme with the strong style; selected=${JSON.stringify(selectedCell)}, styledColumns=${styledColumns.join(',')}, line=${JSON.stringify(lines[selectedCell.row])}`)
     }
@@ -1045,7 +1050,7 @@ test('rendered View reflows the active strong cell and retires its old coordinat
     const after = strongOccurrences(vt, vt.getViewport(), 'needle')
     assert.equal(after.length, 1, 'the reflowed frame has one current painted cell')
     assert.notDeepEqual(after[0], before, 'the strong segment moves with the wrapped rendered row')
-    assert.notEqual(vt.getCellBgRgb(before.row, before.column), STRONG_BG,
+    assert.notEqual(vt.getCellBgRgb(before.row, before.column), strongBg(),
       'the pre-resize coordinates cannot retain a stale strong highlight')
   } finally {
     app.clearRenderedViewSearch()
@@ -1129,7 +1134,7 @@ test('rendered View remeasures its current cell when an async image changes the 
     assert.equal(after.length, 1, 'the remeasured frame has one current painted cell')
     assert.notDeepEqual(after[0], before,
       'the current highlight follows the answer row after the preceding image gains rows')
-    assert.notEqual(vt.getCellBgRgb(before.row, before.column), STRONG_BG,
+    assert.notEqual(vt.getCellBgRgb(before.row, before.column), strongBg(),
       'the old viewport cell is no longer strong after reflow')
 
     const mountedImage = (app as unknown as {
