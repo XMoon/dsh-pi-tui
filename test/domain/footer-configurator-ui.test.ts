@@ -18,7 +18,7 @@ import { FooterCustomItemCatalog } from '../../src/tui/footer/custom-item-catalo
 import { FooterItemRegistry } from '../../src/tui/footer/item-registry.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../../src/domain/footer/presets.ts'
 import type { StatusSnapshot } from '../../src/domain/status/types.ts'
-import { visibleWidth } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { mountEmbeddedPage } from '../support/embedded-page-harness.ts'
 
@@ -149,7 +149,7 @@ test('the configurator opens on the Row Selector with a live preview', async () 
   assert.ok(view.includes('Preview'), `preview label missing:\n${view}`)
   assert.ok(view.includes('Row 1'), `the row list missing:\n${view}`)
   assert.ok(view.includes('deepseek/flash'), `preview must compose the real snapshot:\n${view}`)
-  assert.ok(view.includes('↑↓ Select · Enter Open · S Done · ← Back · Esc Close'), `the selector bar missing:\n${view}`)
+  assert.ok(view.includes('↑↓ Select · Enter Open · S Done · ← Back · Close [Esc]'), `the selector bar missing:\n${view}`)
   app.stop()
 })
 
@@ -299,7 +299,7 @@ test('M enters Move Mode; arrows reorder; Enter exits', async () => {
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('◆') && view.includes('↑↓ Move'), `the move banner must show:\n${view}`)
-  assert.ok(view.includes('↑↓ Move · ←→ Side · Enter/Esc Done'), `the move help must show:\n${view}`)
+  assert.ok(view.includes('↑↓ Move · ←→ Side · Enter · Done [Esc]'), `the move help must show:\n${view}`)
   vt.sendInput('\x1b[B') // ↓ reorders the first item down
   await vt.waitForRender()
   assert.equal(model.preview().rows[0]!.left[0]!.id, 'permission-preset')
@@ -417,7 +417,7 @@ test('the Item Editor edits style/tone; the picker renders live examples', async
   assert.ok(view.includes('Tone'), `the tone row missing:\n${view}`)
   assert.ok(view.includes('Hide in TSP'), `the visibility row missing:\n${view}`)
   assert.ok(view.includes('Advanced…'), `the advanced row missing:\n${view}`)
-  assert.ok(view.includes('↑↓ Select · Enter Open · ←→ Change · Esc Back'), `item help missing:\n${view}`)
+  assert.ok(view.includes('↑↓ Select · Enter Open · ←→ Change · Back [Esc]'), `item help missing:\n${view}`)
   const contextFormat = (): string | undefined =>
     model.preview().rows[1]!.right.find(ref => ref.id === 'context')!.format
   // ←→ cycles the style inline: full → bar (the definition default drops
@@ -910,7 +910,7 @@ test('resizing the terminal LARGER after opening does not clip the configurator'
   await vt.waitForRender()
   const view = vt.getViewport()
   const text = view.join('\n')
-  assert.match(view[view.length - 1]!, /Esc Back|A Add/u,
+  assert.match(view[view.length - 1]!, /Back \[Esc\]|A Add/u,
     `the ONE Action Bar must remain the last physical row after the resize:\n${text}`)
   assert.ok(text.includes('Extension items'), `the active item must be visible after the resize:\n${text}`)
   assert.ok(text.includes('Preview'), `the preview must stay visible after the resize (80x40):\n${text}`)
@@ -974,7 +974,7 @@ test('the preview and the help NEVER scroll away (the fixed shell)', async () =>
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('Preview'), `the preview must not scroll away:\n${view}`)
-  assert.ok(view.includes('Esc Back'), `the contextual help must not scroll away:\n${view}`)
+  assert.ok(view.includes('Back [Esc]'), `the contextual help must not scroll away:\n${view}`)
   assert.ok(view.includes('A Add'), `the help head must stay visible:\n${view}`)
   app.stop()
 })
@@ -1210,7 +1210,7 @@ for (const rows of [1, 2, 3, 4, 6, 40]) {
     openDefault(vt, app)
     await vt.waitForRender()
     const view = vt.getViewport()
-    assert.ok(view[rows - 1]?.includes('Esc Close'),
+    assert.ok(view[rows - 1]?.includes('Close [Esc]'),
       `the ONE Action Bar must be the last physical row at ${rows} rows:\n${view.join('\n')}`)
     assert.ok(!view.some(line => line.includes('╭') || line.includes('╰')),
       `the page paints no overlay Frame chrome at ${rows} rows:\n${view.join('\n')}`)
@@ -1237,7 +1237,7 @@ for (const cols of [40, 80, 120]) {
       await vt.waitForRender()
       const view = vt.getViewport()
       const text = view.join('\n')
-      assert.ok(view[rows - 1]?.includes('Esc Back'),
+      assert.ok(view[rows - 1]?.includes('Back [Esc]'),
         `the ONE Action Bar must be the last physical row at ${cols}x${rows}:\n${text}`)
       // THE key guarantee: the EDITABLE body survives — the cursor's item
       // (the last one: Display) must be on screen, never eaten by a preview.
@@ -1494,7 +1494,7 @@ test('the exit guard keeps all three actions visible at 40x10', async () => {
   assert.ok(view.includes('Save & Exit'), `Save & Exit must be visible:\n${view}`)
   assert.ok(view.includes('Discard & Exit'), `Discard & Exit must be visible:\n${view}`)
   assert.ok(view.includes('Keep Editing'), `Keep Editing must be visible:\n${view}`)
-  assert.ok(view.includes('Esc Keep Editing'), 'the exit guard bar must be painted')
+  assert.ok(view.includes('Keep editing [Esc]'), 'the exit guard bar must be painted')
   assert.equal(cancelled, 0)
   app.stop()
 })
@@ -1556,7 +1556,7 @@ test('a bar-only Footer grant shows the frozen save, never a back verb it refuse
   await vt.waitForRender()
   const bar = vt.getViewport()[0] ?? ''
   assert.match(bar, /Saving…/u, `a held save outranks the bar-only wording: ${bar}`)
-  assert.doesNotMatch(bar, /← Back|Esc Close|Esc Back/u,
+  assert.doesNotMatch(bar, /← Back|Close \[Esc\]|Back \[Esc\]/u,
     `the frozen frame must not advertise a refused back verb: ${bar}`)
   release?.()
   vt.resize(100, 20)
@@ -1576,7 +1576,7 @@ test('a bar-only Footer grant advertises and accepts ← as the root back verb',
   await vt.waitForRender()
   const bar = vt.getViewport()[0] ?? ''
   assert.match(bar, /← Back/u, `the bar-only root advertises the accepted ← verb: ${bar}`)
-  assert.match(bar, /Esc Close/u, `the bar-only root keeps the Esc verb: ${bar}`)
+  assert.match(bar, /Close \[Esc\]/u, `the bar-only root keeps the Esc verb: ${bar}`)
   assert.doesNotMatch(bar, /S Done|Enter Open/u, `no hidden save/open verb is advertised: ${bar}`)
   vt.sendInput('\x1b[D')
   await vt.waitForRender()
@@ -1594,7 +1594,7 @@ test('a bar-only Footer grant refuses ← inside a sub-page (it is not the root)
   vt.resize(100, 1)
   await vt.waitForRender()
   const bar = vt.getViewport()[0] ?? ''
-  assert.match(bar, /Esc Back/u, `the sub-page bar keeps only Esc: ${bar}`)
+  assert.match(bar, /Back \[Esc\]/u, `the sub-page bar keeps only Esc: ${bar}`)
   assert.doesNotMatch(bar, /← Back/u, 'a sub-page never advertises the root back verb')
   vt.sendInput('\x1b[D')
   await vt.waitForRender()
@@ -1928,4 +1928,71 @@ test('row-move mode: a mouse click cannot reorder items or exit the mode (mouse 
   assert.deepEqual(after, before, 'the click must not reorder items in Move Mode')
   assert.equal(model.state().mode, 'row-move', 'the click must not exit Move Mode')
   app.stop()
+})
+
+test('the bar publishes the ONE painted Esc span, and nothing when it is cut or frozen', async () => {
+  const { vt, app } = startApp()
+  const model = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry())
+  const { panel } = openPage(vt, app, {
+    model,
+    registry: app.getFooterItemRegistry(),
+    onSave: () => {},
+    onCancel: () => {},
+  })
+  await vt.waitForRender()
+  // Paint the frame FIRST: the span always describes the last completed paint.
+  const bar = (): string => stripTerminalSequences(panel.render(100).at(-1)!)
+  const expectVerb = (verb: string): void => {
+    const painted = bar()
+    const span = panel.paintedEscapeSpan()
+    assert.ok(span !== undefined, `the ${verb} affordance is complete`)
+    assert.equal(painted.slice(span.startCol, span.endCol), `${verb} [Esc]`,
+      `the span covers exactly the plain ${verb} token`)
+    assert.equal(span.endCol - span.startCol, visibleWidth(`${verb} [Esc]`),
+      'painting the affordance never changes its visible width')
+  }
+
+  // Clean Row Selector: Esc closes the page (the bar names its real effect).
+  expectVerb('Close')
+
+  // A dirty Row Selector: Esc opens the EXISTING unsaved-changes gradient, so
+  // the verb stays Back (never Close).
+  panel.handleInput('\r') // the first row
+  panel.handleInput(' ') // remove its first item → dirty
+  panel.handleInput('\x1b') // back to the Row Selector
+  expectVerb('Back')
+
+  // Esc INSIDE the guard is Keep Editing, the guard's own real outcome.
+  panel.handleInput('\x1b') // open the exit-confirm
+  expectVerb('Keep editing')
+
+  // A save in flight freezes input: the bar states the fact and advertises no
+  // clickable Esc at all.
+  model.beginSave()
+  panel.render(100)
+  assert.equal(panel.paintedEscapeSpan(), undefined,
+    'the frozen save bar publishes no Esc geometry')
+  model.endSave()
+
+  // A cut row keeps no ghost geometry; the next whole paint restores it.
+  panel.render(9)
+  assert.equal(panel.paintedEscapeSpan(), undefined, 'a truncated bar is never clickable')
+  expectVerb('Keep editing')
+})
+
+test('a grant change invalidates the painted Esc span before the repaint', async () => {
+  const { vt, app } = startApp()
+  const model = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry())
+  const { panel } = openPage(vt, app, {
+    model,
+    registry: app.getFooterItemRegistry(),
+    onSave: () => {},
+    onCancel: () => {},
+  })
+  await vt.waitForRender()
+  panel.render(100)
+  assert.ok(panel.paintedEscapeSpan() !== undefined, 'precondition — a whole bar was painted')
+  panel.setMaxRows(5)
+  assert.equal(panel.paintedEscapeSpan(), undefined,
+    'a new grant has not painted yet, so no old geometry stays clickable')
 })

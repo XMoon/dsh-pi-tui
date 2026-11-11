@@ -133,6 +133,7 @@ export {
 import {
   OUTPUT_VIEWER_MAX_HEIGHT,
   OUTPUT_VIEWER_WIDTH,
+  type OutputViewerBar,
   OutputViewerPanel,
 } from './tui/panels/output-viewer-panel.ts'
 import { ImageThumbnail } from './tui/components/media/image-thumbnail.ts'
@@ -26764,12 +26765,13 @@ export class TuiApp {
       // reveal (and leaves a search whose row the frame could not show), so no
       // layout is ever mutated from inside `render()`.
       onFramePainted: () => panel.onFramePainted(),
-      // Phase 3B / B1-C: the header's Command summary / Copy All affordances are
-      // plain painted cells (no mouse-handling component), so their same-cell
-      // press/click arrives here and the panel re-proves the press-time painted
-      // identity before acting.
-      onCellPress: (x, y) => panel.onHeaderPress(x, y),
-      onCellClick: (x, y) => panel.onHeaderClick(x, y),
+      // Phase 3B / B1-C: the header's Command summary / Copy All affordances AND
+      // the pinned Action Bar's Esc affordance are plain painted cells (no
+      // mouse-handling component), so their same-cell press/click arrives here
+      // as the panel's ONE chrome gesture and it re-proves the press-time
+      // painted identity before acting.
+      onCellPress: (x, y) => panel.onChromePress(x, y),
+      onCellClick: (x, y) => panel.onChromeClick(x, y),
     })
     const nativeCopyOnSelect = screen.getCopyOnSelect()
     screen.setLayoutRoot(panel)
@@ -27857,22 +27859,34 @@ export class TuiApp {
     // inert overlay handle would never dispose the panel, so the unref'd
     // interval would keep calling options.refresh() forever.
     if (this.disposed) return () => {}
-    // ONE live capability source for both the hint and the key handler: a
+    // The overlay mounts on the CURRENT active screen; the panel's pointer route
+    // exists only while THAT screen is still the active fullscreen surface, so a
+    // Regular/Main viewer never gains an application mouse path.
+    const hostScreen = this.activeScreen
+    // ONE live capability source for both the chrome and the key handler: a
     // job that settles (or leaves the registry) while the viewer is open
     // stops offering Stop on the next tick and its key becomes a no-op.
     const stopAvailable = (): boolean => options.onStop !== undefined && (options.canStop?.() ?? true)
-    const hintOf = (): { hint: string; fallback: string } => {
+    const closeVerb = options.closeHint === 'back' ? 'Back' : 'Close'
+    const hintOf = (): OutputViewerBar => {
       const close = options.closeHint === 'back' ? 'Esc back' : 'Esc close'
       const closeHint = color.textDim(close)
-      // The close/back verb is the primary action; Stop degrades away when
-      // the combined hint cannot fit the viewer's content width.
-      if (!stopAvailable()) return { hint: closeHint, fallback: closeHint }
-      // The stop label comes from the SAME app keybinding definition the
-      // handler matches (tasks.stop) — never a hard-coded 's'.
-      const key = this.keybindings.keyHint('tasks.stop')
-      return { hint: color.textDim(`${key} stop · ${close}`), fallback: closeHint }
+      const stopKey = this.keybindings.keyHint('tasks.stop')
+      const stop = stopAvailable() && stopKey !== ''
+      return {
+        // The historical keyboard-only forms (the Regular/Main surface).
+        legacy: stop
+          ? { hint: color.textDim(`${stopKey} stop · ${close}`), fallback: closeHint }
+          : { hint: closeHint, fallback: closeHint },
+        // The ONE fullscreen bar: the same live truth as complete affordances;
+        // the keycap is the SAME effective binding the key handler matches.
+        actions: [
+          ...(stop ? [{ action: 'stop' as const, text: `Stop [${stopKey.length === 1 ? stopKey.toUpperCase() : stopKey}]`, priority: 2, role: 'secondary' as const }] : []),
+          { action: 'close' as const, text: `${closeVerb} [Esc]`, priority: 8, role: 'secondary' as const },
+        ],
+      }
     }
-    const initialHint = hintOf()
+    const initialHint = hintOf().legacy
     const panel = new OutputViewerPanel(options.title, options.initial, initialHint.hint, initialHint.fallback)
     // ONE per-open finalizer is the ONLY notification owner: Esc, the returned
     // closer and the frame's physical `onDispose` all funnel here, so
@@ -27915,6 +27929,18 @@ export class TuiApp {
       // caps are reached (the shared last-painted-geometry mouse fence).
       return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
     }
+    // The panel paints the live fullscreen bar from the SAME capability source,
+    // and the pointer route is gated on the REAL mount screen: while a fullscreen
+    // swap rebinds the overlay elsewhere the captured identity stops matching and
+    // the route fails closed. The two sinks are the existing close-once intent
+    // and the existing tasks.stop semantic.
+    panel.setBar(hintOf)
+    panel.setMouseRoute({
+      enabled: () => hostScreen === this.activeScreen && hostScreen instanceof TuiAltScreen,
+      stopAvailable,
+      onStop: () => options.onStop?.(),
+      onClose: () => requestClose(),
+    })
     // The responsive shell mirrors the fork's clamped overlay budget into
     // the panel, so the body row budget (and the bottom hint) match the
     // physically granted box on resize and short terminals. The -2 drops
@@ -27933,7 +27959,7 @@ export class TuiApp {
     // owned panel is disposed and an interval started here would never be
     // cleared — arm the timer only while the viewer is still live.
     if (!finalized) {
-      panel.startRefreshing(options.refresh, () => this.requestRender(), options.intervalMs ?? 1000, hintOf)
+      panel.startRefreshing(options.refresh, () => this.requestRender(), options.intervalMs ?? 1000)
     }
     return requestClose
   }

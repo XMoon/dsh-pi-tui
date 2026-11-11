@@ -191,7 +191,7 @@ test('short action details keep the selected binding in the viewport', () => {
   try {
     const view = plain(editor.render(88).join('\n'))
     assert.match(view, /› Ctrl\+F \(default\)/)
-    assert.match(view, /Esc back/)
+    assert.match(view, /Back \[Esc\]/)
   } finally {
     editor.dispose()
     manager.dispose()
@@ -645,15 +645,15 @@ test('editor search hint switches between Esc clear and Esc close', () => {
   const { manager, panel } = makePanel(() => {})
   try {
     let view = plain(panel.render(88).join('\n'))
-    assert.match(view, /Esc close/, 'empty query advertises Esc close')
+    assert.match(view, /Back \[Esc\]/, 'empty query advertises Back [Esc]')
     panel.handleInput('todo')
     view = plain(panel.render(88).join('\n'))
-    assert.match(view, /Esc clear/, 'non-empty query advertises Esc clear')
-    assert.doesNotMatch(view, /Esc close/, 'non-empty query must not advertise Esc close')
-    // First Esc clears (not closes); the hint flips back to close.
+    assert.match(view, /Clear \[Esc\]/, 'non-empty query advertises Clear [Esc]')
+    assert.doesNotMatch(view, /Back \[Esc\]/, 'non-empty query must not advertise Back [Esc]')
+    // First Esc clears (not closes); the hint flips back to the back verb.
     panel.handleInput('\x1b')
     view = plain(panel.render(88).join('\n'))
-    assert.match(view, /Esc close/, 'after clear the hint returns to Esc close')
+    assert.match(view, /Back \[Esc\]/, 'after clear the hint returns to Back [Esc]')
     // Second Esc closes.
     let closed = 0
     const { manager: m2, panel: p2 } = makePanel(() => { closed += 1 })
@@ -1212,7 +1212,7 @@ test('keybinding editor: the parent grant caps the standalone budget without res
     assert.ok(nested.length <= 4, `the parent grant must cap the frame (got ${nested.length})`)
     const nestedText = plain(nested.join('\n'))
     assert.match(nestedText, /Search: submit/, 'setMaxRows must not reset the query')
-    assert.match(nestedText, /Esc clear/, 'the operation hint must survive the grant')
+    assert.match(nestedText, /Clear \[Esc\]/, 'the operation hint must survive the grant')
     assert.equal(nestedText.split('\n').find(line => line.includes('›')), marked, 'setMaxRows must not reset the selection')
 
     // A non-finite parent grant restores the standalone budget exactly.
@@ -1229,21 +1229,21 @@ test('keybinding editor: degenerate grants keep the operation hint and only pain
     panel.setMaxRows(1)
     let view = panel.render(88).map(plain)
     assert.equal(view.length, 1)
-    assert.match(view[0]!, /Esc close/)
+    assert.match(view[0]!, /Back \[Esc\]/)
     assert.equal(panel.handleMouse(mouse('press', 10, 0, 88, 30)), undefined, 'the hint row is inert')
 
     panel.setMaxRows(2)
     view = panel.render(88).map(plain)
     assert.equal(view.length, 2)
     assert.match(view[0]!, /^Search: /, 'the editable search row survives a two-row grant')
-    assert.match(view[1]!, /Esc close/)
+    assert.match(view[1]!, /Back \[Esc\]/)
 
     panel.setMaxRows(3)
     view = panel.render(88).map(plain)
     assert.deepEqual(view.length, 3)
     assert.match(view[0]!, /^Search: /)
     assert.match(view[1]!, /^Keymap: /, 'the keymap fact is the third-row survivor')
-    assert.match(view[2]!, /Esc close/)
+    assert.match(view[2]!, /Back \[Esc\]/)
     assert.ok(panel.handleMouse(mouse('press', 10, 0, 88, 30))?.handled, 'the painted search row must stay clickable')
     assert.equal(panel.handleMouse(mouse('press', 10, 1, 88, 30)), undefined, 'the keymap fact row is inert')
     assert.equal(panel.handleMouse(mouse('press', 10, 2, 88, 30)), undefined, 'the hint row is inert')
@@ -1272,7 +1272,7 @@ test('keybinding editor: a short grant keeps a real error over the optional chro
     panel.setMaxRows(5)
     const short = plain(panel.render(88).join('\n'))
     assert.match(short, /could not save the leader key/, 'a real error must survive the short grant')
-    assert.match(short, /Esc back/, 'the operation row must survive the short grant')
+    assert.match(short, /Back \[Esc\]/, 'the operation row must survive the short grant')
   } finally {
     panel.dispose()
     manager.dispose()
@@ -1331,7 +1331,7 @@ test('action editor: a short choose-binding grant keeps the painted choice hit m
     editor.handleInput('a') // enter choose-binding
     const view = editor.render(88).map(plain)
     assert.ok(view.length <= 4, `the grant must cap the binding choice (got ${view.length})`)
-    assert.match(view.join('\n'), /Esc back/, 'the binding-choice hint must survive the short grant')
+    assert.match(view.join('\n'), /Back \[Esc\]/, 'the binding-choice hint must survive the short grant')
     const directRow = view.findIndex(line => line.includes('Direct shortcut'))
     assert.ok(directRow >= 0, `the Direct choice must stay painted:\n${view.join('\n')}`)
     assert.notEqual(directRow, 3, 'the hit map must follow the painted rows, not a fixed row index')
@@ -1405,16 +1405,16 @@ test('keybinding editor: the key recorder keeps its Esc line as the last granted
     panel.handleInput('\r') // start the recorder
     const full = plain(panel.render(60).join('\n'))
     assert.match(full, /Record shortcut/, 'the recorder must be active')
-    assert.match(full, /Esc: cancel/, 'the recorder bar names its own cancel')
+    assert.match(full, /Cancel \[Esc\]/, 'the recorder bar names its own cancel')
     panel.setMaxRows(2)
     const short = panel.render(60).map(plain)
     assert.equal(short.length, 2)
     assert.match(short[0]!, /Waiting for one key/, 'the status is the survivor above the bar')
-    assert.match(short[1]!, /Esc: cancel/, 'the recorder bar is the LAST granted row')
+    assert.match(short[1]!, /Cancel \[Esc\]/, 'the recorder bar is the LAST granted row')
     panel.setMaxRows(1)
     const barOnly = panel.render(60).map(plain)
     assert.equal(barOnly.length, 1)
-    assert.match(barOnly[0]!, /Esc: cancel/, 'a bar-only grant still shows the way out')
+    assert.match(barOnly[0]!, /Cancel \[Esc\]/, 'a bar-only grant still shows the way out')
   } finally {
     manager.dispose()
   }
@@ -1452,7 +1452,7 @@ test('a pending action mutation owns the page: Esc cannot strand its result', ()
     assert.equal((editor as unknown as { disposed: boolean }).disposed, false, 'the editor must not be disposed while pending')
     const bar = plain(editor.render(88).join('\n'))
     assert.match(bar, /Saving…/, 'the bar states the frozen write')
-    assert.doesNotMatch(bar, /Esc back/, 'no exit verb is advertised while the write owns the page')
+    assert.doesNotMatch(bar, /Back \[Esc\]/, 'no exit verb is advertised while the write owns the page')
     // The settlement re-opens navigation.
     pending[0]!.done!({
       kind: 'rejected',
@@ -1460,7 +1460,7 @@ test('a pending action mutation owns the page: Esc cannot strand its result', ()
     })
     const settled = plain(editor.render(88).join('\n'))
     assert.match(settled, /the write was refused by the authority/, 'the failure reason is visible')
-    assert.match(settled, /Esc back/, 'navigation resumes once the write settles')
+    assert.match(settled, /Back \[Esc\]/, 'navigation resumes once the write settles')
     editor.handleInput('\x1b')
     assert.equal(backs, 1, 'Esc leaves only after the settlement')
   } finally {
@@ -1558,7 +1558,7 @@ test('a settled action mutation restores Esc; repeated Esc while pending never l
       parsed,
       message: 'Shortcut reset.',
     })
-    assert.match(plain(editor.render(88).join('\n')), /Esc back/, 'the exit verb returns with the settlement')
+    assert.match(plain(editor.render(88).join('\n')), /Back \[Esc\]/, 'the exit verb returns with the settlement')
     editor.handleInput('\x1b')
     assert.equal(backs, 1, 'exactly one back after the write settled')
   } finally {
@@ -1584,7 +1584,7 @@ test('a bar-only leader editor accepts only its painted Esc', () => {
     panel.handleInput('\r') // leader editor
     panel.setMaxRows(1)
     const bar = plain(panel.render(88).join('\n'))
-    assert.match(bar, /Esc back/, 'the bar-only leader view keeps the way back')
+    assert.match(bar, /Back \[Esc\]/, 'the bar-only leader view keeps the way back')
     assert.doesNotMatch(bar, /Enter record|r reset/, 'no hidden leader verb is advertised')
     panel.handleInput('r')
     panel.handleInput('\r')
@@ -1613,7 +1613,7 @@ test('a bar-only keybinding list accepts no hidden Enter action', () => {
   try {
     const lines = panel.render(88)
     assert.equal(lines.length, 1)
-    assert.match(plain(lines[0]!), /Esc close/u)
+    assert.match(plain(lines[0]!), /Back \[Esc\]/u)
     assert.doesNotMatch(plain(lines[0]!), /Enter details/u)
     assert.doesNotMatch(plain(lines[0]!), /type search/u,
       'the one-row bar must not advertise the search it refuses')
@@ -1696,7 +1696,7 @@ test('a bar-only root list with a query neither clears it nor claims the back ve
     const bar = plain(panel.render(88).join('\n'))
     assert.doesNotMatch(bar, /← Back|type search/u,
       `a bar-only query state advertises only the Esc it accepts: ${bar}`)
-    assert.match(bar, /Esc clear/u)
+    assert.match(bar, /Clear \[Esc\]/u)
     panel.handleInput('\x1b[D')
     assert.equal(closed, 0, 'a non-empty query keeps ← away from the page back')
     assert.equal((panel as unknown as { query: string }).query, 'submit', 'the invisible query is untouched')
@@ -1724,7 +1724,7 @@ test('a bar-only action detail refuses a hidden Enter and Add until its body pai
   try {
     const lines = editor.render(88)
     assert.equal(lines.length, 1)
-    assert.match(plain(lines[0]!), /Esc back/u)
+    assert.match(plain(lines[0]!), /Back \[Esc\]/u)
     editor.handleInput('\r')
     editor.handleInput('a')
     assert.deepEqual(mutations, [], 'no hidden recorder or choose-binding transition ran')
@@ -1749,9 +1749,182 @@ test('a bar-only key recorder accepts only its painted Esc, never a hidden key',
   })
   const lines = recorder.render(60)
   assert.equal(lines.length, 1)
-  assert.match(plain(lines[0]!), /Esc: cancel/u)
+  assert.match(plain(lines[0]!), /Cancel \[Esc\]/u)
   recorder.handleInput('\x18')
   assert.deepEqual(captured, [], 'a key is not captured while only the bar is painted')
   recorder.handleInput('\x1b')
   assert.equal(cancelled, 1, 'the painted Esc still cancels')
+})
+
+test('the list bar publishes the ONE painted Esc span and never a half token', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    // Paint the frame FIRST: the span always describes the last completed paint.
+    const bar = (): string => plain(panel.render(88).at(-1)!)
+    const expectVerb = (verb: string): void => {
+      const painted = bar()
+      const span = panel.paintedEscapeSpan()
+      assert.ok(span !== undefined, `the ${verb} affordance is complete`)
+      assert.equal(painted.slice(span.startCol, span.endCol), `${verb} [Esc]`,
+        `the span covers exactly the plain ${verb} token`)
+      assert.equal(span.endCol - span.startCol, visibleWidth(`${verb} [Esc]`),
+        'painting the affordance never changes its visible width')
+    }
+
+    // Empty query: the root list's Esc returns to Settings.
+    expectVerb('Back')
+    // A non-empty query: Esc clears the search and never closes the page.
+    panel.handleInput('todo')
+    expectVerb('Clear')
+    // No whole wording fits: the historical fallback carries no geometry.
+    panel.render(5)
+    assert.equal(panel.paintedEscapeSpan(), undefined, 'a cut bar is never clickable')
+    panel.handleInput('\x1b') // clear the query
+    expectVerb('Back')
+    // The detail page owns its bar; the list delegates that page-local span.
+    panel.handleInput('\x1b[B')
+    panel.handleInput('\r')
+    const detailBar = plain(panel.render(88).at(-1)!)
+    const detailSpan = panel.paintedEscapeSpan()
+    assert.ok(detailSpan !== undefined, 'the detail span is delegated to the list')
+    assert.equal(detailBar.slice(detailSpan.startCol, detailSpan.endCol), 'Back [Esc]')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('the leader editor publishes its own Back [Esc] span and none while saving', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    panel.handleInput('\r') // leader editor
+    const verbSpan = (): { readonly text: string; readonly startCol: number; readonly endCol: number } => {
+      const painted = plain(panel.render(88).at(-1)!)
+      const span = panel.paintedEscapeSpan()
+      assert.ok(span !== undefined, 'the leader bar advertises a complete Esc affordance')
+      return { text: painted, startCol: span.startCol, endCol: span.endCol }
+    }
+    const full = verbSpan()
+    assert.equal(full.text.slice(full.startCol, full.endCol), 'Back [Esc]')
+
+    // A bar-only grant keeps the same truthful span after its own paint.
+    panel.setMaxRows(1)
+    assert.equal(panel.paintedEscapeSpan(), undefined, 'the new grant has not painted yet')
+    const short = verbSpan()
+    assert.equal(short.text.slice(short.startCol, short.endCol), 'Back [Esc]')
+
+    // A pending leader write freezes input: facts only, no Esc geometry.
+    panel.setMaxRows(30)
+    panel.render(88)
+    panel.handleInput('r') // a reset write that never settles
+    assert.match(plain(panel.render(88).join('\n')), /Saving…/)
+    assert.equal(panel.paintedEscapeSpan(), undefined, 'the frozen write advertises no clickable Esc')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('the action detail publishes its own Back [Esc] span and none when cut', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.transcript.search.view')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 30,
+  })
+  try {
+    assert.equal(editor.paintedEscapeSpan(), undefined, 'no frame has been painted yet')
+    const painted = plain(editor.render(88).at(-1)!)
+    const span = editor.paintedEscapeSpan()
+    assert.ok(span !== undefined, 'the detail bar advertises a complete Esc affordance')
+    assert.equal(painted.slice(span.startCol, span.endCol), 'Back [Esc]',
+      'the span covers exactly the plain detail Esc token')
+    assert.equal(span.endCol - span.startCol, visibleWidth('Back [Esc]'),
+      'painting the affordance never changes its visible width')
+
+    // A width where not even the fallback fits: no half token is clickable.
+    editor.render(7)
+    assert.equal(editor.paintedEscapeSpan(), undefined, 'a cut detail bar publishes no span')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('the list delegates the action detail span unchanged', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    panel.render(88)
+    panel.handleInput('\x1b[B') // the first action row
+    panel.handleInput('\r') // open its detail
+    const lines = panel.render(88)
+    const span = panel.paintedEscapeSpan()
+    const painted = plain(lines.at(-1)!)
+    assert.ok(span !== undefined, 'the delegated detail span survives the list render')
+    assert.equal(painted.slice(span.startCol, span.endCol), 'Back [Esc]')
+    const detail = (panel as unknown as { actionEditor?: ActionEditorPanel }).actionEditor
+    assert.ok(detail !== undefined)
+    assert.deepEqual(span, detail.paintedEscapeSpan(),
+      'the list reports the SAME page-local span its detail page painted')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('the recorder publishes Cancel [Esc] for a real cancel, never for interrupt assignment', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({ 'app.agent.interrupt': 'ctrl+x' })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const detail = model.rows.find(candidate => candidate.id === 'app.transcript.search.view')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: detail,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 30,
+  })
+  const interruptRow = model.rows.find(candidate => candidate.id === 'app.agent.interrupt')!
+  const interrupt = new ActionEditorPanel({
+    model,
+    action: interruptRow,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 30,
+  })
+  try {
+    // The ordinary recorder's Esc really cancels back to the detail.
+    editor.handleInput('\r') // start the recorder on the selected binding
+    const painted = plain(editor.render(88).at(-1)!)
+    const span = editor.paintedEscapeSpan()
+    assert.ok(span !== undefined, 'the recorder cancel is a complete affordance')
+    assert.equal(painted.slice(span.startCol, span.endCol), 'Cancel [Esc]',
+      'the span covers exactly the plain Cancel token')
+    // A cut recorder row publishes no geometry.
+    editor.render(5)
+    assert.equal(editor.paintedEscapeSpan(), undefined)
+
+    // The interrupt recorder's Escape window ASSIGNS a key when pressed twice:
+    // it stays a raw-input state hint and publishes no mouse geometry.
+    interrupt.handleInput('\r')
+    const interruptBar = plain(interrupt.render(88).at(-1)!)
+    assert.match(interruptBar, /Esc: cancel/, 'the interrupt raw-input hint stays')
+    assert.match(interruptBar, /double-Esc: assign Escape/u, 'the assignment hint stays discoverable')
+    assert.equal(interrupt.paintedEscapeSpan(), undefined,
+      'the recorder never manufactures a mouse key press')
+  } finally {
+    editor.dispose()
+    interrupt.dispose()
+    manager.dispose()
+  }
 })

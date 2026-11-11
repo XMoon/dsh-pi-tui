@@ -6,6 +6,7 @@ import { isEditorSubmitPreSubmitKey, isPhysicalEscapeAction, isTerminalAmbiguous
 import type { KeyId } from '@xmoon76/pi-tui'
 import type { AppKeybindingId } from '../types.ts'
 import { color } from '../../theme/runtime.ts'
+import { paintActionSpan } from '../../presentation/action-ink.ts'
 
 export type KeyRecorderPurpose = 'direct' | 'leader-completion' | 'leader-key'
 
@@ -94,6 +95,10 @@ export class KeyRecorder implements Component {
   private escapePending = false
   private escapeTimer: unknown
   private disposed = false
+  /** The complete Esc affordance of the LAST painted bar, in this recorder's
+   *  own content columns. The interrupt recorder's Escape window is a raw-input
+   *  state, NOT a plain return affordance, so it never publishes one. */
+  private paintedEscapeSpanValue: { readonly startCol: number; readonly endCol: number } | undefined
 
   constructor(options: KeyRecorderOptions) {
     this.purpose = options.purpose
@@ -109,11 +114,28 @@ export class KeyRecorder implements Component {
   render(width: number): string[] {
     const safeWidth = Math.max(1, width)
     const interruptDirect = this.purpose === 'direct' && this.action === 'app.agent.interrupt'
-    const barText = interruptDirect
-      ? ['Esc: cancel · double-Esc: assign Escape', 'Esc: cancel · double-Esc', 'Esc: cancel']
+    // The ordinary recorder's Esc is a REAL cancel back to the action detail,
+    // so it is the ONE copyable affordance. The interrupt recorder is different:
+    // its first Escape ARMS a 300 ms window and the second ASSIGNS the physical
+    // Escape key, so a synthetic click there could fabricate a recorded key
+    // (design §9.2: the last row must never manufacture mouse "key presses").
+    // That state keeps its raw-input hint and publishes no geometry.
+    const token = 'Cancel [Esc]'
+    const affordance = !interruptDirect && visibleWidth(token) <= safeWidth
+    this.paintedEscapeSpanValue = affordance ? { startCol: 0, endCol: visibleWidth(token) } : undefined
+    if (interruptDirect) {
+      const barText = ['Esc: cancel · double-Esc: assign Escape', 'Esc: cancel · double-Esc', 'Esc: cancel']
         .find(text => visibleWidth(text) <= safeWidth) ?? 'Esc: cancel'
-      : 'Esc: cancel'
-    const bar = truncateToWidth(color.textDim(barText), safeWidth)
+      return this.renderRows(safeWidth, truncateToWidth(color.textDim(barText), safeWidth))
+    }
+    const bar = affordance
+      ? paintActionSpan(token, 'secondary')
+      : truncateToWidth(color.textDim(token), safeWidth)
+    return this.renderRows(safeWidth, bar)
+  }
+
+  /** Paint the optional recorder context above the mandatory Esc bar. */
+  private renderRows(safeWidth: number, bar: string): string[] {
     const budget = Math.max(1, this.maxRows())
     this.hasPainted = true
     if (budget <= 1) {
@@ -123,7 +145,7 @@ export class KeyRecorder implements Component {
     // The way back is the mandatory LAST row; everything else is optional
     // context that yields in priority order on a short grant.
     const status = this.error === undefined
-      ? interruptDirect && this.escapePending
+      ? this.isInterruptDirect() && this.escapePending
         ? color.accent('Esc again to assign Escape…')
         : color.accent('Waiting for one key…')
       : color.error(this.error)
@@ -161,6 +183,13 @@ export class KeyRecorder implements Component {
     return [...body.map(row => truncateToWidth(row.text, safeWidth)), bar]
   }
 
+  /** The complete visible Esc affordance span of the LAST PAINTED frame, in
+   *  this recorder's own content-column coordinates; undefined for the
+   *  interrupt recorder (its Escape window assigns a key) and for a cut row. */
+  paintedEscapeSpan(): { readonly startCol: number; readonly endCol: number } | undefined {
+    return this.paintedEscapeSpanValue
+  }
+
   invalidate(): void {}
 
   /** Stop the pending Escape disambiguation callback before the parent panel
@@ -168,6 +197,7 @@ export class KeyRecorder implements Component {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.paintedEscapeSpanValue = undefined
     this.clearEscapeTimer()
     this.escapePending = false
   }

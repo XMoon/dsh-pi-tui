@@ -188,7 +188,7 @@ test('bare /keybindings deeplinks into the ONE Settings lease and disposes its p
     // pane header and the page's ONE bar — not the legacy 88-column overlay.
     assert.match(view, /Settings · Input & Terminal · Keyboard shortcuts/, `${columns}x${rows}: the Settings lease must own the screen:\n${view}`)
     assert.match(view, /Search: /, `${columns}x${rows}: the page's input is painted:\n${view}`)
-    assert.match(view, /Esc close/, `${columns}x${rows}: the page bar is the physical last row:\n${view}`)
+    assert.match(view, /Back \[Esc\]/, `${columns}x${rows}: the page bar is the physical last row:\n${view}`)
     assert.ok(!view.includes('╭') && !view.includes('╰'), `${columns}x${rows}: no second overlay Frame may be mounted:\n${view}`)
     const panel = h.deeplink().panel
     assert.ok(panel !== undefined, `${columns}x${rows}: the real command must mount the KeybindingEditorPanel:\n${view}`)

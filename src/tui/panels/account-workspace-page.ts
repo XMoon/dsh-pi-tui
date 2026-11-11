@@ -25,7 +25,8 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
-import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { paintActionSpan } from '../presentation/action-ink.ts'
 import { color } from '../theme/runtime.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import type { AccountObservation, AccountObservationLease, AccountProfile, AccountView, AccountWallet, AccountWatchInvalidationReason } from '../../runtime/config-port.ts'
@@ -642,6 +643,38 @@ export class AccountWorkspacePage implements Component {
     this.paintedCopy = false
   }
 
+  /** The complete visible Esc affordance span of the LAST rendered frame
+   *  (page-local columns), or undefined when the frame painted none. The
+   *  Settings root owns the ONE physical last row and publishes its pointer
+   *  target from THIS span. */
+  paintedEscapeSpan(): { readonly startCol: number; readonly endCol: number } | undefined {
+    return this.paintedEscape
+  }
+
+  /** The complete painted Esc affordance of the last bar this page generated. */
+  private paintedEscape: { readonly startCol: number; readonly endCol: number } | undefined
+
+  /** Lay out + paint one bar row: the LAST (Esc) segment carries the scoped
+   *  Fullscreen secondary ink, every other hint stays `textMuted`, and only a
+   *  FULLY painted Esc segment publishes its span. */
+  private paintBar(segments: readonly ActionBarSegment[], width: number): string {
+    const layout = layoutActionBarRow(segments, width)
+    this.paintedEscape = undefined
+    if (layout.truncated || layout.spans.length === 0) return color.textMuted(layout.text)
+    const escapeIndex = segments.length - 1
+    let span: { startCol: number; endCol: number } | undefined
+    const painted = layout.spans.map(candidate => {
+      if (candidate.inputIndex !== escapeIndex) return color.textMuted(candidate.text)
+      span = { startCol: candidate.startCol, endCol: candidate.endCol }
+      return paintActionSpan(candidate.text, 'secondary')
+    })
+    this.paintedEscape = span
+    const segmentWidth = layout.spans.reduce((sum, candidate) => sum + visibleWidth(candidate.text), 0)
+      + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
+    const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
+    return painted.join(color.textMuted(ACTION_BAR_SEPARATOR)) + ' '.repeat(padding)
+  }
+
   render(width: number): string[] {
     if (this.disposed) return []
     this.lastWidth = width
@@ -664,7 +697,7 @@ export class AccountWorkspacePage implements Component {
         : []
       while (out.length < bodyRows) out.push(fit('', width))
       // The fallback names the same real Esc effect as the normal bar.
-      out.push(color.textMuted(renderActionBarRow([{ text: this.escHint(), priority: 8 }], width)))
+      out.push(this.paintBar([{ text: this.escHint(), priority: 8 }], width))
       return out.slice(0, height)
     }
     this.fallbackActive = false
@@ -705,9 +738,9 @@ export class AccountWorkspacePage implements Component {
    *  reports its in-flight state, an open sign-out confirmation cancels, and an
    *  idle page backs out. */
   private escHint(): string {
-    if (this.busy !== undefined) return 'Esc wait'
-    if (this.signOutConfirm) return 'Esc cancel'
-    return 'Esc back'
+    if (this.busy !== undefined) return 'Wait [Esc]'
+    if (this.signOutConfirm) return 'Cancel [Esc]'
+    return 'Back [Esc]'
   }
 
   private actionBar(width: number, actions: readonly ActionLine[]): string {
@@ -716,7 +749,7 @@ export class AccountWorkspacePage implements Component {
     if (actions.length > 0) segments.push({ text: 'Up/Down select', priority: 5 }, { text: 'Enter select', priority: 6 })
     segments.push({ text: 'r refresh', priority: 2 })
     segments.push({ text: this.escHint(), priority: 8 })
-    const rendered = renderActionBarRow(segments, width)
+    const rendered = this.paintBar(segments, width)
     this.paintedCopy = rendered.includes('c copy')
     return rendered
   }

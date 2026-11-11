@@ -190,7 +190,7 @@ can be reviewed against a frame:
 | 11 | Diagnostic line | `textMuted` | no | `Scope: … · Refreshed 09:41` |
 | 12 | Count / position | `textMuted` | no | `2 editable rows`, `rows 7-40/40`, `3/8 checks` |
 | 13 | Action hint | `textMuted` | no | `Esc back`, `Enter details` |
-| 14 | Affordance (clickable/keyed verb) | `primary` (except the Fullscreen dense Action Bar, §7.1) | no | `↗ Command`, `Copy All [C]`, `Change…`, `x remove` (fullscreen draft preview) |
+| 14 | Affordance (clickable/keyed verb) | `primary` (except the Fullscreen dense Action Bars listed in §7.1) | no | `↗ Command`, `Copy All [C]`, `Change…`, `x remove` (fullscreen draft preview) |
 | 15 | Rule / gutter | `border` | no | `─`, 2-cell column gutter |
 | 16 | Placeholder / empty state | `textDim`, and `error` for the word of a *failed* one | no | `No matching commands`, `Model catalog unavailable: …`, `Waiting for retained output…` |
 | 17 | Notice | `textMuted` (info) / `error` (error) | no | `ℹ Copy sent`, `✗ Copy failed` |
@@ -704,18 +704,25 @@ anchor, without inventing a fourth meaning for `primary`.
   body. Plugin Diagnostics, the Models/Account pages and every other surface's
   business copy keep their own affordances; this rule is scoped to Settings
   About alone.
-- Affordances are `primary` (role 14), with ONE Owner-scoped exception: the
-  PiTui Fullscreen Question and Task Center dense Action Bars. There the
-  primary forward/commit verb (Continue, Review, Next, Submit, Confirm stop)
+- Affordances are `primary` (role 14), with an Owner-scoped exception for the
+  PiTui Fullscreen DENSE Action Bars. There the primary forward/commit verb
+  (Question: Continue, Review, Next, Submit, Confirm stop; Task Center:
+  Confirm stop; Session: Open, Choose, Results, Verify, Expand, Collapse)
   paints `text`, the secondary verbs (Skip, Edit, Back, Cancel, Cancel flow,
-  Leave edit, Stop) paint `textDim`, and pure keyboard hints, `[Key]` caps and
-  ` · ` separators paint `textMuted`. The difference is brightness only: no
-  bold, no `primary` flood, no background, border, icon or new glyph. Every
-  other affordance keeps Role 14 `primary`. This exception applies only to the
-  PiTui Fullscreen Question and Task Center Action Bars in this PR; other
-  panels must not adopt it automatically. Later PR2–PR4 surfaces may extend the
-  treatment after an independent UI/UX evaluation and explicit Owner
-  confirmation.
+  Leave edit, Stop, Peek, Close, Clear, Hide, Wait, Keep editing, Done, and
+  the Job/Command bar's `Output`/`Leave find`) paint `textDim`; the Viewer's
+  one-step `Stop [Key]` is such a secondary verb (it has no confirm step), and pure keyboard hints, `[Key]` caps and ` · ` separators paint
+  `textMuted`. The difference is brightness only: no bold, no `primary` flood,
+  no background, border, icon or new glyph. The exception is scoped to the
+  dense Action Bars of the PiTui Fullscreen Question/Task Center seats and the
+  Job, Output Viewer, Session Workspace, Settings (root and its hosted
+  About/Models/Account/Plugin/Footer/Keybindings/specialist pages) fullscreen
+  surfaces; every other affordance keeps Role 14 `primary` and no other panel
+  adopts the treatment automatically. A clickable dense-bar segment renders
+  `Verb [Key]` (or a bare `Verb` when no key can be named) and the keycap alone
+  is muted; the same segment is never also painted as a plain `<Key> <verb>`
+  hint. Extending the scope further is a spec change (§11.1) with an explicit
+  Owner decision.
 
 ### 7.2 Ordering and degradation
 

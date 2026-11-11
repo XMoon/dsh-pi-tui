@@ -22,9 +22,10 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import test, { afterEach } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
-import { visibleWidth } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import type { TuiCommandRunner } from '../../src/commands.ts'
 import { TuiApp } from '../../src/tui-app.ts'
+import { WebSettingsPage, type WebSettingsFacts } from '../../src/tui/panels/web-settings-page.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import type { TuiSettingsDoc, WebProviderSettings } from '../../src/runtime/config-port.ts'
@@ -1316,7 +1317,7 @@ test('no credential action is offered when the store is unavailable, and the bar
   const detail = h.view()
   assert.match(detail, /The official credential store is unavailable/u)
   assert.doesNotMatch(detail, /Enter open in Models/u, 'no false Enter affordance without an action')
-  assert.match(detail, /Esc back/u)
+  assert.match(detail, /Back \[Esc\]/u)
   await key(h, ENTER)
   assert.doesNotMatch(h.view(), /Settings · Models/u)
   assert.deepEqual(h.writes, [])
@@ -1386,7 +1387,7 @@ test('a stale backend closes an open endpoint draft with zero writes and recover
   // The endpoint DETAIL must not advertise the editor either: the backend is
   // non-current, so the editor would refuse the next Confirm.
   assert.doesNotMatch(closed, /Enter edit endpoint/u, `the stale Detail advertises no editor:\n${closed}`)
-  assert.match(closed, /r refresh · Esc back/u, 'the bar offers only the read refresh')
+  assert.match(closed, /r refresh · Back \[Esc\]/u, 'the bar offers only the read refresh')
   assert.deepEqual(h.writes, [], 'closing the draft writes nothing')
   await key(h, ENTER)
   assert.doesNotMatch(h.view(), /Enter confirm · Esc cancel/u, 'Enter on the stale Detail never opens the editor')
@@ -1417,7 +1418,7 @@ test('a resize that clips the credential actions removes the Enter affordance an
   await h.vt.waitForRender()
   const clipped = h.view()
   assert.doesNotMatch(clipped, /Enter open in Models/u, `the clipped frame must not advertise Enter:\n${clipped}`)
-  assert.match(clipped, /r refresh · Esc back/u, 'only the read refresh is offered')
+  assert.match(clipped, /r refresh · Back \[Esc\]/u, 'only the read refresh is offered')
   // No hit target either: Enter cannot navigate.
   await key(h, ENTER)
   assert.doesNotMatch(h.view(), /Settings · Models/u, 'Enter on a cropped action never navigates')
@@ -1588,7 +1589,7 @@ test('a resize that crops the highlighted candidate removes the Enter confirm af
   assert.deepEqual(h.writes, [], 'Enter on an invisible candidate dispatches nothing')
   h.vt.resize(120, 40)
   await h.vt.waitForRender()
-  assert.match(h.view(), /Enter confirm · Esc back/u, 'the restored frame advertises the Confirm again')
+  assert.match(h.view(), /Enter confirm · Back \[Esc\]/u, 'the restored frame advertises the Confirm again')
   await key(h, ENTER)
   await settlePainted(h, 'the confirmed count write', frame => frame.includes('Verified'))
   assert.deepEqual(h.writes, ['count:20'])
@@ -1826,4 +1827,57 @@ test('the page states defaults, billing, the ori_question boundary and the endpo
   assert.match(compact(), /the URL shape/u)
   assert.match(compact(), /is checked, not the host's trust/u)
   assert.match(compact(), /Official base: https:\/\/api\.deepseek\.com\/v1\/tools/u)
+})
+
+test('the page bar publishes the complete Esc span in its OWN content columns', () => {
+  const facts: WebSettingsFacts = {
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-official',
+      fetchProvider: 'http',
+      api: { baseURL: 'https://api.deepseek.com/v1/tools', count: 10, sendOriginalQuestion: true },
+      credential: { configured: true, source: 'file' },
+    },
+  }
+  const page = new WebSettingsPage({
+    readFacts: () => facts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => true,
+    commit: async () => ({ kind: 'verified', actual: '10' }),
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: () => {},
+    done: () => {},
+  })
+  try {
+    // Before ANY paint there is no frame to describe.
+    assert.equal(page.paintedEscapeSpan(), undefined)
+    page.setMaxRows(20)
+    // Paint the frame FIRST: the span always describes the last completed paint.
+    const bar = (): string => stripTerminalSequences(page.render(80).at(-1)!)
+    const expectVerb = (verb: string): void => {
+      const painted = bar()
+      const span = page.paintedEscapeSpan()
+      assert.ok(span !== undefined, `the ${verb} affordance is complete`)
+      assert.equal(painted.slice(span.startCol, span.endCol), `${verb} [Esc]`,
+        `the span covers exactly the plain ${verb} token`)
+      assert.equal(span.endCol - span.startCol, visibleWidth(`${verb} [Esc]`),
+        'painting the affordance never changes its visible width')
+    }
+
+    // List region: Esc returns to the Tools rows.
+    expectVerb('Tools')
+    // Detail region: Esc returns to the page list.
+    page.handleInput('\r')
+    expectVerb('Back')
+    page.handleInput('\x1b')
+    expectVerb('Tools')
+
+    // No wording fits at all: the bar is empty and carries no geometry.
+    page.render(8)
+    assert.equal(page.paintedEscapeSpan(), undefined, 'a dropped wording advertises no Esc')
+  } finally {
+    page.dispose()
+  }
 })

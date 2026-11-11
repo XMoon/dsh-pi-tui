@@ -408,7 +408,7 @@ for (const [columns, rows] of [[120, 40], [80, 24], [44, 20], [44, 8]] as const)
     assert.match(frame, /Enter open in Models/u, 'the ONE action bar names the Models deeplink')
     assert.doesNotMatch(frame, /sk-|secret value/iu, 'no secret is ever painted')
     for (const line of h.plain()) assert.ok(visibleWidth(line) <= columns)
-    assertBarIsLastRow(h.plain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Esc back')
+    assertBarIsLastRow(h.plain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Back [Esc]')
     // Enter opens the EXISTING Models page in the same lease.
     await key(h, ENTER)
     await waitForPainted(h, 'the Models page on the reference', frame =>

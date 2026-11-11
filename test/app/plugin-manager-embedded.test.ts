@@ -79,7 +79,7 @@ test('every breakpoint projects the frozen plugin columns in all three stages', 
     await contentFocus(harness)
     const listRows = frameRows(harness)
     assert.equal(visibleWidth(listRows.at(-1)!), width, `every painted row is exactly ${width} cells wide`)
-    assert.match(bar(harness), /Esc back/u, `${width}: the List root yields, it never closes`)
+    assert.match(bar(harness), /Back \[Esc\]/u, `${width}: the List root yields, it never closes`)
     if (width < 76) {
       // ONE column: no pane header row and the page owns the full width.
       assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 0, `${width}: single-column list starts at x=0`)
@@ -104,7 +104,7 @@ test('every breakpoint projects the frozen plugin columns in all three stages', 
     await harness.waitForFrame()
     assert.equal(harness.panel.currentView(), 'details', `${width}: Enter enters Details`)
     if (width < 76) {
-      assert.match(bar(harness), /Esc back/u, `${width}: narrow Details keeps its own Esc`)
+      assert.match(bar(harness), /Back \[Esc\]/u, `${width}: narrow Details keeps its own Esc`)
       assert.ok(
         !frameRows(harness).some(line => line.trimStart().startsWith('[Details]')),
         `${width}: a narrow frame paints no pane header:\n${harness.view()}`,
@@ -121,7 +121,7 @@ test('every breakpoint projects the frozen plugin columns in all three stages', 
     const page = harness.panel
     await yieldToRail(harness)
     assert.equal(harness.panel, page, `${width}: the yield keeps the SAME page instance`)
-    assert.match(bar(harness), /Esc close/u, `${width}: the rail owns the physical last row`)
+    assert.match(bar(harness), /Close \[Esc\]/u, `${width}: the rail owns the physical last row`)
     const railRows = frameRows(harness)
     if (width < 76) {
       // Narrow: the category list alone; the page is not painted.
@@ -152,7 +152,7 @@ test('short frames keep the truthful last-row bar and drop the optional rows fir
     const frame = frameRows(harness)
     assert.equal(frame.length, rows, `${columns}x${rows}: the frame paints exactly ${rows} rows`)
     assert.equal(visibleWidth(frame.at(-1)!), columns, `${columns}x${rows}: the last row is the full-width bar`)
-    assert.match(bar(harness), /Esc back/u, `${columns}x${rows}: the bar always names the real Esc`)
+    assert.match(bar(harness), /Back \[Esc\]/u, `${columns}x${rows}: the bar always names the real Esc`)
     // The body always keeps at least one row once the header and the bar fit.
     const body = frame.slice(1, -1)
     assert.ok(body.length >= 1, `${columns}x${rows}: one real body row survives`)
@@ -171,7 +171,7 @@ test('short frames keep the truthful last-row bar and drop the optional rows fir
   await harness.vt.waitForRender()
   const frame = frameRows(harness)
   assert.equal(frame.length, 2, 'the 2-row frame keeps only the header and the bar')
-  assert.match(frame.at(-1)!, /Esc back/u, 'the plugin content names its real Esc below the body floor')
+  assert.match(frame.at(-1)!, /Back \[Esc\]/u, 'the plugin content names its real Esc below the body floor')
   assert.doesNotMatch(harness.view(), /TUI & Extensions/u, 'no hidden list row is painted')
   harness.app.dispose()
 })
@@ -210,7 +210,7 @@ test('the focus matrix runs real keys and never rebuilds or re-reads the page', 
   // Shift+Tab from the untouched List root returns to the rail (>=76 columns).
   harness.vt.sendInput('\x1b[Z')
   await harness.waitForFrame()
-  assert.match(bar(harness), /Esc close/u, 'Shift+Tab yielded to the rail')
+  assert.match(bar(harness), /Close \[Esc\]/u, 'Shift+Tab yielded to the rail')
   assert.equal(harness.panel.focused, false)
 
   // Enter: only re-focuses the content; it never opens Details by itself.
@@ -253,7 +253,7 @@ test('the focus matrix runs real keys and never rebuilds or re-reads the page', 
 
   // Esc on the List root yields; a second Esc closes the ONE Settings lease.
   await yieldToRail(harness)
-  assert.match(bar(harness), /Esc close/u)
+  assert.match(bar(harness), /Close \[Esc\]/u)
   harness.vt.sendInput('\x1b')
   await harness.waitForFrame()
   assert.doesNotMatch(harness.view(), /Settings ·/u, 'the final Esc closed the Settings workspace')
@@ -404,7 +404,7 @@ test('below the body floor only the REAL Esc is admitted and advertised', async 
   harness.vt.resize(120, 2)
   await harness.waitForFrame()
   const zero = harness.view()
-  assert.equal(bar(harness).trim(), 'Esc back', 'the 2-row frame advertises only the real Esc destination')
+  assert.equal(bar(harness).trim(), 'Back [Esc]', 'the 2-row frame advertises only the real Esc destination')
   // Every key the page advertises on a full frame is inert here: none may open
   // a hidden body, start a Host read or change the filter.
   for (const key of ['/', 'i', 'd', 'r', '\t'] as const) {
@@ -437,7 +437,7 @@ test('a zero-row search edit drops the apply and keeps only the real Esc', async
   assert.match(harness.view(), /Search: foo/u, 'the query was typed on the full frame')
   harness.vt.resize(80, 2)
   await harness.waitForFrame()
-  assert.equal(bar(harness).trim(), 'Esc clear search', 'the zero-row search bar names the real Esc effect only')
+  assert.equal(bar(harness).trim(), 'Clear [Esc]', 'the zero-row search bar names the real Esc effect only')
   harness.vt.sendInput('x')
   await harness.waitForFrame()
   harness.vt.sendInput('\r')
@@ -468,7 +468,7 @@ test('a same-category rail click never steals a plugin sub-view Esc gradient', a
   await details.waitForFrame()
   assert.equal(details.panel.currentView(), 'details', 'the rail click cannot leave Details')
   assert.equal(details.panel.focused, true, 'the page keeps the ONE input focus')
-  assert.match(bar(details), /Esc back/u, 'the page keeps the last-row bar')
+  assert.match(bar(details), /Back \[Esc\]/u, 'the page keeps the last-row bar')
   details.vt.sendInput('\x1b')
   await details.waitForFrame()
   assert.equal(details.panel.currentView(), 'list', 'Esc runs the page gradient first')
@@ -505,7 +505,7 @@ test('a same-category rail click never steals a plugin sub-view Esc gradient', a
   await root.waitForFrame()
   assert.equal(root.panel.focused, false, 'the List root yields to the rail')
   assert.equal(root.panel.currentView(), 'list', 'the yield keeps the page view')
-  assert.match(bar(root), /Esc close/u, 'the rail now owns the last-row bar')
+  assert.match(bar(root), /Close \[Esc\]/u, 'the rail now owns the last-row bar')
   root.app.dispose()
 })
 
@@ -974,7 +974,7 @@ test('resize, focus yield, filter edit and external disposal refuse the old rele
   release(focusCase, focusRow, 30)
   await focusCase.waitForFrame()
   assert.equal(focusCase.panel.currentView(), 'list', 'the focus yield drops the press')
-  assert.match(bar(focusCase), /Esc close/u)
+  assert.match(bar(focusCase), /Close \[Esc\]/u)
   // §8 T09 wants a MOUSE control on the next frame: re-focus the List through
   // the rail, then click a DIFFERENT card's painted cell (not the pressed one).
   focusCase.vt.sendInput('\r')
@@ -1162,7 +1162,7 @@ test('a 75-column production page mounts lazily from the Categories rail', async
   assert.ok(harness.panelInstance() !== undefined, 'the first focus transfer mounts the page')
   assert.equal(harness.snapshotCalls(), 1, 'the mount reads the inventory exactly once')
   assert.match(harness.view(), /Search: \//u, 'the narrow content paints its local Search row')
-  assert.match(bar(harness), /Esc back/u)
+  assert.match(bar(harness), /Back \[Esc\]/u)
 
   // Esc yields back to the rail and keeps the SAME page (no re-read, no dispose).
   const page = harness.panel
@@ -1202,7 +1202,7 @@ test('Tab never crosses levels from Confirm, Install or Diagnostics', async () =
   confirm.vt.sendInput('\x1b[Z')
   await confirm.waitForFrame()
   assert.equal(confirm.panel.currentView(), 'confirm', 'Shift+Tab inside the confirmation never leaves it')
-  assert.match(bar(confirm), /Esc cancel/u, 'the confirmation keeps its own bar')
+  assert.match(bar(confirm), /Cancel \[Esc\]/u, 'the confirmation keeps its own bar')
   confirm.app.dispose()
 
   const install = await open({ columns: 120, rows: 24 })
@@ -1229,7 +1229,7 @@ test('Tab never crosses levels from Confirm, Install or Diagnostics', async () =
   await diagnostics.waitForFrame()
   assert.equal(diagnostics.panel.currentView(), 'diagnostics', 'neither region key leaves Diagnostics')
   assert.equal(diagnostics.panel.focused, true, 'Diagnostics keeps the ONE input owner')
-  assert.match(bar(diagnostics), /Esc back/u, 'Diagnostics keeps its own Esc')
+  assert.match(bar(diagnostics), /Back \[Esc\]/u, 'Diagnostics keeps its own Esc')
   diagnostics.app.dispose()
 })
 

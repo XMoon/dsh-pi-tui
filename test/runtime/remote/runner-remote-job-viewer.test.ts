@@ -470,7 +470,7 @@ test('the REAL Job viewer observes the Remote stream, updates live without consu
   const key = stopKey(app)
   assert.ok(viewerStopSegmentPainted(view()),
     `the workspace must advertise the component keymap's tasks.stop hint before Stop:\n${view()}`)
-  assert.ok(view().includes('Esc back'), `the Action Bar must keep Esc back:\n${view()}`)
+  assert.ok(view().includes('Back [Esc]'), `the Action Bar must keep its Back affordance:\n${view()}`)
 
   // ── Negative control (c): a PROVEN `requested` admission that never reaches
   // the Host (the settled path is injected as requested) must still not be
@@ -976,7 +976,7 @@ test('the Remote Client roster label reaches the Command page and Copy All copie
   fx.fixture.vt.sendInput('\t')
   await waitFor('the Command reader painted', () => view().includes('Copy All [C]'), 10_000)
   assert.match(view(), /Full command/u, 'the Command page discloses that it shows the full command')
-  assert.match(view(), /Esc output/u, 'Esc on the Command page returns to Output, never out of the workspace')
+  assert.match(view(), /Output \[Esc\]/u, 'Esc on the Command page returns to Output, never out of the workspace')
 
   // The clipboard capability is the SAME Client-local one the surface uses.
   const copied: string[] = []

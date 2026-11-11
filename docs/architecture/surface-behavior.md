@@ -196,6 +196,14 @@ SAME paused Task Browser (lease ownership: [overlay-focus.md](./overlay-focus.md
   captured snapshot text. Selection copy is `label.slice(start, end)`. Copy
   only proves emission, never an OS-clipboard receipt; the raw-text policy is
   owned by [terminal-output.md](./terminal-output.md).
+- **The pinned Action Bar is the workspace's ONE pointer action row.** Only its
+  complete visible `Verb [Esc]` segment is a target (a truncated or dropped
+  segment publishes none); a same-cell release replays the CURRENT Esc outcome
+  through the panel's own key dispatch — `Leave find`, `Output`, or `Back` — so a
+  Find-open bar can never close the lease in one click and the Command page
+  returns to Output without releasing the observation. The Header's
+  Command/Copy affordances remain the only other pointer targets; the Stop verb
+  stays keyboard-only.
 
 Authority: `TuiApp.openJobInspector` + `JobInspectorPanel` (`planChrome`,
 `deriveJobInspectorView`), `JobOutputScrollView`, `JobOutputSearch`,
@@ -411,12 +419,21 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   never changes the Workspace cursor and `Esc` cancels back to the tree.
 - **Mouse is the last painted hit-map.** One render commits a frame revision and
   the REAL painted cell ranges of every tree row plus the Folder disclosure,
-  search results and Peek back target. A click acts only on the SAME frame
-  revision and SAME target range as its press; any scroll, resize, search,
-  Activity or content change between press and release drops the gesture. A
-  Session row click and a Folder LABEL click only select; the Folder disclosure
-  collapses/expands; `+ New session`, `Add directory` and `Show more` clicks run
-  their named explicit action; Resume stays the guarded Enter verb.
+  search results and the physical Action Bar's action segments. A click acts
+  only on the SAME frame revision and SAME target range as its press; any
+  scroll, resize, search, Activity or content change between press and release
+  drops the gesture. A Session row click and a Folder LABEL click only select;
+  the Folder disclosure collapses/expands; `+ New session`, `Add directory` and
+  `Show more` clicks run their named explicit action; Resume stays the guarded
+  Enter verb. The ONE physical Action Bar is pointer-capable for its complete
+  painted `Verb [Key]` segments only (`Open [Enter]`, `Peek [Space]`,
+  `Close [Esc]`, `Back [Esc]`, `Results [Enter]`, `Verify [Enter]`,
+  `Cancel [Esc]`, and the selected row's real Enter verb); each runs the
+  existing method (`resumeSelected`, `openPeek`, `handleEscape`,
+  `handleSearchInput`, `handleDirectorySubmit`, `handleDirectoryCancel`,
+  `activateSelectedBrowseRow`) and never starts a second navigation state
+  machine. The Peek pane paints NO local action line: the global bar is the
+  only navigation row, and its `Open [Enter]` is the one explicit resume.
 - **One lifecycle.** Each open keeps exactly one Workspace follow, one roster
   read owner, one Activity sample generation and one fullscreen lease. The close
   path aborts list/search/Activity, disposes the follow once, stops the screen
@@ -612,6 +629,18 @@ specialist-page contract below).
   back, a state-named cancel such as clearing an editable filter, or an
   explicit wait while a Host mutation is still pending. No unreachable page
   refresh, copy or action runs from an invisible body.
+- **The ONE physical last-row Action Bar is pointer-capable across the root and
+  its hosted pages.** The root registers the target from the FULLY painted Esc
+  span the row really painted: its own bars publish it directly, while a hosted
+  page (About/Models/Account/Plugin/Footer/Keybindings/specialist) exposes only
+  a read-only span of its own last painted Esc affordance in page columns — the
+  root paints that row from column 0, so no column translation is applied. A
+  release replays the CURRENT state's Esc through the root's EXISTING keyboard
+  ladder (`handleInput('\x1b')`: the specialist page's own handler, the direct
+  page's return handling, or root `goBack`/close), so a pending mutation, dirty
+  draft, awaiting-paint grant or install phase is never bypassed. No page
+  registers a second last-row owner, and a page that painted no complete Esc
+  affordance leaves the row inert.
 
 - `About` is the default home: the Welcome-card brand/whale plus the runtime
   facts (the bundle's own version, the installed DSH version — `Unknown` when

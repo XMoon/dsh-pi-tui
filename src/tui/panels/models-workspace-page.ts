@@ -24,7 +24,8 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
-import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { paintActionSpan } from '../presentation/action-ink.ts'
 import { color } from '../theme/runtime.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
@@ -1717,6 +1718,38 @@ export class ModelsWorkspacePage implements Component {
     this.paintedCopy = false
   }
 
+  /** The complete visible Esc affordance span of the LAST rendered frame
+   *  (page-local columns), or undefined when the frame painted none. The
+   *  Settings root owns the ONE physical last row and publishes its pointer
+   *  target from THIS span. */
+  paintedEscapeSpan(): { readonly startCol: number; readonly endCol: number } | undefined {
+    return this.paintedEscape
+  }
+
+  /** The complete painted Esc affordance of the last bar this page generated. */
+  private paintedEscape: { readonly startCol: number; readonly endCol: number } | undefined
+
+  /** Lay out + paint one bar row: the LAST (Esc) segment carries the scoped
+   *  Fullscreen secondary ink, every other hint stays `textMuted`, and only a
+   *  FULLY painted Esc segment publishes its span. */
+  private paintBar(segments: readonly ActionBarSegment[], width: number): string {
+    const layout = layoutActionBarRow(segments, width)
+    this.paintedEscape = undefined
+    if (layout.truncated || layout.spans.length === 0) return color.textMuted(layout.text)
+    const escapeIndex = segments.length - 1
+    let span: { startCol: number; endCol: number } | undefined
+    const painted = layout.spans.map(candidate => {
+      if (candidate.inputIndex !== escapeIndex) return color.textMuted(candidate.text)
+      span = { startCol: candidate.startCol, endCol: candidate.endCol }
+      return paintActionSpan(candidate.text, 'secondary')
+    })
+    this.paintedEscape = span
+    const segmentWidth = layout.spans.reduce((sum, candidate) => sum + visibleWidth(candidate.text), 0)
+      + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
+    const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
+    return painted.join(color.textMuted(ACTION_BAR_SEPARATOR)) + ' '.repeat(padding)
+  }
+
   render(width: number): string[] {
     if (this.disposed) return []
     try {
@@ -1758,16 +1791,16 @@ export class ModelsWorkspacePage implements Component {
       // Below its 8-row gate the question does not accept edits or Enter: the
       // ONLY real key is Esc, which cancels the embedded question. Do not
       // advertise editing/submit hints that this frame cannot honour.
-      const bar = color.textMuted(renderActionBarRow(
+      const bar = this.paintBar(
         usable
           ? [
               { text: 'type to edit', priority: 5 },
               { text: 'Enter continue', priority: 6 },
-              { text: 'Esc back', priority: 8 },
+              { text: 'Back [Esc]', priority: 8 },
             ]
-          : [{ text: 'Esc cancel', priority: 8 }],
+          : [{ text: 'Cancel [Esc]', priority: 8 }],
         width,
-      ))
+      )
       this.paintedCopy = false
       this.copyValue = undefined
       this.paintedTargets = []
@@ -1781,7 +1814,7 @@ export class ModelsWorkspacePage implements Component {
       this.paintedCopy = false
       if (!this.pickerUsable) {
         this.paintedTargets = []
-        const bar = color.textMuted(renderActionBarRow([{ text: 'Esc cancel', priority: 8 }], width))
+        const bar = this.paintBar([{ text: 'Cancel [Esc]', priority: 8 }], width)
         const warning = fit(color.warning(`Resize the terminal: the authorization notice, model choices and actions need ${required} rows.`), width)
         return this.pad(this.barAtLastRow([warning], height, width, bar), height, width)
       }
@@ -1794,12 +1827,12 @@ export class ModelsWorkspacePage implements Component {
         const target = targets[index]!
         targets[index] = { ...target, row: target.row + pickerTop }
       }
-      const bar = color.textMuted(renderActionBarRow([
+      const bar = this.paintBar([
         { text: 'Space toggle', priority: 5 },
         { text: 'Enter apply', priority: 6 },
         { text: 'm manual', priority: 4 },
-        { text: 'Esc cancel', priority: 8 },
-      ], width))
+        { text: 'Cancel [Esc]', priority: 8 },
+      ], width)
       this.paintedTargets = targets
       return this.pad(this.barAtLastRow(body, height, width, bar), height, width)
     }
@@ -1811,7 +1844,7 @@ export class ModelsWorkspacePage implements Component {
       this.paintedCopy = false
       if (!this.pickerUsable) {
         this.paintedTargets = []
-        const bar = color.textMuted(renderActionBarRow([{ text: 'Esc cancel', priority: 8 }], width))
+        const bar = this.paintBar([{ text: 'Cancel [Esc]', priority: 8 }], width)
         const warning = fit(color.warning(`Resize the terminal: the authorization notice, sign-in choices and actions need ${required} rows.`), width)
         return this.pad(this.barAtLastRow([warning], height, width, bar), height, width)
       }
@@ -1824,11 +1857,11 @@ export class ModelsWorkspacePage implements Component {
         const target = targets[index]!
         targets[index] = { ...target, row: target.row + pickerTop }
       }
-      const bar = color.textMuted(renderActionBarRow([
+      const bar = this.paintBar([
         { text: 'Up/Down choose', priority: 5 },
         { text: 'Enter select', priority: 6 },
-        { text: 'Esc cancel', priority: 8 },
-      ], width))
+        { text: 'Cancel [Esc]', priority: 8 },
+      ], width)
       this.paintedTargets = targets
       return this.pad(this.barAtLastRow(body, height, width, bar), height, width)
     }
@@ -1840,7 +1873,7 @@ export class ModelsWorkspacePage implements Component {
       this.paintedActionIds.clear()
       this.paintedCopy = false
       this.paintedTargets = []
-      const bar = color.textMuted(renderActionBarRow([{ text: this.fallbackEscHint(), priority: 8 }], width))
+      const bar = this.paintBar([{ text: this.fallbackEscHint(), priority: 8 }], width)
       const body = [fit(color.warning('Resize the terminal to show the page actions.'), width)]
       return this.pad(this.barAtLastRow(body, height, width, bar), height, width)
     }
@@ -1902,19 +1935,19 @@ export class ModelsWorkspacePage implements Component {
    *  in-flight state (it never leaves); a pending provider authorization is
    *  the opposite case and Esc explicitly cancels it. */
   private pendingEscHint(): string | undefined {
-    if (this.referencePhase === 'pending') return 'Esc wait'
-    if (this.view.kind === 'review' && this.add?.creating === true) return 'Esc wait'
-    if (this.view.kind === 'logout' && this.clear?.phase === 'pending') return 'Esc wait'
+    if (this.referencePhase === 'pending') return 'Wait [Esc]'
+    if (this.view.kind === 'review' && this.add?.creating === true) return 'Wait [Esc]'
+    if (this.view.kind === 'logout' && this.clear?.phase === 'pending') return 'Wait [Esc]'
     if (this.view.kind === 'provider'
-      && (this.auth?.phase === 'starting' || this.auth?.phase === 'running')) return 'Esc cancel'
+      && (this.auth?.phase === 'starting' || this.auth?.phase === 'running')) return 'Cancel [Esc]'
     return undefined
   }
 
   private fallbackEscHint(): string {
     const pending = this.pendingEscHint()
     if (pending !== undefined) return pending
-    if (this.view.kind === 'add-catalog' && this.catalogFilter !== '') return 'Esc clear filter'
-    return 'Esc back'
+    if (this.view.kind === 'add-catalog' && this.catalogFilter !== '') return 'Clear filter [Esc]'
+    return 'Back [Esc]'
   }
 
   /** Keep the page's semantic bar on the physical last row: the body is
@@ -2597,10 +2630,10 @@ export class ModelsWorkspacePage implements Component {
       && Math.max(1, this.bodyHeight) - 1 - actions.length >= 1) {
       segments.push({ text: 'Tab sections', priority: 0 })
     }
-    segments.push({ text: this.pendingEscHint() ?? 'Esc back', priority: 8 })
-    const rendered = renderActionBarRow(segments, width)
+    segments.push({ text: this.pendingEscHint() ?? 'Back [Esc]', priority: 8 })
+    const rendered = this.paintBar(segments, width)
     this.paintedCopy = rendered.includes('c copy')
-    return color.textMuted(rendered)
+    return rendered
   }
 
   // ── input ────────────────────────────────────────────────────────────────

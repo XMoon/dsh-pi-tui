@@ -1188,7 +1188,7 @@ test('the embedded Plugin Manager owns the content keys while the rail keeps the
   assert.equal(h.closes(), 0, 'the workspace stayed open')
   const frame = plain(h)
   assert.match(frame, /Categories \(9\)/u, 'the rail is painted after the yield')
-  assert.match(frame, /Esc close/u, 'the rail bar owns the last row after the yield')
+  assert.match(frame, /Close \[Esc\]/u, 'the rail bar owns the last row after the yield')
   // Esc on the rail closes the Settings lease.
   h.panel.handleInput('\u001b')
   assert.equal(h.closes(), 1, 'the second Esc closes the workspace')
@@ -1770,24 +1770,27 @@ test('the region hints never crowd the About copy/refresh verbs out of a tight b
   assert.match(tightBar, /c copy fact/u, 'the field copy stays visible at 90')
   assert.match(tightBar, /C copy all/u, 'the full-report copy stays visible at 90')
   assert.match(tightBar, /r refresh/u, 'the refresh stays visible at 90')
-  assert.match(tightBar, /Esc back/u)
+  assert.match(tightBar, /Back \[Esc\]/u)
   assert.doesNotMatch(tightBar, /Tab focus/u, 'the region key is dropped before any semantic verb')
   assert.match(tightBar, /Shift\+Tab back/u, 'the remaining region hint only survives because the verbs fit')
 
-  // 100 columns fit the complete row (76 cells): no semantic verb is lost.
+  // 100 columns leave the content column 76 cells: PR2's `Back [Esc]`
+  // affordance (+2 cells over the old `Esc back`) makes the LOWEST-priority
+  // forward region hint yield first — every semantic verb still survives.
   const roomy = setup({ columns: 100, rows: 30, aboutStatusSource: staticAboutSource(view) })
   plain(roomy, 100)
   roomy.panel.handleInput('\r')
   const roomyBar = plain(roomy, 100).split('\n').at(-1)!
-  assert.match(roomyBar, /c copy fact · C copy all · r refresh · Tab focus · Shift\+Tab back · Esc back/u,
-    `every hint fits at 100:\n${roomyBar}`)
+  assert.match(roomyBar, /c copy fact · C copy all · r refresh · Shift\+Tab back · Back \[Esc\]/u,
+    `every semantic verb fits at 100:\n${roomyBar}`)
+  assert.doesNotMatch(roomyBar, /Tab focus/u, 'the forward region hint is the first segment dropped')
 
   // There is room at 120 columns: the same verbs survive WITH the region keys.
   const wide = setup({ columns: 120, rows: 40, aboutStatusSource: staticAboutSource(view) })
   plain(wide, 120)
   wide.panel.handleInput('\r')
   const wideBar = plain(wide, 120).split('\n').at(-1)!
-  assert.match(wideBar, /c copy fact · C copy all · r refresh · Tab focus · Shift\+Tab back · Esc back/u,
+  assert.match(wideBar, /c copy fact · C copy all · r refresh · Tab focus · Shift\+Tab back · Back \[Esc\]/u,
     `every hint fits at 120:\n${wideBar}`)
 })
 
@@ -1799,7 +1802,7 @@ test('the legacy 90-column bars keep refresh when the region hints drop and neve
   const rowsBar = plain(h, 90).split('\n').at(-1)!
   assert.match(rowsBar, /Enter choose/u, 'the row action stays visible')
   assert.match(rowsBar, /r refresh/u, 'the refresh stays visible')
-  assert.match(rowsBar, /Esc back/u)
+  assert.match(rowsBar, /Back \[Esc\]/u)
   assert.doesNotMatch(rowsBar, /Tab panes|Shift\+Tab back/u, 'the region hints drop first')
 
   h.panel.handleInput('\t') // rows -> Detail browsing (no choice)
@@ -1916,7 +1919,7 @@ test('one- and two-row frames paint only the truthful bar and publish no body ta
     const before = plain(h, 100)
     const frame = before.split('\n')
     assert.equal(frame.length, rows, `the frame must paint exactly ${rows} rows`)
-    assert.equal(frame.filter(line => /Esc close|Esc back/u.test(line)).length, 1,
+    assert.equal(frame.filter(line => /Close \[Esc\]|Back \[Esc\]/u.test(line)).length, 1,
       `exactly one Esc bar at ${rows} rows:\n${before}`)
     assert.doesNotMatch(before, /Categories \(|Rows \(|Details| page/u, 'no pane header or page body is painted below the body grant')
     h.panel.handleInput('\u001b[B')

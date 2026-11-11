@@ -2197,10 +2197,10 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
     type WebPageLevel = 'list' | 'detail' | 'endpoint'
     let pageLevel: WebPageLevel = 'list'
     const webListActionBars = [
-      '↑/↓ choose · Enter open · r refresh · Esc Tools',
-      '↑/↓ · Enter open · r refresh · Esc',
-      '↑/↓ · Enter · Esc',
-      'Esc',
+      '↑/↓ choose · Enter open · r refresh · Tools [Esc]',
+      '↑/↓ · Enter open · r refresh · Tools [Esc]',
+      '↑/↓ · Enter · Tools [Esc]',
+      'Tools [Esc]',
     ]
     const isWebPage = (): boolean => page.view().includes('Settings · Tools · Web Search / Fetch')
     const isWebList = (): boolean => isWebPage()

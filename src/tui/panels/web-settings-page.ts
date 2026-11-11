@@ -33,6 +33,8 @@ import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type TuiMo
 import type { WebProviderSettings } from '../../runtime/config-port.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
+import { ACTION_BAR_SEPARATOR } from '../presentation/action-bar.ts'
+import { paintActionSpan } from '../presentation/action-ink.ts'
 import type { ModelsInitialView } from './models-workspace-page.ts'
 import type { EmbeddedSpecialistPage } from './settings-workspace-panel.ts'
 import { WebEndpointPanel, WebWriteVerdictError, type WebPanelTaskRunner } from './web-provider-panels.ts'
@@ -195,9 +197,37 @@ function composeRow(left: string, right: string, width: number): string {
   return fit(left + ' '.repeat(width - leftWidth - rightWidth) + right, width)
 }
 
-/** The LONGEST wording that fits `width` WHOLE, or '' when none does. */
-function wholeWording(preferred: string, width: number, shorter: readonly string[] = []): string {
-  return [preferred, ...shorter].find(text => visibleWidth(text) <= width) ?? ''
+/** One whole Action Bar wording and, when its LAST segment is the real
+ *  `Verb [Esc]` affordance, the UNPAINTED geometry of exactly that segment. */
+interface BarWording {
+  readonly text: string
+  readonly escape?: {
+    readonly startCol: number
+    readonly endCol: number
+    /** The painted prefix, INCLUDING the trailing ` · ` separator. */
+    readonly lead: string
+    readonly token: string
+  }
+}
+
+/** Build one wording whose LAST segment is `Verb [Esc]` (design §7.1), with the
+ *  span measured from the very string it paints. */
+function escapeWording(lead: string, verb: string): BarWording {
+  const token = `${verb} [Esc]`
+  if (lead === '') return { text: token, escape: { startCol: 0, endCol: visibleWidth(token), lead: '', token } }
+  const prefix = lead + ACTION_BAR_SEPARATOR
+  const startCol = visibleWidth(prefix)
+  return {
+    text: prefix + token,
+    escape: { startCol, endCol: startCol + visibleWidth(token), lead: prefix, token },
+  }
+}
+
+/** The LONGEST wording that fits `width` WHOLE, or '' when none does. The
+ *  chosen value is the SAME value the row paints, so its Esc span is never
+ *  re-derived from a coloured string. */
+function wholeWording(preferred: BarWording, width: number, shorter: readonly BarWording[] = []): BarWording {
+  return [preferred, ...shorter].find(word => visibleWidth(word.text) <= width) ?? { text: '' }
 }
 
 /** The state WORD + ink of one transient phase (§4A.2 vocabulary). */
@@ -236,6 +266,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private disposed = false
   private revision = 0
   private paint: PagePaint | undefined
+  /** The complete Esc affordance of the LAST painted bar, in this page's
+   *  own content columns. Cleared by a row-grant change and on dispose, so
+   *  a resize never keeps the previous frame's geometry clickable. */
+  private paintedEscapeSpanValue: { readonly startCol: number; readonly endCol: number } | undefined
   /** The credential action the LAST COMMITTED frame painted as the ACTIVE
    *  cursor (Detail region only). Enter must target exactly this identity. It
    *  is updated ONLY while the real render runs: a non-render projection (the
@@ -261,6 +295,8 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   /** The root's row-budget seam: the granted lines INCLUDE the Action Bar. */
   setMaxRows(rows: number): void {
     this.rowGrant = Math.max(1, Math.floor(rows))
+    // A new grant has not painted yet: the previous bar's geometry is stale.
+    this.paintedEscapeSpanValue = undefined
   }
 
   private bodyRows(): number {
@@ -331,9 +367,18 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     // editor, transcript or a host composer action.
   }
 
+  /** The complete visible Esc affordance span of the LAST PAINTED frame, in
+   *  this page's own content-column coordinates; undefined when the frame
+   *  painted no complete Esc affordance (a loading/saving wording without Esc,
+   *  a wording dropped at this width). */
+  paintedEscapeSpan(): { readonly startCol: number; readonly endCol: number } | undefined {
+    return this.paintedEscapeSpanValue
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.paintedEscapeSpanValue = undefined
     this.endpointPanel?.panel.dispose()
     this.endpointPanel = undefined
     this.paint = undefined
@@ -883,6 +928,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     // The marker belongs to THIS frame only: a list/endpoint/non-credential
     // frame must never retain the credential action an earlier Detail painted.
     this.paintedCredentialAction = undefined
+    // Same rule for the bar's clickable geometry: a frame that paints no
+    // complete Esc affordance (the endpoint panel's own bar, a dropped wording,
+    // a saving/loading fact) must not leave the previous frame's span alive.
+    this.paintedEscapeSpanValue = undefined
     // A backend that turned non-current closes an open endpoint draft FIRST:
     // the frame never paints a Confirm the writer must refuse.
     this.syncEndpointWritability()
@@ -939,7 +988,11 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       targets.push(...detail.targets)
     }
     while (lines.length < bodyRows) lines.push(fit('', width))
-    lines.push(fit(this.actionBar(width, bodyRows), width))
+    const bar = this.actionBar(width, bodyRows)
+    // `fit` below only pads (the chosen wording is already whole and in budget),
+    // so the recorded span is exactly the painted bar's geometry.
+    this.paintedEscapeSpanValue = bar.escape
+    lines.push(fit(this.paintBarWording(bar), width))
     this.paint = { width, rows: grant, bodyRows, targetRows: targets }
     return lines.slice(0, grant)
   }
@@ -967,25 +1020,25 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   /** A choice row's Action Bar: `Enter confirm` only while the highlighted
    *  candidate is inside THIS render's Detail viewport (the same gate the
    *  dispatch uses), so a resize can never advertise a Confirm it will drop. */
-  private choiceActionBar(width: number, bodyRows: number): string {
+  private choiceActionBar(width: number, bodyRows: number): BarWording {
     // A dispatched write owns the row: the bar states it and never advertises a
     // Confirm that `confirmChoice()` would silently drop.
     const rowId = this.selectedSettingId()
     if (rowId !== undefined && this.phases.get(rowId)?.kind === 'saving') {
-      return wholeWording('Saving… · Esc back', width, ['Esc back'])
+      return wholeWording(escapeWording('Saving…', 'Back'), width, [escapeWording('', 'Back')])
     }
     const requested = this.choiceValues()[this.choiceIndex]
-    if (requested === undefined) return wholeWording('r refresh · Esc back', width, ['Esc back'])
+    if (requested === undefined) return wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
     const viewport = this.detailViewport(width, bodyRows)
     const projection = this.detailProjection(width, viewport)
     const entry = projection.optionLines.find(line => line.value === requested)
     const offset = Math.min(Math.max(0, this.detailOffset), projection.maxOffset)
     const visible = entry !== undefined && entry.line >= offset && entry.line < offset + viewport
-    if (!visible) return wholeWording('r refresh · Esc back', width, ['Esc back'])
+    if (!visible) return wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
     return wholeWording(
-      '↑/↓ choose · Enter confirm · Esc back',
+      escapeWording('↑/↓ choose · Enter confirm', 'Back'),
       width,
-      ['Enter confirm · Esc back', 'Enter · Esc', 'Esc back'],
+      [escapeWording('Enter confirm', 'Back'), escapeWording('Enter', 'Back'), escapeWording('', 'Back')],
     )
   }
 
@@ -995,32 +1048,37 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
    *  never described as an available Enter. `bodyRows` is THIS frame's grant,
    *  never the previously painted one (a resize can shrink the grant before
    *  `this.paint` is updated). */
-  private credentialActionBar(width: number, bodyRows: number): string {
+  private credentialActionBar(width: number, bodyRows: number): BarWording {
     const active = this.selectableCredentialActions()[this.reconcileCredentialCursor()]
-    if (active === undefined) return wholeWording('r refresh · Esc back', width, ['Esc back'])
+    if (active === undefined) return wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
     const viewport = this.detailViewport(width, bodyRows)
     const projection = this.detailProjection(width, viewport)
     const entry = projection.actionLines.find(line => line.value === active.action)
     const offset = Math.min(Math.max(0, this.detailOffset), projection.maxOffset)
     const visible = entry !== undefined && entry.line >= offset && entry.line < offset + viewport
-    if (!visible) return wholeWording('r refresh · Esc back', width, ['Esc back'])
+    if (!visible) return wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
     return wholeWording(
-      '↑/↓ choose · Enter open in Models · Esc back',
+      escapeWording('↑/↓ choose · Enter open in Models', 'Back'),
       width,
-      ['Enter open in Models · Esc back', 'Enter · Esc', 'Esc back'],
+      [escapeWording('Enter open in Models', 'Back'), escapeWording('Enter', 'Back'), escapeWording('', 'Back')],
     )
   }
 
   /** The ONE physical Action Bar line. Whole segments only: a hint that does
-   *  not fit is dropped, never cut into half a word. It is painted with the
-   *  hint role (§3.2 role 12), so its first cell is always real ink. */
-  private actionBar(width: number, bodyRows: number): string {
+   *  not fit is dropped, never cut into half a word. Its non-Esc segments keep
+   *  the hint role (§3.2 role 12) and only the real Esc affordance carries the
+   *  secondary ink, so its first cell is always real ink. */
+  private actionBar(width: number, bodyRows: number): BarWording {
     const rowId = this.selectedRowId()
-    const hint = this.region === 'list'
+    return this.region === 'list'
       ? wholeWording(
-          '↑/↓ choose · Enter open · r refresh · Esc Tools',
+          escapeWording('↑/↓ choose · Enter open · r refresh', 'Tools'),
           width,
-          ['↑/↓ · Enter open · r refresh · Esc', '↑/↓ · Enter · Esc', 'Esc'],
+          [
+            escapeWording('↑/↓ · Enter open · r refresh', 'Tools'),
+            escapeWording('↑/↓ · Enter', 'Tools'),
+            escapeWording('', 'Tools'),
+          ],
         )
       : rowId === 'web-credential'
         ? this.credentialActionBar(width, bodyRows)
@@ -1028,18 +1086,25 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
           ? this.intents.readFacts().kind === 'ready'
             && this.intents.writableRefusal() === undefined
             ? wholeWording(
-                'Enter edit endpoint · Esc back',
+                escapeWording('Enter edit endpoint', 'Back'),
                 width,
-                ['Enter edit · Esc back', 'Esc back'],
+                [escapeWording('Enter edit', 'Back'), escapeWording('', 'Back')],
               )
-            : wholeWording('r refresh · Esc back', width, ['Esc back'])
+            : wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
           // No confirmable candidate (a pending/unreadable authority or a custom
           // provider route) means NO Confirm affordance: the bar advertises only
           // what the frame really offers, and a candidate cropped out of THIS
           // frame's Detail viewport is not confirmable either (Enter is refused
           // by the same painted-visibility gate).
           : this.choiceActionBar(width, bodyRows)
-    return hint === '' ? '' : color.textMuted(hint)
+  }
+
+  /** Paint one chosen Action Bar wording: the row stays muted; only the real
+   *  Esc affordance carries the secondary ink (its `[Esc]` cap is muted). */
+  private paintBarWording(wording: BarWording): string {
+    const escape = wording.escape
+    if (escape === undefined) return color.textMuted(wording.text)
+    return `${color.textMuted(escape.lead)}${paintActionSpan(escape.token, 'secondary')}`
   }
 
   private renderList(

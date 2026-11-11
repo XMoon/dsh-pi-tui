@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import type { Component } from '@xmoon76/pi-tui'
+import { visibleWidth, type Component } from '@xmoon76/pi-tui'
 import { PluginManagerController } from '../../src/app/plugin-manager/controller.ts'
 import { PluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
@@ -86,7 +86,7 @@ test('Esc hides a running install without cancelling it and `i` reopens the SAME
   harness.vt.sendInput('\x1b')
   await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'list')
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc back/,
+  assert.match(plain([harness.viewport().at(-1)!]), /Back \[Esc\]/,
     'hiding the running install returns to the embedded List, whose Esc yields to Categories')
 
   harness.vt.sendInput('i')
@@ -200,11 +200,11 @@ test('a running install copies its retained log byte-exact while the display sta
 
 test('the embedded page always names its real Esc destination', async () => {
   const harness = await open({ columns: 120, rows: 30 })
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc back/,
+  assert.match(plain([harness.viewport().at(-1)!]), /Back \[Esc\]/,
     'the List root yields to Categories, it never closes the Settings lease')
   harness.vt.sendInput('i')
   await harness.waitForFrame()
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc back/,
+  assert.match(plain([harness.viewport().at(-1)!]), /Back \[Esc\]/,
     'the install editor returns to the LIST, so it must not claim Esc close')
   harness.vt.sendInput('\t') // spec -> registry focus
   await harness.waitForFrame()
@@ -218,7 +218,7 @@ test('the embedded page always names its real Esc destination', async () => {
   // The List root yields to the rail, whose ONE bar names the real close.
   harness.vt.sendInput('\x1b')
   await harness.waitForFrame()
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc close/,
+  assert.match(plain([harness.viewport().at(-1)!]), /Close \[Esc\]/,
     'the rail owns the physical last row after the yield')
   assert.equal(harness.panel.focused, false, 'the rail owns the input focus')
 })
@@ -237,7 +237,7 @@ test('80x10 keeps the removal consequence and both choices reachable', async () 
   assert.match(view, /unloads the bundle/, 'the dependency consequence is visible')
   assert.match(view, /Cancel/)
   assert.match(view, /Remove/)
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc cancel/)
+  assert.match(plain([harness.viewport().at(-1)!]), /Cancel \[Esc\]/)
 })
 
 test('80x10 reveals then admits the official Install action and keeps its intent visible', async () => {
@@ -255,7 +255,7 @@ test('80x10 reveals then admits the official Install action and keeps its intent
   assert.match(harness.view(), /offered version 0\.2\.1-rc\.2/)
   assert.match(harness.view(), /Activates the bundle/)
   assert.match(harness.view(), /Install/)
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc edit/)
+  assert.match(plain([harness.viewport().at(-1)!]), /Edit \[Esc\]/)
 })
 
 test('a resize mid-install keeps the same request and a truthful last-row bar', async () => {
@@ -275,7 +275,7 @@ test('a resize mid-install keeps the same request and a truthful last-row bar', 
   await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'install')
   assert.equal(harness.controller.installView()?.requestId, requestId)
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc hide/)
+  assert.match(plain([harness.viewport().at(-1)!]), /Hide \[Esc\]/)
   for (const line of harness.viewport()) {
     assert.ok(plain([line]).length <= 80)
   }
@@ -642,7 +642,7 @@ test('a zero-row list frame advertises no Enter invite and keeps the real Esc', 
   harness.vt.resize(80, 2)
   await harness.waitForFrame()
   const bar = plain([harness.viewport().at(-1)!])
-  assert.equal(bar.trim(), 'Esc back', 'the zero-row list bar advertises ONLY the real Esc destination')
+  assert.equal(bar.trim(), 'Back [Esc]', 'the zero-row list bar advertises ONLY the real Esc destination')
   // The hidden row is not just a missing hint: the navigation admission must
   // agree with it (Enter and Right cannot enter an invisible card's Details).
   harness.vt.sendInput('\r')
@@ -664,7 +664,7 @@ test('a zero-row search edit advertises only the real Esc and refuses the apply'
   await harness.waitForFrame()
   const bar = plain([harness.viewport().at(-1)!])
   assert.doesNotMatch(bar, /Enter apply/u, 'the frozen short-screen rule drops the invisible apply hint')
-  assert.match(bar, /Esc clear search/u, 'the real Esc effect stays advertised')
+  assert.match(bar, /Clear \[Esc\]/u, 'the real Esc effect stays advertised')
   // The hint is truthful: the zero-row Enter cannot apply an input whose body
   // cell is not painted. Enter and ordinary typing are both dropped.
   harness.vt.sendInput('x')
@@ -731,7 +731,7 @@ test('a zero-row body revokes the B03 danger action until it is painted again', 
   assert.equal(harness.panel.currentView(), 'confirm')
   const zeroBar = plain([harness.viewport().at(-1)!])
   assert.doesNotMatch(zeroBar, /Enter/u, 'a zero-row frame never advertises a no-op Enter')
-  assert.match(zeroBar, /Esc cancel/u, 'the real Esc destination stays advertised')
+  assert.match(zeroBar, /Cancel \[Esc\]/u, 'the real Esc destination stays advertised')
   harness.vt.sendInput('\r')
   await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'confirm', 'Enter on a zero-row frame is a no-op')
@@ -770,7 +770,7 @@ test('a zero-row body revokes ordinary Remove and Detail actions', async () => {
   await remove.waitForFrame()
   const removeBar = plain([remove.viewport().at(-1)!])
   assert.doesNotMatch(removeBar, /Enter/u, 'a zero-row confirm never advertises Enter')
-  assert.match(removeBar, /Esc cancel/u)
+  assert.match(removeBar, /Cancel \[Esc\]/u)
   remove.vt.sendInput('\r')
   await remove.waitForFrame()
   assert.deepEqual(remove.removeBundle, [], 'a zero-row Remove frame cannot write')
@@ -792,7 +792,7 @@ test('a zero-row body revokes ordinary Remove and Detail actions', async () => {
   await detail.waitForFrame()
   const detailBar = plain([detail.viewport().at(-1)!])
   assert.doesNotMatch(detailBar, /Enter/u, 'a zero-row Detail never advertises Enter action')
-  assert.match(detailBar, /Esc back/u)
+  assert.match(detailBar, /Back \[Esc\]/u)
   detail.vt.sendInput('\r')
   await detail.waitForFrame()
   assert.equal(detail.panel.currentView(), 'details', 'a zero-row Detail frame cannot activate an action')
@@ -1207,4 +1207,97 @@ test('a completed update can be checked and applied again from the same Bundle D
   assert.equal(harness.updateCalls[1]!.version, '1.2.0')
   assert.notEqual(harness.updateCalls[1]!.requestId, firstRequest)
   assert.equal(harness.controller.updateView()?.lastObservedVersion, '1.2.0')
+})
+
+test('the painted Esc span is the ONE plain-text affordance geometry of the bar', async () => {
+  // 80 columns: the content owns the full local column, so the root paints the
+  // page's bar at content column 0 and the page-local span is the plain one.
+  const harness = await open({ columns: 80, rows: 24 })
+  const span = harness.panel.paintedEscapeSpan()
+  assert.ok(span !== undefined, 'the complete Esc affordance is recorded')
+  const painted = harness.viewport().at(-1)!
+  const text = plain([painted])
+  assert.equal(text.slice(span.startCol, span.endCol), 'Back [Esc]',
+    'the span covers exactly the plain Esc token')
+  assert.equal(span.endCol - span.startCol, visibleWidth('Back [Esc]'),
+    'painting the affordance never changes its visible width')
+  assert.equal(visibleWidth(painted), 80, 'the bar keeps the granted width')
+})
+
+test('the painted Esc span stays in the page own content columns, never terminal columns', async () => {
+  // 120 columns keeps the Categories rail, so the page is granted only its own
+  // content width: the span must stay local to that grant (the root owns the
+  // translation onto the physical row).
+  const harness = await open({ columns: 120, rows: 40 })
+  const span = harness.panel.paintedEscapeSpan()
+  assert.ok(span !== undefined)
+  const layout = harness.panel.contentLayout()
+  const contentWidth = layout.dual ? layout.leftWidth + 2 + layout.rightWidth : layout.leftWidth
+  assert.ok(span.endCol <= contentWidth,
+    `the span ends inside the page content (${span.endCol} <= ${contentWidth})`)
+  assert.equal(span.endCol - span.startCol, visibleWidth('Back [Esc]'))
+})
+
+test('each plugin phase advertises the Esc verb its own handleEscape really runs', async () => {
+  const gate = deferred<PluginChangeFact>()
+  const harness = await open({
+    columns: 80,
+    rows: 24,
+    installImpl: () => gate.promise,
+    cancelImpl: async () => ({ status: 'too-late' }),
+  })
+  const expectVerb = (verb: string): void => {
+    const span = harness.panel.paintedEscapeSpan()
+    assert.ok(span !== undefined, `the ${verb} affordance is complete`)
+    const text = plain([harness.viewport().at(-1)!])
+    assert.equal(text.slice(span.startCol, span.endCol), `${verb} [Esc]`,
+      `the bar names the ${verb} effect at this phase`)
+  }
+
+  // List root: Esc yields to the Categories rail and never closes the page.
+  expectVerb('Back')
+  assert.equal(harness.panel.currentView(), 'list')
+
+  // Search editing: Esc CLEARS the query instead of leaving the page.
+  harness.vt.sendInput('/')
+  await harness.waitForFrame()
+  harness.vt.sendInput('foo')
+  await harness.waitForFrame()
+  expectVerb('Clear')
+  harness.vt.sendInput('\x1b')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'list', 'Clear never closed the page')
+  assert.match(harness.view(), /Search: \//u, 'the query was cleared')
+  expectVerb('Back')
+
+  // Running install: Esc HIDES the view and never cancels the Host operation.
+  harness.vt.sendInput('\x1b[F')
+  await harness.waitForFrame()
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  for (let attempt = 0; attempt < 3 && harness.panel.currentView() === 'details'; attempt += 1) {
+    harness.vt.sendInput('\r')
+    await harness.waitForFrame()
+  }
+  assert.equal(harness.panel.currentView(), 'install', 'the explicit Install action opened the editor')
+  harness.vt.sendInput('\r') // explicit install confirm
+  await harness.waitForFrame()
+  assert.equal(harness.installCalls.length, 1)
+  expectVerb('Hide')
+  harness.vt.sendInput('\x1b')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'list', 'Hide returned to the List')
+  assert.deepEqual(harness.cancelInstallCalls, [], 'Hide never aborted the Host install')
+  gate.resolve({ changed: true, application: 'applied', stage: 'install', target: 'x' })
+  await harness.waitForFrame()
+})
+
+test('a truncated or unpublished bar reports NO Esc geometry', async () => {
+  const harness = await open({ columns: 80, rows: 24 })
+  harness.panel.setViewport({ width: 9, rows: 3, allowDual: false })
+  assert.equal(harness.panel.paintedEscapeSpan(), undefined,
+    'a grant change invalidates the previous frame before it repaints')
+  harness.panel.render(9)
+  assert.equal(harness.panel.paintedEscapeSpan(), undefined,
+    'the only surviving segment is cut, so no half affordance is clickable')
 })

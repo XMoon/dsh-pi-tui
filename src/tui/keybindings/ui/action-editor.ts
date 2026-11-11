@@ -5,6 +5,8 @@
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type KeyId } from '@xmoon76/pi-tui'
 import type { TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { color } from '../../theme/runtime.ts'
+import { ACTION_BAR_SEPARATOR } from '../../presentation/action-bar.ts'
+import { paintActionSpan } from '../../presentation/action-ink.ts'
 import { formatKeyId, formatLeaderSequence } from '../hints.ts'
 import type {
   KeybindingEditorBinding,
@@ -27,6 +29,58 @@ export interface ActionEditorOptions {
 }
 
 type ActionEditorMode = 'edit' | 'choose-binding'
+
+/** One whole Action Bar wording and, when its LAST segment is the real
+ *  `Verb [Esc]` affordance, the UNPAINTED geometry of exactly that segment. */
+interface BarWording {
+  readonly text: string
+  readonly escape?: {
+    readonly startCol: number
+    readonly endCol: number
+    /** The painted prefix, INCLUDING the trailing ` · ` separator. */
+    readonly lead: string
+    readonly token: string
+  }
+}
+
+/** Build one wording whose LAST segment is `Verb [Esc]` (design §7.1). */
+function escapeWording(lead: string, verb: string): BarWording {
+  const token = `${verb} [Esc]`
+  if (lead === '') return { text: token, escape: { startCol: 0, endCol: visibleWidth(token), lead: '', token } }
+  const prefix = lead + ACTION_BAR_SEPARATOR
+  const startCol = visibleWidth(prefix)
+  return {
+    text: prefix + token,
+    escape: { startCol, endCol: startCol + visibleWidth(token), lead: prefix, token },
+  }
+}
+
+/** A wording with no Esc affordance (a write in flight freezes input). */
+function plainWording(text: string): BarWording {
+  return { text }
+}
+
+/** The FIRST whole wording that fits `width`; below the shortest wording the
+ *  historical fallback is kept and carries NO span (a half token is never
+ *  clickable). */
+function pickWording(words: readonly BarWording[], width: number, fallback: string): BarWording {
+  return words.find(word => visibleWidth(word.text) <= width) ?? { text: fallback }
+}
+
+/** Paint one chosen wording: the row keeps its hint ink and only the real Esc
+ *  affordance carries the secondary ink (its `[Esc]` cap is muted). */
+function paintBarWording(wording: BarWording): string {
+  const escape = wording.escape
+  if (escape === undefined) return color.textDim(wording.text)
+  return `${color.textDim(escape.lead)}${paintActionSpan(escape.token, 'secondary')}`
+}
+
+/** Paint a whole bar row at one width: a wording that fitted is painted as-is,
+ *  and the historical fallback is still width-clipped with `…`. */
+function paintWholeBar(wording: BarWording, width: number): string {
+  if (wording.escape !== undefined) return paintBarWording(wording)
+  return color.textDim(truncateToWidth(wording.text, width, '…'))
+}
 
 function commandKey(data: string, key: string): boolean {
   return matchesKey(data, key as KeyId) || (data.length === 1 && data.toLowerCase() === key.toLowerCase())
@@ -161,6 +215,10 @@ export class ActionEditorPanel implements Component {
   private selectableKeys: string[] = []
   /** The width the hit map was painted at; a stale-width event is rejected. */
   private lastRenderWidth = 0
+  /** The complete Esc affordance of the LAST painted bar (this panel's own
+   *  content columns). Cleared on every render start, so a sub-view that paints
+   *  its own bar can never leave the previous frame's geometry clickable. */
+  private paintedEscapeSpanValue: { readonly startCol: number; readonly endCol: number } | undefined
 
   constructor(options: ActionEditorOptions) {
     this.model = options.model
@@ -178,12 +236,27 @@ export class ActionEditorPanel implements Component {
     return this.row.id
   }
 
+  /** The complete visible Esc affordance span of the LAST PAINTED frame, in
+   *  this panel's own content-column coordinates; undefined when it painted
+   *  none (a pending write, a recorder state hint, a cut fallback). */
+  paintedEscapeSpan(): { readonly startCol: number; readonly endCol: number } | undefined {
+    return this.paintedEscapeSpanValue
+  }
+
   render(width: number): string[] {
     const safeWidth = Math.max(1, width)
     // The frame about to be returned carries the settlement result, so the
     // navigation lock can be released after it is composed.
     this.settlementAwaitingPaint = false
-    if (this.recorder !== undefined) return this.recorder.render(safeWidth)
+    // The span always describes THIS frame; a sub-view that paints its own bar
+    // either records its own geometry or (the recorder's raw-input states)
+    // reports none.
+    this.paintedEscapeSpanValue = undefined
+    if (this.recorder !== undefined) {
+      const lines = this.recorder.render(safeWidth)
+      this.paintedEscapeSpanValue = this.recorder.paintedEscapeSpan()
+      return lines
+    }
     if (this.mode === 'choose-binding') return this.renderBindingChoice(safeWidth)
 
     const lines: string[] = [
@@ -276,7 +349,8 @@ export class ActionEditorPanel implements Component {
     const addOrdinal = this.selectableKeys.indexOf('add')
     this.paintedAdd = addOrdinal >= 0 && visibleOrdinals.has(addOrdinal)
     const bar = this.actionBar(editable.length, safeWidth)
-    viewport.lines[viewport.lines.length - 1] = color.textDim(truncateToWidth(bar, safeWidth, '…'))
+    this.paintedEscapeSpanValue = bar.escape
+    viewport.lines[viewport.lines.length - 1] = paintWholeBar(bar, safeWidth)
     this.hitMap = viewport.lines.map((_, row) => {
       const selectable = viewport.selectableRows.find(candidate => candidate.row === row)
       if (selectable === undefined) return { kind: 'inert' }
@@ -288,11 +362,14 @@ export class ActionEditorPanel implements Component {
 
   /** The ONE bar wording for the CURRENTLY painted rows: a key the frame
    *  cannot show is not advertised, and a bar-only grant keeps only Esc. */
-  private actionBar(editableLength: number, width: number): string {
-    if (this.pending) return 'Saving… · one write at a time'
-    if (this.paintedBodyRows === 0) return 'Esc back'
-    if (this.row.fixed || this.row.reserved || this.row.safeMode) return 'Esc back'
-    if (!this.row.configurable) return 'Esc back'
+  private actionBar(editableLength: number, width: number): BarWording {
+    // A write in flight freezes input: facts only, no Esc affordance.
+    if (this.pending) return plainWording('Saving… · one write at a time')
+    // The bar-only and read-only states keep only the real Esc: Back returns to
+    // the bindings list, so the affordance names that exact effect.
+    if (this.paintedBodyRows === 0) return escapeWording('', 'Back')
+    if (this.row.fixed || this.row.reserved || this.row.safeMode) return escapeWording('', 'Back')
+    if (!this.row.configurable) return escapeWording('', 'Back')
     const selectedBinding = this.selectedIndex < editableLength
     const enter = selectedBinding
       ? this.paintedSelection ? 'Enter edit' : undefined
@@ -300,20 +377,20 @@ export class ActionEditorPanel implements Component {
     const primary = enter
     const add = this.paintedAdd ? 'a add' : undefined
     const remove = selectedBinding && this.paintedSelection ? 'Delete remove' : undefined
-    const variant = (parts: Array<string | undefined>): string =>
-      parts.filter((part): part is string => part !== undefined).join(' · ')
     // Preserve the PRIMARY verb as the width shrinks; Delete/a-add are optional
-    // before the Esc affordance, never the other way around.
-    const variants = [
-      variant([primary, add, remove, 'r reset', 'd disable', 'Esc back']),
-      variant([primary, add, 'r reset', 'd disable', 'Esc back']),
-      variant([primary, add, 'r reset', 'Esc back']),
-      variant([primary, add, 'Esc back']),
-      variant([primary, 'Esc back']),
-      'r reset · d disable · Esc back',
-      'Esc back',
-    ]
-    return variants.find(text => visibleWidth(text) <= width) ?? 'Esc back'
+    // before the Esc affordance, never the other way around. The wording's
+    // leading hints stay byte-identical to the pre-affordance variants.
+    const variant = (parts: Array<string | undefined>): BarWording =>
+      escapeWording(parts.filter((part): part is string => part !== undefined).join(' · '), 'Back')
+    return pickWording([
+      variant([primary, add, remove, 'r reset', 'd disable']),
+      variant([primary, add, 'r reset', 'd disable']),
+      variant([primary, add, 'r reset']),
+      variant([primary, add]),
+      variant([primary]),
+      escapeWording('r reset · d disable', 'Back'),
+      escapeWording('', 'Back'),
+    ], width, 'Esc back')
   }
 
   invalidate(): void {
@@ -323,6 +400,7 @@ export class ActionEditorPanel implements Component {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.paintedEscapeSpanValue = undefined
     this.mutationGeneration += 1
     this.recorder?.dispose()
     this.recorder = undefined
@@ -544,10 +622,14 @@ export class ActionEditorPanel implements Component {
     this.paintedBodyRows = Math.max(0, viewport.lines.length - 1)
     this.paintedChoice = viewport.selectableRows.some(row => row.ordinal === this.selectedIndex)
     const bar = this.paintedBodyRows === 0 || !this.paintedChoice
-      ? 'Esc back'
-      : ['Enter choose · d/l direct · Esc back', 'Esc back']
-        .find(text => visibleWidth(text) <= width) ?? 'Esc back'
-    viewport.lines[viewport.lines.length - 1] = color.textDim(truncateToWidth(bar, width, '…'))
+      ? escapeWording('', 'Back')
+      : pickWording(
+        [escapeWording('Enter choose · d/l direct', 'Back'), escapeWording('', 'Back')],
+        width,
+        'Esc back',
+      )
+    this.paintedEscapeSpanValue = bar.escape
+    viewport.lines[viewport.lines.length - 1] = paintWholeBar(bar, width)
     this.hitMap = viewport.lines.map((_, row) => {
       const selectable = viewport.selectableRows.find(candidate => candidate.row === row)
       if (selectable === undefined) return { kind: 'inert' }
