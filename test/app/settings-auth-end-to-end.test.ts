@@ -720,6 +720,111 @@ test('one fresh bar click runs exactly ONE Esc step of the embedded QuestionFlow
   h.close()
 })
 
+test('a Host prompt takeover between a bar press and release leaves the old press inert', async () => {
+  const listeners = new Set<(event: unknown) => void>()
+  const responds: string[] = []
+  const emit = (event: unknown): void => {
+    for (const listener of listeners) listener(event)
+  }
+  const auth = {
+    available: () => true,
+    listTargets: () => FLOWS,
+    begin: async () => {
+      queueMicrotask(() => {
+        emit({
+          kind: 'prompt',
+          attemptId: 'auth-takeover',
+          promptId: 'p1',
+          prompt: { kind: 'text', message: 'FIRST PROMPT' },
+        })
+        // The second prompt arrives BEFORE the press: it queues behind p1, so
+        // the owner serial is already at its current value when the press is
+        // recorded and p1's withdrawal is the ONLY thing that changes hands.
+        emit({
+          kind: 'prompt',
+          attemptId: 'auth-takeover',
+          promptId: 'p2',
+          prompt: { kind: 'text', message: 'SECOND PROMPT' },
+        })
+      })
+      return { kind: 'started' as const, attemptId: 'auth-takeover' }
+    },
+    onEvent: (listener: (event: unknown) => void) => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    respond: async (attemptId: string, promptId: string, answer: string | null) => {
+      responds.push(`${attemptId}:${promptId}:${answer === null ? 'null' : answer}`)
+    },
+    cancel: async () => {},
+  }
+  const h = open(120, 40, auth)
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login anthropic')
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('Provider · Anthropic') && frame.includes('> Sign in (provider)'),
+    () => h.vt.waitForRender(),
+    'the /login deeplink must reach the actionable Anthropic provider page',
+  )
+  await key(h, '\r')
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('FIRST PROMPT') && frame.includes('Back [Esc]'),
+    () => h.vt.waitForRender(),
+    'the first Host prompt must own the painted question bar',
+  )
+  const barCell = (): { row: number; col: number } => {
+    const rows = h.rows()
+    const row = rows.length - 1
+    const col = rows[row]!.indexOf('Back [Esc]')
+    assert.ok(col >= 0, `the embedded question bar paints Back:\n${rows[row]}`)
+    return { row, col }
+  }
+  const first = barCell()
+  press(h, first.row, first.col)
+
+  // The Host withdraws the VISIBLE first prompt: the queued second one takes
+  // over the same bar cells while p1's press is still recorded.
+  emit({ kind: 'prompt-withdrawn', attemptId: 'auth-takeover', promptId: 'p1' })
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('SECOND PROMPT') && frame.includes('Back [Esc]'),
+    () => h.vt.waitForRender(),
+    'the withdrawn first prompt must hand the question UI to the queued prompt',
+  )
+  assert.doesNotMatch(h.view(), /FIRST PROMPT/u)
+  assert.equal(barCell().col, first.col, 'the takeover keeps the same Back cells')
+
+  // The OLD press belongs to p1: releasing on the same cells must be inert and
+  // leave p2 in its EDIT state (the flow's own hint still says `esc back`, not
+  // the navigation state's `esc cancel`).
+  release(h, first.row, first.col)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /SECOND PROMPT/u)
+  assert.match(h.view(), /esc back/u, 'the stale release did not run p2 edit exit')
+  assert.deepEqual(responds, [], 'the stale release answered no prompt')
+
+  // A FRESH complete click is a new gesture: it runs exactly ONE Esc step (the
+  // edit exit), so the takeover prompt survives. Two rapid clicks would be a
+  // double click; wait out that terminal gesture window before this click.
+  await new Promise<void>(resolve => setTimeout(resolve, 900))
+  const fresh = barCell()
+  await click(h, fresh.row, fresh.col)
+  assert.match(h.view(), /SECOND PROMPT/u, 'one fresh click ran exactly one Esc step')
+  assert.deepEqual(responds, [], 'one fresh click never cancels the prompt')
+
+  // A second independent click runs the navigation-state Esc exactly once and
+  // answers exactly the takeover prompt; the same double-click window applies.
+  await new Promise<void>(resolve => setTimeout(resolve, 900))
+  const cancelling = barCell()
+  await click(h, cancelling.row, cancelling.col)
+  assert.deepEqual(responds, ['auth-takeover:p2:null'],
+    'the second independent click cancelled exactly the takeover prompt')
+  assert.doesNotMatch(h.view(), /SECOND PROMPT/u)
+  h.close()
+})
+
 test('a 30x8 Settings workspace disables Enter for a clipped masked form; 40x16 keeps it visible (MA12)', async () => {
   const h = open()
   await h.vt.waitForRender()
