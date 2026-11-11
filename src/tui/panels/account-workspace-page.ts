@@ -93,6 +93,10 @@ function phaseLabel(phase: string): string {
 }
 
 /** The page component. Constructed per workspace open. */
+/** The pending-write Esc is a WAIT fact, never a navigation affordance: it is
+ *  painted but publishes no clickable span. */
+const WAIT_ESC_HINT = 'Wait [Esc]'
+
 export class AccountWorkspacePage implements Component {
   private readonly source: AccountWorkspaceSource
   private requestRender: () => void
@@ -654,6 +658,19 @@ export class AccountWorkspacePage implements Component {
   /** The complete painted Esc affordance of the last bar this page generated. */
   private paintedEscape: { readonly startCol: number; readonly endCol: number } | undefined
 
+  /** The page's own SEMANTIC identity for a pointer gesture: the current view
+   *  plus the transient phases its Esc really acts on. The Settings root stores
+   *  it at press and re-proves it at the release, so a child repaint that keeps
+   *  the same bar cells cannot hand a press to a different Esc outcome. */
+  gestureIdentity(): string {
+    return JSON.stringify({
+      view: this.view,
+      busy: this.busy,
+      signOut: this.signOutConfirm,
+      serial: this.signOutConfirmationSerial,
+    })
+  }
+
   /** Lay out + paint one bar row: the LAST (Esc) segment carries the scoped
    *  Fullscreen secondary ink, every other hint stays `textMuted`, and only a
    *  FULLY painted Esc segment publishes its span. */
@@ -663,8 +680,12 @@ export class AccountWorkspacePage implements Component {
     if (layout.truncated || layout.spans.length === 0) return color.textMuted(layout.text)
     const escapeIndex = segments.length - 1
     let span: { startCol: number; endCol: number } | undefined
+    // A pending Host operation paints the real wait fact but is not an
+    // affordance: the Esc key only reports that the write has not settled, so
+    // it publishes no span and a click on it is inert.
+    const waiting = segments[escapeIndex]?.text === WAIT_ESC_HINT
     const painted = layout.spans.map(candidate => {
-      if (candidate.inputIndex !== escapeIndex) return color.textMuted(candidate.text)
+      if (candidate.inputIndex !== escapeIndex || waiting) return color.textMuted(candidate.text)
       span = { startCol: candidate.startCol, endCol: candidate.endCol }
       return paintActionSpan(candidate.text, 'secondary')
     })
@@ -738,7 +759,7 @@ export class AccountWorkspacePage implements Component {
    *  reports its in-flight state, an open sign-out confirmation cancels, and an
    *  idle page backs out. */
   private escHint(): string {
-    if (this.busy !== undefined) return 'Wait [Esc]'
+    if (this.busy !== undefined) return WAIT_ESC_HINT
     if (this.signOutConfirm) return 'Cancel [Esc]'
     return 'Back [Esc]'
   }

@@ -444,6 +444,14 @@ export class FooterConfiguratorPanel implements Component {
     return this.paintedEscapeSpanValue
   }
 
+  /** The page's own SEMANTIC identity for a pointer gesture: the model mode,
+   *  the dirty state and the in-flight save decide what its Esc really does.
+   *  The Settings root stores it at press and re-proves it at the release. */
+  gestureIdentity(): string {
+    const state = this.model.state()
+    return `${state.mode}:${this.model.isDirty() ? 'dirty' : 'clean'}:${state.saving ? 'saving' : 'idle'}`
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true

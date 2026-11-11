@@ -640,12 +640,17 @@ specialist-page contract below).
   page (About/Models/Account/Plugin/Footer/Keybindings/specialist) exposes only
   a read-only span of its own last painted Esc affordance in page columns — the
   root paints that row from column 0, so no column translation is applied. A
-  release replays the CURRENT state's Esc through the root's EXISTING keyboard
-  ladder (`handleInput('\x1b')`: the specialist page's own handler, the direct
-  page's return handling, or root `goBack`/close), so a pending mutation, dirty
-  draft, awaiting-paint grant or install phase is never bypassed. No page
-  registers a second last-row owner, and a page that painted no complete Esc
-  affordance leaves the row inert.
+  hosted page also exposes its own SEMANTIC identity (the current sub-view plus
+  every transient phase its Esc really acts on); the root stores it at press and
+  re-proves it at the release, so a child repaint that keeps the same bar cells
+  can never hand the gesture to a different Esc outcome. A pure wait/status fact
+  (for example a Host write still in flight) publishes no span and is never
+  clickable. A release replays the CURRENT state's Esc through the root's
+  EXISTING keyboard ladder (`handleInput('\x1b')`: the specialist page's own
+  handler, the direct page's return handling, or root `goBack`/close), so a
+  pending mutation, dirty draft, awaiting-paint grant or install phase is never
+  bypassed. No page registers a second last-row owner, and a page that painted
+  no complete Esc affordance leaves the row inert.
 
 - `About` is the default home: the Welcome-card brand/whale plus the runtime
   facts (the bundle's own version, the installed DSH version — `Unknown` when

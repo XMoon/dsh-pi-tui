@@ -375,6 +375,17 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return this.paintedEscapeSpanValue
   }
 
+  /** The page's own SEMANTIC identity for a pointer gesture: the region and
+   *  selected row plus every transient phase its Esc really acts on. The
+   *  Settings root stores it at press and re-proves it at the release, so a
+   *  child repaint that keeps the same bar cells cannot hand a press to a
+   *  different Esc outcome. */
+  gestureIdentity(): string {
+    const rowId = this.selectedSettingId()
+    const phase = rowId === undefined ? undefined : this.phases.get(rowId)?.kind
+    return `${this.region}:${rowId ?? ''}:${phase ?? ''}:${this.endpointPanel === undefined ? '' : 'endpoint'}:${this.choiceIndex}:${this.actionIndex}`
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true

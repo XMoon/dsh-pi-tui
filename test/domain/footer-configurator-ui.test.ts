@@ -1125,6 +1125,10 @@ test('the whole-footer composer preview is sanitized too (SGR survives, OSC/CSI 
     onCancel: () => {},
   })
   const rendered = panel.render(100).join('\n')
+  const rowsIdentity = panel.gestureIdentity()
+  model.activate()
+  assert.notEqual(panel.gestureIdentity(), rowsIdentity,
+    'entering a row changes the page gesture identity')
   assert.ok(!rendered.includes('\u0007'), `a BEL must never reach the panel:\n${rendered}`)
   assert.ok(!rendered.includes('\u001b]52'), `an OSC 52 clipboard write must never reach the panel:\n${rendered}`)
   assert.ok(!rendered.includes('\u001b[2J'), `a CSI screen clear must never reach the panel:\n${rendered}`)

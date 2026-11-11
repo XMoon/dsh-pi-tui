@@ -2361,22 +2361,31 @@ export class SessionWorkspacePanel implements Component {
     return { line: padding > 0 ? `${line}${' '.repeat(padding)}` : line, regions }
   }
 
-  /** The ONE current Enter verb of the selected typed row. */
-  private enterAction(row: PiTuiWorkspaceTreeRow): { readonly text: string; readonly short: string } {
+  /** The ONE current Enter verb of the selected typed row. A row whose body
+   *  click already runs the action keeps its historical keyboard-only hint
+   *  (`Enter New session`) in the bar instead of a second button-style
+   *  affordance; folder/session rows are the ones the bar may execute. */
+  private enterAction(row: PiTuiWorkspaceTreeRow): {
+    readonly text: string
+    readonly short: string
+    readonly hint: string
+  } {
     switch (row.kind) {
       case 'folder':
         if (this.chooserMode() && this.options.currentSessionId === undefined && this.workspaces.byId.has(row.workspaceId)) {
-          return { text: 'Choose [Enter]', short: 'Choose' }
+          return { text: 'Choose [Enter]', short: 'Choose', hint: 'Enter Choose workspace' }
         }
-        return row.expanded ? { text: 'Collapse [Enter]', short: 'Collapse' } : { text: 'Expand [Enter]', short: 'Expand' }
+        return row.expanded
+          ? { text: 'Collapse [Enter]', short: 'Collapse', hint: 'Enter Collapse' }
+          : { text: 'Expand [Enter]', short: 'Expand', hint: 'Enter Expand' }
       case 'newSession':
-        return { text: 'New [Enter]', short: 'New' }
+        return { text: 'Enter New session', short: 'New', hint: 'Enter New session' }
       case 'addDirectory':
-        return { text: 'Add [Enter]', short: 'Add' }
+        return { text: 'Enter Add directory', short: 'Add', hint: 'Enter Add directory' }
       case 'showMore':
-        return { text: 'More [Enter]', short: 'More' }
+        return { text: 'Enter More sessions', short: 'More', hint: 'Enter More sessions' }
       case 'session':
-        return { text: 'Open [Enter]', short: 'Open' }
+        return { text: 'Open [Enter]', short: 'Open', hint: 'Enter Open' }
     }
   }
 
@@ -2466,10 +2475,11 @@ export class SessionWorkspacePanel implements Component {
         if (selected.kind === 'session') segments.push({ text: 'Peek [Space]', priority: 4, short: 'Peek', action: 'peek', ink: 'secondary' })
       } else {
         // New / Add / More: the painted ROOT ROW already runs that explicit
-        // action, so the bar keeps only its truthful keyboard hint and never
-        // registers a second button for the same intent (§8.2).
+        // action, so the bar keeps only its historical keyboard hint (key-first
+        // syntax, never a button-style affordance) and registers no second
+        // intent for the same action (§8.2).
         const enter = this.enterAction(selected)
-        segments.push({ text: enter.text, priority: 7, short: enter.short })
+        segments.push({ text: enter.hint, priority: 7, short: enter.short })
       }
     }
     segments.push({ text: '/ search', priority: 5, short: '/' })

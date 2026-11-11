@@ -732,7 +732,7 @@ test('a command-refused Folder New keeps the Browser and releases the pending lo
   const after = h.view()
   assert.ok(after.includes('Sessions'), 'a refused create keeps the Browser open')
   assert.ok(!after.includes('Starting session…'), 'the refusal settles the pending operation')
-  assert.ok(after.split('\n').at(-1)!.includes('New [Enter]'), 'the failed New is immediately retryable')
+  assert.ok(after.split('\n').at(-1)!.includes('Enter New session'), 'the failed New is immediately retryable')
   h.vt.sendInput('\r')
   await waitUntil(() => attempts === 2, 'a deliberate retry reaches the command transaction once')
   assert.equal(h.facts.handles[0]!.disposed, 0, 'a refused create never retires the Workspace follow')

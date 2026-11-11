@@ -337,6 +337,10 @@ function errorText(error: unknown): string {
 }
 
 /** The Models page component. Constructed per workspace open. */
+/** The pending-write Esc is a WAIT fact, never a navigation affordance: it is
+ *  painted but publishes no clickable span. */
+const WAIT_ESC_HINT = 'Wait [Esc]'
+
 export class ModelsWorkspacePage implements Component {
   private readonly source: ModelsWorkspaceSource
   private requestRender: () => void
@@ -1729,6 +1733,24 @@ export class ModelsWorkspacePage implements Component {
   /** The complete painted Esc affordance of the last bar this page generated. */
   private paintedEscape: { readonly startCol: number; readonly endCol: number } | undefined
 
+  /** The page's own SEMANTIC identity for a pointer gesture: the current view
+   *  plus every transient phase that decides what its Esc really does. The
+   *  Settings root stores it at press and re-proves it at the release, so a
+   *  child repaint that keeps the same bar cells cannot hand a press to a
+   *  different Esc outcome. */
+  gestureIdentity(): string {
+    return JSON.stringify({
+      view: this.view,
+      question: this.question !== undefined,
+      picker: this.picker !== undefined,
+      modelPicker: this.modelPicker !== undefined,
+      reference: this.referencePhase,
+      add: this.add === undefined ? undefined : { step: this.add.step, creating: this.add.creating === true },
+      clear: this.clear === undefined ? undefined : this.clear.phase,
+      read: this.readState,
+    })
+  }
+
   /** Lay out + paint one bar row: the LAST (Esc) segment carries the scoped
    *  Fullscreen secondary ink, every other hint stays `textMuted`, and only a
    *  FULLY painted Esc segment publishes its span. */
@@ -1738,8 +1760,12 @@ export class ModelsWorkspacePage implements Component {
     if (layout.truncated || layout.spans.length === 0) return color.textMuted(layout.text)
     const escapeIndex = segments.length - 1
     let span: { startCol: number; endCol: number } | undefined
+    // A pending write paints the real wait fact but is not an affordance: the
+    // Esc key only reports that the Host has not settled, so it publishes no
+    // span and a click on it is inert.
+    const waiting = segments[escapeIndex]?.text === WAIT_ESC_HINT
     const painted = layout.spans.map(candidate => {
-      if (candidate.inputIndex !== escapeIndex) return color.textMuted(candidate.text)
+      if (candidate.inputIndex !== escapeIndex || waiting) return color.textMuted(candidate.text)
       span = { startCol: candidate.startCol, endCol: candidate.endCol }
       return paintActionSpan(candidate.text, 'secondary')
     })
@@ -1926,7 +1952,7 @@ export class ModelsWorkspacePage implements Component {
     return out
   }
 
-  /** The one truthful Esc action when no Action row fits. The Add Provider
+/** The one truthful Esc action when no Action row fits. The Add Provider
    *  catalog binds a non-empty filter to Esc BEFORE it can leave the page, so
    *  the fallback hint names that real effect instead of claiming a back the
    *  key will not perform. */
@@ -1935,9 +1961,9 @@ export class ModelsWorkspacePage implements Component {
    *  in-flight state (it never leaves); a pending provider authorization is
    *  the opposite case and Esc explicitly cancels it. */
   private pendingEscHint(): string | undefined {
-    if (this.referencePhase === 'pending') return 'Wait [Esc]'
-    if (this.view.kind === 'review' && this.add?.creating === true) return 'Wait [Esc]'
-    if (this.view.kind === 'logout' && this.clear?.phase === 'pending') return 'Wait [Esc]'
+    if (this.referencePhase === 'pending') return WAIT_ESC_HINT
+    if (this.view.kind === 'review' && this.add?.creating === true) return WAIT_ESC_HINT
+    if (this.view.kind === 'logout' && this.clear?.phase === 'pending') return WAIT_ESC_HINT
     if (this.view.kind === 'provider'
       && (this.auth?.phase === 'starting' || this.auth?.phase === 'running')) return 'Cancel [Esc]'
     return undefined

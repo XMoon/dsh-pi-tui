@@ -578,6 +578,12 @@ export interface SettingsAuthPage extends Component {
    *  Settings root owns the ONE physical last row and registers the pointer
    *  target from THIS span; the page never registers a second last-row owner. */
   paintedEscapeSpan?(): { readonly startCol: number; readonly endCol: number } | undefined
+  /** The page's own SEMANTIC identity for a pointer gesture: the current view
+   *  plus every transient phase that decides what its Esc really does. The root
+   *  stores it at press and requires the same value at release, so a child
+   *  repaint that leaves the bar cells unchanged can never hand a press to a
+   *  different Esc outcome. */
+  gestureIdentity?(): string
   /** True while a Host mutation must settle on this page: the workspace root
    *  must not dispose it from USER navigation (category rail / Back / deep
    *  link). Blocking-owner teardown still bypasses this guard. */
@@ -629,6 +635,9 @@ export interface EmbeddedSpecialistPage extends Component {
    *  Settings root owns the ONE physical last row and registers the pointer
    *  target from THIS span. */
   paintedEscapeSpan?(): { readonly startCol: number; readonly endCol: number } | undefined
+  /** The page's own SEMANTIC identity for a pointer gesture (view + the
+   *  transient phases its Esc really acts on), re-proved at the release. */
+  gestureIdentity?(): string
 }
 
 /** One pane the current frame actually paints: its level and absolute geometry.
@@ -5128,15 +5137,29 @@ export class SettingsWorkspacePanel implements Component {
    */
   private childGestureIdentity(): string {
     const page = this.pluginPage
-    if (page === undefined) return 'none'
-    // `liveIdentity()` is the child-side authority: it carries the page's
-    // monotonic semantic generation (a change that REVERTS inside the gesture),
-    // the Controller's monotonic transition count (an asynchronous phase round
-    // trip), the install editor's field values, and the semantic state/grant/
-    // Controller facts. Because it is a VALUE, a repaint that only catches up with
-    // facts already live before the press stays comparable. The view/mutation/
-    // yield triple is appended for readable failures; it is already implied.
-    return `${page.liveIdentity()}:${page.currentView()}:${page.pendingMutation() ? 'pending' : 'idle'}:${page.canYieldFocusToNavigation() ? 'yield' : 'hold'}`
+    if (page !== undefined) {
+      // `liveIdentity()` is the child-side authority: it carries the page's
+      // monotonic semantic generation (a change that REVERTS inside the gesture),
+      // the Controller's monotonic transition count (an asynchronous phase round
+      // trip), the install editor's field values, and the semantic state/grant/
+      // Controller facts. Because it is a VALUE, a repaint that only catches up with
+      // facts already live before the press stays comparable. The view/mutation/
+      // yield triple is appended for readable failures; it is already implied.
+      return `${page.liveIdentity()}:${page.currentView()}:${page.pendingMutation() ? 'pending' : 'idle'}:${page.canYieldFocusToNavigation() ? 'yield' : 'hold'}`
+    }
+    // The hosted specialist and auth pages own their own sub-view machinery and
+    // can repaint the SAME bar cells with a DIFFERENT Esc outcome without
+    // touching the root revision; their own semantic identity is part of the
+    // gesture for exactly the same reason.
+    const specialist = this.specialistPage
+    if (specialist !== undefined) {
+      return `specialist:${specialist.title}:${specialist.gestureIdentity?.() ?? ''}`
+    }
+    const auth = this.authPage
+    if (auth !== undefined) {
+      return `auth:${this.categoryId}:${auth.gestureIdentity?.() ?? ''}`
+    }
+    return 'none'
   }
 
   /** Whether one panel cell belongs to the painted content column. */
