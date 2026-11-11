@@ -787,6 +787,31 @@ test('a cancelled Folder New releases the live pending operation without a guess
   assert.equal(h.facts.handles[0]!.disposed, 0, 'the follow stays alive for the next deliberate operation')
 })
 
+test('a cancelled Folder New during Workspace resolution is a cancellation, not a failure', async () => {
+  const h = harness({
+    currentSessionId: CURRENT,
+    agents: {
+      resolveWorkspace: (async () => { throw cancellationError('cancelled during resolution') }) as never,
+    },
+  })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  h.facts.handles[0]!.push(baseline({ workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] }))
+  await waitUntil(() => h.view().includes('project-a · 1'), 'the official baseline is proved')
+  h.vt.sendInput('\x1b[H')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[C')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await waitUntil(() => !h.view().includes('Starting session…'), 'the cancelled resolution releases the pending lock')
+  assert.ok(h.view().includes('Sessions'), 'a cancelled resolution keeps the Browser open')
+  assert.equal(h.notices.some(notice => notice.kind === 'error'), false,
+    'a cancelled resolution is never a user-visible failure')
+  assert.equal(h.facts.handles[0]!.disposed, 0, 'the follow stays alive after the cancellation')
+})
+
 test('a blocking Question pre-empts the workspace, and a refused lease leaves no hidden reader', async () => {
   const h = harness({ currentSessionId: CURRENT })
   await h.runSessions('')
