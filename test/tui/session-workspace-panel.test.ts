@@ -2435,3 +2435,49 @@ test('the pending path verification blocks mouse tree actions and inert editor v
   assert.ok(view.includes('Enter Verify directory · Esc Cancel'), 'the editor verbs return after the refusal')
   assert.deepEqual(requested, [], 'no tree action ran during or after the pending verification')
 })
+
+test('a tiny frame never submits a Host path it did not paint', async () => {
+  const submitted: string[] = []
+  const outcomes: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
+  const h = harness({
+    columns: 80,
+    rows: 24,
+    initialDirectoryEntry: true,
+    initialDirectoryPath: '/launch/failed',
+    onAddDirectory: (path, settle) => { submitted.push(path); outcomes.push(settle) },
+  })
+  await h.paint()
+  assert.ok(h.view().includes('Host directory: /launch/failed'), 'the retained path is first visible')
+  for (const rows of [3, 4] as const) {
+    h.vt.resize(80, rows)
+    await h.paint()
+    assert.ok(h.view().includes('Host directory: /launch/failed'),
+      `${rows} rows: the editable path line is preferred over the decorative Add row`)
+    assert.ok(panelFrame(h)[panelFrame(h).length - 1]!.includes('Enter Verify directory'),
+      `${rows} rows: the advertised Enter belongs to the painted input`)
+  }
+  // No body line at all: the input is invisible, so Enter must be a no-op and
+  // the Footer must not advertise it.
+  h.vt.resize(80, 2)
+  await h.paint()
+  assert.ok(!h.view().includes('Host directory:'), 'no input row is painted at 2 rows')
+  let footer = panelFrame(h)[panelFrame(h).length - 1]!
+  assert.ok(!footer.includes('Enter Verify directory'), `no unseen submit is advertised:\n${footer}`)
+  assert.ok(footer.includes('Esc Cancel'), 'Esc remains available to leave the editor')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(submitted, [], 'Enter cannot submit a path the frame did not paint')
+  // Restoring the body re-paints the retained input; the same Enter now submits.
+  h.vt.resize(80, 3)
+  await h.paint()
+  assert.ok(h.view().includes('Host directory: /launch/failed'), 'the retained input returns with the body')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(submitted, ['/launch/failed'], 'the visible input submits once')
+  outcomes[0]!({ kind: 'failed', message: 'not a directory on Host' })
+  await h.paint()
+  assert.ok(h.view().includes('/launch/failed'), 'a refusal keeps the attempted path')
+  footer = panelFrame(h)[panelFrame(h).length - 1]!
+  assert.ok(footer.includes('Enter Verify directory') && footer.includes('Esc Cancel'),
+    'the editor verbs return after the refusal')
+})
