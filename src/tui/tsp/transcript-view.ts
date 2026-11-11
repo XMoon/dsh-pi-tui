@@ -64,7 +64,7 @@ import { chartHumanText, chartProjection, chartValueRows, type ChartFact } from 
 import { svgDetailRows, type SvgFact } from '../../domain/visual/svg.ts'
 import { visualParts, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
 import { humanFacingVisualResult, type PublishedVisual } from '../../domain/visual/publication.ts'
-import { assistantVisualPresentation } from '../../domain/visual/presentation.ts'
+import { assistantVisualPresentation, assistantVisualPresentationRevision } from '../../domain/visual/presentation.ts'
 import { CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME } from '../../domain/visual/tools.ts'
 import {
   assistantPublishedVisualNodes,
@@ -1644,6 +1644,13 @@ function disclosureTokenOf(
   return parts.join('\u0001')
 }
 
+/** Whether an Assistant row owns the selected published figure ref. */
+function visualOwnerHits(message: Extract<TranscriptMessage, { kind: 'assistant' }>, ref: string | undefined): boolean {
+  if (ref === undefined || message.displayBlocks !== undefined) return false
+  const presentation = assistantVisualPresentation(message)
+  return presentation?.publications.some(publication => publication.ref === ref) === true
+}
+
 /** The exact display inputs of ONE row (no content copy, no hashing). */
 function messageStampOf(
   message: TranscriptMessage,
@@ -1654,19 +1661,32 @@ function messageStampOf(
   switch (message.kind) {
     case 'assistant':
       parts.push(assistantPresentationRevision(message))
+      // Published figures are a sidecar on the SAME message object; publishing
+      // or withdrawing a figure changes what `messageNode` draws while the row
+      // itself is untouched.
+      parts.push(assistantVisualPresentationRevision(message))
       parts.push((options.transcriptStats?.get(message) ?? []).join('\u0001'))
       parts.push(copyTokenOf(message, options))
       parts.push(imageTokensOf(message, options))
       parts.push(options.nativeImagesSupported === true ? 1 : 0)
       parts.push(options.chartKindsSupported === true ? 1 : 0)
-      parts.push(selectedVisualStampOf(options.selectedVisual))
+      // Only the Assistant row that OWNS the selected figure is affected.
+      parts.push(visualOwnerHits(message, options.selectedVisual?.ref) ? selectedVisualStampOf(options.selectedVisual) : '')
       break
     case 'tool':
       parts.push(message.subtreeRevision ?? 0)
       parts.push(disclosureTokenOf(message, key, options))
       parts.push(svgTokensOf(message, options))
       parts.push(imageTokensOf(message, options))
+      // The settled-answer lookup is a LIVE read keyed by callId: a late
+      // official answer changes the rendered result body without mutating the
+      // canonical tool row. Its current payload is therefore a display input,
+      // not merely the revision at which the lookup was installed.
       parts.push(options.settledQuestionAnswersRevision ?? 0)
+      const answers = message.callId === undefined
+        ? undefined
+        : options.settledQuestionAnswersLookup?.(message.callId)
+      parts.push(answers === undefined ? -1 : JSON.stringify({ answers }))
       break
     case 'thinking':
       parts.push(disclosureTokenOf(message, key, options))

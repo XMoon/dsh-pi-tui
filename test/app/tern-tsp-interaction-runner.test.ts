@@ -934,13 +934,41 @@ test('a real timed claim times out into the continued form (the official sink se
     harness.surface.paintNow()
     // The wire text encodes the payload as JSON inside the frame, so the
     // assertion reads the row's OWN ops rather than a raw substring.
-    const rowOps = (): Op[] => harness.tern.ops().filter(op => op[1] === rowId)
-    /** The payload the row's LAST update carried (the op argument itself, so
-     *  the frame's JSON escaping never hides the value). */
+    // PR2: a retained Main root is updated by targeted ops under its own
+    // subtree, so a late settled answer can arrive as a descendant `add`.
+    // The last update of the retained row is read by id OR by its subtree.
+    const rowOps = (): Op[] => harness.tern.ops().filter(op => typeof op[1] === 'string'
+      && (op[1] === rowId || op[1].startsWith(`${rowId}.`)))
+    /** The payload of the LATEST wire update to the retained `.result` node.
+     *  A targeted Main diff may replace its text with a `set`/`text` op or add
+     *  the whole root with a nested result child; ops are read newest-first so
+     *  the initial timeout payload can never shadow the settled batch. */
+    const textInAdd = (op: Op): string | undefined => {
+      if (op[0] !== 'add') return undefined
+      const visit = (node: { readonly id?: string; readonly p?: Record<string, unknown>; readonly c?: readonly unknown[] }): string | undefined => {
+        if (node.id === rowId && typeof node.p?.text === 'string') return String(node.p.text)
+        for (const child of node.c ?? []) {
+          const found = visit(child as never)
+          if (found !== undefined) return found
+        }
+        return undefined
+      }
+      return visit(op[4] as never)
+    }
     const rowUpdateText = (): string => {
-      const update = [...rowOps()].reverse().find(op => op[0] === 'text' || op[0] === 'set')
-      if (update === undefined) return ''
-      return update[0] === 'text' ? String(update[3]) : JSON.stringify(update[2])
+      const ops = harness.tern.ops()
+      for (let index = ops.length - 1; index >= 0; index -= 1) {
+        const op = ops[index]!
+        if (typeof op[1] !== 'string') continue
+        if (op[1] === rowId && op[0] === 'text') return String(op[3])
+        if (op[1] === rowId && op[0] === 'set' && typeof op[2].text === 'string') return String(op[2].text)
+        if (op[1] === rowId && op[0] === 'set') return JSON.stringify(op[2])
+        if (op[0] === 'add' && (op[1] === rowId || op[1].startsWith('main.'))) {
+          const text = textInAdd(op)
+          if (text !== undefined) return text
+        }
+      }
+      return ''
     }
     const expectedBatch = JSON.stringify({ answers: [{ id: 'q-timed', selected: ['A'] }] })
     await waitFor(() => rowUpdateText() === expectedBatch,

@@ -333,6 +333,10 @@ test('W03: a non-blank commit hides the Welcome and keeps the transcript root', 
     eligibility: 'hidden',
   })
   assert.equal(m.node('welcome-stage'), undefined, 'the Welcome left Main')
+  // A raw-Main commit can be queued behind an ack, so wait for the actual row
+  // rather than for the first frame of the transition.
+  await waitUntil('the transcript root to reach the pane',
+    () => m.nodes('main.').some(node => node.id.includes('msg-')))
   assert.ok(m.nodes('main.').some(node => node.id.includes('msg-')), 'the transcript root stays')
   assert.equal(m.nodes('dock.').some(node => node.id.includes('welcome')), false,
     'the retired line never came back into the Dock')
@@ -564,7 +568,9 @@ test('W18: a pane without `el` gets the plain-text form and claims no button', a
   const nodes = m.nodes('main.')
   assert.equal(nodes.some(node => node.k === 'el'), false, 'no `el` node is sent to a pane that did not negotiate it')
   const texts = nodes.map(node => String(node.p.text ?? '')).filter(text => text !== '')
-  assert.deepEqual(texts, ['dsh-pi-tui', VERSION_LINE, 'Use /sessions to resume'],
+  // Raw `add` ops and the SDK's full-view child order can differ; the contract
+  // is the SET of fallback statements, not their incidental insertion order.
+  assert.deepEqual([...texts].sort(), ['dsh-pi-tui', VERSION_LINE, 'Use /sessions to resume'].sort(),
     'the fallback states the name, the committed version and the typed route')
   assert.equal(nodes.some(node => node.k === 'button' || node.p.actions !== undefined), false,
     'and it never fakes an operable Resume control')
