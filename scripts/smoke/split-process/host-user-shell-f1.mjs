@@ -348,7 +348,7 @@ export async function runHostUserShellF1(context) {
     assert(statusA.sessionOpen && statusA.openSessionId === sessionId, 'F1 Client A did not attach to the pre-existing Host Session')
     const initialEvents = hostSessionEvents(dshHome, sessionId) ?? []
     const hostMarker = 'F1_HOST_EXECUTION_20261109'
-    const hostFacts = `printf '${hostMarker}\\n'; printf 'CWD=%s\\nHOME=%s\\nPATH=%s\\nF1_HOST_VARIABLE=%s\\n' "$PWD" "$HOME" "$PATH" "$F1_HOST_VARIABLE_20261109"; cat host-only.txt; f1-host-command`
+    const hostFacts = `printf 'F1_HOST_%s_20261109\\n' EXECUTION; printf 'CWD=%s\\nHOME=%s\\nPATH=%s\\nF1_HOST_VARIABLE=%s\\n' "$PWD" "$HOME" "$PATH" "$F1_HOST_VARIABLE_20261109"; cat host-only.txt; f1-host-command`
     await submitShellCommand(clientA, '!', hostFacts, 'F1 bypass !')
     await waitForHostSessionEventAfter(dshHome, sessionId, initialEvents.length,
       event => event.type === 'user/message' && JSON.stringify(event).includes(hostMarker),
@@ -383,7 +383,7 @@ export async function runHostUserShellF1(context) {
     const afterBangBangEvents = hostSessionEvents(dshHome, sessionId) ?? []
     assert(afterBangBangEvents.length === beforeBangBang, '!! has no Session or model write')
     assert(!hostUserTexts(afterBangBangEvents).some(text => text.includes(localMarker)), '!! output remains only on its card')
-    await submitShellCommand(clientA, '!', `printf '${bypassMarker}\\n'; printf '${bypassMarker}\\n' > ${shellQuote(bypassOutside)}`,
+    await submitShellCommand(clientA, '!', `printf 'F1_BYPASS_%s_20261109\\n' OUTSIDE_WORKSPACE; printf 'F1_BYPASS_%s_20261109\\n' OUTSIDE_WORKSPACE > ${shellQuote(bypassOutside)}`,
       'F1 explicit Host bypass policy')
     const bypassEvent = await waitForHostSessionEventAfter(dshHome, sessionId, afterBangBangEvents.length,
       event => event.type === 'user/message' && JSON.stringify(event).includes(bypassMarker),
@@ -402,7 +402,7 @@ export async function runHostUserShellF1(context) {
 
     const beforeNonzero = hostSessionEvents(dshHome, sessionId) ?? []
     const nonzeroMarker = 'F1_EXIT_7_20261109'
-    await submitShellCommand(clientA, '!', `printf '${nonzeroMarker}\\n'; exit 7`, 'F1 nonzero exit')
+    await submitShellCommand(clientA, '!', `printf 'F1_EXIT_%s_20261109\\n' 7; exit 7`, 'F1 nonzero exit')
     const nonzeroEvent = await waitForHostSessionEventAfter(dshHome, sessionId, beforeNonzero.length,
       event => event.type === 'user/message' && JSON.stringify(event).includes(nonzeroMarker),
       'F1 nonzero Host result Session write')
@@ -421,7 +421,7 @@ export async function runHostUserShellF1(context) {
       'sleep 0.05 & p=$!',
       'wait "$p"',
       `printf 'F1_WAIT_STATUS=%s\\n' "$?"`,
-      'case $p in ""|*[!0-9]*) printf "F1_WAIT_PID=invalid\\n" ;; *) printf "F1_WAIT_PID=numeric\\n" ;; esac',
+      'case $p in ""|*[!0-9]*) printf "F1_WAIT_%s=%s\\n" PID invalid ;; *) printf "F1_WAIT_%s=%s\\n" PID numeric ;; esac',
       '(exit 7) & q=$!',
       'wait "$q"',
       `printf 'F1_WAIT_BG=%s\\n' "$?"`,
@@ -429,8 +429,8 @@ export async function runHostUserShellF1(context) {
       'kill -TERM "$k"',
       'wait "$k"',
       `printf 'F1_WAIT_SIG=%s\\n' "$?"`,
-      `printf 'F1_STREAM_OUT_20261110\\n'`,
-      `printf 'F1_STREAM_ERR_20261110\\n' >&2`,
+      `printf 'F1_STREAM_%s_20261110\\n' OUT`,
+      `printf 'F1_STREAM_%s_20261110\\n' ERR >&2`,
     ].join('; ')
     await submitShellCommand(clientA, '!!', rawCommand, 'F1 raw Bash $!/wait/FD semantics')
     await waitForLocalShellSettled(clientA, rawMarker, '[exit 0]', 'F1 raw Bash $!/wait/FD semantics')
@@ -642,7 +642,7 @@ export async function runHostUserShellF1(context) {
     await waitForComposerMode(clientB, 'prompt', 'F1 independent Client B prompt preparation')
     clientB.send('!')
     await waitForComposerMode(clientB, '!', 'F1 independent Client B shell-mode activation')
-    clientB.send(`printf 'F1_CLIENT_B_RUNNING_20261109\\n' >&2; touch ${shellQuote(cancelBStarted)}; sleep 2; printf 'F1_CLIENT_B_SURVIVED_20261109\\n'; printf 'F1_CLIENT_B_STDERR_20261109\\n' >&2`)
+    clientB.send(`printf 'F1_CLIENT_B_RUNNING_20261109\\n' >&2; touch ${shellQuote(cancelBStarted)}; sleep 2; printf 'F1_CLIENT_B_%s_20261109\\n' SURVIVED; printf 'F1_CLIENT_B_%s_20261109\\n' STDERR >&2`)
     await waitForComposerText(clientB, 'F1_CLIENT_B_RUNNING_20261109', 'F1 independent Client B command draft')
     clientB.send('\r')
     // The two local cards only prove both Clients ADMITTED their commands. The
@@ -679,16 +679,14 @@ export async function runHostUserShellF1(context) {
       "printf 'F1_TRUNC_%s\\n' BEGIN_20261110",
       "for ((i=0;i<512;i++)); do printf '%200s\\n' ''; done",
       "for ((i=0;i<400;i++)); do printf '%200s\\n' '' >&2; done",
-      `printf '${truncTail}\\n'`,
-      `printf '${truncStderrTail}\\n' >&2`,
+      `printf 'F1_TRUNC_%s_20261110\\n' TAIL`,
+      `printf 'F1_TRUNC_%s_20261110\\n' STDERR_TAIL >&2`,
     ].join('; ')
     const beforeTrunc = hostSessionEvents(dshHome, sessionId) ?? []
     // A committed `!` deletes its local card, so the visible frame is not an
     // authority for its content. This run's unique truncated tail in the Host
     // Session user/message is the only evidence that the bounded result landed.
-    clientB.send('!')
-    clientB.send(truncCommand)
-    clientB.send('\r')
+    await submitShellCommand(clientB, '!', truncCommand, 'F1 bounded truncated output')
     await waitForHostSessionEventAfter(dshHome, sessionId, beforeTrunc.length,
       event => event.type === 'user/message' && JSON.stringify(event).includes(truncTail),
       'F1 bounded truncated result Session write')
@@ -755,7 +753,7 @@ export async function runHostUserShellF1(context) {
     assert(existsSync(bypassOutside), 'the sibling directory is writable in the positive bypass phase')
     const beforeSandboxAllow = hostUserTexts(hostSessionEvents(dshHome, sandboxSessionId) ?? [])
     const sandboxAllow = 'F1_SANDBOX_ALLOW_20261109'
-    await submitShellCommand(sandboxClient, '!', `touch ${shellQuote(allowedPath)}; printf '${sandboxAllow}\\n'`,
+    await submitShellCommand(sandboxClient, '!', `touch ${shellQuote(allowedPath)}; printf 'F1_SANDBOX_%s_20261109\\n' ALLOW`,
       'F1 explicit Host sandbox policy')
     const sandboxAllowEvent = await waitForHostSessionEventAfter(dshHome, sandboxSessionId, beforeSandboxAllow.length,
       event => event.type === 'user/message' && JSON.stringify(event).includes(sandboxAllow),
@@ -802,6 +800,7 @@ export async function runHostUserShellF1(context) {
     assert(!finalUserMessages.some(text => text.includes(signalMarker)), '!! signal outcomes add no model context')
     assert(!finalUserMessages.some(text => text.includes(disconnectMarker)), 'an indeterminate one-shot outcome is never replayed into the Session')
     assert(!finalUserMessages.some(text => text.includes(localMarker)), '!! has no durable Shell result')
+    assert(!finalUserMessages.some(text => text.includes(rawMarker)), 'the raw Bash !! adds no durable Shell result')
     assert(!finalUserMessages.some(text => text.includes(childMarker)), 'cancelled Client A has no durable partial result')
     trace('m6-f1-host-user-shell', {
       tarball: context.tarball,
