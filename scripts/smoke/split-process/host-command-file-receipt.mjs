@@ -218,7 +218,11 @@ export async function runHostCommandFileReceipt(context) {
     const mixedImage = await stagedPlaceholder(clientA, 'image', 'CFR Seg B image')
     clientA.send('\x15')
     await waitForComposerGone(clientA, '[file #', 'CFR Seg B draft line cleared')
-    clientA.send(`/files inspect ${mixedFile} ${mixedImage} ${markerB}`)
+    // The SAME staged file/image placeholders are referenced TWICE: the
+    // attachment occurrence contract keeps both occurrences (each FILE stages
+    // its own receipt), so a real user draft proves the full
+    // IMAGE → FILE → IMAGE → FILE handler order from one command.
+    clientA.send(`/files inspect ${mixedImage} ${mixedFile} ${mixedImage} ${mixedFile} ${markerB}`)
     await waitForComposer(clientA, markerB, 'CFR Seg B command draft')
     clientA.send('\r')
     const proofB = await waitForC1WorkEvent(
@@ -229,26 +233,35 @@ export async function runHostCommandFileReceipt(context) {
       120_000,
     )
     assert(proofB.sessionId === sessionA, `CFR Seg B addressed another Session: ${JSON.stringify(proofB)}`)
-    assert(proofB.attachments.map(entry => entry.type).join(',') === 'file,image',
-      `CFR Seg B keeps the submitted FILE/IMAGE order: ${JSON.stringify(proofB.attachments)}`)
-    const mixedFileBlock = proofB.attachments[0]
-    const mixedImageBlock = proofB.attachments[1]
-    assert(mixedFileBlock.sha256 === clientSha256 && mixedFileBlock.bytes === clientSource.byteLength,
-      `CFR Seg B FILE bytes are the Client source: ${JSON.stringify(mixedFileBlock)}`)
-    assert(mixedImageBlock.mediaType === 'image/png', `CFR Seg B IMAGE keeps its admitted media type: ${JSON.stringify(mixedImageBlock)}`)
-    assert(mixedImageBlock.width === 1 && mixedImageBlock.height === 1,
-      `CFR Seg B IMAGE keeps its admitted dimensions: ${JSON.stringify(mixedImageBlock)}`)
-    assert(mixedImageBlock.bytes === pngBytes.byteLength,
-      `CFR Seg B IMAGE keeps its admitted byte count: ${JSON.stringify(mixedImageBlock)}`)
-    assert(typeof mixedImageBlock.attachmentId === 'string' && mixedImageBlock.attachmentId.length > 0,
-      'CFR Seg B IMAGE resolves to a durable attachment identity')
+    assert(proofB.attachments.map(entry => entry.type).join(',') === 'image,file,image,file',
+      `CFR Seg B keeps the submitted IMAGE/FILE interleaving: ${JSON.stringify(proofB.attachments)}`)
+    for (const index of [1, 3]) {
+      const fileBlock = proofB.attachments[index]
+      assert(fileBlock.sha256 === clientSha256 && fileBlock.bytes === clientSource.byteLength,
+        `CFR Seg B FILE occurrence ${index} carries the Client source bytes: ${JSON.stringify(fileBlock)}`)
+    }
+    for (const index of [0, 2]) {
+      const imageBlock = proofB.attachments[index]
+      assert(imageBlock.mediaType === 'image/png',
+        `CFR Seg B IMAGE occurrence ${index} keeps its admitted media type: ${JSON.stringify(imageBlock)}`)
+      assert(imageBlock.width === 1 && imageBlock.height === 1,
+        `CFR Seg B IMAGE occurrence ${index} keeps its admitted dimensions: ${JSON.stringify(imageBlock)}`)
+      assert(imageBlock.bytes === pngBytes.byteLength,
+        `CFR Seg B IMAGE occurrence ${index} keeps its admitted byte count: ${JSON.stringify(imageBlock)}`)
+      assert(typeof imageBlock.attachmentId === 'string' && imageBlock.attachmentId.length > 0,
+        'CFR Seg B IMAGE resolves to a durable attachment identity')
+    }
     await waitForCommandLifecycle(dshHome, sessionA, proofB.commandId, markerB, 'CFR Seg B')
     trace('cfr-seg-b-mixed', {
       sessionId: sessionA,
       commandId: proofB.commandId,
       order: proofB.attachments.map(entry => entry.type),
-      file: { name: mixedFileBlock.name, bytes: mixedFileBlock.bytes, sha256: mixedFileBlock.sha256 },
-      image: { attachmentId: mixedImageBlock.attachmentId, mediaType: mixedImageBlock.mediaType, bytes: mixedImageBlock.bytes },
+      files: [proofB.attachments[1].sha256, proofB.attachments[3].sha256],
+      image: {
+        attachmentId: proofB.attachments[0].attachmentId,
+        mediaType: proofB.attachments[0].mediaType,
+        bytes: proofB.attachments[0].bytes,
+      },
     })
 
     // ── Negative: a genuine command WITHOUT `input.attachments` refuses ──────

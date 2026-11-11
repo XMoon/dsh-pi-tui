@@ -433,8 +433,10 @@ test('the attachment gate consumes the shared classification alone', () => {
     false, 'no parallel skill predicate may outrank the Host precedence')
   assert.ok(gate.includes("if (classification.kind === 'client-command')"),
     'a Client command refuses staged attachments')
-  assert.ok(gate.includes("if (classification.kind === 'host-command')"),
+  assert.ok(gate.includes("if (classification.kind === 'host-command' && classification.attachments !== true)"),
     'a genuine Host command follows its own attachment declaration')
+  assert.equal(gate.includes('cannot receive file attachments'),
+    false, 'a declared Host command no longer refuses FILE attachments (receipt staging owns them)')
 })
 
 test('the rewind settlement owner is phase-specific', () => {
