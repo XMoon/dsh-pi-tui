@@ -44,6 +44,8 @@ import { Config as TuiConfigSchema } from '../../src/index.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { probeAttachment } from '../../src/client/media/attachment/intake.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
+import type { LaunchWorkspaceVerdict } from '../../src/app/remote-process/local-workspace-equivalence.ts'
+import { statSync } from 'node:fs'
 import { TRANSITION_FENCE_NOTICE } from '../../src/app/submission/steer.ts'
 import type { RemoteApplicationOverride } from '../../src/app/application-runtime.ts'
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
@@ -156,6 +158,24 @@ interface Pr3Fixture {
  * Mount the REAL Remote runner WITHOUT a serializer stub: the aggregate's
  * default (the production serializer) is the composition under test.
  */
+
+/** An in-process VERIFIED launch proof for composition tests. The REAL
+ * classifier's evidence is validated by its own unit contract and the packed
+ * OS lane; this fixture only needs a legal sessionless Workspace target. */
+function launchProof(cwd: string): LaunchWorkspaceVerdict {
+  const evidence = statSync(cwd)
+  return {
+    kind: 'verified',
+    launchCwd: cwd,
+    instanceId: 'in-process-fixture-host',
+    hostPid: process.pid,
+    hostStarttime: 'fixture',
+    device: evidence.dev,
+    inode: evidence.ino,
+    revalidate: () => true,
+  }
+}
+
 async function mountPr3Runner(
   life: TestLifecycle,
   options: {
@@ -212,7 +232,16 @@ async function mountPr3Runner(
   }
   life.defer(() => { TuiApp.prototype.start = originalStart })
   const runnerFiber = runnerCtx.plugin(pluginCtx => {
-    applyRunnerWithRuntime(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: options.resumeSessionId } as never), override)
+    applyRunnerWithRuntime(
+      pluginCtx,
+      TuiConfigSchema({ fullscreen: 'off', sessionId: options.resumeSessionId } as never),
+      override,
+      undefined,
+      // The REAL classifier is proven by its own unit contract and the packed
+      // OS lane; this in-process composition only needs a sessionless first
+      // create to have a legal Host Workspace target.
+      launchProof(process.cwd()),
+    )
   })
   await runnerFiber
   await waitFor('remote runner mount', () => vt.getViewport().join('').length > 0, 20_000)

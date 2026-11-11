@@ -92,6 +92,7 @@ import { foldWireNodes, wireNodes, type WireNode } from '../support/tsp-picker-w
 import { waitUntil } from '../support/tsp-runner-harness.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 import { sessionScopeFacts } from '../support/session-scope-facts.ts'
+import { createWorkspaceNextIntentOwner } from '../../src/app/session/workspace-next-intent.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
 const nullPresentation = {
@@ -948,6 +949,10 @@ async function mountChain(
   // Direct-shaped runner stub uses) over this composition's live ownership core,
   // so a real generation bump really does retire a late intake.
   const scopeFacts = sessionScopeFacts(() => agent as never, () => core.generation())
+  // The sessionless half of the `@` scope is the SAME confirmed Workspace
+  // snapshot the create path owns (never a raw Client cwd).
+  const workspaceNextIntent = createWorkspaceNextIntentOwner(undefined)
+  workspaceNextIntent.setResolvedWorkspace('workspace-home', home)
   let runnerSessionId: string | undefined
   const base: Record<string, unknown> = {
     ctx,
@@ -967,6 +972,7 @@ async function mountChain(
     insertIntoEditor: () => {},
     captureSessionScope: scopeFacts.captureSessionScope,
     isSessionScopeCurrent: scopeFacts.isSessionScopeCurrent,
+    workspaceNextIntent,
     sessionTransitionPending: () => false,
     prepareDraftMessage: async (text: string) => ({ role: 'user', content: [{ type: 'text', text }] }),
     requestExit: () => {},
@@ -2294,7 +2300,7 @@ test('a Client-local read still in flight when the seat moves commits nothing ->
     commands: [],
     cwd: home,
     fileReferences: null,
-    scope: () => ({ kind: 'workspace', cwd: home }),
+    scope: () => ({ kind: 'workspace', workspaceId: 'workspace-home', selectionRevision: 1 }),
     localCwd: () => home,
     skillReferences: [],
     hostShellCompletion: undefined,
@@ -2390,8 +2396,8 @@ test('the @ seat resolves its Host scope at query time -> the sessionless surfac
   await h.setDraft('@src/')
   await h.triggerQuietly(TAB)
   await waitUntil('the workspace-scoped answer painted', () => h.rows().length > 0)
-  assert.deepEqual(h.host.records().at(-1)!.scope, { kind: 'workspace', cwd: home },
-    'the sessionless @ query carried the workspace cwd scope')
+  assert.deepEqual(h.host.records().at(-1)!.scope, { kind: 'workspace', workspaceId: 'workspace-home', selectionRevision: 1 },
+    'the sessionless @ query carried the CONFIRMED Host Workspace scope (never a cwd)')
   const installsAfterFirst = h.mountPorts.catalogInstalls.length
 
   // 2. A live Session appears. No reinstall, no second source: the SAME

@@ -395,19 +395,39 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   `Esc` action. The Input, home read, latest query generation and painted
   candidate admission are disposed with the editor or the per-open lease, so a
   late result can never repaint a newer open.
-- **A sessionless mount verifies its launch directory once.** The sessionless
-  mount resolves the launch `host-path` proposal through the official Host
-  Workspace lifecycle, so the Welcome states a Host-confirmed canonical
-  directory before the first message and the Browser can expand that confirmed
-  destination. The first create awaits the SAME in-flight resolution and then
-  revalidates the committed `workspaceId`; a failed preflight marks the
-  Welcome rejected once and never creates a Session or replays a message.
+- **A sessionless Host surface starts UNSELECTED unless the launch directory is
+  provably the Host's.** `@`, the first Session and the standing Skill read
+  dispatch nothing while no Host Workspace is chosen: the Welcome says so and
+  points at the existing `Choose workspace` Browser. The Client's own launch
+  directory becomes an AUTOMATIC Host-path candidate only when the authenticated
+  local Host identity proves the same directory object — Linux
+  `/proc/<hostPid>/root/<launchCwd>` and the Client launch directory are
+  directories with identical `(dev, ino)`, with the Host PID starttime still
+  equal to the authenticated one. The candidate is re-proved before the Host
+  `workspace.create` and again before its `workspaceId` is adopted, and the
+  automatic proposal is one-shot: a committed create consumes it rather than
+  assuming it later. An explicit Browser/Add choice always outranks it and
+  persists across the Client's next sessionless create.
+- **An unprovable launch directory never degrades into a guess.** A different
+  inode/device (another mount namespace, a symlinked or replaced directory), an
+  unreadable `/proc`, a stale/absent Host identity or a non-Linux Client leaves
+  the surface unselected; the user chooses through the SAME Browser/Add flow.
+  A Direct/sessionless surface keeps its historical launch-directory proposal —
+  there the process IS the Host.
+- **The first submit without a selection refuses before any Host write.** An
+  unselected sessionless submit creates no Workspace and no Session, keeps the
+  draft with the submission owner, states the missing Host workspace, and opens
+  the existing Workspace Browser at most ONCE per mounted surface (a cancelled
+  picker stays unselected; no render, reload or repeat submit reopens it).
 - **The next-create intent is Client-local and runner-scoped.** One
-  `WorkspaceNextIntentOwner` carries the proposal, its verification generation
-  and the last confirmed Workspace id. Directory selection or verification
-  changes only that intent; a committed create consumes the captured intent, a
-  stale intent fails before any Host `create`, and a failed preflight marks the
-  Welcome status rejected without replacing the confirmed target.
+  `WorkspaceNextIntentOwner` carries the optional `host-path` proposal, its
+  provenance (launch default, proved automatic candidate, explicit user choice),
+  the Client-local selection revision and the last confirmed Workspace id.
+  `capture()` returns `undefined` while unselected, so no caller can fabricate a
+  Host request. Directory selection or verification changes only that intent; a
+  committed create consumes the captured intent, a stale intent fails before any
+  Host `create`, and a failed preflight marks the Welcome status rejected
+  without replacing the confirmed target.
 - **Activity is sampled, never inferred.** One accepted roster revision produces
   one sample from `SessionWorkspaceFactsPort.readActivity` over the read owner's
   roster. Activity generation and eligibility updates are separate from

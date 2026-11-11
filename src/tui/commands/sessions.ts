@@ -927,6 +927,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             intent = options.workspaceIntent
           } else if (navigation.scope.sessionId === undefined) {
             nextIntentCapture = workspaceNextIntent.capture()
+            if (nextIntentCapture === undefined) {
+              // UNSELECTED: there is no Host Workspace to create in. Refuse
+              // BEFORE any transition/stop/flush; the Welcome's existing
+              // Browser entry is the one place to choose one.
+              return { kind: 'error', text: 'Choose a Host workspace before starting a session' }
+            }
             intent = nextIntentCapture.intent
           } else {
             intent = { kind: 'source-session', sessionId: navigation.scope.sessionId }

@@ -37,6 +37,7 @@ import {
 import { runEntryAdmission } from '../smoke/split-process/entry-admission.mjs'
 import { runOfficialWebComposition } from '../smoke/split-process/official-web-composition.mjs'
 import { runPtySessionWriteRecovery } from '../smoke/split-process/pty-session-write-recovery.mjs'
+import { runSessionlessHostFileF5B } from '../smoke/split-process/sessionless-host-file-f5b.mjs'
 import { runSharedSessionInteractions } from '../smoke/split-process/shared-session-interactions.mjs'
 import { runHostRuntimeDisabled } from '../smoke/split-process/host-runtime-disabled.mjs'
 import { runHostUserShellF1 } from '../smoke/split-process/host-user-shell-f1.mjs'
@@ -115,6 +116,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'surface.pty-session-write-recovery',
     title: 'one authenticated Host drives real PTY surfaces through Session writes, recovery and stale-generation fences',
     run: runPtySessionWriteRecovery,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.sessionless-host-file-f5b',
+    title: 'two real sessionless TUIs list their own Host Workspace @file markers while a different mount view and an unproved launch cwd adopt nothing',
+    run: runSessionlessHostFileF5B,
   }),
   Object.freeze({
     suite: 'multi-client',

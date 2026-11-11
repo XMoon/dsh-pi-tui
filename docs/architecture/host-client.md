@@ -380,6 +380,47 @@ package AND that the live controller carries the
 `workspaceController`/`workspace` Typert binding; a readable service object
 without it is not a working Workspace API.
 
+### Sessionless `@file` discovery
+
+An `@file` query made without a Session is a HOST WORKSPACE discovery, never a
+Client filesystem read:
+
+- **Authority.** The Host-issued `workspaceId` from the official
+  `workspaceRegistry` is the target; the published
+  `@deepseek-ai/dsh-file-reference-local/search` `WorkspaceFileSearch` over that
+  registry-resolved root is the ONLY discovery engine, with the official
+  published defaults (`maxResults` 20, `maxEntries` 50 000 and the exported
+  excluded directory basenames). The Client sends the exact `workspaceId`, the
+  official query form and its cancellation through the single private
+  `piTuiFileReferences/listWorkspace(workspaceId, query, signal)` endpoint; it
+  never sends a cwd, a path guess, a Client filesystem fact or its Client-local
+  selection revision. Ranking, ordering, exclusions and the result bound stay
+  with the official engine, so Direct and Remote answer the same query with the
+  same semantics.
+- **Zero Session/Agent IO.** The Host service performs no `Session.create`, no
+  Agent lookup and no Workspace registration for a discovery; it re-reads the
+  registry per request, re-checks that the same id still resolves to the same
+  root after the scan, and answers `unavailable` — never `ok([])` — for a
+  missing/unreadable root or a replaced registration. Only a completed official
+  enumeration of zero matches is an authoritative empty result.
+- **Owner-only.** `listWorkspace` validates the live `ctx.invocation` Owner peer
+  (and the invocation/peer/Host-service lifetimes) BEFORE any registry lookup or
+  file read, and re-checks the same identity before returning. The WorkspaceId
+  is a target identity, not a file-access credential, and the Owner path does
+  not claim to pass through `remoteAccess` resource decisions.
+- **Unselected means zero dispatch.** Without a confirmed `workspaceId` the port
+  answers `unavailable` without any Remote call; the surface guides the user to
+  the existing Browser. The Client launch directory is only a candidate, and
+  only after the Linux `/proc/<hostPid>/root` + `(dev, ino)` equivalence proof
+  against the authenticated Host identity; an explicit choice survives the next
+  sessionless create while an automatic one is one-shot.
+- **Session scope is unchanged.** A live Session keeps
+  `piTuiFileReferences/list(sessionId, query, signal)` — the Host router's bare
+  official `ctx.fileReferences` route plus the accepted explicit-path Host
+  augmentation (including child effective cwd and home/absolute/parent
+  spellings). The two scopes share the port and the result vocabulary but not a
+  directory authority.
+
 Host directory browsing is a separate READ authority with exactly one owner:
 the official `directory-picker` bundle row
 (`@deepseek-ai/dsh-host-directory-picker-browse`, the `browse` capability; not

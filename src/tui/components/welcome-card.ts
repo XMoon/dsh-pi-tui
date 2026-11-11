@@ -140,7 +140,9 @@ export class WelcomeCard implements Component {
       const workspace = this.workspace
       const directory = workspace === undefined
         ? 'Working directory unavailable'
-        : `${workspace.status === 'confirmed' ? 'Host directory' : workspace.status === 'rejected' ? 'Host directory unavailable' : workspace.status === 'verifying' ? 'Checking Host directory' : 'Proposed directory'}: ${sanitizedPhysicalLine(workspace.path)}`
+        : workspace.status === 'unselected'
+          ? 'No Host workspace selected — choose one below'
+          : `${workspace.status === 'confirmed' ? 'Host directory' : workspace.status === 'rejected' ? 'Host directory unavailable' : workspace.status === 'verifying' ? 'Checking Host directory' : 'Proposed directory'}: ${sanitizedPhysicalLine(workspace.path)}`
       const lines = [
         width < WELCOME_STACKED_MIN_WIDTH ? color.textStrong('🐋 dsh-pi-tui') : color.textStrong('dsh-pi-tui'),
         color.textDim('type a message to start a session'),

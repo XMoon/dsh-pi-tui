@@ -826,7 +826,7 @@ test('the M3-3A semantic bundle serves over one real Host wire', async (t) => {
     assert.deepEqual(files, { kind: 'ok', items: [{ path: 'anchor/notes.md', kind: 'file' }] })
     const childFiles = await semantics.hostFile.listReferences({ kind: 'session', sessionId: CHILD }, 'notes')
     assert.equal(childFiles.kind, 'ok')
-    const unavailable = await semantics.hostFile.listReferences({ kind: 'workspace', cwd: host.anchorDir }, 'x')
+    const unavailable = await semantics.hostFile.listReferences({ kind: 'workspace', selectionRevision: 1 }, 'x')
     assert.equal(unavailable.kind, 'unavailable', 'the workspace scope stays fail-closed on the wire')
 
     // P7 — the official loadThrough jump on the retained open session.

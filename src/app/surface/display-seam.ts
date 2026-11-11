@@ -93,8 +93,9 @@ export interface DisplayActivityFacts {
 }
 
 export interface DisplayWelcomeWorkspace {
+  /** Empty exactly when `status === 'unselected'` (no Host Workspace chosen). */
   readonly path: string
-  readonly status: 'proposed' | 'verifying' | 'confirmed' | 'rejected'
+  readonly status: 'unselected' | 'proposed' | 'verifying' | 'confirmed' | 'rejected'
   readonly workspaceId?: string
   readonly error?: string
 }

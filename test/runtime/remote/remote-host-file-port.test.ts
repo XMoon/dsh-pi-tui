@@ -15,15 +15,18 @@ import type { HostFileListResult } from '../../../src/runtime/host-file-port.ts'
 import { createObservableGenerationHarness } from '../../support/remote-generation.ts'
 
 type ListCall = { sessionId: string; query: string; signal: AbortSignal | undefined }
+type WorkspaceListCall = { workspaceId: string; query: string; signal: AbortSignal | undefined }
 type WireResult = { ok: true; value: HostFileListResult } | { ok: false; error: unknown }
 
 function harness(options: {
   result?: WireResult
+  workspaceResult?: WireResult
   throw?: unknown
   gate?: Promise<void>
 } = {}) {
   const generation = createObservableGenerationHarness()
   const calls: ListCall[] = []
+  const workspaceCalls: WorkspaceListCall[] = []
   const fileReferences: RemotePiTuiFileReferenceRemotes = {
     list: async (sessionId: string, query: string, signal?: AbortSignal) => {
       calls.push({ sessionId, query, signal })
@@ -31,8 +34,14 @@ function harness(options: {
       if (options.throw !== undefined) throw options.throw
       return options.result ?? { ok: true as const, value: { kind: 'ok', items: [] } }
     },
+    listWorkspace: async (workspaceId: string, query: string, signal?: AbortSignal) => {
+      workspaceCalls.push({ workspaceId, query, signal })
+      if (options.gate !== undefined) await options.gate
+      if (options.throw !== undefined) throw options.throw
+      return options.workspaceResult ?? { ok: true as const, value: { kind: 'ok', items: [] } }
+    },
   }
-  return { generation, calls, port: new RemoteHostFilePort(fileReferences, generation.source) }
+  return { generation, calls, workspaceCalls, port: new RemoteHostFilePort(fileReferences, generation.source) }
 }
 
 test('the session scope sends the EXACT session id and the OFFICIAL query form', async () => {
@@ -124,15 +133,15 @@ test('no connection reads unavailable without any Host call', async () => {
   assert.deepEqual(calls, [])
 })
 
-test('a pre-aborted WORKSPACE request rejects before the unsupported answer', async () => {
-  const { port, calls } = harness()
+test('a pre-aborted WORKSPACE request rejects before the unselected answer', async () => {
+  const { port, workspaceCalls } = harness()
   const controller = new AbortController()
   controller.abort()
   await assert.rejects(
-    port.listReferences({ kind: 'workspace', cwd: '/any' }, 'a', { signal: controller.signal }),
+    port.listReferences({ kind: 'workspace', selectionRevision: 1 }, 'a', { signal: controller.signal }),
     /aborted/u,
-    'cancellation outranks the workspace-scope unavailable')
-  assert.deepEqual(calls, [], 'the rejected request never dispatches')
+    'cancellation outranks the unselected-scope unavailable')
+  assert.deepEqual(workspaceCalls, [], 'the rejected request never dispatches')
 })
 
 test('a pre-aborted resolveReference rejects instead of answering unavailable', async () => {
@@ -145,12 +154,45 @@ test('a pre-aborted resolveReference rejects instead of answering unavailable', 
     'cancellation outranks the no-carrier unavailable on the synchronous resolve path')
 })
 
-test('the workspace scope is unavailable with ZERO Remote calls', async () => {
-  const { port, calls } = harness()
-  const result = await port.listReferences({ kind: 'workspace', cwd: '/any/cwd' }, 'a')
+test('an UNSELECTED workspace scope is unavailable with ZERO Remote calls', async () => {
+  const { port, workspaceCalls } = harness()
+  const result = await port.listReferences({ kind: 'workspace', selectionRevision: 3 }, 'a')
   assert.equal(result.kind, 'unavailable')
-  assert.match(result.kind === 'unavailable' ? result.reason : '', /no official Remote carrier/)
-  assert.deepEqual(calls, [], 'the workspace scope never dispatches')
+  assert.match(result.kind === 'unavailable' ? result.reason : '', /Choose a Host workspace first/)
+  assert.deepEqual(workspaceCalls, [], 'an unselected scope never dispatches')
+})
+
+test('a CONFIRMED workspace scope sends the exact workspaceId and the official query', async () => {
+  const { port, workspaceCalls } = harness({
+    workspaceResult: { ok: true, value: { kind: 'ok', items: [{ path: 'src/a.ts', kind: 'file' }] } },
+  })
+  const result = await port.listReferences({ kind: 'workspace', workspaceId: 'workspace-7', selectionRevision: 2 }, 'src/a')
+  assert.deepEqual(result, { kind: 'ok', items: [{ path: 'src/a.ts', kind: 'file' }] })
+  assert.deepEqual(workspaceCalls, [{ workspaceId: 'workspace-7', query: 'src/a', signal: undefined }],
+    'only the Host-issued id and the query cross the wire — never a cwd nor the selection revision')
+  assert.equal((workspaceCalls[0]! as { selectionRevision?: number }).selectionRevision, undefined)
+})
+
+test('a Host-business unavailable VALUE from listWorkspace crosses as unavailable', async () => {
+  const { port } = harness({
+    workspaceResult: { ok: true, value: { kind: 'unavailable', reason: 'Workspace "gone" is not registered on the Host' } },
+  })
+  const result = await port.listReferences({ kind: 'workspace', workspaceId: 'gone', selectionRevision: 1 }, 'a')
+  assert.deepEqual(result, { kind: 'unavailable', reason: 'Workspace "gone" is not registered on the Host' })
+})
+
+test('a replaced connection during listWorkspace turns the settle unavailable', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const { port, generation } = harness({
+    gate,
+    workspaceResult: { ok: true, value: { kind: 'ok', items: [{ path: 'a', kind: 'file' }] } },
+  })
+  const pending = port.listReferences({ kind: 'workspace', workspaceId: 'workspace-1', selectionRevision: 1 }, 'a')
+  generation.set({ id: 4 })
+  release()
+  const result = await pending
+  assert.equal(result.kind, 'unavailable')
 })
 
 test('no existence carrier — unavailable, never missing', async () => {

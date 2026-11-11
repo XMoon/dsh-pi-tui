@@ -21,8 +21,9 @@
  * already owns).
  *
  * Only identity/data crosses the port: scopes are serializable
- * (`sessionId` / `cwd`), candidates are path-only DTOs, and NO Node fs
- * object, `Dirent`, `Stats` or live Agent ever appears.
+ * (`sessionId` / Host-issued `workspaceId`), candidates are path-only DTOs,
+ * and NO Node fs object, `Dirent`, `Stats` or live Agent ever appears. The
+ * workspace scope's Client-local `selectionRevision` never crosses the wire.
  *
  * NOT in this port (deliberate domain split): the `!`/`!!` user shell
  * (Host-owned execution — `HostUserShellPort`, M3-4 PR3), `/image` local
@@ -75,11 +76,20 @@ export interface HostFileCandidate {
 
 /** The filesystem scope one reference resolves against: a live SESSION
  * (identity-addressed; the Direct adapter resolves the agent internally,
- * a Remote adapter maps the official identity) or an explicit WORKSPACE
- * cwd (the sessionless cold surface). */
+ * a Remote adapter maps the official identity) or the sessionless
+ * WORKSPACE (the Host-issued, currently confirmed `workspaceId`). The
+ * workspace scope never carries a cwd: the Host Workspace registry is the
+ * only directory authority. `undefined` means UNSELECTED — the callers
+ * answer `unavailable` without dispatching any Host read; `selectionRevision`
+ * is Client-local currentness (monotonic across A→B→A) and never crosses
+ * the wire. */
 export type HostFileScope =
   | { readonly kind: 'session'; readonly sessionId: string }
-  | { readonly kind: 'workspace'; readonly cwd: string }
+  | {
+      readonly kind: 'workspace'
+      readonly workspaceId?: string
+      readonly selectionRevision: number
+    }
 
 /** The outcome of one existence probe. `unavailable` is DISTINCT from
  * `missing`: the capability could not answer at all (no official carrier,

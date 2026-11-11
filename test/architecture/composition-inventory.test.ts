@@ -428,13 +428,15 @@ const OTHER_HOST_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
 ]
 
 /**
- * The REMOTE-BRANCH counterpart of three subscriptions the Direct branch owns:
- * the private `piTuiTerminalProgress` Host row observes the same Host events on
- * the other backend branch of the same process (plan R2 §6.4). The two owners
- * never run together (the Direct rows are gated by `if (direct)` and the Host
- * row is mounted only by the built-in PiTui Host Runtime), but both sites exist
- * statically, so both are pinned BY BRANCH: a third site — or a second one in
- * either file — still fails.
+ * The REMOTE-BRANCH counterpart subscriptions the Direct branch also owns: the
+ * private `piTuiTerminalProgress` Host row observes the same Host events on the
+ * other backend branch of the same process (plan R2 §6.4), and the private
+ * `piTuiFileReferences` row observes the existing `session/event` plane to mark
+ * its resident official workspace indexes stale (M6-1/F5-B — no second file
+ * watcher). The two owners never run together (the Direct rows are gated by
+ * `if (direct)` and these Host rows are mounted only by the built-in PiTui Host
+ * Runtime), but both sites exist statically, so both are pinned BY BRANCH: a
+ * third site — or a second one in either file — still fails.
  */
 const REMOTE_BRANCH_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   ['session/event', 'src/app/host/features/terminal-progress.ts'],
@@ -443,6 +445,10 @@ const REMOTE_BRANCH_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   // M6-1 F6: the Host Skills row observes the official registry invalidation
   // event and forwards it as the private stream's pending bit.
   ['skills/change', 'src/app/host/features/skills.ts'],
+  // M6-1 F5-B: the private file-reference row marks its (at most four) resident
+  // official workspace indexes stale after a Host tool result. It consumes the
+  // EXISTING session/event plane and installs no watcher.
+  ['session/event', 'src/app/host/features/file-reference.ts'],
 ]
 
 /** Dynamic (non-literal event) `ctx.on` bridges: the Direct config port only. */

@@ -25551,7 +25551,7 @@ export class TuiApp {
       force?: boolean
     }) => Promise<{ items: import('@xmoon76/pi-tui').AutocompleteItem[]; prefix: string } | null>,
     scope: import('./runtime/host-file-port.ts').HostFileScope
-      | (() => import('./runtime/host-file-port.ts').HostFileScope) = { kind: 'workspace', cwd },
+      | (() => import('./runtime/host-file-port.ts').HostFileScope) = { kind: 'workspace', selectionRevision: 0 },
      localCwd: string | (() => string) = cwd,
     skillReferences: readonly import('./domain/catalog/skill.ts').HumanSkillSummary[] = [],
     hostShellCompletion: import('./runtime/host-shell-completion-port.ts').HostShellCompletionPort | undefined = undefined,

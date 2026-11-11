@@ -18,10 +18,53 @@ import { homedir, tmpdir } from 'node:os'
 import { join, win32, sep } from 'node:path'
 import { classifyFileCompletionContext, extractAtPrefix } from '../../src/tui/file-completion/context.ts'
 import { resolvePathQuery, type PathQueryEnvironment } from '../../src/domain/file-completion/query.ts'
+import { discoverForQuery } from '../../src/domain/file-completion/discovery-policy.ts'
 import { scorePathCandidate } from '../../src/domain/file-completion/ranking.ts'
 import { presentPathCandidate } from '../../src/tui/file-completion/presentation.ts'
 import { MentionProvider } from '../../src/tui/interaction/autocomplete/provider.ts'
+import type { HostFileScope } from '../../src/runtime/host-file-port.ts'
+
+/** The official workspace-scope fixture: a registry that resolves the id to
+ *  the fixture root (the Direct adapter's ONLY root authority). */
+function workspacePort(root: string): DirectHostFilePort {
+  return new DirectHostFilePort(() => undefined, null, {
+    get: (name: string) => name === 'workspaceRegistry'
+      ? {
+          create: async () => { throw new Error('the fixture never creates a workspace') },
+          list: () => [],
+          get: (id: string) => id === root ? { path: root } : undefined,
+        }
+      : undefined,
+  })
+}
+
+function workspaceScope(root: string, revision = 1): HostFileScope {
+  return { kind: 'workspace', workspaceId: root, selectionRevision: revision }
+}
+
+/** A Workspace registry resolving SEVERAL roots by their own id. */
+function workspacePortFor(roots: readonly string[]): DirectHostFilePort {
+  return new DirectHostFilePort(() => undefined, null, {
+    get: (name: string) => name === 'workspaceRegistry'
+      ? {
+          create: async () => { throw new Error('the fixture never creates a workspace') },
+          list: () => [],
+          get: (id: string) => roots.includes(id) ? { path: id } : undefined,
+        }
+      : undefined,
+  })
+}
+
+/** A live SESSION scope over one Host agent cwd: the explicit path route
+ *  (`@../`, `@../../`, `@~/`) keeps the Host scanner semantics. */
+function sessionPort(cwd: string): DirectHostFilePort {
+  return new DirectHostFilePort((sessionId) =>
+    sessionId === 'session-live' ? { session: { header: { cwd } } } : undefined, null)
+}
+
+const SESSION_SCOPE: HostFileScope = { kind: 'session', sessionId: 'session-live' }
 import { DirectHostFilePort, resolveFdPath } from '../../src/runtime/direct/host-file-direct.ts'
+import { DirectHostDiscoveryDriver } from '../../src/runtime/direct/file-completion/host-discovery.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
@@ -82,7 +125,7 @@ function largeWorkspaceFixture(life: TestLifecycle): { root: string } {
 test('ordinary prompt positions never open the HOST file dropdown', async (t) => {
   const life = testLifecycle(t)
   const { root } = largeWorkspaceFixture(life)
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], root, workspacePort(root), undefined, workspaceScope(root))
   for (const [line, col] of [
     ['foo', 3],
     ['./foo', 5],
@@ -127,7 +170,7 @@ test('foo<Tab> opens no dropdown (isShowingAutocomplete stays false)', async (t)
 test('scoped @ paths search their OWN directory (outside the cwd)', async (t) => {
   const life = testLifecycle(t)
   const { root, workspace, sibling } = outsideCwdFixture(life)
-  const provider = new MentionProvider([], workspace, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], workspace, sessionPort(workspace), undefined, SESSION_SCOPE)
   const result = await provider.getSuggestions(['@../sibling/sib'], 0, 15, { signal: abort })
   assert.ok(result !== null, `@../sibling/sib must suggest:\n${JSON.stringify(result)}`)
   assert.ok(
@@ -151,7 +194,7 @@ test('@../../scope resolves outside the cwd by the typed amount', async (t) => {
   writeFileSync(join(alpha, 'alpha', 'deep.ts'), 'x')
   mkdirSync(join(alpha, 'alpha', 'deep'), { recursive: true })
   writeFileSync(join(alpha, 'alpha', 'deep', 'nested.txt'), 'x')
-  const provider = new MentionProvider([], workspace, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], workspace, sessionPort(workspace), undefined, SESSION_SCOPE)
   // /root/alpha/beta/workspace + ../../alpha = /root/alpha/alpha.
   const result = await provider.getSuggestions(['@../../alpha/de'], 0, 16, { signal: abort })
   assert.ok(result !== null, `@../../alpha/de must suggest:\n${JSON.stringify(result)}`)
@@ -172,25 +215,41 @@ test('@~/ resolves through the homedir', async (t) => {
   const saved = process.env.HOME
   try {
     process.env.HOME = home
-    const provider = new MentionProvider([], tmpdir(), new DirectHostFilePort(() => undefined, null))
+    const provider = new MentionProvider([], tmpdir(), sessionPort(tmpdir()), undefined, SESSION_SCOPE)
     const result = await provider.getSuggestions(['@~/pics/a'], 0, 10, { signal: abort })
     assert.ok(result !== null, `@~/pics/a must suggest:\n${JSON.stringify(result)}`)
-    assert.ok(result.items.some(item => item.value === '@~/pics/a.png'))
+    // The Session scoped route answers ABSOLUTE Host paths (the official
+    // FILE_REFERENCE_PROMPT accepts an absolute mention; `~` is not expanded
+    // by DSH itself).
+    assert.ok(result.items.some(item => item.value === `@${join(home, 'pics', 'a.png')}`),
+      `absolute host value missing:\n${JSON.stringify(result.items)}`)
   } finally {
     if (saved === undefined) delete process.env.HOME
     else process.env.HOME = saved
   }
 })
 
-test('@/tmp/ searches the absolute scope', async (t) => {
+test('a SESSION-scoped absolute @ path keeps the Host explicit route', async (t) => {
   const life = testLifecycle(t)
   const root = outsideCwdFixture(life).root
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], root, sessionPort(root), undefined, SESSION_SCOPE)
   const target = life.tempDir('dsh-conv-abs-')
   writeFileSync(join(target, 'deep-abs.txt'), 'x')
-  const result = await provider.getSuggestions([`@${target}/abs`], 0, `@${target}/abs`.length, { signal: abort })
+  const query = `@${target}/abs`
+  const result = await provider.getSuggestions([query], 0, query.length, { signal: abort })
   assert.ok(result !== null, `absolute must suggest:\n${JSON.stringify(result)}`)
   assert.ok(result.items.some(item => item.value.startsWith(`@${target}`)))
+})
+
+test('the OFFICIAL workspace discovery never enumerates an absolute Host path outside its root', async (t) => {
+  const life = testLifecycle(t)
+  const root = outsideCwdFixture(life).root
+  const target = life.tempDir('dsh-conv-abs-out-')
+  writeFileSync(join(target, 'deep-abs.txt'), 'x')
+  const provider = new MentionProvider([], root, workspacePort(root), undefined, workspaceScope(root))
+  const query = `@${target}/abs`
+  const result = await provider.getSuggestions([query], 0, query.length, { signal: abort })
+  assert.equal(result, null, 'an absolute path outside the registered root is not enumerable')
 })
 
 test('matrix: attachment commands share the scoped forms (../, ~/, absolute, directory continuation)', async (t) => {
@@ -245,14 +304,15 @@ test('Host @ and Client /image completion keep separate cwd ownership', async (t
   const provider = new MentionProvider(
     [],
     hostRoot,
-    new DirectHostFilePort(() => undefined, null),
+    sessionPort(hostRoot),
     undefined,
-    { kind: 'workspace', cwd: hostRoot },
+    SESSION_SCOPE,
     null,
     localRoot,
   )
-  const mention = await provider.getSuggestions(['@host-only'], 0, 10, { signal: abort })
-  assert.ok(mention !== null && mention.items.some(item => item.value === '@host-only.txt'))
+  const hostQuery = `@${hostRoot}/host-only`
+  const mention = await provider.getSuggestions([hostQuery], 0, hostQuery.length, { signal: abort })
+  assert.ok(mention !== null && mention.items.some(item => item.value === `@${hostRoot}/host-only.txt`))
   const image = await provider.getSuggestions(['/image local-only'], 0, '/image local-only'.length, { signal: abort })
   assert.ok(image !== null && image.items.some(item => item.value === 'local-only.png'))
   assert.ok(!image.items.some(item => item.value.includes('host-only')), 'image completion must not read Host cwd')
@@ -261,7 +321,7 @@ test('Host @ and Client /image completion keep separate cwd ownership', async (t
 test('a >2000-entry workspace keeps directory continuation working', async (t) => {
   const life = testLifecycle(t)
   const { root } = largeWorkspaceFixture(life)
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], root, workspacePort(root), undefined, workspaceScope(root))
   // First: @src finds the directory.
   const dirs = await provider.getSuggestions(['@src'], 0, 4, { signal: abort })
   assert.ok(dirs !== null, `@src must suggest:\n${JSON.stringify(dirs)}`)
@@ -278,7 +338,7 @@ test('substring ranking is shared between @ and /image', async (t) => {
   const root = outsideCwdFixture(life).workspace
   mkdirSync(join(root, 'src'))
   writeFileSync(join(root, 'src', 'deep-nested.ts'), 'x')
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], root, workspacePort(root), undefined, workspaceScope(root))
   const at = await provider.getSuggestions(['@nested'], 0, 7, { signal: abort })
   assert.ok(at !== null, `@nested must suggest:\n${JSON.stringify(at)}`)
   assert.ok(at.items.some(item => item.value === '@src/deep-nested.ts'), `nested missing:\n${JSON.stringify(at.items)}`)
@@ -301,7 +361,7 @@ test('substring ranking is shared between @ and /image', async (t) => {
 test('a stale prefix accept never deletes @-preceding text', (t) => {
   const life = testLifecycle(t)
   const root = outsideCwdFixture(life).workspace
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], root, workspacePort(root), undefined, workspaceScope(root))
   // Old request prefix `@abcdef`; the draft has since been edited to
   // `hello @ab`. Accepting the old item must leave the draft UNCHANGED.
   const applied = provider.applyCompletion(['hello @ab'], 0, 9, { value: '@abcdef-gh', label: 'abcdef-gh' }, '@abcdef')
@@ -360,14 +420,14 @@ test('matrix: quoted @ completes and stays quoted', async (t) => {
   const life = testLifecycle(t)
   const { workspace } = outsideCwdFixture(life)
   const root = workspace
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], root, workspacePort(root), undefined, workspaceScope(root))
   const result = await provider.getSuggestions(['@"loc'], 0, 5, { signal: abort })
   assert.ok(result !== null)
   assert.equal(result.prefix, '@"loc')
   assert.ok(result.items.some(item => item.value === '@"local.txt"'))
 })
 
-test('matrix: symlink directories keep the trailing slash', async (t) => {
+test('matrix: the OFFICIAL workspace listing never offers a symlinked directory', async (t) => {
   const life = testLifecycle(t)
   const { workspace } = outsideCwdFixture(life)
   const root = workspace
@@ -376,10 +436,16 @@ test('matrix: symlink directories keep the trailing slash', async (t) => {
   mkdirSync(target)
   writeFileSync(join(target, 'inside.ts'), 'x')
   symlinkSync('real', link)
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], root, workspacePort(root), undefined, workspaceScope(root))
   const result = await provider.getSuggestions(['@lin'], 0, 4, { signal: abort })
   assert.ok(result !== null)
-  assert.ok(result.items.some(item => item.value === '@linkdir/'), 'a symlinked dir must complete with /')
+  assert.ok(!result.items.some(item => item.value.startsWith('@linkdir')),
+    'the official discovery classifies the symlink as neither a file nor a directory candidate')
+  // The Session explicit scope still follows the link the user names.
+  const sessionProvider = new MentionProvider([], root, sessionPort(root), undefined, SESSION_SCOPE)
+  const listed = await sessionProvider.getSuggestions(['@linkdir/'], 0, 9, { signal: abort })
+  assert.ok(listed !== null && listed.items.some(item => item.value === '@linkdir/inside.ts'),
+    `the explicit session scope follows the named link:\n${JSON.stringify(listed)}`)
 })
 
 test('fd/fdfind detection prefers fd then fdfind', (t) => {
@@ -424,13 +490,13 @@ printf '%s\\n' "$@" > ${JSON.stringify(argsFile)}
 printf '%s\\0' './src/deep-nested.png' './ leading file.txt'
 `)
   chmodSync(fakeFd, 0o755)
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, fakeFd))
-  const nested = await provider.getSuggestions(['@nested'], 0, 7, { signal: abort })
-  assert.ok(nested !== null, `full-path fd matching must find nested files:\n${JSON.stringify(nested)}`)
-  assert.ok(nested.items.some(item => item.value === '@src/deep-nested.png'))
-  const spaced = await provider.getSuggestions(['@leading'], 0, 8, { signal: abort })
-  assert.ok(spaced !== null, `NUL output with spaces must survive:\n${JSON.stringify(spaced)}`)
-  assert.ok(spaced.items.some(item => item.value === '@" leading file.txt"'))
+  // The Direct Host finder remains the SESSION explicit route's engine; cover
+  // it at its owning seam (a bare query now belongs to the official provider).
+  const driver = new DirectHostDiscoveryDriver(fakeFd)
+  const nested = await driver.find(root, 'nested', abort)
+  assert.ok(nested !== null, 'full-path fd matching must find nested files')
+  assert.ok(nested.some(item => item.path === 'src/deep-nested.png'))
+  assert.ok(nested.some(item => item.path === ' leading file.txt'), 'NUL output with spaces must survive')
   const args = readFileSync(argsFile, 'utf8').split(/\r?\n/)
   assert.ok(args.includes('--full-path'), 'fd must match the full relative path')
   assert.ok(args.includes('--print0'), 'fd must emit NUL-delimited records')
@@ -446,10 +512,10 @@ dd if=/dev/zero bs=1024 count=128 >&2 2>/dev/null
 printf '%s\\0' './visible.txt'
 `)
   chmodSync(fakeFd, 0o755)
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, fakeFd))
-  const result = await provider.getSuggestions(['@visible'], 0, 8, { signal: abort })
-  assert.ok(result !== null, `noisy fd stderr must not block completion:\n${JSON.stringify(result)}`)
-  assert.ok(result.items.some(item => item.value === '@visible.txt'))
+  const driver = new DirectHostDiscoveryDriver(fakeFd)
+  const result = await driver.find(root, 'visible', abort)
+  assert.ok(result !== null, 'noisy fd stderr must not block completion')
+  assert.ok(result.some(item => item.path === 'visible.txt'))
 })
 
 test('matrix: Windows drive and UNC tokens keep their dialect (pure)', () => {
@@ -603,7 +669,7 @@ test('review finding (round 4): a regex-special filename still completes (fd lit
   const root = outsideCwdFixture(life).workspace
   writeFileSync(join(root, 'file[1].ts'), 'x')
   writeFileSync(join(root, 'a+b.ts'), 'x')
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], root, workspacePort(root), undefined, workspaceScope(root))
   const bracketed = await provider.getSuggestions(['@file[1'], 0, 7, { signal: abort })
   assert.ok(bracketed !== null, `@file[1 must suggest:\n${JSON.stringify(bracketed)}`)
   assert.ok(bracketed.items.some(item => item.value.includes('file[1].ts')), `bracketed missing:\n${JSON.stringify(bracketed.items)}`)
@@ -626,19 +692,21 @@ test('review finding (round 5): fd matches case-insensitively (aligned with the 
   // what produces both matches. A fallback-only null would pass even
   // without -i. SKIP when no finder is installed (CI without fd/fdfind
   // must not fail the suite — the fallback path is tested separately).
-  const port = new DirectHostFilePort(() => undefined)
-  if (port.fdPathAvailableForTest() === null) {
+  const port = new DirectHostFilePort(() => ({ session: { header: { cwd: root } } }), null)
+  const fd = port.fdPathAvailableForTest()
+  if (fd === null) {
     t.skip('no fd/fdfind on PATH: the real-fd case test cannot run')
     return
   }
-  const provider = new MentionProvider([], root, port)
   // fd's smart-case default (case-SENSITIVE for an uppercase query) would
-  // return only @Foo.txt; the -i flag returns both.
-  const upper = await provider.getSuggestions(['@FOO'], 0, 4, { signal: abort })
-  assert.ok(upper !== null, `@FOO must suggest:\n${JSON.stringify(upper)}`)
+  // return only Foo.txt; the -i flag returns both. The explicit SESSION route
+  // owns the Host finder.
+  const driver = new DirectHostDiscoveryDriver(fd)
+  const upper = await driver.find(root, 'FOO', abort)
+  assert.ok(upper !== null, '@FOO must find files')
   assert.ok(
-    upper.items.some(item => item.value === '@Foo.txt') && upper.items.some(item => item.value === '@foo.txt'),
-    `both case forms must match (real fd -i):\n${JSON.stringify(upper.items)}`,
+    upper.some(item => item.path === 'Foo.txt') && upper.some(item => item.path === 'foo.txt'),
+    `both case forms must match (real fd -i): ${JSON.stringify(upper)}`,
   )
 })
 
@@ -652,11 +720,12 @@ test('review finding (round 4): failed fd falls back to the bounded scan', async
   const fakeFd = join(life.tempDir('dsh-conv-fdcrash-'), 'fd')
   writeFileSync(fakeFd, '#!/bin/sh\nexit 1\n')
   chmodSync(fakeFd, 0o755)
-  const port = new DirectHostFilePort(() => undefined, fakeFd)
-  const provider = new MentionProvider([], root, port)
-  const result = await provider.getSuggestions(['@../sibling/fallback'], 0, 21, { signal: abort })
-  assert.ok(result !== null, `a failed fd must fall back:\n${JSON.stringify(result)}`)
-  assert.ok(result.items.some(item => item.value.includes('fallback-scan.ts')), `fallback missing:\n${JSON.stringify(result.items)}`)
+  // The explicit `../sibling` session route through the failing finder: the
+  // neutral discovery policy runs the bounded scan when the finder fails.
+  const driver = new DirectHostDiscoveryDriver(fakeFd)
+  const resolved = resolvePathQuery('../sibling/fallback', root, { homeDir: homedir(), windowsHost: false })
+  const found = await discoverForQuery(resolved, driver, abort)
+  assert.ok(found.some(item => item.path.includes('fallback-scan.ts')), `fallback missing: ${JSON.stringify(found)}`)
 })
 
 test('review finding (round 4): scoped listings never present .git', async (t) => {
@@ -665,7 +734,7 @@ test('review finding (round 4): scoped listings never present .git', async (t) =
   mkdirSync(join(root, '.git'))
   writeFileSync(join(root, '.git', 'config'), 'x')
   writeFileSync(join(root, 'visible.txt'), 'x')
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], root, workspacePort(root), undefined, workspaceScope(root))
   const result = await provider.getSuggestions(['@'], 0, 1, { signal: abort })
   assert.ok(result !== null)
   assert.ok(!result.items.some(item => item.value.includes('.git')), `.git must not be listed:\n${JSON.stringify(result.items)}`)
@@ -682,7 +751,7 @@ test('review finding (round 4): null pins the fallback /image source; undefined 
     root,
     new DirectHostFilePort(() => undefined, null),
     undefined,
-    { kind: 'workspace', cwd: root },
+    workspaceScope(root),
     null,
   )
   const result = await fallbackProvider.getSuggestions(['/image shot'], 0, 11, { signal: abort })
@@ -733,7 +802,7 @@ test('review finding: a CLOSED quoted /image token never completes further (no t
 test('review finding 2: a stale accept never applies after an unrelated edit', async (t) => {
   const life = testLifecycle(t)
   const root = outsideCwdFixture(life).workspace
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], root, workspacePort(root), undefined, workspaceScope(root))
   // The request produced a dropdown for `hello @foo` (snapshot captured);
   // the user then edited the LINE START (`hello` → `world`) — the prefix
   // @foo is intact but the document differs. The full-snapshot fence must
@@ -752,10 +821,10 @@ test('review finding 2: a stale accept never applies after an unrelated edit', a
 test('extension suggestion snapshots fence unrelated edits even with the same prefix', (t) => {
   const life = testLifecycle(t)
   const root = outsideCwdFixture(life).workspace
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], root, workspacePort(root), undefined, workspaceScope(root))
   const generation = provider.mintRequestGeneration()
   const suggestion = { items: [{ value: 'world', label: 'world' }], prefix: 'world' }
-  provider.captureRequestSnapshot(generation, { kind: 'workspace', cwd: root }, ['hello world'], 0, 11, suggestion)
+  provider.captureRequestSnapshot(generation, workspaceScope(root), ['hello world'], 0, 11, suggestion)
   const applied = provider.applyCompletion(
     ['changed world'],
     0,
@@ -770,7 +839,7 @@ test('an EXTENSION row can never masquerade as an attachment candidate', (t) => 
   const life = testLifecycle(t)
   const root = outsideCwdFixture(life).workspace
   writeFileSync(join(root, 'secret.png'), 'x')
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], root, workspacePort(root), undefined, workspaceScope(root))
   const accepted: unknown[] = []
   provider.setInlineAttachmentAcceptSink(acceptance => { accepted.push(acceptance) })
   const generation = provider.mintRequestGeneration()
@@ -785,7 +854,7 @@ test('an EXTENSION row can never masquerade as an attachment candidate', (t) => 
   const suggestion = { items: [forged], prefix: '' }
   provider.captureRequestSnapshot(
     generation,
-    { kind: 'workspace', cwd: root },
+    workspaceScope(root),
     ['look /image sec'],
     0,
     'look /image sec'.length,
@@ -810,10 +879,10 @@ test('review finding (round 8): a fallback scan is async and abort-responsive (n
   const life = testLifecycle(t)
   const root = largeWorkspaceFixture(life).root
   const controller = new AbortController()
-  const port = new DirectHostFilePort(() => undefined, null) // forced fallback
-  const provider = new MentionProvider([], root, port)
-  // Abort mid-request: the async scan stops promptly (the old sync scan
-  // could not be interrupted once it started).
+  const port = workspacePort(root)
+  const provider = new MentionProvider([], root, port, undefined, workspaceScope(root))
+  // Abort mid-request: the async official scan stops promptly (the old sync
+  // scan could not be interrupted once it started).
   const started = Date.now()
   const pending = provider.getSuggestions(['@wanted'], 0, 7, { signal: controller.signal })
   controller.abort()
@@ -827,7 +896,7 @@ test('review finding (round 6/8): overlapping delegated requests keep their own 
   const root = outsideCwdFixture(life).workspace
   writeFileSync(join(root, 'item-a.txt'), 'x')
   writeFileSync(join(root, 'item-b.txt'), 'x')
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], root, workspacePort(root), undefined, workspaceScope(root))
   // Two requests mint distinct generations; the OLDER result is dropped by
   // the generation check (it cannot bind a snapshot), so the NEWER
   // request's snapshot stays the only one the apply fence honors.
@@ -835,7 +904,7 @@ test('review finding (round 6/8): overlapping delegated requests keep their own 
   provider.mintRequestGeneration() // a NEWER request starts
   const staleBind = provider.captureRequestSnapshot(
     g1,
-    { kind: 'workspace', cwd: root },
+    workspaceScope(root),
     ['@item-a'],
     0,
     7,
@@ -856,11 +925,11 @@ test('review finding (round 6): a scope switch mid-flight fences the old session
   const rootB = outsideCwdFixture(life).workspace
   writeFileSync(join(rootA, 'session-a.txt'), 'x')
   writeFileSync(join(rootB, 'session-b.txt'), 'x')
-  let scope: { kind: 'workspace'; cwd: string } = { kind: 'workspace', cwd: rootA }
+  let scope: HostFileScope = workspaceScope(rootA)
   const provider = new MentionProvider(
     [],
     rootA,
-    new DirectHostFilePort(() => undefined, null),
+    workspacePortFor([rootA, rootB]),
     undefined,
     () => scope,
   )
@@ -870,7 +939,7 @@ test('review finding (round 6): a scope switch mid-flight fences the old session
   // snapshot's scope no longer matches, so accepting the OLD dropdown item
   // must leave the draft untouched (never insert a Host candidate from the
   // previous session under the new one).
-  scope = { kind: 'workspace', cwd: rootB }
+  scope = workspaceScope(rootB)
   const applied = provider.applyCompletion(
     ['@session-a'],
     0,
@@ -909,12 +978,12 @@ test('extractAtPrefix keeps the CJK-glue rule and rejects emails', () => {
   assert.equal(extractAtPrefix('plain'), null)
 })
 
-test('a sessionless @dir/ lists children (direct children listing)', async (t) => {
+test('a sessionless @dir/ lists children (official directory listing)', async (t) => {
   const life = testLifecycle(t)
   const { root } = largeWorkspaceFixture(life)
-  const port = new DirectHostFilePort(() => undefined, null)
-  const provider = new MentionProvider([], root, port)
-  // No live agent: workspace scope (sessionless).
+  const port = workspacePort(root)
+  const provider = new MentionProvider([], root, port, undefined, workspaceScope(root))
+  // No live agent: the confirmed Workspace scope (sessionless).
   const result = await provider.getSuggestions(['@src/'], 0, 5, { signal: abort })
   assert.ok(result !== null, `@src/ must list children sessionless:\n${JSON.stringify(result)}`)
   assert.ok(result.items.some(item => item.value === '@src/wanted.ts'))

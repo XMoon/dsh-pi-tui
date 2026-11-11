@@ -1489,14 +1489,22 @@ export function registerTuiCommands(
           return { items: [...result.items], prefix: result.prefix }
         }
     // The completion scope is resolved at SUGGESTION time from the LIVE
-    // session id (session identity when one exists — even mid-transition —
-    // the workspace cwd otherwise): a session switch or first create is
-    // picked up immediately, never requiring a reinstall.
+    // session id (session identity when one exists — even mid-transition) or,
+    // sessionless, from the SAME Workspace selection snapshot the create path
+    // uses. Only a CONFIRMED Host WorkspaceId crosses; anything else is an
+    // unselected scope (zero Host discovery) — the Client launch cwd is never
+    // sent. The revision makes A→B→A stale results distinguishable.
     const completionScope: () => HostFileScope = () => {
       const sessionId = runner.currentSessionId
-      return sessionId === undefined
-        ? { kind: 'workspace', cwd: runner.sessionCwd() }
-        : { kind: 'session', sessionId }
+      if (sessionId !== undefined) return { kind: 'session', sessionId }
+      const snapshot = runner.workspaceNextIntent?.snapshot()
+      return {
+        kind: 'workspace',
+        ...(snapshot?.status === 'confirmed' && snapshot.workspaceId !== undefined
+          ? { workspaceId: snapshot.workspaceId }
+          : {}),
+        selectionRevision: snapshot?.revision ?? 0,
+      }
     }
     // `/attach` and `/image` are Client-local. Direct mode uses the process cwd; a remote
     // adapter can keep this independent from the Host session scope.

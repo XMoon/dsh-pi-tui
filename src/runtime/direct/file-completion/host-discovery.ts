@@ -1,19 +1,18 @@
 /**
  * The Direct Host discovery implementation (TS8-A, renamed by TS8-HF1): the
  * DIRECT process's filesystem behind the neutral {@link LocalDiscoveryDriver}
- * contract. It has two legitimate consumers:
- *
- * ```text
- * 1. the sessionless `HostFileScope { kind: 'workspace', cwd }` compatibility
- *    path of `DirectHostFilePort` (the cold surface with no official carrier);
- * 2. the explicit-path `@` navigation route of the Session scope
- *    (`runtime/direct/host-file-augmentation-direct.ts`), where the user
- *    explicitly typed the scope (`@src/`, `@../`, `@/abs`, `@~/`).
- * ```
+ * contract. Its ONE legitimate consumer is the explicit-path `@` navigation
+ * route of the Session scope
+ * (`runtime/direct/host-file-augmentation-direct.ts`), where the user
+ * explicitly typed the scope (`@src/`, `@../`, `@/abs`, `@~/`).
  *
  * A BARE Session `@` query (`@foo`) never runs through this adapter — that
  * path is the OFFICIAL Host authority's (`ctx.fileReferences.list` through the
- * port), whose candidates arrive already filtered, ranked and bounded.
+ * port), whose candidates arrive already filtered, ranked and bounded. The
+ * sessionless `HostFileScope { kind: 'workspace', workspaceId }` route is the
+ * OFFICIAL `WorkspaceFileSearch`
+ * (`runtime/direct/file-completion/official-workspace-search.ts`) — this
+ * finder never answers it.
  *
  * It owns the Direct Host process's own PATH/PATHEXT finder detection, its
  * `node:fs` facts and its fd/fdfind process. The small syscall-level

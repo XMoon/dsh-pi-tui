@@ -15,6 +15,26 @@ import { TuiApp } from '../../src/tui-app.ts'
 import { suggestPathArgument } from '../../src/tui/file-completion/path-argument.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
+import type { HostFileScope } from '../../src/runtime/host-file-port.ts'
+
+/** The fixture's confirmed Workspace scope + registry over its root. */
+const EDITOR_WORKSPACE_ID = 'workspace-editor'
+
+function workspacePort(cwd: string): DirectHostFilePort {
+  return new DirectHostFilePort(() => undefined, null, {
+    get: (name: string) => name === 'workspaceRegistry'
+      ? {
+          create: async () => { throw new Error('the fixture never creates a workspace') },
+          list: () => [],
+          get: (id: string) => id === EDITOR_WORKSPACE_ID ? { path: cwd } : undefined,
+        }
+      : undefined,
+  })
+}
+
+function workspaceScope(): HostFileScope {
+  return { kind: 'workspace', workspaceId: EDITOR_WORKSPACE_ID, selectionRevision: 1 }
+}
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
 
@@ -62,7 +82,7 @@ function startApp(cwd: string): { vt: VirtualTerminal; app: TuiApp; cancels: num
     onExit: () => {},
     onCancel: () => { cancels += 1 },
   })
-  app.setCommandCompletions([], cwd, new DirectHostFilePort(() => undefined, null))
+  app.setCommandCompletions([], cwd, workspacePort(cwd), undefined, workspaceScope())
   app.start()
   startedApps.add(app)
   return { vt, app, get cancels() { return cancels } }
@@ -80,7 +100,9 @@ function startImageApp(cwd: string): { vt: VirtualTerminal; app: TuiApp } {
   app.setCommandCompletions(
     [{ name: 'image', description: 'Attach an image file', getArgumentCompletions: (arg) => suggestPathArgument(arg, cwd) }],
     cwd,
-    new DirectHostFilePort(() => undefined, null),
+    workspacePort(cwd),
+    undefined,
+    workspaceScope(),
   )
   app.start()
   startedApps.add(app)

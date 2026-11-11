@@ -39,6 +39,7 @@ import {
   PiTuiFileReferenceHostService,
   type FileReferencesServiceLike,
   type LiveAgentLike,
+  type WorkspaceRegistryPort,
 } from './features/file-reference.ts'
 import {
   PiTuiTerminalProgressHostService,
@@ -140,6 +141,7 @@ export async function apply(ctx: Context, config: TuiConfigValue): Promise<void>
       new PiTuiFileReferenceHostService(pluginCtx, {
         agentFor: sessionId => agentFor(ctx, sessionId) as LiveAgentLike | undefined,
         official: () => ctx.reflect.get('fileReferences') as FileReferencesServiceLike | undefined,
+        workspaces: () => ctx.reflect.get('workspaceRegistry') as WorkspaceRegistryPort | undefined,
       })
     })
     fibers.push(fileReferenceFiber)

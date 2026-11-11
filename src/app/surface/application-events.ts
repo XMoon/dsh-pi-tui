@@ -806,7 +806,6 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
         content: [{ type: 'text', text: submit.text }],
       }
       const promptViewerAbort = deps.viewer.followUpSignal()
-      const promptViewerCwd = deps.viewer.read()?.cwd
       deps.lifecycle.runOwned('subagent prompt', () => deps.subagentDelivery.subagent.prompt(request, {
         // The caller signal owns lookup/materialization/admission only until
         // inbox acceptance (the official prompt contract): a TUI cleanup / exit,
@@ -818,11 +817,11 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
           : AbortSignal.any([deps.lifecycle.signal(), promptViewerAbort]),
         // Same `@`-mention send seam as the main session's submissions
         // (the official semantics keep the text literal; the seam remains
-        // the one routing point). The scope is the VIEWED CHILD's workspace
-        // when the viewer knows it; an unknown cold-child cwd falls back to
-        // the live parent.
+        // the one routing point). The scope is the VIEWED CHILD's Session
+        // identity; a cold child without an identity falls back to the live
+        // parent. No cwd participates.
         canonicalizeText: (text) => deps.subagentDelivery.hostFile.canonicalizeMentions(
-          viewerCanonicalizeScope(promptViewerCwd, request.parentSessionId),
+          viewerCanonicalizeScope(request.childSessionId, request.parentSessionId),
           text,
         ),
         // The Client-local request zone of THIS follow-up, sampled by the

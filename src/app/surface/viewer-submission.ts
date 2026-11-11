@@ -76,17 +76,19 @@ export function resolveSubagentSettleTarget(
 
 /**
  * The Host-file scope one viewer prompt's send seam addresses: the VIEWED
- * CHILD's workspace when the viewer knows it, the live parent session
- * otherwise (an unknown cold-child cwd). Pure so the race is unit-testable
- * (review finding: parent cwd ≠ child cwd). (The official mention
- * semantics keep the text literal; the scope is bookkeeping for the seam —
- * a future official carrier, if one ever exists, would be the consumer.)
+ * CHILD's Session identity when the viewer knows it, the live parent Session
+ * otherwise. Pure so the race is unit-testable (review finding: parent ≠
+ * child). (The official mention semantics keep the text literal; the scope is
+ * bookkeeping for the seam — a future official carrier, if one ever exists,
+ * would be the consumer. There is no cwd here: a Client cwd is never a Host
+ * Workspace identity.)
  */
 export function viewerCanonicalizeScope(
-  viewingCwd: string | undefined,
+  viewingChildId: string | undefined,
   liveParentSessionId: string | undefined,
-): { kind: 'workspace'; cwd: string } | { kind: 'session'; sessionId: string } {
-  return viewingCwd !== undefined && viewingCwd !== ''
-    ? { kind: 'workspace', cwd: viewingCwd }
-    : { kind: 'session', sessionId: liveParentSessionId ?? '' }
+): { kind: 'session'; sessionId: string } {
+  // The scope is bookkeeping for the literal-mention seam only (no discovery),
+  // so it carries the viewed CHILD's Session identity when known and the live
+  // parent otherwise — never a Client cwd posing as a Host workspace.
+  return { kind: 'session', sessionId: viewingChildId ?? liveParentSessionId ?? '' }
 }

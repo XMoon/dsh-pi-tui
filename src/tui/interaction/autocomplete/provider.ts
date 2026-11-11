@@ -70,13 +70,15 @@ const NO_HOST_REFERENCES: HostFilePort = {
   },
 }
 
-/** Whether two Host file scopes are the same (a session switch mid-flight
- * must drop the old session's candidate list). */
+/** Whether two Host file scopes are the same (a session switch or a Workspace
+ * selection change mid-flight must drop the old candidate list). The Workspace
+ * identity AND its Client-local selection revision must both match: an A→B→A
+ * return to the same WorkspaceId still invalidates the first A's late answer. */
 function sameHostFileScope(left: HostFileScope, right: HostFileScope): boolean {
   if (left.kind !== right.kind) return false
-  return left.kind === 'session'
-    ? left.sessionId === (right as { sessionId: string }).sessionId
-    : left.cwd === (right as { cwd: string }).cwd
+  if (left.kind === 'session') return left.sessionId === (right as { sessionId: string }).sessionId
+  const other = right as { workspaceId?: string; selectionRevision: number }
+  return left.workspaceId === other.workspaceId && left.selectionRevision === other.selectionRevision
 }
 
 /**
@@ -166,7 +168,7 @@ export class MentionProvider implements AutocompleteProvider {
     workDir: string,
     fileReferences: HostFilePort | null,
     inputModeSource: () => EditorInputMode = () => 'prompt',
-    scope: HostFileScope | (() => HostFileScope) = { kind: 'workspace', cwd: workDir },
+    scope: HostFileScope | (() => HostFileScope) = { kind: 'workspace', selectionRevision: 0 },
     localFdPath: string | null | undefined = undefined,
     localCwd: string | (() => string) = workDir,
     skillReferences: readonly HumanSkillSummary[] = [],

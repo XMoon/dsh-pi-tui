@@ -72,6 +72,8 @@ import * as toolTodo from '@deepseek-ai/dsh-tool-todo'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
+import type { LaunchWorkspaceVerdict } from '../../src/app/remote-process/local-workspace-equivalence.ts'
+import { statSync } from 'node:fs'
 import type { ClientReloadRequestResult, RemoteApplicationOverride, RunnerStartupSettlement } from '../../src/app/application-runtime.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { createRemoteApplicationRuntime } from '../support/m3-inprocess/application-runtime.ts'
@@ -215,6 +217,23 @@ export async function mountRemotePresentationHost(
  * Host. The runner consumes only the aggregate's selected core + the
  * presentation-source bundle — no Direct graph is ever constructed.
  */
+/** An in-process VERIFIED launch proof for composition tests. The REAL
+ * classifier's evidence is validated by its own unit contract and the packed
+ * OS lane; this fixture only needs a legal sessionless Workspace target. */
+function launchProof(cwd: string): LaunchWorkspaceVerdict {
+  const evidence = statSync(cwd)
+  return {
+    kind: 'verified',
+    launchCwd: cwd,
+    instanceId: 'in-process-fixture-host',
+    hostPid: process.pid,
+    hostStarttime: 'fixture',
+    device: evidence.dev,
+    inode: evidence.ino,
+    revalidate: () => true,
+  }
+}
+
 export async function mountRemoteRunner(
   life: TestLifecycle,
   options: {
@@ -329,6 +348,10 @@ export async function mountRemoteRunner(
       TuiConfigSchema({ fullscreen: 'off', sessionId: options.resumeSessionId } as never),
       override,
       options.startupSettlement,
+      // The REAL classifier is proven by its own unit contract and the packed
+      // OS lane; this in-process composition only needs a sessionless first
+      // create to have a legal Host Workspace target.
+      launchProof(process.cwd()),
     )
   })
   await runnerFiber

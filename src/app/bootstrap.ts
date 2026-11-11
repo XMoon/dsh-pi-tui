@@ -125,6 +125,7 @@ import { createFatalLifecycle, createSurfaceLifecycle } from './bootstrap/lifecy
 import { createSessionStartupHelpers, quiesceResumedOwner } from './bootstrap/session-startup.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
+import type { LaunchWorkspaceVerdict } from './remote-process/local-workspace-equivalence.ts'
 import { createWorkspaceNextIntentOwner } from '../app/session/workspace-next-intent.ts'
 import { createSessionScopeAuthority, type LiveSessionScope } from '../app/session/scope.ts'
 import type { NavigationIntent } from '../app/session/transition.ts'
@@ -236,6 +237,7 @@ export function applyRunnerWithRuntime(
   config: Config,
   override: RemoteApplicationOverride | undefined,
   startupSettlement?: RunnerStartupSettlement,
+  launchWorkspace?: LaunchWorkspaceVerdict,
 ): void {
   // Read through the global service store, not the property proxy: appExit is
   // an optional host value, never an injected dependency.
@@ -268,7 +270,36 @@ export function applyRunnerWithRuntime(
   const sessionId = config.sessionId !== undefined && config.sessionId !== '' ? config.sessionId : startup.sessionId
   const launchWorkspaceIntent = initialWorkspaceIntentFromEnvironment(process.cwd())
   if (launchWorkspaceIntent.kind !== 'host-path') throw new Error('the launch workspace intent must be a Host path')
-  const workspaceNextIntent = createWorkspaceNextIntentOwner(launchWorkspaceIntent.path)
+  // The sessionless next-create proposal (M6-1/F5-B):
+  // - Direct/sessionless: the launch directory IS this Host process's own
+  //   directory, so it keeps its historical `proposed` default.
+  // - Remote: only a VERIFIED local Client/Host directory equivalence may
+  //   propose the Client launch cwd automatically (one-shot `auto`); anything
+  //   else starts UNSELECTED and the Welcome routes to the existing Browser.
+  // - The internal qualification override stays a MANUAL Host path proposal
+  //   (the OS lane's invalid-path negative control — never equivalence proof).
+  const surfaceWorkspaceOverride = process.env.SPLIT_PROCESS_CLIENT_MODE === 'surface'
+    ? process.env.SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH
+    : undefined
+  const manualWorkspaceOverride = surfaceWorkspaceOverride === undefined || surfaceWorkspaceOverride === ''
+    ? undefined
+    : surfaceWorkspaceOverride
+  const remoteLaunch = override === undefined
+    ? { path: launchWorkspaceIntent.path, provenance: 'launch' as const }
+    : manualWorkspaceOverride !== undefined
+      ? { path: manualWorkspaceOverride, provenance: 'manual' as const }
+      : launchWorkspace?.kind === 'verified' && launchWorkspace.launchCwd !== undefined
+        ? { path: launchWorkspace.launchCwd, provenance: 'auto' as const }
+        : undefined
+  const workspaceNextIntent = createWorkspaceNextIntentOwner(remoteLaunch?.path, remoteLaunch?.provenance)
+  // The auto evidence must be re-observed at the first create boundary: a
+  // Host restart / mount-view change between the mount and the create revokes
+  // the automatic candidate instead of adopting a stale proof.
+  const autoWorkspaceRevalidate = remoteLaunch?.provenance === 'auto' && launchWorkspace?.kind === 'verified'
+    ? launchWorkspace.revalidate
+    : undefined
+  /** The one automatic Workspace-Browser opening of this mounted surface. */
+  let workspaceChooserPrompted = false
   // Lifecycle cancellation: ONE controller owned by the runner fiber. It is
   // aborted by user exit, by the ctx.effect cleanup (loader hot-reload
   // unloads the row), and by startup failure. Every long-running load shares
@@ -941,6 +972,9 @@ export function applyRunnerWithRuntime(
       lifecycle: selectedRuntime.backend.sessionLifecycle,
       lifecycleSignal: lifecycleController.signal,
       workspaceNextIntent,
+      // M6-1/F5-B: the AUTO launch-cwd candidate's live re-proof (absent for a
+      // Direct/sessionless launch proposal, whose cwd IS this Host process's).
+      ...(autoWorkspaceRevalidate === undefined ? {} : { autoWorkspaceRevalidate }),
       surface: {
         warnRetirement: (report) => {
           // The SEMANTIC outcome decides the wording; the backend's phase labels
@@ -1075,6 +1109,15 @@ export function applyRunnerWithRuntime(
           ctx.logger.warn(`tui-runner: failed to create the first session: ${message}`)
           diag.warn('first session creation failed', { error: message })
           resumeFailure = `could not create the first session: ${message}`
+        },
+        // M6-1/F5-B: an UNSELECTED sessionless surface routes the user to the
+        // EXISTING Workspace Browser (/sessions chooser mode) exactly ONCE per
+        // mount; a cancelled picker keeps the surface unselected and no render
+        // or reload re-opens it.
+        promptWorkspaceSelection: () => {
+          if (workspaceChooserPrompted) return
+          workspaceChooserPrompted = true
+          openRegisteredSessionBrowser?.()
         },
          notifyResumeFailure: () => {
           if (resumeFailure !== undefined) {

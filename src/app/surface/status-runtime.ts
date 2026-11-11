@@ -362,12 +362,21 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       if (facts === undefined) {
         deps.surface.display.setWelcomeIdle(true)
         const next = deps.nextWorkspaceIntent?.()
-        deps.surface.display.setWelcomeWorkspace?.(next === undefined ? { path: deps.clientCwd, status: 'proposed' } : {
-          path: next.displayPath ?? deps.clientCwd,
-          status: next.status,
-          ...(next.workspaceId === undefined ? {} : { workspaceId: next.workspaceId }),
-          ...(next.error === undefined ? {} : { error: next.error }),
-        })
+        // M6-1/F5-B: `unselected` is a REAL state (no verified auto candidate
+        // and no explicit choice): the card names the missing Host workspace
+        // and points at the existing Browser, never a fabricated Client cwd.
+        deps.surface.display.setWelcomeWorkspace?.(
+          next === undefined
+            ? { path: deps.clientCwd, status: 'proposed' }
+            : next.status === 'unselected'
+              ? { path: '', status: 'unselected' }
+              : {
+                  path: next.displayPath ?? deps.clientCwd,
+                  status: next.status,
+                  ...(next.workspaceId === undefined ? {} : { workspaceId: next.workspaceId }),
+                  ...(next.error === undefined ? {} : { error: next.error }),
+                },
+        )
         return
       }
       deps.surface.display.setWelcomeCard({

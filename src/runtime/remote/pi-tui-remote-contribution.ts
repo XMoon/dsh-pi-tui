@@ -28,7 +28,10 @@
 
 import type { TypertContribution } from '@deepseek-ai/dsh-typert-registry'
 import type { TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
-import { PI_TUI_FILE_REFERENCES_LIST } from './pi-tui-file-reference-contract.ts'
+import {
+  PI_TUI_FILE_REFERENCES_LIST,
+  PI_TUI_FILE_REFERENCES_LIST_WORKSPACE,
+} from './pi-tui-file-reference-contract.ts'
 import {
   PI_TUI_HOST_USER_SHELL_COMPLETE,
   PI_TUI_HOST_USER_SHELL_RUN,
@@ -56,6 +59,7 @@ export const PI_TUI_HOST_CONTRIBUTION: TypertContribution = {
   model: { services: [], events: [], objects: [] },
   invocations: [
     PI_TUI_FILE_REFERENCES_LIST,
+    PI_TUI_FILE_REFERENCES_LIST_WORKSPACE,
     PI_TUI_HOST_USER_SHELL_RUN,
     PI_TUI_HOST_USER_SHELL_COMPLETE,
     PI_TUI_TERMINAL_PROGRESS_WATCH,
@@ -72,6 +76,7 @@ export const PI_TUI_CLIENT_CONTRIBUTION: TypertRemoteContribution = {
   package: PI_TUI_REMOTE_PACKAGE,
   descriptors: [
     PI_TUI_FILE_REFERENCES_LIST,
+    PI_TUI_FILE_REFERENCES_LIST_WORKSPACE,
     PI_TUI_HOST_USER_SHELL_RUN,
     PI_TUI_HOST_USER_SHELL_COMPLETE,
     PI_TUI_TERMINAL_PROGRESS_WATCH,

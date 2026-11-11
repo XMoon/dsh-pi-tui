@@ -876,7 +876,7 @@ test('a stale multiline shell result is never applied after the edit, scope or r
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const port = fixedShellPort({ commands: ['zoom'] })
-  let scope: HostFileScope = { kind: 'workspace', cwd: root }
+  let scope: HostFileScope = { kind: 'workspace', workspaceId: 'workspace-live', selectionRevision: 1 }
   const provider = new MentionProvider([], root, null, modeSource('shell-context').source, () => scope, undefined, undefined, [], port)
   const lines = ['git status', 'zo']
   const first = await provider.getSuggestions(lines, 1, 2, { signal: abort, force: true })
@@ -1000,7 +1000,7 @@ test('Host path and variable candidates obey the same Session currentness fence'
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const port = fixedShellPort({ variables: ['HOME'], paths: ['src/deep-nested.ts'], authority: 'host' })
-  let scope: HostFileScope = { kind: 'workspace', cwd: root }
+  let scope: HostFileScope = { kind: 'workspace', workspaceId: 'workspace-live', selectionRevision: 1 }
   const provider = new MentionProvider([], root, null, modeSource('shell-context').source, () => scope, undefined, undefined, [], port)
   const variableLine = ['echo "$HO']
   const pathLine = ['cat src/de']

@@ -319,7 +319,7 @@ async function mountSlashPane(
       commands: options.commands ?? COMMANDS,
       cwd: '/work',
       fileReferences: hostFile,
-      scope: () => ({ kind: 'workspace', cwd: '/work' }),
+      scope: () => ({ kind: 'workspace', workspaceId: 'workspace-work', selectionRevision: 1 }),
       localCwd: () => localCwd,
       skillReferences: options.skillReferences ?? [],
       hostShellCompletion: undefined,
@@ -846,7 +846,7 @@ test('a Host @ mention paints the official @ rows and accepting one inserts the 
   assert.equal(staged.length, 0, 'a Host mention acceptance never reaches the inline-attachment stager')
   assert.deepEqual(host.queries.map(entry => entry.query), ['src/fo'],
     'the Host port received the official query form (the @ stripped, exactly once)')
-  assert.deepEqual(host.queries[0]!.scope, { kind: 'workspace', cwd: '/work' },
+  assert.deepEqual(host.queries[0]!.scope, { kind: 'workspace', workspaceId: 'workspace-work', selectionRevision: 1 },
     'the query was addressed to the mounted workspace scope')
   // The next Enter is the one explicit submission; it sends the literal text.
   await m.key(ENTER)
@@ -2009,7 +2009,7 @@ test('a disposed mount cannot be painted or written by a late catalog or a late 
     commands: [{ name: 'model', description: 'Choose a model' }],
     cwd: '/work',
     fileReferences: null,
-    scope: () => ({ kind: 'workspace', cwd: '/work' }),
+    scope: () => ({ kind: 'workspace', workspaceId: 'workspace-work', selectionRevision: 1 }),
     localCwd: () => '/work',
     skillReferences: [],
     hostShellCompletion: undefined,
