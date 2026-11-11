@@ -1122,6 +1122,15 @@ test('a Host `@` explicit-scope reference paints REAL HostFilePort rows, the acc
     await submitCommand(fixture, '/new')
     const [sessionA] = await waitForSessionHeaders(fixture, 1, 'the Session whose scope the mention resolves against')
     await waitFor('the new Session to own a live Agent', () => liveAgentIds(fixture).includes(sessionA), 30_000)
+    // A durable header and a live Agent can appear while /new's single-flight
+    // marker is still held: the committed owner's surface rebuild and
+    // live-catalog refresh settle only after them. The mention query is issued
+    // ONCE when the text is typed, so a discovery that runs against the
+    // unfinished transition paints no rows and never re-queries. Gate on the
+    // production transition's terminal report, the same boundary the sibling
+    // submission lanes use.
+    await waitFor('the /new transition to finish its live-catalog refresh', () =>
+      switchReported(fixture, sessionA), 30_000)
 
     await prepareDraft(fixture, `请看 @src/tui/tsp/edit`)
     await settle(fixture, 'the Host mention rows', () => slashRows(fixture).length > 0)
