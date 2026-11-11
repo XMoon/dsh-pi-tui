@@ -36,6 +36,7 @@ import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
+import { ExtensionLedger } from '../../src/extension/internal/ledger.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import type { TaskBrowserJobInput } from '../../src/domain/task/browser.ts'
 import type { SessionSubject } from '../../src/app/session/subject.ts'
@@ -117,6 +118,9 @@ async function startHarness(options: {
   withCommandRegistration?: boolean
   rows?: number
   draft?: string
+  /** An Unstable raw capture that CONSUMES the given chunks (Esc / wheel)
+   * before the Host key ladder sees them. */
+  rawCapture?: 'esc' | 'wheel'
 } = {}): Promise<Harness> {
   const vt = new VirtualTerminal(100, options.rows ?? 30)
   const restoreTerminal = installVirtualProcessTerminal(vt)
@@ -210,6 +214,28 @@ async function startHarness(options: {
     applyViewedChildAssistantInput: () => {},
     applyMainAssistantInput: () => {},
   } as never)
+  if (options.rawCapture !== undefined) {
+    // The Unstable raw stage is wired through the REAL extension host seam
+    // (surface.attachExtensionHost): a minimal first-party fake service whose
+    // unstable route consumes the named chunks before the Host key ladder.
+    surface.attachExtensionHost({
+      _ledger: () => new ExtensionLedger(),
+      setThemeUnloadedHook: () => () => {},
+      detachSurface: () => {},
+      _unstableInputsLive: () => true,
+      _unstableInputsRevision: () => 1,
+      _unstableEmergencyRelease: () => {},
+      _advancedInputRoute: () => ({ action: 'passed' }),
+      pluginActionFor: () => undefined,
+      pluginActionIdFor: () => undefined,
+      _unstableInputRoute: (data: string) => {
+        const isEsc = data === '\x1b'
+        const isWheel = data.startsWith('\x1b[<64;') || data.startsWith('\x1b[<65;')
+        const captured = options.rawCapture === 'esc' ? isEsc : isWheel
+        return captured ? { action: 'consume' } : { action: 'pass' }
+      },
+    } as never)
+  }
   surface.start({
     events: { onSubmit: () => {}, onExit: () => {} },
     workspaceRoot: '/tmp',
@@ -836,6 +862,86 @@ test('an approval seat and the passthrough search box block background footer cl
       'the search passthrough exception belongs to transcript inspection only')
   } finally {
     search.dispose()
+  }
+})
+
+test('a synchronous recompose retires the release before the next repaint', async () => {
+  const h = await startHarness()
+  try {
+    const cell = cellOf(h.vt, '[deepseek/deepseek-v4-flash]')
+    assert.ok(cell)
+    press(h.vt, cell.x, cell.row)
+    // A SAME-GEOMETRY content change committed synchronously (store notify →
+    // renderFooter): the pending projection advances but NO repaint happened
+    // yet — the painted projection still carries the old frame.
+    h.bumpTaskCount()
+    release(h.vt, cell.x, cell.row)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.equal(h.loads().length, 0, 'a pending recompose retires the release before any repaint')
+    // After the repaint the same placement is still there: a fresh click acts.
+    await new Promise(resolve => setTimeout(resolve, 550))
+    click(h.vt, cell.x, cell.row)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.equal(h.loads().length, 1, 'the fresh click after the repaint opens the picker')
+  } finally {
+    h.dispose()
+  }
+
+  const cmd = await startHarness()
+  try {
+    const cell = cellOf(cmd.vt, '[deepseek/deepseek-v4-flash]')
+    assert.ok(cell)
+    press(cmd.vt, cell.x, cell.row)
+    // The whole-footer command surface replaces the native footer
+    // synchronously; the release arrives before the repaint.
+    cmd.app.setFooterCommandRows(['[deepseek/deepseek-v4-flash]  [2 tasks running]'])
+    release(cmd.vt, cell.x, cell.row)
+    await cmd.vt.waitForRender()
+    await cmd.vt.waitForRender()
+    const view = screen(cmd.vt)
+    assert.equal(cmd.loads().length, 0, 'a command-mode switch retires the release before any repaint')
+    assert.ok(!view.includes('Models'), 'no picker opened from the stale release')
+  } finally {
+    cmd.dispose()
+  }
+})
+
+test('a raw-captured key or wheel still retires the pending footer press', async () => {
+  // The Unstable raw capture CONSUMES Esc before the Host key ladder: the
+  // retirement must have happened EARLIER (handleInput, pre-raw-stage), or a
+  // same-cell release after the captured key would still act.
+  const esc = await startHarness({ rawCapture: 'esc' })
+  try {
+    const cell = cellOf(esc.vt, '[deepseek/deepseek-v4-flash]')
+    assert.ok(cell)
+    press(esc.vt, cell.x, cell.row)
+    esc.vt.sendInput('\x1b') // consumed by the fake plugin capture
+    release(esc.vt, cell.x, cell.row)
+    await esc.vt.waitForRender()
+    assert.equal(esc.loads().length, 0, 'a raw-captured key still retires the pending press')
+    // A NON-captured key passes through and retires the same way.
+    press(esc.vt, cell.x, cell.row)
+    esc.vt.sendInput('x')
+    release(esc.vt, cell.x, cell.row)
+    await esc.vt.waitForRender()
+    assert.equal(esc.loads().length, 0, 'a passed-through key retires the pending press')
+  } finally {
+    esc.dispose()
+  }
+
+  const wheel = await startHarness({ rawCapture: 'wheel' })
+  try {
+    const cell = cellOf(wheel.vt, '[deepseek/deepseek-v4-flash]')
+    assert.ok(cell)
+    press(wheel.vt, cell.x, cell.row)
+    wheel.vt.sendInput('\x1b[<64;50;20M') // consumed by the fake plugin capture
+    release(wheel.vt, cell.x, cell.row)
+    await wheel.vt.waitForRender()
+    assert.equal(wheel.loads().length, 0, 'a raw-captured wheel still retires the pending press')
+  } finally {
+    wheel.dispose()
   }
 })
 

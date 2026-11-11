@@ -6733,6 +6733,16 @@ export class TuiApp {
 
   /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
   private handleInput(data: string): TuiInputListenerResult {
+    // PR3: a pending footer press belongs to the frame the user pressed on.
+    // ANY input that is not that gesture's own primary-button mouse report
+    // retires it HERE — before the unstable raw stage: a capture that
+    // consumes or rewrites a key or wheel is still intervening input, and a
+    // later release must never act past it (the emergency fail-safe's
+    // consumed keys are covered by the same placement).
+    const footerMouseButton = mouseButtonBits(data)
+    if (footerMouseButton === undefined || retiresPointerGesture(footerMouseButton)) {
+      this.footerPressGesture = undefined
+    }
     // Terminal focus reports (CSI ? 1004 — ESC[I/ESC[O) are HOST-RESERVED:
     // they bypass the unstable raw stage entirely (a raw capture can
     // never consume, rewrite or starve them) and flow straight to the
@@ -6873,16 +6883,8 @@ export class TuiApp {
     // BEFORE this point and still see every chunk.)
     if (MOUSE_SEQUENCE.test(data) || (data.length === 6 && data.startsWith('\x1b[M'))) {
       this.clearExitConfirmation()
-      // PR3: a wheel/drag/secondary-button report retires a pending footer
-      // press; a plain primary press/release keeps it (the press path
-      // re-records; the release path completes).
-      const button = mouseButtonBits(data)
-      if (button !== undefined && retiresPointerGesture(button)) this.footerPressGesture = undefined
       return undefined
     }
-    // PR3: any real keyboard/focus input retires a pending footer press
-    // before the key can change the frame or the business owner it names.
-    this.footerPressGesture = undefined
     // FOCUS reports (CSI ? 1004 — ESC[I/ESC[O) are handled HOST-SIDE,
     // before the key ladder: they can never reach the keybinding
     // manager, autocomplete or a host action. Screen-aware consumption
@@ -15212,6 +15214,11 @@ export class TuiApp {
     const inBox = y >= painted.top && y < painted.top + painted.height
       && x >= painted.left && x < painted.left + painted.width
     if (!inBox) return false
+    // A composition newer than the painted frame consumes the press without
+    // starting a gesture: the press may never name a hit of a footer the
+    // app has already replaced on its side.
+    const pending = this.footerPendingProjection
+    if (pending === undefined || pending.revision !== painted.revision) return true
     // Inside the painted footer box the press is CONSUMED even when no hit
     // applies: the footer is not a transcript surface.
     if (painted.subjectKind !== 'main') return true
@@ -15248,6 +15255,13 @@ export class TuiApp {
     if (this.fullscreen !== pressed.screen || this.activeScreen !== pressed.screen) return
     if (this.terminal.columns !== pressed.columns || this.terminal.rows !== pressed.termRows) return
     if (painted.revision !== pressed.compositionRevision) return
+    // A composition NEWER than the painted frame — a synchronous recompose
+    // (command-mode switch, content change) that has not repainted yet —
+    // retires the press immediately (plan §9.1–9.2): the release may never
+    // act on a footer the app has already replaced on its side, paint or no
+    // paint.
+    const pending = this.footerPendingProjection
+    if (pending === undefined || pending.revision !== painted.revision) return
     if (painted.subjectKind !== 'main') return
     if (this.statusStore.snapshot().view.subject.kind !== 'main') return
     if (this.taskQuick.focused || this.optionalSeatOwnsKeyboard()) return
