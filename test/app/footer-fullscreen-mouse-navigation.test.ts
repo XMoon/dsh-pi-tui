@@ -39,6 +39,7 @@ import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/
 import { ExtensionLedger } from '../../src/extension/internal/ledger.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import type { TaskBrowserJobInput } from '../../src/domain/task/browser.ts'
+import type { FooterLayoutV1 } from '../../src/domain/footer/layout.ts'
 import type { SessionSubject } from '../../src/app/session/subject.ts'
 import type { JobObservationPort } from '../../src/runtime/job-observation-port.ts'
 import type { TuiApp } from '../../src/tui-app.ts'
@@ -734,10 +735,6 @@ test('a same-geometry footer content change retires the release through the revi
     // A fresh click on the still-valid placement acts. A different word of
     // the same placement: the fork treats a same-word repeat as a double-click
     // selection, not a disclosure click.
-    // The whole badge is ONE word for the fork's selection engine: a second
-    // press inside the double-click window classifies as a word selection,
-    // never a disclosure click.
-    await new Promise(resolve => setTimeout(resolve, 550)) // reason: the double-click window IS the contract — the fresh click must start a new gesture after it closes.
     click(h.vt, cell.x, cell.row)
     await h.vt.waitForRender()
     await h.vt.waitForRender()
@@ -803,11 +800,17 @@ test('the task admission is re-checked on release: a runtime that lost its sourc
     await h.vt.waitForRender()
     await h.vt.waitForRender()
     assert.ok(!screen(h.vt).includes('build the project'), 'Esc closed the browser for the stale probe')
-    // A press whose release lands on a DIFFERENT footer cell is inert.
+    // A press whose release lands on a DIFFERENT footer cell is inert: the
+    // fork never synthesizes that click, so nothing dispatches.
     press(h.vt, cell.x, cell.row)
     release(h.vt, cell.x + 4, cell.row)
     await h.vt.waitForRender()
     assert.ok(!screen(h.vt).includes('build the project'), 'a mismatched release cannot open the browser')
+    // That un-dispatched press armed the fork's multi-click counter; one
+    // inert footer-cell click (dispatched, consumed, reset) clears it before
+    // the next deliberate same-cell gesture.
+    click(h.vt, cell.x + 45, cell.row)
+    await h.vt.waitForRender()
 
     // The REVOCATION case: detach the runtime's session source between press
     // and release — openTasksBrowser's own admission (sessionId === undefined)
@@ -879,8 +882,10 @@ test('a synchronous recompose retires the release before the next repaint', asyn
     await h.vt.waitForRender()
     await h.vt.waitForRender()
     assert.equal(h.loads().length, 0, 'a pending recompose retires the release before any repaint')
-    // After the repaint the same placement is still there: a fresh click acts.
-    await new Promise(resolve => setTimeout(resolve, 550)) // reason: the double-click window IS the contract — the fresh click must start a new gesture after it closes.
+    // After the repaint the same placement is still there: a fresh click
+    // acts — the completed footer release consumed the fork's click history,
+    // so the immediate next press is a plain single click, not a word
+    // selection.
     click(h.vt, cell.x, cell.row)
     await h.vt.waitForRender()
     await h.vt.waitForRender()
@@ -905,6 +910,43 @@ test('a synchronous recompose retires the release before the next repaint', asyn
     assert.ok(!view.includes('Models'), 'no picker opened from the stale release')
   } finally {
     cmd.dispose()
+  }
+})
+
+test('the fork-supported button=3 release completes a footer navigation exactly once', async () => {
+  const h = await startHarness()
+  try {
+    const cell = cellOf(h.vt, '[deepseek/deepseek-v4-flash]')
+    assert.ok(cell)
+    press(h.vt, cell.x, cell.row)
+    release(h.vt, cell.x, cell.row)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.ok(screen(h.vt).includes('Models'), 'the primary-button release opens the picker (control)')
+    h.vt.sendInput('\x1b')
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.ok(!screen(h.vt).includes('Models'), 'Esc closed the picker')
+    // Several terminals encode the release of the pressed button as button 3
+    // — the fork's click synthesis accepts it, so the footer gesture must
+    // complete (never retire) on it.
+    press(h.vt, cell.x, cell.row)
+    h.vt.sendInput(`\x1b[<3;${cell.x + 1};${cell.row + 1}m`)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.ok(screen(h.vt).includes('Models'), 'the button=3 release opens the picker')
+    h.vt.sendInput('\x1b')
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.ok(!screen(h.vt).includes('Models'), 'Esc closed the picker again')
+    // A secondary-button PRESS is a different gesture: the gesture retires.
+    press(h.vt, cell.x, cell.row)
+    h.vt.sendInput(`\x1b[<2;${cell.x + 1};${cell.row + 1}M`)
+    release(h.vt, cell.x, cell.row)
+    await h.vt.waitForRender()
+    assert.ok(!screen(h.vt).includes('Models'), 'a right-button press retires the pending gesture')
+  } finally {
+    h.dispose()
   }
 })
 
@@ -942,6 +984,77 @@ test('a raw-captured key or wheel still retires the pending footer press', async
     assert.equal(wheel.loads().length, 0, 'a raw-captured wheel still retires the pending press')
   } finally {
     wheel.dispose()
+  }
+})
+
+test('closing the picker and immediately re-clicking the same footer model cell reopens it', async () => {
+  const h = await startHarness()
+  try {
+    const cell = cellOf(h.vt, '[deepseek/deepseek-v4-flash]')
+    assert.ok(cell)
+    click(h.vt, cell.x, cell.row)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.ok(screen(h.vt).includes('Models'), 'the first click opened the picker')
+    h.vt.sendInput('\x1b')
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.ok(!screen(h.vt).includes('Models'), 'Esc closed the picker')
+    // NO wait: the fork's 500 ms double-click window must not swallow the
+    // navigation control's own reopen — the completed footer release
+    // consumed the click history.
+    click(h.vt, cell.x, cell.row)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.ok(screen(h.vt).includes('Models'), 'the immediate re-click reopens the picker')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('closing the Task Center and immediately re-clicking the footer tasks cell reopens it', async () => {
+  const h = await startHarness()
+  try {
+    const cell = cellOf(h.vt, 'task')
+    assert.ok(cell)
+    click(h.vt, cell.x, cell.row)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.ok(screen(h.vt).includes('build the project'), 'the first click opened the browser')
+    h.vt.sendInput('\x1b')
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.ok(!screen(h.vt).includes('build the project'), 'Esc closed the browser')
+    click(h.vt, cell.x, cell.row)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.ok(screen(h.vt).includes('build the project'), 'the immediate re-click reopens the browser')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('a custom layout places model in the RIGHT zone and the full chain still navigates', async () => {
+  const h = await startHarness()
+  try {
+    // A CUSTOM layout whose model placement rides the right zone: the
+    // composer provenance, the painted Text, the SGR click and the real
+    // business entry must all hold off the default preset.
+    h.app.setFooterLayout({
+      schemaVersion: 1,
+      rows: [{ left: [{ id: 'turns-steps' }], right: [{ id: 'model', format: 'plain' }, { id: 'tasks' }] }],
+    } as FooterLayoutV1)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    const cell = cellOf(h.vt, 'deepseek/deepseek-v4-flash')
+    assert.ok(cell, `the right-zone model placement must be painted:\n${screen(h.vt)}`)
+    click(h.vt, cell.x, cell.row)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.ok(screen(h.vt).includes('Models'), `the right-zone click opens the real picker:\n${screen(h.vt)}`)
+    assert.deepEqual(h.loads(), ['loadDirectory'], 'the real command read owner ran once')
+  } finally {
+    h.dispose()
   }
 })
 
