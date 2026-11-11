@@ -167,6 +167,9 @@ export async function runHostDirectoryBrowse(context) {
         sessionOpen: home.sessionOpen,
         openSessionId: home.openSessionId,
       })}`)
+    assert(typeof home.generationAtDispatch === 'number'
+      && home.generationAtDispatch === home.generationAtDelivery,
+    `PR1 the home read crossed a connection generation (${String(home.generationAtDispatch)} -> ${String(home.generationAtDelivery)})`)
     assert(Array.isArray(homeListing.crumbs) && homeListing.crumbs.length > 0,
       'PR1 the official listing carries no ancestry crumbs')
 
@@ -175,6 +178,9 @@ export async function runHostDirectoryBrowse(context) {
     assert(explicit.phase === 'directory-browse' && explicit.outcome.kind === 'ready',
       `PR1 the explicit Host path read is ${JSON.stringify(explicit.outcome ?? explicit)}`)
     const explicitListing = explicit.outcome
+    assert(typeof explicit.generationAtDispatch === 'number'
+      && explicit.generationAtDispatch === explicit.generationAtDelivery,
+    'PR1 the explicit path read crossed a connection generation')
     assert(realpathSync(explicitListing.path) === realpathSync(markerPath),
       `PR1 the explicit path read listed ${explicitListing.path}, expected ${markerPath}`)
     deepEqual(namesOf(explicitListing).sort(), ['.hidden-child', 'alpha'],
@@ -208,36 +214,36 @@ export async function runHostDirectoryBrowse(context) {
     assert(aborted.errorName === 'AbortError',
       `PR1 the aborted read failed as ${String(aborted.errorName)}, expected AbortError`)
 
-    // ── PR1-E2: a physical mux drop during the read stays honest ────────────
-    assert(typeof home.generationId === 'number', 'PR1 the Client reported no official transport generation')
+    // ── PR1-E2: a provably in-flight read across a physical mux drop ────────
+    //
+    // The probe creates the read and drops the mux socket SYNCHRONOUSLY in the
+    // same task, so no RPC response can have been delivered yet: the request is
+    // in flight when its Connection generation is replaced. Such a read must
+    // never deliver a ready listing (its content being correct is irrelevant),
+    // and the replacement must be visible in the recorded generations.
+    assert(typeof home.generationAtDispatch === 'number', 'PR1 the Client reported no official transport generation')
     const dropRecord = await probe({ path: markerPath, abort: 'drop' }, 'PR1 drop during read')
-    if (dropRecord.phase === 'directory-browse' && dropRecord.outcome.kind === 'ready') {
-      // The read genuinely settled before the carrier was dropped: the value
-      // must still be the official level, never an empty or fabricated one.
-      deepEqual(namesOf(dropRecord.outcome).sort(), ['.hidden-child', 'alpha'],
-        `PR1 a listing that crossed a mux drop is ${JSON.stringify(namesOf(dropRecord.outcome))}`)
-    } else if (dropRecord.phase === 'directory-browse') {
-      assert(dropRecord.outcome.kind !== 'ready',
-        `PR1 a dropped read fabricated ${JSON.stringify(dropRecord.outcome)}`)
-    } else {
-      // A read that crossed the drop is either superseded by the replaced
-      // generation or surfaces the carrier's observable failure (the official
-      // `gateway/internal` fold). It is never fabricated into an empty or
-      // unavailable listing.
-      assert(['SupersededReadError', 'AbortError', 'RemoteError'].includes(dropRecord.errorName),
-        `PR1 a dropped read failed as ${String(dropRecord.errorName)}, expected supersession/cancellation/carrier failure`)
-      assert(dropRecord.outcome === undefined, 'PR1 a dropped read emitted a listing outcome')
-    }
+    assert(dropRecord.phase === 'directory-browse-rejected' && dropRecord.rejected === true,
+      `PR1 a read provably in flight at the mux drop delivered ${JSON.stringify(dropRecord)}`)
+    assert(['SupersededReadError', 'AbortError', 'RemoteError'].includes(dropRecord.errorName),
+      `PR1 a dropped read failed as ${String(dropRecord.errorName)}, expected supersession/cancellation/carrier failure`)
+    assert(dropRecord.outcome === undefined, 'PR1 a dropped read emitted a listing outcome')
     // The SAME Client must observe the official generation rollover and keep
-    // reading the SAME Host afterwards.
+    // reading the SAME Host afterwards, on the NEW generation.
     await waitForSurfaceStatus(client,
-      record => typeof record.generationId === 'number' && record.generationId !== home.generationId,
+      record => typeof record.generationId === 'number'
+        && record.generationId !== dropRecord.generationAtDispatch,
       'PR1 connection generation rollover', 120_000)
     const afterDrop = await probe({}, 'PR1 read after rollover')
     assert(afterDrop.phase === 'directory-browse' && afterDrop.outcome.kind === 'ready',
       `PR1 the post-rollover read is ${JSON.stringify(afterDrop.outcome ?? afterDrop)}`)
     assert(namesOf(afterDrop.outcome).includes(markerName),
       'PR1 the post-rollover read lost the Host home marker directory')
+    assert(typeof afterDrop.generationAtDispatch === 'number'
+      && afterDrop.generationAtDispatch !== dropRecord.generationAtDispatch,
+    `PR1 the stale request did not cross a replaced generation (${String(dropRecord.generationAtDispatch)} -> ${String(afterDrop.generationAtDispatch)})`)
+    assert(afterDrop.generationAtDispatch === afterDrop.generationAtDelivery,
+      'PR1 the post-rollover read was delivered on a different generation than it started on')
 
     // ── PR1-C/H: no Session, no Workspace, no second browse backend ─────────
     const sessionsAfter = sessionInventory(dshHome)
