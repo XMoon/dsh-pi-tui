@@ -726,7 +726,18 @@ async function composeRuntime(host: HostFixture): Promise<Composed['runtime']> {
 
 async function compose(host: HostFixture): Promise<Composed> {
   const runtime = await composeRuntime(host)
-  return { runtime, semantics: createRemoteM3ASemantics(runtime.client, { promptSerializer: stubSerializer() }) }
+  return {
+    runtime,
+    semantics: createRemoteM3ASemantics(runtime.client, {
+      promptSerializer: stubSerializer(),
+      fileReceiptUploader: {
+        upload: async (_sessionId, file) => ({
+          receiptId: 'receipt-stub',
+          file: { attachmentId: 'attachment-stub', name: file.name, bytes: file.byteLength },
+        }),
+      },
+    }),
+  }
 }
 
 test('the M3-3A semantic bundle serves over one real Host wire', async (t) => {

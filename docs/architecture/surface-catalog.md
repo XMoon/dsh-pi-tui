@@ -210,20 +210,32 @@ captured contribution is generation-fenced.
 A claimed command accepts attachments only when that claiming descriptor
 declares `input.attachments: true`:
 
-- declared HOST commands receive images as `CommandSubmitAttachment`s and the
-  Host admits them;
-- a declared command still refuses FILE attachments (no upload-receipt seam) —
-  fail closed;
+- declared HOST commands receive encoded images and ordinary files as the
+  official `CommandSubmitAttachment` wire; a file is delivered as a Host-minted
+  Session-scoped upload receipt (`HostCommandPort.stageFileReceipt`), never as a
+  Client path, durable attachment ref or attachment id;
+- staging runs inside the ONE Session writer admission, against the ACTUAL
+  Session, in the gesture's original attachment order; the attachment SOURCE
+  snapshot is frozen at submission, before the first async wait, so a draft
+  edited while a deferred Session is created cannot change what is uploaded;
+- a recalled file (no local bytes) and a recalled image without bytes are
+  refused before any upload; a pre-dispatch staging failure (missing upload
+  authority, source changed, upload/transport failure, stale scope) executes no
+  command and keeps the editable draft and attachments, while an indeterminate
+  post-dispatch result is never retried automatically;
 - command attachments are consumed only on handler success;
 - TUI/core local commands and `!`/`!!` refuse attachments;
 - `/skill` and plain prompts deliver attachments to the model;
-- the policy is re-applied against the FINAL authority after `ensureSession()`.
+- the policy is re-applied against the FINAL authority after `ensureSession()`;
+  a genuine non-claimed line (an argued execute-kind command, an unknown name)
+  is an ordinary submission and stages no receipt.
 
 Authority: `src/domain/command/policy.ts`
 (`classifyCommandLine`, `shouldConsumeAdvertisedMiss`,
 `commandIsLocalForAttachments`), `src/commands.ts` (`wasAdvertised`,
 `hostOriginDescriptors`), `src/app/submission/controller.ts`,
-`src/app/command/surface.ts`.
+`src/app/submission/command-attachments.ts`,
+`src/runtime/host-command-port.ts`, `src/app/command/surface.ts`.
 
 Must-not: execute a same-named contribution when the Host resolves the name;
 consume an advertised miss as a plain model message; let a stale displayed row

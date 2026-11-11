@@ -122,16 +122,19 @@ export async function createRemoteBackendRuntime(
     }
   }
   try {
+    // ONE composition-owned receipt uploader: the production prompt serializer
+    // and the Host command port stage their files through the SAME official
+    // authenticated raw-upload route. A test-injected prompt serializer must
+    // not cost the command path its staging capability.
+    const uploader = createRemoteFileReceiptUploader(options.fetch)
     const semantics = createRemoteM3ASemantics(remoteM3ARuntimeSourceOf(options.runtime), {
       // The production serializer is the DEFAULT (M3-4 PR3): it consumes the
       // application PreparedPrompt and reads recalled durable images through
       // the official binding-scoped attachment read. An explicit injection
       // (composition tests) still wins.
       promptSerializer: options.promptSerializer
-        ?? RemotePromptSerializerProduction.overSessions(
-          options.runtime.sessions,
-          createRemoteFileReceiptUploader(options.fetch),
-        ),
+        ?? RemotePromptSerializerProduction.overSessions(options.runtime.sessions, uploader),
+      fileReceiptUploader: uploader,
       ...(options.isDispatchAllowed === undefined ? {} : { isDispatchAllowed: options.isDispatchAllowed }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.delivery === undefined ? {} : { delivery: options.delivery }),

@@ -201,6 +201,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     read: async () => ({ kind: 'unavailable' as const }),
   }
   const hostCommand = {
+    stageFileReceipt: async () => ({ receiptId: 'receipt-stub' }),
     execute: async () => ({ kind: 'committed' as const, matched: false as const }),
   }
   const pluginManager = {

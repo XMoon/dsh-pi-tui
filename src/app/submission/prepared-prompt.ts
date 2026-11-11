@@ -56,11 +56,15 @@ export interface PreparedImageSource {
 }
 
 /**
- * Build the immutable PreparedPrompt from the (already canonicalized) draft
- * text and the live draft stores. ONE pass, no Host calls, no admission:
- * this is the snapshot the Remote transport preparation path forks from.
+ * Freeze ONE submit-time segment snapshot from the live draft stores: the
+ * exact ordered text/image/file slices this gesture references, with each
+ * referenced file copied as an immutable Client-local source closure
+ * (attach-time path + fingerprint). No Host call, no session id, no I/O.
  */
-export function preparePrompt(sessionId: string, text: string, stores: PreparedPromptStores, requestId?: string): PreparedPrompt {
+export function snapshotPreparedSegments(
+  text: string,
+  stores: PreparedPromptStores,
+): readonly PreparedSegment[] {
   // Generic-file placeholders expand through the same strict store pass. Each
   // referenced draft is copied as an immutable Client-local source snapshot so
   // the serializer can stream the exact attach-time version later.
@@ -123,10 +127,19 @@ export function preparePrompt(sessionId: string, text: string, stores: PreparedP
       },
     }
   })
+  return Object.freeze(segments)
+}
+
+/**
+ * Build the immutable PreparedPrompt from the (already canonicalized) draft
+ * text and the live draft stores. ONE pass, no Host calls, no admission:
+ * this is the snapshot the Remote transport preparation path forks from.
+ */
+export function preparePrompt(sessionId: string, text: string, stores: PreparedPromptStores, requestId?: string): PreparedPrompt {
   return Object.freeze({
     sessionId,
     text,
-    segments: Object.freeze(segments),
+    segments: snapshotPreparedSegments(text, stores),
     ...(requestId !== undefined ? { requestId } : {}),
   })
 }

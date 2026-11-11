@@ -30,7 +30,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'm4-c1-host-work'
-export const inject = ['llm', 'tools', 'jobs', 'subagents', 'agents', 'workingDirectory', 'typertGateway', 'connection']
+export const inject = ['llm', 'tools', 'jobs', 'subagents', 'agents', 'workingDirectory', 'typertGateway', 'connection', 'commands', 'attachments']
 
 const SCENARIOS = new Set([
   'long-turn',
@@ -55,6 +55,9 @@ const SCENARIOS = new Set([
   // M6 F4: one Host-seeded Session for the real Client /attach -> official
   // receipt -> durable file proof.
   'f4-file',
+  // M6 PR-C: the test-only Host /files command proving a real Client command
+  // FILE delivery through the official staged-receipt resolver.
+  'command-file-receipt',
   // M6-1 F6: the Skills cases only need the real Host profile; the scripted
   // model stays inert and the fault provider is gated by C1_SKILLS_FAULT_DIR.
   'skills-standing',
@@ -509,6 +512,98 @@ export async function apply(ctx) {
         cwd: ctx.workingDirectory.get(otherHandle.agent.session),
       })
     }
+  }
+
+  if (scenario === 'command-file-receipt') {
+    const sessionId = process.env.C1_CFR_SESSION_ID
+    const cwd = process.env.C1_CFR_SESSION_CWD
+    if (sessionId === undefined || sessionId === '' || cwd === undefined || cwd === '') {
+      throw new Error('m4-c1-host-work: command-file-receipt requires its isolated Session id and Host cwd')
+    }
+    const handle = await ctx.agents.create({
+      sessionId: SessionId(sessionId),
+      meta: { cwd },
+      agentOptions: { provider: 'c1-qualification', model: 'c1' },
+    })
+    ctx.effect(() => () => handle.dispose())
+    record('cfr-host-session-created', {
+      sessionId: String(handle.agent.id),
+      cwd: ctx.workingDirectory.get(handle.agent.session),
+    })
+    // Describe ONE admitted durable block in the exact submission order. A
+    // FILE is read through the official Host attachment authority (the SAME
+    // `readFileStream` the F4 probe uses); an IMAGE records its admitted
+    // durable metadata only.
+    const describeBlock = async (block, order) => {
+      if (block?.type === 'file' && block.attachment?.attachmentId !== undefined) {
+        const digest = createHash('sha256')
+        let bytes = 0
+        let chunks = 0
+        for await (const chunk of ctx.attachments.readFileStream(block.attachment)) {
+          bytes += chunk.byteLength
+          chunks += 1
+          digest.update(chunk)
+        }
+        return {
+          order,
+          type: 'file',
+          attachmentId: block.attachment.attachmentId,
+          name: block.attachment.name,
+          refBytes: block.attachment.bytes,
+          bytes,
+          chunks,
+          sha256: digest.digest('hex'),
+        }
+      }
+      if (block?.type === 'image' && block.attachment?.attachmentId !== undefined) {
+        return {
+          order,
+          type: 'image',
+          attachmentId: block.attachment.attachmentId,
+          mediaType: block.attachment.mediaType,
+          width: block.attachment.width,
+          height: block.attachment.height,
+          bytes: block.attachment.bytes,
+        }
+      }
+      return { order, type: typeof block?.type === 'string' ? block.type : 'unknown', unsupported: true }
+    }
+    const runInvocation = async (name, invocation) => {
+      const attachments = []
+      for (let index = 0; index < invocation.attachments.length; index += 1) {
+        attachments.push(await describeBlock(invocation.attachments[index], index))
+      }
+      record('cfr-command-invocation', {
+        command: name,
+        sessionId: String(invocation.agent.id),
+        commandId: String(invocation.commandId),
+        args: invocation.rawInput,
+        attachments,
+      })
+      if (attachments.some(entry => entry.unsupported === true)) {
+        return { kind: 'error', text: 'unsupported command attachment' }
+      }
+      return { kind: 'success', text: 'file verified' }
+    }
+    // The test-only Host command declaration: `attachments: true` is the ONE
+    // official declaration a real command FILE delivery requires. It is
+    // registered only in this isolated C1 Host context, never the product
+    // profile.
+    ctx.effect(() => ctx.commands.register({
+      name: 'files',
+      description: 'C1 command FILE receipt proof',
+      input: { hint: '<task>', attachments: true },
+      handler: invocation => runInvocation('files', invocation),
+    }))
+    // The negative control: a genuine Host command that does NOT declare
+    // attachment support. A FILE-bearing submission must be refused by the
+    // composer and never reach this handler.
+    ctx.effect(() => ctx.commands.register({
+      name: 'no-files',
+      description: 'C1 command without attachment support',
+      input: { hint: '<task>' },
+      handler: invocation => runInvocation('no-files', invocation),
+    }))
   }
 
   if (scenario === 'f4-file') {

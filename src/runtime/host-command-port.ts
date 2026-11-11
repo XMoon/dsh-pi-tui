@@ -4,15 +4,18 @@
  * and TUI/client command routing remain in the runner; this port only
  * executes the selected Host line and returns the settled command result.
  *
- * Attachments stay opaque at this boundary. The Direct adapter passes the
- * existing command attachment values through unchanged; no new attachment
- * DTO or parser belongs here.
+ * The submitted command wire stays opaque at `execute`: the application has
+ * already encoded images and staged file receipts. `stageFileReceipt` is the
+ * ONE official receipt seam for a Client generic file — the Host mints the
+ * Session-scoped receipt, so no Client-side receipt registry or private upload
+ * transport belongs here.
  *
- * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
+ * Full contract: docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/host-command-port
  */
 
 import type { WriteError } from './write-outcome.ts'
+import type { PreparedFile } from './prepared-prompt.ts'
 
 /** The semantic request for one already-routed Host command. */
 export interface HostCommandRequest {
@@ -20,6 +23,15 @@ export interface HostCommandRequest {
   readonly line: string
   readonly attachments: readonly unknown[]
   /** Caller-owned lifecycle cancellation; the adapter must forward this exact signal. */
+  readonly signal: AbortSignal
+}
+
+/** One submit-time Client file to stage as an official command receipt. */
+export interface HostCommandFileStageRequest {
+  /** The ACTUAL Session the command will execute in (never a guessed id). */
+  readonly sessionId: string
+  /** The gesture's immutable Client file source snapshot. */
+  readonly file: PreparedFile
   readonly signal: AbortSignal
 }
 
@@ -41,5 +53,12 @@ export type HostCommandOutcome =
 
 /** The Host command execution domain port. */
 export interface HostCommandPort {
+  /**
+   * Stage ONE Client file as an official Session-scoped receipt. The Host
+   * stores the bytes and mints the opaque `receiptId` the command wire cites;
+   * the adapter never returns a durable attachment reference as a receipt.
+   * A failure here PROVES no command was dispatched.
+   */
+  stageFileReceipt(request: HostCommandFileStageRequest): Promise<{ readonly receiptId: string }>
   execute(request: HostCommandRequest): Promise<HostCommandOutcome>
 }

@@ -1759,7 +1759,6 @@ async function settlePresetThroughOuterOwner(
     isScopeCurrent: () => true,
     refuseByTransitionFence: () => {},
     lateAttachmentRefusal: () => undefined,
-    commandSubmitAttachments: () => [],
     isTuiOwnedCommand: () => false,
     commandPlaneOwnsLine: () => false,
     beginNavigationIntent: () => undefined,
@@ -1803,6 +1802,7 @@ async function settlePresetThroughOuterOwner(
     wasAdvertisedAtSubmit: false,
     parsedName: 'preset',
     submitTurn: { wait: Promise.resolve(), release: () => {} },
+    preparedCommandAttachments: { segments: [] },
   })
   await done
   await new Promise(resolve => setImmediate(resolve))
@@ -2214,8 +2214,7 @@ test('the navigation intent starts only for the final TUI-owned route and never 
       isScopeCurrent: () => true,
       refuseByTransitionFence: () => {},
       lateAttachmentRefusal: () => options.lateRefusal,
-      commandSubmitAttachments: () => [],
-      commandPlaneOwnsLine: () => options.commandPlaneLine,
+        commandPlaneOwnsLine: () => options.commandPlaneLine,
       isTuiOwnedCommand: () => options.tuiOwnedCommand,
       beginNavigationIntent: (name: string | undefined) => {
         events.push(`begin:${String(name)}`)
@@ -2258,6 +2257,7 @@ test('the navigation intent starts only for the final TUI-owned route and never 
       wasAdvertisedAtSubmit: false,
       parsedName: 'new',
       submitTurn: { wait: Promise.resolve(), release: () => {} },
+      preparedCommandAttachments: { segments: [] },
     })
     await ack
     await new Promise(resolve => setImmediate(resolve))

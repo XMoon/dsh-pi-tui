@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Host slash commands that declare attachment support can carry ordinary FILE attachments.** A Host command declaring `input.attachments` now delivers staged ordinary files to its handler as official upload receipts on both the Direct and Split backends. Drafts are consumed only after the command actually succeeds; an upload or preflight failure keeps the editable draft and its attachments, and an indeterminate result is never retried automatically.
+
 ### Changed
 
 - **Shell cards stay at their submitted conversation position and `!!` history is retained.** `!`/`!!` cards are no longer appended to the conversation tail; they stay at the conversation position where the user submitted them, fold to at most three rows, show no output while running, and expand the retained output with `Ctrl+O`. A settled `!!` card survives until a Session switch, TUI restart, or Alt+K; a committed `!` removes only its own local card instead of clearing other shell history; a rejected or indeterminate Session write keeps the card marked `not submitted` / `submission uncertain`, with the reason available when expanded.

@@ -1453,6 +1453,24 @@ async function bootCommandHarness(
         return { attachmentId: `file-${fileSaves.length}`, name: input.name ?? 'file', bytes }
       },
     } as never)
+    // The official Host file-upload service (`ctx.fileUploads`, the receipt
+    // resolver `commands.execute` consumes): a command FILE is staged through
+    // THIS service, exactly like the installed row. The fake drains the real
+    // staged stream and mints a receipt; it never substitutes the plain
+    // prompt `saveFileStream` return value for one.
+    let stagedReceipts = 0
+    context.provide('fileUploads', {
+      uploadStream: async (input: { sessionId: string; data: AsyncIterable<Uint8Array>; name?: string }) => {
+        let bytes = 0
+        for await (const chunk of input.data) bytes += chunk.byteLength
+        stagedReceipts += 1
+        fileSaves.push({ name: input.name, byteLength: bytes })
+        return {
+          receiptId: `receipt-${stagedReceipts}`,
+          file: { attachmentId: `upload-${stagedReceipts}`, name: input.name ?? 'file', bytes },
+        }
+      },
+    } as never)
   }
   const harness = makeHarness(home, { id: 'command-session', events: sessionEvents('resumed answer') })
   // The official command service notifies `commands/change` on every
@@ -4218,12 +4236,12 @@ test('an unknown slash line that becomes a DECLARED host command delivers and co
   assert.deepEqual([...delivered.content], [{ type: 'text', text: staged.trim() }], 'the line stays plain text')
 })
 
-test('an unknown slash line that becomes a DECLARED host command still refuses a FILE (no receipt seam)', async (t) => {
-  // The late-authority policy covers FILES too: a declared command receives
-  // images, never a file (the host expects an upload receipt this client
-  // cannot produce). Without the dispatch-side re-check the placeholder line
-  // would run with an empty payload and the success path would CONSUME the
-  // file draft — a silent drop of a user attachment.
+test('a late DECLARED host claim stages the frozen FILE snapshot and consumes it only on handler success', async (t) => {
+  // The submit-time standing view cannot classify the unknown name, so the
+  // composer lets the FILE through. The session then commits a genuine Host
+  // command that DECLARES `input.attachments`: the final Host branch must use
+  // the attachment source snapshot frozen at the submit gesture, stage ONE
+  // official receipt and dispatch the command once.
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-pi-tui-late-host-attachment-')
   const path = join(root, 'report.pdf')
@@ -4244,12 +4262,14 @@ test('an unknown slash line that becomes a DECLARED host command still refuses a
   assert.match(staged, /\[file #1/, `the file is staged: ${JSON.stringify(staged)}`)
   mounted.app.setDraft(`/deploy ${staged.trim()}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-  await drainUntil(() => /cannot receive file attachments/.test(mounted.app.notifyTextForTest()), 5000)
-  assert.match(mounted.app.notifyTextForTest(), /\/deploy cannot receive file attachments in this client; remove them first/)
-  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/deploy')),
-    `the file-bearing invocation never reaches the command plane: ${JSON.stringify(harness.executed)}`)
+  await drainUntil(() => harness.executed.some(entry => entry.line.startsWith('/deploy')), 5000)
+  const call = harness.executed.find(entry => entry.line.startsWith('/deploy'))
+  assert.equal(call?.outcome, 'executed', `the declared late claim is admitted: ${JSON.stringify(harness.executed)}`)
+  assert.deepEqual(call?.attachments, [{ type: 'file', receiptId: 'receipt-1' }],
+    'the Host command wire cites the official staged receipt, never a path or durable ref')
   assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
-  assert.match(mounted.app.getDraft(), /\[file #1/, 'the file draft comes back unconsumed')
+  assert.ok(!mounted.app.getDraft().includes('[file #1'),
+    `handler success consumes the submitted FILE draft: ${JSON.stringify(mounted.app.getDraft())}`)
 })
 
 // A `!`/`!!` shell line is a local UI control: the shell neither admits nor
@@ -4370,40 +4390,32 @@ test('an undeclared LEADING-INPUT host command refuses the attachment on its arg
   assert.match(mounted.app.getDraft(), /\[image #1/, 'with its attachment placeholder intact')
 })
 
-test('a declared HOST command still refuses a FILE attachment (no host receipt seam)', async (t) => {
-  // The host contract carries files as upload RECEIPTS; this client has no
-  // seam to produce one, so a declared command refuses a file rather than
-  // handing over a placeholder with no payload (fail closed).
+test('a declared HOST command stages its FILE as one official receipt and consumes it on success', async (t) => {
+  // A genuine Host command declaring `input.attachments` carries the FILE as a
+  // staged receipt: the Host mints it, the command wire cites it, and a
+  // successful handler consumes exactly the submitted draft.
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-pi-tui-command-attachment-')
   const path = join(root, 'report.pdf')
   await writeFile(path, Buffer.from('%PDF-1.7\nbody'))
-  const { harness, mounted, registerContribution } = await bootCommandHarness(t, {
+  const { harness, mounted } = await bootCommandHarness(t, {
     busyEnter: 'queue',
     status: 'idle',
     attachments: true,
-    extensionCommands: [{ id: 'stub-cmd', name: 'stub', description: 'stub', bridgeHandler: () => ({ kind: 'success' }) }],
+    hostCommands: [{ name: 'goal', input: { hint: '<objective>', attachments: true } }],
   })
-  ;(harness.commands as {
-    register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
-  }).register({ name: 'goal', handler: () => ({ kind: 'success' }), input: { hint: '<objective>', attachments: true } })
-  await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
   const staged = await stageAttachmentDraft(harness, mounted, path)
   assert.match(staged, /\[file #1/)
   mounted.app.setDraft(`/goal ${staged.trim()}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-  for (let round = 0; round < 40 && !/cannot receive file attachments/.test(mounted.app.notifyTextForTest()); round += 1) {
-    await new Promise<void>(resolve => setImmediate(resolve))
-  }
-  assert.match(mounted.app.notifyTextForTest(), /\/goal cannot receive file attachments in this client; remove them first/)
-  // Same as above: an undeliverable file is refused by the composer, never
-  // handed to the host to reject.
-  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/goal ')),
-    `the file-bearing invocation never reaches the command plane: ${JSON.stringify(harness.executed)}`)
-  assert.ok(!harness.executed.some(entry => entry.outcome === 'rejected'),
-    'the refusal happened before dispatch, not at host admission')
+  await drainUntil(() => harness.executed.some(entry => entry.line.startsWith('/goal ')), 5000)
+  const call = harness.executed.find(entry => entry.line.startsWith('/goal '))
+  assert.equal(call?.outcome, 'executed', `the declared command is dispatched: ${JSON.stringify(harness.executed)}`)
+  assert.deepEqual(call?.attachments, [{ type: 'file', receiptId: 'receipt-1' }],
+    'the wire cites exactly the one Host-minted receipt')
   assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
-  assert.match(mounted.app.getDraft(), /\[file #1/, 'the file draft comes back')
+  assert.ok(!mounted.app.getDraft().includes('[file #1'),
+    `handler success consumes the submitted FILE draft: ${JSON.stringify(mounted.app.getDraft())}`)
 })
 
 test('a FAILED declared command keeps its attachment (consume only after handler success)', async (t) => {

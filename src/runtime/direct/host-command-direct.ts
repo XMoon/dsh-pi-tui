@@ -2,16 +2,24 @@
  * The Direct Host command adapter (D2.1): resolve the live Agent by session
  * id at call time and invoke the official `commands.execute` service. Claim
  * classification, line precedence, TUI-local commands and skill wrappers stay
- * in the runner; this adapter passes the selected line and attachments
+ * in the runner; this adapter passes the selected line and prepared wire
  * through unchanged.
  *
- * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
+ * `stageFileReceipt` is Direct's ONE official receipt seam: it resolves the
+ * Host `fileUploads` service (registered by the official file-upload row, whose
+ * receipt resolver `commands.execute` consumes) and streams the Client file
+ * snapshot into that Session's staged receipt. It never falls back to the
+ * plain prompt attachment store: a durable attachment reference is not a
+ * command receipt.
+ *
+ * Full contract: docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/host-command-direct
  */
 
 import { safeErrorMessage } from '../process/errors.ts'
 import type {
   HostCommandExecution,
+  HostCommandFileStageRequest,
   HostCommandOutcome,
   HostCommandPort,
   HostCommandRequest,
@@ -39,6 +47,16 @@ export interface CommandsServiceLike {
   ): Promise<HostCommandExecution | undefined>
 }
 
+/** The official Host file-upload service shape needed by this adapter. */
+export interface FileUploadsServiceLike {
+  uploadStream(request: {
+    readonly sessionId: string
+    readonly data: AsyncIterable<Uint8Array>
+    readonly signal?: AbortSignal
+    readonly name?: string
+  }): Promise<{ readonly receiptId: string }>
+}
+
 function rejected(code: string, message: string): { kind: 'rejected'; error: WriteError } {
   return { kind: 'rejected', error: { code, message } }
 }
@@ -61,6 +79,32 @@ export class DirectHostCommandPort implements HostCommandPort {
   constructor(ctx: HostContextLike, agentFor: (sessionId: string) => LiveAgentLike | undefined) {
     this.ctx = ctx
     this.agentFor = agentFor
+  }
+
+  async stageFileReceipt(request: HostCommandFileStageRequest): Promise<{ readonly receiptId: string }> {
+    request.signal.throwIfAborted()
+    if (request.file.source.kind !== 'client-stream') {
+      throw new Error(`stored file "${request.file.name}" cannot be re-uploaded by this Client`)
+    }
+    const uploads = this.ctx.get('fileUploads') as FileUploadsServiceLike | undefined
+    if (uploads === undefined) throw new Error('fileUploads service unavailable')
+    // The receiving Session must be the exact live Agent this adapter would
+    // dispatch the command to; a disposed/replaced Agent fails closed before
+    // any bytes are stored.
+    if (this.agentFor(request.sessionId) === undefined) {
+      throw new Error(`session "${request.sessionId}" is not available`)
+    }
+    const uploaded = await uploads.uploadStream({
+      sessionId: request.sessionId,
+      data: request.file.source.open(request.signal),
+      signal: request.signal,
+      name: request.file.name,
+    })
+    request.signal.throwIfAborted()
+    if (typeof uploaded.receiptId !== 'string' || uploaded.receiptId === '') {
+      throw new Error('file upload returned no receipt')
+    }
+    return { receiptId: uploaded.receiptId }
   }
 
   async execute(request: HostCommandRequest): Promise<HostCommandOutcome> {

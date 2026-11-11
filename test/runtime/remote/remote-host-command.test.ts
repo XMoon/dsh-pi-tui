@@ -14,6 +14,8 @@ import {
   type RemoteCommandsSource,
 } from '../../../src/runtime/remote/host-command-remote.ts'
 import type { HostCommandRequest } from '../../../src/runtime/host-command-port.ts'
+import type { PreparedFile } from '../../../src/runtime/prepared-prompt.ts'
+import type { RemoteFileReceiptUploader } from '../../../src/runtime/remote/file-upload-remote.ts'
 import { SESSION_WRITER_HELD_GUIDANCE } from '../../../src/runtime/remote/write-failure.ts'
 
 interface CommandCall {
@@ -23,17 +25,27 @@ interface CommandCall {
   readonly signal: AbortSignal | undefined
 }
 
+interface StageCall {
+  readonly sessionId: string
+  readonly file: PreparedFile
+  readonly signal: AbortSignal
+}
+
 interface Harness {
   readonly port: RemoteHostCommandPort
   readonly calls: CommandCall[]
+  readonly stages: StageCall[]
   setResult(result: { ok: true; value: unknown } | { ok: false; error: unknown }): void
   setThrows(error: unknown): void
+  setStageThrows(error: unknown): void
 }
 
 function harness(): Harness {
   const calls: CommandCall[] = []
+  const stages: StageCall[] = []
   let result: { ok: true; value: unknown } | { ok: false; error: unknown } = { ok: true, value: undefined }
   let throws: unknown
+  let stageThrows: unknown
   const source: RemoteCommandsSource = {
     execute: async (agentId, line, attachments, signal) => {
       calls.push({ agentId, line, attachments, signal })
@@ -41,11 +53,31 @@ function harness(): Harness {
       return result
     },
   }
+  const uploader: RemoteFileReceiptUploader = {
+    upload: async (sessionId, file, signal) => {
+      stages.push({ sessionId, file, signal })
+      if (stageThrows !== undefined) throw stageThrows
+      return { receiptId: `receipt-${stages.length}`, file: { attachmentId: 'attachment-1', name: file.name, bytes: file.byteLength } }
+    },
+  }
   return {
-    port: new RemoteHostCommandPort(source),
+    port: new RemoteHostCommandPort(source, uploader),
     calls,
+    stages,
     setResult: value => { result = value },
     setThrows: error => { throws = error },
+    setStageThrows: error => { stageThrows = error },
+  }
+}
+
+function preparedFile(): PreparedFile {
+  return {
+    name: 'report.pdf',
+    byteLength: 4,
+    source: {
+      kind: 'client-stream',
+      open: async function* () { yield new Uint8Array([1, 2, 3, 4]) },
+    },
   }
 }
 
@@ -175,4 +207,26 @@ test('an exact commands.execute session/writer-held refusal is rejected with cod
     assert.deepEqual(outcome.error.details, { sessionId: 'session-a' }, 'the official failure details are preserved')
     assert.equal(outcome.error.message, SESSION_WRITER_HELD_GUIDANCE, 'the shared actionable guidance is the user copy')
   }
+})
+
+test('stageFileReceipt passes the exact session, file snapshot and signal to the ONE uploader', async () => {
+  const h = harness()
+  const file = preparedFile()
+  const signal = new AbortController().signal
+  assert.deepEqual(
+    await h.port.stageFileReceipt({ sessionId: 'session-a', file, signal }),
+    { receiptId: 'receipt-1' },
+  )
+  assert.deepEqual(h.stages, [{ sessionId: 'session-a', file, signal }])
+  assert.equal(h.calls.length, 0, 'staging never dispatches the command')
+})
+
+test('a staging failure propagates BEFORE any command dispatch', async () => {
+  const h = harness()
+  h.setStageThrows(new Error('file changed since it was attached'))
+  await assert.rejects(
+    () => h.port.stageFileReceipt({ sessionId: 'session-a', file: preparedFile(), signal: new AbortController().signal }),
+    /file changed since it was attached/,
+  )
+  assert.equal(h.calls.length, 0, 'a staging failure proves no execute happened')
 })

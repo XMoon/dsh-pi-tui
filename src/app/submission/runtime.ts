@@ -36,6 +36,7 @@ import { formatShellSubmitText, submitShellResult } from './shell-context.ts'
 import type { PreparedMessage, SessionWriter, WriteOutcome } from '../../runtime/session-writer-port.ts'
 import type { PendingInputReader, PendingInputSnapshot } from '../../runtime/pending-input-reader-port.ts'
 import type { HostCommandOutcome } from '../../runtime/host-command-port.ts'
+import type { PreparedCommandAttachments } from './command-attachments.ts'
 import {
   hasParkedSteering,
   mergeDraft,
@@ -1162,7 +1163,6 @@ export interface HostCommandSubmissionDeps {
   readonly refuseByTransitionFence: (text: string) => void
   /** The FINAL-catalog attachment refusal for this line (`undefined` = allowed). */
   readonly lateAttachmentRefusal: () => string | undefined
-  readonly commandSubmitAttachments: (text: string) => readonly unknown[]
   readonly isTuiOwnedCommand: () => boolean
   readonly commandPlaneOwnsLine: () => boolean
   /** Begin the TUI navigation-intent section for ONE TUI-owned navigation
@@ -1177,7 +1177,10 @@ export interface HostCommandSubmissionDeps {
     readonly toggled: string
     readonly commandPlaneLine: boolean
     readonly tuiOwnedCommand: boolean
-    readonly submittedAttachments: readonly unknown[]
+    /** The FINAL genuine Host claim declares `input.attachments: true`: the
+     * Host route may stage the frozen file snapshot and encode the images. */
+    readonly hostAttachmentsDeclared: boolean
+    readonly preparedAttachments: PreparedCommandAttachments
     readonly signal: AbortSignal
   }) => Promise<HostCommandOutcome>
   readonly beginCommandSettlement: () => void
@@ -1209,6 +1212,9 @@ export interface HostCommandSubmissionInput {
   readonly wasAdvertisedAtSubmit: boolean
   readonly parsedName: string | undefined
   readonly submitTurn: { readonly wait: Promise<void>; readonly release: () => void }
+  /** The gesture's immutable command-attachment snapshot (frozen before the
+   * first await; only the final genuine Host command branch consumes it). */
+  readonly preparedCommandAttachments: PreparedCommandAttachments
   /** PR3-B §7.3 (F2): the ownership subject pinned at the gesture's admission
    *  (the fallback prompt's stale-restore discriminator). */
   readonly staleSubject?: unknown
@@ -1254,9 +1260,11 @@ export function executeHostCommandSubmission(
   runOwned('command execution', () => {
     commandHealthRef = deps.captureCommandHealthRef()
     const submittedClaim = deps.submittedHostClaim()
-    const submittedAttachments = submittedClaim?.claimed === true && submittedClaim.attachments
-      ? deps.commandSubmitAttachments(text)
-      : []
+    // Only the FINAL genuine Host claim that DECLARES `input.attachments` may
+    // carry a prepared wire. The composer policy already refused a
+    // non-declaring invocation; this second read keeps the fact at the moment
+    // of dispatch, and a non-invocation stages nothing at all.
+    const hostAttachmentsDeclared = submittedClaim?.claimed === true && submittedClaim.attachments === true
     const commandPlaneLine = deps.commandPlaneOwnsLine()
     planeAdvertised = commandPlaneLine && input.wasAdvertisedAtSubmit
     const tuiOwnedCommand = deps.isTuiOwnedCommand()
@@ -1276,7 +1284,8 @@ export function executeHostCommandSubmission(
         toggled,
         commandPlaneLine,
         tuiOwnedCommand,
-        submittedAttachments,
+        hostAttachmentsDeclared,
+        preparedAttachments: input.preparedCommandAttachments,
         signal: deps.commandSignal(),
       }))
     } catch (error) {
@@ -1415,18 +1424,27 @@ export function executeHostCommandSubmission(
             : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
         }
       } else {
-        // A command submission CONSUMES its attachments only after handler
-        // success (an error outcome keeps the draft for correction).
-        if (execution.result.kind === 'error'
+        // Only the official handler SUCCESS consumes this gesture's drafts; an
+        // error keeps them for correction. The official settlement is exactly
+        // success|error — any other kind is an illegal result that must never
+        // be read as success (no silent draft consumption) or as a recoverable
+        // error.
+        const resultKind = execution.result.kind
+        if (resultKind === 'success') {
+          deps.consumeDraftAttachments(text)
+        } else if (resultKind === 'error'
           && draftDisposition !== 'restored'
           && draftDisposition !== 'suppressed') {
           deps.restoreSubmissionDraft(text)
-        } else if (execution.result.kind !== 'error') {
-          deps.consumeDraftAttachments(text)
         }
         fallbackPin()
         submitTurn.release()
-        if (execution.result.kind === 'success') {
+        if (resultKind !== 'success' && resultKind !== 'error') {
+          throw new Error(
+            `command "${input.parsedName ?? '?'}" settled an unknown result kind "${String(resultKind)}"`,
+          )
+        }
+        if (resultKind === 'success') {
           const commandName = input.parsedName
           if (commandName === 'export' || commandName === 'transcript') deps.startArtifactSave(commandName)
         }
