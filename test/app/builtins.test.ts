@@ -155,10 +155,13 @@ async function clickTodoRow(fixture: LiveBuiltinApp, text: string): Promise<void
   await clickFullscreenRow(fixture, visibleRow(fixture, text, 'todo panel click'))
 }
 
-/** Reset the Todo target coalescing window without relying on a timer. */
+/** Reset the Todo target coalescing window without relying on a timer: one
+ * click on a genuinely neutral cell. The HEADER row is the only guaranteed
+ * neutral one — the bottom screen row is the Footer's consumed box (a click
+ * there is footer-domain and no longer resets the coalescing window). */
 function resetTodoClickGesture(fixture: LiveBuiltinApp): void {
   const x = Math.max(1, Math.floor(fixture.vt.columns / 2))
-  sendFullscreenClick(fixture, x, fixture.vt.rows)
+  sendFullscreenClick(fixture, x, 1)
 }
 
 function assertBuiltinTodoSummary(fixture: LiveBuiltinApp, expected: string, context: string): void {

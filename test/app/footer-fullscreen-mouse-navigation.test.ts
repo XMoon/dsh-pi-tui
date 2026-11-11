@@ -709,9 +709,9 @@ test('a same-geometry footer content change retires the release through the revi
     // the same placement: the fork treats a same-word repeat as a double-click
     // selection, not a disclosure click.
     // The whole badge is ONE word for the fork's selection engine: a second
-    // press inside the double-click window (500 ms) classifies as a word
-    // selection, never a disclosure click. Wait it out before the fresh click.
-    await new Promise(resolve => setTimeout(resolve, 550))
+    // press inside the double-click window classifies as a word selection,
+    // never a disclosure click.
+    await new Promise(resolve => setTimeout(resolve, 550)) // reason: the double-click window IS the contract — the fresh click must start a new gesture after it closes.
     click(h.vt, cell.x, cell.row)
     await h.vt.waitForRender()
     await h.vt.waitForRender()
