@@ -84,6 +84,26 @@ function stringCodec(typeSymbol: string): TypertCodec {
 }
 
 /**
+ * The strict codec for a Host-issued Workspace identity: a NON-EMPTY string.
+ * An empty `workspaceId` names no Host resource at all, so the wire boundary
+ * refuses it (plan §4.2) instead of letting a fabricated id reach the Host
+ * business layer.
+ */
+function workspaceIdCodec(typeSymbol: string): TypertCodec {
+  return {
+    mode: 'strict',
+    typeSymbol,
+    create: () => ({
+      parse: (value: unknown): string => {
+        if (typeof value !== 'string') throw new TypeError(`${typeSymbol}: the wire value must be a string`)
+        if (value === '') throw new TypeError(`${typeSymbol}: the wire value must be a non-empty Workspace id`)
+        return value
+      },
+    }),
+  }
+}
+
+/**
  * Validate and detach one wire `HostFileListResult`. The result is produced by
  * this package's own Host router, but it is still a wire boundary on the Client
  * and the ONLY place the shape crosses.
@@ -182,7 +202,7 @@ export const PI_TUI_FILE_REFERENCES_LIST_WORKSPACE: InvocationDescriptor = {
       name: 'workspaceId',
       wire: 'workspaceId',
       source: 'json',
-      codec: stringCodec('@xmoon76/dsh-pi-tui#piTuiFileReferences/listWorkspace:workspaceId'),
+      codec: workspaceIdCodec('@xmoon76/dsh-pi-tui#piTuiFileReferences/listWorkspace:workspaceId'),
     },
     {
       name: 'query',

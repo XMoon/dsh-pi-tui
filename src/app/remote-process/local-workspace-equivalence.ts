@@ -63,11 +63,13 @@ export type LaunchWorkspaceVerdict =
     }
   | { readonly kind: 'unverified'; readonly reason: string }
 
-/** The classification inputs (the proc root is injectable only for the
- *  fail-closed contract tests). */
+/** The classification inputs. `procRoot` and `readStarttime` exist only so the
+ *  fail-closed contract tests (including the revalidation identity race) are
+ *  deterministic; production always reads the real `/proc`. */
 export interface LaunchWorkspaceOptions {
   readonly procRoot?: string
   readonly platform?: NodeJS.Platform
+  readonly readStarttime?: (pid: number, procRoot: string) => string | undefined
 }
 
 /** The Linux `starttime` of one PID, read through the shared official parser
@@ -92,6 +94,7 @@ export function classifyLaunchWorkspace(
 ): LaunchWorkspaceVerdict {
   const platform = options.platform ?? process.platform
   const procRoot = options.procRoot ?? '/proc'
+  const readStarttime = options.readStarttime ?? readProcessStarttimeAt
   if (identity === undefined) {
     return { kind: 'unverified', reason: 'the local Host identity is unavailable' }
   }
@@ -101,7 +104,7 @@ export function classifyLaunchWorkspace(
   if (identity.hostPid < 1 || identity.hostStarttime === '') {
     return { kind: 'unverified', reason: 'the authenticated Host identity is incomplete' }
   }
-  const observedStarttime = readProcessStarttimeAt(identity.hostPid, procRoot)
+  const observedStarttime = readStarttime(identity.hostPid, procRoot)
   if (observedStarttime === undefined) {
     return { kind: 'unverified', reason: `the Host process /proc/${String(identity.hostPid)}/stat is not readable` }
   }
@@ -132,16 +135,21 @@ export function classifyLaunchWorkspace(
   } catch {
     return { kind: 'unverified', reason: 'the Host view of the launch path cannot be inspected' }
   }
-  if (readProcessStarttimeAt(identity.hostPid, procRoot) !== identity.hostStarttime) {
+  if (readStarttime(identity.hostPid, procRoot) !== identity.hostStarttime) {
     return { kind: 'unverified', reason: 'the Host process changed while the launch directory was compared' }
   }
 
   const revalidate = (): boolean => {
-    if (readProcessStarttimeAt(identity.hostPid, procRoot) !== identity.hostStarttime) return false
+    // The SAME observation-window rule the initial classification applies: the
+    // Host process identity is checked BEFORE the two stats AND again AFTER
+    // them, so a PID restart/reuse inside the window can never leave a stale
+    // directory comparison standing as a live proof.
+    if (readStarttime(identity.hostPid, procRoot) !== identity.hostStarttime) return false
+    let same: boolean
     try {
       const client = statSync(launchCwd)
       const hostView = statSync(hostViewPath)
-      return client.isDirectory()
+      same = client.isDirectory()
         && hostView.isDirectory()
         && client.dev === clientDevice
         && client.ino === clientInode
@@ -150,6 +158,8 @@ export function classifyLaunchWorkspace(
     } catch {
       return false
     }
+    if (readStarttime(identity.hostPid, procRoot) !== identity.hostStarttime) return false
+    return same
   }
 
   return {

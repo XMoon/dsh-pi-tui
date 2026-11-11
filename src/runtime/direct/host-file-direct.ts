@@ -174,10 +174,11 @@ export class DirectHostFilePort implements HostFilePort {
     if (scope.workspaceId === undefined) {
       return { kind: 'unavailable', reason: 'Choose a Host workspace first' }
     }
-    if (this.ctx === undefined) {
+    const registry = this.ctx === undefined ? undefined : directWorkspaceRegistry(this.ctx)
+    if (registry === undefined) {
       return { kind: 'unavailable', reason: 'the Host Workspace registry is unavailable' }
     }
-    const workspace = directWorkspaceRegistry(this.ctx)?.get(scope.workspaceId)
+    const workspace = registry.get(scope.workspaceId)
     if (workspace === undefined) {
       return { kind: 'unavailable', reason: `Workspace "${scope.workspaceId}" is not registered on the Host` }
     }
@@ -191,6 +192,13 @@ export class DirectHostFilePort implements HostFilePort {
       signal,
     )
     signal.throwIfAborted()
+    // The registry stays the authority AFTER the scan: a Workspace removed or
+    // re-rooted while the official index answered must not present its stale
+    // candidates (the same currentness fence the Remote bridge applies).
+    const current = registry.get(scope.workspaceId)
+    if (current === undefined || current.path !== workspace.path) {
+      return { kind: 'unavailable', reason: 'the Host Workspace changed during discovery' }
+    }
     return { kind: 'ok', items: [...items] }
   }
 

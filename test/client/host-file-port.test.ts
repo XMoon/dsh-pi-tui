@@ -69,11 +69,24 @@ function okItems(result: import('../../src/runtime/host-file-port.ts').HostFileL
  *  `WorkspaceFileSearch`, never a cwd and never the legacy scanner. */
 const WORKSPACE_ID = 'workspace-live'
 
-function workspaceContext(root: string, extra: { readonly official?: unknown; readonly workspace?: { readonly path: string } | undefined } = {}): { get(name: string): unknown } {
+function workspaceContext(root: string, extra: {
+  readonly official?: unknown
+  /** The root every `get` answers (default: the fixture root). */
+  readonly workspace?: { readonly path: string } | undefined
+  /** The root `get` answers from the SECOND read onward (the post-scan
+   *  re-check): a replacement root, or `undefined` to simulate removal. */
+  readonly workspaceAfterFirst?: { readonly path: string } | undefined
+} = {}): { get(name: string): unknown } {
+  let reads = 0
   const registry = {
     create: async () => { throw new Error('the workspace fixture never creates') },
     list: () => [],
-    get: (id: string) => id === WORKSPACE_ID ? (extra.workspace ?? { path: root }) : undefined,
+    get: (id: string) => {
+      if (id !== WORKSPACE_ID) return undefined
+      reads += 1
+      if (reads > 1 && 'workspaceAfterFirst' in extra) return extra.workspaceAfterFirst
+      return extra.workspace ?? { path: root }
+    },
   }
   return {
     get(name: string) {
@@ -88,11 +101,11 @@ function workspaceScope(selectionRevision = 1): HostFileScope {
   return { kind: 'workspace', workspaceId: WORKSPACE_ID, selectionRevision }
 }
 
-function fallbackPort(root: string): DirectHostFilePort {
+function fallbackPort(root: string, extra: Parameters<typeof workspaceContext>[1] = {}): DirectHostFilePort {
   return new DirectHostFilePort(
     (sessionId) => sessionId === 'session-live' ? { session: { header: { cwd: root } } } : undefined,
     null,
-    workspaceContext(root),
+    workspaceContext(root, extra),
   )
 }
 
@@ -636,4 +649,30 @@ test('Direct and Remote resolve the SAME workspace query through the ONE officia
   } finally {
     runtime.dispose()
   }
+})
+
+test('a Workspace replaced or removed during the Direct official scan retires the stale candidates', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const replacedRoot = life.tempDir('dsh-hostfile-replaced-')
+  writeFileSync(join(replacedRoot, 'replaced.ts'), 'x')
+
+  // The registry's SECOND read (the post-scan re-check) answers the
+  // replacement root: the first scan's candidates belong to the old tree.
+  const replaced = fallbackPort(root, { workspaceAfterFirst: { path: replacedRoot } })
+  const result = await replaced.listReferences(workspaceScope(), 'file')
+  assert.equal(result.kind, 'unavailable')
+  assert.match(result.kind === 'unavailable' ? result.reason : '', /changed during discovery/u,
+    `the replaced root must not present the old scan: ${JSON.stringify(result)}`)
+
+  // A REMOVED registration during the scan is the same fence: no stale ok.
+  const removed = fallbackPort(root, { workspaceAfterFirst: undefined })
+  const gone = await removed.listReferences(workspaceScope(), 'file')
+  assert.equal(gone.kind, 'unavailable')
+  assert.match(gone.kind === 'unavailable' ? gone.reason : '', /changed during discovery/u)
+
+  // POSITIVE CONTROL: an unchanged registry still answers from the scan.
+  const stable = fallbackPort(root)
+  const ok = await stable.listReferences(workspaceScope(), 'file')
+  assert.ok(ok.kind === 'ok' && ok.items.length > 0, 'the unchanged registry keeps its answer')
 })
