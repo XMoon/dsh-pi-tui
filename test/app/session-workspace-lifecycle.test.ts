@@ -43,6 +43,7 @@ import type {
 import type { SessionSwitchOutcome } from '../../src/app/session/runtime.ts'
 import type { SessionScope } from '../../src/app/session/scope.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
+import { cancellationError } from '../../src/runtime/process/tasks.ts'
 import { EditorRegistry } from '../../src/extension/internal/editor-registry.ts'
 import { AdvancedInputRegistry } from '../../src/extension/internal/advanced-input.ts'
 import { normalizeInputEvent } from '../../src/extension/internal/input-events.ts'
@@ -267,6 +268,12 @@ function harness(options: {
   readonly unstableInputRoute?: (data: string) => import('../../src/extension/internal/unstable-input.ts').UnstableRawRouteResult
   /** The real Advanced input capture registry route (E-L13). */
   readonly advancedInputRoute?: (data: string) => 'consumed' | 'passed'
+  /** The ONE Agents port seam the Folder-New transaction calls. */
+  readonly agents?: Partial<TuiCommandRunner['agents']>
+  /** The ONE transition seam the Folder-New transaction calls. */
+  readonly transitionTo?: TuiCommandRunner['transitionTo']
+  /** The runner's lifetime signal (cancellation tests). */
+  readonly signal?: AbortSignal
 }): Harness {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(
@@ -374,7 +381,7 @@ function harness(options: {
     defaultIntentRecord: undefined,
     settleIntent: () => {},
     tuiSettings: undefined,
-    agents: {} as never,
+    agents: { ...(options.agents ?? {}) } as never,
     sessionReader,
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
@@ -408,13 +415,13 @@ function harness(options: {
     imageLimits: () => undefined,
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
-    signal: new AbortController().signal,
+    signal: options.signal ?? new AbortController().signal,
     switchSession: async () => undefined,
     switchSessionOutcome: async (id: string, scope?: SessionScope): Promise<SessionSwitchOutcome> => {
       switchCalls.push({ id, scope })
       return new Promise<SessionSwitchOutcome>((resolve) => { pendingSwitch = resolve })
     },
-    transitionTo: async <T>(steps: { create: () => Promise<T> }) => ({ ok: true, next: await steps.create() }),
+    transitionTo: options.transitionTo ?? (async <T>(steps: { create: () => Promise<T> }) => ({ ok: true, next: await steps.create() })),
     currentPreset: () => undefined,
     pendingPreset: undefined,
     effectivePresetId: undefined,
@@ -540,9 +547,9 @@ test('/sessions opens the ONE fullscreen lease and lists sibling official Worksp
     { workspaceId: 'ws-b', path: '/ws', title: 'project-b', sessionIds: [OTHER, THIRD] },
   ))
   resolveList([row(CURRENT, 3_000), row(OTHER, 2_000), row(THIRD, 1_000)])
-  await waitUntil(() => !h.view().includes('Checking current workspace…'), 'the official baseline resolves the tree')
+  await waitUntil(() => h.view().includes('project-b · 2'), 'the official baseline resolves the tree')
   const scoped = h.view()
-  assert.ok(scoped.includes('Current: curren'), `Current is the captured Session:\n${scoped}`)
+  assert.ok(/^[ >]*[▾▸] project-a · 1 · Current/m.test(scoped), `Current is the captured Session's official Folder:\n${scoped}`)
   assert.ok(scoped.includes('Current session'), 'the current Workspace member paints')
   assert.ok(scoped.includes('project-b · 2'), `a sibling Workspace Folder remains available:\n${scoped}`)
   assert.ok(!scoped.includes('Other session') && !scoped.includes('Third session'), 'non-current ordinary history remains behind its Show more watermark')
@@ -566,7 +573,7 @@ test('global search remains a flat union and Host-only hits still paint', async 
     { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
     { workspaceId: 'ws-b', path: '/other', title: 'project-b', sessionIds: [OTHER] },
   ))
-  await waitUntil(() => !h.view().includes('Checking current workspace…'), 'the official baseline is proved')
+  await waitUntil(() => h.view().includes('project-a · 1'), 'the official baseline is proved')
   h.vt.sendInput('/')
   await h.vt.waitForRender()
   h.vt.sendInput('needle')
@@ -584,7 +591,7 @@ test('an interactive resume is successful only on the runtime committed outcome 
   h.facts.handles[0]!.push(baseline(
     { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT, OTHER] },
   ))
-  await waitUntil(() => !h.view().includes('Checking current workspace…'), 'the official baseline is proved')
+  await waitUntil(() => h.view().includes('project-a · 2'), 'the official baseline is proved')
   h.vt.sendInput('\x1b[B')
   await h.vt.waitForRender()
   h.vt.sendInput('\r')
@@ -611,7 +618,7 @@ test('a failed interactive resume keeps the workspace and never reports success 
   h.facts.handles[0]!.push(baseline(
     { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT, OTHER] },
   ))
-  await waitUntil(() => !h.view().includes('Checking current workspace…'), 'the official baseline is proved')
+  await waitUntil(() => h.view().includes('project-a · 2'), 'the official baseline is proved')
   h.vt.sendInput('\x1b[B')
   await h.vt.waitForRender()
   h.vt.sendInput('\r')
@@ -634,7 +641,7 @@ test('an indeterminate interactive resume is visible, stays open and never retri
   h.facts.handles[0]!.push(baseline(
     { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT, OTHER] },
   ))
-  await waitUntil(() => !h.view().includes('Checking current workspace…'), 'the official baseline is proved')
+  await waitUntil(() => h.view().includes('project-a · 2'), 'the official baseline is proved')
   h.vt.sendInput('\x1b[B')
   await h.vt.waitForRender()
   h.vt.sendInput('\r')
@@ -644,6 +651,140 @@ test('an indeterminate interactive resume is visible, stays open and never retri
   assert.ok(h.view().includes('Sessions'), 'the workspace stays as the authoritative current reading')
   await new Promise<void>(resolve => setImmediate(resolve))
   assert.equal(h.switchCalls.length, 1, 'an indeterminate switch is never retried automatically')
+})
+
+test('the Folder New row hands the official workspaceId to the real command transaction and retires after commit', async () => {
+  const resolutions: unknown[] = []
+  const creates: Array<{ sessionId: string; workspaceId: string }> = []
+  let resolveCreate!: (agent: unknown) => void
+  const h = harness({
+    currentSessionId: CURRENT,
+    agents: {
+      resolveWorkspace: (async (intent: unknown) => {
+        resolutions.push(intent)
+        return { workspaceId: 'ws-a', path: '/ws' }
+      }) as never,
+      create: (async (input: { sessionId: string; workspaceId: string }) => {
+        creates.push({ sessionId: input.sessionId, workspaceId: input.workspaceId })
+        return await new Promise<unknown>((resolve) => { resolveCreate = resolve })
+      }) as never,
+    },
+  })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  h.facts.handles[0]!.push(baseline(
+    { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
+  ))
+  await waitUntil(() => h.view().includes('project-a · 1'), 'the official baseline is proved')
+  // Root Add -> the current Folder -> its first-child New row.
+  h.vt.sendInput('\x1b[H')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[C')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await waitUntil(() => creates.length === 1, 'the Folder New reaches the real create transaction')
+  assert.deepEqual(resolutions, [{ kind: 'workspace-id', workspaceId: 'ws-a' }],
+    'the panel handed the OFFICIAL Workspace id, never a cwd')
+  assert.equal(creates[0]!.workspaceId, 'ws-a', 'the Host receives the official Workspace identity')
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('Starting session…'), 'the pending state is painted until the real commit')
+  resolveCreate({ session: { id: creates[0]!.sessionId } })
+  await waitUntil(() => !h.view().includes('Sessions'), 'the committed switch retires the Browser')
+  assert.equal(h.facts.handles[0]!.disposed, 1, 'the per-open Workspace follow is disposed once')
+  assert.equal(creates.length, 1, 'a committed Folder New is never retried')
+})
+
+test('a command-refused Folder New keeps the Browser and releases the pending lock for a retry', async () => {
+  let attempts = 0
+  const h = harness({
+    currentSessionId: CURRENT,
+    agents: {
+      resolveWorkspace: (async () => {
+        attempts += 1
+        throw new Error('workspace refused by the Host')
+      }) as never,
+    },
+  })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  h.facts.handles[0]!.push(baseline({ workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] }))
+  await waitUntil(() => h.view().includes('project-a · 1'), 'the official baseline is proved')
+  h.vt.sendInput('\x1b[H')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[C')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await waitUntil(() => h.notices.some(notice => notice.text.includes('workspace refused by the Host')),
+    'the real command refusal is the ONE visible error')
+  const after = h.view()
+  assert.ok(after.includes('Sessions'), 'a refused create keeps the Browser open')
+  assert.ok(!after.includes('Starting session…'), 'the refusal settles the pending operation')
+  assert.ok(after.split('\n').at(-1)!.includes('Enter New session'), 'the failed New is immediately retryable')
+  h.vt.sendInput('\r')
+  await waitUntil(() => attempts === 2, 'a deliberate retry reaches the command transaction once')
+  assert.equal(h.facts.handles[0]!.disposed, 0, 'a refused create never retires the Workspace follow')
+})
+
+test('a silent superseded Folder New is not mistaken for a commit', async () => {
+  const { LifecycleError } = await import('../../src/runtime/session-lifecycle-port.ts')
+  const h = harness({
+    currentSessionId: CURRENT,
+    agents: {
+      resolveWorkspace: (async () => ({ workspaceId: 'ws-a', path: '/ws' })) as never,
+    },
+    transitionTo: (async () => ({
+      ok: false,
+      error: new LifecycleError('superseded', 'superseded', 'the local surface was superseded'),
+    })) as never,
+  })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  h.facts.handles[0]!.push(baseline({ workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] }))
+  await waitUntil(() => h.view().includes('project-a · 1'), 'the official baseline is proved')
+  h.vt.sendInput('\x1b[H')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[C')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await waitUntil(() => !h.view().includes('Starting session…'), 'the superseded operation is released')
+  const after = h.view()
+  assert.ok(after.includes('Sessions'), 'a silent superseded result never closes the Browser')
+  assert.ok(!after.includes('Starting session…'), 'the superseded operation is released, not left pending')
+  assert.equal(h.notices.some(notice => notice.text.includes('superseded')), false,
+    'a silent supersession produces no success or fabricated failure notice')
+})
+
+test('a cancelled Folder New releases the live pending operation without a guessed outcome', async () => {
+  let rejectCreate: ((error: unknown) => void) | undefined
+  const h = harness({
+    currentSessionId: CURRENT,
+    agents: {
+      resolveWorkspace: (async () => ({ workspaceId: 'ws-a', path: '/ws' })) as never,
+      create: (async () => await new Promise((_, reject) => { rejectCreate = reject })) as never,
+    },
+  })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  h.facts.handles[0]!.push(baseline({ workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] }))
+  await waitUntil(() => h.view().includes('project-a · 1'), 'the official baseline is proved')
+  h.vt.sendInput('\x1b[H')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[C')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await waitUntil(() => h.view().includes('Starting session…'), 'the create is pending')
+  rejectCreate!(cancellationError('cancelled by the owner'))
+  await waitUntil(() => !h.view().includes('Starting session…'), 'cancellation releases the pending lock')
+  assert.ok(h.view().includes('Sessions'), 'the cancelled create never closes the Browser')
+  assert.equal(h.facts.handles[0]!.disposed, 0, 'the follow stays alive for the next deliberate operation')
 })
 
 test('a blocking Question pre-empts the workspace, and a refused lease leaves no hidden reader', async () => {
@@ -678,13 +819,13 @@ test('a normally ended official Workspace stream drops the membership annotation
     { workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] },
     { workspaceId: 'ws-b', path: '/other', title: 'b', sessionIds: [OTHER] },
   ))
-  await waitUntil(() => !h.view().includes('Checking current workspace…'), 'the official baseline is proved')
+  await waitUntil(() => h.view().includes('a · 1'), 'the official baseline is proved')
   // The official Remote handle may end iterating after a valid baseline without
   // throwing; the proof is still gone.
   h.facts.handles[0]!.finish()
   await waitUntil(() => h.view().includes('Workspace membership unavailable'), 'the ended stream is visible')
   const after = h.view()
-  assert.ok(after.includes('Workspace: Information unavailable'), 'an ended stream paints the ONE unavailable membership annotation')
+  assert.ok(after.includes('Workspace membership unavailable'), 'an ended stream paints the ONE unavailable membership fact')
   assert.ok(!after.includes('project'), 'the ended stream paints no folder claim')
   assert.ok(after.includes('Other session'), 'All restores every listed row')
 })
@@ -699,7 +840,7 @@ test('missing Current membership does not filter the Workspace-first browser and
   h.facts.handles[0]!.finish()
   await waitUntil(() => h.view().includes('Workspace membership unavailable'), 'the ended stream is visible')
   const after = h.view()
-  assert.ok(after.includes('Workspace: Information unavailable'))
+  assert.ok(after.includes('Workspace membership unavailable'))
   assert.equal(after.split('\n').filter(line => line.includes('Current workspace unavailable')).length, 0)
   assert.equal(after.split('\n').filter(line => line.includes('Workspace membership unavailable')).length, 1)
 })
@@ -709,10 +850,10 @@ test('a failed official Workspace stream keeps the roster usable without members
   await h.runSessions('')
   await h.vt.waitForRender()
   h.facts.handles[0]!.push(baseline({ workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] }))
-  await waitUntil(() => !h.view().includes('Checking current workspace…'), 'the official baseline is proved')
+  await waitUntil(() => h.view().includes('a · 1'), 'the official baseline is proved')
   h.facts.handles[0]!.fail(new Error('workspace generation superseded'))
   await waitUntil(() => h.view().includes('Workspace membership unavailable'), 'the failed stream is visible')
-  assert.ok(h.view().includes('Workspace: Information unavailable'), 'a failed stream removes the folder authority')
+  assert.ok(h.view().includes('Workspace membership unavailable'), 'a failed stream removes the folder authority')
   assert.ok(h.view().includes('Current session'), 'the retained flat session roster remains navigable')
 })
 
@@ -721,7 +862,7 @@ test('an active close owns the stream end and paints no stale scope failure', as
   await h.runSessions('')
   await h.vt.waitForRender()
   h.facts.handles[0]!.push(baseline({ workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] }))
-  await waitUntil(() => !h.view().includes('Checking current workspace…'), 'the official baseline is proved')
+  await waitUntil(() => h.view().includes('a · 1'), 'the official baseline is proved')
   h.vt.sendInput('\x1b') // the user closes the workspace
   await h.vt.waitForRender()
   assert.equal(h.facts.handles[0]!.disposed, 1, 'the active close disposes the follow exactly once')
@@ -1494,7 +1635,7 @@ test('E-L10: a PiTUI mount without the installed control keeps both Lefts native
     { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
     { workspaceId: 'ws-b', path: '/other', title: 'project-b', sessionIds: [OTHER] },
   ))
-  await waitUntil(() => h.view().includes('Workspace: All workspaces'), 'the argument-free entry states the global tree')
+  await waitUntil(() => h.view().includes('project-a · 1'), 'the argument-free entry states the global tree')
   assert.ok(!h.view().includes('Other session'), 'Current never lists an unproved Workspace row')
   h.close()
 })
@@ -1507,7 +1648,7 @@ test('E-L11: every entry browses the full Workspace tree; typed entries keep the
     { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
     { workspaceId: 'ws-b', path: '/other', title: 'project-b', sessionIds: [OTHER] },
   ))
-  await waitUntil(() => h.view().includes('Workspace: All workspaces'), 'the global tree is stated')
+  await waitUntil(() => h.view().includes('project-a · 1'), 'the global tree is stated')
   assert.ok(h.view().includes('project-a') && h.view().includes('project-b'),
     `the typed command lists the complete official tree, not one scope:\n${h.view()}`)
   h.vt.sendInput('\x1b')

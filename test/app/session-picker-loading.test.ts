@@ -757,6 +757,10 @@ test('an interactive selection stays pending and reports its failed switch exact
 
   await h.runSessions()
   await waitUntil(() => h.view().includes('target'))
+  // The root Add row is the initial cursor of the flat (no official Workspace)
+  // tree; Down reaches the first listed Session.
+  h.vt.sendInput('\u001b[B')
+  await h.vt.waitForRender()
   h.vt.sendInput('\r')
   await h.vt.waitForRender()
   assert.ok(h.view().includes('Opening session…'), 'the accepted intent is pending, never a success')
@@ -789,6 +793,8 @@ test('an interactive selection that commits ends without an error notice', async
 
   await h.runSessions()
   await waitUntil(() => h.view().includes('target'))
+  h.vt.sendInput('\u001b[B')
+  await h.vt.waitForRender()
   h.vt.sendInput('\r')
   await waitUntil(() => h.switched.length === 1)
   // The committed outcome publishes the target Session: the captured subject

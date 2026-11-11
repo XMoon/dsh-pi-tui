@@ -2027,7 +2027,7 @@ export interface SessionWorkspaceOpenOptions {
   readonly onQueryChange: (raw: string) => void
   readonly onResume: (sessionId: string) => void
   readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
-  readonly onNewSession?: (workspaceId: string) => void
+  readonly onNewSession?: (workspaceId: string, settle?: (outcome: import('./app/command/session-browser-presentation.ts').SessionBrowserNewSessionSettlement) => void) => void
   readonly onAddDirectory?: (path: string, settle: (outcome: import('./app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => void
   /** The physical lease's ONE close notification (user Esc, blocking-owner
    *  pre-emption or surface teardown). An owner-origin `close()` suppresses it. */
@@ -26731,8 +26731,8 @@ export class TuiApp {
       onUseDirectory: (workspaceId, canonicalPath) => {
         if (this.workspaceLease === record) options.onUseDirectory?.(workspaceId, canonicalPath)
       },
-      onNewSession: (workspaceId) => {
-        if (this.workspaceLease === record) options.onNewSession?.(workspaceId)
+      onNewSession: (workspaceId, settle) => {
+        if (this.workspaceLease === record) options.onNewSession?.(workspaceId, settle)
       },
       onAddDirectory: (path, settle) => {
         if (this.workspaceLease === record) options.onAddDirectory?.(path, settle)

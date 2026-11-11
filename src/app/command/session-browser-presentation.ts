@@ -91,6 +91,15 @@ export type SessionBrowserDirectorySettlement =
   | { readonly kind: 'registered'; readonly workspaceId: string; readonly path: string }
   | { readonly kind: 'failed'; readonly message: string }
 
+/** ONE Folder-New operation's real terminal outcome. It is supplied by the
+ *  command/read-owner seam; a notice, a timer or a roster diff is never a
+ *  settlement channel. */
+export type SessionBrowserNewSessionSettlement =
+  | { readonly kind: 'committed' }
+  | { readonly kind: 'failed'; readonly message: string }
+  | { readonly kind: 'not-committed' }
+  | { readonly kind: 'cancelled' }
+
 export interface SessionBrowserPanelRequest {
   readonly subject: SessionBrowserSubject
   readonly initialDirectoryChooser?: boolean
@@ -99,7 +108,7 @@ export interface SessionBrowserPanelRequest {
   readonly onQueryChange: (query: string) => void
   readonly onResumeIntent: (intent: SessionBrowserResumeIntent) => void
   readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
-  readonly onNewSession?: (workspaceId: string) => void
+  readonly onNewSession?: (workspaceId: string, settle?: (outcome: SessionBrowserNewSessionSettlement) => void) => void
   readonly onAddDirectory?: (path: string, settle: (outcome: SessionBrowserDirectorySettlement) => void) => void
   readonly onClose: () => void
 }

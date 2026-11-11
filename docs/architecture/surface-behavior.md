@@ -229,25 +229,56 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   `Show more` adds five more; the operation disappears when history is
   exhausted. Folder, Session and Show more are separate typed targets, not
   PickerGroup headers.
+- **The PiTUI tree has explicit inline action rows.** A real Host registration
+  capability paints ONE root `Add directory` row above the official folders; an
+  expanded REAL official Workspace paints `+ New session` as its first child
+  row. Synthetic groups (`Unassigned`, `Membership ambiguous`) never paint New,
+  and a Workspace baseline that is not proven never fabricates a Folder. The
+  actions are ordinary rows reachable with `Up`/`Down`, not footer links and
+  not a separate focus mode: there is no hidden Actions ring. `Add directory`
+  opens the existing bare Host-path editor INLINE under the root row; `New
+  session` calls the existing command-owned create handoff with the official
+  `workspaceId` and never creates, closes or reports success by itself. ONE
+  per-operation pending object locks repeated New activation until that SAME
+  operation's own settlement arrives from the command owner: `committed` (the
+  command owner alone retires the Browser), or `failed` / `not-committed` /
+  `cancelled` (which unlock a deliberate retry). A transient notice, its expiry,
+  a timer or a roster diff is never a Folder-New settlement. The Welcome chooser
+  paints no `New session` and no `Use directory` child row.
+- **The cursor is ONE typed row identity.** `> ` marks the selection; `●` marks
+  the current opened Session, and `· Current` marks the one official Workspace
+  that uniquely contains it. Selection never changes Current, the Host working
+  directory or Workspace order. `Right` expands a collapsed Folder and then
+  enters its first visible child, `Left` moves from a child to its parent Folder
+  and collapses an expanded Folder, and `Enter` runs the selected row's own verb
+  (Expand/Collapse, New, Add, More, Open, or the chooser's Choose workspace).
+  Every activation is admitted only against the rows the LAST frame really
+  painted: a row scrolled or budgeted out of the frame cannot be opened by a
+  blind key. The cursor is preserved by row id across official reorders and
+  expansion changes; a hidden Session re-anchors on its parent Folder and a
+  removed Folder on its nearest surviving neighbor.
 - **A sessionless destination is not a Current Session.** A Host-verified
   next-create Workspace is ordered first and painted `Next` with the same
   eight-row history watermark; it never renders as `Current`, because Current
   means the opened Session's unique official membership.
 - **Choose/add a directory returns through the same Browser lifecycle.** The
   sessionless Welcome's Choose directory opens the same `/sessions` Browser at
-  its full Workspace folder tree; a Folder row's `Use directory` (sessionless
-  only) commits that official Workspace as the next-create intent and returns.
+  its full Workspace folder tree, titled `Choose workspace`; there a Folder's
+  `Enter` or label click commits that existing official Workspace as the
+  next-create intent and returns, while `Right`/`Left` and the disclosure only
+  browse. That chooser paints no `Use directory` row and no `New session` child.
   A first submit refused by the Host Workspace preflight opens the same Browser
-  only AFTER the submission owner has restored the draft, directly in its Host
-  absolute-path submode with the refused path prefilled for correction. The
-  path submode paints `Use directory` and `Cancel`, accepts only an absolute
-  Host path, and dispatches at most one Host resolution until it settles; a
-  rejection keeps the text and the previously confirmed intent, while a
-  success commits the next-create intent. That chooser returns to the Welcome
-  only after success; ordinary Browser Add returns to Browse. `New session` on
-  a Folder reuses the existing `/new` transaction with that `workspaceId`, keeps
-  the old Session until the commit, reports a refusal, and retires the Browser
-  only after a committed switch.
+  only AFTER the submission owner has restored the draft, directly in the inline
+  Host absolute-path editor with the refused path prefilled for correction. The
+  editor paints `Verify directory` and `Cancel` (the local Host-registration
+  verbs, not a Workspace selection), accepts only an absolute Host path
+  beginning with `/`, and dispatches at most one Host resolution until it
+  settles; a rejection keeps the text and the previously confirmed intent, while
+  a success commits the next-create intent. That chooser returns to the Welcome
+  only after success; ordinary Browser Add returns to Browse and never creates a
+  Session. `New session` on a Folder reuses the existing `/new` transaction with
+  that `workspaceId`, keeps the old Session until the commit, reports a refusal,
+  and retires the Browser only after a committed switch.
 - **A sessionless mount verifies its launch directory once.** The sessionless
   mount resolves the launch `host-path` proposal through the official Host
   Workspace lifecycle, so the Welcome states a Host-confirmed canonical
@@ -294,29 +325,42 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   focus to the first real result; a second `Enter` from the results list is the
   ONE Resume intent. Results are never re-grouped by Activity.
 - **`Space` is a read-only Peek.** It opens a plain-text detail of the selected
-  painted row (identity, official Workspace membership, cwd, preset, updated,
-  running, pending, source) and nothing else: no Agent, no Question/Approval
-  form, no Session `open`/`retain`, no writer and no Host call. `Esc` returns to
-  the previous focus with the same selection, query and scroll; `Enter`
-  opens the PINNED Session and still has to pass the read owner's
-  eligibility/currentness before any switch. The Peek is pinned to ITS Session
-  id: if a roster/search refresh no longer lists that Session, the Peek exits to
-  its previous focus and the list re-anchors on a listed row — it never silently
+  painted Session row (full Session id, identity, official Workspace
+  membership, cwd, preset, updated, running, pending, source) and nothing else:
+  no Agent, no Question/Approval form, no Session `open`/`retain`, no writer and
+  no Host call. Folder, New, Add and Show more rows have no Peek and never
+  inherit the last Session. `Esc` returns to the previous focus with the same
+  selection, query and scroll; `Enter` opens the PINNED Session and still has to
+  pass the read owner's eligibility/currentness before any switch. The Peek is
+  pinned to ITS Session id: if a roster/search refresh no longer lists that
+  Session, the Peek exits to its previous focus and the list re-anchors on a
+  listed row — it never silently
   shows, or switches to, a different Session.
-- **Focus ring and layout.** `Tab`/`Shift+Tab` cycle the Folder/Session list,
-  global search editor and action bar without consuming a literal `/`. From
-  `112x12` the frame is two columns: the list keeps at least 44 cells, a
-  two-cell gap, and the rest is the read-only preview/Peek; below that it is one
-  column. Frame-level facts (search editor, status and Host error lines, help)
-  span the full width; the Esc action bar is always the last physical row, and a
-  short frame withholds activation instead of opening a row it did not paint.
+- **Header, Preview and navigation.** The header is ONE row: `Sessions · <listed
+  count>` (or `Choose workspace` in the chooser) with the real `/ Search` target
+  on the right. It never repeats the Current Session id or an `All workspaces`
+  scope; `Current`/`Next` live on the official Folder row. `Tab`/`Shift+Tab`
+  jump by ONE Folder TITLE in the projected tree (wrapping, skipping Sessions,
+  New and Show more; from Add they start at the first/last Folder; zero Folders
+  is a no-op), and never enter a second focus ring. `Up`/`Down`, `Home`/`End`
+  and `PageUp`/`PageDown` move within the actually visible rows. The wide
+  read-only Preview follows the typed node (Folder facts, New, Add, Show more or
+  the Session detail) and the action bar advertises only the selected row's real
+  `Enter` verb. From `112x12` the frame is two columns: the list keeps at least
+  44 cells, a two-cell gap, and the rest is the read-only preview/Peek; below
+  that it is one column. Frame-level facts (search editor, status and Host error
+  lines) span the full width; the Esc action bar is always the last physical
+  row, and a short frame withholds activation instead of opening a row it did
+  not paint. The inline Add editor consumes the keyboard while it is open; Tab
+  never changes the Workspace cursor and `Esc` cancels back to the tree.
 - **Mouse is the last painted hit-map.** One render commits a frame revision and
-  the REAL painted cell ranges of Folder, Session, Show more, search results,
-  Peek back targets. A click acts only on the SAME frame
+  the REAL painted cell ranges of every tree row plus the Folder disclosure,
+  search results and Peek back target. A click acts only on the SAME frame
   revision and SAME target range as its press; any scroll, resize, search,
   Activity or content change between press and release drops the gesture. A
-  plain Session click only selects; Folder and Show more clicks are local
-  presentation actions; Resume stays the guarded Enter verb.
+  Session row click and a Folder LABEL click only select; the Folder disclosure
+  collapses/expands; `+ New session`, `Add directory` and `Show more` clicks run
+  their named explicit action; Resume stays the guarded Enter verb.
 - **One lifecycle.** Each open keeps exactly one Workspace follow, one roster
   read owner, one Activity sample generation and one fullscreen lease. The close
   path aborts list/search/Activity, disposes the follow once, stops the screen
@@ -327,9 +371,10 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   while the groups and statuses repaint truthfully.
 
 Authority: `TuiApp.openSessionWorkspace` + `SessionWorkspacePanel`,
-`buildSessionWorkspaceView` (the ONE pure classifier), `SessionBrowserReadOwner`,
-`SessionWorkspaceFactsPort` and the Client-root forwarded-answer eligibility
-view; sink: the leased fullscreen screen.
+`projectPiTuiWorkspaceTree` (the ONE PiTUI action-row adapter over the shared
+visible tree), `buildSessionWorkspaceView` (the ONE pure classifier),
+`SessionBrowserReadOwner`, `SessionWorkspaceFactsPort` and the Client-root
+forwarded-answer eligibility view; sink: the leased fullscreen screen.
 
 Must-not: add a second Session roster, a second Activity reader, a Host pending
 store, a Workspace registry or a persisted Workspace table, re-filter Host
