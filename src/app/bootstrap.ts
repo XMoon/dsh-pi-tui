@@ -155,7 +155,7 @@ import { dangerCommand } from '../domain/shell/danger.ts'
 import { resolveInitialCatalog } from './direct/initial-catalog.ts'
 import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from './surface/task-presentation.ts'
 import { queueTextOf } from '../app/surface/pending-presentation.ts'
-import { APP_KEYBINDINGS } from '../tui/keybindings/definitions.ts'
+import { HostKeybindingManager } from '../tui/keybindings/manager.ts'
 import { parseUserKeybindings } from '../tui/keybindings/config.ts'
 import { bundleVersion, packageVersion } from '../client/launcher/version.ts'
 import { resumeCommand } from '../client/launcher/profile.ts'
@@ -3130,15 +3130,20 @@ export function applyRunnerWithRuntime(
     const tspAttempt = tspRequested(process.env)
     if (tspAttempt) terminalOutput.suspend()
     try {
-      const queueOpenKeys = (): readonly string[] => {
-        const defaults = APP_KEYBINDINGS['app.queue.open'].defaultKeys
-        if (process.env.DSH_PI_TUI_SAFE_KEYBINDINGS === '1') return [...defaults]
-        const parsed = parseUserKeybindings(tuiSettings?.get().keybindings)
-        const value = parsed.bindings['app.queue.open']
-        if (value === undefined) return [...defaults]
-        if (value === false) return []
-        return typeof value === 'string' ? [value] : [...value]
+      // PR-Q: ONE effective keymap instance for the TSP branch. It compiles the
+      // SAME action table + safe mode + persisted user bindings the PiTui
+      // manager uses, so conflicts, `false` and leader-only declarations are
+      // decided by the shared resolver instead of by a raw config read. The TSP
+      // renderer has no leader state machine, so a leader-only binding yields NO
+      // direct key (`keysFor` is empty) and the Dock truthfully paints plain
+      // `Manage` instead of a shortcut TSP cannot execute.
+      const tspQueueKeybindings = new HostKeybindingManager()
+      if (process.env.DSH_PI_TUI_SAFE_KEYBINDINGS === '1') {
+        tspQueueKeybindings.setSafeMode(true)
+      } else {
+        tspQueueKeybindings.setUserConfiguration(parseUserKeybindings(tuiSettings?.get().keybindings))
       }
+      const queueOpenKeys = (): readonly string[] => tspQueueKeybindings.keysFor('app.queue.open')
       rendererMount = await selectRendererMount({
         log: (message, fields) => diag.info(message, fields),
         // TSP-7 PR-D: the boot-time footer projection source. The resolver is

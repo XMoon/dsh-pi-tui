@@ -45,9 +45,11 @@ function harness(options: HarnessOptions = {}) {
   let unavailable = options.unavailable === true
   const writes: WriteRecord[] = []
   const notices: string[] = []
+  let refreshes = 0
   const presents: number[] = []
   const tasks: Promise<void>[] = []
   let outcome: WriteOutcome = { kind: 'committed', value: undefined }
+  let writeGate: { readonly promise: Promise<void>; readonly release: () => void } | undefined
   const reader: PendingInputReader = {
     snapshot(id: string): PendingInputSnapshot | undefined {
       if (unavailable) return undefined
@@ -61,6 +63,7 @@ function harness(options: HarnessOptions = {}) {
       writes.push(action.kind === 'edit'
         ? { sessionId: id, id: itemId, kind: 'edit', content: action.content }
         : { sessionId: id, id: itemId, kind: 'remove' })
+      if (writeGate !== undefined) await writeGate.promise
       return outcome
     },
     cancel: async () => ({ kind: 'committed', value: undefined }),
@@ -79,7 +82,7 @@ function harness(options: HarnessOptions = {}) {
     withWriter: async (_scope, task) => task(),
     beginClientWrite: () => () => {},
     runOwned: (_label, task) => { tasks.push(task()) },
-    refreshPendingInput: () => {},
+    refreshPendingInput: () => { refreshes += 1 },
     notify: (message) => { notices.push(message) },
     textOf: content => queueTextOf(content as readonly ContentBlock[]),
   })
@@ -102,6 +105,16 @@ function harness(options: HarnessOptions = {}) {
     switchSession(next: string | undefined) { sessionId = next },
     setOutcome(next: WriteOutcome) { outcome = next },
     diag: DIAG,
+    refreshes: () => refreshes,
+    holdWrites(): () => void {
+      let release!: () => void
+      const promise = new Promise<void>(resolve => { release = resolve })
+      writeGate = { promise, release }
+      return () => {
+        writeGate = undefined
+        release()
+      }
+    },
   }
 }
 
@@ -311,8 +324,36 @@ test('the Dock preselection uses the exact Host id and a vanished id opens Brows
 
   h.controller.open({ initialItemId: 'gone' })
   assert.equal(h.controller.view().mode, 'browse')
-  assert.equal(h.controller.view().selectedId, 'a', 'the first live row is selected instead')
+  assert.equal(h.controller.view().selectedId, undefined, 'a stale click never falls back to the first live row')
   assert.equal(h.controller.view().notice?.text, 'This message is no longer queued')
+  // Enter/D with no selection perform no target operation at all.
+  h.controller.startEdit()
+  assert.equal(h.controller.view().mode, 'browse')
+  assert.equal(h.controller.view().notice?.text, 'Select a queued message')
+  h.controller.startDelete()
+  assert.equal(h.controller.view().mode, 'browse')
+  assert.deepEqual(h.writes, [])
+  // The user's explicit selection re-enables the normal browse fallbacks.
+  h.controller.select('a')
+  assert.equal(h.controller.view().selectedId, 'a')
+})
+
+test('a write settling after the panel was closed never repaints or reopens it', async () => {
+  const h = harness({ items: [item('occ-1', [{ type: 'text', text: 'hello' }])] })
+  const release = h.holdWrites()
+  h.controller.open()
+  h.controller.startEdit()
+  h.controller.setDraft('edited')
+  h.controller.save()
+  h.controller.close()
+  const presentsAfterClose = [...h.presents]
+  assert.equal(h.controller.view().mode, 'closed')
+  release()
+  await h.drain()
+  assert.equal(h.controller.view().mode, 'closed', 'the closed panel stays closed after the Host write settles')
+  assert.deepEqual(h.presents, presentsAfterClose, 'no presentation is re-emitted for the retired panel')
+  assert.equal(h.refreshes(), 1, 'the shared Host projection is still refreshed after a committed retired write')
+  assert.equal(h.writes.length, 1)
 })
 
 test('a Dock row preselection moves the open Browse selection instead of closing it', () => {

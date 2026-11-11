@@ -20,6 +20,8 @@ import {
   classifyCommandLine,
 } from '../../src/domain/command/policy.ts'
 import { TSP_SUPPORTED_TUI_BUILTINS, tspBuiltinAvailability } from '../../src/app/command/tsp-capability.ts'
+import { HostKeybindingManager } from '../../src/tui/keybindings/manager.ts'
+import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import type { TuiCommandSpec } from '../../src/commands.ts'
 
 function register(openQueueManager?: () => import('@deepseek-ai/dsh-commands').CommandResult): TuiCommandSpec {
@@ -109,4 +111,25 @@ test('TSP admits /queue only with the native Queue sheet capability', () => {
   })
   assert.deepEqual(tspBuiltinAvailability(facts, 'queue', { queueManager: true }, ''), { kind: 'available' })
   assert.deepEqual(tspBuiltinAvailability(facts, 'queue', {}, ''), { kind: 'unsupported' })
+})
+
+
+test('the TSP queue-open keys come from the SHARED effective keymap resolution', () => {
+  function effectiveKeys(raw: unknown): readonly string[] {
+    const manager = new HostKeybindingManager()
+    manager.setUserConfiguration(parseUserKeybindings(raw))
+    return manager.keysFor('app.queue.open')
+  }
+  // The builtin default.
+  assert.deepEqual(effectiveKeys(undefined), ['alt+i'])
+  // A user remap replaces it.
+  assert.deepEqual(effectiveKeys({ 'app.queue.open': 'ctrl+alt+i' }), ['ctrl+alt+i'])
+  // `false` disables the action: the Dock paints plain `Manage`.
+  assert.deepEqual(effectiveKeys({ 'app.queue.open': false }), [])
+  // A leader-only declaration is NOT a direct key. The TSP renderer owns no
+  // leader machine, so the honest result is "no key" (never a fabricated one).
+  assert.deepEqual(
+    effectiveKeys({ leader: 'ctrl+x', bindings: { 'app.queue.open': '<leader>q' } }),
+    [],
+  )
 })

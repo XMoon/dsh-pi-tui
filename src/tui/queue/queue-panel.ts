@@ -215,8 +215,14 @@ export class QueuePanel implements Component, Focusable {
           this.closePanel()
           return
         }
-        if (data === '\x1b[A' || data === '\x1b[B') {
-          this.moveSelection(view, data === '\x1b[A' ? -1 : 1)
+        // Semantic key matching, never a raw escape-sequence comparison:
+        // CSI-u/modifyOtherKeys/SS3 spellings of Up/Down all move the cursor.
+        if (matchesKey(data, 'down')) {
+          this.moveSelection(view, 1)
+          return
+        }
+        if (matchesKey(data, 'up')) {
+          this.moveSelection(view, -1)
           return
         }
         // Everything else is consumed by the sheet: a stray key must never

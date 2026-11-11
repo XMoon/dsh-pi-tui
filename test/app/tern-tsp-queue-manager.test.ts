@@ -144,6 +144,7 @@ const FILE_ROW = queued('occ-file', [
 async function mounted(
   t: { after(fn: () => unknown): void },
   items: readonly PendingInputItem[],
+  queueOpenKeys: readonly string[] = ['alt+i'],
 ): Promise<Mounted> {
   const pane = installTspPane({ queueManager: true })
   t.after(() => pane.restore())
@@ -153,7 +154,7 @@ async function mounted(
     copyVisual: async () => false,
     requestExit() {},
     onFatal: (error) => assert.fail(String(error)),
-    queueOpenKeys: () => ['alt+i'],
+    queueOpenKeys: () => queueOpenKeys,
   })
   t.after(() => renderer.dispose())
   renderer.bindInput({
@@ -406,4 +407,15 @@ test('native Queue: a file-bearing occurrence refuses Edit and still deletes', a
     && m.controller.view().mode === 'browse')
   assert.deepEqual(m.writes, [{ sessionId: 'session-a', id: 'occ-file', kind: 'remove' }],
     'a file-bearing occurrence deletes with ONE remove')
+})
+
+
+test('native Queue: a disabled/leader-only queue-open binding paints Manage with no dead key', async (t) => {
+  const m = await mounted(t, [TEXT_ONE], [])
+  const label = wireNodes(m.pane).find(node => node.id === 'dock.queue-header.queue-manage.queue-manage-label')
+  assert.equal(label?.p.text, 'Manage', 'no shortcut is advertised when the effective action has no direct key')
+  m.pane.key('\u001bi')
+  await settle(50)
+  assert.equal(m.controller.isOpen(), false, 'the unbound raw chord never opens the sheet')
+  assert.equal(sheetPicker(m.pane), undefined)
 })
