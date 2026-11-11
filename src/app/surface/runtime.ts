@@ -1272,6 +1272,9 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    * detached at teardown; the controller itself outlives both.
    */
   attachQueueManager(controller: QueueManagerController): void
+  /** PR-Q: whether the current mount really installed the Queue sheet
+   *  presentation (the TSP builtin capability gate reads this). */
+  queuePresentationAvailable(): boolean
   /**
    * A4-4: clear the pending-input presentation and the own-input memory at a
    * session-generation bump (the original `resetForGeneration` clearing).
@@ -3194,6 +3197,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // here (its presentation is attached inside `start`).
       if (app !== undefined) app.attachQueueManager(controller)
     },
+    queuePresentationAvailable: () => queuePresentation !== undefined,
     resetPendingPresentation,
     schedulePaint,
     paintNow,

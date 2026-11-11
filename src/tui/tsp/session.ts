@@ -2865,32 +2865,44 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // The pending-input presentation IS visible on this renderer: the queue
     // lane (authoritative queued + local echoes) and the ordered conversation
     // tail, exactly as the ONE join produced them.
-    if (pending.queued.length > 0) {
+    const queueSheetMounted = queueManagerPresenter !== undefined
+    if (pending.queued.length > 0 && queueSheetMounted) {
       // PR-Q: ONE compact header replaces no dock row (the queue lane is the
-      // pre-existing lane); `Manage` is a native clickable row over the live
+      // pre-existing lane); `Manage` is a native clickable button over the live
       // effective `app.queue.open` key, and each row opens the SAME sheet with
       // its Host occurrence id as a preselection hint.
       const authoritative = pending.queued.filter(item => item.local !== true).length
       const openKeys = options.queueOpenKeys?.() ?? []
       const manageLabel = openKeys.length === 0 ? 'Manage' : `Manage [${formatKeyId(openKeys[0] as never)}]`
-      lines.push(ui.row(
+      const header = ui.row(
         { key: 'queue-header', justify: 'between' },
         ui.text({ key: 'queue-header-title', text: `Queue · ${authoritative}` }),
         html.button(
           { key: 'queue-manage', onClick: () => { queueManagerPresenter?.openManage() } },
           html.span({ key: 'queue-manage-label' }, manageLabel),
         ),
-      ))
-    }
-    for (const item of pending.queued) {
-      const sending = item.local === true ? ' — sending…' : ''
-      lines.push(ui.row(
-        {
+      )
+      lines.push(header)
+      for (const item of pending.queued) {
+        const sending = item.local === true ? ' — sending…' : ''
+        lines.push(ui.row(
+          {
+            key: `queue-${item.id}`,
+            onClick: () => { queueManagerPresenter?.openRow(item.local === true ? undefined : item.id) },
+          },
+          ui.text({ key: `queue-text-${item.id}`, text: sanitizeDisplayText(`queued (${item.mode}): ${item.text}${sending}`) }),
+        ))
+      }
+    } else {
+      // No sheet capability: the queue lane stays the historical PLAIN read-only
+      // rows (no header, no Manage, no clickable `el`/`row` affordance).
+      for (const item of pending.queued) {
+        const sending = item.local === true ? ' — sending…' : ''
+        lines.push(ui.text({
           key: `queue-${item.id}`,
-          onClick: () => { queueManagerPresenter?.openRow(item.local === true ? undefined : item.id) },
-        },
-        ui.text({ key: `queue-text-${item.id}`, text: sanitizeDisplayText(`queued (${item.mode}): ${item.text}${sending}`) }),
-      ))
+          text: sanitizeDisplayText(`queued (${item.mode}): ${item.text}${sending}`),
+        }))
+      }
     }
     // An IDLE subject with at least one authoritative queued occurrence is the
     // preserved parked queue: the next real prompt wakes it. A local-only echo
@@ -3532,6 +3544,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  without one of those gets the full panel instead of a fake control. */
   const modelQuickCapable = (): boolean =>
     modelPickerAvailable() && session.caps.kinds.includes('input')
+  /** PR-Q: the Queue manager sheet needs the native picker, overlay, controlled
+   *  editor, buttons, clickable rows and the dock `el` control. A pane that did
+   *  not negotiate every one of them receives NO presenter, no raw-key entry
+   *  and no Dock Manage/row pointer affordance — it keeps the historical plain
+   *  queue rows instead of sending nodes it cannot paint. */
+  const queueSheetCapable = (): boolean =>
+    ['picker', 'overlay', 'editor', 'button', 'row', 'col', 'text', 'el']
+      .every(kind => session.caps.kinds.includes(kind))
   /** The three standard presets the Quiet Composer menu may offer, in the
    * Owner-frozen order. `auto`/custom presets stay available through
    * `/permission` and Shift+Tab but never enter this three-row menu. */
@@ -4942,6 +4962,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     bindQueueManager: (controller: QueueManagerController) => {
       if (disposed) throw new Error('cannot bind the queue manager after TSP renderer disposal')
       if (queueManagerPresenter !== undefined) throw new Error('the TSP renderer queue manager is already bound')
+      // A pane without the sheet's kinds mounts NO presenter: its `Manage`
+      // affordance, raw key entry and queuePresentation stay absent together.
+      if (!queueSheetCapable()) return
       queueManagerPresenter = new TspQueueManager({
         controller,
         render: () => render(),
