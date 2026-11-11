@@ -227,6 +227,7 @@ test('a failed Remote open never replaces the current Session, its draft, or rep
     warnCommittedDurability: (sessionId, error) => { events.push(`committedDurability:${sessionId}:${error}`) },
     launchComposition: async () => ({ composition: {} }),
     setResumeFailure: () => {},
+    clearResumeFailure: () => {},
     reportFirstSessionCreateFailure: () => {},
     notifyResumeFailure: () => {},
     awaitPendingDefaultWrite: async () => {},

@@ -1070,6 +1070,7 @@ export function applyRunnerWithRuntime(
         },
         launchComposition: () => launchComposition(),
         setResumeFailure: (failure) => { resumeFailure = failure },
+        clearResumeFailure: () => { resumeFailure = undefined },
         reportFirstSessionCreateFailure: (message) => {
           ctx.logger.warn(`tui-runner: failed to create the first session: ${message}`)
           diag.warn('first session creation failed', { error: message })

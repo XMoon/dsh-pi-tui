@@ -20,6 +20,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
+import { createSessionCommands } from '../../src/tui/commands/sessions.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { TuiApp, type EditorWorkspaceEntryControl, type SubagentViewerTarget } from '../../src/tui-app.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
@@ -218,6 +219,7 @@ function row(id: string, updatedAt: number, extra: Partial<SessionSummary> = {})
 interface Harness {
   readonly vt: VirtualTerminal
   readonly app: TuiApp
+  readonly runner: TuiCommandRunner
   readonly facts: FactsSource
   readonly switchCalls: Array<{ readonly id: string; readonly scope: SessionScope | undefined }>
   readonly pickerCalls: number
@@ -280,10 +282,13 @@ function harness(options: {
   readonly signal?: AbortSignal
   /** PR3: the ONE Host directory browse seam this harness composes. */
   readonly hostDirectoryBrowse?: TuiCommandRunner['hostDirectoryBrowse']
+  /** The physical frame size this mount paints (default 100x30). */
+  readonly frameColumns?: number
+  readonly frameRows?: number
   /** PR3: the intent owner whose commit ordering the case asserts. */
   readonly workspaceNextIntent?: TuiCommandRunner['workspaceNextIntent']
 }): Harness {
-  const vt = new VirtualTerminal(100, 30)
+  const vt = new VirtualTerminal(options.frameColumns ?? 100, options.frameRows ?? 30)
   const app = new TuiApp(
     vt,
     {
@@ -510,6 +515,7 @@ function harness(options: {
   return {
     vt,
     app,
+    runner,
     facts,
     switchCalls,
     get pickerCalls() { return picker.calls },
@@ -2373,5 +2379,127 @@ test('a blocking owner refuses the /new recovery Browser without starting a hidd
     await questions.catch(() => {})
   } finally {
     h.close()
+  }
+})
+
+test('a Folder New pre-selection refusal inside the /new recovery Browser stays there and remains retryable', async () => {
+  let folderResolutions = 0
+  const h = harness({
+    currentSessionId: CURRENT,
+    agents: {
+      resolveWorkspace: (async (intent: { kind: string }) => {
+        if (intent.kind === 'source-session') {
+          throw new WorkspaceSelectionError('refused', 'the Host refused the proposed workspace directory', 'workspace/invalid-path')
+        }
+        folderResolutions += 1
+        throw new WorkspaceSelectionError('refused', 'the Host refused the chosen Workspace', 'workspace/not-found')
+      }) as never,
+      create: (async () => { throw new Error('a refused pre-selection must never create') }) as never,
+    },
+  })
+  const originalOpen = TuiApp.prototype.openSessionWorkspace
+  let opens = 0
+  TuiApp.prototype.openSessionWorkspace = function (this: TuiApp, options) {
+    opens += 1
+    return originalOpen.call(this, options)
+  }
+  try {
+    await h.runCommand('new')
+    await h.vt.waitForRender()
+    h.facts.handles[0]!.push(baseline({ workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] }))
+    await waitUntil(() => h.view().includes('project-a · 1'), 'the official baseline is proved')
+    h.vt.sendInput('\x1b[H')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\x1b[B')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\x1b[C')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\r')
+    await waitUntil(() => folderResolutions === 1
+      && h.notices.some(notice => notice.text.includes('fresh session creation failed')),
+    'the Folder New preselection refusal is reported inside the same Browser')
+    await h.vt.waitForRender()
+    assert.ok(h.view().includes('Sessions ·'), 'a typed pre-selection refusal keeps the recovery Browser open')
+    assert.equal(opens, 1, 'no second Browser is opened from inside the recovery Browser')
+    assert.equal(h.facts.handles[0]!.disposed, 0, 'the refusal never retires the Workspace follow')
+    h.vt.sendInput('\r')
+    await waitUntil(() => folderResolutions === 2, 'the refused Folder New is immediately retryable')
+  } finally {
+    TuiApp.prototype.openSessionWorkspace = originalOpen
+    h.close()
+  }
+})
+
+test('a /new refusal on a renderer without a Browser presenter keeps the command error and opens nothing', async () => {
+  const h = harness({
+    currentSessionId: CURRENT,
+    agents: {
+      resolveWorkspace: (async () => {
+        throw new WorkspaceSelectionError('refused', 'the Host refused the proposed workspace directory', 'workspace/invalid-path')
+      }) as never,
+    },
+  })
+  const definitions: Array<{ name: string; handler?: (...args: never[]) => unknown }> = []
+  try {
+    const registrars = createSessionCommands({
+      runner: h.runner,
+      // The native renderer has no PiTUI app: the recovery must NOT fall back
+      // to the PiTUI presentation.
+      app: undefined as never,
+      registerOne: ((definition: { name: string; handler?: (...args: never[]) => unknown }) => {
+        definitions.push(definition)
+      }) as never,
+      registerTuiCommand: (() => {}) as never,
+      recordCommandDraftDisposition: () => {},
+      newSessionId: (() => 'session-native') as never,
+      notify: (text, kind) => h.notices.push({ text, kind: kind ?? 'info' }),
+      notifyTitleRefusal: () => {},
+      notifyTitleSuccess: () => {},
+    })
+    registrars.registerNew()
+    const definition = definitions.find(entry => entry.name === 'new')
+    assert.ok(definition?.handler !== undefined, 'the /new handler must register')
+    const result = await (definition.handler as () => Promise<{ kind: string; text?: string }>)()
+    assert.equal(result.kind, 'error', 'the original refusal stays the command result')
+    assert.match(result.text ?? '', /fresh session creation failed/u)
+    assert.equal(h.notices.length, 0, 'the command result is the ONE visible owner; no PiTUI fallback notice')
+  } finally {
+    h.close()
+  }
+})
+
+test('the /new recovery entry keeps the full tree at 120x40 and 80x24 and only executable verbs at 80x3/2', async () => {
+  for (const [columns, rows] of [[120, 40], [80, 24], [80, 3], [80, 2]] as const) {
+    const h = harness({
+      currentSessionId: CURRENT,
+      frameColumns: columns,
+      frameRows: rows,
+      agents: {
+        resolveWorkspace: (async () => {
+          throw new WorkspaceSelectionError('refused', 'the Host refused the proposed workspace directory', 'workspace/invalid-path')
+        }) as never,
+      },
+    })
+    try {
+      const result = await h.runCommand('new')
+      assert.equal(result.kind, 'success', `${columns}x${rows}: the recovery entry still navigates`)
+      await h.vt.waitForRender()
+      const lines = h.view().split('\n')
+      const frame = lines.join('\n')
+      assert.ok(frame.includes('Sessions'), `${columns}x${rows}: the shared Browser header is painted`)
+      assert.ok(!frame.includes('Host directory:'), `${columns}x${rows}: the recovery never starts in the inline editor`)
+      if (rows >= 24) {
+        assert.ok(frame.includes('Add directory'), `${columns}x${rows}: the full tree offers the registration row`)
+        assert.ok(lines.at(-1)!.includes('Close [Esc]'), `${columns}x${rows}: the ONE action bar closes the Browser`)
+      } else {
+        assert.ok(!frame.includes('Add directory'), `${columns}x${rows}: a clipped row is not advertised`)
+        assert.ok(lines.at(-1)!.includes('Close [Esc]'), `${columns}x${rows}: Esc remains the one executable verb`)
+        h.vt.sendInput('\x1b')
+        await h.vt.waitForRender()
+        assert.ok(!h.view().includes('Sessions'), `${columns}x${rows}: Esc really closes the Browser`)
+      }
+    } finally {
+      h.close()
+    }
   }
 })

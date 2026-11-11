@@ -1103,7 +1103,15 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     // initial-directory options: the sessionless chooser must keep its Folder
     // click meaning, and the recovery is always the full tree.
     const opened = await openSessionsBody({ rawInput: '' }, 'all')
-    if (opened.kind === 'error') return opened
+    if (opened.kind === 'error') {
+      // The Browser never opened: the command result stays the ONE visible
+      // owner, and it keeps BOTH facts (the recovery could not be presented and
+      // the original Host refusal) instead of silently dropping either.
+      const refusal = settled.result.kind === 'error' ? settled.result.text : ''
+      return refusal === undefined || refusal === ''
+        ? opened
+        : { kind: 'error', text: `${opened.text} — ${refusal}` }
+    }
     const message = settled.result.kind === 'error' ? settled.result.text : undefined
     if (message !== undefined && message !== '') notify(message, 'error')
     return { kind: 'success' }
