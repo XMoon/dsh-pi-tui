@@ -238,7 +238,30 @@ test('Host refused, unavailable and unclassified failures stay distinct and obse
   assert.match(snapshotOf(failed).message ?? '', /Directory suggestions failed: protocol fault/u)
 })
 
-test('a Remote supersession rejects silently instead of becoming a fake empty level', async () => {
+test('a replaced Home generation settles as a local stopped state with a recovery path', async () => {
+  const control = controllableList()
+  const chooser = new HostDirectoryChooser({ list: control.list, onChange: () => {} })
+  chooser.begin()
+  const superseded = new Error('the connection generation changed')
+  superseded.name = 'SupersededReadError'
+  control.calls[0]!.reject(superseded)
+  await flush()
+  const snapshot = snapshotOf(chooser)
+  assert.equal(snapshot.status, 'superseded', 'a replaced generation is a local stopped state, never a permanent loader')
+  assert.match(snapshot.message ?? '', /Reopen Add directory to browse/u)
+  assert.equal(snapshot.hostHome, undefined, 'a replaced read never invents a Host dialect')
+  assert.deepEqual(snapshot.candidates, [])
+  // The dialect is still unknown, so typing must not issue a guessed query;
+  // the editor keeps the raw value for the panel's manual verification.
+  chooser.handleInput('/srv/manual')
+  assert.equal(chooser.input.getValue(), '/srv/manual')
+  await afterDebounce()
+  assert.equal(control.calls.length, 1)
+  chooser.acceptPaintedCandidate('/srv/other')
+  assert.equal(chooser.input.getValue(), '/srv/manual')
+})
+
+test('a replaced prefix query settles stopped and a real edit starts the next generation', async () => {
   const control = controllableList()
   const chooser = new HostDirectoryChooser({ list: control.list, onChange: () => {} }, '/srv/a')
   chooser.begin()
@@ -248,10 +271,20 @@ test('a Remote supersession rejects silently instead of becoming a fake empty le
   superseded.name = 'SupersededReadError'
   control.calls[1]!.reject(superseded)
   await flush()
-  const snapshot = snapshotOf(chooser)
-  assert.equal(snapshot.status, 'loading')
-  assert.equal(snapshot.message, undefined)
-  assert.deepEqual(snapshot.candidates, [])
+  const stopped = snapshotOf(chooser)
+  assert.equal(stopped.status, 'superseded')
+  assert.match(stopped.message ?? '', /Edit the path to retry/u)
+  assert.deepEqual(stopped.candidates, [])
+  // A real edit is the user recovery path: one fresh query on the new
+  // generation, and only that result may settle the display.
+  chooser.handleInput('b')
+  await afterDebounce()
+  assert.equal(control.calls.length, 3)
+  control.calls[2]!.resolve(ready(listing('/srv', POSIX_HOME, [entry('ab', '/srv/ab')])))
+  await flush()
+  const recovered = snapshotOf(chooser)
+  assert.equal(recovered.status, 'ready')
+  assert.deepEqual(recovered.candidates.map(candidate => candidate.path), ['/srv/ab'])
 })
 
 test('truncation and hidden entries keep their official facts', async () => {
