@@ -396,7 +396,9 @@ export class SessionWorkspacePanel implements Component {
     this.options = options
     this.nextCreateWorkspaceId = options.currentWorkspaceId
     this.defaultScope = options.initialBrowseScope
-    this.searchMode = options.initialMode === 'search'
+    // Search and the inline path editor are mutually exclusive presentations:
+    // the editor owns the keyboard while it is open.
+    this.searchMode = options.initialMode === 'search' && !this.directoryEntryActive
     this.directoryEntryActive = options.initialDirectoryEntry === true
     if (options.initialDirectoryPath !== undefined) this.directoryInput.setValue(options.initialDirectoryPath)
     this.focus = this.directoryEntryActive ? 'directory' : this.searchMode ? 'search' : 'list'
@@ -1195,6 +1197,9 @@ export class SessionWorkspacePanel implements Component {
   // ── Search / selector ───────────────────────────────────────────────────
 
   private enterSearch(focus: 'search' | 'search-results'): void {
+    // The inline Host path editor and the global search are NEVER concurrent:
+    // the editor owns the keyboard until Enter/Cancel settles it.
+    if (this.directoryEntryActive) return
     if (!this.searchMode) {
       this.searchReturn = { rowId: this.selectedBrowseRowId, treeScrollAnchorId: this.treeScrollAnchorId }
     }
@@ -1306,6 +1311,7 @@ export class SessionWorkspacePanel implements Component {
         break
       }
       case 'search-hint': {
+        if (this.directoryEntryActive) return
         this.enterSearch('search')
         return
       }
@@ -1382,6 +1388,11 @@ export class SessionWorkspacePanel implements Component {
   private renderHeader(width: number): { readonly line: string; readonly regions: readonly HitRegion[] } {
     const title = this.chooserMode() ? 'Choose workspace' : 'Sessions'
     const left = `${color.textStrong(title)}${color.textMuted(` · ${this.snapshot.rows.length}`)}`
+    if (this.directoryEntryActive) {
+      // The inline path editor owns the keyboard: no visible or clickable
+      // / Search target may enter a search presentation behind it.
+      return { line: fit(left, width), regions: [] }
+    }
     const trailing = color.textMuted('/ Search')
     const line = withTrailing(left, trailing, width)
     const regions: HitRegion[] = []
@@ -1937,10 +1948,10 @@ export class SessionWorkspacePanel implements Component {
           ]
     }
     if (this.focus === 'peek') {
-      const pinnedCurrent = this.peek?.sessionId === this.options.currentSessionId
+      const openable = this.peek?.sessionId !== this.options.currentSessionId && !this.snapshot.resumePending
       return [
         { text: 'Up/Down scroll', priority: 6, short: 'Scroll' },
-        ...(pinnedCurrent ? [] : [{ text: 'Enter open', priority: 7, short: 'Open' }]),
+        ...(openable ? [{ text: 'Enter open', priority: 7, short: 'Open' }] : []),
         { text: 'Space close', priority: 5, short: 'Space' },
         { text: 'Esc back', priority: 9, short: 'Esc' },
       ]
@@ -1950,7 +1961,7 @@ export class SessionWorkspacePanel implements Component {
       const selectedPainted = this.selectedSearchSessionId !== undefined && painted.has(this.selectedSearchSessionId)
       const segments: { text: string; priority: number; short?: string }[] = []
       if (painted.size >= 2) segments.push({ text: 'Up/Down move', priority: 6, short: 'Move' })
-      if (selectedPainted) {
+      if (selectedPainted && !this.snapshot.resumePending) {
         segments.push({ text: 'Space peek', priority: 4, short: 'Peek' })
         // The opened Session is a legal search hit, but Enter on it is the
         // same deliberate no-op as in the browse tree.
@@ -1988,7 +1999,8 @@ export class SessionWorkspacePanel implements Component {
       segments.push({ text: `${SESSION_WORKSPACE_CHORDS.folderCycle.label} Workspace`, priority: 3, short: 'Tab' })
     }
     if (paintedRows.length >= 2) segments.push({ text: 'Up/Down move', priority: 6, short: 'Move' })
-    if (selected !== undefined && selectedPainted) {
+    if (selected !== undefined && selectedPainted
+      && !(selected.kind === 'session' && this.snapshot.resumePending)) {
       if (selected.kind === 'session' && selected.sessionId === this.options.currentSessionId) {
         // Enter on the opened Session is a deliberate no-op: advertise only
         // the read-only Peek it really supports.
