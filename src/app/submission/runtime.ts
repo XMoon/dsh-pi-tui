@@ -1346,6 +1346,18 @@ export function executeHostCommandSubmission(
       const draftDisposition = execution === undefined
         ? undefined
         : deps.readCommandDraftDisposition(execution.commandId)
+      const resultKind = execution?.result.kind
+      // The official settlement is exactly `success` or `error`. An illegal
+      // kind must fail BEFORE any committed-success side effect (health clear,
+      // local-echo/ack stand-down) so it can never be presented as a consumed
+      // command; the terminal failure sinks then restore the submitted line.
+      if (execution !== undefined && resultKind !== 'success' && resultKind !== 'error') {
+        fallbackPin()
+        submitTurn.release()
+        throw new Error(
+          `command "${input.parsedName ?? '?'}" settled an unknown result kind "${String(resultKind)}"`,
+        )
+      }
       if (commandHealthRef !== undefined && execution !== undefined) {
         deps.clearCommandHealthError(commandHealthRef)
       }
@@ -1425,25 +1437,15 @@ export function executeHostCommandSubmission(
         }
       } else {
         // Only the official handler SUCCESS consumes this gesture's drafts; an
-        // error keeps them for correction. The official settlement is exactly
-        // success|error — any other kind is an illegal result that must never
-        // be read as success (no silent draft consumption) or as a recoverable
-        // error.
-        const resultKind = execution.result.kind
+        // error keeps them for correction. The illegal-kind case already threw
+        // above, before this settlement block.
         if (resultKind === 'success') {
           deps.consumeDraftAttachments(text)
-        } else if (resultKind === 'error'
-          && draftDisposition !== 'restored'
-          && draftDisposition !== 'suppressed') {
+        } else if (draftDisposition !== 'restored' && draftDisposition !== 'suppressed') {
           deps.restoreSubmissionDraft(text)
         }
         fallbackPin()
         submitTurn.release()
-        if (resultKind !== 'success' && resultKind !== 'error') {
-          throw new Error(
-            `command "${input.parsedName ?? '?'}" settled an unknown result kind "${String(resultKind)}"`,
-          )
-        }
         if (resultKind === 'success') {
           const commandName = input.parsedName
           if (commandName === 'export' || commandName === 'transcript') deps.startArtifactSave(commandName)
