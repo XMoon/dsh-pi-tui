@@ -586,8 +586,8 @@ export async function runSharedSessionInteractions(context) {
         const bAfterWithdraw = (await clientB.viewport()).join('\n')
         assert(!bAfterWithdraw.includes('Review your answer before submit'),
           'M5C loser B opened the question review page')
-        assert(!bAfterWithdraw.includes('○ Submit') && !bAfterWithdraw.includes('✓ Submit'),
-          'M5C loser B still paints the question Submit tab')
+        assert(!bAfterWithdraw.includes('○ Review') && !bAfterWithdraw.includes('✓ Review'),
+          'M5C loser B still paints the question Review stage tab')
         clientB.send('m5c-b-editor-after-question')
         await clientB.waitForComposerDraft('m5c-b-editor-after-question', 30_000)
         clientB.send('\x15')

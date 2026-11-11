@@ -191,6 +191,24 @@ Fullscreen Question pointer handling uses the same semantic boundary:
 - press/release uses the last-painted geometry and semantic owner/row/hit
   identity, with a Question-instance fence;
 - a presentation rebuild must not change modal focus ownership.
+- the Question frame's one bottom Action Bar is shared by pointer actions and
+  keyboard hints within the original row budget. On Fullscreen it carries the
+  complete visible Back, Progress/Edit, Leave edit, Submit and Cancel spans;
+  the top tab names the inert `Review` stage, and Submit appears only once in
+  the bottom bar. Each span calls the same flow method as its keyboard action.
+  The final keyboard hint is replaced, not duplicated.
+- the action bar keeps required keyboard guidance in the same row as muted,
+  lower-priority hints: list selection/choice/toggle, edit cursor, scroll/expand,
+  and only an eligible Split browse hint. `Esc` always names the real state
+  action and stays last. In a text edit, `Leave edit [Esc]` leaves the edit and
+  the separate click-only `Cancel flow` cancels the request; navigation/Review
+  Esc cancels.
+- the one-row action press/release must retain the same flow instance,
+  question/review position, edit mode, painted span and content width. A
+  body/separator press, page change, keyboard input, resize or replacement
+  cannot turn into an action.
+- Regular/Main has no application Question pointer route. Its terminal-native
+  selection and scrolling behavior is unchanged.
 
 Approval keyboard inspection uses the same semantic allowlist. Approval's own
 fixed and reading keys (`y/n/Esc/Ctrl+C`, arrows, PgUp/PgDn, Home/End, `c`,

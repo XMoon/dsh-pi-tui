@@ -428,7 +428,8 @@ test('review page stays inside the dialog: the hint survives long answers', asyn
   await viewport(vt)
   vt.sendInput('\x1b[C') // → review page
   const view = await viewport(vt)
-  assert.ok(view.includes('Submit'), `Submit tab missing:\n${view}`)
+  assert.ok(view.includes('Review your answer before submit'), `review page missing:\n${view}`)
+  assert.ok(!view.includes('○ Submit') && !view.includes('✓ Submit'), `the old Submit stage tab is gone:\n${view}`)
   assert.ok(!view.includes('Cancel'), `the two-choice Cancel action is gone:\n${view}`)
   assert.ok(view.includes('esc cancel'), `hint missing:\n${view}`)
   await vt.sendInput('\x1b')
@@ -957,7 +958,7 @@ test('a fullscreen click on an option row selects it', async () => {
   await vt.waitForRender()
   view = await viewport(vt)
   // Single-select on the last question advances to the review page.
-  assert.ok(view.includes('Submit'), `click must select the option:\n${view}`)
+  assert.ok(view.includes('Review your answer before submit'), `click must select the option:\n${view}`)
   vt.sendInput('\r')
   assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }])
 })
@@ -1016,7 +1017,7 @@ test('a question resize refreshes the click geometry in both dimensions', async 
   clickCell(vt, 10, movedIdx)
   await vt.waitForRender()
   view = await viewport(vt)
-  assert.ok(view.includes('Submit'), `a post-resize click must select the option:\n${view}`)
+  assert.ok(view.includes('Review your answer before submit'), `a post-resize click must select the option:\n${view}`)
   await vt.sendInput('\x1b')
   await assert.rejects(promise, /cancelled/)
 })
@@ -1109,25 +1110,21 @@ test('a fullscreen click on the "Type something." row enters free-text mode', as
   await assert.rejects(promise, /cancelled/)
 })
 
-test('a fullscreen click is inert on the review page', async () => {
+test('a fullscreen click on the review Submit action settles the answer', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
   await vt.waitForRender()
   const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
   await vt.waitForRender()
   vt.sendInput('1') // single-select advances to the review page
-  let view = await viewport(vt)
+  const view = await viewport(vt)
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
-  assert.ok(view.includes('Submit'), `review page missing:\n${view}`)
-  const submitIdx = view.split('\n').findIndex(line => strip(line).includes('Submit'))
-  assert.ok(submitIdx >= 0, `Submit row missing:\n${view}`)
+  assert.ok(view.includes('Review your answer before submit'), `review page missing:\n${view}`)
+  const submitIdx = view.split('\n').findIndex(line => strip(line).includes('Submit [Enter]'))
+  assert.ok(submitIdx >= 0, `Submit action row missing:\n${view}`)
   clickCell(vt, 10, submitIdx)
-  await vt.waitForRender()
-  const after = await viewport(vt)
-  // The review page has no hit map and no scroll marker: the click is inert.
-  assert.equal(after, view, `click must be inert on the review page:\n${after}`)
-  await vt.sendInput('\x1b')
-  await assert.rejects(promise, /cancelled/)
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }],
+    'the painted Submit action must settle the original answer promise')
 })
 
 test('askQuestions toggles multi-select options', async () => {

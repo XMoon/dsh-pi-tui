@@ -4343,11 +4343,11 @@ test('Quick Tasks: S then a single Esc returns to the editor (original regressio
   // chord, and the SECOND Esc closes the browser back to the editor.
   vt.sendInput('S')
   await vt.waitForRender()
-  assert.ok(vt.getViewport().map(strip).join('\n').includes('confirm stop'),
+  assert.ok(/confirm stop/iu.test(vt.getViewport().map(strip).join('\n')),
     'S arms the stop chord (never confirms without Y)')
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.ok(!vt.getViewport().map(strip).join('\n').includes('confirm stop'),
+  assert.ok(!/confirm stop/iu.test(vt.getViewport().map(strip).join('\n')),
     'Esc cancels the armed chord')
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -5275,6 +5275,137 @@ test('fullscreen openPicker responds to mouse clicks (mouse parity)', async () =
   app.dispose()
 })
 
+function clickFullscreenLabel(vt: VirtualTerminal, label: string): void {
+  const viewport = vt.getViewport()
+  const row = viewport.findIndex(line => line.includes(label))
+  assert.ok(row >= 0, `Fullscreen label '${label}' must be painted:\n${viewport.join('\n')}`)
+  const column = viewport[row]!.indexOf(label)
+  assert.ok(column >= 0)
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+}
+
+test('question: Regular/Main keeps the keyboard hint without painting a mouse action row', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const answers = app.askQuestions([
+    { id: 'q1', question: 'Choose a route', options: [{ label: 'A' }, { label: 'B' }] },
+  ])
+  void answers.catch(() => {})
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  assert.ok(view.some(line => line.includes('Review')), `Regular/Main keeps the Review stage label:\n${view.join('\n')}`)
+  assert.ok(view.some(line => line.includes('↑↓ select') && line.includes('esc cancel')),
+    `Regular/Main retains the legacy keyboard hint:\n${view.join('\n')}`)
+  assert.ok(!view.some(line => line.includes('Skip [→]') || line.includes('Continue [→]') || line.includes('Cancel [Esc]')),
+    `Regular/Main must not paint the mouse action row:\n${view.join('\n')}`)
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  await assert.rejects(answers, /question flow cancelled/u)
+  app.stop()
+})
+
+test('question: Fullscreen SGR Submit resolves the original answer Promise once', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let settlements = 0
+  const answers = app.askQuestions([
+    { id: 'q1', question: 'Choose a route', options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'q2', question: 'Choose a deployment', options: [{ label: 'C' }] },
+  ]).then(value => { settlements += 1; return value })
+
+  await vt.waitForRender()
+  clickFullscreenLabel(vt, '[1] A')
+  await vt.waitForRender()
+  clickFullscreenLabel(vt, '[1] C')
+  await vt.waitForRender()
+  const review = vt.getViewport()
+  assert.ok(review.some(line => line.includes('Review your answer before submit')))
+  assert.ok(review.some(line => line.includes('✓ Review')), `the final top tab must read Review:\n${review.join('\n')}`)
+  assert.ok(review.some(line => line.includes('Submit [Enter]')), `Submit must remain in the bottom action row:\n${review.join('\n')}`)
+  assert.ok(!review.some(line => line.includes('← back · ↵ submit · esc cancel')),
+    `fullscreen actions replace the keyboard hint instead of adding a second row:\n${review.join('\n')}`)
+  clickFullscreenLabel(vt, 'Submit [Enter]')
+
+  assert.deepEqual(await answers, [
+    { id: 'q1', selected: ['A'] },
+    { id: 'q2', selected: ['C'] },
+  ])
+  assert.equal(settlements, 1)
+  assert.equal(app.focusSeatForTest(), 'editor', 'the question seat returns to the original editor')
+  app.stop()
+})
+
+test('question: Fullscreen Review Cancel rejects the original Request without answering', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const answers = app.askQuestions([
+    { id: 'q1', question: 'Choose a route', options: [{ label: 'A' }] },
+  ])
+  void answers.catch(() => {})
+  await vt.waitForRender()
+  clickFullscreenLabel(vt, '[1] A')
+  await vt.waitForRender()
+  clickFullscreenLabel(vt, 'Cancel [Esc]')
+  await assert.rejects(answers, /question flow cancelled/u)
+  assert.equal(app.focusSeatForTest(), 'editor', 'cancel restores the original editor seat')
+  app.stop()
+})
+
+test('question: Fullscreen frame border and padding presses cannot transfer to Cancel on release', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let settled = false
+  const answers = app.askQuestions([
+    { id: 'q1', question: 'Choose a route', options: [{ label: 'A' }] },
+  ]).then(value => { settled = true; return value })
+  void answers.catch(() => {})
+  await vt.waitForRender()
+
+  const cancelLocation = (viewport: string[]): { row: number; column: number } => {
+    const row = viewport.findIndex(line => line.includes('Cancel [Esc]'))
+    assert.ok(row >= 0, `Cancel must be painted before the probe:\n${viewport.join('\n')}`)
+    const column = viewport[row]!.indexOf('Cancel [Esc]')
+    assert.ok(column >= 0)
+    return { row, column }
+  }
+  const sendMouse = (kind: 'press' | 'release', column: number, row: number): void => {
+    const suffix = kind === 'press' ? 'M' : 'm'
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}${suffix}`)
+  }
+
+  for (const target of ['border', 'padding'] as const) {
+    const before = vt.getViewport()
+    const { row } = cancelLocation(before)
+    const leftBorder = before[row]!.indexOf('│')
+    assert.ok(leftBorder >= 0, `the Question frame border must be visible:\n${before.join('\n')}`)
+    const column = target === 'border' ? leftBorder : leftBorder + 1
+    if (target === 'padding') {
+      assert.equal(before[row]![column], ' ', `the press target must be Frame padding:\n${before[row]}`)
+    }
+    sendMouse('press', column, row)
+    await vt.waitForRender()
+
+    // Resolve the release cell from the current viewport, not the press frame.
+    const afterPress = vt.getViewport()
+    const release = cancelLocation(afterPress)
+    sendMouse('release', release.column, release.row)
+    await vt.waitForRender()
+    const view = vt.getViewport()
+    assert.ok(view.some(line => line.includes('Choose a route')), `${target} press must not close the Question:\n${view.join('\n')}`)
+    assert.equal(settled, false, `${target} press released over Cancel must not settle the flow`)
+  }
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  await assert.rejects(answers, /question flow cancelled/u)
+  app.stop()
+})
+
 test('question: press Q1 option → keyboard advance → release same cell must not activate Q2 (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
@@ -5347,6 +5478,54 @@ test('question: a queued flow cannot consume the previous flow press (mouse pari
   app.stop()
 })
 
+test('question: a queued same-id flow cannot consume a stale Review Submit release', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const answers1 = app.askQuestions([
+    { id: 'same', question: 'Confirm?', options: [{ label: 'A' }] },
+  ])
+  const answers2 = app.askQuestions([
+    { id: 'same', question: 'Confirm?', options: [{ label: 'A' }] },
+  ])
+  void answers1.catch(() => {})
+  void answers2.catch(() => {})
+  await vt.waitForRender()
+  clickFullscreenLabel(vt, '[1] A')
+  await vt.waitForRender()
+
+  let view = vt.getViewport()
+  const submitRow = view.findIndex(line => line.includes('Submit [Enter]'))
+  assert.ok(submitRow >= 0, `the first flow must reach Review before the press:\n${view.join('\n')}`)
+  const submitColumn = view[submitRow]!.indexOf('Submit [Enter]')
+  assert.ok(submitColumn >= 0)
+  vt.sendInput(`\x1b[<0;${submitColumn + 1};${submitRow + 1}M`)
+  await vt.waitForRender()
+
+  vt.sendInput('\r') // keyboard Submit hands the seat to the queued flow
+  await vt.waitForRender()
+  assert.deepEqual(await answers1, [{ id: 'same', selected: ['A'] }])
+  vt.sendInput('\r') // answer the queued same-id question and reach Review
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const nextSubmitRow = view.findIndex(line => line.includes('Submit [Enter]'))
+  assert.equal(nextSubmitRow, submitRow, `the queued Review action must occupy the pressed row:\n${view.join('\n')}`)
+  const nextSubmitColumn = view[nextSubmitRow]!.indexOf('Submit [Enter]')
+  assert.equal(nextSubmitColumn, submitColumn, `the queued Review action must occupy the pressed span:\n${view.join('\n')}`)
+
+  vt.sendInput(`\x1b[<0;${submitColumn + 1};${submitRow + 1}m`)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.some(line => line.includes('Review your answer before submit')),
+    `the old flow's press must not Submit the queued flow:\n${view.join('\n')}`)
+  assert.ok(view.some(line => line.includes('✓ Review')), `the queued flow remains in Review:\n${view.join('\n')}`)
+
+  vt.sendInput('\r') // the queued Review remains open and can submit normally
+  await vt.waitForRender()
+  assert.deepEqual(await answers2, [{ id: 'same', selected: ['A'] }])
+  app.stop()
+})
+
 test('question: a press cannot transfer to the next question with a duplicate id (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
@@ -5401,10 +5580,12 @@ test('question: Esc between press and release cannot re-enter the free-text edit
   vt.sendInput('\x1b')
   vt.sendInput(`\x1b[<0;3;${pinnedRow + 1}m`)
   await vt.waitForRender()
-  // The flow must stay in the navigation state.
+  // The flow must stay in optionless navigation state, whose fullscreen
+  // action row exposes Edit and Cancel instead of the keyboard hint.
   const final = vt.getViewport()
-  assert.ok(final.some(line => line.includes('↵ edit')), `the flow must stay in the navigation state:\n${final.join('\n')}`)
-  assert.ok(!final.some(line => line.includes('↵ confirm')), 'the release must not re-enter the edit')
+  assert.ok(final.some(line => line.includes('Edit [Enter]')), `the flow must stay in the navigation state:\n${final.join('\n')}`)
+  assert.ok(final.some(line => line.includes('Cancel [Esc]')), `navigation must retain its flow cancellation:\n${final.join('\n')}`)
+  assert.ok(!final.some(line => line.includes('Leave edit [Esc]')), 'the release must not re-enter the edit')
   answers.catch(() => {})
   app.stop()
 })

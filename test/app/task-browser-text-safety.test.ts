@@ -177,6 +177,17 @@ function startHarness(options: HarnessOptions = {}): Harness {
   return { vt, app, tasks, observation, interrupts, notices, stream: () => written.join('') }
 }
 
+async function clickFullscreenAction(vt: VirtualTerminal, label: string): Promise<void> {
+  const viewport = vt.getViewport()
+  const row = viewport.findIndex(line => line.includes(label))
+  assert.ok(row >= 0, `Fullscreen action '${label}' must be painted:\n${viewport.join('\n')}`)
+  const x = viewport[row]!.indexOf(label)
+  assert.ok(x >= 0)
+  vt.sendInput(`\x1b[<0;${x + 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<0;${x + 1};${row + 1}m`)
+  await vt.waitForRender()
+}
+
 /** Open `/tasks`, select the first row and confirm the S → Y Stop chord. */
 async function openBrowserAndStop(harness: Harness): Promise<void> {
   harness.tasks.openTasksBrowser('full')
@@ -254,6 +265,29 @@ test('a benign label is unchanged, so the hostile-byte guard is not vacuous', as
   assert.ok(!stream.includes('\x1b[2J'), 'a benign Stop emits no full-screen erase')
   assert.ok(stream.includes('stopping plain build'), 'the benign notice is painted verbatim')
   assert.deepEqual(harness.observation.stops, ['job-a'])
+  harness.app.stop()
+})
+
+test('Fullscreen SGR Stop and Confirm reach the original TaskRuntime sink once', async () => {
+  const harness = startHarness({ jobLabel: 'plain build' })
+  await flush()
+  harness.app.setFullscreen(true)
+  await harness.vt.waitForRender()
+  harness.tasks.openTasksBrowser('full')
+  await harness.vt.waitForRender()
+
+  await clickFullscreenAction(harness.vt, 'Stop [')
+  assert.deepEqual(harness.observation.stops, [], 'Stop only opens the existing pending state')
+  await clickFullscreenAction(harness.vt, 'Cancel [Esc]')
+  assert.deepEqual(harness.observation.stops, [], 'mouse Cancel never reaches the Observation sink')
+
+  await clickFullscreenAction(harness.vt, 'Stop [')
+  await clickFullscreenAction(harness.vt, 'Confirm stop [Y]')
+  await flush()
+  await harness.vt.waitForRender()
+  assert.deepEqual(harness.observation.stops, ['job-a'], 'Confirm dispatches the original Stop exactly once')
+  assert.ok(harness.notices.some(notice => notice.text === 'stopping plain build'),
+    'the TaskRuntime keeps its original success notice')
   harness.app.stop()
 })
 
@@ -336,13 +370,14 @@ test('a superseded parent subject never dispatches the selected child Stop', asy
     subjectCurrent: () => current,
   })
   await flush()
+  harness.app.setFullscreen(true)
+  await harness.vt.waitForRender()
   harness.tasks.openTasksBrowser('full')
   await harness.vt.waitForRender()
-  harness.vt.sendInput('S')
-  await harness.vt.waitForRender()
+  await clickFullscreenAction(harness.vt, 'Stop [')
   // The owner generation moves between arming and confirming the Stop.
   current = false
-  harness.vt.sendInput('y')
+  await clickFullscreenAction(harness.vt, 'Confirm stop [Y]')
   await flush()
   await harness.vt.waitForRender()
   assert.deepEqual([...harness.interrupts], [],

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { visibleWidth } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { TaskBrowserPanel } from '../../src/tui/panels/task-panel.ts'
 import type { TaskPanelItem } from '../../src/app/surface/task-presentation.ts'
 
@@ -197,7 +197,7 @@ test('search mode renders its own hint — query actions, never the task actions
     mode: 'full', enableSearch: true, header: 'Tasks',
   }, () => {}, () => {}, () => {})
   panel.handleInput('/')
-  const view = panel.render(100).join('\n')
+  const view = panel.render(100).map(stripTerminalSequences).join('\n')
   // D8 keeps the real Escape outcome last and highest-priority; low-priority
   // query help drops before it when the one-line hint is constrained.
   const searchHint = 'Enter open · ↑↓ select · ←→ edit · Shift+Tab type · type to filter · Esc back'
@@ -341,9 +341,9 @@ test('Full search mode: Shift+Tab cycles the type filter backward without becomi
 
 test('Full Task Center hint advertises the management verbs without N/T/R', () => {
   const panel = new TaskBrowserPanel([job('job:a')], 10,
-    { mode: 'full', enableSearch: true, header: 'Tasks' }, () => {}, () => {}, () => {})
-  const view = panel.render(100).join('\n')
-  for (const verb of ['/ search', 'a scope', 'Shift+Tab type', 's stop', 'Esc close']) {
+    { mode: 'full', enableSearch: true, header: 'Tasks', mouseActionsEnabled: () => true }, () => {}, () => {}, () => {})
+  const view = panel.render(100).map(stripTerminalSequences).join('\n')
+  for (const verb of ['/ search', 'a scope', 'Stop [', 'Esc close']) {
     assert.ok(view.includes(verb), `Full hint must advertise '${verb}':\n${view}`)
   }
   for (const stale of ['N next running', 'T Task Center', 'R refresh']) {
