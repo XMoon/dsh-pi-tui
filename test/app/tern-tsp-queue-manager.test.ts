@@ -38,6 +38,7 @@ import {
   sendActivate,
   sendSelect,
   wireNodes,
+  wireTextPerFrame,
   type WireNode,
 } from '../support/tsp-picker-wire.ts'
 
@@ -603,9 +604,13 @@ test('native Queue: a hostile PASTE in the live editor is sanitized before the w
     notify: () => {},
     textOf: content => queueTextOf(content as readonly ContentBlock[]),
   })
-  const presenter = new TspQueueManager({
+  const frames: Node[] = []
+  let presenter!: TspQueueManager
+  presenter = new TspQueueManager({
     controller,
-    render: () => {},
+    // Every synchronous onChanged frame is captured: the paste must be safe
+    // even BEFORE the presenter's post-apply normalization runs.
+    render: () => { frames.push(presenter.renderLayer() as Node) },
     canInteract: () => true,
     queueOpenKeys: () => ['alt+i'],
     notify: () => {},
@@ -623,18 +628,40 @@ test('native Queue: a hostile PASTE in the live editor is sanitized before the w
   } as never)
   assert.equal(controller.view().draft?.includes('\u001b[2J'), false, 'the edited draft stores safe text')
   assert.equal(controller.view().draft?.includes(']52;'), false)
-  const layer = presenter.renderLayer()
-  assert.ok(layer !== undefined)
-  let editorText = ''
-  for (const root of View.from({ layer }).regions) {
-    const walk = (node: typeof root): void => {
-      if (node === undefined) return
-      if (node.kind === 'editor' && typeof node.props['text'] === 'string') editorText = node.props['text']
-      for (const child of node.children) walk(child)
+  assert.ok(frames.length > 0, 'the paste produced at least one synchronous editor frame')
+  const editorTexts: string[] = []
+  for (const layer of frames) {
+    for (const root of View.from({ layer }).regions) {
+      const walk = (node: typeof root): void => {
+        if (node === undefined) return
+        if (node.kind === 'editor' && typeof node.props['text'] === 'string') editorTexts.push(node.props['text'])
+        for (const child of node.children) walk(child)
+      }
+      walk(root)
     }
-    walk(root)
   }
-  assert.notEqual(editorText, '', 'the editor node is present')
-  assert.equal(editorText.includes('\u001b[2J'), false, 'the editor wire text never carries a CSI clear')
-  assert.equal(editorText.includes(']52;'), false, 'the editor wire text never carries OSC 52')
+  assert.ok(editorTexts.length > 0, 'the editor node is present in the synchronous frames')
+  for (const text of editorTexts) {
+    assert.equal(text.includes('\u001b[2J'), false, 'EVERY editor frame excludes the CSI clear')
+    assert.equal(text.includes(']52;'), false, 'EVERY editor frame excludes OSC 52')
+  }
+})
+
+
+test('native Queue: a REAL bracketed paste is safe in every committed editor frame', async (t) => {
+  const m = await mounted(t, [TEXT_ONE])
+  m.controller.open()
+  m.controller.startEdit('occ-1')
+  await waitUntil('the Edit page', () => sheetNode(m.pane, 'editor') !== undefined)
+  const before = m.pane.frames().length
+  m.pane.key('\u001b[200~pasted\u001b[2J \u001b]52;c;ZXZpbA==\u0007 text\u001b[201~')
+  await waitUntil('the pasted text reaches the draft', () => m.controller.view().draft?.includes('pasted') === true)
+  await settle(50)
+  const perFrame = wireTextPerFrame(m.pane).slice(before)
+  assert.ok(perFrame.length > 0, 'the paste committed at least one frame')
+  for (const texts of perFrame) {
+    const all = texts.join('\n')
+    assert.equal(all.includes('\u001b[2J'), false, 'no committed frame carries the pasted CSI clear')
+    assert.equal(all.includes(']52;'), false, 'no committed frame carries the pasted OSC 52')
+  }
 })
