@@ -290,24 +290,32 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             source: 'enter',
           })
         },
-                 onUseDirectory: (workspaceId, canonicalPath) => {
-            if (!state.disposed) request.onUseDirectory?.(workspaceId, canonicalPath)
-          },
-         onNewSession: (workspaceId, settle) => {
-           // The shared ReadOwner owns ONE folder-New transaction for both
-           // renderers: it invokes the existing /new body and retires this
-           // lease only after the transition commits. The optional ack is the
-           // ONE per-operation settlement (a notice is never a settlement).
-           if (!state.disposed) request.onNewSession?.(workspaceId, settle)
-         },
-         onAddDirectory: (path, settle) => {
-           if (!state.disposed) request.onAddDirectory?.(path, settle)
-         },
-         onClose: () => {
+        onClose: () => {
           if (state.disposed) return
           release(state, false)
           closeAfterCommit()
         },
+        // The capability crossing keeps its OPTIONALITY: a missing owner must
+        // never become a wrapper the panel can paint but nobody can settle.
+        ...(request.onUseDirectory === undefined ? {} : {
+          onUseDirectory: (workspaceId: string, canonicalPath: string) => {
+            if (!state.disposed) request.onUseDirectory?.(workspaceId, canonicalPath)
+          },
+        }),
+        ...(request.onNewSession === undefined ? {} : {
+          onNewSession: (workspaceId: string, settle?: (outcome: import('../../app/command/session-browser-presentation.ts').SessionBrowserNewSessionSettlement) => void) => {
+            // The shared ReadOwner owns ONE folder-New transaction for both
+            // renderers: it invokes the existing /new body and retires this
+            // lease only after the transition commits. The optional ack is the
+            // ONE per-operation settlement (a notice is never a settlement).
+            if (!state.disposed) request.onNewSession?.(workspaceId, settle)
+          },
+        }),
+        ...(request.onAddDirectory === undefined ? {} : {
+          onAddDirectory: (path: string, settle: (outcome: import('../../app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => {
+            if (!state.disposed) request.onAddDirectory?.(path, settle)
+          },
+        }),
         initialMode: intent?.searchRequested === true ? 'search' : 'browse',
         initialBrowseScope: intent?.scope === 'all' || subject.currentSessionId === undefined ? 'all' : 'current',
        initialDirectoryChooser: request.initialDirectoryChooser,

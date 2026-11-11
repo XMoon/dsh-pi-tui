@@ -181,7 +181,7 @@ import {
 } from './tui/panels/settings-workspace-panel.ts'
 import type { ModelsInitialView } from './tui/panels/models-workspace-page.ts'
 import type { AccountInitialView } from './tui/panels/account-workspace-page.ts'
-import { SessionWorkspacePanel, type SessionWorkspaceActivityFacts } from './tui/panels/session-workspace-panel.ts'
+import { SessionWorkspacePanel, type SessionWorkspaceActivityFacts, type SessionWorkspacePanelHost } from './tui/panels/session-workspace-panel.ts'
 import { ScheduleWorkspacePanel } from './tui/schedule/workspace-panel.ts'
 import type {
   SessionBrowserReadSnapshot,
@@ -26717,7 +26717,7 @@ export class TuiApp {
     // still notifies it exactly once through the lease's close path.
     let closingFromOwner = false
     let disposed = false
-    const panel = new SessionWorkspacePanel({
+    const panelHost: SessionWorkspacePanelHost = {
       rows: () => this.terminal.rows,
       columns: () => this.terminal.columns,
       requestRender: () => this.requestRender(),
@@ -26728,19 +26728,29 @@ export class TuiApp {
       onResume: (sessionId) => {
         if (this.workspaceLease === record) options.onResume(sessionId)
       },
-      onUseDirectory: (workspaceId, canonicalPath) => {
-        if (this.workspaceLease === record) options.onUseDirectory?.(workspaceId, canonicalPath)
-      },
-      onNewSession: (workspaceId, settle) => {
-        if (this.workspaceLease === record) options.onNewSession?.(workspaceId, settle)
-      },
-      onAddDirectory: (path, settle) => {
-        if (this.workspaceLease === record) options.onAddDirectory?.(path, settle)
-      },
       onClose: () => {
         record.close()
       },
-    }, {
+      // Optional capabilities stay OPTIONAL all the way to the panel: an
+      // always-present wrapper would paint an action whose owner can never
+      // settle it (a permanently pending Add/New).
+      ...(options.onUseDirectory === undefined ? {} : {
+        onUseDirectory: (workspaceId: string, canonicalPath: string) => {
+          if (this.workspaceLease === record) options.onUseDirectory?.(workspaceId, canonicalPath)
+        },
+      }),
+      ...(options.onNewSession === undefined ? {} : {
+        onNewSession: (workspaceId: string, settle?: Parameters<NonNullable<SessionWorkspacePanelHost['onNewSession']>>[1]) => {
+          if (this.workspaceLease === record) options.onNewSession?.(workspaceId, settle)
+        },
+      }),
+      ...(options.onAddDirectory === undefined ? {} : {
+        onAddDirectory: (path: string, settle: (outcome: import('./app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => {
+          if (this.workspaceLease === record) options.onAddDirectory?.(path, settle)
+        },
+      }),
+    }
+    const panel = new SessionWorkspacePanel(panelHost, {
       initialMode: options.initialMode,
       initialBrowseScope: options.initialBrowseScope,
       initialDirectoryChooser: options.initialDirectoryChooser,
