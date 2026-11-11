@@ -17,18 +17,70 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`
 }
 
-async function runShell(client, mode, command, marker, terminal, label) {
-  client.send(mode)
+/**
+ * Submit one Shell command through the REAL editor transitions. This helper
+ * proves only that the Client admitted the command (prompt → shell mode →
+ * local mode → body → Enter); it never waits for a painted result. Every
+ * caller proves the authoritative settlement itself: a retained local card
+ * for `!!` (and a retained cancelled `!` diagnostic) or this run's Host
+ * Session `user/message` for a committed `!`.
+ */
+async function submitShellCommand(client, mode, command, label) {
+  await waitForComposerMode(client, 'prompt', `${label} prompt preparation`)
+  // `!`/`!!` are editor MODES, not text: send each key alone and wait for the
+  // painted composer before the next byte, so a coalesced chunk can never
+  // insert the prefix as literal draft text.
+  client.send('!')
+  await waitForComposerMode(client, '!', `${label} shell-mode activation`)
+  if (mode === '!!') {
+    client.send('!')
+    await waitForComposerMode(client, '!!', `${label} shell-local activation`)
+  }
   client.send(command)
   client.send('\r')
-  // The marker also rides the painted COMMAND ROW, so a plain viewport wait
-  // returns before the command's real output exists. Only output painted
-  // OUTSIDE the composer proves the run produced it.
-  await waitForScreenOutsideComposer(client, marker, `${label} output`, 60_000)
+}
+
+/**
+ * The terminal outcome of THIS run's retained local Shell Card. The header
+ * carries the run's unique starting marker, the next row is the `$ command`
+ * row and the settlement is the SAME card's outcome row — never any `exit`
+ * text painted by an earlier card. Only for `!!` and a cancelled `!`; a
+ * committed `!` deletes its card and must be proven from the Host Session.
+ */
+async function waitForLocalShellSettled(client, uniqueMarker, expectedOutcome, label) {
   try {
-    await client.waitForScreen(terminal, `${label} terminal fact`, 60_000)
+    await waitForCondition(async () => {
+      const lines = await client.viewport()
+      const indexes = lines.flatMap((line, index) => line.includes('Shell') && line.includes(uniqueMarker) ? [index] : [])
+      if (indexes.length !== 1) return false
+      const index = indexes[0]
+      return lines[index + 1]?.includes('$ ') === true
+        && lines[index + 2]?.includes(expectedOutcome) === true
+    }, `${label} settled local Shell Card`, 30_000)
   } catch (error) {
-    throw new SplitSmokeAssertionError(`${label} terminal fact ${terminal} was not painted: ${String(error)}; frameTail=${(await client.viewport()).slice(-18).join('\\n')}`)
+    throw new SplitSmokeAssertionError(`${label} local Shell Card never settled as ${expectedOutcome}: ${String(error)}; frameTail=${(await client.viewport()).slice(-18).join('\\n')}`)
+  }
+}
+
+/**
+ * Expand the settled local Shell Card through the REAL Ctrl+O transcript
+ * action and assert its retained body facts. Only for `!!`; a committed `!`
+ * keeps its result in the Host Session instead. The folded state is restored
+ * on both the pass and the failure path.
+ */
+async function assertExpandedLocalShellFacts(client, expectedFacts, label) {
+  client.send('\x0f')
+  try {
+    await waitForCondition(async () => {
+      const frame = (await client.viewport()).join('\n')
+      return expectedFacts.every(fact => frame.includes(fact))
+    }, `${label} expanded Shell facts`, 30_000)
+    const frame = (await client.viewport()).join('\n')
+    for (const fact of expectedFacts) {
+      assert(frame.includes(fact), `${label} expanded fact missing ${fact}: ${frame}`)
+    }
+  } finally {
+    client.send('\x0f')
   }
 }
 
@@ -126,23 +178,6 @@ async function completeMultilineFromTui(client, mode, bodyLines, candidate, forb
   client.send('\x03')
   await waitForComposerMode(client, 'prompt', `${label} return to prompt mode`)
 }
-
-/**
- * Wait for a marker that must appear OUTSIDE the composer. A marker string is
- * also part of the painted COMMAND ROW before submission, so a plain
- * waitForScreen() can match the draft instead of the command's real output.
- */
-async function waitForScreenOutsideComposer(client, needle, label, timeoutMs = 30_000) {
-  const started = Date.now()
-  while (Date.now() - started < timeoutMs) {
-    const viewport = await client.viewport()
-    const composer = (await client.composerText()) ?? ''
-    if (viewport.join('\n').includes(needle) && !composer.includes(needle)) return
-    await new Promise(resolve => setTimeout(resolve, 50))
-  }
-  throw new SplitSmokeAssertionError(`${label}: ${needle} never appeared outside the composer: ${JSON.stringify(await client.composerText())}`)
-}
-
 
 /**
  * Accept the CURRENT completion offer after a Tab. Tab has exactly two
@@ -314,7 +349,7 @@ export async function runHostUserShellF1(context) {
     const initialEvents = hostSessionEvents(dshHome, sessionId) ?? []
     const hostMarker = 'F1_HOST_EXECUTION_20261109'
     const hostFacts = `printf '${hostMarker}\\n'; printf 'CWD=%s\\nHOME=%s\\nPATH=%s\\nF1_HOST_VARIABLE=%s\\n' "$PWD" "$HOME" "$PATH" "$F1_HOST_VARIABLE_20261109"; cat host-only.txt; f1-host-command`
-    await runShell(clientA, '!', hostFacts, hostMarker, 'exit 0', 'F1 bypass !')
+    await submitShellCommand(clientA, '!', hostFacts, 'F1 bypass !')
     await waitForHostSessionEventAfter(dshHome, sessionId, initialEvents.length,
       event => event.type === 'user/message' && JSON.stringify(event).includes(hostMarker),
       'F1 ! Host result Session write', 15_000)
@@ -331,6 +366,7 @@ export async function runHostUserShellF1(context) {
     const bangResultRows = afterBang.filter(text => text.includes(hostMarker))
     assert(bangResultRows.length === 1, '! writes the drained Host result to the exact Session once')
     const bangResult = bangResultRows[0] ?? ''
+    assert(bangResult.includes('[exit 0]'), '! Session result carries the real Host terminal outcome')
     assert(bangResult.includes(hostMarker) && bangResult.includes(canonicalHostDir), '! result came from the exact Host Session cwd')
     assert(bangResult.includes(hostHome) && bangResult.includes(hostPath) && bangResult.includes('F1_HOST_VARIABLE=host-value'),
       '! result contains the real Host HOME/PATH and Host-only variable')
@@ -342,29 +378,37 @@ export async function runHostUserShellF1(context) {
 
     const localMarker = 'F1_CARD_ONLY_20261109'
     const beforeBangBang = afterBangEvents.length
-    await runShell(clientA, '!!', `printf '${localMarker}\\n'; pwd; printf 'HOME=%s\\n' "$HOME"`, localMarker, 'exit 0', 'F1 bypass !!')
+    await submitShellCommand(clientA, '!!', `printf '${localMarker}\\n'; pwd; printf 'HOME=%s\\n' "$HOME"`, 'F1 bypass !!')
+    await waitForLocalShellSettled(clientA, localMarker, '[exit 0]', 'F1 bypass !!')
     const afterBangBangEvents = hostSessionEvents(dshHome, sessionId) ?? []
     assert(afterBangBangEvents.length === beforeBangBang, '!! has no Session or model write')
     assert(!hostUserTexts(afterBangBangEvents).some(text => text.includes(localMarker)), '!! output remains only on its card')
-    await runShell(clientA, '!', `printf '${bypassMarker}\\n'; printf '${bypassMarker}\\n' > ${shellQuote(bypassOutside)}`,
-      bypassMarker, 'exit 0', 'F1 explicit Host bypass policy')
-    assert(readFileSync(bypassOutside, 'utf8') === `${bypassMarker}\n`, 'Host bypass writes to the worktree-root sibling outside its Session workspace')
-    bypassProbeOwned = true
-    await waitForHostSessionEventAfter(dshHome, sessionId, afterBangBangEvents.length,
+    await submitShellCommand(clientA, '!', `printf '${bypassMarker}\\n'; printf '${bypassMarker}\\n' > ${shellQuote(bypassOutside)}`,
+      'F1 explicit Host bypass policy')
+    const bypassEvent = await waitForHostSessionEventAfter(dshHome, sessionId, afterBangBangEvents.length,
       event => event.type === 'user/message' && JSON.stringify(event).includes(bypassMarker),
       'F1 bypass outside-workspace result Session write')
+    const bypassText = hostUserTexts([bypassEvent])[0] ?? ''
+    assert(bypassText.includes(bypassMarker) && bypassText.includes('[exit 0]'),
+      'the outside-workspace ! result is committed to the Session with its terminal outcome')
+    assert(readFileSync(bypassOutside, 'utf8') === `${bypassMarker}\n`, 'Host bypass writes to the worktree-root sibling outside its Session workspace')
+    bypassProbeOwned = true
     const beforeSignal = hostUserTexts(hostSessionEvents(dshHome, sessionId) ?? [])
     const signalMarker = 'F1_SIGTERM_20261109'
-    await runShell(clientA, '!!', `printf '${signalMarker}\\n'; kill -TERM "$BASHPID"`, signalMarker, 'signal SIGTERM', 'F1 signal outcome')
+    await submitShellCommand(clientA, '!!', `printf '${signalMarker}\\n'; kill -TERM "$BASHPID"`, 'F1 signal outcome')
+    await waitForLocalShellSettled(clientA, signalMarker, '[signal SIGTERM]', 'F1 signal outcome')
     const afterSignal = hostUserTexts(hostSessionEvents(dshHome, sessionId) ?? [])
     assert(afterSignal.length === beforeSignal.length, 'signal outcome from !! adds no Session/model write')
 
     const beforeNonzero = hostSessionEvents(dshHome, sessionId) ?? []
     const nonzeroMarker = 'F1_EXIT_7_20261109'
-    await runShell(clientA, '!', `printf '${nonzeroMarker}\\n'; exit 7`, nonzeroMarker, 'exit 7', 'F1 nonzero exit')
-    await waitForHostSessionEventAfter(dshHome, sessionId, beforeNonzero.length,
+    await submitShellCommand(clientA, '!', `printf '${nonzeroMarker}\\n'; exit 7`, 'F1 nonzero exit')
+    const nonzeroEvent = await waitForHostSessionEventAfter(dshHome, sessionId, beforeNonzero.length,
       event => event.type === 'user/message' && JSON.stringify(event).includes(nonzeroMarker),
       'F1 nonzero Host result Session write')
+    const nonzeroText = hostUserTexts([nonzeroEvent])[0] ?? ''
+    assert(nonzeroText.includes(nonzeroMarker) && nonzeroText.includes('[exit 7]'),
+      'the nonzero ! result is committed to the Session with its exact exit code')
     await clientA.waitForScreen('f1-shell answer', 'F1 nonzero Host result follow-up', 30_000)
 
     // Raw Bash semantics: the official one-shot executor runs
@@ -388,22 +432,21 @@ export async function runHostUserShellF1(context) {
       `printf 'F1_STREAM_OUT_20261110\\n'`,
       `printf 'F1_STREAM_ERR_20261110\\n' >&2`,
     ].join('; ')
-    await runShell(clientA, '!!', rawCommand, rawMarker, 'exit 0', 'F1 raw Bash $!/wait/FD semantics')
-    // The LAST fact printed by the command is the settle witness: waiting for
-    // it (not for the command-row marker) proves every earlier fact rendered.
-    await waitForCondition(async () => (await clientA.viewport()).join('\\n').includes('F1_STREAM_ERR_20261110'),
-      'F1 raw Bash last stream fact', 30_000)
-    const rawFrame = (await clientA.viewport()).join('\\n')
-    for (const fact of [
+    await submitShellCommand(clientA, '!!', rawCommand, 'F1 raw Bash $!/wait/FD semantics')
+    await waitForLocalShellSettled(clientA, rawMarker, '[exit 0]', 'F1 raw Bash $!/wait/FD semantics')
+    // The folded card paints only the terminal outcome; the retained stdout,
+    // stderr and exit facts live in the card body. Expand the settled card
+    // through the real transcript action, assert every fact, then restore the
+    // folded state for the remaining cases.
+    await assertExpandedLocalShellFacts(clientA, [
       'F1_WAIT_STATUS=0',
       'F1_WAIT_PID=numeric',
       'F1_WAIT_BG=7',
       'F1_WAIT_SIG=143',
       'F1_STREAM_OUT_20261110',
       'F1_STREAM_ERR_20261110',
-    ]) {
-      assert(rawFrame.includes(fact), `F1 raw Bash fact ${fact} is missing: ${rawFrame}`)
-    }
+    ], 'F1 raw Bash')
+    await waitForLocalShellSettled(clientA, rawMarker, '[exit 0]', 'F1 raw Bash folded restoration')
 
 
     const { client: clientB } = await scene.startC1Client('f1-shell-client-b', {
@@ -498,18 +541,25 @@ export async function runHostUserShellF1(context) {
       'the stale Shell result is never retargeted into the newly selected Session')
 
     // The remaining probes act on Session A, so return Client A to it.
+    const returnStatusBaseline = clientA.records.filter(record => record.m4b2s === 'surface-status').length
     clientA.send(`/resume ${sessionId}\r`)
-    await clientA.waitFor(
-      record => record.m4b2s === 'surface-status' && record.sessionOpen === true && record.openSessionId === sessionId,
-      'F1 Client A returns to Session A after the scope switch',
-      60_000,
-    )
+    // `/resume <id>` opens the Session Browser, so a bare `waitFor` can match
+    // the historical Session-A status record from the INITIAL attach and let
+    // this case type into the still-open Browser search. Require a NEW status
+    // record from THIS resume, and wait for the restored regular prompt (the
+    // Browser closed) before touching the editor.
+    await waitForCondition(() => clientA.records
+      .filter(record => record.m4b2s === 'surface-status')
+      .slice(returnStatusBaseline)
+      .some(record => record.sessionOpen === true && record.openSessionId === sessionId),
+    'F1 Client A returns to Session A after the scope switch', 60_000)
+    await waitForComposerMode(clientA, 'prompt', 'F1 Client A prompt restored after the resume')
     // A session commit repaints the seat; prove the editor accepts input again
     // with a harmless round trip instead of assuming the painted glyph is live.
     clientA.send('x')
     await waitForComposerText(clientA, 'x', 'F1 Client A editor accepts input after the resume')
     clientA.send('\x7f')
-    await waitForComposerMode(clientA, 'prompt', 'F1 Client A prompt restored after the resume')
+    await waitForComposerMode(clientA, 'prompt', 'F1 Client A prompt restored after the resume round trip')
 
     // Start a confirmed Remote user-shell command, then drop only Client A's
     // real Gateway mux socket after its first output reaches the PTY. The
@@ -533,34 +583,38 @@ export async function runHostUserShellF1(context) {
     await waitForComposerMode(clientA, '!', 'F1 disconnect shell-context activation')
     clientA.send('!')
     await waitForComposerMode(clientA, '!!', 'F1 disconnect shell-local activation')
-    const disconnectCommand = `printf x >> ${shellQuote(disconnectCounter)}; printf '%s\\n' "$BASHPID" > ${shellQuote(disconnectPidPath)}; printf '${disconnectMarker}\\n'; sleep 30; printf finished > ${shellQuote(disconnectFinish)}`
+    // The marker is printed FIRST so it rides the folded card's header (the
+    // header truncates the command to one row), which lets the case locate
+    // THIS run's card after the transport drop. The pid file is the
+    // authoritative "the Host command really started" fact.
+    const disconnectCommand = `printf '${disconnectMarker}\\n'; printf x >> ${shellQuote(disconnectCounter)}; printf '%s\\n' "$BASHPID" > ${shellQuote(disconnectPidPath)}; sleep 30; printf finished > ${shellQuote(disconnectFinish)}`
     clientA.send(disconnectCommand)
     await waitForComposerText(clientA, 'printf x', 'F1 disconnect command draft')
     clientA.send('\r')
-    // The marker string also rides the painted COMMAND ROW (and can wrap, so a
-    // literal viewport scan is not reliable evidence). The pid file the command
-    // writes BEFORE its marker is the authoritative "the Host command really
-    // started" fact; wait for it before reading.
     await waitForCondition(() => existsSync(disconnectPidPath) && readFileSync(disconnectPidPath, 'utf8').trim() !== '',
       'F1 disconnect probe recorded its Host pid', 30_000)
     const shellPid = Number(readFileSync(disconnectPidPath, 'utf8').trim())
     assert(Number.isInteger(shellPid) && shellPid > 0, 'F1 disconnect probe recorded the Host Bash pid')
     clientA.signalBusiness('SIGUSR1')
     // The reconnected surface first has to be AUTHENTICATED: the status line
-    // legitimately shows `connection lost, retry #N` (and a transitional
-    // aborted card) while the transport is still re-establishing. Only after
-    // the new generation is live can the run's indeterminate outcome be
-    // presented, so that fact is awaited FIRST and the warning second.
+    // legitimately shows `connection lost, retry #N` and a `connecting`
+    // transitional record while the transport is still re-establishing. Only
+    // the CONNECTED record with a NEW numeric generation is that proof.
     await clientA.waitFor(record => record.m4b2s === 'surface-status'
+      && record.transport === 'connected'
+      && typeof record.generationId === 'number'
       && record.generationId !== disconnectGeneration
       && record.sessionOpen === true
       && record.openSessionId === sessionId,
     'F1 Client A authenticated reconnect generation', 120_000)
-    try {
-      await clientA.waitForScreen('do not retry automatically', 'F1 one-shot unknown-outcome warning', 30_000)
-    } catch (error) {
-      throw new SplitSmokeAssertionError(`F1 started-stream disconnect had no visible no-retry outcome: ${String(error)}; frameTail=${(await clientA.viewport()).slice(-18).join('\\n')}; latestStatus=${JSON.stringify(clientA.records.filter(record => record.m4b2s === 'surface-status').at(-1) ?? null)}`)
-    }
+    // The settled local card keeps the full unknown-outcome diagnostic in its
+    // retained body; the folded row paints only the first line. Prove THIS
+    // run's card settled, then expand it through the real Ctrl+O action.
+    await waitForLocalShellSettled(clientA, disconnectMarker, 'Host shell execution', 'F1 started-stream disconnect outcome')
+    await assertExpandedLocalShellFacts(clientA, [
+      'The command may have executed — do not retry automatically',
+    ], 'F1 one-shot unknown-outcome warning')
+    await waitForLocalShellSettled(clientA, disconnectMarker, 'Host shell execution', 'F1 disconnect outcome folded restoration')
     for (let attempt = 0; attempt < 200 && alive(shellPid); attempt += 1) {
       await new Promise(resolve => setTimeout(resolve, 50))
     }
@@ -574,29 +628,42 @@ export async function runHostUserShellF1(context) {
     // on A must not terminate B's independently managed process range.
     const childMarker = 'F1_CANCELLED_CHILD_DONE_20261109'
     const cancelFile = join(hostDir, 'cancelled-child-finished.txt')
+    const cancelAStarted = join(hostDir, 'f1-client-a-cancel-started.txt')
+    const cancelBStarted = join(hostDir, 'f1-client-b-cancel-started.txt')
+    assert(!existsSync(cancelFile) && !existsSync(cancelAStarted) && !existsSync(cancelBStarted),
+      'F1 cancellation barrier files start absent')
     const beforeClientBRuns = hostSessionEvents(dshHome, sessionId) ?? []
     await waitForComposerMode(clientA, 'prompt', 'F1 cancel prompt preparation')
     clientA.send('!')
     await waitForComposerMode(clientA, '!', 'F1 cancel shell-mode activation')
-    clientA.send(`printf 'F1_CLIENT_A_RUNNING_20261109\\n'; sleep 30; touch ${shellQuote(cancelFile)}; printf '${childMarker}\\n'`)
+    clientA.send(`printf 'F1_CLIENT_A_RUNNING_20261109\\n'; touch ${shellQuote(cancelAStarted)}; sleep 30; touch ${shellQuote(cancelFile)}; printf '${childMarker}\\n'`)
     await waitForComposerText(clientA, 'F1_CLIENT_A_RUNNING_20261109', 'F1 cancel command draft')
     clientA.send('\r')
-    await waitForScreenOutsideComposer(clientA, 'F1_CLIENT_A_RUNNING_20261109', 'F1 Client A active Host run')
     await waitForComposerMode(clientB, 'prompt', 'F1 independent Client B prompt preparation')
     clientB.send('!')
     await waitForComposerMode(clientB, '!', 'F1 independent Client B shell-mode activation')
-    clientB.send("printf 'F1_CLIENT_B_RUNNING_20261109\\n' >&2; sleep 2; printf 'F1_CLIENT_B_SURVIVED_20261109\\n'; printf 'F1_CLIENT_B_STDERR_20261109\\n' >&2")
+    clientB.send(`printf 'F1_CLIENT_B_RUNNING_20261109\\n' >&2; touch ${shellQuote(cancelBStarted)}; sleep 2; printf 'F1_CLIENT_B_SURVIVED_20261109\\n'; printf 'F1_CLIENT_B_STDERR_20261109\\n' >&2`)
     await waitForComposerText(clientB, 'F1_CLIENT_B_RUNNING_20261109', 'F1 independent Client B command draft')
     clientB.send('\r')
-    await waitForScreenOutsideComposer(clientB, 'F1_CLIENT_B_RUNNING_20261109', 'F1 Client B independent Host run')
+    // The two local cards only prove both Clients ADMITTED their commands. The
+    // Host-side started files prove both one-shot runs really began before Esc,
+    // so the cancellation cannot race a not-yet-started Host command.
+    await waitForCondition(() => existsSync(cancelAStarted) && existsSync(cancelBStarted),
+      'F1 both independent Host shells started', 30_000)
     clientA.send('\x1b')
-    await clientA.waitForScreen('aborted', 'F1 Client A Host run cancellation', 30_000)
-    await clientB.waitForScreen('F1_CLIENT_B_SURVIVED_20261109', 'F1 Client B remains unaffected', 30_000)
-    await clientB.waitForScreen('F1_CLIENT_B_STDERR_20261109', 'F1 Client B stderr is captured by the official collector', 30_000)
-    await clientB.waitForScreen('exit 0', 'F1 Client B Host run terminal fact', 30_000)
-    await waitForHostSessionEventAfter(dshHome, sessionId, beforeClientBRuns.length,
+    await waitForLocalShellSettled(clientA, 'F1_CLIENT_A_RUNNING_20261109', 'aborted', 'F1 Client A Host run cancellation')
+    const clientBEvent = await waitForHostSessionEventAfter(dshHome, sessionId, beforeClientBRuns.length,
       event => event.type === 'user/message' && JSON.stringify(event).includes('F1_CLIENT_B_SURVIVED_20261109'),
       'F1 Client B Session write')
+    const clientBText = hostUserTexts([clientBEvent])[0] ?? ''
+    assert(clientBText.includes('F1_CLIENT_B_SURVIVED_20261109')
+      && clientBText.includes('[stderr]')
+      && clientBText.includes('F1_CLIENT_B_STDERR_20261109')
+      && clientBText.includes('[exit 0]'),
+    'Client B ! result is committed with its stdout, stderr and terminal outcome')
+    assert(hostUserTexts(hostSessionEvents(dshHome, sessionId) ?? [])
+      .filter(text => text.includes('F1_CLIENT_B_SURVIVED_20261109')).length === 1,
+    'Client B ! result is written exactly once')
     await clientB.waitForScreen('f1-shell answer', 'F1 Client B Host result follow-up', 30_000)
     assert(!existsSync(cancelFile), 'cancelling Client A must terminate its command tree before the side effect')
 
@@ -616,40 +683,32 @@ export async function runHostUserShellF1(context) {
       `printf '${truncStderrTail}\\n' >&2`,
     ].join('; ')
     const beforeTrunc = hostSessionEvents(dshHome, sessionId) ?? []
-    // Do NOT use the generic runShell() terminal wait here: it waits for
-    // `exit 0`, which every earlier `!`/`!!` card in this transcript already
-    // paints. That wait can return on a STALE row, so the frame read next may
-    // belong to a transitional or previous card. This run's unique truncation
-    // text and its Session write are the only authority that the card settled.
+    // A committed `!` deletes its local card, so the visible frame is not an
+    // authority for its content. This run's unique truncated tail in the Host
+    // Session user/message is the only evidence that the bounded result landed.
     clientB.send('!')
     clientB.send(truncCommand)
     clientB.send('\r')
-    await clientB.waitForScreen(truncStderrTail, 'F1 bounded truncated output', 60_000)
     await waitForHostSessionEventAfter(dshHome, sessionId, beforeTrunc.length,
       event => event.type === 'user/message' && JSON.stringify(event).includes(truncTail),
       'F1 bounded truncated result Session write')
-    await waitForCondition(async () => {
-      const frame = (await clientB.viewport()).join('\\n')
-      return frame.includes('stdout truncated') && frame.includes('stderr truncated')
-    }, 'F1 settled truncated card markers', 30_000)
-    const truncFrame = (await clientB.viewport()).join('\\n')
-    assert(truncFrame.includes('stdout truncated') && truncFrame.includes('stderr truncated'),
-      `the settled card must mark both truncated streams truthfully: ${truncFrame}`)
-    const truncExitIndex = truncFrame.lastIndexOf('[exit 0]')
-    assert(truncExitIndex > truncFrame.indexOf('stdout truncated')
-      && truncExitIndex > truncFrame.indexOf('stderr truncated'),
-      `the truncation markers must precede the card's exit marker: ${truncFrame}`)
     const truncWrites = hostUserTexts(hostSessionEvents(dshHome, sessionId) ?? [])
       .filter(text => text.includes(truncTail))
     assert(truncWrites.length === 1, '! writes the bounded truncated result exactly once')
     const truncText = truncWrites[0] ?? ''
     assert(truncText.includes('stdout truncated') && truncText.includes('stderr truncated'),
       'the Session text explicitly represents both stream truncations')
+    assert(truncText.includes(truncTail) && truncText.includes(truncStderrTail),
+      'the Session text retains the bounded stdout and stderr tails')
     assert(truncText.includes('Host-local'), 'the Session text names the spill file as a Host-local fact')
     assert(!truncText.includes(truncBegin),
       'the bounded Session text keeps the tail, not the untruncated beginning')
     assert(Buffer.byteLength(truncText, 'utf8') < 200 * 1024,
       `the Session text stays bounded (got ${Buffer.byteLength(truncText, 'utf8')} bytes)`)
+    const truncExitIndex = truncText.lastIndexOf('[exit 0]')
+    assert(truncExitIndex > truncText.indexOf('stdout truncated')
+      && truncExitIndex > truncText.indexOf('stderr truncated'),
+      'the truncation markers must precede the Session message terminal outcome')
     await clientB.waitForScreen('f1-shell answer', 'F1 bounded truncated result follow-up', 30_000)
     assert(existsSync(join(hostDir, 'host-only.txt')), 'the F1 Host workspace survived the bounded run')
 
@@ -696,10 +755,14 @@ export async function runHostUserShellF1(context) {
     assert(existsSync(bypassOutside), 'the sibling directory is writable in the positive bypass phase')
     const beforeSandboxAllow = hostUserTexts(hostSessionEvents(dshHome, sandboxSessionId) ?? [])
     const sandboxAllow = 'F1_SANDBOX_ALLOW_20261109'
-    await runShell(sandboxClient, '!', `touch ${shellQuote(allowedPath)}; printf '${sandboxAllow}\\n'`, sandboxAllow, 'exit 0', 'F1 explicit Host sandbox policy')
-    await waitForHostSessionEventAfter(dshHome, sandboxSessionId, beforeSandboxAllow.length,
+    await submitShellCommand(sandboxClient, '!', `touch ${shellQuote(allowedPath)}; printf '${sandboxAllow}\\n'`,
+      'F1 explicit Host sandbox policy')
+    const sandboxAllowEvent = await waitForHostSessionEventAfter(dshHome, sandboxSessionId, beforeSandboxAllow.length,
       event => event.type === 'user/message' && JSON.stringify(event).includes(sandboxAllow),
       'F1 sandbox allow Session write')
+    const sandboxAllowText = hostUserTexts([sandboxAllowEvent])[0] ?? ''
+    assert(sandboxAllowText.includes(sandboxAllow) && sandboxAllowText.includes('[exit 0]'),
+      'the sandbox allow ! result is committed to the Session with its terminal outcome')
     await sandboxClient.waitForScreen('f1-shell answer', 'F1 sandbox allow Host follow-up', 30_000)
     const sandboxPolicy = await waitForC1WorkEvent(
       sandboxHostWorkRoot,
@@ -713,11 +776,14 @@ export async function runHostUserShellF1(context) {
     const beforeSandboxDeny = hostUserTexts(hostSessionEvents(dshHome, sandboxSessionId) ?? [])
     const sandboxDeny = 'F1_SANDBOX_DENY_ATTEMPT_20261109'
     assert(!existsSync(deniedPath), 'the sandbox confinement target remains absent before the denied write')
-    await runShell(sandboxClient, '!!', `printf '${sandboxDeny}\\n'; touch ${shellQuote(deniedPath)}`,
-      sandboxDeny, 'exit 1', 'F1 sandbox outside-workspace denial')
-    const denialFrame = (await sandboxClient.viewport()).join('\\n')
-    assert(denialFrame.includes(sandboxDeny) && denialFrame.includes('sandbox denied') && denialFrame.includes('exit 1'),
-      `the Host sandbox must present its real denied-write classification and command result: ${(await sandboxClient.viewport()).slice(-18).join('\\n')}`)
+    await submitShellCommand(sandboxClient, '!!', `printf '${sandboxDeny}\\n'; touch ${shellQuote(deniedPath)}`,
+      'F1 sandbox outside-workspace denial')
+    await waitForLocalShellSettled(sandboxClient, sandboxDeny, '[exit 1]', 'F1 sandbox outside-workspace denial')
+    // The folded card only paints the terminal outcome; the denial
+    // classification and the attempted command live in the retained body.
+    await assertExpandedLocalShellFacts(sandboxClient, [sandboxDeny, 'sandbox denied', '[exit 1]'],
+      'F1 sandbox outside-workspace denial')
+    await waitForLocalShellSettled(sandboxClient, sandboxDeny, '[exit 1]', 'F1 sandbox denial folded restoration')
     const afterSandboxDeny = hostUserTexts(hostSessionEvents(dshHome, sandboxSessionId) ?? [])
     assert(afterSandboxDeny.length === beforeSandboxDeny.length, 'the sandbox denial !! card adds no Session/model write')
     assert(!existsSync(deniedPath), 'Host sandbox blocked a write to the positively writable worktree-root sibling')
