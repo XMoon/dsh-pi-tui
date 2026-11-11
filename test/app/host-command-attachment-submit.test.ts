@@ -25,6 +25,7 @@ import { createSessionOwnershipCore } from '../../src/app/session/ownership-core
 import { createSessionScopeAuthority } from '../../src/app/session/scope.ts'
 import { DraftFileStore } from '../../src/client/media/attachment/file-draft.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
+import { consumeDraftAttachments as consumeReferencedAttachments } from '../../src/client/media/draft-attachments.ts'
 import { probeAttachment } from '../../src/client/media/attachment/intake.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import type { HostCommandClaim } from '../../src/commands.ts'
@@ -145,14 +146,11 @@ function startHarness(options: { readonly sessionId?: string } = {}): Harness {
   const images = new DraftImageStore()
   const files = new DraftFileStore()
   const descriptors = new Map<string, HostDescriptor>()
+  // The REAL consumption primitive (pin-aware). A hand-rolled remove here
+  // would replace the exact primitive under review in the plain-prompt path.
   const consumeAttachments = (text: string): void => {
     consumed += 1
-    const current = {
-      images: [...images.values()].filter(image => text.includes(image.placeholder)),
-      files: [...files.values()].filter(file => text.includes(file.placeholder)),
-    }
-    for (const image of current.images) images.remove(image.id)
-    for (const file of current.files) files.remove(file.id)
+    consumeReferencedAttachments(text, images, files)
   }
   const runtimeSurface: SubmissionRuntimeSurface = {
     withWriter: async (_scope, task) => task(),
@@ -742,4 +740,36 @@ test('the final declaration uses the frozen attachment fact, not the live draft 
   assert.match(harness.notices.join('\n'), /does not accept attachments/,
     'the final declaration refusal is surfaced from the frozen fact')
   assert.equal(harness.draftText(), line, 'the refused line is restored for correction')
+})
+
+test('the draft stores retire a consumed draft only after the last reservation releases', () => {
+  const files = new DraftFileStore()
+  const file = files.add({
+    name: 'shared.bin',
+    byteLength: 3,
+    source: {
+      type: 'path',
+      path: '/fixture/shared.bin',
+      fingerprint: { dev: 1n, ino: 1n, size: 3n, mtimeNs: 1n },
+    },
+  })
+  const images = new DraftImageStore()
+  const image = images.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
+  const releaseFileA = files.pinReferenced(file.placeholder)
+  const releaseFileB = files.pinReferenced(file.placeholder)
+  const releaseImageA = images.pinReferenced(image.placeholder)
+  const releaseImageB = images.pinReferenced(image.placeholder)
+  consumeReferencedAttachments(`${file.placeholder} ${image.placeholder}`, images, files)
+  assert.equal(files.get(file.id), file, 'a consumed FILE still reserved by another gesture survives')
+  assert.equal(images.get(image.id), image, 'a consumed IMAGE still reserved by another gesture survives')
+  releaseFileA()
+  releaseImageA()
+  consumeReferencedAttachments(`${file.placeholder} ${image.placeholder}`, images, files)
+  assert.equal(files.get(file.id), file, 'one remaining reservation still keeps the FILE')
+  assert.equal(images.get(image.id), image, 'one remaining reservation still keeps the IMAGE')
+  releaseFileB()
+  releaseImageB()
+  consumeReferencedAttachments(`${file.placeholder} ${image.placeholder}`, images, files)
+  assert.equal(files.get(file.id), undefined, 'the last released reservation lets the consumed FILE retire')
+  assert.equal(images.get(image.id), undefined, 'the last released reservation lets the consumed IMAGE retire')
 })
