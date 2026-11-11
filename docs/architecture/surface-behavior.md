@@ -339,6 +339,23 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   Session. `New session` on a Folder reuses the existing `/new` transaction with
   that `workspaceId`, keeps the old Session until the commit, reports a refusal,
   and retires the Browser only after a committed switch.
+- **Only a proven PRE-CREATE Workspace refusal opens recovery navigation.** A
+  `/new` whose Host `resolveWorkspace` refuses (the semantic port's typed
+  `refused`) opens the same Browser's full Workspace tree after the failed
+  transaction settles and its single-flight releases; the old Session, its
+  Turn, draft and next-create intent are untouched while the user browses, and
+  a Session is created only by the user's explicit `New session` on the chosen
+  Folder (the existing Folder-New transaction owns that create). The sessionless
+  first ordinary submit follows the same admission only after the submission
+  owner restored the exact draft and its attachment references: it enters the
+  existing inline Host editor prefilled with the refused proposal, Verify only
+  commits the next-create Workspace, and the user must submit again for the
+  first Session to be created. `unavailable` (a disconnected or unreadable Host)
+  and `superseded` (a newer generation or selection) never navigate, an unknown
+  refusal code is never guessed into one, and no post-selection create failure,
+  cancellation, teardown or dropped draft opens a chooser or replays the earlier
+  prompt. A refusal whose captured subject or next intention is no longer
+  current is silent: it never repaints, selects or overwrites the newer surface.
 - **The inline Host-directory editor completes official Host levels, never a
   Client path.** Opening `Add directory`, or the refused-first-submit path
   editor, starts ONE per-open editor controller with its own private Input.

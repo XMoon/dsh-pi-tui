@@ -52,6 +52,7 @@ import type { HistorySearchSource } from '../../src/client/history/search.ts'
 import type { SettingsWorkspaceSource } from '../../src/tui/panels/settings-workspace-panel.ts'
 import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { createWorkspaceNextIntentOwner } from '../../src/app/session/workspace-next-intent.ts'
+import { LifecycleError, WorkspaceSelectionError } from '../../src/runtime/session-lifecycle-port.ts'
 import type { HostDirectoryBrowseOutcome } from '../../src/runtime/host-directory-browse-port.ts'
 import type { DirectoryListing } from '@deepseek-ai/dsh-host-directory-picker/types'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
@@ -1986,6 +1987,390 @@ test('PR3: the native presentation never receives the Host browse seam and issue
     assert.deepEqual(listCalls, [], 'no Host directory read is issued for the native picker')
     assert.ok(!h.view().includes('Host directory:'), 'no PiTUI suggestion layer is mounted')
     assert.equal(h.app.isFullscreen(), false, 'the native picker keeps its own screen and no second layer')
+  } finally {
+    h.close()
+  }
+})
+
+test('a refused /new Host pre-selection opens the full Workspace tree without creating or stopping anything', async () => {
+  const resolutions: unknown[] = []
+  const creates: unknown[] = []
+  let transitions = 0
+  const h = harness({
+    currentSessionId: CURRENT,
+    agents: {
+      resolveWorkspace: (async (intent: unknown) => {
+        resolutions.push(intent)
+        throw new WorkspaceSelectionError('refused', 'the Host refused the proposed workspace directory', 'workspace/invalid-path')
+      }) as never,
+      create: (async (input: unknown) => {
+        creates.push(input)
+        return { session: { id: 'recovered-new' } }
+      }) as never,
+    },
+    transitionTo: (async (steps: { create: () => Promise<unknown> }) => {
+      transitions += 1
+      return { ok: true, next: await steps.create() }
+    }) as never,
+  })
+  try {
+    h.app.setDraft('draft kept across the refusal')
+    const result = await h.runCommand('new')
+    assert.equal(result.kind, 'success', 'the recovery navigation is the command outcome, not a second error card')
+    assert.deepEqual(resolutions, [{ kind: 'source-session', sessionId: CURRENT }],
+      'the live /new asks for the captured Session membership, never a cwd')
+    assert.equal(transitions, 0, 'the refused pre-selection never enters the transition')
+    assert.deepEqual(creates, [], 'the refusal dispatches no Session create and no old-owner stop')
+    assert.equal(h.app.getDraft(), 'draft kept across the refusal', 'the old editor draft is untouched')
+    await h.vt.waitForRender()
+    const frame = h.view()
+    assert.ok(frame.includes('Sessions ·'), 'the ONE full Workspace Browser owns the screen')
+    assert.ok(frame.includes('Sessions'), 'the shared Session Browser opened')
+    assert.ok(frame.includes('Add directory'), 'the recovery is the full tree, not the inline Add editor')
+    assert.ok(!frame.includes('Host directory:'), 'a /new recovery never starts in the path editor')
+    assert.equal(h.notices.filter(notice => notice.text.includes('fresh session creation failed')).length, 1,
+      'the originating refusal is stated exactly once')
+  } finally {
+    h.close()
+  }
+})
+
+test('Esc on a /new recovery Browser leaves the old Session, draft and next-create intent unchanged', async () => {
+  const owner = createWorkspaceNextIntentOwner('/launch')
+  const creates: unknown[] = []
+  const h = harness({
+    workspaceNextIntent: owner,
+    agents: {
+      resolveWorkspace: (async () => {
+        throw new WorkspaceSelectionError('refused', 'the Host refused the proposed workspace directory', 'workspace/not-found')
+      }) as never,
+      create: (async (input: unknown) => {
+        creates.push(input)
+        return { session: { id: 'unused' } }
+      }) as never,
+    },
+  })
+  try {
+    const before = owner.snapshot()
+    await h.runCommand('new')
+    await h.vt.waitForRender()
+    assert.ok(h.view().includes('Sessions ·'), 'the refused /new opened the recovery Browser')
+    h.vt.sendInput('\x1b')
+    await waitUntil(() => !h.view().includes('Sessions ·'), 'Esc closes only the Browser')
+    assert.deepEqual(owner.snapshot().intent, before.intent, 'the next-create intent is unchanged')
+    assert.equal(owner.snapshot().revision, before.revision, 'a cancelled recovery invents no revision')
+    assert.deepEqual(creates, [], 'no Session was created')
+    assert.deepEqual(h.switchCalls, [], 'no Session was switched')
+  } finally {
+    h.close()
+  }
+})
+
+test('a Sessionless /new refusal lets Add register the Host directory before an explicit Folder New creates', async () => {
+  const owner = createWorkspaceNextIntentOwner('/launch')
+  const resolutions: unknown[] = []
+  const creates: Array<{ workspaceId: string }> = []
+  const h = harness({
+    workspaceNextIntent: owner,
+    agents: {
+      resolveWorkspace: (async (intent: { kind: string; path?: string }) => {
+        resolutions.push(intent)
+        if (intent.kind === 'host-path' && intent.path === '/launch') {
+          throw new WorkspaceSelectionError('refused', 'the Host refused the proposed workspace directory', 'workspace/invalid-path')
+        }
+        return { workspaceId: 'ws-recovered', path: intent.path ?? '/host/recovered' }
+      }) as never,
+      create: (async (input: { workspaceId: string }) => {
+        creates.push(input)
+        return { session: { id: 'session-recovered' } }
+      }) as never,
+    },
+  })
+  try {
+    await h.runCommand('new')
+    await h.vt.waitForRender()
+    assert.ok(h.view().includes('Add directory'), 'the Sessionless recovery tree carries the root Add row')
+    h.facts.handles[0]!.push(baseline(
+      { workspaceId: 'ws-other', path: '/ws/other', title: 'other', sessionIds: [] },
+    ))
+    await waitUntil(() => h.view().includes('other'), 'the official baseline is proved')
+    h.vt.sendInput('\x1b[H')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\r')
+    await h.vt.waitForRender()
+    h.vt.sendInput('/host/recovered')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\r')
+    await waitUntil(() => owner.snapshot().status === 'confirmed', 'the Host resolve commits the next-create intent')
+    assert.equal(creates.length, 0, 'Add only registers the Host Workspace and never creates a Session')
+    await waitUntil(() => h.view().includes('Directory added: /host/recovered'),
+      'the registered directory fact returns to the same Browser')
+    h.facts.handles[0]!.push(baseline(
+      { workspaceId: 'ws-recovered', path: '/host/recovered', title: 'recovered', sessionIds: [] },
+      { workspaceId: 'ws-other', path: '/ws/other', title: 'other', sessionIds: [] },
+    ))
+    await waitUntil(() => h.view().includes('New session'),
+      'the official Workspace follow lists the new Folder as the expanded next-create group')
+    h.vt.sendInput('\x1b[H')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\x1b[B')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\x1b[C')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\r')
+    await waitUntil(() => creates.length === 1, 'only the explicit Folder New dispatches the create')
+    assert.equal(creates[0]!.workspaceId, 'ws-recovered', 'the create names the verified official Workspace')
+    await waitUntil(() => !h.view().includes('Sessions ·'), 'the committed Folder New retires the Browser')
+  } finally {
+    h.close()
+  }
+})
+
+test('a Browse full-tree /new recovery creates exactly one Session on the chosen Folder New and closes once', async () => {
+  const resolutions: unknown[] = []
+  const creates: Array<{ workspaceId: string }> = []
+  let transitions = 0
+  const h = harness({
+    currentSessionId: CURRENT,
+    agents: {
+      resolveWorkspace: (async (intent: { kind: string; workspaceId?: string }) => {
+        resolutions.push(intent)
+        if (intent.kind === 'source-session') {
+          throw new WorkspaceSelectionError('refused', 'the Host refused the proposed workspace directory', 'workspace/invalid-path')
+        }
+        return { workspaceId: intent.workspaceId ?? 'ws-a', path: '/ws' }
+      }) as never,
+      create: (async (input: { workspaceId: string }) => {
+        creates.push(input)
+        return { session: { id: 'session-b' } }
+      }) as never,
+    },
+    transitionTo: (async (steps: { create: () => Promise<unknown> }) => {
+      transitions += 1
+      return { ok: true, next: await steps.create() }
+    }) as never,
+  })
+  const originalOpen = TuiApp.prototype.openSessionWorkspace
+  let opens = 0
+  TuiApp.prototype.openSessionWorkspace = function (this: TuiApp, options) {
+    opens += 1
+    return originalOpen.call(this, options)
+  }
+  try {
+    await h.runCommand('new')
+    await h.vt.waitForRender()
+    h.facts.handles[0]!.push(baseline(
+      { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
+      { workspaceId: 'ws-b', path: '/ws/b', title: 'project-b', sessionIds: [] },
+    ))
+    await waitUntil(() => h.view().includes('project-b'), 'the official sibling Workspace is listed')
+    // Home selects the root Add row; Down selects the current Folder; Right
+    // enters its first visible child (`+ New session`); Enter is the explicit
+    // create.
+    h.vt.sendInput('\x1b[H')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\x1b[B')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\x1b[C')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\r')
+    await waitUntil(() => creates.length === 1, 'the explicit Folder New dispatches the ONE create')
+    assert.deepEqual(resolutions, [
+      { kind: 'source-session', sessionId: CURRENT },
+      { kind: 'workspace-id', workspaceId: 'ws-a' },
+    ], 'the recovery re-resolves the chosen official Workspace id, never a cwd')
+    assert.equal(transitions, 1, 'the create enters the ONE existing transition')
+    assert.equal(creates[0]!.workspaceId, 'ws-a', 'the Host receives the official Workspace id')
+    await waitUntil(() => !h.view().includes('Sessions ·'), 'the committed create retires the Browser')
+    assert.equal(opens, 1, 'the refusal opened the Browser exactly once; Folder New does not open a second one')
+    assert.equal(h.facts.handles[0]!.disposed, 1, 'the per-open Workspace follow is released exactly once')
+  } finally {
+    TuiApp.prototype.openSessionWorkspace = originalOpen
+    h.close()
+  }
+})
+
+test('an unavailable selection or an unknown refusal code keeps the original /new error and opens nothing', async () => {
+  for (const failure of [
+    new WorkspaceSelectionError('unavailable', 'the Host Workspace registry is unavailable'),
+    new WorkspaceSelectionError('refused', 'the Host refused for an unknown reason', 'workspace/quota'),
+  ]) {
+    const h = harness({
+      currentSessionId: CURRENT,
+      agents: {
+        resolveWorkspace: (async () => { throw failure }) as never,
+      },
+    })
+    try {
+      const result = await h.runCommand('new')
+      assert.equal(result.kind, 'error', `${failure.message}: the command keeps its own error result`)
+      await h.vt.waitForRender()
+      assert.ok(!h.view().includes('Sessions ·'), `${failure.message}: no recovery Browser opens`)
+      assert.equal(h.notices.some(notice => notice.text.includes('fresh session creation failed')), false,
+        `${failure.message}: the command result is the ONE visible owner`)
+    } finally {
+      h.close()
+    }
+  }
+})
+
+test('a /new preselection whose sessionless next intent changed settles silently and opens nothing', async () => {
+  const owner = createWorkspaceNextIntentOwner('/launch')
+  let rejectResolve!: (error: unknown) => void
+  let resolveCalls = 0
+  const h = harness({
+    workspaceNextIntent: owner,
+    agents: {
+      resolveWorkspace: (async () => {
+        resolveCalls += 1
+        return await new Promise<never>((_, reject) => { rejectResolve = reject })
+      }) as never,
+    },
+  })
+  try {
+    const running = h.runCommand('new')
+    await waitUntil(() => resolveCalls === 1, 'the /new pre-selection is dispatched')
+    owner.proposeHostPath('/chosen/during/selection')
+    rejectResolve(new WorkspaceSelectionError('refused', 'the Host refused the stale proposal', 'workspace/not-found'))
+    const result = await running
+    assert.equal(result.kind, 'success', 'the stale refusal owns no visible outcome')
+    await h.vt.waitForRender()
+    assert.ok(!h.view().includes('Sessions ·'), 'the stale refusal opens no Browser')
+    assert.deepEqual(owner.snapshot().intent, { kind: 'host-path', path: '/chosen/during/selection' },
+      'the newer next-create choice is unchanged')
+  } finally {
+    h.close()
+  }
+})
+
+test('a second synchronous /new is refused while the first pre-selection is pending and the settled create releases it', async () => {
+  let resolveFirst!: (value: { workspaceId: string; path: string }) => void
+  const resolutions: unknown[] = []
+  const h = harness({
+    currentSessionId: CURRENT,
+    agents: {
+      resolveWorkspace: ((intent: unknown) => {
+        resolutions.push(intent)
+        return new Promise<{ workspaceId: string; path: string }>((resolve) => { resolveFirst = resolve })
+      }) as never,
+      create: (async () => ({ session: { id: 'single-flight-' + String(resolutions.length) } })) as never,
+    },
+  })
+  try {
+    const first = h.runCommand('new')
+    await waitUntil(() => resolutions.length === 1, 'the first /new reaches its preselection')
+    const second = await h.runCommand('new')
+    assert.equal(second.kind, 'error', 'the second synchronous /new is refused before any Host dispatch')
+    assert.match(second.kind === 'error' ? second.text : '', /a fresh session is already starting/u)
+    assert.equal(resolutions.length, 1, 'the second /new dispatches no second Host resolve')
+    resolveFirst({ workspaceId: 'ws-a', path: '/ws' })
+    await first
+    // The refused pre-selection released the single-flight: a later /new can
+    // dispatch its own Host resolve.
+    const third = h.runCommand('new')
+    await waitUntil(() => resolutions.length === 2, 'the released single-flight accepts the next /new')
+    resolveFirst({ workspaceId: 'ws-a', path: '/ws' })
+    await third
+  } finally {
+    h.close()
+  }
+})
+
+test('a refused Folder New inside the /new recovery Browser settles there and opens no second Browser', async () => {
+  let attempts = 0
+  const h = harness({
+    currentSessionId: CURRENT,
+    agents: {
+      resolveWorkspace: (async (intent: { kind: string }) => {
+        if (intent.kind === 'source-session') {
+          throw new WorkspaceSelectionError('refused', 'the Host refused the proposed workspace directory', 'workspace/invalid-path')
+        }
+        return { workspaceId: 'ws-a', path: '/ws' }
+      }) as never,
+      create: (async () => {
+        attempts += 1
+        throw new Error('the Host create was refused')
+      }) as never,
+    },
+  })
+  const originalOpen = TuiApp.prototype.openSessionWorkspace
+  let opens = 0
+  TuiApp.prototype.openSessionWorkspace = function (this: TuiApp, options) {
+    opens += 1
+    return originalOpen.call(this, options)
+  }
+  try {
+    await h.runCommand('new')
+    await h.vt.waitForRender()
+    h.facts.handles[0]!.push(baseline({ workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] }))
+    await waitUntil(() => h.view().includes('project-a · 1'), 'the official baseline is proved')
+    h.vt.sendInput('\x1b[H')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\x1b[B')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\x1b[C')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\r')
+    await waitUntil(() => attempts === 1 && h.notices.some(notice => notice.text.includes('the Host create was refused')),
+      'the Folder New refusal is reported inside the same Browser')
+    await h.vt.waitForRender()
+    assert.ok(h.view().includes('Sessions ·'), 'a refused create keeps the recovery Browser open')
+    assert.equal(opens, 1, 'no second Browser is opened from inside the first one')
+    assert.equal(h.facts.handles[0]!.disposed, 0, 'a refused create never retires the Workspace follow')
+    h.vt.sendInput('\r')
+    await waitUntil(() => attempts === 2, 'the failed Folder New is immediately retryable')
+  } finally {
+    TuiApp.prototype.openSessionWorkspace = originalOpen
+    h.close()
+  }
+})
+
+test('a post-selection create failure reports the existing error and never opens recovery navigation', async () => {
+  const creates: unknown[] = []
+  const h = harness({
+    currentSessionId: CURRENT,
+    agents: {
+      resolveWorkspace: (async () => ({ workspaceId: 'ws-a', path: '/ws' })) as never,
+      create: (async (input: unknown) => { creates.push(input); return { session: { id: 'unused' } } }) as never,
+    },
+    transitionTo: (async () => ({
+      ok: false,
+      error: new LifecycleError('published-with-error', 'current', 'the Session was published but the Workspace attach failed'),
+    })) as never,
+  })
+  try {
+    const result = await h.runCommand('new')
+    assert.equal(result.kind, 'error', 'the post-create failure keeps its error result')
+    await h.vt.waitForRender()
+    assert.ok(!h.view().includes('Sessions ·'), 'an uncertain post-create failure never opens recovery navigation')
+    assert.deepEqual(creates, [], 'the transition owns the create; the command never dispatches a second one')
+    assert.equal(h.notices.some(notice => notice.text.includes('fresh session creation failed')), false,
+      'the command result remains the ONE visible owner')
+  } finally {
+    h.close()
+  }
+})
+
+test('a blocking owner refuses the /new recovery Browser without starting a hidden Workspace reader', async () => {
+  const h = harness({
+    currentSessionId: CURRENT,
+    agents: {
+      resolveWorkspace: (async () => {
+        throw new WorkspaceSelectionError('refused', 'the Host refused the proposed workspace directory', 'workspace/invalid-path')
+      }) as never,
+    },
+  })
+  try {
+    const questions = h.app.askQuestions([{ id: 'q-recovery', question: 'proceed?', options: [{ label: 'yes' }] }])
+    await h.vt.waitForRender()
+    const result = await h.runCommand('new')
+    assert.equal(result.kind, 'error', 'the refused Browser lease is a real command error')
+    assert.match(result.kind === 'error' ? result.text : '', /session workspace unavailable/u)
+    await h.vt.waitForRender()
+    assert.ok(!h.view().includes('Sessions ·'), 'the blocking owner keeps the seat')
+    assert.equal(h.facts.followCalls, 0, 'a refused lease starts no Workspace follow')
+    h.vt.sendInput('\x1b')
+    await questions.catch(() => {})
   } finally {
     h.close()
   }
