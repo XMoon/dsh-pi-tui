@@ -341,6 +341,9 @@ export class SessionWorkspacePanel implements Component {
   private readonly directoryInput = new Input({ prompt: 'Host directory: ' })
   private directoryEntryActive = false
   private directorySubmitting = false
+  /** Whether the CURRENT frame really painted the editable Host path line.
+   *  A tiny frame can have no body room; Enter must then not submit. */
+  private directoryEditorPainted = false
   /** ONE pending Folder-New dispatch. The object identity is the per-operation
    *  currentness fence: only the settle callback for THIS object may unlock
    *  New. A notice, timer or roster diff is never a settlement channel. */
@@ -862,6 +865,9 @@ export class SessionWorkspacePanel implements Component {
 
   private handleDirectorySubmit(): void {
     if (this.directorySubmitting) return
+    // Submit only a path this frame really painted: on a frame too short for
+    // the input row, Enter must not verify an unseen/prefilled path.
+    if (!this.directoryEditorPainted) return
     const path = this.directoryInput.getValue().trim()
     if (!path.startsWith('/')) {
       this.statusMessage = 'Enter an absolute Host path beginning with /.'
@@ -1340,6 +1346,7 @@ export class SessionWorkspacePanel implements Component {
     this.lastPaintedBrowseIds = []
     this.lastPaintedTreeIds = []
     this.lastPaintedResultIds = []
+    this.directoryEditorPainted = false
     const view = this.view(this.paintedGroups.flatMap(group => group.ids))
     this.paintedGroups = view.groups
     this.paintView = view
@@ -1485,6 +1492,25 @@ export class SessionWorkspacePanel implements Component {
     if (lines.length >= budget) return { lines: lines.slice(0, budget), regions }
     const editorActive = this.directoryEntryActive
     const addIndex = rows.findIndex(row => row.kind === 'addDirectory')
+    if (editorActive) {
+      const remaining = budget - lines.length
+      // A tiny frame prefers the ACTUAL editable path line over the decorative
+      // root Add row: the user must never press Enter on an unseen path.
+      if (remaining === 1) {
+        this.directoryInput.focused = !this.directorySubmitting
+        lines.push(fit(this.directoryInput.render(width)[0] ?? '', width))
+        this.directoryEditorPainted = true
+        this.lastPaintedListRows = 1
+        return { lines: lines.slice(0, budget), regions }
+      }
+      // Without a root Add row (non-production composition) still paint the
+      // editor directly instead of leaving it invisible but submit-capable.
+      if (addIndex < 0 && remaining > 0) {
+        this.paintDirectoryEditor(width, budget, lines, regions)
+        this.lastPaintedListRows = 1
+        return { lines: lines.slice(0, budget), regions }
+      }
+    }
     let offset: number
     if (editorActive && addIndex >= 0) {
       // The inline path editor stays directly under the root Add row.
@@ -1570,6 +1596,7 @@ export class SessionWorkspacePanel implements Component {
     if (lines.length >= budget) return
     this.directoryInput.focused = !this.directorySubmitting
     lines.push(fit(this.directoryInput.render(width)[0] ?? '', width))
+    this.directoryEditorPainted = true
     if (lines.length >= budget) return
     if (this.directorySubmitting) {
       lines.push(color.textMuted(fit('Verifying directory…', width)))
@@ -1963,12 +1990,13 @@ export class SessionWorkspacePanel implements Component {
 
   private actionBarSegments(): { text: string; priority: number; short?: string }[] {
     if (this.directoryEntryActive) {
-      return this.directorySubmitting
-        ? [{ text: 'Verifying directory', priority: 9, short: 'Verifying' }]
-        : [
-            { text: 'Enter Verify directory', priority: 7, short: 'Verify' },
-            { text: 'Esc Cancel', priority: 9, short: 'Cancel' },
-          ]
+      if (this.directorySubmitting) return [{ text: 'Verifying directory', priority: 9, short: 'Verifying' }]
+      return [
+        ...(this.directoryEditorPainted
+          ? [{ text: 'Enter Verify directory', priority: 7, short: 'Verify' }]
+          : []),
+        { text: 'Esc Cancel', priority: 9, short: 'Cancel' },
+      ]
     }
     if (this.focus === 'peek') {
       const openable = this.peek?.sessionId !== this.options.currentSessionId && !this.snapshot.resumePending
