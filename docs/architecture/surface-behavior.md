@@ -298,11 +298,13 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   A first submit refused by the Host Workspace preflight opens the same Browser
   only AFTER the submission owner has restored the draft, directly in the inline
   Host absolute-path editor with the refused path prefilled for correction. The
-  editor paints `Verify directory` and `Cancel` (the local Host-registration
-  verbs, not a Workspace selection), rejects an empty value and a shape that is
-  definitely non-absolute for the known Host dialect while the Host resolve
-  remains the final judge, and dispatches at most one Host resolution until it
-  settles; a rejection keeps the text and the previously confirmed intent, while
+  ONE physical Action Bar paints its local Host-registration verbs
+  `Verify [Enter]` and `Cancel [Esc]` — while a painted suggestion block is up
+  the same slot names `Hide suggestions [Esc]` — never a Workspace selection;
+  the editor body paints no second verb row. It rejects an empty value and a
+  shape that is definitely non-absolute for the known Host dialect while the
+  Host resolve remains the final judge, and dispatches at most one Host
+  resolution until it settles; a rejection keeps the text and the previously confirmed intent, while
   a success commits the next-create intent. That chooser returns to the Welcome
   only after success; ordinary Browser Add returns to Browse and never creates a
   Session. `New session` on a Folder reuses the existing `/new` transaction with
@@ -327,7 +329,8 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   really painted; `Enter` verifies the RAW Input through the existing
   `onAddDirectory`/`resolveWorkspace` transaction and never accepts a
   candidate; the first `Esc` hides a painted suggestion block and the next
-  leaves the editor. A candidate action, browse read or transport rollover
+  leaves the editor. The ONE bar's `Hide suggestions [Esc]`/`Cancel [Esc]`
+  replay that SAME two-layer ladder. A candidate action, browse read or transport rollover
   never registers a Workspace: only the explicit `Enter` reaches the ONE
   existing resolution, which may then commit the next-create intent. A failed,
   refused or unavailable read is stated as such (`Directory unreadable: …`,
