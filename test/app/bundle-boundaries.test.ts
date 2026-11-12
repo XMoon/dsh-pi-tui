@@ -1,8 +1,9 @@
 /**
- * S4-D3 B01–B14 terminal boundaries (D3-6): the REAL rc.2 Host catalog travels
+ * S4-D3 B02–B14 terminal boundaries (D3-6): the REAL rc.2 Host catalog travels
  * through the ONE shared mapping → D1 classifier/model → the MOUNTED Plugin
  * Manager workspace, where the bounded capability copy and the allowed
- * actions are read from the actual frame. B01 keeps HOST_ONLY, the web-only
+ * actions are read from the actual frame. The retired B01 profile no longer
+ * carries a boundary (rc.2 promotes Team to the base layer), the web-only
  * bundles stay WEB_ONLY, B13/B14 stay missing Install-only and carry their
  * verified one-shot/provider boundaries, and no Team/Discover/mic/Inspector
  * page is invented.
@@ -45,7 +46,7 @@ import { plain } from '../support/plugin-workspace-harness.ts'
 
 const ON_DEMAND = OFFICIAL_ON_DEMAND_CATALOG.map(entry => entry.packageName)
 /** The release-added Experimental members in Host catalog order: they are
- *  appended after the frozen B01–B14 order, not interleaved with it. */
+ *  appended after the frozen B02–B14 order, not interleaved with it. */
 const RELEASE_ONLY_EXPERIMENTAL = [...OPTIONAL_BUNDLES, ...ON_DEMAND]
   .filter(name => EXPERIMENTAL_BUNDLES.has(name) && !EXPERIMENTAL_BUNDLE_IDS.includes(name))
 
@@ -75,7 +76,8 @@ function seedProfile(workRoot: string): Record<string, unknown> {
       name,
       version: '0.2.1-rc.2',
       private: true,
-      dsh: { bundle: { patch: [] } },
+      // Input fact from the official package manifest: CUA is darwin-only.
+      dsh: { bundle: { patch: [], ...(name === '@deepseek-ai/dsh-cua-bundle' ? { platforms: ['darwin'] } : {}) } },
     }, null, 2))
   }
   return {
@@ -92,7 +94,6 @@ function seedProfile(workRoot: string): Record<string, unknown> {
 }
 
 const SURFACE_HINTS: Readonly<Record<string, RegExp>> = {
-  '@deepseek-ai/dsh-experimental-agent-team-profile': /Host Team tools/u,
   '@deepseek-ai/dsh-experimental-voice-input-bundle': /browser microphone UI is not available/u,
   '@deepseek-ai/dsh-experimental-auto-review': /official permission preset/u,
   '@deepseek-ai/dsh-experimental-inspector-profile': /no PiTui inspection page/u,
@@ -108,7 +109,7 @@ const SURFACE_HINTS: Readonly<Record<string, RegExp>> = {
   '@deepseek-ai/dsh-subagent-claude-code': /one-shot Claude Code subagent tool/u,
 }
 
-test('the real Host catalog paints all 14 verified B01–B14 boundaries through the mounted Plugin Manager', async t => {
+test('the real Host catalog paints the 13 verified B02–B14 boundaries through the mounted Plugin Manager', async t => {
   const life = testLifecycle(t)
   const workRoot = life.tempDir('s4-d3-boundaries-')
   const profileContext = seedProfile(workRoot)
@@ -176,7 +177,7 @@ test('the real Host catalog paints all 14 verified B01–B14 boundaries through 
   }
   const detailFrame = (): string => rawDetail().replace(/\s+/gu, ' ')
   // The catalog is the COMPLETE official roster (shipped Optional bundles +
-  // on-demand catalog entries); the 14 B01–B14 UI boundaries below are the
+  // on-demand catalog entries); the B02–B14 UI boundaries below are the
   // TUI's own verified subset, not the catalog size.
   await waitFor(() => controller.model().cards.length === OPTIONAL_BUNDLES.length + ON_DEMAND.length,
     'the real Host catalog read')
@@ -246,7 +247,7 @@ test('the real Host catalog paints all 14 verified B01–B14 boundaries through 
   }
   assert.deepEqual(controller.model().cards.filter(card => card.section === 'experimental').map(card => card.name),
     [...EXPERIMENTAL_BUNDLE_IDS, ...RELEASE_ONLY_EXPERIMENTAL],
-    'the real Host snapshot kept the frozen B01–B14 order and appended the release members')
+    'the real Host snapshot kept the frozen B02–B14 order and appended the release members')
 
   // No phantom Team/Discover/mic/Inspector page action is present in the real
   // catalog; the web-only rows expose only the official Install/Back actions.
@@ -266,7 +267,6 @@ test('the real Host catalog paints all 14 verified B01–B14 boundaries through 
   }))
   const model = buildPluginManagerModel(snapshot, classifyPluginPackages(inputs, []))
   for (const name of [
-    '@deepseek-ai/dsh-experimental-agent-team-profile',
     '@deepseek-ai/dsh-experimental-voice-input-bundle',
     '@deepseek-ai/dsh-experimental-inspector-profile',
     '@deepseek-ai/dsh-experimental-cot-translation-bundle',
@@ -278,7 +278,7 @@ test('the real Host catalog paints all 14 verified B01–B14 boundaries through 
   }
 })
 
-// ── D3-6: B01 and B03 in the mounted application ───────────────────────────
+// ── D3-6: rc.2 base Team and B03 in the mounted application ────────────────
 
 import { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -338,7 +338,6 @@ function toolResultOf(agent: Agent, callId: string): string | undefined {
   return undefined
 }
 
-const B01 = '@deepseek-ai/dsh-experimental-agent-team-profile' satisfies OptionalBundleId
 const B03 = '@deepseek-ai/dsh-experimental-auto-review' satisfies OptionalBundleId
 
 /** Pass-through mutation counter over the REAL plugin-manager service class
@@ -361,7 +360,7 @@ function countPluginMutations(service: unknown): { readonly counts: Record<'setB
 
 /**
  * The Release-added Experimental members' real frame: the four catalog entries
- * the current release adds beyond B01–B14 are painted through the SAME mounted
+ * the current release adds beyond B02–B14 are painted through the SAME mounted
  * Plugin Manager. Their bounded TUI surface/Risk copy, their legal actions and
  * the Host platform refusal of the hidden CUA entry are read from the frame,
  * never from a local support guess. The profile manifests here are the
@@ -522,25 +521,25 @@ test('the release Experimental members paint their real TUI surface and platform
     }
 
     if (name === CUA_BUNDLE) {
-      assert.doesNotMatch(painted, /> Enable…/u, `${name} is missing and never offers Enable`)
+      // rc.2 moved CUA from the on-demand catalog to the shipped Optional
+      // roster: it has no Install route. On a supported Host its shipped
+      // Enable is offered; on an unsupported Host the Enable action is painted
+      // disabled with the exact Host platform refusal.
       if (process.platform === 'darwin') {
-        // On its supported Host this case only reads the catalog/offered
-        // version; it never installs the package or requests native permission.
-        assert.match(painted, /> Install…/u, `${name} offers the official Install action on its supported Host`)
-        assert.match(painted, /Install target\s+@deepseek-ai\/dsh-cua-bundle@[0-9]/u,
-          `${name} paints the official offered install target`)
+        assert.match(painted, /> Enable…/u, `${name} offers Enable on its supported Host`)
+        assert.doesNotMatch(painted, /Remove…/u, `${name} is shipped, so no Remove action exists`)
       } else {
-        // The real Host catalog error is painted on the disabled Install action.
-        assert.match(painted, /Install… — unsupported-platform/u, `${name} paints the Host platform refusal:\n${painted}`)
+        assert.match(painted, /> Enable… — unsupported-platform/u,
+          `${name} paints the Host platform refusal on its disabled Enable action:\n${painted}`)
         assert.match(painted, /This bundle cannot be enabled on the DSH Host platform/u)
         // The disabled action is readable but inert: invoking it only explains
-        // the refusal and writes neither the profile nor a Host install request.
+        // the refusal and writes neither the profile nor a Host mutation.
         const before = { ...mutations.counts }
         vt.sendInput('\r')
         await renderFrame()
         await waitFor(() => /cannot be enabled on the DSH Host platform/u.test(plain(vt.getViewport())),
-          'the disabled Install explanation')
-        assert.deepEqual(mutations.counts, before, 'the refused Install dispatches no Host mutation')
+          'the disabled Enable explanation')
+        assert.deepEqual(mutations.counts, before, 'the refused Enable dispatches no Host mutation')
       }
     } else {
       assert.match(painted, /> Enable…/u, `${name} offers the official Enable action for its shipped installation`)
@@ -600,10 +599,11 @@ test('the release Experimental members paint their real TUI surface and platform
   }
 })
 
-test('the mounted TUI keeps Team capability in the existing Tool/Activity views and invents no Team board', { skip: skippedInstallationReason([B01]) }, async t => {
+test('the mounted TUI keeps rc.2 base Team capability in the existing Tool/Activity views and invents no Team board', { skip: skippedInstallationReason([]) }, async t => {
   const adapter = new BoundaryAdapter()
   const app = await startS4D3Application(t, {
-    bundles: [B01],
+    // rc.2 moved Team to the base layer: no optional bundle is mounted.
+    bundles: [],
     presets: true,
     presetId: 'standard',
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
@@ -612,8 +612,35 @@ test('the mounted TUI keeps Team capability in the existing Tool/Activity views 
   adapter.scripts.push({ kind: 'text', text: 'Team session ready.' })
   const agent = await app.submitFirstPrompt('Start the team session')
   await agent.whenIdle()
-  assert.equal(app.host.hasTool('spawn_teammate', agent), true, 'the real B01 Team tool is Agent-scoped')
-  assert.equal(app.host.hasTool('team_task_create', agent), true)
+  // The base Team authority is mounted but OFF per Session, and the retired
+  // model tool does not exist: the root must enable the mode explicitly.
+  const resolveStepTools = async (): Promise<readonly string[]> => {
+    const tools = app.host.ctx.tools as unknown as {
+      resolve(context: {
+        readonly agent: Agent
+        readonly modelSelection: { readonly provider: string; readonly model: string }
+        readonly signal: AbortSignal
+      }): Promise<{ view(scope: Agent): ReadonlyMap<string, unknown>; dispose(): void }>
+    }
+    const toolSet = await tools.resolve({
+      agent,
+      modelSelection: { provider: 'scripted', model: 'review-model' },
+      signal: new AbortController().signal,
+    })
+    try {
+      return [...toolSet.view(agent).keys()]
+    } finally {
+      toolSet.dispose()
+    }
+  }
+  assert.equal(app.host.hasTool('spawn_teammate', agent), false, 'rc.2 retired spawn_teammate')
+  assert.equal(app.host.hasTool('subagent', agent), true, 'teammates use the standard subagent tool')
+  assert.equal((await resolveStepTools()).includes('team_task_create'), false,
+    'base Team tools start OFF in the real step admission')
+  const teams = app.host.ctx.get('agentTeams') as { setEnabled(agent: unknown, enabled: boolean): Promise<void> }
+  await teams.setEnabled(agent, true)
+  assert.equal((await resolveStepTools()).includes('team_task_create'), true,
+    'the root enablement exposes the shared board to the model step')
   const commands = (app.host.ctx.get('commands') as { list(agent: unknown): readonly { name: string }[] })
     .list(agent).map(command => command.name)
   assert.equal(commands.includes('team'), false, 'no dedicated Team command/board is created by the TUI')

@@ -68,7 +68,6 @@ const PROVISION_TIMEOUT_MS = 20 * 60_000
  *  REAL native/tool/profile-loop qualifications stay limited to these exact
  *  identities. It is NOT the official catalog and never grows automatically. */
 const SHIPPED_OPTIONAL = [
-  '@deepseek-ai/dsh-experimental-agent-team-profile',
   '@deepseek-ai/dsh-experimental-voice-input-bundle',
   '@deepseek-ai/dsh-experimental-auto-review',
   '@deepseek-ai/dsh-experimental-inspector-profile',
@@ -105,7 +104,6 @@ const PROVISION_BUNDLES = [...PROVISION_OPTIONAL, ...PROVISION_ON_DEMAND]
 /** A row package name each bundle's real patch inserts (the composed tree is
  *  read as row names, so the bundle package itself need not appear). */
 const BUNDLE_ROW_MARKERS = {
-  '@deepseek-ai/dsh-experimental-agent-team-profile': '@deepseek-ai/dsh-experimental-agent-team',
   '@deepseek-ai/dsh-experimental-voice-input-bundle': '@deepseek-ai/dsh-experimental-speech-to-text',
   '@deepseek-ai/dsh-experimental-auto-review': '@deepseek-ai/dsh-experimental-auto-review',
   '@deepseek-ai/dsh-experimental-inspector-profile': '@deepseek-ai/dsh-experimental-inspector',

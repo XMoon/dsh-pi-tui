@@ -1,12 +1,13 @@
 /**
- * B01 — Agent Teams against the effective preset tool scopes over the
- * real rc.2 Optional bundle patch (implementation plan §5 D2-3).
+ * rc.2 base Agent Teams over the real DSH composition.
  *
- * REAL: the official `@deepseek-ai/dsh-experimental-agent-team` service, its
- * real journal/projection/roster, the real `tool-agent-team` scoped tool set,
- * the real `subagent-spawn-in-process` child provider and the four generated
- * official preset declarations. A scripted LLM answers only the teammate turns
- * (the Lead calls the real tools directly through the real ToolRuntime).
+ * REAL: the `dsh-base` `agent-team` service (journal/projection/task board) and
+ * its `tool-agent-team` task tools, the real preset mirrors, the real
+ * `subagent` tool + in-process spawn provider, and the real ToolRuntime. The
+ * retired rc.1 `experimental-agent-team-profile` bundle is NOT mounted: rc.2
+ * promotes Team to the base layer and creates teammates through `subagent`
+ * with a `name`.
+ *
  * @module @xmoon76/dsh-pi-tui/agent-team.test
  */
 
@@ -22,13 +23,14 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import {
   skippedInstallationReason,
   startOptionalBundleHost,
-  type OptionalBundleId,
 } from '../support/optional-bundle-fixture.ts'
 
-const B01 = '@deepseek-ai/dsh-experimental-agent-team-profile' satisfies OptionalBundleId
-const skip = skippedInstallationReason([B01])
+const skip = skippedInstallationReason([])
 const signal = new AbortController().signal
 let callCounter = 0
+
+/** The rc.2 Team task tools are conditionally available per root Team mode. */
+const TEAM_TASK_TOOLS = ['team_task_create', 'team_task_list', 'team_task_get', 'team_task_update'] as const
 
 function textChunks(text: string): StreamChunk[] {
   return [
@@ -39,11 +41,9 @@ function textChunks(text: string): StreamChunk[] {
   ]
 }
 
-/** Answers the teammate prompts by content; the Lead never reaches the LLM. */
+/** Answers the child prompts by content; the Lead never reaches the LLM. */
 class TeammateAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
-  hold: Promise<void> | undefined
-  releaseHold: (() => void) | undefined
   override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
     return Promise.resolve({ provider, id: model, name: model })
   }
@@ -52,11 +52,6 @@ class TeammateAdapter extends LlmAdapter {
     options.signal?.throwIfAborted()
     this.requests.push(options)
     const text = JSON.stringify(options.messages)
-    if (text.includes('HOLD_CHILD')) {
-      if (this.hold !== undefined) await this.hold
-      yield* textChunks('HELD_DONE')
-      return
-    }
     if (text.includes('SCOUT_JOB')) {
       yield* textChunks('SCOUT_DONE')
       return
@@ -65,237 +60,196 @@ class TeammateAdapter extends LlmAdapter {
   }
 }
 
-function toolCall(ctx: Context, name: string, agent: Agent, args: unknown): Promise<{
+/** One model call through the REAL step admission (the same ResolvedToolSet
+ *  the agent loop prepares for a model request). This is what makes the
+ *  conditional Team tools prove their actual presence/absence, not just the
+ *  registered definition list. */
+async function toolCall(ctx: Context, name: string, agent: Agent, args: unknown): Promise<{
   isError?: boolean
   content?: readonly { type?: string; text?: string }[]
   error?: { info?: { code?: string } }
 }> {
-  return executeModelToolFixture(ctx, {
-    signal,
-    callId: ToolCallId(`optional-bundle-team-${++callCounter}`),
-    name,
-    arguments: args,
+  const tools = ctx.tools as unknown as {
+    resolve(context: {
+      readonly agent: Agent
+      readonly modelSelection: { readonly provider: string; readonly model: string }
+      readonly signal: AbortSignal
+    }): Promise<{ dispose(): void }>
+  }
+  const toolSet = await tools.resolve({
     agent,
+    modelSelection: { provider: 'scripted', model: 'review-model' },
+    signal,
   })
+  try {
+    return await executeModelToolFixture(ctx, {
+      signal,
+      callId: ToolCallId(`rc2-base-team-${++callCounter}`),
+      name,
+      arguments: args,
+      agent,
+      toolSet: toolSet as never,
+    })
+  } finally {
+    toolSet.dispose()
+  }
 }
 
 function resultText(result: { content?: readonly { type?: string; text?: string }[] }): string {
   return (result.content ?? []).map(block => block.type === 'text' ? block.text ?? '' : '').join('')
 }
 
-test('Agent Teams: real patch scopes, four preset rosters and one Lead→teammate loop', { skip }, async t => {
-  // B01-OFF baseline: the same four official presets without the Team bundle.
-  // The real addition is then exactly the Team tool family, not a global claim.
-  const baseline = await startOptionalBundleHost(t, { bundles: [], presets: true })
-  const baselinePresets = baseline.ctx.get('agentPresets') as { select(agent: unknown, preset: string): Promise<unknown> }
-  const baselineRosters = new Map<string, readonly string[]>()
-  for (const preset of ['standard', 'ptc', 'minimal', 'cordis']) {
-    const agent = await baseline.createAgent(SessionId(`optional-bundle-b01-base-${preset}`), {
-      provider: 'scripted',
-      model: 'review-model',
-      cwd: join(baseline.root, 'work'),
-    })
-    await baselinePresets.select(agent, preset)
-    baselineRosters.set(preset, baseline.toolNames(agent))
-  }
-  await baseline.dispose()
+function errorText(result: { error?: { info?: { code?: string } } }): string {
+  return JSON.stringify(result.error ?? {})
+}
 
-  const host = await startOptionalBundleHost(t, { bundles: [B01], presets: true })
+test('rc.2 base Agent Teams: default OFF, root enablement, shared board and named subagent', { skip }, async t => {
+  const host = await startOptionalBundleHost(t, { bundles: [], presets: true })
   const adapter = new TeammateAdapter()
   host.ctx.llm.registerAdapter(['scripted'], adapter)
   const presets = host.ctx.get('agentPresets') as { select(agent: unknown, preset: string): Promise<unknown> }
-  const lead = await host.createAgent(SessionId('optional-bundle-b01-lead'), {
+    const team = host.ctx.get('agentTeams') as {
+    isEnabled(agent: Agent): boolean
+    setEnabled(agent: Agent, enabled: boolean, signal?: AbortSignal): Promise<void>
+  }
+  const subagents = host.ctx.get('subagents') as {
+    resolveName(caller: Agent, name: string, signal: AbortSignal): Promise<SessionId>
+  }
+
+  const lead = await host.createAgent(SessionId('rc2-base-team-lead'), {
     provider: 'scripted',
     model: 'review-model',
     cwd: join(host.root, 'work'),
   })
+  await presets.select(lead, 'standard')
 
-  // The B01 patch disables the four GLOBAL delegation rows. The TUI overlay
-  // disables the same base rows; either way the global view must not carry
-  // them while a preset-local copy may legitimately stay in an Agent scope.
-  for (const name of ['tool-subagent-control', 'tool-subagent-list-agents', 'tool-subagent', 'tool-subagent-fork']) {
-    assert.equal(host.ctx.tools.get(name, undefined), undefined, `the global ${name} row is disabled`)
-  }
-  assert.equal(host.ctx.tools.get('spawn_teammate', undefined), undefined,
-    'Team tools are Agent-scoped, never global')
-
-  // Four REAL preset rosters. The preset-local delegation rows stay visible in
-  // each capable preset even though the global rows are disabled (negative
-  // control: never use a global has() to claim every same-name tool vanished).
-  const rosters = new Map<string, readonly string[]>()
-  for (const [index, preset] of ['standard', 'ptc', 'minimal', 'cordis'].entries()) {
-    const agent = index === 0 ? lead : await host.createAgent(SessionId(`optional-bundle-b01-${preset}`), {
-      provider: 'scripted',
-      model: 'review-model',
-      cwd: join(host.root, 'work'),
-    })
-    await presets.select(agent, preset)
-    const roster = host.toolNames(agent)
-    rosters.set(preset, roster)
-    assert.ok(roster.includes('spawn_teammate'), `${preset}: the Team tools are installed in the Lead scope`)
-    assert.ok(roster.includes('team_task_create'), `${preset}: the shared task board is reachable`)
-    if (preset !== 'minimal') {
-      assert.ok(host.ctx.tools.get('subagent', agent) !== undefined,
-        `${preset}: the preset-local subagent row is retained in the Agent scope`)
-      assert.ok(host.ctx.tools.get('list_agents', agent) !== undefined,
-        `${preset}: the preset-local list_agents row is retained in the Agent scope`)
-    } else {
-      assert.equal(host.ctx.tools.get('subagent', agent), undefined,
-        'minimal never gains a delegation tool it does not declare')
-      assert.equal(host.ctx.tools.get('subagent_fork', agent), undefined,
-        'minimal never gains a fork delegation tool it does not declare')
-      // `list_agents` remains because the TEAM owns that name in every member
-      // scope; its presence is not the preset-local delegation row returning.
-      assert.ok(host.ctx.tools.get('list_agents', agent) !== undefined)
-    }
-  }
-  // Compare each roster against the B01-off baseline: every baseline tool
-  // remains visible, and the Team-only family is exactly the addition.
-  const TEAM_ONLY = ['spawn_teammate', 'wait_agent', 'team_task_create', 'team_task_list', 'team_task_get', 'team_task_update']
-  for (const preset of ['standard', 'ptc', 'minimal', 'cordis']) {
-    const baselineRoster = new Set(baselineRosters.get(preset))
-    const withTeam = new Set(rosters.get(preset))
-    for (const tool of TEAM_ONLY) {
-      assert.equal(baselineRoster.has(tool), false, `${preset}: ${tool} must not exist without B01`)
-      assert.equal(withTeam.has(tool), true, `${preset}: ${tool} is the real B01 addition`)
-    }
-    for (const tool of baselineRoster) {
-      assert.equal(withTeam.has(tool), true, `${preset}: B01 must not remove the preset-local tool ${tool}`)
-    }
-  }
-  // The Team tools are the real addition: each capable preset keeps its own
-  // declared roster and gains exactly the Team tool family.
-  const teamTools = rosters.get('standard')!.filter(name =>
-    ['spawn_teammate', 'send_message', 'list_agents', 'interrupt_agent', 'wait_agent', 'team_task_create', 'team_task_list', 'team_task_get', 'team_task_update'].includes(name))
-  assert.deepEqual([...teamTools].sort(), [
-    'interrupt_agent', 'list_agents', 'send_message', 'spawn_teammate',
-    'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update', 'wait_agent',
-  ].sort())
-
-  // REAL Lead → teammate: spawn through the official tool, wait for the child's
-  // real activation result, then address it by its durable name.
-  const spawned = await toolCall(host.ctx as never, 'spawn_teammate', lead, {
-    name: 'scout',
-    description: 'Read-only scout teammate',
-    prompt: 'Reply with TEAM_READY and nothing else.',
-    context: 'fresh',
+  // ── default OFF: the base service mounts, but no Team tool is discoverable
+  // in the REAL step-owned tool selection and the task authority itself refuses
+  assert.equal(team.isEnabled(lead), false, 'Team mode is OFF by default')
+  assert.equal(host.hasTool('spawn_teammate', lead), false, 'rc.2 retired the spawn_teammate tool')
+  assert.equal(host.hasTool('subagent', lead), true, 'teammates are created through the standard subagent tool')
+  const disabledCreate = await toolCall(host.ctx, 'team_task_create', lead, {
+    subject: 'must not exist',
+    description: 'the disabled Team authority must refuse creation',
   })
-  assert.notEqual(spawned.isError, true, resultText(spawned))
-  const member = (JSON.parse(resultText(spawned)) as { member: { target: string; role: string; status: string } }).member
-  assert.equal(member.target, 'scout')
-  assert.equal(member.role, 'teammate')
-  const team = host.ctx.get('agentTeams') as {
-    listMembers(agent: unknown): Array<{ id: string; name: string; role: string; status: string }>
-  }
-  const roster = team.listMembers(lead)
-  const scout = roster.find(candidate => candidate.name === 'scout')
-  assert.ok(scout !== undefined, 'the Team roster carries the durable teammate identity')
-  // The Lead's durable Activity stream carries the child identity and its real
-  // settlement; the child Agent may already be retired by the provider.
-  const leadEvents = (): string => JSON.stringify((lead.session.snapshotEvents() as readonly unknown[]))
-  // The spawn tool returns after the child accepted its activation prompt; the
-  // activation settles independently, so wait for the real member status.
-  await waitFor(() => team.listMembers(lead).find(candidate => candidate.name === 'scout')?.status === 'inactive')
-  const liveChild = host.ctx.agents.get(scout.id as never)
-  if (liveChild !== undefined) {
-    assert.equal(liveChild.session.header.parentSession, lead.session.id, 'the teammate is a real child of the Lead Session')
-  }
+  assert.equal(disabledCreate.isError, true, 'a disabled Team session cannot create a task')
+  assert.match(errorText(disabledCreate), /UNKNOWN_TOOL/u,
+    'the conditional Team tool is not admitted to the model executor while Team mode is off')
 
-  // list_agents is a REAL tool result, not a global catalog truth.
-  const listed = await toolCall(host.ctx as never, 'list_agents', lead, {})
-  assert.match(resultText(listed), /scout/)
-  assert.match(resultText(listed), /lead/)
+  // ── root enablement: the official service appends the durable team/mode and
+  // the conditional tools become discoverable in the SAME agent scope ─────────
+  await team.setEnabled(lead, true)
+  assert.equal(team.isEnabled(lead), true)
+  assert.ok((host.events(lead) as readonly { type?: string }[]).some(event => event.type === 'team/mode'),
+    'enablement is persisted as the official team/mode record')
 
-  // Shared task board: create, reassign to the live teammate, read back.
-  const created = await toolCall(host.ctx as never, 'team_task_create', lead, {
+  // ── the real shared board: create → list → get ──────────────────────────────
+  const created = await toolCall(host.ctx, 'team_task_create', lead, {
     subject: 'Scout one file',
     description: 'Read one file and report its content.',
   })
-  const task = JSON.parse(resultText(created)) as { id: string; revision: number }
-  const assigned = await toolCall(host.ctx as never, 'team_task_update', lead, {
+  assert.notEqual(created.isError, true, resultText(created))
+  const task = JSON.parse(resultText(created)) as {
+    id: string
+    revision: number
+    subject: string
+    status: string
+    ready: boolean
+    owner?: string
+  }
+  assert.equal(task.subject, 'Scout one file')
+  assert.equal(task.status, 'pending')
+  assert.equal(task.revision, 1)
+  assert.equal(task.owner, undefined, 'a new task starts unowned')
+
+  const listed = await toolCall(host.ctx, 'team_task_list', lead, {})
+  assert.notEqual(listed.isError, true, resultText(listed))
+  const page = JSON.parse(resultText(listed)) as { tasks: Array<{ id: string; subject: string }> }
+  assert.deepEqual(page.tasks.map(row => row.id), [task.id])
+  const read = await toolCall(host.ctx, 'team_task_get', lead, { task_id: task.id })
+  assert.notEqual(read.isError, true, resultText(read))
+  assert.equal((JSON.parse(resultText(read)) as { revision: number }).revision, 1)
+
+  // ── teammate creation is the standard subagent tool with a unique name ─────
+  const spawned = await toolCall(host.ctx, 'subagent', lead, {
+    name: 'scout',
+    description: 'Read-only scout teammate',
+    prompt: 'Reply with TEAM_READY and nothing else.',
+  })
+  assert.notEqual(spawned.isError, true, resultText(spawned))
+  assert.equal(resultText(spawned), 'started subagent scout',
+    'the rc.2 activation result names the child instead of exposing a session id')
+  const childId = await subagents.resolveName(lead, 'scout', signal)
+  const child = host.ctx.agents.get(childId)
+  assert.ok(child !== undefined, 'the named teammate is a live child Agent')
+  // Root/child inheritance: the child reads the same tree-level Team mode.
+  assert.equal(team.isEnabled(child), true, 'a child inherits the root Team selection')
+
+  // ── root-only authority: a child cannot change the Team mode, and only the
+  // root may reassign; the child may claim its own task ──────────────────────
+  await assert.rejects(team.setEnabled(child, true), (error: unknown) => {
+    assert.match(String((error as { code?: unknown }).code ?? error), /TEAM_LEAD_REQUIRED/u)
+    return true
+  }, 'only the root Session may change Team mode')
+  const childReassign = await toolCall(host.ctx, 'team_task_update', child, {
     task_id: task.id,
     expected_revision: task.revision,
     action: 'reassign',
     owner: 'scout',
   })
-  assert.match(resultText(assigned), /scout/)
-  const listedTasks = await toolCall(host.ctx as never, 'team_task_list', lead, {})
-  assert.match(resultText(listedTasks), /Scout one file/)
-  const readTask = await toolCall(host.ctx as never, 'team_task_get', lead, { task_id: task.id })
-  assert.match(resultText(readTask), /Scout one file/)
+  assert.equal(childReassign.isError, true, 'a teammate cannot reassign a shared task')
+  assert.match(errorText(childReassign), /TEAM_LEAD_REQUIRED/u)
+  const claimed = await toolCall(host.ctx, 'team_task_update', child, {
+    task_id: task.id,
+    expected_revision: task.revision,
+    action: 'claim',
+  })
+  assert.notEqual(claimed.isError, true, resultText(claimed))
+  const claimedTask = JSON.parse(resultText(claimed)) as { revision: number; owner?: string; status: string }
+  assert.equal(claimedTask.owner, 'scout', 'the task names its owner by agent name, not session id')
+  assert.equal(claimedTask.status, 'in_progress')
+  // The root reassigns the SAME task to itself by name (ownerName authority).
+  const reassigned = await toolCall(host.ctx, 'team_task_update', lead, {
+    task_id: task.id,
+    expected_revision: claimedTask.revision,
+    action: 'reassign',
+    owner: 'lead',
+  })
+  assert.notEqual(reassigned.isError, true, resultText(reassigned))
+  assert.equal((JSON.parse(resultText(reassigned)) as { owner?: string }).owner, 'lead')
 
-  // A message is only an ACCEPTANCE: sent:true never proves the member ran it.
-  const sent = await toolCall(host.ctx as never, 'send_message', lead, {
-    target: 'scout',
+  // ── the addressed turn really reaches the child model transport, and the
+  // durable child path is a real Agent/Session ───────────────────────────────
+  const sent = await toolCall(host.ctx, 'send_message', lead, {
+    agent: 'scout',
     message: 'SCOUT_JOB: reply with SCOUT_DONE',
   })
   assert.notEqual(sent.isError, true, resultText(sent))
-  assert.deepEqual(JSON.parse(resultText(sent)), { sent: true })
-  // The Host `wait_agent` tool is the real wait surface (not only a test poll).
-  const waited = await toolCall(host.ctx as never, 'wait_agent', lead, { timeout_ms: 10_000 })
-  assert.notEqual(waited.isError, true, resultText(waited))
-  assert.match(resultText(waited), /"timedOut"/u)
-  // The addressed turn really reached the member model transport and the Lead
-  // received the member's durable settlement, not just the inbox acceptance.
-  await waitFor(() => leadEvents().includes('SCOUT_DONE'))
+  await waitFor(() => JSON.stringify(host.events(lead)).includes('SCOUT_DONE'))
   assert.ok(adapter.requests.some(request => JSON.stringify(request.messages).includes('SCOUT_JOB')),
     'the addressed turn reached the child model transport')
 
-  // NEGATIVE: an unknown target is refused by the official Team authority.
-  const unknown = await toolCall(host.ctx as never, 'send_message', lead, { target: 'ghost', message: 'hi' })
-  assert.equal(unknown.isError, true, 'an unknown Team target is refused')
+  // ── disabling the mode hides the tools again; the durable board survives ──
+  await team.setEnabled(lead, false)
+  assert.equal(team.isEnabled(lead), false)
+  const disabledCreateAgain = await toolCall(host.ctx, 'team_task_create', lead, {
+    subject: 'must still not exist',
+    description: 'the disabled Team authority must refuse creation',
+  })
+  assert.equal(disabledCreateAgain.isError, true)
+  assert.match(errorText(disabledCreateAgain), /UNKNOWN_TOOL/u,
+    'disabling Team mode removes the tool from model admission again')
 
-  // NEGATIVE: a target that belongs to ANOTHER Team is not addressable from
-  // this Lead's Team (cross-Team authorization is scoped by the roster).
-  const otherLead = await host.createAgent(SessionId('optional-bundle-b01-lead-other'), {
-    provider: 'scripted',
-    model: 'review-model',
-    cwd: join(host.root, 'work'),
-  })
-  const outsiderSpawn = await toolCall(host.ctx as never, 'spawn_teammate', otherLead, {
-    name: 'outsider',
-    description: 'other team member',
-    prompt: 'Reply with TEAM_READY and nothing else.',
-    context: 'fresh',
-  })
-  assert.notEqual(outsiderSpawn.isError, true, resultText(outsiderSpawn))
-  const crossTeam = await toolCall(host.ctx as never, 'send_message', lead, { target: 'outsider', message: 'hi' })
-  assert.equal(crossTeam.isError, true, 'a member of another Team is not an addressable target')
-  assert.match(JSON.stringify(crossTeam.error ?? {}), /TEAM_INVALID_TARGET|TEAM_MEMBER_NOT_FOUND|unknown|not an active/i)
-  // NEGATIVE: a LIVE teammate cannot spawn another teammate. Hold its
-  // activation model stream so the exact child Agent stays live and the real
-  // Team authorization path (not a disposed identity) is exercised.
-  adapter.hold = new Promise<void>(resolve => { adapter.releaseHold = resolve })
-  const probeSpawn = await toolCall(host.ctx as never, 'spawn_teammate', lead, {
-    name: 'probe',
-    description: 'authorization probe',
-    prompt: 'HOLD_CHILD',
-    context: 'fresh',
-  })
-  assert.notEqual(probeSpawn.isError, true, resultText(probeSpawn))
-  const probe = team.listMembers(lead).find(candidate => candidate.name === 'probe')
-  assert.ok(probe !== undefined)
-  await waitFor(() => host.ctx.agents.get(probe.id as never) !== undefined)
-  const probeAgent = host.ctx.agents.get(probe.id as never)
-  assert.ok(probeAgent !== undefined)
-  const nested = await toolCall(host.ctx as never, 'spawn_teammate', probeAgent, {
-    name: 'nested',
-    description: 'not allowed',
-    prompt: 'noop',
-    context: 'fresh',
-  })
-  assert.equal(nested.isError, true, 'only the Team Lead may create teammates')
-  assert.match(JSON.stringify(nested.error ?? {}), /TEAM_LEAD_REQUIRED/)
-  adapter.releaseHold?.()
-  await waitFor(() => team.listMembers(lead).find(candidate => candidate.name === 'probe')?.status === 'inactive')
-
-  // TEARDOWN: a fresh Host composition has no orphan child/job from the Team.
-  assert.ok(host.ctx.agents.list().length >= 2, 'the Team children are live before teardown')
+  // ── teardown: a fresh Host has no orphan child and still defaults OFF ─────
   const restarted = await host.restart()
   assert.equal(restarted.ctx.agents.list().length, 0, 'Host teardown drains every Team child')
-  assert.ok(restarted.activeBundles.includes(B01), 'the restarted composition still carries B01')
-
-  // The 14 identities remain the frozen set.
+  const restartedTeam = restarted.ctx.get('agentTeams') as { isEnabled(agent: Agent): boolean }
+  const restartedLead = await restarted.createAgent(SessionId('rc2-base-team-restarted-lead'), {
+    provider: 'scripted',
+    model: 'review-model',
+    cwd: join(restarted.root, 'work'),
+  })
+  assert.equal(restartedTeam.isEnabled(restartedLead), false, 'a fresh Session starts with Team OFF again')
 })
 
 /** Poll one in-process condition with a bounded number of event-loop turns. */

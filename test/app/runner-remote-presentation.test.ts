@@ -408,8 +408,11 @@ function seedTurn(
 ): void {
   const session = fixture.host.ctx.sessions.get(SessionId(sessionId))
   if (session === undefined) throw new Error(`seedTurn: no Host session ${sessionId}`)
+  // rc.2 gives `Session.append` an additional array overload; the single-event
+  // fixture seam therefore goes through `unknown` rather than claiming the two
+  // signatures overlap.
   const append = (type: string, data: unknown, options?: { surfaceOp?: 'append' }): void => {
-    (session.append as (t: string, d: unknown, o?: { surfaceOp?: 'append' }) => void)(type, data, options)
+    (session.append as unknown as (t: string, d: unknown, o?: { surfaceOp?: 'append' }) => void)(type, data, options)
   }
   append('turn/start', { turn })
   append('step/start', { turn, step: 1 })
