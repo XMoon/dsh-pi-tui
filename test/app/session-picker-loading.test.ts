@@ -803,7 +803,7 @@ test('an interactive selection that commits ends without an error notice', async
   assert.deepEqual(h.notices, [], 'a committed switch is not an error')
 })
 
-test('Enter on the current Session row never starts a switch', async (t) => {
+test('Enter on the current Session row returns without starting a switch', async (t) => {
   const rows = [
     { id: 'session-currentrow', updatedAt: 20, cwd: '/ws', live: true },
     { id: 'session-otherrow', updatedAt: 10, cwd: '/ws', live: false },
@@ -821,10 +821,12 @@ test('Enter on the current Session row never starts a switch', async (t) => {
   await h.runSessions()
   await waitUntil(() => h.view().includes('otherrow'))
   assert.ok(h.view().includes('● currentr'), 'the captured current Session carries the marker')
+  assert.ok(h.view().includes('Return [Enter]'), 'the current row advertises its real Return verb')
   h.vt.sendInput('\r')
   await h.vt.waitForRender()
-  assert.deepEqual(h.switched, [], 'the current Session row is a no-op, never a resume')
-  assert.ok(h.view().includes('Sessions'), 'the no-op keeps the current workspace open')
+  assert.deepEqual(h.switched, [], 'the current Session row is a Return, never a resume')
+  assert.ok(!h.view().includes('Sessions'), 'Return closes the Browser and restores the previous surface')
+  assert.equal(h.app.isFullscreen(), false, 'no fullscreen lease remains after the Return')
 })
 
 test('a manual query edit during the listing supersedes the typed /resume direct match (UB-07)', async (t) => {
