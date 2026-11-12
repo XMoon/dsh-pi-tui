@@ -142,13 +142,14 @@ test('a failed read stays failed (never degraded to a guessed default); invalida
 test('subscriptions notify on commit and invalidate; dispose stops everything exactly once', async () => {
   const source = sourceFixture({ reads: new Map([['s1', readyRead('s1')]]) })
   const observation = createSessionPolicyObservation(source)
-  let notifications = 0
-  const unsubscribe = observation.subscribe(() => { notifications += 1 })
+  const notifications: string[] = []
+  const unsubscribe = observation.subscribe(event => { notifications.push(event) })
   await observation.refresh('s1')
   observation.invalidate('s1')
   unsubscribe()
   observation.invalidate('s1')
-  assert.equal(notifications, 1, 'ONLY a committed read repaints consumers; invalidation and read-start are silent')
+  assert.deepEqual(notifications, ['committed', 'invalidated'],
+    'a committed read repaints AND a revocation is observable (read-start is silent); the unsubscribed listener hears nothing after detach')
   observation.dispose()
   observation.dispose()
   // After disposal a late read settles nothing and notifies nobody.

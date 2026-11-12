@@ -2241,7 +2241,15 @@ export function applyRunnerWithRuntime(
       isSubjectCurrent: sessionId => ownership.currentSessionId() === sessionId || viewerRef?.read()?.id === sessionId,
       diag,
     })
-    const disposePolicyObservation = sessionPolicyObservation.subscribe(() => { statusRuntimeRef?.refresh() })
+    // The status owner repaints only on COMMITTED reads. A revocation inside
+    // an owner-commit callback must not trigger a full status refresh (it
+    // could read the published-but-uninitialized owner's Host projections);
+    // the status facts still leave the screen at the generation boundary via
+    // the command surface's explicit `refresh()`, and every later display
+    // refresh sees the revoked `checking` snapshot.
+    const disposePolicyObservation = sessionPolicyObservation.subscribe(event => {
+      if (event === 'committed') statusRuntimeRef?.refresh()
+    })
     // Scope/generation changes revoke every committed snapshot WITHOUT a
     // synchronous re-read: the next display refresh starts the new subject's
     // controlled read (the subject-keyed lazy read). A refresh started inside
