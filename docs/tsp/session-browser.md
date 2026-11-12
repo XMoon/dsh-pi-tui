@@ -74,8 +74,8 @@ production default; TSP keeps the experimental opt-in described in
   fields; it does not locally search content or Host snippets.
 - The native input keeps raw editor text and cursor separate from the canonical
   query. Ordinary Reader snapshots update results/status without rewriting the
-  editor; `/sessions`/`/search` initial queries and a no-match typed `/resume`
-  query are seeded once. Text edits made while the list loads — including
+  editor; `/sessions`/`/search` initial queries, the CLI startup query and a
+  no-match typed `/resume` query are seeded once. Text edits made while the list loads — including
   whitespace-only changes that canonicalize to the existing query — take
   precedence over pending initial/direct-match intent, and canonical no-op edits
   do not restart Host search.

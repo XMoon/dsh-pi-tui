@@ -799,18 +799,29 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       readonly addDirectory?: boolean
       readonly initialDirectoryEntry?: boolean
       readonly initialDirectoryPath?: string
+      /** The CLI startup entry's initial query. An explicit value (including
+       *  the empty Browse-All query) selects the startup semantics: the raw
+       *  input is the launch query and the one entry that skips the sessionless
+       *  Workspace-preflight wait — the Browser must own the first input frame
+       *  even when the preflight is slow or never answers. */
+      readonly initialQuery?: string
     } = 'current',
   ): Promise<CommandResult> => {
+    const settings = typeof options === 'string' ? { scope: options } : options
+    const startupQuery = settings.initialQuery
     // A sessionless Browser's subject may name the launch Workspace only after
     // the mount preflight commits; open the ONE owner with that confirmed
-    // destination instead of a transient "no current Workspace" state.
-    if (runner.captureSessionScope().sessionId === undefined) await runner.awaitWorkspacePreflight?.()
-    return openSessionPicker(invocation, {
+    // destination instead of a transient "no current Workspace" state. The
+    // CLI startup entry deliberately skips this wait (see `initialQuery`).
+    if (startupQuery === undefined && runner.captureSessionScope().sessionId === undefined) {
+      await runner.awaitWorkspacePreflight?.()
+    }
+    return openSessionPicker(startupQuery === undefined ? invocation : { rawInput: startupQuery }, {
       header: 'sessions',
-      browseScope: typeof options === 'string' ? options : options.scope,
-      addDirectory: typeof options === 'string' ? false : options.addDirectory,
-      initialDirectoryEntry: typeof options === 'string' ? false : options.initialDirectoryEntry,
-      initialDirectoryPath: typeof options === 'string' ? undefined : options.initialDirectoryPath,
+      browseScope: settings.scope,
+      addDirectory: settings.addDirectory === true,
+      initialDirectoryEntry: settings.initialDirectoryEntry === true,
+      initialDirectoryPath: settings.initialDirectoryPath,
     })
   }
 
@@ -1235,6 +1246,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       readonly addDirectory?: boolean
       readonly initialDirectoryEntry?: boolean
       readonly initialDirectoryPath?: string
-    }) => openSessionsBody({ rawInput: '' }, scope),
+      readonly initialQuery?: string
+    } = 'current') => {
+      if (typeof scope === 'string') return openSessionsBody({ rawInput: '' }, scope)
+      return openSessionsBody({ rawInput: scope.initialQuery ?? '' }, scope)
+    },
   }
 }

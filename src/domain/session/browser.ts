@@ -4,6 +4,49 @@ import { normalize } from 'node:path'
 /** The official search-query cap in JavaScript UTF-16 code units. */
 export const SESSION_SEARCH_QUERY_MAX_CHARS = 500
 
+/** Strip the `session-`/`session_` prefix and keep the first 8 characters, like
+ * the kimicode card's short id. */
+export function shortSessionId(id: string): string {
+  return id.replace(/^session[-_]/i, '').slice(0, 8)
+}
+
+/** The identity shape the shared matcher needs (a listed row or any object
+ * carrying the full Session id). */
+export interface SessionMatchRow {
+  readonly id: string
+}
+
+/**
+ * Resolve one session row for a typed resume query. A full id wins over the
+ * row order; otherwise only a UNIQUE non-empty prefix (the `session-` form or
+ * the short id) is resolved. An ambiguous or missing prefix returns undefined
+ * so the read owner seeds the same global Browser search instead of guessing.
+ * @param rows - the listed main-session rows (never re-filtered here).
+ * @param query - the resume query.
+ * @returns the matching row, or undefined.
+ */
+export function findSessionMatch<T extends SessionMatchRow>(rows: readonly T[], query: string): T | undefined {
+  const exact = rows.find(row => row.id === query)
+  if (exact !== undefined) return exact
+
+  // Strip an optional session- prefix before prefix matching so both
+  // `session-aaaaaaaa-bbbb` and `aaaaaaaa-bbbb` resolve. An empty bare
+  // query must never match every listed row.
+  const bare = query.replace(/^session[-_]/i, '')
+  if (bare === '') return undefined
+
+  let candidate: T | undefined
+  for (const row of rows) {
+    if (!row.id.startsWith(`session-${bare}`)
+      && !shortSessionId(row.id).startsWith(bare)) continue
+    // A row can satisfy both prefix forms; count it once. A second candidate
+    // means the query is ambiguous and the Browser search owns the choice.
+    if (candidate !== undefined) return undefined
+    candidate = row
+  }
+  return candidate
+}
+
 /** Canonicalize one user query for both metadata matching and Host search. */
 export function sanitizeSessionSearchInput(value: string): string {
   const trimmed = value.replace(/\0/g, '').trim()

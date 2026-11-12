@@ -60,6 +60,13 @@ interface Harness {
   app: TuiApp
   runSessions: () => Promise<unknown>
   runResume: (rawInput: string) => Promise<unknown>
+  /** The CLI startup entry of the SAME registered `/sessions` body. */
+  openSessionBrowser: (request: {
+    readonly scope?: 'current' | 'all'
+    readonly initialQuery: string
+  }) => Promise<import('@deepseek-ai/dsh-commands').CommandResult>
+  /** Counts the sessionless Workspace-preflight waits the entry performed. */
+  preflight: { calls: number }
   view: () => string
   switched: string[]
   switchScopes: Array<import('../../src/app/session/scope.ts').SessionScope | undefined>
@@ -103,7 +110,9 @@ function harness(
   }
   const switched: string[] = []
   const switchScopes: Array<import('../../src/app/session/scope.ts').SessionScope | undefined> = []
+  const preflight = { calls: 0 }
   const runner: TuiCommandRunner = {
+    awaitWorkspacePreflight: async () => { preflight.calls += 1 },
     webAccess: unavailableWebAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
@@ -199,7 +208,7 @@ function harness(
     extensions: undefined,
     exit: () => {},
   }
-  registerTuiCommandsWithDirectSeams(runner)
+  const installed = registerTuiCommandsWithDirectSeams(runner)
   const def = defs.find(entry => entry.name === 'sessions')
   assert.ok(def?.handler !== undefined, 'sessions handler missing')
   // /resume registers as its own command carrying the alias handler.
@@ -217,6 +226,8 @@ function harness(
     app,
     runSessions: () => invoke(def!.handler, ''),
     runResume: (rawInput: string) => invoke(resumeDef!.handler, rawInput),
+    openSessionBrowser: request => installed.openSessionBrowser!(request),
+    preflight,
     view: () => vt.getViewport().join('\n'),
     switched,
     switchScopes,
@@ -937,4 +948,66 @@ test('typed /resume against an empty roster reports the same readable-empty stat
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
   assert.deepEqual(h.switched, [], 'an empty roster never starts a switch')
+})
+
+test('the CLI startup entry opens the SAME Browser with its query and skips the Workspace preflight', async (t) => {
+  const rows = [
+    { id: 'session-mysql-0001', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
+  ]
+  let listCalls = 0
+  const h = harness({
+    list: async () => {
+      listCalls += 1
+      return rows
+    },
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  })
+  t.after(() => h.app.stop())
+
+  const opened = await h.openSessionBrowser({ scope: 'all', initialQuery: 'mysql' })
+  assert.deepEqual(opened, { kind: 'success' }, 'the Browser admission resolves without waiting for any Host content read')
+  await waitUntil(() => h.view().includes('Search all workspaces') && h.view().includes('mysql'))
+  assert.equal(listCalls, 1, 'the SAME read owner lists exactly once')
+  assert.equal(h.preflight.calls, 0, 'the CLI startup entry must not wait for the sessionless Workspace preflight')
+  assert.deepEqual(h.switched, [], 'a query-only startup never auto-resumes')
+
+  // The seeded query starts in the global editor: the first Esc restores the
+  // browse list and the second closes the same workspace.
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Workspace: '), 'Esc closes the startup Browser back to the sessionless Welcome')
+  assert.deepEqual(h.switched, [], 'closing the Browser starts no Session and switches nothing')
+})
+
+test('a bare CLI startup opens Browse All without the Workspace preflight', async (t) => {
+  const rows = [
+    { id: 'session-alpha', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-beta', updatedAt: 10, cwd: '/ws', live: false },
+  ]
+  const h = harness({
+    list: async () => rows,
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  })
+  t.after(() => h.app.stop())
+
+  const opened = await h.openSessionBrowser({ scope: 'all', initialQuery: '' })
+  assert.deepEqual(opened, { kind: 'success' })
+  await waitUntil(() => h.view().includes('alpha') && h.view().includes('beta'))
+  assert.equal(h.preflight.calls, 0, 'browse-all needs no Host Workspace pre-commit')
+  assert.ok(!h.view().includes('Search all workspaces'), 'a bare startup opens the browse list, not the search editor')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Workspace: '), 'Esc returns to the sessionless Welcome')
+  assert.deepEqual(h.switched, [])
 })

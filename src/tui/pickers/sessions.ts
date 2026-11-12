@@ -17,23 +17,21 @@ import { truncateToWidth } from '@xmoon76/pi-tui'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import {
   buildSessionTree,
+  findSessionMatch,
   sameWorkspace,
   sanitizeSessionSearchInput,
   sessionRowMatchesQuery,
+  shortSessionId,
 } from '../../domain/session/browser.ts'
 export {
   buildSessionTree,
+  findSessionMatch,
   sameWorkspace,
   sanitizeSessionSearchInput,
   SESSION_SEARCH_QUERY_MAX_CHARS,
   sessionRowMatchesQuery,
+  shortSessionId,
 } from '../../domain/session/browser.ts'
-
-/** Strip the `session-` prefix and keep the first 8 characters, like the
- * kimicode card's short id. */
-export function shortSessionId(id: string): string {
-  return id.replace(/^session[-_]/i, '').slice(0, 8)
-}
 
 /** kimicode-style workspace key: the last two path segments, or a placeholder.
  * The cwd is a Host/persistence boundary value — the group header is
@@ -167,35 +165,4 @@ export function sessionLabelParts(label: string): { prefix: string; title: strin
   const rest = label.slice(tree.length)
   const marker = rest.startsWith('● ') ? '● ' : ''
   return { prefix: tree + marker, title: rest.slice(marker.length) }
-}
-
-/**
- * Resolve one session row for a typed resume query. A full id wins over the
- * row order; otherwise only a UNIQUE non-empty prefix (the `session-` form or
- * the short id) is resolved. An ambiguous or missing prefix returns undefined
- * so the read owner seeds the same global Browser search instead of guessing.
- * @param rows - the listed main-session rows (never re-filtered here).
- * @param query - the resume query.
- * @returns the matching row, or undefined.
- */
-export function findSessionMatch(rows: readonly SessionPickerRow[], query: string): SessionPickerRow | undefined {
-  const exact = rows.find(row => row.id === query)
-  if (exact !== undefined) return exact
-
-  // Strip an optional session- prefix before prefix matching so both
-  // `session-aaaaaaaa-bbbb` and `aaaaaaaa-bbbb` resolve. An empty bare
-  // query must never match every listed row.
-  const bare = query.replace(/^session[-_]/i, '')
-  if (bare === '') return undefined
-
-  let candidate: SessionPickerRow | undefined
-  for (const row of rows) {
-    if (!row.id.startsWith(`session-${bare}`)
-      && !shortSessionId(row.id).startsWith(bare)) continue
-    // A row can satisfy both prefix forms; count it once. A second candidate
-    // means the query is ambiguous and the Browser search owns the choice.
-    if (candidate !== undefined) return undefined
-    candidate = row
-  }
-  return candidate
 }
