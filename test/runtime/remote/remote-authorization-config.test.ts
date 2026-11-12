@@ -286,7 +286,7 @@ test('REAL_WIRE: a dispatched run whose started frame is lost is dispatch-unknow
       (error: unknown) => error instanceof AuthorizationDispatchUnknownError && error.code === 'DISPATCH_UNKNOWN',
     )
     await waitFor('the Host actually dispatched the attempt', () => runs === 1, 5_000)
-    await sleep(150)
+    await sleep(150) // reason: bounded negative observation — no second Host dispatch after a lost started frame
     assert.equal(runs, 1, 'the Client must never open a second Host attempt after losing the started frame')
   } finally {
     adapter.dispose()
@@ -326,7 +326,7 @@ test('REAL_WIRE: a stream lost after the official commit is unconfirmed, never a
     // stream is still held open (the flow has not settled yet).
     await waitFor('the unconfirmed terminal before the flow settles', () => events.some(event => event.kind === 'unconfirmed'), 10_000)
     release()
-    await sleep(150)
+    await sleep(150) // reason: bounded observation — the released old stream must not deliver a late terminal
     assert.equal(events.some(event => event.kind === 'settled'), false,
       'a stream lost after the official commit must never be reported as authorized/cancelled/failed')
     assert.equal(events.filter(event => event.kind === 'unconfirmed').length, 1)
@@ -538,7 +538,7 @@ test('UNIT: a generation replacement turns an in-flight attempt into unconfirmed
     // frame: the generation subscription must itself wake the attempt.
     await waitFor('the unconfirmed terminal on generation replacement', () => events.some(event => event.kind === 'unconfirmed'), 2_000)
     release()
-    await sleep(50)
+    await sleep(50) // reason: bounded observation — the released old-generation stream must not deliver its authorized frame
     // The late `authorized` frame of the old generation never reaches the page.
     assert.equal(events.some(event => event.kind === 'settled'), false)
     assert.equal(events.filter(event => event.kind === 'unconfirmed').length, 1)
@@ -567,7 +567,7 @@ test('UNIT: a listener that replaces the generation on the official terminal nev
     const started = await adapter.begin({ key: 'llm-pi-ai/x' })
     assert.equal(started.kind, 'started')
     await waitFor('the official terminal', () => events.some(event => event.kind === 'settled'), 5_000)
-    await sleep(50)
+    await sleep(50) // reason: bounded observation — a re-entrant generation replacement must not add a second terminal
     const terminals = events.filter(event => event.kind === 'settled' || event.kind === 'unconfirmed')
     assert.equal(terminals.length, 1, `exactly one terminal must reach the flow: ${JSON.stringify(terminals)}`)
     assert.equal(terminals[0]?.kind, 'settled')
