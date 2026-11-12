@@ -172,12 +172,6 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
       name: '@deepseek-ai/dsh-api-settings-controller'
       inject: [typert]
 
-    # The official DeepSeek Account Remote owner is Host-only and remains live
-    # regardless of the optional Browser Web frontend roster.
-    - id: split-host-account-controller
-      name: '@deepseek-ai/dsh-api-account-controller'
-      inject: [deepseekAccount, agents]
-
     - id: split-host-session-log-download
       name: '@deepseek-ai/dsh-session-log-export'
       inject: [commands, connection]

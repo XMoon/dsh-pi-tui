@@ -163,7 +163,7 @@ const OFFICIAL_TYPERT_BINDINGS = [
   { serviceKey: 'sessionController', namespace: 'session' },
   { serviceKey: 'fileUploads', namespace: 'fileUploads' },
   { serviceKey: 'settingsController', namespace: 'settings' },
-  { serviceKey: 'accountController', namespace: 'account' },
+  { serviceKey: 'deepseekAccount', namespace: 'account' },
   // The Host Workspace Remote owner the bundle mounts: `workspace/create` and
   // `follow` reach the registry only through this binding, so a readable
   // service object without it is not a working Workspace API.
@@ -184,7 +184,10 @@ const OFFICIAL_LOADER_OWNER_PACKAGES = [
   // `ctx.directoryPicker` twice, and a missing one leaves every list verb
   // refusing.
   { owner: 'directoryPicker', id: 'directory-picker', name: '@deepseek-ai/dsh-host-directory-picker-browse' },
-  { owner: 'accountController', id: 'split-host-account-controller', name: '@deepseek-ai/dsh-api-account-controller' },
+  // The rc.2 base bundle's concrete `deepseekAccount` owner is the ONE official
+  // account Typert owner: the Host-only overlay must not mount a second
+  // controller row.
+  { owner: 'deepseekAccount', id: 'deepseek-account', name: '@deepseek-ai/dsh-deepseek-account' },
 ] as const
 
 /** The package's private endpoint bindings. */
@@ -266,7 +269,7 @@ export function collectHostEntryStatus(
     'sessionController',
     'fileUploads',
     'settingsController',
-    'accountController',
+    'deepseekAccount',
     // The Workspace Remote owner this overlay ENABLES is evidence too: `ready`
     // must not be published while `ctx.remote.workspace` has no Host owner.
     'workspaceController',
@@ -309,7 +312,7 @@ export function collectHostEntryStatus(
     turnOutline: activeIds('split-host-turn-outline'),
     sessionController: activeIds('split-host-session-controller'),
     settingsController: activeIds('split-host-settings-controller'),
-    accountController: activeIds('split-host-account-controller'),
+    deepseekAccount: activeIds('deepseek-account'),
     sessionLogExport: activeIds('split-host-session-log-download'),
     piTuiHostRuntime: activeIds('split-host-pi-tui-runtime'),
     // The pre-existing bundle rows must remain the sole owners: Performance

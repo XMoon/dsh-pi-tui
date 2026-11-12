@@ -1403,7 +1403,7 @@ export class DirectAccountConfig implements AccountConfig {
               return
             }
             if (signal.aborted) return
-            yield { kind: 'current', observation: owner.observe(accountViewOf(winner.result.value), lease) }
+            yield { kind: 'current', observation: owner.observe(accountViewOf(accountUpdateStateOf(winner.result.value)), lease) }
           }
         } finally {
           await iterator.return?.(undefined)
@@ -1499,6 +1499,26 @@ export class DirectAccountConfig implements AccountConfig {
  *  provider, so the adapter must not advertise it). */
 function isLoopbackUrlHost(hostname: string): boolean {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+}
+
+/** The rc.2 `account/watch` frame envelope: every frame is
+ *  `{type: 'snapshot' | 'credentials-changed', state}`. This is the external
+ *  Host data boundary, so the published envelope is checked here and the
+ *  payload is handed to `accountViewOf` as a plain detached copy. A
+ *  `credentials-changed` frame is a fresh snapshot of the same view, never a
+ *  sign-out: only the Host-approved view shape is forwarded. */
+function accountUpdateStateOf(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('DeepSeek Account watch frame is not an AccountUpdate')
+  }
+  const update = value as { readonly type?: unknown; readonly state?: unknown }
+  if (
+    (update.type !== 'snapshot' && update.type !== 'credentials-changed')
+    || typeof update.state !== 'object' || update.state === null
+  ) {
+    throw new Error('DeepSeek Account watch frame is not an AccountUpdate')
+  }
+  return update.state
 }
 
 /** A detached account state copy (no Host record is aliased). */

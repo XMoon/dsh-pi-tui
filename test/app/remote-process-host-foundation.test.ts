@@ -56,7 +56,7 @@ const BUNDLE_ENTRIES = parseYaml(
 const BUNDLE_ROWS = BUNDLE_ENTRIES.flatMap(entry => entry.insert ?? [entry])
 
 const WORKSPACE_CONTROLLER_PACKAGE = '@deepseek-ai/dsh-api-workspace-controller'
-const ACCOUNT_CONTROLLER_PACKAGE = '@deepseek-ai/dsh-api-account-controller'
+const ACCOUNT_PACKAGE = '@deepseek-ai/dsh-deepseek-account'
 const WORKSPACE_REGISTRY_PACKAGE = '@deepseek-ai/dsh-workspace'
 const DIRECTORY_PICKER_PACKAGE = '@deepseek-ai/dsh-host-directory-picker-browse'
 const DELIVERABLE_GUIDANCE_ID = 'deliverable-file-references'
@@ -194,10 +194,12 @@ function assertDirectoryBrowseComposition(
   }
 }
 
-/** The thirteen Host execution rows whose lifetime must not depend on the
+/** The twelve Host execution rows whose lifetime must not depend on the
  *  mutable `tuiStartup` provider: `webserver` / `workspace-files` /
  *  `workspace-controller` / `directory-picker` are the four existing rows
- *  overridden in place, the other nine are the Host-only inserted rows. */
+ *  overridden in place, the other eight are the Host-only inserted rows.
+ *  The rc.2 official `deepseek-account` owner is a BASE row (not an overlay
+ *  row): the overlay must not mount a second account controller. */
 const HOST_EXECUTION_INJECT: ReadonlyArray<{ id: string; inject: readonly string[] }> = [
   { id: 'webserver', inject: [] },
   { id: 'workspace-files', inject: [] },
@@ -215,13 +217,12 @@ const HOST_EXECUTION_INJECT: ReadonlyArray<{ id: string; inject: readonly string
     ],
   },
   { id: 'split-host-settings-controller', inject: ['typert'] },
-  { id: 'split-host-account-controller', inject: ['deepseekAccount', 'agents'] },
   { id: 'split-host-session-log-download', inject: ['commands', 'connection'] },
   { id: 'split-host-pi-tui-runtime', inject: ['typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions', 'subprocess', 'workspaceRegistry', 'skills', 'agentPresets'] },
 ]
 
 /**
- * Pin the exact dependency set of the thirteen Host execution rows. Shared by the
+ * Pin the exact dependency set of the twelve Host execution rows. Shared by the
  * positive assertion and its negative control so the control proves THIS
  * assertion group rejects a reintroduced `tuiStartup`, not a private copy.
  */
@@ -249,7 +250,6 @@ const FOUNDATION_ROWS: ReadonlyArray<{ owner: string; id: string; name: string }
   { owner: 'turnOutline', id: 'split-host-turn-outline', name: '@deepseek-ai/dsh-session-turn-outline' },
   { owner: 'sessionController', id: 'split-host-session-controller', name: '@deepseek-ai/dsh-api-session-controller' },
   { owner: 'settingsController', id: 'split-host-settings-controller', name: '@deepseek-ai/dsh-api-settings-controller' },
-  { owner: 'accountController', id: 'split-host-account-controller', name: ACCOUNT_CONTROLLER_PACKAGE },
   { owner: 'sessionLogExport', id: 'split-host-session-log-download', name: '@deepseek-ai/dsh-session-log-export' },
   { owner: 'piTuiHostRuntime', id: 'split-host-pi-tui-runtime', name: '@xmoon76/dsh-pi-tui/host-runtime' },
 ]
@@ -297,9 +297,9 @@ test('the Host-only overlay declares the official Host service rows and ONE buil
   for (const id of ['tui-app', 'pi-tui-extension-host', 'pi-tui-builtins']) {
     assert.equal(row(id).disabled, true, `${id} must stay disabled`)
   }
-  // The eight official service rows; the package runtime remains one combined row.
-  assert.equal(OVERLAY_ROWS.filter(candidate => candidate.id.startsWith('split-host-')).length, 10,
-    'the overlay must own the two B1 rows and eight official Host service rows')
+  // The seven official service rows; the package runtime remains one combined row.
+  assert.equal(OVERLAY_ROWS.filter(candidate => candidate.id.startsWith('split-host-')).length, 9,
+    'the overlay must own the two B1 rows and seven official Host service rows')
   for (const { id, name } of FOUNDATION_ROWS) {
     assert.equal(row(id).name, name)
   }
@@ -308,7 +308,7 @@ test('the Host-only overlay declares the official Host service rows and ONE buil
   assert.equal(OVERLAY_ROWS.some(candidate => /file-reference-host|terminal-progress-host/u.test(candidate.name ?? '')),
     false, 'the private features must not be independent Loader rows')
   assert.deepEqual(row('split-host-session-controller').config, { nativeOpen: false })
-  // The exact thirteen-row dependency contract, including the four in-place overrides.
+  // The exact twelve-row dependency contract, including the four in-place overrides.
   assertHostExecutionInject(OVERLAY_ENTRIES)
 })
 
@@ -419,7 +419,7 @@ test('the directory-browse composition rejects a second backend, a native choice
   )
 })
 
-test('the protected thirteen-row dependency assertion rejects a reintroduced tuiStartup', () => {
+test('the protected twelve-row dependency assertion rejects a reintroduced tuiStartup', () => {
   const reintroduced = OVERLAY_ENTRIES.map(entry => entry.insert === undefined ? entry : {
     ...entry,
     insert: entry.insert.map(candidate => candidate.id === 'split-host-turn-outline'
@@ -433,7 +433,7 @@ test('the protected thirteen-row dependency assertion rejects a reintroduced tui
   )
 })
 
-test('the protected thirteen-row dependency assertion rejects a duplicated protected row', () => {
+test('the protected twelve-row dependency assertion rejects a duplicated protected row', () => {
   const insertEntry = OVERLAY_ENTRIES.find(entry => entry.insert !== undefined)
   const insertRows = insertEntry?.insert
   assert.ok(insertRows !== undefined, 'the overlay must insert the Host execution rows')
@@ -545,7 +545,7 @@ const DUPLICATED_HOST_AUTHORITY_PACKAGES: readonly string[] = [
   '@deepseek-ai/dsh-client-file-upload',
   '@deepseek-ai/dsh-api-session-controller',
   '@deepseek-ai/dsh-api-settings-controller',
-  ACCOUNT_CONTROLLER_PACKAGE,
+  ACCOUNT_PACKAGE,
   '@deepseek-ai/dsh-host-webserver',
   '@deepseek-ai/dsh-host-frontend-static',
   '@deepseek-ai/dsh-api-workspace-controller',
@@ -569,7 +569,6 @@ const HOST_AUTHORITY_OWNERS: ReadonlyArray<{ pkg: string; id: string }> = [
   { pkg: '@deepseek-ai/dsh-client-file-upload', id: 'split-host-file-upload' },
   { pkg: '@deepseek-ai/dsh-api-session-controller', id: 'split-host-session-controller' },
   { pkg: '@deepseek-ai/dsh-api-settings-controller', id: 'split-host-settings-controller' },
-  { pkg: ACCOUNT_CONTROLLER_PACKAGE, id: 'split-host-account-controller' },
 ]
 
 /** The Direct-only Schedule activation prerequisites the Host-only overlay disables. */
@@ -1036,6 +1035,9 @@ function baselineRows(): FixtureRow[] {
     active('workspace', WORKSPACE_REGISTRY_PACKAGE),
     active('workspace-controller', WORKSPACE_CONTROLLER_PACKAGE),
     active('directory-picker', DIRECTORY_PICKER_PACKAGE),
+    // The rc.2 base bundle publishes the ONE concrete account owner; the
+    // Host-only overlay reuses it in place and must never insert a second row.
+    active('deepseek-account', ACCOUNT_PACKAGE),
     ...FOUNDATION_ROWS.map(({ id, name }) => active(id, name)),
     ...['tui-app', 'pi-tui-extension-host', 'pi-tui-builtins'].map(id => ({
       options: { id, name: id, disabled: true },
@@ -1061,7 +1063,7 @@ function hostContext(rows: FixtureRow[], overrides: Record<string, unknown> = {}
   services.set('sessionController', typertService('sessionController', 'session'))
   services.set('fileUploads', typertService('fileUploads', 'fileUploads'))
   services.set('settingsController', typertService('settingsController', 'settings'))
-  services.set('accountController', typertService('accountController', 'account'))
+  services.set('deepseekAccount', typertService('deepseekAccount', 'account'))
   // The official Workspace Controller's REAL binding shape: the Host publishes
   // `workspaceController` under the `workspace` namespace.
   services.set('workspaceController', typertService('workspaceController', 'workspace'))
@@ -1113,8 +1115,8 @@ test('the readiness audit passes only when every owner row and binding is real',
   assert.equal(status.services.workspaceController, true, 'the official Workspace Controller service must be live')
   assert.equal(status.services.directoryPickerController, true,
     'the Workspace Controller child directory-picker handler must be live')
-  assert.deepEqual(status.ownerEntries.accountController, ['split-host-account-controller'])
-  assert.equal(status.services.accountController, true, 'the official Account Controller service must be live')
+  assert.deepEqual(status.ownerEntries.deepseekAccount, ['deepseek-account'])
+  assert.equal(status.services.deepseekAccount, true, 'the official deepseekAccount service must be live')
   for (const { owner, id } of FOUNDATION_ROWS) {
     assert.deepEqual(status.ownerEntries[owner], [id], `${owner} owner row mismatch`)
   }
@@ -1217,38 +1219,38 @@ test('the directory-browse backend fails Ready unless its official row and child
   )
 })
 
-test('the Host account controller fails Ready without one exact package row and account binding', () => {
-  const id = 'split-host-account-controller'
+test('the Host account owner fails Ready without one exact package row and account binding', () => {
+  const id = 'deepseek-account'
   const disabled = baselineRows().map(candidate => candidate.options.id === id
     ? { ...candidate, fiber: { state: 0, uid: rowUid(id) } }
     : candidate)
   assert.throws(
     () => collectHostEntryStatus(hostContext(disabled), { profile: 'pi-tui' }),
-    /expected exactly one active accountController owner row, found 0/u,
+    /expected exactly one active deepseekAccount owner row, found 0/u,
   )
   const absent = baselineRows().filter(candidate => candidate.options.id !== id)
   assert.throws(
     () => collectHostEntryStatus(hostContext(absent), { profile: 'pi-tui' }),
-    /expected exactly one active accountController owner row, found 0/u,
+    /expected exactly one active deepseekAccount owner row, found 0/u,
   )
   assert.throws(
-    () => collectHostEntryStatus(hostContext(baselineRows(), { accountController: {} }), { profile: 'pi-tui' }),
-    /accountController.*Typert binding/u,
+    () => collectHostEntryStatus(hostContext(baselineRows(), { deepseekAccount: {} }), { profile: 'pi-tui' }),
+    /deepseekAccount.*Typert binding/u,
   )
   assert.throws(
     () => collectHostEntryStatus(
-      hostContext(baselineRows(), { accountController: typertService('otherController', 'other') }),
+      hostContext(baselineRows(), { deepseekAccount: typertService('otherController', 'other') }),
       { profile: 'pi-tui' },
     ),
-    /accountController.*Typert binding/u,
+    /deepseekAccount.*Typert binding/u,
   )
   const duplicatePackage = baselineRows().concat({
-    options: { id: 'account-controller-copy', name: ACCOUNT_CONTROLLER_PACKAGE },
-    fiber: { state: 2, uid: rowUid('account-controller-copy') },
+    options: { id: 'deepseek-account-copy', name: ACCOUNT_PACKAGE },
+    fiber: { state: 2, uid: rowUid('deepseek-account-copy') },
   })
   assert.throws(
     () => collectHostEntryStatus(hostContext(duplicatePackage), { profile: 'pi-tui' }),
-    /exactly one active accountController row for.*named "split-host-account-controller"/u,
+    /exactly one active deepseekAccount row for.*named "deepseek-account"/u,
   )
 })
 
@@ -1263,6 +1265,7 @@ test('the Host status reports the live Loader fiber UID of each row and never in
     assert.equal(entry.fiberUid, rowUid(id), `${id} must report its live Loader fiber UID`)
   }
   assert.equal(byId.get('agent')?.fiberUid, rowUid('agent'))
+  assert.equal(byId.get('deepseek-account')?.fiberUid, rowUid('deepseek-account'))
   assert.equal(byId.get('pi-tui-performance-host')?.fiberUid, rowUid('pi-tui-performance-host'))
   // Negative control: a row whose fiber object has no UID reports NO UID. The
   // status must never substitute an index, a sequence number or a cached id.

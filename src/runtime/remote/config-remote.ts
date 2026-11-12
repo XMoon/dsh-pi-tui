@@ -2103,6 +2103,25 @@ function canonicalAccountCallbackOrigin(origin: string | undefined): origin is s
   return port <= 65_535 && String(port) === match[1]
 }
 
+/** The rc.2 `account/watch` frame envelope: every frame is
+ *  `{type: 'snapshot' | 'credentials-changed', state}`. Validated only at this
+ *  external Stream boundary; a `credentials-changed` frame is a fresh snapshot,
+ *  not a sign-out. The Remote guard in `watch` keeps the generation/epoch
+ *  invalidation authoritative around it. */
+function accountUpdateStateOf(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('Remote account watch frame is not an AccountUpdate')
+  }
+  const update = value as { readonly type?: unknown; readonly state?: unknown }
+  if (
+    (update.type !== 'snapshot' && update.type !== 'credentials-changed')
+    || typeof update.state !== 'object' || update.state === null
+  ) {
+    throw new Error('Remote account watch frame is not an AccountUpdate')
+  }
+  return update.state
+}
+
 function accountViewOf(value: unknown): AccountView {
   const view = value as AccountView
   const attempt = view.attempt
@@ -2400,7 +2419,7 @@ class RemoteAccountConfig implements AccountConfig {
             }
             if (winner.result.done === true) break
             if (watchSignal.aborted || owner.disposed) return
-            yield { kind: 'current', observation: { view: accountViewOf(winner.result.value), lease } }
+            yield { kind: 'current', observation: { view: accountViewOf(accountUpdateStateOf(winner.result.value)), lease } }
           }
         } catch (error) {
           if (watchSignal.aborted || owner.disposed) return
