@@ -10,12 +10,13 @@
  * owns profile boot, bundle loading and inner-argument forwarding; the probe
  * only observes the app's published service, it does not parse argv itself.
  *
- * ENVIRONMENT: the pinned CLI comes from the project's mise toolchain (the
- * same executable the developer tasks use). When it is not on PATH or is not
- * the version pinned by `package.json`, the test is SKIPPED with the concrete
- * reason instead of pretending the contract was exercised. The profile, the
- * DSH_HOME and every probe artifact live under the test lifecycle's private
- * temp root; the real `~/.dsh` is never touched.
+ * ENVIRONMENT: the test prefers the pinned CLI the project mise toolchain puts
+ * on PATH. When that executable is absent or is a different version, it
+ * provisions the EXACT `package.json` pin into a private `pnpm` root (with
+ * lifecycle scripts ignored) and runs the same real launcher from there, so
+ * the product shards exercise the contract instead of skipping it. The
+ * profile, the DSH_HOME and every probe artifact live under the test
+ * lifecycle's private temp root; the real `~/.dsh` is never touched.
  *
  * @module @xmoon76/dsh-pi-tui/cli-session-launcher.test
  */
@@ -23,10 +24,12 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import test from 'node:test'
+// @ts-expect-error -- the repository's plain-JavaScript tooling helper has no declaration file
+import { pnpmExecutable } from '../../scripts/lib/process.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -45,23 +48,48 @@ function pinnedDshVersion(): string {
   return version
 }
 
-/** Resolve the pinned launcher from PATH, or a concrete skip reason. */
-function pinnedLauncher(): { readonly path: string } | { readonly skip: string } {
-  const probe = spawnSync('dsh', ['--version'], { encoding: 'utf8', timeout: 20_000 })
-  if (probe.error !== undefined) {
-    return { skip: `the pinned DSH CLI is not on PATH (${probe.error.message}); run this lane through the project's mise toolchain` }
-  }
-  const version = probe.stdout.trim().split('\n')[0]?.trim() ?? ''
-  if (probe.status !== 0) {
-    return { skip: `dsh --version failed with exit ${String(probe.status)}; the pinned CLI is not usable in this environment` }
-  }
+/** One resolved real launcher invocation. */
+interface Launcher {
+  readonly command: string
+  readonly prefix: readonly string[]
+}
+
+/** The version one launcher invocation reports. */
+function launcherVersion(command: string, prefix: readonly string[], env: NodeJS.ProcessEnv): string {
+  const probe = spawnSync(command, [...prefix, '--version'], { encoding: 'utf8', timeout: 20_000, env })
+  return probe.status === 0 ? (probe.stdout.trim().split('\n')[0]?.trim() ?? '') : ''
+}
+
+/**
+ * Resolve the EXACT `package.json` pin. The project mise toolchain is the
+ * first choice; an environment without it (the product shards) provisions the
+ * same pin into a private pnpm root, so the contract is exercised rather than
+ * skipped. The provisioned entry is the real `dsh` launcher binary, never a
+ * reimplementation of its argv parser.
+ */
+function resolveLauncher(home: string, env: NodeJS.ProcessEnv): Launcher {
   const pinned = pinnedDshVersion()
-  if (version !== pinned) {
-    return { skip: `the DSH CLI on PATH reports ${version || '(no version)'}, not the pinned ${pinned}` }
-  }
-  // The launcher has to resolve `dsh` by name; PATH is the same executable the
-  // version probe just used.
-  return { path: 'dsh' }
+  if (launcherVersion('dsh', [], env) === pinned) return { command: 'dsh', prefix: [] }
+  const cliRoot = join(home, 'dsh-cli')
+  mkdirSync(cliRoot, { recursive: true })
+  writeFileSync(join(cliRoot, 'package.json'), JSON.stringify({ name: 'dsh-cli-launcher-test', private: true }))
+  // Lifecycle scripts are ignored on purpose: the launcher, its argv parser
+  // and the probe row do not need the optional native modules, and pnpm 12
+  // otherwise refuses an install whose dependency scripts are not approved.
+  const install = spawnSync(pnpmExecutable(), ['add', `@deepseek-ai/dsh@${pinned}`, '--ignore-scripts'], {
+    cwd: cliRoot,
+    env,
+    encoding: 'utf8',
+    timeout: 240_000,
+  })
+  assert.equal(install.status, 0,
+    `could not provision the pinned DSH CLI ${pinned} for this lane:\n${install.stdout ?? ''}\n${install.stderr ?? ''}`)
+  const bin = join(cliRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+  assert.ok(existsSync(bin), `the provisioned DSH CLI entry is missing at ${bin}`)
+  const launcher: Launcher = { command: process.execPath, prefix: [bin] }
+  assert.equal(launcherVersion(launcher.command, launcher.prefix, env), pinned,
+    `the provisioned DSH CLI must report the pinned ${pinned}`)
+  return launcher
 }
 
 /** The test-only overlay row: observe the REAL published startup values once. */
@@ -110,15 +138,8 @@ function probeRecord(output: string): unknown {
 }
 
 test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartup', async (t) => {
-  if (!existsSync(join(ROOT, 'dist', 'index.mjs'))) {
-    t.skip('the built bundle is missing at dist/index.mjs; this lane must run after `pnpm build`')
-    return
-  }
-  const launcher = pinnedLauncher()
-  if ('skip' in launcher) {
-    t.skip(launcher.skip)
-    return
-  }
+  assert.ok(existsSync(join(ROOT, 'dist', 'index.mjs')),
+    'the product lane must run after `pnpm build`: dist/index.mjs is the bundle the isolated profile loads')
 
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-cli-launcher-home-')
@@ -138,7 +159,8 @@ test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartu
 
   // Install THIS worktree's built bundle into a private profile with the real
   // `dsh plugin` entry (no hand-written profile files).
-  const install = spawnSync(launcher.path, ['plugin', '--profile', PROFILE, '--', 'add', `link:${ROOT}`], {
+  const launcher = resolveLauncher(home, env)
+  const install = spawnSync(launcher.command, [...launcher.prefix, 'plugin', '--profile', PROFILE, '--', 'add', `link:${ROOT}`], {
     cwd: ROOT,
     env,
     encoding: 'utf8',
@@ -160,7 +182,7 @@ test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartu
   ].join('\n'))
 
   const run = (args: readonly string[]): { readonly status: number | null; readonly output: string } => {
-    const result = spawnSync(launcher.path, ['--profile', PROFILE, '--patch', patchPath, ...args], {
+    const result = spawnSync(launcher.command, [...launcher.prefix, '--profile', PROFILE, '--patch', patchPath, ...args], {
       cwd: ROOT,
       env,
       encoding: 'utf8',

@@ -174,12 +174,12 @@ jobs:
         if: ${{ needs.dsh-context.outputs.mode == 'npm' }}
         run: mise run setup
 
-      # The product shards do not install the mise-managed DSH CLI, so the
-      # real-Launcher integration test skips there by design. This job owns
-      # the pinned CLI and is therefore where the REAL launcher argument
-      # chain is qualified: the test installs the built bundle into a private
-      # profile and asserts the app's published `tuiStartup` values for the
-      # full PR2 grammar.
+      # The product lane also discovers the real-Launcher integration test; it
+      # self-provisions the exact `package.json` pin when the product shard has
+      # no global CLI. This job owns the pinned toolchain, so the same test
+      # runs here against the mise-provided executable as well: it installs the
+      # built bundle into a private profile and asserts the app's published
+      # `tuiStartup` values for the full PR2 grammar.
       - name: Verify the real Launcher Session grammar
         if: ${{ needs.dsh-context.outputs.mode == 'npm' }}
         run: |
