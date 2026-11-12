@@ -36,6 +36,7 @@ import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.
 import { selectSettingsCategory } from '../support/settings-rail.ts'
 import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
 import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
+import { unconfiguredPolicyObservation } from '../support/session-policy-fake.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -213,6 +214,7 @@ function setup(options: {
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},
     currentSessionId: undefined,
+    policy: unconfiguredPolicyObservation(),
     captureLiveSessionScope: () => undefined,
     // C3 About seams: this fixture composes no StatusRuntime, so the
     // sessionless capture is the only reachable state (no scoped read can

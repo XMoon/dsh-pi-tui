@@ -28,6 +28,7 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
 import { selectSettingsCategory } from '../support/settings-rail.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { unconfiguredPolicyObservation } from '../support/session-policy-fake.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -163,6 +164,7 @@ function setup(options: { columns?: number; rows?: number } = {}): {
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},
     currentSessionId: undefined,
+    policy: unconfiguredPolicyObservation(),
     captureLiveSessionScope: () => undefined,
     // C3 About seams: this fixture composes no StatusRuntime, so a Session read
     // can only be attempted through the sessionless path (which must not run).
