@@ -387,7 +387,6 @@ function harness(options: {
     ...(options.hostDirectoryBrowse === undefined ? {} : { hostDirectoryBrowse: options.hostDirectoryBrowse }),
     ...(options.workspaceNextIntent === undefined ? {} : { workspaceNextIntent: options.workspaceNextIntent }),
     ...(options.validateAutoWorkspace === undefined ? {} : { validateAutoWorkspace: options.validateAutoWorkspace }),
-    ...(options.validateAutoWorkspace === undefined ? {} : { validateAutoWorkspace: options.validateAutoWorkspace }),
     ...(options.nativePresentation === undefined ? {} : { sessionBrowserPresentation: options.nativePresentation }),
     ...(options.eligibility === undefined ? {} : {
       forwardedAnswerEligibility: options.eligibility,
