@@ -15,6 +15,7 @@
  * the private `piTuiSkills` Host service (standing metadata and invalidation)
  * the private `piTuiAuthorization` Host service (provider-native sign-in)
  * the private `piTuiCredentialRecords` Host service (stored record metadata)
+ * the private `piTuiSessionPolicy` Host service (exact-Session policy)
  * ```
  *
  * The row publishes the data-free `piTuiHostReady` gate only after the
@@ -66,6 +67,13 @@ import {
   type PiTuiCredentialRecordsHostDeps,
   type CredentialRecordsStoreLike,
 } from './features/credential-records.ts'
+import {
+  PiTuiSessionPolicyHostService,
+  type ApprovalServiceLike,
+  type SandboxPolicyServiceLike,
+  type SessionLike,
+} from './features/session-policy.ts'
+import { PI_TUI_SESSION_POLICY_NAMESPACE } from '../../runtime/remote/pi-tui-session-policy-contract.ts'
 
 /** Stable Cordis plugin name (the Loader row id in the Host-only overlay). */
 export const name = 'pi-tui-host-runtime'
@@ -83,7 +91,12 @@ export const Config = TuiConfig
  */
 export const inject = [
   'typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions',
-  'sandboxPolicy', 'sandbox', 'subprocess', 'workspaceRegistry', 'skills', 'agentPresets',
+  // `sandboxPolicy`/`sandbox` are deliberately NOT hard injects (M6-1 F8):
+  // every feature resolves them PER CALL through `ctx.reflect.get`, so a Host
+  // that only lacks the sandbox provider still becomes Ready and reports that
+  // side as a definite unavailable fact (the shell endpoints refuse explicitly
+  // instead of the whole Host staying down).
+  'subprocess', 'workspaceRegistry', 'skills', 'agentPresets',
 ]
 
 /** Data-free readiness gate published after the whole built-in runtime is live. */
@@ -217,6 +230,20 @@ export async function apply(ctx: Context, config: TuiConfigValue): Promise<void>
     })
     fibers.push(credentialRecordsFiber)
     await credentialRecordsFiber
+    // The exact-Session policy bridge resolves the OFFICIAL approval and
+    // sandbox-policy services per call: a Host without either plugin stays
+    // Ready and that side is a definite unavailable fact, never a hard inject
+    // that would keep the whole Split Host from starting.
+    const sessionPolicyFiber = ctx.inject(PiTuiSessionPolicyHostService.inject, pluginCtx => {
+      new PiTuiSessionPolicyHostService(pluginCtx, {
+        sessions: () => ctx.reflect.get('sessions') as { get(sessionId: string): SessionLike | undefined } | undefined,
+        agents: () => ctx.reflect.get('agents') as { get(sessionId: string): unknown } | undefined,
+        approval: () => ctx.reflect.get('approval') as ApprovalServiceLike | undefined,
+        sandboxPolicy: () => ctx.reflect.get('sandboxPolicy') as SandboxPolicyServiceLike | undefined,
+      })
+    })
+    fibers.push(sessionPolicyFiber)
+    await sessionPolicyFiber
     assertPrivateBinding(ctx, 'piTuiFileReferences', PI_TUI_FILE_REFERENCES_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiTerminalProgress', PI_TUI_TERMINAL_PROGRESS_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiWebAccess', PI_TUI_WEB_ACCESS_NAMESPACE)
@@ -224,6 +251,7 @@ export async function apply(ctx: Context, config: TuiConfigValue): Promise<void>
     assertPrivateBinding(ctx, 'piTuiSkills', PI_TUI_SKILLS_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiAuthorization', PI_TUI_AUTHORIZATION_NAMESPACE)
     assertPrivateBinding(ctx, PI_TUI_CREDENTIAL_RECORDS_NAMESPACE, PI_TUI_CREDENTIAL_RECORDS_NAMESPACE)
+    assertPrivateBinding(ctx, PI_TUI_SESSION_POLICY_NAMESPACE, PI_TUI_SESSION_POLICY_NAMESPACE)
     ctx.provide(PI_TUI_HOST_READY_SERVICE, {})
   } catch (error) {
     const cleanupErrors: unknown[] = []

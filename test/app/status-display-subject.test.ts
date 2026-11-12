@@ -46,7 +46,11 @@ function childStats(): StatsFolder {
   return folder
 }
 
-function makeHarness(options: { remote?: boolean } = {}): {
+function makeHarness(options: {
+  remote?: boolean
+  /** M6-1 F8: the ONE session-policy observation the access derivation reads. */
+  policyObservation?: { readSnapshot(sessionId: string): import('../../src/app/command/policy-observation-state.ts').PolicyObservationState; subscribe(listener: () => void): () => void }
+} = {}): {
   runtime: ReturnType<typeof createStatusRuntime>
   commits: Commit[]
   store: StatusStore
@@ -97,6 +101,7 @@ function makeHarness(options: { remote?: boolean } = {}): {
       sessionProjections: undefined,
     }),
     ...options.remote === true ? { remote: { plan: () => undefined } } : {},
+    ...options.policyObservation === undefined ? {} : { policyObservation: options.policyObservation },
     presentation: { mainStats: () => mainStats },
     viewer: { read: () => child },
     diag: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, dispose: () => {} },
@@ -430,4 +435,60 @@ test('TPS PR-2: the display subject’s OWN Host projection is the performance a
     tokensPerSec: 30,
     sessionTokensPerSec: 30,
   }, 'the child renders its own figures; a measured 0ms TTFB stays a visible zero, never absence')
+})
+
+
+test('M6-1 F8: sandbox/approval access facts come from the ONE observation of the DISPLAY SUBJECT', () => {
+  const observation = (read: (sessionId: string) => import('../../src/app/command/policy-observation-state.ts').PolicyObservationState) => ({
+    readSnapshot: read,
+    subscribe: () => () => {},
+  })
+  // The main subject's proven facts ride the access section independently.
+  const main = makeHarness({
+    policyObservation: observation(sessionId => ({
+      kind: 'ready',
+      read: {
+        kind: 'ready',
+        sessionId,
+        approval: { state: 'ready', effective: 'never', override: 'never' },
+        sandbox: { state: 'ready', effective: 'read-only', override: 'read-only' },
+      },
+    })),
+  })
+  main.runtime.refresh()
+  const mainAccess = main.store.snapshot().access
+  assert.deepEqual(mainAccess.approval, { policy: 'never' })
+  assert.deepEqual(mainAccess.sandbox, { mode: 'read-only' })
+  assert.equal('enforcement' in (mainAccess.sandbox ?? {}), false, 'the policy fact never claims sandbox enforcement')
+
+  // A viewed child reads the CHILD's OWN observed facts — never the parent's.
+  const childObservation = makeHarness({
+    policyObservation: observation(sessionId => sessionId === 'child-a'
+      ? {
+        kind: 'ready',
+        read: {
+          kind: 'ready',
+          sessionId,
+          approval: { state: 'ready', effective: 'ask' },
+          sandbox: { state: 'ready', effective: 'workspace-write' },
+        },
+      }
+      : { kind: 'checking' }),
+  })
+  childObservation.setStatus('child-a', {
+    cwd: '/child-a/ws', permission: 'read-only', model: undefined, preset: undefined, todos: [],
+  } as never)
+  childObservation.setChild(childRead('child-a', 'research'))
+  childObservation.runtime.refresh()
+  const childAccess = childObservation.store.snapshot().access
+  assert.deepEqual(childAccess.permissionPreset, { id: 'read-only', label: 'read-only', matched: true })
+  assert.deepEqual(childAccess.approval, { policy: 'ask' }, 'the child approval is the child subject\'s own')
+  assert.deepEqual(childAccess.sandbox, { mode: 'workspace-write' }, 'the child sandbox is the child subject\'s own')
+
+  // A non-ready observation leaves those facts ABSENT (never a guessed default).
+  const pending = makeHarness({ policyObservation: observation(() => ({ kind: 'checking' })) })
+  pending.runtime.refresh()
+  const pendingAccess = pending.store.snapshot().access
+  assert.equal('approval' in pendingAccess, false)
+  assert.equal('sandbox' in pendingAccess, false)
 })

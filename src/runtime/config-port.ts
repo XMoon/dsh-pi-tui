@@ -473,8 +473,10 @@ export interface AuthorizationConfig {
 }
 
 /** The permission sub-domain: permission preset names, the persisted
- * default, preset application (/yolo), and the session's approval-policy
- * override. */
+ * default, and preset application (/yolo). The session's INDEPENDENT
+ * approval-policy/sandbox read and the approval write moved to
+ * `SessionPolicyPort` (M6-1 F8); this sub-domain carries no approval
+ * contract. */
 export interface PermissionConfig {
   /** The advertised preset names, in the preset table's declaration order. */
   presetNames(): readonly string[]
@@ -483,26 +485,6 @@ export interface PermissionConfig {
   defaultPreset(): string | undefined
   /** Persist the default preset for future sessions. */
   setDefaultPreset(name: string): Promise<void>
-  /**
-   * Whether this backend READS and WRITES the session's independent
-   * approval-policy override at all. Direct: yes (the official approval
-   * service). Remote rc.2: NO — no public Client read of the override and no
-   * synchronous policy carrier exist, so the UI must hide/disable the row.
-   *
-   * This is what keeps `undefined` from `approvalOverrideOf` unambiguous: on a
-   * backend where the capability is absent, "undefined" is UNAVAILABLE and
-   * must never be rendered as the consumer's own `ask` default (the current
-   * Remote composition's unsupported set).
-   */
-  approvalOverrideAvailable(): boolean
-  /** The session's own approval-policy override, resolved from the EXACT
-   * live Agent of `sessionId` (the official approval service's
-   * `overrideOf(session)` read — alpha.4; the configured default is
-   * deliberately NOT applied, an override-less session answers undefined
-   * and the consumer shows its own default). Degrades to undefined when
-   * the approval service is absent or the session has no live Agent — which
-   * is only meaningful while `approvalOverrideAvailable()` is true. */
-  approvalOverrideOf(sessionId: string): 'ask' | 'never' | undefined
   /** Apply one permission preset to a live session (/yolo applies
    * `danger-full-access` through the OFFICIAL command line so the switch
    * takes the exact host path — sandbox + approval writer + policy-change

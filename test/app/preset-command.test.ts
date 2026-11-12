@@ -48,6 +48,7 @@ import { SettingsRegistry } from '../../src/extension/internal/settings-registry
 import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { currentPalette } from '../../src/tui/theme/runtime.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 
 /** The plain (ANSI-stripped) viewport of one VT frame. */
@@ -287,6 +288,8 @@ function stubRunner(options: {
       () => options.state !== undefined ? options.state.agent : options.agent,
       () => options.state?.generation ?? 0,
     ),
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     // /help and the collision baseline read the FAKE registry through the
     // scoped-command facade, exactly like the production provider.
     listScopedCommands: () => (options.ctx.get('commands') as unknown as { list(): readonly SurfaceCommandSummary[] }).list(),
@@ -334,8 +337,7 @@ function stubRunner(options: {
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
       updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),

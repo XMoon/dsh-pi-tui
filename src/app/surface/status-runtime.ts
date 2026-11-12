@@ -204,6 +204,20 @@ export interface StatusRuntimeDeps {
      *  never silently downgraded to `unavailable`, never retried. */
     apply(sessionId: string, presetId: string, signal?: AbortSignal): Promise<PermissionCycleApplyOutcome>
   }
+  /**
+   * M6-1 F8: the ONE session-policy observation owner (the SAME object the
+   * command surface holds). The access derivation reads its committed
+   * snapshots for the independent sandbox/approval facts of the display
+   * subject; absent = this composition exposes no policy observation and the
+   * access section keeps its previous behavior.
+   */
+  readonly policyObservation?: {
+    readSnapshot(sessionId: string): import('../command/policy-observation-state.ts').PolicyObservationState
+    subscribe(listener: () => void): () => void
+    /** Revoke one subject's committed truth (the previous display subject is
+     *  retired when the viewer exits or the main subject changes). */
+    invalidate?(sessionId: string): void
+  }
 }
 
 /** The status owner as the rest of the application consumes it. */
@@ -341,6 +355,10 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    */
    
   let goalText: string | undefined
+  /** M6-1 F8: the last policy display subject (main session or viewed child)
+   *  whose observation truth is current. A subject change retires the old
+   *  subject's snapshot. */
+  let lastPolicySubjectId: string | undefined
 
   /** Repaint the welcome card from the live agent's current facts. Re-read
    * on every call so a still-blank session's preset switch shows up. */
@@ -739,21 +757,53 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // (no public rc.2 carrier — §6.6's truthful-unavailable rows). Direct
     // keeps the in-process service derivation.
     let access: ReturnType<typeof deriveAccessStatus> | {}
+    // M6-1 F8: the independent sandbox/approval facts come from the ONE
+    // policy observation (the SAME snapshot source Settings reads), keyed to
+    // the DISPLAY SUBJECT's own session id — the child viewer reads the
+    // child's subject, the main surface the main session's. A missing or
+    // non-ready observation leaves those facts ABSENT (never a guessed
+    // default), exactly like any other unavailable authority.
+    const policySubjectId = viewed === undefined ? deps.currentSessionId() : viewed.id
+    // The previous DISPLAY SUBJECT's observation truth is retired when the
+    // subject changes (viewer exit, session switch): a child's facts must never
+    // linger as the main session's, nor vice versa.
+    if (policySubjectId !== lastPolicySubjectId) {
+      const previous = lastPolicySubjectId
+      lastPolicySubjectId = policySubjectId
+      if (previous !== undefined) deps.policyObservation?.invalidate?.(previous)
+    }
+    const policySnapshot = deps.policyObservation === undefined || policySubjectId === undefined
+      ? undefined
+      : deps.policyObservation.readSnapshot(policySubjectId)
+    const policyFacts = policySnapshot?.kind === 'ready' && policySnapshot.read.kind === 'ready'
+      ? policySnapshot.read
+      : undefined
+    const sandboxFact = policyFacts?.sandbox.state === 'ready'
+      ? { mode: policyFacts.sandbox.effective }
+      : undefined
+    const approvalFact = policyFacts?.approval.state === 'ready'
+      ? { policy: policyFacts.approval.effective }
+      : undefined
     if (viewed !== undefined) {
       // M3-5 PR1 §9.4: the CHILD's access is the projection-authoritative
       // permission preset only — the parent's service-derived sandbox /
       // approval / permission never rides the child surface, and an absent
-      // child fact is omitted (never the parent's).
-      access = childAccessStatus(childStatus)
+      // child fact is omitted (never the parent's). M6-1 F8: the child's OWN
+      // observed sandbox/approval facts (never the parent's) join it.
+      access = { ...childAccessStatus(childStatus), ...sandboxFact === undefined ? {} : { sandbox: sandboxFact }, ...approvalFact === undefined ? {} : { approval: approvalFact } }
     } else if (deps.remote === undefined) {
-      access = deriveAccessStatus(
-          {
-            permissionPresets: permission,
-            sandboxPolicy: deps.host().sandboxPolicy,
-            approval: deps.host().approval,
-          },
-          deps.liveAgent()?.session,
-        )
+      // Direct: the permission preset stays with the official in-process
+      // service fold; sandbox/approval come from the observation (the
+      // official service derivation of those two knobs is retired here).
+      const presetStatus = deriveAccessStatus(
+        { permissionPresets: permission },
+        deps.liveAgent()?.session,
+      )
+      access = {
+        ...presetStatus,
+        ...sandboxFact === undefined ? {} : { sandbox: sandboxFact },
+        ...approvalFact === undefined ? {} : { approval: approvalFact },
+      }
     } else {
       // §6.4: the preset row comes from the projection ONLY. When the
       // projection cannot answer — the session status itself is unavailable,
@@ -767,9 +817,17 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       // never become the main session's retained value.
       const status = mainSessionStatus()
       const currentPreset = status?.permission
-      access = currentPreset === undefined
+      const presetPart = currentPreset === undefined
         ? (current.view.subject.kind === 'main' ? (current.access ?? {}) as typeof access : {})
         : { permissionPreset: { id: currentPreset, label: currentPreset, matched: true } }
+      // The observed sandbox/approval facts are NOT retained across subjects
+      // or generations: only the preset row keeps its subject-scoped
+      // last-known fallback.
+      access = {
+        ...presetPart,
+        ...sandboxFact === undefined ? {} : { sandbox: sandboxFact },
+        ...approvalFact === undefined ? {} : { approval: approvalFact },
+      }
     }
     const collaboration = viewed === undefined
       ? {

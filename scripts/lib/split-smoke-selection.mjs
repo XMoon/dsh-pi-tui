@@ -51,6 +51,7 @@ import { runWebStartupPreference } from '../smoke/split-process/web-startup-pref
 import { runF2AccountComposition } from '../smoke/split-process/account-composition.mjs'
 import { runF7AProviderAuthorization } from '../smoke/split-process/provider-authorization-f7a.mjs'
 import { runF7BCredentialRecords } from '../smoke/split-process/provider-credential-records-f7b.mjs'
+import { runF8SessionPolicy } from '../smoke/split-process/session-policy-f8.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -214,6 +215,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'provider-credential-records.f7b',
     title: 'two real Split Clients list, exact-key clear and re-read the official stored credential records on ONE Host',
     run: runF7BCredentialRecords,
+  }),
+  Object.freeze({
+    suite: 'session-policy',
+    id: 'session-policy.f8',
+    title: 'two real Split Clients write and re-read one exact Session approval policy through the private service, and a fresh Host replays the durable facts',
+    run: runF8SessionPolicy,
   }),
   Object.freeze({
     suite: 'account',

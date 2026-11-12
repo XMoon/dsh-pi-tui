@@ -198,6 +198,14 @@ interface HarnessOptions {
     readonly approvalAvailable?: boolean
     /** The official per-session approval override the service really holds. */
     readonly approval?: { value: 'ask' | 'never' | undefined }
+    /** M6-1 F8: the opaque Connection generation token the write chain binds
+     *  the ACK/readback to (a new object simulates a rollover). */
+    readonly policyGeneration?: object
+    /** Flip `policyGeneration` to a NEW object right after the write is
+     *  admitted (the generation-rollover race). */
+    readonly changeGenerationOnWrite?: boolean
+    /** The mutable generation slot the fake runner reads. */
+    readonly generation?: { value: object | undefined }
     /** The Host permission roster, in Host order. */
     readonly permissionNames?: readonly string[]
     /** The Host's effective default for new sessions. */
@@ -476,6 +484,7 @@ function setup(options: HarnessOptions = {}): Harness {
   const subagentWrites: { enabled: boolean; allowedModels: { provider: string; model: string }[] }[] = []
   const permissionWrites: string[] = []
   const approvalState = agent.approval ?? { value: undefined as 'ask' | 'never' | undefined }
+  const policyGenerationSlot = agent.generation ?? { value: agent.policyGeneration ?? {} }
   let subagentSection = agent.subagent === undefined
     ? undefined
     : { enabled: agent.subagent.enabled, allowedModels: agent.subagent.allowedModels.map(route => ({ ...route })) }
@@ -654,18 +663,61 @@ function setup(options: HarnessOptions = {}): Harness {
       return true
     },
     refreshStatus: () => { calls.push('refreshStatus') },
-    // C2-R3: the official per-session approval override, read and written on
-    // the SAME captured scope. A stale scope is refused exactly like the
-    // production surface facade does.
-    currentApprovalOverride: (scope: { sessionId: string }) => {
-      if (!(agent.scopeCurrent?.() ?? true)) return undefined
-      return approvalState.value
+    // M6-1 F8: the ONE session-policy observation + the transport-neutral
+    // async exact-session write, on the SAME captured scope. The observation
+    // answers the pinned session's proven facts; a stale scope is refused
+    // before any dispatch, exactly like the production facade.
+    policy: {
+      readSnapshot: (sessionId: string) => {
+        if (sessionId !== agent.sessionId) return { kind: 'checking' }
+        if (agent.approvalAvailable === false) {
+          return {
+            kind: 'ready',
+            read: {
+              kind: 'ready',
+              sessionId,
+              approval: { state: 'unavailable', reason: 'service-not-installed' },
+              sandbox: { state: 'ready', effective: 'workspace-write' },
+            },
+          }
+        }
+        return {
+          kind: 'ready',
+          read: {
+            kind: 'ready',
+            sessionId,
+            approval: approvalState.value === undefined
+              ? { state: 'ready', effective: 'ask' }
+              : { state: 'ready', effective: approvalState.value, override: approvalState.value },
+            sandbox: { state: 'ready', effective: 'workspace-write' },
+          },
+        }
+      },
+      refresh: async (sessionId: string) => {
+        if (sessionId !== agent.sessionId || agent.approvalAvailable === false) return { kind: 'checking' }
+        return {
+          kind: 'ready',
+          read: {
+            kind: 'ready',
+            sessionId,
+            approval: approvalState.value === undefined
+              ? { state: 'ready', effective: 'ask' }
+              : { state: 'ready', effective: approvalState.value, override: approvalState.value },
+            sandbox: { state: 'ready', effective: 'workspace-write' },
+          },
+        }
+      },
+      invalidate: () => {},
+      subscribe: () => () => {},
+      dispose: () => {},
     },
-    setSessionApprovalPolicy: (scope: { sessionId: string }, value: 'ask' | 'never') => {
+    sessionPolicyGeneration: () => policyGenerationSlot.value,
+    setSessionApprovalPolicy: async (scope: { sessionId: string }, value: 'ask' | 'never') => {
       calls.push(`approval:${scope.sessionId}:${value}`)
-      if (!(agent.scopeCurrent?.() ?? true)) return 'superseded'
+      if (!(agent.scopeCurrent?.() ?? true)) return { ownership: 'superseded' as const, outcome: undefined }
       approvalState.value = value
-      return 'applied'
+      if (agent.changeGenerationOnWrite === true) policyGenerationSlot.value = {}
+      return { ownership: 'current' as const, outcome: { kind: 'applied' as const, sessionId: scope.sessionId } }
     },
     tuiSettings: options.settingsService === false
       ? undefined
@@ -767,8 +819,6 @@ function setup(options: HarnessOptions = {}): Harness {
           if (agent.permissionDefault === undefined) throw new Error('settings service unavailable')
           agent.permissionDefault.value = name
         },
-        approvalOverrideOf: (sessionId: string) => sessionId === agent.sessionId ? approvalState.value : undefined,
-        approvalOverrideAvailable: () => agent.approvalAvailable ?? false,
       },
       subagentModelSelection: {
         available: () => subagentSection !== undefined,
@@ -1572,13 +1622,14 @@ test('Agent paints only the five availability-gated rows and no legacy launcher'
   assert.equal(h.replacements(), 0, 'reading the Agent rows writes no document')
   assert.deepEqual(h.subagentWrites(), [], 'reading the Agent rows writes no official section')
   assert.deepEqual(h.permissionWrites(), [], 'reading the Agent rows writes no Host permission default')
-  // The approval row states an override-less session as such — never a saved
-  // `ask` it never read.
+  // The approval row states the PROVEN effective policy and `override: none`
+  // only when the read succeeded — never a saved `ask` it never read.
   await key(h, '\r') // Enter the approval Detail (and its choice)
   const approval = h.view()
-  assert.match(approval, /not overridden/u, `an absent override is stated, not faked:\n${approval}`)
-  assert.match(approval, /consumer fallback ask/u, 'the consumer fallback is named as the runtime effect')
-  assert.match(approval, /not applicable — current session only/u, 'the persisted half is explicitly not applicable')
+  assert.match(approval, /Effective: ask/u, `the official effective policy is stated:\n${approval}`)
+  assert.match(approval, /Session override: none/u, 'a successful read with no override states none, never a guessed value')
+  assert.match(approval, /Source: Host session policy/u, 'the durable event source is named')
+  assert.match(approval, /persisted: not applicable/u, 'the persisted half is explicitly not applicable')
   h.dispose()
 })
 
@@ -1597,8 +1648,9 @@ test('Agent hides the approval and delegation rows when their authority is absen
   assert.doesNotMatch(sessionless.view(), /Subagent (?:allowed models|model selection)/u, 'no official section means no delegation rows')
   sessionless.dispose()
 
-  // A live session on a backend WITHOUT the approval capability (Remote): the
-  // row is absent rather than rendered as a saved `ask`.
+  // M6-1 F8: a pinned live Session with an UNAVAILABLE approval side keeps
+  // its row so the user can SEE the gap and refresh — but the row states the
+  // unavailability and offers no confirmable candidate (never a guessed ask).
   const remote = setup({
     columns: 140,
     rows: 44,
@@ -1611,7 +1663,11 @@ test('Agent hides the approval and delegation rows when their authority is absen
   })
   await remote.open('Agent')
   await key(remote, '\r')
-  assert.doesNotMatch(remote.view(), /Approval policy \(this session\)/u, 'no capability means no approval row')
+  assert.match(remote.view(), /Approval policy \(this session\)/u, 'a pinned session keeps the row to show the gap')
+  assert.match(remote.view(), /unavailable on this Host/u, 'the missing side is stated, never a guessed ask')
+  await key(remote, '\r')
+  const remoteDetail = remote.view()
+  assert.doesNotMatch(remoteDetail, /Effective: ask/u, 'no effective value is fabricated for a missing service')
   remote.dispose()
 
   // An empty Host roster paints no default-permission row at all.
@@ -1748,6 +1804,32 @@ test('the approval Confirm targets the pinned session scope; a stale scope dispa
   assert.equal(h.agent.approval?.value, 'never', 'the official per-session override really changed')
   assert.match(h.view(), /Verified/u, 'the same-scope readback agrees')
   assert.equal(h.replacements(), 0, 'the approval policy never reaches the TUI document')
+  h.dispose()
+})
+
+test('a Connection generation rollover after the applied ACK is never Verified (M6-1 F8 R07/RF-004)', async () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: true,
+      approval: { value: 'ask' },
+      changeGenerationOnWrite: true,
+      permissionNames: ['workspace-write'],
+      permissionDefault: { value: 'workspace-write' },
+    },
+  })
+  await openAgentRow(h, 'Approval policy (this session)')
+  await key(h, '\r')
+  await key(h, '\x1b[B')
+  await key(h, '\r')
+  await settle(h)
+  const view = h.view()
+  assert.doesNotMatch(view, /Verified/u,
+    `an ACK from a replaced generation must not be verified on the new one:\n${view}`)
+  assert.match(view, /Commit accepted|verification unavailable/u,
+    `the accepted-but-unverified state is stated truthfully:\n${view}`)
   h.dispose()
 })
 
@@ -5619,12 +5701,21 @@ test('a narrow Account deeplink → rail-browse About reads nothing; Enter reads
     extensions: undefined,
     openPluginManager: () => {},
     createPluginManagerPage: () => undefined,
+    // M6-1 F8: the About-only page still asks the approval row's snapshot,
+    // which reads the ONE observation owner (this stub has no session scope).
+    policy: {
+      readSnapshot: () => ({ kind: 'checking' as const }),
+      refresh: async () => ({ kind: 'checking' as const }),
+      invalidate: () => {},
+      subscribe: () => () => {},
+      dispose: () => {},
+    },
     config: {
       configReadiness: () => 'ready',
       visualTools: { read: () => undefined, setEnabled: async (_enabled: boolean, _revision: number) => {} },
       webStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
-      permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
+      permissions: { presetNames: () => [], defaultPreset: () => undefined },
       subagentModelSelection: { available: () => false },
       web: { available: () => false },
       credentials: { available: () => false, recordsSupported: () => false },

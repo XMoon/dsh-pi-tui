@@ -1013,8 +1013,6 @@ test('the rc.2 Question wire surfaces (live request → claim → timeout → la
     assert.deepEqual(answered, { answers: [{ id: 'q1', selected: ['no'] }] }, 'the foreground answer reaches the Host')
     claim.release()
     await claim.ended
-    assert.equal(semantics.interaction.setApprovalPolicy(MAIN, 'ask'), false,
-      'the Remote approval-policy write fails closed (no public rc.2 carrier)')
   } finally {
     semantics.dispose()
     await runtime.dispose()

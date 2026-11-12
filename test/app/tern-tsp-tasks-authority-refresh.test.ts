@@ -206,7 +206,7 @@ async function mountChain(): Promise<Chain> {
       } as never,
       interaction: {
         questions: { onRequest: () => true, subscribe: () => undefined, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const },
-        onApprovalRequest: () => {}, setApprovalPolicy: () => true,
+        onApprovalRequest: () => {},
       } as never,
       catalog: { models: { available: () => false } } as never,
       config: { configReadiness: () => 'ready' } as never,

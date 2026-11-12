@@ -99,8 +99,7 @@ function harness(): Harness {
   const port: InteractionPort = {
     questions,
     onApprovalRequest: (listener) => { approvalListener = listener },
-    setApprovalPolicy: () => false,
-  }
+    }
   const seam: SurfaceInteractionPresenter = {
     showApprovalPrompt: () => new Promise<ApprovalOutcome>((resolve) => {
       presenter.resolveApproval = resolve
@@ -258,8 +257,7 @@ test('a sessionless committed surface admits no forwarded request and reads no s
         answerContinued: async () => 'queued',
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => false,
-    }, { lookupCallArgs: () => undefined, dangerCommand: () => false })
+      }, { lookupCallArgs: () => undefined, dangerCommand: () => false })
     assert.ok(provider !== undefined, 'the runtime registered the live question provider')
     const question = {
       sessionId: 'session-x',

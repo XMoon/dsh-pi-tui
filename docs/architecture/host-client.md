@@ -354,10 +354,11 @@ The Host Profile's Loader is the only Host composition authority: one
 that Loader. The Host-only overlay disables the TUI surface rows, keeps the B1
 Connection and API-remotes rows, and adds exactly the official Session-serving
 rows plus ONE built-in `@xmoon76/dsh-pi-tui/host-runtime` row. That built-in row
-owns the package's ONE private Typert contribution and its five private
-business services (`piTuiFileReferences`, `piTuiTerminalProgress`,
-`piTuiWebAccess`, `piTuiHostUserShell`, `piTuiSkills`); the feature modules are
-not independent Loader rows, configurable plugins or package subpaths. The row
+owns the package's ONE private Typert contribution and its private business
+services (`piTuiFileReferences`, `piTuiTerminalProgress`, `piTuiWebAccess`,
+`piTuiHostUserShell`, `piTuiSkills`, `piTuiAuthorization`,
+`piTuiCredentialRecords`, `piTuiSessionPolicy`); the feature modules are not
+independent Loader rows, configurable plugins or package subpaths. The row
 publishes `piTuiHostReady` only after every service binding is live.
 
 Host Workspace authority has exactly two owners, both official bundle rows with
@@ -1102,6 +1103,56 @@ authoritative absence (a fresh read after the ACK) may report a local clear, and
 that copy never claims an issuer revoke or a model switch. The official
 `credentials/record-updated` event remains the single change notice; there is
 no second watch, poll or optimistic Client mirror.
+
+### Exact-Session approval and sandbox policy over the Split wire
+
+The Split Host serves the exact live Session's INDEPENDENT approval-policy and
+sandbox-mode facts through this package's OWN private `piTuiSessionPolicy`
+Typert namespace (`read`, `setApproval`). The installed official `ctx.approval`
+and `ctx.sandboxPolicy` services remain the ONLY policy authorities: the bridge
+never writes a Session event itself, never caches a policy value, never touches
+the permission-preset table, never applies `/permission`, and never fabricates
+a Client-side `unconfirmed`. Approval and sandbox stay SEPARATE knobs: an
+effective sandbox mode is a POLICY fact, never proof that a sandbox provider
+actually enforces a call, and no preset name is ever decoded back into either
+knob.
+
+`read(exactSessionId)` returns a detached DTO whose two sides each carry either
+the proven `effective` value plus the Session `override` when the Host states
+one, or their own `service-not-installed` unavailability. A missing override is
+ABSENT (not a guessed `ask`/`read-only`), a missing session is a definite
+`session-not-live`, and a throwing official read or an unknown enum fails the
+whole read — never a fabricated "no override". `setApproval(exactSessionId,
+'ask'|'never')` validates the parameter, resolves the EXACT live Agent and
+requires `agent.session === sessions.get(sessionId)` immediately before ONE
+official `approval.setPolicy(liveAgent, policy)` call; it never touches the
+sandbox, the permission presets or the transcript. A value already equal to the
+effective policy is the official no-op and still `applied`, with no
+`approval/policy` event appended.
+
+Both methods are Owner-only (peer principal AND invocation signals), checked
+before any service is read or the log is touched. A Host without the approval
+or sandbox plugin still becomes Ready; the missing side is that side's
+unavailable fact and a missing approval service makes the write a definite
+refusal. The write wire result is only `applied | refused`; `unconfirmed` is the
+CLIENT classification of a dispatched write whose outcome it cannot prove (a
+lost ACK, transport throw, `gateway/internal`/`cancelled`/`result-invalid`).
+A proven pre-invocation refusal (`gateway/bad-request`) or a missing current
+Connection generation is a definite "not sent"; everything unproven is
+`unconfirmed`, is never retried and is never rendered as "not applied". A legitimate `applied`
+ACK stays applied even if the generation is replaced afterwards — only the old
+surface's presentation ownership ends. Reads capture the generation OBJECT
+identity and re-fence before committing; a Remote write is bracketed by the
+SAME accepted-write lifetime counter as the configuration port, so the Client
+reload gate observes it through ONE fact.
+
+The application keeps ONE Client-local policy observation owner (checking /
+ready / unavailable / failed), keyed by Connection generation, exact session id
+and observed subject epoch, with latest-read-serial wins; the Settings approval
+row and the status/footer sandbox+approval facts consume the SAME snapshots.
+The Settings `Verified` state still requires a fresh authoritative readback of
+that exact Session's EFFECTIVE policy; the port's `applied` alone is never
+proof.
 
 The account DTOs are detached (`AccountView`, `AccountProfile`, wallet decimal
 strings, safe attempt ids/phases/error codes). An `AccountView` is last-known

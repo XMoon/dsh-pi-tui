@@ -56,10 +56,12 @@ export const REMOTE_HOST_PREREQUISITE_SERVICES = [
   // without it cannot serve the preview at all, so this is a composition error
   // rather than a degradable state.
   'workspaceFiles',
-  // F1 Host-owned user shell: these are official Host capabilities, mounted
-  // once by dsh-base and reused by the package's one Host Runtime service.
-  'sandboxPolicy',
-  'sandbox',
+  // F1 Host-owned user shell: the subprocess provider is a required base
+  // capability. `sandboxPolicy`/`sandbox` are deliberately NOT required here
+  // (M6-1 F8): every consumer resolves them per call, a Host without them
+  // still becomes Ready, and the exact-Session policy bridge reports the
+  // sandbox side as a definite `service-not-installed` fact instead of the
+  // whole Host refusing to start.
   'subprocess',
 ] as const
 

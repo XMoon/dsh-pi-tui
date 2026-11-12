@@ -225,17 +225,52 @@ function mountSettingsUi(port: DirectConfigPort, live?: LiveSessionSeams): UiHar
     captureLiveSessionScope: () => live === undefined ? undefined : { sessionId: live.sessionId },
     isSessionScopeCurrent: (scope: { sessionId?: string } | undefined) =>
       live !== undefined && scope?.sessionId === live.sessionId,
-    currentApprovalOverride: () => live?.approvalOverride(),
-    // The production write seam: the CAPTURED scope resolves to its live Agent
-    // and the official approval service applies the policy. This mirrors
-    // DirectInteractionPort.setApprovalPolicy (identity-based, fails closed for an
-    // unknown/superseded scope).
-    setSessionApprovalPolicy: (scope: { sessionId?: string } | undefined, value: 'ask' | 'never') => {
-      if (live === undefined || scope?.sessionId !== live.sessionId) return 'superseded' as const
+    // M6-1 F8: the ONE session-policy observation owner (the approval row's
+    // read source) + the transport-neutral async exact-session write. This
+    // mirrors the production DirectSessionPolicyPort: the official service
+    // reads the exact session override, the scope gate refuses a stale owner,
+    // and the write returns the two independent axes.
+    policy: {
+      readSnapshot: (sessionId: string) => {
+        if (live === undefined || sessionId !== live.sessionId) return { kind: 'checking' as const }
+        const override = live.approvalOverride()
+        return {
+          kind: 'ready' as const,
+          read: {
+            kind: 'ready' as const,
+            sessionId,
+            approval: override === undefined
+              ? { state: 'ready' as const, effective: 'ask' as const }
+              : { state: 'ready' as const, effective: override, override },
+            sandbox: { state: 'unavailable' as const, reason: 'service-not-installed' as const },
+          },
+        }
+      },
+      refresh: async (sessionId: string) => {
+        if (live === undefined || sessionId !== live.sessionId) return { kind: 'checking' as const }
+        const override = live.approvalOverride()
+        return {
+          kind: 'ready' as const,
+          read: {
+            kind: 'ready' as const,
+            sessionId,
+            approval: override === undefined
+              ? { state: 'ready' as const, effective: 'ask' as const }
+              : { state: 'ready' as const, effective: override, override },
+            sandbox: { state: 'unavailable' as const, reason: 'service-not-installed' as const },
+          },
+        }
+      },
+      invalidate: () => {},
+      subscribe: () => () => {},
+      dispose: () => {},
+    },
+    setSessionApprovalPolicy: async (scope: { sessionId?: string } | undefined, value: 'ask' | 'never') => {
+      if (live === undefined || scope?.sessionId !== live.sessionId) return { ownership: 'superseded' as const, outcome: undefined }
       const target = live.agentFor(scope.sessionId)
-      if (target === undefined) return 'superseded' as const
+      if (target === undefined) return { ownership: 'superseded' as const, outcome: undefined }
       live.officialApproval.setPolicy(target, value)
-      return 'applied' as const
+      return { ownership: 'current' as const, outcome: { kind: 'applied' as const, sessionId: scope.sessionId } }
     },
     currentSessionStats: async () => undefined,
     sessionReader: { measureContext: () => undefined, sessionStatus: () => undefined },

@@ -67,7 +67,6 @@
   "runtime/direct/config-direct.ts": [
     "agentPresets",
     "agents",
-    "approval",
     "authorization",
     "commands",
     "credentials",
@@ -87,7 +86,6 @@
     "fileReferences"
   ],
   "runtime/direct/interaction-direct.ts": [
-    "approval",
     "sessionProjections",
     "userQuestions"
   ],
@@ -123,6 +121,10 @@
     "import:dsh-session",
     "sessionPersistence",
     "sessionQuery"
+  ],
+  "runtime/direct/session-policy-direct.ts": [
+    "approval",
+    "sandboxPolicy"
   ],
   "runtime/direct/session-preset-direct.ts": [
     "agentPresets",

@@ -748,8 +748,7 @@ function mountQuestionOwner(options: {
   runtime.attach({
     onApprovalRequest: (listener: unknown) => { approvalListener = listener as typeof approvalListener },
     questions: port,
-    setApprovalPolicy: () => true,
-  } as never, {
+    } as never, {
     lookupCallArgs: () => undefined,
     dangerCommand: () => false,
   })

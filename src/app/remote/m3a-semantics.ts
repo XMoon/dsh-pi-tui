@@ -58,6 +58,7 @@ import type { RemoteWebAccessNamespace } from '../../runtime/remote/web-access-r
 import type { PiTuiHostUserShellNamespace } from '../../runtime/remote/pi-tui-host-user-shell-contract.ts'
 import type { PiTuiAuthorizationNamespace } from '../../runtime/remote/pi-tui-authorization-contract.ts'
 import type { PiTuiCredentialRecordsNamespace } from '../../runtime/remote/pi-tui-credential-records-contract.ts'
+import type { PiTuiSessionPolicyNamespace } from '../../runtime/remote/pi-tui-session-policy-contract.ts'
 import {
   RemoteSchedulePort,
   type RemoteScheduleEvents,
@@ -184,6 +185,11 @@ export interface RemoteM3ARuntimeSource {
      *  records. The SAME mounted contribution publishes it; the Remote
      *  ConfigPort's credential adapter is its only consumer. */
     readonly piTuiCredentialRecords?: PiTuiCredentialRecordsNamespace
+    /** The PRIVATE `piTuiSessionPolicy` namespace (M6-1 F8): the exact-Session
+     *  approval/sandbox policy facts and the single approval write. The SAME
+     *  mounted contribution publishes it; the Remote session-policy port is
+     *  its only consumer. */
+    readonly piTuiSessionPolicy: PiTuiSessionPolicyNamespace
     /** The PRIVATE `piTuiWebAccess` namespace (M5-W PR-C): the Split-Client
      *  Web frontend control (`/web`). The SAME mounted contribution publishes
      *  it; `/web` is its only consumer. */

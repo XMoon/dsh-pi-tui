@@ -342,7 +342,7 @@ async function startHarness(options: {
         onRequest: () => true, subscribe: () => undefined, snapshot: () => undefined,
         claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const,
       },
-      onApprovalRequest: () => {}, setApprovalPolicy: () => true,
+      onApprovalRequest: () => {},
     } as never,
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),

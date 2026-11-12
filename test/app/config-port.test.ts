@@ -16,6 +16,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { credentialKey, credentialRef } from '@deepseek-ai/dsh-credentials'
 import { DirectConfigPort, type HostContextLike } from '../../src/runtime/direct/config-direct.ts'
+import { DirectSessionPolicyPort } from '../../src/runtime/direct/session-policy-direct.ts'
 import { CredentialWorkflow, resolveLoginDestination, resolveLogoutDestination } from '../../src/app/command/credential-workflow.ts'
 import type { ProviderProfileConfig } from '../../src/runtime/config-port.ts'
 
@@ -1008,19 +1009,23 @@ test('credential onChanged returns a disposer (a remount never accumulates liste
   assert.deepEqual(refreshes, ['refresh'], 'after dispose no credential event reaches the listener')
 })
 
-// ── approval override (alpha.4 session-oriented read) ─────────────────────
+// ── session policy (M6-1 F8: the independent facts moved to SessionPolicyPort) ──
 
-test('permissions approvalOverrideOf resolves the session id to its live Agent and reads the official override', () => {
+test('the session-policy port reads the exact live Session and classifies each side independently', async () => {
   const overrides = new Map<string, 'ask' | 'never'>([['session-live', 'never']])
-  const config = port({
-    approval: { overrideOf: (session: { id?: string }) => overrides.get(session?.id ?? '') },
-  }).permissions
-  assert.equal(config.approvalOverrideOf('session-live'), 'never')
-  assert.equal(config.approvalOverrideOf('session-ghost'), undefined, 'no live Agent for the session stays undefined')
-  const without = port({}).permissions
-  assert.equal(without.approvalOverrideOf('session-live'), undefined, 'a missing approval service degrades')
-  const throwing = port({ approval: { overrideOf: () => { throw new Error('boom') } } }).permissions
-  assert.equal(throwing.approvalOverrideOf('session-live'), undefined, 'a throwing service degrades to undefined')
+  const ctx = {
+    get: (name: string) => name === 'approval'
+      ? { overrideOf: (session: { id?: string }) => overrides.get(session?.id ?? ''), config: {} }
+      : undefined,
+  }
+  const liveAgent = { session: { id: 'session-live' } }
+  const policy = new DirectSessionPolicyPort(ctx as never, id => id === 'session-live' ? liveAgent : undefined)
+  const read = await policy.read('session-live')
+  assert.ok(read.kind === 'ready')
+  assert.ok(read.approval.state === 'ready' && read.approval.effective === 'never' && read.approval.override === 'never')
+  assert.equal(read.sandbox.state, 'unavailable', 'a missing sandbox service is that side\'s unavailable fact')
+  const ghost = await policy.read('session-ghost')
+  assert.deepEqual(ghost, { kind: 'unavailable', sessionId: 'session-ghost', reason: 'session-not-live' })
 })
 
 // ── subagent model selection (the official settings section) ──────────────

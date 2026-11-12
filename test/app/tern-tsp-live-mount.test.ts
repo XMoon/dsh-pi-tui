@@ -1607,8 +1607,7 @@ test('the interaction owner registers fail-closed answerers on a modal-less rend
       subscribeAttention: () => undefined,
       answerContinued: async () => 'queued',
     },
-    setApprovalPolicy: () => true,
-  }
+    }
   const interaction = createInteractionRuntime({
     presenter: () => { throw new Error('no TuiApp on the TSP branch') },
     livePresenter: () => undefined,

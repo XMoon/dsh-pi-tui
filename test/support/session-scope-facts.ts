@@ -42,6 +42,9 @@ import { computeStats, type SessionStats } from '../../src/domain/status/stats.t
 import type { SurfaceCommandSummary } from '../../src/domain/catalog/surface.ts'
 import type { SessionWorkspaceFactsPort } from '../../src/runtime/session-workspace-facts-port.ts'
 import type { HostDirectoryBrowsePort } from '../../src/runtime/host-directory-browse-port.ts'
+import type { SessionPolicySetOutcome } from '../../src/runtime/session-policy-port.ts'
+import type { SessionPolicyObservation } from '../../src/app/command/session-policy-observation.ts'
+import { unconfiguredPolicyObservation } from './session-policy-fake.ts'
 import { unconfiguredSessionWorkspaceFacts } from './session-workspace-facts-fake.ts'
 
 /** The subset of `TuiCommandRunner` the scope helper supplies: the CAPTURE
@@ -64,7 +67,9 @@ export interface SessionScopeFacts {
     readonly model: string | undefined
     readonly cwd: string
   }
-  currentApprovalOverride(scope: LiveSessionScope): 'ask' | 'never' | undefined
+  /** M6-1 F8: the ONE session-policy observation owner (the retired
+   *  synchronous `currentApprovalOverride` read moved there). */
+  readonly policy: SessionPolicyObservation
   currentSessionStats(scope: LiveSessionScope, signal?: AbortSignal): Promise<SessionStats | undefined>
   lastAssistantText(scope: LiveSessionScope, signal?: AbortSignal): Promise<string | undefined>
   refreshSessionCatalog(scope: SessionScope, source: CatalogRefreshSource): Promise<CatalogRefreshOutcome>
@@ -78,7 +83,11 @@ export interface SessionScopeFacts {
     presetId: string,
     signal?: AbortSignal,
   ): Promise<PermissionPresetResult>
-  setSessionApprovalPolicy(scope: LiveSessionScope, value: 'ask' | 'never'): 'applied' | 'superseded'
+  setSessionApprovalPolicy(
+    scope: LiveSessionScope,
+    value: 'ask' | 'never',
+    signal?: AbortSignal,
+  ): Promise<{ ownership: 'current' | 'superseded'; outcome: SessionPolicySetOutcome | undefined }>
   sessionWorkspaceFacts: SessionWorkspaceFactsPort
   /** The generic fail-closed Host directory browse stub: a suite that exercises
    *  the inline Add editor overrides it after the spread. */
@@ -193,10 +202,6 @@ export function sessionScopeFacts(
         cwd: agent.session.header.cwd ?? '',
       }
     },
-    currentApprovalOverride: (scope) => {
-      agentForLiveScope(scope)
-      return undefined
-    },
     currentSessionStats: async (scope) => computeStats(agentForLiveScope(scope).session.snapshotEvents()),
     lastAssistantText: async (scope) => {
       const session = agentForLiveScope(scope).session
@@ -229,10 +234,15 @@ export function sessionScopeFacts(
       if (!scopeAuthority.isCurrent(scope)) return { ownership: 'superseded' as const, outcome }
       return { ownership: 'current' as const, outcome }
     },
-    setSessionApprovalPolicy: (scope) => {
-      if (!scopeAuthority.isCurrent(scope)) return 'superseded' as const
+    // M6-1 F8: the ONE observation owner, by reference (a suite overrides
+    // the members after the spread to exercise policy behavior).
+    policy: unconfiguredPolicyObservation(),
+    // The write mirrors the production stale-before-dispatch refusal with the
+    // new ownership/outcome axes.
+    setSessionApprovalPolicy: async (scope, value) => {
+      if (!scopeAuthority.isCurrent(scope)) return { ownership: 'superseded' as const, outcome: undefined }
       agentForLiveScope(scope)
-      return 'applied' as const
+      return { ownership: 'current' as const, outcome: { kind: 'applied', sessionId: scope.sessionId } }
     },
     // C3 About seams: the generic stub has no StatusRuntime coordinator (the
     // explicit force reads `unavailable`) and a no-op invalidation trigger; a

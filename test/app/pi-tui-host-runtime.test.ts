@@ -189,8 +189,21 @@ test('disposing the ONE built-in fiber withdraws every service, the contribution
   await ctx.fiber.dispose()
 })
 
+test('a Host without the optional sandbox services still becomes Ready (M6-1 F8 per-call resolution)', async () => {
+  const ctx = await hostContext({ sandboxPolicy: false, sandbox: false })
+  const fiber = ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
+  await fiber
+  assert.equal(ctx.reflect.get(piTuiHostRuntime.PI_TUI_HOST_READY_SERVICE) !== undefined, true,
+    'piTuiHostReady must exist without the optional sandbox services')
+  assert.equal(ctx.typert.local.get('piTuiSessionPolicy/read') !== undefined, true,
+    'the exact-Session policy read must still be bound')
+  assert.equal(ctx.typert.local.get('piTuiSessionPolicy/setApproval') !== undefined, true)
+  await fiber.dispose()
+  await ctx.fiber.dispose()
+})
+
 test('every required Host inject keeps the fiber from completing when missing', async () => {
-  for (const missing of ['typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions', 'sandboxPolicy', 'sandbox', 'subprocess', 'workspaceRegistry', 'skills', 'agentPresets'] as const) {
+  for (const missing of ['typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions', 'subprocess', 'workspaceRegistry', 'skills', 'agentPresets'] as const) {
     const ctx = await hostContext({ [missing]: false })
     const fiber = ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
     await new Promise<void>(resolve => setImmediate(resolve))

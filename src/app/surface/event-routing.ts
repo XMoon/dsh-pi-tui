@@ -182,6 +182,14 @@ export interface SurfaceEventRoutingSource<Event extends RoutedSessionEvent> {
    * reads the official projection; a Remote Host cwd never reaches OSC 7.
    */
   refreshWorkspaceFacts(): void
+  /**
+   * M6-1 F8: one session-policy knob event (`approval/policy`,
+   * `sandbox/mode`, `permission/preset`) of the CURRENT session arrived —
+   * revoke the session-policy observation's committed snapshots so the
+   * next read re-derives from the official Host store (never a local
+   * event-log fold). Absent = this composition observes no policy.
+   */
+  invalidateSessionPolicy?(sessionId: string): void
   /** Fold one `goal/change` into the runner's status goal text. */
   applyGoalChange(event: Event): void
   /** The session title one `session/title` event implies. */
@@ -476,7 +484,11 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     // derives (measure-kind events refresh again through the context path below).
     if (isKnob || viewedId !== undefined) {
       // Knob events are UI-only: the permission badge repaints from
-      // cached facts — never a context measurement.
+      // cached facts — never a context measurement. M6-1 F8: the same knob
+      // events revoke the session-policy observation (the read re-derives
+      // from the official Host store on the next refresh, never a local
+      // event fold).
+      if (isKnob) source.invalidateSessionPolicy?.(session.id)
       source.refreshStatusCheap()
     }
     // Every durable inbox mutation (followup, steer, splice) commits

@@ -22,6 +22,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { DirectPermissionConfig } from '../../src/runtime/direct/config-direct.ts'
 import { DirectPluginManagerPort } from '../../src/runtime/direct/plugin-manager-direct.ts'
 import { AUTO_REVIEW_BUNDLE } from '../../src/app/plugin-manager/model.ts'
+import { DirectSessionPolicyPort } from '../../src/runtime/direct/session-policy-direct.ts'
 import { openWorkspace } from '../support/plugin-workspace-harness.ts'
 import {
   profileSelectsBundle,
@@ -374,7 +375,12 @@ test('/permission: the real Auto preset is visible and applies through the Direc
   assert.deepEqual(await config.applyPermissionPreset(sessionId, 'auto', new AbortController().signal), { kind: 'applied' })
   const permissions = host.ctx.get('permissionPresets') as { current(session: unknown): string | null }
   assert.equal(permissions.current(agent.session), 'auto', 'the official apply really selected Auto')
-  assert.equal(config.approvalOverrideOf(sessionId), 'ask', 'the official Auto spec pinned the ask policy')
+  // M6-1 F8: the independent approval fact moved to the session-policy port;
+  // the same official projection is read there.
+  const policy = new DirectSessionPolicyPort(host.ctx as never, id => id === sessionId ? agent : undefined)
+  const read = await policy.read(sessionId)
+  assert.ok(read.kind === 'ready' && read.approval.state === 'ready' && read.approval.effective === 'ask',
+    'the official Auto spec pinned the ask policy')
 })
 
 test('/permission: without the bundle the Auto id is not offered and cannot be applied', { skip }, async t => {

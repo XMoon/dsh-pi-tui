@@ -37,7 +37,6 @@
  * @module @xmoon76/dsh-pi-tui/runtime/interaction-port
  */
 
-import type { ApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import type {
   AskUserQuestionAnswer,
   AskUserQuestionAnswerItem,
@@ -259,11 +258,6 @@ export interface InteractionPort {
   /** Subscribe to approval requests. The listener renders the approval
    * prompt and returns the outcome. */
   onApprovalRequest(listener: ApprovalRequestListener): void
-  /** Set the approval policy for a SESSION (identity-based). `false` = the
-   * capability is unavailable on this backend (Remote: no public carrier —
-   * never a silent fallback). The Direct adapter resolves the live Agent
-   * internally. */
-  setApprovalPolicy(sessionId: string, policy: ApprovalPolicy): boolean
   /**
    * Split-Client only: revoke the CURRENT surface revision's presentation
    * token BEFORE the surface withdraws its modal promises. The root delivery

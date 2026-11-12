@@ -448,6 +448,15 @@ export interface TuiCommandRunner {  ctx: Context
    */
   readonly hostDirectoryBrowse: HostDirectoryBrowsePort
   /**
+   * M6-1 F8: the exact-Session policy port — the independent
+   * approval/sandbox facts of one live Session and the single official
+   * approval-policy write. The Settings approval row (through the
+   * {@link TuiCommandRunner.policy} observation owner) and the scope-bound
+   * `setSessionApprovalPolicy` are its consumers; it is never a preset
+   * table and never a sandbox enforcement claim.
+   */
+  readonly sessionPolicy: import('./runtime/session-policy-port.ts').SessionPolicyPort
+  /**
    * Split-Client only (G567's Client-root read view, consumed by M5-U-D): the
    * official forwarded Question/Approval invocations THIS Client still holds
    * for an answer. It carries identity only — never a question payload, option,
@@ -648,9 +657,20 @@ export interface TuiCommandRunner {  ctx: Context
     readonly model: string | undefined
     readonly cwd: string
   }
-  /** The pinned Session's approval-policy override, or `undefined` when it
-   *  has none. A stale scope throws {@link SupersededReadError}. */
-  currentApprovalOverride(scope: LiveSessionScope): 'ask' | 'never' | undefined
+  /** M6-1 F8: the ONE session-policy observation owner — the Settings
+   *  approval row's read source (checking/ready/unavailable/failed) and the
+   *  status/footer sandbox+approval projection, on BOTH backends. The SAME
+   *  object reference the status runtime consumes; there is no second
+   *  synchronous override read anymore. */
+  readonly policy: import('./app/command/session-policy-observation.ts').SessionPolicyObservation
+  /**
+   * M6-1 F8: the opaque CURRENT Connection generation identity (object
+   * identity), used by the Settings write chain to bind an `applied` policy
+   * ACK and its fresh readback to the SAME Host generation. `undefined` on
+   * Direct (no transport generation) and while disconnected; never inferred
+   * from a Host value.
+   */
+  sessionPolicyGeneration?(): unknown
   /**
    * The pinned Session's whole-log stats, or `undefined` when the owner
    * exposes none. Async since M3-4 PR4 §D5: the Remote branch composes the
@@ -690,10 +710,19 @@ export interface TuiCommandRunner {  ctx: Context
     presetId: string,
     signal?: AbortSignal,
   ): Promise<PermissionPresetResult>
-  /** Set the approval-policy override of the owner the scope pins. A stale scope
-   *  is REFUSED (`superseded`) before any dispatch — never retargeted. This write
-   *  is SYNCHRONOUS, so `superseded` always means "nothing ran". */
-  setSessionApprovalPolicy(scope: LiveSessionScope, value: 'ask' | 'never'): 'applied' | 'superseded'
+  /** Set the approval-policy override of the owner the scope pins (M6-1 F8:
+   *  the transport-neutral `SessionPolicyPort.setApproval`). Two INDEPENDENT
+   *  axes: `ownership` says whether the result still owns the current
+   *  surface; `outcome` carries what the port settled (`applied` / `refused`
+   *  / `unconfirmed`). A stale scope BEFORE the dispatch is `superseded`
+   *  with `outcome: undefined` — nothing ran. A dispatched write keeps its
+   *  settlement even when the surface moved on; `unconfirmed` is never
+   *  retried and never reported as "not applied". */
+  setSessionApprovalPolicy(
+    scope: LiveSessionScope,
+    value: 'ask' | 'never',
+    signal?: AbortSignal,
+  ): Promise<{ ownership: 'current' | 'superseded'; outcome: import('./runtime/session-policy-port.ts').SessionPolicySetOutcome | undefined }>
   refreshStatus(): void
   /** PR D2: the explicit About/status context force — measures NOW through
    * the runner's context coordinator (mark dirty + semantic SessionReader),

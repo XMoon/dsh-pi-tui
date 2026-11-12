@@ -39,6 +39,7 @@ import { checkImageLimits } from '../../src/client/media/image/intake.ts'
 import { TSP_B2A_RESULT_NOTICE_COMMANDS, tspBuiltinAvailability } from '../../src/app/command/tsp-capability.ts'
 import { classifyCommandLine } from '../../src/domain/command/policy.ts'
 import { prepareUserMessage } from '../../src/app/submission/direct-message-preparation.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
@@ -100,6 +101,8 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     ...sessionScopeFacts(() => undefined, () => 0),
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -133,8 +136,7 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
       updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
@@ -533,6 +535,8 @@ function mountedHarness(options: {
     app: undefined,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     ...scopeFacts,
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     // The recorder wraps the REAL scope authority: the intake's post-read
     // fence still decides exactly as production does, and its occurrence is
     // the deterministic "the file read settled" signal.
@@ -573,8 +577,7 @@ function mountedHarness(options: {
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
       updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),

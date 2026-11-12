@@ -366,6 +366,13 @@ export async function createRemoteApplicationHostFixture(
      */
     readonly isolateHome?: boolean
     /**
+     * M6-1 F8 H07: omit the official sandbox-policy provider (and the
+     * workspace-files row that injects it) so a Host with approval but WITHOUT
+     * any sandbox service can be composed. Opt-in; every other consumer keeps
+     * the production prerequisite graph.
+     */
+    readonly withoutSandbox?: boolean
+    /**
      * TS8-HF1: the Host `@`-file reference provider the private
      * `piTuiFileReferences` bare route delegates. `'local'` mounts the REAL
      * `@deepseek-ai/dsh-file-reference-local` service the production Host
@@ -450,8 +457,10 @@ export async function createRemoteApplicationHostFixture(
     })
     await ctx.plugin(LocalFileSystem)
     // The OFFICIAL Host file service (the bundle's `workspace-files` row) — a
-    // Remote-composition prerequisite, mounted exactly once.
-    await mountWorkspaceFileService(ctx)
+    // Remote-composition prerequisite, mounted exactly once. The F8 H07
+    // composition deliberately omits the sandbox-policy provider this row
+    // injects, so the row is skipped with it.
+    if (options.withoutSandbox !== true) await mountWorkspaceFileService(ctx)
     // 0.2.1-rc.2's SessionController nests the official skill catalog and the real
     // `@`-file reference provider injects the directory owner: both require
     // the real `workingDirectory` service (the same row dsh-base mounts once).

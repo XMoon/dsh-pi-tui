@@ -136,11 +136,6 @@ export interface PermissionPresetsServiceLike {
   readonly defaultPreset?: string
 }
 
-/** The structural approval service surface (the session override read). */
-export interface ApprovalServiceLike {
-  overrideOf(session: unknown): 'ask' | 'never' | undefined
-}
-
 /** The structural commands service surface (permission application only). */
 export interface CommandsServiceLike {
   execute(agent: unknown, line: string, args: readonly unknown[], signal: AbortSignal): Promise<unknown>
@@ -1587,27 +1582,6 @@ export class DirectPermissionConfig implements PermissionConfig {
     await mutateSettings(settings, 'permission', [
       { op: 'set', path: ['defaultPreset'], value: name },
     ])
-  }
-
-  approvalOverrideAvailable(): boolean {
-    // Direct reads and writes the official session approval policy in-process.
-    return true
-  }
-
-  approvalOverrideOf(sessionId: string): 'ask' | 'never' | undefined {
-    const approval = this.ctx.get('approval') as ApprovalServiceLike | undefined
-    if (approval === undefined) return undefined
-    // The semantic port resolves the session id to the EXACT live Agent
-    // internally; the session object never crosses the boundary.
-    const agent = this.agentFor(sessionId) as { readonly session: unknown } | undefined
-    if (agent === undefined) return undefined
-    try {
-      return approval.overrideOf(agent.session)
-    } catch {
-      // A throwing approval service degrades to "no override", never
-      // breaks the settings read.
-      return undefined
-    }
   }
 
   async applyPermissionPreset(
