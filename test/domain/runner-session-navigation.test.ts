@@ -3207,7 +3207,7 @@ test('a teardown during /new\'s command/done window waits for the replaced Sessi
 
 // ── the deferred window cannot re-wake the replaced Agent ───────────────────
 
-test('a prompt submitted while the replaced owner awaits command/done is refused for that Session, never delivered to A', async (t) => {
+test('a prompt queued while the replaced owner awaits command/done is delivered to the committed child, never to A', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-new-deferred-no-wake-')
   const previousHome = process.env.DSH_HOME
@@ -3232,6 +3232,10 @@ test('a prompt submitted while the replaced owner awaits command/done is refused
     events: sessionEvents('A standing state'),
   })
   const harness = makeHarness(home, source)
+  // PR-acceptance ON: the fake Direct agent COMMITS prompts, so a delivery
+  // assertion is positive evidence about the writer's Agent resolution — not
+  // the vacuous negative a rejecting fixture produces.
+  harness.promptAcceptance.value = true
   ;(harness.commands as { settlementGate?: () => Promise<void> }).settlementGate = async () => {
     signalSettlementReached()
     await new Promise<void>(resolve => { releaseSettlement = resolve })
@@ -3253,32 +3257,36 @@ test('a prompt submitted while the replaced owner awaits command/done is refused
   assert.equal(harness.retirementEvents.includes(`dispose:${source.id}`), false,
     'the replaced owner is in the deferred window')
 
-  // A queued prompt typed against the SAME surface while the settlement is
-  // held: the Direct writer resolves the Agent through the ownership core's
-  // CURRENT owner (B), never the still-attached A. Nothing may deliver
-  // input to A in this window (the exact P1 hazard: waking a replaced but
-  // not-yet-retired Agent).
+  // A prompt typed against the SAME surface while the settlement is held.
+  // The submit FIFO serializes it behind the in-flight command, so it is
+  // admitted only after the settlement — the Direct writer then resolves the
+  // Agent through the ownership core's CURRENT owner (B). If that fence were
+  // broken (resolving the still-attached A), the delivery below would land on
+  // A and wake it: exactly the reviewed hazard.
   app.setDraft('hello after /new')
   ;(app as unknown as { submitDraft(): void }).submitDraft()
-  // Bounded observation window: the queued prompt has been admitted here.
+  // Bounded observation window: the queued prompt is parked behind the FIFO here.
   await settle()
-  assert.equal(harness.delivered.filter(entry => entry.sessionId === source.id).length, 0,
-    `no prompt may reach the replaced Session while it awaits command/done: ${JSON.stringify(harness.delivered)}`)
+  assert.equal(harness.delivered.length, 0,
+    `nothing is delivered while the command settlement holds the FIFO: ${JSON.stringify(harness.delivered)}`)
   const runMarkers = harness.retirementEvents.filter(event => event.startsWith('command-run:'))
   assert.deepEqual(runMarkers, [`command-run:${source.id}`],
     `only the /new command itself may start in this window: ${JSON.stringify(harness.retirementEvents)}`)
 
   releaseSettlement()
-  // Bounded observation window: the released settlement drains the deferred retirement.
-  await settle()
-  assert.ok(harness.retirementEvents.includes(`dispose:${source.id}`),
-    'the deferred retirement completes once the settlement releases')
+  // Bounded drain: the FIFO releases, the deferred retirement runs.
+  await waitUntil('the queued prompt is delivered', () => harness.delivered.length === 1, 15_000)
+  await waitUntil('the deferred retirement', () =>
+    harness.retirementEvents.includes(`dispose:${source.id}`), 15_000)
+  // THE routing assertion: the real writer delivered the queued prompt to the
+  // CURRENT owner B — never to the still-attached-but-replaced A.
+  assert.equal(harness.delivered[0]!.sessionId, child.id,
+    `the queued prompt must be delivered to the committed child, never the replaced Session: ${JSON.stringify(harness.delivered)}`)
   const aLog = source.snapshotEvents() as unknown as Array<{ type: string }>
   assert.ok(!aLog.some(entry => entry.type === 'user/message'),
     "A's durable log carries no user message from the deferred window")
-  // The hazard fence itself: the Direct writer never resolved A in the
-  // window, so A's status stayed idle — no agent wake, no model call. The
-  // keepInbox navigation cancel precedes the window and is the ONLY cancel.
+  // The keepInbox navigation cancel precedes the window and is the ONLY
+  // cancel: A was never re-woken and never re-driven inside it.
   assert.equal(harness.retirementEvents.filter(event => event === `cancel:keepInbox:${source.id}`).length, 1,
     'exactly the one navigation stop, never a retirement cancel inside the window')
 })
