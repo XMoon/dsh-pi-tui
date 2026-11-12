@@ -2250,23 +2250,9 @@ export function applyRunnerWithRuntime(
     const disposePolicyScopeInvalidation = ownership.subscribeScopeInvalidation(() => {
       sessionPolicyObservation.invalidate()
     })
-    let disposePolicyGeneration: (() => void) | undefined
-    if (remoteSources !== undefined) {
-      disposePolicyGeneration = remoteSources.commandSource.subscribeConnectionGeneration(() => {
-        // A Connection generation rollover/rollback revokes every committed
-        // snapshot AND repaints NOW: the old Host's policy facts must leave
-        // the footer/surface immediately (the new generation starts from
-        // `checking`, and the next display refresh starts its controlled
-        // read). This is a transport event, never an owner-commit callback,
-        // so the repaint cannot read a published-but-uninitialized owner.
-        sessionPolicyObservation.invalidate()
-        statusRuntimeRef?.refresh()
-      })
-    }
     lifecycleController.signal.addEventListener('abort', () => {
       disposePolicyObservation()
       disposePolicyScopeInvalidation()
-      disposePolicyGeneration?.()
       sessionPolicyObservation.dispose()
     }, { once: true })
     const command: CommandSurface<ModelSelection, Agent> = createCommandSurface<ModelSelection, SessionId, Agent>({
