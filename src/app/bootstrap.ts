@@ -125,7 +125,7 @@ import { createFatalLifecycle, createSurfaceLifecycle } from './bootstrap/lifecy
 import { createSessionStartupHelpers, quiesceResumedOwner } from './bootstrap/session-startup.ts'
 import { canonicalFullSessionId, chooseContinueSession, chooseListedSession } from './bootstrap/session-launch-intent.ts'
 import type { SessionSummary } from '../runtime/session-reader-port.ts'
-import type { SessionWorkspaceFact } from '../runtime/session-workspace-facts-port.ts'
+import type { SessionWorkspaceFact, WorkspaceFactsHandle } from '../runtime/session-workspace-facts-port.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
 import type { LaunchWorkspaceVerdict } from './remote-process/local-workspace-equivalence.ts'
@@ -259,6 +259,15 @@ export function applyRunnerWithRuntime(
     }
     return
   }
+  const configuredExactSessionId = config.sessionId !== undefined && config.sessionId !== '' ? config.sessionId : startup.sessionId
+  // Two startup Session targets are mutually exclusive. The exact
+  // `config.sessionId` / internal split-Client `startup.sessionId` identity and
+  // the public CLI launch intent must never silently override one another, so
+  // this refuses BEFORE any Host session or roster read AND before the
+  // diagnostics/log composition (a refused startup owns no side effect).
+  if (startup.sessionLaunch !== undefined && configuredExactSessionId !== undefined) {
+    throw new Error('tui-runner: an exact configured session cannot be combined with a CLI Session launch intent')
+  }
   // The semantic backend (server/client migration M1): the TUI consumes
   // Host domains through narrow ports, never ctx.* directly. Direct is the
   // only backend today; remote/wire adapters join in later milestones
@@ -270,14 +279,6 @@ export function applyRunnerWithRuntime(
   // The patch row carries a static config; the real session id comes from the
   // startup service (no `!!js` expression, so loader hot-reloads cannot race
   // the service's availability while evaluating the row).
-  const configuredExactSessionId = config.sessionId !== undefined && config.sessionId !== '' ? config.sessionId : startup.sessionId
-  // Two startup Session targets are mutually exclusive. The exact
-  // `config.sessionId` / internal split-Client `startup.sessionId` identity and
-  // the public CLI launch intent must never silently override one another, so
-  // this refuses BEFORE any Host session or roster read.
-  if (startup.sessionLaunch !== undefined && configuredExactSessionId !== undefined) {
-    throw new Error('tui-runner: an exact configured session cannot be combined with a CLI Session launch intent')
-  }
   const launchWorkspaceIntent = initialWorkspaceIntentFromEnvironment(process.cwd())
   if (launchWorkspaceIntent.kind !== 'host-path') throw new Error('the launch workspace intent must be a Host path')
   // The sessionless next-create proposal (M6-1/F5-B):
@@ -1220,15 +1221,19 @@ export function applyRunnerWithRuntime(
       // ends/fails before its baseline, or a baseline without the confirmed
       // WorkspaceId, is NOT an empty membership.
       let baseline: readonly SessionWorkspaceFact[] | undefined
-      const facts = backend.sessionWorkspaceFacts.followWorkspaces(lifecycleController.signal)
+      let facts: WorkspaceFactsHandle | undefined
       try {
+        // Opening the official stream can itself fail closed (for example a
+        // replaced Remote Connection generation): that is an unavailable
+        // membership, never a crash and never an empty Workspace.
+        facts = backend.sessionWorkspaceFacts.followWorkspaces(lifecycleController.signal)
         const first = await facts[Symbol.asyncIterator]().next()
         if (first.done !== true && first.value.type === 'baseline') baseline = first.value.items
       } catch (error) {
         if (lifecycleController.signal.aborted) return 'aborted'
         diag.warn('startup continue membership read failed', { error: safeErrorMessage(error) })
       } finally {
-        facts.dispose()
+        facts?.dispose()
       }
       if (lifecycleController.signal.aborted) return 'aborted'
       if (baseline === undefined) {

@@ -115,7 +115,7 @@ dsh --profile pi-tui --session <id>        # 恢复完整 ID、已列出 ID 或�
 dsh --profile pi-tui --continue            # 继续当前 Host Workspace 中最近的 Session
 ```
 
-`--session` 不带值或只含空白时进入 Browse All；非空值先按规范完整 ID（`session-`/`session_` 加 32 位十六进制）、官方列表中的精确 ID 或至少 4 位十六进制唯一前缀解析，其余（关键词、歧义或未命中）进入同一个全局搜索，按 `Esc` 回到 sessionless Welcome。只有规范完整 ID 会在列表不可用时仍直接尝试一次恢复；列表不可用不会被当成“没有 Session”。`-c, --continue` 只在 Host 已确认的 Workspace 内、按官方成员关系与主 Session 列表的交集选择最近一条；未确认 Workspace 或无历史时保持 sessionless 并提示一次，不会猜选其他 Workspace，也不会创建 Session。`--session` 与 `-c` 互斥；`--preset` 仍按原规则只对空白 Session 生效。
+`--session` 不带值或只含空白时进入 Browse All；非空值先按规范完整 ID（`session-`/`session_` 加 32 位十六进制）、官方列表中的精确 ID 或至少 4 位十六进制唯一前缀解析，其余（关键词、歧义或未命中）进入同一个全局搜索；搜索态先按一次 `Esc` 回到浏览列表，再按一次回到 sessionless Welcome。只有规范完整 ID 会在列表不可用时仍直接尝试一次恢复；列表不可用不会被当成“没有 Session”。`-c, --continue` 只在 Host 已确认的 Workspace 内、按官方成员关系与主 Session 列表的交集选择最近一条；未确认 Workspace 或无历史时保持 sessionless 并提示一次，不会猜选其他 Workspace，也不会创建 Session。`--session` 与 `-c` 互斥；`--preset` 仍按原规则只对空白 Session 生效。
 
 ## 功能
 

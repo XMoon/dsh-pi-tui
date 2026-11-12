@@ -35,7 +35,7 @@ import {
 import { installProbe } from '../support/runner-session-fixtures.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
-import { createFakeHostWorkspaceRegistry, type FakeHostWorkspace, type FakeHostWorkspaceRegistry } from '../support/workspace-registry.ts'
+import { createFakeHostWorkspaceRegistry, type FakeHostWorkspaceRegistry } from '../support/workspace-registry.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
@@ -59,27 +59,6 @@ function listedSession(home: string, id: string, createdAt: number): FakeSession
     header: { id, cwd: home, createdAt, version: SESSION_FORMAT_VERSION },
     events: sessionEvents(`${id} answer`),
   })
-}
-
-/** Seed one official Workspace row into the fake Host registry. */
-function seedWorkspace(
-  workspaces: FakeHostWorkspace[],
-  id: string,
-  path: string,
-  sessionIds: string[],
-): FakeHostWorkspace {
-  const row: FakeHostWorkspace = {
-    id,
-    path,
-    sessionIds,
-    attachSession: async (sessionId) => {
-      const text = String(sessionId)
-      const target = workspaces.find(candidate => candidate.id === id)
-      if (target !== undefined && !target.sessionIds.includes(text)) target.sessionIds.unshift(text)
-    },
-  }
-  workspaces.push(row)
-  return row
 }
 
 interface CliMount {
@@ -224,13 +203,14 @@ test('a bare --session opens Browse All and starts no Session', async (t) => {
 
 test('-c chooses the newest readable member of the CONFIRMED Host Workspace, not the global newest', async (t) => {
   const life = testLifecycle(t)
-  const { registry, workspaces } = createFakeHostWorkspaceRegistry()
-  seedWorkspace(workspaces, 'workspace-A', process.cwd(), ['s-old', 's-new'])
+  const { registry } = createFakeHostWorkspaceRegistry()
+  const workspace = await registry.create(process.cwd())
+  workspace.sessionIds.push('s-old', 's-new')
   const fixture = await mountCli(life, {
     sessions: [
-      listedSession('/placeholder', 's-global-latest', 4_000),
-      listedSession('/placeholder', 's-new', 3_000),
-      listedSession('/placeholder', 's-old', 2_000),
+      listedSession(process.cwd(), 's-global-latest', 4_000),
+      listedSession(process.cwd(), 's-new', 3_000),
+      listedSession(process.cwd(), 's-old', 2_000),
     ],
     launch: { kind: 'continue' },
     registry,
@@ -244,10 +224,10 @@ test('-c chooses the newest readable member of the CONFIRMED Host Workspace, not
 
 test('-c with no readable workspace member stays sessionless with ONE notice', async (t) => {
   const life = testLifecycle(t)
-  const { registry, workspaces } = createFakeHostWorkspaceRegistry()
-  seedWorkspace(workspaces, 'workspace-A', process.cwd(), [])
+  const { registry } = createFakeHostWorkspaceRegistry()
+  await registry.create(process.cwd())
   const fixture = await mountCli(life, {
-    sessions: [listedSession('/placeholder', 's-global-latest', 4_000)],
+    sessions: [listedSession(process.cwd(), 's-global-latest', 4_000)],
     launch: { kind: 'continue' },
     registry,
   })
@@ -277,10 +257,11 @@ test('-c fails closed with one notice when the Host Workspace authority refuses 
 
 test('-c keeps the ONE genuine Open failure and never retries or opens a Browser', async (t) => {
   const life = testLifecycle(t)
-  const { registry, workspaces } = createFakeHostWorkspaceRegistry()
-  seedWorkspace(workspaces, 'workspace-A', process.cwd(), ['s-new'])
+  const { registry } = createFakeHostWorkspaceRegistry()
+  const workspace = await registry.create(process.cwd())
+  workspace.sessionIds.push('s-new')
   const fixture = await mountCli(life, {
-    sessions: [listedSession('/placeholder', 's-new', 3_000)],
+    sessions: [listedSession(process.cwd(), 's-new', 3_000)],
     launch: { kind: 'continue' },
     registry,
     resumeError: new Error('session is locked by another writer'),
