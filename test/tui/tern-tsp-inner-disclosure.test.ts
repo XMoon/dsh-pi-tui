@@ -182,9 +182,14 @@ test('Full stays flat while Compact and Focus preserve one canonical owner per W
   const clusterNodes = compactOpen.filter(node => node.kind === 'section' && String(node.props['key']).includes('ctx-'))
   assert.equal(clusterNodes.length, 1, 'Compact emits one cluster at its canonical Work position')
   assert.equal(clusterNodes[0]!.props['collapsed'], false)
-  assert.equal(compactOpen.filter(node => node.props['text'] === 'first injected payload').length, 1)
-  assert.equal(compactOpen.filter(node => node.props['text'] === 'second injected payload').length, 1,
-    'the open cluster presents each member exactly once without a second row disclosure')
+  const memberHeads = compactOpen.filter(node => node.kind === 'section'
+    && (node.props['head'] === 'repo · ambient' || node.props['head'] === 'build · ambient'))
+  assert.equal(memberHeads.length, 2, 'the open canonical Cluster presents each eligible member as its own Section')
+  assert.ok(memberHeads.every(node => node.props['collapsible'] === true && node.props['collapsed'] === true),
+    'each member starts independently collapsed')
+  assert.equal(compactOpen.filter(node => node.props['text'] === 'first injected payload').length, 0)
+  assert.equal(compactOpen.filter(node => node.props['text'] === 'second injected payload').length, 0,
+    'opening the canonical Cluster alone materializes no member body')
 
   const focusClosed = flatten(messages, 'focus', new TranscriptNodeKeys(), {
     turnActivities: workFolder().turnActivities(),
@@ -198,6 +203,109 @@ test('Full stays flat while Compact and Focus preserve one canonical owner per W
   })
   assert.equal(focusOpen.filter(node => node.kind === 'section' && String(node.props['key']).includes('focus-')).length, 1)
   assert.equal(focusOpen.filter(node => node.kind === 'section' && String(node.props['key']).includes('work-')).length, 1)
+})
+
+
+test('Cluster members keep one independent native disclosure owner in Full, Compact and Focus', () => {
+  const messages = workFolder().messages()
+  const systemRows = messages.filter((row): row is Extract<TranscriptMessage, { kind: 'system' }> => row.kind === 'system')
+  const [memberA, memberB] = systemRows
+  assert.ok(memberA !== undefined && memberB !== undefined)
+  const structure = projectTranscriptStructure(messages)
+  const work = structure.find(block => block.kind === 'work')
+  assert.ok(work?.kind === 'work')
+  const cluster = structure.flatMap(block => block.kind === 'work'
+    ? block.span.parts.flatMap(part => part.kind === 'context-cluster' ? [part.cluster] : [])
+    : block.kind === 'context-cluster' ? [block.cluster] : [])[0]
+  assert.ok(cluster !== undefined)
+  const presets = ['full', 'compact', 'focus'] as const
+  const expandedContextRowOwners = new Set<TranscriptMessage>()
+  for (const preset of presets) {
+    const options = {
+      turnActivities: workFolder().turnActivities(),
+      expandedWorkOwners: new Set([work.span.owner]),
+      expandedFocusTurns: new Set([1]),
+      expandedClusterOwners: new Set([cluster.owner]),
+      expandedContextRowOwners,
+    }
+    const countText = (nodes: Tree[], text: string): number => nodes.filter(node => node.props['text'] === text).length
+    const memberSections = (nodes: Tree[]): Tree[] => nodes.filter(node => node.kind === 'section'
+      && (node.props['head'] === 'repo · ambient' || node.props['head'] === 'build · ambient'))
+
+    const closed = flatten(messages, preset, new TranscriptNodeKeys(), options)
+    const closedMembers = memberSections(closed)
+    assert.equal(closedMembers.length, 2, `${preset}: both member headers exist inside the open Cluster`)
+    assert.ok(closedMembers.every(node => node.props['collapsible'] === true && node.props['collapsed'] === true),
+      `${preset}: each member starts collapsed`)
+    assert.equal(countText(closed, 'first injected payload'), 0)
+    assert.equal(countText(closed, 'second injected payload'), 0)
+
+    expandedContextRowOwners.add(memberA)
+    const aOpen = flatten(messages, preset, new TranscriptNodeKeys(), options)
+    assert.equal(countText(aOpen, 'first injected payload'), 1, `${preset}: opening member A materializes only A`)
+    assert.equal(countText(aOpen, 'second injected payload'), 0, `${preset}: member B stays closed`)
+    assert.equal(memberSections(aOpen).length, 2)
+    const openedA = memberSections(aOpen).find(node => node.props['head'] === 'repo · ambient')
+    assert.equal(openedA?.props['collapsed'], false)
+    assert.equal(memberSections(aOpen).find(node => node.props['head'] === 'build · ambient')?.props['collapsed'], true)
+
+    expandedContextRowOwners.add(memberB)
+    const bothOpen = flatten(messages, preset, new TranscriptNodeKeys(), options)
+    assert.equal(countText(bothOpen, 'first injected payload'), 1)
+    assert.equal(countText(bothOpen, 'second injected payload'), 1, `${preset}: member B opens independently`)
+
+    // Closing the canonical Cluster removes the member nodes but never rewrites
+    // the members' own manual disclosure owners.
+    const clusterClosed = flatten(messages, preset, new TranscriptNodeKeys(), {
+      ...options, expandedClusterOwners: new Set<TranscriptMessage>(),
+    })
+    assert.equal(memberSections(clusterClosed).length, 0, `${preset}: a closed Cluster materializes no member nodes`)
+    assert.equal(countText(clusterClosed, 'first injected payload'), 0)
+    assert.equal(countText(clusterClosed, 'second injected payload'), 0)
+    assert.deepEqual([...expandedContextRowOwners], [memberA, memberB],
+      `${preset}: closing the Cluster preserves both member owners`)
+
+    const reopened = flatten(messages, preset, new TranscriptNodeKeys(), options)
+    const reopenedMembers = memberSections(reopened)
+    assert.equal(reopenedMembers.length, 2)
+    assert.ok(reopenedMembers.every(node => node.props['collapsed'] === false),
+      `${preset}: reopening the Cluster restores each member's own state`)
+    assert.equal(countText(reopened, 'first injected payload'), 1)
+    assert.equal(countText(reopened, 'second injected payload'), 1)
+    expandedContextRowOwners.clear()
+  }
+})
+
+test('same-label members of different canonical Clusters never share disclosure or node identity', () => {
+  const events: SessionEvent[] = []
+  for (const turn of [1, 2]) {
+    const base = (turn - 1) * 10
+    events.push(ev('turn/start', { turn }, base))
+    events.push(user(base + 1, `turn-${turn}-user`, `turn-${turn}-user`))
+    events.push(context(base + 2, `same-label-${turn}-a`, `cluster ${turn} body A`, { kind: 'plugin', form: 'snapshot', plugin: 'same-label' }))
+    events.push(context(base + 3, `same-label-${turn}-b`, `cluster ${turn} body B`, { kind: 'plugin', form: 'snapshot', plugin: 'same-label' }))
+    events.push(ev('turn/end', { turn, reason: { kind: 'completed' } }, base + 4))
+  }
+  const messages = folder(events).messages()
+  const systemRows = messages.filter((row): row is Extract<TranscriptMessage, { kind: 'system' }> => row.kind === 'system')
+  assert.equal(systemRows.length, 4)
+  const structure = projectTranscriptStructure(messages)
+  const clusters = structure.filter(block => block.kind === 'context-cluster').map(block => block.cluster)
+  assert.equal(clusters.length, 2)
+  const keys = new TranscriptNodeKeys()
+  const nodes = flatten(messages, 'full', keys, {
+    expandedClusterOwners: new Set(clusters.map(cluster => cluster.owner)),
+    expandedContextRowOwners: new Set([systemRows[0]!]),
+  })
+  const memberSections = nodes.filter(node => node.kind === 'section' && node.props['head'] === 'same-label · ambient')
+  assert.equal(memberSections.length, 4, 'each Cluster materializes its own two same-label members')
+  assert.equal(memberSections.filter(node => node.props['collapsed'] === false).length, 1,
+    'only the exact opened message owner is expanded')
+  assert.equal(nodes.filter(node => node.props['text'] === 'cluster 1 body A').length, 1)
+  assert.equal(nodes.filter(node => node.props['text'] === 'cluster 1 body B').length, 0)
+  assert.equal(nodes.filter(node => node.props['text'] === 'cluster 2 body A').length, 0)
+  assert.equal(nodes.filter(node => node.props['text'] === 'cluster 2 body B').length, 0)
+  assert.equal(new Set(nodes.map(node => node.id)).size, nodes.length, 'member node ids stay unique across Clusters')
 })
 
 
@@ -493,7 +601,18 @@ test('collapsed Tool and Context details do not enter the visible image-demand s
       expandedThinkingOwners: new Set(), expandedContextRowOwners: new Set(), expandedClusterOwners: new Set([cluster.owner]),
     },
   }, keys)
-  assert.ok(clusterOpen.has(cluster.members[0]!), 'opening the canonical cluster grants its members')
+  assert.ok(!clusterOpen.has(snapshots[0]!), 'an open canonical Cluster alone does not claim a member body')
+  assert.ok(!clusterOpen.has(cluster.members[1]!), 'each member body needs its own disclosure owner')
+  const memberOpen = visibleTranscriptMembers(messages, {
+    preset: 'full', window: WINDOW, expandedToolKeys: new Set<string>(),
+    innerDisclosure: {
+      expandedThinkingOwners: new Set(),
+      expandedContextRowOwners: new Set([snapshots[0]!]),
+      expandedClusterOwners: new Set([cluster.owner]),
+    },
+  }, keys)
+  assert.ok(memberOpen.has(snapshots[0]!), 'opening the exact member owner grants its body')
+  assert.ok(!memberOpen.has(cluster.members[1]!), 'the sibling member stays hidden')
 
   const compact = visibleTranscriptMembers(messages, { preset: 'compact', window: WINDOW }, keys)
   assert.ok(!compact.has(tool), 'a collapsed Compact Work remains hidden')

@@ -1058,13 +1058,30 @@ function contextMemberNode(message: Extract<TranscriptMessage, { kind: 'system' 
   )
 }
 
-function contextClusterMemberNode(message: Extract<TranscriptMessage, { kind: 'system' }>, key: string): Node {
+function contextClusterMemberNode(
+  message: Extract<TranscriptMessage, { kind: 'system' }>,
+  key: string,
+  options: TranscriptViewOptions,
+): Node {
   const kind = contextPresentationKind(message)
   const identity = sanitizedPhysicalLine(message.label ?? contextFormOf(message) ?? 'Context')
-  return ui.col(
-    { key, gap: 'sm' },
-    ui.text({ key: 'identity', text: sanitizedPhysicalLine(kind === undefined ? identity : `${identity} · ${kind}`), wrap: 'none' }),
-    ...contextBodyNodes(message),
+  const head = sanitizedPhysicalLine(kind === undefined ? identity : `${identity} · ${kind}`)
+  const disclosure = options.innerDisclosure
+  // Historical / capability-less projection: preserve the readable original shape.
+  if (disclosure === undefined || !canCollapseContextRow(message)) {
+    return ui.col(
+      { key, gap: 'sm' },
+      ui.text({ key: 'identity', text: head, wrap: 'none' }),
+      ...contextBodyNodes(message),
+    )
+  }
+  // The member keeps its canonical message key: the Cluster owner never stands
+  // in for one member's own disclosure. The native Section header is the ONLY
+  // control; the Session iterator's exact-node toggle owns the state.
+  const expanded = disclosure.expandedContextRowOwners.has(message)
+  return ui.section(
+    { key, head, collapsible: true, collapsed: !expanded },
+    ...(expanded ? contextBodyNodes(message) : []),
   )
 }
 
@@ -1381,7 +1398,7 @@ function clusterNode(cluster: ContextCluster, keys: TranscriptNodeKeys, options:
   const disclosure = options.innerDisclosure
   if (disclosure === undefined) {
     const members = cluster.members.map(member => member.kind === 'system'
-      ? contextClusterMemberNode(member, keys.keyFor(member))
+      ? contextClusterMemberNode(member, keys.keyFor(member), options)
       : messageNode(member, keys.keyFor(member), options))
     return ui.card({ key, head }, ...members)
   }
@@ -1389,7 +1406,7 @@ function clusterNode(cluster: ContextCluster, keys: TranscriptNodeKeys, options:
     return ui.section({ key, head, collapsible: true, collapsed: true })
   }
   const members = cluster.members.map(member => member.kind === 'system'
-    ? contextClusterMemberNode(member, keys.keyFor(member))
+    ? contextClusterMemberNode(member, keys.keyFor(member), options)
     : messageNode(member, keys.keyFor(member), options))
   return ui.section({ key, head, collapsible: true, collapsed: false }, ...members)
 }
@@ -2164,14 +2181,14 @@ export function visibleTranscriptMembers(
   const inner = options.innerDisclosure
   const expandedTools = options.expandedToolKeys
 
-  const contextRowOpen = (message: Extract<TranscriptMessage, { kind: 'system' }>, inCluster: boolean): boolean => {
-    if (inCluster || inner === undefined || !canCollapseContextRow(message)) return true
+  const contextRowOpen = (message: Extract<TranscriptMessage, { kind: 'system' }>): boolean => {
+    if (inner === undefined || !canCollapseContextRow(message)) return true
     return inner.expandedContextRowOwners.has(message)
   }
 
-  const addMessage = (message: TranscriptMessage, inCluster = false, toolPath?: string): void => {
+  const addMessage = (message: TranscriptMessage, toolPath?: string): void => {
     if (message.kind === 'thinking' && inner !== undefined && !inner.expandedThinkingOwners.has(message)) return
-    if (message.kind === 'system' && message.context === true && !contextRowOpen(message, inCluster)) return
+    if (message.kind === 'system' && message.context === true && !contextRowOpen(message)) return
     if (message.kind !== 'tool') {
       visible.add(message)
       return
@@ -2189,13 +2206,15 @@ export function visibleTranscriptMembers(
     visible.add(message)
     for (const child of message.subCalls ?? []) {
       const childPath = `${identity}/sub-${child.subCallId!}`
-      addMessage(child, false, childPath)
+      addMessage(child, childPath)
     }
   }
 
   const addCluster = (cluster: ContextCluster): void => {
     if (inner !== undefined && !inner.expandedClusterOwners.has(cluster.owner)) return
-    for (const member of cluster.members) addMessage(member, true)
+    // A member body is visible only when the member's OWN disclosure is open;
+    // `Cluster open` never stands in for `member body visible`.
+    for (const member of cluster.members) addMessage(member)
   }
 
   const addWorkParts = (span: TranscriptWorkSpan): void => {
