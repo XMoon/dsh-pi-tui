@@ -10,12 +10,14 @@
  * classifier then requires ALL of:
  *
  * ```text
- * Linux                                   (the /proc root view only exists there)
- * /proc/<authenticated hostPid>/stat      starttime equals the authenticated one
- * stat(client launch cwd)                 is a directory
- * stat('/proc/<hostPid>/root' + cwd)      is a directory
- * (dev, ino) of the two                   EXACTLY equal
- * the same starttime again                after all facts were observed
+ * Linux                                     (the /proc root view only exists there)
+ * /proc/<authenticated hostPid>/stat        starttime equals the authenticated one
+ * launch object (dev, ino), captured at     the Client's OWN start directory object
+ *   launch (or the real stat('.'))          (a rename+recreate of the path is refused)
+ * stat(client launch cwd)                   is a directory
+ * stat('/proc/<hostPid>/root' + cwd)        is a directory
+ * (dev, ino) of launch / cwd / Host view    ALL EXACTLY equal
+ * the same starttime again                  after all facts were observed
  * ```
  *
  * Same path SPELLING is never evidence; a different inode/device (another
