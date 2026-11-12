@@ -378,7 +378,10 @@ export interface CompactToolPresentationOptions {
   readonly error?: { readonly name: string; readonly code: string }
 }
 
-/** Counts from one historical `list_agents` result snapshot. */
+/** Counting semantics of one list_agents snapshot. `idle` counts rc.1 replay
+ *  rows; `ready` counts resumable inactive children; every unrecognized or
+ *  damaged row (rc.2 `corrupt`/`unsupported`/`unavailable`, a diagnostic row,
+ *  a malformed entry) is ONLY a diagnostic, never an idle/ready agent. */
 export interface AgentListSummary {
   readonly total: number
   readonly running: number
@@ -402,7 +405,10 @@ export interface InterruptAgentCallPresentation {
 }
 
 export interface ListAgentsCallPresentation {
-  readonly scope: 'children' | 'descendants'
+  /** The historical rc.1 `scope` argument, ONLY when the persisted call
+   *  declared it. rc.2 `list_agents` takes no arguments and lists the whole
+   *  tree (including the root `lead`), so a new call carries no scope. */
+  readonly scope?: 'children' | 'descendants'
 }
 
 /** The declared files in one `present` call, kept separate from execution. */
@@ -422,10 +428,12 @@ export function sendMessageCallPresentation(argsRaw: string): SendMessageCallPre
   const parsed = parseArgs(argsRaw)
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
   const args = parsed as Record<string, unknown>
-  // The two currently known producers use agent_id and target respectively;
-  // prefer the first non-blank field so malformed optional data cannot hide a
-  // valid Team target during replay.
-  const target = nonBlankString(args.agent_id) ?? nonBlankString(args.target)
+  // Target priority: rc.2 `agent` (the official name/id field) → rc.1 `agent_id`
+  // (historical replay) → `target` (historical Agent Teams rows). Display only:
+  // the persisted model tool call is never rewritten.
+  const target = nonBlankString(args.agent)
+    ?? nonBlankString(args.agent_id)
+    ?? nonBlankString(args.target)
   if (target === undefined || typeof args.message !== 'string') return undefined
   return { target, message: args.message }
 }
@@ -435,7 +443,9 @@ export function interruptAgentCallPresentation(argsRaw: string): InterruptAgentC
   const parsed = parseArgs(argsRaw)
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
   const args = parsed as Record<string, unknown>
-  const target = nonBlankString(args.agent_id) ?? nonBlankString(args.target)
+  const target = nonBlankString(args.agent)
+    ?? nonBlankString(args.agent_id)
+    ?? nonBlankString(args.target)
   return target === undefined ? undefined : { target }
 }
 
@@ -451,14 +461,15 @@ export function terminalSendCallPresentation(argsRaw: string): TerminalSendCallP
   return { sessionId, text: args.text }
 }
 
-/** Parse list_agents scope without consulting any live registry. */
+/** Parse list_agents arguments without consulting any live registry. */
 export function listAgentsCallPresentation(argsRaw: string): ListAgentsCallPresentation | undefined {
-  // No-parameter tools are recorded as `{}` in normal events, but an older
-  // replay can retain an empty argument string; both mean the default scope.
+  // rc.2 records the no-parameter tool as `{}` (an older replay can retain an
+  // empty argument string): both name no scope. A persisted rc.1 `scope` is
+  // still parsed for historical display only.
   const parsed = argsRaw.trim() === '' ? {} : parseArgs(argsRaw)
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
   const scope = (parsed as Record<string, unknown>).scope
-  if (scope === undefined) return { scope: 'children' }
+  if (scope === undefined) return {}
   return scope === 'children' || scope === 'descendants' ? { scope } : undefined
 }
 
@@ -717,7 +728,8 @@ export function compactToolPresentation(
         return snapshot === undefined ? undefined : formatAgentListSummary(snapshot)
       })()
     return {
-      title: 'List agents', summary: list.scope,
+      title: 'List agents',
+      ...(list.scope === undefined ? {} : { summary: list.scope }),
       ...(summary === undefined ? {} : { result: summary }),
     }
   }
