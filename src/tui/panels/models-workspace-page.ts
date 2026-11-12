@@ -378,6 +378,15 @@ export class ModelsWorkspacePage implements Component {
   private readonly credentialStates = new Map<string, ModelsCredentialState>()
   private records: ModelsStoredCredentials | undefined
   private clear: ClearState | undefined
+  /**
+   * STICKY post-dispatch memory for the current clear target: a record delete
+   * was dispatched and the client never observed a definite refusal; from then
+   * on, a failed current-presence read is UNKNOWN, never a "Not cleared" claim.
+   * Reset only when the next clear confirmation is opened for a (possibly new)
+   * target — never by a transient `reading` phase, so a re-entrant refresh in
+   * the same failing connection cannot lose the fact.
+   */
+  private clearOutcomeUnknown = false
   private add: AddProviderState | undefined
   private cursor = 0
   private scroll = 0
@@ -1035,6 +1044,7 @@ export class ModelsWorkspacePage implements Component {
 
   private openClear(target: CredentialClearTarget, deferRead = false): void {
     this.clearSerial += 1
+    this.clearOutcomeUnknown = false
     this.view = { kind: 'logout', target }
     this.cursor = 0
     this.scroll = 0
@@ -1068,13 +1078,10 @@ export class ModelsWorkspacePage implements Component {
     if (this.clear?.phase === 'pending') return
     const key = this.view.target.key
     const serial = this.clearSerial
-    // A delete was already DISPATCHED and its current presence was never
-    // authoritatively re-read (unconfirmed), or its presence observation can no
-    // longer be re-confirmed (done / still-stored). A failed refresh in those
-    // states may not become a definite "Not cleared" claim.
-    const priorPhase = this.clear?.phase
-    const dispatchedUnknown = priorPhase === 'unconfirmed' || priorPhase === 'done'
-      || (priorPhase === 'failed' && this.clear?.failure === 'still-stored')
+    // A dispatched delete whose outcome was never disproven keeps its unknown
+    // class across every refresh (including a re-entrant one while a first read
+    // is still in flight): a failed read may never become "Not cleared".
+    const dispatchedUnknown = this.clearOutcomeUnknown
     const readSerial = ++this.clearReadSerial
     this.clear = { phase: 'reading', configured: false }
     // The stored-credential read scans the provider configuration
@@ -1161,6 +1168,7 @@ export class ModelsWorkspacePage implements Component {
               kind: 'unknown',
               reason: 'the last clear outcome is unconfirmed; refresh records',
             }
+            this.clearOutcomeUnknown = true
             this.clear = { phase: 'unconfirmed', configured: true, reason: errorText(error) }
             return
           }
@@ -1216,6 +1224,9 @@ export class ModelsWorkspacePage implements Component {
           if (!isCurrent() || readSerial !== this.clearReadSerial) return
           this.recordsSerial += 1
           this.records = records
+          // The delete was dispatched; even a confirmed presence/absence keeps
+          // the post-dispatch class so a later failed refresh stays unknown.
+          this.clearOutcomeUnknown = true
           this.clear = present
             ? {
                 phase: 'failed',
@@ -1244,6 +1255,7 @@ export class ModelsWorkspacePage implements Component {
           this.records = undefined
           this.recordPresenceSerial += 1
           this.recordPresence = { kind: 'unknown', reason: `the clear returned; the record list could not be re-read: ${errorText(error)}` }
+          this.clearOutcomeUnknown = true
           this.clear = { phase: 'unconfirmed', configured: true, reason: `the clear returned; the record list could not be re-read: ${errorText(error)}` }
         })
       }
