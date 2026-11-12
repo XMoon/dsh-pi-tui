@@ -433,6 +433,22 @@ test('/fork settles when the source disposal fails (contained, never a hang)', a
   const sourceSettlements = harness.commandSettlements.filter(entry => entry.sessionId === source.id)
   assert.deepEqual(sourceSettlements.map(entry => entry.phase), ['run', 'done'],
     'the source command must still settle after a contained dispose failure')
+
+  // Sibling of the deferred ordinary transition: a failed dispose is contained
+  // for the /fork source retirement too, so a LATER /new command against the
+  // adopted child still runs — the failed source retirement neither hangs the
+  // FIFO nor poisons the next command. (The deferred old-owner retirement of a
+  // command-backed /new shares the same queue, ledger and release semantics.)
+  app.setDraft('/new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await waitUntil('the fresh Session after the contained failure', () => harness.createdSessions.length === 2, 15_000)
+  await waitUntil('the replaced child retirement', () =>
+    harness.retirementEvents.includes(`dispose:${harness.createdSessions[0]!.id}`), 15_000)
+  const childSettlements = harness.commandSettlements.filter(entry => entry.sessionId === harness.createdSessions[0]!.id)
+  assert.deepEqual(childSettlements.map(entry => entry.phase), ['run', 'done'],
+    'the next /new still settles its replaced Session command')
+  assert.equal(childSettlements.at(-1)?.ownerLive, true,
+    'the deferred retirement keeps the replaced child attached through its command/done')
 })
 
 test('/fork does not release the submit FIFO before the source retirement completes', async (t) => {
