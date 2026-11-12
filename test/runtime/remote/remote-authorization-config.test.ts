@@ -16,10 +16,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import AuthorizationService, { type AuthorizationSession } from '@deepseek-ai/dsh-authorization'
 import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import { createRemoteClientRuntime, type RemoteClientRuntime } from '../../support/m3-inprocess/client-runtime.ts'
-import { createRemoteHostRuntime, type RemoteHostRuntime } from '../../support/m3-inprocess/host-runtime.ts'
+import { createRemoteHostRuntime, type InProcessHostCarrier, type RemoteHostRuntime } from '../../support/m3-inprocess/host-runtime.ts'
 import { createRemoteApplicationHostFixture, waitFor } from '../../support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from '../../support/temp-lifecycle.ts'
 import {
@@ -234,6 +235,149 @@ test('REAL_WIRE: two Clients run different credential keys independently', async
   }
 })
 
+/**
+ * A REAL carrier that forwards every call to the in-process Host and then
+ * DROPS the first `run` downlink frame. The Host really dispatches the attempt
+ * (the fixture flow runs), so this is a transport fault on a real send/consume
+ * chain — not a precomputed `connected=false` fake.
+ */
+function dropFirstRunFrame(carrier: InProcessHostCarrier): InProcessHostCarrier {
+  return {
+    ownsHost: true,
+    fetch: carrier.fetch,
+    openStream(endpoint, payload, signal, uplink) {
+      const source = carrier.openStream(endpoint, payload, signal, uplink)
+      if (endpoint !== 'piTuiAuthorization/run') return source
+      return (async function* dropping(): AsyncGenerator<unknown> {
+        let first = true
+        for await (const item of source) {
+          if (first) {
+            first = false
+            continue
+          }
+          yield item
+        }
+      })()
+    },
+  }
+}
+
+test('REAL_WIRE: a dispatched run whose started frame is lost is dispatch-unknown and never re-run', async (t) => {
+  const life = testLifecycle(t)
+  const wire = await mountWire(life, 'f7a-wire-start-lost')
+  let runs = 0
+  wire.registerFlow({
+    key: credentialKey('llm-pi-ai', 'f7a-wire-start-lost-provider'),
+    label: 'F7A start lost',
+    methods: [{ id: 'device', label: 'Device code' }],
+    run: async (session: AuthorizationSession) => {
+      runs += 1
+      session.notify({ message: 'F7A start-lost attempt' })
+      await new Promise<void>((_resolve, reject) => {
+        session.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+      })
+    },
+  })
+  const flaky = await createRemoteClientRuntime({ carrier: dropFirstRunFrame(wire.hostRuntime.carrier) })
+  const adapter = new RemoteAuthorizationConfig(flaky.remote.piTuiAuthorization, flaky.connection.generation)
+  try {
+    await assert.rejects(
+      adapter.begin({ key: 'llm-pi-ai/f7a-wire-start-lost-provider', method: 'device' }),
+      (error: unknown) => error instanceof AuthorizationDispatchUnknownError && error.code === 'DISPATCH_UNKNOWN',
+    )
+    await waitFor('the Host actually dispatched the attempt', () => runs === 1, 5_000)
+    await sleep(150)
+    assert.equal(runs, 1, 'the Client must never open a second Host attempt after losing the started frame')
+  } finally {
+    adapter.dispose()
+    await flaky.dispose()
+    await wire.dispose()
+  }
+})
+
+test('REAL_WIRE: a stream lost after the official commit is unconfirmed, never authorized', async (t) => {
+  const life = testLifecycle(t)
+  const wire = await mountWire(life, 'f7a-wire-commit-lost')
+  const events: AuthorizationFlowEvent[] = []
+  wire.adapter.onEvent(event => { events.push(event) })
+  let committed = false
+  let release: () => void = () => {}
+  const held = new Promise<void>(resolve => { release = resolve })
+  const key = 'llm-pi-ai/f7a-wire-commit-lost-provider'
+  wire.registerFlow({
+    key: credentialKey('llm-pi-ai', 'f7a-wire-commit-lost-provider'),
+    label: 'F7A commit lost',
+    methods: [{ id: 'device', label: 'Device code' }],
+    run: async (session: AuthorizationSession) => {
+      session.notify({ message: 'F7A committing' })
+      await session.commit({ kind: 'grant', payload: { token: 'committed-but-unobserved' } } as never)
+      committed = true
+      await held
+    },
+  })
+  try {
+    const started = await within(wire.adapter.begin({ key, method: 'device' }), 'begin')
+    assert.equal(started.kind, 'started')
+    await waitFor('the official credential commit', () => committed, 10_000)
+    const before = wire.client.connection.generation.getSnapshot()
+    wire.client.connection.reconnect()
+    await waitFor('the Connection generation replacement', () => !Object.is(before, wire.client.connection.generation.getSnapshot()), 10_000)
+    release()
+    await waitFor('the unconfirmed terminal', () => events.some(event => event.kind === 'unconfirmed'), 10_000)
+    await sleep(150)
+    assert.equal(events.some(event => event.kind === 'settled'), false,
+      'a stream lost after the official commit must never be reported as authorized/cancelled/failed')
+    assert.equal(events.filter(event => event.kind === 'unconfirmed').length, 1)
+    // The Host commit is REAL and remains; the Client did not observe it.
+    assert.equal((await wire.host.ctx.credentials.describeRecord(credentialKey('llm-pi-ai', 'f7a-wire-commit-lost-provider'))).configured, true)
+  } finally {
+    release()
+    await wire.dispose()
+  }
+})
+
+test('REAL_WIRE: a caller teardown of a running attempt closes the flow as unconfirmed instead of leaving it pending', async (t) => {
+  const life = testLifecycle(t)
+  const wire = await mountWire(life, 'f7a-wire-page-teardown')
+  let flowAborted = false
+  wire.registerFlow({
+    key: credentialKey('llm-pi-ai', 'f7a-wire-page-teardown-provider'),
+    label: 'F7A page teardown',
+    methods: [{ id: 'device', label: 'Device code' }],
+    run: async (session: AuthorizationSession) => {
+      try {
+        session.notify({ message: 'F7A page-teardown attempt' })
+        await session.prompt({ kind: 'text', message: 'F7A page-teardown prompt' })
+      } catch (error) {
+        flowAborted = session.signal.aborted
+        throw error
+      }
+    },
+  })
+  const controller = new AbortController()
+  const key = 'llm-pi-ai/f7a-wire-page-teardown-provider'
+  try {
+    const started = await within(wire.adapter.begin({ key, method: 'device', signal: controller.signal }), 'begin')
+    assert.equal(started.kind, 'started')
+    await waitForEvent(wire.events, event => event.kind === 'prompt', 'the page-teardown prompt')
+    // The Models page disposes: it aborts its own signal first and only then
+    // requests cancellation. The adapter still owns the flow listener, so the
+    // official terminal is no longer observable through this stream.
+    controller.abort()
+    await waitForEvent(wire.events, event => event.kind === 'unconfirmed', 'the teardown unconfirmed terminal')
+    const unconfirmed = wire.events.find(event => event.kind === 'unconfirmed')
+    assert.ok(unconfirmed !== undefined && unconfirmed.kind === 'unconfirmed')
+    assert.match(unconfirmed.reason, /page was closed/)
+    assert.equal(wire.events.some(event => event.kind === 'settled'), false,
+      'a caller teardown must not fabricate an official business outcome')
+    await waitFor('the Host attempt withdrawal', () => flowAborted, 10_000)
+    // The attempt is closed locally; a late answer/reply cannot resurrect it.
+    await assert.rejects(wire.adapter.cancel(started.attemptId), /no longer active/)
+  } finally {
+    await wire.dispose()
+  }
+})
+
 /* ------------------------------------------------------------------------- *
  * UNIT: currentness and transport-failure taxonomy (scripted namespace).
  * ------------------------------------------------------------------------- */
@@ -396,6 +540,12 @@ test('UNIT: an invalid or foreign frame closes the attempt as unconfirmed instea
   for (const [label, frame] of [
     ['extra secret field', { kind: 'notice', attemptId: 'attempt-bad', notice: { message: 'x' }, token: 'secret' }],
     ['unknown kind', { kind: 'progress', attemptId: 'attempt-bad' }],
+    ['foreign attempt', {
+      kind: 'prompt',
+      attemptId: 'another-attempt',
+      promptId: 'p-foreign',
+      prompt: { kind: 'text', message: 'not this stream' },
+    }],
   ] as const) {
     const adapter = new RemoteAuthorizationConfig(fakeNamespace({
       run: () => streamOf([{ kind: 'started', attemptId: 'attempt-bad' }, frame]),
@@ -433,6 +583,36 @@ test('UNIT: a lost respond acknowledgement becomes unconfirmed and the answer is
     assert.equal(respondCalls, 1, 'the answer is never automatically re-sent')
     await waitFor('the unconfirmed terminal', () => events.some(event => event.kind === 'unconfirmed'), 5_000)
     assert.equal(events[events.length - 1]?.kind, 'unconfirmed')
+  } finally {
+    adapter.dispose()
+  }
+})
+
+test('UNIT: a DEFINITE respond refusal closes the attempt as unconfirmed instead of leaving the flow pending', async () => {
+  const generation = fakeGeneration()
+  let respondCalls = 0
+  const adapter = new RemoteAuthorizationConfig(fakeNamespace({
+    run: () => streamOf([
+      { kind: 'started', attemptId: 'attempt-refused' },
+      { kind: 'prompt', attemptId: 'attempt-refused', promptId: 'p-refused', prompt: { kind: 'secret', message: 'code' } },
+    ], { holdOpen: true }),
+    respond: async () => {
+      respondCalls += 1
+      return { ok: false as const, error: new RemoteError('gateway/invocation-unavailable', 'the prompt is no longer pending', { endpoint: 'piTuiAuthorization/respond' }) }
+    },
+  }), generation.source)
+  const events: AuthorizationFlowEvent[] = []
+  adapter.onEvent(event => { events.push(event) })
+  try {
+    const started = await adapter.begin({ key: 'llm-pi-ai/x' })
+    assert.equal(started.kind, 'started')
+    await waitFor('the prompt event', () => events.some(event => event.kind === 'prompt'), 5_000)
+    await assert.rejects(adapter.respond('attempt-refused', 'p-refused', 'secret'), /no longer pending/)
+    assert.equal(respondCalls, 1, 'the refused answer is never re-sent')
+    await waitFor('the unconfirmed terminal', () => events.some(event => event.kind === 'unconfirmed'), 5_000)
+    assert.equal(events[events.length - 1]?.kind, 'unconfirmed')
+    // The attempt is closed: no further prompt can be answered for it.
+    await assert.rejects(adapter.respond('attempt-refused', 'p-refused', 'secret'), /no longer active/)
   } finally {
     adapter.dispose()
   }

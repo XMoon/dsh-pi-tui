@@ -66,6 +66,8 @@ interface ClientAttempt {
   readonly handle: PiTuiAuthorizationRunStream
   /** The attempt's own cancellation (the caller's signal is combined into it). */
   readonly controller: AbortController
+  /** One terminal/unconfirmed event has already been emitted for this attempt. */
+  reported: boolean
 }
 
 /** The semantic authorization port over the private Client namespace. */
@@ -219,7 +221,14 @@ export class RemoteAuthorizationConfig implements AuthorizationConfig {
         'the Connection changed while the authorization attempt was opening — refresh credentials before retrying',
       )
     }
-    const attempt: ClientAttempt = { attemptId: frame.attemptId, generation, streamSignal, handle, controller }
+    const attempt: ClientAttempt = {
+      attemptId: frame.attemptId,
+      generation,
+      streamSignal,
+      handle,
+      controller,
+      reported: false,
+    }
     this.attempts.set(frame.attemptId, attempt)
     // The pump is OWNED by this adapter until settlement: it is the only reader
     // of the stream and it disposes the handle on every exit path.
@@ -242,7 +251,16 @@ export class RemoteAuthorizationConfig implements AuthorizationConfig {
       this.markUnconfirmed(attempt, 'the prompt answer acknowledgement was lost')
       throw error
     }
-    if (!result.ok) throw result.error
+    if (!result.ok) {
+      // The Host refused the answer as a definite business result. The answer
+      // will NOT be re-sent, and the local flow must not be left waiting for a
+      // settlement the Host may never deliver: close the attempt and publish
+      // the one observable terminal (`unconfirmed`). A prompt already
+      // withdrawn by the Host is still covered by the same rule — the flow is
+      // closed instead of hanging, and no secret is retried.
+      this.markUnconfirmed(attempt, 'the prompt answer was refused by the Host')
+      throw result.error
+    }
   }
 
   async cancel(attemptId: string): Promise<void> {
@@ -291,8 +309,11 @@ export class RemoteAuthorizationConfig implements AuthorizationConfig {
           break
         }
         if (frame.attemptId !== attempt.attemptId) {
-          // A frame of another attempt can never settle or prompt this one.
-          continue
+          // The Host stream is per attempt: a frame naming another attempt is a
+          // protocol violation, not a benign interleaving. Fail closed for THIS
+          // attempt instead of ignoring it and staying open forever.
+          unknownReason = 'the Host sent a frame for another authorization attempt'
+          break
         }
         if (!Object.is(attempt.generation, this.generation.getSnapshot())) {
           unknownReason = 'the Connection changed before the authorization settled'
@@ -304,6 +325,7 @@ export class RemoteAuthorizationConfig implements AuthorizationConfig {
         }
         this.emit(frame)
         if (frame.kind === 'settled' || frame.kind === 'unconfirmed') {
+          attempt.reported = true
           terminal = true
           break
         }
@@ -316,11 +338,18 @@ export class RemoteAuthorizationConfig implements AuthorizationConfig {
       attempt.handle.dispose()
       if (this.attempts.get(attempt.attemptId) === attempt) this.attempts.delete(attempt.attemptId)
     }
-    // A page/Client teardown aborted the stream deliberately: there is no UI
-    // left to inform. Any OTHER disappearance is an unknown result.
-    if (!terminal && !attempt.streamSignal.aborted && !this.disposed && unknownReason !== undefined) {
-      this.emit({ kind: 'unconfirmed', attemptId: attempt.attemptId, reason: unknownReason })
-    }
+    if (terminal || attempt.reported || this.disposed) return
+    // A CALLER teardown (the page's own signal) closed this stream while the
+    // adapter is still alive. The official settlement is now unobservable
+    // through this attempt, so the still-subscribed flow must be closed with
+    // the FOURTH outcome instead of awaiting an event that can never arrive.
+    // An adapter/Client disposal is different: every listener is gone with it.
+    const reason = attempt.streamSignal.aborted
+      ? 'the authorization page was closed before the Host settled'
+      : unknownReason
+    if (reason === undefined) return
+    attempt.reported = true
+    this.emit({ kind: 'unconfirmed', attemptId: attempt.attemptId, reason })
   }
 
   /** Close the attempt and publish the ONE unconfirmed terminal for it. */
@@ -329,6 +358,8 @@ export class RemoteAuthorizationConfig implements AuthorizationConfig {
     this.attempts.delete(attempt.attemptId)
     attempt.controller.abort()
     attempt.handle.dispose()
+    if (attempt.reported) return
+    attempt.reported = true
     this.emit({ kind: 'unconfirmed', attemptId: attempt.attemptId, reason })
   }
 

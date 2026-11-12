@@ -1037,10 +1037,13 @@ own signal withdraws that prompt only and leaves the whole attempt alive.
 from the official settlement, which may be `authorized` when the commit was
 already accepted.
 
-A Remote client treats a lost stream/answer acknowledgement, a Connection
-generation replacement or an invalid frame as the FOURTH outcome
-`unconfirmed`: the Host may still commit, the UI never claims
-failed/cancelled/authorized and never retries automatically. `listTargets` is a
+A Remote client treats a lost stream, a lost OR refused answer acknowledgement,
+a Connection generation replacement, a frame naming another attempt, or a
+caller teardown that closes the stream as the FOURTH outcome `unconfirmed`: the
+Host may still commit, the UI never claims failed/cancelled/authorized and never
+retries automatically. A refused answer closes the attempt's local flow (the
+answer is never re-sent) instead of leaving it waiting for an event the Host may
+not deliver. `listTargets` is a
 generation-fenced detached snapshot; `targetsState()` distinguishes `ready`,
 `unavailable` (the Host has no authorization service) and `stale` (no
 authoritative read for this Connection generation), and a stale roster may not
