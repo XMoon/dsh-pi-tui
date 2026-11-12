@@ -135,6 +135,12 @@ class DirectWorkspaceFactsHandle implements WorkspaceFactsHandle {
     return new Promise(resolve => { this.waiters.push(resolve) })
   }
 
+  /** The in-process registry is the observation's generation: it stays
+   *  current while this handle is open AND the official registry is mounted. */
+  isCurrent(): boolean {
+    return !this.disposed && this.registry() !== undefined
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true

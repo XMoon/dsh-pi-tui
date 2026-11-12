@@ -706,10 +706,17 @@ replace membership or attach a historical Session to the Client's current
 directory. `-c, --continue` is a WORKSPACE-SCOPED read: it may select only when
 the Host has CONFIRMED a `workspaceId` for this launch, the official
 `workspace.follow` membership baseline exists, and the official main Session
-roster intersects it. The first intersecting row in roster order wins; an
-unconfirmed Workspace, a missing/failed baseline or a replaced connection
-fails closed rather than falling back to another Workspace or to a fabricated
-empty membership, and the launch creates no Workspace and no Session. There is
+roster intersects it. The first intersecting row in roster order wins. The
+membership observation must still be on the SAME Host/Connection generation as
+the roster: a replacement between the two abandons the automatic continue
+rather than pairing stale membership with a newer roster. An unconfirmed
+Workspace produces no Host write; an already-authorized Direct launch path or a
+verified Remote auto proposal may still be resolved by the existing Workspace
+preflight (which can create-or-reuse the official Workspace record), exactly as
+the ordinary sessionless mount. The launch creates no Session, and a
+missing/failed baseline, a replaced connection or an unconfirmed Workspace
+never falls back to another Workspace or to a fabricated empty membership.
+There is
 no implicit "current Workspace" global — each Client holds
 its own selection intent, and two Clients of one Host may create in different
 Workspaces.

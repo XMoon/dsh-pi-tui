@@ -65,6 +65,14 @@ test('a unique legal short prefix resolves through the SAME primitive', () => {
   assert.equal(chooseListedSession(rows('session-abcdef12-0000'), 'session-abcd'), 'session-abcdef12-0000')
 })
 
+test('a longer session_ prefix is a legal CLI prefix and resolves uniquely', () => {
+  const target = 'session_abcdef1234567890abcdef1234567890'
+  assert.equal(chooseListedSession(rows(target), 'session_abcdef123'), target)
+  assert.equal(chooseListedSession(rows(target), 'abcdef123'), target)
+  assert.equal(chooseListedSession(rows(target), 'session_abcdef1234567890abcdef123'), target,
+    'the CLI prefix length is not capped at eight characters')
+})
+
 test('an ambiguous short prefix is never an automatic resume', () => {
   assert.equal(chooseListedSession(rows('session-abcdef12-0000', 'session-abcdef34-0000'), 'abcd'), undefined)
 })

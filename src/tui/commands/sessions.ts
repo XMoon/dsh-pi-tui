@@ -35,6 +35,7 @@ import {
   sessionBrowserErrorNotice,
   type SessionPickerRow,
 } from '../pickers/sessions.ts'
+import { chooseListedSession } from '../../domain/session/browser.ts'
 import type {
   NewSessionId,
   RegisterOne,
@@ -599,6 +600,13 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     readonly initialDirectoryPath?: string
     /** `/resume <arg>` direct id/prefix lookup query. */
     readonly directMatchQuery?: string
+    /** The CLI startup direct match: exact/unique-prefix only, with a word
+     *  query never auto-resuming. Omitted for the looser `/resume` rule. */
+    readonly cliDirectMatch?: boolean
+    /** Return the ADMISSION immediately; the read owner observes the later
+     *  direct-match outcome and states a real failure through the presentation.
+     *  The startup root must never wait for roster content. */
+    readonly startupAdmission?: boolean
     /** `/search` only: the query is required — an empty argument is
      * rejected BEFORE the overlay opens. */
     readonly requireQuery?: boolean
@@ -615,7 +623,9 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       ? undefined
       : {
           query: options.directMatchQuery,
-          find: (rows: readonly SessionPickerRow[], query: string) => findSessionMatch(rows, query),
+          find: (rows: readonly SessionPickerRow[], query: string) => options.cliDirectMatch === true
+            ? chooseListedSession(rows, query)
+            : findSessionMatch(rows, query),
         }
     // `open()` captures the typed `/resume` scope SYNCHRONOUSLY (before any
     // listing await), so a navigation that wins during the listing leaves this
@@ -628,6 +638,25 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       ...(options.initialDirectoryPath === undefined ? {} : { initialDirectoryPath: options.initialDirectoryPath }),
     })
     if (directMatch === undefined) return Promise.resolve({ kind: 'success' })
+    if (options.startupAdmission === true) {
+      // The Browser is already admitted. The startup root must not wait for the
+      // roster/guarded-Resume settlement; the read owner still owns the real
+      // outcome, and a failed/indeterminate/refused outcome becomes the existing
+      // presentation notice instead of a command result (there is no command).
+      void handle.settlement.then(async (result: SessionBrowserReadSettlement) => {
+        if (result.kind === 'matched') {
+          const resume: SessionBrowserResumeSettlement = await handle.resumeSettlement
+          if (resume.kind === 'failed' || resume.kind === 'indeterminate') {
+            presentation.notify(sanitizeTerminalText(resume.text), 'error')
+          }
+          return
+        }
+        if (result.kind === 'refused') presentation.notify(sanitizeTerminalText(result.text), 'error')
+      }, (error: unknown) => {
+        presentation.notify(sanitizeTerminalText(safeErrorMessage(error)), 'error')
+      }) // allowlist: startup admission observer — the read owner owns the operation
+      return Promise.resolve({ kind: 'success' })
+    }
     return handle.settlement.then(async (result: SessionBrowserReadSettlement) => {
       if (result.kind === 'matched') {
         const resume: SessionBrowserResumeSettlement = await handle.resumeSettlement
@@ -805,6 +834,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
        *  Workspace-preflight wait — the Browser must own the first input frame
        *  even when the preflight is slow or never answers. */
       readonly initialQuery?: string
+      /** The CLI startup lookup entry: run the strict exact/unique-prefix
+       *  direct match after the roster lands through the SAME guarded Resume
+       *  `/resume` uses. The Browser opens before the read. */
+      readonly directMatch?: boolean
     } = 'current',
   ): Promise<CommandResult> => {
     const settings = typeof options === 'string' ? { scope: options } : options
@@ -815,6 +848,18 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     // CLI startup entry deliberately skips this wait (see `initialQuery`).
     if (startupQuery === undefined && runner.captureSessionScope().sessionId === undefined) {
       await runner.awaitWorkspacePreflight?.()
+    }
+    if (startupQuery !== undefined && settings.directMatch === true) {
+      return openSessionPicker({ rawInput: startupQuery }, {
+        // 'sessions' (not the typed 'resume' header) seeds the global query in
+        // the same open: the search editor is live before the roster lands,
+        // while the direct match still runs after it unless the user edits.
+        header: 'sessions',
+        directMatchQuery: startupQuery,
+        cliDirectMatch: true,
+        startupAdmission: true,
+        browseScope: settings.scope,
+      })
     }
     return openSessionPicker(startupQuery === undefined ? invocation : { rawInput: startupQuery }, {
       header: 'sessions',
@@ -1247,6 +1292,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       readonly initialDirectoryEntry?: boolean
       readonly initialDirectoryPath?: string
       readonly initialQuery?: string
+      readonly directMatch?: boolean
     } = 'current') => {
       if (typeof scope === 'string') return openSessionsBody({ rawInput: '' }, scope)
       return openSessionsBody({ rawInput: scope.initialQuery ?? '' }, scope)

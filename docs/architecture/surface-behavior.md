@@ -223,17 +223,22 @@ Workspace over the existing `SessionBrowserReadOwner`; the retired PiTUI Picker
 is not a fallback. TSP keeps its own native Presenter over the same owner (see
 [tsp/session-browser.md](../tsp/session-browser.md)).
 
-- **A CLI Session launch opens the SAME Browser without waiting for the Host
-  Workspace.** Bare or explicitly blank `--session` opens Browse All, and a
-  non-blank value that is not a canonical full id, an exact listed row id or a
-  unique CLI hex prefix opens the same Browser with that value as its one
-  initial global search. This startup entry skips the sessionless mount
-  Workspace-preflight wait so the first input frame is never blocked by a slow
-  Host; `Esc` returns to the sessionless Welcome with no Session, draft or
-  writer. A canonical full id (or an exact listed row) still resumes pre-mount
-  through the ONE `SessionLifecycle.open`; a genuine open failure keeps its
-  original Host error and opens the same Browser once as a MANUAL recovery
-  entry, never a second automatic resume.
+- **A CLI Session launch is Browser-first except for a canonical full id.**
+  Bare or explicitly blank `--session` opens Browse All. A canonical full
+  Session id is the ONLY value that resumes before the surface mounts through
+  the ONE `SessionLifecycle.open`; it needs no roster read. Every other
+  non-blank value opens the SAME Browser immediately with the value as its one
+  live global query, and the existing `SessionBrowserReadOwner` then applies
+  the strict CLI policy — exact official id first, then a legal unique hex
+  prefix through the same guarded Resume flow — as soon as the roster lands.
+  A keyword or an ambiguous prefix never auto-resumes; a query edit made while
+  the roster is loading cancels the pending direct match. This startup entry
+  skips the sessionless mount Workspace-preflight wait, and it is never
+  blocked by a slow or never-settling Host roster read: the Browser owns the
+  first input frame and `Esc` reaches the sessionless Welcome with no Session,
+  draft or writer. A genuine canonical open failure keeps its original Host
+  error and opens the same Browser once as a MANUAL recovery entry, never a
+  second automatic resume.
 - **The Host Editor `←←` entry is contextual, never a global binding.** Two
   independent, unmodified `Left` presses within 600 ms from the empty PiTUI Host
   main Editor open the SAME fullscreen Workspace with the All browse intent,

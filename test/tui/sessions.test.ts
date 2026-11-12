@@ -331,6 +331,23 @@ test('findSessionMatch resolves only a unique non-empty prefix, never row order'
 })
 
 
+test('findSessionMatch resolves a long session_ prefix, not only the eight-character short id', () => {
+  // F3: the CLI accepts any legal hex prefix length. The old matcher only
+  // compared `session-`-prefixed ids verbatim and otherwise used the EIGHT
+  // character `shortSessionId`, so a longer `session_` prefix never matched.
+  const rows: SessionPickerRow[] = [
+    { id: 'session_abcdef1234567890abcdef1234567890', updatedAt: 2, createdAt: 2, live: false },
+    { id: 'session_fedcba9876543210fedcba9876543210', updatedAt: 1, createdAt: 1, live: false },
+  ]
+  assert.equal(findSessionMatch(rows, 'session_abcdef123')?.id, 'session_abcdef1234567890abcdef1234567890')
+  assert.equal(findSessionMatch(rows, 'abcdef123')?.id, 'session_abcdef1234567890abcdef1234567890')
+  assert.equal(findSessionMatch(rows, 'session_abcdef1234567890abcdef123')?.id,
+    'session_abcdef1234567890abcdef1234567890')
+  assert.equal(findSessionMatch(rows, 'session_ffff'), undefined, 'an unmatched long prefix stays unresolved')
+  assert.equal(findSessionMatch(rows, 'session_abcdef1234567890abcdef1234567890abcdef'), undefined,
+    'a longer-than-id prefix never matches')
+})
+
 test('sanitizeTerminalText strips C0, DEL, C1 and complete ESC sequences', () => {
   // C0: ESC + OSC payload + BEL → the whole sequence is removed by the
   // shared projection; a lone ESC and other C0 controls are dropped.

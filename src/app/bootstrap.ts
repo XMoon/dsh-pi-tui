@@ -123,7 +123,7 @@ import {
 } from './bootstrap/remote-refold-request.ts'
 import { createFatalLifecycle, createSurfaceLifecycle } from './bootstrap/lifecycle.ts'
 import { createSessionStartupHelpers, quiesceResumedOwner } from './bootstrap/session-startup.ts'
-import { canonicalFullSessionId, chooseContinueSession, chooseListedSession } from './bootstrap/session-launch-intent.ts'
+import { canonicalFullSessionId, chooseContinueSession } from './bootstrap/session-launch-intent.ts'
 import type { SessionSummary } from '../runtime/session-reader-port.ts'
 import type { SessionWorkspaceFact, WorkspaceFactsHandle } from '../runtime/session-workspace-facts-port.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
@@ -1169,8 +1169,10 @@ export function applyRunnerWithRuntime(
     const sessionLaunch = startup.sessionLaunch
     let startupResumeSessionId: string | undefined = configuredExactSessionId
     /** The ONE runner-local startup Browser request, consumed after the command
-     *  registration and before the first bound input. */
-    let startupSessionBrowserRequest: { readonly initialQuery: string } | undefined
+     *  registration and before the first bound input. `directMatch` selects the
+     *  strict CLI exact/unique-prefix policy; the read owner performs it after
+     *  the roster lands through its existing guarded Resume. */
+    let startupSessionBrowserRequest: { readonly initialQuery: string; readonly directMatch: boolean } | undefined
     /** The ONE sessionless launch notice (the launch could not pick a target),
      *  delivered once after the mount admission. */
     let startupLaunchNotice: { readonly text: string; readonly kind: 'error' | 'info' } | undefined
@@ -1223,122 +1225,110 @@ export function applyRunnerWithRuntime(
       let baseline: readonly SessionWorkspaceFact[] | undefined
       let facts: WorkspaceFactsHandle | undefined
       try {
-        // Opening the official stream can itself fail closed (for example a
-        // replaced Remote Connection generation): that is an unavailable
-        // membership, never a crash and never an empty Workspace.
-        facts = backend.sessionWorkspaceFacts.followWorkspaces(lifecycleController.signal)
-        const first = await facts[Symbol.asyncIterator]().next()
-        if (first.done !== true && first.value.type === 'baseline') baseline = first.value.items
-      } catch (error) {
+        // The handle stays OPEN across the roster read. Its generation token is
+        // the proof that the membership baseline and the roster came from the
+        // same Remote Connection generation; a replacement in between makes the
+        // paired decision unusable instead of stitching old membership onto a
+        // new roster.
+        try {
+          // Opening the official stream can itself fail closed (for example a
+          // replaced Remote Connection generation): that is an unavailable
+          // membership, never a crash and never an empty Workspace.
+          facts = backend.sessionWorkspaceFacts.followWorkspaces(lifecycleController.signal)
+          const first = await facts[Symbol.asyncIterator]().next()
+          if (first.done !== true && first.value.type === 'baseline') baseline = first.value.items
+        } catch (error) {
+          if (lifecycleController.signal.aborted) return 'aborted'
+          diag.warn('startup continue membership read failed', { error: safeErrorMessage(error) })
+        }
         if (lifecycleController.signal.aborted) return 'aborted'
-        diag.warn('startup continue membership read failed', { error: safeErrorMessage(error) })
+        if (baseline === undefined) {
+          return {
+            kind: 'stop',
+            notice: { text: 'Cannot continue: Host workspace membership is unavailable', kind: 'error' },
+          }
+        }
+        const membership = baseline.find(fact => fact.workspaceId === workspaceId)
+        if (membership === undefined) {
+          return {
+            kind: 'stop',
+            notice: { text: 'Cannot continue: the confirmed Host workspace is no longer reported', kind: 'info' },
+          }
+        }
+        let rows: readonly SessionSummary[] | undefined
+        try {
+          rows = await backend.sessionReader.list(undefined, lifecycleController.signal)
+        } catch (error) {
+          if (lifecycleController.signal.aborted) return 'aborted'
+          diag.warn('startup continue listing failed', { error: safeErrorMessage(error) })
+          return {
+            kind: 'stop',
+            notice: { text: 'Cannot continue: session listing is unavailable', kind: 'error' },
+          }
+        }
+        if (lifecycleController.signal.aborted) return 'aborted'
+        if (rows === undefined) {
+          return {
+            kind: 'stop',
+            notice: { text: 'Cannot continue: session listing is unavailable', kind: 'error' },
+          }
+        }
+        // The membership observation must still be on the SAME Host/Connection
+        // generation as the roster that just landed. A replacement here is a
+        // real authority gap, never an empty or reusable membership.
+        if (facts === undefined || !facts.isCurrent()) {
+          diag.warn('startup continue membership generation changed', { workspace: workspaceId })
+          return {
+            kind: 'stop',
+            notice: { text: 'Cannot continue: the Host connection changed while reading the workspace', kind: 'error' },
+          }
+        }
+        // The Workspace proposal and the automatic proof are fenced AFTER every
+        // await: a replaced A→B→A revision, a Host WorkspaceId change, a revoked
+        // auto proof or a torn-down runner publishes no owner.
+        const after = workspaceNextIntent.snapshot()
+        if (after.revision !== capturedRevision
+          || after.status !== 'confirmed'
+          || after.intent?.kind !== 'workspace-id'
+          || after.intent.workspaceId !== workspaceId) {
+          diag.warn('startup continue target superseded', { workspace: workspaceId })
+          return { kind: 'superseded' }
+        }
+        if (!autoProofCurrent()) {
+          return {
+            kind: 'stop',
+            notice: { text: 'Cannot continue: the verified local workspace changed — choose a Host workspace', kind: 'info' },
+          }
+        }
+        const continuedSessionId = chooseContinueSession(rows, membership.sessionIds)
+        if (continuedSessionId === undefined) {
+          return {
+            kind: 'stop',
+            notice: { text: 'No readable sessions in this Host workspace', kind: 'info' },
+          }
+        }
+        return { kind: 'resume', sessionId: continuedSessionId }
       } finally {
         facts?.dispose()
       }
-      if (lifecycleController.signal.aborted) return 'aborted'
-      if (baseline === undefined) {
-        return {
-          kind: 'stop',
-          notice: { text: 'Cannot continue: Host workspace membership is unavailable', kind: 'error' },
-        }
-      }
-      const membership = baseline.find(fact => fact.workspaceId === workspaceId)
-      if (membership === undefined) {
-        return {
-          kind: 'stop',
-          notice: { text: 'Cannot continue: the confirmed Host workspace is no longer reported', kind: 'info' },
-        }
-      }
-      let rows: readonly SessionSummary[] | undefined
-      try {
-        rows = await backend.sessionReader.list(undefined, lifecycleController.signal)
-      } catch (error) {
-        if (lifecycleController.signal.aborted) return 'aborted'
-        diag.warn('startup continue listing failed', { error: safeErrorMessage(error) })
-        return {
-          kind: 'stop',
-          notice: { text: 'Cannot continue: session listing is unavailable', kind: 'error' },
-        }
-      }
-      if (lifecycleController.signal.aborted) return 'aborted'
-      if (rows === undefined) {
-        return {
-          kind: 'stop',
-          notice: { text: 'Cannot continue: session listing is unavailable', kind: 'error' },
-        }
-      }
-      // The Workspace proposal and the automatic proof are fenced AFTER every
-      // await: a replaced A→B→A revision, a Host WorkspaceId change, a revoked
-      // auto proof or a torn-down runner publishes no owner.
-      const after = workspaceNextIntent.snapshot()
-      if (after.revision !== capturedRevision
-        || after.status !== 'confirmed'
-        || after.intent?.kind !== 'workspace-id'
-        || after.intent.workspaceId !== workspaceId) {
-        diag.warn('startup continue target superseded', { workspace: workspaceId })
-        return { kind: 'superseded' }
-      }
-      if (!autoProofCurrent()) {
-        return {
-          kind: 'stop',
-          notice: { text: 'Cannot continue: the verified local workspace changed — choose a Host workspace', kind: 'info' },
-        }
-      }
-      const continuedSessionId = chooseContinueSession(rows, membership.sessionIds)
-      if (continuedSessionId === undefined) {
-        return {
-          kind: 'stop',
-          notice: { text: 'No readable sessions in this Host workspace', kind: 'info' },
-        }
-      }
-      return { kind: 'resume', sessionId: continuedSessionId }
     }
     if (sessionLaunch?.kind === 'lookup') {
       if (canonicalFullSessionId(sessionLaunch.query)) {
-        // An explicit canonical full id keeps the ORIGINAL direct-open
+        // ONLY the canonical full id keeps the original pre-mount Open
         // contract: no roster read is required and the id bytes pass through
         // unchanged.
         startupResumeSessionId = sessionLaunch.query
       } else {
-        let rows: readonly SessionSummary[] | undefined
-        let listingError: string | undefined
-        try {
-          rows = await backend.sessionReader.list(undefined, lifecycleController.signal)
-        } catch (error) {
-          if (lifecycleController.signal.aborted) {
-            unwindLaunchResolution()
-            return
-          }
-          listingError = safeErrorMessage(error)
-          diag.warn('startup session listing failed', { error: listingError })
-        }
-        if (lifecycleController.signal.aborted) {
-          unwindLaunchResolution()
-          return
-        }
-        if (rows === undefined) {
-          // "Unavailable" is NOT "no history": never guess, never open.
-          startupLaunchNotice = {
-            text: 'Session listing unavailable — the session browser will open so you can search',
-            kind: 'error',
-          }
-          startupSessionBrowserRequest = { initialQuery: sessionLaunch.query }
-        } else {
-          const listedSessionId = chooseListedSession(rows, sessionLaunch.query)
-          if (listedSessionId === undefined) {
-            // A word-like/ambiguous/missing query searches the SAME Browser; it
-            // never auto-resumes an arbitrary first row.
-            startupSessionBrowserRequest = { initialQuery: sessionLaunch.query }
-          } else {
-            startupResumeSessionId = listedSessionId
-          }
-        }
+        // Every other value is Browser-first. The Browser opens immediately
+        // (input/Esc never wait for the Host roster); the SAME ReadOwner then
+        // applies the strict CLI exact/unique-prefix policy and performs its
+        // existing guarded Resume once the roster lands. A word-like or
+        // ambiguous query remains one global search.
+        startupSessionBrowserRequest = { initialQuery: sessionLaunch.query, directMatch: true }
       }
     } else if (sessionLaunch?.kind === 'browse') {
-      // Bare / explicitly blank `--session`: one Browser on Browse All. The
-      // empty query is an explicit value, so the startup entry keeps its
-      // input-first semantics and opens no Host read itself.
-      startupSessionBrowserRequest = { initialQuery: '' }
+      // Bare / explicitly blank `--session`: one Browser on Browse All.
+      startupSessionBrowserRequest = { initialQuery: '', directMatch: false }
     } else if (sessionLaunch?.kind === 'continue') {
       const target = await resolveContinueLaunchTarget()
       if (target === 'aborted') {
@@ -1622,7 +1612,7 @@ export function applyRunnerWithRuntime(
         // owner never existed, so nothing is covered up. `-c` never opens a
         // Browser and never retries another historical row.
         if (!resumeResolved && sessionLaunch?.kind === 'lookup') {
-          startupSessionBrowserRequest = { initialQuery: sessionLaunch.query }
+          startupSessionBrowserRequest = { initialQuery: sessionLaunch.query, directMatch: false }
         }
       }
     } else {
@@ -4382,7 +4372,7 @@ export function applyRunnerWithRuntime(
       startupSessionBrowserRequest = undefined
       let refusal: string | undefined
       try {
-        const opened = await command.openStartupSessionBrowser({ scope: 'all', initialQuery: request.initialQuery })
+        const opened = await command.openStartupSessionBrowser({ scope: 'all', initialQuery: request.initialQuery, directMatch: request.directMatch })
         if (opened.kind === 'error') refusal = opened.text
       } catch (error) {
         refusal = safeErrorMessage(error)

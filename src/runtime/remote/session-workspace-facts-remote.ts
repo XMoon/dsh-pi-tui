@@ -391,6 +391,13 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
     this.stream = source.remote.workspace.follow(signal)
   }
 
+  /** The captured Connection generation is the observation's identity; a
+   *  replacement makes this baseline unusable for a paired roster read. */
+  isCurrent(): boolean {
+    if (this.disposed) return false
+    return Object.is(this.generation.getSnapshot(), this.capturedGeneration)
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true

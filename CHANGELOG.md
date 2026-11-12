@@ -15,7 +15,7 @@
 
 ### 变更
 
-- **CLI 启动支持 `--session [id-or-query]` 与 `-c, --continue`。** 裸 `--session` 打开 Session Browser 的 Browse All；关键词、歧义或未命中的值进入同一个全局搜索并可 `Esc` 回到 sessionless Welcome；规范完整 ID 或官方列表中的精确 ID 保留原来的启动前恢复。`-c, --continue` 只在 Host 已确认的 Workspace 内按官方成员关系与主 Session 列表的交集选择最近一条，未确认 Workspace 或无历史时保持 sessionless 并提示一次，不猜测其他 Workspace，也不创建 Session；两个参数互斥。`--session` 与 `-c` 的自动恢复都只使用原有启动前 `SessionLifecycle.open`，不模拟按键或额外打开 Session。
+- **CLI 启动支持 `--session [id-or-query]` 与 `-c, --continue`。** 裸 `--session` 打开 Session Browser 的 Browse All；只有规范完整 ID 保留挂载前的直接恢复，其他非空值立即打开同一个 Browser，等官方列表到位后精确/唯一前缀匹配并走现有受保护 Resume，关键词、歧义或未命中只进入全局搜索。列表加载中 Browser 始终可输入、可 `Esc`；加载期间修改查询会取消原自动匹配。`-c, --continue` 只在 Host 已确认的 Workspace 内按官方成员关系与主 Session 列表的交集选择最近一条，且 baseline 与列表必须来自同一 Host/Connection generation；未确认 Workspace 或无历史时保持 sessionless 并提示一次，不猜测其他 Workspace，也不创建 Session。两个参数互斥。
 - **Session Browser 的当前会话行按 Enter 返回原会话。** PiTUI Session Workspace 与 TSP 原生 Browser 中，已列出且本帧绘制的当前 Session 行被 Enter/激活时关闭 Browser 并回到该会话本身：不发送 Resume、不切换 Session，Session、草稿、回合与 writer 均保持原样；其他 Session 仍走原有受保护的 Resume。PiTUI 底栏对当前行显示次要导航色的 `Return [Enter]`，其他行仍为 `Open [Enter]`；行单击仍只选中，TSP 原生 Footer Resume 对当前行保持禁用。
 - **`/resume` 优先完整 ID，仅唯一非空前缀自动恢复。** `/resume <id-or-prefix>` 先按完整 Session ID 精确匹配，其次仅当 `session-`/`session_`/短 ID 前缀唯一时才自动恢复；歧义、空前缀（如单独的 `session-`）与未命中都会在原 Browser 中以同一文本进入全局搜索，不再按列表顺序猜选，也不增加第二次列表读取。
 - **Shell 卡片随提交位置展示并保留 `!!` 历史。** `!`/`!!` 卡片不再追加到对话末尾，而是固定在用户提交时的对话位置；默认折叠为至多三行，运行中不显示输出，`Ctrl+O` 展开完整保留内容。已结算的 `!!` 卡片会保留到切换 Session、重启 TUI 或 `Alt+K`；`!` 写入 Session 成功后只移除自己的本地卡片，不再清空其他 Shell 历史；写入失败或结果不确定时保留卡片并标注 `not submitted` / `submission uncertain`，展开可查看原因。
