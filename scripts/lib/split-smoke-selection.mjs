@@ -52,6 +52,7 @@ import { runF2AccountComposition } from '../smoke/split-process/account-composit
 import { runF7AProviderAuthorization } from '../smoke/split-process/provider-authorization-f7a.mjs'
 import { runF7BCredentialRecords } from '../smoke/split-process/provider-credential-records-f7b.mjs'
 import { runF8SessionPolicy } from '../smoke/split-process/session-policy-f8.mjs'
+import { runHerdrH1 } from '../smoke/split-process/herdr-h1.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -269,6 +270,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'skills.recovery',
     title: 'a SIGKILLed Sessionless Client is replaced by a new process that re-establishes Host skill observation on the same Host',
     run: runSkillsRecovery,
+  }),
+  Object.freeze({
+    suite: 'herdr',
+    id: 'herdr.h1-split-surface',
+    title: 'real Split Clients report the Host Agent idle/working/blocked state to their own Herdr Pane, and only the Client owns that registration',
+    run: runHerdrH1,
   }),
 ])
 

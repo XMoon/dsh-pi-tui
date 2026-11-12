@@ -89,6 +89,7 @@ import { diagFromEnv, dshHome, type Diag } from '../runtime/process/diagnostics.
 import { runDetached, runOwned } from '../runtime/process/tasks.ts'
 import { captureScheduleSessionSwitch, openScheduleWorkspace } from './schedule/runtime.ts'
 import { FileHistorySearchSource } from '../client/history/search.ts'
+import { createHerdrReporter } from '../client/herdr/reporter.ts'
 import { safeErrorMessage } from '../runtime/process/errors.ts'
 import { DraftImageStore } from '../client/media/image/draft-store.ts'
 import { DraftFileStore } from '../client/media/attachment/file-draft.ts'
@@ -724,12 +725,27 @@ export function applyRunnerWithRuntime(
     /** Mouse PR4: the real `/tasks` business-entry availability (registration
      *  fact + live Task Center capability), late-bound with the opener above. */
     let tasksBrowserAvailableOwner: (() => boolean) | undefined
+    /**
+     * H1: the ONE Client-local Herdr Pane reporter of this process. Direct owns
+     * its Pane immediately; the Remote branch starts UNqualified, and only a
+     * valid Host progress snapshot/update can register this Pane. A process
+     * outside a complete Herdr environment gets `undefined`, so no hook, no
+     * timer and no child process exists at all.
+     *
+     * The composition root (this function) is the ONLY creator: the Split Host
+     * never imports or constructs a reporter.
+     */
+    const herdrReporter = createHerdrReporter(process.env, override === undefined, diag)
     const surface = createSurfaceRuntime<SessionEvent>({
       tuiVersion: bundleVersion(),
       notificationPresentation,
       notificationMode: tuiSettings?.get().notificationMode,
       notificationMethod: tuiSettings?.get().notificationMethod,
       terminalProgress: tuiSettings?.get().terminalProgress,
+      // H1: the read-only logical-status sink of the MOUNTED PiTui surface.
+      // Only the Client process has this surface; the TSP renderer branch
+      // mounts no TuiApp and therefore never publishes through it.
+      ...(herdrReporter === undefined ? {} : { onProgramStatus: status => herdrReporter.publish(status) }),
       // R1 §5.3: exactly ONE adapter owns the main terminal outcome. Direct
       // keeps the local durable-event evidence; the Remote branch hands the
       // outcome to the Host evidence stream, so the Remote durable ingress
@@ -1871,6 +1887,12 @@ export function applyRunnerWithRuntime(
       remoteInitRetryHandle = undefined
     }
     const disposeRemoteLiveSurface = (): void => {
+      // H1: a retired Remote live surface (owner switch, generation rollover,
+      // watch re-init, teardown) no longer proves the Host Agent state. Stop
+      // accepting it as this Pane's registered status FIRST; an already
+      // registered Pane is withdrawn with an ordered `release-agent` while the
+      // old watch is still the authority (never a fabricated `idle`).
+      herdrReporter?.setQualified(false)
       disposeRemoteInitRetry()
       remoteIngressHandle?.dispose()
       remoteIngressHandle = undefined
@@ -2130,7 +2152,14 @@ export function applyRunnerWithRuntime(
               isCurrent: () => !cleanedUp
                 && ownership.currentSessionId() === sessionId
                 && ownership.generation() === initGeneration,
-              onFact: fact => { surface.applyRemoteMainProgress(fact, sessionId) },
+              onFact: fact => {
+                surface.applyRemoteMainProgress(fact, sessionId)
+                // H1: only a frame the existing currentness/binding fences
+                // accepted can qualify this Pane. The publish that follows reads
+                // the JUST-COMMITTED logical status, so a stale queued state from
+                // a previous qualification is never replayed.
+                herdrReporter?.setQualified(true)
+              },
             },
           )
           failed = false
@@ -2142,6 +2171,13 @@ export function applyRunnerWithRuntime(
           if (failed && !cleanedUp
             && ownership.currentSessionId() === sessionId
             && ownership.generation() === initGeneration) {
+            // H1: the conservative terminal fail-closed below is a PRESENTATION
+            // cleanup, not proof the Agent finished. Invalidate the external
+            // Pane qualification BEFORE that idle fallback runs, so the fallback
+            // can never be published to Herdr as a completed Agent; only a new
+            // valid snapshot can requalify this Pane (and the next watch's
+            // opening snapshot does exactly that).
+            herdrReporter?.setQualified(false)
             surface.applyRemoteMainProgress(
               { kind: 'snapshot', restart: true, running: false, outcome: 'idle' },
               sessionId,
@@ -2988,6 +3024,9 @@ export function applyRunnerWithRuntime(
       disposeFooterCommand: () => settings.disposeFooterCommand(),
       disposeLocalShell: () => localShell.dispose(),
       disposePastedImageIntake: () => pastedImageIntake.dispose(),
+      // H1: the ONE Client-local Pane reporter is released inside the same
+      // ordered, non-truncating surface batch (before the mounted app dies).
+      disposeHerdrReporter: () => { herdrReporter?.dispose() },
       retireOwnedSession: sessionRuntime.retireOwnedSession,
       disposeSelectedTransport,
       registerDisposal: (dispose) => { ctx.effect(function* () { yield dispose }) },

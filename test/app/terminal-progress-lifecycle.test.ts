@@ -17,7 +17,7 @@
 
 import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
-import { afterEach, test } from 'node:test'
+import { afterEach, test, type TestContext } from 'node:test'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -37,6 +37,9 @@ import type { MainProgressAuthority, RoutedSessionEvent, SurfaceEventRoutingSour
 import type { TerminalNotificationPresentation } from '../../src/app/surface/notification-runtime.ts'
 import type { ApprovalOutcome } from '../../src/tui/panels/approval-dialog.ts'
 import { isTernTerminal } from '../../src/tui/terminal/tern.ts'
+import type { ProgramStatus } from '../../src/tui/terminal/program-status.ts'
+import { createHerdrReporter, type HerdrReporter } from '../../src/client/herdr/reporter.ts'
+import { createHerdrCliFixture, type HerdrCliEntry, type HerdrCliFixture } from '../support/herdr-cli-fixture.ts'
 import type {
   ApprovalRequestLike,
   InteractionPort,
@@ -444,6 +447,12 @@ interface MountSurfaceOptions {
    * mutual-exclusion gate (the durable ingress never writes the local fold).
    */
   readonly mainProgressAuthority?: MainProgressAuthority
+  /**
+   * H1: the optional read-only logical-status observer forwarded into the SAME
+   * production mount (`SurfaceRuntimeOptions.onProgramStatus`). The H1 cases
+   * wire a REAL reporter over this seam; every other case leaves it absent.
+   */
+  readonly onProgramStatus?: (status: ProgramStatus) => void
 }
 
 /**
@@ -586,6 +595,7 @@ function mountSurface(
     notificationMethod: options.notificationMethod,
     terminalProgress: options.terminalProgress,
     mainProgressAuthority: options.mainProgressAuthority ?? 'local-events',
+    ...(options.onProgramStatus === undefined ? {} : { onProgramStatus: options.onProgramStatus }),
     ...(options.diag === undefined ? {} : { diag: options.diag }),
     createPluginManagerPanel: createPluginManagerWorkspacePanel,
   })
@@ -3001,6 +3011,7 @@ function disposeThroughProductionLifecycle(h: SurfaceHarness): () => void {
     disposeFooterCommand: () => {},
     disposeLocalShell: () => {},
     disposePastedImageIntake: () => {},
+    disposeHerdrReporter: () => {},
     retireOwnedSession: async () => ({}) as never,
     disposeSelectedTransport: async () => {},
     registerDisposal: () => {},
@@ -3071,5 +3082,320 @@ test('the production exit path retains a proven done/error and clears a live int
       'after a rebind the exit has no proven completion to retain')
   } finally {
     switched.dispose()
+  }
+})
+
+// ── H1 Herdr Pane status (plan §6.2, HS-01…HS-09) ──────────────────────────
+//
+// Every case below crosses the REAL reporter -> external CLI process boundary:
+// the fake CLI records the argv it received, and the assertions are about those
+// process invocations, not about an injected `ProgramStatus`.
+
+/** The subcommand a fake Herdr `start` entry describes. */
+function herdrCommand(entry: HerdrCliEntry): string {
+  return entry.argv?.[1] ?? '(missing)'
+}
+
+function herdrArg(entry: HerdrCliEntry, flag: string): string {
+  const argv = entry.argv ?? []
+  const index = argv.indexOf(flag)
+  assert.ok(index >= 0, `missing ${flag} in ${JSON.stringify(argv)}`)
+  return argv[index + 1] ?? '(missing)'
+}
+
+/** The ordered Herdr facts this fixture's CLI observed. */
+function herdrStates(fixture: HerdrCliFixture): string[] {
+  return fixture.starts().map(entry => herdrCommand(entry) === 'release-agent'
+    ? 'release'
+    : herdrArg(entry, '--state'))
+}
+
+function herdrReportCount(fixture: HerdrCliFixture): number {
+  return fixture.starts().filter(entry => herdrCommand(entry) === 'report-agent').length
+}
+
+function herdrReleaseCount(fixture: HerdrCliFixture): number {
+  return fixture.starts().filter(entry => herdrCommand(entry) === 'release-agent').length
+}
+
+/** Mount the production surface with a REAL reporter over a fake CLI. */
+function mountHerdrSurface(
+  t: TestContext,
+  beforeStart?: (controls: SurfaceControls) => void,
+  options: MountSurfaceOptions = {},
+): { fixture: HerdrCliFixture; reporter: HerdrReporter; harness: SurfaceHarness } {
+  const fixture = createHerdrCliFixture(t)
+  const reporter = createHerdrReporter(fixture.env, true)
+  assert.ok(reporter !== undefined)
+  const harness = mountSurface(beforeStart, {
+    ...options,
+    onProgramStatus: status => reporter.publish(status),
+  })
+  return { fixture, reporter, harness }
+}
+
+async function waitForHerdrState(fixture: HerdrCliFixture, index: number, state: string): Promise<void> {
+  await fixture.waitFor(
+    entries => entries.filter(entry => entry.phase === 'start').length >= index
+      && herdrStates(fixture)[index - 1] === state,
+    `Herdr ${String(index)} reported ${state}`,
+  )
+}
+
+test('HS-01 a Direct main-Agent running edge reaches the Herdr CLI as working', async (t) => {
+  const { fixture, reporter, harness } = mountHerdrSurface(t, (controls) => controls.setOwner('main'))
+  try {
+    await waitForHerdrState(fixture, 1, 'idle')
+    harness.routeStatus('main', 'running')
+    await drain()
+    await waitForHerdrState(fixture, 2, 'working')
+    harness.routeStatus('main', 'idle')
+    await drain()
+    await waitForHerdrState(fixture, 3, 'idle')
+    assert.deepEqual(herdrStates(fixture), ['idle', 'working', 'idle'])
+  } finally {
+    harness.dispose()
+    reporter.dispose()
+  }
+})
+
+test('HS-02 a real Agent Approval reports blocked and settling it returns to working', async (t) => {
+  const { fixture, reporter, harness } = mountHerdrSurface(t, (controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  })
+  try {
+    // The pre-mount running latch is asserted by the FIRST acquisition: the
+    // Pane never flashes idle before working.
+    await waitForHerdrState(fixture, 1, 'working')
+    const controller = new AbortController()
+    const decision = harness.agentApproval({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    await waitForHerdrState(fixture, 2, 'blocked')
+    controller.abort()
+    await decision
+    await drain()
+    await waitForHerdrState(fixture, 3, 'working')
+    assert.deepEqual(herdrStates(fixture), ['working', 'blocked', 'working'])
+  } finally {
+    harness.dispose()
+    reporter.dispose()
+  }
+})
+
+test('HS-03 a real Agent Question reports blocked and a legal answer returns to working', async (t) => {
+  const { fixture, reporter, harness } = mountHerdrSurface(t, (controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  })
+  try {
+    await waitForHerdrState(fixture, 1, 'working')
+    const controller = new AbortController()
+    const answer = harness.agentQuestion(controller.signal)
+    await waitForHerdrState(fixture, 2, 'blocked')
+    controller.abort()
+    await answer.catch(() => {})
+    await drain()
+    await waitForHerdrState(fixture, 3, 'working')
+    assert.deepEqual(herdrStates(fixture), ['working', 'blocked', 'working'])
+  } finally {
+    harness.dispose()
+    reporter.dispose()
+  }
+})
+
+test('HS-04 a Client-local question (the /login shape) never reports blocked', async (t) => {
+  const { fixture, reporter, harness } = mountHerdrSurface(t, (controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  })
+  try {
+    await waitForHerdrState(fixture, 1, 'working')
+    const controller = new AbortController()
+    const answer = harness.app.askQuestions(
+      [{ id: 'auth', question: 'API key', masked: true }],
+      controller.signal,
+    )
+    assert.equal(harness.phase(), 'waiting-question')
+    await new Promise<void>(resolve => setTimeout(resolve, 200))
+    assert.deepEqual(herdrStates(fixture), ['working'],
+      'a Client-local wait is not an Agent-blocking wait')
+    controller.abort()
+    await answer.catch(() => {})
+    await drain()
+    await new Promise<void>(resolve => setTimeout(resolve, 100))
+    assert.deepEqual(herdrStates(fixture), ['working'])
+  } finally {
+    harness.dispose()
+    reporter.dispose()
+  }
+})
+
+test('HS-05 parked attention and a CONTINUED late answer never report blocked', async (t) => {
+  const { fixture, reporter, harness } = mountHerdrSurface(t, (controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  })
+  try {
+    await waitForHerdrState(fixture, 1, 'working')
+    // Attention alone owns no response surface.
+    harness.app.setQuestionAttention(2)
+    await drain()
+    await new Promise<void>(resolve => setTimeout(resolve, 100))
+    assert.deepEqual(herdrStates(fixture), ['working'])
+    // The Host wait ended: the call is CONTINUED and the Agent already moved on.
+    harness.setQuestionSnapshot({
+      sessionId: 'session-terminal-progress-test',
+      active: [{
+        sessionId: 'session-terminal-progress-test',
+        callId: 'call-late',
+        state: 'continued',
+        questions: [{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }],
+      }],
+      settled: [],
+      queuedReplyCallIds: new Set(),
+    })
+    harness.notifyQuestionChange()
+    await drain()
+    assert.equal(harness.reopenContinued('call-late'), true)
+    await drain()
+    assert.equal(harness.phase(), 'waiting-question')
+    await new Promise<void>(resolve => setTimeout(resolve, 150))
+    assert.deepEqual(herdrStates(fixture), ['working'],
+      'a continued late-answer form never reports blocked')
+  } finally {
+    harness.dispose()
+    reporter.dispose()
+  }
+})
+
+test('HS-06 an owner switch retires the Pane registration and a late old-owner wait cannot restore it', async (t) => {
+  const { fixture, reporter, harness } = mountHerdrSurface(t, (controls) => {
+    controls.setOwner('A')
+    controls.routeStatus('A', 'running')
+  })
+  try {
+    await waitForHerdrState(fixture, 1, 'working')
+    const controller = new AbortController()
+    const decision = harness.agentApproval({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    await waitForHerdrState(fixture, 2, 'blocked')
+    harness.setOwner('B')
+    await drain()
+    await waitForHerdrState(fixture, 3, 'idle')
+    controller.abort()
+    await decision
+    harness.routeStatus('A', 'running')
+    await drain()
+    await new Promise<void>(resolve => setTimeout(resolve, 150))
+    assert.deepEqual(herdrStates(fixture), ['working', 'blocked', 'idle'],
+      'a late retired-owner status and its settled wait are inert')
+    harness.routeStatus('B', 'running')
+    await drain()
+    await waitForHerdrState(fixture, 4, 'working')
+    assert.deepEqual(herdrStates(fixture), ['working', 'blocked', 'idle', 'working'])
+  } finally {
+    harness.dispose()
+    reporter.dispose()
+  }
+})
+
+test('HS-07 terminal progress off and a non-Tern terminal still report the logical status', async (t) => {
+  const { fixture, reporter, harness } = mountHerdrSurface(t, (controls) => controls.setOwner('main'), {
+    terminalProgress: 'off',
+  })
+  try {
+    await waitForHerdrState(fixture, 1, 'idle')
+    harness.routeStatus('main', 'running')
+    await drain()
+    await waitForHerdrState(fixture, 2, 'working')
+    assert.ok(!harness.programWrites.includes(WORKING),
+      `OSC 7501 must stay deselected while Herdr still reports: ${JSON.stringify(harness.programWrites)}`)
+    harness.routeStatus('main', 'idle')
+    await drain()
+    await waitForHerdrState(fixture, 3, 'idle')
+    assert.deepEqual(herdrStates(fixture), ['idle', 'working', 'idle'])
+  } finally {
+    harness.dispose()
+    reporter.dispose()
+  }
+})
+
+test('HS-08 an $EDITOR round trip never releases the Pane and republishes the latest logical fact', async (t) => {
+  const fixture = createHerdrCliFixture(t)
+  const reporter = createHerdrReporter(fixture.env, true)
+  assert.ok(reporter !== undefined)
+  const vt = new VirtualTerminal(80, 24)
+  let release!: (text: string) => void
+  const gate = new Promise<string>(resolve => { release = resolve })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: () => gate,
+    runOwned: () => {},
+  }, { onProgramStatus: status => reporter.publish(status) })
+  app.start()
+  startedApps.add(app)
+  try {
+    await waitForHerdrState(fixture, 1, 'idle')
+    app.setTerminalProgress(true)
+    await waitForHerdrState(fixture, 2, 'working')
+    // $EDITOR owns the PTY: the logical status keeps flowing, but no release.
+    const pending = app.launchExternalEditor()
+    app.setTerminalProgress(false)
+    await waitForHerdrState(fixture, 3, 'idle')
+    app.setTerminalProgress(true)
+    await waitForHerdrState(fixture, 4, 'working')
+    assert.equal(herdrReleaseCount(fixture), 0, 'a suspend is not an Agent release')
+    release('edited')
+    await pending
+    await new Promise<void>(resolve => setTimeout(resolve, 100))
+    assert.deepEqual(herdrStates(fixture), ['idle', 'working', 'idle', 'working'],
+      'the resume dedupes the still-current working fact')
+    assert.equal(herdrReleaseCount(fixture), 0)
+  } finally {
+    app.dispose()
+    reporter.dispose()
+  }
+})
+
+test('HS-09 done/error settle to idle, repeated idle is inert and child activity is never the main Agent', async (t) => {
+  const { fixture, reporter, harness } = mountHerdrSurface(t, (controls) => controls.setOwner('main'))
+  try {
+    await waitForHerdrState(fixture, 1, 'idle')
+    // One full completed interval, driven edge by edge so each Herdr command
+    // is observable (a synchronous burst is HR-04's latest-wins contract).
+    harness.routeStatus('main', 'running')
+    await drain()
+    await waitForHerdrState(fixture, 2, 'working')
+    harness.routeSession({ type: 'turn/start', data: { turn: 1 } })
+    await drain()
+    harness.routeSession({ type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await drain()
+    harness.routeStatus('main', 'idle')
+    await drain()
+    await waitForHerdrState(fixture, 3, 'idle')
+    assert.deepEqual(herdrStates(fixture), ['idle', 'working', 'idle'],
+      'a completed interval reports idle, never a fabricated done state')
+    harness.routeStatus('main', 'idle')
+    await drain()
+    harness.routeStatus('child', 'running')
+    await drain()
+    await new Promise<void>(resolve => setTimeout(resolve, 150))
+    assert.deepEqual(herdrStates(fixture), ['idle', 'working', 'idle'],
+      'repeated idle and child-only activity never churn the Pane')
+    harness.routeStatus('main', 'running')
+    await drain()
+    await waitForHerdrState(fixture, 4, 'working')
+    harness.routeSession({ type: 'turn/start', data: { turn: 2 } })
+    await drain()
+    harness.routeSession({ type: 'turn/end', data: { turn: 2, reason: { kind: 'error' } } })
+    await drain()
+    harness.routeStatus('main', 'idle')
+    await drain()
+    await waitForHerdrState(fixture, 5, 'idle')
+    assert.deepEqual(herdrStates(fixture), ['idle', 'working', 'idle', 'working', 'idle'],
+      'an error interval also settles to the Herdr idle state')
+  } finally {
+    harness.dispose()
+    reporter.dispose()
   }
 })

@@ -151,6 +151,10 @@ A bare or whitespace-only `--session` opens Browse All. **Only a canonical full 
 
 Tool approvals appear in the editor seat: the full Reason/Arguments body is readable in a scrollable area (no six-line preview), with `y` to allow once, `n` to reject, `Esc`/`Ctrl+C` to cancel, `c` to copy the raw arguments and `e` to expand. Fullscreen can click the actually painted Allow once / Reject / Cancel actions and wheel the body; regular mode stays keyboard-only. Short viewports show the real compact payload or `Resize to inspect more`, never a cropped decision.
 
+### Herdr terminal integration
+
+When `dsh --profile pi-tui` runs inside a Herdr pane (Direct or the internal Split Client), the TUI automatically reports the main Agent's `idle` / `working` / `blocked` state to that pane, so `herdr agent list` and the pane UI recognize `dsh-pi-tui` without configuration. The report reuses the Agent status the TUI already derived: it is independent of the Terminal progress setting, a Client-local flow such as `/login` is never reported as blocked, and exiting withdraws this pane's registration. It is status display only — it does not resume a Session, browse Sessions or let Herdr operate the Agent; an ordinary terminal or an incomplete Herdr environment starts no extra background process, and an unavailable Herdr never affects the TUI.
+
 ### Conversation display
 
 `/display` switches between three presentation presets: `full` (default) is the normal Transcript projection; `focus` groups the current turn's Thinking, Tool Calls, and intermediate replies into a live Thought block; `compact` folds contiguous process into `Activity` spans with Header + `Think:` / `Action:` previews, keeps the session and assistant intermediate output visible in chronological order, renders injected notice / relay / recall entries separately (adjacent environment injections merge into an expandable Context cluster), and expands with a mouse click or `Ctrl+O`. The `Display` row in `/settings` offers the same values and persists the choice; `/focus` remains available as a compatibility command.
