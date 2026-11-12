@@ -1049,9 +1049,45 @@ generation-fenced detached snapshot; `targetsState()` distinguishes `ready`,
 authoritative read for this Connection generation), and a stale roster may not
 route a `/login` attempt. The typed answer is the only secret-bearing direction
 and rides the authenticated unary `respond` once; frames, events, logs and
-diagnostics never carry a credential record or token. Credential-record
-enumeration/deletion stays F7B: a Split Client cannot confirm record presence
-and must not paint "signed in" from a local guess.
+diagnostics never carry a credential record or token.
+
+### Stored credential records over the Split wire
+
+The internal Split Host serves stored credential RECORDS through this package's
+OWN private `piTuiCredentialRecords` Typert namespace (`list`, `delete`). The
+installed official `ctx.credentials` store remains the ONLY authority for
+record storage, presence, deletion and its file lock/atomic write and
+`credentials/record-updated` event: the bridge is metadata-only, never caches a
+record, never writes one and never reimplements the store. The generated
+`credentials` namespace stays REFERENCE-only (`describe|set|unset`); the two
+key spaces are disjoint, so a record delete is never an `unset(ref)`.
+
+`list` returns every stored record's detached `{key, kind}` (`kind` is exactly
+`api-key` or `grant`), including records whose owning plugin/flow is not
+registered (an orphan) and the DeepSeek Account grant — Account filtering is an
+application-entry ownership rule, not a Host `deleteRecord` restriction. Any
+extra field, secret value, env mapping or Host record object fails the whole
+result instead of being forwarded. `delete(key)` re-validates the official
+`<scope>/<id>` grammar and calls `deleteRecord(exactKey)` exactly once; an
+absent key is the official no-op and any legal scope (a foreign orphan
+included) is a valid target. Both methods are Owner-only (peer principal AND
+invocation signals), checked before the store is read or written; a Host
+without the credentials plugin still becomes Ready and answers a definite
+service-unavailable failure, never an empty list.
+
+A Client read captures the Connection generation and re-checks it before
+committing the metadata, so an old empty or failed answer never overwrites the
+current Host. A dispatched delete is bracketed by the accepted-write lifetime
+(the Client reload gate observes it) and never replayed. Only a definite
+pre-invocation refusal (`gateway/bad-request`) is a normal failure; a lost ACK,
+a transport throw, `gateway/cancelled`, `gateway/internal` or an invalid result
+leaves the commit unproven and surfaces as the stable
+`RECORD_DELETE_UNCONFIRMED` outcome: the UI never claims success or failure,
+keeps the exact key and offers a read-only re-read of the current Host. Only the
+authoritative absence (a fresh read after the ACK) may report a local clear, and
+that copy never claims an issuer revoke or a model switch. The official
+`credentials/record-updated` event remains the single change notice; there is
+no second watch, poll or optimistic Client mirror.
 
 The account DTOs are detached (`AccountView`, `AccountProfile`, wallet decimal
 strings, safe attempt ids/phases/error codes). An `AccountView` is last-known

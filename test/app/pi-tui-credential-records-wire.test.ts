@@ -27,7 +27,7 @@ import { createRemoteClientRuntime, type RemoteClientRuntime } from '../support/
 import { createRemoteHostRuntime, type RemoteHostRuntime } from '../support/m3-inprocess/host-runtime.ts'
 import { createRemoteApplicationHostFixture } from '../support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
-import { RemoteConfigPort } from '../../src/runtime/remote/config-remote.ts'
+import { RemoteConfigPort, RecordDeleteUnconfirmedError } from '../../src/runtime/remote/config-remote.ts'
 import { SupersededReadError } from '../../src/runtime/read-error.ts'
 
 type Host = Awaited<ReturnType<typeof createRemoteApplicationHostFixture>>
@@ -48,9 +48,28 @@ interface Wire {
   dispose(): Promise<void>
 }
 
-async function mountWire(life: TestLifecycle, presetId: string): Promise<Wire> {
+async function mountWire(
+  life: TestLifecycle,
+  presetId: string,
+  fault: { readonly match: (url: string) => boolean } | undefined = undefined,
+): Promise<Wire> {
   const host = await createRemoteApplicationHostFixture(life, presetId)
   const hostRuntime = await createRemoteHostRuntime(host.ctx)
+  if (fault !== undefined) {
+    // ONE-SHOT carrier fault: the request still reaches the Host (the official
+    // store really commits), but the answer never returns to the Client.
+    const originalFetch = hostRuntime.carrier.fetch
+    let injected = false
+    hostRuntime.carrier.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input)
+      const response = await originalFetch(input, init)
+      if (!injected && fault.match(url)) {
+        injected = true
+        throw new Error('simulated carrier loss after the Host committed the call')
+      }
+      return response
+    }
+  }
   const client = await createRemoteClientRuntime({ carrier: hostRuntime.carrier })
   const port = new RemoteConfigPort({
     remote: client.remote,
@@ -125,6 +144,37 @@ test('L5 REAL_WIRE: the generated Client Remote lists the official store metadat
     await assert.rejects(() => wire.port.credentials.deleteRecord('DEEPSEEK_API_KEY'), /<scope>\/<id>/u)
     assert.deepEqual((await wire.host.ctx.credentials.listRecords()).map(record => record.key).sort(),
       [API_KEY_KEY, FOREIGN_KEY].sort())
+  } finally {
+    await wire.dispose()
+  }
+})
+
+test('L5 REAL_WIRE: a Host-committed delete whose ACK is lost is UNCONFIRMED and never replayed', async (t) => {
+  const life = testLifecycle(t)
+  let deleteRequests = 0
+  const wire = await mountWire(life, 'f7b-wire-ack-loss', {
+    match: url => {
+      if (!url.includes('piTuiCredentialRecords/delete')) return false
+      deleteRequests += 1
+      return true
+    },
+  })
+  try {
+    await seedRecords(wire)
+    await assert.rejects(wire.port.credentials.deleteRecord(GRANT_KEY),
+      (error: unknown) => error instanceof RecordDeleteUnconfirmedError,
+      'a lost ACK after dispatch must never be a definite failure or success')
+    assert.equal(deleteRequests, 1, 'the delete crossed the carrier exactly once')
+    // The Host really committed the delete before the answer was dropped.
+    assert.equal(await wire.host.ctx.credentials.readRecord(GRANT_KEY), undefined)
+    assert.deepEqual((await wire.host.ctx.credentials.listRecords()).map(record => record.key).sort(),
+      [API_KEY_KEY, FOREIGN_KEY].sort(), 'only the exact key was removed')
+    // The Client re-reads the CURRENT Host truth through a NEW call; the adapter
+    // never replays the delete on its own.
+    assert.deepEqual((await wire.port.credentials.listRecords()).map(record => record.key).sort(),
+      [API_KEY_KEY, FOREIGN_KEY].sort())
+    assert.equal(deleteRequests, 1, 'the readback did not replay the delete')
+    assert.equal(wire.port.hasUnsettledWrites(), false, 'the unconfirmed settlement released the write lifetime')
   } finally {
     await wire.dispose()
   }

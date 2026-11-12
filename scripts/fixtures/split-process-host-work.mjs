@@ -68,6 +68,9 @@ const SCENARIOS = new Set([
   // `AuthorizationSession.commit` write path; this fixture is the provider
   // plugin boundary, never a replacement for the authorization seam.
   'f7a-authorization',
+  // M6-1 F7B: seed stored credential RECORDS through the official
+  // `ctx.credentials.modifyRecord()` write path (never a hand-edited YAML).
+  'f7b-credential-records',
 ])
 
 /** Quote one token for the Host shell used by the harmless fixture commands. */
@@ -1294,5 +1297,54 @@ export async function apply(ctx) {
     register('f7a-main', 'F7A main', runMain)
     register('f7a-other', 'F7A other', runOther)
     record('f7a-flows-registered', { keys: ['llm-pi-ai/f7a-main', 'llm-pi-ai/f7a-other'] })
+  }
+
+  if (scenario === 'f7b-credential-records') {
+    // F7B stored-record qualification. The OFFICIAL `ctx.credentials` store is
+    // the only authority: every seed goes through its read-modify-write path,
+    // the fixture never edits the YAML file and never mounts a second
+    // credential service. Sentinels live in the record payloads only; a
+    // qualification proof line records keys/kinds, never a value.
+    const credentials = ctx.reflect.get('credentials')
+    if (credentials === undefined || typeof credentials.modifyRecord !== 'function') {
+      throw new Error('m4-c1-host-work: f7b-credential-records requires the official ctx.credentials service')
+    }
+    const seeds = [
+      {
+        key: credentialKey('llm-pi-ai', 'f7b-grant'),
+        record: { kind: 'grant', payload: { token: 'f7b-grant-token-sentinel-20261112' } },
+      },
+      {
+        key: credentialKey('llm-pi-ai', 'f7b-api-key'),
+        record: {
+          kind: 'api-key',
+          key: 'f7b-api-key-value-sentinel-20261112',
+          env: { F7B_ENV: 'f7b-env-value-sentinel-20261112' },
+        },
+      },
+      {
+        key: credentialKey('other-plugin', 'f7b-orphan'),
+        record: { kind: 'grant', payload: { token: 'f7b-orphan-token-sentinel-20261112' } },
+      },
+      {
+        // The DeepSeek Account grant: seeded so the smoke can prove the generic
+        // records list EXCLUDES it while the Account page owns it.
+        key: credentialKey('deepseek-account-platform', 'default'),
+        record: { kind: 'grant', payload: { token: 'f7b-account-token-sentinel-20261112' } },
+      },
+    ]
+    for (const seed of seeds) {
+      await credentials.modifyRecord(seed.key, async () => seed.record)
+    }
+    const listed = await credentials.listRecords()
+    record('f7b-records-seeded', {
+      keys: listed.map(entry => String(entry.key)).sort(),
+      kinds: listed.map(entry => `${String(entry.key)}:${entry.kind}`).sort(),
+    })
+    // The REAL official record-updated event is the observable commit proof the
+    // smoke waits for after a delete (one key, never a payload).
+    ctx.effect(() => ctx.on('credentials/record-updated', (key) => {
+      record('f7b-record-updated', { key: String(key) })
+    }), 'f7b-record-updated-observer')
   }
 }
