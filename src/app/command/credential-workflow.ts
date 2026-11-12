@@ -263,8 +263,11 @@ export interface ProviderCatalogRead {
    *  the snapshot is authoritative. */
   readonly failure?: string
   /** Whether the values are the LAST KNOWN ones and not current (a stale
-   *  backend mirror). */
+   *  backend mirror or an unreadable authorization roster). */
   readonly stale?: boolean
+  /** The reason provider-native sign-in cannot run on this backend (the Host
+   *  has no authorization service). The API key/provider list stays usable. */
+  readonly authorizationUnavailable?: string
 }
 
 /**
@@ -337,6 +340,19 @@ export class CredentialWorkflow {
     return genericAuthorizationTargets(this.deps.authorization.listTargets())
   }
 
+  /** Re-read the Host authorization roster before a Models page snapshot. The
+   *  page calls this once per read; a failure leaves the roster `stale` and the
+   *  page states that refresh is needed instead of painting an empty list. */
+  async refreshAuthorizationTargets(): Promise<void> {
+    await this.deps.authorization.refreshTargets()
+  }
+
+  /** Whether the roster may decide a `/login` target: only a `ready` roster is
+   *  allowed to route an authorization attempt. */
+  authorizationTargetsCurrent(): boolean {
+    return this.deps.authorization.targetsState() === 'ready'
+  }
+
   options(): readonly CredentialProviderOption[] {
     return this.genericProviderOptions()
   }
@@ -350,12 +366,20 @@ export class CredentialWorkflow {
   readCatalog(): ProviderCatalogRead {
     const snapshot = this.deps.providers.readCatalog()
     const options = snapshot.options.filter(option => option.route !== ACCOUNT_PROVIDER_ROUTE)
+    // A roster that was never read for THIS Connection generation, or whose
+    // last read failed, is STALE — the last-known flow rows are not a current
+    // authority. An UNAVAILABLE Host authorization service is a definite fact
+    // that affects ONLY native sign-in, never the API key/provider list.
+    const targetsState = this.deps.authorization.targetsState()
     return {
       targets: mergeLoginTargets(options, this.genericTargets()),
       options,
       profiles: new Map(snapshot.profiles.map(profile => [profile.route, profile])),
       ...(snapshot.failure === undefined ? {} : { failure: snapshot.failure }),
-      ...(snapshot.stale === true ? { stale: true } : {}),
+      ...(snapshot.stale === true || targetsState === 'stale' ? { stale: true } : {}),
+      ...(targetsState === 'unavailable'
+        ? { authorizationUnavailable: 'provider-native sign-in is unavailable on this Host' }
+        : {}),
     }
   }
 

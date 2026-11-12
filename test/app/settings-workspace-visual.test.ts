@@ -820,6 +820,8 @@ function setup(options: HarnessOptions = {}): Harness {
       authorization: {
         available: () => false,
         listTargets: () => [],
+        refreshTargets: async () => {},
+        targetsState: () => 'unavailable' as const,
         begin: async () => ({ kind: 'unavailable' as const }),
         onEvent: () => () => {},
         respond: async () => {},

@@ -27,6 +27,7 @@ import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../src/runtime/remote/pi-tu
 import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../src/runtime/remote/pi-tui-terminal-progress-contract.ts'
 import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../src/runtime/remote/pi-tui-web-access-contract.ts'
 import { PI_TUI_SKILLS_NAMESPACE } from '../../src/runtime/remote/pi-tui-skills-contract.ts'
+import { PI_TUI_AUTHORIZATION_NAMESPACE } from '../../src/runtime/remote/pi-tui-authorization-contract.ts'
 import { PI_TUI_WEB_ACCESS_ROWS } from '../../src/app/host/features/web-roster.ts'
 
 /** One row of a real patch file (in-place override or `insert` entry). */
@@ -1074,6 +1075,10 @@ function hostContext(rows: FixtureRow[], overrides: Record<string, unknown> = {}
   services.set('piTuiSkills', {
     ...typertService('piTuiSkills', PI_TUI_SKILLS_NAMESPACE),
     activeSubscriptions: 0,
+  })
+  services.set('piTuiAuthorization', {
+    ...typertService('piTuiAuthorization', PI_TUI_AUTHORIZATION_NAMESPACE),
+    activeAttempts: 0,
   })
   services.set(PI_TUI_HOST_READY_SERVICE, {})
   services.set('piTuiPerformanceReady', {})

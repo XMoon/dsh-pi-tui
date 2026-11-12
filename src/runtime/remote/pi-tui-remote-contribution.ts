@@ -46,6 +46,12 @@ import {
   PI_TUI_SKILLS_STANDING,
   PI_TUI_SKILLS_WATCH_INVALIDATIONS,
 } from './pi-tui-skills-contract.ts'
+import {
+  PI_TUI_AUTHORIZATION_CANCEL,
+  PI_TUI_AUTHORIZATION_LIST,
+  PI_TUI_AUTHORIZATION_RESPOND,
+  PI_TUI_AUTHORIZATION_RUN,
+} from './pi-tui-authorization-contract.ts'
 
 /** The npm package that owns every private Remote invocation here. A test
  *  guards that it equals each contract module's own package constant. */
@@ -68,6 +74,10 @@ export const PI_TUI_HOST_CONTRIBUTION: TypertContribution = {
     PI_TUI_WEB_ACCESS_GET_AUTHENTICATED_URL,
     PI_TUI_SKILLS_STANDING,
     PI_TUI_SKILLS_WATCH_INVALIDATIONS,
+    PI_TUI_AUTHORIZATION_LIST,
+    PI_TUI_AUTHORIZATION_RUN,
+    PI_TUI_AUTHORIZATION_RESPOND,
+    PI_TUI_AUTHORIZATION_CANCEL,
   ],
 }
 
@@ -85,5 +95,9 @@ export const PI_TUI_CLIENT_CONTRIBUTION: TypertRemoteContribution = {
     PI_TUI_WEB_ACCESS_GET_AUTHENTICATED_URL,
     PI_TUI_SKILLS_STANDING,
     PI_TUI_SKILLS_WATCH_INVALIDATIONS,
+    PI_TUI_AUTHORIZATION_LIST,
+    PI_TUI_AUTHORIZATION_RUN,
+    PI_TUI_AUTHORIZATION_RESPOND,
+    PI_TUI_AUTHORIZATION_CANCEL,
   ],
 }

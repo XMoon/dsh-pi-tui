@@ -425,6 +425,7 @@ export type AuthorizationFlowEvent =
   | { kind: 'prompt'; attemptId: string; promptId: string; prompt: AuthorizationPromptEvent }
   | { kind: 'prompt-withdrawn'; attemptId: string; promptId: string }
   | { kind: 'settled'; attemptId: string; status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string }
+  | { kind: 'unconfirmed'; attemptId: string; reason: string }
 
 /** The authorization sub-domain: provider sign-in flows. The seam owns
  * the protocol/lifecycle; this port exposes the targets and an
@@ -436,6 +437,20 @@ export interface AuthorizationConfig {
   available(): boolean
   /** The registered flows as detached targets. */
   listTargets(): readonly AuthorizationFlowTarget[]
+  /**
+   * Re-read the roster from the authoritative Host (one bounded read, never a
+   * background poll). Direct reads the official in-process registry; Remote
+   * issues the private `piTuiAuthorization/list` call. A failed Remote read
+   * leaves the state `stale` (never an empty "ready" roster).
+   */
+  refreshTargets(): Promise<void>
+  /**
+   * How current {@link listTargets} is. `ready` = an authoritative read for the
+   * CURRENT Connection generation; `unavailable` = the Host has no
+   * authorization service (definite, not stale); `stale` = the roster could
+   * not be read for this generation (or was never read).
+   */
+  targetsState(): 'ready' | 'unavailable' | 'stale'
   /** Start one flow. The attempt's notices/prompts/settlement arrive on
    * the event subscription; `respond`/`cancel` answer it. */
   begin(request: {

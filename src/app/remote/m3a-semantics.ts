@@ -56,6 +56,7 @@ import type { SessionWorkspaceFactsPort } from '../../runtime/session-workspace-
 import { RemoteSessionWorkspaceFacts, type RemoteSessionFactsRemotes } from '../../runtime/remote/session-workspace-facts-remote.ts'
 import type { RemoteWebAccessNamespace } from '../../runtime/remote/web-access-remote.ts'
 import type { PiTuiHostUserShellNamespace } from '../../runtime/remote/pi-tui-host-user-shell-contract.ts'
+import type { PiTuiAuthorizationNamespace } from '../../runtime/remote/pi-tui-authorization-contract.ts'
 import {
   RemoteSchedulePort,
   type RemoteScheduleEvents,
@@ -173,6 +174,10 @@ export interface RemoteM3ARuntimeSource {
      *  consumed only by the Host-side bare-query delegation. */
     readonly piTuiFileReferences: RemotePiTuiFileReferenceRemotes
     readonly piTuiHostUserShell: PiTuiHostUserShellNamespace
+    /** The PRIVATE `piTuiAuthorization` namespace (M6-1 F7A): provider-native
+     *  sign-in attempts and the official roster. The SAME mounted contribution
+     *  publishes it; the Remote ConfigPort is its only consumer. */
+    readonly piTuiAuthorization: PiTuiAuthorizationNamespace
     /** The PRIVATE `piTuiWebAccess` namespace (M5-W PR-C): the Split-Client
      *  Web frontend control (`/web`). The SAME mounted contribution publishes
      *  it; `/web` is its only consumer. */

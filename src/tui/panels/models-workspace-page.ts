@@ -111,9 +111,15 @@ export interface ModelsStoredCredentials {
  * providers configured".
  */
 export type ModelsCatalogRead =
-  | { readonly kind: 'ready'; readonly rows: readonly ModelsProviderRow[] }
+  | {
+    readonly kind: 'ready'
+    readonly rows: readonly ModelsProviderRow[]
+    /** A definite limitation that affects native sign-in ONLY (never the API
+     *  key/provider list): the Host has no authorization service. */
+    readonly authorizationNotice?: string
+  }
   /** The LAST KNOWN rows, explicitly not current (a stale backend mirror). */
-  | { readonly kind: 'stale'; readonly rows: readonly ModelsProviderRow[] }
+  | { readonly kind: 'stale'; readonly rows: readonly ModelsProviderRow[]; readonly authorizationNotice?: string }
   | { readonly kind: 'failed'; readonly reason: string }
 
 /**
@@ -232,7 +238,7 @@ interface NoticeState {
 
 interface AuthState {
   readonly targetIdentity: string
-  readonly phase: 'starting' | 'running' | 'authorized' | 'cancelled' | 'failed'
+  readonly phase: 'starting' | 'running' | 'authorized' | 'cancelled' | 'failed' | 'unconfirmed'
   /** A cancellation was requested but the Host may still commit/finish. */
   readonly cancelRequested?: boolean
   readonly attemptId?: string
@@ -411,6 +417,8 @@ export class ModelsWorkspacePage implements Component {
    * never painted as "no providers configured".
    */
   private readState: 'loading' | 'ready' | 'refreshing' | 'stale' | 'error' = 'loading'
+  /** A definite native-sign-in limitation reported by the catalog read. */
+  private authorizationNotice: string | undefined
   /** Why the last read failed (the `stale`/`error` reason). */
   private readFailure: string | undefined
   /** The stored RECORD presence (one enumeration per read generation). */
@@ -664,6 +672,7 @@ export class ModelsWorkspacePage implements Component {
           return
         }
         this.providerRows = read.rows
+        this.authorizationNotice = read.authorizationNotice
         this.readState = read.kind === 'stale' ? 'stale' : 'ready'
         this.readFailure = read.kind === 'stale'
           ? 'the last snapshot is not the current authority'
@@ -1466,6 +1475,20 @@ export class ModelsWorkspacePage implements Component {
           this.auth = { targetIdentity: row.identity, phase: 'cancelled', attemptId: started.attemptId, status: 'sign-in cancelled' }
           if (this.pendingAfterAuth !== undefined) this.runPendingAfterAuth()
         })
+      } else if (outcome.status === 'unconfirmed') {
+        // The transport lost the official outcome: the Host may have
+        // committed. Never paint a business failure and never retry: offer the
+        // read-only refresh path instead.
+        this.settle(() => {
+          this.auth = {
+            targetIdentity: row.identity,
+            phase: 'unconfirmed',
+            attemptId: started.attemptId,
+            status: 'sign-in outcome unconfirmed — refresh credentials before retrying',
+          }
+          this.refresh()
+          if (this.pendingAfterAuth !== undefined) this.runPendingAfterAuth()
+        })
       } else {
         this.settle(() => {
           this.auth = {
@@ -2113,6 +2136,9 @@ export class ModelsWorkspacePage implements Component {
           color.warning('Stale — the provider configuration is not current'),
           color.textDim(sanitizedPhysicalLine(this.readFailure ?? 'the last snapshot is not the current authority')),
           color.textDim('Press r to refresh; an authority-dependent write waits for the fresh read.'),
+          ...(this.authorizationNotice === undefined
+            ? []
+            : [color.textDim(sanitizedPhysicalLine(this.authorizationNotice))]),
         ]
       case 'error':
         return [
@@ -2120,6 +2146,9 @@ export class ModelsWorkspacePage implements Component {
           color.textDim('Press r to retry.'),
         ]
       case 'ready':
+        if (this.authorizationNotice !== undefined) {
+          return [color.textDim(sanitizedPhysicalLine(this.authorizationNotice))]
+        }
         if (this.recordPresence?.kind === 'failed') {
           return [color.warning(`The stored credential records could not be read: ${sanitizedPhysicalLine(this.recordPresence.reason)}`)]
         }
@@ -2254,7 +2283,7 @@ export class ModelsWorkspacePage implements Component {
         label: row.inFlight ? 'Sign-in in progress' : this.auth?.targetIdentity === row.identity && this.auth.phase === 'authorized' ? 'Sign in again (provider)' : 'Sign in (provider)',
         // A native sign-in writes a credential record: it waits for the fresh
         // read like every other authority-dependent write.
-        enabled: mayWrite && !row.inFlight && (this.auth === undefined || this.auth.phase === 'authorized' || this.auth.phase === 'cancelled' || this.auth.phase === 'failed'),
+        enabled: mayWrite && !row.inFlight && (this.auth === undefined || this.auth.phase === 'authorized' || this.auth.phase === 'cancelled' || this.auth.phase === 'failed' || this.auth.phase === 'unconfirmed'),
       })
     }
     if (row.kind === 'reference' || (row.ref !== undefined && row.namesCredential)) {

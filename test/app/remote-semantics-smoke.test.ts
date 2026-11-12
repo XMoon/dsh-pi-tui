@@ -718,6 +718,13 @@ async function mountSettingsWorkspace(
 }
 
 async function composeRuntime(host: HostFixture): Promise<Composed['runtime']> {
+  // The built-in Host Runtime is mounted through a fiber whose `apply` runs once
+  // its declared injects (including `agentPresets`) are live; awaiting the
+  // fiber resolves before that activation in this fixture. Wait for the gate it
+  // publishes instead of racing it (production waits for Host Ready).
+  for (let attempt = 0; attempt < 500 && host.ctx.reflect.get('piTuiHostReady') === undefined; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
   return await createExperimentalRemoteRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},

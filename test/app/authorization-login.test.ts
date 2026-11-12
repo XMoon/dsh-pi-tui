@@ -970,3 +970,56 @@ test('authorizationFailureText maps the stable taxonomy', () => {
   assert.equal(authorizationFailureText({ code: 'DECLINED' }, 'x'), 'login cancelled')
   assert.equal(authorizationFailureText(new Error('boom'), 'safe boom'), 'sign-in failed: safe boom')
 })
+
+// ── transport-lost outcome (unconfirmed) ──────────────────────────────────
+
+test('a transport-lost attempt settles `unconfirmed`, never failed/cancelled/authorized', async () => {
+  let opened = 0
+  let closed = 0
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => {
+      opened += 1
+      return () => { closed += 1 }
+    },
+    askQuestions: async () => [],
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, {
+    respond: async () => {},
+    cancel: async () => {},
+  })
+  flow.bind('attempt-lost')
+  flow.onEvent({
+    kind: 'notice',
+    attemptId: 'attempt-lost',
+    notice: { message: 'Open the page', url: 'https://example.test/device' },
+  })
+  assert.equal(opened, 1)
+  flow.onEvent({ kind: 'unconfirmed', attemptId: 'attempt-lost', reason: 'the authorization stream was lost' })
+  const outcome = await flow.outcome
+  assert.deepEqual(outcome, { status: 'unconfirmed', message: 'the authorization stream was lost' })
+  assert.equal(closed, 1, 'the notice panel is retired')
+})
+
+test('a pre-bind unconfirmed terminal is preserved and applied only to its own attempt', async () => {
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: async () => [],
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, {
+    respond: async () => {},
+    cancel: async () => {},
+  })
+  flow.onEvent({ kind: 'unconfirmed', attemptId: 'other', reason: 'other attempt lost' })
+  flow.onEvent({ kind: 'unconfirmed', attemptId: 'mine', reason: 'my attempt lost' })
+  flow.bind('mine')
+  assert.deepEqual(await flow.outcome, { status: 'unconfirmed', message: 'my attempt lost' })
+})
+
+test('authorizationFailureText maps the dispatch-unknown taxonomy', () => {
+  assert.equal(
+    authorizationFailureText({ code: 'DISPATCH_UNKNOWN' }, 'x'),
+    'sign-in outcome unknown — refresh credentials before retrying',
+  )
+})

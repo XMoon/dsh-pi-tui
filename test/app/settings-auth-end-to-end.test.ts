@@ -241,6 +241,8 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
       authorization: authorizationOverride ?? {
         available: () => true,
         listTargets: () => FLOWS,
+        refreshTargets: async () => {},
+        targetsState: () => 'ready' as const,
         begin: async () => ({ kind: 'unavailable' as const }),
         onEvent: () => () => {},
         respond: async () => {},
@@ -737,6 +739,8 @@ test('a Host prompt takeover between a bar press and release leaves the old pres
   const auth = {
     available: () => true,
     listTargets: () => FLOWS,
+    refreshTargets: async () => {},
+    targetsState: () => 'ready' as const,
     begin: async () => {
       queueMicrotask(() => {
         emit({
@@ -1005,6 +1009,8 @@ test('real Settings 30x8 hides a clipped select prompt and refuses Enter (F7)', 
   const auth = {
     available: () => true,
     listTargets: () => FLOWS,
+    refreshTargets: async () => {},
+    targetsState: () => 'ready' as const,
     begin: async () => {
       queueMicrotask(() => {
         for (const listener of listeners) {

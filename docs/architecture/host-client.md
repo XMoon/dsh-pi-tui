@@ -1012,6 +1012,44 @@ The `ConfigPort` keeps the three credential planes distinct:
 - `account` — the DeepSeek Account state/attempt, profile, wallet balances,
   watch, start/cancel sign-in, sign-out and the running-account-task risk read.
 
+### Provider-native authorization over the Split wire
+
+The internal Split Host serves provider-native sign-in through this package's
+OWN private `piTuiAuthorization` Typert namespace (`list`, `run`, `respond`,
+`cancel`). The installed official `@deepseek-ai/dsh-authorization` service and
+the official credential store remain the only authorization authority: the
+private bridge never writes a grant/token, never invents a flow and never
+decides that an attempt succeeded. A Host without the official service keeps
+running and answers `list` as a definite `unavailable` (never an empty roster)
+and `run` as `failed`/`NO_FLOW`.
+
+`run` is ONE ordered attempt stream owned by the exact `RemoteInvocation.peer`
+that opened it: `started` first (a stream admission, never an authorization
+acknowledgement), then the official notices/prompts/prompt withdrawals in Host
+order, then exactly one terminal frame from the official `begin()` settlement.
+`authorized` is published only when the official seam observed a
+credential-record commit inside the attempt; a human decline is `cancelled`;
+official refusals and failures are `failed` with their safe code (`NO_FLOW`,
+`UNKNOWN_METHOD`, `ALREADY_IN_FLIGHT`, `NOT_COMMITTED`, ...). `respond` and
+`cancel` reject an attempt that does not belong to the calling peer. A prompt's
+own signal withdraws that prompt only and leaves the whole attempt alive.
+`cancel` requests withdrawal and returns an ACK only: the terminal still comes
+from the official settlement, which may be `authorized` when the commit was
+already accepted.
+
+A Remote client treats a lost stream/answer acknowledgement, a Connection
+generation replacement or an invalid frame as the FOURTH outcome
+`unconfirmed`: the Host may still commit, the UI never claims
+failed/cancelled/authorized and never retries automatically. `listTargets` is a
+generation-fenced detached snapshot; `targetsState()` distinguishes `ready`,
+`unavailable` (the Host has no authorization service) and `stale` (no
+authoritative read for this Connection generation), and a stale roster may not
+route a `/login` attempt. The typed answer is the only secret-bearing direction
+and rides the authenticated unary `respond` once; frames, events, logs and
+diagnostics never carry a credential record or token. Credential-record
+enumeration/deletion stays F7B: a Split Client cannot confirm record presence
+and must not paint "signed in" from a local guess.
+
 The account DTOs are detached (`AccountView`, `AccountProfile`, wallet decimal
 strings, safe attempt ids/phases/error codes). An `AccountView` is last-known
 unless paired with a local opaque `AccountObservationLease` issued by its adapter;

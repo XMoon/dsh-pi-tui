@@ -54,7 +54,7 @@ function workflowOver(providers: ProviderProfileConfig): CredentialWorkflow {
       listRecords: async () => [],
       onChanged: () => () => {},
     },
-    authorization: { available: () => false, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    authorization: { available: () => false, listTargets: () => [], refreshTargets: async () => {}, targetsState: () => 'unavailable' as const, begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
     account: {
       available: () => false,
       isObservationCurrent: () => false,

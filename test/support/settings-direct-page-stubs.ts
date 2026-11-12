@@ -28,6 +28,8 @@ export const SETTINGS_DIRECT_PAGE_STUBS = {
   authorization: {
     available: () => false,
     listTargets: () => [] as readonly unknown[],
+    refreshTargets: async () => {},
+    targetsState: () => 'unavailable' as const,
     begin: async () => ({ kind: 'unavailable' as const }),
     onEvent: () => () => {},
     respond: async () => {},

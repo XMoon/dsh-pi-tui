@@ -13,6 +13,7 @@
  * the private `piTuiWebAccess` Host service (official Web frontend toggle)
  * the private `piTuiHostUserShell` Host service (one-shot Shell and completion)
  * the private `piTuiSkills` Host service (standing metadata and invalidation)
+ * the private `piTuiAuthorization` Host service (provider-native sign-in)
  * ```
  *
  * The row publishes the data-free `piTuiHostReady` gate only after the
@@ -33,6 +34,7 @@ import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../runtime/remote/pi-tui-
 import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-web-access-contract.ts'
 import { PI_TUI_HOST_USER_SHELL_NAMESPACE } from '../../runtime/remote/pi-tui-host-user-shell-contract.ts'
 import { PI_TUI_SKILLS_NAMESPACE } from '../../runtime/remote/pi-tui-skills-contract.ts'
+import { PI_TUI_AUTHORIZATION_NAMESPACE } from '../../runtime/remote/pi-tui-authorization-contract.ts'
 import { createHostShellPathCompletionBridge } from '../../runtime/remote/pi-tui-host-user-shell-host-bridge.ts'
 import { mergeCause } from '../remote/dispose-cause.ts'
 import {
@@ -53,6 +55,10 @@ import {
   type SkillRegistryLike,
   type WorkspaceRegistryLike,
 } from './features/skills.ts'
+import {
+  PiTuiAuthorizationHostService,
+  type PiTuiAuthorizationHostDeps,
+} from './features/authorization.ts'
 
 /** Stable Cordis plugin name (the Loader row id in the Host-only overlay). */
 export const name = 'pi-tui-host-runtime'
@@ -184,11 +190,22 @@ export async function apply(ctx: Context, config: TuiConfigValue): Promise<void>
     })
     fibers.push(skillsFiber)
     await skillsFiber
+    // The provider-native sign-in bridge resolves the OFFICIAL authorization
+    // service per call: a Host without that plugin is a truthful `unavailable`,
+    // never a hard inject that would keep the whole Split Host from starting.
+    const authorizationFiber = ctx.inject(PiTuiAuthorizationHostService.inject, pluginCtx => {
+      new PiTuiAuthorizationHostService(pluginCtx, {
+        authorization: () => ctx.reflect.get('authorization') as ReturnType<PiTuiAuthorizationHostDeps['authorization']>,
+      })
+    })
+    fibers.push(authorizationFiber)
+    await authorizationFiber
     assertPrivateBinding(ctx, 'piTuiFileReferences', PI_TUI_FILE_REFERENCES_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiTerminalProgress', PI_TUI_TERMINAL_PROGRESS_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiWebAccess', PI_TUI_WEB_ACCESS_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiHostUserShell', PI_TUI_HOST_USER_SHELL_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiSkills', PI_TUI_SKILLS_NAMESPACE)
+    assertPrivateBinding(ctx, 'piTuiAuthorization', PI_TUI_AUTHORIZATION_NAMESPACE)
     ctx.provide(PI_TUI_HOST_READY_SERVICE, {})
   } catch (error) {
     const cleanupErrors: unknown[] = []
