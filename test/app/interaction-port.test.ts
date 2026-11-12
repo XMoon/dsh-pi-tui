@@ -14,6 +14,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DirectInteractionPort, type HostContextLike } from '../../src/runtime/direct/interaction-direct.ts'
+import { DirectSessionPolicyPort } from '../../src/runtime/direct/session-policy-direct.ts'
 import type { UserQuestionProvider } from '../../src/runtime/interaction-port.ts'
 
 type RegisteredListener = (req: unknown, next: unknown) => unknown
@@ -230,22 +231,25 @@ test('onApprovalRequest adapts the official ApprovalRequest onto the Session-ide
   assert.equal('agent' in (received[0] as object), false, 'no same-process Agent crosses the port')
 })
 
-test('setApprovalPolicy resolves the session id to the live Agent internally and delegates', () => {
+test('the session-policy port resolves the session id to the live Agent internally and delegates (M6-1 F8)', async () => {
   const calls: Array<{ agent: unknown; policy: unknown }> = []
   const liveAgent = { session: { id: 'session-a' } }
-  const p = port(
-    { approval: { setPolicy: (agent: unknown, policy: string) => { calls.push({ agent, policy }) } } },
+  const p = new DirectSessionPolicyPort(
+    { get: (name: string) => name === 'approval' ? { setPolicy: (agent: unknown, policy: string) => { calls.push({ agent, policy }) } } : undefined } as never,
     (sessionId) => sessionId === 'session-a' ? liveAgent : undefined,
   )
-  assert.equal(p.setApprovalPolicy('session-a', 'ask'), true)
+  assert.deepEqual(await p.setApproval('session-a', 'ask'), { kind: 'applied', sessionId: 'session-a' })
   assert.deepEqual(calls, [{ agent: liveAgent, policy: 'ask' }])
 })
 
-test('setApprovalPolicy reports unavailable when the service or the session is absent', () => {
-  const p = port({}, (sessionId) => sessionId === 'session-a' ? { session: { id: 'session-a' } } : undefined)
-  assert.equal(p.setApprovalPolicy('session-ghost', 'never'), false, 'no live agent for the session')
-  const p2 = port({})
-  assert.equal(p2.setApprovalPolicy('session-a', 'never'), false, 'no approval service')
+test('the session-policy write refuses when the service or the session is absent', async () => {
+  const liveAgent = { session: { id: 'session-a' } }
+  const p = new DirectSessionPolicyPort(
+    { get: () => undefined } as never,
+    (sessionId) => sessionId === 'session-a' ? liveAgent : undefined,
+  )
+  assert.deepEqual(await p.setApproval('session-ghost', 'never'), { kind: 'refused', reason: 'session-not-live' }, 'no live session for the id')
+  assert.deepEqual(await p.setApproval('session-a', 'never'), { kind: 'refused', reason: 'approval-unavailable' }, 'no approval service')
 })
 
 test('questions.claimTimedWait drops the claim when the caller aborts between frame and return (Direct)', async () => {

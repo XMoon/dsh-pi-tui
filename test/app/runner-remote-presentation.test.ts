@@ -1228,35 +1228,43 @@ test('an edit tool card renders from RAW durable call/result facts (no Host pres
     'the settled result text renders for an unknown tool')
 })
 
-test('the Remote branch OMITS the Host-derived access section when the permission projection carries no value (no sandbox fact is painted)', async (t) => {
+test('the Remote branch derives sandbox/approval from the EXACT Session policy and still omits a projection-less preset (M6-1 F8)', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-access'
   const hostPreset = 'm3-4-pr2-preset'
   const seedHost = await mountRemotePresentationHost(life, hostPreset)
-  // A Host sandbox service that answers WITHOUT a session (the exact hole the
-  // plan's §6.6 forbids on Remote): `resolve(undefined)` yields a mode. The
-  // fixture now mounts the OFFICIAL `sandboxPolicy` service (the Remote
-  // composition's workspace-file prerequisite needs it), so the hole is
-  // reproduced by overriding that live service — a second `provide` would
-  // collide with the already-registered service.
+  // The AGENTLESS sandbox default (the retired §6.6 hole) answers a different
+  // mode: an F8 read passes the exact live Session, so this default must never
+  // reach the footer. The fixture mounts the official `sandboxPolicy` service,
+  // so the discrimination is a patched resolve that special-cases a missing
+  // request — never a second service.
   const sandbox = seedHost.ctx.get('sandboxPolicy') as unknown as {
-    resolve(session?: unknown): { readonly mode: string }
+    resolve(request?: { readonly session?: unknown }): { readonly mode: string }
   }
-  sandbox.resolve = () => ({ mode: 'danger-full-access' })
+  const originalResolve = sandbox.resolve.bind(sandbox)
+  sandbox.resolve = request => (request?.session === undefined ? { mode: 'danger-full-access' } : originalResolve(request))
   await seedHost.harness.create(SessionId(mainId), undefined, { cwd: seedHost.anchorDir })
   const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
   const app = await waitForApp(fixture)
   // The committed STATUS projection is what every access-rendering item reads
-  // (permission-preset / sandbox-mode / approval-policy): assert the section
-  // itself is absent, not just whether a particular layout paints it.
+  // (permission-preset / sandbox-mode / approval-policy).
   const accessOf = (): unknown => (app as unknown as {
-    statusStore: { snapshot(): { access?: { sandbox?: unknown; permissionPreset?: unknown; approval?: unknown } } }
+    statusStore: { snapshot(): { access?: { sandbox?: { mode?: string }; permissionPreset?: unknown; approval?: unknown } } }
   }).statusStore.snapshot().access
-  await new Promise(resolve => setTimeout(resolve, 300))
-  const access = accessOf() as { sandbox?: unknown; permissionPreset?: unknown; approval?: unknown } | undefined
-  assert.equal(access?.sandbox, undefined,
-    'the Remote status must not carry a Host-derived sandbox mode (§6.6)')
+  // The policy read is an async authoritative read: wait for its commit.
+  await waitFor('the observed sandbox fact rendered on Remote', () => accessOf() !== undefined
+    && (accessOf() as { sandbox?: unknown }).sandbox !== undefined, 20_000)
+  const access = accessOf() as { sandbox?: { mode?: string }; permissionPreset?: unknown; approval?: unknown } | undefined
+  const session = seedHost.ctx.sessions.get(SessionId(mainId))
+  assert.equal(access?.sandbox?.mode, originalResolve({ session }).mode,
+    'the Remote sandbox fact is the SESSION-scoped policy')
+  assert.notEqual(access?.sandbox?.mode, 'danger-full-access',
+    'the agentless sandbox default never stands in for the exact Session policy')
+  // The permission PRESET still needs the official projection: with none, the
+  // preset row stays omitted (a projection-less window is not "no permission").
   assert.equal(access?.permissionPreset, undefined)
+  // This fixture mounts no approval service: that side is a definite
+  // unavailable fact and stays absent, never a guessed `ask`.
   assert.equal(access?.approval, undefined)
 })
 

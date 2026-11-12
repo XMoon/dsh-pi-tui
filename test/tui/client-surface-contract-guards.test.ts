@@ -217,24 +217,27 @@ test('the Remote skill gesture never loads a Client skill body', () => {
     'the fallback body is never built on the literal-gesture branch')
 })
 
-test('unavailable Remote approval/sandbox facts are omitted, never guessed', () => {
-  const remoteConfig = code('runtime/remote/config-remote.ts')
-  assert.ok(remoteConfig.includes('approvalOverrideAvailable(): boolean'),
-    'the capability marker exists (the consumer asks it instead of inferring)')
-  const remoteConfigRaw = source('runtime/remote/config-remote.ts')
-  assert.ok(/approvalOverrideAvailable\(\)[^{]*\{\s*\/\/[^\n]*\n\s*return false/u.test(remoteConfigRaw)
-    || remoteConfigRaw.includes('INTENTIONAL_UNSUPPORTED_IN_M3'),
-    'the Remote approval override is explicitly unavailable')
-  // The Remote status branch omits approval/sandbox entirely.
-  const status = code('app/surface/status-runtime.ts')
-  const remoteAccess = status.slice(
-    status.indexOf('} else {\n      // §6.4'),
-    status.indexOf('const collaboration = displaySubject === undefined'),
-  )
-  assert.equal(remoteAccess.includes('approval'), false,
-    'the Remote access branch never renders an approval fact')
-  assert.equal(remoteAccess.includes('sandbox'), false,
-    'the Remote access branch never infers a sandbox mode')
+test('M6-1 F8: approval/sandbox facts come from the ONE observation on BOTH branches, never a guessed default', () => {
+  // The retired synchronous approval contract is GONE from the config port and
+  // the interaction port (one writable semantic only).
+  const configPort = code('runtime/config-port.ts')
+  assert.equal(configPort.includes('approvalOverrideAvailable'), false,
+    'the retired availability flag is not resurrected on the config port')
+  assert.equal(configPort.includes('approvalOverrideOf'), false,
+    'the retired synchronous override read is not resurrected on the config port')
+  const interactionPort = code('runtime/interaction-port.ts')
+  assert.equal(interactionPort.includes('setApprovalPolicy'), false,
+    'the retired synchronous approval write is not resurrected on the interaction port')
+  // The status access derivation reads the observation on BOTH branches and
+  // never derives approval/sandbox from a preset name.
+  const status = source('app/surface/status-runtime.ts')
+  assert.ok(status.includes('policyObservation'), 'the status reads the ONE observation owner')
+  assert.ok(status.includes('readSnapshot(policySubjectId)'), 'the subject id is explicit (main or viewed child)')
+  const domainDerive = source('domain/status/derive-access.ts')
+  assert.equal(domainDerive.includes('resolve('), false,
+    'the domain derive no longer reads the sandbox service (the observation owns the effective mode)')
+  assert.equal(domainDerive.includes('overrideOf('), false,
+    'the domain derive no longer reads the approval service (the observation owns the effective policy)')
 })
 
 /* ───────── S5-PR3: the transcript renderer capability, not a backend flag ─ */

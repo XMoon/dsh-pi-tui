@@ -47,6 +47,7 @@ import {
 } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import type { SeatEditor } from '../../src/tui/interaction/editor-seat-holder.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -306,6 +307,8 @@ function setup(
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     get defaultIntentOutcome() { return undefined },
     ...scopeFacts,
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -339,8 +342,7 @@ function setup(
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
       updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),

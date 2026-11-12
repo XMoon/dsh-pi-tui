@@ -36,6 +36,7 @@ import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-comm
 import { confirmSettingsChoice, openSettingsRows, paintedSelectedRowCell, selectSettingsRow } from '../support/settings-workspace-navigation.ts'
 import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
 import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test (the process slot is released by the FINAL
@@ -124,6 +125,8 @@ function setupSettings(options: { gitAttribution?: string; failWrite?: boolean }
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -155,8 +158,7 @@ function setupSettings(options: { gitAttribution?: string; failWrite?: boolean }
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
       updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),

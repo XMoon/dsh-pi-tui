@@ -36,6 +36,7 @@ import { bindSubmissionRuntime } from '../../src/app/submission/runtime.ts'
 import { mergeDraft } from '../../src/app/submission/steer.ts'
 import { createSessionOwnershipCore } from '../../src/app/session/ownership-core.ts'
 import { createSessionScopeAuthority } from '../../src/app/session/scope.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -91,6 +92,8 @@ function setup(options: {
     app: options.mounted === false ? undefined : app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     ...sessionScopeFacts(() => undefined, () => 0),
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     currentSessionId: undefined,
     ensureSession: async () => { ensureSessionCalls += 1 },
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -124,8 +127,7 @@ function setup(options: {
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
       updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
@@ -564,6 +566,8 @@ test('a user Enter on /view-image routes through the REAL controller into the pi
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     ...sessionScopeFacts(() => undefined, () => 0),
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     currentSessionId: 'session-live',
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -585,8 +589,7 @@ test('a user Enter on /view-image routes through the REAL controller into the pi
     interaction: {
       questions: { onRequest: () => true, subscribe: () => undefined, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
       updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),

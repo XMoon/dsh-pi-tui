@@ -22,17 +22,17 @@
  *
  * The Direct adapter may resolve a live Agent because that is its provider
  * implementation detail; the semantic port never exposes that fact. The
- * identity-based `setApprovalPolicy(sessionId)` is resolved to the live Agent
- * HERE (runner-injected resolver); the approval request listener is adapted
- * from the official ApprovalRequest (which carries a same-process Agent) onto
- * the transport-neutral ApprovalRequestLike.
+ * approval request listener is adapted from the official ApprovalRequest
+ * (which carries a same-process Agent) onto the transport-neutral
+ * ApprovalRequestLike; the session approval-policy WRITE moved to the
+ * Direct session-policy port (M6-1 F8).
  *
  * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/interaction-direct
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { ApprovalOutcome, ApprovalPolicy, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
+import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import type {
   ApprovalRequestLike,
@@ -52,11 +52,6 @@ import { QuestionAnswerError, questionAnswerError } from '../interaction-port.ts
 export interface HostContextLike {
   get(name: string): unknown
   on: Context['on']
-}
-
-/** The structural `approval` service surface. */
-export interface ApprovalServiceLike {
-  setPolicy?(agent: unknown, policy: ApprovalPolicy): unknown
 }
 
 /** The structural hosted agent identity resolved from a session id. */
@@ -324,17 +319,5 @@ export class DirectInteractionPort implements InteractionPort {
       }
       return listener(like, next) as Promise<ApprovalOutcome>
     })
-  }
-
-  setApprovalPolicy(sessionId: string, policy: ApprovalPolicy): boolean {
-    const approval = this.ctx.get('approval') as ApprovalServiceLike | undefined
-    if (approval === undefined || approval.setPolicy === undefined) return false
-    // Identity → live Agent resolution happens HERE (never across the
-    // port): the Remote backend maps sessionId to the official wire
-    // capability instead and fails closed (no public carrier).
-    const agent = this.agentFor(sessionId)
-    if (agent === undefined) return false
-    approval.setPolicy(agent, policy)
-    return true
   }
 }

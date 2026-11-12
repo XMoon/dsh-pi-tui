@@ -9,6 +9,8 @@
 
 ### 新增
 
+- **Split 端可以在 Settings 里单独修改当前 Session 的审批策略，并准确显示 Sandbox/Approval 状态。** Settings → Agent 的 `Approval policy (this session)` 现在按精确 Session 读取官方 `ask`/`never` 有效策略与独立的 Session override（无 override 时如实写 `none`），并可就地切换；写入经过官方 Session 策略事件持久化，只改 Approval，不会改动 Sandbox、permission preset、TUI 设置文档或新 Session 的默认值。状态栏/footer 的 preset、sandbox、approval 现在是三个独立事实，读不到时隐藏而不是补一个默认值；`Verified` 只在一次新的官方有效策略回读一致后出现，已等于当前值的 no-op 也会正确 Verified，结果无法确认时显示 `Outcome unconfirmed` 且不会自动重试。
+
 - **Split 后端可以列出并清除本地存储的凭据记录。** 在 Settings → Models 的 Credential records 或 `/logout` 中，远程 TUI 现在会列出 Host 官方凭据存储里的每条记录（仅精确 key 与类型，不显示 token、grant payload 或 API-key 值），并可按该精确 key 清除；清除只代表本地遗忘，不会在服务商侧撤销授权，也不会切换当前模型或 Profile。删除结果无法确认时显示 `Outcome unconfirmed`，只允许重新读取当前 Host，不会自动重试或谎报成功；已不在记录中的 key 删除是官方 no-op。DeepSeek Account 的凭据记录不出现在通用列表中，其独立登出入口保持不变。
 
 - **Split 后端支持 Provider 原生登录。** 在 Settings → Models 或 `/login <route>` 中，远程 TUI 现在会读取 Host 已注册的 Provider 登录流，显示官方登录提示（URL/设备码），回答 text/secret/select 问题，并准确呈现授权成功、用户取消、失败或通信中断后的结果不明。secret 只经已认证链路单次上送；断线不会自动重试，也不会把未知结果说成失败或成功。DeepSeek Account 的登录语义保持不变。

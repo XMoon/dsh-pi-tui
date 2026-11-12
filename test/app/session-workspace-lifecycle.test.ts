@@ -59,6 +59,7 @@ import type { DirectoryListing } from '@deepseek-ai/dsh-host-directory-picker/ty
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { unavailableWebAccess } from '../support/web-access-fake.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 const { started, disposeAll } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -389,6 +390,8 @@ function harness(options: {
     get defaultIntentOutcome() { return undefined },
     openScheduleWorkspace: () => ({ kind: 'success' } as const),
     ...sessionScopeFacts(() => state.agent, () => 1),
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     sessionWorkspaceFacts: facts.port,
     ...(options.hostDirectoryBrowse === undefined ? {} : { hostDirectoryBrowse: options.hostDirectoryBrowse }),
     ...(options.workspaceNextIntent === undefined ? {} : { workspaceNextIntent: options.workspaceNextIntent }),
@@ -428,8 +431,7 @@ function harness(options: {
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as never,

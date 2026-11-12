@@ -46,6 +46,7 @@ import { DirectDeliveredFileReadPort } from './deliverables-direct.ts'
 import { DirectSessionWorkspaceFacts } from './session-workspace-facts-direct.ts'
 import { DirectSchedulePort } from './schedule-direct.ts'
 import { DirectHostDirectoryBrowsePort } from './host-directory-browse-direct.ts'
+import { DirectSessionPolicyPort } from './session-policy-direct.ts'
 import type { WebAccessPort, WebAccessStatus, WebAccessUrl } from '../web-access-port.ts'
 
 /** The minimal Host context surface the Direct adapters need (structural;
@@ -177,5 +178,9 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     // own `list` handler, resolved per read from the SAME Host Context. This
     // adapter owns no filesystem scan and no Workspace write.
     new DirectHostDirectoryBrowsePort(deps.ctx),
+    // M6-1 F8: the exact-Session policy facts + the official approval write,
+    // resolved per call from the SAME Host Context (the exact live
+    // Session/Agent identity is resolved inside the adapter).
+    new DirectSessionPolicyPort(deps.ctx, sessionId => deps.agentFor(sessionId)),
   )
 }

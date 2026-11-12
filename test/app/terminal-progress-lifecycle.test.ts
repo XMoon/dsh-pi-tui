@@ -661,8 +661,7 @@ function mountSurface(
     onApprovalRequest: (listener: (request: ApprovalRequestLike, next: unknown) => unknown) => {
       approvalListener = listener
     },
-    setApprovalPolicy: () => true,
-  } as unknown as InteractionPort
+    } as unknown as InteractionPort
   const agentInteraction = createInteractionRuntime({
     // PR3-B B3: the PiTui presenter is the narrow delegating adapter over the
     // live app (the app itself cannot satisfy `withdrawPending`).

@@ -208,14 +208,12 @@ test('a scope-bound read facade throws SupersededReadError on a stale scope; a v
   const scope = facts.captureLiveSessionScope()
   assert.notEqual(scope, undefined)
   // A valid scope with an absent domain value returns undefined.
-  assert.equal(facts.currentApprovalOverride(scope!), undefined, 'no override is an absent value')
   assert.equal(await facts.lastAssistantText(scope!), undefined, 'no assistant message is an absent value')
   assert.deepEqual(facts.currentSessionActivity(scope!), { running: false })
   // The SAME session id on a NEW owner object is a different owner: every
   // scope-bound read must refuse instead of retargeting to the new owner.
   live.setAgent(fakeAgent('s1'))
   for (const read of [
-    () => facts.currentApprovalOverride(scope!),
     () => facts.currentSessionActivity(scope!),
     () => facts.currentSessionRouting(scope!),
     () => facts.currentSessionStats(scope!),
@@ -238,7 +236,7 @@ test('a scope-bound read facade throws SupersededReadError on a stale scope; a v
   const stableScope = stableFacts.captureLiveSessionScope()
   assert.notEqual(stableScope, undefined)
   stable.setGeneration(2)
-  assert.throws(() => stableFacts.currentApprovalOverride(stableScope!),
+  assert.throws(() => stableFacts.currentSessionRouting(stableScope!),
     (error: unknown) => error instanceof SupersededReadError)
 })
 
@@ -254,13 +252,15 @@ test('a scope-bound WRITE refuses a stale scope before dispatching (never retarg
   const scope = facts.captureLiveSessionScope()
   assert.notEqual(scope, undefined)
   // A current scope applies, and the ownership axis says the result is current.
-  assert.equal(facts.setSessionApprovalPolicy(scope!, 'never'), 'applied')
+  assert.deepEqual(await facts.setSessionApprovalPolicy(scope!, 'never'),
+    { ownership: 'current', outcome: { kind: 'applied', sessionId: scope!.sessionId } })
   assert.deepEqual(await facts.applyPermissionPreset(scope!, 'danger-full-access'),
     { ownership: 'current', outcome: { kind: 'applied' } })
   // The SAME session id on a NEW owner object: both writes refuse.
   live.setAgent(fakeAgent('s1'))
-  assert.equal(facts.setSessionApprovalPolicy(scope!, 'never'), 'superseded',
-    'a stale sync write must refuse, not dispatch to the replacement owner')
+  assert.deepEqual(await facts.setSessionApprovalPolicy(scope!, 'never'),
+    { ownership: 'superseded', outcome: undefined },
+    'a stale write must refuse before dispatch, not target the replacement owner')
   assert.deepEqual(await facts.applyPermissionPreset(scope!, 'danger-full-access'), { ownership: 'refused' },
     'a stale async write must refuse BEFORE dispatching (nothing ran)')
 })

@@ -16,12 +16,10 @@
  * late answer      -> remote.userQuestions.answer(sessionId, callId, answer)
  * ```
  *
- * Explicitly unsupported on the wire:
- * `setApprovalPolicy` has no dedicated approval-policy Remote and no
- * synchronous exact-equivalent carrier in rc.2, so it returns `false` — the
- * Remote `/settings` approval row is shown unavailable, never guessed as
- * `ask`. No private Host seam, no event-log reconstruction and no preset-name
- * inference back it.
+ * The session approval-policy WRITE does not ride this port (M6-1 F8): the
+ * Remote `SessionPolicyPort` owns it over the private `piTuiSessionPolicy`
+ * namespace. This adapter carries only the forwarded approval REQUEST
+ * waterfall.
  *
  * The adapter never leaks a generated Typert stream object: `QuestionWaitClaim`
  * is the transport-neutral lifetime and this class owns the underlying
@@ -31,7 +29,6 @@
  * @module @xmoon76/dsh-pi-tui/runtime/remote/interaction-remote
  */
 
-import type { ApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import type {
   ApprovalRequestListener,
@@ -556,12 +553,5 @@ export class RemoteInteractionPort implements InteractionPort {
     this.detachSurface()
     this.questionsPort.dispose()
     for (const off of this.owned.splice(0)) off()
-  }
-
-  setApprovalPolicy(_sessionId: string, _policy: ApprovalPolicy): boolean {
-    // INTENTIONAL_UNSUPPORTED_IN_M3: rc.2 has
-    // no dedicated approval-policy Remote and no synchronous exact carrier.
-    // Never a silent fallback to a different semantic.
-    return false
   }
 }

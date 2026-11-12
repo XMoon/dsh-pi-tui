@@ -13,6 +13,8 @@
 import type { Backend } from '../../runtime/backend.ts'
 import type { RemotePromptSerializer } from '../../runtime/remote/session-writer-remote.ts'
 import { RemoteConfigPort, type RemoteConfigRuntimeSource } from '../../runtime/remote/config-remote.ts'
+import { RemoteConfigWriteLifetime } from '../../runtime/remote/config-write-lifetime.ts'
+import { RemoteSessionPolicyPort } from '../../runtime/remote/session-policy-remote.ts'
 import { RemoteSessionArchive } from '../../runtime/remote/session-archive-remote.ts'
 import { RemoteSessionMarkdown } from '../../runtime/remote/session-markdown-remote.ts'
 import { createRemoteBackend } from '../../runtime/remote/backend-remote.ts'
@@ -142,7 +144,15 @@ export async function createRemoteBackendRuntime(
       ...(options.onQualification === undefined ? {} : { onQualification: options.onQualification }),
     })
     unwind.push(() => semantics.dispose())
-    const config = new RemoteConfigPort(remoteConfigRuntimeSourceOf(options.runtime, options.trustedHostOrigin))
+    // M6-1 F8: the ONE shared accepted-write lifetime. The ConfigPort's
+    // settings/credential writes and the session-policy approval write both
+    // bracket through it, so the Client reload gate observes every accepted
+    // persisted write through ONE fact (never a second counter).
+    const writeLifetime = new RemoteConfigWriteLifetime()
+    const config = new RemoteConfigPort(
+      remoteConfigRuntimeSourceOf(options.runtime, options.trustedHostOrigin),
+      { writeLifetime },
+    )
     unwind.push(() => config.dispose())
     const sessionArchive = new RemoteSessionArchive({ fetch: options.fetch })
     // S5-PR3: the official authenticated Markdown read over the SAME
@@ -192,6 +202,14 @@ export async function createRemoteBackendRuntime(
         webAccess: new RemoteWebAccessPort(
           options.runtime.remote.piTuiWebAccess,
           options.runtime.connection.generation,
+        ),
+        // M6-1 F8: the exact-Session policy port over the SAME mounted
+        // contribution namespace, the SAME Connection generation source and
+        // the SHARED accepted-write lifetime above.
+        sessionPolicy: new RemoteSessionPolicyPort(
+          options.runtime.remote.piTuiSessionPolicy,
+          options.runtime.connection.generation,
+          writeLifetime,
         ),
       }),
       semantics,

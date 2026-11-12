@@ -32,6 +32,7 @@ import type { WebAccessPort } from './web-access-port.ts'
 import type { SessionWorkspaceFactsPort } from './session-workspace-facts-port.ts'
 import type { SchedulePort } from './schedule-port.ts'
 import type { HostDirectoryBrowsePort } from './host-directory-browse-port.ts'
+import type { SessionPolicyPort } from './session-policy-port.ts'
 
 /** The transport backends the TUI can run on. `direct` remains the
  * production/default; `remote` is the experimental M3-3B assembly that can be
@@ -105,6 +106,10 @@ export interface Backend {
    *  `directoryPicker/list` level over the SAME Host the other ports reach.
    *  Read-only; it never registers a Workspace or creates a Session. */
   readonly hostDirectoryBrowse: HostDirectoryBrowsePort
+  /** The exact-Session policy port (M6-1 F8): the independent
+   *  approval/sandbox facts of one live Session and the single official
+   *  approval-policy write. Both backends serve the SAME contract. */
+  readonly sessionPolicy: SessionPolicyPort
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -132,6 +137,7 @@ export function createDirectBackend(
   sessionWorkspaceFacts: SessionWorkspaceFactsPort,
   schedule: SchedulePort,
   hostDirectoryBrowse: HostDirectoryBrowsePort,
+  sessionPolicy: SessionPolicyPort,
 ): Backend {
   return {
     kind: 'direct',
@@ -157,5 +163,6 @@ export function createDirectBackend(
     sessionWorkspaceFacts,
     schedule,
     hostDirectoryBrowse,
+    sessionPolicy,
   }
 }

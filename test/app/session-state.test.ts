@@ -46,6 +46,7 @@ import {
   settingsDetailsPaneStart,
 } from '../support/settings-workspace-navigation.ts'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -177,6 +178,8 @@ function stubRunner(
     webAccess: unavailableWebAccess(),
     diag,
     ...sessionScopeFacts(() => state.agent, () => state.generation),
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     get currentSessionId() { return state.agent?.session.id },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -211,8 +214,7 @@ function stubRunner(
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
       updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),

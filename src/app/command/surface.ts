@@ -41,6 +41,7 @@ import type { ClientCommandRegistry } from './client-command-registry.ts'
 import type { SubmissionComposerPort } from '../submission/composer-port.ts'
 import type { RemoteCommandSourceFace } from '../application-runtime.ts'
 import { bindCommandRuntime, type CommandRuntimeSurface, type CommandSessionRuntime } from './runtime.ts'
+import type { SessionPolicyObservation } from './session-policy-observation.ts'
 import { titleRefusalNoticeOwner, titleSuccessNoticeVisible, type TspBuiltinPickers } from './tsp-capability.ts'
 import type { TspCommandCompletionInstallation, TspInlineAttachmentStager } from '../surface/runtime.ts'
 import type { DeliveredFilesSnapshot } from '../../domain/deliverables/catalog.ts'
@@ -302,6 +303,10 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
      *  port, forwarded unchanged. The PiTUI inline Add editor lists the Host
      *  home/levels through it; this facade never scans a Client directory. */
     readonly hostDirectoryBrowse: TuiCommandRunner['hostDirectoryBrowse']
+    /** M6-1 F8: the exact-Session policy port (independent approval/sandbox
+     *  facts + the single approval write), forwarded unchanged to the
+     *  runner's scope-bound write and the policy observation owner. */
+    readonly sessionPolicy: TuiCommandRunner['sessionPolicy']
     /** Split-Client only (G567 capability): the Client-root forwarded-answer
      *  eligibility read view, forwarded unchanged. Direct/TSP supply nothing. */
     readonly forwardedAnswerEligibility?: TuiCommandRunner['forwardedAnswerEligibility']
@@ -349,6 +354,14 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
      */
     subscribeSessionScopeInvalidation(listener: () => void): () => void
   }
+  /** M6-1 F8: the ONE application-level session-policy observation owner.
+   *  The SAME object reference the composition hands the status runtime —
+   *  Settings and Status/footer consume one snapshot source, never two. */
+  readonly policy: SessionPolicyObservation
+  /** M6-1 F8: the opaque current Connection generation identity (absent on
+   *  Direct); the Settings write chain binds an applied ACK and its readback
+   *  to this exact generation. */
+  readonly policyGeneration?: () => unknown
   /** The settings owner seams the runner delegates to. */
   readonly settings: {
     applyFooterSettings: TuiCommandRunner['applyFooterSettings']
@@ -1345,6 +1358,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         withWriter: (scope, task) => deps.session.withWriter(scope, task),
       },
       skills: deps.catalog.skills,
+      policy: deps.policy,
       surface: {
         // PR4 §2.2: the Direct seams above (scoped commands, running, routing,
         // stats, last assistant text) are Direct-only; the Remote branch
@@ -1383,8 +1397,6 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
             cwd: deps.backend.sessionReader.sessionStatus(sessionId)?.cwd ?? deps.clientCwd,
           }
         },
-        approvalOverride: (sessionId) =>
-          deps.backend.config.permissions.approvalOverrideOf(sessionId),
         sessionStats: (sessionId) => deps.direct.sessionStats(sessionId),
         lastAssistantText: (sessionId) => deps.direct.lastAssistantText(sessionId),
         refreshLiveCatalog: async (sessionId, source) => {
@@ -1490,6 +1502,12 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       sessionReader: deps.backend.sessionReader,
       sessionWorkspaceFacts: deps.backend.sessionWorkspaceFacts,
       hostDirectoryBrowse: deps.backend.hostDirectoryBrowse,
+      // M6-1 F8: the exact-Session policy port (read + write), forwarded
+      // unchanged — the observation owner above is its read consumer.
+      sessionPolicy: deps.backend.sessionPolicy,
+      // The opaque Host-generation identity the write chain binds its ACK and
+      // readback to (undefined on Direct).
+      sessionPolicyGeneration: () => deps.policyGeneration?.(),
       ...(deps.backend.forwardedAnswerEligibility === undefined
         ? {}
         : { forwardedAnswerEligibility: deps.backend.forwardedAnswerEligibility }),
@@ -1613,13 +1631,22 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         if (!deps.sessionScope.isCurrent(scope)) return { ownership: 'superseded' as const, outcome }
         return { ownership: 'current' as const, outcome }
       },
-      setSessionApprovalPolicy: (scope, value) => {
-        // Same contract for the synchronous write: validate, then dispatch in
-        // the SAME stack — the exact owner, never `sessionId` re-resolved later.
-        if (!deps.sessionScope.isCurrent(scope)) return 'superseded' as const
-        agentForLiveScope(scope)
-        deps.backend.interaction.setApprovalPolicy(scope.sessionId, value)
-        return 'applied' as const
+      setSessionApprovalPolicy: async (scope, value, signal) => {
+        // M6-1 F8: the transport-neutral exact-Session approval write. A stale
+        // scope BEFORE the dispatch proves nothing ran (`superseded`); a
+        // dispatched write keeps whatever the port settled even when the
+        // surface moved on — the two independent axes of
+        // `src/runtime/write-outcome.ts`. No Direct-Agent prerequisite: the
+        // Remote session reaches the SAME semantic through
+        // `piTuiSessionPolicy/setApproval`.
+        if (!deps.sessionScope.isCurrent(scope)) return { ownership: 'superseded' as const, outcome: undefined }
+        const outcome = await deps.backend.sessionPolicy.setApproval(
+          scope.sessionId,
+          value,
+          signal ?? deps.signal,
+        )
+        if (!deps.sessionScope.isCurrent(scope)) return { ownership: 'superseded' as const, outcome }
+        return { ownership: 'current' as const, outcome }
       },
       switchSession: (sessionId, expectedScope) => deps.session.switchSession(sessionId, expectedScope),
       ...(deps.session.switchSessionOutcome === undefined ? {} : { switchSessionOutcome: (sessionId, expectedScope) => deps.session.switchSessionOutcome!(sessionId, expectedScope) }),

@@ -40,6 +40,7 @@ import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import type { SessionMarkdownPort } from '../../src/runtime/session-markdown-port.ts'
 import { provideFakeHostWorkspaceRegistry } from '../support/workspace-registry.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -64,6 +65,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
         ...sessionScopeFacts(() => state.agent, () => 1),
         get currentSessionId() { return state.agent?.session.id },
+    sessionPolicy: unconfiguredSessionPolicyPort(),
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -97,8 +99,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     catalog: {
       models: {
         available: () => true,
@@ -182,11 +183,9 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         cancel: async () => {},
       },
       permissions: {
-        approvalOverrideAvailable: () => true,
         presetNames: () => [],
         defaultPreset: () => undefined,
         setDefaultPreset: async () => {},
-        approvalOverrideOf: () => undefined,
         applyPermissionPreset: async () => ({ kind: 'applied' as const }),
       },
       subagentModelSelection: {

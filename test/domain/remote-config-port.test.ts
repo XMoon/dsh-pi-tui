@@ -811,10 +811,12 @@ test('a generation replacement invalidates an UNAVAILABLE roster and describe re
   port.dispose()
 })
 
-test('approvalOverrideOf is always undefined (unavailable, never an ask guess)', () => {
+test('the retired permission approval members are gone (M6-1 F8: SessionPolicyPort owns the semantic)', () => {
   const { port } = createBackend()
-  assert.equal(port.permissions.approvalOverrideOf('session-a'), undefined)
-  assert.equal(port.permissions.approvalOverrideOf('session-b'), undefined)
+  assert.equal('approvalOverrideOf' in port.permissions, false,
+    'the retired synchronous approval read no longer exists on the permission sub-domain')
+  assert.equal('approvalOverrideAvailable' in port.permissions, false,
+    'the retired availability flag no longer exists either')
 })
 
 /* ------------------------------------------------------------------------- *

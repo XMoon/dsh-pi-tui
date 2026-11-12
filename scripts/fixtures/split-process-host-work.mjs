@@ -71,6 +71,11 @@ const SCENARIOS = new Set([
   // M6-1 F7B: seed stored credential RECORDS through the official
   // `ctx.credentials.modifyRecord()` write path (never a hand-edited YAML).
   'f7b-credential-records',
+  // M6-1 F8: create two live Sessions and seed independent official
+  // approval/sandbox policy facts; the replay scenario resumes one Session in
+  // a FRESH Host to prove the durable projection replay.
+  'session-policy-f8',
+  'session-policy-f8-replay',
 ])
 
 /** Quote one token for the Host shell used by the harmless fixture commands. */
@@ -1346,5 +1351,80 @@ export async function apply(ctx) {
     ctx.effect(() => ctx.on('credentials/record-updated', (key) => {
       record('f7b-record-updated', { key: String(key) })
     }), 'f7b-record-updated-observer')
+  }
+
+  if (scenario === 'session-policy-f8' || scenario === 'session-policy-f8-replay') {
+    // M6-1 F8 exact-Session policy qualification. The OFFICIAL `ctx.approval`
+    // and `ctx.sandboxPolicy` services are the only policy authority: the
+    // seeds and the replayed facts are computed from THEIR projections, never
+    // from a TUI mirror. The fixture records policy VALUES only (no session
+    // paths, no agent objects).
+    const approval = ctx.reflect.get('approval')
+    const sandboxPolicy = ctx.reflect.get('sandboxPolicy')
+    if (approval === undefined || sandboxPolicy === undefined) {
+      throw new Error('m4-c1-host-work: session-policy-f8 requires the official ctx.approval and ctx.sandboxPolicy services')
+    }
+    const sessionA = process.env.C1_F8_SESSION_A
+    const sessionB = process.env.C1_F8_SESSION_B
+    const cwd = process.env.C1_F8_CWD
+    if (sessionA === undefined || sessionA === '' || cwd === undefined || cwd === '') {
+      throw new Error('m4-c1-host-work: session-policy-f8 requires its isolated Session ids and Host cwd')
+    }
+    const factsOf = session => ({
+      approvalOverride: approval.overrideOf(session) ?? null,
+      approvalEffective: approval.overrideOf(session) ?? approval.config?.policy ?? 'ask',
+      sandboxOverride: sandboxPolicy.overrideOf(session) ?? null,
+      sandboxEffective: sandboxPolicy.resolve({ session }).mode,
+    })
+    if (scenario === 'session-policy-f8-replay') {
+      // DURABLE REPLAY: a FRESH Host loads the persisted Session log through
+      // the official registry and the projections re-derive the facts.
+      const resumed = await ctx.agents.resume({
+        resumeSessionId: SessionId(sessionA),
+        agentOptions: { provider: 'c1-qualification', model: 'c1' },
+      })
+      ctx.effect(() => () => resumed.dispose())
+      record('f8-replayed', {
+        sessionId: String(resumed.agent.id),
+        ...factsOf(resumed.agent.session),
+      })
+    } else {
+      const officialApproval = await import('@deepseek-ai/dsh-user-approval')
+      const officialSandbox = await import('@deepseek-ai/dsh-sandbox-policy')
+      const handles = []
+      for (const sessionId of [sessionA, sessionB]) {
+        if (sessionId === undefined || sessionId === '') {
+          throw new Error('m4-c1-host-work: session-policy-f8 requires BOTH isolated Session ids')
+        }
+        const handle = await ctx.agents.create({
+          sessionId: SessionId(sessionId),
+          meta: { cwd },
+          agentOptions: { provider: 'c1-qualification', model: 'c1' },
+        })
+        ctx.effect(() => () => handle.dispose())
+        handles.push(handle)
+      }
+      const [a, b] = handles
+      // A keeps the deployment defaults (approval ask / sandbox default); B
+      // carries an INDEPENDENT approval never and a workspace-write sandbox
+      // override, written through the OFFICIAL durable event path.
+      officialApproval.setApprovalPolicy(b.agent.session, 'never')
+      officialSandbox.setSandboxMode(b.agent.session, 'workspace-write')
+      // Observe the official durable knob events (type + policy/mode only).
+      ctx.effect(() => ctx.on('session/event', (session, event) => {
+        if (event?.type !== 'approval/policy' && event?.type !== 'sandbox/mode') return
+        record('f8-knob-event', {
+          sessionId: String(session.id),
+          type: event.type,
+          value: event.data?.policy ?? event.data?.mode ?? null,
+        })
+      }), 'f8-knob-observer')
+      record('f8-seeded', {
+        sessions: [
+          { sessionId: String(a.agent.id), ...factsOf(a.agent.session) },
+          { sessionId: String(b.agent.id), ...factsOf(b.agent.session) },
+        ],
+      })
+    }
   }
 }

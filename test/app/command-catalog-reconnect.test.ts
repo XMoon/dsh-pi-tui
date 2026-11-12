@@ -41,6 +41,7 @@ import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import type { ModelSelectionValue } from '../../src/domain/session/model-selection.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -226,6 +227,8 @@ function fakeRunnerDeps(options: {
     app,
     diag: silentDiag,
     ...sessionScopeFacts(() => undefined, () => 0),
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     get currentSessionId() { return options.currentSessionId() },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } as never },
@@ -256,7 +259,7 @@ function fakeRunnerDeps(options: {
         onRequest: () => true, subscribe: () => undefined, snapshot: () => undefined,
         claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const,
       },
-      onApprovalRequest: () => {}, setApprovalPolicy: () => true,
+      onApprovalRequest: () => {},
     },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
@@ -311,6 +314,7 @@ function fakeRunnerDeps(options: {
     ctx,
     logError: () => {},
     diag: silentDiag,
+    policy: unconfiguredPolicyObservation(),
     signal: options.signal ?? new AbortController().signal,
     app: () => app,
     notify: () => {},
@@ -378,6 +382,7 @@ function fakeRunnerDeps(options: {
       sessionReader: runner.sessionReader,
       sessionWorkspaceFacts: runner.sessionWorkspaceFacts,
       hostDirectoryBrowse: runner.hostDirectoryBrowse,
+      sessionPolicy: runner.sessionPolicy,
       sessionWriter: runner.sessionWriter,
       interaction: runner.interaction,
       catalog: runner.catalog,

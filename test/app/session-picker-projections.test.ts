@@ -34,6 +34,7 @@ import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -127,6 +128,8 @@ test('the workspace projection loader covers EVERY main row beyond the legacy wi
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
         ...sessionScopeFacts(() => state.agent, () => 1),
+        sessionPolicy: unconfiguredSessionPolicyPort(),
+        policy: unconfiguredPolicyObservation(),
         get currentSessionId() { return state.agent?.session.id },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -154,8 +157,7 @@ test('the workspace projection loader covers EVERY main row beyond the legacy wi
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as never,

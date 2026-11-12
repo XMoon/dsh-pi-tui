@@ -20,9 +20,10 @@
  * so a drift between the descriptors the Host registers and the Client mounts
  * remains impossible by construction.
  *
- * The six features here are file references, terminal progress, the official
- * Web frontend availability toggle, Host one-shot Shell/completion, Skills and
- * the provider-native authorization + stored-credential-record bridges.
+ * The features here are file references, terminal progress, the official
+ * Web frontend availability toggle, Host one-shot Shell/completion, Skills,
+ * the provider-native authorization + stored-credential-record bridges, and
+ * the exact-Session policy (approval/sandbox) bridge.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/pi-tui-remote-contribution
  */
@@ -57,6 +58,10 @@ import {
   PI_TUI_CREDENTIAL_RECORDS_DELETE,
   PI_TUI_CREDENTIAL_RECORDS_LIST,
 } from './pi-tui-credential-records-contract.ts'
+import {
+  PI_TUI_SESSION_POLICY_READ,
+  PI_TUI_SESSION_POLICY_SET_APPROVAL,
+} from './pi-tui-session-policy-contract.ts'
 
 /** The npm package that owns every private Remote invocation here. A test
  *  guards that it equals each contract module's own package constant. */
@@ -85,6 +90,8 @@ export const PI_TUI_HOST_CONTRIBUTION: TypertContribution = {
     PI_TUI_AUTHORIZATION_CANCEL,
     PI_TUI_CREDENTIAL_RECORDS_LIST,
     PI_TUI_CREDENTIAL_RECORDS_DELETE,
+    PI_TUI_SESSION_POLICY_READ,
+    PI_TUI_SESSION_POLICY_SET_APPROVAL,
   ],
 }
 
@@ -108,5 +115,7 @@ export const PI_TUI_CLIENT_CONTRIBUTION: TypertRemoteContribution = {
     PI_TUI_AUTHORIZATION_CANCEL,
     PI_TUI_CREDENTIAL_RECORDS_LIST,
     PI_TUI_CREDENTIAL_RECORDS_DELETE,
+    PI_TUI_SESSION_POLICY_READ,
+    PI_TUI_SESSION_POLICY_SET_APPROVAL,
   ],
 }

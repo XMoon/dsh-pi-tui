@@ -166,6 +166,15 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
     },
     extensions: undefined,
     createPluginManagerPage: () => undefined,
+    // M6-1 F8: the Settings snapshot asks the approval row's observation
+    // (this e2e scenario never opens a live session, so it answers checking).
+    policy: {
+      readSnapshot: () => ({ kind: 'checking' as const }),
+      refresh: async () => ({ kind: 'checking' as const }),
+      invalidate: () => {},
+      subscribe: () => () => {},
+      dispose: () => {},
+    },
     config: {
       configReadiness: () => 'ready',
       visualTools: {
@@ -177,7 +186,7 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
         setAutoStart: async (_value: boolean, _revision: number) => {},
       },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
-      permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
+      permissions: { presetNames: () => [], defaultPreset: () => undefined },
       subagentModelSelection: { available: () => false },
       // C2-R4: the Tools Web page is mountable for the credential deeplink case.
       web: {

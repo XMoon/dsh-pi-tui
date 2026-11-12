@@ -41,7 +41,7 @@ import {
 } from '../../domain/footer/custom-items.ts'
 import { FooterItemRegistry } from '../footer/item-registry.ts'
 import { FooterConfiguratorModel, sameFooterCustomItem } from '../footer/configurator-model.ts'
-import { runOwned } from '../../runtime/process/tasks.ts'
+import { runDetached, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { color } from '../theme/runtime.ts'
 import { themeDisplayName as themeDisplayNameOf } from '../pickers/theme-menu.ts'
@@ -96,7 +96,8 @@ type SettingsCommandRunner = Pick<
   | 'clientCommands'
   | 'config'
   | 'createPluginManagerPage'
-  | 'currentApprovalOverride'
+  | 'policy'
+  | 'sessionPolicyGeneration'
   | 'currentNotificationMethod'
   | 'currentNotificationMode'
   | 'currentPreset'
@@ -905,6 +906,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // The panel snapshots its source in its CONSTRUCTOR, so the pending state
     // must be in place before the lease is taken.
     if (webSettingsAvailable()) beginWebSettingsRead()
+    // M6-1 F8: the initial session-policy read starts only after this
+    // workspace's lease was granted (the lazy scope pin below is what the
+    // observation answers for). The read is fire-and-forget for the ROW: the
+    // panel's own snapshot loop reads the observation synchronously, and the
+    // observation's subscribe-driven repaint delivers the settle.
+    const startPolicyRead = (): void => {
+      const scope = pinnedApprovalScope()
+      if (scope === undefined) return
+      runDetached('session policy read', async () => {
+        await runner.policy.refresh(scope.sessionId)
+        runner.refreshStatus()
+      }, { diag: runner.diag, sessionId: () => scope.sessionId })
+    }
     // C3: the ONE per-open About owner. Its subscription is acquired HERE
     // (page open), its `enter()` runs only AFTER `openSettingsWorkspace`
     // returned the live handle (no synchronous callback can target an
@@ -943,7 +957,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           const registry = runner.extensions?.settings.snapshot()
           return { revision: registry?.revision ?? 0, count: registry?.rows.length ?? 0 }
         },
-        onRefresh: () => { startWebSettingsRead() },
+        onRefresh: () => { startWebSettingsRead(); startPolicyRead() },
       },
       {
         onOpenPlugins: (onYieldNavigation) => runner.createPluginManagerPage(onYieldNavigation),
@@ -1084,6 +1098,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     )
     activeSettingsWorkspace = { token, refreshWebRow: () => handle?.refreshRow(WEB_LAUNCHER_ROW_ID, webWorkspaceRowFacts()) }
     startWebSettingsRead()
+    // M6-1 F8: the initial session-policy read starts only now that the
+    // workspace lease was granted (a refused open captures no scope and
+    // starts no read).
+    startPolicyRead()
     // C3 (plan §3.2 step 6): the workspace's OWN home is About, so a plain
     // open IS a semantic About entry — exactly ONE scoped snapshot refresh,
     // started only now that `openSettingsWorkspace` returned its live handle
@@ -1904,7 +1922,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         case 'notification-mode': return commitNotificationMode(request.value)
         case 'notification-method': return commitNotificationMethod(request.value)
         case 'terminal-progress': return commitTerminalProgress(request.value)
-        case 'approval': return Promise.resolve(commitApproval(request.value, approvalScope))
+        case 'approval': return commitApproval(request.value, approvalScope)
         case 'default-permission': return commitDefaultPermission(request.value)
         case 'subagent-model-selection': return commitSubagentSelection(request.value)
         case 'local-shell-sandbox': return commitLocalShellSandbox(request.value)
@@ -2598,17 +2616,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   }
 
   /**
-   * C2-R3: RUNTIME-ONLY approval policy of the EXACT session this workspace was
-   * opened on. The pinned scope is the whole target identity: a scope that is no
-   * longer current is refused SYNCHRONOUSLY with no dispatch at all, so a stale
-   * Confirm can never land on the replacement Session. `Verified` means the
-   * official service now reads this value back for the SAME scope; it makes no
-   * persistence claim (there is no document field).
+   * C2-R3 + M6-1 F8: the EXACT session's independent approval policy. The
+   * pinned scope is the whole target identity: a scope that is no longer
+   * current is refused SYNCHRONOUSLY with no dispatch at all. The write is
+   * the transport-neutral `SessionPolicyPort.setApproval` (ONE dispatch, no
+   * retry); `Verified` requires a FRESH official readback of the effective
+   * policy through the observation owner — an already-effective no-op write
+   * still verifies (the official setter appends nothing when the effective
+   * policy already matches, and that is not a failure).
    */
-  const commitApproval = (
+  const commitApproval = async (
     value: string,
     approvalScope: import('../../app/session/scope.ts').LiveSessionScope | undefined,
-  ): SettingsWorkspaceCommitOutcome => {
+  ): Promise<SettingsWorkspaceCommitOutcome> => {
     if (!isCandidateOf(value, APPROVAL_CANDIDATES)) {
       return { outcome: 'not-saved', reason: `"${value}" is not an approval policy candidate` }
     }
@@ -2622,29 +2642,73 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         reason: 'the session this workspace was opened on is no longer current — reopen Settings to change the approval policy of the new session',
       }
     }
-    if (!runner.config.permissions.approvalOverrideAvailable()) {
-      return { outcome: 'not-saved', reason: 'this backend does not read or write a session approval override' }
+    // The commit gate is the observation's CURRENT snapshot: its Approval
+    // side must be a proven `ready` fact before a dispatch is admissible
+    // (checking/failed/unavailable refuse with zero writes).
+    const before = runner.policy.readSnapshot(approvalScope.sessionId)
+    if (before.kind !== 'ready' || before.read.kind !== 'ready' || before.read.approval.state !== 'ready') {
+      return { outcome: 'not-saved', reason: 'the current session approval policy has not been read from the Host yet — press r to refresh, then confirm' }
     }
-    if (runner.setSessionApprovalPolicy(approvalScope, value) === 'superseded') {
+    // ONE dispatch; the result axes (ownership × outcome) stay independent.
+    // The dispatch generation is captured HERE so an `applied` ACK and its
+    // fresh readback can only be verified against the SAME Host generation.
+    const dispatchGeneration = runner.sessionPolicyGeneration?.()
+    const sameGeneration = (): boolean => runner.sessionPolicyGeneration?.() === dispatchGeneration
+    const result = await runner.setSessionApprovalPolicy(approvalScope, value)
+    if (result.outcome === undefined) {
+      // Nothing ran (the scope went stale before the dispatch).
       app.notify('the session changed — the approval policy was not applied', 'error')
       return {
         outcome: 'not-saved',
         reason: 'the session changed — the approval policy was not applied',
       }
     }
-    // The official service is the reader: only a same-scope value that really
-    // reads back as the requested policy is Verified.
-    const readback = runner.currentApprovalOverride(approvalScope)
-    if (readback === value) {
-      runner.refreshStatus()
-      return { outcome: 'verified' }
+    if (result.outcome.kind === 'refused') {
+      return { outcome: 'not-saved', reason: `the Host refused the approval policy write (${result.outcome.reason})` }
     }
-    if (readback === undefined) {
-      return { outcome: 'unverified', reason: 'the session approval override could not be re-read' }
+    if (result.outcome.kind === 'unconfirmed') {
+      return {
+        outcome: 'indeterminate',
+        reason: `Outcome unconfirmed; refresh Session policy before retrying. (${result.outcome.reason})`,
+      }
+    }
+    if (!sameGeneration()) {
+      return {
+        outcome: 'unverified',
+        reason: 'the Connection changed before the session policy could be re-read — check the current Host policy',
+      }
+    }
+    // `applied`: verify through a fresh authoritative readback of the SAME
+    // exact session. Only an equal EFFECTIVE policy is Verified — an absent
+    // override with an equal effective is the official no-op success. The
+    // write's own durable event may legitimately supersede the first read
+    // with a NEWER observation read; a second (read-only) attempt lets that
+    // newer read land instead of reporting a superseded one as unverified.
+    let readback = await runner.policy.refresh(approvalScope.sessionId)
+    if (readback.kind !== 'ready' && sameGeneration()) {
+      readback = await runner.policy.refresh(approvalScope.sessionId)
+    }
+    if (!sameGeneration()) {
+      return {
+        outcome: 'unverified',
+        reason: 'the Connection changed during the policy readback — check the current Host policy',
+      }
+    }
+    if (readback.kind === 'ready' && readback.read.kind === 'ready' && readback.read.approval.state === 'ready') {
+      if (readback.read.approval.effective === value) {
+        runner.refreshStatus()
+        return { outcome: 'verified' }
+      }
+      // A DIFFERENT effective value is another writer's newer fact — the
+      // outcome is indeterminate, never "this request failed".
+      return {
+        outcome: 'indeterminate',
+        reason: `the session approval policy now reads ${readback.read.approval.effective} — another client changed it before this readback`,
+      }
     }
     return {
-      outcome: 'not-saved',
-      reason: `the session approval override reads ${readback}`,
+      outcome: 'unverified',
+      reason: 'the approval policy write was accepted, but the fresh policy read could not confirm it — refresh Session policy before retrying',
     }
   }
 
@@ -3048,46 +3112,71 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const visualToolsFreshness = visualToolsFreshnessOf(visualTools, configReadiness)
     const webAutostart = runner.config.webStartupPreference.read()
     const webAutostartFreshness = webAutostartFreshnessOf(webAutostart, configReadiness)
-    // ── C2-R3: the five Agent rows' read facts ────────────────────────────────
-    // PERMISSIONS. The approval row exists only for a LIVE, still-current
-    // captured scope on a backend that really reads and writes the override:
-    // a Remote composition (no capability) or a sessionless surface paints no
-    // approval row at all — never an `ask` the authority did not state.
-    const approvalLive = approvalScope !== undefined
-      && runner.isSessionScopeCurrent(approvalScope)
-      && runner.config.permissions.approvalOverrideAvailable()
-    const approvalOverride = approvalLive && approvalScope !== undefined
-      ? runner.currentApprovalOverride(approvalScope)
+    // ── C2-R3 + M6-1 F8: the five Agent rows' read facts ────────────────────
+    // PERMISSIONS. The approval row exists for a LIVE, still-current captured
+    // scope; the row's VALUE comes from the ONE session-policy observation
+    // (checking/ready/unavailable/failed). A non-ready observation keeps the
+    // row visible with its truthful state — never an `ask` the authority did
+    // not state, and never a hidden gap the user cannot refresh.
+    const approvalLive = approvalScope !== undefined && runner.isSessionScopeCurrent(approvalScope)
+    const approvalObservation = approvalLive && approvalScope !== undefined
+      ? runner.policy.readSnapshot(approvalScope.sessionId)
       : undefined
+    const approvalReadReady = approvalObservation?.kind === 'ready' && approvalObservation.read.kind === 'ready'
+      ? approvalObservation.read
+      : undefined
+    // The narrowed ready approval side (the ternary chain cannot narrow a
+    // discriminated union member, so the fact is extracted once here).
+    let approvalSide: { readonly state: 'ready'; readonly effective: 'ask' | 'never'; readonly override?: 'ask' | 'never' } | undefined
+    if (approvalReadReady !== undefined && approvalReadReady.approval.state === 'ready') {
+      approvalSide = approvalReadReady.approval
+    }
+    const approvalSideUnavailable = approvalReadReady !== undefined && approvalReadReady.approval.state === 'unavailable'
+    // M6-1 F8: the SAME observation read also proves the independent SANDBOX
+    // fact; it is displayed as its own labeled fact beside the approval one
+    // (an effective sandbox mode is a policy fact, never an enforcement claim).
+    const sandboxSide = approvalReadReady?.sandbox
+    const sandboxFact = sandboxSide?.state === 'ready'
+      ? `Sandbox: ${sandboxSide.effective} (override: ${sandboxSide.override ?? 'none'})`
+      : 'Sandbox: unavailable on this Host'
+    const approvalSummary = approvalSide === undefined
+      ? approvalObservation === undefined || approvalObservation.kind === 'checking'
+        ? 'Checking…'
+        : approvalSideUnavailable
+          ? 'unavailable on this Host'
+          : approvalObservation.kind === 'failed'
+            ? 'read failed — press r to refresh'
+            : 'unavailable — press r to refresh'
+      : approvalSide.effective
+    const approvalOverrideLabel = approvalSide?.override === undefined ? 'none' : approvalSide.override
     const approvalRow: SettingsWorkspaceRow[] = !approvalLive ? [] : [{
       id: 'approval',
       category: 'agent',
       label: 'Approval policy (this session)',
-      summary: approvalOverride ?? 'not overridden',
-      ...approvalOverride === undefined ? {} : { value: approvalOverride },
-      scope: 'Current session only · runtime-only override',
-      freshness: 'runtime',
+      summary: approvalSummary,
+      ...approvalSide !== undefined ? { value: approvalSide.effective } : {},
+      scope: 'Current session · durable session policy event',
+      freshness: approvalSide !== undefined ? 'runtime' : 'unavailable',
       description: 'How tool approvals are handled in the session this workspace was opened on. '
-        + 'This is the official per-session approval override, applied at the next approval the session needs; '
-        + 'it is not a permission preset and it never changes the default for new sessions. '
-        + 'Persisted: not applicable — current session only.',
+        + 'This is the official per-session approval policy: a durable session policy event the Host replays, applied at the next approval the session needs. '
+        + 'It is not a permission preset, not the Host profile default, and it never changes the default for new sessions. '
+        + 'Source: Host session policy. Persisted: not applicable — current session only.',
       edit: {
         field: 'approval',
         primary: 'runtime',
-        options: APPROVAL_CANDIDATES.map(value => ({
+        // Only a proven ready Approval fact offers confirmable candidates; a
+        // checking/unavailable/failed row keeps its facts without a write.
+        options: approvalSide === undefined ? [] : APPROVAL_CANDIDATES.map(value => ({
           value,
           label: value,
           available: true,
-          current: approvalOverride === value,
+          current: approvalSide.effective === value,
         })),
-        // The primary Value IS the runtime override (or `not overridden`); the
-        // SEPARATE effect fact states what the next approval consumes, so an
-        // absent override never reads as a saved `ask`.
-        runtime: approvalOverride === undefined ? 'ask (consumer fallback; no session override)' : approvalOverride,
-        runtimeEffect: approvalOverride === undefined
-          ? 'next approval uses the consumer fallback ask (no session override)'
-          : `next approval uses ${approvalOverride} (session override)`,
-        persisted: 'not applicable — current session only',
+        runtime: approvalSide === undefined ? approvalSummary : `Effective: ${approvalSide.effective}`,
+        runtimeEffect: approvalSide === undefined
+          ? approvalSummary
+          : `Effective: ${approvalSide.effective} · Session override: ${approvalOverrideLabel} · ${sandboxFact}`,
+        persisted: 'Source: Host session policy · persisted: not applicable — current session only',
       },
     }]
     // The preset roster and the effective Host default are read ONCE for this

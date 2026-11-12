@@ -117,7 +117,7 @@ function makeRunner(
         subscribe: () => undefined, onRequest: () => true, snapshot: () => undefined,
         claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const,
       },
-      onApprovalRequest: () => {}, setApprovalPolicy: () => true,
+      onApprovalRequest: () => {},
     },
     catalog: { models: { available: () => false } } as never,
     config: settingsDirectPageConfig({

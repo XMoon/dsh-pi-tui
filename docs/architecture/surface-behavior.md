@@ -813,8 +813,9 @@ specialist-page contract below).
   Terminal progress and the `Agent` user-shell sandbox policy are persisted
   through the ONE serialized TUI settings document; the profile-wide
   `Visual tools` switch is the Host profile's revision-checked form section;
-  the `Agent` `Approval policy` is the official per-session runtime override
-  (no document field), `Default permission` is the Host permission default, and
+  the `Agent` `Approval policy` is the official per-Session durable policy
+  event (write-through, no document field), `Default permission` is the Host
+  permission default, and
   `Subagent model selection` is the official subagent model-selection section;
   transcript detail (`Ctrl+O`) and thinking detail (`Alt+T`) are Client-local
   RUNTIME-ONLY disclosure states with no document field at all, so their Detail
@@ -890,25 +891,37 @@ specialist-page contract below).
     be read), and a normalizer's fallback is never presented as the stored
     value.
 - `Agent` owns FIVE rows in this frozen order: `Approval policy (this session)`
-  (only for a live, still-current captured Session on a backend that really
-  reads and writes the official per-session approval override) → `Default
+  (only while a live, still-current captured Session exists — the row stays
+  visible with its truthful state when the Host policy read is checking,
+  unavailable or failed, and offers no confirmable candidate until a proven
+  read answers) → `Default
   permission` (only while the Host advertises a preset roster) →
   `Subagent allowed models` + `Subagent model selection` (BOTH only while the
   official subagent model-selection section and the model catalog are
   available) → `User shell sandbox policy` (always painted). The category stays
   in the fixed rail even when every row is unavailable, and `Agent` has NO
   transition launcher any more: it has no unmigrated field left.
-  - `Approval policy` is RUNTIME-ONLY and scope-pinned: the workspace captures
-    ONE live Session scope on open and never re-targets it. A session switch
-    makes the captured scope stale — the Confirm is refused synchronously
-    (zero dispatch, the refusal reaches the ONE app notice) and reopening the
-    workspace is what speaks about the new Session. `Value` is the override the
-    official service reads (or `not overridden`), a separate `Runtime` fact
-    states what the next approval consumes (the consumer's own `ask` fallback
-    when there is no override), and `Persisted` says
-    `not applicable — current session only`. `Verified` means the SAME scope
-    reads the value back; it is never a persistence claim, never a permission
-    preset and never `/yolo`.
+  - `Approval policy` is scope-pinned and reads the PROVEN Host fact: the
+    workspace captures ONE live Session scope on open and never re-targets it.
+    A session switch makes the captured scope stale — the Confirm is refused
+    synchronously (zero dispatch, the refusal reaches the ONE app notice) and
+    reopening the workspace is what speaks about the new Session. `Value` is the
+    current official EFFECTIVE approval policy; the `Runtime` detail splits it
+    into `Effective: …`, `Session override: <…|none>` and the SAME read's
+    independent `Sandbox: <mode> (override: <…|none>)` fact (a policy fact,
+    never an enforcement claim), and `Persisted` names
+    `Source: Host session policy` with `not applicable — current session only`
+    (a durable per-Session event, never a TUI document field, never the Host
+    profile default and never a permission preset). `Checking…` is painted
+    until the first authoritative read answers; a failed or unavailable read is
+    stated as such and the user can refresh (`r`). `Verified` requires ONE
+    fresh authoritative readback of the SAME exact Session whose effective
+    policy equals the requested value — an already-effective `ask` written as a
+    no-op is Verified while `override: none` stays stated, and a readback that
+    another client changed is indeterminate rather than "this request failed".
+    `Not saved` is reserved for a proven pre-dispatch refusal; a dispatched
+    write whose ACK/readback is lost is unconfirmed/unverified and never
+    retried automatically.
   - `Default permission` is HOST-PERSIST-FIRST: candidates are the Host's raw
     preset ids in Host order, the write is the official
     `permission.defaultPreset` mutation, and `Verified` needs a fresh

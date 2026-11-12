@@ -19,10 +19,12 @@
  * ```
  *
  * Explicitly unsupported on the wire:
- * authorization flows (no `authorization` namespace anywhere in rc.2),
- * credential-record enumeration/deletion (no `credentials/list` or record
- * delete Remote), and the exact independent session approval-policy read
- * (`approvalOverrideOf` answers `undefined` as "unavailable", never `ask`).
+ * authorization flows (no `authorization` namespace anywhere in rc.2) and
+ * credential-record enumeration/deletion on the generated config plane (the
+ * package's OWN `piTuiCredentialRecords` bridge serves them). The independent
+ * session approval/sandbox facts are NOT part of this port at all: the
+ * package's OWN `piTuiSessionPolicy` bridge and the `SessionPolicyPort` serve
+ * them (M6-1 F8).
  *
  * Frozen sync/async bridge (§2.3): the port's synchronous reads (`get()`,
  * `presetNames()`, `listCredentialOptions()`, ...) cannot await the wire, so
@@ -95,6 +97,7 @@ import type {
   WebStartupPreferenceState,
 } from '../config-port.ts'
 import { SupersededReadError } from '../read-error.ts'
+import { RemoteConfigWriteLifetime } from './config-write-lifetime.ts'
 import { RemoteAuthorizationConfig } from './authorization-remote.ts'
 import type { PiTuiAuthorizationNamespace } from './pi-tui-authorization-contract.ts'
 import {
@@ -223,9 +226,9 @@ export interface RemoteConfigEventsSource {
 }
 
 /** The narrow one-source runtime face this adapter consumes. No `sessions`
- *  field is needed: every Config read is process-scoped, and the only
- *  session-scoped method (`approvalOverrideOf`) is deliberately unavailable
- *  on the wire (§10). */
+ *  field is needed: every config read here is process-scoped. The
+ *  session-scoped policy read/write belongs to `SessionPolicyPort` (M6-1 F8),
+ *  never to this port. */
 export interface RemoteConfigRuntimeSource {
   readonly remote: {
     readonly settings: RemoteSettingsRemotes
@@ -391,32 +394,6 @@ function copyProviderEntry(entry: ProviderCatalogEntry): ProviderCatalogEntry {
  * Invalidations only bump the counter (the snapshot stays readable as the
  * last-known display value); no unowned background promise is started.
  */
-/**
- * The ONE accepted-write lifetime counter of the Remote configuration port.
- * Every write sink (the settings mirror's `mutate` and the credential
- * reference writes) brackets its accepted work; the Client reload safety gate
- * reads the count so it can never retire the Client while a persisted
- * configuration write is still in flight. Read-only calls never register.
- */
-class RemoteConfigWriteLifetime {
-  private pending = 0
-
-  /** Register one accepted write; the returned release is idempotent. */
-  begin(): () => void {
-    this.pending += 1
-    let released = false
-    return () => {
-      if (released) return
-      released = true
-      this.pending -= 1
-    }
-  }
-
-  hasUnsettledWrites(): boolean {
-    return this.pending > 0
-  }
-}
-
 class RemoteConfigMirror {
   /** The accepted-write lifetime owner (the serialized chain below is
    *  `writes`, its internal queue). */
@@ -1594,21 +1571,6 @@ class RemotePermissionConfig implements PermissionConfig {
     ])
   }
 
-  approvalOverrideAvailable(): boolean {
-    // INTENTIONAL_UNSUPPORTED_IN_M3 (§10): no public Client read of the session
-    // approval override and no synchronous policy carrier exist on rc.2, so the
-    // UI must HIDE/DISABLE the row instead of showing a guessed `ask`.
-    return false
-  }
-
-  approvalOverrideOf(_sessionId: string): undefined {
-    // INTENTIONAL_UNSUPPORTED_IN_M3: rc.2 has
-    // no public Client read of the independent session `approval/policy`
-    // override. `undefined` means "unavailable", NEVER `ask` — the Remote
-    // settings row must be hidden/disabled instead of guessing.
-    return undefined
-  }
-
   async applyPermissionPreset(
     sessionId: string,
     presetId: string,
@@ -1867,8 +1829,11 @@ export class RemoteConfigPort implements ConfigPort {
   private readonly credentialConfig: RemoteCredentialConfig
   private readonly accountConfig: RemoteAccountConfig
   private readonly authorizationConfig: RemoteAuthorizationConfig
-  /** The ONE accepted-write lifetime of this port (settings + credentials). */
-  private readonly writes = new RemoteConfigWriteLifetime()
+  /** The ONE accepted-write lifetime of this port (settings + credentials).
+   *  An injected instance is SHARED with the Remote session-policy port so
+   *  the Client reload gate observes every accepted persisted write through
+   *  one fact; absent, the port owns a private instance exactly as before. */
+  private readonly writes: RemoteConfigWriteLifetime
 
   readonly footerCommandTrust: FooterCommandTrust
   readonly footerCustomItems: FooterCustomItemsConfig
@@ -1889,7 +1854,8 @@ export class RemoteConfigPort implements ConfigPort {
     return this.tuiSettingsWrapper.hasNamespace() ? this.tuiSettingsWrapper : undefined
   }
 
-  constructor(source: RemoteConfigRuntimeSource) {
+  constructor(source: RemoteConfigRuntimeSource, options?: { readonly writeLifetime?: RemoteConfigWriteLifetime }) {
+    this.writes = options?.writeLifetime ?? new RemoteConfigWriteLifetime()
     // Bind the event seat to its service BEFORE anything subscribes.
     const on = source.remote.$on.bind(source.remote) as unknown as RemoteConfigEventsSource['$on']
     // NEVER rebuild `remote` with a spread: the official Client remote exposes

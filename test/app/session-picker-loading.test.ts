@@ -32,6 +32,7 @@ import type { SessionReader } from '../../src/runtime/session-reader-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import type { SessionSwitchOutcome } from '../../src/app/session/runtime.ts'
 import type { SessionBrowserPanelRequest, SessionBrowserPresentation, SessionBrowserReadSnapshot } from '../../src/app/command/session-browser-presentation.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -121,6 +122,8 @@ function harness(
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => state.agent, () => 1),
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     ...(nativePresentation === undefined ? {} : { sessionBrowserPresentation: nativePresentation }),
     get currentSessionId() { return state.agent?.session.id },
     ensureSession: async () => {},
@@ -149,8 +152,7 @@ function harness(
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as never,

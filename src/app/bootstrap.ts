@@ -51,8 +51,8 @@ import { DirectTuiSettings, type SettingsFormsLike } from '../runtime/direct/tui
 import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import { TUI_STARTUP_SERVICE } from '../startup.ts'
 import { createSessionPresentation } from './surface/session-presentation.ts'
-import { createStatusRuntime } from './surface/status-runtime.ts'
-import type { StatusRuntime } from './surface/status-runtime.ts'
+import { createStatusRuntime, type StatusRuntime } from './surface/status-runtime.ts'
+import { createSessionPolicyObservation } from './command/session-policy-observation.ts'
 import { createInputHistory } from './surface/input-history.ts'
 import { createSettingsRuntime } from './surface/settings-runtime.ts'
 import { QueueManagerController, queueManagerCommandResult } from './queue/manager.ts'
@@ -1738,6 +1738,16 @@ export function applyRunnerWithRuntime(
       summaryKeys: toolSummaryKeys,
       isCleanedUp: () => cleanedUp,
       refreshStatusCheap: () => status.refresh(),
+      // M6-1 F8: a policy knob event revokes the observation's committed
+      // snapshots and starts ONE controlled re-read of the official Host
+      // store (never a local event-log fold).
+      invalidateSessionPolicy: sessionId => {
+        sessionPolicyObservation.invalidate(sessionId)
+        runDetached('session policy refresh', () => sessionPolicyObservation.refresh(sessionId), {
+          diag,
+          sessionId: () => sessionId,
+        })
+      },
       folds: { title: (events) => foldSessionTitle(events)?.title },
       direct: {
         installModelSelection: (agent) => { directRuntime()?.modelSelections.installForAgent(agent as Agent) },
@@ -2206,6 +2216,57 @@ export function applyRunnerWithRuntime(
     // irrelevant and no capability can go stale.
     // Explicit annotation: the Direct seams below read the owner back
     // (late-bound through `command`), so the initializer cannot drive inference.
+    // M6-1 F8: the ONE per-runner session-policy observation owner, created
+    // BEFORE both consumers (the command surface here, the status runtime
+    // below) so they share the SAME object reference. Its invalidation
+    // triggers: session-scope owner changes, Connection generation changes
+    // (Remote), and the canonical session-event knob routing below. The
+    // late-bound `statusRuntimeRef` lets the observation repaint the footer
+    // without a creation-order cycle (the status runtime is constructed
+    // after this block).
+    let statusRuntimeRef: StatusRuntime | undefined
+    // The Direct branch's stand-in generation identity: one frozen object per
+    // process. Direct has no Connection generation to compare; the per-boot
+    // singleton keeps the observation's identity comparison total (the
+    // process IS the generation boundary there).
+    const directPolicyGenerationToken = {}
+    const sessionPolicyObservation = createSessionPolicyObservation({
+      read: (sessionId, signal) => backend.sessionPolicy.read(sessionId, signal),
+      // Direct has no Connection generation object; a per-boot singleton
+      // token stands in so the identity comparison stays meaningful (a
+      // Direct reboot is a new process anyway).
+      generation: (): object | undefined => remoteSources === undefined
+        ? directPolicyGenerationToken
+        : (remoteSources.commandSource.connectionGeneration() as object | undefined),
+      isSubjectCurrent: sessionId => ownership.currentSessionId() === sessionId || viewerRef?.read()?.id === sessionId,
+      diag,
+    })
+    const disposePolicyObservation = sessionPolicyObservation.subscribe(() => { statusRuntimeRef?.refresh() })
+    // Scope/generation changes revoke every committed snapshot WITHOUT a
+    // synchronous re-read: the next display refresh starts the new subject's
+    // controlled read (the subject-keyed lazy read). A refresh started inside
+    // this owner-commit callback would otherwise read the published-but-not-
+    // yet-initialized owner's Host projections during the transition window.
+    const disposePolicyScopeInvalidation = ownership.subscribeScopeInvalidation(() => {
+      sessionPolicyObservation.invalidate()
+    })
+    if (remoteSources !== undefined) {
+      remoteSources.commandSource.subscribeConnectionGeneration(() => {
+        // A Connection generation rollover/rollback revokes every committed
+        // snapshot AND repaints NOW: the old Host's policy facts must leave
+        // the footer/surface immediately (the new generation starts from
+        // `checking`, and the next display refresh starts its controlled
+        // read). This is a transport event, never an owner-commit callback,
+        // so the repaint cannot read a published-but-uninitialized owner.
+        sessionPolicyObservation.invalidate()
+        statusRuntimeRef?.refresh()
+      })
+    }
+    lifecycleController.signal.addEventListener('abort', () => {
+      disposePolicyObservation()
+      disposePolicyScopeInvalidation()
+      sessionPolicyObservation.dispose()
+    }, { once: true })
     const command: CommandSurface<ModelSelection, Agent> = createCommandSurface<ModelSelection, SessionId, Agent>({
       ctx,
       diag,
@@ -2354,6 +2415,9 @@ export function applyRunnerWithRuntime(
         // inline Add editor lists the Host home/levels; a listing never
         // registers a Workspace or reads a Client filesystem.
         hostDirectoryBrowse: backend.hostDirectoryBrowse,
+        // M6-1 F8: the SAME exact-Session policy port both the observation
+        // owner and the scope-bound approval write consume.
+        sessionPolicy: backend.sessionPolicy,
         // Split-Client only: the Client-root forwarded-answer eligibility read
         // view. The Session Workspace uses it ONLY as the positive
         // answerability gate for `Needs attention`; a Direct/TSP composition
@@ -2543,6 +2607,18 @@ export function applyRunnerWithRuntime(
             Promise.resolve(task()) as Promise<T>,
         }),
       },
+      // M6-1 F8: the ONE per-runner session-policy observation owner. The
+      // SAME object reference goes to the status runtime (footer access
+      // facts) and the command runtime (the Settings approval row) — one
+      // snapshot source, never two. Reads ride the backend's neutral
+      // SessionPolicyPort; currentness keys on the Connection generation
+      // (Remote) and the session-scope authority (both branches).
+      policy: sessionPolicyObservation,
+      // M6-1 F8: the SAME Connection generation identity the observation
+      // fences on — the Settings write chain binds its ACK/readback to it.
+      policyGeneration: () => remoteSources === undefined
+        ? undefined
+        : remoteSources.commandSource.connectionGeneration(),
       // TS8-E: the narrow Direct catalog capability. The Direct catalog context
       // and the in-process `commands.list(undefined)` convention are captured
       // ONCE here and adapted into neutral-DTO operations, so the application
@@ -2572,6 +2648,10 @@ export function applyRunnerWithRuntime(
     const status = createStatusRuntime({
       surface,
       diag,
+      // M6-1 F8: the SAME session-policy observation object the command
+      // surface holds — the footer's sandbox/approval facts and the Settings
+      // approval row read ONE snapshot source.
+      policyObservation: sessionPolicyObservation,
       // The composition owns the terminal policy: the status owner supplies
       // the semantic identity facts and this applies OSC 0 (width/ANSI
       // mechanics stay in `tui/terminal/title.ts`).
@@ -2661,6 +2741,9 @@ export function applyRunnerWithRuntime(
     // can deliver the first click/key. The renderer only reaches this owner
     // through the narrow surface seam above.
     permissionUiOwner = status
+    // M6-1 F8: the observation owner's repaint hook now points at the live
+    // status runtime (declared late to avoid a creation-order cycle).
+    statusRuntimeRef = status
     // A5b-2: the client-local input-history owner (known cwds, the canonical
     // last row and the per-session recall projection). Constructed before the
     // mount; it only touches the display seam inside `activateBootRecall`.
@@ -3929,6 +4012,16 @@ export function applyRunnerWithRuntime(
       queueTextOf: content => queueTextOf(content as readonly import('@deepseek-ai/dsh-llm').ContentBlock[]),
       exitView: () => { viewer.exitView() },
       refreshStatusCheap: () => status.refresh(),
+      // M6-1 F8: a policy knob event revokes the observation's committed
+      // snapshots and starts ONE controlled re-read of the official Host
+      // store (never a local event-log fold).
+      invalidateSessionPolicy: sessionId => {
+        sessionPolicyObservation.invalidate(sessionId)
+        runDetached('session policy refresh', () => sessionPolicyObservation.refresh(sessionId), {
+          diag,
+          sessionId: () => sessionId,
+        })
+      },
       refreshStatusAndWelcome: () => {
         status.refresh()
         status.updateWelcomeCard()

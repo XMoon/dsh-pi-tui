@@ -34,6 +34,7 @@ import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { visibleWidth, type SettingItem } from '@xmoon76/pi-tui'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -112,6 +113,8 @@ function stubRunner(
     webAccess: unavailableWebAccess(),
     diag,
     ...sessionScopeFacts(() => state.agent, () => options.generation?.() ?? 1, catalog.skills),
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     // The scoped collision baseline must read the FAKE registry (which
     // reflects registrations in its global view), exactly like the real
     // commands service does through the production provider.
@@ -162,8 +165,7 @@ function stubRunner(
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     sessionWriter: {
       prompt: async (_sessionId: string, message: unknown, mode: 'queue' | 'steer') => {
         const outcome = state.writerOutcome
