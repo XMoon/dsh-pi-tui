@@ -455,11 +455,70 @@ export default async function (h) {
       resume: reconnectResume?.class }))
   h.capture('session-browser-direct-renderer-reconnected-current-b-560x640', 'reconnected renderer rereads B as the Current child')
 
-  const reconnectCloseSnapshot = h.snapshot()
-  const reconnectClose = buttonFor(h, reconnectCloseSnapshot, 'Close')
-  h.check('the reconnected Browser closes before the second graceful exit',
-    reconnectClose !== undefined && await h.click(reconnectCloseSnapshot.chains, reconnectClose))
-  if (!await requiredWait(h, 'the reconnected Browser closes', () => pickerNode(h) === undefined)) {
+  // ── Current B Return through the real native key and pointer paths ────────
+  const returnSnapshot = h.snapshot()
+  const returnTarget = sessionRowById(h, returnSnapshot, TARGET_ID)
+  const returnSelected = returnTarget !== undefined
+    && hasClass(returnTarget, 'sel') && hasClass(returnTarget, 'cur')
+  const resumeStartsBeforeReturn = records(h).filter((entry) =>
+    entry.kind === 'agents.resume.start' && entry.sessionId === TARGET_ID).length
+  await h.key('Return', 900)
+  const keyboardReturned = await requiredWait(h, 'Current keyboard Enter returns from the real Browser',
+    () => pickerNode(h) === undefined)
+  h.check('real native keyboard Enter on the listed Current Session returns without a second Direct Resume',
+    returnSelected && keyboardReturned
+    && records(h).filter((entry) => entry.kind === 'agents.resume.start' && entry.sessionId === TARGET_ID).length === resumeStartsBeforeReturn,
+    JSON.stringify({ returnSelected, keyboardReturned,
+      resumeStarts: records(h).filter((entry) => entry.kind === 'agents.resume.start' && entry.sessionId === TARGET_ID).length,
+      expected: resumeStartsBeforeReturn }))
+  if (!keyboardReturned) {
+    finish(h)
+    return
+  }
+
+  await submitCommand(h, '/sessions')
+  if (!await requiredWait(h, 'the Browser reopens for the native pointer witnesses', () => {
+    const snapshot = h.snapshot()
+    const target = sessionRowById(h, snapshot, TARGET_ID)
+    return pickerNode(h, snapshot) !== undefined
+      && target !== undefined && hasClass(target, 'sel') && hasClass(target, 'cur')
+  })) {
+    finish(h)
+    return
+  }
+  await h.key('Down', 500)
+  const movedAway = await requiredWait(h, 'keyboard moves the selection off the Current row', () => {
+    const target = sessionRowById(h, h.snapshot(), TARGET_ID)
+    return target !== undefined && !hasClass(target, 'sel')
+  })
+  const selectSnapshot = h.snapshot()
+  const selectTarget = sessionRowById(h, selectSnapshot, TARGET_ID)
+  const selectedByPointer = selectTarget !== undefined && await h.click(selectSnapshot.chains, selectTarget)
+  const stillOpen = await requiredWait(h, 'native select on the Current row leaves the Browser open', () => {
+    const snapshot = h.snapshot()
+    const target = sessionRowById(h, snapshot, TARGET_ID)
+    return pickerNode(h, snapshot) !== undefined && target !== undefined && hasClass(target, 'sel')
+  })
+  h.check('real native select on the Current Session row only selects and never closes',
+    movedAway && selectedByPointer && stillOpen
+    && records(h).filter((entry) => entry.kind === 'agents.resume.start' && entry.sessionId === TARGET_ID).length === resumeStartsBeforeReturn,
+    JSON.stringify({ movedAway, selectedByPointer, stillOpen,
+      resumeStarts: records(h).filter((entry) => entry.kind === 'agents.resume.start' && entry.sessionId === TARGET_ID).length }))
+  if (!stillOpen) {
+    finish(h)
+    return
+  }
+  const activateSnapshot = h.snapshot()
+  const activateTarget = sessionRowById(h, activateSnapshot, TARGET_ID)
+  const activated = activateTarget !== undefined && await h.click(activateSnapshot.chains, activateTarget)
+  const activateReturned = await requiredWait(h, 'native activate on the Current row closes the real Browser',
+    () => pickerNode(h) === undefined)
+  h.check('real native activate on the listed Current Session returns without a Resume',
+    activated && activateReturned
+    && records(h).filter((entry) => entry.kind === 'agents.resume.start' && entry.sessionId === TARGET_ID).length === resumeStartsBeforeReturn,
+    JSON.stringify({ activated, activateReturned,
+      resumeStarts: records(h).filter((entry) => entry.kind === 'agents.resume.start' && entry.sessionId === TARGET_ID).length }))
+  if (!activateReturned) {
     finish(h)
     return
   }

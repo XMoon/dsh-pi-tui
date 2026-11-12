@@ -170,7 +170,9 @@ production default; TSP keeps the experimental opt-in described in
   `src/tui/panels/session-workspace-panel.ts`), so the main-only corpus, matcher
   and query precedence are the rule on every renderer; the PiTUI side owns only
   its physical screen and Client-local presentation, never a second Reader or
-  query owner. This native TSP Presenter is unchanged.
+  query owner. On both renderers the Current row's Enter/activate returns
+  (closes the Browser) while every other listed row is the pre-existing guarded
+  Resume; the read-owner admission and settlement contract above is unchanged.
 - Footer order is Close, Details, Use directory (sessionless Folder selection),
   New session, Add directory, Resume; each unavailable action carries its own
   reason and only enabled actions take keyboard focus. Resume keeps the `primary` action

@@ -292,9 +292,10 @@ test('the browse list paints the header, current marker, and the Return verb', a
   assert.equal(h.closes, 1, 'Return closes the Browser exactly once')
   assert.equal(h.handle.isDisposed(), true, 'the same leased open really retired')
   assert.equal(h.app.isFullscreen(), false, 'no fullscreen lease survives the Return')
-  h.vt.sendInput('\r')
+  // The SAME retired handle is owner-origin and cannot notify the owner twice.
+  h.handle.close()
   await h.paint()
-  assert.equal(h.closes, 1, 'a stale old handle cannot close the Browser twice')
+  assert.equal(h.closes, 1, 'the retired handle cannot close the Browser twice')
 })
 
 test('the browse list Enter on a listed non-current row emits one guarded Resume', async () => {
