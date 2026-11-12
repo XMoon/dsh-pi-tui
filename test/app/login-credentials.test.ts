@@ -146,6 +146,38 @@ test('/logout navigates: bare stored-credentials, exact ref, keyless record, acc
   ])
 })
 
+test('/logout from a STALE roster never derives a record target from old flows (F7B)', async () => {
+  const { invoke, opened } = authCommands({ targetsState: 'stale' })
+  await invoke('logout', '')
+  // A route-shaped word could be an old provider route: the page re-reads the
+  // CURRENT Host through the stored-credentials list instead of guessing a key.
+  await invoke('logout', 'anthropic')
+  // A lowercase single word is ambiguous (route grammar AND env-var grammar).
+  await invoke('logout', 'mykey')
+  // Explicit references and the Account escape hatch stay safe.
+  await invoke('logout', 'ACME_GATEWAY_API_KEY')
+  await invoke('logout', 'MY_KEY')
+  await invoke('logout', 'deepseek-account')
+  // An unparseable/unknown target falls back to the list, never an error page.
+  await invoke('logout', 'not valid!')
+  assert.deepEqual(opened, [
+    { kind: 'models', view: 'logout-list' },
+    { kind: 'models', view: 'logout-list' },
+    { kind: 'models', view: 'logout-list' },
+    { kind: 'models', view: 'logout', target: { kind: 'reference', ref: 'ACME_GATEWAY_API_KEY', label: 'acme', route: 'acme' } },
+    { kind: 'models', view: 'logout', target: { kind: 'reference', ref: 'MY_KEY', label: 'MY_KEY' } },
+    { kind: 'account', view: 'signout' },
+    { kind: 'models', view: 'logout-list' },
+  ])
+  assert.equal(
+    opened.some(destination => destination.kind === 'models'
+      && destination.view === 'logout'
+      && destination.target.kind === 'record'),
+    false,
+    'a stale flow roster must never produce an exact record-delete target',
+  )
+})
+
 test('/logout rejects an unknown target', async () => {
   const { invoke, opened } = authCommands()
   const result = await invoke('logout', 'not valid!') as { kind: string; text: string }

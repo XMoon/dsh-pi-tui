@@ -13,6 +13,7 @@ import { test } from 'node:test'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { ModelsWorkspacePage, type ModelsInitialView, type ModelsProviderRow, type ModelsWorkspaceSource } from '../../src/tui/panels/models-workspace-page.ts'
 import { CredentialWorkflow } from '../../src/app/command/credential-workflow.ts'
+import { SupersededReadError } from '../../src/runtime/read-error.ts'
 import {
   resolveLoginDestination,
   resolveLogoutDestination,
@@ -670,7 +671,7 @@ test('a stored credential RECORD is deleted through deleteRecord and never throu
   await flush()
   assert.ok(calls.includes('delete:llm-pi-ai/anthropic'), calls.join(','))
   assert.equal(calls.some(call => call.startsWith('unset:')), false)
-  assert.match(viewText(page), /signed out locally — stored credential cleared/u)
+  assert.match(viewText(page), /local stored credential cleared \(not revoked at the issuer/u)
 })
 
 test('Esc on a running native attempt cancels the exact attempt and returns to the list only after settlement', async () => {
@@ -2370,8 +2371,8 @@ test('a pending delete keeps the confirmation locked while a refresh happens', a
     deleted = true
   }
   // The store really REMOVES the record: the final success assertion below
-  // can only pass on the authoritative absence, because the failure text
-  // ("Not cleared: …") also contains the word "cleared".
+  // can only pass on the authoritative absence (the failure texts do not
+  // claim a local clear).
   source.storedCredentials = async () => ({
     rows: deleted
       ? []
@@ -2402,7 +2403,7 @@ test('a pending delete keeps the confirmation locked while a refresh happens', a
   // The Host write finishes: the outcome is reported.
   for (const release of releases) release()
   await flush()
-  assert.match(viewText(page), /Anthropic signed out locally — stored credential cleared/u)
+  assert.match(viewText(page), /Anthropic — local stored credential cleared \(not revoked at the issuer/u)
   assert.doesNotMatch(viewText(page), /Not cleared/u)
   assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'], 'the delete must not be dispatched twice')
 })
@@ -2426,8 +2427,126 @@ test('a delete that returns but leaves the record present is NOT reported as cle
   page.handleInput('\r')
   await flush()
   assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'])
-  assert.match(viewText(page), /Not cleared: the stored record is still present after the clear/u)
-  assert.doesNotMatch(viewText(page), /stored credential cleared/u)
+  assert.match(viewText(page), /Still stored: the stored record is present on the current Host/u)
+  assert.doesNotMatch(viewText(page), /local stored credential cleared/u)
+  assert.doesNotMatch(viewText(page), /Not cleared/u, 'a present record is not a "delete did not run" claim')
+})
+
+test('an UNCONFIRMED record delete never claims failure and only offers a fresh read (F7B)', async () => {
+  const { source, calls } = fakeSource()
+  let present = true
+  source.storedCredentials = async () => ({
+    rows: present
+      ? [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }]
+      : [],
+    recordCleanupUnavailable: false,
+    referenceReadFailures: [],
+  })
+  source.deleteRecord = async (key: string) => {
+    calls.push(`delete:${key}`)
+    // The Host may have committed, but the Client never observed the ACK.
+    const error = new Error('the stored credential record delete outcome is unconfirmed: carrier lost')
+    Object.assign(error, { code: 'RECORD_DELETE_UNCONFIRMED' })
+    throw error
+  }
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, 24)
+  await flush()
+  page.handleInput('\r')
+  await flush()
+  const text = viewText(page)
+  assert.match(text, /Outcome unconfirmed — refresh stored credentials before retrying\./u)
+  assert.doesNotMatch(text, /Not cleared/u, 'an unobserved ACK is never a definite failure')
+  assert.doesNotMatch(text, /Still stored/u, 'an unobserved ACK is never a definite presence')
+  assert.match(text, /Refresh records \[r\]/u)
+  assert.doesNotMatch(text, /Clear credential/u, 'the old confirmation must not be reused')
+  assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'], 'the delete is dispatched exactly once')
+  // The user's explicit read is the ONLY next step: the current Host truth is
+  // now "no record", and only then is the page done (no second delete).
+  present = false
+  page.handleInput('r')
+  await flush()
+  assert.match(viewText(page), /Nothing stored for this target/u)
+  assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'], 'the refresh never re-sends the delete')
+  // An unconfirmed outcome may be left (unlike a pending mutation).
+  page.handleInput('\u001b')
+  await flush()
+  assert.match(viewText(page), /Models & Credentials/u, 'the unconfirmed view is exit-able')
+})
+
+test('a definite pre-dispatch record refusal is reported as Not sent (F7B)', async () => {
+  const { source, calls } = fakeSource()
+  source.storedCredentials = async () => ({
+    rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }],
+    recordCleanupUnavailable: false,
+    referenceReadFailures: [],
+  })
+  source.deleteRecord = async (key: string) => {
+    calls.push(`delete:${key}`)
+    throw new SupersededReadError('the credential write was not dispatched: no current Connection generation')
+  }
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, 24)
+  await flush()
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /Not sent: .*not dispatched/u)
+  assert.doesNotMatch(viewText(page), /Not cleared/u)
+})
+
+test('a definite record input refusal is reported as Failed, not unconfirmed (F7B)', async () => {
+  const { source, calls } = fakeSource()
+  source.storedCredentials = async () => ({
+    rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }],
+    recordCleanupUnavailable: false,
+    referenceReadFailures: [],
+  })
+  source.deleteRecord = async (key: string) => {
+    calls.push(`delete:${key}`)
+    throw new Error(`piTuiCredentialRecords.delete(${key}) was rejected: the wire field key was refused`)
+  }
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, 24)
+  await flush()
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /Failed: .*was rejected/u)
+  assert.doesNotMatch(viewText(page), /Outcome unconfirmed/u)
+})
+
+test('a record delete whose authoritative readback fails is unconfirmed, never done/not-cleared (F7B)', async () => {
+  const { source, calls } = fakeSource()
+  let reads = 0
+  source.deleteRecord = async (key: string) => { calls.push(`delete:${key}`) }
+  source.storedCredentials = async () => {
+    reads += 1
+    // The FIRST read (before the delete) succeeds; the READBACK fails.
+    if (reads === 1) {
+      return {
+        rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }],
+        recordCleanupUnavailable: false,
+        referenceReadFailures: [],
+      }
+    }
+    throw new Error('the Host record list could not be re-read')
+  }
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, 24)
+  await flush()
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /Outcome unconfirmed — refresh stored credentials before retrying\./u)
+  assert.doesNotMatch(viewText(page), /local stored credential cleared/u)
+  assert.doesNotMatch(viewText(page), /Not cleared/u)
+  assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'])
 })
 
 test('the Models list may yield the focus to the Settings category rail', () => {

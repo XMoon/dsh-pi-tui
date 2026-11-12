@@ -17,6 +17,7 @@ import type { RegisterOne, TuiCommandRunner } from '../../commands.ts'
 import {
   resolveLoginDestination,
   resolveLogoutDestination,
+  resolveStaleLogoutDestination,
   type AuthDestination,
 } from '../../app/command/credential-workflow.ts'
 
@@ -72,6 +73,13 @@ export function createAuthCommands(deps: AuthCommandDeps): AuthCommandRegistrars
           return { kind: 'error', text: 'credentials service unavailable' }
         }
         const options = runner.config.providers.listCredentialOptions()
+        // A STALE roster may not decide a clear: a last-known flow target can
+        // belong to another Host generation and would delete a record the user
+        // did not mean. The account and explicit-reference escapes stay; every
+        // other target re-reads the CURRENT Host through the logout list.
+        if (runner.config.authorization.targetsState() === 'stale') {
+          return openAuthWorkspace(resolveStaleLogoutDestination(invocation.rawInput, options))
+        }
         const targets = runner.config.authorization.listTargets()
         return openAuthWorkspace(resolveLogoutDestination(invocation.rawInput, options, targets))
       },
