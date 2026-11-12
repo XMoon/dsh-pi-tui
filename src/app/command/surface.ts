@@ -1298,6 +1298,13 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
             const next = source.connectionGeneration()
             if (Object.is(next, observedRemoteConnectionGeneration)) return
             observedRemoteConnectionGeneration = next
+            // M6-1 F8: the exact-Session policy facts belong to the OLD Host
+            // generation. Revoke them and repaint NOW (the next display
+            // refresh starts the new generation's controlled read) — this
+            // rides the discriminant's ONE existing generation subscription,
+            // never a second source subscription.
+            deps.policy.invalidate()
+            deps.status.refresh()
             // Disconnected / connecting (§6 Must 2): keep the last-good
             // Host claims; NO catalog RPC, no Session retain, no UI clear.
             if (next === undefined) return
