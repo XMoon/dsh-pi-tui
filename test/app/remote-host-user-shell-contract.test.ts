@@ -3,10 +3,16 @@ import test from 'node:test'
 import {
   MAX_HOST_USER_SHELL_MESSAGE_BYTES,
   MAX_HOST_USER_SHELL_SPILL_PATH_BYTES,
+  PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE,
+  PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE_ENDPOINT,
   PI_TUI_HOST_USER_SHELL_RUN,
   parseHostShellCompletionOutcome,
   parseHostUserShellRunOutcome,
 } from '../../src/runtime/remote/pi-tui-host-user-shell-contract.ts'
+import {
+  PI_TUI_CLIENT_CONTRIBUTION,
+  PI_TUI_HOST_CONTRIBUTION,
+} from '../../src/runtime/remote/pi-tui-remote-contribution.ts'
 import { MAX_HOST_USER_SHELL_STREAM_BYTES, HostUserShellOutcomeUnknownError } from '../../src/runtime/host-user-shell-port.ts'
 
 const settled = {
@@ -119,6 +125,51 @@ test('completion result parsing enforces item and byte bounds', () => {
   assert.throws(() => parseHostShellCompletionOutcome({ kind: 'ok', candidates: Array.from({ length: 51 }, () => 'git') }), /50/)
   assert.throws(() => parseHostShellCompletionOutcome({ kind: 'ok', candidates: ['x'.repeat(4097)] }), /4 KiB/)
   assert.throws(() => parseHostShellCompletionOutcome({ kind: 'ok', candidates: ['git'], extra: true }), /unexpected/)
+})
+
+test('the sessionless completeWorkspace descriptor is one strict unary invocation', () => {
+  assert.equal(PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE.id, PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE_ENDPOINT)
+  assert.equal(PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE.id, '@xmoon76/dsh-pi-tui#piTuiHostUserShell/completeWorkspace')
+  assert.equal(PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE.namespace, 'piTuiHostUserShell')
+  assert.equal(PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE.method, 'completeWorkspace')
+  assert.deepEqual(PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE.cancellation, { parameter: 'signal' })
+  assert.deepEqual(
+    PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE.parameters.map(parameter => parameter.name),
+    ['workspaceId', 'request'],
+    'only the Host-issued workspace id and the shared completion request cross the wire',
+  )
+})
+
+test('the workspace id codec refuses an empty id before it reaches the Host business layer', () => {
+  const codec = PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE.parameters[0]!.codec
+  assert.equal(codec.mode, 'strict')
+  if (codec.mode !== 'strict') throw new Error('expected a strict workspace id codec')
+  const parser = codec.create()
+  assert.equal(parser.parse('workspace-1'), 'workspace-1')
+  assert.throws(() => parser.parse(''), /non-empty Workspace id/)
+  assert.throws(() => parser.parse(7), /must be a string/)
+})
+
+test('the completeWorkspace result codec is the same strict completion decoder', () => {
+  const codec = PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE.result
+  assert.equal(codec.mode, 'strict')
+  if (codec.mode !== 'strict') throw new Error('expected a strict completion result codec')
+  assert.deepEqual(codec.decode?.({ kind: 'unavailable', reason: 'no registry' }), {
+    kind: 'unavailable', reason: 'no registry',
+  })
+  assert.throws(() => codec.decode?.({ kind: 'ok' }), /array|missing|result/u)
+})
+
+test('both contributions register every private endpoint exactly once and in parity', () => {
+  const hostIds = PI_TUI_HOST_CONTRIBUTION.invocations.map(descriptor => descriptor.id)
+  const clientIds = PI_TUI_CLIENT_CONTRIBUTION.descriptors.map(descriptor => descriptor.id)
+  assert.equal(new Set(hostIds).size, hostIds.length, 'the Host contribution has no duplicate endpoint')
+  assert.equal(new Set(clientIds).size, clientIds.length, 'the Client contribution has no duplicate endpoint')
+  assert.deepEqual(clientIds, hostIds, 'the Host registers exactly the descriptors the Client mounts')
+  for (const id of hostIds) {
+    assert.ok(id.startsWith('@xmoon76/dsh-pi-tui#'), `${id} is owned by this package`)
+  }
+  assert.equal(hostIds.filter(id => id === PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE_ENDPOINT).length, 1)
 })
 
 test('a lost started outcome has a distinct unknown-outcome error', () => {

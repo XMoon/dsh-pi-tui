@@ -1120,6 +1120,7 @@ async function startSurfaceLocalClient(
             readonly maxFrames?: unknown
             readonly path?: unknown
             readonly abort?: unknown
+            readonly namespace?: unknown
           }
           nonce = request.nonce
           const backend = currentRevision?.application?.selected.backend
@@ -1289,6 +1290,48 @@ async function startSurfaceLocalClient(
               request.answers as Parameters<typeof backend.interaction.questions.answerContinued>[2],
             )
             emit({ phase: 'continued-answer', sessionId: request.sessionId, callId: request.callId, outcome })
+            return
+          }
+          if (request.op === 'settings-stale-cas') {
+            // L5 official Settings CAS proof through the REAL generated Client
+            // `settings` namespace (the SAME face the ConfigPort mirror uses).
+            // This is the ONLY deterministic stale-revision witness: the TUI /
+            // ConfigPort always fresh-reads before dispatch, so a single Client
+            // can never SEND a stale revision. Two literal mutations against the
+            // one revision `describe()` returned prove the Host accepted the
+            // first and rejected the second with the official conflict.
+            const remote = domains.remote as unknown as {
+              readonly settings?: {
+                describe(): Promise<{
+                  readonly ok: boolean
+                  readonly value?: { readonly namespaces?: readonly { readonly ns?: unknown; readonly revision?: unknown }[] }
+                }>
+                mutate(
+                  ns: string,
+                  ops: readonly { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }[],
+                  expectedRevision: number | undefined,
+                ): Promise<{ readonly ok: boolean; readonly error?: { readonly code?: unknown; readonly message?: unknown } }>
+              }
+            }
+            const settings = remote.settings
+            if (settings === undefined) throw new Error('settings-stale-cas probe: the official settings namespace is not mounted')
+            const ns = typeof request.namespace === 'string' ? request.namespace : 'web-deepseek-api'
+            const described = await settings.describe()
+            if (described.ok !== true) throw new Error('settings-stale-cas probe: settings.describe failed')
+            const view = described.value?.namespaces?.find(entry => entry.ns === ns)
+            if (typeof view?.revision !== 'number') throw new Error(`settings-stale-cas probe: no revision for ${ns}`)
+            const expectedRevision = view.revision
+            const first = await settings.mutate(ns, [{ op: 'set', path: ['count'], value: 11 }], expectedRevision)
+            const second = await settings.mutate(ns, [{ op: 'set', path: ['count'], value: 12 }], expectedRevision)
+            emit({
+              phase: 'settings-stale-cas',
+              namespace: ns,
+              expectedRevision,
+              firstOk: first.ok === true,
+              secondOk: second.ok === true,
+              secondCode: second.ok === true ? undefined : String(second.error?.code ?? ''),
+              secondMessage: second.ok === true ? undefined : String(second.error?.message ?? ''),
+            })
             return
           }
           throw new Error(`read-authority probe: unsupported op ${JSON.stringify(request.op)}`)

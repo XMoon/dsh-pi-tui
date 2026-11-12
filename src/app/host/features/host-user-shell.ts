@@ -26,6 +26,7 @@ import {
 } from '../../../runtime/remote/pi-tui-host-user-shell-contract.ts'
 import type { HostUserShellPolicy } from '../../../runtime/host-user-shell-port.ts'
 import type { HostShellPathCompletionBridge } from '../../../runtime/remote/pi-tui-host-user-shell-host-bridge.ts'
+import type { WorkspaceRegistryPort } from '../../../runtime/remote/pi-tui-file-reference-host-bridge.ts'
 
 export type {
   HostSessionLike,
@@ -62,6 +63,9 @@ export interface PiTuiHostUserShellHostDeps {
   readonly subprocess: () => SubprocessServiceLike | undefined
   readonly pathCompletion: HostShellPathCompletionBridge
   readonly shellPolicy: () => HostUserShellPolicy
+  /** The official Host `workspaceRegistry` (resolved PER CALL): the sessionless
+   *  Workspace completion's ONLY id/path authority. */
+  readonly workspaces: () => WorkspaceRegistryPort | undefined
 }
 
 interface HelperLines {
@@ -359,40 +363,88 @@ export class PiTuiHostUserShellService extends TypertRemoteService {
     const cwd = this.effectiveCwd(exact.session)
     if (cwd === undefined) return unavailable('the Host Session working directory is unavailable')
     const operationSignal = AbortSignal.any([signal, invocation.signal, invocation.peer.signal, this.lifecycle.signal])
-    let result: HostShellCompletionOutcome
-    if (request.kind === 'paths') {
-      result = await this.deps.pathCompletion.complete(cwd, request.prefix, operationSignal)
-    } else {
-      const subprocess = this.deps.subprocess()
-      if (subprocess === undefined) return unavailable('the Host subprocess provider is unavailable')
-      const argv = request.kind === 'commands'
-        ? ['bash', '-c', 'compgen -A command -- "$1"', 'dsh-pi-tui-compgen', request.prefix]
-        : request.kind === 'variables'
-          ? ['bash', '-c', 'compgen -A variable -- "$1"', 'dsh-pi-tui-compgen', request.prefix]
-          : ['git', '--list-cmds=main']
-      const helper = await runCompletionHelper(subprocess, argv, cwd, operationSignal)
-      if (helper.kind === 'failed') {
-        if (request.kind === 'subcommands' && (helper.failure === 'exit' || helper.failure === 'spawn')) {
-          result = { kind: 'ok', candidates: [...GIT_SUBCOMMAND_FALLBACK] }
-        } else {
-          return unavailable(helper.reason)
-        }
-      } else if (request.kind === 'subcommands' && helper.candidates.length === 0) {
-        result = { kind: 'ok', candidates: [...GIT_SUBCOMMAND_FALLBACK] }
-      } else {
-        result = {
-          kind: 'ok',
-          candidates: request.kind === 'subcommands'
-            ? helper.candidates.flatMap(line => line.split(/\s+/u)).filter(Boolean)
-            : helper.candidates,
-        }
-      }
-    }
+    const result = await this.completeInHostCwd(cwd, request, operationSignal)
     operationSignal.throwIfAborted()
     if (!this.isSameIdentity(sessionId, exact) || this.effectiveCwd(exact.session) !== cwd) {
       return unavailable('the Host Session changed during completion')
     }
-    return parseHostShellCompletionOutcome(result)
+    return result
+  }
+
+  /**
+   * Sessionless completion for ONE selected Host Workspace. The Host-issued
+   * `workspaceId` is a TARGET identity, never a permission token: the call
+   * still requires the authenticated Owner peer, and the official
+   * `workspaceRegistry` is the only id/path authority, resolved BEFORE the
+   * completion and re-read AFTER it, so a replaced/removed Workspace (or an
+   * unreadable path) retires the answer. No Session, no Agent, no Session
+   * writer and no user command execution participates — only the read-only
+   * completion helpers in the Workspace's Host directory.
+   */
+  async completeWorkspace(
+    workspaceId: string,
+    request: HostShellCompletionRequest,
+    signal: AbortSignal,
+  ): Promise<HostShellCompletionOutcome> {
+    signal.throwIfAborted()
+    const invocation = this.ctx.invocation
+    if (!this.isOwnerInvocation(invocation)) return unavailable('Host shell completion is restricted to the authenticated Owner peer')
+    if (this.disposed || this.lifecycle.signal.aborted) return unavailable('Host shell service is stopping')
+    const registry = this.deps.workspaces()
+    if (registry === undefined) return unavailable('the Host Workspace registry is unavailable')
+    if (workspaceId === '') return unavailable('the requested Host Workspace id is empty')
+    const workspace = registry.get(workspaceId)
+    if (workspace === undefined) return unavailable(`Workspace "${workspaceId}" is not registered on the Host`)
+    if (!isAbsolute(workspace.path) || !isHostDirectory(workspace.path)) return unavailable('the Host Workspace directory is unreadable')
+    const operationSignal = AbortSignal.any([signal, invocation.signal, invocation.peer.signal, this.lifecycle.signal])
+    const result = await this.completeInHostCwd(workspace.path, request, operationSignal)
+    operationSignal.throwIfAborted()
+    const current = registry.get(workspaceId)
+    if (current === undefined || current.path !== workspace.path
+      || !isAbsolute(current.path) || !isHostDirectory(current.path)) {
+      return unavailable('the Host Workspace changed during completion')
+    }
+    return result
+  }
+
+  /**
+   * The ONE shared completion body for one confirmed Host directory (the live
+   * Session's effective cwd or the selected Workspace path): the official
+   * subprocess provider answers commands/variables/git and the Host path
+   * bridge answers paths. It owns no identity policy — every caller applies
+   * its own admission fence around it.
+   */
+  private async completeInHostCwd(
+    cwd: string,
+    request: HostShellCompletionRequest,
+    operationSignal: AbortSignal,
+  ): Promise<HostShellCompletionOutcome> {
+    if (request.kind === 'paths') {
+      return this.deps.pathCompletion.complete(cwd, request.prefix, operationSignal)
+    }
+    const subprocess = this.deps.subprocess()
+    if (subprocess === undefined) return unavailable('the Host subprocess provider is unavailable')
+    const argv = request.kind === 'commands'
+      ? ['bash', '-c', 'compgen -A command -- "$1"', 'dsh-pi-tui-compgen', request.prefix]
+      : request.kind === 'variables'
+        ? ['bash', '-c', 'compgen -A variable -- "$1"', 'dsh-pi-tui-compgen', request.prefix]
+        : ['git', '--list-cmds=main']
+    const helper = await runCompletionHelper(subprocess, argv, cwd, operationSignal)
+    if (helper.kind === 'failed') {
+      if (request.kind === 'subcommands' && (helper.failure === 'exit' || helper.failure === 'spawn')) {
+        return parseHostShellCompletionOutcome({ kind: 'ok', candidates: [...GIT_SUBCOMMAND_FALLBACK] })
+      }
+      return unavailable(helper.reason)
+    }
+    if (request.kind === 'subcommands' && helper.candidates.length === 0) {
+      return parseHostShellCompletionOutcome({ kind: 'ok', candidates: [...GIT_SUBCOMMAND_FALLBACK] })
+    }
+    return parseHostShellCompletionOutcome({
+      kind: 'ok',
+      candidates: request.kind === 'subcommands'
+        ? helper.candidates.flatMap(line => line.split(/\s+/u)).filter(Boolean)
+        : helper.candidates,
+    })
   }
 
   private isOwnerInvocation(invocation: RemoteInvocation | undefined): invocation is RemoteInvocation {

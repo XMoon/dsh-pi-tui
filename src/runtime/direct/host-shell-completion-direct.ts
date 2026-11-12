@@ -1,4 +1,4 @@
-import type { HostShellCompletionOutcome, HostShellCompletionPort, HostShellCompletionRequest } from '../host-shell-completion-port.ts'
+import type { HostShellCompletionOutcome, HostShellCompletionPort, HostShellCompletionRequest, HostShellCompletionTarget } from '../host-shell-completion-port.ts'
 
 interface DirectShellAgentLike {
   readonly session: { readonly id: string }
@@ -15,7 +15,13 @@ export type DirectShellCandidateReader = (
   signal: AbortSignal,
 ) => Promise<readonly string[]>
 
-/** The Direct adapter uses the existing local compgen implementation supplied by the composition root. */
+/**
+ * The Direct adapter maps the SAME completion contract onto the in-process
+ * Host environment: a `session` target keeps the exact-Agent currentness, a
+ * `workspace`/`unselected` target keeps the existing sessionless in-process
+ * compatibility cwd. It is a Direct mapping only — no Client cwd or PATH ever
+ * becomes a Remote answer.
+ */
 export class DirectHostShellCompletionPort implements HostShellCompletionPort {
   readonly pathAuthority = 'client' as const
   private readonly cwdOf: () => string
@@ -33,7 +39,7 @@ export class DirectHostShellCompletionPort implements HostShellCompletionPort {
   }
 
   async complete(input: {
-    readonly sessionId?: string
+    readonly target: HostShellCompletionTarget
     readonly request: HostShellCompletionRequest
     readonly signal: AbortSignal
   }): Promise<HostShellCompletionOutcome> {
@@ -41,9 +47,11 @@ export class DirectHostShellCompletionPort implements HostShellCompletionPort {
     if (input.request.kind === 'paths') {
       return { kind: 'unavailable', reason: 'Direct shell paths use the existing path provider' }
     }
-    const agent = input.sessionId === undefined ? undefined : this.agentFor(input.sessionId)
-    if (input.sessionId !== undefined && agent === undefined) {
-      return { kind: 'unavailable', reason: 'the requested Session has no live Direct Agent' }
+    if (input.target.kind === 'session') {
+      const agent = this.agentFor(input.target.sessionId)
+      if (agent === undefined) {
+        return { kind: 'unavailable', reason: 'the requested Session has no live Direct Agent' }
+      }
     }
     const cwd = this.cwdOf()
     const request: DirectShellCandidateRequest = input.request.kind === 'commands'

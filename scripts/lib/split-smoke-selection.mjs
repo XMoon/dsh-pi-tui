@@ -41,6 +41,7 @@ import { runSessionlessHostFileF5B } from '../smoke/split-process/sessionless-ho
 import { runSharedSessionInteractions } from '../smoke/split-process/shared-session-interactions.mjs'
 import { runHostRuntimeDisabled } from '../smoke/split-process/host-runtime-disabled.mjs'
 import { runHostUserShellF1 } from '../smoke/split-process/host-user-shell-f1.mjs'
+import { runSessionlessShellCompletionG14 } from '../smoke/split-process/sessionless-shell-completion-g14.mjs'
 import { runGenericFileUploadF4 } from '../smoke/split-process/generic-file-upload-f4.mjs'
 import { runHostCommandFileReceipt } from '../smoke/split-process/host-command-file-receipt.mjs'
 import { runRuntimeArtifactRecovery } from '../smoke/split-process/runtime-artifact-recovery.mjs'
@@ -53,6 +54,7 @@ import { runF7AProviderAuthorization } from '../smoke/split-process/provider-aut
 import { runF7BCredentialRecords } from '../smoke/split-process/provider-credential-records-f7b.mjs'
 import { runF8SessionPolicy } from '../smoke/split-process/session-policy-f8.mjs'
 import { runHerdrH1 } from '../smoke/split-process/herdr-h1.mjs'
+import { runWebProviderSettingsF3 } from '../smoke/split-process/web-provider-settings-f3.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -102,6 +104,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'surface.host-user-shell-f1',
     title: 'real installed Host Shell and Host completion use Host environment, bound output and exact Session writes',
     run: runHostUserShellF1,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.sessionless-shell-completion-g14',
+    title: 'two real sessionless TUIs complete the Shell from their own Host Workspace environment and never from the Client or a Session',
+    run: runSessionlessShellCompletionG14,
   }),
   Object.freeze({
     suite: 'surface',
@@ -222,6 +230,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'session-policy.f8',
     title: 'two real Split Clients write and re-read one exact Session approval policy through the private service, and a fresh Host replays the durable facts',
     run: runF8SessionPolicy,
+  }),
+  Object.freeze({
+    suite: 'web-settings',
+    id: 'web-settings.official-provider-f3',
+    title: 'two real sessionless TUIs edit, cross-read and race the official Web Search / Fetch Settings CAS on ONE Host',
+    run: runWebProviderSettingsF3,
   }),
   Object.freeze({
     suite: 'account',

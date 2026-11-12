@@ -31,6 +31,8 @@ import {
 export const PI_TUI_HOST_USER_SHELL_NAMESPACE = 'piTuiHostUserShell'
 export const PI_TUI_HOST_USER_SHELL_RUN_ENDPOINT = '@xmoon76/dsh-pi-tui#piTuiHostUserShell/run'
 export const PI_TUI_HOST_USER_SHELL_COMPLETE_ENDPOINT = '@xmoon76/dsh-pi-tui#piTuiHostUserShell/complete'
+export const PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE_ENDPOINT =
+  '@xmoon76/dsh-pi-tui#piTuiHostUserShell/completeWorkspace'
 export const MAX_HOST_SHELL_COMPLETION_ITEMS = 50
 export const MAX_HOST_SHELL_COMPLETION_ITEM_BYTES = 4 * 1024
 export const MAX_HOST_SHELL_COMPLETION_RESULT_BYTES = 64 * 1024
@@ -64,6 +66,25 @@ export interface HostUserShellRunArguments {
 export type HostUserShellCallResult = RemoteResult<HostUserShellRunOutcome>
 export type HostShellCompletionCallResult = RemoteResult<HostShellCompletionOutcome>
 export type PiTuiHostUserShellNamespace = TypertRemoteNamespace<'piTuiHostUserShell'>
+
+/**
+ * The strict codec for a Host-issued Workspace identity: a NON-EMPTY string.
+ * An empty `workspaceId` names no Host resource at all, so the wire boundary
+ * refuses it instead of letting a fabricated id reach the Host business layer.
+ */
+function workspaceIdCodec(typeSymbol: string): TypertCodec {
+  return {
+    mode: 'strict',
+    typeSymbol,
+    create: () => ({
+      parse: (value: unknown): string => {
+        if (typeof value !== 'string') throw new TypeError(`${typeSymbol}: the wire value must be a string`)
+        if (value === '') throw new TypeError(`${typeSymbol}: the wire value must be a non-empty Workspace id`)
+        return value
+      },
+    }),
+  }
+}
 
 const signalNames = new Set(Object.keys(osConstants.signals))
 
@@ -322,6 +343,25 @@ export const PI_TUI_HOST_USER_SHELL_COMPLETE: InvocationDescriptor = {
   result: completionResultCodec(),
 }
 
+/**
+ * The ONE sessionless Workspace completion descriptor both contributions
+ * derive from: only the Host-issued `workspaceId` and the same strict
+ * completion request/result codecs as the Session method cross the wire.
+ */
+export const PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE: InvocationDescriptor = {
+  id: PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE_ENDPOINT,
+  service: PI_TUI_HOST_USER_SHELL_NAMESPACE,
+  namespace: PI_TUI_HOST_USER_SHELL_NAMESPACE,
+  method: 'completeWorkspace',
+  invocation: { kind: 'direct' },
+  parameters: [
+    { name: 'workspaceId', wire: 'workspaceId', source: 'json', codec: workspaceIdCodec('@xmoon76/dsh-pi-tui#piTuiHostUserShell/completeWorkspace:workspaceId') },
+    { name: 'request', wire: 'request', source: 'json', codec: completionRequestCodec() },
+  ],
+  cancellation: { parameter: 'signal' },
+  result: completionResultCodec(),
+}
+
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteMap {
     'piTuiHostUserShell/run': (
@@ -333,6 +373,11 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     ) => Promise<HostUserShellCallResult>
     'piTuiHostUserShell/complete': (
       sessionId: string,
+      request: HostShellCompletionRequest,
+      signal?: AbortSignal,
+    ) => Promise<HostShellCompletionCallResult>
+    'piTuiHostUserShell/completeWorkspace': (
+      workspaceId: string,
       request: HostShellCompletionRequest,
       signal?: AbortSignal,
     ) => Promise<HostShellCompletionCallResult>
@@ -349,6 +394,11 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
       ) => Promise<HostUserShellCallResult>
       complete: (
         sessionId: string,
+        request: HostShellCompletionRequest,
+        signal?: AbortSignal,
+      ) => Promise<HostShellCompletionCallResult>
+      completeWorkspace: (
+        workspaceId: string,
         request: HostShellCompletionRequest,
         signal?: AbortSignal,
       ) => Promise<HostShellCompletionCallResult>

@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
@@ -148,6 +151,7 @@ function hostDeps(overrides: Partial<PiTuiHostUserShellHostDeps> = {}): {
       subprocess: () => undefined,
       pathCompletion: { complete: async () => ({ kind: 'ok', candidates: [] }) },
       shellPolicy: () => 'bypass',
+      workspaces: () => undefined,
       ...overrides,
     },
   }
@@ -875,6 +879,197 @@ test('Remote completion answers from the exact live Host Session workspace', asy
       kind: 'ok', candidates: ['host:src/de'],
     })
     assert.equal(calls, 1)
+  } finally {
+    await ctx.fiber.dispose()
+  }
+})
+
+// ── G14 sessionless Workspace completion (official workspaceRegistry) ───────
+
+/** A registry whose `get` is the official id/path authority for one Host. */
+function fakeWorkspaceRegistry(pathOf: (id: string) => string | undefined) {
+  const lookups: string[] = []
+  return {
+    lookups,
+    registry: {
+      get(id: string) {
+        lookups.push(id)
+        const path = pathOf(id)
+        return path === undefined ? undefined : { path }
+      },
+    },
+  }
+}
+
+test('Workspace completion answers from the official registry path, not a Session or the Client', async () => {
+  const signal = new AbortController().signal
+  const { Readable } = await import('node:stream')
+  const spawns: SubprocessSpawnSpec[] = []
+  // A registered path DISTINCT from process.cwd() (and from the Session working
+  // directory): a bug that used either would resolve the wrong directory.
+  const workspacePath = mkdtempSync(join(tmpdir(), 'g14-registry-'))
+  const { lookups, registry } = fakeWorkspaceRegistry(() => workspacePath)
+  const { deps } = hostDeps({
+    agentFor: () => { throw new Error('sessionless completion must not resolve a Host Agent') },
+    sessionFor: () => { throw new Error('sessionless completion must not resolve a Host Session') },
+    workingDirectory: () => { throw new Error('sessionless completion must not read a Session working directory') },
+    workspaces: () => registry,
+    subprocess: () => ({ spawn: spec => {
+      spawns.push(spec)
+      return {
+        stdin: undefined,
+        control: undefined,
+        collected: {},
+        stdout: Readable.from([Buffer.from('git\ncheckout\n')]),
+        stderr: Readable.from([]),
+        done: Promise.resolve({ exitCode: 0, signal: null }),
+        terminate: () => {},
+        waitForExit: async () => true,
+      }
+    } }),
+  })
+  const { service, ctx } = await mount(deps, ownerInvocation(signal))
+  try {
+    assert.deepEqual(await service.completeWorkspace('workspace-a', { kind: 'commands', prefix: 'gi' }, signal), {
+      kind: 'ok', candidates: ['git', 'checkout'],
+    })
+    assert.deepEqual(lookups, ['workspace-a', 'workspace-a'], 'the registry is the authority BEFORE and AFTER the completion')
+    assert.equal(spawns.length, 1, 'only the read-only completion helper spawns')
+    assert.deepEqual(spawns[0]!.argv.slice(0, 3), ['bash', '-c', 'compgen -A command -- "$1"'])
+    assert.equal(spawns[0]!.cwd, workspacePath, 'the helper queries the REGISTERED Workspace path')
+    assert.notEqual(spawns[0]!.cwd, process.cwd(), 'the path is not the process cwd (a cwd fallback would be visible)')
+  } finally {
+    await ctx.fiber.dispose()
+    rmSync(workspacePath, { recursive: true, force: true })
+  }
+})
+
+test('Workspace path completion uses the same Host path bridge under the Workspace path', async () => {
+  const signal = new AbortController().signal
+  const seen: string[] = []
+  const workspacePath = mkdtempSync(join(tmpdir(), 'g14-registry-'))
+  const { registry } = fakeWorkspaceRegistry(() => workspacePath)
+  const { deps } = hostDeps({
+    workspaces: () => registry,
+    pathCompletion: { complete: async (cwd, prefix) => { seen.push(`${cwd}|${prefix}`); return { kind: 'ok', candidates: ['src/'] } } },
+  })
+  const { service, ctx } = await mount(deps, ownerInvocation(signal))
+  try {
+    assert.deepEqual(await service.completeWorkspace('workspace-a', { kind: 'paths', prefix: 'sr' }, signal), {
+      kind: 'ok', candidates: ['src/'],
+    })
+    assert.deepEqual(seen, [`${workspacePath}|sr`])
+  } finally {
+    await ctx.fiber.dispose()
+    rmSync(workspacePath, { recursive: true, force: true })
+  }
+})
+
+test('an unregistered, empty or unreadable Workspace is a definite unavailable fact with no helper run', async () => {
+  const signal = new AbortController().signal
+  const spawns: SubprocessSpawnSpec[] = []
+  const { registry } = fakeWorkspaceRegistry(id => id === 'readable' ? process.cwd()
+    : id === 'unreadable' ? '/definitely/not/a/host/directory/m6-g14'
+      : id === 'relative' ? 'relative/g14-workspace'
+        : undefined)
+  const { deps } = hostDeps({
+    workspaces: () => registry,
+    subprocess: () => ({ spawn: spec => {
+      spawns.push(spec)
+      throw new Error('an unavailable Workspace must never start a helper')
+    } }),
+  })
+  const { service, ctx } = await mount(deps, ownerInvocation(signal))
+  try {
+    for (const workspaceId of ['missing', '', 'unreadable', 'relative']) {
+      const outcome = await service.completeWorkspace(workspaceId, { kind: 'commands', prefix: 'gi' }, signal)
+      assert.equal(outcome.kind, 'unavailable', `Workspace ${JSON.stringify(workspaceId)} must be unavailable: ${JSON.stringify(outcome)}`)
+    }
+    assert.equal(spawns.length, 0)
+  } finally {
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a Host without the Workspace registry answers unavailable instead of guessing a path', async () => {
+  const signal = new AbortController().signal
+  const { deps } = hostDeps({ workspaces: () => undefined })
+  const { service, ctx } = await mount(deps, ownerInvocation(signal))
+  try {
+    const outcome = await service.completeWorkspace('workspace-a', { kind: 'commands', prefix: 'gi' }, signal)
+    assert.equal(outcome.kind, 'unavailable')
+    if (outcome.kind !== 'unavailable') throw new Error('expected an unavailable Workspace registry')
+    assert.match(outcome.reason, /registry/u)
+  } finally {
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a non-owner invocation never consults the Workspace registry', async () => {
+  const signal = new AbortController().signal
+  const { lookups, registry } = fakeWorkspaceRegistry(() => process.cwd())
+  const { deps } = hostDeps({ workspaces: () => registry })
+  const { service, ctx } = await mount(deps, {
+    peer: { id: 'peer-viewer', principal: { kind: 'viewer' }, signal },
+    signal,
+  })
+  try {
+    const outcome = await service.completeWorkspace('workspace-a', { kind: 'commands', prefix: 'gi' }, signal)
+    assert.equal(outcome.kind, 'unavailable')
+    assert.deepEqual(lookups, [], 'a non-owner call fails closed before the Workspace authority')
+  } finally {
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a Workspace replaced during the completion retires the old answer', async () => {
+  const signal = new AbortController().signal
+  let path: string | undefined = process.cwd()
+  const { registry } = fakeWorkspaceRegistry(() => path)
+  const { deps } = hostDeps({
+    workspaces: () => registry,
+    pathCompletion: {
+      complete: async () => {
+        path = join(tmpdir(), 'm6-g14-replaced-workspace')
+        return { kind: 'ok', candidates: ['old-answer'] }
+      },
+    },
+  })
+  const { service, ctx } = await mount(deps, ownerInvocation(signal))
+  try {
+    const outcome = await service.completeWorkspace('workspace-a', { kind: 'paths', prefix: 'ol' }, signal)
+    assert.equal(outcome.kind, 'unavailable')
+    if (outcome.kind !== 'unavailable') throw new Error('expected the replaced Workspace to be unavailable')
+    assert.match(outcome.reason, /changed during completion/u)
+  } finally {
+    await ctx.fiber.dispose()
+  }
+})
+
+test('aborting a Workspace completion rejects and drops the settled helper answer', async () => {
+  const { Readable } = await import('node:stream')
+  const controller = new AbortController()
+  const registry = fakeWorkspaceRegistry(() => process.cwd())
+  const { deps } = hostDeps({
+    workspaces: () => registry.registry,
+    subprocess: () => ({ spawn: () => ({
+      stdin: undefined,
+      control: undefined,
+      collected: {},
+      stdout: Readable.from([Buffer.from('git\n')]),
+      stderr: Readable.from([]),
+      done: Promise.resolve({ exitCode: 0, signal: null }),
+      terminate: () => {},
+      waitForExit: async () => true,
+    }) }),
+  })
+  const { service, ctx } = await mount(deps, ownerInvocation(controller.signal))
+  try {
+    controller.abort()
+    await assert.rejects(
+      () => service.completeWorkspace('workspace-a', { kind: 'commands', prefix: 'gi' }, controller.signal),
+      (error: unknown) => error instanceof Error && error.name === 'AbortError',
+    )
   } finally {
     await ctx.fiber.dispose()
   }
