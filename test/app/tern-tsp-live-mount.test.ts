@@ -2994,6 +2994,370 @@ test('Focus root and nested Work toggles keep one semantic owner and reset only 
   }
 })
 
+/** Two completed Focus turns with ordinary process, a semantic Context Cluster,
+ *  a settled human-interaction Tool and a PTC parent/child. */
+function routeFocusResetTurns(harness: Harness): void {
+  harness.route(ev('turn/start', { turn: 1 }, 0))
+  harness.route(userMessage(1, 'focus reset turn one', 'focus-reset-user-1'))
+  harness.route(ev('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: MessageId('focus-reset-think-1'), role: 'assistant',
+      content: [{ type: 'reasoning', text: 'turn1 reasoning line' }],
+      source: { kind: 'model', provider: 'p', model: 'm' }, stream: [],
+    },
+  }, 2))
+  harness.route(ev('tool/call', { turn: 1, step: 0, callId: ToolCallId('focus-reset-read-1'), name: 'read', arguments: '{}' }, 3))
+  harness.route(ev('tool/result', {
+    turn: 1, step: 0,
+    message: {
+      id: MessageId('focus-reset-read-result-1'), role: 'tool', toolCallId: ToolCallId('focus-reset-read-1'),
+      content: [{ type: 'text', text: 'turn1 read body' }], source: { kind: 'tool', callId: 'focus-reset-read-1' },
+    },
+  }, 4))
+  harness.route(contextEvent(5, 'focus-reset-context-a', 'turn1 context A body', 'turn1-context-a'))
+  harness.route(contextEvent(6, 'focus-reset-context-b', 'turn1 context B body', 'turn1-context-b'))
+  harness.route(ev('tool/call', {
+    turn: 1, step: 1, callId: ToolCallId('focus-reset-question-1'), name: 'ask_user_question',
+    arguments: JSON.stringify({ questions: [{ id: 'q1', question: 'Continue?', options: ['Yes'] }] }),
+  }, 7))
+  harness.route(ev('tool/result', {
+    turn: 1, step: 1,
+    message: {
+      id: MessageId('focus-reset-question-result'), role: 'tool', toolCallId: ToolCallId('focus-reset-question-1'),
+      content: [{ type: 'text', text: '{"answers":[]}' }], source: { kind: 'tool', callId: 'focus-reset-question-1' },
+    },
+  }, 8))
+  harness.route(ev('tool/call', { turn: 1, step: 2, callId: ToolCallId('focus-reset-ptc-1'), name: 'run_code', arguments: '{}' }, 9))
+  harness.route(ev('tool/ptc-dispatch-start', {
+    rootCallId: ToolCallId('focus-reset-ptc-1'), parentCallId: ToolCallId('focus-reset-ptc-1'),
+    subCallId: 'focus-reset-child-1', name: 'read', arguments: { file_path: 'turn1-child.ts' },
+  }, 10))
+  harness.route(ev('tool/result', {
+    turn: 1, step: 2,
+    message: {
+      id: MessageId('focus-reset-ptc-result'), role: 'tool', toolCallId: ToolCallId('focus-reset-ptc-1'),
+      content: [{ type: 'text', text: 'turn1 program output' }], source: { kind: 'tool', callId: 'focus-reset-ptc-1' },
+    },
+  }, 11))
+  harness.route(ev('tool/ptc-dispatch', {
+    rootCallId: ToolCallId('focus-reset-ptc-1'), parentCallId: ToolCallId('focus-reset-ptc-1'),
+    subCallId: 'focus-reset-child-1', name: 'read', arguments: { file_path: 'turn1-child.ts' },
+    isError: false, content: [{ type: 'text', text: 'turn1 child read body' }],
+  }, 12))
+  harness.route(ev('assistant/message', {
+    turn: 1, step: 3,
+    message: {
+      id: MessageId('focus-reset-final-1'), role: 'assistant', content: [{ type: 'text', text: 'turn1 final answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' }, stream: [],
+    },
+  }, 13))
+  harness.route(ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 14))
+
+  harness.route(ev('turn/start', { turn: 2 }, 20))
+  harness.route(userMessage(21, 'focus reset turn two', 'focus-reset-user-2'))
+  harness.route(ev('assistant/message', {
+    turn: 2, step: 0,
+    message: {
+      id: MessageId('focus-reset-think-2'), role: 'assistant',
+      content: [{ type: 'reasoning', text: 'turn2 reasoning line' }],
+      source: { kind: 'model', provider: 'p', model: 'm' }, stream: [],
+    },
+  }, 22))
+  harness.route(ev('tool/call', { turn: 2, step: 0, callId: ToolCallId('focus-reset-read-2'), name: 'read', arguments: '{}' }, 23))
+  harness.route(ev('tool/result', {
+    turn: 2, step: 0,
+    message: {
+      id: MessageId('focus-reset-read-result-2'), role: 'tool', toolCallId: ToolCallId('focus-reset-read-2'),
+      content: [{ type: 'text', text: 'turn2 read body' }], source: { kind: 'tool', callId: 'focus-reset-read-2' },
+    },
+  }, 24))
+  harness.route(ev('assistant/message', {
+    turn: 2, step: 1,
+    message: {
+      id: MessageId('focus-reset-final-2'), role: 'assistant', content: [{ type: 'text', text: 'turn2 final answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' }, stream: [],
+    },
+  }, 25))
+  harness.route(ev('turn/end', { turn: 2, reason: { kind: 'completed' } }, 26))
+  harness.surface.paintNow()
+}
+
+test('closing and reopening a Compact Work keeps member and PTC-child manual owners', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'compact' } })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'compact disclosure memory', 'compact-memory-user'))
+    harness.route(ev('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('compact-memory-think'), role: 'assistant',
+        content: [{ type: 'reasoning', text: 'compact reasoning line' }],
+        source: { kind: 'model', provider: 'p', model: 'm' }, stream: [],
+      },
+    }, 2))
+    harness.route(toolCall(3, 'compact-memory-read'))
+    harness.route(toolResult(4, 'compact-memory-read', 'compact read body'))
+    harness.route(contextEvent(5, 'compact-memory-context-a', 'compact context A body', 'compact-context-a'))
+    harness.route(contextEvent(6, 'compact-memory-context-b', 'compact context B body', 'compact-context-b'))
+    harness.route(ev('tool/call', { turn: 1, step: 1, callId: ToolCallId('compact-memory-ptc'), name: 'run_code', arguments: '{}' }, 7))
+    harness.route(ev('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId('compact-memory-ptc'), parentCallId: ToolCallId('compact-memory-ptc'),
+      subCallId: 'compact-memory-child', name: 'read', arguments: { file_path: 'compact-child.ts' },
+    }, 8))
+    harness.route(ev('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('compact-memory-ptc-result'), role: 'tool', toolCallId: ToolCallId('compact-memory-ptc'),
+        content: [{ type: 'text', text: 'compact program output' }], source: { kind: 'tool', callId: 'compact-memory-ptc' },
+      },
+    }, 9))
+    harness.route(ev('tool/ptc-dispatch', {
+      rootCallId: ToolCallId('compact-memory-ptc'), parentCallId: ToolCallId('compact-memory-ptc'),
+      subCallId: 'compact-memory-child', name: 'read', arguments: { file_path: 'compact-child.ts' },
+      isError: false, content: [{ type: 'text', text: 'compact child read body' }],
+    }, 10))
+    harness.route(ev('assistant/message', {
+      turn: 1, step: 2,
+      message: {
+        id: MessageId('compact-memory-final'), role: 'assistant', content: [{ type: 'text', text: 'compact final answer' }],
+        source: { kind: 'model', provider: 'p', model: 'm' }, stream: [],
+      },
+    }, 11))
+    harness.route(ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 12))
+    harness.surface.paintNow()
+
+    const section = (id: string): ModeWireNode | undefined => mountedSections(harness).find(node => node.id === id)
+    const toolNode = (id: string): ModeWireNode | undefined => mountedNodes(harness).find(node => node.id === id)
+    const toggle = (id: string, collapsed: boolean): void => {
+      harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id, collapsed, raw: {} })
+    }
+    await awaitWireFact(() => mountedSections(harness).filter(node => String(node.p['key']).includes('work-')).length === 1,
+      'the one Compact Activity section of the canonical Work run')
+    const works = mountedSections(harness).filter(node => String(node.p['key']).includes('work-'))
+    const workA = works[0]!
+    if (workA.p['collapsed'] === true) toggle(workA.id, false)
+    await awaitWireFact(() => section(workA.id)?.p['collapsed'] === false, 'the Compact Work opens')
+
+    const thinking = mountedSections(harness).find(node =>
+      node.id.startsWith(`${workA.id}.`) && node.k === 'section'
+      && /^(?:s\d+-)?msg-\d+$/u.test(String(node.p['key'])) && nodeText(node).includes('compact reasoning line'))!
+    const read = mountedNodes(harness).find(node => node.k === 'tool' && node.p['name'] === 'read'
+      && node.id.startsWith(`${workA.id}.`))!
+    const cluster = mountedSections(harness).find(node =>
+      node.id.startsWith(`${workA.id}.`) && String(node.p['key']).includes('ctx-'))!
+    assert.ok(thinking !== undefined && read !== undefined && cluster !== undefined)
+    toggle(thinking.id, false)
+    toggle(read.id, false)
+    toggle(cluster.id, false)
+    await awaitWireFact(() => mountedSections(harness).some(node =>
+      node.id.startsWith(`${cluster.id}.`) && node.p['head'] === 'compact-context-a · ambient'), 'the Compact member headers')
+    const memberA = mountedSections(harness).find(node =>
+      node.id.startsWith(`${cluster.id}.`) && node.p['head'] === 'compact-context-a · ambient')!
+    const memberB = mountedSections(harness).find(node =>
+      node.id.startsWith(`${cluster.id}.`) && node.p['head'] === 'compact-context-b · ambient')!
+    toggle(memberA.id, false)
+    await awaitWireFact(() => toolNode(`${memberA.id}.body`) !== undefined, 'the Compact member A body')
+
+    const parent = mountedNodes(harness).find(node => node.k === 'tool' && node.p['name'] === 'run_code'
+      && node.id.startsWith(`${workA.id}.`))!
+    assert.ok(parent !== undefined)
+    toggle(parent.id, false)
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'tool'
+      && node.id.startsWith(`${parent.id}.`) && node.id.endsWith('.sub-compact-memory-child')), 'the Compact PTC child')
+    const child = mountedNodes(harness).find(node => node.k === 'tool'
+      && node.id.startsWith(`${parent.id}.`) && node.id.endsWith('.sub-compact-memory-child'))!
+    toggle(child.id, false)
+    await awaitWireFact(() => toolNode(`${child.id}.result`) !== undefined, 'the Compact PTC child body')
+
+    // Close and reopen the enclosing Work: nothing below it loses its own
+    // manual owner (the Tool parent close/reopen preserves its child too).
+    toggle(workA.id, true)
+    await awaitWireFact(() => section(workA.id)?.p['collapsed'] === true, 'Work A closes')
+    toggle(workA.id, false)
+    await awaitWireFact(() => section(workA.id)?.p['collapsed'] === false, 'Work A reopens')
+    assert.equal(section(thinking.id)?.p['collapsed'], false, 'the Thinking preference survives the Work close')
+    assert.equal(toolNode(read.id)?.p['collapsed'], false, 'the Tool preference survives the Work close')
+    assert.equal(section(cluster.id)?.p['collapsed'], false, 'the Cluster preference survives the Work close')
+    assert.equal(section(memberA.id)?.p['collapsed'], false, 'member A survives the Work close')
+    assert.equal(toolNode(`${memberA.id}.body`) !== undefined, true)
+    assert.equal(section(memberB.id)?.p['collapsed'], true, 'the sibling member stays closed')
+
+    toggle(parent.id, true)
+    await awaitWireFact(() => mountedNodes(harness).every(node => !node.id.startsWith(`${parent.id}.`)),
+      'the closed PTC parent retires its child nodes')
+    toggle(parent.id, false)
+    await awaitWireFact(() => toolNode(`${parent.id}.result`) !== undefined, 'the PTC parent reopens')
+    assert.equal(toolNode(child.id)?.p['collapsed'], false,
+      'the PTC child keeps its manual disclosure through the parent close/reopen')
+    assert.equal(toolNode(`${child.id}.result`) !== undefined, true, 'the child body follows its preserved owner')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('an explicit Focus root close resets only the process owners that root projects', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'focus' } })
+  try {
+    harness.surface.bindRendererInput()
+    routeFocusResetTurns(harness)
+    const section = (id: string): ModeWireNode | undefined => mountedSections(harness).find(node => node.id === id)
+    const toolNode = (id: string): ModeWireNode | undefined => mountedNodes(harness).find(node => node.id === id)
+    const toggle = (id: string, collapsed: boolean): void => {
+      harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id, collapsed, raw: {} })
+    }
+    const waitState = async (id: string, collapsed: boolean, label: string): Promise<void> => {
+      await awaitWireFact(() => section(id)?.p['collapsed'] === collapsed, label)
+    }
+    const painted = (): number => harness.tern.frames.filter(frame =>
+      frame.ops.some(op => op[0] !== 'settle' && op[0] !== 'focus')).length
+    const under = (rootId: string): ModeWireNode[] => mountedNodes(harness)
+      .filter(node => node.id.startsWith(`${rootId}.`))
+    const worksUnder = (rootId: string): ModeWireNode[] => mountedSections(harness)
+      .filter(node => node.id.startsWith(`${rootId}.`) && String(node.p['key']).includes('work-'))
+
+    await awaitWireFact(() => mountedSections(harness).filter(node => String(node.p['key']).includes('focus-')).length === 2,
+      'the two canonical Focus roots')
+    const roots = mountedSections(harness).filter(node => String(node.p['key']).includes('focus-'))
+    const root1 = roots[0]!
+    const root2 = roots[1]!
+    toggle(root1.id, false)
+    await waitState(root1.id, false, 'the first Focus root opens')
+    toggle(root2.id, false)
+    await waitState(root2.id, false, 'the second Focus root opens')
+
+    await awaitWireFact(() => worksUnder(root1.id).length === 2, 'the two turn-1 Work spans')
+    const works1 = worksUnder(root1.id)
+    for (const work of works1) {
+      if (work.p['collapsed'] === true) toggle(work.id, false)
+    }
+    await awaitWireFact(() => worksUnder(root1.id).every(node => node.p['collapsed'] === false),
+      'both turn-1 Work spans open')
+
+    const isThinkingSection = (node: ModeWireNode, line: string): boolean =>
+      node.k === 'section' && /^(?:s\d+-)?msg-\d+$/u.test(String(node.p['key'])) && nodeText(node).includes(line)
+    await awaitWireFact(() => mountedSections(harness).some(node => isThinkingSection(node, 'turn1 reasoning line')),
+      'the turn-1 Thinking node')
+    const thinking1 = mountedSections(harness).find(node => isThinkingSection(node, 'turn1 reasoning line'))!
+    const workA = works1.find(work => thinking1.id.startsWith(`${work.id}.`))!
+    assert.ok(workA !== undefined, 'the Thinking node belongs to a turn-1 Work')
+    const workB = works1.find(work => work.id !== workA.id)!
+    assert.ok(workB !== undefined, 'the PTC Work is the other turn-1 Work')
+    toggle(thinking1.id, false)
+    await awaitWireFact(() => toolNode(`${thinking1.id}.body`) !== undefined, 'the turn-1 Thinking body')
+    const read1 = mountedNodes(harness).find(node => node.k === 'tool' && node.p['name'] === 'read'
+      && node.id.startsWith(`${workA.id}.`))!
+    assert.ok(read1 !== undefined)
+    toggle(read1.id, false)
+    await awaitWireFact(() => toolNode(`${read1.id}.result`) !== undefined, 'the turn-1 ordinary Tool body')
+
+    const cluster1 = mountedSections(harness).find(node =>
+      node.id.startsWith(`${workA.id}.`) && String(node.p['key']).includes('ctx-'))!
+    assert.ok(cluster1 !== undefined)
+    toggle(cluster1.id, false)
+    await awaitWireFact(() => mountedSections(harness).some(node =>
+      node.id.startsWith(`${cluster1.id}.`) && node.p['head'] === 'turn1-context-a · ambient'), 'the turn-1 member headers')
+    const memberA = mountedSections(harness).find(node =>
+      node.id.startsWith(`${cluster1.id}.`) && node.p['head'] === 'turn1-context-a · ambient')!
+    const memberB = mountedSections(harness).find(node =>
+      node.id.startsWith(`${cluster1.id}.`) && node.p['head'] === 'turn1-context-b · ambient')!
+    toggle(memberA.id, false)
+    await awaitWireFact(() => toolNode(`${memberA.id}.body`) !== undefined, 'the turn-1 member A body')
+    assert.equal(section(memberB.id)?.p['collapsed'], true, 'member B stays independently closed')
+
+    const question = mountedNodes(harness).find(node => node.k === 'tool' && node.p['name'] === 'ask_user_question')
+    assert.ok(question !== undefined, 'the settled human-interaction Tool is a surfaced row')
+    toggle(question.id, false)
+    await awaitWireFact(() => toolNode(`${question.id}.result`) !== undefined, 'the settled interaction Tool body')
+
+    const ptcParent = mountedNodes(harness).find(node => node.k === 'tool' && node.p['name'] === 'run_code'
+      && node.id.startsWith(`${workB.id}.`))!
+    assert.ok(ptcParent !== undefined)
+    toggle(ptcParent.id, false)
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'tool'
+      && node.id.startsWith(`${ptcParent.id}.`) && node.id.endsWith('.sub-focus-reset-child-1')), 'the PTC child')
+    const ptcChild = mountedNodes(harness).find(node => node.k === 'tool'
+      && node.id.startsWith(`${ptcParent.id}.`) && node.id.endsWith('.sub-focus-reset-child-1'))!
+    toggle(ptcChild.id, false)
+    await awaitWireFact(() => toolNode(`${ptcChild.id}.result`) !== undefined, 'the PTC child body')
+
+    await awaitWireFact(() => worksUnder(root2.id).length === 1, 'the turn-2 Work span')
+    const work2 = worksUnder(root2.id)[0]!
+    if (work2.p['collapsed'] === true) toggle(work2.id, false)
+    await awaitWireFact(() => section(work2.id)?.p['collapsed'] === false, 'the turn-2 Work opens')
+    const thinking2 = mountedSections(harness).find(node =>
+      node.id.startsWith(`${work2.id}.`) && node.k === 'section'
+      && /^(?:s\d+-)?msg-\d+$/u.test(String(node.p['key'])) && nodeText(node).includes('turn2 reasoning line'))!
+    const read2 = mountedNodes(harness).find(node => node.k === 'tool' && node.p['name'] === 'read'
+      && node.id.startsWith(`${work2.id}.`))!
+    toggle(thinking2.id, false)
+    await awaitWireFact(() => toolNode(`${thinking2.id}.body`) !== undefined, 'the turn-2 Thinking body')
+    toggle(read2.id, false)
+    await awaitWireFact(() => toolNode(`${read2.id}.result`) !== undefined, 'the turn-2 Tool body')
+
+    // The user explicitly closes the FIRST root. Its Work/Thinking/ordinary
+    // Tool roots reset; its independent Context, settled interaction and PTC
+    // child owners, plus the whole second Turn, keep their manual state.
+    toggle(root1.id, true)
+    await waitState(root1.id, true, 'the first Focus root closes')
+    await awaitWireFact(() => [thinking1.id, read1.id, cluster1.id, question.id]
+      .every(id => mountedNodes(harness).every(node => node.id !== id)),
+    'the closed root retires its inner nodes')
+    assert.deepEqual(under(root2.id).filter(node => node.id === thinking2.id)
+      .map(node => node.p['collapsed']), [false], 'the other Turn Thinking stays open')
+    assert.deepEqual(under(root2.id).filter(node => node.id === read2.id)
+      .map(node => node.p['collapsed']), [false], 'the other Turn Tool stays open')
+    assert.deepEqual(under(root2.id).filter(node => node.id === work2.id)
+      .map(node => node.p['collapsed']), [false], 'the other Turn Work stays open')
+    const closedFrames = painted()
+    toggle(thinking1.id, true)
+    // Bounded negative observation: a stale inner id must paint no frame.
+    await settle()
+    assert.equal(painted(), closedFrames, 'a stale inner id under the closed root paints no frame')
+
+    toggle(root1.id, false)
+    await waitState(root1.id, false, 'the first Focus root reopens')
+    await awaitWireFact(() => toolNode(question.id) !== undefined, 'the reopened root materializes its persistent rows')
+    await awaitWireFact(() => toolNode(question.id)?.p['collapsed'] === false
+      && toolNode(`${question.id}.result`) !== undefined,
+    'the settled interaction Tool keeps its open preference without its root-hidden Work')
+    assert.deepEqual(worksUnder(root1.id).map(node => node.p['collapsed']), [true, true],
+      'the explicit root close reset both owned Work owners')
+    assert.equal(under(root1.id).some(node => node.id === thinking1.id), false,
+      'a collapsed Work materializes no Thinking node')
+
+    const reopenedWorkA = section(workA.id)!
+    toggle(reopenedWorkA.id, false)
+    await waitState(reopenedWorkA.id, false, 'the first Work reopens')
+    assert.equal(section(thinking1.id)?.p['collapsed'], true, 'the root close reset the owned Thinking owner')
+    assert.equal(toolNode(read1.id)?.p['collapsed'], true, 'the root close reset the owned ordinary Tool root')
+    assert.equal(section(cluster1.id)?.p['collapsed'], false, 'the independent Context Cluster keeps its preference')
+    assert.equal(section(memberA.id)?.p['collapsed'], false, 'the independent Context member keeps its preference')
+    assert.equal(toolNode(`${memberA.id}.body`) !== undefined, true)
+    assert.equal(section(memberB.id)?.p['collapsed'], true, 'the closed sibling member is unchanged')
+
+    const reopenedWorkB = section(workB.id)!
+    toggle(reopenedWorkB.id, false)
+    await waitState(reopenedWorkB.id, false, 'the second Work reopens')
+    assert.equal(toolNode(ptcParent.id)?.p['collapsed'], true, 'the root close reset the PTC parent root')
+    toggle(ptcParent.id, false)
+    await awaitWireFact(() => toolNode(`${ptcParent.id}.result`) !== undefined, 'the PTC parent body reopens')
+    assert.equal(toolNode(ptcChild.id)?.p['collapsed'], false,
+      'the PTC child keeps its own disclosure owner through the parent/root reset')
+    assert.equal(toolNode(`${ptcChild.id}.result`) !== undefined, true,
+      'the PTC child body is readable again with its preserved preference')
+
+    assert.equal(section(work2.id)?.p['collapsed'], false, 'the other Turn Work is still open')
+    assert.equal(toolNode(`${thinking2.id}.body`) !== undefined, true, 'the other Turn Thinking body is still visible')
+    assert.equal(toolNode(`${read2.id}.result`) !== undefined, true, 'the other Turn Tool body is still visible')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
 test('a TSP Main ignores a virtual history anchor and retains its latest live Preparing', async () => {
   const harness = await mountTspHarness({ displayState: { preset: 'focus' } })
   try {

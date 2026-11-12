@@ -107,6 +107,7 @@ import { FocusTimingStore } from '../transcript/focus-timing.ts'
 import type { DisplayState } from '../../domain/display/preset.ts'
 import type { ToolPresenter } from '../transcript/tool-presentation.ts'
 import type { TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../../domain/transcript/types.ts'
+import { isSurfacedInteractionTool } from '../../domain/transcript/semantics.ts'
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import type { TodoItem, TranscriptSearchPresentation } from '../../tui-app.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
@@ -134,12 +135,6 @@ type InnerDisclosurePathTarget =
   | { readonly kind: 'thinking'; readonly owner: Extract<TranscriptMessage, { kind: 'thinking' }> }
   | { readonly kind: 'context-row'; readonly owner: Extract<TranscriptMessage, { kind: 'system' }> }
   | { readonly kind: 'context-cluster'; readonly owner: Extract<TranscriptMessage, { kind: 'system' }> }
-
-type FocusInnerDisclosureOwners = {
-  readonly thinking: ReadonlySet<TranscriptMessage>
-  readonly contextRows: ReadonlySet<TranscriptMessage>
-  readonly clusters: ReadonlySet<TranscriptMessage>
-}
 
 /**
  * The renderer-local dock state (notices + the mount-scoped footer notices).
@@ -1345,8 +1340,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  exact expanded projection that produced its native sections. */
   let focusWorkTurnByOwner: ReadonlyMap<TranscriptMessage, number> = new Map()
   let focusWorkOwnersByTurn: ReadonlyMap<number, ReadonlySet<TranscriptMessage>> = new Map()
-  let focusToolKeysByTurn: ReadonlyMap<number, ReadonlySet<string>> = new Map()
-  let focusInnerOwnersByTurn: ReadonlyMap<number, FocusInnerDisclosureOwners> = new Map()
+  /** The top-level ordinary process Tool keys the CURRENT Focus frame projects
+   *  per turn. A root close resets exactly these cards; a settled human-
+   *  interaction card, a PTC child path and another Turn keep their own owners. */
+  let focusToolRootsByTurn: ReadonlyMap<number, ReadonlySet<string>> = new Map()
+  /** The Thinking owners the CURRENT Focus frame projects per turn (the
+   *  PiTui-Focus secondary reset set; Context/cluster owners are NOT here). */
+  let focusThinkingOwnersByTurn: ReadonlyMap<number, ReadonlySet<TranscriptMessage>> = new Map()
   /** Renderer-local version of the settled-answer lookup (see the mapper's
    *  `settledQuestionAnswersRevision`): a settled Question changes a tool row
    *  without a Folder mutation, so this version is part of that row's stamp. */
@@ -1485,8 +1485,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     focusTiming.resetSessionScope()
     focusWorkTurnByOwner = new Map()
     focusWorkOwnersByTurn = new Map()
-    focusToolKeysByTurn = new Map()
-    focusInnerOwnersByTurn = new Map()
+    focusToolRootsByTurn = new Map()
+    focusThinkingOwnersByTurn = new Map()
     expandedWorkOwners.clear()
     workDisclosureByPath.clear()
     expandedToolKeys.clear()
@@ -2866,42 +2866,37 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const focusWorkBySectionKey = new Map<string, { readonly owner: TranscriptMessage; readonly turn: number }>()
     const focusWorkTurn = new Map<TranscriptMessage, number>()
     const focusWorksByTurn = new Map<number, Set<TranscriptMessage>>()
-    const focusToolsByTurn = new Map<number, Set<string>>()
-    const focusInner = new Map<number, {
-      readonly thinking: Set<TranscriptMessage>
-      readonly contextRows: Set<TranscriptMessage>
-      readonly clusters: Set<TranscriptMessage>
-    }>()
-    const innerForTurn = (turn: number): {
-      readonly thinking: Set<TranscriptMessage>
-      readonly contextRows: Set<TranscriptMessage>
-      readonly clusters: Set<TranscriptMessage>
-    } => {
-      let owners = focusInner.get(turn)
-      if (owners === undefined) {
-        owners = { thinking: new Set(), contextRows: new Set(), clusters: new Set() }
-        focusInner.set(turn, owners)
-      }
-      return owners
-    }
-    const toolKeysForTurn = (turn: number): Set<string> => {
-      let keys = focusToolsByTurn.get(turn)
+    const focusToolRoots = new Map<number, Set<string>>()
+    const focusThinking = new Map<number, Set<TranscriptMessage>>()
+    const toolRootsForTurn = (turn: number): Set<string> => {
+      let keys = focusToolRoots.get(turn)
       if (keys === undefined) {
         keys = new Set()
-        focusToolsByTurn.set(turn, keys)
+        focusToolRoots.set(turn, keys)
       }
       return keys
     }
-    const collectFocusTool = (message: TranscriptMessage, turn: number, parent?: string): void => {
-      if (message.kind !== 'tool') return
-      const path = parent === undefined ? scopeKeys.keyFor(message) : `${parent}/sub-${message.subCallId!}`
-      toolKeysForTurn(turn).add(path)
-      for (const child of message.subCalls ?? []) collectFocusTool(child, turn, path)
+    const thinkingOwnersForTurn = (turn: number): Set<TranscriptMessage> => {
+      let owners = focusThinking.get(turn)
+      if (owners === undefined) {
+        owners = new Set()
+        focusThinking.set(turn, owners)
+      }
+      return owners
     }
+    /**
+     * The per-turn manual-owner projections one explicit Focus root close may
+     * reset. Context Row/Cluster owners are deliberately ABSENT: they are
+     * independent disclosure facts, not Thought-owned process detail (the same
+     * rule PiTui applies to Surfaced Context). Only the top-level ordinary
+     * process Tool root is collected: a settled human-interaction card is
+     * surfaced evidence, and a PTC child keeps its own `root/sub-...` owner.
+     */
     const collectFocusInnerMessage = (message: TranscriptMessage, turn: number): void => {
-      if (message.kind === 'thinking') innerForTurn(turn).thinking.add(message)
-      else if (message.kind === 'system' && message.context === true) innerForTurn(turn).contextRows.add(message)
-      else if (message.kind === 'tool') collectFocusTool(message, turn)
+      if (message.kind === 'thinking') thinkingOwnersForTurn(turn).add(message)
+      else if (message.kind === 'tool' && !isSurfacedInteractionTool(message)) {
+        toolRootsForTurn(turn).add(scopeKeys.keyFor(message))
+      }
     }
     const turnActivities = lastTurnActivities ?? new Map<number, TurnActivity>()
     const focusBlocks = displayState?.preset === 'focus'
@@ -2927,7 +2922,6 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       focusWorksByTurn.set(block.focusOwnerTurn, owners)
       for (const part of block.span.parts) {
         if (part.kind === 'message') collectFocusInnerMessage(part.message, block.focusOwnerTurn)
-        else innerForTurn(block.focusOwnerTurn).clusters.add(part.cluster.owner)
       }
     }
     const focusPhase = displayState?.preset === 'focus' ? presentedStatus?.activity.phase : undefined
@@ -3043,8 +3037,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         }
     focusWorkTurnByOwner = focusWorkTurn
     focusWorkOwnersByTurn = focusWorksByTurn
-    focusToolKeysByTurn = focusToolsByTurn
-    focusInnerOwnersByTurn = focusInner
+    focusToolRootsByTurn = focusToolRoots
+    focusThinkingOwnersByTurn = focusThinking
     return true
   }
 
@@ -4909,19 +4903,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
                 expandedFocusTurns.add(turn)
               } else {
                 expandedFocusTurns.delete(turn)
+                // Reset ONLY the process detail this exact Thought root owns:
+                // Work and Thinking manual owners, plus the top-level ordinary
+                // process Tool cards. Independent Surfaced Context Rows /
+                // Clusters, settled human-interaction cards, PTC child owners
+                // and other Turns keep their manual disclosure state.
                 for (const owner of focusWorkOwnersByTurn.get(turn) ?? []) expandedWorkOwners.delete(owner)
-                const innerOwners = focusInnerOwnersByTurn.get(turn)
-                for (const owner of innerOwners?.thinking ?? []) expandedThinkingOwners.delete(owner)
-                for (const owner of innerOwners?.contextRows ?? []) expandedContextRowOwners.delete(owner)
-                for (const owner of innerOwners?.clusters ?? []) expandedClusterOwners.delete(owner)
-                const toolKeys = focusToolKeysByTurn.get(turn)
-                if (toolKeys !== undefined) {
-                  for (const expandedKey of expandedToolKeys) {
-                    const slash = expandedKey.indexOf('/')
-                    const rootKey = slash < 0 ? expandedKey : expandedKey.slice(0, slash)
-                    if (toolKeys.has(rootKey)) expandedToolKeys.delete(expandedKey)
-                  }
-                }
+                for (const owner of focusThinkingOwnersByTurn.get(turn) ?? []) expandedThinkingOwners.delete(owner)
+                for (const rootKey of focusToolRootsByTurn.get(turn) ?? []) expandedToolKeys.delete(rootKey)
               }
               if (rebuildLastMain()) render()
             }
