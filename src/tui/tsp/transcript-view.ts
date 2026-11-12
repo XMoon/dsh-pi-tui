@@ -54,18 +54,36 @@ import { projectFocus, type FocusProjectedBlock } from '../transcript/focus-proj
 import type { TranscriptStructureBlock, TranscriptWorkSpan } from '../transcript/structure.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
 import { summarizeWorkSpan } from '../transcript/work-summary.ts'
-import { firstLine, systemContextBody, toolCardHeader, toolTitle, relativizeToCwd } from '../transcript/tool-presentation.ts'
+import {
+  askAnswersSummary,
+  classifyTool,
+  compactToolPresentation,
+  FOLDED_JSON_RESULT_TOOLS,
+  foldedResultSummaryFor,
+  firstLine,
+  GOAL_TOOL_NAMES,
+  goalResultSummary,
+  imageFoldedPreview,
+  readFoldedPreview,
+  skillFoldedPreview,
+  systemContextBody,
+  toolCardHeader,
+  toolTitle,
+  relativizeToCwd,
+  writeFoldedPreview,
+} from '../transcript/tool-presentation.ts'
 import type { ToolPresenter } from '../transcript/tool-presentation.ts'
+import { isLocalShellCard } from '../components/transcript/local-shell-card.ts'
 import { toolTargetFactsOf, toolTargetKind } from '../transcript/tool-target-semantics.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
-import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
+import { sanitizeDisplayLog, sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { formatTokens } from '../token-format.ts'
 import { chartHumanText, chartProjection, chartValueRows, type ChartFact } from '../../domain/visual/chart.ts'
 import { svgDetailRows, type SvgFact } from '../../domain/visual/svg.ts'
 import { visualParts, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
 import { humanFacingVisualResult, type PublishedVisual } from '../../domain/visual/publication.ts'
 import { assistantVisualPresentation, assistantVisualPresentationRevision } from '../../domain/visual/presentation.ts'
-import { CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME } from '../../domain/visual/tools.ts'
+import { CHART_TOOL_NAME, isVisualToolName, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME } from '../../domain/visual/tools.ts'
 import {
   assistantPublishedVisualNodes,
   type SelectedVisualState,
@@ -931,6 +949,76 @@ function toolErrorNote(
   return summary === '' ? undefined : summary
 }
 
+/** One existing `tool-presentation` folded suffix (` — …`) without its dash. */
+function foldedSuffixText(value: string): string | undefined {
+  if (value === '') return undefined
+  return value.startsWith(' — ') ? value.slice(3) : value
+}
+
+/** Whether this row's result is a terminal stream whose log policy must run
+ *  before any preview (the shared class, never a copied tool-name set). */
+function isTerminalOutputRow(message: TranscriptToolMessage): boolean {
+  return classifyTool(message.name) === 'bash' || isLocalShellCard(message)
+}
+
+/**
+ * T3-0B: the trusted, bounded folded Note of one ordinary Tool. It answers
+ * only "what can this already-settled result prove in one line?" and never
+ * becomes a status authority: the native `status`/`toolErrorNote` own failure,
+ * and an unparseable structured payload yields NO note rather than raw JSON,
+ * XML or a machine receipt. Every helper is the existing
+ * `tool-presentation.ts` one, so no tool registry, envelope parser or preview
+ * budget is duplicated here.
+ */
+function toolFoldedNote(
+  message: TranscriptToolMessage,
+  options: TranscriptViewOptions,
+  displayStatus: TranscriptToolMessage['status'],
+): string | undefined {
+  if (displayStatus === 'error') return undefined
+  const shown = shownToolResult(message, options)
+  if (shown === '') return undefined
+  const name = message.name
+  const bounded = (source: string | undefined): string | undefined =>
+    source === undefined ? undefined : boundedNoteText(source)
+  if (name === 'read') return bounded(foldedSuffixText(readFoldedPreview(shown)))
+  if (name === 'write') return bounded(foldedSuffixText(writeFoldedPreview(shown)))
+  if (name === 'skill') return bounded(foldedSuffixText(skillFoldedPreview(shown)))
+  if (name === 'read_image') return bounded(foldedSuffixText(imageFoldedPreview(shown)))
+  if (isVisualToolName(name)) {
+    // The SAME source-aware projection the opened body uses: machine receipts
+    // and visual facts never become a one-line human note.
+    const human = humanFacingVisualResult({ toolName: name, blocks: message.resultBlocks, text: shown })
+    return bounded(human.text)
+  }
+  if (name === 'ask_user_question') {
+    const summary = message.error === undefined ? askAnswersSummary(shown) : undefined
+    return bounded(summary)
+  }
+  if (GOAL_TOOL_NAMES.has(name)) {
+    const summary = message.error === undefined ? goalResultSummary(shown) : undefined
+    return bounded(summary)
+  }
+  if (FOLDED_JSON_RESULT_TOOLS.has(name)) {
+    // A failed/unparseable JSON result is NOT retried as raw text: the row
+    // keeps its explicit status and shows no invented summary.
+    return bounded(foldedResultSummaryFor(name, shown))
+  }
+  const action = compactToolPresentation(name, message.args, shown)
+  if (action !== undefined) return bounded(action.result ?? action.payload)
+  if (isTerminalOutputRow(message)) {
+    // The log policy runs over the WHOLE preview source BEFORE it is folded to
+    // one line and bounded: a lone CR becomes a visible row break, and no
+    // OSC/CSI/untrusted escape can survive into the Note.
+    return boundedNoteText(firstLine(sanitizeDisplayLog(shown)))
+  }
+  const first = firstLine(shown)
+  const trimmed = first.trimStart()
+  // Structured or opaque machine payloads never degrade into a raw note.
+  if (trimmed.startsWith('{') || trimmed.startsWith('[') || trimmed.startsWith('<')) return undefined
+  return bounded(first)
+}
+
 function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOptions, parentDisclosure: string): Node {
   const header = toolCardHeader(child.name, child.args, options.cwd)
   const childKey = `sub-${child.subCallId!}`
@@ -958,6 +1046,7 @@ function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOpti
     body.push(...toolResultNodes(child, options, true, child.result, false))
   }
   const note = toolErrorNote(child, options, display.status, display.terminalFailure)
+    ?? (collapsed ? toolFoldedNote(child, options, display.status) : undefined)
   return ui.tool(
     {
       key: childKey,
@@ -1021,6 +1110,7 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
     : toolBodyParts(message, options, hasChildren, false)
   const children = collapsed ? [] : toolChildNodes(message, options, disclosure)
   const note = toolErrorNote(message, options, message.status)
+    ?? (collapsed ? toolFoldedNote(message, options, message.status) : undefined)
   return ui.tool(
     {
       key,

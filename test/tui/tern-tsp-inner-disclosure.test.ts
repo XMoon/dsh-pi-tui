@@ -930,3 +930,83 @@ test('a manual compaction failure recognizes the command error kind even with em
   const opened = flatten(messages, 'full', keys, { expandedCommandCompactionOwners: new Set([row]) })
   assert.ok(opened.some(entry => entry.id === `${node!.id}.body` && entry.props['text'] === 'summary body survived the failure'))
 })
+
+test('folded Tools expose only trusted, bounded human summaries from the shared helpers', () => {
+  const ref = `sv2_${'a'.repeat(20)}`
+  const receipt = `visual-published-v1:${JSON.stringify({ version: 1, published: [{ ref }] })}`
+  const events: SessionEvent[] = [
+    ev('turn/start', { turn: 1 }, 0),
+    user(1, 'exercise folded tool previews'),
+    toolCall(2, 'call-read', 'read', '{"file_path":"src/a.ts"}', 0),
+    toolResult(3, 'call-read', '<path>src/a.ts</path>\n<type>file</type>\n<content>\n1: a\n2: b\n(End of file - total 2 lines)\n</content>', 0),
+    toolCall(4, 'call-write', 'write', '{"file_path":"src/a.ts"}', 1),
+    toolResult(5, 'call-write', '<path>src/a.ts</path> <type>file</type> <content>Updated file</content>', 1),
+    toolCall(6, 'call-skill', 'skill', '{"name":"alpha"}', 2),
+    toolResult(7, 'call-skill', '<skill_content name="alpha"><skill_resources></skill_resources><skill_instructions>\nfirst instruction\nsecond instruction\n</skill_instructions></skill_content>', 2),
+    toolCall(8, 'call-image', 'read_image', '{"path":"shot.png"}', 3),
+    toolResult(9, 'call-image', '<path>shot.png</path> <type>image</type> <content>\nPNG image, 800x600 px, 1234 bytes\n</content>', 3),
+    toolCall(10, 'call-goal', 'update_goal', '{"status":"active"}', 4),
+    toolResult(11, 'call-goal', '{"goal":{"phase":"active","revision":3,"roundsStarted":2,"maxGoalRounds":6}}', 4),
+    toolCall(12, 'call-ask', 'ask_user_question', '{"questions":[]}', 5),
+    toolResult(13, 'call-ask', '{"answers":[{"id":"q1","selected":["yes"]},{"id":"q2"}]}', 5),
+    toolCall(14, 'call-schedule', 'schedule_list', '{}', 6),
+    toolResult(15, 'call-schedule', '{"items":[],"shown":0,"total":0,"limit":10,"offset":0}', 6),
+    toolCall(16, 'call-visual', 'present_visual', '{"files":[]}', 7),
+    toolResult(17, 'call-visual', `Published 1 visual.\n${receipt}`, 7),
+    toolCall(18, 'call-bash', 'bash', '{"command":"false"}', 8),
+    toolResult(19, 'call-bash', '\u001b[31mline one\u001b[0m\rprogress 10%\rprogress 100%\nsecond', 8),
+    toolCall(20, 'call-unknown', 'mystery_tool', '{}', 9),
+    toolResult(21, 'call-unknown', 'human summary line\nmore detail', 9),
+    toolCall(22, 'call-json', 'mystery_tool', '{}', 10),
+    toolResult(23, 'call-json', '{"machine":"receipt"}', 10),
+    toolCall(24, 'call-xml', 'mystery_tool', '{}', 11),
+    toolResult(25, 'call-xml', '<path>machine.xml</path>', 11),
+    toolCall(26, 'call-cjk', 'mystery_tool', '{}', 12),
+    toolResult(27, 'call-cjk', `中文摘要${'很长'.repeat(200)}`, 12),
+    toolCall(28, 'call-error', 'read', '{"file_path":"missing.ts"}', 13),
+    toolResult(29, 'call-error', '<path>missing.ts</path>\n<type>file</type>\n<content>\n1: x\n(End of file - total 1 lines)\n</content>', 13, true),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 30),
+  ]
+  const messages = folder(events).messages()
+  const keys = new TranscriptNodeKeys()
+  const closed = flatten(messages, 'full', keys)
+  const noteOf = (name: string, occurrence = 0): string | undefined => {
+    const nodes = closed.filter(node => node.kind === 'tool' && node.props['name'] === name)
+    return nodes[occurrence]?.props['note'] === undefined ? undefined : String(nodes[occurrence]!.props['note'])
+  }
+  assert.equal(noteOf('read'), '2 lines')
+  assert.equal(noteOf('write'), 'Updated')
+  assert.equal(noteOf('skill'), '2 lines of instructions')
+  assert.equal(noteOf('read_image'), 'PNG image, 800x600 px, 1234 bytes')
+  assert.equal(noteOf('update_goal'), 'phase active · revision 3 · 2/6 rounds')
+  assert.equal(noteOf('ask_user_question'), '1/2 answered')
+  assert.equal(noteOf('schedule_list'), 'no scheduled tasks')
+  assert.equal(noteOf('present_visual'), 'Published 1 visual.')
+  assert.ok(!(noteOf('present_visual') ?? '').includes('visual-published-v1'), 'no machine receipt becomes a note')
+  assert.equal(noteOf('bash'), 'line one', 'the terminal log policy runs before the preview and strips SGR')
+  assert.equal(noteOf('mystery_tool', 0), 'human summary line')
+  assert.equal(noteOf('mystery_tool', 1), undefined, 'raw JSON never becomes a human note')
+  assert.equal(noteOf('mystery_tool', 2), undefined, 'raw XML never becomes a human note')
+  const cjk = noteOf('mystery_tool', 3)
+  assert.ok(cjk !== undefined && Array.from(cjk).length <= 180, `a CJK note stays bounded: ${cjk?.length}`)
+  const failed = closed.find(node => node.kind === 'tool' && node.props['name'] === 'read' && node.props['status'] === 'error')
+  assert.ok(String(failed?.props['note'] ?? '').startsWith('<path>'), 'the existing error note still owns a failed row')
+
+  // A malformed read envelope degrades to NO note, never to the raw envelope.
+  const malformed = folder([
+    ev('turn/start', { turn: 1 }, 0), user(1, 'malformed read'),
+    toolCall(2, 'call-bad-read', 'read', '{}'), toolResult(3, 'call-bad-read', '<path>bad.ts</path><type>file</type><content>not numbered</content>'),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 4),
+  ]).messages()
+  const malformedNode = flatten(malformed, 'full').find(node => node.kind === 'tool' && node.props['name'] === 'read')
+  assert.equal(malformedNode?.props['note'], undefined, 'an unparseable envelope shows no preview')
+
+  // The note is a FOLDED-only affordance: opening the exact row reveals the
+  // real body and no longer needs the one-line substitute.
+  const readRow = messages.find((row): row is TranscriptToolMessage => row.kind === 'tool' && row.name === 'read' && row.status === 'ok')!
+  const opened = flatten(messages, 'full', keys, { expandedToolKeys: new Set([keys.keyFor(readRow)]) })
+  const openedRead = opened.find(node => node.kind === 'tool' && node.props['name'] === 'read' && node.props['collapsed'] === false)
+  assert.equal(openedRead?.props['note'], undefined, 'an opened Tool drops the folded note')
+  assert.equal(openedRead?.props['collapsed'], false)
+  assert.ok(nodeText(openedRead!).includes('src/a.ts'), 'the opened body is the real Tool content')
+})
