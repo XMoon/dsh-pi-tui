@@ -387,6 +387,7 @@ function harness(options: {
     ...(options.hostDirectoryBrowse === undefined ? {} : { hostDirectoryBrowse: options.hostDirectoryBrowse }),
     ...(options.workspaceNextIntent === undefined ? {} : { workspaceNextIntent: options.workspaceNextIntent }),
     ...(options.validateAutoWorkspace === undefined ? {} : { validateAutoWorkspace: options.validateAutoWorkspace }),
+    ...(options.validateAutoWorkspace === undefined ? {} : { validateAutoWorkspace: options.validateAutoWorkspace }),
     ...(options.nativePresentation === undefined ? {} : { sessionBrowserPresentation: options.nativePresentation }),
     ...(options.eligibility === undefined ? {} : {
       forwardedAnswerEligibility: options.eligibility,
@@ -2744,6 +2745,57 @@ test('review EXT-P2 (/new): the final pre-dispatch gate cancels a sessionless /n
       'the final gate must cancel the Session create when the auto proof expires during the last wait')
     assert.equal(owner.snapshot().status, 'unselected')
   } finally {
+    h.close()
+  }
+})
+
+test('review EXT-P1 (manual precedence): a Folder New into a VALID Workspace succeeds while the leftover auto proof is stale', async () => {
+  const owner = createWorkspaceNextIntentOwner('/client/cwd', 'auto')
+  const preflight = owner.beginPathVerification()
+  owner.commitVerifiedPath(preflight, 'workspace-a', '/host/a')
+  assert.equal(owner.snapshot().provenance, 'auto')
+
+  const resolutions: unknown[] = []
+  const creates: unknown[] = []
+  const h = harness({
+    workspaceNextIntent: owner,
+    // The AUTO candidate's local proof has expired; an explicit manual choice
+    // must NOT inherit this veto.
+    validateAutoWorkspace: () => false,
+    agents: {
+      resolveWorkspace: (async (intent: unknown) => {
+        resolutions.push(intent)
+        return { workspaceId: 'workspace-b', path: '/host/b' }
+      }) as never,
+      create: (async (input: unknown) => {
+        creates.push(input)
+        return { session: { id: 'session-from-b' } }
+      }) as never,
+    },
+    transitionTo: (async (steps: { create: () => Promise<unknown> }) => ({ ok: true, next: await steps.create() })) as never,
+  })
+  // Capture the REAL Folder-New callback the PiTUI Browser panel receives.
+  let folderNew: ((workspaceId: string, settle?: unknown) => void) | undefined
+  const originalOpen = TuiApp.prototype.openSessionWorkspace
+  TuiApp.prototype.openSessionWorkspace = function recordedOpen(this: TuiApp, options) {
+    const candidate = (options as { readonly onNewSession?: typeof folderNew }).onNewSession
+    if (candidate !== undefined) folderNew = candidate
+    return originalOpen.call(this, options)
+  } as typeof originalOpen
+  try {
+    await h.openSessionBrowser({ scope: 'all' })
+    await h.vt.waitForRender()
+    assert.ok(folderNew !== undefined, 'the real Folder New callback reached the PiTUI panel')
+    assert.equal(h.runner.currentSessionId, undefined, 'the manual-precedence case is SESSIONLESS')
+    // THE REAL ENTRY: the Folder New action dispatches exactly this callback.
+    folderNew('workspace-b', () => {})
+    await waitUntil(() => creates.length === 1, 'the explicit Folder New dispatches the ONE create', 10_000)
+    assert.deepEqual(resolutions, [{ kind: 'workspace-id', workspaceId: 'workspace-b' }],
+      'the Folder New target is the chosen WorkspaceId, never the stale auto candidate')
+    assert.equal((creates[0] as { workspaceId: string }).workspaceId, 'workspace-b',
+      'a stale AUTO proof must not veto an explicit manual choice')
+  } finally {
+    TuiApp.prototype.openSessionWorkspace = originalOpen
     h.close()
   }
 })

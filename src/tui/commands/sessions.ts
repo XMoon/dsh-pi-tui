@@ -918,6 +918,11 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           // `/new` offers the Client launch directory as a Host path proposal.
           let nextIntentCapture: ReturnType<typeof workspaceNextIntent.capture> | undefined
           let intent: WorkspaceSelectionIntent
+          // Whether THIS create's target comes from the next-intent owner. An
+          // EXPLICIT caller (Folder New with an official workspace-id) owns its
+          // target: it must never be refused by the leftover AUTO candidate's
+          // proof, which belongs to a different, not-consumed proposal.
+          const targetFromNextIntent = options.workspaceIntent === undefined
           // The sessionless mount may still be verifying the launch directory:
           // wait for that ONE request before capturing, so its committed
           // revision is the one this create revalidates (never a stale token).
@@ -1038,7 +1043,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
                 // The LAST gate before the real Host create (external review
                 // EXT-P2): all preset/default awaits have settled, so the
                 // automatic candidate's local proof is re-observed once more.
-                if (nextIntentCapture?.provenance === 'auto' && runner.validateAutoWorkspace?.() !== true) {
+                // ONLY a create that actually consumes the next-intent target is
+                // subject to it (explicit Folder New owns its own WorkspaceId).
+                if (targetFromNextIntent && nextIntentCapture?.provenance === 'auto'
+                  && runner.validateAutoWorkspace?.() !== true) {
                   workspaceNextIntent.resetToLaunchCwd()
                   throw new WorkspaceSelectionError(
                     'refused',
