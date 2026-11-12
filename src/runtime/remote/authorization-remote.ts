@@ -79,6 +79,10 @@ export class RemoteAuthorizationConfig implements AuthorizationConfig {
   private readonly unsubscribeGeneration: () => void
   private targets: readonly AuthorizationFlowTarget[] = []
   private state: 'ready' | 'unavailable' | 'stale' = 'stale'
+  /** Monotone same-generation roster read id; only the latest may commit. */
+  private rosterSerial = 0
+  /** One-shot invalidators for `begin()` calls still waiting on the started frame. */
+  private readonly pendingOpens = new Set<() => void>()
   private disposed = false
 
   constructor(
@@ -87,18 +91,23 @@ export class RemoteAuthorizationConfig implements AuthorizationConfig {
   ) {
     this.namespace = namespace
     this.generation = generation
-    // A generation replacement invalidates the roster AT ONCE: a last-known
-    // `inFlight` from another Host is never painted as the current one.
+    // A generation replacement invalidates the roster AT ONCE, whatever the
+    // previous state was: a last-known `inFlight` from another Host, and an
+    // `unavailable` verdict from a Host WITHOUT the authorization service, are
+    // both facts about the OLD generation. The new generation's capability is
+    // unknown until it is read (`stale`), so /login cannot route from the old
+    // conclusion and describe() re-reads it.
     this.unsubscribeGeneration = generation.subscribe(() => {
-      if (this.state === 'ready') this.state = 'stale'
-      // Every in-flight attempt belongs to the generation that opened its
-      // stream. Its later frames/terminal can no longer be trusted, and the old
-      // stream may stay open without ever producing another frame, so the
-      // attempt is closed NOW with the fourth `unconfirmed` terminal instead of
-      // waiting for a frame that may never arrive.
+      this.state = 'stale'
+      // A roster read for the old generation must not commit after this point.
+      this.rosterSerial += 1
+      // The attempt/pending-open result belongs to the generation that opened
+      // its stream: close both at once instead of waiting for a frame that may
+      // never arrive.
       for (const attempt of [...this.attempts.values()]) {
         this.markUnconfirmed(attempt, 'the Connection changed before the authorization settled')
       }
+      for (const invalidate of [...this.pendingOpens]) invalidate()
     })
   }
 
@@ -126,6 +135,13 @@ export class RemoteAuthorizationConfig implements AuthorizationConfig {
    */
   async refreshTargets(): Promise<void> {
     if (this.disposed) throw new Error('authorization: the Remote adapter is disposed')
+    // Same-generation latest-wins: overlapping page refreshes can complete out
+    // of order, and only the newest request may commit the shared roster cache.
+    const serial = ++this.rosterSerial
+    const isCurrent = (generation: RemoteConnectionGeneration): boolean =>
+      serial === this.rosterSerial
+      && !this.disposed
+      && Object.is(generation, this.generation.getSnapshot())
     const namespace = this.namespace
     if (namespace === undefined) {
       this.targets = []
@@ -141,15 +157,13 @@ export class RemoteAuthorizationConfig implements AuthorizationConfig {
     try {
       result = await namespace.list()
     } catch (error) {
-      if (!Object.is(generation, this.generation.getSnapshot())) {
-        this.state = 'stale'
+      if (!isCurrent(generation)) {
         throw new SupersededReadError('authorization roster superseded')
       }
       this.state = 'stale'
       throw error
     }
-    if (!Object.is(generation, this.generation.getSnapshot())) {
-      this.state = 'stale'
+    if (!isCurrent(generation)) {
       throw new SupersededReadError('authorization roster superseded')
     }
     if (!result.ok) {
@@ -190,14 +204,43 @@ export class RemoteAuthorizationConfig implements AuthorizationConfig {
       : AbortSignal.any([request.signal, controller.signal])
     const handle = namespace.run(request.key, request.method, streamSignal)
     const iterator = handle[Symbol.asyncIterator]()
+    // The dispatch window before `started` is a real pending OPEN: the run may
+    // already be at the Host while the Client has no attempt id yet. Register it
+    // with this adapter so a generation replacement, the caller's abort or an
+    // adapter disposal can end `begin()` deterministically instead of leaving
+    // the page's Starting state waiting on a stream that never yields.
+    let invalidate: () => void = () => {}
+    const invalidated = new Promise<'invalidated'>(resolve => {
+      invalidate = () => resolve('invalidated')
+    })
+    const removeGenerationListener = this.generation.subscribe(() => { invalidate() })
+    const onAbort = (): void => { invalidate() }
+    streamSignal.addEventListener('abort', onAbort, { once: true })
+    const invalidatePending = (): void => {
+      invalidate()
+      controller.abort()
+      handle.dispose()
+    }
+    this.pendingOpens.add(invalidatePending)
     let first: IteratorResult<unknown>
     try {
-      first = await iterator.next()
+      const opening = await Promise.race([iterator.next(), invalidated])
+      if (opening === 'invalidated') {
+        throw new AuthorizationDispatchUnknownError(
+          'the Connection changed while the authorization attempt was opening — refresh credentials before retrying',
+        )
+      }
+      first = opening
     } catch (error) {
       handle.dispose()
+      if (error instanceof AuthorizationDispatchUnknownError) throw error
       throw new AuthorizationDispatchUnknownError(
         `the Host did not acknowledge the authorization attempt (${safeTransportReason(error)}) — refresh credentials before retrying`,
       )
+    } finally {
+      removeGenerationListener()
+      streamSignal.removeEventListener('abort', onAbort)
+      this.pendingOpens.delete(invalidatePending)
     }
     if (first.done === true) {
       handle.dispose()
@@ -287,8 +330,11 @@ export class RemoteAuthorizationConfig implements AuthorizationConfig {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.rosterSerial += 1
     this.unsubscribeGeneration()
     this.listeners.clear()
+    for (const invalidate of [...this.pendingOpens]) invalidate()
+    this.pendingOpens.clear()
     for (const attempt of [...this.attempts.values()]) {
       attempt.controller.abort()
       attempt.handle.dispose()

@@ -42,7 +42,7 @@ const TARGETS: readonly AuthorizationFlowTarget[] = [
   { kind: 'authorization', key: 'deepseek-account-platform/default', label: 'DeepSeek', methods: [{ id: 'browser', label: 'DeepSeek' }], inFlight: false },
 ]
 
-function authCommands() {
+function authCommands(options: { readonly targetsState?: 'ready' | 'unavailable' | 'stale' } = {}) {
   const definitions = new Map<string, (invocation: CommandInvocation) => unknown>()
   const opened: AuthDestination[] = []
   const commands = createAuthCommands({
@@ -61,7 +61,7 @@ function authCommands() {
           available: () => true,
           listTargets: () => TARGETS,
           refreshTargets: async () => {},
-          targetsState: () => 'ready' as const,
+          targetsState: () => options.targetsState ?? 'ready',
           begin: async () => ({ kind: 'unavailable' }),
           onEvent: () => () => {},
           respond: async () => {},
@@ -114,6 +114,14 @@ test('/login navigates: bare list, known route, explicit ref, new route, account
     { kind: 'models', view: 'add-provider', route: 'new-route' },
     { kind: 'account', view: 'page' },
   ])
+})
+
+test('/login falls back to the Models list instead of routing from a STALE roster', async () => {
+  const { invoke, opened } = authCommands({ targetsState: 'stale' })
+  await invoke('login', 'acme')
+  // The stale flow target may belong to another Host generation: /login opens
+  // the Models list, whose read revalidates the roster before any sign-in.
+  assert.deepEqual(opened, [{ kind: 'models', view: 'list' }])
 })
 
 test('/login rejects an unknown target without opening a targetless page', async () => {

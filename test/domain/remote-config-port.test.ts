@@ -713,6 +713,38 @@ test('the initial describe loads the REAL authorization roster once; a generatio
   port.dispose()
 })
 
+test('a generation replacement invalidates an UNAVAILABLE roster and describe re-reads the new Host capability', async () => {
+  const target = {
+    kind: 'authorization' as const,
+    route: 'openai-codex',
+    key: 'llm-pi-ai/openai-codex',
+    label: 'ChatGPT (Codex)',
+    methods: [{ id: 'oauth', label: 'Sign in with ChatGPT' }],
+    inFlight: false,
+  }
+  const { port, generation, state } = createBackend(current => {
+    current.authorizationListOutcome = { kind: 'unavailable', reason: 'the Host authorization service is not installed' }
+  })
+  await port.describe()
+  assert.equal(port.authorization.targetsState(), 'unavailable')
+  const calls = (): number => state.order.filter(entry => entry === 'authorization:list').length
+  const before = calls()
+
+  // Host A had no authorization service; the replacement Host B does. The old
+  // definite `unavailable` is a fact about A and must not survive the switch.
+  state.authorizationListOutcome = undefined
+  state.authorizationRoster = [target]
+  generation.set({ id: 'gen-2' })
+  assert.equal(port.authorization.targetsState(), 'stale',
+    'an unavailable verdict from the old generation is not current for the new one')
+  await port.describe()
+  assert.equal(port.authorization.targetsState(), 'ready')
+  assert.equal(calls(), before + 1, 'describe re-reads the roster for the new generation')
+  assert.deepEqual(port.authorization.listTargets(), [target])
+  assert.equal(port.authorization.available(), true)
+  port.dispose()
+})
+
 test('approvalOverrideOf is always undefined (unavailable, never an ask guess)', () => {
   const { port } = createBackend()
   assert.equal(port.permissions.approvalOverrideOf('session-a'), undefined)
