@@ -1109,6 +1109,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // The observation's committed reads re-read THIS open workspace's rows
     // through the existing runtime-facts seam: a Host read that settles after
     // the first frame replaces `Checking…` without a key press.
+    // BOTH events repaint the OPEN page: a committed read paints the proven
+    // facts, and a revocation (Connection generation/subject change) drops the
+    // old Host's fact back to `Checking…` immediately — this listener only
+    // re-reads the panel snapshot, so it is safe outside the commit callback.
     disposePolicyWatch = runner.policy.subscribe(() => {
       if (activeSettingsWorkspace?.token !== token) return
       app.refreshSettingsWorkspaceRuntimeFacts()

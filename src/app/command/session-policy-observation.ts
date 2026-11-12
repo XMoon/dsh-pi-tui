@@ -25,6 +25,9 @@ import type { SessionPolicyRead } from '../../runtime/session-policy-port.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 
+/** What changed for one observation listener. */
+export type PolicyObservationEvent = 'committed' | 'invalidated'
+
 /** The narrow source face the observation owner reads. */
 export interface SessionPolicyObservationSource {
   /** ONE authoritative read (the SessionPolicyPort). */
@@ -47,8 +50,17 @@ export interface SessionPolicyObservation {
   refresh(sessionId: string): Promise<PolicyObservationState>
   /** Revoke one subject's truth (or every subject's with no argument). */
   invalidate(sessionId?: string): void
-  /** Client-local listeners (UI repaint); disposed with the owner. */
-  subscribe(listener: () => void): () => void
+  /** Client-local listeners (UI repaint); disposed with the owner.
+   *
+   *  The event tells a consumer WHAT changed without letting it re-enter the
+   *  read path: `committed` = a read settled into the snapshot; `invalidated`
+   *  = the snapshot was REVOKED (subject/generation change) and the old fact
+   *  must leave the screen NOW. A consumer that repaints by re-reading the
+   *  snapshot (the Settings panel) handles both; the status subscriber keeps
+   *  its commit-only repaint so a revocation inside an owner-commit callback
+   *  never triggers a full status read of the published-but-uninitialized
+   *  owner (the publication-window contract). */
+  subscribe(listener: (event: PolicyObservationEvent) => void): () => void
   /** Cancel every pending commit and subscription; idempotent. */
   dispose(): void
 }
@@ -66,12 +78,12 @@ export function createSessionPolicyObservation(
   source: SessionPolicyObservationSource,
 ): SessionPolicyObservation {
   const subjects = new Map<string, SubjectEntry>()
-  const listeners = new Set<() => void>()
+  const listeners = new Set<(event: PolicyObservationEvent) => void>()
   const controllers = new Set<AbortController>()
   let disposed = false
 
-  const notify = (): void => {
-    for (const listener of [...listeners]) listener()
+  const notify = (event: PolicyObservationEvent): void => {
+    for (const listener of [...listeners]) listener(event)
   }
 
   const entryOf = (sessionId: string): SubjectEntry => {
@@ -114,7 +126,7 @@ export function createSessionPolicyObservation(
         // serial may commit, and disposal revokes everything.
         if (!disposed && entry.serial === serial) {
           entry.state = state
-          notify()
+          notify('committed')
         }
         return entry.state
       }
@@ -159,11 +171,13 @@ export function createSessionPolicyObservation(
     },
     refresh,
     invalidate(sessionId) {
+      let revoked = false
       if (sessionId === undefined) {
         for (const entry of subjects.values()) {
           entry.serial += 1
           entry.state = { kind: 'checking' }
           entry.inFlightSerial = undefined
+          revoked = true
         }
       } else {
         const entry = subjects.get(sessionId)
@@ -171,8 +185,13 @@ export function createSessionPolicyObservation(
           entry.serial += 1
           entry.state = { kind: 'checking' }
           entry.inFlightSerial = undefined
+          revoked = true
         }
       }
+      // The revocation is observable so an OPEN Settings page can drop the
+      // last Host's fact immediately. The status subscriber deliberately does
+      // not repaint on this event (see the listener contract).
+      if (revoked) notify('invalidated')
     },
     subscribe(listener) {
       listeners.add(listener)

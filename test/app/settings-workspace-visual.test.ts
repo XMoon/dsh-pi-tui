@@ -437,6 +437,8 @@ interface Harness {
   readonly releaseFirstReplace: () => void
   /** M6-1 F8: settle the deferred initial Host policy read. */
   readonly releasePolicyRead: () => void
+  /** M6-1 F8: revoke the policy truth (Connection generation/subject change). */
+  readonly revokePolicyRead: () => void
   readonly dispose: () => void
 }
 
@@ -490,12 +492,31 @@ function setup(options: HarnessOptions = {}): Harness {
   const permissionWrites: string[] = []
   const approvalState = agent.approval ?? { value: undefined as 'ask' | 'never' | undefined }
   const policyGenerationSlot = agent.generation ?? { value: agent.policyGeneration ?? {} }
-  const policyListeners = new Set<() => void>()
+  const policyListeners = new Set<(event: 'committed' | 'invalidated') => void>()
   let policyReadSettled = agent.deferPolicyRead !== true
   let releaseDeferredPolicyRead: (() => void) | undefined
-  const notifyPolicyListeners = (): void => { for (const listener of [...policyListeners]) listener() }
+  let policyReadGate: Promise<void> | undefined
+  const notifyPolicyListeners = (event: 'committed' | 'invalidated'): void => {
+    for (const listener of [...policyListeners]) listener(event)
+  }
+  const beginDeferredPolicyRead = (): void => {
+    if (policyReadGate !== undefined) return
+    policyReadGate = new Promise<void>(resolve => { releaseDeferredPolicyRead = resolve })
+    // The production observation starts a controlled read from the display
+    // path; the fake mirrors it so a revocation + repaint starts the new read.
+    void policyReadGate.then(() => {
+      policyReadGate = undefined
+      if (policyReadSettled) return
+      policyReadSettled = true
+      notifyPolicyListeners('committed')
+    })
+  }
   const policySnapshot = (sessionId: string): unknown => {
-    if (sessionId !== agent.sessionId || !policyReadSettled) return { kind: 'checking' }
+    if (sessionId !== agent.sessionId) return { kind: 'checking' }
+    if (!policyReadSettled) {
+      if (agent.deferPolicyRead === true) beginDeferredPolicyRead()
+      return { kind: 'checking' }
+    }
     if (agent.approvalAvailable === false) {
       return {
         kind: 'ready',
@@ -705,14 +726,16 @@ function setup(options: HarnessOptions = {}): Harness {
       readSnapshot: policySnapshot,
       refresh: async (sessionId: string) => {
         if (agent.deferPolicyRead === true && !policyReadSettled) {
-          await new Promise<void>(resolve => { releaseDeferredPolicyRead = resolve })
-          policyReadSettled = true
+          beginDeferredPolicyRead()
+          await policyReadGate
         }
-        notifyPolicyListeners()
         return policySnapshot(sessionId) as never
       },
-      invalidate: () => {},
-      subscribe: (listener: () => void) => {
+      invalidate: () => {
+        policyReadSettled = false
+        notifyPolicyListeners('invalidated')
+      },
+      subscribe: (listener: (event: 'committed' | 'invalidated') => void) => {
         policyListeners.add(listener)
         return () => { policyListeners.delete(listener) }
       },
@@ -1005,6 +1028,11 @@ function setup(options: HarnessOptions = {}): Harness {
     releaseFirstReplace: () => { releaseFirstReplace?.() },
     /** M6-1 F8: settle the deferred initial Host policy read. */
     releasePolicyRead: () => { releaseDeferredPolicyRead?.() },
+    /** M6-1 F8: revoke the policy truth (Connection generation/subject change). */
+    revokePolicyRead: () => {
+      policyReadSettled = false
+      notifyPolicyListeners('invalidated')
+    },
     dispose,
   }
 }
@@ -1846,6 +1874,40 @@ test('M6-1 F8: a Host policy read settling after the first frame replaces Checki
   await key(h, '\r')
   assert.match(h.view(), /Effective: never/u, `the detail shows the settled fact:\n${h.view()}`)
   assert.match(h.view(), /Choose value/u)
+  h.dispose()
+})
+
+test('M6-1 F8: a connection-generation revocation drops the old policy from the open Settings page immediately', async () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: true,
+      approval: { value: 'never' },
+      deferPolicyRead: true,
+      permissionNames: ['workspace-write'],
+      permissionDefault: { value: 'workspace-write' },
+    },
+  })
+  await h.open('Agent')
+  await key(h, '\r')
+  h.releasePolicyRead()
+  await new Promise<void>(resolve => { setTimeout(resolve, 30) })
+  assert.match(h.view(), /never/u, 'the first Host read settled')
+  // The Connection generation changes: the observation revokes its truth.
+  // The OPEN page must drop the old Host fact NOW — before (and without) any
+  // new Host read answering.
+  h.revokePolicyRead()
+  await new Promise<void>(resolve => { setTimeout(resolve, 20) })
+  const revoked = h.view()
+  assert.match(revoked, /Checking…/u, `the revoked fact returns to the truthful pending state:\n${revoked}`)
+  assert.doesNotMatch(revoked, /Effective: never/u, 'the old Host policy is gone from the page')
+  // The NEW Host read answers later; only then does the fresh fact paint.
+  await new Promise<void>(resolve => { setTimeout(resolve, 20) })
+  h.releasePolicyRead()
+  await new Promise<void>(resolve => { setTimeout(resolve, 30) })
+  assert.match(h.view(), /never/u, 'the new generation fact paints after its own read settles')
   h.dispose()
 })
 

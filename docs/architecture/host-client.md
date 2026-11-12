@@ -1150,9 +1150,14 @@ The application keeps ONE Client-local policy observation owner (checking /
 ready / unavailable / failed), keyed by Connection generation, exact session id
 and observed subject epoch, with latest-read-serial wins; the Settings approval
 row and the status/footer sandbox+approval facts consume the SAME snapshots.
-The Settings `Verified` state still requires a fresh authoritative readback of
-that exact Session's EFFECTIVE policy; the port's `applied` alone is never
-proof.
+Its listeners distinguish a committed read from a REVOCATION (subject or
+Connection generation change): the open Settings page re-reads its row facts on
+both (so the old Host's policy leaves the page immediately and returns to
+`Checking…` until the new generation answers), while the status owner repaints
+only on commits — a revocation inside an owner-commit callback must never
+trigger a full status read of a published-but-uninitialized owner. The Settings
+`Verified` state still requires a fresh authoritative readback of that exact
+Session's EFFECTIVE policy; the port's `applied` alone is never proof.
 
 The account DTOs are detached (`AccountView`, `AccountProfile`, wallet decimal
 strings, safe attempt ids/phases/error codes). An `AccountView` is last-known
