@@ -621,21 +621,23 @@ test('a card-less /yolo unavailability is published, never reported as applied',
     'the Client registry route produced no Host command/run row')
 })
 
-test('a sessionless /logout target error is settled ONCE by the local command path', async (t) => {
+test('a sessionless /logout with a stale roster opens the list ONCE instead of guessing', async (t) => {
   const life = testLifecycle(t)
   // No resumed Session: a sessionless command runs through the controller's
-  // local-command path, which already notifies its errors — the new card-less
-  // settlement must not add a second line.
+  // local-command path. The never-read (stale) authorization roster may not
+  // decide a clear target, so an ambiguous/unknown argument opens the stored
+  // credentials list (M6-1 F7B) instead of publishing a target error — and the
+  // navigation is settled exactly once (no duplicate notification).
   const fixture = await mountRunner(life)
   await waitFor('the remote runner mount', () => fixture.vt.getViewport().join('').length > 0, 20_000)
   const notifications = recordNotifications(life)
   submit(fixture, '/logout No-Such-Route')
-  await waitFor('the local-command logout error is published', () =>
-    notifications.some(message => message.includes('unknown credential target')), 20_000)
+  await waitFor('the stale /logout opened the stored credentials list', () =>
+    fixture.vt.getViewport().join('\n').includes('Stored credentials'), 20_000)
   await settle(400)
   assert.equal(
-    notifications.filter(message => message.includes('unknown credential target')).length, 1,
-    'the sessionless error is reported EXACTLY once (no double notification)')
+    notifications.filter(message => message.includes('unknown credential target')).length, 0,
+    'a stale roster must not turn an ambiguous target into an error page')
 })
 
 /**
