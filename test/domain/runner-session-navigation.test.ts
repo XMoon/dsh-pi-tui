@@ -10,10 +10,18 @@ import { Context } from '@deepseek-ai/cordis'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { SESSION_FORMAT_VERSION, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { createDirectOwnerRegistry } from '../../src/app/direct/owner-registry.ts'
+import { createDirectOwnerRetirement } from '../../src/app/direct/owner-retirement.ts'
+import { bindSessionRuntime, type SessionRuntimeSurface } from '../../src/app/session/runtime.ts'
+import { createSessionOwnershipCore } from '../../src/app/session/ownership-core.ts'
+import type { SessionScope } from '../../src/app/session/scope.ts'
 import { foldPendingModelSelection } from '../../src/domain/session/model-selection.ts'
+import type { Diag } from '../../src/runtime/process/diagnostics.ts'
+import type { SessionHandle, SessionLifecycle } from '../../src/runtime/session-lifecycle-port.ts'
 import {
   disposeContext,
   event,
+  fakeAgent,
   fakeSession,
   makeHarness,
   mountRunner,
@@ -3032,4 +3040,283 @@ test('the real /new uses the captured Session Host Workspace membership, never t
     // Bounded fixture teardown (the owned runner is closed, not a timing window).
     await owned.settle()
   }
+})
+
+// ── command-backed /new: the replaced Session's own settlement must land ────
+
+test('/new keeps the replaced Session attached until the command executor appends command/done', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-new-command-settlement-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const source = fakeSession({
+    id: 'new-command-settlement-source',
+    header: { id: 'new-command-settlement-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const harness = makeHarness(home, source)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  // The REAL TUI submission path (not the bare registered handler): the Direct
+  // command plane owns `/new`, so the official executor appends `command/run`
+  // to A before the handler and `command/done` to the SAME A after it settles.
+  app.setDraft('/new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await waitUntil('the /new child Session', () => harness.createdSessions.length === 1, 15_000)
+  const child = harness.createdSessions[0]!
+  assert.notEqual(child.id, source.id, '/new publishes a DIFFERENT Session')
+  await waitUntil('the source command/done append', () =>
+    harness.commandSettlements.some(entry => entry.sessionId === source.id && entry.phase === 'done'), 15_000)
+  await waitUntil('the replaced owner retirement', () =>
+    harness.retirementEvents.includes(`dispose:${source.id}`), 15_000)
+
+  // The executor's `command/done` must land while A still owns its Session
+  // store: retiring A inside the `/new` handler detaches it first, and the
+  // append then throws "cannot append outside a SessionStore".
+  const settlements = harness.commandSettlements.filter(entry => entry.sessionId === source.id)
+  assert.deepEqual(settlements.map(entry => entry.phase), ['run', 'done'],
+    `the replaced Session keeps exactly one run/done pair: ${JSON.stringify(harness.commandSettlements)}`)
+  assert.equal(settlements.at(-1)?.ownerLive, true,
+    'the replaced owner must stay attached through the command/done append')
+
+  // The REAL durable pairing on A: same commandId, success, run before done.
+  const log = source.snapshotEvents() as unknown as Array<{ type: string; seq: number; data: Record<string, unknown> }>
+  const runs = log.filter(entry => entry.type === 'command/run')
+  const dones = log.filter(entry => entry.type === 'command/done')
+  assert.equal(runs.length, 1, `A must persist exactly one command/run: ${JSON.stringify(log.map(entry => entry.type))}`)
+  assert.equal(dones.length, 1, `A must persist exactly one command/done: ${JSON.stringify(log.map(entry => entry.type))}`)
+  assert.equal(dones[0]!.data.commandId, runs[0]!.data.commandId, 'the done appends must name the run command')
+  assert.equal(dones[0]!.data.kind, 'success', 'the /new command settled successfully')
+  assert.ok(runs[0]!.seq < dones[0]!.seq, 'the run appends before the done')
+
+  // The ONE causal timeline (the harness records the executor appends and the
+  // retirement phases into the same array): A is retired only AFTER its own
+  // command/done, exactly once.
+  const events = harness.retirementEvents
+  assert.ok(events.indexOf(`dispose:${source.id}`) > events.indexOf(`command-done:${source.id}`),
+    `A must be retired after its command/done: ${JSON.stringify(events)}`)
+  assert.equal(events.filter(event => event === `dispose:${source.id}`).length, 1,
+    'the replaced owner is disposed exactly once')
+  assert.equal((harness.agents as { get(id: string): unknown }).get(source.id), undefined,
+    'no live owner may remain for the replaced Session')
+})
+
+test('a teardown during /new\'s command/done window waits for the replaced Session retirement', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-new-command-teardown-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let releaseSettlement!: () => void
+  let signalSettlementReached!: () => void
+  const settlementReached = new Promise<void>(resolve => { signalSettlementReached = resolve })
+  const source = fakeSession({
+    id: 'new-command-teardown-source',
+    header: { id: 'new-command-teardown-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const harness = makeHarness(home, source)
+  // Hold the executor's post-handler `command/done` append open: the fresh
+  // Session is already committed, A's own settlement is not.
+  ;(harness.commands as { settlementGate?: () => Promise<void> }).settlementGate = async () => {
+    signalSettlementReached()
+    await new Promise<void>(resolve => { releaseSettlement = resolve })
+  }
+  // A held gate always has a fallback release: a failed assertion must never
+  // park the teardown's command-settlement wait forever.
+  life.defer(() => { releaseSettlement?.() })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  app.setDraft('/new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await settlementReached
+  // Bounded observation window: the fresh Session must be committed here.
+  await settle()
+  assert.equal(harness.createdSessions.length, 1, 'the fresh Session is committed before its window closes')
+  const child = harness.createdSessions[0]!
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${source.id}`).length, 0,
+    'the replaced owner must not be retired while its command/done is pending')
+
+  // Tear the surface down in that exact window: the exit waits for the pending
+  // command settlement, so it cannot dispose A first.
+  const disposal = fiber.dispose()
+  // Bounded observation window: the blocked teardown must not dispose A here.
+  await settle()
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${source.id}`).length, 0,
+    'teardown must not retire the replaced owner before its own command/done')
+
+  releaseSettlement()
+  await disposal
+  // Bounded observation window: the deferred retirement settles before teardown ends.
+  await settle()
+
+  const settlements = harness.commandSettlements.filter(entry => entry.sessionId === source.id)
+  assert.deepEqual(settlements.map(entry => entry.phase), ['run', 'done'],
+    'the executor still settles the replaced Session command')
+  assert.equal(settlements.at(-1)?.ownerLive, true,
+    'teardown must not detach the replaced Session before its command/done')
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${source.id}`).length, 1,
+    'the replaced owner is retired exactly once at the command settlement')
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${child.id}`).length, 1,
+    'teardown then retires the committed current Session exactly once')
+})
+
+// ── the deferred source release blocks a reopen of the replaced Session ────
+
+test('a reopen of the Session a /new command replaced waits for its deferred release', async () => {
+  const events: string[] = []
+  const diagnostics: Array<{ readonly message: string; readonly fields?: Record<string, unknown> }> = []
+  const diag: Diag = {
+    debug: () => {},
+    info: () => {},
+    warn: () => {},
+    error: (message, fields) => { diagnostics.push({ message, fields }) },
+    dispose: () => {},
+  }
+  /** One Direct-shaped attachment: the Agent identity plus its handle. */
+  const attach = (sessionId: string): SessionHandle => {
+    const session = fakeSession({
+      id: sessionId,
+      header: { id: sessionId, cwd: '/workspace', createdAt: 0, version: SESSION_FORMAT_VERSION },
+      events: sessionEvents(`${sessionId} answer`),
+    })
+    const agent = fakeAgent(session, undefined, events)
+    return {
+      session,
+      direct: { agent, ownerHandle: { dispose: async () => { events.push(`dispose:${sessionId}`) } } },
+    } as unknown as SessionHandle
+  }
+
+  let disposed = false
+  const core = createSessionOwnershipCore({
+    isSurfaceDisposed: () => disposed,
+    resetForGeneration: () => {},
+  })
+  const registry = createDirectOwnerRegistry(() => core.owner())
+  const retirement = createDirectOwnerRetirement({
+    owners: registry,
+    diag,
+    isLifecycleAborted: () => false,
+    drainContinuableDescendants: async () => {},
+    flushSession: async () => {},
+    parkHandle: () => {},
+    takeAllParkedOwners: () => [],
+  })
+  const lifecycle: SessionLifecycle = {
+    resolveWorkspace: async intent => ({ workspaceId: 'ws', path: intent.kind === 'host-path' ? intent.path : '/workspace' }),
+    create: async request => ({ ownership: 'current', outcome: { kind: 'created', handle: attach(request.sessionId) } }),
+    // The Direct adapter's own open shape: the pending owner release is awaited
+    // through the SAME ledger seam bootstrap wires as the Direct pool's
+    // `waitForRelease` (`ownership.waitForOwnerRelease`). The real adapter's
+    // wait/cancel behavior is covered by the Direct lifecycle tests.
+    open: async request => {
+      await core.waitForOwnerRelease(request.sessionId)
+      events.push(`resume:${request.sessionId}`)
+      return { ownership: 'current', outcome: { kind: 'opened', handle: attach(request.sessionId) } }
+    },
+    fork: async () => ({ ownership: 'current', outcome: { kind: 'unavailable', message: 'fork is not used by this fixture' } }),
+  }
+  const surface: SessionRuntimeSurface = {
+    warnRetirement: () => {},
+    warnRetirementSkipped: () => {},
+    isSurfaceDisposed: () => disposed,
+    beginOpening: () => undefined,
+    clearOpening: () => {},
+    settlePendingQueueRecalls: () => {},
+    settleLocalSubmitAck: () => {},
+    resetSubmitLatency: () => {},
+    setCompletionOwner: () => {},
+    initLiveSession: async owner => { events.push(`init:${registry.sessionId(owner)}`) },
+    refreshLiveCatalog: async owner => { events.push(`catalog:${registry.sessionId(owner)}`) },
+    reportSwitch: (from, to) => { events.push(`switch:${from ?? '(none)'}->${registry.sessionId(to)}`) },
+    clearUnpinnedDrafts: () => {},
+    dropOutgoingActiveDraft: () => {},
+    withdrawReplacedPresentation: () => {},
+    beginInputHistoryScope: () => {},
+    retireStaleHistorySeat: () => {},
+    reportSwitchFailure: () => {},
+    warnCommittedDurability: () => {},
+    launchComposition: async () => ({ composition: {} }),
+    setResumeFailure: () => {},
+    clearResumeFailure: () => {},
+    reportFirstSessionCreateFailure: () => {},
+    notifyResumeFailure: () => {},
+    awaitPendingDefaultWrite: async () => {},
+    newSessionId: () => 'session-first',
+    initialWorkspaceIntent: () => ({ kind: 'host-path', path: '/workspace' }),
+    currentOpening: () => undefined,
+    resetOpening: () => {},
+  }
+  const runtime = bindSessionRuntime(core, {
+    owners: registry,
+    retirement,
+    lifecycle,
+    lifecycleSignal: new AbortController().signal,
+    surface,
+    isScopeCurrent: () => true,
+    captureScope: () => ({ sessionId: core.currentSessionId() }) as SessionScope,
+    diag,
+  })
+
+  // A is the live Session; the command window is open (the DSH executor still
+  // owns A's `command/done` append), and the ordinary transition commits B.
+  runtime.publishResumedOwner(attach('session-a'), () => undefined)
+  runtime.beginCommandSettlement()
+  const handleB = attach('session-b')
+  const transition = await runtime.transitionTo({
+    target: { id: 'session-b' },
+    create: async () => handleB,
+  })
+  assert.equal(transition.ok, true, `the ordinary transition still commits: ${JSON.stringify(transition)}`)
+  assert.equal(core.currentSessionId(), 'session-b')
+  assert.equal(events.includes('dispose:session-a'), false,
+    'a command-window transition defers the replaced owner’s physical retirement')
+
+  // The reopen of A must wait for the EXACT deferred release: the adapter open
+  // cannot resume A before A is disposed, and it must not create a second live
+  // owner for the same id.
+  const opening = lifecycle.open({ sessionId: 'session-a' })
+  // Bounded observation window: the open has reached its release wait here.
+  await settle()
+  assert.equal(events.includes('resume:session-a'), false,
+    `the reopen must not resume the replaced Session while its release is pending: ${JSON.stringify(events)}`)
+  assert.equal(events.includes('dispose:session-a'), false,
+    'the release is only settled by the command settlement')
+
+  await runtime.settleCommandSettlement()
+  const opened = await opening
+  assert.equal(opened.outcome.kind, 'opened', 'the reopen completes once the release settles')
+  assert.equal(events.filter(event => event === 'dispose:session-a').length, 1,
+    'the replaced owner is retired exactly once')
+  assert.ok(events.indexOf('dispose:session-a') < events.indexOf('resume:session-a'),
+    `A must be disposed BEFORE its reopen resumes it: ${JSON.stringify(events)}`)
+  assert.deepEqual(diagnostics, [], 'a clean deferred retirement emits no failure diagnostic')
+  disposed = true
 })

@@ -455,6 +455,10 @@ export function makeHarness(
       const session = (agent as { session: FakeSession }).session
       const appendEvent = session.append as (type: string, data: unknown) => unknown
       const append = (phase: 'run' | 'done', type: string, data: unknown): void => {
+        // The ONE causal timeline: the executor's own appends and the
+        // retirement phases share this array, so a witness can prove that an
+        // owner's `dispose` really landed AFTER its `command/done`.
+        retirementEvents.push(`command-${phase}:${session.id}`)
         commandSettlements.push({ sessionId: session.id, phase, ownerLive: live.has(session.id) })
         appendEvent(type, data)
       }

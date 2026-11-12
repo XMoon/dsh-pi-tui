@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Running `/new` from an already open Session no longer loses that command's settlement record.** The old Session is now closed only after the new Session is ready AND the command executor has written the `/new` completion record, so the record is persisted instead of failing with `cannot append outside a SessionStore`; the new Session's visibility and resumability are unchanged.
+
 - **A command submitted while a new Session is being created is no longer lost.** Commands such as `/preset status` typed while `/new` is still creating the Session now run in that Session once it is ready instead of silently disappearing.
 
 ## [0.5.6] - 2026-11-08
