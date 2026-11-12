@@ -28,6 +28,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   cardShowing,
+  foldLiveWithRetention,
   cardsShowing,
   eventLedger,
   foldLive,
@@ -273,4 +274,71 @@ test('turnEnded is qualified by Session, so two Sessions cannot share an ordinal
   assert.equal(turnEnded(turnEnds, 'session-a', 26), true)
   assert.equal(turnEnded(turnEnds, 'session-b', 26), false)
   assert.equal(turnEnded(turnEnds, 'session-b', 1), true)
+})
+
+// ── retention chronology: client `gone` is a real eviction epoch ────────────
+
+const goneEvent = (ids, s = 100) => ({ dir: 'in', verb: 'e', body: { ev: 'gone', s, ids } })
+
+test('retention: a client gone event retires the root and its subtree without an outbound del', () => {
+  const { nodes, goneEvents } = foldLiveWithRetention([
+    frame([['add', 'main', 's1', null, mainRoot([
+      card('main.0', 'first', [{ id: 'main.0.t', k: 'text', p: { text: 'body' } }]),
+    ])]], 1),
+    goneEvent(['main.0'], 2),
+  ])
+  assert.deepEqual(goneEvents, [{ frame: 2, ids: ['main.0'] }])
+  assert.equal(nodes.has('main.0'), false, 'the evicted root is unmounted')
+  assert.equal(nodes.has('main.0.t'), false, 'its subtree is unmounted')
+  assert.deepEqual(mainIds(nodes), [], 'the parent no longer lists the evicted root')
+})
+
+test('retention: a legal update BEFORE the eviction is not a violation', () => {
+  const { violations } = foldLiveWithRetention([
+    frame([['add', 'main', 's1', null, mainRoot([card('main.0', 'first')])]], 1),
+    frame([['set', 'main.0', { status: 'settled' }]], 2),
+    goneEvent(['main.0'], 3),
+  ])
+  assert.deepEqual(violations, [])
+})
+
+test('retention: a set/text AFTER the eviction is a violation and never resurrects the root', () => {
+  const { nodes, violations } = foldLiveWithRetention([
+    frame([['add', 'main', 's1', null, mainRoot([card('main.0', 'first')])]], 1),
+    goneEvent(['main.0'], 2),
+    frame([['set', 'main.0', { status: 'late' }]], 3),
+    frame([['text', 'main.0', 'append', 'late']], 4),
+  ])
+  assert.deepEqual(violations.map(entry => [entry.kind, entry.id, entry.frame]), [
+    ['op-after-gone', 'main.0', 3],
+    ['op-after-gone', 'main.0', 4],
+  ])
+  assert.equal(nodes.has('main.0'), false)
+  assert.deepEqual(mainIds(nodes), [])
+})
+
+test('retention: a legal re-add opens a new epoch; a later update is legal again', () => {
+  const { nodes, violations } = foldLiveWithRetention([
+    frame([['add', 'main', 's1', null, mainRoot([card('main.0', 'first')])]], 1),
+    goneEvent(['main.0'], 2),
+    // A genuine stamp change re-adds the whole root, which is the legal path.
+    frame([['add', 'main.0', 'main', null, card('main.0', 're-added')]], 3),
+    frame([['set', 'main.0', { status: 'live' }]], 4),
+  ])
+  assert.deepEqual(violations, [])
+  assert.equal(nodes.has('main.0'), true)
+  assert.deepEqual(mainIds(nodes), ['main.0'])
+  assert.equal(nodes.get('main.0').p.text, 're-added')
+})
+
+test('retention: an outbound del also detaches the root from its parent order', () => {
+  const { nodes } = foldLiveWithRetention([
+    frame([['add', 'main', 's1', null, mainRoot([
+      card('main.0', 'a'),
+      card('main.1', 'b'),
+    ])]], 1),
+    frame([['del', 'main.0']], 2),
+  ])
+  assert.deepEqual(mainIds(nodes), ['main.1'])
+  assert.equal(nodes.has('main.0'), false)
 })

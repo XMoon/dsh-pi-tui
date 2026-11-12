@@ -55,15 +55,34 @@ function ownText(node) {
 }
 
 /**
- * Fold every `f` frame's ops into the live node set.
+ * Fold the ledger into the live node set AND the retention chronology.
  *
- * The returned map is the SDK's authoritative live view: an id absent from it is
- * NOT mounted (deleted, or never added), which is what makes an "unknown id"
- * negative control meaningful. Order is insertion order of first add.
+ * Two authorities are folded IN ORDER, not just the outbound frames:
+ *  - an outbound `f` frame applies its ops;
+ *  - an inbound `e` event with `ev: 'gone'` EVICTS the named roots (and their
+ *    current subtrees) exactly when the client reported it — Tern can evict a
+ *    settled root WITHOUT an outbound `del`, so a fold that ignores `gone`
+ *    keeps calling an evicted row "mounted".
+ *
+ * A later legal `add` of the same root starts a NEW attached epoch: queued
+ * `set`/`text` ops are judged against the epoch they occur in, never against a
+ * union of every id that was ever gone. `violations` records only ops that
+ * target an id while it is RETIRED (gone and not yet re-added).
+ *
+ * Returns `{ nodes, violations, goneEvents }`; `nodes` is the SDK's live view.
  */
-export function foldLive(wire) {
+export function foldLiveWithRetention(wire) {
   const nodes = new Map()
-  const dropSubtree = id => {
+  /** Ids currently retired by a `gone` epoch (cleared by a real re-add). */
+  const retiredIds = new Set()
+  const violations = []
+  const gone = []
+  const detachFromParent = id => {
+    const node = nodes.get(id)
+    const parent = node?.parentId === null || node?.parentId === undefined ? undefined : nodes.get(node.parentId)
+    if (parent !== undefined) parent.childIds = parent.childIds.filter(child => child !== id)
+  }
+  const collectSubtree = id => {
     const doomed = new Set()
     const collect = current => {
       if (doomed.has(current)) return
@@ -71,7 +90,16 @@ export function foldLive(wire) {
       for (const child of nodes.get(current)?.childIds ?? []) collect(child)
     }
     collect(id)
-    for (const doomedId of doomed) nodes.delete(doomedId)
+    return doomed
+  }
+  const retire = (id, reason) => {
+    const doomed = collectSubtree(id)
+    detachFromParent(id)
+    for (const doomedId of doomed) {
+      nodes.delete(doomedId)
+      retiredIds.add(doomedId)
+    }
+    return [...doomed]
   }
   const visit = (node, parentId) => {
     if (node === null || node === undefined || typeof node !== 'object' || typeof node.id !== 'string') return
@@ -83,66 +111,84 @@ export function foldLive(wire) {
       childIds,
       parentId: parentId ?? null,
     })
+    retiredIds.delete(node.id)
     for (const child of node.c ?? []) visit(child, node.id)
   }
-  for (const entry of wire) {
-    if (entry.dir !== 'out' || entry.verb !== 'f') continue
-    for (const op of entry.body?.ops ?? []) {
-      switch (op[0]) {
-        case 'add': {
-          // Re-adding an id replaces its whole subtree, so the old children leave.
-          dropSubtree(op[1])
-          visit(op[4], op[2])
-          const parent = nodes.get(op[2])
-          if (parent !== undefined && !parent.childIds.includes(op[1])) {
-            // `op[3]` is the sibling the node is placed BEFORE, or null to append.
-            const at = op[3] === null || op[3] === undefined ? -1 : parent.childIds.indexOf(op[3])
-            if (at < 0) parent.childIds.push(op[1])
-            else parent.childIds.splice(at, 0, op[1])
-          }
-          break
+  const applyOp = (op, frame) => {
+    switch (op[0]) {
+      case 'add': {
+        // Re-adding an id replaces its whole subtree and opens a NEW epoch.
+        const doomed = collectSubtree(op[1])
+        detachFromParent(op[1])
+        for (const doomedId of doomed) nodes.delete(doomedId)
+        visit(op[4], op[2])
+        const parent = nodes.get(op[2])
+        if (parent !== undefined && !parent.childIds.includes(op[1])) {
+          // `op[3]` is the sibling the node is placed BEFORE, or null to append.
+          const at = op[3] === null || op[3] === undefined ? -1 : parent.childIds.indexOf(op[3])
+          if (at < 0) parent.childIds.push(op[1])
+          else parent.childIds.splice(at, 0, op[1])
         }
-        case 'del':
-          dropSubtree(op[1])
-          break
-        case 'set': {
-          const node = nodes.get(op[1])
-          if (node === undefined) break
+        break
+      }
+      case 'del': {
+        retire(op[1], 'del')
+        break
+      }
+      case 'set':
+      case 'text': {
+        if (retiredIds.has(op[1])) {
+          violations.push({ kind: 'op-after-gone', op, frame, id: op[1] })
+        }
+        const node = nodes.get(op[1])
+        if (node === undefined) break
+        if (op[0] === 'set') {
           for (const [key, value] of Object.entries(op[2] ?? {})) {
             if (value === null) delete node.p[key]
             else node.p[key] = value
           }
-          break
-        }
-        case 'text': {
-          const node = nodes.get(op[1])
-          if (node === undefined) break
+        } else {
           const before = typeof node.p.text === 'string' ? node.p.text : ''
           node.p.text = op[2] === 'append' ? before + String(op[3] ?? '') : String(op[3] ?? '')
-          break
         }
-        case 'move': {
-          const node = nodes.get(op[1])
-          const parentId = op[2]
-          const before = op[3]
-          if (node === undefined) break
-          const oldParent = node.parentId === null ? undefined : nodes.get(node.parentId)
-          if (oldParent !== undefined) oldParent.childIds = oldParent.childIds.filter(id => id !== op[1])
-          node.parentId = parentId
-          const parent = nodes.get(parentId)
-          if (parent === undefined) break
-          const at = before === null || before === undefined ? -1 : parent.childIds.indexOf(before)
-          if (at < 0) parent.childIds.push(op[1])
-          else parent.childIds.splice(at, 0, op[1])
-          break
-        }
-        default:
-          // `settle` and any future hint carry no node identity this observer needs.
-          break
+        break
       }
+      case 'move': {
+        const node = nodes.get(op[1])
+        const parentId = op[2]
+        const before = op[3]
+        if (node === undefined) break
+        const oldParent = node.parentId === null ? undefined : nodes.get(node.parentId)
+        if (oldParent !== undefined) oldParent.childIds = oldParent.childIds.filter(id => id !== op[1])
+        node.parentId = parentId
+        const parent = nodes.get(parentId)
+        if (parent === undefined) break
+        const at = before === null || before === undefined ? -1 : parent.childIds.indexOf(before)
+        if (at < 0) parent.childIds.push(op[1])
+        else parent.childIds.splice(at, 0, op[1])
+        break
+      }
+      default:
+        // `settle` and any future hint carry no node identity this observer needs.
+        break
     }
   }
-  return nodes
+  for (const entry of wire) {
+    if (entry.dir === 'in' && entry.verb === 'e' && entry.body?.ev === 'gone') {
+      const ids = Array.isArray(entry.body.ids) ? entry.body.ids : []
+      gone.push({ frame: entry.body.s ?? null, ids: [...ids] })
+      for (const id of ids) retire(id, 'gone')
+      continue
+    }
+    if (entry.dir !== 'out' || entry.verb !== 'f') continue
+    for (const op of entry.body?.ops ?? []) applyOp(op, entry.body?.s ?? null)
+  }
+  return { nodes, violations, goneEvents: gone }
+}
+
+/** The live node map only (the common case). */
+export function foldLive(wire) {
+  return foldLiveWithRetention(wire).nodes
 }
 
 /** The concatenated text of a node's own subtree, with cycle protection. */
@@ -214,15 +260,7 @@ export function settleOps(wire) {
 }
 
 /** Every `gone` event the real client reported, with the ids it evicted. */
-export function goneEvents(wire) {
-  const out = []
-  for (const entry of wire) {
-    if (entry.dir !== 'in' || entry.verb !== 'e') continue
-    if (entry.body?.ev !== 'gone') continue
-    out.push({ frame: entry.body?.s ?? null, ids: Array.isArray(entry.body.ids) ? [...entry.body.ids] : [] })
-  }
-  return out
-}
+export const goneEvents = wire => foldLiveWithRetention(wire).goneEvents
 
 /** The inline Surfaces this run opened; more than one breaks the contract. */
 export function openedSurfaces(wire) {
