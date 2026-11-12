@@ -1503,6 +1503,19 @@ function commandCompactionHead(title: string, statusWord: string, detail: readon
 }
 
 function commandNode(message: TranscriptCommandRow, key: string, options: TranscriptViewOptions): Node {
+  // The historical standalone mapping has no operable disclosure owner: keep
+  // its EXACT fully-readable card shape (string head, no native head slot).
+  if (options.innerDisclosure === undefined) {
+    const name = message.name ?? 'command'
+    const head = sanitizedPhysicalLine(message.args === null || message.args === ''
+      ? `/${name}`
+      : `/${name} ${message.args}`)
+    const detail = commandDetailText(message)
+    return ui.card(
+      { key, head, status: commandStatusOf(message) },
+      ...(detail === '' ? [] : [ui.md({ key: 'body', text: detail })]),
+    )
+  }
   const identity = commandIdentityLine(message)
   const statusWord = commandStatusWord(message)
   const detail = commandDetailText(message)
@@ -1521,6 +1534,19 @@ function commandNode(message: TranscriptCommandRow, key: string, options: Transc
 }
 
 function compactionNode(message: TranscriptCompactionRow, key: string, options: TranscriptViewOptions): Node {
+  // Historical standalone mapping: the original fully-readable card, with no
+  // operable disclosure head and no re-interpreted status authority.
+  if (options.innerDisclosure === undefined) {
+    const status: Status = message.error !== undefined && message.error !== ''
+      ? 'error'
+      : message.running === true ? 'running' : 'done'
+    const body = message.text === '' ? [] : [ui.md({ key: 'body', text: sanitizeDisplayText(message.text) })]
+    return ui.card(
+      { key, head: 'Compaction', status },
+      ui.badge({ key: 'counts', text: `${message.items} items · ${message.tokens} tokens` }),
+      ...body,
+    )
+  }
   const view = compactionPresentation(message)
   const headDetail = [...(view.counts === '' ? [] : [view.counts]), ...(view.preview === undefined ? [] : [view.preview])]
   if (!commandCompactionCanCollapse(message, options)) {
