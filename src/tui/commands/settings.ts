@@ -49,11 +49,15 @@ import { SubagentModelAllowlistPicker, allowlistSummary, lastRouteWhileEnabled }
 import { resolveThemeSelection, themePickerRows } from '../../app/surface/theme-selection.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
 import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings, type WebStartupPreferenceState } from '../../runtime/config-port.ts'
+import { isWebApiBilling } from '../../domain/web-provider-settings.ts'
 import {
   WEB_FETCH_PROVIDER_CANDIDATES,
   WEB_SEARCH_PROVIDER_CANDIDATES,
   WEB_SETTINGS_PAGE_TITLE,
   WebSettingsPage,
+  webAdvancedFactsText,
+  webAdvancedOverrideFields,
+  webBillingLabel,
   type WebCommitResult,
   type WebSettingRowId,
   type WebSettingsFacts,
@@ -449,9 +453,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
 
   /** Why the Web page may not commit right now. The page keeps painting the
    *  LAST read facts (they are readable), but it offers no confirmable
-   *  candidate, no endpoint draft and no credential action while the backend is
-   *  not current — the commit entry would refuse every one of them at its turn,
-   *  so offering them would be a false affordance. */
+   *  candidate and no credential action while the backend is not current — the
+   *  commit entry would refuse every one of them at its turn, so offering them
+   *  would be a false affordance. */
   const webWritableRefusal = (): string | undefined => {
     if (!webSettingsAvailable()) return 'the Host Web provider settings are not available on this backend'
     const readiness = runner.config.configReadiness()
@@ -491,7 +495,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       case 'web-fetch-provider': return providerLabel(WEB_FETCH_PROVIDER_VALUES, webSettings.fetchProvider)
       case 'web-search-count': return String(webSettings.api.count)
       case 'web-send-original-question': return webSettings.api.sendOriginalQuestion ? 'on' : 'off'
-      case 'web-search-endpoint': return webSettings.api.baseURL
+      case 'web-search-billing': return webBillingLabel(webSettings.api.searchBilling)
+      case 'web-fetch-billing': return webBillingLabel(webSettings.api.fetchBilling)
+      case 'web-search-advanced': return webAdvancedFactsText(webSettings.advanced, 'search')
+      case 'web-fetch-advanced': return webAdvancedFactsText(webSettings.advanced, 'fetch')
     }
   }
 
@@ -500,7 +507,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  the first frame already carries authoritative values; a missing or failed
    *  read is stated, never defaulted. */
   const webWorkspaceRowFacts = (): { summary: string; freshness: SettingsWorkspaceFreshness; description: string } => {
-    const description = 'Host Web settings for the base profile, not an Optional Bundle. Defaults: Messages search · HTTP fetch; other bundles never change them and the defaults call no billed API. The Search/Fetch APIs are billed separately as opt-in providers (a Messages plan does not guarantee coverage) and send the request to the configured endpoint. Share Original Question is on by default: it sends up to 128 characters of the human question (never the full history or system prompt). The key stays in the official credential reference and is never shown. Enter opens the Web Search / Fetch page in this same workspace: each value is written only by its own explicit Confirm and reads Verified only after the Host write and authoritative read-back agree.'
+    const description = 'Host Web settings for the base profile, not an Optional Bundle. Defaults: DeepSeek Search API search · HTTP fetch; other bundles never change them. The DeepSeek Search API is billed separately per call (a Messages plan does not guarantee coverage). Share Original Question is on by default: it sends up to 128 characters of the human question as ori_question (never the full history or system prompt); the HTTP fetch default calls no billed API. Each Search/Fetch API billing mode (Automatic/Account/API key) is one explicit choice; the YAML-only Search/Fetch endpoint overrides are read-only facts here and, when set, own their capability over the billing choice. Old baseURL/apiKeyEnv/apiKey keys no longer control Search/Fetch. The key stays in the official credential reference and is never shown. Enter opens the Web Search / Fetch page in this same workspace: each value is written only by its own explicit Confirm and reads Verified only after the Host write and authoritative read-back agree.'
     if (!webSettingsAvailable()) {
       return { summary: 'Unavailable', freshness: 'unavailable', description: `${description} Not supported on this backend.` }
     }
@@ -519,9 +526,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     }
   }
 
-  /** The ONE Web write chain of this command owner. Every Web mutation (the
-   *  page's five fields and the endpoint draft) joins THIS chain: a slow
-   *  earlier mutation can never land after a newer one. */
+  /** The ONE Web write chain of this command owner. Every Web mutation (every
+   *  writable page row) joins THIS chain: a slow earlier mutation can never
+   *  land after a newer one. */
   let webWriteChain: Promise<void> = Promise.resolve()
 
   /** Queue one Web-section operation on the ONE owner FIFO. */
@@ -532,9 +539,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   }
 
   /** The exact ConfigPort operation one choice row means (undefined = the value
-   *  is not one this UI writes, so the row is restored unchanged). The ENDPOINT
-   *  row is owned by the exclusive endpoint editor, which passes its draft
-   *  through `commitWebIntent` directly. */
+   *  is not one this UI writes, so the row is restored unchanged). The override
+   *  rows are read-only facts: they never carry a write. */
   const webWriteFor = (id: WebSettingRowId, value: string): (() => Promise<void>) | undefined => {
     switch (id) {
       case 'web-search-provider': {
@@ -555,9 +561,13 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         return value !== 'on' && value !== 'off'
           ? undefined
           : () => runner.config.web.setSendOriginalQuestion(value === 'on')
-      case 'web-search-endpoint':
-        // Owned by the exclusive endpoint editor (it validates, writes and
-        // verifies before closing), so the row's own commit carries no write.
+      case 'web-search-billing':
+        return isWebApiBilling(value) ? () => runner.config.web.setSearchBilling(value) : undefined
+      case 'web-fetch-billing':
+        return isWebApiBilling(value) ? () => runner.config.web.setFetchBilling(value) : undefined
+      case 'web-search-advanced':
+      case 'web-fetch-advanced':
+        // Read-only YAML-only facts: no write path exists for them here.
         return undefined
     }
   }
@@ -565,7 +575,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   /** The RAW identity one requested value means, or undefined when this UI never
    *  writes it. Providers accept their official id OR their display label (the
    *  page submits ids, an already-stored label still names the same route); the
-   *  write itself only ever uses the official id. */
+   *  write itself only ever uses the official id. Billing rows accept only the
+   *  official closed enum. */
   const webRequestedIdentity = (id: WebSettingRowId, requested: string): string | undefined => {
     switch (id) {
       case 'web-search-provider':
@@ -578,21 +589,31 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       }
       case 'web-send-original-question':
         return requested === 'on' || requested === 'off' ? requested : undefined
-      case 'web-search-endpoint':
-        return requested.trim() === '' ? undefined : requested
+      case 'web-search-billing':
+      case 'web-fetch-billing':
+        return isWebApiBilling(requested) ? requested : undefined
+      case 'web-search-advanced':
+      case 'web-fetch-advanced':
+        return undefined
     }
   }
 
   /** The RAW identity the LATEST authoritative settings hold (never a display
    *  label): the write verdict compares THIS against the requested identity, so
-   *  a canonical form / a winning external writer is a readable difference. */
+   *  a canonical form / a winning external writer is a readable difference. The
+   *  billing rows report the raw billing mode; the read-only override rows
+   *  report their facts string (no write exists, so the identity is
+   *  display-only). */
   const webCommittedIdentity = (settings: WebProviderSettings, id: WebSettingRowId): string | undefined => {
     switch (id) {
       case 'web-search-provider': return settings.searchProvider
       case 'web-fetch-provider': return settings.fetchProvider
       case 'web-search-count': return String(settings.api.count)
       case 'web-send-original-question': return settings.api.sendOriginalQuestion ? 'on' : 'off'
-      case 'web-search-endpoint': return settings.api.baseURL
+      case 'web-search-billing': return settings.api.searchBilling
+      case 'web-fetch-billing': return settings.api.fetchBilling
+      case 'web-search-advanced': return webAdvancedFactsText(settings.advanced, 'search')
+      case 'web-fetch-advanced': return webAdvancedFactsText(settings.advanced, 'fetch')
     }
   }
 
@@ -608,17 +629,17 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   }
 
   /**
-   * The ONE Web commit entry (C2-R4 §5): the page's five fields AND the legacy
-   * editor's rows both confirm through this function, so there is exactly ONE
-   * FIFO, ONE latest-read fence and ONE settlement vocabulary:
+   * The ONE Web commit entry (C2-R4 §5): every writable row confirms through
+   * this function, so there is exactly ONE FIFO, ONE latest-read fence and ONE
+   * settlement vocabulary:
    *
    *  - (1) the caller already decided the exact field + value;
    *  - (2) the intent joins the command-owned chain;
    *  - (3) its turn re-proves readiness/availability and takes the NEWEST
    *    committed read as the base — a snapshot a later read superseded is never
    *    a commit base;
-   *  - (4) the candidate / custom-provider / value guard runs with ZERO Host
-   *    writes on refusal;
+   *  - (4) the candidate / custom-provider / value / override guard runs with
+   *    ZERO Host writes on refusal;
    *  - (5) the ONE official setter is dispatched;
    *  - (6) a fresh read-back decides `verified` / `not-saved` / `outcome-unknown`;
    *  - (7) the result is returned to whichever presentation still exists.
@@ -670,9 +691,20 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       } else if (webCommittedIdentity(base, id) === requestedIdentity) {
         return { kind: 'verified', actual: requestedIdentity }
       }
-      const write = id === 'web-search-endpoint'
-        ? () => runner.config.web.setSearchApiBaseURL(requested)
-        : webWriteFor(id, requested)
+      // A non-empty YAML-only override owns its capability's endpoint/credential
+      // configuration: the matching Billing row dispatches ZERO writes, even
+      // when a stale presentation offered a candidate.
+      if (id === 'web-search-billing' || id === 'web-fetch-billing') {
+        const capability = id === 'web-search-billing' ? 'search' : 'fetch'
+        const overrides = webAdvancedOverrideFields(base.advanced, capability)
+        if (overrides.length > 0) {
+          return {
+            kind: 'not-saved',
+            reason: `the ${capability} API is overridden by Host YAML (${overrides.map(entry => entry.field).join(' and ')}); the billing choice cannot be written here`,
+          }
+        }
+      }
+      const write = webWriteFor(id, requested)
       if (write === undefined) {
         return { kind: 'not-saved', reason: `"${requested}" is not a value this page writes` }
       }

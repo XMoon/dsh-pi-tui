@@ -51,10 +51,12 @@ import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../..
 import {
   assertFetchProviderId,
   assertFetchProviderReplaceable,
-  assertSearchApiBaseURL,
   assertSearchApiCount,
   assertSearchProviderId,
   assertSearchProviderReplaceable,
+  assertWebApiBilling,
+  readWebApiBilling,
+  webApiAdvancedFactsOf,
 } from '../../domain/web-provider-settings.ts'
 import type {
   AccountBalanceOutcome,
@@ -1795,16 +1797,22 @@ export class DirectWebProviderConfig implements WebProviderConfig {
     const provider = formValueOf(readSettingsDescriptor(settings, WEB_PROVIDER_NS))
     const api = formValueOf(readSettingsDescriptor(settings, WEB_SEARCH_API_NS))
     if (provider === undefined || api === undefined) return undefined
-    const baseURL = api.baseURL
+    // rc.2 has NO single `baseURL` requirement: an unset Search/Fetch endpoint
+    // follows the current conversation's DeepSeek route, so the read stays
+    // ready. A missing/foreign billing value, though, is UNAVAILABLE — never a
+    // silent `auto`.
+    const searchBilling = readWebApiBilling(api, 'searchBilling')
+    const fetchBilling = readWebApiBilling(api, 'fetchBilling')
     const count = api.count
     const sendOriginalQuestion = api.sendOriginalQuestion
-    if (typeof baseURL !== 'string' || baseURL === '') return undefined
+    if (searchBilling === undefined || fetchBilling === undefined) return undefined
     if (typeof count !== 'number' || !Number.isInteger(count)) return undefined
     if (typeof sendOriginalQuestion !== 'boolean') return undefined
     return {
       searchProvider: optionalId(provider.searchProvider),
       fetchProvider: optionalId(provider.fetchProvider),
-      api: { baseURL, count, sendOriginalQuestion },
+      api: { searchBilling, fetchBilling, count, sendOriginalQuestion },
+      advanced: webApiAdvancedFactsOf(api),
       credential: await this.credentialFact(),
     }
   }
@@ -1849,9 +1857,14 @@ export class DirectWebProviderConfig implements WebProviderConfig {
     await this.mutate(WEB_SEARCH_API_NS, [{ op: 'set', path: ['sendOriginalQuestion'], value: enabled }])
   }
 
-  async setSearchApiBaseURL(url: string): Promise<void> {
-    assertSearchApiBaseURL(url)
-    await this.mutate(WEB_SEARCH_API_NS, [{ op: 'set', path: ['baseURL'], value: url }])
+  async setSearchBilling(mode: 'auto' | 'account' | 'api-key'): Promise<void> {
+    assertWebApiBilling(mode)
+    await this.mutate(WEB_SEARCH_API_NS, [{ op: 'set', path: ['searchBilling'], value: mode }])
+  }
+
+  async setFetchBilling(mode: 'auto' | 'account' | 'api-key'): Promise<void> {
+    assertWebApiBilling(mode)
+    await this.mutate(WEB_SEARCH_API_NS, [{ op: 'set', path: ['fetchBilling'], value: mode }])
   }
 
   /** One revision-checked official settings mutation. The section must be a

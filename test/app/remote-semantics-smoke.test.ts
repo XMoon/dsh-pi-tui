@@ -1800,7 +1800,8 @@ test('the official Web settings Remotes and /settings page use the same Host aut
     assert.deepEqual(await config.web.read(), {
       searchProvider: 'deepseek-official',
       fetchProvider: 'http',
-      api: { baseURL: 'https://api.deepseek.com/v1/tools', count: 10, sendOriginalQuestion: true },
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {},
       credential: { configured: true, source: 'file' },
     })
     const credentialProjection = JSON.stringify(await config.web.read())
@@ -1823,23 +1824,27 @@ test('the official Web settings Remotes and /settings page use the same Host aut
     await config.web.setFetchProvider('deepseek-fetch-api')
     await config.web.setSearchApiCount(20)
     await config.web.setSendOriginalQuestion(false)
-    await config.web.setSearchApiBaseURL('https://gateway.example.test/v1/tools')
+    // rc.2's API writes are the two official billing enums: each CAS lands on
+    // its exact `web-deepseek-api` field and both stay independent.
+    await config.web.setSearchBilling('account')
+    await config.web.setFetchBilling('api-key')
     assert.deepEqual(await config.web.read(), {
       searchProvider: 'deepseek-search-api',
       fetchProvider: 'deepseek-fetch-api',
-      api: { baseURL: 'https://gateway.example.test/v1/tools', count: 20, sendOriginalQuestion: false },
+      api: { searchBilling: 'account', fetchBilling: 'api-key', count: 20, sendOriginalQuestion: false },
+      advanced: {},
       credential: { configured: true, source: 'file' },
-    }, 'all five generated settings mutations are authoritative on read-back')
+    }, 'all generated settings mutations are authoritative on read-back')
     const hostValues = forms.describe()
     assert.equal(hostValues.find(entry => entry.ns === 'web')?.value?.searchProvider, 'deepseek-search-api')
     assert.equal(hostValues.find(entry => entry.ns === 'web')?.value?.fetchProvider, 'deepseek-fetch-api')
     assert.equal(hostValues.find(entry => entry.ns === 'web-deepseek-api')?.value?.count, 20)
     assert.equal(hostValues.find(entry => entry.ns === 'web-deepseek-api')?.value?.sendOriginalQuestion, false)
-    assert.equal(hostValues.find(entry => entry.ns === 'web-deepseek-api')?.value?.baseURL,
-      'https://gateway.example.test/v1/tools')
+    assert.equal(hostValues.find(entry => entry.ns === 'web-deepseek-api')?.value?.searchBilling, 'account')
+    assert.equal(hostValues.find(entry => entry.ns === 'web-deepseek-api')?.value?.fetchBilling, 'api-key')
     const directWeb = new DirectWebProviderConfig(host.ctx as never)
     assert.deepEqual(await directWeb.read(), await config.web.read(),
-      'Direct and Remote project the same five Host fields and credential metadata')
+      'Direct and Remote project the same Host fields and credential metadata')
 
     // The configured provider is the NEXT operation's actual Host authority.
     // Replace only the outer HTTP transport, then call the real ctx.web
@@ -1877,13 +1882,29 @@ test('the official Web settings Remotes and /settings page use the same Host aut
       const web = host.ctx.get('web') as {
         search(request: { query: string }): Promise<{ sources: readonly { url: string }[] }>
       }
+      // The Remote-written `account` billing is the official credential claim:
+      // with NO signed-in account the real Host search fails closed (no
+      // fallback, no dispatched request) instead of silently using the key.
+      await assert.rejects(
+        agents.withInitiator(webAgent, () => web.search({ query: 'f3 account probe' })),
+        (error: unknown) => {
+          assert.equal((error as { code?: string }).code, 'WEB_PROVIDER_CREDENTIAL_MISSING')
+          assert.match((error as { message?: string }).message ?? '', /signed-in DeepSeek account/u)
+          return true
+        },
+        'account billing without an account fails closed',
+      )
+      assert.equal(requests.length, 0, 'the failed account-billing probe dispatched no request')
+      // Switch the SAME capability to `api-key` billing through the port: the
+      // real Host search then runs on the API-key credential.
+      await config.web.setSearchBilling('api-key')
       const result = await agents.withInitiator(webAgent, () => web.search({ query: 'f3 route probe' }))
       assert.deepEqual(result.sources.map(source => source.url), ['https://result.example.test/f3'])
       assert.equal(requests.length, 1)
-      assert.equal(requests[0]?.url, 'https://gateway.example.test/v1/tools/search',
-        'the Remote-written provider and endpoint select the real Host HTTP route')
-      assert.equal(requests[0]?.authorization?.startsWith('Bearer '), true,
-        'the real Host credential provider supplies authentication')
+      assert.equal(requests[0]?.url, 'https://api.deepseek.com/v1/tools/search',
+        'the Remote-written provider selects the real Host HTTP route (no endpoint override was ever written)')
+      assert.equal(requests[0]?.authorization, 'Bearer f3-isolated-test-secret',
+        'the api-key billing sends exactly the API-key credential')
       assert.deepEqual(requests[0]?.body, { query: 'f3 route probe', count: 20, need_content: false },
         'the Remote-written provider uses count 20 and omits ori_question when disabled')
 
@@ -2201,7 +2222,7 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
     await waitFor('the Remote Web page to read the Host', () =>
       page.view().includes('Web Search Provider') && !page.view().includes('Loading…'))
 
-    type WebPageLevel = 'list' | 'detail' | 'endpoint'
+    type WebPageLevel = 'list' | 'detail'
     let pageLevel: WebPageLevel = 'list'
     const webListActionBars = [
       '↑/↓ choose · Enter open · r refresh · Back [Esc]',
@@ -2226,7 +2247,7 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
       await page.key('\x1b[H')
       for (let step = 0; step < index; step += 1) await page.key('\x1b[B')
       await page.key('\r')
-      pageLevel = index === 4 ? 'endpoint' : 'detail'
+      pageLevel = 'detail'
     }
     const choose = async (index: number): Promise<void> => {
       await page.key('\x1b[H')
@@ -2274,46 +2295,49 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
     await page.settleUntil(/Current: off/u, 'the original-question read-back')
     assert.match(page.view(), /Verified/u)
 
-    // The endpoint editor always paints the trusted-HTTPS disclosure. Esc
-    // cancels without a write; an explicit invalid HTTP Confirm is refused by
-    // the Remote adapter before Host mutate; a distinct HTTPS Confirm is saved.
+    // The rc.2 Search billing row replaces the retired single-endpoint editor:
+    // browsing the candidates writes nothing, Esc cancels without a write, and
+    // one explicit Confirm CASes the exact `web-deepseek-api.searchBilling`
+    // field with the official read-back. Fetch billing stays independent.
     await openRow(4)
-    assert.match(page.view(), /Only confirm a trusted https base: it receives the API key and the query/u)
-    assert.match(page.view(), /Enter confirm · Esc cancel/u)
+    assert.match(page.view(), /Current: Automatic/u, 'the stored billing mode is the raw Host value')
+    assert.match(page.view(), /› Automatic/u)
+    await choose(1)
+    assert.match(page.view(), /› Account/u, 'the highlighted candidate is visible before Confirm')
     const apiRevisionBeforeCancel = forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.revision
-    const endpointBefore = forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.baseURL
     await page.key('\x1b')
     pageLevel = 'list'
     assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.revision, apiRevisionBeforeCancel,
-      'cancelling the editor writes nothing')
-    assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.baseURL, endpointBefore)
+      'browsing and Esc from the billing Detail writes nothing')
 
     await openRow(4)
-    await page.key('\x15')
-    const invalidEndpoint = 'http://invalid.example.test/v1/tools'
-    for (const character of invalidEndpoint) await page.key(character)
-    const apiRevisionBeforeInvalid = forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.revision
+    await choose(1)
     await page.key('\r')
-    await page.settleUntil(/the Search\/Fetch API endpoint must use https:\/\//u, 'the rejected HTTP endpoint')
-    assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.revision, apiRevisionBeforeInvalid,
-      'the invalid endpoint is rejected before any Host write')
-    assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.baseURL, endpointBefore)
+    await waitFor('the Account billing Confirm is authoritative on the Host', () =>
+      forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.searchBilling === 'account')
+    await page.settleUntil(/Current: Account/u, 'the confirmed Search billing read-back')
+    assert.match(page.view(), /Verified/u)
+    assert.equal((await config.web.read())?.api.searchBilling, 'account')
+    assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.fetchBilling, 'auto',
+      'a Search billing write never touches the Fetch capability')
+
+    // The read-only Fetch API override row: Enter only opens its Detail, and
+    // the Host revision proves nothing was written from it.
+    await openRow(7)
+    assert.match(page.view(), /Current: Host YAML: not set/u,
+      'the unset override follows the conversation route instead of a fabricated URL')
+    const apiRevisionBeforeOverrideDetail = forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.revision
+    await page.key('\r')
+    await page.settleUntil(/Host YAML: not set/u, 'the read-only override Detail')
+    assert.doesNotMatch(page.view(), /Enter confirm/u, 'the override row offers no Confirm affordance')
+    assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.revision, apiRevisionBeforeOverrideDetail,
+      'the read-only override row dispatches no Host write')
     await page.key('\x1b')
     pageLevel = 'list'
 
-    await openRow(4)
-    const confirmedEndpoint = `${String(endpointBefore)}/m6-f3-ui`
-    for (const character of '/m6-f3-ui') await page.key(character)
-    await page.key('\r')
-    await waitFor('the HTTPS endpoint Confirm is authoritative on the Host', () =>
-      forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.baseURL === confirmedEndpoint)
-    await waitFor('the verified endpoint editor returns to the painted Web list after read-back', () => isWebList())
-    pageLevel = 'list'
-    assert.equal((await config.web.read())?.api.baseURL, confirmedEndpoint)
-
     // The page's credential reference reader shows only presence/source and
     // the Models hand-off; a provider failure paints Unavailable, not false.
-    await openRow(5)
+    await openRow(8)
     await page.settleUntil(/State: Configured · source: file/u, 'the configured Remote credential reference')
     assert.match(page.view(), /Reference: DEEPSEEK_API_KEY/u)
     assert.match(page.view(), /Clear in Models…/u)
@@ -2372,7 +2396,7 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
     await page.key('\r')
     await waitFor('the Remote Web page remounts in the existing Settings lease', () =>
       page.view().includes('Web Search Provider') && !page.view().includes('Loading…'))
-    await openRow(5)
+    await openRow(8)
     await page.settleUntil(/State: Configured · source: file/u, 'the reopened credential reference')
     const originalCredentialDescribe = credentialHost.describe
     credentialHost.describe = function (this: unknown): Promise<unknown> {

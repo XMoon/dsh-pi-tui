@@ -42,21 +42,78 @@ export function assertSearchApiCount(count: number): void {
   }
 }
 
-export function assertSearchApiBaseURL(url: string): void {
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    throw new Error('the Search/Fetch API endpoint must be an absolute https:// URL')
+/** The official rc.2 `searchBilling` / `fetchBilling` closed enum. */
+const WEB_API_BILLING_MODES = new Set(['auto', 'account', 'api-key'])
+
+/** Whether `mode` is one of the official closed billing modes. */
+export function isWebApiBilling(mode: string): mode is 'auto' | 'account' | 'api-key' {
+  return WEB_API_BILLING_MODES.has(mode)
+}
+
+/** Accept exactly the official closed billing enum; anything else (including a
+ *  legacy free-form value) is refused before it can reach the Host settings. */
+export function assertWebApiBilling(mode: string): void {
+  if (!WEB_API_BILLING_MODES.has(mode)) {
+    throw new Error(`unsupported web API billing mode "${mode}" (the official modes are auto, account and api-key)`)
   }
-  if (parsed.protocol !== 'https:') throw new Error('the Search/Fetch API endpoint must use https://')
-  if (parsed.username !== '' || parsed.password !== '') {
-    throw new Error('the Search/Fetch API endpoint must not carry credentials in the URL')
+}
+
+/** The official billing mode of one `web-deepseek-api` descriptor field, or
+ *  `undefined` when the field is absent or outside the closed enum. `undefined`
+ *  is UNAVAILABLE — the adapters must never silently default it to `auto`. */
+export function readWebApiBilling(
+  value: Record<string, unknown>,
+  field: 'searchBilling' | 'fetchBilling',
+): 'auto' | 'account' | 'api-key' | undefined {
+  const raw = value[field]
+  return typeof raw === 'string' && WEB_API_BILLING_MODES.has(raw)
+    ? raw as 'auto' | 'account' | 'api-key'
+    : undefined
+}
+
+/** The rc.2 YAML-only advanced override fields, as DETACHED read-only facts:
+ *  only non-empty string values are copied, and the legacy single-endpoint keys
+ *  (`baseURL`/`apiKeyEnv`/`apiKey`) contribute PRESENCE only — never a value. */
+export interface WebApiAdvancedFacts {
+  searchBaseURL?: string
+  searchApiKeyEnv?: string
+  fetchBaseURL?: string
+  fetchApiKeyEnv?: string
+  legacyOverrideDetected?: boolean
+}
+
+/** Mask the credential-bearing parts of one DISPLAYED URL override fact: the
+ *  userinfo segment becomes `***` and any query/fragment is dropped, so the
+ *  detached fact can never carry a credential into the UI or a diagnostic. */
+function maskedOverrideUrl(value: string): string {
+  const withoutSuffix = value.replace(/[?#].*$/u, '')
+  const match = /^([a-z][a-z0-9+.-]*:\/\/)([^/@\s]+)@/iu.exec(withoutSuffix)
+  return match === null
+    ? withoutSuffix
+    : `${match[1]}***@${withoutSuffix.slice(match[0].length)}`
+}
+
+/** Project one `web-deepseek-api` descriptor value into the advanced override
+ *  facts both adapters report. The URL fields are masked for display (userinfo
+ *  and query/fragment never survive); the `*ApiKeyEnv` fields are environment
+ *  NAMES, not secret values, and are copied verbatim. */
+export function webApiAdvancedFactsOf(value: Record<string, unknown>): WebApiAdvancedFacts {
+  const copyField = (field: 'searchBaseURL' | 'searchApiKeyEnv' | 'fetchBaseURL' | 'fetchApiKeyEnv'): string | undefined => {
+    const raw = value[field]
+    if (typeof raw !== 'string' || raw === '') return undefined
+    return field === 'searchBaseURL' || field === 'fetchBaseURL' ? maskedOverrideUrl(raw) : raw
   }
-  if (parsed.search !== '' || parsed.hash !== '') {
-    throw new Error('the Search/Fetch API endpoint must not carry a query or fragment')
-  }
-  if (/\/(?:search|fetch)$/u.test(parsed.pathname)) {
-    throw new Error('the Search/Fetch API endpoint is the API base: drop the trailing /search or /fetch action')
+  const searchBaseURL = copyField('searchBaseURL')
+  const searchApiKeyEnv = copyField('searchApiKeyEnv')
+  const fetchBaseURL = copyField('fetchBaseURL')
+  const fetchApiKeyEnv = copyField('fetchApiKeyEnv')
+  const legacyOverrideDetected = ['baseURL', 'apiKeyEnv', 'apiKey']
+    .some(field => typeof value[field] === 'string' && (value[field] as string) !== '')
+  return {
+    ...(searchBaseURL !== undefined ? { searchBaseURL } : {}),
+    ...(searchApiKeyEnv !== undefined ? { searchApiKeyEnv } : {}),
+    ...(fetchBaseURL !== undefined ? { fetchBaseURL } : {}),
+    ...(fetchApiKeyEnv !== undefined ? { fetchApiKeyEnv } : {}),
+    ...(legacyOverrideDetected ? { legacyOverrideDetected: true } : {}),
   }
 }

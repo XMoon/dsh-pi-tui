@@ -6,13 +6,13 @@
  * PHYSICAL frame plus the cell ink of the state vocabulary:
  *
  * - the page is reachable at 200×50, 120×40, 100×40, 80×24, 80×10, 72×24,
- *   44×20 and 44×8, paints the six frozen rows (cropped/scrolled when the
+ *   44×20 and 44×8, paints the nine frozen rows (cropped/scrolled when the
  *   grant is short), keeps the ONE physical Action Bar, and never overflows a
  *   physical line;
  * - the Detail pane names the real Host facts (`Current: …`) and the whole
  *   `[current]` chip; a candidate/verdict is never painted partially;
- * - the endpoint editor keeps its trust warning and its ONE
- *   `Enter confirm · Esc cancel` bar at the narrow sizes;
+ * - the Search billing row keeps its three official candidates and its
+ *   `Enter confirm` bar at the narrow sizes;
  * - the credential row keeps the official reference, the presence/source and
  *   BOTH explicit Models actions at 44×8 and above;
  * - the ink roles come from the LIVE palette (`textMuted` chips, `error`
@@ -96,7 +96,6 @@ interface Harness {
     web: WebProviderSettings
     available: boolean
     failNext: string | undefined
-    endpointStoredValue: string | undefined
   }
   readonly view: () => string
   readonly plain: () => readonly string[]
@@ -107,20 +106,17 @@ interface Harness {
 function setup(options: {
   readonly columns: number
   readonly rows: number
-  readonly endpoint?: string
   readonly iconStyle?: 'emoji' | 'symbols' | 'minimal'
 }): Harness {
   const vt = new VirtualTerminal(options.columns, options.rows)
   const store = {
     available: true,
     failNext: undefined as string | undefined,
-    /** The value the Host actually KEEPS after a successful endpoint write (a
-     *  canonical form / a winning project layer); undefined = the submitted URL. */
-    endpointStoredValue: undefined as string | undefined,
     web: {
       searchProvider: 'deepseek-official',
       fetchProvider: 'http',
-      api: { baseURL: options.endpoint ?? 'https://api.deepseek.com/v1/tools', count: 10, sendOriginalQuestion: true },
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {},
       credential: { configured: true, source: 'file' },
     } as WebProviderSettings,
   }
@@ -212,7 +208,8 @@ function setup(options: {
         setFetchProvider: async (id: string) => { write(() => { store.web.fetchProvider = id }) },
         setSearchApiCount: async (count: number) => { write(() => { store.web.api.count = count }) },
         setSendOriginalQuestion: async (enabled: boolean) => { write(() => { store.web.api.sendOriginalQuestion = enabled }) },
-        setSearchApiBaseURL: async (url: string) => { write(() => { store.web.api.baseURL = store.endpointStoredValue ?? url }) },
+        setSearchBilling: async (mode: string) => { write(() => { store.web.api.searchBilling = mode as 'auto' | 'account' | 'api-key' }) },
+        setFetchBilling: async (mode: string) => { write(() => { store.web.api.fetchBilling = mode as 'auto' | 'account' | 'api-key' }) },
       },
     }),
     catalog: { models: { available: () => false } },
@@ -303,7 +300,7 @@ for (const [columns, rows] of SIZES) {
     await key(h, ENTER)
     const frame = await waitForPainted(h, `the Web page at ${columns}x${rows}`, frame =>
       frame.includes('Web Search Provider') && !frame.includes('Loading…'))
-    // The six frozen rows exist and the FIRST is always visible at the top; a
+    // The nine frozen rows exist and the FIRST is always visible at the top; a
     // short grant crops/scolls the rest instead of inventing a compact mode.
     assert.match(frame, /Web Search Provider/u, 'the first frozen row is painted')
     assert.match(frame, /Enter open/u, 'the list bar states the ONE action')
@@ -329,14 +326,14 @@ for (const [columns, rows] of SIZES) {
       assert.equal(primaries.length, 1, `exactly one active pane header at ${columns}x${rows}:\n${frame}`)
     }
     // Scroll the list to the last row: every row stays reachable at every size.
-    for (let step = 0; step < 5; step += 1) await key(h, DOWN)
+    for (let step = 0; step < 8; step += 1) await key(h, DOWN)
     const scrolled = h.view()
     // The wide/medium projections paint the Detail pane; a narrow frame paints
     // the list alone, where the selected row's own value IS the Host fact.
     assert.match(scrolled, /Current: |Reference: |Configured · source: file/u,
       `the selected row states a real Host fact:\n${scrolled}`)
-    const lastRowPainted = scrolled.includes('DeepSeek API Key') || scrolled.includes('Search / Fetch API Endpoint')
-      || scrolled.includes('Search API Result Count') || scrolled.includes('Share Original Question')
+    const lastRowPainted = scrolled.includes('DeepSeek API Key') || scrolled.includes('Search API Override')
+      || scrolled.includes('Search Billing') || scrolled.includes('Search API Result Count')
     assert.ok(lastRowPainted, `the scroll really reveals later frozen rows:\n${scrolled}`)
     // Esc from the list returns to the Tools row (never a second overlay).
     await key(h, ESC)
@@ -370,28 +367,36 @@ for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [44, 2
 }
 
 for (const [columns, rows] of SIZES) {
-  test(`the endpoint editor keeps its trust warning and confirm/cancel bar at ${columns}×${rows}`, async t => {
-    const longEndpoint = 'https://gateway.example.test/deepseek/v1/tools/with/a/long/path'
-    const h = setup({ columns, rows, endpoint: longEndpoint })
+  test(`the Search billing row keeps its candidates and confirm bar at ${columns}×${rows}`, async t => {
+    const h = setup({ columns, rows })
     t.after(h.dispose)
     await openWebPage(h)
     await selectListRow(h, 4)
-    await key(h, ENTER) // mount the endpoint editor
+    await key(h, ENTER) // the billing Detail
     const frame = h.view()
-    assert.match(frame, /Enter confirm · Esc cancel/u, `the whole confirm/cancel bar survives at ${columns}x${rows}`)
-    // The COMPLETE disclosure is mandatory before any confirm: a trusted https
-    // base, the API key AND query sent there, and the URL-shape/trust boundary.
-    const disclosure = frame.replace(/\s+/gu, ' ')
-    assert.match(disclosure, /Only confirm a trusted https base:/u, `the trust warning is painted:\n${frame}`)
-    assert.match(disclosure, /it receives the API key and the query/u,
-      `the credential+query disclosure is painted:\n${frame}`)
-    assert.match(disclosure, /The URL shape is not a trust check/u,
-      `the URL-shape/trust boundary is painted:\n${frame}`)
-    assert.ok(!/Esc ca$|Esc can$|Esc canc$|Enter confir$/u.test(frame), 'no hint is painted as a partial word')
+    assert.match(frame, /Current: Automatic/u, `the stored billing mode is painted at ${columns}x${rows}`)
+    assert.match(frame, /› Automatic/u, 'the current candidate is highlighted')
+    assert.match(frame, /Enter confirm/u, `the confirm bar survives at ${columns}x${rows}`)
+    assert.ok(!/Enter confir$|Back \[Es$/u.test(frame), 'no hint is painted as a partial word')
     for (const line of h.plain()) assert.ok(visibleWidth(line) <= columns)
-    assertBarIsLastRow(h.plain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Enter confirm · Esc cancel')
-    await key(h, ESC) // cancel without a write
-    assert.doesNotMatch(h.view(), /Enter confirm · Esc cancel/u, 'Esc cancels the draft')
+    assertBarIsLastRow(h.plain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Back [Esc]')
+    // The three official modes are offered with their credential claims. The
+    // highlighted candidate is the current mode; a short grant crops the rest
+    // of the Detail, so the remaining candidates are reachable by scrolling
+    // (never dropped) — a tiny viewport may not show two at once.
+    const disclosure = frame.replace(/\s+/gu, ' ')
+    assert.match(disclosure, /› Automatic · follows the conversation route/u)
+    assert.match(disclosure, /Enter confirm/u)
+    for (let step = 0; step < 10 && !h.view().includes('API key · API key credential only'); step += 1) {
+      await key(h, '\x1b[6~') // PgDn scrolls the Detail viewport
+    }
+    assert.match(h.view().replace(/\s+/gu, ' '), /API key · API key credential only/u)
+    for (let step = 0; step < 10 && !h.view().includes('Account · signed-in account only'); step += 1) {
+      await key(h, '\x1b[5~') // PgUp scrolls back
+    }
+    assert.match(h.view().replace(/\s+/gu, ' '), /Account · signed-in account only/u)
+    await key(h, ESC) // back to the list without a write
+    assert.equal(h.store.web.api.searchBilling, 'auto', 'browsing the billing Detail writes nothing')
   })
 }
 
@@ -400,7 +405,7 @@ for (const [columns, rows] of [[120, 40], [80, 24], [44, 20], [44, 8]] as const)
     const h = setup({ columns, rows })
     t.after(h.dispose)
     await openWebPage(h)
-    await selectListRow(h, 5)
+    await selectListRow(h, 8)
     await key(h, ENTER)
     const frame = h.view()
     assert.match(frame, /Reference: DEEPSEEK_API_KEY/u, `the official reference is painted:\n${frame}`)
@@ -558,7 +563,7 @@ test('a click on an option only highlights it; the explicit Enter is the ONE wri
   await openWebPage(h)
   await selectListRow(h, 0)
   await key(h, ENTER)
-  const optionRow = h.plain().findIndex(line => line.includes('DeepSeek Search API · opt-in'))
+  const optionRow = h.plain().findIndex(line => line.includes('DeepSeek Search API · official default'))
   assert.ok(optionRow >= 0, `the candidate row is painted:\n${h.view()}`)
   press(h, optionRow, 40)
   release(h, optionRow, 40)

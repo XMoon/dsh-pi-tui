@@ -34,10 +34,18 @@ export const WEB_TOOL_ROW = 'tool-web'
  * (a disposable bundle + profile patch), so `settings.describe/mutate` address
  * real entries and a volatile write reaches the LIVE provider configuration.
  * The caller owns Loader and mounts it before calling this helper.
+ *
+ * `providers` selects the `web` row's shipped configuration:
+ * - `'messages'` (the historical rc.1 stored selection): an explicitly stored
+ *   `deepseek-official` keeps applying over rc.2's shipped default (F15).
+ * - `'base-defaults'`: exactly the rc.2 `dsh-base` patch — the official
+ *   default Search API / HTTP fetch, and NO `web-deepseek-api` config at all
+ *   (the pure schema defaults, no legacy key).
  */
 export async function mountWebProviderPlane(
   ctx: Context,
   workRoot: string,
+  options: { readonly providers?: 'messages' | 'base-defaults' } = {},
 ): Promise<{ readonly patchPath: string; readonly profileDir: string }> {
   const profileDir = join(workRoot, 'web-profile')
   const bundleDir = join(workRoot, 'web-bundle')
@@ -58,16 +66,21 @@ export async function mountWebProviderPlane(
     `    - id: ${WEB_PROVIDER_ROW}`,
     `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web'))}`,
     '      config:',
-    '        searchProvider: deepseek-official',
-    '        fetchProvider: http',
+    ...(options.providers === 'base-defaults'
+      ? ['        searchProvider: deepseek-search-api', '        fetchProvider: http']
+      : ['        searchProvider: deepseek-official', '        fetchProvider: http']),
     `    - id: ${WEB_SEARCH_MESSAGES_ROW}`,
     `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web-search-deepseek'))}`,
     '      config:',
     '        apiKeyEnv: DEEPSEEK_API_KEY',
     `    - id: ${WEB_SEARCH_API_ROW}`,
     `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web-deepseek-api'))}`,
-    '      config:',
-    '        apiKeyEnv: DEEPSEEK_API_KEY',
+    ...options.providers === 'base-defaults'
+      ? []
+      // The historical rc.1 single-endpoint keys are NOT rc.2 schema fields:
+      // they load without error and have no effect (the official upgrade note),
+      // which this variant exercises on the real Host composition.
+      : ['      config:', '        apiKeyEnv: DEEPSEEK_API_KEY'],
     `    - id: ${WEB_FETCH_HTTP_ROW}`,
     `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web-fetch-http'))}`,
     `    - id: ${WEB_TOOL_ROW}`,

@@ -1,5 +1,5 @@
 /**
- * The `/settings → Tools → Web Search / Fetch` page (C2-R4).
+ * The `/settings → Tools → Web Search / Fetch` page (C2-R4, rc.2 F3).
  *
  * This is the ONE Web provider configuration surface. It is mounted as an
  * EMBEDDED SPECIALIST PAGE inside the existing Settings Workspace lease (the
@@ -7,7 +7,7 @@
  * second alt-screen overlay.
  *
  * Authority is deliberately NOT here:
- *  - the six displayed facts come from the command owner's LATEST authoritative
+ *  - the displayed facts come from the command owner's LATEST authoritative
  *    Host read (`readFacts`): a pending read paints `Loading…`, an unreadable
  *    authority paints `Unavailable` with its reason, and a readable one paints
  *    the raw Host identity (a custom provider id stays verbatim, a stored count
@@ -15,8 +15,11 @@
  *  - every write is ONE explicit Enter confirmation handed to the command
  *    owner's single FIFO (`commit`), whose verdict is `verified` /
  *    `not-saved` / `outcome-unknown` against a fresh read-back;
- *  - the endpoint draft is the EXISTING `WebEndpointPanel` (Input + explicit
- *    Enter Confirm + its own verdict vocabulary), not a cloned URL editor;
+ *  - the rc.2 Search/Fetch YAML-only advanced overrides (`searchBaseURL`,
+ *    `searchApiKeyEnv`, `fetchBaseURL`, `fetchApiKeyEnv`) are READ-ONLY facts:
+ *    no editable input exists for them, Enter only opens their Detail, and a
+ *    non-empty override makes the matching Billing row non-writable (the
+ *    override owns that capability's endpoint/credential configuration);
  *  - the DeepSeek API key is only displayed as the official credential
  *    REFERENCE. Configure/Clear hand a typed `ModelsInitialView` to the
  *    workspace root, which retires this page and mounts the existing Models
@@ -37,7 +40,7 @@ import { ACTION_BAR_SEPARATOR } from '../presentation/action-bar.ts'
 import { paintActionSpan } from '../presentation/action-ink.ts'
 import type { ModelsInitialView } from './models-workspace-page.ts'
 import type { EmbeddedSpecialistPage } from './settings-workspace-panel.ts'
-import { WebEndpointPanel, WebWriteVerdictError, type WebPanelTaskRunner } from './web-provider-panels.ts'
+import type { WebPanelTaskRunner } from './web-provider-panels.ts'
 
 /** The exact credential reference the official DeepSeek Search / Fetch API
  *  providers resolve (`apiKeyEnv`'s shipped default). Its VALUE never reaches
@@ -50,11 +53,12 @@ export const WEB_SETTINGS_PAGE_TITLE = 'Web Search / Fetch'
  * The official search-provider candidates, in their frozen order. `id` is the
  * ONLY value ever written (`label` is presentation); a configured id outside
  * this table is a CUSTOM route: it is reported verbatim and is not selectable
- * here.
+ * here. rc.2's official default (an absent `web.searchProvider`) is the
+ * DeepSeek Search API; a stored `deepseek-official` selection keeps applying.
  */
 export const WEB_SEARCH_PROVIDER_CANDIDATES = [
-  { id: 'deepseek-official', label: 'Messages', default: true },
-  { id: 'deepseek-search-api', label: 'DeepSeek Search API', default: false },
+  { id: 'deepseek-official', label: 'Messages', default: false },
+  { id: 'deepseek-search-api', label: 'DeepSeek Search API', default: true },
 ] as const
 
 /** The official fetch-provider candidates (same identity contract). */
@@ -71,22 +75,91 @@ export const WEB_SEARCH_COUNT_CANDIDATES = ['5', '10', '20', '50'] as const
 /** The `sendOriginalQuestion` candidates. */
 export const WEB_QUESTION_CANDIDATES = ['on', 'off'] as const
 
-/** The five CONFIGURED fields (the credential row is the sixth, read-only
- *  reference row). */
+/** The official rc.2 billing candidates (`web-deepseek-api.searchBilling` /
+ *  `fetchBilling`), in their frozen order. `id` is the ONLY value ever written;
+ *  `auto` is a persisted explicit choice, never a reset of the YAML-only
+ *  overrides. */
+export const WEB_BILLING_CANDIDATES = [
+  { id: 'auto', label: 'Automatic' },
+  { id: 'account', label: 'Account' },
+  { id: 'api-key', label: 'API key' },
+] as const
+
+/** One billing mode's official display label (`auto` paints as `Automatic`). */
+export function webBillingLabel(mode: string): string {
+  return WEB_BILLING_CANDIDATES.find(candidate => candidate.id === mode)?.label ?? mode
+}
+
+/** Mask the credential-bearing parts of one DISPLAYED URL override: the
+ *  userinfo segment becomes `***` and any query/fragment is dropped, so a URL
+ *  fact is paintable without ever exposing a credential. */
+function maskOverrideUrl(value: string): string {
+  const withoutSuffix = value.replace(/[?#].*$/u, '')
+  const match = /^([a-z][a-z0-9+.-]*:\/\/)([^/@\s]+)@/iu.exec(withoutSuffix)
+  return match === null
+    ? withoutSuffix
+    : `${match[1]}***@${withoutSuffix.slice(match[0].length)}`
+}
+
+/** One capability's NON-EMPTY rc.2 YAML-only override fields, with their
+ *  configured values (a masked URL or an env NAME — never a secret value).
+ *  Masking is applied HERE, centrally, so every paintable consumer (the
+ *  override rows' facts, the Billing Detail's `Configured override:` line and
+ *  the command owner's refusal reasons) is safe even if a source hands over a
+ *  raw Host URL. */
+export function webAdvancedOverrideFields(
+  advanced: WebProviderSettings['advanced'],
+  capability: 'search' | 'fetch',
+): readonly { readonly field: string; readonly value: string }[] {
+  const fields = capability === 'search'
+    ? ['searchBaseURL', 'searchApiKeyEnv'] as const
+    : ['fetchBaseURL', 'fetchApiKeyEnv'] as const
+  return fields.flatMap(field => {
+    const value = advanced[field]
+    if (typeof value !== 'string' || value === '') return []
+    return [{
+      field,
+      value: field === 'searchBaseURL' || field === 'fetchBaseURL' ? maskOverrideUrl(value) : value,
+    }]
+  })
+}
+
+/** The read-only override facts one capability's row paints. Unset says the
+ *  configuration follows the CURRENT conversation's DeepSeek route — never a
+ *  fabricated fixed URL; set fields are painted as `field=value` pairs. */
+export function webAdvancedFactsText(
+  advanced: WebProviderSettings['advanced'],
+  capability: 'search' | 'fetch',
+): string {
+  const overrides = webAdvancedOverrideFields(advanced, capability)
+  if (overrides.length === 0) {
+    return "Host YAML: not set — follows current conversation's DeepSeek route"
+  }
+  return `Host YAML: ${overrides.map(entry => `${entry.field}=${entry.value}`).join(' · ')}`
+}
+
+/** The eight CONFIGURED fields (the credential row is the ninth, read-only
+ *  reference row; the two override rows are read-only facts). */
 export type WebSettingRowId =
   | 'web-search-provider'
   | 'web-fetch-provider'
   | 'web-search-count'
   | 'web-send-original-question'
-  | 'web-search-endpoint'
+  | 'web-search-billing'
+  | 'web-fetch-billing'
+  | 'web-search-advanced'
+  | 'web-fetch-advanced'
 
-/** The six row identities of this page, in the FROZEN order. */
+/** The nine row identities of this page, in the FROZEN order (§5.5A E2.3). */
 export const WEB_SETTINGS_ROW_IDS = [
   'web-search-provider',
   'web-fetch-provider',
   'web-search-count',
   'web-send-original-question',
-  'web-search-endpoint',
+  'web-search-billing',
+  'web-fetch-billing',
+  'web-search-advanced',
+  'web-fetch-advanced',
   'web-credential',
 ] as const
 export type WebSettingsRowId = (typeof WEB_SETTINGS_ROW_IDS)[number]
@@ -121,8 +194,8 @@ export interface WebSettingsPageIntents {
   readonly readFacts: () => WebSettingsFacts
   /** Why this page may not commit right now (backend non-current/unavailable).
    *  The page still paints the last read facts, but offers NO confirmable
-   *  candidate, no endpoint draft and no credential action until it is writable
-   *  again — the command queue would refuse every one of them. */
+   *  candidate and no credential action until it is writable again — the
+   *  command queue would refuse every one of them. */
   readonly writableRefusal: () => string | undefined
   /** Whether the official credential store is mounted right now. */
   readonly credentialAvailable: () => boolean
@@ -242,7 +315,7 @@ function phaseWord(phase: WebRowPhase): string {
 
 /**
  * The `/settings → Tools → Web Search / Fetch` page. It paints a short list of
- * the six frozen rows plus the selected row's Detail, keeps ONE active cursor,
+ * the nine frozen rows plus the selected row's Detail, keeps ONE active cursor,
  * and turns exactly one explicit Enter into a `commit` on the command owner's
  * FIFO.
  */
@@ -262,7 +335,6 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private detailOffset = 0
   private rowGrant = 8
   private readonly phases = new Map<WebSettingRowId, WebRowPhase>()
-  private endpointPanel: { readonly panel: WebEndpointPanel } | undefined
   private disposed = false
   private revision = 0
   private paint: PagePaint | undefined
@@ -322,20 +394,6 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   handleInput(data: string): void {
     if (this.disposed) return
-    // The endpoint draft owns the keyboard: its Input + its own explicit Enter
-    // Confirm + its own Esc cancel are the ONLY keys it understands.
-    if (this.endpointPanel !== undefined) {
-      // Readiness is re-proved BEFORE the key is forwarded: a backend that
-      // turned stale while the draft was open must not accept a Confirm, and
-      // the key that discovered it is not applied to the read-only surface.
-      if (this.syncEndpointWritability()) {
-        this.commitPresentation(() => {})
-        return
-      }
-      this.endpointPanel.panel.focused = this.focused
-      this.endpointPanel.panel.handleInput(data)
-      return
-    }
     if (matchesKey(data, 'escape')) {
       if (this.region === 'detail') {
         this.commitPresentation(() => { this.region = 'list' })
@@ -383,15 +441,13 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   gestureIdentity(): string {
     const rowId = this.selectedSettingId()
     const phase = rowId === undefined ? undefined : this.phases.get(rowId)?.kind
-    return `${this.region}:${rowId ?? ''}:${phase ?? ''}:${this.endpointPanel === undefined ? '' : 'endpoint'}:${this.choiceIndex}:${this.actionIndex}`
+    return `${this.region}:${rowId ?? ''}:${phase ?? ''}:${this.choiceIndex}:${this.actionIndex}`
   }
 
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
     this.paintedEscapeSpanValue = undefined
-    this.endpointPanel?.panel.dispose()
-    this.endpointPanel = undefined
     this.paint = undefined
     this.pressed = undefined
     this.phases.clear()
@@ -514,18 +570,12 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     this.commitPresentation(() => { this.detailOffset = next })
   }
 
-  /** Enter at the list: show the selected row's Detail. The endpoint row opens
-   *  the EXISTING endpoint editor (only over a READABLE authority); every other
-   *  row shows its facts/candidates read-only until an explicit Enter. */
+  /** Enter at the list: show the selected row's Detail (its facts/candidates
+   *  stay read-only until an explicit Enter). */
   private openSelectedRow(): void {
     const rowId = this.selectedRowId()
     if (rowId === undefined) return
     const facts = this.intents.readFacts()
-    if (rowId === 'web-search-endpoint' && facts.kind === 'ready'
-      && this.intents.writableRefusal() === undefined) {
-      this.openEndpointEditor(facts.settings.api.baseURL)
-      return
-    }
     this.commitPresentation(() => {
       this.region = 'detail'
       this.detailOffset = 0
@@ -537,7 +587,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   }
 
   /** Enter in the Detail: confirm the highlighted candidate (choice rows) or
-   *  activate one credential deeplink. Nothing else writes. */
+   *  activate one credential deeplink. The read-only override rows offer no
+   *  candidate, so their Enter only re-proves the painted frame (nothing
+   *  writes). Nothing else writes. */
   private confirmSelected(): void {
     const rowId = this.selectedRowId()
     if (rowId === undefined) return
@@ -546,15 +598,6 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       return
     }
     const facts = this.intents.readFacts()
-    // The endpoint row's ONE action is its explicit editor, reachable from the
-    // LIST (Enter opens the Detail) and from the read-only Detail (Enter opens
-    // the editor) — the bar never advertises a key that does nothing.
-    if (rowId === 'web-search-endpoint') {
-      if (facts.kind === 'ready' && this.intents.writableRefusal() === undefined) {
-        this.openEndpointEditor(facts.settings.api.baseURL)
-      }
-      return
-    }
     if (facts.kind !== 'ready') return
     const requested = this.choiceValues()[this.choiceIndex]
     if (requested === undefined) return
@@ -583,58 +626,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     })
   }
 
-  /** Close the endpoint draft without a write (the backend stopped being
-   *  writable, or the page is being retired). The draft never outlives its
-   *  ability to be confirmed. */
-  private closeEndpointDraft(): void {
-    this.endpointPanel?.panel.dispose()
-    this.endpointPanel = undefined
-    this.region = 'detail'
-    this.detailOffset = 0
-    this.pressed = undefined
-  }
-
-  /** A draft whose Confirm can only be refused is a false affordance: when the
-   *  backend turned non-current (or the credential/section disappeared), the
-   *  draft closes with ZERO writes and the row's read-only Detail states why.
-   *  Returns true when this call really closed a mounted draft. */
-  private syncEndpointWritability(): boolean {
-    if (this.endpointPanel === undefined) return false
-    if (this.intents.writableRefusal() === undefined) return false
-    this.closeEndpointDraft()
-    return true
-  }
-
-  /** Mount the EXISTING endpoint editor for the row's current authority value. */
-  private openEndpointEditor(current: string): void {
-    const panel = new WebEndpointPanel((selected) => {
-      if (this.endpointPanel?.panel !== panel) return
-      this.endpointPanel = undefined
-      if (selected !== undefined) this.phases.set('web-search-endpoint', { kind: 'verified' })
-      this.commitPresentation(() => { this.region = 'list' })
-    }, {
-      current,
-      save: async (url: string) => {
-        const result = await this.intents.commit('web-search-endpoint', url)
-        if (result.kind === 'verified') {
-          this.phases.set('web-search-endpoint', { kind: 'verified' })
-          return
-        }
-        this.phases.set('web-search-endpoint', { kind: result.kind, reason: result.reason })
-        throw new WebWriteVerdictError(result.kind, result.reason)
-      },
-      requestRender: () => { if (!this.disposed) this.intents.requestRender() },
-      run: (label, task) => this.intents.run(label, task),
-    })
-    panel.focused = this.focused
-    this.endpointPanel = { panel }
-    this.commitPresentation(() => {
-      this.region = 'detail'
-      this.detailOffset = 0
-    })
-  }
-
-  // ── the six rows and their candidates ─────────────────────────────────────
+  // ── the nine rows and their candidates ────────────────────────────────────
 
   private selectedRowId(): WebSettingsRowId | undefined {
     return WEB_SETTINGS_ROW_IDS[this.cursor]
@@ -647,11 +639,12 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   }
 
   /** The candidate identities the selected row may CONFIRM right now. A
-   *  pending/unavailable authority, a custom provider route and the endpoint
-   *  row (its own editor owns the write) offer NONE. */
+   *  pending/unavailable authority, a custom provider route, a read-only
+   *  override row and a Billing row whose capability carries a non-empty YAML
+   *  override (the override owns that configuration) offer NONE. */
   private choiceValues(): readonly string[] {
     const rowId = this.selectedSettingId()
-    if (rowId === undefined || rowId === 'web-search-endpoint') return []
+    if (rowId === undefined || rowId === 'web-search-advanced' || rowId === 'web-fetch-advanced') return []
     const facts = this.intents.readFacts()
     if (facts.kind !== 'ready') return []
     if (this.intents.writableRefusal() !== undefined) return []
@@ -668,7 +661,18 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         return WEB_SEARCH_COUNT_CANDIDATES
       case 'web-send-original-question':
         return WEB_QUESTION_CANDIDATES
+      case 'web-search-billing':
+        return this.billingOverridden(facts.settings, 'search') ? [] : WEB_BILLING_CANDIDATES.map(candidate => candidate.id)
+      case 'web-fetch-billing':
+        return this.billingOverridden(facts.settings, 'fetch') ? [] : WEB_BILLING_CANDIDATES.map(candidate => candidate.id)
     }
+  }
+
+  /** Whether ONE capability's YAML-only override is non-empty: it then owns
+   *  that capability's endpoint/credential configuration, so the Billing row
+   *  must not write (the official Host behaviour the override implies). */
+  private billingOverridden(settings: WebProviderSettings, capability: 'search' | 'fetch'): boolean {
+    return webAdvancedOverrideFields(settings.advanced, capability).length > 0
   }
 
   /** Whether the configured provider id is one of the official candidates this
@@ -693,14 +697,20 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return index < 0 ? 0 : index
   }
 
-  /** The authority's RAW identity of one field (never a display label). */
+  /** The authority's RAW identity of one field (never a display label). The
+   *  billing rows report the raw official mode; the read-only override rows
+   *  report the same facts string the row paints (they are never written, so
+   *  this identity is display-only). */
   private committedIdentity(settings: WebProviderSettings, rowId: WebSettingRowId): string | undefined {
     switch (rowId) {
       case 'web-search-provider': return settings.searchProvider
       case 'web-fetch-provider': return settings.fetchProvider
       case 'web-search-count': return String(settings.api.count)
       case 'web-send-original-question': return settings.api.sendOriginalQuestion ? 'on' : 'off'
-      case 'web-search-endpoint': return settings.api.baseURL
+      case 'web-search-billing': return settings.api.searchBilling
+      case 'web-fetch-billing': return settings.api.fetchBilling
+      case 'web-search-advanced': return webAdvancedFactsText(settings.advanced, 'search')
+      case 'web-fetch-advanced': return webAdvancedFactsText(settings.advanced, 'fetch')
     }
   }
 
@@ -728,7 +738,16 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       }
       case 'web-search-count': return String(settings.api.count)
       case 'web-send-original-question': return settings.api.sendOriginalQuestion ? 'on' : 'off'
-      case 'web-search-endpoint': return sanitizedPhysicalLine(settings.api.baseURL)
+      case 'web-search-billing':
+        return this.billingOverridden(settings, 'search')
+          ? `Overridden by Host YAML (stored: ${webBillingLabel(settings.api.searchBilling)})`
+          : webBillingLabel(settings.api.searchBilling)
+      case 'web-fetch-billing':
+        return this.billingOverridden(settings, 'fetch')
+          ? `Overridden by Host YAML (stored: ${webBillingLabel(settings.api.fetchBilling)})`
+          : webBillingLabel(settings.api.fetchBilling)
+      case 'web-search-advanced': return sanitizedPhysicalLine(webAdvancedFactsText(settings.advanced, 'search'))
+      case 'web-fetch-advanced': return sanitizedPhysicalLine(webAdvancedFactsText(settings.advanced, 'fetch'))
       case 'web-credential': return this.credentialState(facts).value
     }
   }
@@ -830,7 +849,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private listViewport(width: number, bodyRows: number): number {
     if (!this.paintsBothRegions(width, bodyRows)) return bodyRows
     if (layoutForWidth(width) === 'wide') return bodyRows
-    // Medium: the list is granted the top share, never more than its six rows.
+    // Medium: the list is granted the top share, never more than its nine rows.
     return Math.min(WEB_SETTINGS_ROW_IDS.length, Math.max(1, Math.floor((bodyRows - 1) / 2)))
   }
 
@@ -936,19 +955,16 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   }
 
   private renderFrame(width: number): string[] {
-    // The marker belongs to THIS frame only: a list/endpoint/non-credential
-    // frame must never retain the credential action an earlier Detail painted.
+    // The marker belongs to THIS frame only: a list/non-credential frame must
+    // never retain the credential action an earlier Detail painted.
     this.paintedCredentialAction = undefined
     // Same rule for the bar's clickable geometry: a frame that paints no
-    // complete Esc affordance (the endpoint panel's own bar, a dropped wording,
-    // a saving/loading fact) must not leave the previous frame's span alive.
+    // complete Esc affordance (a dropped wording, a saving/loading fact) must
+    // not leave the previous frame's span alive.
     this.paintedEscapeSpanValue = undefined
-    // A backend that turned non-current closes an open endpoint draft FIRST:
-    // the frame never paints a Confirm the writer must refuse.
-    this.syncEndpointWritability()
     // A fresh read can invalidate the credential cursor before this frame: clamp
     // it FIRST so the painted cursor, the bar and the Enter target agree.
-    if (this.endpointPanel === undefined && this.selectedRowId() === 'web-credential') {
+    if (this.selectedRowId() === 'web-credential') {
       this.reconcileCredentialCursor()
     }
     const grant = this.rowGrant
@@ -956,19 +972,6 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const facts = this.intents.readFacts()
     const targets: PageTarget[] = []
     const lines: string[] = []
-    if (this.endpointPanel !== undefined) {
-      const panel = this.endpointPanel.panel
-      panel.focused = this.focused
-      panel.setMaxRows(grant)
-      const painted = panel.render(width)
-      // The panel's OWN last line is its semantic hint: it becomes this page's
-      // ONE physical Action Bar, exactly like a direct page's bar.
-      const body = painted.slice(0, Math.max(0, painted.length - 1))
-      for (let index = 0; index < bodyRows; index += 1) lines.push(fit(body[index] ?? '', width))
-      lines.push(fit(painted[painted.length - 1] ?? '', width))
-      this.paint = { width, rows: grant, bodyRows, targetRows: [] }
-      return lines
-    }
     const both = this.paintsBothRegions(width, bodyRows)
     if (both && layoutForWidth(width) === 'wide') {
       const listWidth = this.listColumnWidth(width)
@@ -1012,11 +1015,6 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
    *  two-column projection names BOTH columns; exactly one is the active
    *  device (§4.5) — the focused region's. */
   paneHeader(width: number): string {
-    if (this.endpointPanel !== undefined) {
-      return this.focused
-        ? color.textStrong('[Search / Fetch API Endpoint]', 'primary')
-        : color.textDim('Search / Fetch API Endpoint')
-    }
     if (!this.paintsBothRegions(width, this.bodyRows())) {
       return this.focused
         ? color.textStrong(`[${WEB_SETTINGS_PAGE_TITLE}]`, 'primary')
@@ -1093,21 +1091,13 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         )
       : rowId === 'web-credential'
         ? this.credentialActionBar(width, bodyRows)
-        : rowId === 'web-search-endpoint'
-          ? this.intents.readFacts().kind === 'ready'
-            && this.intents.writableRefusal() === undefined
-            ? wholeWording(
-                escapeWording('Enter edit endpoint', 'Back'),
-                width,
-                [escapeWording('Enter edit', 'Back'), escapeWording('', 'Back')],
-              )
-            : wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
-          // No confirmable candidate (a pending/unreadable authority or a custom
-          // provider route) means NO Confirm affordance: the bar advertises only
-          // what the frame really offers, and a candidate cropped out of THIS
-          // frame's Detail viewport is not confirmable either (Enter is refused
-          // by the same painted-visibility gate).
-          : this.choiceActionBar(width, bodyRows)
+        // No confirmable candidate (a pending/unreadable authority, a custom
+        // provider route, a read-only override row or a Billing row owned by a
+        // YAML override) means NO Confirm affordance: the bar advertises only
+        // what the frame really offers, and a candidate cropped out of THIS
+        // frame's Detail viewport is not confirmable either (Enter is refused
+        // by the same painted-visibility gate).
+        : this.choiceActionBar(width, bodyRows)
   }
 
   /** Paint one chosen Action Bar wording: the row stays muted; only the real
@@ -1181,7 +1171,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       case 'web-fetch-provider': return 'Web Fetch Provider'
       case 'web-search-count': return 'Search API Result Count'
       case 'web-send-original-question': return 'Share Original Question'
-      case 'web-search-endpoint': return 'Search / Fetch API Endpoint'
+      case 'web-search-billing': return 'Search Billing'
+      case 'web-fetch-billing': return 'Fetch Billing'
+      case 'web-search-advanced': return 'Search API Override'
+      case 'web-fetch-advanced': return 'Fetch API Override'
       case 'web-credential': return 'DeepSeek API Key'
     }
   }
@@ -1281,6 +1274,8 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     switch (rowId) {
       case 'web-search-provider': return WEB_SEARCH_PROVIDER_CANDIDATES.find(candidate => candidate.id === value)?.label ?? value
       case 'web-fetch-provider': return WEB_FETCH_PROVIDER_CANDIDATES.find(candidate => candidate.id === value)?.label ?? value
+      case 'web-search-billing':
+      case 'web-fetch-billing': return webBillingLabel(value)
       default: return value
     }
   }
@@ -1288,20 +1283,34 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private optionNote(rowId: WebSettingRowId, value: string): string {
     switch (rowId) {
       case 'web-search-provider':
-        return value === 'deepseek-official' ? 'built-in default' : 'opt-in · separately billed'
+        return value === 'deepseek-search-api' ? 'official default · billed per call' : 'Messages route'
       case 'web-fetch-provider':
-        return value === 'http' ? 'anonymous default' : 'opt-in · separately billed'
+        return value === 'http' ? 'official default · anonymous' : 'separately billed'
       case 'web-search-count':
         return value === '10' ? 'packed default' : ''
       case 'web-send-original-question':
         return value === 'on' ? 'packed default' : ''
+      case 'web-search-billing':
+      case 'web-fetch-billing':
+        return value === 'auto'
+          ? 'follows the conversation route'
+          : value === 'account' ? 'signed-in account only' : 'API key credential only'
       default: return ''
     }
   }
 
+  /** The billing explanation ONE row's Detail freezes: the three explicit modes'
+   *  credential claims, the per-API billing fact, and the override precedence. */
+  private static readonly BILLING_NOTE =
+    'Automatic follows the credential the CURRENT conversation\'s DeepSeek route selects (the account token in a '
+      + 'DeepSeek-model conversation, otherwise the API key, then the signed-in account) and never claims a key is '
+      + 'configured. Account uses only the signed-in account; API key uses only the DEEPSEEK_API_KEY credential '
+      + 'reference. Each choice is explicit and persistent (Automatic is NOT a reset of an override) and applies to '
+      + 'the NEXT call; the Search API is billed separately per call, and a Messages plan does not guarantee coverage.'
+
   /** The row's static explanation, wrapped to the Detail column. These are the
-   *  durable product facts (defaults, billing, payload boundary, endpoint
-   *  trust) this page freezes; they are never derived from the request. */
+   *  durable product facts (defaults, billing, payload boundary, override
+   *  ownership) this page freezes; they are never derived from the request. */
   private rowNotes(rowId: WebSettingRowId, facts: WebSettingsFacts, width: number): string[] {
     const notes: string[] = []
     switch (rowId) {
@@ -1311,9 +1320,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         notes.push(custom
           ? 'The configured search provider is a CUSTOM route: it is displayed as-is and is not selectable here. '
             + 'The official candidates are Messages and DeepSeek Search API.'
-          : 'Messages is the official default and does not call the billed Search API. '
-            + 'DeepSeek Search API is opt-in and separately billed: a Messages plan does not guarantee coverage. '
-            + 'The choice applies to the NEXT search. No write happens without an explicit Enter.')
+          : 'With no explicit selection the official default is the DeepSeek Search API: it is billed separately per '
+            + 'Search API call (a Messages plan does not guarantee coverage). A stored Messages selection keeps '
+            + 'applying and does not call the billed Search API. The choice applies to the NEXT search. '
+            + 'No write happens without an explicit Enter.')
         break
       }
       case 'web-fetch-provider': {
@@ -1322,8 +1332,8 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         notes.push(custom
           ? 'The configured fetch provider is a CUSTOM route: it is displayed as-is and is not selectable here. '
             + 'The official candidates are HTTP and DeepSeek Fetch API.'
-          : 'HTTP is the official anonymous default. DeepSeek Fetch API is opt-in and separately billed: '
-            + 'a Messages plan does not guarantee coverage. The choice applies to the NEXT fetch.')
+          : 'HTTP is the official default and calls no billed API. DeepSeek Fetch API is the opt-in alternative and '
+            + 'is separately billed: a Messages plan does not guarantee coverage. The choice applies to the NEXT fetch.')
         break
       }
       case 'web-search-count':
@@ -1336,13 +1346,37 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
           + 'triggering human question as ori_question — never the full history or the system prompt. Off: never sent. '
           + 'Only the DeepSeek Search API uses this field; a running operation is unchanged.')
         break
-      case 'web-search-endpoint':
-        notes.push('The API base the DeepSeek Search and Fetch APIs call; /search and /fetch are appended automatically. '
-          + 'Enter opens the endpoint editor and nothing is written until its explicit Confirm. '
-          + 'Changing it sends the DeepSeek API credential and the query to that target: confirm only a trusted HTTPS base — '
-          + 'the URL shape is checked, not the host\'s trust.')
-        notes.push('Official base: https://api.deepseek.com/v1/tools')
+      case 'web-search-billing':
+      case 'web-fetch-billing': {
+        const capability = rowId === 'web-search-billing' ? 'search' : 'fetch'
+        const settings = facts.kind === 'ready' ? facts.settings : undefined
+        const overrides = settings === undefined ? [] : webAdvancedOverrideFields(settings.advanced, capability)
+        if (overrides.length > 0) {
+          notes.push('Overridden by Host YAML: the advanced '
+            + `${overrides.map(entry => entry.field).join(' and ')} field(s) own this capability's endpoint/credential `
+            + 'configuration, so this billing choice cannot be written here. Review profile YAML to change it; '
+            + 'the stored billing mode below stays the Host value and is not lost.')
+          notes.push(`Configured override: ${overrides.map(entry => `${entry.field}=${entry.value}`).join(' · ')}`)
+        }
+        notes.push(WebSettingsPage.BILLING_NOTE)
         break
+      }
+      case 'web-search-advanced':
+      case 'web-fetch-advanced': {
+        const settings = facts.kind === 'ready' ? facts.settings : undefined
+        if (settings?.advanced.legacyOverrideDetected === true) {
+          notes.push('Legacy single-endpoint fields are present in the Host configuration. '
+            + 'Legacy web-deepseek-api.baseURL/apiKeyEnv/apiKey no longer control Search/Fetch. '
+            + 'Review profile YAML and explicitly configure search*/fetch* overrides; no automatic conversion.')
+        } else {
+          notes.push('Legacy web-deepseek-api.baseURL/apiKeyEnv/apiKey no longer control Search/Fetch. '
+            + 'Review profile YAML and explicitly configure search*/fetch* overrides; no automatic conversion.')
+        }
+        notes.push('This override is YAML-only and owned by the Host profile: it is read-only here, Enter never opens '
+          + 'an editor, and a non-empty override decides the endpoint/credential for its own capability only '
+          + '(Search and Fetch stay independent). Configure it in the profile YAML, never from this page.')
+        break
+      }
     }
     if (notes.length === 0) return []
     return ['', ...notes.flatMap(note => wrapTextWithAnsi(note, Math.max(1, width)))]
@@ -1450,11 +1484,6 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
-    if (this.endpointPanel !== undefined) {
-      // The endpoint draft owns its own editing semantics; this page publishes
-      // no pointer grant inside it.
-      return event.type === 'wheel' ? { handled: true } : undefined
-    }
     if (event.type === 'wheel') {
       const delta = event.wheelDelta ?? 0
       if (delta === 0) return undefined

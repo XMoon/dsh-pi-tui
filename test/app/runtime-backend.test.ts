@@ -179,7 +179,8 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       setFetchProvider: async () => {},
       setSearchApiCount: async () => {},
       setSendOriginalQuestion: async () => {},
-      setSearchApiBaseURL: async () => {},
+      setSearchBilling: async () => {},
+      setFetchBilling: async () => {},
     },
     visualTools: {
       read: () => undefined,

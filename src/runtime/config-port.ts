@@ -551,6 +551,16 @@ export interface PresetDefaultConfig {
 }
 
 /**
+ * The OFFICIAL billing mode of one DeepSeek Search/Fetch API capability
+ * (`web-deepseek-api.searchBilling` / `fetchBilling`, rc.2's closed enum). The
+ * default `auto` follows the credential the CURRENT conversation's DeepSeek
+ * route selects; `account` uses only the signed-in account and `api-key` only
+ * the API-key credential reference — the three are explicit, non-fallback
+ * choices.
+ */
+export type WebApiBilling = 'auto' | 'account' | 'api-key'
+
+/**
  * The OFFICIAL web provider selection and DeepSeek Search/Fetch API options
  * (the DSH `web` / `web-deepseek-api` settings sections, S2/PR-B §3.2).
  *
@@ -569,9 +579,27 @@ export interface WebProviderSettings {
   fetchProvider: string | undefined
   /** The `web-deepseek-api` API options (official defaults when unset). */
   api: {
-    baseURL: string
+    /** `searchBilling`: the Search API's official billing mode. */
+    searchBilling: WebApiBilling
+    /** `fetchBilling`: the Fetch API's official billing mode. */
+    fetchBilling: WebApiBilling
     count: number
     sendOriginalQuestion: boolean
+  }
+  /** The rc.2 YAML-only advanced Search/Fetch endpoint fields, as DETACHED
+   *  read-only facts: the client never writes them and never derives a request
+   *  route from them. A non-empty `search*` field overrides the Search billing
+   *  choice, a non-empty `fetch*` field the Fetch billing choice (the official
+   *  Host operation still owns the real routing). Legacy single-endpoint keys
+   *  (`baseURL`/`apiKeyEnv`/`apiKey`) are NOT rc.2 schema fields; when a Host
+   *  descriptor happens to project them, only their PRESENCE is reported —
+   *  never their values. */
+  advanced: {
+    searchBaseURL?: string
+    searchApiKeyEnv?: string
+    fetchBaseURL?: string
+    fetchApiKeyEnv?: string
+    legacyOverrideDetected?: boolean
   }
   /** Credential-presence facts from the official credential store (never the
    *  value): `configured` is the store's own answer, `source` its layer when
@@ -611,11 +639,13 @@ export interface WebProviderConfig {
    *  send the triggering human question (the provider bounds it to 128
    *  characters). */
   setSendOriginalQuestion(enabled: boolean): Promise<void>
-  /** `web-deepseek-api.baseURL`: an absolute `https:` API base WITHOUT
-   *  credentials, query, fragment or a trailing `/search` / `/fetch` action
-   *  name. A custom endpoint receives the credential, so the human must confirm
-   *  it explicitly in the UI. */
-  setSearchApiBaseURL(url: string): Promise<void>
+  /** `web-deepseek-api.searchBilling`: one explicit official billing choice
+   *  for the Search API (`auto` is a persisted choice, never a reset of the
+   *  YAML-only overrides). */
+  setSearchBilling(mode: WebApiBilling): Promise<void>
+  /** `web-deepseek-api.fetchBilling`: the same explicit official billing
+   *  choice for the Fetch API. */
+  setFetchBilling(mode: WebApiBilling): Promise<void>
 }
 
 /** The effective state of the Host `pi-tui-visual-tools` row — the ONE

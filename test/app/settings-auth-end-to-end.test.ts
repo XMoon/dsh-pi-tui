@@ -194,7 +194,8 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
         read: async () => ({
           searchProvider: 'deepseek-official',
           fetchProvider: 'http',
-          api: { baseURL: 'https://api.deepseek.com/v1/tools', count: 10, sendOriginalQuestion: true },
+          api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+          advanced: {},
           credential: configuredRefs.has('DEEPSEEK_API_KEY')
             ? { configured: true, source: 'file' }
             : { configured: false },
@@ -1500,7 +1501,8 @@ test('a resize to 120x7 rejects a mouse press/release on the old sign-out row', 
 // ── C2-R4: the Web page's credential row is the SAME official reference ─────
 
 /** Open `/settings → Tools → Web Search / Fetch` and select the credential row
- *  of the real Web page (Home + five Downs within the page list). */
+ *  of the real Web page (Home + eight Downs within the page list: the
+ *  credential row is the ninth frozen row). */
 async function openWebCredentialRow(h: Harness): Promise<void> {
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
   await waitForFrame(h.view, frame => frame.includes('Settings ·'), () => h.vt.waitForRender(), 'the Settings workspace')
@@ -1513,7 +1515,7 @@ async function openWebCredentialRow(h: Harness): Promise<void> {
   await waitForFrame(h.view, frame => frame.includes('Web Search Provider') && !frame.includes('Loading…'),
     () => h.vt.waitForRender(), 'the Web Search / Fetch page')
   await key(h, '\x1b[H')
-  for (let step = 0; step < 5; step += 1) await key(h, '\x1b[B')
+  for (let step = 0; step < 8; step += 1) await key(h, '\x1b[B')
   await key(h, '\r') // the credential row Detail
   await waitForFrame(h.view, frame => frame.includes('Reference: DEEPSEEK_API_KEY'),
     () => h.vt.waitForRender(), 'the credential row Detail')

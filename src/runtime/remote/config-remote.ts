@@ -55,10 +55,12 @@ import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../..
 import {
   assertFetchProviderId,
   assertFetchProviderReplaceable,
-  assertSearchApiBaseURL,
   assertSearchApiCount,
   assertSearchProviderId,
   assertSearchProviderReplaceable,
+  assertWebApiBilling,
+  readWebApiBilling,
+  webApiAdvancedFactsOf,
 } from '../../domain/web-provider-settings.ts'
 import type {
   AccountBalanceOutcome,
@@ -1991,10 +1993,14 @@ class RemoteWebProviderConfig implements WebProviderConfig {
       const webValue = plainRecord(web.value)
       const apiValue = plainRecord(api.value)
       if (webValue === undefined || apiValue === undefined) return undefined
-      const baseURL = apiValue.baseURL
+      // rc.2 has NO single `baseURL` requirement: the read stays ready without
+      // one. A missing/foreign billing value is UNAVAILABLE — never a silent
+      // `auto` — and the advanced overrides are detached read-only facts.
+      const searchBilling = readWebApiBilling(apiValue, 'searchBilling')
+      const fetchBilling = readWebApiBilling(apiValue, 'fetchBilling')
       const count = apiValue.count
       const sendOriginalQuestion = apiValue.sendOriginalQuestion
-      if (typeof baseURL !== 'string' || baseURL === '') return undefined
+      if (searchBilling === undefined || fetchBilling === undefined) return undefined
       if (typeof count !== 'number' || !Number.isInteger(count)) return undefined
       if (typeof sendOriginalQuestion !== 'boolean') return undefined
       const credential = await this.credentials.describeReference(WEB_API_KEY_REF)
@@ -2008,7 +2014,8 @@ class RemoteWebProviderConfig implements WebProviderConfig {
         fetchProvider: typeof webValue.fetchProvider === 'string' && webValue.fetchProvider !== ''
           ? webValue.fetchProvider
           : undefined,
-        api: { baseURL, count, sendOriginalQuestion },
+        api: { searchBilling, fetchBilling, count, sendOriginalQuestion },
+        advanced: webApiAdvancedFactsOf(apiValue),
         credential,
       }
     }
@@ -2062,9 +2069,14 @@ class RemoteWebProviderConfig implements WebProviderConfig {
     await this.mutate(WEB_SEARCH_API_NS, 'sendOriginalQuestion', enabled)
   }
 
-  async setSearchApiBaseURL(url: string): Promise<void> {
-    assertSearchApiBaseURL(url)
-    await this.mutate(WEB_SEARCH_API_NS, 'baseURL', url)
+  async setSearchBilling(mode: 'auto' | 'account' | 'api-key'): Promise<void> {
+    assertWebApiBilling(mode)
+    await this.mutate(WEB_SEARCH_API_NS, 'searchBilling', mode)
+  }
+
+  async setFetchBilling(mode: 'auto' | 'account' | 'api-key'): Promise<void> {
+    assertWebApiBilling(mode)
+    await this.mutate(WEB_SEARCH_API_NS, 'fetchBilling', mode)
   }
 }
 
