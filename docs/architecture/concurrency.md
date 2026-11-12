@@ -503,9 +503,12 @@ changing the ownership or ordering rules:
   runner never restores or automatically retries a command whose side effect
   status is unknown. A settled command result is committed separately from the
   TUI's fallback prompt path.
-- Task Center child interruption uses `SubagentPort` with the durable direct
-  parent and child identities. The semantic writer hides Direct cancellation
-  knobs such as the user reason and inbox-preservation option.
+- Task Center child interruption uses `SubagentPort` with the child identity
+  plus the viewer's local parent-relation currentness. The rc.2 Host request
+  carries only the child address; the Host authorizes that exact target, and no
+  parent-authority parameter is fabricated by the TUI. The semantic writer
+  hides Direct cancellation knobs such as the user reason and
+  inbox-preservation option.
 - Continuable viewer prompts carry the runner-resolved `queue` or `steer`
   delivery from the child running state and `busyEnter` policy. The prompt
   port forwards that delivery with human provenance; it does not force every
@@ -515,8 +518,9 @@ changing the ownership or ordering rules:
   cannot settle, the original child draft (including whitespace-only input) is
   restored to the current editor or the stale child slot. Child queue occurrence
   reads and mutations require the exact interactive continuable viewer Agent,
-  its live registry identity, and its pinned direct parent; ordinary child
-  prompts retain `SubagentPort` parent authority. The queue pane reads that
+  its live registry identity, and its pinned direct parent (a Client-side
+  currentness fact); ordinary child prompts send only the child identity to the
+  rc.2 Host, which owns target authorization. The queue pane reads that
   same active child subject while the viewer is mounted; an unavailable child
   clears the pane rather than falling back to the parent's queue.
 

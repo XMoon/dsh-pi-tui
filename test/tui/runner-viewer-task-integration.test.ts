@@ -3357,8 +3357,8 @@ test('the real /tasks Subagent interrupt admits through the session control admi
   // reached `ctx.subagents` with the exact durable parent/child authority.
   assert.deepEqual(interrupts, [{
     childSessionId: child.id,
-    authority: { kind: 'user', parentSessionId: parent.id },
-  }], 'the writer-admitted interrupt must name the exact durable parent/child authority')
+    authority: { kind: 'user' },
+  }], 'the writer-admitted rc.2 interrupt names the exact child; the viewer parent relation stays Client currentness')
   // The committed settlement produced the ONE transient notice from the RAW
   // official label (the draw-boundary projection of that notice is proven by
   // the dedicated Task Browser suite; here the full-screen `/tasks` overlay

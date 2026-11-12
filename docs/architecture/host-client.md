@@ -591,15 +591,38 @@ Review page from exactly those answers. Consequences of this contract:
   the TUI `/deliverables` panel remain separate capabilities with no Web
   prerequisite. The effective assembled prompt, not the Loader row inventory,
   is the authority for whether a preset consumes that guidance.
-- The Office-to-PDF provider is Web-only: enabling the official Browser graph
-  publishes `officeToPdf` for the document-preview sidebar, and disabling Web
-  disposes that provider together with the Web graph while retaining protected
-  Host owners.
+- The Office conversion provider is Web-only: enabling the official Browser
+  graph publishes `officeKit` (rc.2 renamed it from `officeToPdf`) for the
+  document-preview sidebar, alongside the shared `mcpManager` server fleet;
+  disabling Web disposes those providers together with the Web graph while
+  retaining protected Host owners. `office-kit` writes its output under the
+  Host's own DSH home, never a Client cwd.
 - `harness-dev-context` remains deliberately uncomposed. Its developer
   instructions assume that the Agent is editing the DSH GUI that serves the
   page, and expose the DSH implementation path, GUI URL and HMR/build workflow;
   those are not ordinary PiTUI coding instructions. `web-runtime` therefore
   keeps `surfaceContext: false`.
+
+#### Web Search/Fetch Host settings authority (rc.2)
+
+The official `web` / `web-deepseek-api` Settings sections are the ONLY authority
+for Search/Fetch provider selection, result count, Send Original Question, the
+two Billing modes and the YAML-only advanced overrides. The semantic
+`WebProviderConfig` is a detached read/write DTO: `read()` projects the official
+descriptor values (`searchBilling`/`fetchBilling` MUST be one of the official
+`auto`/`account`/`api-key` values or the read is unavailable — never silently
+defaulted to `auto`; a missing single endpoint is NOT an error) plus read-only
+`advanced` facts copied from the Host descriptor (`search*`/`fetch*` values;
+the retired `baseURL`/`apiKeyEnv`/`apiKey` contribute only a
+`legacyOverrideDetected` presence fact, never a value). Writes are exactly the
+existing provider/count/question setters and the two Billing `set` operations
+against the official revision-checked `settings.mutate` path; there is no
+`baseURL` setter, no automatic migration and no TUI-side endpoint store. A
+non-empty Search/Fetch override is the Host's effective configuration for that
+capability: the TUI never writes the matching Billing field, and it never
+derives a request endpoint or credential from the override or from the
+credential-presence metadata — the Host operation decides the actual route and
+credential from the current Session.
 
 The Client-side `/web` menu is the ONE user entry and it holds no Web state of
 its own: it reads the Host status through the semantic WebAccessPort, performs
@@ -1180,24 +1203,27 @@ the offset is never cached across a DST change.
 
 The base profile mounts the official `@deepseek-ai/dsh-host-webserver` row with
 stable id `webserver`, `host: 127.0.0.1`, and `port: 0`; the Direct runner injects
-both `deepseekAccount` and `webServer`. The official PlatformAccount registers
-`/oauth/callback` on that Host listener while an attempt waits for the browser.
+both `deepseekAccount` and `webServer`. The official `DeepSeekAccount` service
+registers `/oauth/callback` on that Host listener while an attempt waits for the
+browser.
 Direct obtains the origin from `webServer.getOrigin()` and calls
 `startSignIn(client, origin, 'web')`; a Client never supplies a callback URL,
 opens a second HTTP server, or parses the browser callback. `--help` mounts no
 listener. A bind failure fails the Host row instead of falling back to a public
 interface.
 
-The internal Split Host mounts the official
-`@deepseek-ai/dsh-api-account-controller` exactly once on its Host-only Loader,
-with `deepseekAccount` and `agents` injections. This Host owner remains active
-whether the optional Browser Web roster is enabled or disabled. Host readiness
-requires the `accountController/account` Typert binding and exactly one active
-Loader row for the official package identity; a Web UI row is not that service.
-The Client mounts the package's generated `account` Remote contribution on the
-same authenticated `remote` object and Connection as its other generated
-contributions. It does not mount another Host controller, create an Account
-store, copy the generated namespace, or introduce a feature-specific carrier.
+The rc.2 base bundle mounts the concrete
+`@deepseek-ai/dsh-deepseek-account` service as the ONE Host Account owner: the
+`deepseekAccount` Cordis service is the Typert `account` namespace owner. The
+internal Split Host reuses that base row and does NOT insert a second
+account-controller row. This Host owner remains active whether the optional
+Browser Web roster is enabled or disabled. Host readiness requires the
+`deepseekAccount/account` Typert binding and exactly one ACTIVE Loader row for
+that exact package identity; a Web UI row is not that service. The Client mounts
+`@deepseek-ai/dsh-deepseek-account/remote` on the same authenticated `remote`
+object and Connection as its other generated contributions. It does not mount
+another Host owner, create an Account store, copy the generated namespace, or
+introduce a feature-specific carrier.
 
 The semantic Account port carries only detached `AccountView`, profile and
 wallet DTOs, safe attempt ids/phases/error codes, and per-operation
@@ -1215,12 +1241,17 @@ it then calls the official generated method with that origin and the fixed
 `loginSource='web'`. Missing provenance or a disconnected generation fails
 closed. Registry hints, Client environment, arbitrary user input, `localhost`,
 other loopback spellings, and another legal listener are not substitutes for
-that authenticated identity. The official Controller forwards its argument and
+that authenticated identity. The official service forwards its argument and
 does not independently compare it to its listener; this contract establishes
 the trusted source used by this Client adapter, not a new upstream Host policy.
 
-`watch(signal)` yields a complete initial current observation and later snapshots;
-an invalidation revokes its affected observations and is distinct from signed-out.
+`watch(signal)` yields the rc.2 `AccountUpdate` frames
+(`{type:'snapshot'|'credentials-changed', state:AccountView}`): both frame types
+are current Host views and `credentials-changed` is a fresh snapshot, never a
+sign-out. The adapter validates the envelope only at this external stream
+boundary and forwards `state` as the detached view; ordinary Account RPCs
+(`getState`/`startSignIn`/...) keep their bare `AccountView` shape. An
+invalidation revokes its affected observations and is distinct from signed-out.
 Ending the signal, disposing the generated stream, closing a page, or retiring a
 Client surface stops observation only; it never cancels the Host browser attempt.
 Cancellation addresses the exact `SignInAttemptId`. The Watch subscription is the
@@ -1272,7 +1303,8 @@ truth, enablement, installed state, install/remove, compatibility, version
 exemptions and version updates. The semantic port projects **detached**
 `PluginBundleFact` (`official`, `availability`, `installTarget`, `version`,
 `listedByDefault`, `enabled`, `installed`, `optional`, `source`, `removable`,
-`updatable`, `readOnlyReason`, `error`, `rows`, `overrides`), `PluginRowFact`,
+`update` (`'registry' | 'git'`, absent when the Host offers neither),
+`readOnlyReason`, `error`, `rows`, `overrides`), `PluginRowFact`,
 `PluginRegistriesFact`, `PluginExemptionFact` and `PluginChangeFact`
 (`application`, `restartReason`, `version`, `pendingBuilds`, `approvedBuilds`,
 `packageResult`, `registries`, `failedAt`). It also carries the update facts:
@@ -1295,12 +1327,15 @@ Host fact
 ```
 
 `listVersions(name, {})` and `updateBundle(name, exactVersion, { registry,
-requestId })` are the official update read/write. The Host alone decides whether
-a bundle is updatable, which registry answered, which exact version is offered,
+requestId })` are the official update read/write for a bundle whose Host
+`BundleInfo.update` is `'registry'`. The Host alone declares the update source
+(`registry` or `git`), which registry answered, which exact version is offered,
 whether it declares a bundle and whether it accepts the running DSH version; it
 re-checks the exact target before changing the profile and may run its own
-remove/install/restore sequence. The TUI never guesses a newer version, accepts
-an arbitrary registry, or reproduces the update with removeBundle + installBundle.
+remove/install/restore sequence. A `git`-managed bundle states its Host source
+but never offers the registry action: the TUI never guesses a newer version,
+accepts an arbitrary registry, or reproduces the update with removeBundle +
+installBundle.
 `plugin-manager/update-state` is the official stage hint only, never proof of
 success; `cancelInstall(requestId)` stops ONLY the target installation step and
 never the whole update or the Host's restore. `updateBundle` is called once per

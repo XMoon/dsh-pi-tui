@@ -669,7 +669,7 @@ export function updateVersionBlocker(version: PluginVersionFact): string | undef
 /** One published version the TUI may select as an update target. This is a
  *  LOCAL narrowing of the Host list only (`bundle`/`incompatible`/`deprecated`);
  *  it never answers whether the bundle itself may be updated (`Host
- *  BundleInfo.updatable`) or whether the Host accepts the version (the Host
+ *  BundleInfo.update`) or whether the Host accepts the version (the Host
  *  re-checks the exact target before changing anything). A legal prerelease
  *  stays selectable: the user may explicitly choose it after its warning. */
 export function isSelectableUpdateVersion(version: PluginVersionFact): boolean {
@@ -721,8 +721,9 @@ function cardActions(card: PluginCardView): PluginDetailAction[] {
         tone: 'warning',
       })
   }
-  // Only a Host-updatable third-party profile bundle exposes the official
-  // version-update entry. The Host re-checks the exact target before writing.
+  // Only a Host registry-updatable third-party profile bundle exposes the
+  // official version-update entry. The Host re-checks the exact target before
+  // writing; a `git`-managed bundle never reaches this branch.
   if (card.target === 'bundle' && card.updatable && !card.isSelf) {
     actions.push({
       value: PLUGIN_ACTION.checkUpdates,

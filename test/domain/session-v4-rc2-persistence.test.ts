@@ -526,7 +526,7 @@ test('the rc.2 Session reader accepts historical catalog generations and the new
     [2, 'external', undefined],
     [3, 'continuable', 'reviewer'],
   ], 'the current official reader keeps every catalog generation readable')
-  const teamMode = read.events.find(event => event.type === 'team/mode')
+  const teamMode = read.events.find(event => String(event.type) === 'team/mode')
   assert.deepEqual(teamMode?.data, { enabled: true },
     'the rc.2 log-only team/mode record round-trips through the real persistence')
   assert.equal(read.events.length, 9)

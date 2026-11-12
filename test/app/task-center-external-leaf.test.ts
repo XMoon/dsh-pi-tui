@@ -147,7 +147,8 @@ for (const [columns, rows] of SIZES) test(`the REAL Task Center external leaf fr
   const activation = await subagents.startActivation({
     provider: 'fixture-external',
     label: LABEL,
-    request: { parent, prompt: [{ type: 'text', text: 'run the external task' }] },
+    parent,
+    prompt: [{ type: 'text', text: 'run the external task' }],
     signal: new AbortController().signal,
     delivery: 'parent',
   })

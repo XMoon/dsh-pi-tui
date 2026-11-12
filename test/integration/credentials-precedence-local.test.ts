@@ -60,6 +60,27 @@ async function boot(life: TestLifecycle, workRoot: string, path?: string): Promi
   return { ctx, credentials: ctx.get('credentials') as Fixture['credentials'], logs }
 }
 
+/** rc.2 credential describe adds a masked preview alongside presence/source;
+ *  assert the stable facts and the bullet-only preview without pinning its length. */
+function assertCredentialDescribe(
+  actual: Record<string, unknown> | undefined,
+  expected: { readonly configured: boolean; readonly source?: string; readonly writable: boolean },
+  secret?: string,
+): void {
+  assert.ok(actual !== undefined, 'describe must return a record')
+  const { masked, ...facts } = actual
+  assert.deepEqual(facts, expected)
+  // rc.2 adds a masked preview for a FILE-stored value; an environment value
+  // has no masked field. The preview must contain the mask and never the value.
+  if (expected.source === 'file') {
+    assert.equal(typeof masked, 'string')
+    assert.match(String(masked), /•/u, 'a file-backed credential preview is masked')
+    if (secret !== undefined) assert.equal(String(masked).includes(secret), false, 'the raw value never crosses')
+  } else {
+    assert.equal(masked, undefined)
+  }
+}
+
 test('the managed store outranks the launch environment, which outranks the .env layers', async t => {
   const life = testLifecycle(t)
   const workRoot = life.tempDir('dsh-s2b-cred-')
@@ -71,12 +92,12 @@ test('the managed store outranks the launch environment, which outranks the .env
   assert.equal((await fixture.credentials.resolve(HOME_REF))?.source, 'user-env')
   assert.equal(await fixture.credentials.resolve(MISSING_REF), undefined)
   // Presence/source are the same facts the TUI shows; the VALUE never rides.
-  assert.deepEqual(await fixture.credentials.describe(REF), { configured: true, source: 'env', writable: true })
+  assertCredentialDescribe(await fixture.credentials.describe(REF), { configured: true, source: 'env', writable: true })
 
   // A stored value immediately wins over every environment layer...
   await fixture.credentials.set(REF, 'stored-value')
   assert.deepEqual(await fixture.credentials.resolve(REF), { value: 'stored-value', source: 'file' })
-  assert.deepEqual(await fixture.credentials.describe(REF), { configured: true, source: 'file', writable: true })
+  assertCredentialDescribe(await fixture.credentials.describe(REF), { configured: true, source: 'file', writable: true }, 'stored-value')
   // ...and clearing it restores the environment fallback (never a stale value).
   await fixture.credentials.unset(REF)
   assert.deepEqual(await fixture.credentials.resolve(REF), { value: 'from-process', source: 'env' })
@@ -101,5 +122,5 @@ test('a value written by another process is read back by a fresh store (external
   // not any in-process cache.
   const second = await boot(life, workRoot, path)
   assert.deepEqual(await second.credentials.resolve(REF), { value: 'saved-by-this-process', source: 'file' })
-  assert.deepEqual(await second.credentials.describe(REF), { configured: true, source: 'file', writable: true })
+  assertCredentialDescribe(await second.credentials.describe(REF), { configured: true, source: 'file', writable: true }, 'saved-by-this-process')
 })

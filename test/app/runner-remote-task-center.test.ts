@@ -866,10 +866,8 @@ test('a REAL delegated continuable child receives the viewer follow-up through t
     provider: 'spawn',
     label: REAL_LABEL,
     childId: SessionId(REAL_CHILD_ID),
-    request: {
-      prompt: [{ type: 'text', text: REAL_INITIAL_PROMPT }],
-      parent: agents.get(SessionId(PARENT_ID)),
-    },
+    prompt: [{ type: 'text', text: REAL_INITIAL_PROMPT }],
+    parent: agents.get(SessionId(PARENT_ID)),
     signal: new AbortController().signal,
     delivery: 'parent',
   })

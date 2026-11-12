@@ -1019,9 +1019,10 @@ specialist-page contract below).
   a second alt-screen overlay and never a second settings manager, and its `Esc`
   ladder is `Detail → Web list → the Tools row → the category rail`.
 
-  The page paints exactly SIX rows in this frozen order: `Web Search Provider`,
+  The page paints exactly NINE rows in this frozen order: `Web Search Provider`,
   `Web Fetch Provider`, `Search API Result Count`, `Share Original Question`,
-  `Search / Fetch API Endpoint`, `DeepSeek API Key`. At ≥100 columns the row list
+  `Search Billing`, `Fetch Billing`, `Search API Override` (read-only),
+  `Fetch API Override` (read-only), `DeepSeek API Key`. At ≥100 columns the row list
   (max 34 columns) sits beside the selected row's Detail; at 65–99 columns the
   list is stacked above it; below 65 columns exactly ONE region is painted at a
   time and `Enter`/`Esc` move between the list and its Detail. The frame keeps
@@ -1033,22 +1034,33 @@ specialist-page contract below).
   is painted through the existing sanitizers and width helpers.
 
   Authority is the Host `web` / `web-deepseek-api` sections through the
-  `WebProviderConfig` read and its FIVE setters. The provider choices are the
-  official identities `Messages`↔`deepseek-official` and
-  `HTTP`↔`http`, plus the opt-in, separately billed `DeepSeek Search API` /
-  `DeepSeek Fetch API`. A configured provider id outside those candidates is a
-  CUSTOM route: it is displayed verbatim, it is never replaced by a default and
-  the page offers NO confirmable candidate for it. The count row offers the
-  `5/10/20/50` presets while the official domain stays 1–50: a stored integer
-  outside the presets (for example `7`) is reported exactly and is never
-  rewritten by navigation or refresh. `Share Original Question` is `on` by
-  default and states the payload boundary (up to 128 characters of the
-  triggering human question as `ori_question`, never the full history or system
-  prompt). The endpoint row reuses the existing endpoint editor
-  (`WebEndpointPanel`): a full URL draft, an explicit Enter Confirm and the
-  trust warning that the credential and query are sent to that HTTPS target
-  (the URL shape is validated, not the host's trust); `http`, userinfo, query,
-  fragment and a trailing `/search`/`/fetch` are refused with no Host write.
+  `WebProviderConfig` read and its provider/count/question/Billing setters. The
+  provider choices are the official identities `Messages`↔`deepseek-official`
+  and `HTTP`↔`http`, plus the separately billed `DeepSeek Search API` /
+  `DeepSeek Fetch API`. With no explicit stored `web.searchProvider` the
+  official default is DeepSeek Search API; the page states that as an effective
+  default and never writes it merely to display it. A configured provider id
+  outside those candidates is a CUSTOM route: it is displayed verbatim, it is
+  never replaced by a default and the page offers NO confirmable candidate for
+  it. The count row offers the `5/10/20/50` presets while the official domain
+  stays 1–50: a stored integer outside the presets (for example `7`) is reported
+  exactly and is never rewritten by navigation or refresh. `Share Original
+  Question` is `on` by default and states the payload boundary (up to 128
+  characters of the triggering human question as `ori_question`, never the full
+  history or system prompt). `Search Billing` and `Fetch Billing` are two
+  independent Host fields over the official closed enum `auto`/`account`/
+  `api-key`; each may be set only while its capability is selected and has no
+  advanced Host override. `auto` follows the current conversation's DeepSeek
+  route and is not a claim that `DEEPSEEK_API_KEY` is configured. The two
+  Override rows are READ-ONLY Host YAML facts: when set they name the official
+  field/value the Host really uses (`searchBaseURL`/`searchApiKeyEnv` or
+  `fetchBaseURL`/`fetchApiKeyEnv`; never a secret value) and the corresponding
+  Billing row states it is overridden; when unset they state that the capability
+  follows the current conversation's DeepSeek route instead of inventing a fixed
+  public URL. `web-deepseek-api.baseURL`/`apiKeyEnv`/`apiKey` are retired
+  profile residue: they are never read as effective values and never written by
+  this page (an optional legacy notice points the user to the external profile
+  YAML; no automatic migration).
 
   Every write is ONE explicit Enter confirmation that enters the command
   owner's single Web FIFO. At its turn the intent re-proves readiness and
@@ -1500,12 +1512,13 @@ Host `removable`/`availability` facts, through its own destructive confirmation.
 The TUI never fabricates a platform decision, retries an indeterminate write, or
 reports a refusal as success.
 
-`BundleInfo.updatable` is a declared Host capability, never a TUI guess: only a
-Host-updatable, non-self bundle Detail offers `Check updates…` (before Remove),
-and the entry is answered by the official `listVersions` read. The Host's
-`installed`/`official`/`source`/`readOnlyReason` facts — not a local check —
-decide that capability; a non-updatable profile bundle keeps the
-Remove-then-explicit-install guidance.
+`BundleInfo.update` is the declared Host update SOURCE, never a TUI guess: only
+a non-self bundle whose value is `'registry'` offers `Check updates…` (before
+Remove), and the entry is answered by the official `listVersions` read. A
+bundle whose Host source is `'git'` states that source but never offers the
+registry action. The Host's `installed`/`official`/`source`/`readOnlyReason`
+facts — not a local check — decide the capability; a bundle with no declared
+update source keeps the Remove-then-explicit-install guidance.
 
 ### Inventory read epoch
 
@@ -1570,7 +1583,7 @@ checking → selecting → confirm → running → done
 ```
 
 - `Check updates…` requires the current Host model card to be a non-self
-  `target:'bundle'` with `updatable:true`, and fixes the installed version and
+  `target:'bundle'` with `update:'registry'`, and fixes the installed version and
   read epoch before `listVersions(name,{})`. An UNFINISHED preview
   (`checking`/`selecting`/`confirm`) is reused when the page is re-entered; only
   an explicit `r` repeats its registry read, and a new inventory read
@@ -1674,14 +1687,16 @@ a name/prefix, or let a Host `Stale`/error notice label the extension projection
 ### Detail upgrade guidance
 
 Derive only from `availability`, `canRemove`, `isSelf`, `version`,
-`installTarget` and the Host `updatable`/error facts:
+`installTarget` and the Host `update`/error facts:
 
 - self → managed outside this screen;
 - installation → upgrade DSH; no in-place update or Remove;
-- profile-owned with `updatable:true` → name `Check updates…` and state that the
-  Host re-checks the exact target before changing the profile;
-- profile-owned without it → Remove first, then an explicit later install; state
-  when removal is not permitted;
+- profile-owned with `update:'registry'` → name `Check updates…` and state that
+  the Host re-checks the exact target before changing the profile;
+- profile-owned with `update:'git'` → state that the bundle is managed from its
+  Git source and is updated there, never through the Plugin Manager;
+- profile-owned without an update source → Remove first, then an explicit later
+  install; state when removal is not permitted;
 - missing with an official target the Host itself refuses (for example
   `unsupported-platform`) → install unavailable with the Host reason;
 - missing with an official target → the Host-offered target (masked spec +

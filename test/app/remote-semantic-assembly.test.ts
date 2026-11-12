@@ -114,7 +114,7 @@ function runtimeSource(): {
     $on: () => () => {},
     subagents: {
       prompt: async () => ({ ok: true as const, value: { messageId: 'm' } }),
-      interruptByParent: async () => ({ ok: true as const, value: {} }),
+      interruptByUser: async () => ({ ok: true as const, value: {} }),
     },
   }
   return {
