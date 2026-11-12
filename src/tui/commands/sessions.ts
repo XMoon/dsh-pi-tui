@@ -643,7 +643,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       // roster/guarded-Resume settlement; the read owner still owns the real
       // outcome, and a failed/indeterminate/refused outcome becomes the existing
       // presentation notice instead of a command result (there is no command).
-      void handle.settlement.then(async (result: SessionBrowserReadSettlement) => {
+      void handle.settlement.then(async (result: SessionBrowserReadSettlement) => { // allowlist: startup admission observer — the read owner owns the operation
         if (result.kind === 'matched') {
           const resume: SessionBrowserResumeSettlement = await handle.resumeSettlement
           if (resume.kind === 'failed' || resume.kind === 'indeterminate') {
@@ -654,7 +654,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         if (result.kind === 'refused') presentation.notify(sanitizeTerminalText(result.text), 'error')
       }, (error: unknown) => {
         presentation.notify(sanitizeTerminalText(safeErrorMessage(error)), 'error')
-      }) // allowlist: startup admission observer — the read owner owns the operation
+      })
       return Promise.resolve({ kind: 'success' })
     }
     return handle.settlement.then(async (result: SessionBrowserReadSettlement) => {
