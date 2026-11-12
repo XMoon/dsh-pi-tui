@@ -54,7 +54,7 @@ import { projectFocus, type FocusProjectedBlock } from '../transcript/focus-proj
 import type { TranscriptStructureBlock, TranscriptWorkSpan } from '../transcript/structure.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
 import { summarizeWorkSpan } from '../transcript/work-summary.ts'
-import { systemContextBody, toolCardHeader, toolTitle, relativizeToCwd } from '../transcript/tool-presentation.ts'
+import { firstLine, systemContextBody, toolCardHeader, toolTitle, relativizeToCwd } from '../transcript/tool-presentation.ts'
 import type { ToolPresenter } from '../transcript/tool-presentation.ts'
 import { toolTargetFactsOf, toolTargetKind } from '../transcript/tool-target-semantics.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
@@ -188,6 +188,14 @@ export interface TranscriptViewOptions {
     readonly expandedThinkingOwners: ReadonlySet<TranscriptMessage>
     readonly expandedContextRowOwners: ReadonlySet<TranscriptMessage>
     readonly expandedClusterOwners: ReadonlySet<TranscriptMessage>
+    /**
+     * T3-0B: the ONE manual owner shared by native Command and Compaction
+     * cards. A card with real details is a `ui.section` that starts collapsed;
+     * a card without any detail stays directly readable and never becomes an
+     * operable (dead-chevron) head. The set is renderer-local and cleared with
+     * the source scope, never a second business fold state.
+     */
+    readonly expandedCommandCompactionOwners: ReadonlySet<TranscriptMessage>
   }
   /**
    * PR3: whether the pane negotiated the `image` kind AND the `blobs` feature.
@@ -1154,26 +1162,173 @@ function thinkingNode(
   )
 }
 
-function commandNode(message: Extract<TranscriptMessage, { kind: 'command' }>, key: string): Node {
-  const name = message.name ?? 'command'
-  const head = sanitizedPhysicalLine(message.args === null || message.args === '' ? `/${name}` : `/${name} ${message.args}`)
-  const outcome = message.outcome
-  // The official `command/done` kind is the only status authority: a run
-  // without a done is running, and a fragment-only fallback invents nothing.
-  const status: Status = outcome === null ? 'running' : outcome.kind === 'error' ? 'error' : 'done'
-  const body = outcome?.text === undefined || outcome.text === '' ? [] : [ui.md({ key: 'body', text: sanitizeDisplayText(outcome.text) })]
-  return ui.card({ key, head, status }, ...body)
+type TranscriptCommandRow = Extract<TranscriptMessage, { kind: 'command' }>
+type TranscriptCompactionRow = Extract<TranscriptMessage, { kind: 'compaction' }>
+type TranscriptCommandCompactionRow = TranscriptCommandRow | TranscriptCompactionRow
+
+/** The bounded one-line preview of an already-sanitized display text. */
+function boundedNoteText(source: string | undefined): string | undefined {
+  if (source === undefined || source === '') return undefined
+  const line = boundedPhysicalPrefix(sanitizeDisplayText(firstLine(source)), TOOL_ERROR_NOTE_LIMIT)
+  return line === '' ? undefined : line
 }
 
-function compactionNode(message: Extract<TranscriptMessage, { kind: 'compaction' }>, key: string): Node {
-  const status: Status = message.error !== undefined && message.error !== ''
-    ? 'error'
-    : message.running === true ? 'running' : 'done'
-  const body = message.text === '' ? [] : [ui.md({ key: 'body', text: sanitizeDisplayText(message.text) })]
-  return ui.card(
-    { key, head: 'Compaction', status },
-    ui.badge({ key: 'counts', text: `${message.items} items · ${message.tokens} tokens` }),
-    ...body,
+function commandStatusWord(message: TranscriptCommandRow): string {
+  // The official `command/done` kind is the only status authority: a run
+  // without a done is running, and a fragment-only fallback invents nothing.
+  return message.outcome === null ? 'Running' : message.outcome.kind === 'error' ? 'Error' : 'OK'
+}
+
+function commandStatusOf(message: TranscriptCommandRow): Status {
+  return message.outcome === null ? 'running' : message.outcome.kind === 'error' ? 'error' : 'done'
+}
+
+function commandIdentityLine(message: TranscriptCommandRow): string {
+  // A fragment-only `command/done` has no name/args authority; it must not
+  // invent them. The official args are the VERBATIM raw input including the
+  // separator whitespace, so the separator is never doubled.
+  const name = message.name === null ? 'Command' : `/${sanitizedPhysicalLine(message.name)}`
+  const rawArgs = message.args === null ? null : sanitizedPhysicalLine(message.args)
+  const args = rawArgs === null || rawArgs === '' ? '' : /^\s/u.test(rawArgs) ? rawArgs : ` ${rawArgs}`
+  return `${name}${args}`
+}
+
+function commandDetailText(message: TranscriptCommandRow): string {
+  return message.outcome?.text === undefined ? '' : sanitizeDisplayText(message.outcome.text)
+}
+
+interface CompactionPresentation {
+  readonly title: string
+  readonly statusWord: string
+  readonly status: Status
+  readonly counts: string
+  /** The ONE bounded collapsed preview (counts are a separate head row). */
+  readonly preview: string | undefined
+  readonly body: readonly Node[]
+  readonly canCollapse: boolean
+}
+
+/**
+ * The ONE Command/Compaction state projection. Error precedence follows the
+ * official authority order: a correlated command `outcome.kind === 'error'`
+ * wins over the compaction `message.error` (even when the normalized command
+ * text is empty), then a running lifecycle, then a settled success.
+ */
+function compactionPresentation(message: TranscriptCompactionRow): CompactionPresentation {
+  const command = message.sourceCommand
+  const commandOutcomeText = command?.outcome?.text === undefined
+    ? undefined
+    : sanitizeDisplayText(command.outcome.text)
+  const commandName = command?.name === null || command?.name === undefined
+    ? ''
+    : ` /${sanitizedPhysicalLine(command.name)}`
+  const commandError = command !== undefined && command.outcome?.kind === 'error'
+    ? commandOutcomeText ?? ''
+    : undefined
+  const failed = commandError ?? (message.error === undefined ? undefined : sanitizeDisplayText(message.error))
+  const running = failed === undefined && message.running === true
+  const title = failed !== undefined
+    ? `Compaction failed${commandName}`
+    : running ? `Compacting context…${commandName}` : `Context compacted${commandName}`
+  const statusWord = failed !== undefined ? 'Error' : running ? 'Running' : 'OK'
+  const counts = message.items > 0 || message.tokens > 0
+    ? `Compacted ${message.items} history item${message.items === 1 ? '' : 's'} (~${message.tokens} tokens)`
+    : ''
+  const outcomeForPreview = commandOutcomeText ?? (failed !== undefined && failed !== '' ? failed : undefined)
+  const preview = boundedNoteText(outcomeForPreview)
+  const summary = message.text === '' ? '' : sanitizeDisplayText(message.text)
+  const body: Node[] = []
+  if (summary !== '') {
+    body.push(ui.md({ key: 'body', text: summary }))
+  } else if (failed !== undefined && failed !== '') {
+    body.push(ui.md({ key: 'error', text: failed }))
+  }
+  if (commandOutcomeText !== undefined && commandOutcomeText !== '' && commandOutcomeText !== failed) {
+    body.push(ui.md({ key: 'outcome', text: commandOutcomeText }))
+  }
+  return {
+    title,
+    statusWord,
+    status: failed !== undefined ? 'error' : running ? 'running' : 'done',
+    counts,
+    preview,
+    body,
+    canCollapse: body.length > 0,
+  }
+}
+
+function commandCompactionCanCollapse(
+  message: TranscriptCommandCompactionRow,
+  options: TranscriptViewOptions,
+): boolean {
+  if (options.innerDisclosure === undefined) return false
+  return message.kind === 'command'
+    ? commandDetailText(message) !== ''
+    : compactionPresentation(message).canCollapse
+}
+
+/**
+ * A detail-less Command/Compaction is a STATIC card, not a Section with a dead
+ * chevron. The two states therefore carry distinct Main keys: the SDK journal
+ * cannot mutate a root's kind in place, and a legal `running -> done` or
+ * `summary` transition is a real content change that may re-materialize this
+ * ONE root. The renderer-local disclosure owner is keyed by the message object
+ * either way, so no preference is created before an operable head exists.
+ */
+function commandCompactionNodeKey(
+  message: TranscriptCommandCompactionRow,
+  key: string,
+  options: TranscriptViewOptions,
+): string {
+  if (options.innerDisclosure === undefined) return key
+  return commandCompactionCanCollapse(message, options) ? key : `${key}-static`
+}
+
+function commandCompactionHead(title: string, statusWord: string, detail: readonly string[]): Node {
+  return ui.col(
+    { key: 'head', gap: 'none' },
+    ui.row(
+      { key: 'title-row', gap: 'sm', align: 'baseline', wrap: true },
+      ui.text({ key: 'title', text: title, wrap: 'none' }),
+      ui.badge({ key: 'status', text: statusWord }),
+    ),
+    ...detail.map((text, index) => ui.text({
+      key: index === 0 ? 'detail' : `detail-${index}`,
+      text,
+      wrap: 'none',
+      truncate: 'end',
+    })),
+  )
+}
+
+function commandNode(message: TranscriptCommandRow, key: string, options: TranscriptViewOptions): Node {
+  const identity = commandIdentityLine(message)
+  const statusWord = commandStatusWord(message)
+  const detail = commandDetailText(message)
+  const preview = boundedNoteText(detail)
+  if (!commandCompactionCanCollapse(message, options)) {
+    return ui.card(
+      { key, head: commandCompactionHead(identity, statusWord, []), status: commandStatusOf(message) },
+      ...(detail === '' ? [] : [ui.md({ key: 'body', text: detail })]),
+    )
+  }
+  const expanded = options.innerDisclosure!.expandedCommandCompactionOwners.has(message)
+  return ui.section(
+    { key, head: commandCompactionHead(identity, statusWord, preview === undefined ? [] : [preview]), collapsible: true, collapsed: !expanded },
+    ...(expanded ? [ui.md({ key: 'body', text: detail })] : []),
+  )
+}
+
+function compactionNode(message: TranscriptCompactionRow, key: string, options: TranscriptViewOptions): Node {
+  const view = compactionPresentation(message)
+  const headDetail = [...(view.counts === '' ? [] : [view.counts]), ...(view.preview === undefined ? [] : [view.preview])]
+  if (!commandCompactionCanCollapse(message, options)) {
+    return ui.card({ key, head: commandCompactionHead(view.title, view.statusWord, view.counts === '' ? [] : [view.counts]), status: view.status }, ...view.body)
+  }
+  const expanded = options.innerDisclosure!.expandedCommandCompactionOwners.has(message)
+  return ui.section(
+    { key, head: commandCompactionHead(view.title, view.statusWord, headDetail), collapsible: true, collapsed: !expanded },
+    ...(expanded ? view.body : []),
   )
 }
 
@@ -1299,9 +1454,9 @@ function messageNode(message: TranscriptMessage, key: string, options: Transcrip
     case 'system':
       return systemNode(message, key, options)
     case 'command':
-      return commandNode(message, key)
+      return commandNode(message, commandCompactionNodeKey(message, key, options), options)
     case 'compaction':
-      return compactionNode(message, key)
+      return compactionNode(message, commandCompactionNodeKey(message, key, options), options)
     case 'workflow':
       return workflowNode(message, key)
     case 'summary':
@@ -1644,6 +1799,11 @@ function disclosureTokenOf(
       ? -1
       : inner.expandedContextRowOwners.has(message) ? 1 : 0
   }
+  if (message.kind === 'command' || message.kind === 'compaction') {
+    return inner === undefined || !commandCompactionCanCollapse(message, options)
+      ? -1
+      : inner.expandedCommandCompactionOwners.has(message) ? 1 : 0
+  }
   if (message.kind !== 'tool') return -1
   const expanded = options.expandedToolKeys
   if (expanded === undefined) return -1
@@ -1719,6 +1879,10 @@ function messageStampOf(
     case 'system':
       parts.push(disclosureTokenOf(message, key, options))
       break
+    case 'command':
+    case 'compaction':
+      parts.push(disclosureTokenOf(message, key, options))
+      break
     default:
       break
   }
@@ -1745,8 +1909,11 @@ function messageDescriptor(
   options: TranscriptViewOptions,
   truncated = false,
 ): TranscriptMainBlockDescriptor {
+  const descriptorKey = message.kind === 'command' || message.kind === 'compaction'
+    ? commandCompactionNodeKey(message, key, options)
+    : key
   return {
-    key,
+    key: descriptorKey,
     stamp: messageStampOf(message, key, options),
     owners: [message],
     materialize: () => messageNode(message, key, options, truncated),

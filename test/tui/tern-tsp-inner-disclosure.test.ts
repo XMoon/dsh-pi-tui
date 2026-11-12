@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { View, type JsonObject, type Tree } from '@stencil-hq/tern'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import type { TranscriptMessage, TranscriptToolMessage } from '../../src/domain/transcript/types.ts'
@@ -112,6 +113,7 @@ function flatten(
     expandedThinkingOwners: options['expandedThinkingOwners'] as ReadonlySet<TranscriptMessage> | undefined ?? new Set<TranscriptMessage>(),
     expandedContextRowOwners: options['expandedContextRowOwners'] as ReadonlySet<TranscriptMessage> | undefined ?? new Set<TranscriptMessage>(),
     expandedClusterOwners: options['expandedClusterOwners'] as ReadonlySet<TranscriptMessage> | undefined ?? new Set<TranscriptMessage>(),
+    expandedCommandCompactionOwners: options['expandedCommandCompactionOwners'] as ReadonlySet<TranscriptMessage> | undefined ?? new Set<TranscriptMessage>(),
   }
   const view = View.from({ main: transcriptViewForPreset(messages, keys, {
     preset, scopePrefix: 's1-', window: WINDOW, expandedToolKeys: new Set<string>(), innerDisclosure, ...options,
@@ -583,6 +585,7 @@ test('collapsed Tool and Context details do not enter the visible image-demand s
     preset: 'full', window: WINDOW, expandedToolKeys: new Set<string>(),
     innerDisclosure: {
       expandedThinkingOwners: new Set(), expandedContextRowOwners: new Set(), expandedClusterOwners: new Set(),
+      expandedCommandCompactionOwners: new Set(),
     },
   }, keys)
   assert.ok(!closed.has(tool), 'a closed Full Tool body does not demand its result image')
@@ -592,6 +595,7 @@ test('collapsed Tool and Context details do not enter the visible image-demand s
     preset: 'full', window: WINDOW, expandedToolKeys: new Set([keys.keyFor(tool)]),
     innerDisclosure: {
       expandedThinkingOwners: new Set(), expandedContextRowOwners: new Set(), expandedClusterOwners: new Set(),
+      expandedCommandCompactionOwners: new Set(),
     },
   }, keys)
   assert.ok(toolOpen.has(tool), 'opening the exact Tool owner grants its body')
@@ -599,6 +603,7 @@ test('collapsed Tool and Context details do not enter the visible image-demand s
     preset: 'full', window: WINDOW, expandedToolKeys: new Set<string>(),
     innerDisclosure: {
       expandedThinkingOwners: new Set(), expandedContextRowOwners: new Set(), expandedClusterOwners: new Set([cluster.owner]),
+      expandedCommandCompactionOwners: new Set(),
     },
   }, keys)
   assert.ok(!clusterOpen.has(snapshots[0]!), 'an open canonical Cluster alone does not claim a member body')
@@ -609,6 +614,7 @@ test('collapsed Tool and Context details do not enter the visible image-demand s
       expandedThinkingOwners: new Set(),
       expandedContextRowOwners: new Set([snapshots[0]!]),
       expandedClusterOwners: new Set([cluster.owner]),
+      expandedCommandCompactionOwners: new Set(),
     },
   }, keys)
   assert.ok(memberOpen.has(snapshots[0]!), 'opening the exact member owner grants its body')
@@ -667,6 +673,7 @@ test('inner disclosure preserves per-owner visibility through canonical presets 
     expandedThinkingOwners: new Set<TranscriptMessage>(),
     expandedContextRowOwners: new Set<TranscriptMessage>(),
     expandedClusterOwners: new Set<TranscriptMessage>(),
+    expandedCommandCompactionOwners: new Set<TranscriptMessage>(),
   }
   const rootClosed = visibleTranscriptMembers(messages, {
     preset: 'focus', ...base, expandedToolKeys: new Set<string>(), innerDisclosure,
@@ -689,4 +696,237 @@ test('inner disclosure preserves per-owner visibility through canonical presets 
   }, keys)
   assert.ok(toolOpen.has(tool), 'the exact Tool owner is the final image-demand gate')
   assert.ok(toolOpen.has(thinkingRow), 'the requested Thinking row is the same canonical message owner')
+})
+
+function commandRun(seq: number, id: string, name: string, args?: string): SessionEvent {
+  return ev('command/run', {
+    commandId: CommandId(id),
+    name,
+    ...(args === undefined ? {} : { args }),
+    source: { kind: 'user' },
+  }, seq)
+}
+
+function commandDone(seq: number, id: string, kind: 'success' | 'error', text?: string): SessionEvent {
+  return ev('command/done', {
+    commandId: CommandId(id),
+    kind,
+    ...(text === undefined ? {} : { text }),
+  }, seq)
+}
+
+function commandRowsOf(messages: readonly TranscriptMessage[]): TranscriptCommandRow[] {
+  return messages.filter((row): row is TranscriptCommandRow => row.kind === 'command')
+}
+
+function compactionRowsOf(messages: readonly TranscriptMessage[]): TranscriptCompactionRow[] {
+  return messages.filter((row): row is TranscriptCompactionRow => row.kind === 'compaction')
+}
+
+type TranscriptCommandRow = Extract<TranscriptMessage, { kind: 'command' }>
+type TranscriptCompactionRow = Extract<TranscriptMessage, { kind: 'compaction' }>
+
+test('Command rows become native Sections only when they carry real detail', () => {
+  const longLine = `LONG-COMMAND-RESULT-${'x'.repeat(400)}`
+  const events: SessionEvent[] = [
+    commandRun(0, 'cmd-running', 'status', ' --short'),
+    commandRun(1, 'cmd-ok', 'status', ' --short'),
+    commandDone(2, 'cmd-ok', 'success', 'session healthy\nsecond line'),
+    commandDone(3, 'cmd-fragment', 'success', 'fragment outcome'),
+    commandDone(4, 'cmd-empty-error', 'error', ''),
+    commandRun(5, 'cmd-long', 'report', ''),
+    commandDone(6, 'cmd-long', 'success', longLine),
+    commandRun(7, 'cmd-error', 'deploy', 'prod'),
+    commandDone(8, 'cmd-error', 'error', 'permission denied'),
+  ]
+  const messages = folder(events).messages()
+  const rows = commandRowsOf(messages)
+  const keys = new TranscriptNodeKeys()
+  const closed = flatten(messages, 'full', keys)
+  const nodeOf = (row: TranscriptCommandRow, nodes = closed): Tree | undefined =>
+    nodes.find(node => node.props['key'] === `s1-${keys.keyFor(row)}`)
+  const staticNodeOf = (row: TranscriptCommandRow, nodes = closed): Tree | undefined =>
+    nodes.find(node => node.props['key'] === `s1-${keys.keyFor(row)}-static`)
+
+  const ok = rows.find(row => row.commandId === CommandId('cmd-ok'))!
+  const okNode = nodeOf(ok)
+  assert.equal(okNode?.kind, 'section', 'a settled Command with a result is a native Section')
+  assert.equal(okNode?.props['collapsible'], true)
+  assert.equal(okNode?.props['collapsed'], true, 'real Command detail starts collapsed')
+  const okText = nodeText(okNode!)
+  assert.ok(okText.includes('/status --short'), `the raw args keep their one authored separator: ${okText}`)
+  assert.ok(okText.includes('OK'), 'the status word is textual, never color-only')
+  assert.ok(okText.includes('session healthy'), 'the bounded preview shows the first result line')
+  assert.ok(!okText.includes('second line'), 'the hidden body is not materialized')
+  assert.ok(!okText.includes(' --short  --short'), 'the args separator is never doubled')
+  assert.equal(closed.some(node => node.id === `${okNode!.id}.body`), false)
+
+  const opened = flatten(messages, 'full', keys, { expandedCommandCompactionOwners: new Set([ok]) })
+  const openedNode = opened.find(node => node.id === okNode!.id)
+  assert.equal(openedNode?.props['collapsed'], false)
+  assert.ok(opened.some(node => node.id === `${okNode!.id}.body` && node.props['text'] === 'session healthy\nsecond line'),
+    'the opened body is the complete source result, not the preview')
+
+  const running = rows.find(row => row.commandId === CommandId('cmd-running'))!
+  const runningNode = staticNodeOf(running)
+  assert.equal(runningNode?.kind, 'card', 'a detail-less running Command is a static card')
+  assert.equal(runningNode?.props['collapsible'], undefined, 'a static card has no dead chevron')
+  const runningText = nodeText(runningNode!)
+  assert.ok(runningText.includes('/status --short'))
+  assert.ok(runningText.includes('Running'))
+
+  const fragment = rows.find(row => row.commandId === CommandId('cmd-fragment'))!
+  const fragmentNode = nodeOf(fragment)
+  assert.equal(fragmentNode?.kind, 'section')
+  const fragmentText = nodeText(fragmentNode!)
+  const fragmentTitle = fragmentNode!.children
+    .find(child => child.props['key'] === 'head')?.children
+    .find(child => child.props['key'] === 'title-row')?.children
+    .find(child => child.props['key'] === 'title')
+  assert.equal(fragmentTitle?.props['text'], 'Command', 'a done-only fragment invents no command name')
+  assert.ok(!fragmentText.includes('/undefined') && !fragmentText.includes('/null'))
+  assert.ok(fragmentText.includes('OK'))
+
+  const emptyError = rows.find(row => row.commandId === CommandId('cmd-empty-error'))!
+  const emptyErrorNode = staticNodeOf(emptyError)
+  assert.equal(emptyErrorNode?.kind, 'card', 'an empty error result is a static failure card')
+  assert.equal(emptyErrorNode?.props['status'], 'error')
+  assert.equal(emptyErrorNode?.props['collapsible'], undefined)
+  assert.ok(nodeText(emptyErrorNode!).includes('Error'), 'the empty error still shows its failed status word')
+  assert.equal(closed.some(node => node.id === `${emptyErrorNode!.id}.body`), false, 'no invented failure detail')
+
+  const error = rows.find(row => row.commandId === CommandId('cmd-error'))!
+  const errorNode = nodeOf(error)
+  assert.equal(errorNode?.props['collapsed'], true)
+  assert.ok(nodeText(errorNode!).includes('Error'))
+  const errorOpened = flatten(messages, 'full', keys, { expandedCommandCompactionOwners: new Set([error]) })
+  assert.ok(errorOpened.some(node => node.id === `${errorNode!.id}.body` && node.props['text'] === 'permission denied'),
+    'the failed command exposes its complete result on demand')
+
+  const long = rows.find(row => row.commandId === CommandId('cmd-long'))!
+  const longNode = nodeOf(long)
+  const preview = longNode!.children.filter(child => child.props['key'] === 'head')[0]?.children
+    .filter(child => String(child.props['key'] ?? '').startsWith('detail'))
+    .map(child => String(child.props['text'] ?? ''))
+    .join('')
+  assert.ok(preview !== undefined && Array.from(preview).length <= 180, `the Command preview is width-bounded: ${preview?.length}`)
+  assert.ok(preview!.endsWith('…'), 'a truncated preview is explicit')
+  assert.equal(closed.some(node => node.id === `${longNode!.id}.body`), false, 'the long body stays unmaterialized while closed')
+
+  const legacy = View.from({ main: transcriptView(projectTranscriptStructure(messages), new TranscriptNodeKeys()) })
+  const legacySections = legacy.regions[0]?.children.filter(node => node.kind === 'section') ?? []
+  assert.ok(legacySections.every(node => node.props['collapsible'] !== true),
+    'a legacy ownerless map keeps the historical fully-readable card, never a dead head')
+  assert.ok(legacy.regions[0]!.children.some(node => node.kind === 'card' && nodeText(node).includes('permission denied')))
+})
+
+test('Compaction cards follow the official lifecycle, counts and manual-compaction ownership', () => {
+  const events: SessionEvent[] = [
+    ev('compaction/start', { compactionId: 'cpt-run', turn: null }, 0),
+    ev('compaction/start', { compactionId: 'cpt-ok', turn: null }, 1),
+    ev('compaction/summary', {
+      compactionId: 'cpt-ok', summary: [{ type: 'text', text: 'summarized body\nsecond summary line' }],
+      shadowedSeqs: [1, 2, 3], shadowedTokenCount: 42,
+    }, 2),
+    ev('compaction/end', { compactionId: 'cpt-ok' }, 3),
+    ev('compaction/start', { compactionId: 'cpt-error', turn: null }, 4),
+    ev('compaction/end', { compactionId: 'cpt-error', error: 'summarizer failed' }, 5),
+    commandRun(6, 'cmd-manual', 'compact', ''),
+    ev('compaction/start', { compactionId: 'cpt-manual', sourceCommandId: CommandId('cmd-manual'), turn: null }, 7),
+    ev('compaction/summary', {
+      compactionId: 'cpt-manual', sourceCommandId: CommandId('cmd-manual'),
+      summary: [{ type: 'text', text: 'manual summary body' }], shadowedSeqs: [4], shadowedTokenCount: 9,
+    }, 8),
+    ev('compaction/end', { compactionId: 'cpt-manual' }, 9),
+    commandDone(10, 'cmd-manual', 'success', 'manual command result'),
+  ]
+  const messages = folder(events).messages()
+  assert.equal(commandRowsOf(messages).length, 0, 'a fused manual Command is never a second visible row')
+  const compactions = compactionRowsOf(messages)
+  assert.equal(compactions.length, 4)
+  const keys = new TranscriptNodeKeys()
+  const closed = flatten(messages, 'full', keys)
+  const nodeOf = (row: TranscriptCompactionRow, nodes = closed): Tree | undefined =>
+    nodes.find(node => node.props['key'] === `s1-${keys.keyFor(row)}`)
+  const staticNodeOf = (row: TranscriptCompactionRow, nodes = closed): Tree | undefined =>
+    nodes.find(node => node.props['key'] === `s1-${keys.keyFor(row)}-static`)
+
+  const running = compactions.find(row => row.items === 0 && row.tokens === 0 && row.error === undefined)!
+  const runningNode = staticNodeOf(running)
+  assert.equal(runningNode?.kind, 'card', 'a running count-less Compaction is a static card')
+  assert.equal(runningNode?.props['collapsible'], undefined)
+  assert.ok(nodeText(runningNode!).includes('Compacting context'))
+
+  const ok = compactions.find(row => row.items === 3)!
+  const okNode = nodeOf(ok)
+  assert.equal(okNode?.kind, 'section')
+  assert.equal(okNode?.props['collapsed'], true)
+  const okText = nodeText(okNode!)
+  assert.ok(okText.includes('Context compacted'))
+  assert.ok(okText.includes('Compacted 3 history items (~42 tokens)'))
+  assert.ok(!okText.includes('summarized body'), 'the summary is detail, not the collapsed preview')
+  const okOpened = flatten(messages, 'full', keys, { expandedCommandCompactionOwners: new Set([ok]) })
+  assert.ok(okOpened.some(node => node.id === `${okNode!.id}.body` && node.props['text'] === 'summarized body\nsecond summary line'))
+
+  const failed = compactions.find(row => row.error === 'summarizer failed')!
+  const failedNode = nodeOf(failed)
+  assert.equal(failedNode?.kind, 'section')
+  assert.ok(nodeText(failedNode!).includes('Compaction failed'))
+  assert.ok(nodeText(failedNode!).includes('Error'))
+  assert.ok(nodeText(failedNode!).includes('summarizer failed'), 'the failed reason stays readable while collapsed')
+  const failedOpened = flatten(messages, 'full', keys, { expandedCommandCompactionOwners: new Set([failed]) })
+  assert.ok(failedOpened.some(node => node.id === `${failedNode!.id}.error` && node.props['text'] === 'summarizer failed'))
+
+  const manual = compactions.find(row => row.sourceCommand !== undefined)!
+  assert.equal(manual.sourceCommand?.name, 'compact')
+  const manualNode = nodeOf(manual)
+  assert.equal(manualNode?.kind, 'section')
+  const manualText = nodeText(manualNode!)
+  assert.ok(manualText.includes('Context compacted /compact'), `the fused owner names the command: ${manualText}`)
+  assert.ok(manualText.includes('Compacted 1 history item (~9 tokens)'))
+  assert.ok(manualText.includes('manual command result'), 'the settled command result feeds the collapsed preview')
+  const manualOpened = flatten(messages, 'full', keys, { expandedCommandCompactionOwners: new Set([manual]) })
+  assert.ok(manualOpened.some(node => node.id === `${manualNode!.id}.body` && node.props['text'] === 'manual summary body'))
+  assert.ok(manualOpened.some(node => node.id === `${manualNode!.id}.outcome` && node.props['text'] === 'manual command result'),
+    'the linked command outcome is shown once beside the summary')
+
+  // Negative control: a `/compact` command and a compaction WITHOUT the
+  // official source-command relationship are two independent rows; nothing is
+  // fused by name or by neighbouring position.
+  const unrelated = folder([
+    commandRun(0, 'cmd-unrelated', 'compact'),
+    commandDone(1, 'cmd-unrelated', 'success', 'normal command'),
+    ev('compaction/start', { compactionId: 'cpt-unrelated', turn: null }, 2),
+    ev('compaction/summary', { compactionId: 'cpt-unrelated', summary: [{ type: 'text', text: 'unrelated summary' }], shadowedSeqs: [1], shadowedTokenCount: 3 }, 3),
+    ev('compaction/end', { compactionId: 'cpt-unrelated' }, 4),
+  ]).messages()
+  assert.equal(commandRowsOf(unrelated).length, 1, 'an unproven /compact command keeps its own row')
+  const unrelatedRows = compactionRowsOf(unrelated)
+  assert.equal(unrelatedRows.length, 1)
+  assert.equal(unrelatedRows[0]!.sourceCommand, undefined)
+})
+
+test('a manual compaction failure recognizes the command error kind even with empty text', () => {
+  const messages = folder([
+    commandRun(0, 'cmd-failed-manual', 'compact'),
+    ev('compaction/start', { compactionId: 'cpt-failed', sourceCommandId: CommandId('cmd-failed-manual'), turn: null }, 1),
+    ev('compaction/summary', {
+      compactionId: 'cpt-failed', sourceCommandId: CommandId('cmd-failed-manual'),
+      summary: [{ type: 'text', text: 'summary body survived the failure' }], shadowedSeqs: [2], shadowedTokenCount: 5,
+    }, 2),
+    ev('compaction/end', { compactionId: 'cpt-failed' }, 3),
+    commandDone(4, 'cmd-failed-manual', 'error', ''),
+  ]).messages()
+  const row = compactionRowsOf(messages)[0]!
+  assert.equal(row.sourceCommand?.outcome?.kind, 'error')
+  const keys = new TranscriptNodeKeys()
+  const closed = flatten(messages, 'full', keys)
+  const node = closed.find(entry => entry.props['key'] === `s1-${keys.keyFor(row)}`)
+  assert.equal(node?.kind, 'section')
+  const text = nodeText(node!)
+  assert.ok(text.includes('Compaction failed /compact'), `error kind wins without error text: ${text}`)
+  assert.ok(text.includes('Error'))
+  assert.ok(!text.includes('Context compacted'))
+  const opened = flatten(messages, 'full', keys, { expandedCommandCompactionOwners: new Set([row]) })
+  assert.ok(opened.some(entry => entry.id === `${node!.id}.body` && entry.props['text'] === 'summary body survived the failure'))
 })
