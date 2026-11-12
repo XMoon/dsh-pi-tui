@@ -26,6 +26,8 @@ import type { TaskSurfaceSource } from '../../src/app/surface/task-runtime.ts'
 import type { TaskBrowserJobInput } from '../../src/domain/task/browser.ts'
 import type { TaskSubagentEntry } from '../../src/runtime/task-read-port.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
+import { registerTasksCommand } from '../../src/tui/commands/tasks.ts'
+import { emptyStatusSnapshot, type StatusSnapshot } from '../../src/domain/status/types.ts'
 import type { QuestionAttentionRow } from '../../src/app/surface/question-controller.ts'
 import { questionTaskRowValue } from '../../src/app/surface/task-attention.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
@@ -40,6 +42,9 @@ import {
 
 const HUB = 'work-hub-'
 
+/** Mouse PR4: the first-party Tasks segment's protocol action string. */
+const TASKS_ACTION = 'dsh.footer.tasks.open'
+
 interface Composition {
   readonly pane: TspPane
   renderer: TspRenderer
@@ -50,6 +55,18 @@ interface Composition {
   setJobs(jobs: readonly TaskBrowserJobInput[]): void
   /** Replace the controller's detached Question attention rows. */
   setAttention(rows: readonly QuestionAttentionRow[]): void
+  /** Mouse PR4: how many times the REAL registered `/tasks` handler ran. */
+  readonly entryCalls: readonly number[]
+  /** Mouse PR4: the registered handler's OWN Session admissions. */
+  readonly openAdmissions: readonly number[]
+  /** Mouse PR4: the handler registered on the `/tasks` name, captured by the
+   *  test's registration seam (identity evidence, not a second entry). */
+  readonly registeredHandler: (() => Promise<unknown>) | undefined
+  /** Mouse PR4: commit one status snapshot through the renderer's OWN display
+   *  completion point (the same one the surface runtime calls). */
+  commitStatus(snapshot: StatusSnapshot): void
+  /** Mouse PR4: the visible Tasks badge carrying the click action, if any. */
+  tasksActionId(): string | undefined
   readerId(): string | undefined
   /** The `scroll` targets one surface received, in order. */
   scrollOps(sf: string): string[]
@@ -95,7 +112,11 @@ async function compose(
   t: { after(fn: () => unknown): void },
   descendants: readonly TaskSubagentEntry[],
   attentionRows: readonly QuestionAttentionRow[] = [],
-  options: { readonly pane?: Parameters<typeof installTspPane>[0] } = {},
+  options: {
+    readonly pane?: Parameters<typeof installTspPane>[0]
+    /** Mouse PR4: leave the Hub closed so a case can open it by a real click. */
+    readonly openHub?: boolean
+  } = {},
 ): Promise<Composition> {
   const pane = installTspPane(options.pane ?? { sessionBrowser: true, workDetails: true })
   const session = await connect({ timeout: 500, exitHooks: false })
@@ -105,6 +126,10 @@ async function compose(
 
   const selects: string[] = []
   const stops: string[] = []
+  const entryCalls: number[] = []
+  const openAdmissions: number[] = []
+  let registeredHandlerSlot: (() => Promise<unknown>) | undefined
+  let statusSnapshot: StatusSnapshot = emptyStatusSnapshot()
   const fatals: unknown[] = []
   const jobRoster: { jobs: readonly TaskBrowserJobInput[] } = { jobs: JOBS }
   const attention: { rows: readonly QuestionAttentionRow[] } = { rows: attentionRows }
@@ -115,6 +140,18 @@ async function compose(
     tasks: undefined as unknown as ReturnType<typeof createTaskRuntime>,
     selects,
     stops,
+    entryCalls,
+    openAdmissions,
+    get registeredHandler() { return registeredHandlerSlot },
+    commitStatus(snapshot) {
+      statusSnapshot = snapshot
+      composition.renderer.display.commitDisplaySubject({} as never, {}, undefined)
+    },
+    tasksActionId: () => {
+      const node = surfaceNodes(pane, 's1').find(candidate => candidate.k === 'seg'
+        && (candidate.p['actions'] as { readonly click?: unknown } | undefined)?.click === TASKS_ACTION)
+      return node?.id
+    },
     setJobs(jobs) {
       jobRoster.jobs = jobs
     },
@@ -141,6 +178,22 @@ async function compose(
     composition.tasks.resetTasks()
     void composition.renderer.dispose().catch(() => {})
   })
+  // Mouse PR4: the status reader is bound FIRST so the display completion
+  // point has a snapshot to sample; nothing paints until a case commits one.
+  renderer.bindStatusReader({ snapshot: () => statusSnapshot })
+  // Mouse PR4: the REAL registered `/tasks` handler — the SAME body the typed
+  // line and the `/subagents` alias run. Its business opener is the REAL
+  // Task Runtime below, so a click reaches the production Hub.
+  const registeredTasks = registerTasksCommand({
+    runner: {
+      requireLiveSessionScope: async () => {
+        openAdmissions.push(1)
+        return {} as never
+      },
+      openTasksBrowser: () => { composition.tasks.openTasksBrowser('full') },
+    },
+    registerTuiCommand: spec => { registeredHandlerSlot = spec.handler as () => Promise<unknown> },
+  })
   renderer.bindInput({
     exit() {},
     cancel() {},
@@ -153,6 +206,11 @@ async function compose(
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
     openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
+    openTasksBrowserUi: () => {
+      entryCalls.push(1)
+      void registeredTasks().catch(error => { fatals.push(error) })
+    },
+    tasksBrowserUiAvailable: () => true,
   })
   composition.renderer = renderer
 
@@ -196,8 +254,11 @@ async function compose(
   })
   composition.tasks = tasks
   tasks.attachTasks(source, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
-  tasks.openTasksBrowser('full')
-  if (renderer.display.supportsTaskCenter) {
+  if (options.openHub !== false) tasks.openTasksBrowser('full')
+  if (options.openHub === false) {
+    // Mouse PR4: the Hub stays closed so the case can open it through the REAL
+    // status-segment click; the entry itself is still the production one.
+  } else if (renderer.display.supportsTaskCenter) {
     await waitUntil('the real Task Runtime rows reach the Work Hub', () => pickerNode(pane, HUB) !== undefined)
   } else {
     // Only the REFUSAL branch needs a wait, and the thing to wait for is the
@@ -429,4 +490,71 @@ test('a real background Job update repaints the open Reader without a new readin
   assert.equal(composition.pane.openSurfaces().filter(entry => entry.mode === 'screen').length, openedScreens,
     'no second Screen was acquired for the update')
   assert.deepEqual(composition.stops, [], 'a failed Job is never stopped by rendering it')
+})
+
+// ── Mouse PR4: the Tasks status segment reaches the SAME business entry ──────
+
+/** The status snapshot whose real Task facts paint the attention badge. */
+function runningTasksSnapshot(): StatusSnapshot {
+  const base = emptyStatusSnapshot()
+  return {
+    ...base,
+    activity: {
+      ...base.activity,
+      taskCount: 2,
+      taskTotalCount: 3,
+      childAgentCount: 0,
+      childAgentTotalCount: 0,
+    },
+  } as unknown as StatusSnapshot
+}
+
+/** Fire one real wire action event at the base surface. */
+function sendAction(composition: Composition, id: string, act: string = TASKS_ACTION): void {
+  composition.pane.event({ ev: 'action', sf: 's1', id, act })
+}
+
+test('Mouse PR4 L6: a click on the visible Tasks badge runs the registered /tasks handler and opens the real Work Hub', async (t) => {
+  const composition = await compose(t, DESCENDANTS, [], {
+    pane: { sessionBrowser: true, workDetails: true },
+    openHub: false,
+  })
+  composition.commitStatus(runningTasksSnapshot())
+  await waitUntil('the badge paints its click action', () => composition.tasksActionId() !== undefined)
+  const badge = composition.tasksActionId()!
+  assert.equal(composition.registeredHandler?.name, 'openTasks',
+    'the captured registration handler IS the `/tasks` body (one function, no wrapper)')
+
+  sendAction(composition, badge)
+  await waitForHub(composition, 'the real click opened the Hub', 'job:job-1')
+  assert.equal(composition.entryCalls.length, 1, 'the UI entry ran exactly once')
+  assert.equal(composition.openAdmissions.length, 1, 'the registered handler ran its Session admission exactly once')
+  assert.deepEqual(hubItemIds(composition).filter(id => id.startsWith('job:')), ['job:job-1', 'job:job-2'],
+    'the Hub shows the SAME Task Runtime roster — no second source')
+
+  // While the Hub owns the seat the background badge must stay inert: a second
+  // action on the committed id is dropped, never a nested browser open.
+  sendAction(composition, badge)
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(composition.entryCalls.length, 1, 'an occupied presenter seat refuses the background click')
+})
+
+test('Mouse PR4 L6: the open Reader keeps the background Tasks badge inert', async (t) => {
+  const composition = await compose(t, DESCENDANTS, [], {
+    pane: { sessionBrowser: true, workDetails: true },
+    openHub: false,
+  })
+  composition.commitStatus(runningTasksSnapshot())
+  await waitUntil('the badge paints its click action', () => composition.tasksActionId() !== undefined)
+  const badge = composition.tasksActionId()!
+  sendAction(composition, badge)
+  await waitForHub(composition, 'the Hub after the real click', 'job:job-1')
+  await selectRow(composition, 'job:job-1')
+  await enterReader(composition)
+
+  sendAction(composition, badge)
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(composition.entryCalls.length, 1, 'the Reader seat refuses the background status action')
+  assert.equal(composition.pane.openSurfaces().filter(entry => entry.mode === 'screen').length, 1,
+    'no second Screen was acquired')
 })

@@ -225,7 +225,7 @@ async function mountHistoryPane(
     openModelQuick: () => {},
     modelPickerAvailable: () => false,
     openSessionBrowser: () => {},
-    sessionBrowserAvailable: () => false,
+    sessionBrowserAvailable: () => false, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => false,
   })
   renderer.bindStatusReader({ snapshot: () => emptyStatusSnapshot() })
   renderer.display.commitDisplaySubject({}, {}, undefined)
@@ -729,7 +729,7 @@ test('a Copy outcome whose captured scope went stale never announces itself onto
     exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {},
     admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {},
     listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker: () => {},
-    openModelQuick: () => {}, openSessionBrowser: () => {}, sessionBrowserAvailable: () => false,
+    openModelQuick: () => {}, openSessionBrowser: () => {}, sessionBrowserAvailable: () => false, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => false,
   })
   renderer.bindStatusReader({ snapshot: () => emptyStatusSnapshot() })
   renderer.display.commitDisplaySubject({}, {}, undefined)
@@ -876,7 +876,7 @@ test('a failed read states the failure with one Retry and is never dressed up as
     exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {},
     admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {},
     listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker: () => {},
-    openModelQuick: () => {}, openSessionBrowser: () => {}, sessionBrowserAvailable: () => false,
+    openModelQuick: () => {}, openSessionBrowser: () => {}, sessionBrowserAvailable: () => false, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => false,
   })
   renderer.bindStatusReader({ snapshot: () => emptyStatusSnapshot() })
   renderer.display.commitDisplaySubject({}, {}, undefined)
@@ -1139,7 +1139,7 @@ test('a copy that settles while a Modal parks the card still states its outcome'
     exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {},
     admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {},
     listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker: () => {},
-    openModelQuick: () => {}, openSessionBrowser: () => {}, sessionBrowserAvailable: () => false,
+    openModelQuick: () => {}, openSessionBrowser: () => {}, sessionBrowserAvailable: () => false, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => false,
   })
   renderer.bindStatusReader({ snapshot: () => emptyStatusSnapshot() })
   renderer.display.commitDisplaySubject({}, {}, undefined)
@@ -1384,7 +1384,7 @@ test('the mount wires the seat\u2019s fatal port to its own fatal owner (end-to-
     exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {},
     admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {},
     listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker: () => {},
-    openModelQuick: () => {}, openSessionBrowser: () => {}, sessionBrowserAvailable: () => false,
+    openModelQuick: () => {}, openSessionBrowser: () => {}, sessionBrowserAvailable: () => false, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => false,
   })
   renderer.bindStatusReader({ snapshot: () => emptyStatusSnapshot() })
   renderer.display.commitDisplaySubject({}, {}, undefined)

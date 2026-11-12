@@ -1112,6 +1112,17 @@ export function registerTuiCommands(
      *  guarded Resume after the roster lands; word queries never auto-resume. */
     readonly directMatch?: boolean
   }): Promise<CommandResult>
+  /**
+   * Mouse PR4: the command-only UI entry into the SAME registered `/tasks`
+   * (`/subagents`) handler the typed line runs — the TSP native Tasks status
+   * segment calls this and never a fabricated `/tasks` submission. Undefined
+   * when THAT registration degraded (a genuine Host-owned `/tasks` or
+   * `/subagents` name): the surface entry then refuses through its own notice
+   * path instead of bypassing the Host route, exactly as `/model` above. The
+   * handler keeps every admission (`requireLiveSessionScope`) and the ONE
+   * `TaskRuntime` opener; this entry adds no state of its own.
+   */
+  openTasksBrowserUi?(): Promise<CommandResult>
 } {
   const { ctx, app } = runner
   // PR3-A: `app` is undefined while a non-PiTui renderer owns the terminal
@@ -2454,8 +2465,10 @@ export function registerTuiCommands(
 
   sessionCommands.registerNew()
 
-  registerTasksCommand({ runner, registerTuiCommand })
-
+  // Mouse PR4: the registration RETURNS its own handler, so the TSP Tasks
+  // status segment's UI entry below is the SAME function body the typed line
+  // and the `/subagents` alias run — one Session admission, one Task Runtime.
+  const openTasksBrowserUi = registerTasksCommand({ runner, registerTuiCommand })
   // `/queue` (PR-Q): the ONE per-occurrence pending-input manager. It sits
   // beside the other sessionless panel entries and is NOT a second queue
   // surface: the panel reads the existing pending-input projection and writes
@@ -2654,6 +2667,14 @@ export function registerTuiCommands(
       : {
           openSessionBrowser: (scope): Promise<CommandResult> => sessionCommands.openSessions(scope),
         }),
+    // Mouse PR4: the TSP native Tasks status segment's ONLY business entry —
+    // the `/tasks` registration's own handler. The identical degradation rule
+    // as `/model` and `/sessions`: a genuine Host-owned `/tasks` (or its
+    // `/subagents` alias) leaves this entry undefined, so the renderer paints
+    // an inert badge instead of routing around the Host command.
+    ...(registrationFailures.some(failure => failure.startsWith('/tasks:') || failure.startsWith('/subagents:'))
+      ? {}
+      : { openTasksBrowserUi }),
     takeCommandDraftDisposition: (commandId?: string): CommandDraftDisposition | undefined => {
       if (commandId !== undefined) {
         const disposition = commandDraftDispositions.get(commandId)

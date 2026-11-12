@@ -68,7 +68,7 @@ test('REAL_DIRECT_HEADLESS: persisted main Session → DirectSessionReader → p
       noteUserInput() {},
       listContinuedQuestions: () => [],
       reopenContinuedQuestion: () => false,
-      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
+      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
     })
     const browserPresentation = renderer.sessionBrowserPresentation
     assert.ok(browserPresentation)
@@ -186,7 +186,7 @@ test('REAL_DIRECT_HEADLESS: legacy persisted Fork headers stay flat roots across
       noteUserInput() {},
       listContinuedQuestions: () => [],
       reopenContinuedQuestion: () => false,
-      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
+      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
     })
     const browserPresentation = renderer.sessionBrowserPresentation
     assert.ok(browserPresentation)

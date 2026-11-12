@@ -78,7 +78,7 @@ async function mountPermissionComposer(options: {
     openModelPicker: entry => { calls.modelEntries.push(entry) },
     openModelQuick: () => { calls.quickEntries.push('quick') },
     openSessionBrowser: () => {},
-    sessionBrowserAvailable: () => true,
+    sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
     permissionOptions: () => { calls.permissionOptions.push('read'); return roster },
     selectPermission: id => { calls.selects.push(id) },
   })

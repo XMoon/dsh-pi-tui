@@ -721,6 +721,12 @@ Rules that follow from the read-only projection:
   their placement instead of being silently dropped or guessed.
 - `/footer` and `/statusline` remain PiTui-only configurators; they are not
   reachable inside a TSP session.
+- The first-party `tasks` status segment is the ONE exception to the read-only
+  statusline: when its fact is present and the Work Hub is reachable, clicking
+  that visible segment opens the SAME read-only Work Hub as `/tasks`. Every
+  other builtin, Custom and extension segment stays status-only (the native
+  Model control belongs to the Composer). See
+  [TSP Work Hub](../tsp/work-hub.md).
 - Very short panes (roughly under six rows) remain a known limitation for the
   whole dock; this is not a footer-config loss.
 

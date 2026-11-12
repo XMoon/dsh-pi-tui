@@ -159,7 +159,7 @@ async function mountRecallPane(
     openModelPicker: () => {},
     openModelQuick: () => {},
     openSessionBrowser: () => {},
-    sessionBrowserAvailable: () => true,
+    sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
     ...(options.chrome === true
       ? {
         permissionOptions: () => ['read-only', 'workspace-write', 'danger-full-access'],

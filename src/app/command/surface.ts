@@ -515,6 +515,23 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
    *  presentable on this mount) — the business-entry fact the Welcome button
    *  paints, never the presence of a painted button. */
   sessionBrowserAvailable(): boolean
+  /**
+   * Mouse PR4: open the SAME registered `/tasks` (`/subagents`) browser the
+   * typed command runs, from the TSP native Tasks status segment. It is
+   * admitted only while the `/tasks` registration actually succeeded
+   * (`commandsRegistered` with a live `tasksBrowserOpener`) AND this mount's
+   * live `supportsTaskCenter` capability holds; a refusal states itself once
+   * through the existing notice path and runs no handler. It opens no Screen
+   * of its own and reads no Task/Job/Question fact: every admission
+   * (`requireLiveSessionScope`), scope read and Task Runtime call stays with
+   * the registered `/tasks` command.
+   */
+  openTasksBrowserUi(): void
+  /** Whether that `/tasks` UI entry is really usable right now — the
+   *  registration fact AND the live structural capability. The TSP status
+   *  segment paints its action from this, so a badge no entry could open is
+   *  never claimed to be clickable. */
+  tasksBrowserUiAvailable(): boolean
   /** Request one catalog refresh through the coordinator. */
   requestCatalogRefresh(request: CatalogRefreshRequest): Promise<CatalogRefreshOutcome>
   /** Whether the catalog coordinator is registered yet. */
@@ -667,6 +684,16 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       readonly initialDirectoryPath?: string
       readonly initialQuery?: string
     }) => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
+
+  /**
+   * Mouse PR4: the installed `/tasks` UI entry — the `openTasksBrowserUi`
+   * member `registerTuiCommands` returns, captured only when the `/tasks`
+   * (and its `/subagents` alias) registration itself succeeded. `undefined`
+   * means "not registered / Host-owned": the TSP status segment then paints
+   * an inert badge and the public entry refuses through the existing notice
+   * path instead of opening a browser of its own.
+   */
+  let tasksBrowserOpener: (() => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
 
   /** Consume TUI-local command draft dispositions after DSH normalizes the
    * public CommandResult. A missing id is used only for a thrown command
@@ -1017,6 +1044,48 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     && sessionBrowserOpener !== undefined
     && (deps.sessionBrowserPresentation?.() !== undefined || deps.app() !== undefined)
 
+  /**
+   * The mounted renderer's ONE Task Center reachability truth, read LIVE
+   * through the SAME seam the typed `/tasks` admission already consumes
+   * (`tsp-capability`). It is the structural negotiated capability only; the
+   * transient seat/hydration admission stays with the renderer's own
+   * predicate.
+   */
+  const taskCenterCapable = (): boolean => deps.surface.tspCommandPickerCapabilities().taskCenter === true
+
+  /**
+   * Mouse PR4: the ONE `/tasks` UI entry — the registered handler's own body,
+   * admitted only while its registration is live AND this mount's live
+   * `supportsTaskCenter` holds. The structural capability is read at CALL
+   * time (the renderer negotiates it and TSP panes differ), never cached at
+   * registration: a pane that could not present the Work Hub must not run the
+   * handler, and a pane that lost it must refuse too. A refusal states itself
+   * once through the existing notice path; it never constructs a roster read,
+   * a Session admission or a Task Browser request of its own.
+   */
+  const openTasksBrowserUi = (): void => {
+    if (!commandsRegistered || tasksBrowserOpener === undefined) {
+      deps.notify('the task browser is unavailable in this session (the /tasks command is not registered)', 'error')
+      return
+    }
+    if (!taskCenterCapable()) {
+      deps.notify("This command's UI is not available in TSP yet", 'error')
+      return
+    }
+    const opened = tasksBrowserOpener()
+    void opened.then((result) => { // allowlist: result observer — the command owns the task
+      if (result.kind === 'error' && typeof result.text === 'string' && result.text !== '') {
+        deps.notify(result.text, 'error')
+      }
+    }, (error: unknown) => { // allowlist: diagnostics observer, the command owns the task
+      deps.logError(`tui-runner: tasks browser UI entry failed: ${safeErrorMessage(error)}`)
+    })
+  }
+
+  const tasksBrowserUiAvailable = (): boolean => commandsRegistered
+    && tasksBrowserOpener !== undefined
+    && taskCenterCapable()
+
   const registerCommands = (initial?: InitialCommandCatalog): void => {
     if (commandsRegistered) return
     commandsRegistered = true
@@ -1097,6 +1166,10 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // fact — `registerTuiCommands` supplies it only when the `/sessions`
       // registration really installed one.
       sessionBrowserOpener = installed.openSessionBrowser
+      // Mouse PR4: the `/tasks` UI entry rides its own registration fact. An
+      // absent member means THAT registration degraded (a genuine Host-owned
+      // `/tasks`/`/subagents`), so the status segment's action is refused.
+      tasksBrowserOpener = installed.openTasksBrowserUi
       takeCommandDraftDisposition = installed.takeCommandDraftDisposition
       // The coordinator's surface hooks point INTO the command surface;
       // the command runtime's refresh facades (and the switch/first-session
@@ -1662,6 +1735,10 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     openSessionBrowser,
     openStartupSessionBrowser,
     sessionBrowserAvailable,
+    // Mouse PR4: the `/tasks` UI entry and its real availability (the
+    // registration fact AND the live mounted Task Center capability).
+    openTasksBrowserUi,
+    tasksBrowserUiAvailable,
     requestCatalogRefresh,
     catalogRefreshAvailable,
     isSkillInvocation,

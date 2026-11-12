@@ -139,6 +139,8 @@ async function mountWelcome(options: {
     // presentation AND the case's own switch (the production Command Surface
     // admits on exactly these two facts).
     sessionBrowserAvailable: () => state.browserAvailable && renderer.sessionBrowserPresentation !== undefined,
+    openTasksBrowserUi() {},
+    tasksBrowserUiAvailable: () => false,
   })
   let snapshot = snapshotWithVersion(TEST_VERSION)
   const reader: StatusSnapshotReader = { snapshot: () => snapshot }
