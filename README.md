@@ -148,6 +148,10 @@ dsh --profile pi-tui --continue            # 继续当前 Host Workspace 中最�
 
 工具审批显示在编辑器座位：完整 Reason/Arguments 在可滚动正文中阅读（不再只显示前六行），`y` 允许一次、`n` 拒绝、`Esc`/`Ctrl+C` 取消、`c` 复制原始参数、`e` 展开；全屏可点击实际绘制的 Allow once / Reject / Cancel 并滚轮滚动正文，普通模式保持键盘。窄窗口显示真实精简内容或 `Resize to inspect more`，不会画出被裁掉的决定。
 
+### Herdr 终端集成
+
+在 Herdr Pane 内启动 `dsh --profile pi-tui`（Direct 或内部 Split Client）时，TUI 会自动把主 Agent 的 `idle` / `working` / `blocked` 状态上报给当前 Pane，`herdr agent list` 与 Pane UI 无需任何配置即可识别 `dsh-pi-tui`。上报复用 TUI 已经判定的 Agent 状态：它不依赖 Terminal progress 设置，不会把仅属客户端的 `/login` 等交互显示为阻塞，并在退出时撤销本 Pane 的注册。它只提供状态显示，不恢复 Session、不浏览会话，也不能通过 Herdr 操作 Agent；普通终端或缺少完整 Herdr 环境时不会启动额外后台进程，Herdr 不可用也不影响 TUI 工作。
+
 ### Conversation display
 
 `/display` 在三种展示预设间切换：`full`（默认）是普通 Transcript 展示；`focus` 将当前回合的 Thinking、Tool Call 和中间回复聚合为一个实时更新的 Thought 区块；`compact` 把连续的过程折叠为带 Header + `Think:` / `Action:` 预览的 `Activity` 段，会话与 assistant 的中间输出仍按时间顺序可见，注入的 notice / relay / recall 改为独立呈现（相邻的环境类注入合并为可展开的 Context 簇），展开用鼠标点击或 `Ctrl+O`。`/settings` 的 `Display` 行提供同一组取值并持久化；`/focus` 仍作为兼容命令保留。

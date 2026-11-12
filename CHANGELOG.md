@@ -10,6 +10,7 @@
 ### 新增
 
 - **Split 端可以在 Settings 里单独修改当前 Session 的审批策略，并准确显示 Sandbox/Approval 状态。** Settings → Agent 的 `Approval policy (this session)` 现在按精确 Session 读取官方 `ask`/`never` 有效策略与独立的 Session override（无 override 时如实写 `none`），并可就地切换；写入经过官方 Session 策略事件持久化，只改 Approval，不会改动 Sandbox、permission preset、TUI 设置文档或新 Session 的默认值。状态栏/footer 的 preset、sandbox、approval 现在是三个独立事实，读不到时隐藏而不是补一个默认值；`Verified` 只在一次新的官方有效策略回读一致后出现，已等于当前值的 no-op 也会正确 Verified，结果无法确认时显示 `Outcome unconfirmed` 且不会自动重试。
+- **Herdr Pane 自动显示主 Agent 状态。** 在 Herdr Pane 内运行 `dsh --profile pi-tui`（Direct 或内部 Split Client）时，会自动向当前 Pane 上报主 Agent 的 `idle` / `working` / `blocked`；`herdr agent list` 与 Pane UI 无需配置即可识别 `dsh-pi-tui`。状态取自 TUI 已有的 Agent 判定，不受 Terminal progress 设置影响，也不会把 `/login` 等仅属客户端的交互报成阻塞；退出或远端事实失效时撤销本 Pane 的注册。该集成只显示状态，不恢复 Session，也没有 Session restore 或 Herdr 内的 Agent 操作；非 Herdr 环境不启动额外后台进程，Herdr 不可用不影响 TUI。
 
 - **Split 后端可以列出并清除本地存储的凭据记录。** 在 Settings → Models 的 Credential records 或 `/logout` 中，远程 TUI 现在会列出 Host 官方凭据存储里的每条记录（仅精确 key 与类型，不显示 token、grant payload 或 API-key 值），并可按该精确 key 清除；清除只代表本地遗忘，不会在服务商侧撤销授权，也不会切换当前模型或 Profile。删除结果无法确认时显示 `Outcome unconfirmed`，只允许重新读取当前 Host，不会自动重试或谎报成功；已不在记录中的 key 删除是官方 no-op。DeepSeek Account 的凭据记录不出现在通用列表中，其独立登出入口保持不变。
 

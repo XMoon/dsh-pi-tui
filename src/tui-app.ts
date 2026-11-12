@@ -2399,6 +2399,15 @@ export interface TuiAppOptions {
    */
   terminalProgressMode?: TerminalProgressMode
   /**
+   * READ-ONLY observation of the main-Agent LOGICAL status this app already
+   * derives for itself ({@link TuiApp.effectiveProgramStatus}). It is called
+   * after the authoritative fact commit — never from the physical OSC writer —
+   * so an external sink keeps reporting even when the terminal progress mode
+   * is off or the PTY is temporarily owned by `$EDITOR`. The observer must be
+   * synchronous and must not re-enter the app's status inputs.
+   */
+  onProgramStatus?: (status: ProgramStatus) => void
+  /**
    * The structural icon palette (emoji | symbols | minimal), read once at
    * startup from the persisted settings. Runtime switches go through
    * {@link TuiApp.setIconStyle} — renderers NEVER deep-read a settings
@@ -3547,6 +3556,12 @@ export class TuiApp {
    * re-asserts the effective value.
    */
   private terminalProgressActive = false
+  /**
+   * The optional READ-ONLY logical-status observer (an external Pane reporter).
+   * It receives the already-derived main-Agent status after a fact commit and
+   * is never consulted by the physical terminal writers.
+   */
+  private readonly onProgramStatus: ((status: ProgramStatus) => void) | undefined
   /**
    * The already-SETTLED outcome of the current main-Agent running interval, as
    * proven by the application evidence fold before this commit. It only
@@ -5023,6 +5038,7 @@ export class TuiApp {
     this.ternTerminal = options.ternTerminal === true
     this.terminalProgressActive = options.initialTerminalProgress === true
     this.terminalProgressMode = options.terminalProgressMode ?? DEFAULT_TERMINAL_PROGRESS_MODE
+    this.onProgramStatus = options.onProgramStatus
     this.extensionHost = options.extensionHost
     this.onTerminalResize = options.onTerminalResize
     this.onWorkflowAction = options.onWorkflowAction
@@ -6112,6 +6128,7 @@ export class TuiApp {
     if (this.terminalProgressActive === active && this.terminalProgressOutcome === settled) return
     this.terminalProgressActive = active
     this.terminalProgressOutcome = settled
+    this.publishProgramStatus()
     this.convergeTerminalPresentation(false)
   }
 
@@ -6279,6 +6296,18 @@ export class TuiApp {
   }
 
   /**
+   * Hand the CURRENT logical program status to the optional READ-ONLY
+   * observer (H1 Herdr). This is the ONLY observation point: it reuses the
+   * exact derivation {@link convergeTerminalPresentation} writes physically, so
+   * the external report is independent of the selected terminal protocol and
+   * of PTY ownership. It never caches a second status.
+   */
+  private publishProgramStatus(): void {
+    if (this.disposed) return
+    this.onProgramStatus?.(this.effectiveProgramStatus())
+  }
+
+  /**
    * Whether the interaction currently owning the response surface is a wait the
    * main Agent is BLOCKED on. A CONTINUED (late-answer) Agent question and every
    * Client-local flow are `false`: the phase alone cannot tell them apart, so the
@@ -6328,6 +6357,12 @@ export class TuiApp {
     // state observed before the mount — or one left behind by another terminal
     // owner — never needs a corrective second write.
     this.convergeTerminalPresentation(true, tokens)
+    // H1: every terminal (re)acquisition republishes the CURRENT logical fact
+    // to the read-only observer. A stop()/start() round trip (an `$EDITOR`
+    // excursion, a fullscreen swap) may have moved the logical status while the
+    // PTY was not owned; the observer's own three-state dedupe keeps this
+    // physically inert when nothing changed.
+    this.publishProgramStatus()
   }
 
   /**
@@ -23801,6 +23836,10 @@ export class TuiApp {
     // paint the transcript rarely, so a render-driven freeze could miss the
     // whole wait and over-count it (plan §5.3).
     this.observeFocusTiming(activity.phase)
+    // H1: the activity commit above is the authoritative fact the logical
+    // status is derived from, so the read-only external observer runs after it
+    // and before the terminal projection (which re-reads the newest inputs).
+    this.publishProgramStatus()
     // The activity phase is an input of BOTH projections: a wait that opens or
     // settles while the main Agent keeps running moves the Tern pane state AND
     // the OSC 7501 blocked record immediately. Convergence reads the phase from

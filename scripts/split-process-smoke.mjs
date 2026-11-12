@@ -506,6 +506,12 @@ export function assertSelectedVerdict(caseId, result) {
     assert(result?.verified === true, `selected ${caseId}: the settings/cold-Host verdict was not verified`)
     return
   }
+  if (caseId === 'herdr.h1-split-surface') {
+    assert(result?.rh01 === 'REAL_SPLIT_PROCESS_L6' && result?.rh03 === 'REAL_SPLIT_PROCESS_L6'
+      && result?.hostReportedNothing === true,
+    `selected ${caseId}: the Herdr Split verdict ended as ${String(result?.rh01 ?? 'missing')}/${String(result?.rh03 ?? 'missing')}`)
+    return
+  }
   if (caseId === 'web.product-browser-tui') {
     assert(result?.browserSubset === 'PASS'
       && (result?.status === 'PASS' || result?.status === 'DEFERRED_WITH_OWNER'),

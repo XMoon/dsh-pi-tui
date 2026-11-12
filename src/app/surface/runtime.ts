@@ -113,6 +113,7 @@ import {
   type NoAnswerNavigationControl,
   type EditorWorkspaceEntryControl,
 } from '../../tui-app.ts'
+import type { ProgramStatus } from '../../domain/terminal-progress/program-status.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { CompactionPhase } from './compaction-presentation.ts'
 import type { SubmissionComposerPort } from '../submission/composer-port.ts'
@@ -820,6 +821,14 @@ export interface SurfaceRuntimeOptions {
   /** The persisted native-terminal-progress preference at startup (dual
    *  protocol by default), parsed through the shared terminal-progress parser. */
   readonly terminalProgress: string | undefined
+  /**
+   * H1: a READ-ONLY observer of the main-Agent logical program status the
+   * mounted PiTui surface derives for itself. It is a Client-local notification
+   * (the external Pane reporter), never a Backend port, and is forwarded into
+   * the existing `startProcessTui` mount unchanged. The TSP renderer branch has
+   * no `TuiApp` and therefore never calls it.
+   */
+  readonly onProgramStatus?: (status: ProgramStatus) => void
   /**
    * Which adapter OWNS the main-Agent terminal outcome (R1 §5.3): the Direct
    * local durable events, or the Remote Host evidence stream. Decided once by
@@ -3695,6 +3704,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         ...buildOptions(deps, imageLoader, rasterLoader),
         initialTerminalProgress: interval.snapshot().active,
         terminalProgressMode: parseTerminalProgressMode(options.terminalProgress),
+        ...(options.onProgramStatus === undefined ? {} : { onProgramStatus: options.onProgramStatus }),
       })
       display = pituiDisplaySeam(app)
       if (queueManager !== undefined) app.attachQueueManager(queueManager)
