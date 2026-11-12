@@ -3216,12 +3216,14 @@ test('HS-04 a Client-local question (the /login shape) never reports blocked', a
       controller.signal,
     )
     assert.equal(harness.phase(), 'waiting-question')
+    // Negative observation window: the Client-local wait must never emit blocked.
     await new Promise<void>(resolve => setTimeout(resolve, 200))
     assert.deepEqual(herdrStates(fixture), ['working'],
       'a Client-local wait is not an Agent-blocking wait')
     controller.abort()
     await answer.catch(() => {})
     await drain()
+    // Negative observation window: a settled local flow must not report a delayed state.
     await new Promise<void>(resolve => setTimeout(resolve, 100))
     assert.deepEqual(herdrStates(fixture), ['working'])
   } finally {
@@ -3240,6 +3242,7 @@ test('HS-05 parked attention and a CONTINUED late answer never report blocked', 
     // Attention alone owns no response surface.
     harness.app.setQuestionAttention(2)
     await drain()
+    // Negative observation window: parked attention owns no Agent-blocking status.
     await new Promise<void>(resolve => setTimeout(resolve, 100))
     assert.deepEqual(herdrStates(fixture), ['working'])
     // The Host wait ended: the call is CONTINUED and the Agent already moved on.
@@ -3259,6 +3262,7 @@ test('HS-05 parked attention and a CONTINUED late answer never report blocked', 
     assert.equal(harness.reopenContinued('call-late'), true)
     await drain()
     assert.equal(harness.phase(), 'waiting-question')
+    // Negative observation window: the continued late-answer form is not a live wait.
     await new Promise<void>(resolve => setTimeout(resolve, 150))
     assert.deepEqual(herdrStates(fixture), ['working'],
       'a continued late-answer form never reports blocked')
@@ -3285,6 +3289,7 @@ test('HS-06 an owner switch retires the Pane registration and a late old-owner w
     await decision
     harness.routeStatus('A', 'running')
     await drain()
+    // Negative observation window: a late retired-owner status must stay inert.
     await new Promise<void>(resolve => setTimeout(resolve, 150))
     assert.deepEqual(herdrStates(fixture), ['working', 'blocked', 'idle'],
       'a late retired-owner status and its settled wait are inert')
@@ -3347,6 +3352,7 @@ test('HS-08 an $EDITOR round trip never releases the Pane and republishes the la
     assert.equal(herdrReleaseCount(fixture), 0, 'a suspend is not an Agent release')
     release('edited')
     await pending
+    // Observation window: the resume must not duplicate the still-current fact.
     await new Promise<void>(resolve => setTimeout(resolve, 100))
     assert.deepEqual(herdrStates(fixture), ['idle', 'working', 'idle', 'working'],
       'the resume dedupes the still-current working fact')
@@ -3379,6 +3385,7 @@ test('HS-09 done/error settle to idle, repeated idle is inert and child activity
     await drain()
     harness.routeStatus('child', 'running')
     await drain()
+    // Negative observation window: repeated idle and child activity must not churn.
     await new Promise<void>(resolve => setTimeout(resolve, 150))
     assert.deepEqual(herdrStates(fixture), ['idle', 'working', 'idle'],
       'repeated idle and child-only activity never churn the Pane')
