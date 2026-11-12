@@ -14,6 +14,7 @@
  * the private `piTuiHostUserShell` Host service (one-shot Shell and completion)
  * the private `piTuiSkills` Host service (standing metadata and invalidation)
  * the private `piTuiAuthorization` Host service (provider-native sign-in)
+ * the private `piTuiCredentialRecords` Host service (stored record metadata)
  * ```
  *
  * The row publishes the data-free `piTuiHostReady` gate only after the
@@ -35,6 +36,7 @@ import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-web-acc
 import { PI_TUI_HOST_USER_SHELL_NAMESPACE } from '../../runtime/remote/pi-tui-host-user-shell-contract.ts'
 import { PI_TUI_SKILLS_NAMESPACE } from '../../runtime/remote/pi-tui-skills-contract.ts'
 import { PI_TUI_AUTHORIZATION_NAMESPACE } from '../../runtime/remote/pi-tui-authorization-contract.ts'
+import { PI_TUI_CREDENTIAL_RECORDS_NAMESPACE } from '../../runtime/remote/pi-tui-credential-records-contract.ts'
 import { createHostShellPathCompletionBridge } from '../../runtime/remote/pi-tui-host-user-shell-host-bridge.ts'
 import { mergeCause } from '../remote/dispose-cause.ts'
 import {
@@ -59,6 +61,11 @@ import {
   PiTuiAuthorizationHostService,
   type PiTuiAuthorizationHostDeps,
 } from './features/authorization.ts'
+import {
+  PiTuiCredentialRecordsHostService,
+  type PiTuiCredentialRecordsHostDeps,
+  type CredentialRecordsStoreLike,
+} from './features/credential-records.ts'
 
 /** Stable Cordis plugin name (the Loader row id in the Host-only overlay). */
 export const name = 'pi-tui-host-runtime'
@@ -200,12 +207,23 @@ export async function apply(ctx: Context, config: TuiConfigValue): Promise<void>
     })
     fibers.push(authorizationFiber)
     await authorizationFiber
+    // The stored-credential-record bridge reads the OFFICIAL credentials store
+    // per call: a Host without that plugin stays Ready and the two methods are
+    // a definite service-unavailable failure, never an empty record list.
+    const credentialRecordsFiber = ctx.inject(PiTuiCredentialRecordsHostService.inject, pluginCtx => {
+      new PiTuiCredentialRecordsHostService(pluginCtx, {
+        credentials: () => ctx.reflect.get('credentials') as CredentialRecordsStoreLike | undefined,
+      })
+    })
+    fibers.push(credentialRecordsFiber)
+    await credentialRecordsFiber
     assertPrivateBinding(ctx, 'piTuiFileReferences', PI_TUI_FILE_REFERENCES_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiTerminalProgress', PI_TUI_TERMINAL_PROGRESS_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiWebAccess', PI_TUI_WEB_ACCESS_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiHostUserShell', PI_TUI_HOST_USER_SHELL_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiSkills', PI_TUI_SKILLS_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiAuthorization', PI_TUI_AUTHORIZATION_NAMESPACE)
+    assertPrivateBinding(ctx, PI_TUI_CREDENTIAL_RECORDS_NAMESPACE, PI_TUI_CREDENTIAL_RECORDS_NAMESPACE)
     ctx.provide(PI_TUI_HOST_READY_SERVICE, {})
   } catch (error) {
     const cleanupErrors: unknown[] = []

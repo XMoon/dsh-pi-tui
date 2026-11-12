@@ -25,6 +25,7 @@ import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../src/runtime/remote/pi-tui-web
 import { PI_TUI_HOST_USER_SHELL_NAMESPACE } from '../../src/runtime/remote/pi-tui-host-user-shell-contract.ts'
 import { PI_TUI_SKILLS_NAMESPACE } from '../../src/runtime/remote/pi-tui-skills-contract.ts'
 import { PI_TUI_AUTHORIZATION_NAMESPACE } from '../../src/runtime/remote/pi-tui-authorization-contract.ts'
+import { PI_TUI_CREDENTIAL_RECORDS_NAMESPACE } from '../../src/runtime/remote/pi-tui-credential-records-contract.ts'
 import type { PiTuiTerminalProgressFrame } from '../../src/runtime/remote/pi-tui-terminal-progress-contract.ts'
 
 /** Cordis `FiberState.ACTIVE` (const enum: no runtime value). */
@@ -108,6 +109,10 @@ test('one contribution registers every private service and publishes readiness l
   assert.equal(bindingOf(ctx, 'piTuiSkills').namespace, PI_TUI_SKILLS_NAMESPACE)
   assert.equal(bindingOf(ctx, 'piTuiAuthorization').serviceKey, 'piTuiAuthorization')
   assert.equal(bindingOf(ctx, 'piTuiAuthorization').namespace, PI_TUI_AUTHORIZATION_NAMESPACE)
+  // The stored-credential-record bridge resolves the official store per call,
+  // so this Host Context (which has NO credentials service) still mounts it.
+  assert.equal(bindingOf(ctx, PI_TUI_CREDENTIAL_RECORDS_NAMESPACE).serviceKey, PI_TUI_CREDENTIAL_RECORDS_NAMESPACE)
+  assert.equal(bindingOf(ctx, PI_TUI_CREDENTIAL_RECORDS_NAMESPACE).namespace, PI_TUI_CREDENTIAL_RECORDS_NAMESPACE)
   // Every private endpoint is registered by the ONE package contribution.
   assert.equal(
     ctx.typert.local.get('piTuiFileReferences/list')?.id,
@@ -137,6 +142,8 @@ test('one contribution registers every private service and publishes readiness l
   assert.equal(ctx.typert.local.get('piTuiAuthorization/run')?.id, '@xmoon76/dsh-pi-tui#piTuiAuthorization/run')
   assert.equal(ctx.typert.local.get('piTuiAuthorization/respond')?.id, '@xmoon76/dsh-pi-tui#piTuiAuthorization/respond')
   assert.equal(ctx.typert.local.get('piTuiAuthorization/cancel')?.id, '@xmoon76/dsh-pi-tui#piTuiAuthorization/cancel')
+  assert.equal(ctx.typert.local.get('piTuiCredentialRecords/list')?.id, '@xmoon76/dsh-pi-tui#piTuiCredentialRecords/list')
+  assert.equal(ctx.typert.local.get('piTuiCredentialRecords/delete')?.id, '@xmoon76/dsh-pi-tui#piTuiCredentialRecords/delete')
   await ctx.fiber.dispose()
 })
 
@@ -162,6 +169,7 @@ test('disposing the ONE built-in fiber withdraws every service, the contribution
   assert.equal(ctx.reflect.get('piTuiHostUserShell'), undefined)
   assert.equal(ctx.reflect.get('piTuiSkills'), undefined)
   assert.equal(ctx.reflect.get('piTuiAuthorization'), undefined)
+  assert.equal(ctx.reflect.get(PI_TUI_CREDENTIAL_RECORDS_NAMESPACE), undefined)
   assert.equal(ctx.reflect.get(piTuiHostRuntime.PI_TUI_HOST_READY_SERVICE), undefined)
   assert.equal(ctx.typert.local.get('piTuiFileReferences/list'), undefined)
   assert.equal(ctx.typert.local.get('piTuiTerminalProgress/watch'), undefined)
@@ -176,6 +184,8 @@ test('disposing the ONE built-in fiber withdraws every service, the contribution
   assert.equal(ctx.typert.local.get('piTuiAuthorization/run'), undefined)
   assert.equal(ctx.typert.local.get('piTuiAuthorization/respond'), undefined)
   assert.equal(ctx.typert.local.get('piTuiAuthorization/cancel'), undefined)
+  assert.equal(ctx.typert.local.get('piTuiCredentialRecords/list'), undefined)
+  assert.equal(ctx.typert.local.get('piTuiCredentialRecords/delete'), undefined)
   await ctx.fiber.dispose()
 })
 
