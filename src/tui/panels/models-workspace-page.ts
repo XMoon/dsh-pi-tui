@@ -2649,7 +2649,13 @@ export class ModelsWorkspacePage implements Component {
     const view = this.view
     const clear = this.clear
     if (view.kind !== 'logout' || clear === undefined) return { content: [], actions: [] }
+    const unconfirmed = clear.phase === 'unconfirmed'
     const content: string[] = [color.textStrong('Clear stored credential'), '']
+    // The unconfirmed outcome is the frame's SAFETY fact: it is pinned directly
+    // under the title so a short-height frame can never clip the only statement
+    // that says "unknown, read before retrying" while the exact target facts
+    // stay below it.
+    if (unconfirmed) content.push(color.warning('Outcome unconfirmed — refresh stored credentials before retrying.'))
     if (view.target.kind === 'reference') {
       content.push(...this.fact('API key reference', view.target.ref, width))
       content.push(...this.fact('Provider', view.target.route ?? view.target.label, width))
@@ -2659,10 +2665,9 @@ export class ModelsWorkspacePage implements Component {
     }
     content.push('')
     if (clear.phase === 'reading') content.push(color.textMuted('Reading the credential store…'))
-    else if (clear.phase === 'unconfirmed') {
+    else if (unconfirmed) {
       // A dispatched delete whose Host settlement was lost: neither success nor
       // failure, and never a reason to re-send it automatically.
-      content.push(color.warning('Outcome unconfirmed — refresh stored credentials before retrying.'))
       if (clear.reason !== undefined) content.push(color.textDim(sanitizedPhysicalLine(clear.reason)))
       content.push(color.textDim('The Host may already have removed it. Reading the current Host once is the only next step.'))
     } else if (clear.phase === 'failed') {

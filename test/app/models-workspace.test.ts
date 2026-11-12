@@ -2476,6 +2476,32 @@ test('an UNCONFIRMED record delete never claims failure and only offers a fresh 
   assert.match(viewText(page), /Models & Credentials/u, 'the unconfirmed view is exit-able')
 })
 
+test('the UNCONFIRMED safety outcome survives a 10-row frame (F7B)', async () => {
+  const { source } = fakeSource()
+  source.storedCredentials = async () => ({
+    rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }],
+    recordCleanupUnavailable: false,
+    referenceReadFailures: [],
+  })
+  source.deleteRecord = async () => {
+    const error = new Error('the stored credential record delete outcome is unconfirmed: carrier lost')
+    Object.assign(error, { code: 'RECORD_DELETE_UNCONFIRMED' })
+    throw error
+  }
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, 10)
+  await flush()
+  page.handleInput('\r')
+  await flush()
+  const text = viewText(page)
+  assert.match(text, /Outcome unconfirmed — refresh stored credentials before retrying\./u,
+    'the short frame pins the safety outcome above the facts')
+  assert.match(text, /Refresh records \[r\]/u)
+  assert.doesNotMatch(text, /Clear credential/u)
+})
+
 test('a definite pre-dispatch record refusal is reported as Not sent (F7B)', async () => {
   const { source, calls } = fakeSource()
   source.storedCredentials = async () => ({

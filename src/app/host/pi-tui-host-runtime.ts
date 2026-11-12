@@ -134,9 +134,9 @@ function assertPrivateBinding(ctx: Context, serviceKey: string, namespace: strin
 /**
  * Mount the built-in PiTui Host Runtime on the launching Host Context.
  *
- * Startup order is fixed: register the package's ONE contribution, mount the
- * file-reference service, mount the terminal-progress service, mount the Web
- * access service, verify ALL live bindings, then publish the readiness gate.
+ * Startup order is fixed: register the package's ONE contribution, mount every
+ * private business service in order, verify ALL live bindings, then publish the
+ * readiness gate.
  * Every child fiber is recorded BEFORE it is awaited; a partial rejection
  * disposes the recorded children in reverse order (contribution last) while
  * keeping the original error primary and attaching cleanup failures to its
