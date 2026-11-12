@@ -46,7 +46,12 @@ interface OverlayEntry extends OverlayRow {
   readonly insert?: readonly OverlayRow[]
 }
 
-const OVERLAY_ENTRIES = parseYaml(HOST_ONLY_PATCH) as OverlayEntry[]
+const OVERLAY_ENTRIES = parseYaml(HOST_ONLY_PATCH, {
+  // The official include dialect has one `!!js` scalar (office-kit's Host data
+  // output path). Keep it as its verbatim expression text for the contract
+  // assertions instead of letting an unknown tag warn.
+  customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
+}) as OverlayEntry[]
 const OVERLAY_ROWS = OVERLAY_ENTRIES.flatMap(entry => entry.insert ?? [entry])
 
 /** The bundle's OWN patch, read from the tracked file the profile installs. */
@@ -61,7 +66,7 @@ const WORKSPACE_REGISTRY_PACKAGE = '@deepseek-ai/dsh-workspace'
 const DIRECTORY_PICKER_PACKAGE = '@deepseek-ai/dsh-host-directory-picker-browse'
 const DELIVERABLE_GUIDANCE_ID = 'deliverable-file-references'
 const DELIVERABLE_GUIDANCE_PACKAGE = '@deepseek-ai/dsh-deliverable-file-references'
-const OFFICE_PACKAGE = '@deepseek-ai/dsh-office-to-pdf'
+const OFFICE_PACKAGE = '@deepseek-ai/dsh-office-kit'
 const HARNESS_DEV_CONTEXT_PACKAGE = '@deepseek-ai/dsh-harness-dev-context'
 
 /**
@@ -471,10 +476,12 @@ const WEB_ROWS: ReadonlyArray<{ id: string; name: string }> = [
   { id: 'modules', name: '@deepseek-ai/dsh-client-modules' },
   { id: 'client-hmr', name: '@deepseek-ai/dsh-client-hmr' },
   { id: 'cordis-client-runner', name: '@deepseek-ai/dsh-cordis-client-runner' },
+  { id: 'mcp-manager', name: '@deepseek-ai/dsh-mcp-manager' },
   { id: 'ui-file-actions', name: '@deepseek-ai/dsh-client-ui-file-actions' },
   { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
   { id: 'ui-open-in-app', name: '@deepseek-ai/dsh-client-ui-open-in-app' },
   { id: 'ui-settings-account', name: '@deepseek-ai/dsh-client-ui-settings-account' },
+  { id: 'ui-account-notifications', name: '@deepseek-ai/dsh-client-ui-account-notifications' },
   { id: 'ui-theme', name: '@deepseek-ai/dsh-client-ui-theme' },
   { id: 'locale', name: '@deepseek-ai/dsh-client-locale' },
   { id: 'shortcuts', name: '@deepseek-ai/dsh-client-shortcuts' },
@@ -485,7 +492,8 @@ const WEB_ROWS: ReadonlyArray<{ id: string; name: string }> = [
   { id: 'resources', name: '@deepseek-ai/dsh-client-resources' },
   { id: 'ui-sidebar', name: '@deepseek-ai/dsh-client-ui-sidebar' },
   { id: 'ui-sidebar-right', name: '@deepseek-ai/dsh-client-ui-sidebar-right' },
-  { id: 'office-to-pdf', name: '@deepseek-ai/dsh-office-to-pdf' },
+  { id: 'office-kit', name: '@deepseek-ai/dsh-office-kit' },
+  { id: 'skill-office', name: '@deepseek-ai/dsh-skill-office' },
   { id: 'ui-sidebar-documentpreview', name: '@deepseek-ai/dsh-client-ui-sidebar-documentpreview' },
   { id: 'ui-sidebar-terminal', name: '@deepseek-ai/dsh-client-ui-sidebar-terminal' },
   { id: 'ui-sidebar-files', name: '@deepseek-ai/dsh-client-ui-sidebar-files' },
@@ -510,6 +518,7 @@ const WEB_ROWS: ReadonlyArray<{ id: string; name: string }> = [
   { id: 'ui-input-trigger', name: '@deepseek-ai/dsh-client-ui-input-trigger' },
   { id: 'ui-commands', name: '@deepseek-ai/dsh-client-ui-commands' },
   { id: 'ui-skill', name: '@deepseek-ai/dsh-client-ui-skill' },
+  { id: 'ui-agent-team', name: '@deepseek-ai/dsh-client-ui-agent-team' },
   { id: 'ui-subagent', name: '@deepseek-ai/dsh-client-ui-subagent' },
   { id: 'ui-reference', name: '@deepseek-ai/dsh-client-ui-reference' },
   { id: 'ui-secret-mask', name: '@deepseek-ai/dsh-client-ui-secret-mask' },
@@ -618,6 +627,26 @@ function assertWebRoster(
         'web-runtime must inject the existing webserver, not a second listener')
       assert.deepEqual(candidate.config, WEB_RUNTIME_CONFIG,
         'web-runtime must stay silent: no browser launch, no printed token URL, no DSH_WEB_URL')
+      continue
+    }
+    if (candidate.id === 'mcp-manager') {
+      // Official rc.2 row: the MCP fleet resolves credential templates through
+      // the already-mounted credentials provider.
+      assert.deepEqual(candidate.inject, ['credentials'])
+      assert.equal(candidate.config, undefined)
+      continue
+    }
+    if (candidate.id === 'skill-office') {
+      // Official rc.2 non-desktop value: the user's Python, never a
+      // workspace-dependencies runtime this Host-only profile does not mount.
+      assert.equal(candidate.inject, undefined)
+      assert.deepEqual(candidate.config, { pythonEnvironment: 'user' })
+      continue
+    }
+    if (candidate.id === 'office-kit') {
+      // Official rc.2 macro: output stays under the Host's own DSH home.
+      assert.equal(candidate.inject, undefined)
+      assert.deepEqual(candidate.config, { outputDirectory: "dshHomePath('office-kit', 'outputs')" })
       continue
     }
     assert.equal(candidate.inject, undefined, `the "${candidate.id}" Web row must not inject extra services`)

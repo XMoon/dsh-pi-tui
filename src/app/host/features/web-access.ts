@@ -71,10 +71,12 @@ const FIBER_ACTIVE = 2
 /**
  * The official Web services whose live binding is what `enabled` claims:
  * `webApp` owns the SPA fallback, `clientModules` owns the `/plugins` graph,
- * `terminalController` is the Web Browser's Host-side terminal owner, and
- * `officeToPdf` is the Browser document-preview conversion provider.
+ * `terminalController` is the Web Browser's Host-side terminal owner,
+ * `officeKit` is the Browser document-preview conversion provider (rc.2
+ * renamed the service from `officeToPdf`), and `mcpManager` is the shared MCP
+ * server fleet the Browser settings surface reads.
  */
-const REQUIRED_WEB_SERVICES = ['webApp', 'clientModules', 'terminalController', 'officeToPdf'] as const
+const REQUIRED_WEB_SERVICES = ['webApp', 'clientModules', 'terminalController', 'officeKit', 'mcpManager'] as const
 
 /** The Browser graph rows that must be assembled first and released last. */
 const BROWSER_GRAPH_ROWS = ['modules', 'client-hmr', 'cordis-client-runner', 'terminal-controller'] as const

@@ -266,7 +266,7 @@ test('the Host-only overlay adds exactly the two B1 owner rows and no second gat
   assert.match(HOST_ONLY_PATCH, /^- insert:$/mu)
   // The inserted-row block of ONE row ends at the next `- id:` line, so the
   // `disabled` fact is read from that row itself instead of the whole overlay
-  // (the Web insert legitimately carries 59 `disabled: true` rows later).
+  // (the Web insert legitimately carries 68 `disabled: true` rows later).
   const insertedRowBlock = (id: string): string => {
     const match = new RegExp(`^    - id: ${id}\\n(?:      [^\\n]*\\n)*`, 'mu').exec(HOST_ONLY_PATCH)
     assert.ok(match !== null, `the overlay must insert a "${id}" row`)

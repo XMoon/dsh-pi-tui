@@ -44,7 +44,7 @@ const FIBER_ACTIVE = 2
 const FIBER_DISPOSED = 4
 
 /** The official Web services whose presence the status vocabulary claims. */
-const WEB_SERVICES = ['webApp', 'clientModules', 'terminalController', 'officeToPdf'] as const
+const WEB_SERVICES = ['webApp', 'clientModules', 'terminalController', 'officeKit', 'mcpManager'] as const
 
 /** The Host owners that must keep their fiber identity across every toggle. */
 const PROTECTED_ROWS: ReadonlyArray<{ readonly id: string; readonly name: string }> = [
@@ -164,7 +164,10 @@ async function createFixture(options: FixtureOptions = {}): Promise<WebAccessFix
     ['modules', { provide: 'clientModules' }],
     ['client-hmr', { inject: ['clientModules', 'webServer'] }],
     ['terminal-controller', { provide: 'terminalController' }],
-    ['office-to-pdf', { provide: 'officeToPdf' }],
+    // rc.2 renamed the Office conversion service and added the shared MCP
+    // server fleet; both are required Host services for an `enabled` claim.
+    ['office-kit', { provide: 'officeKit' }],
+    ['mcp-manager', { provide: 'mcpManager' }],
     // The changed-files Host recorder `ui-deliverables` injects. The fixture
     // provides the SERVICE (topology only); the real Git recorder is qualified
     // by the split-process Host lane, never here.
@@ -405,6 +408,33 @@ function assertFrozenOrders(enable: readonly string[], disable: readonly string[
     'the presentation rows are released in reverse canonical order')
 }
 
+test('the rc.2 Web rows carry their official non-desktop inject/config facts', () => {
+  const byId = new Map(PI_TUI_WEB_ACCESS_ROWS.map(row => [row.id, row]))
+  // Official rc.2 row facts copied from the installed web-app patch, not
+  // derived from the production table under test.
+  assert.deepEqual(byId.get('mcp-manager')?.inject, ['credentials'],
+    'the shared MCP server fleet resolves credential templates through the mounted provider')
+  assert.deepEqual(byId.get('skill-office')?.config, { pythonEnvironment: 'user' },
+    'a non-desktop Host-only profile selects the user Python, never a workspace runtime')
+  assert.match(byId.get('office-kit')?.yaml?.join('\n') ?? '',
+    /outputDirectory: !!js dshHomePath\('office-kit', 'outputs'\)/u,
+    'the Office output stays in the Host data location through the official macro')
+  assert.equal(byId.has('office-to-pdf'), false, 'the retired Office package must not be declared')
+  assert.equal(byId.has('workspace-dependencies'), false,
+    'the desktop-only workspace-dependencies row must never be activated by this profile')
+  const index = (id: string): number => PI_TUI_WEB_ACCESS_ROWS.findIndex(row => row.id === id)
+  assert.ok(index('office-kit') >= 0 && index('office-kit') < index('ui-sidebar-documentpreview'),
+    'the Office conversion service must mount before its document-preview UI')
+  assert.ok(index('skill-office') >= 0 && index('skill-office') < index('ui-sidebar-documentpreview'),
+    'the Office skills must mount before the document-preview UI')
+  assert.ok(index('mcp-manager') >= 0 && index('mcp-manager') < index('ui-settings'),
+    'the MCP manager must mount before its Browser settings consumer')
+  assert.ok(index('ui-settings-account') >= 0 && index('ui-settings-account') < index('ui-account-notifications'),
+    'the notification UI comes after the settings-account module it injects')
+  assert.ok(index('ui-agent-team') >= 0 && index('ui-agent-team') > index('ui-skill'),
+    'the Team client UI mounts after the always-active base team providers')
+})
+
 test('the enable and disable orders are the frozen production orders', () => {
   assertFrozenOrders(PI_TUI_WEB_ACCESS_ENABLE_ORDER, PI_TUI_WEB_ACCESS_DISABLE_ORDER)
   // Negative controls: the SAME assertion rejects a reordered, dropped or
@@ -621,16 +651,16 @@ test('a missing required Web service keeps the composition unavailable', async t
 })
 
 test('an active Office row without its provider rolls Web back without remounting protected Host owners', async t => {
-  const fixture = await createFixture({ overrides: new Map<string, RowOverride>([['office-to-pdf', {}]]) })
+  const fixture = await createFixture({ overrides: new Map<string, RowOverride>([['office-kit', {}]]) })
   t.after(() => fixture.dispose())
   const protectedUids = new Map(PROTECTED_ROWS.map(row => [row.id, fixture.rows.get(row.id)?.fiber?.uid]))
   const protectedApplies = new Map(PROTECTED_ROWS.map(row => [row.id, fixture.facts.get(row.name)?.applies]))
 
   const status = await fixture.service.setEnabled(true)
   assert.equal(status.state, 'unavailable')
-  assert.match((status as { reason: string }).reason, /officeToPdf|office-to-pdf/u)
+  assert.match((status as { reason: string }).reason, /officeKit|office-kit/u)
   assertAllRowsDisabled(fixture)
-  assert.equal(fixture.ctx.reflect.get('officeToPdf'), undefined)
+  assert.equal(fixture.ctx.reflect.get('officeKit'), undefined)
   for (const row of PROTECTED_ROWS) {
     assert.equal(fixture.rows.get(row.id)?.fiber?.uid, protectedUids.get(row.id),
       `the protected "${row.id}" owner must keep its fiber after Office rollback`)
