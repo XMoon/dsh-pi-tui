@@ -2239,6 +2239,11 @@ export function applyRunnerWithRuntime(
         ? directPolicyGenerationToken
         : (remoteSources.commandSource.connectionGeneration() as object | undefined),
       isSubjectCurrent: sessionId => ownership.currentSessionId() === sessionId || viewerRef?.read()?.id === sessionId,
+      // A transition/owner commit holds the gate: its callbacks must never
+      // reach a Host projection read, so a revocation repaint only paints
+      // `checking` there. The next safe display refresh (after the gate
+      // opens) starts the controlled read.
+      canStartRead: () => !ownership.gate.busy,
       diag,
     })
     // The status owner repaints only on COMMITTED reads. A revocation inside
@@ -2257,6 +2262,15 @@ export function applyRunnerWithRuntime(
     // yet-initialized owner's Host projections during the transition window.
     const disposePolicyScopeInvalidation = ownership.subscribeScopeInvalidation(() => {
       sessionPolicyObservation.invalidate()
+      // The owner commit's synchronous stack must never reach a Host
+      // projection read. Repaint the revoked truth now (the invalidation is
+      // observable to the open Settings page) and ask for ONE display refresh
+      // only AFTER the transition settles, when the new subject's controlled
+      // read is safe to start.
+      runDetached('session policy refresh', async () => {
+        await ownership.gate.whenSettled()
+        statusRuntimeRef?.refresh()
+      }, { diag, sessionId: () => ownership.currentSessionId() })
     })
     lifecycleController.signal.addEventListener('abort', () => {
       disposePolicyObservation()
