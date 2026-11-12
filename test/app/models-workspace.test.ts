@@ -2476,6 +2476,54 @@ test('an UNCONFIRMED record delete never claims failure and only offers a fresh 
   assert.match(viewText(page), /Models & Credentials/u, 'the unconfirmed view is exit-able')
 })
 
+test('a RE-ENTRANT failed refresh after an unconfirmed delete stays unconfirmed (F7B)', async () => {
+  const { source, calls } = fakeSource()
+  let reads = 0
+  const held: { reject: (error: Error) => void }[] = []
+  source.storedCredentials = async () => {
+    reads += 1
+    if (reads === 1) {
+      return {
+        rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }],
+        recordCleanupUnavailable: false,
+        referenceReadFailures: [],
+      }
+    }
+    return await new Promise<never>((_resolve, reject) => { held.push({ reject }) })
+  }
+  source.deleteRecord = async (key: string) => {
+    calls.push(`delete:${key}`)
+    const error = new Error('the stored credential record delete outcome is unconfirmed: carrier lost')
+    Object.assign(error, { code: 'RECORD_DELETE_UNCONFIRMED' })
+    throw error
+  }
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, 24)
+  await flush()
+  page.handleInput('\r')
+  await flush()
+  // The first refresh read hangs (the failing connection that caused the
+  // unknown outcome); a SECOND refresh arrives while it is still in flight.
+  page.handleInput('r')
+  await flush()
+  assert.equal(held.length, 1, 'the first refresh read is in flight')
+  page.handleInput('r')
+  await flush()
+  assert.equal(held.length, 2, 'the second refresh read is in flight')
+  held[0]!.reject(new Error('the first refresh read failed'))
+  held[1]!.reject(new Error('the second refresh read failed'))
+  await flush()
+  const text = viewText(page)
+  assert.match(text, /Outcome unconfirmed — refresh stored credentials before retrying\./u,
+    'the re-entrant failed refresh may not lose the post-dispatch unknown class')
+  assert.match(text, /Refresh records \[r\]/u)
+  assert.doesNotMatch(text, /Not cleared/u)
+  assert.doesNotMatch(text, /Still stored/u)
+  assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'], 'neither refresh re-sends the delete')
+})
+
 test('a FAILED refresh after an unconfirmed delete stays unconfirmed, never Not cleared (F7B)', async () => {
   const { source, calls } = fakeSource()
   let reads = 0
