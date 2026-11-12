@@ -123,6 +123,9 @@ import {
 } from './bootstrap/remote-refold-request.ts'
 import { createFatalLifecycle, createSurfaceLifecycle } from './bootstrap/lifecycle.ts'
 import { createSessionStartupHelpers, quiesceResumedOwner } from './bootstrap/session-startup.ts'
+import { canonicalFullSessionId, chooseContinueSession, chooseListedSession } from './bootstrap/session-launch-intent.ts'
+import type { SessionSummary } from '../runtime/session-reader-port.ts'
+import type { SessionWorkspaceFact } from '../runtime/session-workspace-facts-port.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
 import type { LaunchWorkspaceVerdict } from './remote-process/local-workspace-equivalence.ts'
@@ -267,7 +270,14 @@ export function applyRunnerWithRuntime(
   // The patch row carries a static config; the real session id comes from the
   // startup service (no `!!js` expression, so loader hot-reloads cannot race
   // the service's availability while evaluating the row).
-  const sessionId = config.sessionId !== undefined && config.sessionId !== '' ? config.sessionId : startup.sessionId
+  const configuredExactSessionId = config.sessionId !== undefined && config.sessionId !== '' ? config.sessionId : startup.sessionId
+  // Two startup Session targets are mutually exclusive. The exact
+  // `config.sessionId` / internal split-Client `startup.sessionId` identity and
+  // the public CLI launch intent must never silently override one another, so
+  // this refuses BEFORE any Host session or roster read.
+  if (startup.sessionLaunch !== undefined && configuredExactSessionId !== undefined) {
+    throw new Error('tui-runner: an exact configured session cannot be combined with a CLI Session launch intent')
+  }
   const launchWorkspaceIntent = initialWorkspaceIntentFromEnvironment(process.cwd())
   if (launchWorkspaceIntent.kind !== 'host-path') throw new Error('the launch workspace intent must be a Host path')
   // The sessionless next-create proposal (M6-1/F5-B):
@@ -1149,6 +1159,191 @@ export function applyRunnerWithRuntime(
     // assembly owned by `runtime/direct/backend-direct.ts`); this runner only
     // consumes it.
     const backend = selectedRuntime.backend
+    // ── PR2: the ONE CLI Session launch admission ───────────────────────────
+    // `--session` (bare/query/full id) and `-c` are resolved HERE, after the
+    // semantic backend exists and BEFORE the existing pre-mount
+    // `open → preset → publication → quiesce` block. This admission performs
+    // at most ONE official roster read and NEVER calls `open()` to discover or
+    // validate a candidate: the only open is the real resume below.
+    const sessionLaunch = startup.sessionLaunch
+    let startupResumeSessionId: string | undefined = configuredExactSessionId
+    /** The ONE runner-local startup Browser request, consumed after the command
+     *  registration and before the first bound input. */
+    let startupSessionBrowserRequest: { readonly initialQuery: string } | undefined
+    /** The ONE sessionless launch notice (the launch could not pick a target),
+     *  delivered once after the mount admission. */
+    let startupLaunchNotice: { readonly text: string; readonly kind: 'error' | 'info' } | undefined
+    /** Pre-mount cancellation unwinds exactly like the existing resume
+     *  admission: no owner exists yet and the full fiber disposer is not
+     *  registered, so the diagnostics handle is closed here. */
+    const unwindLaunchResolution = (): void => {
+      diag.dispose()
+      settleSurfaceCancelled('session launch resolution')
+    }
+    /**
+     * Resolve `-c` against the official authorities: the confirmed Host
+     * WorkspaceId (the existing preflight), the official membership baseline
+     * and the official main roster. Any unavailable authority fails closed
+     * with one truthful notice; it is never read as "empty history".
+     */
+    const resolveContinueLaunchTarget = async (): Promise<
+      | { readonly kind: 'resume'; readonly sessionId: string }
+      | { readonly kind: 'stop'; readonly notice: { readonly text: string; readonly kind: 'error' | 'info' } }
+      /** A newer Workspace revision / connection replaced this launch: publish
+       *  nothing, open nothing and claim nothing. */
+      | { readonly kind: 'superseded' }
+      | 'aborted'
+    > => {
+      // `awaitWorkspacePreflight()` only waits for work that already started;
+      // `-c` owns the ONE preflight that resolves an already-authorized launch
+      // proposal through the existing Host Workspace lifecycle.
+      await sessionRuntime.preflightWorkspace()
+      if (lifecycleController.signal.aborted) return 'aborted'
+      const workspace = workspaceNextIntent.snapshot()
+      if (workspace.intent?.kind !== 'workspace-id' || workspace.status !== 'confirmed') {
+        return {
+          kind: 'stop',
+          notice: { text: 'Cannot continue: the Host workspace is not confirmed for this launch', kind: 'info' },
+        }
+      }
+      const workspaceId = workspace.intent.workspaceId
+      const capturedRevision = workspace.revision
+      const autoProvenance = workspace.provenance === 'auto'
+      const autoProofCurrent = (): boolean => !autoProvenance || autoWorkspaceRevalidate?.() === true
+      if (!autoProofCurrent()) {
+        return {
+          kind: 'stop',
+          notice: { text: 'Cannot continue: the verified local workspace changed — choose a Host workspace', kind: 'info' },
+        }
+      }
+      // ONE official membership baseline, released exactly once. A stream that
+      // ends/fails before its baseline, or a baseline without the confirmed
+      // WorkspaceId, is NOT an empty membership.
+      let baseline: readonly SessionWorkspaceFact[] | undefined
+      const facts = backend.sessionWorkspaceFacts.followWorkspaces(lifecycleController.signal)
+      try {
+        const first = await facts[Symbol.asyncIterator]().next()
+        if (first.done !== true && first.value.type === 'baseline') baseline = first.value.items
+      } catch (error) {
+        if (lifecycleController.signal.aborted) return 'aborted'
+        diag.warn('startup continue membership read failed', { error: safeErrorMessage(error) })
+      } finally {
+        facts.dispose()
+      }
+      if (lifecycleController.signal.aborted) return 'aborted'
+      if (baseline === undefined) {
+        return {
+          kind: 'stop',
+          notice: { text: 'Cannot continue: Host workspace membership is unavailable', kind: 'error' },
+        }
+      }
+      const membership = baseline.find(fact => fact.workspaceId === workspaceId)
+      if (membership === undefined) {
+        return {
+          kind: 'stop',
+          notice: { text: 'Cannot continue: the confirmed Host workspace is no longer reported', kind: 'info' },
+        }
+      }
+      let rows: readonly SessionSummary[] | undefined
+      try {
+        rows = await backend.sessionReader.list(undefined, lifecycleController.signal)
+      } catch (error) {
+        if (lifecycleController.signal.aborted) return 'aborted'
+        diag.warn('startup continue listing failed', { error: safeErrorMessage(error) })
+        return {
+          kind: 'stop',
+          notice: { text: 'Cannot continue: session listing is unavailable', kind: 'error' },
+        }
+      }
+      if (lifecycleController.signal.aborted) return 'aborted'
+      if (rows === undefined) {
+        return {
+          kind: 'stop',
+          notice: { text: 'Cannot continue: session listing is unavailable', kind: 'error' },
+        }
+      }
+      // The Workspace proposal and the automatic proof are fenced AFTER every
+      // await: a replaced A→B→A revision, a Host WorkspaceId change, a revoked
+      // auto proof or a torn-down runner publishes no owner.
+      const after = workspaceNextIntent.snapshot()
+      if (after.revision !== capturedRevision
+        || after.status !== 'confirmed'
+        || after.intent?.kind !== 'workspace-id'
+        || after.intent.workspaceId !== workspaceId) {
+        diag.warn('startup continue target superseded', { workspace: workspaceId })
+        return { kind: 'superseded' }
+      }
+      if (!autoProofCurrent()) {
+        return {
+          kind: 'stop',
+          notice: { text: 'Cannot continue: the verified local workspace changed — choose a Host workspace', kind: 'info' },
+        }
+      }
+      const continuedSessionId = chooseContinueSession(rows, membership.sessionIds)
+      if (continuedSessionId === undefined) {
+        return {
+          kind: 'stop',
+          notice: { text: 'No readable sessions in this Host workspace', kind: 'info' },
+        }
+      }
+      return { kind: 'resume', sessionId: continuedSessionId }
+    }
+    if (sessionLaunch?.kind === 'lookup') {
+      if (canonicalFullSessionId(sessionLaunch.query)) {
+        // An explicit canonical full id keeps the ORIGINAL direct-open
+        // contract: no roster read is required and the id bytes pass through
+        // unchanged.
+        startupResumeSessionId = sessionLaunch.query
+      } else {
+        let rows: readonly SessionSummary[] | undefined
+        let listingError: string | undefined
+        try {
+          rows = await backend.sessionReader.list(undefined, lifecycleController.signal)
+        } catch (error) {
+          if (lifecycleController.signal.aborted) {
+            unwindLaunchResolution()
+            return
+          }
+          listingError = safeErrorMessage(error)
+          diag.warn('startup session listing failed', { error: listingError })
+        }
+        if (lifecycleController.signal.aborted) {
+          unwindLaunchResolution()
+          return
+        }
+        if (rows === undefined) {
+          // "Unavailable" is NOT "no history": never guess, never open.
+          startupLaunchNotice = {
+            text: 'Session listing unavailable — the session browser will open so you can search',
+            kind: 'error',
+          }
+          startupSessionBrowserRequest = { initialQuery: sessionLaunch.query }
+        } else {
+          const listedSessionId = chooseListedSession(rows, sessionLaunch.query)
+          if (listedSessionId === undefined) {
+            // A word-like/ambiguous/missing query searches the SAME Browser; it
+            // never auto-resumes an arbitrary first row.
+            startupSessionBrowserRequest = { initialQuery: sessionLaunch.query }
+          } else {
+            startupResumeSessionId = listedSessionId
+          }
+        }
+      }
+    } else if (sessionLaunch?.kind === 'browse') {
+      // Bare / explicitly blank `--session`: one Browser on Browse All. The
+      // empty query is an explicit value, so the startup entry keeps its
+      // input-first semantics and opens no Host read itself.
+      startupSessionBrowserRequest = { initialQuery: '' }
+    } else if (sessionLaunch?.kind === 'continue') {
+      const target = await resolveContinueLaunchTarget()
+      if (target === 'aborted') {
+        unwindLaunchResolution()
+        return
+      }
+      if (target.kind === 'resume') startupResumeSessionId = target.sessionId
+      else if (target.kind === 'stop') startupLaunchNotice = target.notice
+      // `superseded` keeps the sessionless surface without a notice.
+    }
     // TSP-7 Welcome D: the Welcome eligibility's ONE blank authority is the
     // same semantic `SessionReader.blank` read the `/preset` affordance already
     // consumes (Direct: the official turn-boundary projection; Remote: the
@@ -1212,7 +1407,7 @@ export function applyRunnerWithRuntime(
       dsh: dshVersion() ?? 'unknown',
       bundle: packageVersion(),
       cwd: process.cwd(),
-      session: sessionId ?? '(deferred)',
+      session: startupResumeSessionId ?? (sessionLaunch === undefined ? '(deferred)' : `(launch:${sessionLaunch.kind})`),
       preset: launchPreset ?? 'default',
       // Host capability check (plan stage K): the services the TUI surface
       // consumes. Each one degrades locally when absent (presets → default
@@ -1269,7 +1464,7 @@ export function applyRunnerWithRuntime(
     // lifecycle await. Once resume resolves, its creation-only signal no
     // longer owns the returned handle (DSH contract).
     let resumeResolved = false
-    if (sessionId !== undefined) {
+    if (startupResumeSessionId !== undefined) {
       // The explicit-resume path is the ONLY pre-mount wait worth
       // explaining: deferred / sessionless starts have nothing to resume.
       startupStatus.show('Resuming session…')
@@ -1286,7 +1481,7 @@ export function applyRunnerWithRuntime(
         // observation seam; the cross-backend open request carries only the
         // Session identity.
         handle = requireOpened(await backend.sessionLifecycle.open({
-          sessionId: String(sessionId),
+          sessionId: String(startupResumeSessionId),
           signal: lifecycleController.signal,
         }))
         resumeResolved = true
@@ -1310,7 +1505,7 @@ export function applyRunnerWithRuntime(
         if (resumedDirectAgent !== undefined) {
           const recorded = sessionPresetOf(ctx, resumedDirectAgent.session)
           diag.info('resume ok', {
-            session: sessionId,
+            session: startupResumeSessionId,
             seq: Number(resumedDirectAgent.session.seq),
             preset: recorded ?? 'default',
           })
@@ -1323,13 +1518,13 @@ export function applyRunnerWithRuntime(
             } catch (error) {
               startupStatus.clear()
               if (presetErrorCode(error) === 'agent-preset/locked') {
-                const message = `session ${sessionId} has started; its agent preset ${recorded} is fixed, ignoring --preset ${launchPreset}`
+                const message = `session ${startupResumeSessionId} has started; its agent preset ${recorded} is fixed, ignoring --preset ${launchPreset}`
                 ctx.logger.warn(`tui-runner: ${message}`)
-                diag.warn('preset ignored on resume', { session: sessionId, preset: launchPreset })
+                diag.warn('preset ignored on resume', { session: startupResumeSessionId, preset: launchPreset })
               } else {
                 const message = `--preset ${launchPreset} not applied on resume: ${safeErrorMessage(error)}`
                 ctx.logger.warn(`tui-runner: ${message}`)
-                diag.warn('preset not applied on resume', { session: sessionId, preset: launchPreset, error: safeErrorMessage(error) })
+                diag.warn('preset not applied on resume', { session: startupResumeSessionId, preset: launchPreset, error: safeErrorMessage(error) })
               }
             }
           }
@@ -1340,7 +1535,7 @@ export function applyRunnerWithRuntime(
           // `PresetCatalog.selectSessionPreset` port the /preset command
           // uses — the Host owns blankness and the `agent-preset/locked`
           // refusal; a started Session keeps its recorded preset and warns.
-          const sessionIdText = String(sessionId)
+          const sessionIdText = String(startupResumeSessionId)
           const recorded = backend.sessionReader.sessionStatus(sessionIdText)?.preset
           if (launchPreset !== undefined && launchPreset !== recorded) {
             const outcome = await backend.catalog.presets.selectSessionPreset(
@@ -1385,14 +1580,14 @@ export function applyRunnerWithRuntime(
             }
           }
           diag.info('resume ok', {
-            session: sessionId,
+            session: startupResumeSessionId,
             preset: backend.sessionReader.sessionStatus(sessionIdText)?.preset ?? recorded ?? 'default',
           })
         }
       } catch (error) {
         if (lifecycleController.signal.aborted && !resumeResolved) {
           startupStatus.clear()
-          diag.debug('startup resume cancelled', { session: sessionId })
+          diag.debug('startup resume cancelled', { session: startupResumeSessionId })
           // No owner was published and the full fiber disposer is not
           // registered: close the diagnostics handle (idempotent).
           diag.dispose()
@@ -1411,11 +1606,19 @@ export function applyRunnerWithRuntime(
         // input creates a new session; the failure is surfaced as a
         // notify line.
         const message = safeErrorMessage(error)
-        ctx.logger.warn(`tui-runner: resume ${sessionId} failed: ${message}`)
-        diag.error('resume failed', { session: sessionId, error: message })
+        ctx.logger.warn(`tui-runner: resume ${startupResumeSessionId} failed: ${message}`)
+        diag.error('resume failed', { session: startupResumeSessionId, error: message })
         resumeFailure = /already owned/i.test(message)
-          ? `session ${sessionId} is already owned by another DSH writer/process`
-          : `session ${sessionId} could not be resumed: ${message}`
+          ? `session ${startupResumeSessionId} is already owned by another DSH writer/process`
+          : `session ${startupResumeSessionId} could not be resumed: ${message}`
+        // A `--session` Open that really failed keeps the original Host error
+        // visible and opens the SAME Browser once with the original query as a
+        // MANUAL recovery entry. This is not a second automatic Resume: the
+        // owner never existed, so nothing is covered up. `-c` never opens a
+        // Browser and never retries another historical row.
+        if (!resumeResolved && sessionLaunch?.kind === 'lookup') {
+          startupSessionBrowserRequest = { initialQuery: sessionLaunch.query }
+        }
       }
     } else {
       // Deferred session creation: without --session the TUI opens with NO
@@ -4165,9 +4368,32 @@ export function applyRunnerWithRuntime(
         }
       }
     }
+    // CLI startup Browser: the ONE admission AFTER `command.register(...)` and
+    // BEFORE the first `bindRendererInput()`. The request is consumed exactly
+    // once; the opener resolves on presenter/lease admission, never on the
+    // list/search content. A refusal is reported once and never retried.
+    if (startupSessionBrowserRequest !== undefined) {
+      const request = startupSessionBrowserRequest
+      startupSessionBrowserRequest = undefined
+      let refusal: string | undefined
+      try {
+        const opened = await command.openStartupSessionBrowser({ scope: 'all', initialQuery: request.initialQuery })
+        if (opened.kind === 'error') refusal = opened.text
+      } catch (error) {
+        refusal = safeErrorMessage(error)
+        diag.warn('startup session browser failed', { error: refusal })
+      }
+      if (refusal !== undefined && refusal !== '') {
+        surface.display.notify(`session browser unavailable: ${refusal}`, 'error')
+      }
+    }
     if (surfaceNotice !== undefined) {
       surface.display.notify(surfaceNotice, 'error')
       surfaceNotice = undefined
+    }
+    if (startupLaunchNotice !== undefined) {
+      surface.display.notify(startupLaunchNotice.text, startupLaunchNotice.kind)
+      startupLaunchNotice = undefined
     }
     if (resumeFailure !== undefined) {
       surface.display.notify(resumeFailure, 'error')

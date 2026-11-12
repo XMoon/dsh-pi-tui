@@ -113,7 +113,7 @@ test('an older harness gets actionable npm upgrade guidance without a hard Loade
     // interception, so this row must unload like any other mounted row.
     t.after(async () => { await ctx.fiber.dispose() })
     assert.doesNotThrow(() => applyStartup(ctx), 'the advisory notice must not block concurrent profile mounting')
-    assert.equal((ctx.get(TUI_STARTUP_SERVICE) as { sessionId: string }).sessionId, 's1')
+    assert.deepEqual((ctx.get(TUI_STARTUP_SERVICE) as { sessionLaunch?: unknown }).sessionLaunch, { kind: 'lookup', query: 's1' })
     const joined = stderr.lines.join('')
     assert.ok(joined.includes(`running dsh 0.1.0-rc.8`), `stderr must name the installed version:\n${joined}`)
     assert.ok(joined.includes(EXPECTED_REQUIREMENT), `stderr must name the npm floor:\n${joined}`)
@@ -132,7 +132,7 @@ test('the published 0.2.2-rc.1 harness version starts normally and provides the 
   try {
     const ctx = mountStartup(t, ['--session', 's1'])
     assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'the startup service must be provided')
-    assert.equal((ctx.get(TUI_STARTUP_SERVICE) as { sessionId: string }).sessionId, 's1')
+    assert.deepEqual((ctx.get(TUI_STARTUP_SERVICE) as { sessionLaunch?: unknown }).sessionLaunch, { kind: 'lookup', query: 's1' })
     assert.equal(stderr.lines.length, 0, 'no gate message on a supported harness')
   } finally {
     stderr.restore()
@@ -300,6 +300,48 @@ test('--help never runs the action, on any harness', (t) => {
   } finally {
     stderr.restore()
     launcher.restore()
+  }
+})
+
+test('the CLI Session launch grammar maps the launcher argv to ONE intent', (t) => {
+  const cases: Array<{ args: string[]; launch: unknown; preset?: string }> = [
+    { args: [], launch: undefined },
+    { args: ['--session'], launch: { kind: 'browse', query: '' } },
+    { args: ['--session='], launch: { kind: 'browse', query: '' } },
+    { args: ['--session', ''], launch: { kind: 'browse', query: '' } },
+    { args: ['--session', '   '], launch: { kind: 'browse', query: '' } },
+    { args: ['--session', 'mysql'], launch: { kind: 'lookup', query: 'mysql' } },
+    { args: ['--session=mysql'], launch: { kind: 'lookup', query: 'mysql' } },
+    { args: ['--session', ' mysql '], launch: { kind: 'lookup', query: 'mysql' } },
+    { args: ['-c'], launch: { kind: 'continue' } },
+    { args: ['--continue'], launch: { kind: 'continue' } },
+    { args: ['-c', '--preset', 'x'], launch: { kind: 'continue' }, preset: 'x' },
+    { args: ['--session', '--preset', 'x'], launch: { kind: 'browse', query: '' }, preset: 'x' },
+    { args: ['--session', 'mysql', '--preset', 'x'], launch: { kind: 'lookup', query: 'mysql' }, preset: 'x' },
+  ]
+  for (const { args, launch, preset } of cases) {
+    const ctx = mountStartup(t, args)
+    const values = ctx.get(TUI_STARTUP_SERVICE) as { sessionLaunch?: unknown; presetId?: string } | undefined
+    assert.ok(values !== undefined, `${args.join(' ')} must publish the startup service`)
+    assert.deepEqual(values.sessionLaunch, launch, `${args.join(' ')}: the launch intent`)
+    assert.equal(values.presetId, preset, `${args.join(' ')}: the preset is never swallowed by an optional value`)
+  }
+})
+
+test('a conflicting --session/--continue launch fails before any startup side effect', (t) => {
+  for (const args of [['--session', '-c'], ['-c', '--session', 'abc']]) {
+    const stderr = captureStderr()
+    const consoleBefore = console.error
+    try {
+      const { ctx, exitCodes, readyListenerCount } = mountStartupWithReady(t, args)
+      assert.deepEqual(exitCodes, [1], `${args.join(' ')} must exit nonzero`)
+      assert.equal(ctx.get(TUI_STARTUP_SERVICE), undefined, 'the startup service is never published')
+      assert.equal(readyListenerCount(), 0, 'the readiness handshake is never armed')
+      assert.equal(console.error, consoleBefore, 'the model-listing interception is never installed')
+      assert.match(stderr.lines.join(''), /--session and --continue are mutually exclusive/u)
+    } finally {
+      stderr.restore()
+    }
   }
 })
 

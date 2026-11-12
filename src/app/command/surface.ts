@@ -496,6 +496,18 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
     readonly initialDirectoryEntry?: boolean
     readonly initialDirectoryPath?: string
   }): void
+  /**
+   * The CLI startup entry into the SAME registered `/sessions` Browser
+   * lifecycle. Unlike {@link openSessionBrowser} it RESOLVES with the opener's
+   * admission settlement, so the startup root can await the Browser admission
+   * (presenter/lease) before the first bound input — never the list/search
+   * content, which settles inside the read owner. Only the composition root
+   * calls it; a refusal states itself through the returned result.
+   */
+  openStartupSessionBrowser(request: {
+    readonly scope?: 'current' | 'all'
+    readonly initialQuery: string
+  }): Promise<import('@deepseek-ai/dsh-commands').CommandResult>
   /** Whether that `/sessions` UI entry is actually installed (registered AND
    *  presentable on this mount) — the business-entry fact the Welcome button
    *  paints, never the presence of a painted button. */
@@ -650,6 +662,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       readonly addDirectory?: boolean
       readonly initialDirectoryEntry?: boolean
       readonly initialDirectoryPath?: string
+      readonly initialQuery?: string
     }) => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
 
   /** Consume TUI-local command draft dispositions after DSH normalizes the
@@ -947,24 +960,39 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
    * session list and switches nothing: every settlement, notice, cancel and
    * stale check stays with the `/sessions` command and its Browser owner.
    */
-  const openSessionBrowser = (scope?: 'current' | 'all' | {
+  type SessionBrowserRequest = 'current' | 'all' | {
     readonly scope?: 'current' | 'all'
     readonly addDirectory?: boolean
     readonly initialDirectoryEntry?: boolean
     readonly initialDirectoryPath?: string
-  }): void => {
+    readonly initialQuery?: string
+  }
+  /** The ONE admission both the void UI entry and the awaitable CLI startup
+   *  entry share. A string is the exact refusal text. */
+  const sessionBrowserRefusal = (): string | undefined => {
     if (!commandsRegistered || sessionBrowserOpener === undefined) {
-      deps.notify('session resume is unavailable in this session (the /sessions command is not registered)', 'error')
-      return
+      return 'session resume is unavailable in this session (the /sessions command is not registered)'
     }
     // The TSP branch has no PiTui fallback presenter, so a mounted renderer
     // that offers no Session Browser presentation is refused BEFORE the
     // handler runs — the same fail-closed admission the model entries apply.
     if (deps.app() === undefined && deps.sessionBrowserPresentation?.() === undefined) {
-      deps.notify("This command's UI is not available in TSP yet", 'error')
+      return "This command's UI is not available in TSP yet"
+    }
+    return undefined
+  }
+  const openSessionBrowserCommand = (request: SessionBrowserRequest): Promise<import('@deepseek-ai/dsh-commands').CommandResult> => {
+    const refusal = sessionBrowserRefusal()
+    if (refusal !== undefined) return Promise.resolve({ kind: 'error', text: refusal })
+    return sessionBrowserOpener!(request)
+  }
+  const openSessionBrowser = (scope?: SessionBrowserRequest): void => {
+    const refusal = sessionBrowserRefusal()
+    if (refusal !== undefined) {
+      deps.notify(refusal, 'error')
       return
     }
-    const opened = sessionBrowserOpener(scope)
+    const opened = sessionBrowserOpener!(scope)
     void opened.then((result) => { // allowlist: result observer — the command owns the task
       if (result.kind === 'error' && typeof result.text === 'string' && result.text !== '') {
         deps.notify(result.text, 'error')
@@ -973,6 +1001,12 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       deps.logError(`tui-runner: session browser UI entry failed: ${safeErrorMessage(error)}`)
     })
   }
+  /** The CLI startup admission: resolves with the opener's own initialization
+   *  settlement (presenter/lease), never with the list/search content. */
+  const openStartupSessionBrowser = (request: {
+    readonly scope?: 'current' | 'all'
+    readonly initialQuery: string
+  }): Promise<import('@deepseek-ai/dsh-commands').CommandResult> => openSessionBrowserCommand(request)
 
   const sessionBrowserAvailable = (): boolean => commandsRegistered
     && sessionBrowserOpener !== undefined
@@ -1621,6 +1655,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     openModelQuick,
     // TSP-7 Welcome D: the `/sessions` UI entry and its real availability.
     openSessionBrowser,
+    openStartupSessionBrowser,
     sessionBrowserAvailable,
     requestCatalogRefresh,
     catalogRefreshAvailable,

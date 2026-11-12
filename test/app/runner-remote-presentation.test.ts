@@ -269,6 +269,8 @@ export async function mountRemoteRunner(
      *  ONE process-owned manual-reload capability). Absent keeps the Direct
      *  pending behavior. */
     startupSettlement?: RunnerStartupSettlement
+    /** PR2: the public CLI Session launch intent carried by `tuiStartup`. */
+    sessionLaunch?: { readonly kind: 'lookup' | 'browse' | 'continue'; readonly query?: string }
   } = {},
 ): Promise<RemoteRunnerFixture> {
   const presetId = options.presetId ?? 'm3-4-pr2-preset'
@@ -291,6 +293,21 @@ export async function mountRemoteRunner(
     },
   })
   life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+  if (options.sessionLaunch !== undefined) {
+    // The split Client process mounts and awaits its official Client domains
+    // BEFORE the runner starts; this in-process fixture creates the aggregate
+    // asynchronously, so wait for the SAME official Client session-list baseline
+    // before handing the runner the CLI launch intent. This is fixture setup,
+    // not a second read: the adapter's own `list()` below still performs the
+    // one production read under the runner's lifecycle signal.
+    const deadline = Date.now() + 20_000
+    for (;;) {
+      const rows = await aggregate.selected.backend.sessionReader.list(undefined)
+      if (rows !== undefined) break
+      if (Date.now() > deadline) throw new Error('timed out waiting for the official Client session-list baseline')
+      await new Promise<void>(resolve => setTimeout(resolve, 20))
+    }
+  }
 
   const vt = new VirtualTerminal(100, 30)
   let pane: TspPane | undefined
@@ -323,6 +340,7 @@ export async function mountRemoteRunner(
   runnerCtx.provide(TUI_STARTUP_SERVICE, {
     sessionId: options.resumeSessionId,
     ...(options.launchPresetId === undefined ? {} : { presetId: options.launchPresetId }),
+    ...(options.sessionLaunch === undefined ? {} : { sessionLaunch: options.sessionLaunch }),
     shippedPresetRoot: host.workRoot,
   })
   const override: RemoteApplicationOverride = {
@@ -3505,4 +3523,75 @@ test('the live /reload-client command reaches the ONE process capability with it
   } finally {
     await fixture.dispose()
   }
+})
+
+/** Seed one completed durable turn on a pre-mounted Host fixture. */
+async function seedHostCompletedTurn(
+  host: Awaited<ReturnType<typeof mountRemotePresentationHost>>,
+  sessionId: string,
+  prompt: string,
+  response: string,
+  cwd: string = host.anchorDir,
+): Promise<void> {
+  await host.harness.create(SessionId(sessionId), undefined, { cwd })
+  const session = host.ctx.sessions.get(SessionId(sessionId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('user/message', {
+    id: `u-${sessionId}`, role: 'user', content: [{ type: 'text', text: prompt }], source: { kind: 'user' },
+  }, { surfaceOp: 'append' })
+  session.append('assistant/message', {
+    turn: 1, step: 1,
+    message: {
+      id: `a-${sessionId}`, role: 'assistant',
+      content: [{ type: 'text', text: response }],
+      source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+    },
+    stream: [], usage: { inputTokens: 10, outputTokens: 5 },
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 1 })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+}
+
+test('a preselected Remote runner resolves a unique prefix through the official Client roster and publishes the resumed owner', async (t) => {
+  const life = testLifecycle(t)
+  const hostPreset = 'm3-4-pr2-preset'
+  const target = 'abcdef12-remote-cli-target'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  await seedHostCompletedTurn(host, target, 'remote cli prompt', 'remote cli resumed answer')
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    host,
+    sessionLaunch: { kind: 'lookup', query: 'abcdef12' },
+  })
+  await waitFor('Remote CLI unique-prefix resume', () => fixture.vt.getViewport().join('\n').includes('remote cli resumed answer'), 20_000)
+  const frame = fixture.vt.getViewport().join('\n')
+  assert.ok(!frame.includes('type a message to start a session'), 'a resumed Session replaces the sessionless Welcome')
+  assert.ok(!frame.includes('Back [Esc]'), 'a pre-mount resume never opens the Session Browser')
+})
+
+test('a preselected Remote runner continues the confirmed Workspace member selected by the official Workspace facts', async (t) => {
+  const life = testLifecycle(t)
+  const hostPreset = 'm3-4-pr2-preset'
+  const target = 'remote-cli-continue-target'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  await seedHostCompletedTurn(host, target, 'remote continue prompt', 'remote continue answer', process.cwd())
+  // The Host Workspace membership is a Host fact: seed the official registry
+  // row the same way the Host controller would for a Session created there.
+  const registry = host.ctx.get('workspaceRegistry') as {
+    create(path: string): Promise<{ attachSession(id: unknown): Promise<void> }>
+  }
+  const workspace = await registry.create(process.cwd())
+  await workspace.attachSession(SessionId(target))
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    host,
+    sessionLaunch: { kind: 'continue' },
+  })
+  await waitFor('Remote CLI continue resume', () => fixture.vt.getViewport().join('\n').includes('remote continue answer'), 20_000)
+  const frame = fixture.vt.getViewport().join('\n')
+  assert.ok(!frame.includes('No readable sessions in this Host workspace'), 'the official membership contains the seeded Session')
+  assert.ok(!frame.includes('Back [Esc]'), '-c never opens the Session Browser')
 })

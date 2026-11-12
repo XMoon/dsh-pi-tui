@@ -1101,7 +1101,14 @@ export function registerTuiCommands(
    * The optional scope is the PiTUI Host Editor gesture's initial browse
    * scope (`'all'`); the Welcome calls it without one and keeps Current.
    */
-  openSessionBrowser?(scope?: 'current' | 'all' | { readonly scope?: 'current' | 'all'; readonly addDirectory?: boolean }): Promise<CommandResult>
+  openSessionBrowser?(scope?: 'current' | 'all' | {
+    readonly scope?: 'current' | 'all'
+    readonly addDirectory?: boolean
+    /** A CLI startup query: the Browser opens on this global search value
+     *  instead of Browse All, and the startup entry skips the sessionless
+     *  Workspace-preflight wait (the first input frame must not be blocked). */
+    readonly initialQuery?: string
+  }): Promise<CommandResult>
 } {
   const { ctx, app } = runner
   // PR3-A: `app` is undefined while a non-PiTui renderer owns the terminal

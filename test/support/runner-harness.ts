@@ -539,7 +539,7 @@ export async function mountRunner(
   ctx: Context,
   home: string,
   harness: RunnerHarness,
-  startup: { sessionId?: string; presetId?: string },
+  startup: { sessionId?: string; presetId?: string; sessionLaunch?: unknown },
   /** Plain plugin-config input; resolved through the exported schema so the
    * live preference fields arrive as volatile references, exactly like a
    * Loader-mounted row. `fullscreen` defaults to OFF to preserve the

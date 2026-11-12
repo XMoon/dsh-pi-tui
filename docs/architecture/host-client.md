@@ -703,7 +703,14 @@ before a connection loss stays `indeterminate` with the requested id as
 correlation only; neither is ever retried. `open`/`resume`/`--session` keep
 addressing a Session by identity only: they never rewrite the header directory,
 replace membership or attach a historical Session to the Client's current
-directory. There is no implicit "current Workspace" global — each Client holds
+directory. `-c, --continue` is a WORKSPACE-SCOPED read: it may select only when
+the Host has CONFIRMED a `workspaceId` for this launch, the official
+`workspace.follow` membership baseline exists, and the official main Session
+roster intersects it. The first intersecting row in roster order wins; an
+unconfirmed Workspace, a missing/failed baseline or a replaced connection
+fails closed rather than falling back to another Workspace or to a fabricated
+empty membership, and the launch creates no Workspace and no Session. There is
+no implicit "current Workspace" global — each Client holds
 its own selection intent, and two Clients of one Host may create in different
 Workspaces.
 

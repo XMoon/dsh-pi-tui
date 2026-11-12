@@ -273,12 +273,34 @@ export function incompatibleHarnessMessage(installed: string, entry: HarnessComp
 /** Service provided by this plugin and injected by the TUI runner row. */
 export const TUI_STARTUP_SERVICE = 'tuiStartup'
 
+/**
+ * The ONE immutable Session-launch intent `--session <id-or-query>` /
+ * `-c, --continue` parsed. It is resolved against the official Host Session
+ * roster by the runner; it never replaces the exact `sessionId` identity field
+ * used by the internal split-Client channel.
+ */
+export type CliSessionLaunchIntent =
+  /** Bare `--session`, an explicitly empty value, or a whitespace-only query:
+   *  open the Session Browser on Browse All. */
+  | { readonly kind: 'browse'; readonly query: string }
+  /** Any other non-blank value: resolve it as a full/listed id or a unique
+   *  short prefix, otherwise seed the same Browser search with it. */
+  | { readonly kind: 'lookup'; readonly query: string }
+  /** `-c, --continue`: continue the newest readable main Session in the
+   *  CONFIRMED Host Workspace. */
+  | { readonly kind: 'continue' }
+
 /** What the runner row reads from {@link TUI_STARTUP_SERVICE}. */
 export interface TuiStartupValues {
-  /** `--session`, absent when the invocation did not name one. */
+  /** The EXACT Session identity of the internal split-Client channel. The
+   *  public `--session` grammar never fills this field: production CLI
+   *  launches carry {@link sessionLaunch} instead. */
   sessionId?: string
   /** `--preset`, the agent preset a fresh session starts on. */
   presetId?: string
+  /** The public CLI Session launch intent, absent on a plain cold start. It is
+   *  mutually exclusive with the exact fields above. */
+  sessionLaunch?: CliSessionLaunchIntent
   /**
    * Mark the TUI required surface as mounted. `src/index.ts` calls this once
    * its synchronous initialization succeeded and its async startup root is
@@ -311,13 +333,17 @@ function tuiCommand(): Command {
     .name('dsh --profile pi-tui')
     .description('Run the DeepSeek Harness terminal UI.')
     .helpOption('-h, --help', 'show this help')
-    .option('--session <id>', 'resume an existing session instead of creating one')
+    .option('--session [id-or-query]', 'open the session browser; a full session id or a listed unique prefix resumes it')
+    .option('-c, --continue', 'continue the most recent session in the confirmed workspace')
     .option('--preset <id>', 'agent preset for a fresh session (falls back to $DSH_PI_TUI_PRESET, then the saved default)')
     .addHelpText('after', `
 Examples:
   dsh --profile pi-tui                       start the terminal UI
-  dsh --profile pi-tui --session <id>        resume an existing session
-  dsh --profile pi-tui --preset minimal      fresh session on the minimal preset
+  dsh --profile pi-tui --session             browse all sessions
+  dsh --profile pi-tui --session mysql       search sessions for "mysql"
+  dsh --profile pi-tui --session <id>        resume a listed or full session id
+  dsh --profile pi-tui --continue            continue the last session in this workspace
+  dsh --profile pi-tui --session <id> --preset minimal
 `)
 }
 
@@ -481,6 +507,26 @@ function installModelListingLogInterceptor(): () => void {
 export function apply(ctx: Context): void {
   const program = tuiCommand()
   program.action(() => {
+    // The CLI grammar is read and validated FIRST: a conflicting Session
+    // launch must fail before the model-listing interception, the
+    // compatibility notice, the readiness handshake, the startup service
+    // publication or any Host Session/Workspace side effect.
+    const options = program.opts<{ session?: string | boolean; continue?: boolean; preset?: string }>()
+    if (options.continue === true && options.session !== undefined) {
+      program.error('error: --session and --continue are mutually exclusive')
+    }
+    // The public CLI never fills the exact `sessionId` identity field: a bare
+    // (or explicitly blank) value browses, any non-blank value is a lookup the
+    // runner resolves against the official roster, and `-c` continues. The
+    // internal split-Client channel keeps publishing an exact `sessionId`
+    // directly (it does not run this action).
+    const sessionLaunch: CliSessionLaunchIntent | undefined = options.continue === true
+      ? { kind: 'continue' }
+      : options.session === undefined
+        ? undefined
+        : typeof options.session === 'string' && options.session.trim() !== ''
+          ? { kind: 'lookup', query: options.session.trim() }
+          : { kind: 'browse', query: '' }
     // The model-listing interception is installed as early as the action
     // allows: the provider's listing diagnostics arrive while the session
     // connects, so the interception must be in place before this row
@@ -564,9 +610,8 @@ export function apply(ctx: Context): void {
       // cancelled instead of judging a startup the row never witnessed.
       ctx.effect(() => () => { cancel() }, 'tui-startup readiness handshake')
     }
-    const options = program.opts<{ session?: string; preset?: string }>()
     ctx.provide(TUI_STARTUP_SERVICE, {
-      ...(options.session !== undefined ? { sessionId: options.session } : {}),
+      ...(sessionLaunch !== undefined ? { sessionLaunch } : {}),
       ...(options.preset !== undefined ? { presetId: options.preset } : {}),
       markSurfaceMounted: () => { surfaceMounted = true },
     } satisfies TuiStartupValues)

@@ -108,11 +108,17 @@ Remove the plugin:
 dsh plugin --profile pi-tui -- remove @xmoon76/dsh-pi-tui
 ```
 
-Resume an existing Session:
+Start and navigate Sessions:
 
 ```sh
-dsh --profile pi-tui --session <session-id>
+dsh --profile pi-tui                       # ordinary start, no Session
+dsh --profile pi-tui --session             # open the Session Browser on Browse All
+dsh --profile pi-tui --session mysql       # open the same Browser searching for a keyword
+dsh --profile pi-tui --session <id>        # resume a full id, a listed id or a unique prefix
+dsh --profile pi-tui --continue            # continue the latest Session in this Host Workspace
 ```
+
+A bare or whitespace-only `--session` opens Browse All. Any other value is resolved as a canonical full id (`session-`/`session_` plus 32 hex characters), an exact official listed id, or a unique prefix of at least four hex characters; everything else (a keyword, an ambiguity or a miss) opens the same Browser with the value as one global search, and `Esc` returns to the sessionless Welcome. Only a canonical full id still attempts one direct resume when the roster is unavailable; an unavailable roster is never read as "no Sessions". `-c, --continue` selects only inside the Host-confirmed Workspace, through the intersection of official membership and the main Session roster, and keeps the roster order; an unconfirmed Workspace or no readable history keeps the surface sessionless with one notice, never guesses another Workspace and creates no Session. `--session` and `-c` are mutually exclusive; `--preset` keeps its existing blank-Session rule.
 
 ## Features
 
