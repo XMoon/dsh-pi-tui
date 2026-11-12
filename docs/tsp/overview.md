@@ -149,6 +149,39 @@ folder/window/subject before the commit and publishes only if all are still
 live afterwards; a session switch, viewer open/exit or teardown drops the stale
 frame, and `dispose()` releases the observer before the app dies.
 
+### Native card disclosure
+
+The mapper owns the final presentation shape of every Main row; no row is
+folded by a second business state machine.
+
+- A Command or Compaction that carries real detail is a native `ui.section`
+  with one renderer-local manual owner shared by both kinds. It starts
+  collapsed and shows the bounded result/error preview plus the status word.
+  A row without any detail stays a directly readable static card: it paints no
+  operable disclosure head. A correlated manual `/compact` remains ONE
+  Compaction card; its command's error kind outranks the compaction error
+  text even when the normalized command text is empty.
+- An ordinary Tool keeps its native `ui.tool` identity and disclosure. While
+  collapsed it may carry one bounded human note derived from the existing
+  `tool-presentation` helpers (read/write/skill/read_image envelopes, answer
+  and Goal summaries, registered JSON summaries, action results, terminal
+  output after the shared log policy). Raw XML/JSON, machine receipts and
+  malformed envelopes never become that note; the existing error note keeps
+  precedence, and an opened card drops the folded note.
+- Standalone Notice/Recall/Relay rows reuse the existing Context owner. A
+  producer Notice summary stays normal wrapped text beside its header; Recall
+  names only its official label. A short Relay is directly readable, while a
+  long Relay uses a bounded first/last preview. The Relay threshold (more than
+  10 logical lines or 800 Unicode code points) is an explicit TSP text policy,
+  not PiTui's physical visual-row metric. Ambient/unknown Context keeps its
+  fail-open behavior, and T3 Context Cluster member semantics are unchanged.
+- Every toggle is admitted only from the current frame's materialized head and
+  the current source scope. A source replacement clears all manual owners; a
+  removed ancestor makes its descendants inoperable without deleting an owner
+  that is still loaded; an explicit Focus root close resets only the process
+  owners that root projects. The application never writes business state from
+  a disclosure toggle.
+
 ### The Main empty state (Welcome)
 
 The TSP renderer paints its invitation in **Main only**. The Dock stays the ONE
