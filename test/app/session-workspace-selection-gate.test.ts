@@ -31,7 +31,9 @@ interface SampledSurface {
   readonly resumed: number
 }
 
-function surface(): SampledSurface {
+function surface(options: {
+  readonly awaitPendingDefaultWrite?: () => Promise<void>
+} = {}): SampledSurface {
   const calls = { prompts: 0, failures: [] as string[], resumed: 0, compositions: 0 }
   const record = (..._args: unknown[]): void => {}
   const value: SessionRuntimeSurface = {
@@ -63,7 +65,7 @@ function surface(): SampledSurface {
     reportFirstSessionCreateFailure: (message: string) => { calls.failures.push(message) },
     promptWorkspaceSelection: () => { calls.prompts += 1 },
     notifyResumeFailure: () => { calls.resumed += 1 },
-    awaitPendingDefaultWrite: async () => {},
+    awaitPendingDefaultWrite: options.awaitPendingDefaultWrite ?? (async () => {}),
     newSessionId: () => 'session-new',
     currentOpening: () => 1,
     resetOpening: record,
@@ -108,6 +110,7 @@ function bind(input: {
   readonly host?: HostTape
   readonly sampled?: SampledSurface
   readonly resolve?: (intent: { readonly kind: string; readonly path?: string }) => Promise<ResolvedWorkspaceSelection>
+  readonly awaitPendingDefaultWrite?: () => Promise<void>
 }): {
   readonly runtime: ReturnType<typeof bindSessionRuntime>
   readonly owner: ReturnType<typeof createWorkspaceNextIntentOwner>
@@ -116,7 +119,9 @@ function bind(input: {
 } {
   const owner = createWorkspaceNextIntentOwner(input.launchCwd, input.provenance)
   const host = input.host ?? lifecycle({ ...(input.resolve === undefined ? {} : { resolve: input.resolve }) })
-  const sampled = input.sampled ?? surface()
+  const sampled = input.sampled ?? surface({
+    ...(input.awaitPendingDefaultWrite === undefined ? {} : { awaitPendingDefaultWrite: input.awaitPendingDefaultWrite }),
+  })
   const core = {
     owner: () => undefined,
     gate: { run: <T>(task: () => Promise<T>) => task() },
@@ -270,4 +275,37 @@ test('review P2: an explicit MANUAL selection needs no Client proof at the consu
   await runtime.ensureSession().catch(() => {})
   assert.deepEqual(resolveCalls, [{ kind: 'workspace-id', workspaceId: 'workspace-manual' }],
     'a manual workspace-id reaches the create boundary WITHOUT any Client-cwd proof')
+})
+
+test('review EXT-P2 (final window): a mount-view change during the LAST default-write wait cancels the create dispatch', async () => {
+  let current = true
+  let release!: () => void
+  const hold = new Promise<void>(resolve => { release = resolve })
+  let entered!: () => void
+  const enteredGate = new Promise<void>(resolve => { entered = resolve })
+  const { runtime, owner, host } = bind({
+    launchCwd: '/client/cwd',
+    provenance: 'auto',
+    autoWorkspaceRevalidate: () => current,
+    resolve: async () => ({ workspaceId: 'workspace-auto', path: '/host/cwd' }),
+    awaitPendingDefaultWrite: async () => {
+      entered()
+      await hold
+    },
+  })
+  // The preflight and the entry boundary both pass; the create is now parked
+  // in its FINAL await, immediately before the Host dispatch.
+  await runtime.preflightWorkspace()
+  assert.equal(owner.snapshot().status, 'confirmed')
+  const pending = runtime.ensureSession()
+  await enteredGate
+  // The directory object behind the automatic candidate is replaced WHILE the
+  // create waits — exactly the window the entry gate cannot see.
+  current = false
+  release()
+  await assert.rejects(pending, (error: unknown) =>
+    error instanceof WorkspaceSelectionError && error.code === 'workspace/not-selected')
+  assert.deepEqual(host.creates, [],
+    'the final gate must cancel the Host Session create when the proof expires during the last wait')
+  assert.equal(owner.snapshot().status, 'unselected')
 })

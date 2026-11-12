@@ -1035,6 +1035,17 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
                 if (nextIntentCapture !== undefined && !nextIntentCapture.isCurrent()) {
                   throw new WorkspaceSelectionError('superseded', 'workspace selection changed before fresh session creation')
                 }
+                // The LAST gate before the real Host create (external review
+                // EXT-P2): all preset/default awaits have settled, so the
+                // automatic candidate's local proof is re-observed once more.
+                if (nextIntentCapture?.provenance === 'auto' && runner.validateAutoWorkspace?.() !== true) {
+                  workspaceNextIntent.resetToLaunchCwd()
+                  throw new WorkspaceSelectionError(
+                    'refused',
+                    'The verified local workspace changed before fresh session creation — choose a Host workspace',
+                    'workspace/not-selected',
+                  )
+                }
                 return runner.agents.create({
                   sessionId: String(sessionId),
                   // The official Host Workspace identity is the ONE directory

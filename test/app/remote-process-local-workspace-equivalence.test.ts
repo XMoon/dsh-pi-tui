@@ -14,7 +14,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   classifyLaunchWorkspace,
@@ -22,6 +22,12 @@ import {
 } from '../../src/app/remote-process/local-workspace-equivalence.ts'
 import { readProcessStarttime } from '../../src/app/remote-process/local-scope.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
+
+/** The `(dev, ino)` a caller would capture at CLIENT LAUNCH for this path. */
+function launchObjectOf(path: string): { readonly device: number; readonly inode: number } {
+  const stat = statSync(path)
+  return { device: stat.dev, inode: stat.ino }
+}
 
 function selfIdentity() {
   const starttime = readProcessStarttime(process.pid)
@@ -43,7 +49,8 @@ test('the REAL Linux /proc proves the Client launch directory is the Host direct
   const life: TestLifecycle = testLifecycle(t)
   const root = life.tempDir('dsh-f5b-equivalence-')
   const launchCwd = realpathSync(root)
-  const verdict = classifyLaunchWorkspace(selfIdentity(), launchCwd)
+  const launchObject = launchObjectOf(launchCwd)
+  const verdict = classifyLaunchWorkspace(selfIdentity(), launchCwd, { launchObject })
   assert.equal(verdict.kind, 'verified', JSON.stringify(verdict))
   if (verdict.kind !== 'verified') return
   assert.equal(verdict.launchCwd, launchCwd)
@@ -56,9 +63,11 @@ test('the REAL Linux /proc proves the Client launch directory is the Host direct
 test('a mismatched Host starttime is unverified (PID reuse is never evidence)', (t) => {
   const life: TestLifecycle = testLifecycle(t)
   const root = life.tempDir('dsh-f5b-equivalence-')
+  const launchCwd = realpathSync(root)
   const verdict = classifyLaunchWorkspace(
     { ...selfIdentity(), hostStarttime: '1' },
-    realpathSync(root),
+    launchCwd,
+    { launchObject: launchObjectOf(launchCwd) },
   )
   assert.equal(verdict.kind, 'unverified')
   assert.match(verdict.kind === 'unverified' ? verdict.reason : '', /starttime/u)
@@ -67,9 +76,11 @@ test('a mismatched Host starttime is unverified (PID reuse is never evidence)', 
 test('an unreadable /proc/<pid>/stat is unverified, never a guess', (t) => {
   const life: TestLifecycle = testLifecycle(t)
   const root = life.tempDir('dsh-f5b-equivalence-')
+  const launchCwd = realpathSync(root)
   const verdict = classifyLaunchWorkspace(
     { instanceId: 'i', hostPid: 999_999_999, hostStarttime: '12345' },
-    realpathSync(root),
+    launchCwd,
+    { launchObject: launchObjectOf(launchCwd) },
   )
   assert.equal(verdict.kind, 'unverified')
   assert.match(verdict.kind === 'unverified' ? verdict.reason : '', /not readable/u)
@@ -89,7 +100,7 @@ test('the same pathname under a DIFFERENT Host root object is unverified', (t) =
   writeFileSync(join(pidDir, 'stat'), `1 (host) S ${Array.from({ length: 18 }, () => '0').join(' ')} ${identity.hostStarttime} 0 0\n`)
   const hostView = mkdir(pidDir, 'root')
   mkdirSync(join(hostView, realLaunch.slice(1)), { recursive: true })
-  const verdict = classifyLaunchWorkspace(identity, realLaunch, { procRoot })
+  const verdict = classifyLaunchWorkspace(identity, realLaunch, { procRoot, launchObject: launchObjectOf(realLaunch) })
   assert.equal(verdict.kind, 'unverified')
   assert.match(verdict.kind === 'unverified' ? verdict.reason : '', /different directory objects/u)
 })
@@ -99,7 +110,7 @@ test('a launch cwd that is not a directory is unverified', (t) => {
   const root = life.tempDir('dsh-f5b-equivalence-')
   const file = join(root, 'not-a-dir.txt')
   writeFileSync(file, 'x')
-  assert.equal(classifyLaunchWorkspace(selfIdentity(), file).kind, 'unverified')
+  assert.equal(classifyLaunchWorkspace(selfIdentity(), file, { launchObject: launchObjectOf(file) }).kind, 'unverified')
 })
 
 test('a symlinked Client view resolves to the SAME object on this same-root Host', (t) => {
@@ -108,16 +119,18 @@ test('a symlinked Client view resolves to the SAME object on this same-root Host
   const real = mkdir(root, 'real')
   const link = join(root, 'link')
   symlinkSync(real, link)
-  assert.equal(classifyLaunchWorkspace(selfIdentity(), realpathSync(real)).kind, 'verified')
+  const realPath = realpathSync(real)
+  assert.equal(classifyLaunchWorkspace(selfIdentity(), realPath, { launchObject: launchObjectOf(realPath) }).kind, 'verified')
   // `stat` follows the link, so on a same-root Host the link is the SAME
   // directory object — the (dev, ino) comparison, not the spelling, decides.
-  assert.equal(classifyLaunchWorkspace(selfIdentity(), link).kind, 'verified')
+  assert.equal(classifyLaunchWorkspace(selfIdentity(), link, { launchObject: launchObjectOf(link) }).kind, 'verified')
 })
 
 test('non-Linux platforms are unverified (the /proc root view is Linux-only)', (t) => {
   const life: TestLifecycle = testLifecycle(t)
   const root = life.tempDir('dsh-f5b-equivalence-')
-  const verdict = classifyLaunchWorkspace(selfIdentity(), realpathSync(root), { platform: 'darwin' })
+  const launchCwd = realpathSync(root)
+  const verdict = classifyLaunchWorkspace(selfIdentity(), launchCwd, { platform: 'darwin', launchObject: launchObjectOf(launchCwd) })
   assert.equal(verdict.kind, 'unverified')
   assert.match(verdict.kind === 'unverified' ? verdict.reason : '', /Linux/u)
 })
@@ -125,7 +138,8 @@ test('non-Linux platforms are unverified (the /proc root view is Linux-only)', (
 test('a missing authenticated Host identity is unverified', (t) => {
   const life: TestLifecycle = testLifecycle(t)
   const root = life.tempDir('dsh-f5b-equivalence-')
-  assert.equal(classifyLaunchWorkspace(undefined, realpathSync(root)).kind, 'unverified')
+  const launchCwd = realpathSync(root)
+  assert.equal(classifyLaunchWorkspace(undefined, launchCwd, { launchObject: launchObjectOf(launchCwd) }).kind, 'unverified')
 })
 
 test('the shared official parser reads a real /proc/<pid>/stat and rejects a fabricated one', () => {
@@ -144,6 +158,7 @@ test('revalidate fails closed when the Host identity changes INSIDE its observat
   const matching = identity.hostStarttime
   let reads = 0
   const verdict = classifyLaunchWorkspace(identity, launchCwd, {
+    launchObject: launchObjectOf(launchCwd),
     readStarttime: () => {
       reads += 1
       // classify: 2 reads (initial + final); revalidate: read 3 (its first
@@ -160,7 +175,47 @@ test('revalidate fails closed when the Host identity changes INSIDE its observat
 test('revalidate still proves unchanged identity across its full window', (t) => {
   const life: TestLifecycle = testLifecycle(t)
   const root = life.tempDir('dsh-f5b-equivalence-')
-  const verdict = classifyLaunchWorkspace(selfIdentity(), realpathSync(root))
+  const launchCwd = realpathSync(root)
+  const verdict = classifyLaunchWorkspace(selfIdentity(), launchCwd, { launchObject: launchObjectOf(launchCwd) })
   assert.equal(verdict.kind, 'verified')
   assert.equal(verdict.kind === 'verified' ? verdict.revalidate() : false, true)
+})
+
+test('a rename-and-recreate of the launch path is NOT the launch directory (real OS negative)', (t) => {
+  const life: TestLifecycle = testLifecycle(t)
+  const root = life.tempDir('dsh-f5b-equivalence-')
+  const work = mkdir(root, 'project')
+  writeFileSync(join(work, 'real.txt'), 'x')
+  // The Client starts in `project`: capture its object BEFORE anything moves.
+  const startup = launchObjectOf(work)
+  // Rename the original away and put a NEW directory at the SAME spelling.
+  renameSync(work, join(root, 'project.old'))
+  mkdirSync(work)
+  writeFileSync(join(work, 'impostor.txt'), 'x')
+  const now = launchObjectOf(work)
+  assert.notEqual(now.inode, startup.inode, 'the fixture really replaced the directory object')
+
+  // Path and Host view now agree with EACH OTHER — but not with the launch.
+  const verdict = classifyLaunchWorkspace(selfIdentity(), work, { launchObject: startup })
+  assert.equal(verdict.kind, 'unverified')
+  assert.match(verdict.kind === 'unverified' ? verdict.reason : '', /renamed or recreated/u)
+
+  // POSITIVE CONTROL: without the replacement the same call verifies.
+  const stable = mkdir(root, 'stable')
+  const stableObject = launchObjectOf(stable)
+  assert.equal(classifyLaunchWorkspace(selfIdentity(), stable, { launchObject: stableObject }).kind, 'verified')
+})
+
+test('revalidate also refuses a launch path replaced after the first classification', (t) => {
+  const life: TestLifecycle = testLifecycle(t)
+  const root = life.tempDir('dsh-f5b-equivalence-')
+  const work = mkdir(root, 'project')
+  const startup = launchObjectOf(work)
+  const verdict = classifyLaunchWorkspace(selfIdentity(), work, { launchObject: startup })
+  assert.equal(verdict.kind, 'verified')
+  if (verdict.kind !== 'verified') return
+  renameSync(work, join(root, 'project.old'))
+  mkdirSync(work)
+  assert.equal(verdict.revalidate(), false,
+    'a path recreation after classification revokes the proof even though path and Host view agree')
 })

@@ -74,6 +74,19 @@ import type { ClientReloadProcessRefusal, ClientReloadRequestResult } from '../a
  * fact, so the automatic Workspace classifier never follows drift.
  */
 const CLIENT_LAUNCH_CWD = process.cwd()
+/** The DIRECTORY OBJECT the Client started in, captured at the same instant as
+ *  `CLIENT_LAUNCH_CWD`. A later rename+recreation of the path must not be
+ *  mistaken for the launch directory (external review EXT-P1). An unreadable
+ *  capture stays `undefined`; the classifier then falls back to its own real
+ *  `stat('.')` object and still fails closed. */
+const CLIENT_LAUNCH_OBJECT = ((): { device: number; inode: number } | undefined => {
+  try {
+    const stat = statSync('.')
+    return stat.isDirectory() ? { device: stat.dev, inode: stat.ino } : undefined
+  } catch {
+    return undefined
+  }
+})()
 
 interface OfficialClientHostModules {
   readonly Context: new () => import('@deepseek-ai/cordis').Context
@@ -1719,7 +1732,9 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       // Host still signs the WorkspaceId). Every unreadable/uncertain fact is
       // `unverified`, so the surface stays unselected until the user picks a
       // Host Workspace through the existing Browser.
-      const launchWorkspace: LaunchWorkspaceVerdict = classifyLaunchWorkspace(host.identity, CLIENT_LAUNCH_CWD)
+      const launchWorkspace: LaunchWorkspaceVerdict = classifyLaunchWorkspace(host.identity, CLIENT_LAUNCH_CWD, {
+        ...(CLIENT_LAUNCH_OBJECT === undefined ? {} : { launchObject: CLIENT_LAUNCH_OBJECT }),
+      })
       let runnerFiber: Fiber | undefined
       try {
         runnerFiber = clientContext.plugin(pluginContext => {
