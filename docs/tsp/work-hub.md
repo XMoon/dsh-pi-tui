@@ -31,11 +31,24 @@ or Questions.
 
 ## Entry and capability admission
 
-The only entries are the registered `/tasks` command and its registered alias
-`/subagents`. Both reach the unchanged handler
+The entries are the registered `/tasks` command, its registered alias
+`/subagents`, and the CURRENT TSP native first-party Tasks status segment. All
+three reach the unchanged handler
 (`requireLiveSessionScope()` → `runner.openTasksBrowser()`) and therefore the
 unchanged `TaskRuntime` opener. The renderer never parses a slash line itself
 and never opens the browser on its own initiative.
+
+The status segment is a POINTER entry, not a second business surface and not a
+write: only the first-party builtin `tasks` segment the projection really paints
+carries the action, in the configured `default`, `compact` and `custom` layouts
+alike (a repeated custom placement is still one intent). It is inert unless the
+same facts admit the typed command — the pane negotiated the Work Hub, the
+registered handler is live (a genuine Host-owned `/tasks` or `/subagents` name
+leaves no TUI entry), the badge has a real fact to paint, and no modal, Reader,
+Picker or other seat owner holds the surface. A missing fact paints no badge at
+all, so no synthetic click target exists. A click is admitted only for the exact
+node identity of the frame the client committed; `/tasks` remains the keyboard
+entry when the client's own priority policy drops the segment.
 
 Admission is decided after classification, by the existing command classifier
 and the mounted renderer's capability:

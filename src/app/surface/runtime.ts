@@ -449,6 +449,20 @@ export interface SurfaceInputBinding {
   /** Whether that `/sessions` UI entry is actually installed (registered, not
    *  Host-owned) — the business-entry fact the Welcome button paints. */
   sessionBrowserAvailable(): boolean
+  /**
+   * Mouse PR4: open the SAME registered `/tasks` (`/subagents`) browser the
+   * typed command runs, from the TSP native Tasks status segment. The
+   * composition root late-binds this to the command surface's registered
+   * entry BEFORE the renderer input is bound, so an action before the binding
+   * (or on a mount whose registration degraded) reaches a refused entry —
+   * never a renderer-side Task read, Session admission or browser of its own.
+   * PiTui supplies no consumer.
+   */
+  openTasksBrowserUi(): void
+  /** Whether that `/tasks` UI entry is really usable (registration fact AND
+   *  the live mounted Task Center capability) — the fact the TSP status
+   *  segment paints its action from. */
+  tasksBrowserUiAvailable(): boolean
 }
 
 /**
@@ -912,6 +926,18 @@ export interface SurfaceRuntimeOptions {
    *  (registered, not Host-owned) — the real business-entry fact the Welcome
    *  button paints, never the presence of a painted button. */
   readonly sessionBrowserAvailable?: () => boolean
+  /**
+   * Mouse PR4: the LATE-BOUND UI entry into the registered `/tasks` command
+   * (the TSP native Tasks status segment's only pointer entry). Same
+   * assignment window, same loud-placeholder contract and same owned-promise
+   * rule as {@link openSessionBrowser}; the command owns the Session
+   * admission, the capability refusal and the ONE Task Runtime opener.
+   */
+  readonly openTasksBrowserUi?: () => void
+  /** Mouse PR4: whether that `/tasks` UI entry is really usable now (the
+   *  registration fact AND the live mounted Task Center capability) — the
+   *  business-entry fact the TSP status segment paints its action from. */
+  readonly tasksBrowserUiAvailable?: () => boolean
 }
 
 /**
@@ -3625,6 +3651,17 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
             open()
           },
           sessionBrowserAvailable: () => options.sessionBrowserAvailable?.() ?? false,
+          // Mouse PR4: the late-bound `/tasks` UI entry, forwarded verbatim.
+          // Same loud-placeholder rule as the model/session entries: an
+          // unwired composition must not leave the status segment's action
+          // dead, and availability answers the real business-entry fact
+          // (false before the binding, never an optimistic true).
+          openTasksBrowserUi: () => {
+            const open = options.openTasksBrowserUi
+            if (open === undefined) throw new Error('the tasks browser command entry is not wired in this composition')
+            open()
+          },
+          tasksBrowserUiAvailable: () => options.tasksBrowserUiAvailable?.() ?? false,
         }
         inputBindTarget = mounted
         return

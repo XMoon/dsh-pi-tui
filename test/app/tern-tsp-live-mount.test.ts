@@ -267,6 +267,11 @@ async function mountTspHarness(options: {
   openModelPicker?: (entry: 'models' | 'effort') => void
   /** PR-E (TSP-7): the composition's late-bound Permission UI seam. */
   permissionUi?: { options(): readonly string[]; select(id: string): void }
+  /** Mouse PR4: the composition's late-bound `/tasks` UI entry, injected
+   *  exactly as `src/app/bootstrap.ts` injects it into `createSurfaceRuntime`. */
+  openTasksBrowserUi?: () => void
+  /** Mouse PR4: the real `/tasks` business-entry availability read. */
+  tasksBrowserUiAvailable?: () => boolean
   /** Observe the same injected Client-local copy capability used by the renderer. */
   copyVisual?: (text: string) => Promise<boolean>
   /** TSP I-A: the ONE application submit entry the real `pendingInputBinding`
@@ -373,6 +378,10 @@ async function mountTspHarness(options: {
     // PR-E (TSP-7): the narrow Permission UI seam, forwarded by the runtime
     // into the renderer input binding exactly like the production bootstrap.
     ...(options.permissionUi === undefined ? {} : { permissionUi: options.permissionUi }),
+    // Mouse PR4: the late-bound `/tasks` UI entry and its availability fact,
+    // forwarded verbatim like the model/session entries above.
+    ...(options.openTasksBrowserUi === undefined ? {} : { openTasksBrowserUi: options.openTasksBrowserUi }),
+    ...(options.tasksBrowserUiAvailable === undefined ? {} : { tasksBrowserUiAvailable: options.tasksBrowserUiAvailable }),
   })
   surface.attachEventRouting(source)
 
@@ -1091,7 +1100,7 @@ test('non-key SDK events reach no business action while no modal seat is up', as
       noteUserInput: () => { calls.noteUserInput += 1 },
       listContinuedQuestions: () => [],
       reopenContinuedQuestion: () => false,
-      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
+      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
     })
     await settle()
     // INJECTED protocol events, not events this UI emits: the current TSP view
@@ -1174,7 +1183,7 @@ async function mountDiagnosed(tern: ScriptedTern) {
     noteUserInput: () => { business.noteUserInput += 1 },
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
-    openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
+    openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
   })
   return { renderer, diagnostics, notifications, business, fatals }
 }
@@ -3799,6 +3808,194 @@ test('a Compact Tool toggle is isolated by the Question Modal and expands when i
       'the same Compact Tool node expands after the Modal releases its seat')
     await awaitWireFact(() => harness.tern.blobs.length === modalBlobs + 1,
       'the admitted Compact Tool requests its SVG Blob')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+// ── Mouse PR4: the first-party Tasks status segment's pointer entry ─────────
+//
+// The renderer paints the click action ONLY while its live admission predicate
+// allows the click, and it admits an `action` event ONLY for the exact node id
+// of the frame it committed. These cases drive the REAL scripted pane input, so
+// the event shape (`sf`/`id`/`act`) is the client's own.
+
+/** The protocol action the first-party Tasks segment sends. */
+const TASKS_ACTION = 'dsh.footer.tasks.open'
+
+/** The committed Tasks status segment carrying the click action, if any. */
+function tasksActionNode(harness: Harness): ModeWireNode | undefined {
+  return mountedNodes(harness).find(node => node.k === 'seg'
+    && (node.p['actions'] as { readonly click?: unknown } | undefined)?.click === TASKS_ACTION)
+}
+
+/** Commit the real activity facts a running Task roster produces. */
+function commitRunningTasks(harness: Harness): void {
+  harness.surface.commitStatus({
+    activity: { taskCount: 2, taskTotalCount: 3, childAgentCount: 0, childAgentTotalCount: 0 },
+  } as never, {}, undefined)
+}
+
+test('Mouse PR4: a real click on the visible Tasks badge opens the registered entry exactly once', async () => {
+  const opens: number[] = []
+  const harness = await mountTspHarness({
+    // The Hub + Reader capability: the SAME negotiation `/tasks` admission uses.
+    sessionBrowserCapabilities: true,
+    openTasksBrowserUi: () => { opens.push(1) },
+    tasksBrowserUiAvailable: () => true,
+  })
+  try {
+    harness.surface.bindRendererInput()
+    commitRunningTasks(harness)
+    await awaitWireFact(() => tasksActionNode(harness) !== undefined, 'the badge paints its click action')
+    const badge = tasksActionNode(harness)!
+    assert.ok(String(badge.p['text'] ?? '').includes('2/3j'),
+      `the action rides the REAL attention badge: ${String(badge.p['text'])}`)
+
+    // The SF must be the surface this action was committed on.
+    const sf = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'action', sf, id: badge.id, act: TASKS_ACTION })
+    await awaitWireFact(() => opens.length === 1, 'the registered entry ran once')
+    await settle() // bounded window: a duplicate dispatch would land here
+    assert.equal(opens.length, 1, 'exactly one business entry call per click')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('Mouse PR4: a pane without the Task Center capability paints an inert badge and refuses a fabricated action', async () => {
+  const opens: number[] = []
+  const harness = await mountTspHarness({
+    openTasksBrowserUi: () => { opens.push(1) },
+    tasksBrowserUiAvailable: () => true,
+  })
+  try {
+    harness.surface.bindRendererInput()
+    commitRunningTasks(harness)
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'seg'
+      && String(node.p['text'] ?? '').includes('2/3j')), 'the badge itself paints')
+    assert.equal(tasksActionNode(harness), undefined,
+      'a pane that cannot present the Hub never claims a click target')
+    const badge = mountedNodes(harness).find(node => node.k === 'seg'
+      && String(node.p['text'] ?? '').includes('2/3j'))!
+    const sf = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'action', sf, id: badge.id, act: TASKS_ACTION })
+    await settle() // bounded window: a wrong admission would have called the entry
+    assert.deepEqual(opens, [], 'the event is dropped, never routed around the capability')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('Mouse PR4: an unregistered /tasks entry leaves the badge inert even on a capable pane', async () => {
+  const opens: number[] = []
+  const harness = await mountTspHarness({
+    sessionBrowserCapabilities: true,
+    openTasksBrowserUi: () => { opens.push(1) },
+    tasksBrowserUiAvailable: () => false,
+  })
+  try {
+    harness.surface.bindRendererInput()
+    commitRunningTasks(harness)
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'seg'
+      && String(node.p['text'] ?? '').includes('2/3j')), 'the badge itself paints')
+    assert.equal(tasksActionNode(harness), undefined,
+      'the availability fact — not the painted badge — decides the action')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('Mouse PR4: a foreign, stale or mismatched Tasks action is dropped without a call', async () => {
+  const opens: number[] = []
+  const harness = await mountTspHarness({
+    sessionBrowserCapabilities: true,
+    openTasksBrowserUi: () => { opens.push(1) },
+    tasksBrowserUiAvailable: () => true,
+  })
+  try {
+    harness.surface.bindRendererInput()
+    commitRunningTasks(harness)
+    await awaitWireFact(() => tasksActionNode(harness) !== undefined, 'the badge paints its click action')
+    const badge = tasksActionNode(harness)!
+    const sf = harness.tern.frames.at(-1)!.sf
+
+    // A forged sibling id: no node of the committed frame has it.
+    harnessFreeInput(harness.tern, { ev: 'action', sf, id: `${badge.id}.forged`, act: TASKS_ACTION })
+    // The committed id with a different action name.
+    harnessFreeInput(harness.tern, { ev: 'action', sf, id: badge.id, act: 'other.action' })
+    // The right id and act on ANOTHER surface.
+    harnessFreeInput(harness.tern, { ev: 'action', sf: `${sf}-other`, id: badge.id, act: TASKS_ACTION })
+    await settle() // bounded window: any wrong admission would have called the entry
+    assert.deepEqual(opens, [], 'only the committed node id on its own surface is admitted')
+
+    // The frame that retires the badge retires its node id too.
+    harness.surface.commitStatus({
+      activity: { taskCount: 0, taskTotalCount: 0, childAgentCount: 0, childAgentTotalCount: 0 },
+    } as never, {}, undefined)
+    await awaitWireFact(() => tasksActionNode(harness) === undefined, 'the badge leaves the frame')
+    harnessFreeInput(harness.tern, { ev: 'action', sf, id: badge.id, act: TASKS_ACTION })
+    await settle() // bounded window
+    assert.deepEqual(opens, [], 'a retired node id can never claim the intent')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('Mouse PR4: an unbound renderer input admits no Tasks action', async () => {
+  const opens: number[] = []
+  const harness = await mountTspHarness({
+    sessionBrowserCapabilities: true,
+    openTasksBrowserUi: () => { opens.push(1) },
+    tasksBrowserUiAvailable: () => true,
+  })
+  try {
+    commitRunningTasks(harness)
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'seg'
+      && String(node.p['text'] ?? '').includes('2/3j')), 'the badge itself paints')
+    assert.equal(tasksActionNode(harness), undefined,
+      'no action is claimed before the application input binding exists')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('Mouse PR4: the late-bound /tasks entry and its availability reach the bound renderer input', async () => {
+  const calls: number[] = []
+  const harness = await mountTspHarness({
+    openTasksBrowserUi: () => { calls.push(1) },
+    tasksBrowserUiAvailable: () => true,
+  })
+  try {
+    harness.surface.bindRendererInput()
+    const bound = harness.boundHandlers()
+    assert.ok(bound, 'the renderer input is bound')
+    assert.equal(bound.tasksBrowserUiAvailable(), true, 'the availability fact traverses verbatim')
+    bound.openTasksBrowserUi()
+    await settle() // window: let the seam callback run before reading the record
+    assert.deepEqual(calls, [1], 'the entry traverses the surface seam exactly once')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('Mouse PR4: an unwired /tasks entry refuses loudly and availability answers false', async () => {
+  const harness = await mountTspHarness()
+  try {
+    harness.surface.bindRendererInput()
+    const bound = harness.boundHandlers()
+    assert.ok(bound)
+    assert.throws(() => bound.openTasksBrowserUi(),
+      /tasks browser command entry is not wired/)
+    assert.equal(bound.tasksBrowserUiAvailable(), false,
+      'an unwired composition never claims the entry is available')
   } finally {
     await harness.dispose()
     await harness.session.close()

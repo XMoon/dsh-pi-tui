@@ -720,7 +720,7 @@ async function mountChain(
       } satisfies ModelPickerRequest)
     },
     openSessionBrowser: () => {},
-    sessionBrowserAvailable: () => true,
+    sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
   })
   surface.attachEventRouting(source)
 

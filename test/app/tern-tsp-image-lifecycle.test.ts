@@ -434,7 +434,7 @@ test('a closed Context Cluster with an adjacent image Tool does not demand bytes
       exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, pastedPath: () => {},
       admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput() {},
       listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
-      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
+      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
     })
     const structure = projectTranscriptStructure(messages)
     const work = structure.find(block => block.kind === 'work')
@@ -483,7 +483,7 @@ test('a PTC image child reads only after every exact parent-scoped Tool disclosu
     exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, pastedPath: () => {},
     admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput() {},
     listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
-    openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
+    openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
   })
   const toggle = (id: string, collapsed: boolean): void => {
     const frame = harness.tern.frames().at(-1)
@@ -693,7 +693,7 @@ test('Focus opens the exact Work image and stops every later read after a fatal 
       exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, pastedPath: () => {},
       admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput() {},
       listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
-      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
+      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
     })
     commitFocus(harness.renderer, messages, source)
     await until('the collapsed Focus root', () => currentNodes(harness.tern).some(node => node.kind === 'section' && node.id.includes('-focus-')))

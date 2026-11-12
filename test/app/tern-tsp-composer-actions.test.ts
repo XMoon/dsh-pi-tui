@@ -208,7 +208,7 @@ async function mountComposerActions(options: {
     openModelPicker: entry => { calls.modelEntries.push(entry) },
     openModelQuick: () => { calls.quickEntries.push(calls.quickEntries.length + 1) },
     openSessionBrowser: () => {},
-    sessionBrowserAvailable: () => true,
+    sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
     modelPickerAvailable: () => options.modelPickerAvailable ?? true,
   })
   let current = snapshotFor({})

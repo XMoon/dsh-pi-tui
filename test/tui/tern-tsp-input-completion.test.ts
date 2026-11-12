@@ -300,7 +300,7 @@ async function mountSlashPane(
     openModelPicker: () => {},
     openModelQuick: () => {},
     openSessionBrowser: () => {},
-    sessionBrowserAvailable: () => true,
+    sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
     ...(chrome
       ? {
         permissionOptions: () => ['read-only', 'workspace-write', 'danger-full-access'],

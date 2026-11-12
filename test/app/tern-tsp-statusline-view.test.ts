@@ -27,7 +27,7 @@ import { StatsFolder } from '../../src/domain/status/stats.ts'
 import type { SessionStatusProjection } from '../../src/runtime/session-reader-port.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../../src/domain/status/types.ts'
 import { mountTspRenderer } from '../../src/tui/tsp/session.ts'
-import { nativeStatuslineRows } from '../../src/tui/tsp/statusline-view.ts'
+import { compileNativeFooterPresentation, nativeStatuslineRows, TSP_FOOTER_TASKS_ACTION, type NativeFooterPresentation } from '../../src/tui/tsp/statusline-view.ts'
 import { resolveTspNativeFooterConfig } from '../../src/domain/footer/tsp-native-config.ts'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
@@ -51,6 +51,7 @@ const INERT_HISTORY_BINDING = {
   captureScope: () => ({ sessionId: undefined, isCurrent: () => false }),
 }
 
+const TASKS_ACTION = TSP_FOOTER_TASKS_ACTION
 const SESSION_ID = 'session-tsp7-pra'
 const T0 = 1_700_000_000_000
 
@@ -1084,6 +1085,136 @@ test('PR-A: a dangerous permission carries the warning tone, a safe one does not
     'a read-only preset is de-emphasized, never painted like yolo')
   assert.notEqual(toneOf('danger-full-access'), toneOf('read-only'),
     'danger and read-only are distinguishable by tone, not only by text')
+})
+
+// ── Mouse PR4: the first-party Tasks status segment action ──────────────────
+//
+// The projection stays PURE: only the caller's action string plus the
+// FIRST-PARTY `tasks` builtin identity put `actions.click` on a segment. Every
+// other segment — and the whole projection when no action is passed — keeps
+// its frozen read-only shape byte for byte.
+
+/** A snapshot whose real Task facts render the compact attention badge. */
+function tasksSnapshot(): StatusSnapshot {
+  const base = emptyStatusSnapshot()
+  return {
+    ...base,
+    activity: {
+      ...base.activity,
+      taskCount: 2,
+      taskTotalCount: 3,
+      childAgentCount: 1,
+      childAgentTotalCount: 1,
+    },
+  } as unknown as StatusSnapshot
+}
+
+/** One projection's segments with the action their props declare. */
+function segActions(rows: readonly Node[]): Array<{ readonly key: unknown; readonly click: unknown }> {
+  return rows.flatMap(row => children(row).map(node => {
+    const actions = props(node)['actions'] as { readonly click?: unknown } | undefined
+    return { key: props(node).key, click: actions?.click }
+  }))
+}
+
+function customPresentation(
+  layout: { readonly schemaVersion: 1; readonly rows: readonly unknown[] },
+  options: { readonly userTextItems?: readonly unknown[]; readonly userCommandIds?: readonly string[] } = {},
+): NativeFooterPresentation {
+  return compileNativeFooterPresentation({
+    mode: 'custom',
+    layout: layout as never,
+    userTextItems: (options.userTextItems ?? []) as never,
+    userCommandIds: new Set(options.userCommandIds ?? []),
+    notices: [],
+  })
+}
+
+test('Mouse PR4: the protocol action is the frozen internal constant', () => {
+  assert.equal(TSP_FOOTER_TASKS_ACTION, 'dsh.footer.tasks.open',
+    'the segment action is a private renderer constant, never a slash command line')
+})
+
+test('Mouse PR4: default mode puts the action on the first-party Tasks badge ONLY', () => {
+  const snapshot = tasksSnapshot()
+  const plain = nativeStatuslineRows(snapshot)
+  const withAction = nativeStatuslineRows(snapshot, undefined, undefined, { tasksAction: TASKS_ACTION })
+
+  // The read-only projection carries no action at all — absent option means
+  // the frozen PR-A/B shape.
+  assert.deepEqual(segActions(plain).filter(entry => entry.click !== undefined), [])
+  const painted = segActions(withAction)
+  assert.deepEqual(painted.filter(entry => entry.click !== undefined),
+    [{ key: 'status-r1-attention', click: TASKS_ACTION }],
+    'exactly the attention badge carries the click action')
+  // Nothing else changed: same rows, same keys, same text.
+  assert.deepEqual(
+    withAction.map(row => children(row).map(child => props(child).key)),
+    plain.map(row => children(row).map(child => props(child).key)),
+    'the option adds no segment and reorders none',
+  )
+  assert.deepEqual(segTexts(withAction), segTexts(plain), 'the option never changes the painted text')
+})
+
+test('Mouse PR4: compact mode carries the same action on its attention badge', () => {
+  const snapshot = tasksSnapshot()
+  const compact = compileNativeFooterPresentation({ mode: 'compact', userTextItems: [], userCommandIds: new Set(), notices: [] })
+  const withAction = nativeStatuslineRows(snapshot, compact, undefined, { tasksAction: TASKS_ACTION })
+  assert.deepEqual(segActions(withAction).filter(entry => entry.click !== undefined),
+    [{ key: 'status-r1-attention', click: TASKS_ACTION }],
+    'the compact row declares the action on the SAME badge key')
+  assert.equal(withAction.length, 1, 'compact stays ONE native row')
+})
+
+test('Mouse PR4: an absent Tasks fact paints no badge and therefore no action', () => {
+  const base = emptyStatusSnapshot()
+  const quiet = nativeStatuslineRows(base, undefined, undefined, { tasksAction: TASKS_ACTION })
+  assert.deepEqual(segActions(quiet).filter(entry => entry.click !== undefined), [],
+    'no fabricated badge, no fabricated click target')
+})
+
+test('Mouse PR4: custom placements carry the action only for the real first-party Tasks item', () => {
+  const presentation = customPresentation({
+    schemaVersion: 1,
+    rows: [{
+      left: [{ id: 'cwd' }, { id: 'user:looks-like-tasks' }, { id: 'ext:someone/tasks' }],
+      right: [{ id: 'tasks' }, { id: 'tasks' }, { id: 'unknown-item', prefix: 'tasks ' }],
+    }],
+  }, {
+    userTextItems: [{ schemaVersion: 1, id: 'user:looks-like-tasks', kind: 'text', text: 'tasks 2', tone: 'auto' }],
+  })
+  const rows = nativeStatuslineRows(tasksSnapshot(), presentation, undefined, { tasksAction: TASKS_ACTION })
+  const painted = segActions(rows)
+  const actioned = painted.filter(entry => entry.click !== undefined)
+  assert.deepEqual(actioned.map(entry => entry.key),
+    ['footer-r1-r0', 'footer-r1-r1'],
+    'both REAL Tasks placements carry the action, each under its own placement key')
+  // The lookalikes stay inert: a USER text item, an extension item and an
+  // unknown item never become navigation controls.
+  for (const key of ['footer-r1-l1', 'footer-r1-l2', 'footer-r1-r2']) {
+    assert.equal(painted.find(entry => entry.key === key)?.click, undefined,
+      `${key} renders text only, never an action`)
+  }
+})
+
+test('Mouse PR4: a hidden Tasks placement paints nothing, so no action survives', () => {
+  const presentation = customPresentation({
+    schemaVersion: 1,
+    rows: [{ left: [], right: [{ id: 'tasks', hideInTsp: true }] }],
+  })
+  const rows = nativeStatuslineRows(tasksSnapshot(), presentation, undefined, { tasksAction: TASKS_ACTION })
+  assert.deepEqual(rows, [], 'the hidden placement produces no status row at all')
+})
+
+test('Mouse PR4: the option is per-frame UI, never a change to the read-only projection', () => {
+  const snapshot = tasksSnapshot()
+  const presentation = customPresentation({ schemaVersion: 1, rows: [{ left: [{ id: 'tasks' }], right: [] }] })
+  const inert = nativeStatuslineRows(snapshot, presentation)
+  const actioned = nativeStatuslineRows(snapshot, presentation, undefined, { tasksAction: TASKS_ACTION })
+  assert.deepEqual(segActions(inert).filter(entry => entry.click !== undefined), [])
+  assert.deepEqual(segActions(actioned).filter(entry => entry.click !== undefined),
+    [{ key: 'footer-r1-l0', click: TASKS_ACTION }])
+  assert.deepEqual(segTexts(inert), segTexts(actioned))
 })
 
 /** Keep the typed imports above honest for the exported surface. */

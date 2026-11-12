@@ -80,7 +80,7 @@ import type { QuickMenuIntent } from './model-quick-menu.ts'
 import { TspPresetPicker } from './preset-picker.ts'
 import { TspWebAccessPicker } from './web-access-picker.ts'
 import { TspSessionBrowser } from './session-browser.ts'
-import { nativeStatuslineRows, compileNativeFooterPresentation, type NativeFooterPresentation } from './statusline-view.ts'
+import { nativeStatuslineRows, compileNativeFooterPresentation, TSP_FOOTER_TASKS_ACTION, type NativeFooterPresentation } from './statusline-view.ts'
 import { quietComposerView, QUIET_COMPOSER_SHEET, QUIET_COMPOSER_STYLES, QUIET_COMPOSER_ROLES, type QuietComposerPermissionOption } from './quiet-composer-view.ts'
 import { welcomeView, TSP_WELCOME_SHEET, TSP_WELCOME_STYLES } from './welcome-view.ts'
 import { pickWelcomeWhaleVariant, welcomeWhalePlainLines } from '../components/welcome-whale.ts'
@@ -352,6 +352,18 @@ export interface TspInputHandlers {
   /** Whether that `/sessions` business entry is actually installed (registered
    *  AND presentable on this mount). The Welcome paints its real state. */
   sessionBrowserAvailable(): boolean
+  /**
+   * Mouse PR4: open the SAME registered `/tasks` (`/subagents`) browser the
+   * typed command runs, from the native first-party Tasks status segment. The
+   * renderer owns no Task/Job/Question read, no Session admission and no
+   * browser: it re-checks its own current-frame + seat admission and forwards
+   * to this ONE application entry, which runs the registered handler.
+   */
+  openTasksBrowserUi(): void
+  /** Whether that `/tasks` business entry is actually usable now (registered
+   *  AND this mount's live Task Center capability holds). The status segment
+   *  paints its click action from this fact, never from a painted badge. */
+  tasksBrowserUiAvailable(): boolean
 }
 
 /** The B1 binding: editor-local + lifecycle only (submissions are B2). */
@@ -1498,6 +1510,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   /** Copy actions admitted only by the exact current main-frame node id. */
   let transcriptCopyButtons: ReadonlyMap<string, TranscriptCopyTarget> = new Map()
   /**
+   * Mouse PR4: the wire node ids carrying {@link TSP_FOOTER_TASKS_ACTION} in
+   * the LAST COMMITTED dock frame — the event provenance of one pointer click,
+   * never business state. The set is REPLACED at every `surface.render`
+   * commit boundary from that frame's own `seg` nodes; a frame without the
+   * action-bearing segment clears it, so a stale node id (a retired badge, a
+   * configuration change, a hydration) can never claim the intent.
+   */
+  let tasksActionNodeIds: ReadonlySet<string> = new Set()
+  /**
    * PR3: the selected figure of the CURRENT subject. It stores the ref plus
    * the 1-based position/count painted in the last committed frame; the next
    * rebuild reconciles it against the new frame's real order (a target that
@@ -2042,6 +2063,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // `focus`/`reveal` are the ones of the frame the SDK just committed
     // (resolved from the SDK's own id assignment, never a guessed path). A dock
     // without the menu indexes nothing.
+    // Mouse PR4: the Tasks action ids are read from the frame the SDK just
+    // committed — the SAME boundary the other frame indexes use, so an action
+    // event always resolves against the node identity that really reached the
+    // client. This is provenance only (no Session/Task/browser fact).
+    indexTasksActions(dockNode)
     if (dockNode !== undefined && modelQuick?.isOpen() === true) modelQuick.indexFrame(dockNode)
     // TSP I-E: the History card's reveal/scroll/focus targets are the wire ids
     // of the frame the SDK just committed — never a guessed path. A closed or
@@ -3234,8 +3260,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // the Quiet Composer branch — wrapped in the ONE transparent footer group
     // so the Shell→Footer gap belongs to the presentation, never a synthetic
     // row inside the dock. An empty projection adds NO wrapper and NO height.
+    // Mouse PR4: the first-party Tasks segment carries its click action ONLY
+    // while the live admission predicate allows the click; every other
+    // segment stays status-only. Absent action => the frozen read-only frame.
+    const tasksAction = nativeTasksActionAdmitted() ? TSP_FOOTER_TASKS_ACTION : undefined
     const footerRows = presentedStatus !== undefined && !hydrating
-      ? nativeStatuslineRows(presentedStatus, footerPresentation, nativeFooterAffordances())
+      ? nativeStatuslineRows(
+          presentedStatus,
+          footerPresentation,
+          nativeFooterAffordances(),
+          ...(tasksAction === undefined ? [] : [{ tasksAction }]),
+        )
       : []
     if (footerRows.length > 0) {
       if (composerActionsSupported()) {
@@ -3482,6 +3517,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     },
     beginSessionHydration() {
       if (disposed) return
+      // Mouse PR4: the outgoing subject's action-bearing status node ids die
+      // with it — a late click on the retired frame must not reach the new
+      // subject's `/tasks` entry.
+      tasksActionNodeIds = new Set()
       retireTranscriptDisclosureScope()
       // TSP-7 PR-E: the open Permission menu belongs to the outgoing subject;
       // revoke its expansion identity with the subject before any later frame
@@ -3743,6 +3782,53 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     && !historyHoldsComposerSeat()
     && !permissionMenuOpen
     && !completion.isOpen()
+
+  /**
+   * Mouse PR4: the ONE admission predicate of the first-party Tasks status
+   * segment's click. It decides BOTH what the frame paints (`tasksAction`) and
+   * whether a received action may run, so the painted affordance and the
+   * handled event can never disagree.
+   *
+   * The base is the STRICTER `transcriptCopyAdmitted()` seat predicate (it
+   * already covers modal seats, the Reader slot, web/menu/history/completion
+   * presenters, the composer-seat holds, hydration, disposal and an unbound
+   * input). Added here: the Reader's in-flight close, the pane's structural
+   * Task Center negotiation, the REGISTERED `/tasks` UI entry's live
+   * availability, and the exact snapshot presence the dock paints from. It
+   * answers about THIS instant only — it is not persistent state and it never
+   * substitutes for the command's own Session admission.
+   */
+  const nativeTasksActionAdmitted = (): boolean => transcriptCopyAdmitted()
+    && detailsCloseTask === undefined
+    && taskCenterCapabilitiesNegotiated()
+    && boundHandlers?.tasksBrowserUiAvailable() === true
+    && presentedStatus !== undefined
+    && !hydrating
+
+  /**
+   * Rebuild the CURRENT frame's action-bearing Tasks node ids from the dock
+   * root the SDK just committed. Identity comes from the SDK's own tree
+   * (`Tree.id`), and the test is the node's explicit `seg` + `actions.click`
+   * prop — never a key/text/id suffix heuristic. Called at the ONE commit
+   * boundary; a frame with no dock clears the set.
+   */
+  const indexTasksActions = (dockRoot: Node | undefined): void => {
+    const next = new Set<string>()
+    if (dockRoot !== undefined) {
+      const root = View.from({ dock: dockRoot }).regions.find(region => region !== undefined)
+      if (root !== undefined) {
+        const visit = (tree: Tree): void => {
+          if (tree.kind === 'seg') {
+            const actions = tree.props['actions'] as { readonly click?: unknown } | undefined
+            if (actions?.click === TSP_FOOTER_TASKS_ACTION) next.add(tree.id)
+          }
+          for (const child of tree.children) visit(child)
+        }
+        visit(root)
+      }
+    }
+    tasksActionNodeIds = next
+  }
 
   // ── TSP-7 PR-C/PR-E: the ONE Quiet Composer (editor + controls) ──
   //
@@ -4918,6 +5004,21 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         if (presetPicker?.handleEvent(input.event)) return false
         if (modelPicker?.handleEvent(input.event)) return false
         if (queueManagerPresenter?.handleEvent(input.event)) return false
+        // Mouse PR4: the first-party Tasks status segment's ONE pointer entry.
+        // Admission is the CURRENT committed frame's exact node id PLUS a live
+        // re-check of the predicate that painted it; the event's own claim is
+        // never trusted. A rejected/foreign action falls through to `false`
+        // (dropped, never another app handler), and an admitted one runs the
+        // registered `/tasks` UI entry exactly once.
+        if (input.event.ev === 'action' && input.event.act === TSP_FOOTER_TASKS_ACTION) {
+          const handlers = boundHandlers
+          if (handlers !== undefined
+            && tasksActionNodeIds.has(input.event.id)
+            && nativeTasksActionAdmitted()) {
+            handlers.openTasksBrowserUi()
+          }
+          return false
+        }
         if (input.event.ev === 'action' && input.event.act === TRANSCRIPT_COPY_ACTION) {
           if (transcriptCopyAdmitted()) {
             const target = transcriptCopyButtons.get(input.event.id)
@@ -5262,6 +5363,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // frame index or retained projection input for a late event.
       lastWindowState = undefined
       lastTurnActivities = undefined
+      // Mouse PR4: a disposed mount owns no committed-frame action provenance.
+      tasksActionNodeIds = new Set()
       // PR2: the Main journal is renderer-local disposable state too. The
       // surface is closing, so no `del` op is sent here.
       mainJournal.reset()

@@ -174,7 +174,7 @@ async function mounted(
     openModelPicker() {},
     openModelQuick() {},
     openSessionBrowser() {},
-    sessionBrowserAvailable: () => true,
+    sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
   })
 
   const writes: WriteRecord[] = []
@@ -462,7 +462,7 @@ test('a pane without the sheet kinds mounts no presenter, no Manage and no raw e
     openModelPicker() {},
     openModelQuick() {},
     openSessionBrowser() {},
-    sessionBrowserAvailable: () => true,
+    sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
   } as never)
   const controller = new QueueManagerController({
     reader: { snapshot: () => ({ running: true, items: [TEXT_ONE] }) },

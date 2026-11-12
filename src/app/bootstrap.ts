@@ -712,6 +712,18 @@ export function applyRunnerWithRuntime(
     /** TSP-7 Welcome D: the real `/sessions` business-entry availability,
      *  late-bound with the opener above. */
     let sessionBrowserAvailableOwner: (() => boolean) | undefined
+    /**
+     * Mouse PR4: the ONE late-bound `/tasks` UI entry (the TSP native Tasks
+     * status segment's pointer entry), armed in exactly the same window as
+     * {@link openRegisteredModelQuick} and through the same `runOwned` seam.
+     * The registered command owns every admission, scope and Task Runtime
+     * call; this slot only opens it. An unbound slot is a startup-order bug
+     * and reaches the surface runtime's loud placeholder.
+     */
+    let openRegisteredTasksBrowser: (() => void) | undefined
+    /** Mouse PR4: the real `/tasks` business-entry availability (registration
+     *  fact + live Task Center capability), late-bound with the opener above. */
+    let tasksBrowserAvailableOwner: (() => boolean) | undefined
     const surface = createSurfaceRuntime<SessionEvent>({
       tuiVersion: bundleVersion(),
       notificationPresentation,
@@ -782,6 +794,16 @@ export function applyRunnerWithRuntime(
         openRegisteredSessionBrowser(request)
       },
       sessionBrowserAvailable: () => sessionBrowserAvailableOwner?.() ?? false,
+      // Mouse PR4: the `/tasks` UI entry the TSP native Tasks status segment
+      // calls. Before the arming below the slot is empty, so a click reaches
+      // the loud placeholder and never a fabricated browser request; the
+      // availability fact answers false until the registration really
+      // installed the entry.
+      openTasksBrowserUi: () => {
+        if (openRegisteredTasksBrowser === undefined) throw new Error('tasks browser command not registered')
+        openRegisteredTasksBrowser()
+      },
+      tasksBrowserUiAvailable: () => tasksBrowserAvailableOwner?.() ?? false,
     })
 
     // The live Agent is declared before the TUI-facing facade so every read
@@ -4305,6 +4327,19 @@ export function applyRunnerWithRuntime(
       })
     }
     sessionBrowserAvailableOwner = () => command.sessionBrowserAvailable()
+    // Mouse PR4: the TSP native Tasks status segment's pointer entry rides the
+    // SAME registered `/tasks` command surface and the SAME owned-task wiring,
+    // armed in the same window (before `bindRendererInput()` can deliver the
+    // first bound action). The command owns the Session admission, the
+    // capability refusal and the Task Runtime opener; this entry only opens
+    // it. It never injects a `/tasks` line into any editor.
+    openRegisteredTasksBrowser = () => {
+      runOwned('tasks browser UI entry', () => command.openTasksBrowserUi(), {
+        diag,
+        sessionId: () => ownership.currentSessionId(),
+      })
+    }
+    tasksBrowserAvailableOwner = () => command.tasksBrowserUiAvailable()
     // Split-Client only: the modal-safe Alt+W entry. It commits the root
     // presentation-only hold, withdraws the local modal seat, then opens the
     // EXISTING registered `/sessions` Browser through the SAME command action.
