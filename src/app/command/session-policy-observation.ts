@@ -37,6 +37,11 @@ export interface SessionPolicyObservationSource {
   /** Whether the observed subject (owner generation + session id) is still
    *  the current display subject. */
   isSubjectCurrent(sessionId: string): boolean
+  /** Whether a NEW Host read may start right now. FALSE inside an owner
+   *  commit/transition window: the commit callback must never reach a Host
+   *  projection read, so `readSnapshot` only paints the revoked `checking`
+   *  state there and the read starts at the next safe display refresh. */
+  canStartRead(): boolean
   /** The runner diagnostics channel (dropped late reads and detached-read
    *  failures are recorded here; never a UI surface). */
   diag: Diag
@@ -164,7 +169,10 @@ export function createSessionPolicyObservation(
       // the answer lands through the same commit path (latest-wins,
       // subject/generation fenced).
       const entry = entryOf(sessionId)
-      if (!disposed && entry.inFlightSerial === undefined && entry.state.kind === 'checking') {
+      if (!disposed
+        && entry.inFlightSerial === undefined
+        && entry.state.kind === 'checking'
+        && source.canStartRead()) {
         runDetached('session policy read', () => refresh(sessionId), { diag: source.diag, sessionId: () => sessionId })
       }
       return entry.state

@@ -15,6 +15,7 @@ interface SourceFixture {
   read(sessionId: string, signal?: AbortSignal): Promise<SessionPolicyRead>
   generation(): object | undefined
   isSubjectCurrent(sessionId: string): boolean
+  canStartRead(): boolean
   diag: import('../../src/runtime/process/diagnostics.ts').Diag
 }
 
@@ -32,10 +33,12 @@ function sourceFixture(options: {
   readDelay?: (sessionId: string) => Promise<void>
   subjectCurrent?: boolean
   generationStable?: boolean
+  canStartRead?: boolean
 } = {}): SourceFixture & {
   readonly debugs: string[]
   replaceGeneration(): void
   setSubjectCurrent(value: boolean): void
+  setCanStartRead(value: boolean): void
 } {
   const debugs: string[] = []
   const diag = {
@@ -47,10 +50,12 @@ function sourceFixture(options: {
   }
   let generation: object | undefined = {}
   let subjectCurrent = options.subjectCurrent ?? true
+  let canStartRead = options.canStartRead ?? true
   return {
     debugs,
     replaceGeneration: () => { generation = {} },
     setSubjectCurrent: (value: boolean) => { subjectCurrent = value },
+    setCanStartRead: (value: boolean) => { canStartRead = value },
     read: async (sessionId, signal) => {
       await options.readDelay?.(sessionId)
       signal?.throwIfAborted()
@@ -60,6 +65,7 @@ function sourceFixture(options: {
     },
     generation: () => (options.generationStable === false ? generation : generation),
     isSubjectCurrent: () => subjectCurrent,
+    canStartRead: () => canStartRead,
     diag,
   }
 }
@@ -185,4 +191,20 @@ test('a revisited subject whose truth was invalidated starts a fresh read (re-en
   const state = observation.readSnapshot('child-x')
   assert.ok(state.kind === 'ready' && state.read.kind === 'ready' && state.read.approval.state === 'ready')
   assert.equal(state.read.approval.effective, 'never', 'the revisited subject shows the fresh Host fact')
+})
+
+
+test('readSnapshot starts NO read while the owner-commit window forbids it (RFL-F8-005)', async () => {
+  const reads: string[] = []
+  const source = sourceFixture({ canStartRead: false })
+  source.read = async sessionId => { reads.push(sessionId); return readyRead(sessionId) }
+  const observation = createSessionPolicyObservation(source)
+  assert.equal(observation.readSnapshot('s1').kind, 'checking')
+  await new Promise<void>(resolve => { setTimeout(resolve, 10) })
+  assert.deepEqual(reads, [], 'the revocation repaint must not reach a Host read inside the commit callback')
+  // The gate opens after the transition: the next safe observation starts it.
+  source.setCanStartRead(true)
+  assert.equal(observation.readSnapshot('s1').kind, 'checking')
+  await new Promise<void>(resolve => { setTimeout(resolve, 10) })
+  assert.deepEqual(reads, ['s1'], 'the safe display refresh starts exactly one read')
 })
