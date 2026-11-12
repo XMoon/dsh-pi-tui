@@ -116,6 +116,19 @@ function subtreeText(nodes, id) {
 }
 
 const mainRegion = snapshot => snapshot.nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('sf-main'))
+const isSectionHead = node => String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+/** The member Sections the CURRENT wire tree nests under one Cluster id. */
+function contextMemberNodes(h, clusterId) {
+  // The incremental journal adds a member with an explicit parent/insert ref;
+  // it does not re-send the parent's child list, so membership follows the
+  // deterministic SDK id ancestry, never a stale folded `children` array.
+  const keyNumber = node => Number(/\d+$/u.exec(String(node.p?.key ?? ''))?.[0] ?? Number.NaN)
+  return [...foldLive(h).values()].filter(node => node.k === 'section'
+    && typeof node.id === 'string' && node.id.startsWith(`${clusterId}.`)
+    && String(node.p?.head ?? '').includes(' · ambient'))
+    .sort((left, right) => keyNumber(left) - keyNumber(right))
+}
+const memberBodyPresent = (h, member) => foldLive(h).has(`${member.id}.body`)
 const mainNodes = snapshot => {
   const root = mainRegion(snapshot)
   if (root === undefined) return []
@@ -476,7 +489,9 @@ export default async function (h) {
   if (!await waitUntil(h, 'one inline production Surface and renderer are mounted', () =>
     records(h).some(row => row.kind === 'surface.inline.opened')
       && records(h).some(row => row.kind === 'renderer.observed')
-      && wire(h).some(row => row.dir === 'in' && row.verb === 'r' && row.body?.r === 'hello'))) {
+      && wire(h).some(row => row.dir === 'in' && row.verb === 'r' && row.body?.r === 'hello')
+      && records(h).some(row => row.kind === 'fixture.ready'
+        && row.scenario === 'inner-disclosure' && row.mode === preset))) {
     finish(h, { ...extra, qualification: 'MOUNT_NOT_READY' })
     return
   }
@@ -685,6 +700,7 @@ export default async function (h) {
   h.check('two official same-turn snapshot Context events were appended for the open Direct turn', contextResult?.status === 'ok', JSON.stringify(contextResult ?? null))
   let cluster
   const contextOwnerIds = []
+  const contextMemberIds = []
   let focusContextRowsPreservedDuringStreaming = false
   if (preset === 'focus') {
     if (!await waitUntil(h, 'both canonical Focus Context Rows reach the current Root', () =>
@@ -738,21 +754,96 @@ export default async function (h) {
     const clusters = [...live.values()].filter(node => node.k === 'section' && String(node.p['key']).includes('ctx-'))
     cluster = clusters.at(-1)
     h.check('the current Context Cluster is independently collapsed', cluster?.p['collapsed'] === true, JSON.stringify(cluster?.p))
+    const clusterHeadText = snapshot => mainNodes(snapshot).find(node => isSectionHead(node)
+      && h.descendantsText(node).includes('inner-context-0')
+      && h.descendantsText(node).includes('inner-context-1'))
     const contextSnap = h.snapshot()
-    const contextHead = mainNodes(contextSnap).find(node => String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
-      && h.descendantsText(node).includes('inner-context'))
+    const contextHead = clusterHeadText(contextSnap)
     h.capture(`${preset}-context-cluster-closed-1280x800-dark`, 'the canonical Cluster body remains absent before its native header opens')
     await clickToggle(h, contextSnap, contextHead, cluster.id, false, 'Context Cluster')
-    if (!await waitUntil(h, 'the Context Cluster members enter the current wire tree', () =>
-      h.texts(h.snapshot()).some(text => text.includes('first native context detail'))
-        || [...foldLive(h).values()].some(node => node.p['text'] === 'first native context detail'))) {
-      finish(h, { ...extra, qualification: 'CONTEXT_BODY_NOT_OPEN' })
+    if (!await waitUntil(h, 'the Cluster member Sections enter the current wire tree', () =>
+      contextMemberNodes(h, cluster.id).length === 2)) {
+      finish(h, { ...extra, qualification: 'CONTEXT_MEMBERS_NOT_MATERIALIZED' })
       return
     }
-    h.check('both Context member payloads are readable only after their canonical cluster opens',
-      h.texts(h.snapshot()).some(text => text.includes('first native context detail'))
+    let contextMembers = contextMemberNodes(h, cluster.id)
+    h.check('opening the canonical Cluster shows both eligible member Sections independently collapsed',
+      contextMembers.length === 2
+        && contextMembers.every(member => member.p.collapsible === true && member.p.collapsed === true)
+        && contextMembers.every(member => !memberBodyPresent(h, member)),
+      JSON.stringify(contextMembers.map(member => ({ id: member.id, p: member.p }))))
+    h.capture(`${preset}-context-members-closed-1280x800-dark`,
+      'the canonical Cluster exposes two independently collapsed native member headers and no body')
+
+    const memberHeader = async (member, label) => {
+      const witness = await revealInnerHeader(h, label, snapshot => mainNodes(snapshot).find(node =>
+        isSectionHead(node) && h.descendantsText(node).includes(String(member.p.head))))
+      return witness
+    }
+    const openMember = async (member, label) => {
+      const witness = await memberHeader(member, label)
+      await clickToggle(h, witness.snapshot, witness.header, member.id, false, label)
+      if (!await waitUntil(h, `${label} materializes only its own body`, () => memberBodyPresent(h, member))) {
+        finish(h, { ...extra, qualification: 'CONTEXT_MEMBER_BODY_NOT_OPEN' })
+        return false
+      }
+      return true
+    }
+    const memberA = contextMembers[0]
+    const memberB = contextMembers[1]
+    if (!await openMember(memberA, 'Context member A')) return
+    h.check('opening member A does not open its sibling or leak the other payload',
+      memberBodyPresent(h, memberA) && !memberBodyPresent(h, memberB)
+        && !h.texts(h.snapshot()).some(text => text.includes('second native context detail')),
+      JSON.stringify({ A: memberA.p, B: memberB.p }))
+    if (!await openMember(memberB, 'Context member B')) return
+    h.check('member B opens independently with its own exact node id',
+      memberBodyPresent(h, memberA) && memberBodyPresent(h, memberB)
+        && h.texts(h.snapshot()).some(text => text.includes('first native context detail'))
+        && h.texts(h.snapshot()).some(text => text.includes('continuous context detail'))
         && h.texts(h.snapshot()).some(text => text.includes('second native context detail')))
-    h.capture(`${preset}-context-open-1280x800-dark`, 'the canonical same-turn Cluster exposes both producer rows once')
+    h.capture(`${preset}-context-members-open-1280x800-dark`,
+      'both member bodies are readable after their own native disclosure opens')
+
+    const closeMember = async (member, label) => {
+      const witness = await memberHeader(member, label)
+      await clickToggle(h, witness.snapshot, witness.header, member.id, true, label)
+      if (!await waitUntil(h, `${label} retires only its own body`, () => !memberBodyPresent(h, member))) {
+        finish(h, { ...extra, qualification: 'CONTEXT_MEMBER_BODY_NOT_CLOSED' })
+        return false
+      }
+      return true
+    }
+    if (!await closeMember(memberA, 'Context member A')) return
+    h.check('closing member A keeps the sibling body open and the Cluster untouched',
+      !memberBodyPresent(h, memberA) && memberBodyPresent(h, memberB)
+        && foldLive(h).get(cluster.id)?.p.collapsed === false,
+      JSON.stringify({ cluster: foldLive(h).get(cluster.id)?.p, A: foldLive(h).get(memberA.id)?.p, B: foldLive(h).get(memberB.id)?.p }))
+
+    const closeCluster = async () => {
+      const witness = await revealInnerHeader(h, 'Context Cluster close', snapshot => clusterHeadText(snapshot))
+      await clickToggle(h, witness.snapshot, witness.header, cluster.id, true, 'Context Cluster close')
+      return await waitUntil(h, 'the closed Cluster retires both member nodes', () =>
+        contextMemberNodes(h, cluster.id).length === 0)
+    }
+    if (!await closeCluster()) { finish(h, { ...extra, qualification: 'CONTEXT_CLUSTER_NOT_CLOSED' }); return }
+    const reopenCluster = async () => {
+      const witness = await revealInnerHeader(h, 'Context Cluster reopen', snapshot => clusterHeadText(snapshot))
+      await clickToggle(h, witness.snapshot, witness.header, cluster.id, false, 'Context Cluster reopen')
+      return await waitUntil(h, 'the reopened Cluster restores both member nodes', () =>
+        contextMemberNodes(h, cluster.id).length === 2)
+    }
+    if (!await reopenCluster()) { finish(h, { ...extra, qualification: 'CONTEXT_CLUSTER_NOT_REOPENED' }); return }
+    contextMembers = contextMemberNodes(h, cluster.id)
+    const restoredA = contextMembers.find(member => member.id === memberA.id)
+    const restoredB = contextMembers.find(member => member.id === memberB.id)
+    h.check('closing and reopening the Cluster restores each member manual state',
+      restoredA?.p.collapsed === true && !memberBodyPresent(h, restoredA)
+        && restoredB?.p.collapsed === false && memberBodyPresent(h, restoredB),
+      JSON.stringify({ A: restoredA?.p, B: restoredB?.p }))
+    contextMemberIds.push(restoredA.id, restoredB.id)
+    h.capture(`${preset}-context-members-restored-1280x800-dark`,
+      'the reopened canonical Cluster restores member B open and member A closed')
   }
 
   const toolBefore = [...foldLive(h).values()].find(node => node.k === 'tool' && node.p['name'] === 'job_list')
@@ -800,16 +891,55 @@ export default async function (h) {
     h.check('settled Focus materializes the same Context members in its canonical Work Cluster', cluster !== undefined, JSON.stringify(settledClusters))
     if (cluster === undefined) { finish(h, { ...extra, qualification: 'FOCUS_SETTLED_CONTEXT_CLUSTER_NOT_MATERIALIZED' }); return }
     h.check('the settled Focus Context Cluster starts independently collapsed', cluster.p['collapsible'] === true && cluster.p['collapsed'] === true)
-    const snap = h.snapshot()
-    const head = mainNodes(snap).find(node => String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
-      && h.descendantsText(node).includes('inner-context-0'))
-    await clickToggle(h, snap, head, cluster.id, false, 'settled Focus Context Cluster')
-    if (!await waitUntil(h, 'settled Focus Context Cluster materializes both source rows', () =>
-      h.texts(h.snapshot()).some(text => text.includes('first native context detail'))
-        && h.texts(h.snapshot()).some(text => text.includes('second native context detail')))) {
-      finish(h, { ...extra, qualification: 'FOCUS_SETTLED_CONTEXT_BODY_NOT_OPEN' })
+    const focusClusterHead = snapshot => mainNodes(snapshot).find(node => isSectionHead(node)
+      && h.descendantsText(node).includes('inner-context-0')
+      && h.descendantsText(node).includes('inner-context-1'))
+    const clickFocusCluster = async (collapsed, label) => {
+      const snap = h.snapshot()
+      await clickToggle(h, snap, focusClusterHead(snap), cluster.id, collapsed, label)
+      return await waitUntil(h, label, () => collapsed
+        ? contextMemberNodes(h, cluster.id).length === 0
+        : contextMemberNodes(h, cluster.id).length === 2)
+    }
+    if (!await clickFocusCluster(false, 'settled Focus Context Cluster')) {
+      finish(h, { ...extra, qualification: 'FOCUS_SETTLED_CONTEXT_MEMBERS_NOT_MATERIALIZED' })
       return
     }
+    let focusMembers = contextMemberNodes(h, cluster.id)
+    h.check('the settled Focus members inherit the same message owners already opened as rows',
+      focusMembers.length === 2
+        && focusMembers.every(member => member.p.collapsible === true && member.p.collapsed === false)
+        && focusMembers.every(member => memberBodyPresent(h, member)),
+      JSON.stringify(focusMembers.map(member => ({ id: member.id, p: member.p }))))
+    h.capture('focus-settled-context-members-open-1280x800-dark',
+      'settled Focus members show the persisted shared owner preference, not a second state')
+    const focusMemberA = focusMembers[0]
+    const witnessA = await revealInnerHeader(h, 'settled Focus Context member A', snapshot => mainNodes(snapshot).find(node =>
+      isSectionHead(node) && h.descendantsText(node).includes(String(focusMemberA.p.head))))
+    await clickToggle(h, witnessA.snapshot, witnessA.header, focusMemberA.id, true, 'settled Focus Context member A')
+    if (!await waitUntil(h, 'settled member A closes while member B keeps its body', () =>
+      !memberBodyPresent(h, focusMemberA) && memberBodyPresent(h, focusMembers[1]))) {
+      finish(h, { ...extra, qualification: 'FOCUS_SETTLED_CONTEXT_MEMBER_NOT_CLOSED' })
+      return
+    }
+    if (!await clickFocusCluster(true, 'settled Focus Context Cluster close')) {
+      finish(h, { ...extra, qualification: 'FOCUS_SETTLED_CONTEXT_CLUSTER_NOT_CLOSED' })
+      return
+    }
+    if (!await clickFocusCluster(false, 'settled Focus Context Cluster reopen')) {
+      finish(h, { ...extra, qualification: 'FOCUS_SETTLED_CONTEXT_CLUSTER_NOT_REOPENED' })
+      return
+    }
+    focusMembers = contextMemberNodes(h, cluster.id)
+    const reopenedFocusA = focusMembers.find(member => member.id === focusMemberA.id)
+    const reopenedFocusB = focusMembers.find(member => member.id === focusMembers[1].id)
+    h.check('closing and reopening the settled Cluster restores each Focus member owner',
+      reopenedFocusA?.p.collapsed === true && !memberBodyPresent(h, reopenedFocusA)
+        && reopenedFocusB?.p.collapsed === false && memberBodyPresent(h, reopenedFocusB),
+      JSON.stringify({ A: reopenedFocusA?.p, B: reopenedFocusB?.p }))
+    contextMemberIds.push(reopenedFocusA.id, reopenedFocusB.id)
+    h.capture('focus-settled-context-members-restored-1280x800-dark',
+      'the reopened settled Focus Cluster restores member B open and member A closed')
   }
   live = foldLive(h)
   const durableTools = [...live.values()].filter(node => node.k === 'tool' && node.p['name'] === 'job_list')
@@ -833,10 +963,18 @@ export default async function (h) {
   const contextToggleIdentity = preset === 'focus'
     ? contextOwnerIds.length === 2 && contextOwnerIds.every(id => toggles.some(row => row.id === id))
     : cluster !== undefined && toggles.some(row => row.id === cluster.id)
-  h.check(`client toggle ledger contains the exact Thinking, Tool and ${preset === 'focus' ? 'Context Row' : 'Context Cluster'} ids`,
+  // Full/Compact open both members through their own native headers. Focus
+  // proves the SAME message owner was already toggled as a standalone Row, so
+  // one member-header toggle is the member-level proof (the other member kept
+  // that owner's state).
+  const memberToggleIdentity = contextMemberIds.length === 2
+    && (preset === 'focus'
+      ? contextMemberIds.some(id => toggles.some(row => row.id === id))
+      : contextMemberIds.every(id => toggles.some(row => row.id === id)))
+  h.check(`client toggle ledger contains the exact Thinking, Tool, ${preset === 'focus' ? 'Context Row' : 'Context Cluster'} and Context member ids`,
     toggles.some(row => row.id === reasoningId)
       && tool !== undefined && toggles.some(row => row.id === tool.id)
-      && contextToggleIdentity,
+      && contextToggleIdentity && memberToggleIdentity,
     JSON.stringify(toggles))
   await runCase(h, 'reproject')
   live = foldLive(h)
@@ -850,8 +988,23 @@ export default async function (h) {
   const contextOwnersRemainOpen = preset === 'focus'
     ? focusContextRowsPreservedDuringStreaming && cluster !== undefined && retainedCluster?.p['collapsed'] === false
     : cluster !== undefined && retainedCluster?.p['collapsed'] === false
+  // A retained Context row may legitimately move from a standalone Cluster into
+  // a Work-nested one (its node ancestry, and therefore its id, changes while
+  // the message OBJECT — the disclosure owner — stays the same).
+  const retainedMembers = retainedCluster === undefined ? [] : contextMemberNodes(h, retainedCluster.id)
+  const retainedMember = label => retainedMembers.find(member => String(member.p?.head ?? '').startsWith(label))
+  const retainedMemberState = (label, collapsed) => {
+    const member = retainedMember(label)
+    if (member === undefined) return false
+    return member.p.collapsed === collapsed
+      && (collapsed ? !live.has(`${member.id}.body`) : live.has(`${member.id}.body`))
+  }
+  const memberStatesRemain = retainedMemberState('inner-context-0', true)
+    && retainedMemberState('inner-context-1', false)
   h.check('same-source repaint preserves the opened Tool and canonical Context disclosure facts',
-    tool !== undefined && live.get(tool.id)?.p['collapsed'] === false && contextOwnersRemainOpen)
+    tool !== undefined && live.get(tool.id)?.p['collapsed'] === false && contextOwnersRemainOpen && memberStatesRemain,
+    JSON.stringify({ members: retainedMembers.map(member => ({ id: member.id, head: member.p.head,
+      collapsed: member.p.collapsed, body: live.has(`${member.id}.body`) })) }))
 
   const matrix = []
   const viewports = gui ? [VIEWPORTS[0]] : VIEWPORTS
@@ -898,6 +1051,11 @@ export default async function (h) {
         name: 'context',
         find: tree => mainNodes(tree).find(node => String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
           && (h.descendantsText(node).includes('inner-context-0') || h.descendantsText(node).includes('runtime-context'))),
+      },
+      {
+        name: 'context-member',
+        find: tree => mainNodes(tree).find(node => isSectionHead(node)
+          && h.descendantsText(node).includes('inner-context-0 · ambient')),
       },
     ]
     const innerGeometry = {}
@@ -968,6 +1126,12 @@ export default async function (h) {
     cluster: retainedCluster?.id ?? cluster?.id ?? null,
     initialContextCluster: cluster?.id ?? null,
     contextRows: contextOwnerIds,
+    contextMembers: (retainedCluster === undefined ? [] : contextMemberNodes(h, retainedCluster.id)).map(member => ({
+      id: member.id,
+      head: member.p.head,
+      collapsed: member.p.collapsed,
+      bodyPresent: foldLive(h).has(`${member.id}.body`),
+    })),
     clientToggles: toggles,
     evidenceTier: innerDisclosureEvidenceTier(gui),
     notVerified: ['OS physical keyboard/IME/wheel', 'OS dark appearance', 'G8 Owner visual signature'],

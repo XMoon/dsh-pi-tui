@@ -23,6 +23,7 @@ import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import type { TurnActivity } from '../../src/domain/transcript/types.ts'
 import type { TranscriptMessage } from '../../src/domain/transcript/types.ts'
+import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import {
   TranscriptNodeKeys,
   describeTranscriptMainBlocksForPreset,
@@ -401,4 +402,76 @@ test('the settled-answer stamp reads only the ask_user_question row', () => {
   // materialize nothing for it.
   assert.deepEqual(bashAfter, bashStamp, 'the ordinary tool stamp is untouched by the projection change')
   assert.deepEqual([...new Set(readCallIds)], ['call-q'])
+})
+
+test('one Cluster member toggle changes only the owning Cluster descriptor stamp', () => {
+  const contextEvent = (seq: number, id: string, text: string, plugin: string): SessionEvent => ev('user/message', {
+    id: MessageId(id),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'plugin', form: 'snapshot', plugin },
+  }, seq)
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'user-1', 'inspect two context clusters'),
+    contextEvent(2, 'cluster-1-a', 'first cluster member A', 'repo'),
+    contextEvent(3, 'cluster-1-b', 'first cluster member B', 'build'),
+    assistantMessage(4, 'final-1', 'the first answer', 1),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+    ev('turn/start', { turn: 2 }, 6),
+    userMessage(7, 'user-2', 'inspect the second turn'),
+    contextEvent(8, 'cluster-2-a', 'second cluster member A', 'repo'),
+    contextEvent(9, 'cluster-2-b', 'second cluster member B', 'build'),
+    assistantMessage(10, 'final-2', 'the second answer', 1),
+    ev('turn/end', { turn: 2, reason: { kind: 'completed' } }, 11),
+  ])
+  const messages = folder.messages()
+  const clusters = projectTranscriptStructure(messages)
+    .filter(block => block.kind === 'context-cluster')
+    .map(block => block.cluster)
+  assert.equal(clusters.length, 2)
+  const baseOptions = {
+    preset: 'full' as const,
+    scopePrefix: 's1-',
+    window: LATEST_WINDOW,
+    innerDisclosure: {
+      expandedThinkingOwners: new Set<TranscriptMessage>(),
+      expandedContextRowOwners: new Set<TranscriptMessage>(),
+      expandedClusterOwners: new Set(clusters.map(cluster => cluster.owner)),
+    },
+  }
+  const before = describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), baseOptions)
+  const after = describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), {
+    ...baseOptions,
+    innerDisclosure: {
+      ...baseOptions.innerDisclosure,
+      expandedContextRowOwners: new Set([clusters[0]!.members[0]!]),
+    },
+  })
+  assert.deepEqual(after.map(descriptor => descriptor.key), before.map(descriptor => descriptor.key),
+    'one member toggle keeps every top-level descriptor identity and order')
+  const changed = before.flatMap((descriptor, index) => {
+    assert.ok(descriptor.key === after[index]!.key)
+    return JSON.stringify(descriptor.stamp) === JSON.stringify(after[index]!.stamp) ? [] : [descriptor.key]
+  })
+  const clusterKey = before.find(descriptor => descriptor.owners.includes(clusters[0]!.owner))!.key
+  assert.deepEqual(changed, [clusterKey],
+    'only the descriptor that carries the toggled Cluster member is re-materialized')
+
+  // The unrelated top-level rows keep their REAL SDK node ids and content; the
+  // owning Cluster is the one subtree allowed to change.
+  const beforeFlat = flattenMain(lazyMain(messages, new TranscriptNodeKeys(), baseOptions))
+  const afterFlat = flattenMain(lazyMain(messages, new TranscriptNodeKeys(), {
+    ...baseOptions,
+    innerDisclosure: {
+      ...baseOptions.innerDisclosure,
+      expandedContextRowOwners: new Set([clusters[0]!.members[0]!]),
+    } as never,
+  }))
+  const clusterId = beforeFlat.find(node => node.id === `main.${clusterKey}`)?.id
+  assert.ok(clusterId !== undefined)
+  const unaffected = (nodes: FlatNode[]): FlatNode[] => nodes.filter(node =>
+    node.id !== clusterId && !node.id.startsWith(`${clusterId}.`))
+  assert.deepEqual(unaffected(afterFlat), unaffected(beforeFlat),
+    'unrelated User/Assistant/Cluster nodes and identities do not change')
 })

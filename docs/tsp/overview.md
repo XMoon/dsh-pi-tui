@@ -81,13 +81,18 @@ SurfaceRuntime.repaintTarget()  -- the ONE application writer
 - `src/tui/transcript/structure.ts` → `projectTranscriptStructure()` remains the
   ONLY Work/Context/standalone segmentation authority; the TSP mapper consumes
   its blocks and never re-groups rows.
-- The mapper renders canonical `TranscriptWorkSpan.parts`: a snapshot-only
-  Context cluster carried by a Work becomes a nested `ui.card` inside the Work
-  `ui.section` (member cards stay under that card); a proven Working
-  `tool-jobs` Notice is a direct card child of that section. A retained Context
-  row whose parent changes from standalone to Work-internal legitimately
-  produces a local `del` of the old top-level card plus one `add` carrying the
-  new Work subtree; Work and unrelated user/assistant node ids stay stable.
+- The mapper renders canonical `TranscriptWorkSpan.parts`: a canonical
+  snapshot-only Context Cluster carried by a Work becomes one native
+  `ui.section` inside the Work `ui.section`; each eligible Context member is
+  its own nested `ui.section` with an independent disclosure owner, while a
+  non-eligible member stays directly readable. Cluster and member are two
+  different disclosure owners: closing the ancestor never deletes a
+  descendant's manual preference, and each operable node is admitted only from
+  the current Main/Frame contribution index. A proven Working `tool-jobs`
+  Notice is a direct card child of that section. A retained Context row whose
+  parent changes from standalone to Work-internal legitimately produces a local
+  `del` of the old top-level card plus one `add` carrying the new Work subtree;
+  Work and unrelated user/assistant node ids stay stable.
 - TSP keeps ONE `Surface` and ONE Main document. The transcript Main's
   top-level children are maintained as targeted SDK ops from the block
   descriptors (`describeTranscriptMainBlocksForPreset`), so a retained row is

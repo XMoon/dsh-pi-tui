@@ -332,10 +332,15 @@ const handleOneBatch = async (): Promise<void> => {
       const agent = fixture.ctx.agents.get(mainSessionId as never)
       if (agent === undefined) throw new Error('the Direct Session agent is not available')
       for (const [index, text] of ['first native context detail', 'second native context detail'].entries()) {
+        // The FIRST payload is deliberately long: the member body must wrap and
+        // stay reachable through the client's own scroll without moving the Dock.
+        const body = index === 0
+          ? `${text}\n${'continuous context detail '.repeat(24).trim()}`
+          : text
         agent.session.append('user/message', {
           id: MessageId(`inner-context-${mode}-${index}`),
           role: 'user',
-          content: [{ type: 'text', text }],
+          content: [{ type: 'text', text: body }],
           source: { kind: 'plugin', form: 'snapshot', plugin: `inner-context-${index}` },
         }, { surfaceOp: 'append' })
       }
