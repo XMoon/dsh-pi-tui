@@ -907,13 +907,14 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // must be in place before the lease is taken.
     if (webSettingsAvailable()) beginWebSettingsRead()
     // M6-1 F8: the initial session-policy read starts only after this
-    // workspace's lease was granted (the lazy scope pin below is what the
-    // observation answers for). The read is fire-and-forget for the ROW: the
-    // panel's own snapshot loop reads the observation synchronously, and the
-    // observation's subscribe-driven repaint delivers the settle.
-    const startPolicyRead = (): void => {
+    // workspace's lease was granted. The panel's FIRST snapshot (constructor,
+    // inside the granted open) already starts the observation's controlled
+    // read, so the initial call only forces one when that snapshot is NOT
+    // `checking` (a proven old value that must be re-read). `r` forces it.
+    const startPolicyRead = (force: boolean): void => {
       const scope = pinnedApprovalScope()
       if (scope === undefined) return
+      if (!force && runner.policy.readSnapshot(scope.sessionId).kind === 'checking') return
       runDetached('session policy read', async () => {
         await runner.policy.refresh(scope.sessionId)
         runner.refreshStatus()
@@ -963,7 +964,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           const registry = runner.extensions?.settings.snapshot()
           return { revision: registry?.revision ?? 0, count: registry?.rows.length ?? 0 }
         },
-        onRefresh: () => { startWebSettingsRead(); startPolicyRead() },
+        onRefresh: () => { startWebSettingsRead(); startPolicyRead(true) },
       },
       {
         onOpenPlugins: (onYieldNavigation) => runner.createPluginManagerPage(onYieldNavigation),
@@ -1120,8 +1121,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     startWebSettingsRead()
     // M6-1 F8: the initial session-policy read starts only now that the
     // workspace lease was granted (a refused open captures no scope and
-    // starts no read).
-    startPolicyRead()
+    // starts no read); the panel's first snapshot already started it.
+    startPolicyRead(false)
     // C3 (plan §3.2 step 6): the workspace's OWN home is About, so a plain
     // open IS a semantic About entry — exactly ONE scoped snapshot refresh,
     // started only now that `openSettingsWorkspace` returned its live handle

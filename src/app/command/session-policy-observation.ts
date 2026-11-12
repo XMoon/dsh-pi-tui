@@ -125,8 +125,6 @@ export function createSessionPolicyObservation(
       controllers.add(controller)
       entry.inFlightSerial = serial
       const settle = (state: PolicyObservationState): PolicyObservationState => {
-        controllers.delete(controller)
-        if (entry.inFlightSerial === serial) entry.inFlightSerial = undefined
         // A late settlement never downgrades a newer read: only the CURRENT
         // serial may commit, and disposal revokes everything.
         if (!disposed && entry.serial === serial) {
@@ -135,30 +133,37 @@ export function createSessionPolicyObservation(
         }
         return entry.state
       }
-      let read: SessionPolicyRead
       try {
-        read = await source.read(sessionId, controller.signal)
-      } catch (error) {
+        let read: SessionPolicyRead
+        try {
+          read = await source.read(sessionId, controller.signal)
+        } catch (error) {
+          if (entry.serial !== serial) {
+            source.diag.debug('session policy read superseded before failure', { session: sessionId })
+            return entry.state
+          }
+          if (!stillLive(entry) || !source.isSubjectCurrent(sessionId)) {
+            return settle({ kind: 'unavailable', reason: 'session-not-live' })
+          }
+          return settle({ kind: 'failed', reason: error instanceof Error ? error.message : String(error) })
+        }
         if (entry.serial !== serial) {
-          source.diag.debug('session policy read superseded before failure', { session: sessionId })
+          source.diag.debug('session policy read superseded', { session: sessionId })
           return entry.state
+        }
+        if (read.kind === 'unavailable') {
+          return settle({ kind: 'unavailable', reason: read.reason })
         }
         if (!stillLive(entry) || !source.isSubjectCurrent(sessionId)) {
           return settle({ kind: 'unavailable', reason: 'session-not-live' })
         }
-        return settle({ kind: 'failed', reason: error instanceof Error ? error.message : String(error) })
+        return settle({ kind: 'ready', read })
+      } finally {
+        // EVERY terminal path releases the accepted-read controller — a
+        // superseded read must not keep it alive until the owner disposes.
+        controllers.delete(controller)
+        if (entry.inFlightSerial === serial) entry.inFlightSerial = undefined
       }
-      if (entry.serial !== serial) {
-        source.diag.debug('session policy read superseded', { session: sessionId })
-        return entry.state
-      }
-      if (read.kind === 'unavailable') {
-        return settle({ kind: 'unavailable', reason: read.reason })
-      }
-      if (!stillLive(entry) || !source.isSubjectCurrent(sessionId)) {
-        return settle({ kind: 'unavailable', reason: 'session-not-live' })
-      }
-      return settle({ kind: 'ready', read })
   }
 
   return {

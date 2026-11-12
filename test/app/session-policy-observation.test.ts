@@ -210,3 +210,28 @@ test('readSnapshot starts NO Host read while the owner-commit fence is closed (R
   await new Promise<void>(resolve => { setTimeout(resolve, 10) })
   assert.deepEqual(reads, ['s1'], 'the safe display refresh starts exactly one read')
 })
+
+
+test('a superseded read releases its AbortController instead of holding it to dispose (P2-B)', async () => {
+  const signals: AbortSignal[] = []
+  let releaseFirst: (() => void) | undefined
+  let call = 0
+  const source = sourceFixture({})
+  source.read = async (sessionId, signal) => {
+    if (signal !== undefined) signals.push(signal)
+    call += 1
+    if (call === 1) await new Promise<void>(resolve => { releaseFirst = resolve })
+    return readyRead(sessionId)
+  }
+  const observation = createSessionPolicyObservation(source)
+  const first = observation.refresh('s1')
+  const second = observation.refresh('s1')
+  releaseFirst?.()
+  await first
+  await second
+  // A settled SUPERSEDED read must have released its controller already: a
+  // later dispose therefore cannot abort its signal anymore.
+  observation.dispose()
+  assert.equal(signals[0]?.aborted, false,
+    'the superseded read released its controller when it settled, before dispose')
+})
