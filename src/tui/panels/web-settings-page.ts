@@ -662,9 +662,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       case 'web-send-original-question':
         return WEB_QUESTION_CANDIDATES
       case 'web-search-billing':
-        return this.billingOverridden(facts.settings, 'search') ? [] : WEB_BILLING_CANDIDATES.map(candidate => candidate.id)
+        return this.billingSelectable(facts.settings, 'search') ? WEB_BILLING_CANDIDATES.map(candidate => candidate.id) : []
       case 'web-fetch-billing':
-        return this.billingOverridden(facts.settings, 'fetch') ? [] : WEB_BILLING_CANDIDATES.map(candidate => candidate.id)
+        return this.billingSelectable(facts.settings, 'fetch') ? WEB_BILLING_CANDIDATES.map(candidate => candidate.id) : []
     }
   }
 
@@ -673,6 +673,22 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
    *  must not write (the official Host behaviour the override implies). */
   private billingOverridden(settings: WebProviderSettings, capability: 'search' | 'fetch'): boolean {
     return webAdvancedOverrideFields(settings.advanced, capability).length > 0
+  }
+
+  /** Whether the capability's API provider is the selected route. Only the
+   *  official Search/Fetch API consumes its billing mode; Messages Search and
+   *  HTTP Fetch never do. An absent value takes the official default (Search
+   *  API / HTTP respectively). */
+  private billingProviderSelected(settings: WebProviderSettings, capability: 'search' | 'fetch'): boolean {
+    return capability === 'search'
+      ? settings.searchProvider === undefined || settings.searchProvider === 'deepseek-search-api'
+      : settings.fetchProvider === 'deepseek-fetch-api'
+  }
+
+  /** A Billing row is writable only while its API provider is the current
+   *  route AND no YAML-only override owns that capability. */
+  private billingSelectable(settings: WebProviderSettings, capability: 'search' | 'fetch'): boolean {
+    return this.billingProviderSelected(settings, capability) && !this.billingOverridden(settings, capability)
   }
 
   /** Whether the configured provider id is one of the official candidates this
@@ -739,10 +755,12 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       case 'web-search-count': return String(settings.api.count)
       case 'web-send-original-question': return settings.api.sendOriginalQuestion ? 'on' : 'off'
       case 'web-search-billing':
+        if (!this.billingProviderSelected(settings, 'search')) return 'Not selected'
         return this.billingOverridden(settings, 'search')
           ? `Overridden by Host YAML (stored: ${webBillingLabel(settings.api.searchBilling)})`
           : webBillingLabel(settings.api.searchBilling)
       case 'web-fetch-billing':
+        if (!this.billingProviderSelected(settings, 'fetch')) return 'Not selected'
         return this.billingOverridden(settings, 'fetch')
           ? `Overridden by Host YAML (stored: ${webBillingLabel(settings.api.fetchBilling)})`
           : webBillingLabel(settings.api.fetchBilling)
@@ -1351,6 +1369,18 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         const capability = rowId === 'web-search-billing' ? 'search' : 'fetch'
         const settings = facts.kind === 'ready' ? facts.settings : undefined
         const overrides = settings === undefined ? [] : webAdvancedOverrideFields(settings.advanced, capability)
+        if (settings !== undefined && !this.billingProviderSelected(settings, capability)) {
+          notes.push(capability === 'search'
+            ? 'Not selected: only the DeepSeek Search API uses Search Billing. The current Search route is Messages, '
+              + 'which has its own endpoint/credential path; select the DeepSeek Search API provider first. '
+              + 'This row cannot write here.'
+            : 'Not selected: only the DeepSeek Fetch API uses Fetch Billing. The current Fetch route is HTTP, '
+              + 'which calls no billed API; select the DeepSeek Fetch API provider first. This row cannot write here.')
+          if (overrides.length > 0) {
+            notes.push(`Configured override: ${overrides.map(entry => `${entry.field}=${entry.value}`).join(' · ')}`)
+          }
+          break
+        }
         if (overrides.length > 0) {
           notes.push('Overridden by Host YAML: the advanced '
             + `${overrides.map(entry => entry.field).join(' and ')} field(s) own this capability's endpoint/credential `

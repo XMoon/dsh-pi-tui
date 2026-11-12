@@ -1101,7 +1101,7 @@ test('a superseded readback settling while the newer read is STILL pending never
 })
 
 test('a verified billing write reads back the committed mode on its own row', async t => {
-  const h = setup()
+  const h = setup({ searchProvider: 'deepseek-search-api' })
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 4) // the Search Billing row
@@ -1119,7 +1119,7 @@ test('a verified billing write reads back the committed mode on its own row', as
 })
 
 test('a billing write reports Outcome unknown when the read-back is unreadable', async t => {
-  const h = setup()
+  const h = setup({ searchProvider: 'deepseek-search-api' })
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 4)
@@ -1155,7 +1155,7 @@ function supersededBillingCase(
 ): void {
   for (const [columns, rows] of SUPERSEDED_SIZES) {
     test(`a superseded billing readback is judged by the NEWEST read at ${columns}x${rows}: ${name}`, async t => {
-      const h = setup({ columns, rows })
+      const h = setup({ columns, rows, searchProvider: 'deepseek-search-api' })
       t.after(h.dispose)
       await openWebPage(h)
       await openWebRow(h, 4) // the Search Billing row
@@ -1411,7 +1411,7 @@ test('a HOST error reason with ANSI/OSC/CR/LF is sanitized at the display bounda
 })
 
 test('a HOST failure reason with control text is sanitized inside the billing verdict', async t => {
-  const h = setup()
+  const h = setup({ searchProvider: 'deepseek-search-api' })
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 4)
@@ -1688,7 +1688,7 @@ test('a long Host failure reason is wholly readable in the Detail', async t => {
 // ── D3-2: the page states the real rc.2 facts ──────────────────────────────
 
 test('the page states the rc.2 defaults, billing and read-only overrides', async t => {
-  const h = setup()
+  const h = setup({ searchProvider: 'deepseek-search-api' })
   t.after(h.dispose)
   await openWebPage(h)
   const compact = (): string => h.view().replace(/[\u2500-\u257f│]/gu, ' ').replace(/\s+/gu, ' ')
@@ -1734,7 +1734,7 @@ test('the page states the rc.2 defaults, billing and read-only overrides', async
   const overrideFacts = (): WebSettingsFacts => ({
     kind: 'ready',
     settings: {
-      searchProvider: 'deepseek-official',
+      searchProvider: 'deepseek-search-api',
       fetchProvider: 'http',
       api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
       advanced: {
@@ -1845,6 +1845,60 @@ test('the page bar publishes the complete Esc span in its OWN content columns', 
     // No wording fits at all: the bar is empty and carries no geometry.
     page.render(8)
     assert.equal(page.paintedEscapeSpan(), undefined, 'a dropped wording advertises no Esc')
+  } finally {
+    page.dispose()
+  }
+})
+
+test('Billing rows are Not selected and inert when their API provider is not the current route', async () => {
+  const facts = (): WebSettingsFacts => ({
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-official',
+      fetchProvider: 'http',
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {},
+      credential: { configured: false },
+    },
+  })
+  const writes: string[] = []
+  const page = new WebSettingsPage({
+    readFacts: facts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => false,
+    commit: async (id, requested) => {
+      writes.push(`${id}:${requested}`)
+      return { kind: 'not-saved', reason: 'the inert row must never dispatch' }
+    },
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: () => {},
+    done: () => {},
+  })
+  try {
+    page.setMaxRows(24)
+    page.render(140)
+    // Rows: search provider, fetch provider, count, question, search billing.
+    page.handleInput('\x1b[H')
+    for (let step = 0; step < 4; step += 1) page.handleInput('\x1b[B')
+    page.handleInput('\r')
+    const search = stripTerminalSequences(page.render(140).join('\n'))
+    assert.match(search, /Current: Not selected/u)
+    assert.match(search, /only the DeepSeek Search API uses Search Billing/u)
+    assert.doesNotMatch(search, /Automatic · follows/u,
+      'a non-API Search route never paints the billing credential claim')
+    page.handleInput('\r')
+    assert.deepEqual(writes, [], 'the non-API Search route dispatches zero writes')
+    // Back to the list, then the Fetch Billing row (HTTP is not the API route).
+    page.handleInput('\x1b')
+    page.handleInput('\x1b[B')
+    page.handleInput('\r')
+    const fetch = stripTerminalSequences(page.render(140).join('\n'))
+    assert.match(fetch, /Current: Not selected/u)
+    assert.match(fetch, /only the DeepSeek Fetch API uses Fetch Billing/u)
+    page.handleInput('\r')
+    assert.deepEqual(writes, [], 'the non-API Fetch route dispatches zero writes')
   } finally {
     page.dispose()
   }

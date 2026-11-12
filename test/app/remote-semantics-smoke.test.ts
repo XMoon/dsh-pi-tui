@@ -2211,6 +2211,10 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
     assert.equal(config.credentials.available(), true, 'credential availability follows the current Client generation')
     await config.web.setSearchApiCount(7)
     assert.equal((await config.web.read())?.api.count, 7)
+    // Search Billing exists only for the official Search API route; the fixture
+    // profile keeps the stored Messages selection, so switch routes first.
+    await config.web.setSearchProvider('deepseek-search-api')
+    assert.equal((await config.web.read())?.searchProvider, 'deepseek-search-api')
     fixture = await mountSettingsWorkspace(host.anchorDir, config, 'remote')
     const page = fixture
     await page.open()

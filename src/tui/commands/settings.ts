@@ -696,6 +696,20 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       // when a stale presentation offered a candidate.
       if (id === 'web-search-billing' || id === 'web-fetch-billing') {
         const capability = id === 'web-search-billing' ? 'search' : 'fetch'
+        const providerSelected = capability === 'search'
+          ? base.searchProvider === undefined || base.searchProvider === 'deepseek-search-api'
+          : base.fetchProvider === 'deepseek-fetch-api'
+        // Only the official Search/Fetch API consumes its billing mode. A
+        // Messages/HTTP (or custom) route makes this row inert: an explicit
+        // Enter must never store a billing choice that does not apply now.
+        if (!providerSelected) {
+          return {
+            kind: 'not-saved',
+            reason: capability === 'search'
+              ? 'the Search route is not the DeepSeek Search API; Search Billing applies only to that API'
+              : 'the Fetch route is not the DeepSeek Fetch API; Fetch Billing applies only to that API',
+          }
+        }
         const overrides = webAdvancedOverrideFields(base.advanced, capability)
         if (overrides.length > 0) {
           return {

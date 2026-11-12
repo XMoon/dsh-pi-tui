@@ -370,6 +370,9 @@ for (const [columns, rows] of SIZES) {
   test(`the Search billing row keeps its candidates and confirm bar at ${columns}×${rows}`, async t => {
     const h = setup({ columns, rows })
     t.after(h.dispose)
+    // The Billing row exists only for the Search API route (Messages Search
+    // never consumes searchBilling).
+    h.store.web.searchProvider = 'deepseek-search-api'
     await openWebPage(h)
     await selectListRow(h, 4)
     await key(h, ENTER) // the billing Detail
