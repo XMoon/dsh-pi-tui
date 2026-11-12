@@ -331,9 +331,17 @@ export class RemoteAuthorizationConfig implements AuthorizationConfig {
           unknownReason = 'the Host repeated the authorization start frame'
           break
         }
-        this.emit(frame)
-        if (frame.kind === 'settled' || frame.kind === 'unconfirmed') {
+        const terminalFrame = frame.kind === 'settled' || frame.kind === 'unconfirmed'
+        if (terminalFrame) {
+          // Commit the attempt's terminal state BEFORE any listener runs: a
+          // synchronous listener that replaces the generation must not find
+          // this attempt in the map and publish a second `unconfirmed` terminal
+          // for the settlement it is already receiving.
           attempt.reported = true
+          if (this.attempts.get(attempt.attemptId) === attempt) this.attempts.delete(attempt.attemptId)
+        }
+        this.emit(frame)
+        if (terminalFrame) {
           terminal = true
           break
         }

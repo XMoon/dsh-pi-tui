@@ -547,6 +547,36 @@ test('UNIT: a generation replacement turns an in-flight attempt into unconfirmed
   }
 })
 
+test('UNIT: a listener that replaces the generation on the official terminal never receives a second terminal', async () => {
+  const generation = fakeGeneration()
+  const adapter = new RemoteAuthorizationConfig(fakeNamespace({
+    run: () => streamOf([
+      { kind: 'started', attemptId: 'attempt-reentrant' },
+      { kind: 'settled', attemptId: 'attempt-reentrant', status: 'authorized' },
+    ]),
+  }), generation.source)
+  const events: AuthorizationFlowEvent[] = []
+  adapter.onEvent(event => {
+    events.push(event)
+    // A REAL listener may react to the settlement (a reconnect, an app-level
+    // refresh) synchronously. That must never turn the ONE official terminal
+    // into a second `unconfirmed` terminal for the same attempt.
+    if (event.kind === 'settled') generation.replace()
+  })
+  try {
+    const started = await adapter.begin({ key: 'llm-pi-ai/x' })
+    assert.equal(started.kind, 'started')
+    await waitFor('the official terminal', () => events.some(event => event.kind === 'settled'), 5_000)
+    await sleep(50)
+    const terminals = events.filter(event => event.kind === 'settled' || event.kind === 'unconfirmed')
+    assert.equal(terminals.length, 1, `exactly one terminal must reach the flow: ${JSON.stringify(terminals)}`)
+    assert.equal(terminals[0]?.kind, 'settled')
+    assert.equal(adapter.targetsState(), 'stale')
+  } finally {
+    adapter.dispose()
+  }
+})
+
 test('UNIT: an invalid or foreign frame closes the attempt as unconfirmed instead of trusting it', async () => {
   const generation = fakeGeneration()
   for (const [label, frame] of [
