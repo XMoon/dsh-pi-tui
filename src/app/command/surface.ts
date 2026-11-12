@@ -1454,6 +1454,14 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       awaitWorkspacePreflight: deps.session.awaitWorkspacePreflight === undefined
         ? undefined
         : () => deps.session.awaitWorkspacePreflight!(),
+      // The create-boundary AUTO Workspace re-proof (`/new`). The session owner
+      // is the only holder of the Client-local equivalence evidence, so the
+      // facade must forward its validator: a dropped member makes every Remote
+      // sessionless `/new` treat a preflight-confirmed candidate as stale and
+      // refuse the create.
+      validateAutoWorkspace: deps.session.validateAutoWorkspace === undefined
+        ? undefined
+        : () => deps.session.validateAutoWorkspace!(),
       get selected() { return deps.model.selected },
       // Legacy/display facade: the newest SESSIONLESS `/model` intent (pending
       // or unresolved) falling back to the persisted global default. A fresh
