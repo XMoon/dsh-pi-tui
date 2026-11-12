@@ -97,8 +97,13 @@ export interface TspInputCompletion {
    *  plugin fallback can resurrect a menu whose command source is known-bad.
    *  It is a COMMAND-source fact ONLY: a Host `@` seat and a Client-local path
    *  seat keep answering from their own sources, and each of those sources
-   *  stays the sole authority on whether it can answer at all (I-D D23). */
-  install(provider: AutocompleteProvider, sourceFailed?: boolean): void
+   *  stays the sole authority on whether it can answer at all (I-D D23).
+   *
+   *  Returns whether the install ALREADY repainted (its open list was
+   *  withdrawn). The mount uses that fact to guarantee ONE frame per catalog
+   *  commit: a closed seat never repaints on its own, and the command
+   *  authority the dock's controls are admitted by changed with the commit. */
+  install(provider: AutocompleteProvider, sourceFailed?: boolean): boolean
   /** The shared provider's inline-attachment capture entry, wired when the
    *  mount composes the provider (D03). A provider calls it SYNCHRONOUSLY
    *  inside `applyCompletion()`, which is the only moment this seat pays
@@ -635,7 +640,9 @@ export function createTspInputCompletion(
       sourceRevision += 1
       provider = installed
       sourceFailed = failedSource
-      if (withdraw()) ports.requestRender()
+      const withdrew = withdraw()
+      if (withdrew) ports.requestRender()
+      return withdrew
     },
     captureInlineAttachmentAcceptance: (acceptance) => {
       // Armed ONLY inside this seat's own `applyCompletion()` call, and always
