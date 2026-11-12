@@ -5263,7 +5263,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           completion.captureInlineAttachmentAcceptance(acceptance)
         },
       })
-      completion.install(provider, installation.sourceFailed === true)
+      // F2: a catalog commit can change the command authority the dock's
+      // controls are admitted by (a genuine Host `/tasks`/`/subagents` taking
+      // over the name, or releasing it). The closed completion seat repaints
+      // nothing on its own, so the dock would keep a stale click affordance
+      // until an unrelated status commit. Paint exactly ONE frame per commit:
+      // the install's own repaint (its list was withdrawn) already happened.
+      const repainted = completion.install(provider, installation.sourceFailed === true)
+      if (!repainted) render()
     },
     // TSP I-E: the ONE History-search bind. Synchronous, exactly once, at the
     // mount (before `bindInput` can deliver any key), and it installs nothing
