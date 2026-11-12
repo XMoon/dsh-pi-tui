@@ -437,6 +437,8 @@ interface Harness {
   readonly releaseFirstReplace: () => void
   /** M6-1 F8: settle the deferred initial Host policy read. */
   readonly releasePolicyRead: () => void
+  /** M6-1 F8: explicit `policy.refresh()` calls (double-read witness). */
+  readonly policyRefreshCalls: () => number
   /** M6-1 F8: revoke the policy truth (Connection generation/subject change). */
   readonly revokePolicyRead: () => void
   readonly dispose: () => void
@@ -493,6 +495,7 @@ function setup(options: HarnessOptions = {}): Harness {
   const approvalState = agent.approval ?? { value: undefined as 'ask' | 'never' | undefined }
   const policyGenerationSlot = agent.generation ?? { value: agent.policyGeneration ?? {} }
   const policyListeners = new Set<(event: 'committed' | 'invalidated') => void>()
+  let policyRefreshCalls = 0
   let policyReadSettled = agent.deferPolicyRead !== true
   let releaseDeferredPolicyRead: (() => void) | undefined
   let policyReadGate: Promise<void> | undefined
@@ -725,6 +728,7 @@ function setup(options: HarnessOptions = {}): Harness {
     policy: {
       readSnapshot: policySnapshot,
       refresh: async (sessionId: string) => {
+        policyRefreshCalls += 1
         if (agent.deferPolicyRead === true && !policyReadSettled) {
           beginDeferredPolicyRead()
           await policyReadGate
@@ -1028,6 +1032,8 @@ function setup(options: HarnessOptions = {}): Harness {
     releaseFirstReplace: () => { releaseFirstReplace?.() },
     /** M6-1 F8: settle the deferred initial Host policy read. */
     releasePolicyRead: () => { releaseDeferredPolicyRead?.() },
+    /** M6-1 F8: explicit `policy.refresh()` calls (double-read witness). */
+    policyRefreshCalls: () => policyRefreshCalls,
     /** M6-1 F8: revoke the policy truth (Connection generation/subject change). */
     revokePolicyRead: () => {
       policyReadSettled = false
@@ -1861,6 +1867,10 @@ test('M6-1 F8: a Host policy read settling after the first frame replaces Checki
   })
   await h.open('Agent')
   await key(h, '\r') // L0 -> L1 rows: the first frame reads the still-pending Host policy
+  // The panel's first snapshot already started the ONE read; the Settings
+  // command must not issue a second explicit refresh for the same open.
+  assert.equal(h.policyRefreshCalls(), 0,
+    'the initial open must not double-read: the panel snapshot already started the read')
   assert.match(h.view(), /Checking…/u, `the first frame is the truthful pending state:\n${h.view()}`)
   assert.doesNotMatch(h.view(), /Effective:/u, 'no fact is guessed before the Host answers')
   // The Host read settles LATER; no `r`, no re-open, no key press at all.

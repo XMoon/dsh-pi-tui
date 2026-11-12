@@ -328,6 +328,13 @@ function sessionTurnEndReasonOf(data: unknown): string | undefined {
   return typeof reason?.kind === 'string' ? reason.kind : undefined
 }
 
+/** The durable policy knob events (the exact family the approval/sandbox
+ *  observation re-derives from the official Host store). ONE predicate for the
+ *  main and the viewed-child routing branches. */
+function isPolicyKnobEvent(type: string): boolean {
+  return type === 'permission/preset' || type === 'approval/policy' || type === 'sandbox/mode'
+}
+
 /**
  * Create the application-level presentation event router. The bodies are the
  * aggregate's original routing bodies verbatim; only the free variables became
@@ -402,6 +409,11 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
         // just above, and both stores keep their content-equality no-notify
         // discipline. Transient assistant-stream frames never reach this durable
         // path at all, so no per-token work is added.
+        // M6-1 F8: the CHILD's own policy knob events revoke the observation
+        // for the CHILD's exact session id too — a footer refresh alone would
+        // keep rendering the previous ready sandbox/approval snapshot for the
+        // viewed subject.
+        if (isPolicyKnobEvent(event.type)) source.invalidateSessionPolicy?.(session.id)
         viewer.refreshFooter()
         if (event.type === 'turn/start' || event.type === 'agent/inbox/spliced') queueMicrotask(() => options.refreshPendingInput())
         if (event.type === 'turn/end') options.paintNow()
@@ -458,7 +470,7 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     // "permission: …" notice) ~REPAINT_FLUSH_MS after the switch, making
     // it flash. The footer badge refresh below repaints the status line
     // instead, and the next real session event repaints the transcript.
-    const isKnob = event.type === 'permission/preset' || event.type === 'approval/policy' || event.type === 'sandbox/mode'
+    const isKnob = isPolicyKnobEvent(event.type)
     if (!isKnob) options.schedulePaint()
     if (event.type === 'todo/write') options.mounted().commitStatusFacts({ todos: (event.data as { readonly todos: readonly TodoItem[] }).todos })
     if (event.type === 'plan/mode') options.mounted().commitStatusFacts({ planMode: (event.data as { readonly active: boolean }).active })
