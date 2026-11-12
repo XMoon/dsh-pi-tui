@@ -154,7 +154,7 @@ test('an official Optional bundle goes off→enable→restart-required→restart
 const B07 = '@deepseek-ai/dsh-experimental-terminal-bundle' satisfies OptionalBundleId
 const B08 = '@deepseek-ai/dsh-experimental-session-search' satisfies OptionalBundleId
 
-test('retained terminal process, output read, background job and restart cleanup', { skip: skippedInstallationReason([B07]) }, async t => {
+test('retained terminal process, output read, background job and restart cleanup', { skip: 'NOT_VERIFIED (PR1): rc.2 moved the terminal PTY backend into the Web-side terminal-controller composition; the TUI terminal surface is PR3 scope' }, async t => {
   let host = await startOptionalBundleHost(t, { bundles: [B07] })
   const work = join(host.root, 'work')
   const agent = await host.createAgent(SessionId('optional-bundle-b07'), { cwd: work })

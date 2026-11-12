@@ -1,7 +1,7 @@
 /**
  * S5-PR1 official Optional-bundle qualification: the three Optional bundles
  * the current release adds beyond the legacy B01–B14 verified subset, plus the
- * Host's OWN platform refusal for the darwin-only CUA on-demand catalog entry.
+ * Host's OWN platform refusal for the darwin-only CUA shipped Optional bundle.
  *
  * `PRODUCTION PREREQUISITES REPRODUCED`: the published `@deepseek-ai/dsh-base`
  * family and the three published Optional bundle packages at this checkout's
@@ -170,7 +170,7 @@ for (const name of S5_OPTIONAL_BUNDLE_IDS) {
   })
 }
 
-test('the darwin-only CUA on-demand entry is a REAL Host catalog negative on this platform', { skip: skippedInstallationReason([]) }, async t => {
+test('the darwin-only CUA shipped Optional bundle is a REAL Host catalog platform negative', { skip: skippedInstallationReason([]) }, async t => {
   const host = await startOptionalBundleHost(t, { bundles: [] })
   const bundles = await host.pluginManager.listBundles() as readonly {
     readonly name: string
@@ -183,21 +183,23 @@ test('the darwin-only CUA on-demand entry is a REAL Host catalog negative on thi
     readonly error?: { readonly code: string; readonly diagnostic?: string }
   }[]
   const cua = bundles.find(candidate => candidate.name === CUA_BUNDLE)
-  assert.ok(cua !== undefined, 'the real Host catalog carries the CUA on-demand entry')
+  assert.ok(cua !== undefined, 'the real Host catalog carries the CUA shipped Optional bundle')
   assert.equal(cua.official, true)
-  assert.equal(cua.availability, 'missing')
+  // rc.2 moved CUA from the on-demand catalog to the shipped Optional roster:
+  // it is installation-owned and has no install target.
+  assert.equal(cua.availability, 'installation')
   assert.equal(cua.enabled, false)
-  assert.equal(cua.listedByDefault, false, 'the Host hides it from the default listing')
-  assert.equal(cua.installTarget?.version, TARGET_VERSION)
-  assert.equal(cua.installTarget?.spec, `${CUA_BUNDLE}@${TARGET_VERSION}`)
+  assert.equal(cua.installTarget, undefined)
   if (process.platform === 'darwin') {
     // On its supported Host the platform refusal is absent; the native
     // Accessibility/Consent/desktop operations remain EXTERNAL_NOT_QUALIFIED.
     assert.equal(cua.error, undefined)
+    assert.equal(cua.listedByDefault, undefined)
   } else {
     assert.equal(cua.error?.code, 'unsupported-platform')
+    assert.equal(cua.listedByDefault, false, 'the Host hides a platform-refused entry from the default listing')
   }
-  // This Host never loads the bundle: the case is a catalog/platform negative,
+  // This Host never selects the bundle: the case is a catalog/platform negative,
   // not a native CUA qualification.
   assert.equal(host.activeBundles.includes(CUA_BUNDLE), false)
 })

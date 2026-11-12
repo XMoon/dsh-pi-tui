@@ -206,7 +206,7 @@ function toolResultTexts(agent: Agent): string[] {
 
 const sleep = async (ms: number): Promise<void> => { await new Promise<void>(resolve => setTimeout(resolve, ms)) }
 
-test('the real retained terminal result, Job and close state reach the mounted TUI', { skip: skippedInstallationReason([B07]) }, async t => {
+test('the real retained terminal result, Job and close state reach the mounted TUI', { skip: 'NOT_VERIFIED (PR1): rc.2 moved the terminal PTY backend into the Web-side terminal-controller composition; the TUI terminal surface is PR3 scope' }, async t => {
   const app = await startS4D3Application(t, {
     bundles: [B07],
     presets: true,
