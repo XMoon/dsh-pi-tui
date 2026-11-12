@@ -127,15 +127,6 @@ export function parsePiTuiCredentialRecordList(value: unknown): readonly Credent
   return value.map(parsePiTuiCredentialRecordMetadata)
 }
 
-function codecOf<T>(label: string, parse: (value: unknown) => T): TypertCodec {
-  return {
-    mode: 'strict',
-    typeSymbol: `@xmoon76/dsh-pi-tui#${label}`,
-    create: () => ({ parse }),
-    decode: parse,
-  }
-}
-
 const LIST_CODEC: TypertCodec = {
   mode: 'strict',
   typeSymbol: `${PI_TUI_CREDENTIAL_RECORDS_LIST_ENDPOINT}:result`,
