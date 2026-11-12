@@ -397,8 +397,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           subject: {
             currentSessionId: scope.sessionId,
             currentCwd: runner.sessionCwd(),
-            ...(nextIntent?.status === 'confirmed' && nextIntent.workspaceId !== undefined
-              ? { currentWorkspaceId: nextIntent.workspaceId }
+            // IDENTITY, not transient status (external review EXT-P1 sibling):
+            // the Browser/TSP panel's next-create identity is the snapshot's
+            // intent, so a verifying/refused Add of another path never clears
+            // the still-confirmed Workspace.
+            ...(nextIntent?.intent?.kind === 'workspace-id'
+              ? { currentWorkspaceId: nextIntent.intent.workspaceId }
               : {}),
             isCurrent: () => !signal.aborted && runner.isSessionScopeCurrent(scope),
           },
