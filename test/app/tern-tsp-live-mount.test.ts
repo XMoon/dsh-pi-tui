@@ -2457,11 +2457,59 @@ test('inner Thinking, Context and Tool toggles use the exact current node owner 
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: thinking.id, collapsed: false, raw: {} })
     await awaitWireFact(() => current().some(node => node.id === `${thinking.id}.body`), 'the Thinking body after exact toggle')
     harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: cluster.id, collapsed: false, raw: {} })
-    await awaitWireFact(() => current().some(node => node.p['text'] === 'first hidden context'), 'the exact canonical Context Cluster body')
+    await awaitWireFact(() => current().filter(node => node.k === 'section'
+      && (node.p['head'] === 'first label · ambient' || node.p['head'] === 'second label · ambient')).length === 2,
+    'the two canonical Context member Sections after the Cluster opens')
+    const memberOf = (head: string): ModeWireNode => {
+      const node = current().find(entry => entry.k === 'section' && entry.p['head'] === head)
+      assert.ok(node !== undefined, `the current member Section exists: ${head}`)
+      return node
+    }
+    const memberA = memberOf('first label · ambient')
+    const memberB = memberOf('second label · ambient')
+    assert.ok(memberA.id !== memberB.id, 'each Cluster member has its own exact node id')
+    for (const member of [memberA, memberB]) {
+      assert.equal(member.p['collapsible'], true)
+      assert.equal(member.p['collapsed'], true, 'a member body starts independently closed')
+      assert.equal(current().some(node => node.id === `${member.id}.body`), false)
+    }
+    assert.equal(current().some(node => node.p['text'] === 'first hidden context'), false,
+      'opening the canonical Cluster alone materializes no member body')
+    const memberBodies = (): { readonly a: boolean; readonly b: boolean } => ({
+      a: current().some(node => node.id === `${memberA.id}.body` && node.p['text'] === 'first hidden context'),
+      b: current().some(node => node.id === `${memberB.id}.body` && node.p['text'] === 'second hidden context'),
+    })
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: memberA.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => memberBodies().a, 'the exact member A body after its own toggle')
+    assert.deepEqual(memberBodies(), { a: true, b: false }, 'member A opens without opening B')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: memberB.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => memberBodies().b, 'the exact member B body after its own toggle')
+    assert.deepEqual(memberBodies(), { a: true, b: true }, 'both members are independently open')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: memberA.id, collapsed: true, raw: {} })
+    await awaitWireFact(() => !memberBodies().a, 'closing member A retires only its own body')
+    assert.deepEqual(memberBodies(), { a: false, b: true }, 'member B keeps its own open state')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: cluster.id, collapsed: true, raw: {} })
+    await awaitWireFact(() => current().every(node => node.id !== memberA.id && node.id !== memberB.id),
+      'closing the Cluster retires both member nodes')
+    // A stale member id under the closed ancestor names no current contribution.
+    const framesWithClusterClosed = painted()
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: memberA.id, collapsed: false, raw: {} })
+    // Bounded negative observation: a stale member id must paint no frame.
+    await settle()
+    assert.equal(painted(), framesWithClusterClosed, 'a stale member id under a closed Cluster paints no frame')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: cluster.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => current().some(node => node.id === memberB.id), 'the same Cluster reopens')
+    assert.equal(current().find(node => node.id === memberA.id)?.p['collapsed'], true,
+      'reopening the Cluster restores member A closed')
+    assert.equal(current().find(node => node.id === memberB.id)?.p['collapsed'], false,
+      'reopening the Cluster restores member B open')
+    assert.deepEqual(memberBodies(), { a: false, b: true }, 'the member preference survives the Cluster close/open cycle')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: memberA.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => memberBodies().a, 'member A reopens independently again')
     harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: tool.id, collapsed: false, raw: {} })
     await awaitWireFact(() => current().some(node => node.id === `${tool.id}.result`), 'the exact Tool result body')
 
-    const stableIds = [thinking.id, cluster.id, tool.id]
+    const stableIds = [thinking.id, cluster.id, tool.id, memberA.id, memberB.id]
     harness.route(ev('user/message', { id: MessageId('inner-followup'), role: 'user', content: [{ type: 'text', text: 'same Source follow-up' }], source: { kind: 'user' } }, 8))
     harness.surface.paintNow()
     await awaitWireFact(() => current().some(node => nodeText(node).includes('same Source follow-up')), 'a later same-source projection')
@@ -2469,6 +2517,9 @@ test('inner Thinking, Context and Tool toggles use the exact current node owner 
     assert.equal(current().find(node => node.id === thinking.id)?.p['collapsed'], false, 'the opened Thinking stays open')
     assert.equal(current().find(node => node.id === cluster.id)?.p['collapsed'], false, 'the opened Cluster stays open')
     assert.equal(current().find(node => node.id === tool.id)?.p['collapsed'], false, 'the opened Tool stays open')
+    assert.equal(current().find(node => node.id === memberA.id)?.p['collapsed'], false, 'member A stays open')
+    assert.equal(current().find(node => node.id === memberB.id)?.p['collapsed'], false, 'member B stays open')
+    assert.deepEqual(memberBodies(), { a: true, b: true }, 'the same-source update keeps both member bodies')
 
     const pending = harness.renderer().interaction.askQuestions([{ id: 'inner-seat-q', question: 'Proceed?' }], undefined, undefined, false)
     pending.catch(() => {})
@@ -2481,6 +2532,12 @@ test('inner Thinking, Context and Tool toggles use the exact current node owner 
       'a covered toggle does not mutate the manual owner')
     assert.equal(current().some(node => node.id === `${thinking.id}.body`), true,
       'the covered close does not remove the Thinking body')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: memberA.id, collapsed: true, raw: {} })
+    // Bounded negative observation: a covered member toggle must paint no frame.
+    await settle()
+    assert.equal(current().find(node => node.id === memberA.id)?.p['collapsed'], false,
+      'a covered member toggle does not mutate the member owner')
+    assert.deepEqual(memberBodies(), { a: true, b: true }, 'the covered member close keeps its body')
     harness.renderer().interaction.withdrawPending()
     await pending.catch(() => {})
 
@@ -2509,6 +2566,11 @@ test('inner Thinking, Context and Tool toggles use the exact current node owner 
     // Bounded negative observation: a retired Context Cluster id must paint no late frame.
     await settle()
     assert.equal(painted(), beforeLate, 'a retired Context cluster id cannot act on the new Source')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: oldIds[3]!, collapsed: false, raw: {} })
+    // Bounded negative observation: a retired Cluster member id must paint no late frame.
+    await settle()
+    assert.equal(painted(), beforeLate, 'a retired Cluster member id cannot act on the new Source')
+    assert.equal(current().some(node => node.p['text'] === 'incoming reasoning'), true)
   } finally {
     await harness.dispose()
     await harness.session.close()
