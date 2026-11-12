@@ -45,6 +45,7 @@ import type {
   StoredCredentialRow,
 } from '../../app/command/credential-workflow.ts'
 import { PROTOCOL_CHOICES, ROUTE_PATTERN } from '../../domain/catalog/provider.ts'
+import { SupersededReadError } from '../../runtime/read-error.ts'
 
 /** One provider row of the Models list (a detached semantic DTO). */
 export interface ModelsProviderRow {
@@ -131,6 +132,9 @@ export type ModelsRecordPresence =
   | { readonly kind: 'known'; readonly records: readonly { readonly key: string; readonly route?: string }[] }
   | { readonly kind: 'unavailable'; readonly reason: string }
   | { readonly kind: 'failed'; readonly reason: string }
+  /** A record DELETE was dispatched but its outcome could not be observed: the
+   *  stored presence is unknown until a fresh authoritative read. */
+  | { readonly kind: 'unknown'; readonly reason: string }
 
 /** The page's intent surface (the app/command owner implements it). */
 export interface ModelsWorkspaceSource {
@@ -195,11 +199,16 @@ type ModelsView =
   | { readonly kind: 'guide' }
 
 interface ClearState {
-  readonly phase: 'reading' | 'ready' | 'pending' | 'done' | 'failed'
+  /** `unconfirmed` is a DISPATCHED record delete whose Host outcome could not
+   *  be observed — never a failure and never a success. */
+  readonly phase: 'reading' | 'ready' | 'pending' | 'done' | 'failed' | 'unconfirmed'
   readonly configured: boolean
   readonly source?: string
   readonly reason?: string
   readonly result?: string
+  /** The definite failure class of the record path: the exact reason the clear
+   *  ended without a committed delete. */
+  readonly failure?: 'not-sent' | 'rejected' | 'still-stored'
 }
 
 interface AddProviderState {
@@ -341,6 +350,18 @@ function isPrintableText(data: string): boolean {
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
+
+/** The UI's structural read of the Remote adapter's stable failure code (the
+ *  page never imports the Remote error class). */
+function errorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const code = (error as { readonly code?: unknown }).code
+  return typeof code === 'string' && code !== '' ? code : undefined
+}
+
+/** The stable code of a dispatched record delete whose Host settlement the
+ *  Client could not observe (owned by the Remote credential adapter). */
+const RECORD_DELETE_UNCONFIRMED_CODE = 'RECORD_DELETE_UNCONFIRMED'
 
 /** The Models page component. Constructed per workspace open. */
 /** The pending-write Esc is a WAIT fact, never a navigation affordance: it is
@@ -1105,9 +1126,34 @@ export class ModelsWorkspacePage implements Component {
         if (target.kind === 'reference') await this.source.clearReference(target.ref)
         else await this.source.deleteRecord(target.key)
       } catch (error) {
+        const unconfirmed = target.kind === 'record' && errorCode(error) === RECORD_DELETE_UNCONFIRMED_CODE
         this.settle(() => {
           if (!isCurrent()) return
-          this.clear = { phase: 'failed', configured: true, reason: errorText(error) }
+          if (unconfirmed) {
+            // The Host MAY have committed the delete: never report "Not
+            // cleared", never replay the call. Every older record snapshot is
+            // invalidated and the exact key is kept; only a fresh read may
+            // re-arm the confirmation.
+            this.recordsSerial += 1
+            this.records = undefined
+            this.recordPresenceSerial += 1
+            this.recordPresence = {
+              kind: 'unknown',
+              reason: 'the last clear outcome is unconfirmed; refresh records',
+            }
+            this.clear = { phase: 'unconfirmed', configured: true, reason: errorText(error) }
+            return
+          }
+          // A definite refusal (invalid key / official bad-request) or a
+          // pre-dispatch fence: this attempt provably did not change the store.
+          this.clear = target.kind === 'reference'
+            ? { phase: 'failed', configured: true, reason: errorText(error) }
+            : {
+                phase: 'failed',
+                configured: true,
+                failure: error instanceof SupersededReadError ? 'not-sent' : 'rejected',
+                reason: errorText(error),
+              }
         })
         return
       }
@@ -1151,8 +1197,18 @@ export class ModelsWorkspacePage implements Component {
           this.recordsSerial += 1
           this.records = records
           this.clear = present
-            ? { phase: 'failed', configured: true, reason: 'the stored record is still present after the clear' }
-            : { phase: 'done', configured: false, result: `${target.label} signed out locally — stored credential cleared` }
+            ? {
+                phase: 'failed',
+                configured: true,
+                failure: 'still-stored',
+                reason:
+                  'the stored record is present on the current Host (it may have been re-created since the clear); refresh and confirm a new clear',
+              }
+            : {
+                phase: 'done',
+                configured: false,
+                result: `${target.label} — local stored credential cleared (not revoked at the issuer; the current model is unchanged)`,
+              }
           // The HOME's record presence is the same fact: re-read it (the
           // minimal affected authority) instead of leaving the old answer.
           this.readRecordPresence()
@@ -1160,16 +1216,15 @@ export class ModelsWorkspacePage implements Component {
       } catch (error) {
         this.settle(() => {
           if (!isCurrent() || readSerial !== this.clearReadSerial) return
-          // The authoritative re-read failed. Fence any older refreshRecords
-          // answer and drop the old snapshot: record presence is Unknown, never
-          // the pre-delete list.
+          // The method ACK does not prove the CURRENT presence: a failed
+          // readback is an unconfirmed outcome, never `done` and never
+          // `Not cleared`. Fence every older snapshot and keep a read-only
+          // refresh.
           this.recordsSerial += 1
           this.records = undefined
-          // The HOME's record presence is the SAME deleted fact: a read that
-          // started before the clear must not settle as a fresh "Signed in".
           this.recordPresenceSerial += 1
-          this.recordPresence = { kind: 'failed', reason: `the clear returned; the record list could not be re-read: ${errorText(error)}` }
-          this.clear = { phase: 'failed', configured: true, reason: `the clear returned; the record list could not be re-read: ${errorText(error)}` }
+          this.recordPresence = { kind: 'unknown', reason: `the clear returned; the record list could not be re-read: ${errorText(error)}` }
+          this.clear = { phase: 'unconfirmed', configured: true, reason: `the clear returned; the record list could not be re-read: ${errorText(error)}` }
         })
       }
     })
@@ -2157,6 +2212,9 @@ export class ModelsWorkspacePage implements Component {
         if (this.authorizationNotice !== undefined) {
           return [color.textDim(sanitizedPhysicalLine(this.authorizationNotice))]
         }
+        if (this.recordPresence?.kind === 'unknown') {
+          return [color.warning(`The stored credential state is unconfirmed: ${sanitizedPhysicalLine(this.recordPresence.reason)}`)]
+        }
         if (this.recordPresence?.kind === 'failed') {
           return [color.warning(`The stored credential records could not be read: ${sanitizedPhysicalLine(this.recordPresence.reason)}`)]
         }
@@ -2215,7 +2273,7 @@ export class ModelsWorkspacePage implements Component {
     // A backend that cannot enumerate records is UNAVAILABLE, never an empty
     // answer that would read as "not signed in".
     if (presence.kind === 'unavailable') return { kind: 'unavailable', reason: presence.reason }
-    if (presence.kind === 'failed') return { kind: 'unknown', reason: presence.reason }
+    if (presence.kind === 'failed' || presence.kind === 'unknown') return { kind: 'unknown', reason: presence.reason }
     const key = row.key
     const configured = key === undefined
       ? presence.records.some(entry => entry.route !== undefined && entry.route === row.route)
@@ -2601,15 +2659,31 @@ export class ModelsWorkspacePage implements Component {
     }
     content.push('')
     if (clear.phase === 'reading') content.push(color.textMuted('Reading the credential store…'))
-    else if (clear.phase === 'failed') content.push(color.error(`Not cleared: ${sanitizedPhysicalLine(clear.reason ?? 'the clear could not be verified')}`))
-    else if (clear.phase === 'pending') content.push(color.textMuted('Clearing — the Host has not confirmed yet.'))
+    else if (clear.phase === 'unconfirmed') {
+      // A dispatched delete whose Host settlement was lost: neither success nor
+      // failure, and never a reason to re-send it automatically.
+      content.push(color.warning('Outcome unconfirmed — refresh stored credentials before retrying.'))
+      if (clear.reason !== undefined) content.push(color.textDim(sanitizedPhysicalLine(clear.reason)))
+      content.push(color.textDim('The Host may already have removed it. Reading the current Host once is the only next step.'))
+    } else if (clear.phase === 'failed') {
+      const reasonText = sanitizedPhysicalLine(clear.reason ?? 'the clear could not be verified')
+      if (clear.failure === 'not-sent') content.push(color.error(`Not sent: ${reasonText}`))
+      else if (clear.failure === 'still-stored') content.push(color.warning(`Still stored: ${reasonText}`))
+      else if (clear.failure === 'rejected') content.push(color.error(`Failed: ${reasonText}`))
+      else content.push(color.error(`Not cleared: ${reasonText}`))
+    } else if (clear.phase === 'pending') content.push(color.textMuted('Clearing — the Host has not confirmed yet.'))
     else if (clear.phase === 'done') content.push(color.success(sanitizedPhysicalLine(clear.result ?? 'cleared')))
     else if (!clear.configured) content.push(color.textMuted('Nothing stored for this target — nothing will be cleared.'))
-    else content.push(color.warning('This removes the locally stored credential. The current model is not switched.'))
+    else if (view.target.kind === 'record') {
+      content.push(color.warning('This clears the local stored credential; it does not revoke access at the issuer or switch the current model.'))
+    } else content.push(color.warning('This removes the locally stored credential. The current model is not switched.'))
     if (this.notice !== undefined) content.push('', color.warning(sanitizedPhysicalLine(this.notice)))
     this.copyValue = undefined
     const actions: ActionLine[] = []
     if (clear.phase === 'ready' && clear.configured) actions.push({ id: 'clear:confirm', label: 'Clear credential', enabled: true })
+    // The unconfirmed state offers ONE read-only action; the old confirmation is
+    // never reused before a fresh authoritative presence read.
+    if (clear.phase === 'unconfirmed') actions.push({ id: 'clear:refresh', label: 'Refresh records [r]', enabled: true })
     if (clear.phase !== 'pending') actions.push({ id: 'clear:back', label: '← Back', enabled: true })
     return { content, actions }
   }
@@ -3142,6 +3216,7 @@ export class ModelsWorkspacePage implements Component {
       case 'review:done': this.addSerial += 1; this.add = undefined; this.enter({ kind: 'list' }); return 'handled'
       case 'records:back': this.enter({ kind: 'list' }); return 'handled'
       case 'clear:confirm': this.confirmClear(); return 'handled'
+      case 'clear:refresh': this.readClearRecord(); return 'handled'
       case 'clear:back': this.clear = undefined; this.enter({ kind: 'list' }); return 'handled'
       case 'guide:back': this.enter({ kind: 'list' }); return 'handled'
       case 'page:back': return 'exit'

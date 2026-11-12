@@ -228,6 +228,43 @@ export function resolveLogoutDestination(
   }
 }
 
+/**
+ * Resolve a `/logout` argument when the Host authorization roster is STALE.
+ *
+ * A last-known flow target may belong to a replaced Host, so a stale roster may
+ * never decide a record-delete target. The Account sign-out and an EXPLICIT
+ * credential reference stay safe (neither is derived from the roster); any
+ * route-shaped or ambiguous target falls back to the stored-credentials list,
+ * which reads the CURRENT Host before offering a clear.
+ *
+ * "Explicit reference" means text the route grammar cannot produce: a known
+ * reference name or a token containing an uppercase letter / underscore. A
+ * lowercase single word such as `mykey` could be a provider route, so it is
+ * ambiguous and falls back — it never produces a guessed record key.
+ */
+export function resolveStaleLogoutDestination(
+  rawArg: string,
+  options: readonly CredentialProviderOption[],
+): AuthDestination {
+  const arg = rawArg.trim()
+  if (arg === '') return { kind: 'models', view: 'logout-list' }
+  // Classify against the CURRENT provider options only: no stale flow rows.
+  const destination = resolveLogoutDestination(arg, options, [])
+  if (destination.kind === 'account') return destination
+  const match = classifyCredentialArg(arg, options)
+  const knownReference = options.some(option => option.ref.toLowerCase() === arg.toLowerCase())
+  const explicitReference = match?.kind === 'ref' && (knownReference || /[A-Z_]/u.test(arg))
+  if (
+    explicitReference
+    && destination.kind === 'models'
+    && destination.view === 'logout'
+    && destination.target.kind === 'reference'
+  ) {
+    return destination
+  }
+  return { kind: 'models', view: 'logout-list' }
+}
+
 /** One stored credential row the Models Stored credentials list paints. */
 export interface StoredCredentialRow {
   readonly kind: 'reference' | 'record'
