@@ -3357,8 +3357,11 @@ export class ModelsWorkspacePage implements Component {
     if (attemptId !== undefined) {
       // A native attempt must not outlive the page with an open prompt. The
       // account browser attempt is deliberately NOT cancelled here (it is the
-      // Host's, not this page's). Keep the subscription alive until the Host
-      // settles so its outcome cannot hang on a dropped settled event.
+      // Host's, not this page's). The still-live flow subscription must reach a
+      // terminal: a Remote stream that can no longer observe the official
+      // settlement reports `unconfirmed`, and the Direct adapter's caller-abort
+      // path settles from the official outcome, so the owned flow task cannot
+      // hang on a lost event.
       this.source.run('models cancel sign-in on close', async () => {
         await this.source.cancelAuthorization(attemptId)
       })

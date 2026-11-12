@@ -91,6 +91,14 @@ export class RemoteAuthorizationConfig implements AuthorizationConfig {
     // `inFlight` from another Host is never painted as the current one.
     this.unsubscribeGeneration = generation.subscribe(() => {
       if (this.state === 'ready') this.state = 'stale'
+      // Every in-flight attempt belongs to the generation that opened its
+      // stream. Its later frames/terminal can no longer be trusted, and the old
+      // stream may stay open without ever producing another frame, so the
+      // attempt is closed NOW with the fourth `unconfirmed` terminal instead of
+      // waiting for a frame that may never arrive.
+      for (const attempt of [...this.attempts.values()]) {
+        this.markUnconfirmed(attempt, 'the Connection changed before the authorization settled')
+      }
     })
   }
 
