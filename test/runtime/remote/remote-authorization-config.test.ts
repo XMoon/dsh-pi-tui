@@ -322,8 +322,10 @@ test('REAL_WIRE: a stream lost after the official commit is unconfirmed, never a
     const before = wire.client.connection.generation.getSnapshot()
     wire.client.connection.reconnect()
     await waitFor('the Connection generation replacement', () => !Object.is(before, wire.client.connection.generation.getSnapshot()), 10_000)
+    // The generation subscription must close the attempt while the old Host
+    // stream is still held open (the flow has not settled yet).
+    await waitFor('the unconfirmed terminal before the flow settles', () => events.some(event => event.kind === 'unconfirmed'), 10_000)
     release()
-    await waitFor('the unconfirmed terminal', () => events.some(event => event.kind === 'unconfirmed'), 10_000)
     await sleep(150)
     assert.equal(events.some(event => event.kind === 'settled'), false,
       'a stream lost after the official commit must never be reported as authorized/cancelled/failed')
@@ -518,13 +520,23 @@ test('UNIT: a generation replacement turns an in-flight attempt into unconfirmed
     })()),
   }), generation.source)
   const events: AuthorizationFlowEvent[] = []
-  adapter.onEvent(event => { events.push(event) })
+  let noticeSeen = false
+  adapter.onEvent(event => {
+    events.push(event)
+    if (event.kind === 'notice') noticeSeen = true
+  })
   try {
     await adapter.begin({ key: 'llm-pi-ai/x' })
-    assert.equal(adapter.targetsState(), 'stale')
+    // The pump must have CONSUMED the notice and parked on the held-open stream
+    // before the generation changes; otherwise the later frame check would pass
+    // for the wrong reason (a vacuous race).
+    await waitFor('the pump consumed the notice', () => noticeSeen, 5_000)
+    assert.equal(events.some(event => event.kind === 'unconfirmed'), false)
     generation.replace()
     assert.equal(adapter.targetsState(), 'stale')
-    await waitFor('the unconfirmed terminal', () => events.some(event => event.kind === 'unconfirmed'), 5_000)
+    // Bounded while the OLD stream is still held open and yields no further
+    // frame: the generation subscription must itself wake the attempt.
+    await waitFor('the unconfirmed terminal on generation replacement', () => events.some(event => event.kind === 'unconfirmed'), 2_000)
     release()
     await sleep(50)
     // The late `authorized` frame of the old generation never reaches the page.
