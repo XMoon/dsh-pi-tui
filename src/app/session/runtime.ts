@@ -1885,6 +1885,18 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         if (!workspaceIntent.isCurrent() || core.owner() !== undefined) {
           throw new WorkspaceSelectionError('superseded', 'workspace selection changed before first session creation')
         }
+        // The LAST gate before the real Host dispatch (external review EXT-P2):
+        // every await that could straddle a mount-view change has settled, so the
+        // automatic candidate's local proof is re-observed one final time. A
+        // revoked candidate releases the target and creates NOTHING.
+        if (workspaceIntent.provenance === 'auto' && !autoWorkspaceEvidenceCurrent()) {
+          intentOwner().resetToLaunchCwd()
+          throw new WorkspaceSelectionError(
+            'refused',
+            'The verified local workspace changed before the first session — choose a Host workspace',
+            'workspace/not-selected',
+          )
+        }
         created = requireCreated(await deps.lifecycle.create({
           sessionId,
           // The semantic `agentPreset` is the sole preset authority; the Direct

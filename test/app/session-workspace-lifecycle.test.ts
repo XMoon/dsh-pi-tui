@@ -290,6 +290,10 @@ function harness(options: {
   /** F5-B: the Host-file port the runner's `@` completion consumes (a spy in
    *  the review-P1 identity-rule case). */
   readonly hostFile?: TuiCommandRunner['hostFile']
+  /** F5-B review EXT-P2: the create-side AUTO evidence check (`/new`). */
+  readonly validateAutoWorkspace?: () => boolean
+  /** F5-B review EXT-P2: the FINAL default-write wait before a create. */
+  readonly awaitPendingDefaultWrite?: (signal: AbortSignal) => Promise<void>
 }): Harness {
   const vt = new VirtualTerminal(options.frameColumns ?? 100, options.frameRows ?? 30)
   const app = new TuiApp(
@@ -382,6 +386,7 @@ function harness(options: {
     sessionWorkspaceFacts: facts.port,
     ...(options.hostDirectoryBrowse === undefined ? {} : { hostDirectoryBrowse: options.hostDirectoryBrowse }),
     ...(options.workspaceNextIntent === undefined ? {} : { workspaceNextIntent: options.workspaceNextIntent }),
+    ...(options.validateAutoWorkspace === undefined ? {} : { validateAutoWorkspace: options.validateAutoWorkspace }),
     ...(options.nativePresentation === undefined ? {} : { sessionBrowserPresentation: options.nativePresentation }),
     ...(options.eligibility === undefined ? {} : {
       forwardedAnswerEligibility: options.eligibility,
@@ -443,7 +448,7 @@ function harness(options: {
     currentPreset: () => undefined,
     pendingPreset: undefined,
     effectivePresetId: undefined,
-    awaitPendingDefaultWrite: async () => {},
+    awaitPendingDefaultWrite: options.awaitPendingDefaultWrite ?? (async () => {}),
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
     reconcileDefaultIntent: () => {},
@@ -2691,6 +2696,54 @@ test('review EXT-P1 sibling: the real Browser open keeps the confirmed Workspace
       'a refused Add must not clear the Browser/TSP next-create Workspace identity')
   } finally {
     TuiApp.prototype.openSessionWorkspace = original
+    h.close()
+  }
+})
+
+test('review EXT-P2 (/new): the final pre-dispatch gate cancels a sessionless /new whose auto proof expired during the last wait', async () => {
+  const owner = createWorkspaceNextIntentOwner('/client/cwd', 'auto')
+  // Model the mount preflight's confirmed auto candidate.
+  const preflight = owner.beginPathVerification()
+  owner.commitVerifiedPath(preflight, 'workspace-auto', '/host/cwd')
+  assert.equal(owner.snapshot().status, 'confirmed')
+  assert.equal(owner.snapshot().provenance, 'auto')
+
+  let current = true
+  let release!: () => void
+  const hold = new Promise<void>(resolve => { release = resolve })
+  let entered!: () => void
+  const enteredGate = new Promise<void>(resolve => { entered = resolve })
+  const creates: unknown[] = []
+  const h = harness({
+    workspaceNextIntent: owner,
+    validateAutoWorkspace: () => current,
+    awaitPendingDefaultWrite: async () => {
+      entered()
+      await hold
+    },
+    agents: {
+      resolveWorkspace: (async () => ({ workspaceId: 'workspace-auto', path: '/host/cwd' })) as never,
+      create: (async (input: unknown) => {
+        creates.push(input)
+        return { session: { id: 'must-not-exist' } }
+      }) as never,
+    },
+    transitionTo: (async (steps: { create: () => Promise<unknown> }) => ({ ok: true, next: await steps.create() })) as never,
+  })
+  try {
+    const pending = h.runCommand('new')
+    await enteredGate
+    // The launch directory object is replaced DURING the final default-write
+    // wait — after the entry check, immediately before the Host dispatch.
+    current = false
+    release()
+    const result = await pending
+    assert.equal(result.kind, 'error')
+    assert.match(result.kind === 'error' ? result.text : '', /verified local workspace changed/u)
+    assert.deepEqual(creates, [],
+      'the final gate must cancel the Session create when the auto proof expires during the last wait')
+    assert.equal(owner.snapshot().status, 'unselected')
+  } finally {
     h.close()
   }
 })
