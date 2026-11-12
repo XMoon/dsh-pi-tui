@@ -4522,6 +4522,13 @@ test('foldedResultSummaryFor derives a friendly phrase, never the JSON', async (
   )
   // A bare-JSON ralph result (no render prefix) falls back to status/rounds.
   assert.equal(foldedResultSummaryFor('ralph', '{"status":"blocked","roundsStarted":3,"report":{}}'), 'blocked · 3 rounds')
+  // A JSON document with legal leading whitespace is still machine JSON: the
+  // trimmed first line starts with `{`, so the parsed summary wins, never the
+  // raw payload as a human phrase.
+  assert.equal(
+    foldedResultSummaryFor('ralph', '  {"status":"completed","roundsStarted":2}'),
+    'completed · 2 rounds',
+  )
   // schedule family — current schema (create/view/edit task + paged list).
   assert.equal(foldedResultSummaryFor('schedule_create', '{"kind":"after","id":"s1","status":"active"}'), 'after · active')
   assert.equal(foldedResultSummaryFor('schedule_view', '{"kind":"weekly","id":"s1","status":"paused"}'), 'weekly · paused')
