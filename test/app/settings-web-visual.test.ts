@@ -51,6 +51,7 @@ import {
   assertNoHalfSegmentInBar,
   assertOneActiveDevice,
 } from '../support/design-language-frames.ts'
+import { unconfiguredPolicyObservation } from '../support/session-policy-fake.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -158,6 +159,7 @@ function setup(options: {
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},
     currentSessionId: undefined,
+    policy: unconfiguredPolicyObservation(),
     captureLiveSessionScope: () => undefined,
     isSessionScopeCurrent: () => false,
     currentSessionStats: async () => undefined,

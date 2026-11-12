@@ -206,6 +206,9 @@ interface HarnessOptions {
     readonly changeGenerationOnWrite?: boolean
     /** The mutable generation slot the fake runner reads. */
     readonly generation?: { value: object | undefined }
+    /** M6-1 F8: hold the initial Host policy read until the case releases it
+     *  (the real asynchronous first frame: the panel paints Checking… first). */
+    readonly deferPolicyRead?: boolean
     /** The Host permission roster, in Host order. */
     readonly permissionNames?: readonly string[]
     /** The Host's effective default for new sessions. */
@@ -432,6 +435,8 @@ interface Harness {
   readonly firstWriteStarted: () => Promise<void>
   /** Release the held first document write. */
   readonly releaseFirstReplace: () => void
+  /** M6-1 F8: settle the deferred initial Host policy read. */
+  readonly releasePolicyRead: () => void
   readonly dispose: () => void
 }
 
@@ -485,6 +490,35 @@ function setup(options: HarnessOptions = {}): Harness {
   const permissionWrites: string[] = []
   const approvalState = agent.approval ?? { value: undefined as 'ask' | 'never' | undefined }
   const policyGenerationSlot = agent.generation ?? { value: agent.policyGeneration ?? {} }
+  const policyListeners = new Set<() => void>()
+  let policyReadSettled = agent.deferPolicyRead !== true
+  let releaseDeferredPolicyRead: (() => void) | undefined
+  const notifyPolicyListeners = (): void => { for (const listener of [...policyListeners]) listener() }
+  const policySnapshot = (sessionId: string): unknown => {
+    if (sessionId !== agent.sessionId || !policyReadSettled) return { kind: 'checking' }
+    if (agent.approvalAvailable === false) {
+      return {
+        kind: 'ready',
+        read: {
+          kind: 'ready',
+          sessionId,
+          approval: { state: 'unavailable', reason: 'service-not-installed' },
+          sandbox: { state: 'ready', effective: 'workspace-write' },
+        },
+      }
+    }
+    return {
+      kind: 'ready',
+      read: {
+        kind: 'ready',
+        sessionId,
+        approval: approvalState.value === undefined
+          ? { state: 'ready', effective: 'ask' }
+          : { state: 'ready', effective: approvalState.value, override: approvalState.value },
+        sandbox: { state: 'ready', effective: 'workspace-write' },
+      },
+    }
+  }
   let subagentSection = agent.subagent === undefined
     ? undefined
     : { enabled: agent.subagent.enabled, allowedModels: agent.subagent.allowedModels.map(route => ({ ...route })) }
@@ -668,48 +702,21 @@ function setup(options: HarnessOptions = {}): Harness {
     // answers the pinned session's proven facts; a stale scope is refused
     // before any dispatch, exactly like the production facade.
     policy: {
-      readSnapshot: (sessionId: string) => {
-        if (sessionId !== agent.sessionId) return { kind: 'checking' }
-        if (agent.approvalAvailable === false) {
-          return {
-            kind: 'ready',
-            read: {
-              kind: 'ready',
-              sessionId,
-              approval: { state: 'unavailable', reason: 'service-not-installed' },
-              sandbox: { state: 'ready', effective: 'workspace-write' },
-            },
-          }
-        }
-        return {
-          kind: 'ready',
-          read: {
-            kind: 'ready',
-            sessionId,
-            approval: approvalState.value === undefined
-              ? { state: 'ready', effective: 'ask' }
-              : { state: 'ready', effective: approvalState.value, override: approvalState.value },
-            sandbox: { state: 'ready', effective: 'workspace-write' },
-          },
-        }
-      },
+      readSnapshot: policySnapshot,
       refresh: async (sessionId: string) => {
-        if (sessionId !== agent.sessionId || agent.approvalAvailable === false) return { kind: 'checking' }
-        return {
-          kind: 'ready',
-          read: {
-            kind: 'ready',
-            sessionId,
-            approval: approvalState.value === undefined
-              ? { state: 'ready', effective: 'ask' }
-              : { state: 'ready', effective: approvalState.value, override: approvalState.value },
-            sandbox: { state: 'ready', effective: 'workspace-write' },
-          },
+        if (agent.deferPolicyRead === true && !policyReadSettled) {
+          await new Promise<void>(resolve => { releaseDeferredPolicyRead = resolve })
+          policyReadSettled = true
         }
+        notifyPolicyListeners()
+        return policySnapshot(sessionId) as never
       },
       invalidate: () => {},
-      subscribe: () => () => {},
-      dispose: () => {},
+      subscribe: (listener: () => void) => {
+        policyListeners.add(listener)
+        return () => { policyListeners.delete(listener) }
+      },
+      dispose: () => { policyListeners.clear() },
     },
     sessionPolicyGeneration: () => policyGenerationSlot.value,
     setSessionApprovalPolicy: async (scope: { sessionId: string }, value: 'ask' | 'never') => {
@@ -996,6 +1003,8 @@ function setup(options: HarnessOptions = {}): Harness {
     firstWriteStarted: () => firstReplaceRunning ?? Promise.resolve(),
     /** Release the held first document write. */
     releaseFirstReplace: () => { releaseFirstReplace?.() },
+    /** M6-1 F8: settle the deferred initial Host policy read. */
+    releasePolicyRead: () => { releaseDeferredPolicyRead?.() },
     dispose,
   }
 }
@@ -1629,7 +1638,9 @@ test('Agent paints only the five availability-gated rows and no legacy launcher'
   assert.match(approval, /Effective: ask/u, `the official effective policy is stated:\n${approval}`)
   assert.match(approval, /Session override: none/u, 'a successful read with no override states none, never a guessed value')
   assert.match(approval, /Source: Host session policy/u, 'the durable event source is named')
-  assert.match(approval, /persisted: not applicable/u, 'the persisted half is explicitly not applicable')
+  assert.match(approval, /not written to the TUI/u,
+    'the persistence wording names the Host Session log, not a TUI document field')
+  assert.match(approval, /Source: Host session policy/u, 'the durable source is named')
   h.dispose()
 })
 
@@ -1804,6 +1815,37 @@ test('the approval Confirm targets the pinned session scope; a stale scope dispa
   assert.equal(h.agent.approval?.value, 'never', 'the official per-session override really changed')
   assert.match(h.view(), /Verified/u, 'the same-scope readback agrees')
   assert.equal(h.replacements(), 0, 'the approval policy never reaches the TUI document')
+  h.dispose()
+})
+
+test('M6-1 F8: a Host policy read settling after the first frame replaces Checking… without a key press', async () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: true,
+      approval: { value: 'never' },
+      deferPolicyRead: true,
+      permissionNames: ['workspace-write'],
+      permissionDefault: { value: 'workspace-write' },
+    },
+  })
+  await h.open('Agent')
+  await key(h, '\r') // L0 -> L1 rows: the first frame reads the still-pending Host policy
+  assert.match(h.view(), /Checking…/u, `the first frame is the truthful pending state:\n${h.view()}`)
+  assert.doesNotMatch(h.view(), /Effective:/u, 'no fact is guessed before the Host answers')
+  // The Host read settles LATER; no `r`, no re-open, no key press at all.
+  h.releasePolicyRead()
+  await new Promise<void>(resolve => { setTimeout(resolve, 30) })
+  const settled = h.view()
+  assert.doesNotMatch(settled, /Checking…/u,
+    `the settled read must replace the pending state without user input:\n${settled}`)
+  assert.match(settled, /never/u, 'the proven effective value is painted')
+  // The row is editable again: Enter opens the inline choice with the proven facts.
+  await key(h, '\r')
+  assert.match(h.view(), /Effective: never/u, `the detail shows the settled fact:\n${h.view()}`)
+  assert.match(h.view(), /Choose value/u)
   h.dispose()
 })
 

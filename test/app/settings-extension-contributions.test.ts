@@ -38,6 +38,7 @@ import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import type { TuiSettingsDoc } from '../../src/runtime/config-port.ts'
 import type { ContributionHealth } from '../../src/extension/public-types.ts'
 import type { TuiCommandRunner } from '../../src/commands.ts'
+import { unconfiguredPolicyObservation } from '../support/session-policy-fake.ts'
 
 /** The concrete extension service members this case drives (the public
  *  registration path plus the internal health ledger the runner reads). */
@@ -177,6 +178,7 @@ async function setupEnvironment(): Promise<Harness> {
     // Sessionless surface: the About page reports unavailable facts and the
     // approval row is withheld; no Session is created or read.
     currentSessionId: undefined,
+    policy: unconfiguredPolicyObservation(),
     captureLiveSessionScope: () => undefined,
     isSessionScopeCurrent: () => false,
     currentSessionStats: async () => undefined,

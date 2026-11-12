@@ -941,6 +941,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       return aboutController
     }
     let handle: import('../../tui-app.ts').SettingsWorkspaceHandle | undefined
+    /** M6-1 F8: the observation settlement that repaints THIS open workspace's
+     *  rows. The panel captures its row facts at construction; the async Host
+     *  policy read settles later, so the settle must go through the existing
+     *  runtime-facts re-read seam (never a second observation state). Released
+     *  with the workspace lease. */
+    let disposePolicyWatch: (() => void) | undefined
     // C2-R2: the per-open VERIFIED fullscreen intent. A Fullscreen confirm that
     // really stored its preference records the target here; the post-close
     // hand-off applies the LAST verified choice of THIS open only. It is not a
@@ -1060,6 +1066,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           // inert before any physical switch is attempted.
           const wasActive = activeSettingsWorkspace?.token === token
           if (wasActive) activeSettingsWorkspace = undefined
+          // The policy observation subscription dies with this workspace.
+          disposePolicyWatch?.()
+          disposePolicyWatch = undefined
           // C2-R4: the mounted Web page's command reference dies with this open
           // (the panel itself disposes the instance on teardown). A late fact
           // settlement then repaints nothing.
@@ -1097,6 +1106,13 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       },
     )
     activeSettingsWorkspace = { token, refreshWebRow: () => handle?.refreshRow(WEB_LAUNCHER_ROW_ID, webWorkspaceRowFacts()) }
+    // The observation's committed reads re-read THIS open workspace's rows
+    // through the existing runtime-facts seam: a Host read that settles after
+    // the first frame replaces `Checking…` without a key press.
+    disposePolicyWatch = runner.policy.subscribe(() => {
+      if (activeSettingsWorkspace?.token !== token) return
+      app.refreshSettingsWorkspaceRuntimeFacts()
+    })
     startWebSettingsRead()
     // M6-1 F8: the initial session-policy read starts only now that the
     // workspace lease was granted (a refused open captures no scope and
@@ -3160,7 +3176,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       description: 'How tool approvals are handled in the session this workspace was opened on. '
         + 'This is the official per-session approval policy: a durable session policy event the Host replays, applied at the next approval the session needs. '
         + 'It is not a permission preset, not the Host profile default, and it never changes the default for new sessions. '
-        + 'Source: Host session policy. Persisted: not applicable — current session only.',
+        + 'Source: Host session policy. It is not written to the TUI Settings document; the Host Session log persists it.',
       edit: {
         field: 'approval',
         primary: 'runtime',
@@ -3176,7 +3192,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         runtimeEffect: approvalSide === undefined
           ? approvalSummary
           : `Effective: ${approvalSide.effective} · Session override: ${approvalOverrideLabel} · ${sandboxFact}`,
-        persisted: 'Source: Host session policy · persisted: not applicable — current session only',
+        persisted: 'Source: Host session policy · not written to the TUI Settings document — persisted by the Host Session log',
       },
     }]
     // The preset roster and the effective Host default are read ONCE for this

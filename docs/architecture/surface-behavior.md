@@ -910,9 +910,10 @@ specialist-page contract below).
     into `Effective: …`, `Session override: <…|none>` and the SAME read's
     independent `Sandbox: <mode> (override: <…|none>)` fact (a policy fact,
     never an enforcement claim), and `Persisted` names
-    `Source: Host session policy` with `not applicable — current session only`
-    (a durable per-Session event, never a TUI document field, never the Host
-    profile default and never a permission preset). `Checking…` is painted
+    `Source: Host session policy` and `not written to the TUI Settings
+    document — persisted by the Host Session log` (a durable per-Session event,
+    never the Host profile default and never a permission
+    preset). `Checking…` is painted
     until the first authoritative read answers; a failed or unavailable read is
     stated as such and the user can refresh (`r`). `Verified` requires ONE
     fresh authoritative readback of the SAME exact Session whose effective

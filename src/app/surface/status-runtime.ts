@@ -817,8 +817,16 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       // never become the main session's retained value.
       const status = mainSessionStatus()
       const currentPreset = status?.permission
+      // The LAST-KNOWN fallback is the PRESET ROW ONLY. The independent
+      // sandbox/approval facts must never ride this fallback: an unavailable
+      // projection after a Connection generation change or a failed policy
+      // read would otherwise keep painting the old Host's security policy as
+      // the current fact.
+      const retainedPreset = current.view.subject.kind === 'main'
+        ? current.access?.permissionPreset
+        : undefined
       const presetPart = currentPreset === undefined
-        ? (current.view.subject.kind === 'main' ? (current.access ?? {}) as typeof access : {})
+        ? (retainedPreset === undefined ? {} : { permissionPreset: retainedPreset })
         : { permissionPreset: { id: currentPreset, label: currentPreset, matched: true } }
       // The observed sandbox/approval facts are NOT retained across subjects
       // or generations: only the preset row keeps its subject-scoped

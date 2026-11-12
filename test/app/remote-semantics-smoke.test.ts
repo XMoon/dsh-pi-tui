@@ -94,6 +94,7 @@ import { contextPressureOccupancy } from '../../src/runtime/session-reader-port.
 import { DirectConfigPort, DirectWebProviderConfig } from '../../src/runtime/direct/config-direct.ts'
 import { DirectTuiSettings, type SettingsFormsLike, type TuiConfigRefs } from '../../src/runtime/direct/tui-settings-direct.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
+import { unconfiguredPolicyObservation } from '../support/session-policy-fake.ts'
 
 const require = createRequire(import.meta.url)
 const PRESET = 'm3a-smoke-preset'
@@ -626,6 +627,7 @@ async function mountSettingsWorkspace(
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},
     currentSessionId: undefined,
+    policy: unconfiguredPolicyObservation(),
     captureLiveSessionScope: () => undefined,
     // C3 About seams: this fixture composes no StatusRuntime, so the
     // sessionless capture is the only reachable state (no scoped read can

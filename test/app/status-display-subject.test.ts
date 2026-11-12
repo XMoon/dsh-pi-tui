@@ -492,3 +492,35 @@ test('M6-1 F8: sandbox/approval access facts come from the ONE observation of th
   assert.equal('approval' in pendingAccess, false)
   assert.equal('sandbox' in pendingAccess, false)
 })
+
+
+test('M6-1 F8: an invalidated Remote policy cannot leak the last-known sandbox/approval through the preset fallback', () => {
+  // The historical §6.4 fallback keeps the last-known PRESET when the
+  // permissions projection is unavailable. The independent sandbox/approval
+  // facts must NOT ride that fallback: after a Connection generation change
+  // (the observation answers checking) and an unavailable permission
+  // projection, the footer may keep only the preset row.
+  const pending = makeHarness({
+    remote: true,
+    policyObservation: {
+      readSnapshot: () => ({ kind: 'checking' }),
+      subscribe: () => () => {},
+    },
+  })
+  // The PREVIOUS committed access still carries all three facts (the last Host).
+  pending.store.update({
+    access: {
+      permissionPreset: { id: 'read-only', label: 'read-only', matched: true },
+      sandbox: { mode: 'workspace-write' as const },
+      approval: { policy: 'never' },
+    },
+  })
+  pending.runtime.refresh()
+  const access = pending.store.snapshot().access
+  assert.deepEqual(access.permissionPreset, { id: 'read-only', label: 'read-only', matched: true },
+    'the preset row keeps its subject-scoped last-known fallback')
+  assert.equal('sandbox' in access, false,
+    'the revoked sandbox fact must not survive through the preset fallback')
+  assert.equal('approval' in access, false,
+    'the revoked approval fact must not survive through the preset fallback')
+})

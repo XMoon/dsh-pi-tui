@@ -26,6 +26,7 @@ import { bundle } from '../support/plugin-workspace-harness.ts'
 import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { unconfiguredPolicyObservation } from '../support/session-policy-fake.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -107,6 +108,7 @@ function proxyRunner(
     captureExtensionHealthRef: () => () => {},
     // A sessionless surface: both entries must work before any Session exists.
     currentSessionId: undefined,
+    policy: unconfiguredPolicyObservation(),
     agents: {
       create: async () => {
         counts.sessions += 1
@@ -305,6 +307,7 @@ test('the real /plugins chain mounts the PRODUCTION page and reads the inventory
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},
     currentSessionId: undefined,
+    policy: unconfiguredPolicyObservation(),
     // A sessionless entry must not create/open a Session OR admit an About read.
     agents: {
       create: async () => { counts.sessions += 1; throw new Error('a sessionless entry must not create a Session') },
