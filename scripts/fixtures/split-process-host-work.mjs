@@ -25,6 +25,7 @@
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { isAbsolute, join } from 'node:path'
+import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -62,6 +63,11 @@ const SCENARIOS = new Set([
   // model stays inert and the fault provider is gated by C1_SKILLS_FAULT_DIR.
   'skills-standing',
   'skills-recovery',
+  // M6-1 F7A: register the qualification provider flows on the REAL official
+  // `ctx.authorization` service. The flows commit through the official
+  // `AuthorizationSession.commit` write path; this fixture is the provider
+  // plugin boundary, never a replacement for the authorization seam.
+  'f7a-authorization',
 ])
 
 /** Quote one token for the Host shell used by the harmless fixture commands. */
@@ -1188,5 +1194,105 @@ export async function apply(ctx) {
         return `c1-tool-result-${String(args.token)}`
       },
     })))
+  }
+  if (scenario === 'f7a-authorization') {
+    // F7A qualification flows. The official `ctx.authorization` seam owns the
+    // attempt, the mutual exclusion and the credential write; this row only
+    // provides the PROVIDER bodies (the plugin boundary the seam is designed
+    // around). Every step records a proof line; a secret ANSWER is never
+    // recorded, only the fact that the exact prompt was answered.
+    const authorization = ctx.reflect.get('authorization')
+    if (authorization === undefined || typeof authorization.registerFlow !== 'function') {
+      throw new Error('m4-c1-host-work: f7a-authorization requires the official ctx.authorization service')
+    }
+    const barrier = name => join(root, name)
+    const waitFor = async (name, signal) => {
+      await waitForBarrier(barrier(name), signal)
+    }
+    const holdIfPresent = async (holdName, releaseName, phase, signal, run) => {
+      if (!existsSync(barrier(holdName))) return
+      record(`f7a-${phase}-held`, { run })
+      await waitFor(releaseName, signal)
+      record(`f7a-${phase}-released`, { run })
+    }
+    const answer = async (session, prompt) => {
+      const value = await session.prompt(prompt)
+      // The value may be a secret: record only the prompt kind, never the text.
+      record('f7a-prompt-answered', { kind: prompt.kind, message: prompt.message })
+      return value
+    }
+    let mainRunCount = 0
+    const runMain = async session => {
+      mainRunCount += 1
+      const run = mainRunCount
+      record('f7a-run-start', { key: 'llm-pi-ai/f7a-main', run, method: session.method })
+      session.notify({ message: 'F7A sign-in', url: 'https://provider.example/f7a', code: 'F7A-CODE-1' })
+      await holdIfPresent('f7a-hold-before-prompt', 'f7a-release-before-prompt', 'before-prompt', session.signal, run)
+      if (existsSync(barrier('f7a-withdraw'))) {
+        const controller = new AbortController()
+        const losing = session.prompt({
+          kind: 'text',
+          message: 'F7A losing prompt',
+          signal: controller.signal,
+        }).then(
+          () => 'answered',
+          () => 'withdrawn',
+        )
+        // Retire the losing prompt of the race, exactly as a real flow does;
+        // the prompt-level withdrawal must NOT cancel the whole attempt.
+        setTimeout(() => controller.abort(), 50)
+        const outcome = await losing
+        record('f7a-withdrawn-prompt', { outcome, run })
+        if (outcome !== 'withdrawn') throw new Error('m4-c1-host-work: the losing F7A prompt was not withdrawn')
+        await answer(session, { kind: 'text', message: 'F7A winning prompt' })
+      }
+      await answer(session, { kind: 'secret', message: 'F7A secret code', placeholder: 'F7A-SECRET' })
+      const label = await answer(session, { kind: 'text', message: 'F7A account label' })
+      const choice = await answer(session, {
+        kind: 'select',
+        message: 'F7A choose account',
+        options: [{ id: 'primary', label: 'Primary' }, { id: 'secondary', label: 'Secondary' }],
+      })
+      await session.commit({
+        kind: 'grant',
+        payload: { provider: 'f7a-main', label, choice },
+      })
+      record('f7a-committed', { key: 'llm-pi-ai/f7a-main', run })
+      await holdIfPresent('f7a-hold-after-commit', 'f7a-release-after-commit', 'after-commit', session.signal, run)
+      record('f7a-run-end', { key: 'llm-pi-ai/f7a-main', run })
+    }
+    const runOther = async session => {
+      record('f7a-run-start', { key: 'llm-pi-ai/f7a-other', method: session.method })
+      session.notify({ message: 'F7A other sign-in', url: 'https://provider.example/f7a-other' })
+      await answer(session, { kind: 'secret', message: 'F7A other secret' })
+      await session.commit({
+        kind: 'grant',
+        payload: { provider: 'f7a-other' },
+      })
+      record('f7a-committed', { key: 'llm-pi-ai/f7a-other' })
+      record('f7a-run-end', { key: 'llm-pi-ai/f7a-other' })
+    }
+    const register = (id, label, run) => {
+      ctx.effect(() => authorization.registerFlow({
+        key: credentialKey('llm-pi-ai', id),
+        label,
+        methods: [{ id: 'device', label: 'Continue in the browser' }],
+        async run(session) {
+          try {
+            await run(session)
+          } catch (error) {
+            record('f7a-run-failed', {
+              key: `llm-pi-ai/${id}`,
+              aborted: session.signal.aborted,
+              code: typeof error?.code === 'string' ? error.code : undefined,
+            })
+            throw error
+          }
+        },
+      }), `f7a-authorization-${id}`)
+    }
+    register('f7a-main', 'F7A main', runMain)
+    register('f7a-other', 'F7A other', runOther)
+    record('f7a-flows-registered', { keys: ['llm-pi-ai/f7a-main', 'llm-pi-ai/f7a-other'] })
   }
 }

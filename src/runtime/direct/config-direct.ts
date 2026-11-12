@@ -959,6 +959,18 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
       .map(target => ({ ...target, methods: target.methods.map(method => ({ ...method })) }))
   }
 
+  /** The in-process registry is read on demand: there is no mirror to refresh
+   *  and no Connection generation to fence. */
+  refreshTargets(): Promise<void> {
+    return Promise.resolve()
+  }
+
+  targetsState(): 'ready' | 'unavailable' {
+    // Direct is always current: `unavailable` means the official plugin is not
+    // installed, which is a definite fact, never an unread snapshot.
+    return this.available() ? 'ready' : 'unavailable'
+  }
+
   onEvent(listener: (event: AuthorizationFlowEvent) => void): () => void {
     this.listeners.add(listener)
     return () => { this.listeners.delete(listener) }

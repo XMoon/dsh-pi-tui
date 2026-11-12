@@ -63,6 +63,17 @@ interface FakeState {
   readonly executeCalls: { sessionId: string; line: string; attachments: readonly unknown[]; signal: AbortSignal }[]
   executeResult: { ok: true; value: unknown } | { ok: false; error: unknown }
   readonly order: string[]
+  /** The private authorization roster the Host would report. */
+  authorizationRoster: readonly {
+    kind: 'authorization'
+    route?: string
+    key: string
+    label: string
+    methods: readonly { id: string; label: string }[]
+    inFlight: boolean
+  }[]
+  /** The roster read's next result (a definite unavailable, or a failure). */
+  authorizationListOutcome: { kind: 'unavailable'; reason: string } | { kind: 'throw'; error: { code: string; message: string } } | undefined
 }
 
 type EventListener = (...args: unknown[]) => void
@@ -142,7 +153,7 @@ function tick(): Promise<void> {
   return new Promise(resolve => { setImmediate(resolve) })
 }
 
-function createBackend(seed?: (state: FakeState) => void) {
+function createBackend(seed?: (state: FakeState) => void, options: { readonly authorization?: boolean } = {}) {
   const generation = createObservableGenerationHarness({ id: 'gen-1' })
   const state: FakeState = {
     namespaces: new Map(),
@@ -163,6 +174,8 @@ function createBackend(seed?: (state: FakeState) => void) {
     executeCalls: [],
     executeResult: { ok: true, value: { commandId: 'c' } },
     order: [],
+    authorizationRoster: [],
+    authorizationListOutcome: undefined,
   }
   seed?.(state)
 
@@ -287,6 +300,33 @@ function createBackend(seed?: (state: FakeState) => void) {
         : { ok: true as const, value: state.providers.map(entry => ({ ...entry, settingsPath: [...entry.settingsPath] })) },
       discoverModels: async () => ({ ok: true as const, value: [] }),
     },
+    ...options.authorization === false ? {} : {
+      piTuiAuthorization: {
+        list: async () => {
+          state.order.push('authorization:list')
+          if (state.authorizationListOutcome?.kind === 'throw') {
+            throw new Error(state.authorizationListOutcome.error.message)
+          }
+          if (state.authorizationListOutcome?.kind === 'unavailable') {
+            return { ok: true as const, value: { kind: 'unavailable' as const, reason: state.authorizationListOutcome.reason } }
+          }
+          return {
+            ok: true as const,
+            value: {
+              kind: 'ready' as const,
+              targets: state.authorizationRoster.map(target => ({
+                ...target,
+                ...(target.route === undefined ? {} : { route: target.route }),
+                methods: target.methods.map(method => ({ ...method })),
+              })),
+            },
+          }
+        },
+        run: () => { throw new Error('authorization.run is unused by the ConfigPort') },
+        respond: async () => ({ ok: true as const, value: undefined }),
+        cancel: async () => ({ ok: true as const, value: undefined }),
+      },
+    },
     // A METHOD with a real `this`, like the generated Client `$on`: it reads
     // its own service state, so a detached reference must throw. This is the
     // regression lock for the P11-class bug (an unbound event seat).
@@ -339,7 +379,7 @@ function workflowOver(providers: ProviderProfileConfig): CredentialWorkflow {
       listRecords: async () => [],
       onChanged: () => () => {},
     },
-    authorization: { available: () => false, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    authorization: { available: () => false, listTargets: () => [], refreshTargets: async () => {}, targetsState: () => 'unavailable' as const, begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
     account: {
       available: () => false,
       isObservationCurrent: () => false,
@@ -616,16 +656,61 @@ test('credential record enumeration/deletion reject as unavailable (never an emp
  * Explicitly unsupported classes.
  * ------------------------------------------------------------------------- */
 
-test('authorization is unavailable on the wire and never opens a private RPC', async () => {
-  const { port } = createBackend()
+test('a Host without the private authorization namespace reports an unavailable roster, never a fake flow', async () => {
+  const { port } = createBackend(undefined, { authorization: false })
+  // Before the first authoritative read the roster is STALE, never an empty
+  // ready catalog.
+  assert.equal(port.authorization.targetsState(), 'stale')
   assert.equal(port.authorization.available(), false)
+  assert.deepEqual(port.authorization.listTargets(), [])
+  await port.authorization.refreshTargets()
+  // The mounted contribution is the only provider of the namespace: its
+  // absence is a definite unavailable, distinct from "no flows registered".
+  assert.equal(port.authorization.targetsState(), 'unavailable')
   assert.deepEqual(port.authorization.listTargets(), [])
   assert.deepEqual(await port.authorization.begin({ key: 'openai' }), { kind: 'unavailable' })
   const unsubscribe = port.authorization.onEvent(() => {})
   assert.equal(typeof unsubscribe, 'function')
   unsubscribe()
-  await assert.rejects(() => port.authorization.respond('a', 'p', 'x'), /authorization is unavailable/)
-  await assert.rejects(() => port.authorization.cancel('a'), /authorization is unavailable/)
+  // No attempt was admitted, so there is no exact attempt to answer or cancel.
+  await assert.rejects(() => port.authorization.respond('a', 'p', 'x'), /no longer active/)
+  await assert.rejects(() => port.authorization.cancel('a'), /no longer active/)
+})
+
+test('the initial describe loads the REAL authorization roster once; a generation replacement marks it stale', async () => {
+  const { port, generation, state } = createBackend(current => {
+    current.authorizationRoster = [{
+      kind: 'authorization',
+      route: 'openai-codex',
+      key: 'llm-pi-ai/openai-codex',
+      label: 'ChatGPT (Codex)',
+      methods: [{ id: 'oauth', label: 'Sign in with ChatGPT' }],
+      inFlight: false,
+    }]
+  })
+  assert.equal(port.authorization.targetsState(), 'stale')
+  await port.describe()
+  assert.equal(port.authorization.targetsState(), 'ready')
+  assert.deepEqual(port.authorization.listTargets(), [{
+    kind: 'authorization',
+    route: 'openai-codex',
+    key: 'llm-pi-ai/openai-codex',
+    label: 'ChatGPT (Codex)',
+    methods: [{ id: 'oauth', label: 'Sign in with ChatGPT' }],
+    inFlight: false,
+  }])
+  const listCalls = state.order.filter(entry => entry === 'authorization:list').length
+  assert.equal(listCalls, 1, 'the initial barrier reads the roster exactly once')
+  // A second describe on a still-current generation does not re-poll it.
+  await port.describe()
+  assert.equal(state.order.filter(entry => entry === 'authorization:list').length, listCalls)
+  // A generation replacement immediately invalidates the roster.
+  generation.set({ id: 'gen-2' })
+  assert.equal(port.authorization.targetsState(), 'stale')
+  await port.describe()
+  assert.equal(port.authorization.targetsState(), 'ready')
+  assert.equal(state.order.filter(entry => entry === 'authorization:list').length, listCalls + 1)
+  port.dispose()
 })
 
 test('approvalOverrideOf is always undefined (unavailable, never an ask guess)', () => {

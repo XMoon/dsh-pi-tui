@@ -70,8 +70,6 @@ import type {
   AccountView,
   AccountWallet,
   AuthorizationConfig,
-  AuthorizationFlowEvent,
-  AuthorizationFlowTarget,
   ConfigPort,
   CredentialConfig,
   CredentialProviderOption,
@@ -97,6 +95,8 @@ import type {
   WebStartupPreferenceState,
 } from '../config-port.ts'
 import { SupersededReadError } from '../read-error.ts'
+import { RemoteAuthorizationConfig } from './authorization-remote.ts'
+import type { PiTuiAuthorizationNamespace } from './pi-tui-authorization-contract.ts'
 import type { RemoteCommandsSource } from './host-command-remote.ts'
 import type { RemoteLlmRemotes } from './model-remote.ts'
 import type { RemotePresetRemotes } from './preset-remote.ts'
@@ -224,6 +224,9 @@ export interface RemoteConfigRuntimeSource {
   readonly remote: {
     readonly settings: RemoteSettingsRemotes
     readonly credentials: RemoteCredentialsRemotes
+    /** The private provider-native authorization namespace mounted by this
+     *  package's ONE contribution. Absent until that contribution is mounted. */
+    readonly piTuiAuthorization?: PiTuiAuthorizationNamespace
     readonly account?: RemoteAccountRemotes
     readonly commands: RemoteCommandsSource
     readonly permissionPresets: RemotePermissionPresetRemotes
@@ -1473,43 +1476,6 @@ class RemoteCredentialConfig implements CredentialConfig {
 }
 
 /* ------------------------------------------------------------------------- *
- * Authorization (unsupported on rc.2).
- * ------------------------------------------------------------------------- */
-
-class RemoteAuthorizationConfig implements AuthorizationConfig {
-  available(): boolean {
-    // INTENTIONAL_UNSUPPORTED_IN_M3: rc.2
-    // publishes no authorization namespace/Remote at all. Never a private RPC.
-    return false
-  }
-
-  listTargets(): readonly AuthorizationFlowTarget[] {
-    // No fake targets: there is no catalog to list.
-    return []
-  }
-
-  begin(): Promise<{ kind: 'unavailable' }> {
-    return Promise.resolve({ kind: 'unavailable' })
-  }
-
-  onEvent(_listener: (event: AuthorizationFlowEvent) => void): () => void {
-    return () => {}
-  }
-
-  respond(): Promise<void> {
-    return Promise.reject(new Error(
-      'authorization is unavailable on this backend: rc.2 publishes no authorization Remote',
-    ))
-  }
-
-  cancel(): Promise<void> {
-    return Promise.reject(new Error(
-      'authorization is unavailable on this backend: rc.2 publishes no authorization Remote',
-    ))
-  }
-}
-
-/* ------------------------------------------------------------------------- *
  * Permissions.
  * ------------------------------------------------------------------------- */
 
@@ -1814,6 +1780,7 @@ export class RemoteConfigPort implements ConfigPort {
   private readonly tuiSettingsWrapper: RemoteTuiSettingsConfig
   private readonly credentialConfig: RemoteCredentialConfig
   private readonly accountConfig: RemoteAccountConfig
+  private readonly authorizationConfig: RemoteAuthorizationConfig
   /** The ONE accepted-write lifetime of this port (settings + credentials). */
   private readonly writes = new RemoteConfigWriteLifetime()
 
@@ -1862,7 +1829,11 @@ export class RemoteConfigPort implements ConfigPort {
       this.writes,
     )
     this.credentials = this.credentialConfig
-    this.authorization = new RemoteAuthorizationConfig()
+    this.authorizationConfig = new RemoteAuthorizationConfig(
+      source.remote.piTuiAuthorization,
+      source.connection.generation,
+    )
+    this.authorization = this.authorizationConfig
     this.accountConfig = new RemoteAccountConfig(
       source.remote.account,
       source.trustedHostOrigin,
@@ -1888,6 +1859,19 @@ export class RemoteConfigPort implements ConfigPort {
     } catch (error) {
       this.mirror.recordFailure(error)
       throw error
+    }
+    // The initial readiness barrier (and a post-reconnect describe) loads the
+    // authorization roster ONCE. A failure is NOT a describe failure: the
+    // roster state stays `stale` (the page shows "refresh needed") and the rest
+    // of the settings plane keeps working. The read is generation-fenced
+    // inside the adapter; an already-current roster is not re-read on every
+    // settings refresh.
+    if (this.authorizationConfig.targetsState() === 'stale') {
+      try {
+        await this.authorizationConfig.refreshTargets()
+      } catch {
+        // Recorded as `stale` by the adapter; an explicit page read retries.
+      }
     }
   }
 
@@ -1924,6 +1908,7 @@ export class RemoteConfigPort implements ConfigPort {
     this.mirror.dispose()
     this.credentialConfig.dispose()
     this.accountConfig.dispose()
+    this.authorizationConfig.dispose()
   }
 }
 

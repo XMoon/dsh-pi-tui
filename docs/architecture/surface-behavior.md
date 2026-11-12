@@ -1248,6 +1248,14 @@ The page never infers a stored key from a route/profile.
   report failed/cancelled even when a commit had started; the next Host read
   remains authoritative. That forced-teardown boundary has no safe
   adapter-only outcome.
+- On the Split wire a lost attempt stream is the FOURTH outcome `unconfirmed`:
+  the page closes the open prompts/notice and states that the sign-in outcome
+  is unknown and credentials must be refreshed first. It never paints
+  failed/cancelled/authorized from a lost frame and never retries the attempt.
+  A roster that was not read for the current Connection generation is stale:
+  `/login` falls back to the Models list and the page revalidates before
+  offering a native attempt; a Host without the authorization service keeps the
+  API-key/provider list usable and states that native sign-in is unavailable.
 - Stored credential records exclude the DeepSeek Account grant.
 - The `/login` and `/logout` resolver stays fail-soft when a read fails: the
   always-present builtin target (whose reference is a constant) remains

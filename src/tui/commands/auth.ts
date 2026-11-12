@@ -50,6 +50,12 @@ export function createAuthCommands(deps: AuthCommandDeps): AuthCommandRegistrars
           return { kind: 'error', text: 'credentials service unavailable' }
         }
         const options = runner.config.providers.listCredentialOptions()
+        // A STALE roster may not decide this attempt: a last-known flow target
+        // can belong to another Host generation. Fall back to the Models list,
+        // whose read revalidates the roster before any sign-in is offered.
+        if (runner.config.authorization.targetsState() === 'stale') {
+          return openAuthWorkspace({ kind: 'models', view: 'list' })
+        }
         const targets = runner.config.authorization.listTargets()
         return openAuthWorkspace(resolveLoginDestination(invocation.rawInput, options, targets))
       },

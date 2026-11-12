@@ -60,6 +60,8 @@ function authCommands() {
         authorization: {
           available: () => true,
           listTargets: () => TARGETS,
+          refreshTargets: async () => {},
+          targetsState: () => 'ready' as const,
           begin: async () => ({ kind: 'unavailable' }),
           onEvent: () => () => {},
           respond: async () => {},

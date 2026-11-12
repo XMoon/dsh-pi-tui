@@ -24,6 +24,7 @@ import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../runtime/remote/pi-tui-fi
 import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../runtime/remote/pi-tui-terminal-progress-contract.ts'
 import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-web-access-contract.ts'
 import { PI_TUI_SKILLS_NAMESPACE } from '../../runtime/remote/pi-tui-skills-contract.ts'
+import { PI_TUI_AUTHORIZATION_NAMESPACE } from '../../runtime/remote/pi-tui-authorization-contract.ts'
 
 /** Cordis `FiberState.ACTIVE` (the enum is a const enum with no runtime value). */
 const FIBER_ACTIVE = 2
@@ -64,6 +65,8 @@ export interface HostEntryStatus {
   readonly terminalProgressWatches: number
   /** Live private Skills invalidation subscriptions on THIS Host. */
   readonly skillInvalidationWatches: number
+  /** Live private provider-authorization attempts on THIS Host. */
+  readonly authorizationAttempts: number
   readonly ownerEntries: Record<string, readonly string[]>
   /**
    * Per-row Loader facts. `fiberUid` is the CURRENT Loader fiber identity of
@@ -123,6 +126,20 @@ interface SkillsServiceLike {
   readonly activeSubscriptions?: number
 }
 
+function authorizationAttemptCount(context: Context): number {
+  const service = context.reflect.get('piTuiAuthorization') as
+    { readonly [symbols.original]?: { readonly activeAttempts?: unknown } } | undefined
+  if (service === undefined) {
+    throw new Error('local host entry: the private authorization service is not readable')
+  }
+  const raw = service[symbols.original] ?? service
+  const attempts = (raw as { readonly activeAttempts?: unknown }).activeAttempts
+  if (typeof attempts !== 'number') {
+    throw new Error('local host entry: the private authorization service has no attempt count')
+  }
+  return attempts
+}
+
 function terminalProgressWatchCount(context: Context): number {
   const service = context.reflect.get('piTuiTerminalProgress') as
     (TerminalProgressServiceLike & { readonly [symbols.original]?: TerminalProgressServiceLike }) | undefined
@@ -174,6 +191,7 @@ const PRIVATE_TYPERT_BINDINGS = [
   { serviceKey: 'piTuiTerminalProgress', namespace: PI_TUI_TERMINAL_PROGRESS_NAMESPACE },
   { serviceKey: 'piTuiWebAccess', namespace: PI_TUI_WEB_ACCESS_NAMESPACE },
   { serviceKey: PI_TUI_SKILLS_NAMESPACE, namespace: PI_TUI_SKILLS_NAMESPACE },
+  { serviceKey: 'piTuiAuthorization', namespace: PI_TUI_AUTHORIZATION_NAMESPACE },
 ] as const
 
 /**
@@ -258,6 +276,7 @@ export function collectHostEntryStatus(
     // disabled, and the toggle must never be a Web-composition prerequisite.
     PI_TUI_WEB_ACCESS_NAMESPACE,
     PI_TUI_SKILLS_NAMESPACE,
+    PI_TUI_AUTHORIZATION_NAMESPACE,
     PI_TUI_HOST_READY_SERVICE,
     'piTuiPerformanceReady',
   ]) {
@@ -364,6 +383,7 @@ export function collectHostEntryStatus(
     services,
     terminalProgressWatches: terminalProgressWatchCount(context),
     skillInvalidationWatches: skillInvalidationWatchCount(context),
+    authorizationAttempts: authorizationAttemptCount(context),
     ownerEntries,
     entries: entries.map(entry => ({
       id: entry.options.id,

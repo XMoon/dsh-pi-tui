@@ -49,6 +49,7 @@ import { runWebProductQualification } from '../smoke/split-process/web-product.m
 import { runWebRuntimeToggle } from '../smoke/split-process/web-runtime-toggle.mjs'
 import { runWebStartupPreference } from '../smoke/split-process/web-startup-preference.mjs'
 import { runF2AccountComposition } from '../smoke/split-process/account-composition.mjs'
+import { runF7AProviderAuthorization } from '../smoke/split-process/provider-authorization-f7a.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -200,6 +201,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'recovery.unknown-write-host-death',
     title: 'an ACK-dropped write survives Host death as one durable write and no fabricated answer',
     run: runUnknownWriteHostDeath,
+  }),
+  Object.freeze({
+    suite: 'provider-authorization',
+    id: 'provider-authorization.f7a',
+    title: 'two real Split Clients drive the official provider-native authorization stream (notice, prompts, commit, same-key refusal, withdrawal, disconnect, cancel-vs-commit)',
+    run: runF7AProviderAuthorization,
   }),
   Object.freeze({
     suite: 'account',

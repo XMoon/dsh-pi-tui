@@ -186,8 +186,14 @@ export function createAuthorizationFlow(
   bind(attemptId: string): void
   /** Feed one attempt event (the runner forwards the subscription). */
   onEvent(event: AuthorizationFlowEvent): void
-  /** The attempt outcome, resolved on the `settled` event. */
-  outcome: Promise<{ status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string }>
+  /** The attempt outcome, resolved on the terminal (`settled`/`unconfirmed`)
+   *  event. `unconfirmed` is the TRANSPORT-lost result: the Host may still
+   *  commit, so it is never presented as a business failure. */
+  outcome: Promise<{
+    status: 'authorized' | 'cancelled' | 'failed' | 'unconfirmed'
+    code?: string
+    message?: string
+  }>
   /** Close the notice panel and any open prompt UI (attempt settled). */
   close(): void
 } {
@@ -212,8 +218,16 @@ export function createAuthorizationFlow(
   let boundAttemptId: string | undefined
   let closed = false
   /** Resolve the attempt outcome when the `settled` event arrives. */
-  let settle: (outcome: { status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string }) => void
-  const outcome = new Promise<{ status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string }>((resolve) => {
+  let settle: (outcome: {
+    status: 'authorized' | 'cancelled' | 'failed' | 'unconfirmed'
+    code?: string
+    message?: string
+  }) => void
+  const outcome = new Promise<{
+    status: 'authorized' | 'cancelled' | 'failed' | 'unconfirmed'
+    code?: string
+    message?: string
+  }>((resolve) => {
     settle = resolve
   })
   const showNotice = (notice: AuthorizationNoticeEvent): void => {
@@ -374,6 +388,12 @@ export function createAuthorizationFlow(
         settle({ status: event.status, code: event.code, message: event.message })
         close()
         break
+      case 'unconfirmed':
+        // The transport lost the official outcome: the Host may still have
+        // committed. It is a FOURTH fact — never failed/cancelled/authorized.
+        settle({ status: 'unconfirmed', message: event.reason })
+        close()
+        break
     }
   }
   return {
@@ -417,8 +437,9 @@ export function createAuthorizationFlow(
         // Terminal events of OTHER attempts are kept only in the bounded
         // per-attempt slot and dropped at bind (never applied).
         const pending = buffered.get(event.attemptId) ?? []
-        if (event.kind === 'settled') {
-          const lastSettled = pending.findIndex(candidate => candidate.kind === 'settled')
+        if (event.kind === 'settled' || event.kind === 'unconfirmed') {
+          const lastSettled = pending.findIndex(candidate =>
+            candidate.kind === 'settled' || candidate.kind === 'unconfirmed')
           if (lastSettled === -1) {
             pending.push(event)
           } else {
@@ -455,6 +476,8 @@ export function authorizationFailureText(error: unknown, unknownErrorText: strin
       return 'sign-in finished without storing a credential'
     case 'DECLINED':
       return 'login cancelled'
+    case 'DISPATCH_UNKNOWN':
+      return 'sign-in outcome unknown — refresh credentials before retrying'
     default:
       return `sign-in failed: ${unknownErrorText}`
   }

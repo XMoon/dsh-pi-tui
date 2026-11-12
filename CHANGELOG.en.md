@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Provider-native sign-in on the Split backend.** In Settings → Models or `/login <route>`, the remote TUI now reads the Host's registered provider sign-in flows, shows the official notice (URL/device code), answers text/secret/select prompts, and reports the official authorized, cancelled or failed outcome — or an unknown outcome when the connection is lost. A secret is sent once over the authenticated link; a lost connection never retries automatically and never turns an unknown result into a failure or a success. DeepSeek Account sign-in semantics are unchanged.
+
 - **Host slash commands that declare attachment support can carry ordinary FILE attachments.** A Host command declaring `input.attachments` now delivers staged ordinary files to its handler as official upload receipts on both the Direct and Split backends. Drafts are consumed only after the command actually succeeds; an upload or preflight failure keeps the editable draft and its attachments, and an indeterminate result is never retried automatically.
 
 ### Changed

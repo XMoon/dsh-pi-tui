@@ -373,7 +373,7 @@ test('CredentialWorkflow.createProvider reports a profile write and a separate k
       listRecords: async () => [],
       onChanged: () => () => {},
     },
-    authorization: { available: () => false, listTargets: () => [], begin: async () => ({ kind: 'unavailable' }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    authorization: { available: () => false, listTargets: () => [], refreshTargets: async () => {}, targetsState: () => 'unavailable' as const, begin: async () => ({ kind: 'unavailable' }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
     account: { available: () => false, isObservationCurrent: () => false, getState: async () => { throw new Error('x') }, getProfile: async () => null, getBalance: async () => null, watch: async function* () {}, getCallbackOrigin: () => undefined, startSignIn: async () => { throw new Error('x') }, cancelSignIn: async () => { throw new Error('x') }, signOut: async () => { throw new Error('x') }, hasRunningAccountTasks: async () => false },
     catalog: { models: { available: () => true, discoverModels: async () => [] } },
     signal: new AbortController().signal,
@@ -437,6 +437,56 @@ test('provider-native sign-in presents the Host notice and a masked prompt, then
   assert.match(viewText(page), /signed in to Anthropic — provider profile recorded/u)
 })
 
+test('a transport-lost native attempt paints the unconfirmed outcome, never a business failure', async () => {
+  const { source, calls } = fakeSource()
+  const listeners = new Set<(event: import('../../src/runtime/config-port.ts').AuthorizationFlowEvent) => void>()
+  const emit = (event: import('../../src/runtime/config-port.ts').AuthorizationFlowEvent): void => {
+    for (const listener of listeners) listener(event)
+  }
+  source.authorizationEvents = listener => {
+    listeners.add(listener)
+    return () => { listeners.delete(listener) }
+  }
+  source.beginAuthorization = async key => {
+    calls.push(`begin:${key}`)
+    return { kind: 'started', attemptId: 'auth-lost' }
+  }
+  let catalogReads = 0
+  source.readCatalog = async () => {
+    catalogReads += 1
+    return { kind: 'ready', rows: makeRows() }
+  }
+  const page = openWith(source, { view: 'provider', route: 'anthropic' }, 26)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+  emit({ kind: 'unconfirmed', attemptId: 'auth-lost', reason: 'the authorization stream was lost' })
+  await flush()
+  const text = viewText(page)
+  assert.match(text, /sign-in outcome unconfirmed — refresh credentials before retrying/u)
+  assert.doesNotMatch(text, /sign-in failed/u)
+  assert.doesNotMatch(text, /sign-in cancelled/u)
+  assert.doesNotMatch(text, /signed in to/u)
+  assert.ok(catalogReads >= 1, 'the unconfirmed outcome re-reads the Host credential roster')
+})
+
+test('the catalog authorization notice states that native sign-in is unavailable without hiding the API key list', async () => {
+  const { source } = fakeSource()
+  source.readCatalog = async () => ({
+    kind: 'ready',
+    rows: makeRows(),
+    authorizationNotice: 'provider-native sign-in is unavailable on this Host',
+  })
+  const page = openWith(source, { view: 'list' }, 30)
+  await flush()
+  const text = viewText(page)
+  assert.match(text, /provider-native sign-in is unavailable on this Host/u)
+  // The API-key provider rows and the list's write actions stay available.
+  assert.match(text, /Acme Gateway/u)
+  assert.match(text, /Add Provider/u)
+})
+
 test('cancelling the Models page during a native attempt calls the Host cancel for that attempt', async () => {
   const { source, calls } = fakeSource()
   source.beginAuthorization = async () => ({ kind: 'started', attemptId: 'auth-9' })
@@ -474,7 +524,7 @@ test('the stored-credential list excludes the DeepSeek Account grant (MA14)', as
       ],
       onChanged: () => () => {},
     },
-    authorization: { available: () => true, listTargets: () => FLOWS, begin: async () => ({ kind: 'unavailable' }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    authorization: { available: () => true, listTargets: () => FLOWS, refreshTargets: async () => {}, targetsState: () => 'ready' as const, begin: async () => ({ kind: 'unavailable' }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
     account: { available: () => true, isObservationCurrent: (_lease: AccountObservationLease) => true, getState: async () => accountObservation({ status: 'credential-stored', links: { usageUrl: '', topUpUrl: '' }, attempt: null }), getProfile: async () => null, getBalance: async () => null, watch: async function* () {}, getCallbackOrigin: () => undefined, startSignIn: async () => { throw new Error('x') }, cancelSignIn: async () => { throw new Error('x') }, signOut: async () => { throw new Error('x') }, hasRunningAccountTasks: async () => false },
     catalog: { models: { available: () => false, discoverModels: async () => [] } },
     signal: new AbortController().signal,
@@ -2084,7 +2134,7 @@ test('a failed authoritative read cannot authorize a write', async () => {
       listRecords: async () => [],
       onChanged: () => () => {},
     },
-    authorization: { available: () => true, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    authorization: { available: () => true, listTargets: () => [], refreshTargets: async () => {}, targetsState: () => 'ready' as const, begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
     account: {
       available: () => false,
       isObservationCurrent: () => false,
@@ -2136,7 +2186,7 @@ test('a stale catalog authorizes neither the keyless profile write nor the creat
       listRecords: async () => [],
       onChanged: () => () => {},
     },
-    authorization: { available: () => true, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    authorization: { available: () => true, listTargets: () => [], refreshTargets: async () => {}, targetsState: () => 'ready' as const, begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
     account: {
       available: () => false,
       isObservationCurrent: () => false,

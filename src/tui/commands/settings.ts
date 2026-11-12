@@ -257,6 +257,15 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // snapshot, so a refresh never repeats the directory enumeration or the
     // settings read per route.
     readCatalog: async () => {
+      // Re-read the Host authorization roster ONCE for this page snapshot: a
+      // Remote page must never paint "no provider flow" from a roster that was
+      // not loaded for the CURRENT Connection generation. A failure leaves the
+      // catalog stale instead of failing the provider list.
+      try {
+        await workflow.refreshAuthorizationTargets()
+      } catch {
+        // `targetsState()` reports `stale`; the catalog below carries it.
+      }
       const catalog = workflow.readCatalog()
       if (catalog.failure !== undefined) return { kind: 'failed' as const, reason: catalog.failure }
       const profileOf = (route: string) => catalog.profiles.get(route) ?? { route, configured: false, models: [] }
@@ -296,9 +305,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
               ? { route: '', configured: false, models: [] }
               : profileOf(target.route),
           })
+      const authorizationNotice = catalog.authorizationUnavailable
       // A stale mirror: the LAST KNOWN rows, explicitly not current.
-      if (catalog.stale === true) return { kind: 'stale' as const, rows }
-      return { kind: 'ready' as const, rows }
+      if (catalog.stale === true) {
+        return { kind: 'stale' as const, rows, ...(authorizationNotice === undefined ? {} : { authorizationNotice }) }
+      }
+      return { kind: 'ready' as const, rows, ...(authorizationNotice === undefined ? {} : { authorizationNotice }) }
     },
     accountSummary: () => workflow.accountSummary(),
     credentialState: async (ref: string) => {
