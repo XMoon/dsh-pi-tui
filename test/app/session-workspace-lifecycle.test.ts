@@ -2638,3 +2638,59 @@ test('review P1: a SUCCESSFUL Add replaces the target; the pre-Add target stops 
     h.close()
   }
 })
+
+test('review EXT-P1 sibling: the real Browser open keeps the confirmed Workspace identity after a REFUSED Add', async () => {
+  const nextIntent = createWorkspaceNextIntentOwner(undefined)
+  nextIntent.setResolvedWorkspace('workspace-a', '/host/a')
+  // Spy the REAL production consumer: TuiApp.openSessionWorkspace receives the
+  // command surface's captured subject (currentWorkspaceId → nextCreateWorkspaceId).
+  const opens: Array<string | undefined> = []
+  const original = TuiApp.prototype.openSessionWorkspace
+  TuiApp.prototype.openSessionWorkspace = function recordedOpen(this: TuiApp, options) {
+    opens.push((options as { readonly currentWorkspaceId?: string }).currentWorkspaceId)
+    return original.call(this, options)
+  } as typeof original
+  const h = harness({
+    workspaceNextIntent: nextIntent,
+    hostDirectoryBrowse: {
+      list: async (path) => path === undefined
+        ? pr3Ready(pr3Listing(PR3_HOME, ['project-b']))
+        : pr3Ready(pr3Listing(path, [])),
+    },
+    agents: {
+      resolveWorkspace: (async () => {
+        throw new Error('the Host refused the proposed workspace directory')
+      }) as never,
+    },
+  })
+  try {
+    // Baseline: the first Browser open carries A's identity.
+    await h.runSessions('')
+    await h.vt.waitForRender()
+    assert.deepEqual(opens, ['workspace-a'], 'the first open carries the confirmed Workspace identity')
+
+    // The REAL refused Add of B.
+    h.vt.sendInput('\x1b[H')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\r')
+    await h.vt.waitForRender()
+    await waitUntil(() => h.view().includes('project-b/'), 'the Add editor lists the Host level')
+    h.vt.sendInput('\r')
+    await waitUntil(() => nextIntent.snapshot().status === 'rejected', 'the refused verification painted')
+    for (let escapes = 0; escapes < 5; escapes += 1) {
+      if (!h.view().includes('Sessions ·') && !h.view().includes('Add directory')) break
+      h.vt.sendInput('\x1b')
+      await h.vt.waitForRender()
+    }
+    opens.length = 0
+
+    // Reopen: the subject must STILL carry A (identity, not transient status).
+    await h.runSessions('')
+    await h.vt.waitForRender()
+    assert.deepEqual(opens, ['workspace-a'],
+      'a refused Add must not clear the Browser/TSP next-create Workspace identity')
+  } finally {
+    TuiApp.prototype.openSessionWorkspace = original
+    h.close()
+  }
+})
