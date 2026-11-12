@@ -2239,10 +2239,11 @@ export function applyRunnerWithRuntime(
         ? directPolicyGenerationToken
         : (remoteSources.commandSource.connectionGeneration() as object | undefined),
       isSubjectCurrent: sessionId => ownership.currentSessionId() === sessionId || viewerRef?.read()?.id === sessionId,
-      // A transition/owner commit holds the gate: its callbacks must never
-      // reach a Host projection read, so a revocation repaint only paints
-      // `checking` there. The next safe display refresh (after the gate
-      // opens) starts the controlled read.
+      // The F8 read-admission fence: a transition/owner commit holds the
+      // gate, so its callbacks only paint `checking`; the next safe display
+      // refresh starts the controlled read. This is the SECOND sanctioned
+      // reader of the transition gate (the other is the attachments intake UX
+      // fence); writer admission stays with SessionRuntime.withWriter.
       canStartRead: () => !ownership.gate.busy,
       diag,
     })
@@ -2261,12 +2262,12 @@ export function applyRunnerWithRuntime(
     // this owner-commit callback would otherwise read the published-but-not-
     // yet-initialized owner's Host projections during the transition window.
     const disposePolicyScopeInvalidation = ownership.subscribeScopeInvalidation(() => {
-      sessionPolicyObservation.invalidate()
       // The owner commit's synchronous stack must never reach a Host
-      // projection read. Repaint the revoked truth now (the invalidation is
-      // observable to the open Settings page) and ask for ONE display refresh
-      // only AFTER the transition settles, when the new subject's controlled
-      // read is safe to start.
+      // projection read: revoke the truth (the open Settings page repaints to
+      // `checking`) and request ONE display refresh only AFTER the transition
+      // settles, when the read-admission fence opens and the new subject's
+      // controlled read may start.
+      sessionPolicyObservation.invalidate()
       runDetached('session policy refresh', async () => {
         await ownership.gate.whenSettled()
         statusRuntimeRef?.refresh()

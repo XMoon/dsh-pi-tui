@@ -1903,8 +1903,8 @@ test('M6-1 F8: a connection-generation revocation drops the old policy from the 
   const revoked = h.view()
   assert.match(revoked, /Checking…/u, `the revoked fact returns to the truthful pending state:\n${revoked}`)
   assert.doesNotMatch(revoked, /Effective: never/u, 'the old Host policy is gone from the page')
-  // The NEW Host read answers later; only then does the fresh fact paint.
-  await new Promise<void>(resolve => { setTimeout(resolve, 20) })
+  // The revocation repaint already started the new Host read (the generation
+  // edge is a safe trigger); only its settlement paints the fresh fact.
   h.releasePolicyRead()
   await new Promise<void>(resolve => { setTimeout(resolve, 30) })
   assert.match(h.view(), /never/u, 'the new generation fact paints after its own read settles')

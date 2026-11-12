@@ -685,18 +685,28 @@ test('the queue pull-back reconciles a STALE pre-entry refusal distinctly from a
     'the stale notice text is the session change, not a transition')
 })
 
-test('the transition gate has exactly ONE production reader: the intake UX fence', () => {
+test('the transition gate has exactly TWO production readers, each with ONE admission role', () => {
   const runtime = readFileSync(new URL('../../src/app/submission/runtime.ts', import.meta.url), 'utf8')
-  // The gate has exactly ONE production reader across ALL of `src/**` (not just
-  // the composition surface): the attachment-intake UX fence
-  // (`sessionTransitionPending`). Reading only the composition surface made a
-  // second reader in an unlisted module invisible. The HostCommand quick fence
-  // was removed; `SessionRuntime.withWriter` is the sole writer-admission
-  // authority.
+  // The gate has exactly TWO production readers across ALL of `src/**` (not
+  // just the composition surface), with DISTINCT responsibilities:
+  //   1. the attachment-intake UX fence (`transition.pending`, consumed by
+  //      `sessionTransitionPending`), and
+  //   2. the M6-1 F8 session-policy READ-admission fence (`canStartRead`): a
+  //      revocation repaint inside an owner-commit callback must not reach a
+  //      Host projection read.
+  // Reading only the composition surface made a second reader in an unlisted
+  // module invisible. The HostCommand quick fence was removed;
+  // `SessionRuntime.withWriter` remains the sole writer-admission authority —
+  // neither reader grants or refuses a WRITE.
   const readers = productionSources()
     .flatMap(({ rel, source }) => Array.from(source.matchAll(/ownership\.gate\.busy/g), () => rel))
-  assert.deepEqual(readers, ['src/app/bootstrap.ts'],
-    'the gate may be read only by the attachment-intake UX fence (in src/app/bootstrap.ts)')
+  assert.deepEqual(readers, ['src/app/bootstrap.ts', 'src/app/bootstrap.ts'],
+    'the transition gate may be read only by the two sanctioned fences in src/app/bootstrap.ts')
+  const bootstrap = readFileSync(new URL('../../src/app/bootstrap.ts', import.meta.url), 'utf8')
+  assert.ok(bootstrap.includes('pending: () => ownership.gate.busy,'),
+    'the attachment-intake UX fence keeps its gate read')
+  assert.ok(bootstrap.includes('canStartRead: () => !ownership.gate.busy,'),
+    'the F8 policy read-admission fence is the only OTHER gate read')
   assert.equal(runtime.includes('isTransitionBusy'), false,
     'app/submission must not read the transition gate')
   const command = runtime.slice(

@@ -183,7 +183,7 @@ test('a revisited subject whose truth was invalidated starts a fresh read (re-en
   // The viewer exits: the subject's truth is revoked (no synchronous re-read).
   observation.invalidate('child-x')
   assert.equal(reads.length, 1, 'invalidation itself starts no read')
-  // The SAME child is re-entered: the next observation restarts a read.
+  // The SAME child is re-entered: the next safe observation restarts ONE read.
   value = 'never'
   assert.equal(observation.readSnapshot('child-x').kind, 'checking')
   await new Promise<void>(resolve => { setTimeout(resolve, 10) })
@@ -194,15 +194,17 @@ test('a revisited subject whose truth was invalidated starts a fresh read (re-en
 })
 
 
-test('readSnapshot starts NO read while the owner-commit window forbids it (RFL-F8-005)', async () => {
+test('readSnapshot starts NO Host read while the owner-commit fence is closed (RFL-F8-005)', async () => {
+  // The Settings revocation repaint calls readSnapshot from inside an
+  // owner-commit callback. The read-admission fence must keep that repaint at
+  // `checking`; the read starts at the next safe display refresh only.
   const reads: string[] = []
   const source = sourceFixture({ canStartRead: false })
   source.read = async sessionId => { reads.push(sessionId); return readyRead(sessionId) }
   const observation = createSessionPolicyObservation(source)
   assert.equal(observation.readSnapshot('s1').kind, 'checking')
   await new Promise<void>(resolve => { setTimeout(resolve, 10) })
-  assert.deepEqual(reads, [], 'the revocation repaint must not reach a Host read inside the commit callback')
-  // The gate opens after the transition: the next safe observation starts it.
+  assert.deepEqual(reads, [], 'no read may start from a synchronous repaint inside the commit')
   source.setCanStartRead(true)
   assert.equal(observation.readSnapshot('s1').kind, 'checking')
   await new Promise<void>(resolve => { setTimeout(resolve, 10) })

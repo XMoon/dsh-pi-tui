@@ -37,10 +37,10 @@ export interface SessionPolicyObservationSource {
   /** Whether the observed subject (owner generation + session id) is still
    *  the current display subject. */
   isSubjectCurrent(sessionId: string): boolean
-  /** Whether a NEW Host read may start right now. FALSE inside an owner
-   *  commit/transition window: the commit callback must never reach a Host
-   *  projection read, so `readSnapshot` only paints the revoked `checking`
-   *  state there and the read starts at the next safe display refresh. */
+  /** Whether a NEW Host read may start right now. FALSE inside a
+   *  transition/owner-commit window: a revocation repaint must never reach a
+   *  Host projection read there, so `readSnapshot` only paints the revoked
+   *  `checking` state and the read starts at the next safe display refresh. */
   canStartRead(): boolean
   /** The runner diagnostics channel (dropped late reads and detached-read
    *  failures are recorded here; never a UI surface). */
@@ -163,11 +163,12 @@ export function createSessionPolicyObservation(
 
   return {
     readSnapshot(sessionId) {
-      // FIRST OBSERVATION of a subject, and a REVISITED subject whose truth
-      // was invalidated (checking, no read running), each start exactly ONE
-      // controlled read: the display/footer consumer asks synchronously, and
-      // the answer lands through the same commit path (latest-wins,
-      // subject/generation fenced).
+      // FIRST OBSERVATION of a subject — and a REVISITED subject whose truth
+      // was invalidated (checking, no read running) — starts exactly ONE
+      // controlled read, but ONLY when the owner-commit read-admission fence
+      // (`canStartRead`) allows it. A repaint driven from inside an owner
+      // commit callback therefore only paints `checking`; the read starts at
+      // the next safe display refresh.
       const entry = entryOf(sessionId)
       if (!disposed
         && entry.inFlightSerial === undefined
