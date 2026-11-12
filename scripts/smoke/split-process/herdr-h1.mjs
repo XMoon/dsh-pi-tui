@@ -162,6 +162,7 @@ export async function runHerdrH1(context) {
   }
   const {
     startC1Host,
+    stopC1Host,
     startC1Client,
     exitC1Client,
     openC1Session,
@@ -189,6 +190,9 @@ export async function runHerdrH1(context) {
     assert(alive(longReady.pid), 'H1 the Host died during the long-turn scene')
     await exitC1Client(longClient, `H1 long Client ${unique}`)
     await waitForLog(longLog, () => lastIndex(longLog, 'release') === states(longLog).length - 1, 'RH-01a release on dispose', 60_000)
+    // The Host seat is exclusive: release this scene's Host before the next
+    // independent Host starts (otherwise the second Host reports host-seat-conflict).
+    await stopC1Host(longHost)
     trace('herdr-h1-rh01a', {
       scope: 'REAL_SPLIT_PROCESS_L6',
       hostPid: longReady.pid,
@@ -225,6 +229,7 @@ export async function runHerdrH1(context) {
     assertPaneOwnership(questionLog, questionPane)
     assert(alive(questionReady.pid), 'H1 the Host died during the question scene')
     await exitC1Client(questionClient, `H1 question Client ${unique}`)
+    await stopC1Host(questionHost)
     trace('herdr-h1-rh01b', {
       scope: 'REAL_SPLIT_PROCESS_L6',
       hostPid: questionReady.pid,
@@ -281,9 +286,8 @@ export async function runHerdrH1(context) {
     // ── The Split Host never creates a reporter ────────────────────────────
     assert(readInvocations(hostLog).length === 0,
       `H1 the Host process created a Pane reporter: ${JSON.stringify(readInvocations(hostLog))}`)
-    for (const host of [longHost, questionHost, multiHost]) {
-      assert(host.exited === false, 'H1 a scene Host exited before its own stop')
-    }
+    assert(alive(multiReady.pid), 'H1 the multi-client Host died before its own stop')
+    await stopC1Host(multiHost)
 
     trace('herdr-h1-rh02', {
       scope: 'STRUCTURAL_ONLY',
