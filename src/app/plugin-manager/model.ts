@@ -83,10 +83,6 @@ interface ExperimentalBundleSupport {
  * from it (the live ledger stays in `docs/architecture/host-client.md`).
  */
 const EXPERIMENTAL_BUNDLE_SUPPORT: Readonly<Record<string, ExperimentalBundleSupport>> = Object.freeze({
-  '@deepseek-ai/dsh-experimental-agent-team-profile': {
-    surface: 'Host Team tools; child and task activity use existing Tool/Activity views.',
-    limit: 'No native Team roster or task board. Global delegation tools differ from preset-local tools.',
-  },
   '@deepseek-ai/dsh-experimental-voice-input-bundle': {
     surface: 'Speech services are Host-side; browser microphone UI is not available in PiTui.',
     limit: 'Local model preparation or API credentials may be required; no TUI recording/transcription flow.',
@@ -190,7 +186,12 @@ export interface PluginCardView {
   /** Host `BundleInfo.listedByDefault`; absent = the Host declares no default
    *  listing decision. Only a default-list projection may hide such a card. */
   readonly listedByDefault?: boolean
-  /** Host `BundleInfo.updatable`: a declared capability, NOT a TUI action.
+  /** Host `BundleInfo.update`: how the Host can update the bundle at all
+   *  (`registry` or `git`), absent when it cannot. Presentation fact only. */
+  readonly update?: 'registry' | 'git'
+  /** REGISTRY-ONLY executable UI capability, derived from
+   *  `BundleInfo.update === 'registry'`: only that mode licenses the
+   *  `Check updates…` action and its Host listVersions/updateBundle calls.
    *  A standalone entry is never a Host bundle, so it is always `false`. */
   readonly updatable: boolean
   /** Host profile-owned dependency spec (user information already stripped). */
@@ -452,6 +453,13 @@ function upgradeGuidance(card: PluginCardView): PluginDetailFact | undefined {
         tone: 'normal',
       }
     }
+    if (card.update === 'git') {
+      return {
+        label: 'Upgrade',
+        value: 'This bundle is managed from its Git source and is updated through that source. The Plugin Manager does not run registry updates for it.',
+        tone: 'normal',
+      }
+    }
     return {
       label: 'Upgrade',
       value: `Upgrade: Profile-owned. Remove the current bundle first, then explicitly install the desired package version. No in-place update.${removal}`,
@@ -522,7 +530,15 @@ function cardSourceFacts(card: PluginCardView): PluginDetailFact[] {
       value: card.listedByDefault === undefined ? 'Host default' : card.listedByDefault ? 'Shown' : 'Hidden',
       tone: card.listedByDefault === false ? 'warning' : 'dim',
     })
-    facts.push({ label: 'Host updatable', value: card.updatable ? 'Yes' : 'No', tone: 'dim' })
+    facts.push({
+      label: 'Host update source',
+      value: card.update === 'registry'
+        ? 'registry'
+        : card.update === 'git'
+          ? 'git (updated through its Git source, not the Plugin Manager)'
+          : 'none',
+      tone: 'dim',
+    })
   }
   return facts
 }
@@ -926,7 +942,8 @@ export function buildPluginManagerModel(
       availability: bundle.availability,
       ...(bundle.installTarget === undefined ? {} : { installTarget: bundle.installTarget }),
       ...(bundle.listedByDefault === undefined ? {} : { listedByDefault: bundle.listedByDefault }),
-      updatable: bundle.updatable,
+      ...(bundle.update === undefined ? {} : { update: bundle.update }),
+      updatable: bundle.update === 'registry',
       ...(bundle.source === undefined ? {} : { source: bundle.source }),
       enabled: bundle.enabled,
       installed: bundle.installed,

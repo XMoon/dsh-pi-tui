@@ -624,7 +624,7 @@ function primaryActionPainted(text: string): boolean {
 function updatableBundles(): readonly PluginBundleFact[] {
   return [bundle({
     name: 'updatable',
-    updatable: true,
+    update: 'registry',
     version: '1.0.0',
     source: 'https://registry.example/updatable',
     enabled: false,

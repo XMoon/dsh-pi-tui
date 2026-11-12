@@ -41,7 +41,7 @@ function bundle(overrides: Partial<PluginBundleFact> = {}): PluginBundleFact {
     installed: true,
     optional: false,
     removable: true,
-    updatable: false,
+    update: undefined,
     rows: [],
     overrides: [],
     ...overrides,
@@ -1303,7 +1303,7 @@ test('version difference, equal version and masked sources never leak credential
 function updatable(overrides: Partial<PluginBundleFact> = {}): PluginBundleFact {
   return bundle({
     name: 'updatable',
-    updatable: true,
+    update: 'registry',
     source: 'https://registry.example/updatable',
     version: '1.0.0',
     ...overrides,
@@ -1765,8 +1765,8 @@ test('update: request-id-matched events update the one log and duplicate steps d
 test('update: begin refuses a bundle the Host does not declare updatable without any registry read', async () => {
   const fixture = fakePort({
     snapshotImpl: async () => snapshot([
-      updatable({ name: 'fixed', updatable: false }),
-      updatable({ name: '@vendor/official', official: true, availability: 'installation', source: undefined, updatable: false }),
+      updatable({ name: 'fixed', update: undefined }),
+      updatable({ name: '@vendor/official', official: true, availability: 'installation', source: undefined, update: undefined }),
     ]),
   })
   const { controller } = controllerOf(fixture.port)

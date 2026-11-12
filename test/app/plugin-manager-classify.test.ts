@@ -61,7 +61,7 @@ function bundle(overrides: Partial<PluginBundleFact> = {}): PluginBundleFact {
     installed: true,
     optional: false,
     removable: true,
-    updatable: false,
+    update: undefined,
     rows: [],
     overrides: [],
     ...overrides,
@@ -264,7 +264,7 @@ test('model sections are ordered TUI → Official → Third-party → Experiment
   })
 })
 
-test('the official Experimental identities keep the rc.2 B01–B14 order, Codex/Claude last', () => {
+test('the official Experimental identities keep the frozen B02–B14 order, Codex/Claude last', () => {
   const snap = snapshot(
     EXPERIMENTAL_BUNDLE_IDS.map(name => bundle({
       name,
@@ -300,7 +300,7 @@ test('a real Host catalog row reaches the section through shared mapping, not a 
         installed: false,
         optional: true,
         removable: false,
-        updatable: false,
+        update: undefined,
         rows: [],
         overrides: [],
       },
@@ -314,7 +314,7 @@ test('a real Host catalog row reaches the section through shared mapping, not a 
         installed: true,
         optional: false,
         removable: true,
-        updatable: false,
+        update: undefined,
         rows: [],
         overrides: [],
       },
@@ -675,7 +675,6 @@ test('without the self bundle there is no Current TUI card and no guessed fallba
 
 // ── D3-0: bounded rc.2 product-support copy ────────────────────────────────
 
-const B01 = '@deepseek-ai/dsh-experimental-agent-team-profile'
 const B02 = '@deepseek-ai/dsh-experimental-voice-input-bundle'
 const B04 = '@deepseek-ai/dsh-experimental-inspector-profile'
 const B06 = '@deepseek-ai/dsh-experimental-cot-translation-bundle'
@@ -747,9 +746,9 @@ function fact(card: PluginCardView, label: string) {
   return undefined
 }
 
-test('all 14 rc.2 Experimental identities carry an exact TUI surface fact and never the stale generic copy', () => {
+test('all 13 rc.2 Experimental identities carry an exact TUI surface fact and never the stale generic copy', () => {
   const model = experimentalModel()
-  assert.equal(cardsOf(model, 'experimental').length, 14)
+  assert.equal(cardsOf(model, 'experimental').length, 13)
   for (const name of EXPERIMENTAL_BUNDLE_IDS) {
     const card = cardByName(model, name)!
     const detail = buildPluginDetailView(card)
@@ -779,9 +778,7 @@ test('hazardous rc.2 limitations use warning tone while plain limitations stay d
   for (const name of [B02, B04, B06, B11, B13, B14]) {
     assert.equal(fact(cardByName(model, name)!, 'Risk')?.tone, 'warning', `${name} carries a real risk`)
   }
-  for (const name of [B01, B07]) {
-    assert.equal(fact(cardByName(model, name)!, 'Limit')?.tone, 'dim', `${name} is a neutral limitation`)
-  }
+  assert.equal(fact(cardByName(model, B07)!, 'Limit')?.tone, 'dim', `${B07} is a neutral limitation`)
   // B03 keeps its existing Owner-frozen danger confirmation as the ONLY hazard
   // statement; the capability copy must not duplicate a conflicting one.
   const autoReview = cardByName(model, '@deepseek-ai/dsh-experimental-auto-review')!
@@ -811,7 +808,7 @@ test('the bounded copy never changes with installed/enabled state (no fake dynam
 
 test('same-name official:false packages and standalone entries never inherit the official copy', () => {
   const fakeBundle = bundle({
-    name: B01,
+    name: B02,
     official: false,
     availability: 'profile',
     installed: true,
@@ -821,20 +818,20 @@ test('same-name official:false packages and standalone entries never inherit the
   const fakeName = buildPluginManagerModel(
     snapshot([fakeBundle], []),
     classifyPluginPackages(inputs([{
-      key: bundleValue(B01),
-      bundleName: B01,
+      key: bundleValue(B02),
+      bundleName: B02,
       entryIds: [],
       availability: 'profile',
       installed: true,
       source: 'file:/tmp/not-official',
     }]), []),
   )
-  const fake = fakeName.cards.find(card => card.name === B01 && card.section === 'third-party')
+  const fake = fakeName.cards.find(card => card.name === B02 && card.section === 'third-party')
   assert.ok(fake !== undefined, 'the same-name non-official package is a Third-party card')
   assert.equal(fact(fake!, 'TUI surface'), undefined)
 
-  const entryModel = experimentalModel({ extraRows: [row({ entryId: 'include:fake-b01', moduleName: B01, patchId: 'fake-b01' })] })
-  const entry = entryModel.cards.find(card => card.value === entryValue('include:fake-b01'))!
+  const entryModel = experimentalModel({ extraRows: [row({ entryId: 'include:fake-b02', moduleName: B02, patchId: 'fake-b02' })] })
+  const entry = entryModel.cards.find(card => card.value === entryValue('include:fake-b02'))!
   assert.equal(fact(entry, 'TUI surface'), undefined)
 })
 
@@ -956,22 +953,23 @@ test('an unsupported-platform refusal blocks catalog Install yet keeps Disable a
   assert.equal(errorText(profileRefused!.error!), 'unsupported-platform — This bundle cannot be enabled on the DSH Host platform. — darwin only')
 })
 
-test('a Host-declared update capability is the only source of the Detail Check updates entry', () => {
-  const updatable = bundle({ name: 'updatable-profile', updatable: true, source: 'https://registry.example/pkg' })
-  const fixed = bundle({ name: 'fixed-profile', updatable: false, source: 'https://registry.example/fixed' })
+test('a Host-declared registry update source is the only source of the Detail Check updates entry', () => {
+  const registryUpdatable = bundle({ name: 'updatable-profile', update: 'registry', source: 'https://registry.example/pkg' })
+  const gitManaged = bundle({ name: 'git-profile', update: 'git', source: 'git+https://github.com/example/pkg.git' })
+  const fixed = bundle({ name: 'fixed-profile', update: undefined, source: 'https://registry.example/fixed' })
   const official = bundle({
     name: '@vendor/official-shipped',
     official: true,
     availability: 'installation',
     source: undefined,
-    updatable: false,
+    update: undefined,
   })
-  const self = bundle({ name: SELF_BUNDLE, updatable: true, source: 'https://registry.example/tui' })
-  const model = buildPluginManagerModel(snapshot([updatable, fixed, official], []), new Map())
+  const self = bundle({ name: SELF_BUNDLE, update: 'registry', source: 'https://registry.example/tui' })
+  const model = buildPluginManagerModel(snapshot([registryUpdatable, gitManaged, fixed, official], []), new Map())
 
   const updatableDetail = buildPluginDetailView(cardByName(model, 'updatable-profile')!)
   const updatableFacts = updatableDetail.groups.flatMap(group => group.facts)
-  assert.equal(updatableFacts.find(entry => entry.label === 'Host updatable')?.value, 'Yes')
+  assert.equal(updatableFacts.find(entry => entry.label === 'Host update source')?.value, 'registry')
   assert.equal(
     updatableFacts.find(entry => entry.label === 'Upgrade')?.value,
     'Host-supported registry updates are available through Check updates…; the Host checks the exact target again before changing the profile.',
@@ -983,8 +981,19 @@ test('a Host-declared update capability is the only source of the Detail Check u
   const values = updatableDetail.actions.map(action => action.value)
   assert.ok(values.indexOf(PLUGIN_ACTION.checkUpdates) < values.indexOf(PLUGIN_ACTION.remove))
 
+  // A Git-managed bundle states its Host source but NEVER exposes the registry
+  // action (no Check updates…, therefore no listVersions/updateBundle call).
+  const gitDetail = buildPluginDetailView(cardByName(model, 'git-profile')!)
+  const gitFacts = gitDetail.groups.flatMap(group => group.facts)
+  assert.equal(gitFacts.find(entry => entry.label === 'Host update source')?.value,
+    'git (updated through its Git source, not the Plugin Manager)')
+  assert.match(gitFacts.find(entry => entry.label === 'Upgrade')?.value ?? '', /Git source/u)
+  assert.equal(gitDetail.actions.some(action => action.value === PLUGIN_ACTION.checkUpdates), false)
+  assert.equal(cardByName(model, 'git-profile')!.updatable, false,
+    'the registry-only UI capability is never inferred from a Git source')
+
   const fixedFacts = buildPluginDetailView(cardByName(model, 'fixed-profile')!).groups.flatMap(group => group.facts)
-  assert.equal(fixedFacts.find(entry => entry.label === 'Host updatable')?.value, 'No')
+  assert.equal(fixedFacts.find(entry => entry.label === 'Host update source')?.value, 'none')
   assert.match(fixedFacts.find(entry => entry.label === 'Upgrade')?.value ?? '',
     /Remove the current bundle first, then explicitly install the desired package version/u)
   assert.ok(!buildPluginDetailView(cardByName(model, 'fixed-profile')!).actions.some(action => action.value === PLUGIN_ACTION.checkUpdates))
@@ -1007,7 +1016,7 @@ test('a Host-declared update capability is the only source of the Detail Check u
     .cards.find(card => card.value === 'entry:include:plain')!
   assert.equal(entry.updatable, false)
   const entryFacts = buildPluginDetailView(entry).groups.flatMap(group => group.facts)
-  assert.equal(entryFacts.some(fact => fact.label === 'Host updatable'), false)
+  assert.equal(entryFacts.some(fact => fact.label === 'Host update source'), false)
   assert.equal(entryFacts.some(fact => fact.label === 'Default listing'), false)
   assert.ok(!buildPluginDetailView(entry).actions.some(action => action.value === PLUGIN_ACTION.checkUpdates))
 })
@@ -1077,7 +1086,7 @@ test('the release Experimental set decides identity while the frozen Bxx set kee
     assert.equal(claims.get(bundleValue(name))!.experimental, true)
   }
   // The ONLY legacy names the release does not mark are the frozen exceptions;
-  // the TUI keeps them Experimental here so B01–B14 keep their copy and order.
+  // the TUI keeps them Experimental here so B02–B14 keep their copy and order.
   const legacyOnly = EXPERIMENTAL_BUNDLE_IDS.filter(name => !EXPERIMENTAL_BUNDLES.has(name))
   assert.deepEqual([...legacyOnly].sort(), [...LEGACY_EXPERIMENTAL_BUNDLE_IDS].sort())
 

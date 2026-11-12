@@ -47,7 +47,7 @@ export function bundle(overrides: Partial<PluginBundleFact> = {}): PluginBundleF
     installed: true,
     optional: false,
     removable: true,
-    updatable: false,
+    update: undefined,
     rows: [],
     overrides: [],
     ...overrides,
@@ -65,7 +65,6 @@ export function row(overrides: Partial<PluginRowFact> = {}): PluginRowFact {
 }
 
 export const EXPERIMENTAL_NAMES = [
-  '@deepseek-ai/dsh-experimental-agent-team-profile',
   '@deepseek-ai/dsh-experimental-voice-input-bundle',
   '@deepseek-ai/dsh-experimental-auto-review',
   '@deepseek-ai/dsh-experimental-inspector-profile',
