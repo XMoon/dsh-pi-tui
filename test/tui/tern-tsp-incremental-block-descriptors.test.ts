@@ -220,6 +220,7 @@ test('lazy Main blocks equal the full view for Snapshot Context carried into a W
         expandedThinkingOwners: new Set(),
         expandedContextRowOwners: new Set(),
         expandedClusterOwners: new Set(messages.filter(message => message.kind === 'system').map(message => message)),
+        expandedCommandCompactionOwners: new Set(),
       },
     })
   }
@@ -273,6 +274,7 @@ test('lazy Main blocks equal the full view for a nested PTC child and its own di
         expandedThinkingOwners: new Set(),
         expandedContextRowOwners: new Set(),
         expandedClusterOwners: new Set(),
+        expandedCommandCompactionOwners: new Set(),
       },
       expandedToolKeys: new Set(['msg-3', 'msg-3/sub-code-1:code:1']),
       expandedWorkOwners: new Set(messages.filter(message => message.kind === 'thinking')),
@@ -438,6 +440,7 @@ test('one Cluster member toggle changes only the owning Cluster descriptor stamp
       expandedThinkingOwners: new Set<TranscriptMessage>(),
       expandedContextRowOwners: new Set<TranscriptMessage>(),
       expandedClusterOwners: new Set(clusters.map(cluster => cluster.owner)),
+      expandedCommandCompactionOwners: new Set<TranscriptMessage>(),
     },
   }
   const before = describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), baseOptions)
@@ -474,4 +477,66 @@ test('one Cluster member toggle changes only the owning Cluster descriptor stamp
     node.id !== clusterId && !node.id.startsWith(`${clusterId}.`))
   assert.deepEqual(unaffected(afterFlat), unaffected(beforeFlat),
     'unrelated User/Assistant/Cluster nodes and identities do not change')
+})
+
+test('one Command toggle changes only its own descriptor and the static key stays legal', () => {
+  const commandRun = (seq: number, id: string, name: string): SessionEvent =>
+    ev('command/run', { commandId: CommandId(id), name, source: { kind: 'user' } }, seq)
+  const commandDone = (seq: number, id: string, text: string): SessionEvent =>
+    ev('command/done', { commandId: CommandId(id), kind: 'success', text }, seq)
+  const folderWith = (settled: boolean): TranscriptFolder => apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'user-1', 'show the command'),
+    commandRun(2, 'cmd-1', 'status'),
+    ...(settled ? [commandDone(3, 'cmd-1', 'all good\nmore detail')] : []),
+    assistantMessage(settled ? 4 : 3, 'final-1', 'the answer', 1),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, settled ? 5 : 4),
+  ])
+  const settled = folderWith(true)
+  const messages = settled.messages()
+  const command = messages.find(message => message.kind === 'command')
+  assert.ok(command !== undefined && command.kind === 'command')
+  const baseOptions = {
+    preset: 'full' as const,
+    scopePrefix: 's1-',
+    window: LATEST_WINDOW,
+    innerDisclosure: {
+      expandedThinkingOwners: new Set<TranscriptMessage>(),
+      expandedContextRowOwners: new Set<TranscriptMessage>(),
+      expandedClusterOwners: new Set<TranscriptMessage>(),
+      expandedCommandCompactionOwners: new Set<TranscriptMessage>(),
+    },
+  }
+  const before = describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), baseOptions)
+  const after = describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), {
+    ...baseOptions,
+    innerDisclosure: { ...baseOptions.innerDisclosure, expandedCommandCompactionOwners: new Set([command]) },
+  })
+  assert.deepEqual(after.map(descriptor => descriptor.key), before.map(descriptor => descriptor.key),
+    'opening one Command keeps every top-level descriptor identity and order')
+  const changed = before.flatMap((descriptor, index) =>
+    JSON.stringify(descriptor.stamp) === JSON.stringify(after[index]!.stamp) ? [] : [descriptor.key])
+  const commandKey = before.find(descriptor => descriptor.owners.includes(command))!.key
+  assert.deepEqual(changed, [commandKey], 'only the toggled Command is re-materialized')
+
+  const beforeFlat = flattenMain(lazyMain(messages, new TranscriptNodeKeys(), baseOptions))
+  const afterFlat = flattenMain(lazyMain(messages, new TranscriptNodeKeys(), {
+    ...baseOptions,
+    innerDisclosure: { ...baseOptions.innerDisclosure, expandedCommandCompactionOwners: new Set([command]) },
+  }))
+  const unaffected = (nodes: FlatNode[]): FlatNode[] => nodes.filter(node =>
+    node.id !== `main.${commandKey}` && !node.id.startsWith(`main.${commandKey}.`))
+  assert.deepEqual(unaffected(afterFlat), unaffected(beforeFlat),
+    'the User and Assistant rows keep their exact ids and props')
+
+  // The running card and the settled Section cannot share a Main key: the
+  // journal cannot mutate a root kind in place, and the detail-less card is
+  // the non-operable state. Both states keep the same ordinal position.
+  const runningKeys = describeTranscriptMainBlocksForPreset(
+    folderWith(false).messages(), new TranscriptNodeKeys(), baseOptions,
+  ).map(descriptor => descriptor.key)
+  const settledKeys = before.map(descriptor => descriptor.key)
+  assert.equal(runningKeys.length, settledKeys.length)
+  assert.deepEqual(runningKeys.filter(key => key !== settledKeys[runningKeys.indexOf(key)]), [`s1-msg-2-static`])
+  assert.equal(settledKeys[runningKeys.indexOf('s1-msg-2-static')], 's1-msg-2')
 })

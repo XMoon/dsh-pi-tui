@@ -135,6 +135,10 @@ type InnerDisclosurePathTarget =
   | { readonly kind: 'thinking'; readonly owner: Extract<TranscriptMessage, { kind: 'thinking' }> }
   | { readonly kind: 'context-row'; readonly owner: Extract<TranscriptMessage, { kind: 'system' }> }
   | { readonly kind: 'context-cluster'; readonly owner: Extract<TranscriptMessage, { kind: 'system' }> }
+  | {
+    readonly kind: 'command-compaction'
+    readonly owner: Extract<TranscriptMessage, { kind: 'command' | 'compaction' }>
+  }
 
 /**
  * The renderer-local dock state (notices + the mount-scoped footer notices).
@@ -1465,6 +1469,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const expandedThinkingOwners = new Set<TranscriptMessage>()
   const expandedContextRowOwners = new Set<TranscriptMessage>()
   const expandedClusterOwners = new Set<TranscriptMessage>()
+  /**
+   * T3-0B: the ONE manual owner of native Command/Compaction disclosure. A
+   * card with real detail starts collapsed; a detail-less card stays directly
+   * readable. The set is source-local like every sibling above and is never
+   * reset by closing a Work/Focus ancestor.
+   */
+  const expandedCommandCompactionOwners = new Set<TranscriptMessage>()
   const innerDisclosureByPath = new Map<string, InnerDisclosurePathTarget>()
   /**
    * PR-D RFL-016: the tool-card keys the user EXPANDED via the Tern `toggle`
@@ -1494,6 +1505,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     expandedThinkingOwners.clear()
     expandedContextRowOwners.clear()
     expandedClusterOwners.clear()
+    expandedCommandCompactionOwners.clear()
     innerDisclosureByPath.clear()
   }
   /**
@@ -2176,7 +2188,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       expandedWorkOwners,
       expandedFocusTurns,
       expandedToolKeys,
-      innerDisclosure: { expandedThinkingOwners, expandedContextRowOwners, expandedClusterOwners },
+      innerDisclosure: {
+        expandedThinkingOwners,
+        expandedContextRowOwners,
+        expandedClusterOwners,
+        expandedCommandCompactionOwners,
+      },
       turnActivities: lastTurnActivities,
       ...(lastWindowState === undefined ? {} : { window: lastWindowState }),
     }, keys)
@@ -2961,7 +2978,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       ...(svgStates === undefined ? {} : { toolSvgStates: svgStates }),
       expandedToolKeys,
       ...(displayState === undefined ? {} : {
-        innerDisclosure: { expandedThinkingOwners, expandedContextRowOwners, expandedClusterOwners },
+        innerDisclosure: {
+          expandedThinkingOwners,
+          expandedContextRowOwners,
+          expandedClusterOwners,
+          expandedCommandCompactionOwners,
+        },
       }),
       imageStates,
       nativeImagesSupported: nativeImagesSupported(),
@@ -2999,6 +3021,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           addInnerKey(`${scopePrefix}${key}`, target)
         } else if (message.kind === 'system' && message.context === true) {
           const target: InnerDisclosurePathTarget = { kind: 'context-row', owner: message }
+          addInnerKey(key, target)
+          addInnerKey(`${scopePrefix}${key}`, target)
+        } else if (message.kind === 'command' || message.kind === 'compaction') {
+          // Only a Command/Compaction that actually materializes a collapsible
+          // Section is admitted by `collectRootContribution`'s real-node check;
+          // this semantic candidate map itself grants no operation.
+          const target: InnerDisclosurePathTarget = { kind: 'command-compaction', owner: message }
           addInnerKey(key, target)
           addInnerKey(`${scopePrefix}${key}`, target)
         }
@@ -3387,6 +3416,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       if (!loadedMessages.has(owner)) expandedContextRowOwners.delete(owner)
     }
     for (const owner of expandedClusterOwners) if (!liveClusters.has(owner)) expandedClusterOwners.delete(owner)
+    // Command/Compaction owners follow the CURRENT loaded canonical objects:
+    // a replaced fold must never let a same-name /command row inherit the old
+    // row's manual preference.
+    for (const owner of expandedCommandCompactionOwners) {
+      if (!loadedMessages.has(owner)) expandedCommandCompactionOwners.delete(owner)
+    }
 
     const liveToolDisclosures = new Set<string>()
     const collectTools = (message: TranscriptMessage, parentPath?: string): void => {
@@ -4942,7 +4977,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         if (innerTarget !== undefined) {
           const set = innerTarget.kind === 'thinking'
             ? expandedThinkingOwners
-            : innerTarget.kind === 'context-row' ? expandedContextRowOwners : expandedClusterOwners
+            : innerTarget.kind === 'context-row'
+              ? expandedContextRowOwners
+              : innerTarget.kind === 'context-cluster' ? expandedClusterOwners : expandedCommandCompactionOwners
           const wasExpanded = set.has(innerTarget.owner)
           const targetExpanded = input.event.collapsed !== true
           if (wasExpanded !== targetExpanded) {
