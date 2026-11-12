@@ -29,7 +29,8 @@
  * @module scripts/tern-pane-transcript-modes-subject
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unwatchFile, watchFile, writeFileSync } from 'node:fs'
-import { MessageId } from '@deepseek-ai/dsh-llm'
+import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { CommandId } from '@deepseek-ai/dsh-commands'
 import { join } from 'node:path'
 import { registerHooks } from 'node:module'
 
@@ -46,7 +47,7 @@ const scenario = modeConfig.scenario ?? 'modes'
 if (mode !== 'full' && mode !== 'compact' && mode !== 'focus') {
   throw new Error('the flow must select exactly full, compact or focus')
 }
-if (scenario !== 'modes' && scenario !== 'inner-disclosure' && scenario !== 'ptc-error-note') {
+if (scenario !== 'modes' && scenario !== 'inner-disclosure' && scenario !== 'ptc-error-note' && scenario !== 'card-disclosure') {
   throw new Error(`unknown transcript Tern scenario ${scenario}`)
 }
 const workRoot = join(paneRoot, 'dsh-home')
@@ -126,16 +127,20 @@ const PROMPT = scenario === 'ptc-error-note'
   ? 'PTC-NOTE'
   : scenario === 'inner-disclosure'
     ? `INNER-${mode.toUpperCase()} Inspect the live reasoning, tool details and context disclosures.`
-    : 'MODES-01 Please list the background jobs and then answer with one short plain note '
-      + 'about the canonical transcript reading flow, mixing English with 中文混排 so the real client wraps it.'
+    : scenario === 'card-disclosure'
+      ? `CARD-${mode.toUpperCase()} Inspect the native command, compaction, tool and context cards.`
+      : 'MODES-01 Please list the background jobs and then answer with one short plain note '
+        + 'about the canonical transcript reading flow, mixing English with 中文混排 so the real client wraps it.'
 writeFileSync(promptsPath, `${JSON.stringify({
   mode,
   scenario,
   assistantMarker: scenario === 'ptc-error-note' ? `PTC-NOTE-${mode.toUpperCase()}-ANSWER`
-    : scenario === 'inner-disclosure' ? `INNER-${mode.toUpperCase()}-ANSWER` : 'MODES-DIRECT-ANSWER',
+    : scenario === 'inner-disclosure' ? `INNER-${mode.toUpperCase()}-ANSWER`
+      : scenario === 'card-disclosure' ? `CARD-${mode.toUpperCase()}-ANSWER` : 'MODES-DIRECT-ANSWER',
   toolName: scenario === 'ptc-error-note' ? 'run_code' : 'job_list',
   prompts: [{ ordinal: 1, marker: scenario === 'ptc-error-note' ? `PTC-NOTE-${mode.toUpperCase()}`
-    : scenario === 'inner-disclosure' ? `INNER-${mode.toUpperCase()}` : 'MODES-01', text: PROMPT }],
+    : scenario === 'inner-disclosure' ? `INNER-${mode.toUpperCase()}`
+      : scenario === 'card-disclosure' ? `CARD-${mode.toUpperCase()}` : 'MODES-01', text: PROMPT }],
 }, null, 1)}\n`)
 
 // ── ONE-TO-ONE recorder around the production mount (append-only) ──
@@ -291,6 +296,154 @@ const reproject = (): Record<string, unknown> => {
   return { messageCount: committed.messages.length, sourceSeq: sourceSeqByToken.get(committed.rest[4] as object) ?? null }
 }
 
+/** The T3-0B card-disclosure scenario's Test-only SessionEvent composer.
+ *  Every row is a REAL official SessionEvent appended through the live Direct
+ *  Session writer and read back through the production TranscriptFolder; the
+ *  composer never renders a node, fabricates a fold row or bypasses the
+ *  renderer's input iterator. */
+interface CardEventSession {
+  append(type: string, data: Record<string, unknown>, intent?: Record<string, unknown>): unknown
+}
+
+const CARD_LATE_COMMAND = 'cmd-card-late'
+
+const cardTool = (
+  session: CardEventSession,
+  callId: string,
+  name: string,
+  args: string,
+  text: string,
+  isError = false,
+): void => {
+  session.append('tool/call', { turn: 2, step: 0, callId: ToolCallId(callId), name, arguments: args })
+  session.append('tool/result', {
+    turn: 2,
+    step: 0,
+    message: {
+      id: MessageId(`card-result-${callId}`),
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: text === '' ? [] : [{ type: 'text', text }],
+      ...(isError ? { isError: true, error: { name: 'ToolError', code: 'E_CARD' } } : {}),
+      source: { kind: 'tool', callId: ToolCallId(callId) },
+    },
+  }, { surfaceOp: 'append' })
+}
+
+const cardContext = (
+  session: CardEventSession,
+  id: string,
+  text: string,
+  source: Record<string, unknown>,
+): void => {
+  session.append('user/message', {
+    id: MessageId(id),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source,
+  }, { surfaceOp: 'append' })
+}
+
+const appendCardDisclosure = (): void => {
+  if (fixture === undefined || mainSessionId === undefined) {
+    throw new Error('the production Direct writer has not selected the main Session')
+  }
+  const agent = fixture.ctx.agents.get(mainSessionId as never) as { session: unknown } | undefined
+  if (agent === undefined) throw new Error('the Direct Session agent is not available')
+  const session = agent.session as CardEventSession
+  // Command lifecycle: one settled success, one running row that a later case
+  // settles as an error, and one done-only fragment.
+  session.append('command/run', {
+    commandId: CommandId('cmd-card-ok'), name: 'status', args: ' --short', source: { kind: 'user' },
+  })
+  session.append('command/done', {
+    commandId: CommandId('cmd-card-ok'), kind: 'success',
+    text: 'session healthy: one live Direct session\nsecond result line\n中文输出仍然可读',
+  })
+  session.append('command/run', {
+    commandId: CommandId(CARD_LATE_COMMAND), name: 'deploy', args: ' production', source: { kind: 'user' },
+  })
+  session.append('command/done', {
+    commandId: CommandId('cmd-card-fragment'), kind: 'success', text: 'fragment-only result',
+  })
+  // Compaction lifecycle: success with counts, a plain failure and the ONE
+  // fused manual-compaction owner (failure with an empty command text).
+  session.append('compaction/start', { compactionId: 'cpt-card-ok', turn: null })
+  session.append('compaction/summary', {
+    compactionId: 'cpt-card-ok',
+    summary: [{ type: 'text', text: 'Compaction summary body\nsecond summary line' }],
+    shadowedSeqs: [1, 2, 3],
+    shadowedTokenCount: 42,
+  })
+  session.append('compaction/end', { compactionId: 'cpt-card-ok' })
+  session.append('compaction/start', { compactionId: 'cpt-card-error', turn: null })
+  session.append('compaction/end', {
+    compactionId: 'cpt-card-error', error: 'summarizer failed: upstream timeout after 120s',
+  })
+  session.append('command/run', {
+    commandId: CommandId('cmd-card-manual'), name: 'compact', source: { kind: 'user' },
+  })
+  session.append('compaction/start', {
+    compactionId: 'cpt-card-manual', sourceCommandId: CommandId('cmd-card-manual'), turn: null,
+  })
+  session.append('compaction/summary', {
+    compactionId: 'cpt-card-manual',
+    sourceCommandId: CommandId('cmd-card-manual'),
+    summary: [{ type: 'text', text: 'manual compaction summary body' }],
+    shadowedSeqs: [4],
+    shadowedTokenCount: 9,
+  })
+  session.append('compaction/end', { compactionId: 'cpt-card-manual' })
+  session.append('command/done', {
+    commandId: CommandId('cmd-card-manual'), kind: 'error', text: '',
+  })
+  // One synthetic but official tool/context turn: the Fold sees real
+  // tool/call + tool/result pairs and real injected user/message sources.
+  session.append('turn/start', { turn: 2 })
+  session.append('step/start', { turn: 2, step: 0 })
+  cardTool(session, 'card-read', 'read', '{"file_path":"src/example.ts"}',
+    '<path>src/example.ts</path>\n<type>file</type>\n<content>\n1: first line\n2: second line\n(End of file - total 2 lines)\n</content>')
+  cardTool(session, 'card-write', 'write', '{"file_path":"src/example.ts"}',
+    '<path>src/example.ts</path> <type>file</type> <content>Updated file</content>')
+  cardTool(session, 'card-skill', 'skill', '{"name":"alpha"}',
+    '<skill_content name="alpha"><skill_resources></skill_resources><skill_instructions>\nfirst instruction\nsecond instruction\n</skill_instructions></skill_content>')
+  cardTool(session, 'card-image', 'read_image', '{"path":"shot.png"}',
+    '<path>shot.png</path> <type>image</type> <content>\nPNG image, 800x600 px, 1234 bytes\n</content>')
+  cardTool(session, 'card-goal', 'update_goal', '{"status":"active"}',
+    '{"goal":{"phase":"active","revision":3,"roundsStarted":2,"maxGoalRounds":6}}')
+  cardTool(session, 'card-ask', 'ask_user_question', '{"questions":[]}',
+    '{"answers":[{"id":"q1","selected":["yes"]},{"id":"q2"}]}')
+  cardTool(session, 'card-schedule', 'schedule_list', '{}',
+    '{"items":[],"shown":0,"total":0,"limit":10,"offset":0}')
+  cardTool(session, 'card-visual', 'present_visual', '{"files":[]}',
+    `Published 1 visual.\nvisual-published-v1:{"version":1,"published":[{"ref":"sv2_${'a'.repeat(20)}"}]}`)
+  cardTool(session, 'card-bash', 'bash', '{"command":"qualify terminal output"}',
+    '\u001b[31mline one\u001b[0m\rprogress 10%\rprogress 100%\nsecond output line')
+  cardTool(session, 'card-json', 'mystery_tool', '{}', '{"machine":"receipt"}')
+  cardTool(session, 'card-text', 'mystery_tool', '{}', 'human summary line\nmore detail')
+  cardTool(session, 'card-error', 'read', '{"file_path":"missing.ts"}',
+    'ENOENT: no such file or directory', true)
+  session.append('step/end', { turn: 2, step: 0 })
+  cardContext(session, 'card-notice', 'notice full payload detail', {
+    kind: 'subagent-settled', form: 'notice',
+    summary: `Agent completed\n第二行摘要 ${'很长'.repeat(20)}`,
+  })
+  cardContext(session, 'card-recall', 'recalled transcript details', {
+    kind: 'session-reference', form: 'recall', references: [{ label: 'prior session' }],
+  })
+  cardContext(session, 'card-relay-short', 'relayed short body', {
+    kind: 'agent-message', form: 'relay', senderSessionId: 'agent-short',
+  })
+  cardContext(session, 'card-relay-long',
+    Array.from({ length: 12 }, (_, index) => `relay line ${index + 1}`).join('\n'), {
+      kind: 'agent-message', form: 'relay', senderSessionId: 'agent-long',
+    })
+  cardContext(session, 'card-unknown', 'unknown context stays readable', {
+    kind: 'future-producer', form: 'future-context',
+  })
+  session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+}
+
 let lastHandledSeq = 0
 let handling: Promise<void> | undefined
 let polling = false
@@ -390,6 +543,30 @@ const handleOneBatch = async (): Promise<void> => {
       note({ kind: 'case.finished', ...payload })
       return
     }
+    if (kind === 'card-disclosure') {
+      appendCardDisclosure()
+      const payload = { seq, command: kind, status: 'ok' }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
+    if (kind === 'late-command-error') {
+      if (fixture === undefined || mainSessionId === undefined) {
+        throw new Error('the production Direct writer has not selected the main Session')
+      }
+      const agent = fixture.ctx.agents.get(mainSessionId as never) as { session: CardEventSession } | undefined
+      if (agent === undefined) throw new Error('the Direct Session agent is not available')
+      agent.session.append('command/done', {
+        commandId: CommandId(CARD_LATE_COMMAND), kind: 'error',
+        text: 'deployment failed: permission denied',
+      })
+      const payload = { seq, command: kind, status: 'ok' }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
     if (kind === 'release-tool-arguments') {
       writeFileSync(releaseToolArgumentsPath, `${JSON.stringify({ release: true })}\n`)
       onReleaseToolArguments()
@@ -455,7 +632,8 @@ try {
     // `resolveDisplayPreset` reads. No renderer-local preset is set anywhere.
     tuiConfig: { displayPreset: mode },
     deltas: scenario === 'ptc-error-note' ? []
-      : scenario === 'inner-disclosure' ? [`INNER-${mode.toUpperCase()}-`, 'ANSWER'] : ['MODES-', 'DIRECT-', 'ANSWER'],
+      : scenario === 'inner-disclosure' ? [`INNER-${mode.toUpperCase()}-`, 'ANSWER']
+        : scenario === 'card-disclosure' ? [`CARD-${mode.toUpperCase()}-`, 'ANSWER'] : ['MODES-', 'DIRECT-', 'ANSWER'],
     ...(scenario === 'inner-disclosure' ? {
       scriptedToolCalls: [{ text: 'the production Agent is checking the jobs', toolCall: { callId: 'call-inner-jobs', name: 'job_list', arguments: '{}' } }],
       scriptedReasoningDeltas: ['checking the first row\n', 'latest reasoning line'],

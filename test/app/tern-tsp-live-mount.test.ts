@@ -32,6 +32,7 @@ import { EventEmitter } from 'node:events'
 import { connect as sdkConnect, concatBytes, ui } from '@stencil-hq/tern'
 import type { Op, Session, TermInput, TermOutput, WireNode } from '@stencil-hq/tern'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ModelPickerRequest } from '../../src/app/command/model-presentation.ts'
 import { applyAssistantLiveInput } from '../../src/app/surface/session-presentation.ts'
@@ -4467,6 +4468,233 @@ test('Mouse PR4: the badge action follows the LIVE entry availability across com
       act: TASKS_ACTION,
     })
     await awaitWireFact(() => opens.length === 1, 'the restored action runs once')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+// ── T3-0B L6: routed Command/Compaction native disclosure ───────────────────
+
+test('a routed Command/Compaction card uses one exact native owner, late settlement and modal fencing', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'full' } })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'qualify native command cards'))
+    harness.route(ev('command/run', {
+      commandId: CommandId('cmd-l6'), name: 'status', args: ' --short', source: { kind: 'user' },
+    }, 2))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'card'
+      && nodeText(node).includes('/status --short')), 'the running Command static card')
+    const running = mountedNodes(harness).find(node => node.k === 'card' && nodeText(node).includes('/status --short'))!
+    assert.equal(running.p['collapsible'], undefined, 'a detail-less running Command offers no dead disclosure')
+    assert.ok(nodeText(running).includes('Running'))
+
+    harness.route(ev('command/done', {
+      commandId: CommandId('cmd-l6'), kind: 'success', text: 'session healthy\nsecond line',
+    }, 3))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedSections(harness).some(node => nodeText(node).includes('/status --short')),
+      'the same transcript Command becomes a native Section')
+    const command = mountedSections(harness).find(node => nodeText(node).includes('/status --short'))!
+    assert.equal(command.p['collapsed'], true)
+    assert.ok(nodeText(command).includes('session healthy'))
+    assert.equal(mountedNodes(harness).some(node => node.id === `${command.id}.body`), false)
+    assert.equal(mountedNodes(harness).some(node => node.id === running.id), false, 'the static key left the frame')
+
+    const sf = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: command.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node =>
+      node.id === `${command.id}.body` && nodeText(node).includes('session healthy')), 'the exact Command body')
+    assert.equal(mountedNodes(harness).find(node => node.id === command.id)?.p['collapsed'], false)
+
+    // A same-source projection keeps the opened owner and the exact id.
+    harness.route(userMessage(4, 'a same-source follow-up'))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node => nodeText(node).includes('a same-source follow-up')),
+      'the same-source projection')
+    assert.equal(mountedNodes(harness).find(node => node.id === command.id)?.p['collapsed'], false,
+      'the Command manual owner survives a same-source repaint')
+
+    // A modal seat covers the base surface: the pointer must not change it.
+    const pending = harness.renderer().interaction.askQuestions([{ id: 'cmd-seat-q', question: 'Proceed?' }], undefined, undefined, false)
+    pending.catch(() => {})
+    await awaitWireFact(() => harness.tern.output.text().includes('Proceed?'), 'the modal seat')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: command.id, collapsed: true, raw: {} })
+    // Bounded negative observation: a covered pointer must not paint a late frame.
+    await settle()
+    assert.equal(mountedNodes(harness).find(node => node.id === command.id)?.p['collapsed'], false,
+      'a covered toggle does not mutate the Command owner')
+    harness.renderer().interaction.withdrawPending()
+    await pending.catch(() => {})
+
+    // The official compaction lifecycle reaches the same live renderer.
+    harness.route(ev('compaction/start', { compactionId: 'cpt-l6', turn: null }, 5))
+    harness.route(ev('compaction/summary', {
+      compactionId: 'cpt-l6', summary: [{ type: 'text', text: 'compacted summary body' }],
+      shadowedSeqs: [1, 2], shadowedTokenCount: 12,
+    }, 6))
+    harness.route(ev('compaction/end', { compactionId: 'cpt-l6' }, 7))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedSections(harness).some(node => nodeText(node).includes('Context compacted')),
+      'the routed Compaction Section')
+    const compaction = mountedSections(harness).find(node => nodeText(node).includes('Context compacted'))!
+    assert.equal(compaction.p['collapsed'], true)
+    assert.ok(nodeText(compaction).includes('Compacted 2 history items (~12 tokens)'))
+    assert.equal(mountedNodes(harness).some(node => node.id === `${compaction.id}.body`), false)
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: compaction.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node =>
+      node.id === `${compaction.id}.body` && nodeText(node).includes('compacted summary body')), 'the exact Compaction body')
+
+    // A new Source starts with no inherited Command/Compaction disclosure.
+    harness.surface.display.beginSessionHydration()
+    await awaitWireFact(() => mountedNodes(harness).some(node => nodeText(node).includes('Loading session')), 'hydration')
+    harness.replaceMain()
+    harness.route(ev('turn/start', { turn: 1 }, 20))
+    harness.route(userMessage(21, 'incoming source without cards'))
+    harness.route(ev('command/run', { commandId: CommandId('cmd-l6'), name: 'status', args: ' --short', source: { kind: 'user' } }, 22))
+    harness.route(ev('command/done', { commandId: CommandId('cmd-l6'), kind: 'success', text: 'healthy again' }, 23))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedSections(harness).some(node => nodeText(node).includes('/status --short')),
+      'the incoming source Command Section')
+    const incoming = mountedSections(harness).find(node => nodeText(node).includes('/status --short'))!
+    assert.equal(incoming.p['collapsed'], true, 'new Source Command starts collapsed')
+    assert.equal(incoming.id !== command.id, true, 'a replaced Source owns a new exact node id')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('an explicit Focus root close leaves an independent Command owner open', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'focus' } })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'qualify Focus command independence'))
+    harness.route(ev('command/run', { commandId: CommandId('cmd-focus'), name: 'status', source: { kind: 'user' } }, 2))
+    harness.route(ev('command/done', { commandId: CommandId('cmd-focus'), kind: 'success', text: 'focus command result' }, 3))
+    harness.route(assistantMessage(4, 'focus-answer', 'a focused answer'))
+    harness.route(ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'section'
+      && String(node.p['key']).includes('focus-')), 'the Focus root')
+    const command = mountedSections(harness).find(node => nodeText(node).includes('/status'))
+    assert.ok(command !== undefined, 'the turnless Command stays standalone beside the Focus root')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: command.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.id === `${command.id}.body`), 'the opened Command body')
+    const root = mountedSections(harness).find(node => String(node.p['key']).includes('focus-'))!
+    assert.equal(root.p['collapsed'], true)
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: root.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id === root.id && node.p['collapsed'] === false), 'Focus opens')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: root.id, collapsed: true, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id === root.id && node.p['collapsed'] === true), 'Focus closes')
+    assert.equal(mountedNodes(harness).find(node => node.id === command.id)?.p['collapsed'], false,
+      'closing the Focus root does not reset an independent Command')
+    assert.ok(mountedNodes(harness).some(node => node.id === `${command.id}.body`),
+      'the independent Command body stays materialized')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+// ── T3-0B L6: routed Tool notes and standalone Context forms ────────────────
+
+test('routed Tool notes and Notice/Recall/Relay forms keep exact current native owners', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'full' } })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'qualify folded tool and context cards'))
+    harness.route(ev('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('call-l6-read'), name: 'read', arguments: '{"file_path":"src/a.ts"}',
+    }, 2))
+    harness.route(ev('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('result-l6-read'), role: 'tool', toolCallId: ToolCallId('call-l6-read'),
+        content: [{ type: 'text', text: '<path>src/a.ts</path>\n<type>file</type>\n<content>\n1: a\n2: b\n(End of file - total 2 lines)\n</content>' }],
+        source: { kind: 'tool', callId: ToolCallId('call-l6-read') },
+      },
+    }, 3))
+    harness.route(ev('user/message', {
+      id: MessageId('relay-l6'), role: 'user',
+      content: [{ type: 'text', text: Array.from({ length: 12 }, (_, index) => `relay line ${index + 1}`).join('\n') }],
+      source: { kind: 'agent-message', form: 'relay', senderSessionId: 'agent-1' },
+    }, 4))
+    harness.route(ev('user/message', {
+      id: MessageId('notice-l6'), role: 'user',
+      content: [{ type: 'text', text: 'notice full payload' }],
+      source: { kind: 'subagent-settled', form: 'notice', summary: 'Agent completed\nsecond summary line' },
+    }, 5))
+    harness.route(ev('user/message', {
+      id: MessageId('recall-l6'), role: 'user',
+      content: [{ type: 'text', text: 'recalled details' }],
+      source: { kind: 'session-reference', form: 'recall', references: [{ label: 'prior session' }] },
+    }, 6))
+    harness.route(ev('tool/call', {
+      turn: 1, step: 1, callId: ToolCallId('call-l6-error'), name: 'read', arguments: '{"file_path":"missing.ts"}',
+    }, 7))
+    harness.route(ev('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('result-l6-error'), role: 'tool', toolCallId: ToolCallId('call-l6-error'),
+        content: [{ type: 'text', text: 'ENOENT: no such file or directory' }],
+        isError: true, error: { name: 'ReadError', code: 'ENOENT' },
+        source: { kind: 'tool', callId: ToolCallId('call-l6-error') },
+      },
+    }, 8))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'tool' && node.p['name'] === 'read'),
+      'the routed read Tool')
+
+    const read = mountedNodes(harness).find(node => node.k === 'tool' && node.p['name'] === 'read' && node.p['status'] === 'done')!
+    assert.equal(read.p['collapsed'], true)
+    assert.equal(read.p['note'], '2 lines', 'the folded Tool carries only its trusted line count')
+    assert.equal(mountedNodes(harness).some(node => node.id === `${read.id}.result`), false)
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: read.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node =>
+      node.id === `${read.id}.result` && nodeText(node).includes('<path>src/a.ts</path>')), 'the exact Tool body')
+    assert.ok(mountedNodes(harness).find(node => node.id === read.id)?.p['note'] == null,
+      'an opened Tool drops the folded note')
+
+    const error = mountedNodes(harness).find(node => node.k === 'tool' && node.p['name'] === 'read' && node.p['status'] === 'error')!
+    assert.equal(error.p['collapsed'], true)
+    assert.ok(String(error.p['note']).startsWith('ENOENT'), 'the failure note keeps precedence')
+
+    const relay = mountedSections(harness).find(node => nodeText(node).includes('Agent message · agent-1'))
+    assert.ok(relay !== undefined, 'the long Relay is a native Section')
+    assert.equal(relay.p['collapsed'], true)
+    assert.ok(nodeText(relay).includes('First: relay line 1') && nodeText(relay).includes('Last: relay line 12'))
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: relay.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node =>
+      node.id === `${relay.id}.body` && nodeText(node).includes('relay line 12')), 'the exact Relay body')
+
+    const notice = mountedSections(harness).find(node => nodeText(node).includes('Agent completed'))
+    assert.ok(notice !== undefined, 'the Notice keeps the producer summary in its native header')
+    assert.equal(notice.p['collapsed'], true)
+    assert.ok(nodeText(notice).includes('second summary line'), 'the summary wraps instead of being flattened')
+    assert.equal(mountedNodes(harness).some(node => node.id === `${notice.id}.body`), false)
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: notice.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node =>
+      node.id === `${notice.id}.body` && nodeText(node).includes('notice full payload')), 'the exact Notice payload')
+
+    const recall = mountedSections(harness).find(node => node.p['head'] === 'Session recall · prior session')
+    assert.ok(recall !== undefined, 'the Recall names the official label without inventing a title')
+    assert.equal(recall.p['collapsed'], true)
+
+    // Same-source repaint keeps all three manual owners; the hidden payloads
+    // stay hidden for the still-closed rows.
+    harness.route(userMessage(9, 'same-source follow-up after the cards'))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node => nodeText(node).includes('same-source follow-up after the cards')),
+      'the same-source follow-up')
+    assert.equal(mountedNodes(harness).find(node => node.id === relay.id)?.p['collapsed'], false)
+    assert.equal(mountedNodes(harness).find(node => node.id === notice.id)?.p['collapsed'], false)
+    assert.equal(mountedNodes(harness).find(node => node.id === recall.id)?.p['collapsed'], true)
   } finally {
     await harness.dispose()
     await harness.session.close()
