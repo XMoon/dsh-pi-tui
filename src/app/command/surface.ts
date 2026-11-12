@@ -507,6 +507,9 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
   openStartupSessionBrowser(request: {
     readonly scope?: 'current' | 'all'
     readonly initialQuery: string
+    /** Run the strict CLI exact/unique-prefix match through the existing
+     *  guarded Resume; the Browser itself is admitted before the roster read. */
+    readonly directMatch?: boolean
   }): Promise<import('@deepseek-ai/dsh-commands').CommandResult>
   /** Whether that `/sessions` UI entry is actually installed (registered AND
    *  presentable on this mount) — the business-entry fact the Welcome button
@@ -966,6 +969,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     readonly initialDirectoryEntry?: boolean
     readonly initialDirectoryPath?: string
     readonly initialQuery?: string
+    readonly directMatch?: boolean
   }
   /** The ONE admission both the void UI entry and the awaitable CLI startup
    *  entry share. A string is the exact refusal text. */
@@ -1006,6 +1010,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   const openStartupSessionBrowser = (request: {
     readonly scope?: 'current' | 'all'
     readonly initialQuery: string
+    readonly directMatch?: boolean
   }): Promise<import('@deepseek-ai/dsh-commands').CommandResult> => openSessionBrowserCommand(request)
 
   const sessionBrowserAvailable = (): boolean => commandsRegistered

@@ -69,6 +69,8 @@ interface CliMount {
   readonly harness: ReturnType<typeof makeHarness>
   /** How many official roster reads the Direct reader performed. */
   readonly listCalls: () => number
+  /** Release a gated roster read (present only when `gatedList` was asked). */
+  readonly releaseList?: () => void
 }
 
 async function mountCli(
@@ -78,6 +80,8 @@ async function mountCli(
     readonly launch: { readonly kind: 'lookup' | 'browse' | 'continue'; readonly query?: string }
     readonly registry?: FakeHostWorkspaceRegistry
     readonly resumeError?: Error
+    /** Hold the official roster read open until `releaseList()` runs. */
+    readonly gatedList?: boolean
   },
 ): Promise<CliMount> {
   const home = life.tempDir('dsh-cli-launch-')
@@ -100,9 +104,21 @@ async function mountCli(
   const query = harness.sessionQuery as { listSessions: (...args: never[]) => Promise<unknown> }
   const originalList = query.listSessions
   let listCalls = 0
-  query.listSessions = (...args: never[]) => {
-    listCalls += 1
-    return originalList.apply(query, args)
+  let releaseList: (() => void) | undefined
+  if (options.gatedList === true) {
+    let open!: () => void
+    const gate = new Promise<void>(resolve => { open = resolve })
+    releaseList = () => { open() }
+    query.listSessions = async (...args: never[]) => {
+      listCalls += 1
+      await gate
+      return originalList.apply(query, args)
+    }
+  } else {
+    query.listSessions = (...args: never[]) => {
+      listCalls += 1
+      return originalList.apply(query, args)
+    }
   }
   const ctx = new Context()
   life.defer(() => disposeContext(ctx))
@@ -118,7 +134,15 @@ async function mountCli(
     options.registry,
   )
   life.defer(() => fiber.dispose())
-  return { life, home, vt, probe, harness, listCalls: () => listCalls }
+  return {
+    life,
+    home,
+    vt,
+    probe,
+    harness,
+    listCalls: () => listCalls,
+    ...(releaseList === undefined ? {} : { releaseList }),
+  }
 }
 
 // ── `--session` lookup ──────────────────────────────────────────────────────
@@ -137,7 +161,7 @@ test('a canonical full id resumes pre-mount WITHOUT a roster read', async (t) =>
   assert.ok(!fixture.vt.getViewport().join('\n').includes('Search all workspaces'), 'a successful full-id resume opens no Browser')
 })
 
-test('a unique listed prefix resolves through the official roster', async (t) => {
+test('a unique listed prefix resumes through the Browser\'s existing guarded Resume after the roster lands', async (t) => {
   const life = testLifecycle(t)
   const target = `session-${'abcdef12'}${'0'.repeat(24)}`
   const other = `session-${'fedcba98'}${'0'.repeat(24)}`
@@ -145,9 +169,11 @@ test('a unique listed prefix resolves through the official roster', async (t) =>
     sessions: [listedSession('/placeholder', target, 2_000), listedSession('/placeholder', other, 1_000)],
     launch: { kind: 'lookup', query: 'abcdef12' },
   })
-  await waitUntil(() => fixture.harness.resumeSessionIds.length === 1, 'unique prefix resume')
+  // The Browser is the pre-mount entry; the SAME ReadOwner lists once and the
+  // strict direct match resumes through the existing guarded switch.
+  await waitUntil(() => fixture.harness.resumeSessionIds.length === 1, 'unique prefix guarded resume')
   assert.deepEqual(fixture.harness.resumeSessionIds, [target])
-  assert.equal(fixture.listCalls(), 1, 'the launch admission reads the roster exactly once')
+  assert.equal(fixture.listCalls(), 1, 'the Browser ReadOwner lists the roster exactly once')
   assert.equal(fixture.harness.createdSessions.length, 0)
 })
 
@@ -162,6 +188,7 @@ test('an ambiguous prefix opens the SAME Browser with the query and never auto-r
   })
   await waitUntil(() => fixture.vt.getViewport().join('\n').includes('abcd'), 'ambiguous Browser seeded query')
   assert.match(fixture.vt.getViewport().join('\n'), /Search all workspaces/u, 'the unmatched prefix opens the same global search editor')
+  await waitUntil(() => fixture.vt.getViewport().join('\n').includes('abcd1111') || fixture.vt.getViewport().join('\n').includes('abcd2222'), 'ambiguous roster rendered')
   assert.deepEqual(fixture.harness.resumeSessionIds, [], 'an ambiguous prefix never guesses a row')
   assert.equal(fixture.harness.createdSessions.length, 0)
   // First Esc restores browse, the second closes the same Browser: no Session
@@ -181,8 +208,58 @@ test('a word-like query searches even when a listed id starts with it', async (t
     launch: { kind: 'lookup', query: 'mysql' },
   })
   await waitUntil(() => fixture.vt.getViewport().join('\n').includes('Search all workspaces'), 'keyword Browser open')
-  assert.deepEqual(fixture.harness.resumeSessionIds, [], 'a word is never an automatic Session prefix')
   assert.match(fixture.vt.getViewport().join('\n'), /mysql/u, 'the keyword is prefilled in the same global search')
+  // Wait for the roster to land and the search results to render: the strict
+  // CLI policy must still NOT auto-resume a word that merely prefixes an id.
+  await waitUntil(() => fixture.vt.getViewport().join('\n').includes('mysql-00'), 'keyword roster rendered')
+  assert.deepEqual(fixture.harness.resumeSessionIds, [], 'a word is never an automatic Session prefix')
+  assert.equal(fixture.harness.createdSessions.length, 0)
+})
+
+test('a keyword Browser opens, stays operable and Escapes while the roster read pends forever', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await mountCli(life, {
+    sessions: [listedSession('/placeholder', 'session-mysql-0001', 2_000)],
+    launch: { kind: 'lookup', query: 'mysql' },
+    gatedList: true,
+  })
+  // F1: the roster read never resolves, but the startup Browser must still own
+  // the first input frame and the user must be able to leave it.
+  await waitUntil(() => fixture.vt.getViewport().join('\n').includes('Loading sessions…')
+    || fixture.vt.getViewport().join('\n').includes('Search all workspaces'), 'pending-list Browser admission')
+  assert.match(fixture.vt.getViewport().join('\n'), /Search: mysql/u, 'the keyword is already the live query')
+  assert.deepEqual(fixture.harness.resumeSessionIds, [], 'a pending roster never auto-opens')
+  // The seeded query starts in the global editor: the first Esc restores the
+  // browse list, the second closes the same Browser while the roster is STILL
+  // pending. No Session and no Host read settlement is involved.
+  fixture.vt.sendInput('\x1b')
+  await fixture.vt.waitForRender()
+  fixture.vt.sendInput('\x1b')
+  await fixture.vt.waitForRender()
+  assert.ok(!fixture.vt.getViewport().join('\n').includes('Loading sessions…'), 'Esc closes the pending Browser')
+  assert.ok(!fixture.vt.getViewport().join('\n').includes('Search all workspaces'), 'Esc returns to the sessionless Welcome')
+  assert.deepEqual(fixture.harness.resumeSessionIds, [])
+  assert.equal(fixture.harness.createdSessions.length, 0)
+})
+
+test('a user edit during the pending roster cancels the startup direct match', async (t) => {
+  const life = testLifecycle(t)
+  const target = `session-${'abcdef12'}${'0'.repeat(24)}`
+  const fixture = await mountCli(life, {
+    sessions: [listedSession('/placeholder', target, 2_000)],
+    launch: { kind: 'lookup', query: 'abcdef12' },
+    gatedList: true,
+  })
+  await waitUntil(() => fixture.vt.getViewport().join('\n').includes('Search: abcdef12'), 'startup direct-match editor')
+  // The user owns the live query before the roster settles: the original CLI
+  // auto-match intent must be cancelled instead of switching later.
+  fixture.vt.sendInput('zzz')
+  await fixture.vt.waitForRender()
+  fixture.releaseList?.()
+  await waitUntil(() => !fixture.vt.getViewport().join('\n').includes('Loading sessions…'), 'edited roster settlement')
+  assert.deepEqual(fixture.harness.resumeSessionIds, [], 'a user edit supersedes the startup direct match')
+  assert.equal(fixture.harness.createdSessions.length, 0)
+  assert.match(fixture.vt.getViewport().join('\n'), /abcdef12zzz/u, 'the edited query remains the live search')
 })
 
 test('a bare --session opens Browse All and starts no Session', async (t) => {
@@ -309,4 +386,18 @@ test('a failed --session open keeps the Host error visible after the recovery Br
   assert.match(frame, /could not be resumed/u, 'the original Host error is visible after the Browser admission')
   assert.equal(fixture.harness.resumeSessionIds.length, 1, 'a failed explicit open is never retried')
   assert.equal(fixture.harness.createdSessions.length, 0)
+})
+
+test('a failed post-mount unique-prefix resume reports once and never retries', async (t) => {
+  const life = testLifecycle(t)
+  const target = `session-${'cafe1234'}${'0'.repeat(24)}`
+  const fixture = await mountCli(life, {
+    sessions: [listedSession('/placeholder', target, 2_000)],
+    launch: { kind: 'lookup', query: 'cafe1234' },
+    resumeError: new Error('session is locked by another writer'),
+  })
+  await waitUntil(() => fixture.probe.notices.some(note => note.includes('session is locked')), 'failed guarded resume notice')
+  assert.equal(fixture.harness.resumeSessionIds.length, 1, 'exactly ONE guarded Resume attempt, never a retry')
+  assert.equal(fixture.harness.createdSessions.length, 0)
+  assert.ok(!fixture.vt.getViewport().join('\n').includes('Back [Esc]'), 'the failed direct match leaves the Browser closed')
 })

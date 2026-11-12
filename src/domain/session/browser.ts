@@ -11,9 +11,34 @@ export function shortSessionId(id: string): string {
 }
 
 /** The identity shape the shared matcher needs (a listed row or any object
- * carrying the full Session id). */
+ * carrying the full Session id). `origin` lets the CLI's automatic selection
+ * exclude subagent children without re-filtering the Browser's own rows. */
 export interface SessionMatchRow {
   readonly id: string
+  readonly origin?: 'subagent'
+}
+
+/** A canonical full Session id: the `session-`/`session_` prefix plus 32 hex
+ * characters, optionally written as a hyphenated canonical UUID. A BARE UUID
+ * is NOT a canonical Session id — it must match an official listed row. */
+const CANONICAL_SESSION_ID = /^session[-_](?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
+
+/** The CLI automatic-prefix rule: at least four ASCII hex digits after the
+ * optional `session-`/`session_` prefix. Deliberately stricter than the
+ * `/resume` matcher; the CLI must not auto-resume a word-like query. */
+const CLI_PREFIX = /^[0-9a-f]{4,}$/i
+
+/** Whether `query` is a canonical full Session id that may be opened WITHOUT
+ * a roster read (the explicit full-id launch contract). */
+export function canonicalFullSessionId(query: string): boolean {
+  return CANONICAL_SESSION_ID.test(query)
+}
+
+/** The legal automatic prefix `query` carries, or undefined. The returned
+ * value is the bare hex prefix (the leading Session prefix stripped). */
+export function cliAutoPrefix(query: string): string | undefined {
+  const bare = query.replace(/^session[-_]/i, '')
+  return CLI_PREFIX.test(bare) ? bare : undefined
 }
 
 /**
@@ -37,14 +62,36 @@ export function findSessionMatch<T extends SessionMatchRow>(rows: readonly T[], 
 
   let candidate: T | undefined
   for (const row of rows) {
-    if (!row.id.startsWith(`session-${bare}`)
-      && !shortSessionId(row.id).startsWith(bare)) continue
+    // Strip the SAME optional prefix from the row id before comparing. The
+    // `session-`-only form could not match a long `session_` prefix because
+    // `shortSessionId` truncates at eight characters; the CLI accepts any
+    // legal hex prefix length, and `/resume` shares this matcher.
+    const bareId = row.id.replace(/^session[-_]/i, '')
+    if (!bareId.startsWith(bare) && !shortSessionId(row.id).startsWith(bare)) continue
     // A row can satisfy both prefix forms; count it once. A second candidate
     // means the query is ambiguous and the Browser search owns the choice.
     if (candidate !== undefined) return undefined
     candidate = row
   }
   return candidate
+}
+
+/**
+ * Resolve one CLI `--session` value before the Browser mounts: an exact
+ * official row id first (including historical non-standard ids), then — only
+ * for a legal CLI automatic prefix — the SAME unique-prefix primitive
+ * `/resume` uses. An ambiguous, missing or word-like query returns undefined
+ * so the startup Browser keeps it as one global search instead of guessing.
+ * A subagent child is never an automatic main-Session selection.
+ */
+export function chooseListedSession<T extends SessionMatchRow>(rows: readonly T[], query: string): T | undefined {
+  // A blank query or the bare Session prefix carries no identity: it always
+  // searches, even if a malformed listed row happens to carry that exact text.
+  if (query === '' || /^session[-_]$/i.test(query)) return undefined
+  const exact = rows.find(row => row.id === query)
+  if (exact !== undefined) return exact
+  if (cliAutoPrefix(query) === undefined) return undefined
+  return findSessionMatch(rows.filter(row => row.origin !== 'subagent'), query)
 }
 
 /** Canonicalize one user query for both metadata matching and Host search. */

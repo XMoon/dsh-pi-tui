@@ -1108,6 +1108,9 @@ export function registerTuiCommands(
      *  instead of Browse All, and the startup entry skips the sessionless
      *  Workspace-preflight wait (the first input frame must not be blocked). */
     readonly initialQuery?: string
+    /** CLI startup lookup: exact/unique-prefix only, through the existing
+     *  guarded Resume after the roster lands; word queries never auto-resume. */
+    readonly directMatch?: boolean
   }): Promise<CommandResult>
 } {
   const { ctx, app } = runner

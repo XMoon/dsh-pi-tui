@@ -124,6 +124,12 @@ class ControlledFactsHandle implements WorkspaceFactsHandle {
     reject?.(error)
   }
 
+  /** The controlled observation stays current until it finishes, fails,
+   *  aborts or is disposed; the UI suites do not drive generation replacement. */
+  isCurrent(): boolean {
+    return !this.done && this.signal?.aborted !== true
+  }
+
   dispose(): void {
     this.disposed += 1
     this.done = true

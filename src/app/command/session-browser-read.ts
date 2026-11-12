@@ -923,6 +923,13 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       }
       panel.handle.setSnapshot(snapshotOf(panel))
       if (!isActive(panel)) return handle
+      // An explicit initial query is the OPENING input, not a list-settlement
+      // effect: the search editor must be live (and editable) before any Host
+      // roster read settles. The one-shot seed is still skipped after a real
+      // user edit, and the list-settled fallback remains the direct-match path.
+      if (openOptions.initialQuery !== undefined && openOptions.initialQuery !== '') {
+        publish(panel, openOptions.initialQuery)
+      }
       startWorkspaceFollow(panel)
       panel.answerEligibility = options.forwardedAnswerEligibility === undefined
         ? undefined

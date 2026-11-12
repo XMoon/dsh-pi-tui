@@ -256,7 +256,10 @@ export async function mountRemoteRunner(
     /** Invoked with the Remote presentation bundle BEFORE the runner fiber
      *  mounts: a suite that must hold the startup hydration wraps the
      *  presentation reader here (the runner reads it lazily at call time). */
-    beforeRunnerMount?: (presentation: RemoteApplicationOverride['presentation']) => void
+    beforeRunnerMount?: (
+      presentation: RemoteApplicationOverride['presentation'],
+      aggregate: Awaited<ReturnType<typeof createRemoteApplicationRuntime>>,
+    ) => void
     /** Mount the production TSP renderer over the scripted pane instead of PiTui. */
     renderer?: 'pi-tui' | 'tsp'
     /** Advertise the TSP Session Browser presenter (for /sessions and /resume). */
@@ -359,7 +362,7 @@ export async function mountRemoteRunner(
     return originalStart.call(this)
   }
   life.defer(() => { TuiApp.prototype.start = originalStart })
-  options.beforeRunnerMount?.(override.presentation)
+  options.beforeRunnerMount?.(override.presentation, aggregate)
   const runnerFiber = runnerCtx.plugin(pluginCtx => {
     applyRunnerWithRuntime(
       pluginCtx,
@@ -3570,6 +3573,59 @@ test('a preselected Remote runner resolves a unique prefix through the official 
   const frame = fixture.vt.getViewport().join('\n')
   assert.ok(!frame.includes('type a message to start a session'), 'a resumed Session replaces the sessionless Welcome')
   assert.ok(!frame.includes('Back [Esc]'), 'a pre-mount resume never opens the Session Browser')
+})
+
+test('a Remote generation replacement between the Workspace baseline and the roster abandons -c', async (t) => {
+  const life = testLifecycle(t)
+  const hostPreset = 'm3-4-pr2-preset'
+  const target = 'remote-cli-generation-target'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  await seedHostCompletedTurn(host, target, 'remote generation prompt', 'remote generation answer', process.cwd())
+  const registry = host.ctx.get('workspaceRegistry') as {
+    create(path: string): Promise<{ attachSession(id: unknown): Promise<void>; detachSession(id: unknown): Promise<void> }>
+  }
+  const workspace = await registry.create(process.cwd())
+  await workspace.attachSession(SessionId(target))
+
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    host,
+    sessionLaunch: { kind: 'continue' },
+    beforeRunnerMount: (_presentation, aggregate) => {
+      const backend = aggregate.selected.backend as unknown as {
+        sessionReader: { list(...args: unknown[]): Promise<unknown> }
+      }
+      const originalList = backend.sessionReader.list.bind(backend.sessionReader)
+      let reconnected = false
+      backend.sessionReader.list = async (...args: unknown[]) => {
+        if (!reconnected) {
+          reconnected = true
+          const connection = aggregate.wire.client.connection as unknown as {
+            generation: { getSnapshot(): { readonly id: number } | undefined }
+            reconnect(): void
+          }
+          const before = connection.generation.getSnapshot()?.id
+          connection.reconnect()
+          await waitFor('a new Remote generation before the roster', () => {
+            const id = connection.generation.getSnapshot()?.id
+            return id !== undefined && id !== before
+          }, 20_000)
+          // The membership changes under the NEW generation: only a stale
+          // baseline would still contain this Session, so pairing it with the
+          // new roster would fabricate a candidate.
+          await workspace.detachSession(SessionId(target))
+        }
+        return originalList(...args)
+      }
+    },
+  })
+
+  await waitFor('continue connection-change notice', () => fixture.vt.getViewport().join('\n')
+    .includes('the Host connection changed while reading the workspace'), 20_000)
+  const frame = fixture.vt.getViewport().join('\n')
+  assert.ok(frame.includes('type a message to start a session'), 'the generation change keeps the sessionless Welcome')
+  assert.ok(!frame.includes('Back [Esc]'), '-c never opens the Browser on a generation change')
+  assert.ok(!frame.includes('remote generation answer'), 'no stale-membership owner was published')
 })
 
 test('a preselected Remote runner continues the confirmed Workspace member selected by the official Workspace facts', async (t) => {

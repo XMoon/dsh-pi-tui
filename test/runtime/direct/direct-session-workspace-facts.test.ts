@@ -103,6 +103,7 @@ test('UA-07 the Direct Workspace baseline is the official registry list', async 
     ],
   })
   const handle = h.facts.followWorkspaces()
+  assert.equal(handle.isCurrent(), true, 'the open Direct registry observation is current')
   const iterator = handle[Symbol.asyncIterator]()
   assert.deepEqual(await iterator.next(), {
     done: false,
@@ -115,6 +116,7 @@ test('UA-07 the Direct Workspace baseline is the official registry list', async 
     },
   })
   handle.dispose()
+  assert.equal(handle.isCurrent(), false, 'a disposed observation is no longer current')
   assert.deepEqual(await iterator.next(), { done: true, value: undefined })
   assert.equal(h.offCount(), 1, 'the domain subscription is released exactly once')
 })

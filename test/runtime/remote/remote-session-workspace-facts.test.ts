@@ -526,6 +526,25 @@ test('UA-10 a generation replacement ends the open Workspace stream', async () =
   assert.equal(workspace.disposed(), 1)
 })
 
+test('UA-10 the open Workspace handle becomes non-current after a generation replacement', () => {
+  const workspace = workspaceNamespace([{ type: 'baseline', value: { items: [] } }])
+  const h = harness({ workspace: workspace.namespace })
+  const handle = h.facts.followWorkspaces()
+  assert.equal(handle.isCurrent(), true, 'the freshly opened baseline is current')
+  h.setGeneration('gen-2')
+  assert.equal(handle.isCurrent(), false,
+    'a replacement makes the baseline unusable for a paired roster read')
+  handle.dispose()
+})
+
+test('UA-10 a disposed Workspace handle is never current', () => {
+  const workspace = workspaceNamespace([{ type: 'baseline', value: { items: [] } }])
+  const h = harness({ workspace: workspace.namespace })
+  const handle = h.facts.followWorkspaces()
+  handle.dispose()
+  assert.equal(handle.isCurrent(), false)
+})
+
 test('UA-10 an already-aborted signal never opens a Workspace stream', () => {
   const controller = new AbortController()
   controller.abort()

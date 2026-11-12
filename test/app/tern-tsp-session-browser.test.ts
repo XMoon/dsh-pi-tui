@@ -303,6 +303,7 @@ test('workspace-first TSP browse uses official Workspace ids and emits real fold
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
+      isCurrent: () => true,
       async *[Symbol.asyncIterator]() {
         yield {
           type: 'baseline' as const,
@@ -330,6 +331,7 @@ test('keyboard Enter toggles the selected Folder and reveals selected Show more 
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
+      isCurrent: () => true,
       async *[Symbol.asyncIterator]() {
         yield { type: 'baseline' as const, items: [{ workspaceId: 'ws-current', path: '/srv/project', title: 'Project', sessionIds: sessionRows.map(item => item.id) }] }
         if (signal?.aborted === true) return
@@ -362,6 +364,7 @@ test('expanding a non-current TSP folder reveals its first five history rows', a
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
+      isCurrent: () => true,
       async *[Symbol.asyncIterator]() {
         yield { type: 'baseline' as const, items: [
           { workspaceId: 'ws-current', path: '/srv/current', title: 'Current', sessionIds: ['session-current'] },
@@ -391,6 +394,7 @@ test('sessionless TSP Browse prioritizes the Host-confirmed next-create Workspac
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
+      isCurrent: () => true,
       async *[Symbol.asyncIterator]() {
         yield { type: 'baseline' as const, items: [
           { workspaceId: 'ws-other', path: '/other', title: 'Other', sessionIds: [] },
@@ -419,6 +423,7 @@ test('Welcome chooser lists official folders and Add directory retains rejected 
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
+      isCurrent: () => true,
       async *[Symbol.asyncIterator]() {
         yield { type: 'baseline' as const, items: [{ workspaceId: 'ws-existing', path: '/srv/existing', title: 'Existing', sessionIds: [] }] }
         if (signal?.aborted === true) return
@@ -465,6 +470,7 @@ test('a failed Activity sample is ONE low-noise diagnostic and never fabricates 
     readActivity: async () => { throw new Error('activity sample refused') },
     followWorkspaces: (signal) => ({
       dispose() {},
+      isCurrent: () => true,
       async *[Symbol.asyncIterator]() {
         yield { type: 'baseline' as const, items: [
           { workspaceId: 'ws-folder', path: '/srv/folder', title: 'Folder', sessionIds: ['session-current', 'session-other'] },
@@ -504,6 +510,7 @@ test('a Folder or Show more selection never inherits the previous Session action
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
+      isCurrent: () => true,
       async *[Symbol.asyncIterator]() {
         yield { type: 'baseline' as const, items: [
           { workspaceId: 'ws-folder', path: '/srv/folder', title: 'Folder', sessionIds: ['session-current', 'session-other', ...history.map(item => item.id)] },
@@ -545,6 +552,7 @@ test('synthetic Unassigned/ambiguous groups never authorize a Host create or dir
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
+      isCurrent: () => true,
       async *[Symbol.asyncIterator]() {
         yield { type: 'baseline' as const, items: [
           { workspaceId: 'ws-empty', path: '/srv/empty', title: 'Empty', sessionIds: [] },
@@ -586,6 +594,7 @@ test('the same Activity facts paint the compact row status and the complete Deta
     readActivity: async () => activity,
     followWorkspaces: (signal) => ({
       dispose() {},
+      isCurrent: () => true,
       async *[Symbol.asyncIterator]() {
         yield { type: 'baseline' as const, items: [
           { workspaceId: 'ws-folder', path: '/srv/folder', title: 'Folder', sessionIds: ['session-current', 'session-other'] },
@@ -630,6 +639,7 @@ test('global Cards search never keeps a Folder-only Footer action target', async
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
+      isCurrent: () => true,
       async *[Symbol.asyncIterator]() {
         yield { type: 'baseline' as const, items: [
           { workspaceId: 'ws-folder', path: '/srv/folder', title: 'Folder', sessionIds: ['session-current', 'session-other'] },
@@ -665,6 +675,7 @@ test('the Folder New session action delegates its exact Workspace and retires on
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
+      isCurrent: () => true,
       async *[Symbol.asyncIterator]() {
         yield { type: 'baseline' as const, items: [
           { workspaceId: 'ws-folder', path: '/srv/folder', title: 'Folder', sessionIds: ['session-current', 'session-other'] },
@@ -741,6 +752,7 @@ test('Use directory selects a canonical official Workspace and closes the sessio
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
+      isCurrent: () => true,
       async *[Symbol.asyncIterator]() {
         yield { type: 'baseline' as const, items: [{ workspaceId: 'ws-existing', path: '/srv/canonical', title: 'Existing', sessionIds: [] }] }
         if (signal?.aborted === true) return

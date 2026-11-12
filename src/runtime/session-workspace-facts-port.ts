@@ -61,6 +61,14 @@ export type WorkspaceFactsFrame =
 
 /** One caller-owned per-open Workspace observation. */
 export interface WorkspaceFactsHandle extends AsyncIterable<WorkspaceFactsFrame> {
+  /**
+   * Whether the observation's Host/Connection generation is STILL current.
+   * A caller that pairs this baseline with another read (the `-c` Workspace
+   * membership ∩ roster decision) must check this after the second read: a
+   * superseded generation makes the baseline unusable, never an empty or
+   * stale membership.
+   */
+  isCurrent(): boolean
   /** Release this open generation exactly once. */
   dispose(): void
 }
