@@ -22,7 +22,8 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import test from 'node:test'
@@ -190,15 +191,33 @@ test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartu
 
   // The conflict must fail inside the app command action, BEFORE the startup
   // service publication (the probe never runs) and without a Host durable
-  // Session/Workspace write.
-  const durable = (): { readonly sessions: boolean; readonly workspace: boolean } => ({
-    sessions: existsSync(join(home, 'sessions')),
-    workspace: existsSync(join(home, 'storages', 'workspace.json')),
-  })
+  // Session/Workspace write. Existence alone is not enough: a pre-existing
+  // durable file must not be MODIFIED either, so the snapshot records the
+  // content digest and stat identity of every entry under the two authorities.
+  const durable = (): string => {
+    const entries: string[] = []
+    const visit = (path: string): void => {
+      if (!existsSync(path)) {
+        entries.push(`${path} absent`)
+        return
+      }
+      const stat = statSync(path)
+      if (stat.isDirectory()) {
+        entries.push(`${path} dir ${String(stat.mtimeMs)}`)
+        for (const name of readdirSync(path).sort()) visit(join(path, name))
+        return
+      }
+      const digest = createHash('sha256').update(readFileSync(path)).digest('hex')
+      entries.push(`${path} file ${String(stat.size)} ${String(stat.mtimeMs)} ${digest}`)
+    }
+    visit(join(home, 'sessions'))
+    visit(join(home, 'storages', 'workspace.json'))
+    return entries.join('\n')
+  }
   const before = durable()
   const conflict = run(['--session', '-c'])
   assert.equal(conflict.status, 1, `the --session/--continue conflict must exit nonzero:\n${conflict.output}`)
   assert.equal(probeRecord(conflict.output), undefined, 'the conflict must not publish tuiStartup')
   assert.match(conflict.output, /--session and --continue are mutually exclusive/u)
-  assert.deepEqual(durable(), before, 'the conflict must perform no Host Session or Workspace write')
+  assert.equal(durable(), before, 'the conflict must perform no Host Session or Workspace create, modify or delete')
 })
