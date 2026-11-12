@@ -23,7 +23,7 @@ import {
   type SlashCommand,
 } from '@xmoon76/pi-tui'
 import { shellCommandIsOpen, shellCompletionContext, shellWordRange, shellWordSuffix, suggestShellCompletion } from './shell.ts'
-import type { HostShellCompletionPort } from '../../../runtime/host-shell-completion-port.ts'
+import type { HostShellCompletionPort, HostShellCompletionTarget } from '../../../runtime/host-shell-completion-port.ts'
 import { shellPrefixForMode, type EditorInputMode } from '../editor-input-mode.ts'
 import { applyInlineSkillReference, extractInlineSkillPrefix } from './skill-reference.ts'
 import {
@@ -79,6 +79,18 @@ function sameHostFileScope(left: HostFileScope, right: HostFileScope): boolean {
   if (left.kind === 'session') return left.sessionId === (right as { sessionId: string }).sessionId
   const other = right as { workspaceId?: string; selectionRevision: number }
   return left.workspaceId === other.workspaceId && left.selectionRevision === other.selectionRevision
+}
+
+/** Map ONE captured Host file scope to the completion target the Shell port
+ * takes: the exact live Session, the Host-issued Workspace id, or the explicit
+ * unselected state. The Client-local `selectionRevision` stays in the request
+ * identity (`sameHostFileScope` / `shellResultIdentity`) and is never sent. */
+function shellCompletionTargetOf(scope: HostFileScope): HostShellCompletionTarget {
+  if (scope.kind === 'session') return { kind: 'session', sessionId: scope.sessionId }
+  const workspaceId = scope.workspaceId
+  return workspaceId === undefined || workspaceId === ''
+    ? { kind: 'unselected' }
+    : { kind: 'workspace', workspaceId }
 }
 
 /**
@@ -300,8 +312,7 @@ export class MentionProvider implements AutocompleteProvider {
       const port = this.hostShellCompletion!
       const directPath = shellContext.kind === 'paths' && port.pathAuthority === 'client'
       if (!directPath) {
-        const sessionId = requestScope.kind === 'session' ? requestScope.sessionId : undefined
-        const suggestions = await suggestShellCompletion(shellContext, port, sessionId, options)
+        const suggestions = await suggestShellCompletion(shellContext, port, shellCompletionTargetOf(requestScope), options)
         if (suggestions !== null) {
           if (generation === this.requestGeneration) {
             this.shellResultIdentity = {

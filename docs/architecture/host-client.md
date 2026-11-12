@@ -54,10 +54,16 @@ Consequences that are part of the contract:
   sessions.get(sessionId)`) before preparation and again immediately before spawn.
   Gateway `remoteAccess` resource decisions run only for non-Owner peers in the
   pinned DSH contract, so they are not an authorization fact for Owner calls.
-  Host shell completion uses the same Host cwd/PATH/filesystem authority and
-  fails closed when that Host source is unavailable; it never falls back to the
-  Client machine. The draft external editor stays Client-local; a future
-  Host-filesystem editor/open is a separate capability.
+  Host shell completion resolves ONE explicit target — the exact live Session
+  or the exact Host-issued Workspace id, else the explicit unselected state——
+  and uses that Host source's cwd/PATH/filesystem authority; it never falls
+  back to the Client machine. A Workspace target is resolved through the
+  official Host `workspaceRegistry` before the completion and re-read after it
+  (a replaced/removed Workspace or an unreadable path retires the answer), and
+  it involves no Session, Agent or Session write. The Client-local
+  `selectionRevision` is an admission epoch that never crosses the wire. The
+  draft external editor stays Client-local; a future Host-filesystem
+  editor/open is a separate capability.
 
 ## Semantic ports and composition
 

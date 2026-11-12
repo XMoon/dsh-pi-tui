@@ -9,6 +9,8 @@
 
 ### 新增
 
+- **无 Session 的 Split Client 也能补全 `!`/`!!` 命令。** 在 `/sessions` 选定 Host Workspace 后（不创建 Session），Shell 补全的命令名、变量、`git` 子命令和路径都来自该 Host Workspace 的 Host 环境，不会读客户端本机的 PATH 或目录；不同 Workspace 的候选互不串号，切回原 Workspace 后只提供当前选择的候选。未选定 Workspace 时不显示任何候选；Workspace 被移除或不可读时补全如实不可用，不会退回客户端文件。
+
 - **Split 端可以在 Settings 里单独修改当前 Session 的审批策略，并准确显示 Sandbox/Approval 状态。** Settings → Agent 的 `Approval policy (this session)` 现在按精确 Session 读取官方 `ask`/`never` 有效策略与独立的 Session override（无 override 时如实写 `none`），并可就地切换；写入经过官方 Session 策略事件持久化，只改 Approval，不会改动 Sandbox、permission preset、TUI 设置文档或新 Session 的默认值。状态栏/footer 的 preset、sandbox、approval 现在是三个独立事实，读不到时隐藏而不是补一个默认值；`Verified` 只在一次新的官方有效策略回读一致后出现，已等于当前值的 no-op 也会正确 Verified，结果无法确认时显示 `Outcome unconfirmed` 且不会自动重试。
 - **Herdr Pane 自动显示主 Agent 状态。** 在 Herdr Pane 内运行 `dsh --profile pi-tui`（Direct 或内部 Split Client）时，会自动向当前 Pane 上报主 Agent 的 `idle` / `working` / `blocked`；`herdr agent list` 与 Pane UI 无需配置即可识别 `dsh-pi-tui`。状态取自 TUI 已有的 Agent 判定，不受 Terminal progress 设置影响，也不会把 `/login` 等仅属客户端的交互报成阻塞；退出或远端事实失效时撤销本 Pane 的注册。该集成只显示状态，不恢复 Session，也没有 Session restore 或 Herdr 内的 Agent 操作；非 Herdr 环境不启动额外后台进程，Herdr 不可用不影响 TUI。
 

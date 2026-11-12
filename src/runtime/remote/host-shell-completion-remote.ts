@@ -1,5 +1,5 @@
 import { SupersededReadError } from '../read-error.ts'
-import type { HostShellCompletionOutcome, HostShellCompletionPort, HostShellCompletionRequest } from '../host-shell-completion-port.ts'
+import type { HostShellCompletionOutcome, HostShellCompletionPort, HostShellCompletionRequest, HostShellCompletionTarget } from '../host-shell-completion-port.ts'
 import { parseHostShellCompletionOutcome, type PiTuiHostUserShellNamespace } from './pi-tui-host-user-shell-contract.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 
@@ -15,20 +15,25 @@ export class RemoteHostShellCompletionPort implements HostShellCompletionPort {
   }
 
   async complete(input: {
-    readonly sessionId?: string
+    readonly target: HostShellCompletionTarget
     readonly request: HostShellCompletionRequest
     readonly signal: AbortSignal
   }): Promise<HostShellCompletionOutcome> {
     input.signal.throwIfAborted()
-    if (input.sessionId === undefined) {
-      return { kind: 'unavailable', reason: 'Host shell completion requires a live Session' }
+    // An unselected scope dispatches NOTHING: no Host read, no fabricated
+    // empty answer and no Client-only fallback — the completion is simply
+    // unavailable until a Session or a Host Workspace is selected.
+    if (input.target.kind === 'unselected') {
+      return { kind: 'unavailable', reason: 'Host shell completion requires a selected Session or Host Workspace' }
     }
     const captured = this.generation.getSnapshot()
     if (captured === undefined) return { kind: 'unavailable', reason: 'the Client is not connected to a Host' }
     const current = (): boolean => Object.is(captured, this.generation.getSnapshot())
     let result
     try {
-      result = await this.namespace.complete(input.sessionId, input.request, input.signal)
+      result = input.target.kind === 'session'
+        ? await this.namespace.complete(input.target.sessionId, input.request, input.signal)
+        : await this.namespace.completeWorkspace(input.target.workspaceId, input.request, input.signal)
     } catch (error) {
       if (!current()) throw new SupersededReadError('Host shell completion superseded')
       throw error

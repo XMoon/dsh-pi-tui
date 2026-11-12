@@ -5,6 +5,7 @@ import test from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import { RemoteHostShellCompletionPort } from '../../src/runtime/remote/host-shell-completion-remote.ts'
+import { SupersededReadError } from '../../src/runtime/read-error.ts'
 import { RemoteHostUserShellPort } from '../../src/runtime/remote/host-user-shell-remote.ts'
 import type { RemoteConnectionGenerationSource } from '../../src/runtime/remote/session-reader-remote.ts'
 import type {
@@ -17,6 +18,7 @@ import {
   MAX_HOST_USER_SHELL_STREAM_BYTES,
   type HostUserShellOutcome,
 } from '../../src/runtime/host-user-shell-port.ts'
+import type { HostShellCompletionOutcome } from '../../src/runtime/host-shell-completion-port.ts'
 import { createRemoteClientRuntime, type RemoteClientRuntime } from '../support/m3-inprocess/client-runtime.ts'
 import { createRemoteHostRuntime, type RemoteHostRuntime } from '../support/m3-inprocess/host-runtime.ts'
 import { createRemoteApplicationHostFixture, waitFor } from '../support/remote-application-fixture.ts'
@@ -38,6 +40,7 @@ async function mountWire(life: ReturnType<typeof testLifecycle>, preset: string)
   const remote = client.remote.piTuiHostUserShell
   const namespace: PiTuiHostUserShellNamespace = {
     complete: (...args) => remote.complete(...args),
+    completeWorkspace: (...args) => remote.completeWorkspace(...args),
     run: (...args) => remote.run(...args),
   }
   const shell = new RemoteHostUserShellPort(namespace, client.connection.generation)
@@ -233,7 +236,7 @@ test('the same authenticated Host namespace answers read-only Host completion', 
     await retained.ready
     try {
       const outcome = await wire.completion.complete({
-        sessionId,
+        target: { kind: 'session', sessionId },
         request: { kind: 'commands', prefix: 'ba' },
         signal: new AbortController().signal,
       })
@@ -241,7 +244,7 @@ test('the same authenticated Host namespace answers read-only Host completion', 
       if (outcome.kind !== 'ok') throw new Error('Host command completion was unavailable')
       assert.ok(outcome.candidates.includes('bash'))
       const git = await wire.completion.complete({
-        sessionId,
+        target: { kind: 'session', sessionId },
         request: { kind: 'subcommands', command: 'git', prefix: 'che' },
         signal: new AbortController().signal,
       })
@@ -256,13 +259,77 @@ test('the same authenticated Host namespace answers read-only Host completion', 
   }
 })
 
+test('a sessionless Workspace target answers from the official Host workspaceRegistry without a Session', async t => {
+  const life = testLifecycle(t)
+  const wire = await mountWire(life, 'm6-g14-real-gateway-completion-workspace')
+  try {
+    // The Workspace root is the fixture anchor; a unique Host-side file makes
+    // the path answer local to THIS Workspace instead of any Client fact.
+    const marker = 'g14-workspace-marker-20261113.txt'
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(join(wire.host.anchorDir, marker), 'workspace\n')
+    const workspace = await wire.host.ctx.workspaceRegistry.create(wire.host.anchorDir)
+    const workspaceId = String(workspace.id)
+    const commands = await wire.completion.complete({
+      target: { kind: 'workspace', workspaceId },
+      request: { kind: 'commands', prefix: 'ba' },
+      signal: new AbortController().signal,
+    })
+    assert.equal(commands.kind, 'ok', JSON.stringify(commands))
+    if (commands.kind !== 'ok') throw new Error('sessionless Host Workspace command completion was unavailable')
+    assert.ok(commands.candidates.includes('bash'))
+    const paths = await wire.completion.complete({
+      target: { kind: 'workspace', workspaceId },
+      request: { kind: 'paths', prefix: 'g14-workspace' },
+      signal: new AbortController().signal,
+    })
+    assert.equal(paths.kind, 'ok', JSON.stringify(paths))
+    if (paths.kind !== 'ok') throw new Error('sessionless Host Workspace path completion was unavailable')
+    assert.ok(paths.candidates.some(candidate => candidate.startsWith('g14-workspace-marker-')),
+      `the workspace path candidates were ${JSON.stringify(paths.candidates)}`)
+    const unknown = await wire.completion.complete({
+      target: { kind: 'workspace', workspaceId: 'not-a-registered-workspace' },
+      request: { kind: 'commands', prefix: 'ba' },
+      signal: new AbortController().signal,
+    })
+    assert.equal(unknown.kind, 'unavailable', 'an unregistered Workspace id is a definite unavailable fact')
+    const unselected = await wire.completion.complete({
+      target: { kind: 'unselected' },
+      request: { kind: 'commands', prefix: 'ba' },
+      signal: new AbortController().signal,
+    })
+    assert.equal(unselected.kind, 'unavailable', 'an unselected scope never fabricates an answer')
+  } finally {
+    await wire.dispose()
+  }
+})
+
 // ── Remote adapter mapping (unary outcomes, not a transport stream) ─────────
 
 function fakeNamespace(run: PiTuiHostUserShellNamespace['run']): PiTuiHostUserShellNamespace {
   return {
     run,
     complete: async () => ({ ok: true, value: { kind: 'ok', candidates: [] } }),
+    completeWorkspace: async () => ({ ok: true, value: { kind: 'ok', candidates: [] } }),
   }
+}
+
+/** A completion namespace that records every dispatch, so a target that must
+ *  dispatch NOTHING is proven by an empty log instead of a mock answer. */
+function completionNamespace() {
+  const calls: { method: 'complete' | 'completeWorkspace'; id: string }[] = []
+  const namespace: PiTuiHostUserShellNamespace = {
+    run: async () => ({ ok: true, value: { kind: 'refused', reason: 'invalid-request', message: 'unused' } }),
+    complete: async (sessionId) => {
+      calls.push({ method: 'complete', id: sessionId })
+      return { ok: true, value: { kind: 'ok', candidates: ['session-candidate'] } }
+    },
+    completeWorkspace: async (workspaceId) => {
+      calls.push({ method: 'completeWorkspace', id: workspaceId })
+      return { ok: true, value: { kind: 'ok', candidates: ['workspace-candidate'] } }
+    },
+  }
+  return { namespace, calls }
 }
 
 function generationOf(): RemoteConnectionGenerationSource {
@@ -292,6 +359,76 @@ const settledOutcome: HostUserShellRunOutcome = {
     timedOut: false,
   },
 }
+
+test('the Remote completion adapter dispatches each target to its own official method', async () => {
+  const { namespace, calls } = completionNamespace()
+  const port = new RemoteHostShellCompletionPort(namespace, generationOf())
+  const session = await port.complete({
+    target: { kind: 'session', sessionId: 'session-a' },
+    request: { kind: 'commands', prefix: 'ba' },
+    signal: new AbortController().signal,
+  })
+  const workspace = await port.complete({
+    target: { kind: 'workspace', workspaceId: 'workspace-a' },
+    request: { kind: 'commands', prefix: 'ba' },
+    signal: new AbortController().signal,
+  })
+  const unselected = await port.complete({
+    target: { kind: 'unselected' },
+    request: { kind: 'commands', prefix: 'ba' },
+    signal: new AbortController().signal,
+  })
+  assert.deepEqual(calls, [
+    { method: 'complete', id: 'session-a' },
+    { method: 'completeWorkspace', id: 'workspace-a' },
+  ], 'an unselected target dispatches nothing')
+  assert.deepEqual(session, { kind: 'ok', candidates: ['session-candidate'] })
+  assert.deepEqual(workspace, { kind: 'ok', candidates: ['workspace-candidate'] })
+  assert.equal(unselected.kind, 'unavailable')
+})
+
+test('a completion reply that lands after the Connection generation changed is superseded, never applied', async () => {
+  let current: unknown = {}
+  const generation: RemoteConnectionGenerationSource = {
+    getSnapshot: () => current as never,
+    subscribe: () => () => {},
+  }
+  const { namespace } = completionNamespace()
+  const delayed: PiTuiHostUserShellNamespace = {
+    ...namespace,
+    completeWorkspace: async () => {
+      current = {}
+      return { ok: true, value: { kind: 'ok', candidates: ['late'] } }
+    },
+  }
+  const port = new RemoteHostShellCompletionPort(delayed, generation)
+  await assert.rejects(
+    () => port.complete({
+      target: { kind: 'workspace', workspaceId: 'workspace-a' },
+      request: { kind: 'commands', prefix: 'ba' },
+      signal: new AbortController().signal,
+    }),
+    SupersededReadError,
+  )
+})
+
+test('a Host completion failure is an unavailable fact, never an empty ok', async () => {
+  const { namespace } = completionNamespace()
+  const failing: PiTuiHostUserShellNamespace = {
+    ...namespace,
+    completeWorkspace: async () => ({
+      ok: false,
+      error: { code: 'gateway/invocation-unavailable', message: 'workspace refused' },
+    }) as unknown as RemoteResult<HostShellCompletionOutcome>,
+  }
+  const port = new RemoteHostShellCompletionPort(failing, generationOf())
+  const outcome = await port.complete({
+    target: { kind: 'workspace', workspaceId: 'workspace-a' },
+    request: { kind: 'commands', prefix: 'ba' },
+    signal: new AbortController().signal,
+  })
+  assert.deepEqual(outcome, { kind: 'unavailable', reason: 'workspace refused' })
+})
 
 test('the Remote adapter maps a refusal to unavailable and keeps the Host message', async () => {
   const port = new RemoteHostUserShellPort(fakeNamespace(async () => ({

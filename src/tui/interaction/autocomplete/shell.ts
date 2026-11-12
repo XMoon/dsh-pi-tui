@@ -1,7 +1,7 @@
 /** The `!`/`!!` shell completion grammar and semantic-port adapter. */
 
 import type { AutocompleteSuggestions } from '@xmoon76/pi-tui'
-import type { HostShellCompletionPort } from '../../../runtime/host-shell-completion-port.ts'
+import type { HostShellCompletionPort, HostShellCompletionTarget } from '../../../runtime/host-shell-completion-port.ts'
 import { parseShellWords } from '../../../client/shell/words.ts'
 
 const MAX_SHELL_CANDIDATES = 50
@@ -435,7 +435,7 @@ function matchesFor(
 export async function suggestShellCompletion(
   context: ShellCompletionContext,
   port: HostShellCompletionPort,
-  sessionId: string | undefined,
+  target: HostShellCompletionTarget,
   options: { readonly signal: AbortSignal; readonly force?: boolean },
 ): Promise<AutocompleteSuggestions | null> {
   if (options.signal.aborted) return null
@@ -453,7 +453,7 @@ export async function suggestShellCompletion(
       : context.kind === 'subcommand'
         ? { kind: 'subcommands' as const, command: context.priorWords[0]!, prefix: context.prefix }
         : { kind: 'paths' as const, prefix: hostPathPrefix }
-  const outcome = await port.complete({ sessionId, request, signal: options.signal })
+  const outcome = await port.complete({ target, request, signal: options.signal })
   if (options.signal.aborted || outcome.kind !== 'ok') return null
   if (context.kind === 'paths') {
     const candidates = outcome.candidates.slice(0, MAX_SHELL_CANDIDATES)

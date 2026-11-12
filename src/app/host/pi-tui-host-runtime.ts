@@ -197,6 +197,7 @@ export async function apply(ctx: Context, config: TuiConfigValue): Promise<void>
         subprocess: () => ctx.reflect.get('subprocess') as import('./features/host-user-shell.ts').SubprocessServiceLike | undefined,
         pathCompletion: createHostShellPathCompletionBridge(),
         shellPolicy: () => config.localShellSandbox.get() === 'sandbox' ? 'sandbox' : 'bypass',
+        workspaces: () => ctx.reflect.get('workspaceRegistry') as WorkspaceRegistryPort | undefined,
       })
     })
     fibers.push(hostUserShellFiber)
