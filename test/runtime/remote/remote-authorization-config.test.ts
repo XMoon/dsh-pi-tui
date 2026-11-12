@@ -381,7 +381,7 @@ test('REAL_WIRE: a caller teardown of a running attempt closes the flow as uncon
   }
 })
 
-test('REAL_WIRE: a generation replacement while waiting for the started frame ends begin, never retries', async () => {
+test('UNIT: a generation replacement while waiting for the started frame ends begin, never retries', async () => {
   const generation = fakeGeneration()
   let runCalls = 0
   const adapter = new RemoteAuthorizationConfig(fakeNamespace({
