@@ -50,6 +50,7 @@ import { runWebRuntimeToggle } from '../smoke/split-process/web-runtime-toggle.m
 import { runWebStartupPreference } from '../smoke/split-process/web-startup-preference.mjs'
 import { runF2AccountComposition } from '../smoke/split-process/account-composition.mjs'
 import { runF7AProviderAuthorization } from '../smoke/split-process/provider-authorization-f7a.mjs'
+import { runF7BCredentialRecords } from '../smoke/split-process/provider-credential-records-f7b.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -207,6 +208,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'provider-authorization.f7a',
     title: 'two real Split Clients drive the official provider-native authorization stream (notice, prompts, commit, same-key refusal, withdrawal, disconnect, cancel-vs-commit)',
     run: runF7AProviderAuthorization,
+  }),
+  Object.freeze({
+    suite: 'provider-credential-records',
+    id: 'provider-credential-records.f7b',
+    title: 'two real Split Clients list, exact-key clear and re-read the official stored credential records on ONE Host',
+    run: runF7BCredentialRecords,
   }),
   Object.freeze({
     suite: 'account',

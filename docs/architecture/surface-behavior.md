@@ -1245,7 +1245,20 @@ The page never infers a stored key from a route/profile.
   frame. A clear that is IN FLIGHT owns its own state: a refresh never re-arms
   or resets it, the confirmation stays locked until the Host answers, and the
   same delete can never be dispatched twice. After the clear the page re-reads
-  the store; it never claims success without the authoritative absence.
+  the exact key; it never claims success without the authoritative absence.
+- A stored-RECORD clear has four truthful outcomes, not one failure bucket. A
+  dispatched delete whose Host settlement the Client could not observe (lost
+  ACK, transport throw, cancelled/internal failure) is `Outcome unconfirmed —
+  refresh stored credentials before retrying`: the page keeps the exact key,
+  offers only the read-only `Refresh records [r]` action and never re-sends the
+  delete or reuses the old confirmation. A definite pre-dispatch refusal
+  (no current Connection) is `Not sent`; a definite input refusal is `Failed`;
+  a record still present on the current Host is `Still stored` (it may have
+  been re-created) and never claims the delete did not run; a successful
+  readback reports `local stored credential cleared` and states that this does
+  not revoke access at the issuer or switch the current model. A readback
+  failure is unconfirmed too. An unconfirmed view may be left (`Esc`); a
+  pending mutation still blocks leaving and a second dispatch.
 - The custom provider draft is one page-local form over route → protocol →
   base URL → display name → optional key → discovered/manual model ids →
   review → create. Nothing persists before Create. Profile and credential
@@ -1285,7 +1298,16 @@ The page never infers a stored key from a route/profile.
   `/login` falls back to the Models list and the page revalidates before
   offering a native attempt; a Host without the authorization service keeps the
   API-key/provider list usable and states that native sign-in is unavailable.
-- Stored credential records exclude the DeepSeek Account grant.
+- Stored credential records exclude the DeepSeek Account grant; the row is
+  never a generic `/logout` clear target, while `/logout deepseek-account`
+  keeps opening the Account sign-out surface. A foreign-scope orphan record is
+  listed as its raw key with its exact kind and is clearable by that exact key.
+- A STALE authorization roster never decides a `/logout` target: account
+  sign-out and an explicit credential reference (a known reference name, or a
+  token the route grammar cannot produce — uppercase/underscore) stay
+  addressable, while a route-shaped or ambiguous target falls back to the
+  stored-credentials list, which reads the CURRENT Host first. An unknown
+  target in that state opens the list instead of an error page.
 - The `/login` and `/logout` resolver stays fail-soft when a read fails: the
   always-present builtin target (whose reference is a constant) remains
   addressable, and an explicitly typed reference still resolves. A route whose

@@ -9,6 +9,8 @@
 
 ### 新增
 
+- **Split 后端可以列出并清除本地存储的凭据记录。** 在 Settings → Models 的 Credential records 或 `/logout` 中，远程 TUI 现在会列出 Host 官方凭据存储里的每条记录（仅精确 key 与类型，不显示 token、grant payload 或 API-key 值），并可按该精确 key 清除；清除只代表本地遗忘，不会在服务商侧撤销授权，也不会切换当前模型或 Profile。删除结果无法确认时显示 `Outcome unconfirmed`，只允许重新读取当前 Host，不会自动重试或谎报成功；已不在记录中的 key 删除是官方 no-op。DeepSeek Account 的凭据记录不出现在通用列表中，其独立登出入口保持不变。
+
 - **Split 后端支持 Provider 原生登录。** 在 Settings → Models 或 `/login <route>` 中，远程 TUI 现在会读取 Host 已注册的 Provider 登录流，显示官方登录提示（URL/设备码），回答 text/secret/select 问题，并准确呈现授权成功、用户取消、失败或通信中断后的结果不明。secret 只经已认证链路单次上送；断线不会自动重试，也不会把未知结果说成失败或成功。DeepSeek Account 的登录语义保持不变。
 
 - **声明接受附件的 Host 斜杠命令可以携带普通 FILE。** Host 声明 `input.attachments` 的斜杠命令（Direct 与 Split 两种后端）现在会把已暂存的普通文件按官方 upload receipt 投递给命令 handler；只有命令执行成功才消费草稿，上传或预检失败会保留可编辑的草稿与附件，结果不确定时不会自动重试。
