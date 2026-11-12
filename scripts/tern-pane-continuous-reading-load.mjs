@@ -23,13 +23,13 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { arch, cpus, platform, release, type as osType } from 'node:os'
+import { arch, cpus, loadavg, platform, release, type as osType } from 'node:os'
 import { join } from 'node:path'
 import { containedXY, rect, visibleBox } from './tern-pane-geometry.mjs'
 import {
   eventRecords,
   foldLive,
-  goneEvents,
+  foldLiveWithRetention,
   mainIds,
   openedSurfaces,
   readJson,
@@ -145,7 +145,13 @@ export default async function (h) {
   })()
   const lock = readFileSync(join(h.repo, 'pnpm-lock.yaml'), 'utf8')
   const sdkIntegrity = lock.match(/'@stencil-hq\/tern@0\.2\.0':\s*\n\s*resolution: \{integrity: ([^}]+)\}/u)?.[1] ?? 'UNVERIFIED'
-  const host = { os: `${osType()} ${release()}`, platform: platform(), arch: arch(), cpu: cpus()[0]?.model ?? null, cores: cpus().length }
+  const host = {
+    os: `${osType()} ${release()}`, platform: platform(), arch: arch(),
+    cpu: cpus()[0]?.model ?? null, cores: cpus().length,
+    // Host load is a CONFOUND for a synchronous p95 claim; record it with the
+    // measurement instead of assuming a quiet machine.
+    loadAverageAtStart: loadavg(),
+  }
 
   // The case is written BEFORE launch: the pane does not inherit our env, so a
   // file in the run directory is the only reliable input channel (measured).
@@ -236,36 +242,35 @@ export default async function (h) {
   await h.sleep(400)
   const followResult = await runCommand(h, 'append-tail', { turns: 1 })
   const followTurn = followResult?.lastTailTurn
+  const followMarker = `LOAD-TAIL-${String(followTurn).padStart(6, '0')}`
   const followed = await waitUntil(h, 'the followed tail turn is visible after return-to-live',
     () => {
       const rows = mainRows(h).filter(row => row.containedXY)
-      return rows.some(row => row.text.includes(`LOAD-TAIL-${String(followTurn).padStart(6, '0')}`))
+      return rows.some(row => row.text.includes(followMarker))
     }, { limit: 300, intervalMs: 200 })
-  h.measure('A4: continued follow after native return-to-live', JSON.stringify({
-    followTurn, followed,
-    visibleTail: mainRows(h).filter(row => row.containedXY).slice(-3).map(row => row.text.slice(0, 60)),
-  }))
+  // A continued-follow failure is a product/behaviour failure, not a
+  // measurement: assert it with the exact appended turn as the witness.
+  h.check('A4: the newly appended turn is visible at the live tail after native return-to-live',
+    followed === true && followTurn === appendResult.lastTailTurn + 1,
+    JSON.stringify({
+      followTurn, followMarker, followed,
+      visibleTail: mainRows(h).filter(row => row.containedXY).slice(-3).map(row => row.text.slice(0, 60)),
+    }))
 
   // ── settle/gone chronology, never inferred from absence ──
+  // The SAME chronological fold the live assertions use judges every op against
+  // the retention epoch it occurred in: an update before an eviction and a real
+  // re-add after it are legal; an update while retired is a violation.
+  const retention = foldLiveWithRetention(wire(h))
   const settles = settleOps(wire(h))
-  const gone = goneEvents(wire(h))
-  const goneIds = new Set(gone.flatMap(entry => entry.ids))
-  // A `gone` id must never receive a later `set`/`text`; a real stamp change may
-  // re-add the whole root. Check the actual op stream after each gone frame.
-  const offending = []
-  for (const entry of wire(h)) {
-    if (entry.dir !== 'out' || entry.verb !== 'f') continue
-    for (const op of entry.body?.ops ?? []) {
-      if ((op[0] === 'set' || op[0] === 'text') && goneIds.has(op[1])) offending.push({ op, frame: entry.body?.s ?? null })
-    }
-  }
-  h.check('A4: no settle/text op ever targeted an id the client reported gone',
-    offending.length === 0, JSON.stringify(offending.slice(0, 3)))
+  h.check('A4: no set/text op ever targeted an id while the client reported it gone',
+    retention.violations.length === 0, JSON.stringify(retention.violations.slice(0, 3)))
   h.measure('A4: retention chronology', JSON.stringify({
     settleOps: settles.length,
-    goneFrames: gone.length,
-    goneIds: [...goneIds].slice(0, 8),
-    goneDisposition: gone.length === 0 ? 'GONE_NOT_OBSERVED_AT_THIS_LOAD' : 'GONE_OBSERVED',
+    goneFrames: retention.goneEvents.length,
+    goneIds: [...new Set(retention.goneEvents.flatMap(entry => entry.ids))].slice(0, 8),
+    violations: retention.violations.length,
+    goneDisposition: retention.goneEvents.length === 0 ? 'GONE_NOT_OBSERVED_AT_THIS_LOAD' : 'GONE_OBSERVED',
     journalRetired: records(h).filter(entry => entry.kind === 'load.gone').map(entry => ({ frame: entry.frame, retired: entry.retired })),
   }))
 
@@ -303,8 +308,18 @@ export default async function (h) {
     },
     steady: { appended: appendResult.appended, p50: pct(steady, 50), p95: pct(steady, 95), max: Math.max(...steady), samples: steady },
     follow: { followTurn, followed },
-    retention: { settleOps: settles.length, goneFrames: gone.length, goneIds: [...goneIds], disposition: gone.length === 0 ? 'GONE_NOT_OBSERVED_AT_THIS_LOAD' : 'GONE_OBSERVED' },
-    final: { nodes: finalStats.nodes, frames: finalStats.frames, rssClientBytes: rssOf(clientPid) ?? null, clientPid, driverRss: process.memoryUsage().rss },
+    retention: {
+      settleOps: settles.length,
+      goneFrames: retention.goneEvents.length,
+      goneIds: [...new Set(retention.goneEvents.flatMap(entry => entry.ids))],
+      violations: retention.violations.length,
+      disposition: retention.goneEvents.length === 0 ? 'GONE_NOT_OBSERVED_AT_THIS_LOAD' : 'GONE_OBSERVED',
+    },
+    final: {
+      nodes: finalStats.nodes, frames: finalStats.frames,
+      rssClientBytes: rssOf(clientPid) ?? null, clientPid, driverRss: process.memoryUsage().rss,
+      loadAverageAtEnd: loadavg(),
+    },
     captures,
     limitation: 'SYNTHETIC PROJECTION INPUT: no Host Session claim, no Direct Writer. This is a real-client document-cost lane, not production E2E.',
   }

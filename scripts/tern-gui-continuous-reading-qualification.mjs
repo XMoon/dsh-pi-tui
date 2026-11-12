@@ -23,9 +23,10 @@
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { containedXY, rect, visibleBox } from './tern-pane-geometry.mjs'
+import { containedXY, rect, visibleBox, visibleSpan } from './tern-pane-geometry.mjs'
 import {
   cardShowing,
+  userRows,
   eventLedger,
   eventRecords,
   foldLive,
@@ -108,7 +109,12 @@ function mainNodes (snapshot) {
 function mainRow (snapshot, text) {
   const node = mainNodes(snapshot).find(candidate => String(candidate.text ?? '').includes(text))
   if (node === undefined) return undefined
-  return { text: String(node.text ?? ''), rect: rect(node), containedXY: containedXY(snapshot.chains, node) }
+  return {
+    text: String(node.text ?? ''),
+    rect: rect(node),
+    containedXY: containedXY(snapshot.chains, node),
+    visibleSpanY: visibleSpan(snapshot.chains, node, 'y'),
+  }
 }
 
 /** Every readable text node inside one named region, with real boxes. */
@@ -198,9 +204,16 @@ export default async function (h) {
       JSON.stringify(ledger(h).writes.at(-1) ?? null))
     if (!ok) { h.finish({ evidenceTier: EVIDENCE_TIER, turns: prompt.ordinal }); return }
   }
-  h.check('A3: all 25 User rows are mounted in the one continuous Main',
-    [...live(h).keys()].filter(id => id.startsWith('main.')).length >= 25,
-    JSON.stringify({ mains: [...live(h).keys()].filter(id => id.startsWith('main.')).length }))
+  // Top-level User ROOTS only: a descendant-count would let one card satisfy the
+  // claim. The observer's `userRows` keys off the Main root's direct children.
+  const guiUserRows = userRows(live(h))
+  const guiAnchors = ['PR1-TERN-01', 'PR1-TERN-13', 'PR1-TERN-25']
+  const guiAnchorIds = Object.fromEntries(guiAnchors.map(marker => [marker, cardShowing(live(h), marker) ?? null]))
+  h.check('A3: all 25 User rows are mounted as 25 distinct top-level Main roots',
+    guiUserRows.length === 25 && new Set(guiUserRows).size === 25
+      && guiAnchors.every(marker => typeof guiAnchorIds[marker] === 'string')
+      && new Set(Object.values(guiAnchorIds)).size === 3,
+    JSON.stringify({ users: guiUserRows.length, distinct: new Set(guiUserRows).size, anchors: guiAnchorIds }))
   const capture25 = h.capture('gui-25-turns-1280x800-initial',
     'the real GUI window after 25 sequential Composer submissions')
 
@@ -237,6 +250,17 @@ export default async function (h) {
   h.check('A3: one real wheel over Main moves the visible older rows',
     afterWheel.join() !== beforeWheel.join() || afterWheel.some(marker => !beforeWheel.includes(marker)),
     JSON.stringify({ before: beforeWheel, after: afterWheel }))
+  // Capture the EXACT reading anchor before the stream releases. A fresh anchor
+  // chosen after release could hide a jump to a different older location; the
+  // claim must be that THIS marker stayed readable.
+  const promptMarkers = prompts.slice(0, 26).map(prompt => prompt.marker)
+  const readingSnapshot = h.snapshot()
+  const visibleBeforeRelease = promptMarkers.filter(marker => mainRow(readingSnapshot, marker)?.containedXY === true)
+  const anchorBeforeRelease = visibleBeforeRelease[0]
+  const anchorRowBefore = anchorBeforeRelease === undefined ? undefined : mainRow(readingSnapshot, anchorBeforeRelease)
+  h.check('A3: the GUI reader holds a fully visible older anchor BEFORE the release',
+    anchorBeforeRelease !== undefined && anchorBeforeRelease !== 'PR1-TERN-25' && anchorRowBefore?.containedXY === true,
+    JSON.stringify({ anchorBeforeRelease, anchorRowBefore, visibleBeforeRelease }))
   const captureReading = h.capture('gui-reading-held-26',
     'the reader above the tail while turn 26 is still held')
 
@@ -249,13 +273,17 @@ export default async function (h) {
     () => ({ result: readJson(join(h.root, 'case-result.json')), turns: ledger(h).turnEnds.slice(-2) }), { limit: 600 })
   if (!released) { h.finish({ evidenceTier: EVIDENCE_TIER }); return }
   await h.sleep(1200)
-  const readableNow = prompts.slice(0, 26).map(prompt => prompt.marker)
-    .filter(marker => mainRow(h.snapshot(), marker)?.containedXY === true)
-  const anchorMarker = readableNow[0]
-  h.check('A3: a real older anchor stayed visible after the stream released',
-    anchorMarker !== undefined && anchorMarker !== 'PR1-TERN-25',
-    JSON.stringify({ readableNow, anchorMarker }))
-  const captureAfter = h.capture('gui-reading-after-stream', 'the anchor preserved after the held turn streamed')
+  const postReleaseSnapshot = h.snapshot()
+  const readableNow = promptMarkers.filter(marker => mainRow(postReleaseSnapshot, marker)?.containedXY === true)
+  // The SAME marker captured before the release must still be fully readable.
+  const anchorRowAfter = anchorBeforeRelease === undefined ? undefined : mainRow(postReleaseSnapshot, anchorBeforeRelease)
+  h.check('A3: the SAME pre-release anchor is fully visible after the stream released',
+    anchorBeforeRelease !== undefined && anchorRowAfter?.containedXY === true,
+    JSON.stringify({ anchorBeforeRelease, before: anchorRowBefore, after: anchorRowAfter, readableNow }))
+  h.check('A3: the post-release window still shows older content (no jump to the tail)',
+    readableNow.length > 0 && readableNow[0] !== 'PR1-TERN-25',
+    JSON.stringify({ readableNow }))
+  const captureAfter = h.capture('gui-reading-after-stream', 'the pre-release anchor preserved after the held turn streamed')
 
   // Native tv-back, then the 27th turn for sustained Follow.
   const backSnapshot = h.snapshot()

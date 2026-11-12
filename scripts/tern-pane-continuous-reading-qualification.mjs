@@ -37,6 +37,7 @@ import {
   eventLedger,
   eventRecords,
   foldLive,
+  foldLiveWithRetention,
   goneEvents,
   mainIds,
   openedSurfaces,
@@ -448,12 +449,31 @@ export default async function (h) {
   h.check('A1.5: the client did NOT snap to the newest tail (no forced scroll-to-bottom)',
     tailAfter === undefined || tailAfter.containedXY !== true,
     JSON.stringify({ tailAfter, anchorAfter }))
-  h.check('A1.5: the Dock/Composer remains operable while the reader is above the tail',
-    dockRegion(afterStreamSnapshot) !== undefined
-      && (mainRow(afterStreamSnapshot, prompt26.marker) === undefined
-        || mainRow(afterStreamSnapshot, prompt26.marker)?.containedXY !== true
-        || mainRow(afterStreamSnapshot, prompt26.marker)?.containedXY === true),
-    JSON.stringify({ dock: rect(dockRegion(afterStreamSnapshot) ?? {}) }))
+  // A real input-seat witness while the reader is still above the tail: the
+  // dock existing is not evidence that its editor accepts input. Type a single
+  // non-submitting character, prove it reached the editor, then clear it — no
+  // business submission is made and the reading position is untouched.
+  const seatSnapshot = h.snapshot()
+  const seatEditor = editorNode(seatSnapshot)
+  const seatVisible = seatEditor !== undefined && containedXY(seatSnapshot.chains, seatEditor)
+  h.check('A1.5: the composer editor is fully visible while the reader is above the tail',
+    seatVisible, JSON.stringify({ editor: seatEditor === undefined ? null : rect(seatEditor), dock: rect(dockRegion(afterStreamSnapshot) ?? {}) }))
+  let seatAccepted = false
+  let seatCleared = false
+  if (seatVisible) {
+    await h.click(seatSnapshot.chains, seatEditor)
+    h.send('type', JSON.stringify('X'))
+    await h.sleep(500)
+    const typed = editorNode(h.snapshot())
+    seatAccepted = typed !== undefined && h.descendantsText(typed).includes('X')
+    h.check('A1.5: the composer seat accepts real input while reading history', seatAccepted,
+      JSON.stringify({ draft: typed === undefined ? null : h.descendantsText(typed).slice(0, 60) }))
+    await h.key('Backspace', 400)
+    const cleared = editorNode(h.snapshot())
+    seatCleared = cleared === undefined || !h.descendantsText(cleared).includes('X')
+    h.check('A1.5: the probe draft was cleared again (no business submission was made)', seatCleared,
+      JSON.stringify({ draft: cleared === undefined ? null : h.descendantsText(cleared).slice(0, 60) }))
+  }
   const captureAfterStream = h.capture('stage4-reading-after-real-stream-1280x800-dark',
     'the older anchor preserved after the held 26th turn really streamed to completion')
 
@@ -616,6 +636,18 @@ export default async function (h) {
     aCurrentCardId !== null && staleRefused === true
       && wireErrors(wire(h)).slice(errorsBefore).some(entry => /unknown id/iu.test(String(entry?.msg))),
     JSON.stringify({ staleId: aCurrentCardId, result: staleReveal, errors: wireErrors(wire(h)).slice(errorsBefore) }))
+  // ACCEPTANCE BOUNDARY (accepted plan §4 A1.7): the plan asks for proof that a
+  // stale Session-A *business action/Copy* is refused by the APPLICATION
+  // admission after B owns the source. This lane proves the protocol-level fact
+  // (the client refuses an evicted wire id) and that A's roots are retired; it
+  // does NOT inject a business `action` event into the Direct application, and
+  // the client exposes no command to replay one. The app-level admission is
+  // covered by the existing `test/app/tern-tsp-live-mount.test.ts` currentness
+  // cases, but that is SPLIT evidence, not a same-path source→decision→sink
+  // witness. Report the obligation as NOT_VERIFIED and let the Owner decide
+  // whether the split evidence is an acceptable amendment.
+  h.measure('A1.7: stale Session-A business-action admission',
+    'NOT_VERIFIED: protocol refusal proven; no same-path business-action injection exists in the real-client lane')
 
   const writesBeforeB = ledger(h).writes.length
   await submit(h, SESSION_B_MARKER)
@@ -646,11 +678,23 @@ export default async function (h) {
     ledger(h).writes.length === 28
       && new Set(ledger(h).writes.map(entry => entry.marker)).size === 28,
     JSON.stringify({ writes: ledger(h).writes.length, distinct: new Set(ledger(h).writes.map(e => e.marker)).size }))
-  h.check('A1.8: no fatal client error and no unknown id was ever sent by this application',
-    wireErrors(wire(h)).every(entry => /unknown id/iu.test(String(entry?.msg ?? ''))),
-    JSON.stringify(wireErrors(wire(h)).map(entry => String(entry?.msg ?? '').slice(0, 80))))
+  // Strict error admission: the ONLY client error the whole run may carry is the
+  // deliberate stale-id refusal, and it must name that exact id. Anything else —
+  // including an unexpected `unknown id` caused by the application — fails.
+  const allErrors = wireErrors(wire(h))
+  h.check('A1.8: no client error occurred before the intentional stale-id probe',
+    errorsBefore === 0, JSON.stringify(allErrors.slice(0, 3)))
+  h.check('A1.8: the only client error is the exact stale-id refusal of the probe',
+    allErrors.length === 1
+      && /unknown id/iu.test(String(allErrors[0]?.msg ?? ''))
+      && typeof aCurrentCardId === 'string'
+      && String(allErrors[0]?.msg ?? '').includes(aCurrentCardId),
+    JSON.stringify({ errors: allErrors.map(entry => String(entry?.msg ?? '').slice(0, 80)), staleId: aCurrentCardId }))
   h.check('A1.8: the client reported no synthetic "Earlier turns" summary',
     !mainText(h).includes('Earlier turns'), mainText(h).slice(0, 200))
+  h.check('A1.8: no set/text op ever targeted an id while the client reported it gone',
+    foldLiveWithRetention(wire(h)).violations.length === 0,
+    JSON.stringify(foldLiveWithRetention(wire(h)).violations.slice(0, 3)))
 
   const captures = [capture25, captureHeld, captureReading, captureAfterStream, captureBack, captureFollow, captureB, captureBWriter]
   h.send('type', JSON.stringify('/exit'))
@@ -676,9 +720,11 @@ export default async function (h) {
     oldestBefore, oldestAfterWheel, oldestBeforePageUp, oldestAfterPageUp, readableNow,
     terminals: { wheel: true, pageUp: true, tvBack: backClicked === true },
     staleActionId: aCurrentCardId,
+    businessActionAdmission: 'NOT_VERIFIED (protocol refusal proven; no same-path business-action injection in this lane)',
     captures,
     settlements: settleOps(wire(h)).length,
     gone: goneEvents(wire(h)),
+    retentionViolations: foldLiveWithRetention(wire(h)).violations,
     evidenceTier: EVIDENCE_TIER,
   })
   finish(h, {
