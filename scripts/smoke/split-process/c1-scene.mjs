@@ -49,7 +49,7 @@ const PROTECTED_HOST_ROWS = [
   'split-host-turn-outline',
   'split-host-session-controller',
   'split-host-settings-controller',
-  'split-host-account-controller',
+  'deepseek-account',
   'split-host-session-log-download',
   'split-host-pi-tui-runtime',
   'pi-tui-performance-host',

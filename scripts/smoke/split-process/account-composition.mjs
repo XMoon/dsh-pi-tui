@@ -440,11 +440,11 @@ export async function runF2AccountComposition(context) {
       env: { ...base.env, SPLIT_PROCESS_EXTRA_PATCH: accountPatchPath },
     })
     const hostReady = await host.waitFor(record => record.m4a0 === 'ready', 'F2 Host Account Ready', 180_000)
-    assert(hostReady.ownerEntries?.accountController?.length === 1
-      && hostReady.ownerEntries.accountController[0] === 'split-host-account-controller',
+    assert(hostReady.ownerEntries?.deepseekAccount?.length === 1
+      && hostReady.ownerEntries.deepseekAccount[0] === 'deepseek-account',
     'the real Host did not publish exactly one official Account Controller owner')
-    assert(hostReady.services?.accountController === true,
-      'the real Host did not publish the official accountController/account binding')
+    assert(hostReady.services?.deepseekAccount === true,
+      'the real Host did not publish the official deepseekAccount/account binding')
     const webAccountRow = hostReady.entries?.find(entry => entry.id === 'ui-settings-account')
     assert(webAccountRow?.state === 'absent' || webAccountRow?.state === 'state-4',
       'the Web-only Account UI row must remain inactive while the official Host Account Controller is live')
@@ -721,11 +721,11 @@ export async function runF2AccountComposition(context) {
     await waitForAccountFrame(clientB, 'Signed in (stored credential)',
       'F2-T11 stored credential before Web enable', trace, 30_000)
     const accountOwnerUid = status => ({
-      owner: status.ownerEntries?.accountController?.[0],
-      fiberUid: status.entries?.find(entry => entry.id === 'split-host-account-controller')?.fiberUid,
+      owner: status.ownerEntries?.deepseekAccount?.[0],
+      fiberUid: status.entries?.find(entry => entry.id === 'deepseek-account')?.fiberUid,
     })
     const ownerBeforeWeb = accountOwnerUid(await hostStatus(host))
-    assert(ownerBeforeWeb.owner === 'split-host-account-controller' && Number.isInteger(ownerBeforeWeb.fiberUid),
+    assert(ownerBeforeWeb.owner === 'deepseek-account' && Number.isInteger(ownerBeforeWeb.fiberUid),
       `F2-T11 the Host has no unique live Account Controller owner: ${JSON.stringify(ownerBeforeWeb)}`)
 
     peer = new EntryProcess('peer', entries.client, {
@@ -772,8 +772,8 @@ export async function runF2AccountComposition(context) {
     assert(requests.filter(path => path === 'POST /auth-api/v0/users/logout').length === webLogoutCalls,
       'F2-T11 disabling Web triggered a Host sign-out')
     trace('account.web-coexistence', {
-      accountControllerOwner: ownerBeforeWeb.owner,
-      accountControllerFiberUid: ownerBeforeWeb.fiberUid,
+      accountOwner: ownerBeforeWeb.owner,
+      accountFiberUid: ownerBeforeWeb.fiberUid,
       fiberUnchanged: true,
       webAccountUi: 'active',
       webAccountMenu: 'credential-stored',
@@ -871,8 +871,8 @@ export async function runF2AccountComposition(context) {
     assert(normalExit.code === 0 && normalExit.signal === null,
       'the qualified Account Host did not stop cleanly before its negative composition control')
     host = undefined
-    const disabledPatchPath = join(workDir, 'm6-f2-account-controller-disabled.patch.yml')
-    writeFileSync(disabledPatchPath, '- id: split-host-account-controller\n  disabled: true\n', { mode: 0o600 })
+    const disabledPatchPath = join(workDir, 'm6-f2-deepseek-account-disabled.patch.yml')
+    writeFileSync(disabledPatchPath, '- id: deepseek-account\n  disabled: true\n', { mode: 0o600 })
     host = new EntryProcess('host', entries.host, {
       ...base,
       env: { ...base.env, SPLIT_PROCESS_EXTRA_PATCH: disabledPatchPath },
@@ -881,16 +881,16 @@ export async function runF2AccountComposition(context) {
       'F2 disabled Account Controller row refuses Host Ready', 120_000)
     const failedExit = await host.waitForExit(60_000)
     assert(failedExit.code === 1 && failedExit.signal === null,
-      'a Host missing its Account Controller exited without a readiness failure')
+      'a Host missing its deepseekAccount owner exited without a readiness failure')
     assert(!host.records.some(record => record.m4a0 === 'ready'),
-      'a Host missing its Account Controller emitted Ready')
-    assert(String(failedReady.error).includes('expected exactly one active accountController owner row, found 0'),
-      'the Host did not fail specifically on the absent Account Controller owner')
+      'a Host missing its deepseekAccount owner emitted Ready')
+    assert(String(failedReady.error).includes('expected exactly one active deepseekAccount owner row, found 0'),
+      'the Host did not fail specifically on the absent deepseekAccount owner')
     host = undefined
 
     trace('account.official-composition', {
-      hostControllerOwners: hostReady.ownerEntries.accountController.length,
-      hostTypertBinding: hostReady.services.accountController,
+      hostControllerOwners: hostReady.ownerEntries.deepseekAccount.length,
+      hostTypertBinding: hostReady.services.deepseekAccount,
       missingHostBinding: 'FAIL_CLOSED',
       webAccountUi: 'inactive-initially',
       webAccountCoexistence: 'credential-stored',

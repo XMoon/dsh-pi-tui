@@ -83,7 +83,7 @@ export async function runWebRuntimeToggle(context) {
   const PROTECTED_OWNER_KEYS = [
     'connection', 'apiRemotes', 'typertGateway', 'workspaceRegistry', 'workspaceController',
     'directoryPicker',
-    'sessionController', 'fileUpload', 'settingsController', 'accountController', 'jobController', 'piTuiHostRuntime',
+    'sessionController', 'fileUpload', 'settingsController', 'deepseekAccount', 'jobController', 'piTuiHostRuntime',
   ]
   /** `id -> live Loader fiber UID` for EVERY row the Host status reports. */
   const rowUids = ready => Object.fromEntries((ready.entries ?? [])
@@ -101,8 +101,8 @@ export async function runWebRuntimeToggle(context) {
     }
     assert(ready.webServer?.host === '127.0.0.1' && typeof ready.webServer?.port === 'number' && ready.webServer.port > 0,
       `${label}: the ONE loopback listener is not a bound 127.0.0.1 port (${JSON.stringify(ready.webServer)})`)
-    assert(ready.ownerEntries?.accountController?.[0] === 'split-host-account-controller',
-      `${label}: the official Account Controller owner row is ${JSON.stringify(ready.ownerEntries?.accountController)}`)
+    assert(ready.ownerEntries?.deepseekAccount?.[0] === 'deepseek-account',
+      `${label}: the official deepseekAccount owner row is ${JSON.stringify(ready.ownerEntries?.deepseekAccount)}`)
     assert(ready.services?.piTuiWebAccess === true,
       `${label}: the private Web access service is not part of the Host readiness record`)
   }
@@ -365,7 +365,7 @@ export async function runWebRuntimeToggle(context) {
     // rows and nothing else.
     const enabledUids = rowUids(enabledStatus)
     for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
-      'split-host-api-remotes', 'split-host-session-controller', 'split-host-account-controller',
+      'split-host-api-remotes', 'split-host-session-controller', 'deepseek-account',
       'split-host-pi-tui-runtime', 'directory-picker']) {
       assert(enabledUids[id] === protectedUids[id], `PB-05 the "${id}" Host owner was re-mounted by the Web enable`)
     }
@@ -382,9 +382,9 @@ export async function runWebRuntimeToggle(context) {
       unknownPluginStatus: serving.unknownPlugin,
       uiDeliverables: enabledStates.get('ui-deliverables'),
       workspaceChanges: enabledStates.get('workspace-changes'),
-      accountControllerOwner: enabledStatus.ownerEntries?.accountController?.[0],
-      accountControllerFiberUid: enabledUids['split-host-account-controller'],
-      accountControllerFiberUnchanged: enabledUids['split-host-account-controller'] === protectedUids['split-host-account-controller'],
+      accountOwner: enabledStatus.ownerEntries?.deepseekAccount?.[0],
+      accountFiberUid: enabledUids['deepseek-account'],
+      accountFiberUnchanged: enabledUids['deepseek-account'] === protectedUids['deepseek-account'],
       hostOwnersRemounted: false,
     })
     await assertTuiAccountSignedOut('PB-03')
@@ -411,7 +411,7 @@ export async function runWebRuntimeToggle(context) {
     assertIdentityFields(disabledStatus.localHost, ready.localHost, 'PB-04 Host identity')
     const disabledUids = rowUids(disabledStatus)
     for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
-      'split-host-api-remotes', 'split-host-session-controller', 'split-host-account-controller',
+      'split-host-api-remotes', 'split-host-session-controller', 'deepseek-account',
       'split-host-pi-tui-runtime', 'directory-picker']) {
       assert(disabledUids[id] === protectedUids[id], `PB-05 the "${id}" Host owner changed identity across the disable`)
     }
@@ -471,9 +471,9 @@ export async function runWebRuntimeToggle(context) {
       tuiGenerationUnchanged: true,
       acceptedTurnSettled: true,
       postDisablePrompt: 'answered',
-      accountControllerOwner: disabledStatus.ownerEntries?.accountController?.[0],
-      accountControllerFiberUid: disabledUids['split-host-account-controller'],
-      accountControllerFiberUnchanged: disabledUids['split-host-account-controller'] === protectedUids['split-host-account-controller'],
+      accountOwner: disabledStatus.ownerEntries?.deepseekAccount?.[0],
+      accountFiberUid: disabledUids['deepseek-account'],
+      accountFiberUnchanged: disabledUids['deepseek-account'] === protectedUids['deepseek-account'],
       hostOwnersRemounted: false,
     })
 
@@ -489,7 +489,7 @@ export async function runWebRuntimeToggle(context) {
     assertIdentityFields(reenabledStatus.localHost, ready.localHost, 'PB-07 Host identity')
     const reenabledUids = rowUids(reenabledStatus)
     for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
-      'split-host-api-remotes', 'split-host-session-controller', 'split-host-account-controller',
+      'split-host-api-remotes', 'split-host-session-controller', 'deepseek-account',
       'split-host-pi-tui-runtime', 'directory-picker']) {
       assert(reenabledUids[id] === protectedUids[id], `PB-07 the "${id}" Host owner changed identity across the re-enable`)
     }
@@ -647,7 +647,7 @@ export async function runWebRuntimeToggle(context) {
     'PB-10 the Web toggle wrote the profile patch')
     // The TUI is still usable after the second disable.
     const finalUids = rowUids(finalOff)
-    assert(finalUids['split-host-account-controller'] === protectedUids['split-host-account-controller'],
+    assert(finalUids['deepseek-account'] === protectedUids['deepseek-account'],
       'PB-10 the official Account Controller owner changed identity across the final Web disable')
     assert(finalUids['directory-picker'] === protectedUids['directory-picker'],
       'PB-10 the official directory-picker owner changed identity across the final Web disable')
@@ -664,9 +664,9 @@ export async function runWebRuntimeToggle(context) {
       apiStatus: finalOffHttp.api,
       connectStatus: finalOffHttp.connect,
       tuiUsable: true,
-      accountControllerOwner: finalOff.ownerEntries?.accountController?.[0],
-      accountControllerFiberUid: finalUids['split-host-account-controller'],
-      accountControllerFiberUnchanged: finalUids['split-host-account-controller'] === protectedUids['split-host-account-controller'],
+      accountOwner: finalOff.ownerEntries?.deepseekAccount?.[0],
+      accountFiberUid: finalUids['deepseek-account'],
+      accountFiberUnchanged: finalUids['deepseek-account'] === protectedUids['deepseek-account'],
       profilePatchUnchanged: true,
       hostShutdownExit: hostShutdown.code,
     })

@@ -50,18 +50,38 @@ function agent(
   }
 }
 
-/** Provide the minimal official AgentRegistry view. */
+/** Provide the minimal official AgentRegistry view plus the rc.2 tree-root lookup. */
 function provideAgents(
   context: Context,
   agents: readonly FakeAgent[],
-  options: { readonly roots?: readonly FakeAgent[]; readonly listThrows?: boolean } = {},
+  options: {
+    readonly roots?: readonly FakeAgent[]
+    readonly listThrows?: boolean
+    readonly rootOf?: (agent: FakeAgent) => FakeAgent
+    readonly rootOfThrows?: boolean
+    readonly omitSubagents?: boolean
+  } = {},
 ): void {
   context.provide('agents', {
     list: () => {
       if (options.listThrows === true) throw new Error('agent registry exploded')
       return agents
     },
-    roots: () => options.roots ?? agents,
+  } as never)
+  if (options.omitSubagents === true) return
+  // rc.2 removed `agents.roots()`: the official tree relation is
+  // `subagents.rootOf(liveAgent)`. The default fake keeps every listed Agent as
+  // its own root (the stock single-Agent case); child tests override it.
+  const roots = new Set(options.roots ?? agents)
+  context.provide('subagents', {
+    rootOf: (target: unknown) => {
+      if (options.rootOfThrows === true) throw new Error('subagent root lookup exploded')
+      if (options.rootOf !== undefined) return options.rootOf(target as FakeAgent)
+      if (roots.has(target as FakeAgent)) return target
+      const root = [...roots][0]
+      if (root === undefined) throw new Error('no live root for a non-root Agent')
+      return root
+    },
   } as never)
 }
 
@@ -496,7 +516,8 @@ test('the snapshot carries no prompt, objective, Job label or token material', a
 test('a running child Agent contributes child-active', async () => {
   const context = new Context()
   const child = agent('child-running', 'running')
-  provideAgents(context, [child], { roots: [] })
+  const root = agent('root-running', 'idle')
+  provideAgents(context, [child], { rootOf: () => root })
   provideJobs(context, {})
   provideGoals(context, {})
   const observer = new HostActivityObserver(context)
@@ -507,6 +528,103 @@ test('a running child Agent contributes child-active', async () => {
   } finally {
     await observer.close()
     await disposeContext(context)
+  }
+})
+
+test('a missing rc.2 rootOf service never turns an active Agent into a root-only tree', async () => {
+  const context = new Context()
+  provideAgents(context, [agent('session-running', 'running')], { omitSubagents: true })
+  provideJobs(context, {})
+  provideGoals(context, {})
+  const observer = new HostActivityObserver(context)
+  try {
+    const snapshot = await observer.snapshot()
+    assert.equal(snapshot.verdict, 'BLOCKED')
+    assert.ok(snapshot.reasons.includes('agent-running'))
+    assert.ok(snapshot.reasons.includes('source-unavailable'),
+      'an unprovable tree relation is a coverage gap, not an absent child')
+    assert.equal(snapshot.reasons.includes('child-active'), false)
+  } finally {
+    await observer.close()
+    await disposeContext(context)
+  }
+})
+
+test('a throwing rootOf keeps the positive Agent facts and never certifies quiescence', async () => {
+  const context = new Context()
+  provideAgents(context, [agent('session-inbox', 'idle', { nextStep: 1 })], { rootOfThrows: true })
+  provideJobs(context, {})
+  provideGoals(context, {})
+  const observer = new HostActivityObserver(context)
+  try {
+    const snapshot = await observer.snapshot()
+    assert.equal(snapshot.verdict, 'BLOCKED')
+    assert.ok(snapshot.reasons.includes('agent-inbox'))
+    assert.ok(snapshot.reasons.includes('source-unavailable'))
+    assert.notEqual(snapshot.sourceStates.agent, 'IDLE')
+  } finally {
+    await observer.close()
+    await disposeContext(context)
+  }
+})
+
+test('the rc.2 base agent-team rows are exact qualified passive sources', async () => {
+  const context = new Context()
+  provideAgents(context, [])
+  provideJobs(context, {})
+  provideGoals(context, {})
+  provideLoader(context, [
+    { options: { id: 'agent-team', name: '@deepseek-ai/dsh-agent-team' }, fiber: { state: 2 } },
+    { options: { id: 'tool-agent-team', name: '@deepseek-ai/dsh-tool-agent-team' }, fiber: { state: 2 } },
+  ])
+  const observer = new HostActivityObserver(context)
+  try {
+    const snapshot = await observer.snapshot()
+    assert.equal(snapshot.reasons.includes('unqualified-host-source'), false)
+    assert.equal(snapshot.sourceStates.other, 'IDLE')
+  } finally {
+    observer.close()
+    await disposeContext(context)
+  }
+})
+
+test('agent-team bound to a different package is an unqualified source', async () => {
+  const context = new Context()
+  provideAgents(context, [])
+  provideJobs(context, {})
+  provideGoals(context, {})
+  provideLoader(context, [
+    { options: { id: 'agent-team', name: 'file:///tmp/agent-team-imposter.mjs' }, fiber: { state: 2 } },
+  ])
+  const observer = new HostActivityObserver(context)
+  try {
+    const snapshot = await observer.snapshot()
+    assert.equal(snapshot.verdict, 'UNKNOWN')
+    assert.ok(snapshot.reasons.includes('unqualified-host-source'))
+  } finally {
+    observer.close()
+    await disposeContext(context)
+  }
+})
+
+test('an active rc.2 Web-only row never lets activity claim quiescence', async () => {
+  for (const name of ['@deepseek-ai/dsh-office-kit', '@deepseek-ai/dsh-mcp-manager', '@deepseek-ai/dsh-client-ui-account-notifications']) {
+    const context = new Context()
+    provideAgents(context, [])
+    provideJobs(context, {})
+    provideGoals(context, {})
+    provideLoader(context, [
+      { options: { id: `web-${name}`, name }, fiber: { state: 2 } },
+    ])
+    const observer = new HostActivityObserver(context)
+    try {
+      const snapshot = await observer.snapshot()
+      assert.notEqual(snapshot.verdict, 'OBSERVED_QUIESCENT', `${name} must stay fail-closed while the Web graph is live`)
+      assert.ok(snapshot.reasons.includes('unqualified-host-source'))
+    } finally {
+      observer.close()
+      await disposeContext(context)
+    }
   }
 })
 
