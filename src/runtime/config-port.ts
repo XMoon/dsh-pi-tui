@@ -354,15 +354,19 @@ export interface CredentialConfig {
   /** Clear one reference credential (/logout). */
   unsetReference(ref: string): Promise<void>
   /**
-   * Whether this backend can enumerate and delete stored credential RECORDS
-   * (plan §8.5). Direct: yes — the credentials service owns them. Remote
-   * rc.2: NO — the wire publishes no record read and no record delete, so
-   * `listRecords()` rejects and `deleteRecord()` fails closed.
+   * Whether this backend can enumerate and delete stored credential RECORDS.
    *
-   * The distinction is the point: a consumer must present "this backend
-   * cannot list stored records" instead of treating a rejection as an empty
-   * list, and a SUPPORTED backend whose read really failed must still surface
-   * that failure rather than being reported as a capability gap.
+   * The two key spaces are disjoint: the generated `credentials` Remote
+   * publishes only REFERENCE `describe/set/unset`, while a stored record is
+   * addressed by the official `<scope>/<id>` `CredentialKey`. M6-1 F7B adds the
+   * private `piTuiCredentialRecords` namespace for the record half, so Direct
+   * (the official store in process) and a Split backend that mounts that
+   * namespace both answer `true`.
+   *
+   * The distinction is the point: a consumer must present "this backend cannot
+   * list stored records" instead of treating a rejection as an empty list, and
+   * a SUPPORTED backend whose read really failed must still surface that
+   * failure rather than being reported as a capability gap.
    */
   recordsSupported(): boolean
   /** Delete one stored credential record (/logout; the authorization

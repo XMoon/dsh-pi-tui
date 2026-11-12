@@ -57,6 +57,7 @@ import { RemoteSessionWorkspaceFacts, type RemoteSessionFactsRemotes } from '../
 import type { RemoteWebAccessNamespace } from '../../runtime/remote/web-access-remote.ts'
 import type { PiTuiHostUserShellNamespace } from '../../runtime/remote/pi-tui-host-user-shell-contract.ts'
 import type { PiTuiAuthorizationNamespace } from '../../runtime/remote/pi-tui-authorization-contract.ts'
+import type { PiTuiCredentialRecordsNamespace } from '../../runtime/remote/pi-tui-credential-records-contract.ts'
 import {
   RemoteSchedulePort,
   type RemoteScheduleEvents,
@@ -178,6 +179,11 @@ export interface RemoteM3ARuntimeSource {
      *  sign-in attempts and the official roster. The SAME mounted contribution
      *  publishes it; the Remote ConfigPort is its only consumer. */
     readonly piTuiAuthorization: PiTuiAuthorizationNamespace
+    /** The PRIVATE `piTuiCredentialRecords` namespace (M6-1 F7B): metadata-only
+     *  enumeration and exact-key deletion of the official stored credential
+     *  records. The SAME mounted contribution publishes it; the Remote
+     *  ConfigPort's credential adapter is its only consumer. */
+    readonly piTuiCredentialRecords?: PiTuiCredentialRecordsNamespace
     /** The PRIVATE `piTuiWebAccess` namespace (M5-W PR-C): the Split-Client
      *  Web frontend control (`/web`). The SAME mounted contribution publishes
      *  it; `/web` is its only consumer. */

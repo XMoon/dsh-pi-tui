@@ -60,6 +60,13 @@ interface FakeState {
   credentialGate: (() => void | Promise<void>) | undefined
   /** Makes the next credential RPC fail (a real failure result). */
   credentialFailure: { code: string; message: string } | undefined
+  /** The stored RECORD metadata the private namespace reports. */
+  records: { key: string; kind: 'api-key' | 'grant' }[]
+  /** Holds the next record RPC open so a test can replace the generation mid-call. */
+  recordsGate: (() => void | Promise<void>) | undefined
+  recordsListFailure: { code: string; message: string } | undefined
+  recordsDeleteFailure: { code: string; message: string } | undefined
+  readonly recordsDeleteCalls: string[]
   readonly executeCalls: { sessionId: string; line: string; attachments: readonly unknown[]; signal: AbortSignal }[]
   executeResult: { ok: true; value: unknown } | { ok: false; error: unknown }
   readonly order: string[]
@@ -153,7 +160,7 @@ function tick(): Promise<void> {
   return new Promise(resolve => { setImmediate(resolve) })
 }
 
-function createBackend(seed?: (state: FakeState) => void, options: { readonly authorization?: boolean } = {}) {
+function createBackend(seed?: (state: FakeState) => void, options: { readonly authorization?: boolean; readonly records?: boolean } = {}) {
   const generation = createObservableGenerationHarness({ id: 'gen-1' })
   const state: FakeState = {
     namespaces: new Map(),
@@ -171,6 +178,11 @@ function createBackend(seed?: (state: FakeState) => void, options: { readonly au
     credentialStore: new Map(),
     credentialGate: undefined,
     credentialFailure: undefined,
+    records: [],
+    recordsGate: undefined,
+    recordsListFailure: undefined,
+    recordsDeleteFailure: undefined,
+    recordsDeleteCalls: [],
     executeCalls: [],
     executeResult: { ok: true, value: { commandId: 'c' } },
     order: [],
@@ -273,6 +285,26 @@ function createBackend(seed?: (state: FakeState) => void, options: { readonly au
         if (state.credentialFailure !== undefined) return { ok: false as const, error: state.credentialFailure }
         state.credentialStore.delete(ref)
         return { ok: true as const, value: undefined }
+      },
+    },
+    ...options.records === false ? {} : {
+      // The SAME mounted private namespace the package contribution publishes
+      // (M6-1 F7B): metadata-only rows, exact-key delete, official store state.
+      piTuiCredentialRecords: {
+        list: async () => {
+          state.order.push('records:list')
+          await state.recordsGate?.()
+          if (state.recordsListFailure !== undefined) return { ok: false as const, error: state.recordsListFailure }
+          return { ok: true as const, value: state.records.map(record => ({ ...record })) }
+        },
+        delete: async (key: string) => {
+          state.order.push(`records:delete:${key}`)
+          state.recordsDeleteCalls.push(key)
+          await state.recordsGate?.()
+          if (state.recordsDeleteFailure !== undefined) return { ok: false as const, error: state.recordsDeleteFailure }
+          state.records = state.records.filter(record => record.key !== key)
+          return { ok: true as const, value: undefined }
+        },
       },
     },
     commands: {
@@ -640,15 +672,49 @@ test('a port dispose releases an active credential subscription exactly once', (
   assert.equal(state.order.filter(entry => entry === 'off:credentials/record-updated').length, 1)
 })
 
-test('credential record enumeration/deletion reject as unavailable (never an empty list)', async () => {
-  const { port } = createBackend()
+test('credential record list/delete map the mounted private namespace (metadata only)', async () => {
+  const { port, state, generation } = createBackend(current => {
+    current.records = [
+      { key: 'llm-pi-ai/f7b-grant', kind: 'grant' },
+      { key: 'other-plugin/f7b-orphan', kind: 'api-key' },
+    ]
+  })
+  assert.equal(port.credentials.recordsSupported(), true)
+  assert.deepEqual(await port.credentials.listRecords(), [
+    { key: 'llm-pi-ai/f7b-grant', kind: 'grant' },
+    { key: 'other-plugin/f7b-orphan', kind: 'api-key' },
+  ])
+  // The exact key deletes exactly one row through the private namespace; it is
+  // never an `unset()` of some derived reference.
+  await port.credentials.deleteRecord('llm-pi-ai/f7b-grant')
+  assert.deepEqual(state.recordsDeleteCalls, ['llm-pi-ai/f7b-grant'])
+  assert.deepEqual(await port.credentials.listRecords(), [{ key: 'other-plugin/f7b-orphan', kind: 'api-key' }])
+  // The empty store is a REAL answer, and it is never cached.
+  state.records = []
+  assert.deepEqual(await port.credentials.listRecords(), [])
+  // An invalid key is refused locally, before any dispatch.
+  await assert.rejects(() => port.credentials.deleteRecord('DEEPSEEK_API_KEY'), /<scope>\/<id>/u)
+  assert.deepEqual(state.recordsDeleteCalls, ['llm-pi-ai/f7b-grant'])
+  // A replaced Host must not present the old answer as the current list.
+  let release!: () => void
+  state.recordsGate = () => new Promise<void>(resolve => { release = resolve })
+  const stale = port.credentials.listRecords()
+  await tick()
+  generation.set({ id: 'gen-2' })
+  release()
+  await assert.rejects(stale, (error: unknown) => error instanceof Error && error.name === 'SupersededReadError')
+})
+
+test('a Host without the private record namespace is a truthful capability gap, never an empty list', async () => {
+  const { port } = createBackend(undefined, { records: false })
+  assert.equal(port.credentials.recordsSupported(), false)
   await assert.rejects(
     () => port.credentials.listRecords(),
-    /cannot enumerate stored credential records/,
+    /private record namespace is not mounted/,
   )
   await assert.rejects(
-    () => port.credentials.deleteRecord('scope/id'),
-    /cannot delete stored credential record "scope\/id"/,
+    () => port.credentials.deleteRecord('llm-pi-ai/f7b-grant'),
+    /private record namespace is not mounted/,
   )
 })
 

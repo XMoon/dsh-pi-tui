@@ -97,6 +97,12 @@ import type {
 import { SupersededReadError } from '../read-error.ts'
 import { RemoteAuthorizationConfig } from './authorization-remote.ts'
 import type { PiTuiAuthorizationNamespace } from './pi-tui-authorization-contract.ts'
+import {
+  parsePiTuiCredentialRecordKey,
+  parsePiTuiCredentialRecordList,
+  type CredentialRecordMetadata,
+  type PiTuiCredentialRecordsNamespace,
+} from './pi-tui-credential-records-contract.ts'
 import type { RemoteCommandsSource } from './host-command-remote.ts'
 import type { RemoteLlmRemotes } from './model-remote.ts'
 import type { RemotePresetRemotes } from './preset-remote.ts'
@@ -227,6 +233,11 @@ export interface RemoteConfigRuntimeSource {
     /** The private provider-native authorization namespace mounted by this
      *  package's ONE contribution. Absent until that contribution is mounted. */
     readonly piTuiAuthorization?: PiTuiAuthorizationNamespace
+    /** The private stored-credential-RECORD namespace (M6-1 F7B) mounted by
+     *  the SAME contribution. Its presence alone is the record capability flag;
+     *  a mounted namespace whose Host read fails is a SUPPORTED backend with a
+     *  failed read, never a capability gap. */
+    readonly piTuiCredentialRecords?: PiTuiCredentialRecordsNamespace
     readonly account?: RemoteAccountRemotes
     readonly commands: RemoteCommandsSource
     readonly permissionPresets: RemotePermissionPresetRemotes
@@ -1324,11 +1335,30 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
 }
 
 /* ------------------------------------------------------------------------- *
- * Credentials (references only).
+ * Credentials (references and stored records).
  * ------------------------------------------------------------------------- */
+
+/** The stable code of a record delete whose Host settlement the Client could
+ *  not observe. The outcome is UNKNOWN: the Host may have committed the delete,
+ *  so nothing may claim it failed and nothing may retry it automatically. */
+export const RECORD_DELETE_UNCONFIRMED_CODE = 'RECORD_DELETE_UNCONFIRMED'
+
+/** One record delete that was dispatched but never settled observably.
+ *
+ *  The UI reads the stable `code` structurally (never this class), so the
+ *  presentation layer stays independent of the Remote adapter. */
+export class RecordDeleteUnconfirmedError extends Error {
+  readonly code = RECORD_DELETE_UNCONFIRMED_CODE
+
+  constructor(detail: string) {
+    super(`the stored credential record delete outcome is unconfirmed: ${detail}`)
+    this.name = 'RecordDeleteUnconfirmedError'
+  }
+}
 
 class RemoteCredentialConfig implements CredentialConfig {
   private readonly credentials: RemoteCredentialsRemotes
+  private readonly records: PiTuiCredentialRecordsNamespace | undefined
   private readonly generation: RemoteConnectionGenerationSource
   private readonly on: RemoteConfigEventsSource['$on']
   private readonly writeLifetime: RemoteConfigWriteLifetime
@@ -1337,11 +1367,13 @@ class RemoteCredentialConfig implements CredentialConfig {
 
   constructor(
     credentials: RemoteCredentialsRemotes,
+    records: PiTuiCredentialRecordsNamespace | undefined,
     on: RemoteConfigEventsSource['$on'],
     generation: RemoteConnectionGenerationSource,
     writeLifetime: RemoteConfigWriteLifetime,
   ) {
     this.credentials = credentials
+    this.records = records
     this.on = on
     this.generation = generation
     this.writeLifetime = writeLifetime
@@ -1423,33 +1455,87 @@ class RemoteCredentialConfig implements CredentialConfig {
   }
 
   /**
-   * Unsupported on the wire: rc.2
-   * publishes no credentials record read Remote and no record delete Remote
-   * (`credentials/describe|set|unset` address REFERENCE names only, and the
-   * two key grammars are disjoint). `recordsSupported()` (below) is the
-   * port-level availability marker the consumer asks instead of inferring a
-   * capability gap from a rejection; this method still REJECTS with a
-   * truthful message rather than faking an empty list or a silent successful
-   * delete.
+   * The official generated reference Remote never enumerates or deletes stored
+   * RECORDS (`credentials/describe|set|unset` address REFERENCE names only, and
+   * the two key grammars are disjoint). M6-1 F7B adds the private
+   * `piTuiCredentialRecords` namespace for exactly those two operations: a
+   * mounted namespace is the CAPABILITY, and the Host's official
+   * `ctx.credentials` store remains the metadata/delete authority. Without the
+   * namespace this method still REJECTS with a truthful message rather than
+   * faking an empty list.
    */
-  listRecords(): Promise<readonly { key: string; kind?: string }[]> {
-    return Promise.reject(new Error(
-      'the Remote credentials backend cannot enumerate stored credential records: rc.2 publishes no credentials record read Remote',
-    ))
+  async listRecords(): Promise<readonly { key: string; kind?: string }[]> {
+    const records = this.requireRecordsNamespace()
+    // The read belongs to the Host that answers it: with no current Connection
+    // generation there is nothing to ask, and a result that completes after a
+    // replacement must never be presented as the current Host's list.
+    const captured = this.generation.getSnapshot()
+    if (captured === undefined) {
+      throw new SupersededReadError('the stored credential record list was not read: no current Connection generation')
+    }
+    const result = await settledResult(records.list())
+    // The fence runs BEFORE the result branch: an OLD empty list, an old
+    // failure and an old success are all equally superseded.
+    this.fence(captured)
+    if (!result.ok) {
+      throw new Error(`piTuiCredentialRecords.list failed: ${remoteFailureMessage(result.error)}`)
+    }
+    // Detached, exact metadata only: any extra field or invalid row fails the
+    // whole result instead of being filtered into a false "complete" list.
+    const metadata: readonly CredentialRecordMetadata[] = parsePiTuiCredentialRecordList(result.value)
+    return metadata
   }
 
   recordsSupported(): boolean {
-    // INTENTIONAL_UNSUPPORTED_IN_M3 (§8.5/§10): rc.2 publishes no record-read
-    // and no record-delete Remote, so this is a CAPABILITY GAP — reported as
-    // such by consumers, never as an empty record list.
-    return false
+    // The mounted private namespace IS the capability. It is NOT a claim that
+    // the Host store has records, that the Host is online, or that a delete can
+    // succeed: a mounted namespace whose read fails stays SUPPORTED with a
+    // failed read (the UI must not turn that into "cannot list records").
+    return this.records !== undefined
   }
 
-  /** @see listRecords — no record delete Remote exists on rc.2. */
-  deleteRecord(key: string): Promise<void> {
-    return Promise.reject(new Error(
-      `the Remote credentials backend cannot delete stored credential record "${key}": rc.2 publishes no credential record delete Remote`,
-    ))
+  /**
+   * Delete exactly one record through the official Host store.
+   *
+   * The key is validated against the official wire grammar BEFORE dispatch, so
+   * an invalid key is never sent. Once dispatched, the call is bracketed by the
+   * accepted-write lifetime (a Client reload must observe it), made EXACTLY
+   * once, and never replayed. Only a definite pre-invocation refusal
+   * (`gateway/bad-request`) may be reported as a normal failure; a lost ACK,
+   * `gateway/cancelled`, `gateway/internal`, a transport throw or a result
+   * rejection all leave the commit unproven and surface as
+   * `RECORD_DELETE_UNCONFIRMED`.
+   */
+  async deleteRecord(key: string): Promise<void> {
+    const records = this.requireRecordsNamespace()
+    const exact = parsePiTuiCredentialRecordKey(key)
+    this.requireDispatchableGeneration()
+    const endWrite = this.writeLifetime.begin()
+    try {
+      const result = await settledResult(records.delete(exact))
+      if (result.ok) return
+      const code = remoteFailureCode(result.error)
+      const message = remoteFailureMessage(result.error)
+      if (code === 'gateway/bad-request') {
+        throw new Error(`piTuiCredentialRecords.delete(${exact}) was rejected: ${message}`)
+      }
+      throw new RecordDeleteUnconfirmedError(message)
+    } finally {
+      // Every path — success, definite refusal, unconfirmed, throw — releases
+      // the accepted-write lifetime exactly once.
+      endWrite()
+    }
+  }
+
+  /** The mounted record namespace, or the truthful capability refusal. */
+  private requireRecordsNamespace(): PiTuiCredentialRecordsNamespace {
+    const records = this.records
+    if (records === undefined) {
+      throw new Error(
+        'the Remote credentials backend cannot address stored credential records: the private record namespace is not mounted',
+      )
+    }
+    return records
   }
 
   onChanged(listener: () => void): () => void {
@@ -1824,6 +1910,7 @@ export class RemoteConfigPort implements ConfigPort {
     this.providers = new RemoteProviderProfileConfig(this.mirror)
     this.credentialConfig = new RemoteCredentialConfig(
       bound.remote.credentials,
+      bound.remote.piTuiCredentialRecords,
       on,
       source.connection.generation,
       this.writes,
