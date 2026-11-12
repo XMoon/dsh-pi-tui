@@ -31,6 +31,7 @@ import {
   PI_TUI_AUTHORIZATION_NAMESPACE,
   type PiTuiAuthorizationNamespace,
   type PiTuiAuthorizationRunStream,
+  type PiTuiAuthorizationTargetsCall,
 } from '../../../src/runtime/remote/pi-tui-authorization-contract.ts'
 import type { AuthorizationFlowEvent, AuthorizationFlowTarget } from '../../../src/runtime/config-port.ts'
 import type { RemoteConnectionGenerationSource } from '../../../src/runtime/remote/session-reader-remote.ts'
@@ -377,6 +378,111 @@ test('REAL_WIRE: a caller teardown of a running attempt closes the flow as uncon
     await assert.rejects(wire.adapter.cancel(started.attemptId), /no longer active/)
   } finally {
     await wire.dispose()
+  }
+})
+
+test('REAL_WIRE: a generation replacement while waiting for the started frame ends begin, never retries', async () => {
+  const generation = fakeGeneration()
+  let runCalls = 0
+  const adapter = new RemoteAuthorizationConfig(fakeNamespace({
+    run: () => {
+      runCalls += 1
+      return fakeStream((async function* neverStarts(): AsyncGenerator<unknown> {
+        await new Promise(() => {})
+      })())
+    },
+  }), generation.source)
+  try {
+    const begin = adapter.begin({ key: 'llm-pi-ai/x', method: 'device' })
+    await waitFor('the run dispatch', () => runCalls === 1, 5_000)
+    generation.replace()
+    await assert.rejects(
+      within(begin, 'begin after the generation replacement'),
+      (error: unknown) => error instanceof AuthorizationDispatchUnknownError && error.code === 'DISPATCH_UNKNOWN',
+    )
+    assert.equal(runCalls, 1, 'a lost started frame is never re-dispatched')
+  } finally {
+    adapter.dispose()
+  }
+})
+
+test('UNIT: a caller abort while waiting for the started frame ends begin as dispatch-unknown', async () => {
+  const generation = fakeGeneration()
+  const adapter = new RemoteAuthorizationConfig(fakeNamespace({
+    run: () => fakeStream((async function* neverStarts(): AsyncGenerator<unknown> {
+      await new Promise(() => {})
+    })()),
+  }), generation.source)
+  const controller = new AbortController()
+  try {
+    const begin = adapter.begin({ key: 'llm-pi-ai/x', signal: controller.signal })
+    controller.abort()
+    await assert.rejects(
+      within(begin, 'begin after the caller abort'),
+      (error: unknown) => error instanceof AuthorizationDispatchUnknownError && error.code === 'DISPATCH_UNKNOWN',
+    )
+  } finally {
+    adapter.dispose()
+  }
+})
+
+test('UNIT: adapter disposal while waiting for the started frame ends begin instead of hanging', async () => {
+  const generation = fakeGeneration()
+  const adapter = new RemoteAuthorizationConfig(fakeNamespace({
+    run: () => fakeStream((async function* neverStarts(): AsyncGenerator<unknown> {
+      await new Promise(() => {})
+    })()),
+  }), generation.source)
+  const begin = adapter.begin({ key: 'llm-pi-ai/x' })
+  adapter.dispose()
+  await assert.rejects(
+    within(begin, 'begin after adapter disposal'),
+    (error: unknown) => error instanceof AuthorizationDispatchUnknownError && error.code === 'DISPATCH_UNKNOWN',
+  )
+})
+
+test('UNIT: same-generation roster reads are latest-wins, including a newer unavailable verdict', async () => {
+  const generation = fakeGeneration()
+  const targetA: AuthorizationFlowTarget = {
+    kind: 'authorization',
+    key: 'llm-pi-ai/a',
+    route: 'a',
+    label: 'A',
+    methods: [{ id: 'oauth', label: 'OAuth' }],
+    inFlight: false,
+  }
+  const targetB: AuthorizationFlowTarget = { ...targetA, key: 'llm-pi-ai/b', route: 'b', label: 'B' }
+  let pending: Array<(value: PiTuiAuthorizationTargetsCall) => void> = []
+  const adapter = new RemoteAuthorizationConfig(fakeNamespace({
+    list: () => new Promise<PiTuiAuthorizationTargetsCall>(resolve => { pending.push(resolve) }),
+  }), generation.source)
+  try {
+    const older = adapter.refreshTargets()
+    const newer = adapter.refreshTargets()
+    assert.equal(pending.length, 2)
+    // The NEWER read completes first and commits B.
+    pending[1]!({ ok: true, value: { kind: 'ready', targets: [targetB] } })
+    await newer
+    assert.deepEqual(adapter.listTargets(), [targetB])
+    // The OLDER read completes last; it must NOT overwrite the newer roster.
+    pending[0]!({ ok: true, value: { kind: 'ready', targets: [targetA] } })
+    await assert.rejects(older, /roster superseded/u)
+    assert.deepEqual(adapter.listTargets(), [targetB])
+    assert.equal(adapter.targetsState(), 'ready')
+
+    // A newer UNAVAILABLE verdict stays authoritative over a late ready read.
+    pending = []
+    const olderReady = adapter.refreshTargets()
+    const newerUnavailable = adapter.refreshTargets()
+    pending[1]!({ ok: true, value: { kind: 'unavailable', reason: 'the Host authorization service is not installed' } })
+    await newerUnavailable
+    assert.equal(adapter.targetsState(), 'unavailable')
+    pending[0]!({ ok: true, value: { kind: 'ready', targets: [targetA] } })
+    await assert.rejects(olderReady, /roster superseded/u)
+    assert.equal(adapter.targetsState(), 'unavailable')
+    assert.deepEqual(adapter.listTargets(), [])
+  } finally {
+    adapter.dispose()
   }
 })
 
