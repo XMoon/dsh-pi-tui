@@ -25,6 +25,7 @@ import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../runtime/remote/pi-tui-
 import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-web-access-contract.ts'
 import { PI_TUI_SKILLS_NAMESPACE } from '../../runtime/remote/pi-tui-skills-contract.ts'
 import { PI_TUI_AUTHORIZATION_NAMESPACE } from '../../runtime/remote/pi-tui-authorization-contract.ts'
+import { PI_TUI_CREDENTIAL_RECORDS_NAMESPACE } from '../../runtime/remote/pi-tui-credential-records-contract.ts'
 
 /** Cordis `FiberState.ACTIVE` (the enum is a const enum with no runtime value). */
 const FIBER_ACTIVE = 2
@@ -185,13 +186,14 @@ const OFFICIAL_LOADER_OWNER_PACKAGES = [
   { owner: 'accountController', id: 'split-host-account-controller', name: '@deepseek-ai/dsh-api-account-controller' },
 ] as const
 
-/** The package's four private endpoint bindings. */
+/** The package's private endpoint bindings. */
 const PRIVATE_TYPERT_BINDINGS = [
   { serviceKey: 'piTuiFileReferences', namespace: PI_TUI_FILE_REFERENCES_NAMESPACE },
   { serviceKey: 'piTuiTerminalProgress', namespace: PI_TUI_TERMINAL_PROGRESS_NAMESPACE },
   { serviceKey: 'piTuiWebAccess', namespace: PI_TUI_WEB_ACCESS_NAMESPACE },
   { serviceKey: PI_TUI_SKILLS_NAMESPACE, namespace: PI_TUI_SKILLS_NAMESPACE },
   { serviceKey: 'piTuiAuthorization', namespace: PI_TUI_AUTHORIZATION_NAMESPACE },
+  { serviceKey: PI_TUI_CREDENTIAL_RECORDS_NAMESPACE, namespace: PI_TUI_CREDENTIAL_RECORDS_NAMESPACE },
 ] as const
 
 /**
@@ -277,6 +279,7 @@ export function collectHostEntryStatus(
     PI_TUI_WEB_ACCESS_NAMESPACE,
     PI_TUI_SKILLS_NAMESPACE,
     PI_TUI_AUTHORIZATION_NAMESPACE,
+    PI_TUI_CREDENTIAL_RECORDS_NAMESPACE,
     PI_TUI_HOST_READY_SERVICE,
     'piTuiPerformanceReady',
   ]) {

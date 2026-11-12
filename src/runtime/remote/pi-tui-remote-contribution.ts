@@ -20,8 +20,9 @@
  * so a drift between the descriptors the Host registers and the Client mounts
  * remains impossible by construction.
  *
- * The five features here are file references, terminal progress, the official
- * Web frontend availability toggle, Host one-shot Shell/completion and Skills.
+ * The six features here are file references, terminal progress, the official
+ * Web frontend availability toggle, Host one-shot Shell/completion, Skills and
+ * the provider-native authorization + stored-credential-record bridges.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/pi-tui-remote-contribution
  */
@@ -52,6 +53,10 @@ import {
   PI_TUI_AUTHORIZATION_RESPOND,
   PI_TUI_AUTHORIZATION_RUN,
 } from './pi-tui-authorization-contract.ts'
+import {
+  PI_TUI_CREDENTIAL_RECORDS_DELETE,
+  PI_TUI_CREDENTIAL_RECORDS_LIST,
+} from './pi-tui-credential-records-contract.ts'
 
 /** The npm package that owns every private Remote invocation here. A test
  *  guards that it equals each contract module's own package constant. */
@@ -78,6 +83,8 @@ export const PI_TUI_HOST_CONTRIBUTION: TypertContribution = {
     PI_TUI_AUTHORIZATION_RUN,
     PI_TUI_AUTHORIZATION_RESPOND,
     PI_TUI_AUTHORIZATION_CANCEL,
+    PI_TUI_CREDENTIAL_RECORDS_LIST,
+    PI_TUI_CREDENTIAL_RECORDS_DELETE,
   ],
 }
 
@@ -99,5 +106,7 @@ export const PI_TUI_CLIENT_CONTRIBUTION: TypertRemoteContribution = {
     PI_TUI_AUTHORIZATION_RUN,
     PI_TUI_AUTHORIZATION_RESPOND,
     PI_TUI_AUTHORIZATION_CANCEL,
+    PI_TUI_CREDENTIAL_RECORDS_LIST,
+    PI_TUI_CREDENTIAL_RECORDS_DELETE,
   ],
 }
