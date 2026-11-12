@@ -4001,3 +4001,49 @@ test('Mouse PR4: an unwired /tasks entry refuses loudly and availability answers
     await harness.session.close()
   }
 })
+
+test('Mouse PR4: the badge action follows the LIVE entry availability across committed frames', async () => {
+  let available = true
+  const opens: number[] = []
+  const harness = await mountTspHarness({
+    sessionBrowserCapabilities: true,
+    openTasksBrowserUi: () => { opens.push(1) },
+    tasksBrowserUiAvailable: () => available,
+  })
+  try {
+    harness.surface.bindRendererInput()
+    commitRunningTasks(harness)
+    await awaitWireFact(() => tasksActionNode(harness) !== undefined, 'the badge paints its action')
+    const badgeId = tasksActionNode(harness)!.id
+    const commit = (queued: number): void => {
+      harness.surface.commitStatus({
+        activity: { taskCount: 2, taskTotalCount: 3, childAgentCount: 0, childAgentTotalCount: 0, queuedCount: queued },
+      } as never, {}, undefined)
+    }
+
+    // The command authority changes hands (e.g. a later Host override): the
+    // NEXT committed frame must retract the action, and the retired node id
+    // must not run the entry from a stale click.
+    available = false
+    commit(1)
+    await awaitWireFact(() => tasksActionNode(harness) === undefined, 'the action is retracted')
+    harnessFreeInput(harness.tern, { ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: badgeId, act: TASKS_ACTION })
+    await settle() // window: a wrong admission would have called the entry by now (negative observation)
+    assert.deepEqual(opens, [], 'the retracted frame admits no action')
+
+    // Authority returns: the same projection repaints the action.
+    available = true
+    commit(2)
+    await awaitWireFact(() => tasksActionNode(harness) !== undefined, 'the action returns')
+    harnessFreeInput(harness.tern, {
+      ev: 'action',
+      sf: harness.tern.frames.at(-1)!.sf,
+      id: tasksActionNode(harness)!.id,
+      act: TASKS_ACTION,
+    })
+    await awaitWireFact(() => opens.length === 1, 'the restored action runs once')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})

@@ -44,6 +44,7 @@ import type { SessionSubject } from '../../src/app/session/subject.ts'
 import type { JobObservationPort } from '../../src/runtime/job-observation-port.ts'
 import type { TuiApp } from '../../src/tui-app.ts'
 import type { StatusSnapshot } from '../../src/domain/status/types.ts'
+import type { SurfaceCommandSummary } from '../../src/domain/catalog/surface.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -103,6 +104,14 @@ interface Harness {
    * refreshTasks): a SAME-LENGTH footer text change that leaves the model
    * placement's painted geometry byte-identical. */
   readonly bumpTaskCount: () => void
+  /** Mouse PR4: the REAL command surface (the Tasks UI entry's owner). */
+  readonly command: ReturnType<typeof createCommandSurface>
+  /** Every notice the command surface published. */
+  readonly notices: readonly string[]
+  /** How many times the registered `/tasks` handler reached its opener. */
+  readonly tasksOpens: readonly number[]
+  /** Replace the LIVE Direct Host catalog the next refresh reads. */
+  readonly setCatalogCommands: (rows: readonly SurfaceCommandSummary[]) => void
   readonly dispose: () => void
 }
 
@@ -122,11 +131,22 @@ async function startHarness(options: {
   /** An Unstable raw capture that CONSUMES the given chunks (Esc / wheel)
    * before the Host key ladder sees them. */
   rawCapture?: 'esc' | 'wheel'
+  /** Mouse PR4: the rows the Direct Host catalog read returns on the next
+   *  coordinator refresh — a genuine Host command of a name this surface also
+   *  registers is how the live Host-origin authority changes after startup. */
+  catalogCommands?: readonly SurfaceCommandSummary[]
+  /** Mouse PR4: advertise the mounted pane's Task Center capability. */
+  taskCenterCapability?: boolean
 } = {}): Promise<Harness> {
   const vt = new VirtualTerminal(100, options.rows ?? 30)
   const restoreTerminal = installVirtualProcessTerminal(vt)
   const ctx = new Context()
   const loads: string[] = []
+  // Mouse PR4: the LIVE Host catalog this harness's coordinator reads, and the
+  // notices the command surface published (its refusal path states itself).
+  const catalogRows: { rows: readonly SurfaceCommandSummary[] } = { rows: options.catalogCommands ?? [] }
+  const notices: string[] = []
+  const tasksOpens: number[] = []
   // Structural Host stand-ins: the llm + agentDefaultModel services the real
   // DirectModelCatalog reads (the /model handler's own read owner).
   const llm = {
@@ -360,6 +380,7 @@ async function startHarness(options: {
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
+    requireLiveSessionScope: async () => ({}) as never,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -376,7 +397,7 @@ async function startHarness(options: {
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     signal: new AbortController().signal,
     app: () => app,
-    notify: () => {},
+    notify: (text: string) => { notices.push(String(text)) },
     liveAgent: () => undefined,
     sessionScope: {
       capture: () => scopeFacts.captureSessionScope(),
@@ -394,7 +415,7 @@ async function startHarness(options: {
       promptAdmission: async (_agent: unknown, _hasImages: boolean, task: () => unknown) => task(),
     },
     directCatalog: {
-      readSurfaceCatalog: async () => ({ commands: [], scopedCommands: [], skills: [], issues: [] }),
+      readSurfaceCatalog: async () => ({ commands: catalogRows.rows, scopedCommands: [], skills: [], issues: [] }),
       listGlobalCommands: () => [],
     },
     catalog: runnerBase.catalog as never,
@@ -411,13 +432,13 @@ async function startHarness(options: {
       setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto',
       setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
       openJobView: () => {},
-      openTasksBrowser: () => {},
+      openTasksBrowser: () => { tasksOpens.push(1) },
       openScheduleWorkspace: () => ({ kind: 'success' } as const),
       composer: () => app,
       deliveredFilesSnapshot: () => undefined,
       installTspCommandCompletions: () => {},
       installTspInlineAttachmentStager: () => {},
-      tspCommandPickerCapabilities: () => ({}),
+      tspCommandPickerCapabilities: () => (options.taskCenterCapability === true ? { taskCenter: true } : {}),
     },
     backend: {
       kind: 'direct',
@@ -546,6 +567,10 @@ async function startHarness(options: {
       roster.rows = [...roster.rows, { id: `j${roster.rows.length + 1}`, kind: 'bash', label: `job ${roster.rows.length + 1}`, status: 'running', startedAt: 1_000 }]
       surface.refreshTasks()
     },
+    command,
+    notices,
+    tasksOpens,
+    setCatalogCommands: (rows) => { catalogRows.rows = rows },
     dispose: () => {
       command.disposeCatalog()
       surface.dispose()
@@ -1108,6 +1133,61 @@ test('the focused Task Quick band sits BELOW the footer and blocks footer clicks
     click(h.vt, cell.x, cell.row)
     await h.vt.waitForRender()
     assert.equal(h.app.taskQuickFocusedForTest(), true, 'the click does not steal Quick focus')
+  } finally {
+    h.dispose()
+  }
+})
+
+// ── Mouse PR4: the Tasks UI entry obeys the LIVE Host-origin authority ──────
+//
+// The startup registration fact is not the whole answer: an Agent-scoped Host
+// command installed LATER owns the name, and the typed `/tasks` line then runs
+// the Host handler (`classifyCommandLine` prefers the genuine Host-origin
+// claim). The status-line entry must follow that authority in the same window,
+// or the mouse would be a second, TUI-only route.
+
+test('the Tasks UI entry follows the LIVE Host-origin authority, not the startup registration fact', async () => {
+  const h = await startHarness({ taskCenterCapability: true })
+  try {
+    assert.equal(h.command.tasksBrowserUiAvailable(), true,
+      'a clean startup installs the real registered entry')
+    const refresh = async (): Promise<string> => {
+      const outcome = await h.command.requestCatalogRefresh({
+        source: 'invalidation',
+        target: { kind: 'agent', key: 0 },
+        agent: {} as never,
+      })
+      return outcome.kind
+    }
+
+    // 1. A genuine Host /tasks becomes the WINNER after startup.
+    h.setCatalogCommands([{ name: 'tasks', description: 'a genuine Host command' }])
+    assert.equal(await refresh(), 'applied', 'the Host catalog really committed')
+    assert.equal(h.command.tasksBrowserUiAvailable(), false,
+      'the entry loses the action while the Host owns /tasks')
+    const admitted = h.tasksOpens.length
+    h.command.openTasksBrowserUi()
+    await new Promise(resolve => setTimeout(resolve, 20))
+    assert.equal(h.tasksOpens.length, admitted,
+      'the TUI handler never runs for a Host-owned name')
+    assert.ok(h.notices.some(text => text.includes('served by the Host')),
+      `the refusal states the real owner: ${h.notices.join(' | ')}`)
+
+    // 2. The registered ALIAS is covered by the same authority.
+    h.setCatalogCommands([{ name: 'subagents', description: 'a genuine Host alias command' }])
+    assert.equal(await refresh(), 'applied')
+    assert.equal(h.command.tasksBrowserUiAvailable(), false,
+      'a Host-owned /subagents alias disables the entry too')
+
+    // 3. The Host withdraws: the SAME registered handler is reachable again.
+    h.setCatalogCommands([])
+    assert.equal(await refresh(), 'applied')
+    assert.equal(h.command.tasksBrowserUiAvailable(), true,
+      'the entry returns with the command authority')
+    h.command.openTasksBrowserUi()
+    await new Promise(resolve => setTimeout(resolve, 20))
+    assert.equal(h.tasksOpens.length, admitted + 1,
+      'the admitted call runs the registered /tasks opener exactly once')
   } finally {
     h.dispose()
   }

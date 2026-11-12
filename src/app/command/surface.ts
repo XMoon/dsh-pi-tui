@@ -1054,18 +1054,54 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   const taskCenterCapable = (): boolean => deps.surface.tspCommandPickerCapabilities().taskCenter === true
 
   /**
+   * Mouse PR4: whether the LIVE command authority would route an
+   * argument-free `/name` line to a GENUINE Host command.
+   *
+   * It is the SAME §D3 routing primitive the typed submission classifies
+   * with (`hostOriginClaimOf`, whose Direct compatibility mirrors are already
+   * subtracted upstream), so this surface's own registration never answers
+   * `true` here. A name can change hands AFTER startup: an Agent-scoped Host
+   * command installed later becomes the winner for `/name`, and the typed
+   * line then executes the Host handler. The mouse entry must follow that
+   * authority instead of the startup registration fact.
+   */
+  const hostOwnsCommandName = (name: string): boolean =>
+    hostOriginClaimOf?.({ name })?.claimed === true
+
+  /**
+   * Mouse PR4: the ONE admission fact of the `/tasks` UI entry. It answers
+   * "is this entry still the same business route the typed command uses?" —
+   * never "was the badge painted":
+   *
+   * - its registration really installed an opener;
+   * - no genuine Host command currently owns `/tasks` or `/subagents` (the
+   *   typed line would route there instead);
+   * - the mounted pane can present the Work Hub (`supportsTaskCenter`).
+   *
+   * Every term is read at CALL time, so a later Host override or a lost
+   * capability flips the answer without re-registration.
+   */
+  const tasksBrowserUiAdmitted = (): boolean => commandsRegistered
+    && tasksBrowserOpener !== undefined
+    && !hostOwnsCommandName('tasks')
+    && !hostOwnsCommandName('subagents')
+    && taskCenterCapable()
+
+  /**
    * Mouse PR4: the ONE `/tasks` UI entry — the registered handler's own body,
-   * admitted only while its registration is live AND this mount's live
-   * `supportsTaskCenter` holds. The structural capability is read at CALL
-   * time (the renderer negotiates it and TSP panes differ), never cached at
-   * registration: a pane that could not present the Work Hub must not run the
-   * handler, and a pane that lost it must refuse too. A refusal states itself
-   * once through the existing notice path; it never constructs a roster read,
-   * a Session admission or a Task Browser request of its own.
+   * admitted only while {@link tasksBrowserUiAdmitted} holds. A refusal
+   * states itself once through the existing notice path; it never constructs
+   * a roster read, a Session admission or a Task Browser request of its own.
    */
   const openTasksBrowserUi = (): void => {
     if (!commandsRegistered || tasksBrowserOpener === undefined) {
       deps.notify('the task browser is unavailable in this session (the /tasks command is not registered)', 'error')
+      return
+    }
+    if (hostOwnsCommandName('tasks') || hostOwnsCommandName('subagents')) {
+      // The typed `/tasks` (or `/subagents`) line belongs to the Host now.
+      // Running the TUI handler here would be a mouse-only second route.
+      deps.notify('the status-line task entry is disabled: /tasks is currently served by the Host', 'error')
       return
     }
     if (!taskCenterCapable()) {
@@ -1082,9 +1118,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     })
   }
 
-  const tasksBrowserUiAvailable = (): boolean => commandsRegistered
-    && tasksBrowserOpener !== undefined
-    && taskCenterCapable()
+  const tasksBrowserUiAvailable = (): boolean => tasksBrowserUiAdmitted()
 
   const registerCommands = (initial?: InitialCommandCatalog): void => {
     if (commandsRegistered) return
