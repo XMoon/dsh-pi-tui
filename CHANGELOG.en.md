@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Running `/new` from an already open Session no longer loses that command's settlement record.** The old Session is now closed only after the new Session is ready AND the command executor has written the `/new` completion record, so the record is persisted instead of failing with `cannot append outside a SessionStore`; the new Session's visibility and resumability are unchanged.
 
+- **`/new` creates a Session on a sessionless Remote Client.** With a Host-confirmed automatic Workspace, the first `/new` in a Split/Remote Client now creates and opens the new Session instead of falsely reporting that the verified local workspace changed; the refusal now happens only when the local directory-equivalence proof has actually been revoked.
+
 - **A command submitted while a new Session is being created is no longer lost.** Commands such as `/preset status` typed while `/new` is still creating the Session now run in that Session once it is ready instead of silently disappearing.
 
 ## [0.5.6] - 2026-11-08
