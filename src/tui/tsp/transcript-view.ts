@@ -1222,15 +1222,20 @@ function boundedRelayHead(value: string, edge: 'start' | 'end'): string | undefi
     : `…${characters.slice(-keep).join('')}`
 }
 
-/** The bounded first/last text preview of one long Relay body. */
+/**
+ * The bounded first/last preview of one long Relay body: the first and last
+ * NON-BLANK logical lines, so a trailing newline or blank-line padding can
+ * never blank out the ending information. The full body is untouched.
+ */
 function relayHeadPreview(text: string): { readonly first?: string; readonly last?: string } {
-  const lines = text.split(/\r\n|\r|\n/)
-  if (lines.length === 1) {
-    return { first: boundedRelayHead(text, 'start'), last: boundedRelayHead(text, 'end') }
+  const meaningful: string[] = []
+  for (const line of text.split(/\r\n|\r|\n/)) {
+    if (/\S/u.test(line)) meaningful.push(line)
   }
+  if (meaningful.length === 0) return {}
   return {
-    first: boundedRelayHead(lines[0] ?? '', 'start'),
-    last: boundedRelayHead(lines[lines.length - 1] ?? '', 'end'),
+    first: boundedRelayHead(meaningful[0] ?? '', 'start'),
+    last: boundedRelayHead(meaningful[meaningful.length - 1] ?? '', 'end'),
   }
 }
 
@@ -1444,7 +1449,10 @@ function compactionPresentation(message: TranscriptCompactionRow): CompactionPre
   } else if (failed !== undefined && failed !== '') {
     body.push(ui.md({ key: 'error', text: failed }))
   }
-  if (commandOutcomeText !== undefined && commandOutcomeText !== '' && commandOutcomeText !== failed) {
+  // The linked command outcome is shown once BESIDE the summary, and never
+  // repeats the already-painted failure text or the summary body itself.
+  if (commandOutcomeText !== undefined && commandOutcomeText !== ''
+    && commandOutcomeText !== failed && commandOutcomeText !== summary) {
     body.push(ui.md({ key: 'outcome', text: commandOutcomeText }))
   }
   return {

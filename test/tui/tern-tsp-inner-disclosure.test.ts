@@ -931,6 +931,52 @@ test('a manual compaction failure recognizes the command error kind even with em
   assert.ok(opened.some(entry => entry.id === `${node!.id}.body` && entry.props['text'] === 'summary body survived the failure'))
 })
 
+test('a fused manual compaction outcome equal to the summary body is never painted twice', () => {
+  const messages = folder([
+    commandRun(0, 'cmd-same-text', 'compact'),
+    ev('compaction/start', { compactionId: 'cpt-same', sourceCommandId: CommandId('cmd-same-text'), turn: null }, 1),
+    ev('compaction/summary', {
+      compactionId: 'cpt-same', sourceCommandId: CommandId('cmd-same-text'),
+      summary: [{ type: 'text', text: 'identical compaction report' }], shadowedSeqs: [2], shadowedTokenCount: 4,
+    }, 2),
+    ev('compaction/end', { compactionId: 'cpt-same' }, 3),
+    commandDone(4, 'cmd-same-text', 'success', 'identical compaction report'),
+  ]).messages()
+  const row = compactionRowsOf(messages)[0]!
+  assert.equal(row.sourceCommand?.outcome?.text, 'identical compaction report')
+  const keys = new TranscriptNodeKeys()
+  const opened = flatten(messages, 'full', keys, { expandedCommandCompactionOwners: new Set([row]) })
+  const node = opened.find(entry => entry.props['key'] === `s1-${keys.keyFor(row)}`)
+  assert.ok(node !== undefined)
+  const bodies = opened.filter(entry => entry.id.startsWith(`${node!.id}.`)
+    && entry.props['key'] !== undefined
+    && (entry.props['key'] === 'body' || entry.props['key'] === 'error' || entry.props['key'] === 'outcome'))
+  assert.equal(bodies.length, 1, `one text body only: ${JSON.stringify(bodies.map(entry => entry.props['key']))}`)
+  assert.equal(bodies[0]?.props['key'], 'body')
+  assert.equal(bodies[0]?.props['text'], 'identical compaction report')
+  // A DIFFERENT command outcome still earns its own second body row.
+  const different = folder([
+    commandRun(0, 'cmd-different', 'compact'),
+    ev('compaction/start', { compactionId: 'cpt-different', sourceCommandId: CommandId('cmd-different'), turn: null }, 1),
+    ev('compaction/summary', {
+      compactionId: 'cpt-different', sourceCommandId: CommandId('cmd-different'),
+      summary: [{ type: 'text', text: 'the compaction summary' }], shadowedSeqs: [2], shadowedTokenCount: 4,
+    }, 2),
+    ev('compaction/end', { compactionId: 'cpt-different' }, 3),
+    commandDone(4, 'cmd-different', 'success', 'the command settlement message'),
+  ]).messages()
+  const differentRow = compactionRowsOf(different)[0]!
+  const differentOpen = flatten(different, 'full', new TranscriptNodeKeys(), {
+    expandedCommandCompactionOwners: new Set([differentRow]),
+  })
+  const differentNode = differentOpen.find(entry => entry.props['key'] === `s1-${new TranscriptNodeKeys().keyFor(differentRow)}`)
+  assert.ok(differentNode !== undefined)
+  const differentBodies = differentOpen.filter(entry => entry.id.startsWith(`${differentNode!.id}.`)
+    && (entry.props['key'] === 'body' || entry.props['key'] === 'error' || entry.props['key'] === 'outcome'))
+  assert.deepEqual(differentBodies.map(entry => entry.props['key']), ['body', 'outcome'],
+    'a distinct command result keeps its own body row')
+})
+
 test('folded Tools expose only trusted, bounded human summaries from the shared helpers', () => {
   const ref = `sv2_${'a'.repeat(20)}`
   const receipt = `visual-published-v1:${JSON.stringify({ version: 1, published: [{ ref }] })}`
@@ -1014,6 +1060,9 @@ test('folded Tools expose only trusted, bounded human summaries from the shared 
 test('standalone Notice, Recall and Relay forms keep their own readable identity and bounded disclosure', () => {
   const longNoticeSummary = `Agent completed\n第二行摘要 ${'很长'.repeat(60)}`
   const relayLines = Array.from({ length: 12 }, (_, index) => `relay line ${index + 1}`)
+  // A trailing newline and blank-line padding are ordinary message shapes:
+  // the Last preview must still name the real final content line.
+  const relayTrailingLines = [...relayLines, '', '   ']
   const longSingleLine = `RELAY-${'z'.repeat(900)}`
   const events: SessionEvent[] = [
     ev('turn/start', { turn: 1 }, 0),
@@ -1027,8 +1076,9 @@ test('standalone Notice, Recall and Relay forms keep their own readable identity
     }),
     context(5, 'recall-unlabelled', 'recalled unlabelled detail', { kind: 'session-reference', form: 'recall' }),
     context(6, 'relay-short', 'relayed short body', { kind: 'agent-message', form: 'relay', senderSessionId: 'agent-1' }),
-    context(7, 'relay-lines', relayLines.join('\n'), { kind: 'agent-message', form: 'relay', senderSessionId: 'agent-2' }),
+    context(7, 'relay-lines', `${relayLines.join('\n')}\n`, { kind: 'agent-message', form: 'relay', senderSessionId: 'agent-2' }),
     context(8, 'relay-single', longSingleLine, { kind: 'agent-message', form: 'relay' }),
+    context(10, 'relay-trailing', relayTrailingLines.join('\n'), { kind: 'agent-message', form: 'relay', senderSessionId: 'agent-3' }),
     context(9, 'relay-sibling', 'a second relay from the same sender', { kind: 'agent-message', form: 'relay', senderSessionId: 'agent-2' }),
     ev('llm/retry', {
       retry: 1, delayMs: 2000, failure: { code: 'RATE', message: 'too many requests' }, turn: 1, step: 0,
@@ -1090,15 +1140,25 @@ test('standalone Notice, Recall and Relay forms keep their own readable identity
   assert.ok(shortText.includes('Agent message · agent-1'))
   assert.ok(shortText.includes('relayed short body'))
 
-  const lines = rowOf(row => row.text === relayLines.join('\n'))
+  const lines = rowOf(row => row.text === `${relayLines.join('\n')}\n`)
   const linesNode = nodeFor(lines)!
   assert.equal(linesNode.kind, 'section')
   assert.equal(linesNode.props['collapsed'], true)
   assert.equal(headChild(linesNode, 'first')?.props['text'], 'First: relay line 1')
-  assert.equal(headChild(linesNode, 'last')?.props['text'], 'Last: relay line 12')
+  assert.equal(headChild(linesNode, 'last')?.props['text'], 'Last: relay line 12',
+    'a trailing newline never blanks the Last preview')
+
+  const trailing = rowOf(row => row.text === relayTrailingLines.join('\n'))
+  const trailingNode = nodeFor(trailing)!
+  assert.equal(trailingNode.kind, 'section')
+  assert.equal(headChild(trailingNode, 'first')?.props['text'], 'First: relay line 1')
+  assert.equal(headChild(trailingNode, 'last')?.props['text'], 'Last: relay line 12')
+  const trailingOpen = flatten(messages, 'full', keys, { expandedContextRowOwners: new Set([trailing]) })
+  assert.equal(bodyOf(trailingOpen, trailingNode)?.props['text'], relayTrailingLines.join('\n'),
+    'the full body keeps its blank-line padding verbatim')
   assert.equal(bodyOf(closed, linesNode), undefined)
   const linesOpen = flatten(messages, 'full', keys, { expandedContextRowOwners: new Set([lines]) })
-  assert.equal(bodyOf(linesOpen, linesNode)?.props['text'], relayLines.join('\n'))
+  assert.equal(bodyOf(linesOpen, linesNode)?.props['text'], `${relayLines.join('\n')}\n`)
 
   const single = rowOf(row => row.text === longSingleLine)
   const singleNode = nodeFor(single)!

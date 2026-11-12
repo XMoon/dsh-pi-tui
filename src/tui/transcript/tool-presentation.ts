@@ -283,9 +283,12 @@ export function foldedResultSummaryFor(name: string, text: string): string | und
   if (name === 'ralph') {
     // The render text leads with a friendly line before the JSON report;
     // that line is the best folded summary. A bare-JSON result (e.g. a
-    // replay without the render prefix) falls back to status/rounds.
-    const line = firstLine(text)
-    if (line !== '' && !line.startsWith('{')) return line
+    // replay without the render prefix) falls back to status/rounds. The
+    // JSON decision is made on the TRIMMED first line so a result that
+    // legally starts with whitespace before its JSON document never leaks
+    // the raw machine text as a human phrase.
+    const line = firstLine(text).trim()
+    if (line !== '' && !line.startsWith('{') && !line.startsWith('[')) return line
     const parsed = parseJsonValue(text)
     if (typeof parsed === 'object' && parsed !== null) {
       const record = parsed as Record<string, unknown>
