@@ -6,9 +6,11 @@
  *
  * The port owns human prompt delivery and continuable-child interruption, and
  * the DETACHED wire/application DTOs that cross it (TS8-F4 owns them here so the
- * adapter modules never depend on an application/root module). Parent/child
- * authority is explicit for both operations; no UI row or root inference
- * crosses this boundary.
+ * adapter modules never depend on an application/root module). The viewer's
+ * parent relation is an application currentness fact: the rc.2 official Host
+ * request carries only the child address (the Host authorizes the caller for
+ * that target), so no UI row or root inference crosses this boundary as an
+ * authorization claim.
  *
  * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/subagent-port
@@ -30,8 +32,10 @@ export type SubagentPromptContentPart =
 
 /** The semantic prompt request from the viewer (mirrors
  * SubagentViewerSubmit without importing TuiApp). The runner resolves the
- * composer gesture to `delivery`; the `requestId` and `mode: 'continuable'`
- * are added at the Host adapter boundary. */
+ * composer gesture to `delivery`; `parentSessionId` proves the viewer's own
+ * currentness in the Client and is NOT sent to the rc.2 Host, which accepts
+ * only `requestId`, `childSessionId`, `delivery`, `content` and the optional
+ * `clientTimeZone`. */
 export interface SubagentViewerSubmitRequest {
   readonly parentSessionId: string
   readonly childSessionId: string
@@ -82,7 +86,10 @@ export interface SubagentPromptContext {
   clientTimeZone(): string
 }
 
-/** The explicit semantic target for stopping a continuable child. */
+/** The explicit semantic target for stopping a continuable child. The
+ * `parentSessionId`/`mode` fields are the Client's viewer/currentness facts
+ * (whether this TUI may issue the gesture); the rc.2 official interrupt only
+ * names the child and the Host re-authorizes the target. */
 export interface SubagentInterruptRequest {
   readonly parentSessionId: string
   readonly childSessionId: string
