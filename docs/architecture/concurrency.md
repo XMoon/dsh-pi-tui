@@ -153,6 +153,14 @@ On top of the gate, ordinary session transitions share ONE transaction shape
    Client reference, and its committed child is NOT waited to idle before the
    surface init/catalog (the target may legitimately be running). Child
    surface/catalog work is best-effort and the committed child always stands.
+   When the transition runs INSIDE a DSH command execution (the official
+   command executor dispatches `/new`), the `stop-and-quiesce` retirement is
+   ARRANGED here but the captured OLD owner's physical retirement is deferred
+   to that command's settlement: the executor appends `command/done` to the
+   OLD Session only after the handler returns, so detaching it in the handler
+   would lose the append. The committed child's checkpoint, quiesce and
+   surface/catalog work keep their positions (see "Command-backed transition
+   settlement").
 
 ### Fork dispatch and adoption
 
@@ -751,6 +759,58 @@ the failure itself, before the next unbounded await, because the OLD owner's
 retirement and the child quiesce can outlive the process's shutdown budget; a
 later summary re-logs the failure as part of the transaction but never
 re-reports it as a second durability failure.
+
+### Command-backed transition settlement
+
+A user navigation can be dispatched by the official DSH command executor
+(`/new` is registered with the Host command service). The executor appends
+`command/run` to the Session of the Agent it was invoked with BEFORE the
+handler runs, and appends `command/done` to that SAME Session after the
+handler settles. The handler's transition replaces that Session, so a
+`stop-and-quiesce` retirement performed inside the handler would detach the
+Session before the executor's own `command/done` append, and that append
+would fail with "cannot append outside a SessionStore" — a real durability
+loss of the command lifecycle, not a cosmetic error.
+
+The runtime therefore splits ONLY the physical retirement of a captured OLD
+owner when ALL of the following hold: the backend's navigation kind is
+`stop-and-quiesce` (Direct) and a command-settlement window is open (the
+submission opened it before dispatching the command plane). The deferred
+retirement joins the SAME process-local queue the `/fork` source retirement
+uses, and the command's settlement drains it after the executor appended
+`command/done`. Ordering:
+
+```text
+DSH command/run on A
+→ transition(A → B): capture A, quiesce/freeze, create B, COMMIT B
+   → B's durability checkpoint (first post-commit step, position unchanged)
+   → register A's source-owner release pin, DEFER ONLY retire(A)
+   → init B / catalog / report switch
+→ handler returns
+→ DSH command/done on A (accepted: A is still attached)
+→ command settlement: retire(A) → B's FIFO/submit release follows
+```
+
+- The deferral covers the OLD owner only. The committed child's checkpoint
+  stays the first post-commit step, and the child quiesce/surface/catalog
+  work is not delayed.
+- The source-owner release pin is the ONE owner-release ledger
+  (`SessionOwnershipCore`): a reopen/resume of the replaced id waits for the
+  EXACT release (the old write lease is not handed to a second owner). The
+  pin is released when the deferred retirement finishes, success or contained
+  failure — never left pending by a failed phase.
+- The deferred retirement's own failures are diagnosed by the deferred
+  callback with the OLD and NEW Session identities (the transaction summary
+  already reported the committed child; a failed old-owner phase is never
+  rewritten as success).
+- An EXIT during this window waits for the pending command settlement and the
+  queued retirement before it retires the current owner: the DSH handle is
+  never closed before `command/done`.
+- A NON-command transition (a Session Browser switch, the rewind picker's
+  awaited source retirement, a first-session create) and every
+  `detach-client` (Remote) navigation keep their baseline ordering: the
+  replaced owner/reference is settled INSIDE the transaction, with no
+  deferral and no pin.
 
 A flush can also be OVERTAKEN while it is in flight: DSH re-checks the
 handle's closing state inside the flush's own turn, so a `close()` that

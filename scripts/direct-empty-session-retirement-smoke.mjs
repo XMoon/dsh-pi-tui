@@ -51,6 +51,7 @@ import {
   validateCandidateTarball,
 } from './lib/dsh-smoke-harness.mjs'
 import { loadDshDistribution, npmDshVersion } from './lib/dsh-distribution.mjs'
+import { hostSessionEvents } from './lib/split-smoke-sessions.mjs'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = resolve(SCRIPT_DIR, '..')
@@ -61,6 +62,7 @@ const FORBIDDEN_DIAGNOSTICS = [
   'retire phase failed',
   'SessionHandleClosedError',
   'flush on a closed handle',
+  'cannot append outside a SessionStore',
   'UnhandledPromiseRejection',
 ]
 
@@ -498,6 +500,9 @@ async function main() {
     const artifactsBeforeC = countSessionArtifacts(sessionsRoot)
     const runC = makeRun('c-new-new-exit')
     let logC
+    // The first committed Session of this scenario is the one the SECOND `/new`
+    // replaces. Its durable log must carry that command's own run/done pair.
+    let firstSessionId
     try {
       logC = await driveTuiRun('c', {
         socket,
@@ -516,6 +521,7 @@ async function main() {
           // second /new already committed and then wait forever for a change.
           const first = currentSessionId(tmux.capture())
           if (first === undefined) fail('C_NEW_FAILURE', 'the first /new did not expose its committed session id')
+          firstSessionId = first
           tmux.send('/new')
           tmux.send('Enter')
           await waitUntil('second /new committed', STEP_TIMEOUT_MS, () => {
@@ -528,6 +534,35 @@ async function main() {
       })
     } finally { /* evidence checked immediately */ }
     assertNoRetirementErrors('c', [{ name: basename(runC.tuiLog), text: logC }, ...piTuiLogs(dshHome)])
+    // The FIRST committed Session's durable log must carry the complete
+    // command lifecycle of the `/new` that left it. The official DSH executor
+    // appends `command/run` BEFORE the handler and `command/done` AFTER the
+    // handler settles, BOTH to the replaced Session; a retirement that detaches
+    // that Session inside the handler loses the done append (and the process
+    // would have logged "cannot append outside a SessionStore"). This is read
+    // from the real persisted zstd log, never inferred from the pane.
+    if (firstSessionId === undefined) {
+      fail('C_COMMAND_SETTLEMENT_FAILURE', 'the first /new committed no observable Session id')
+    }
+    const firstEvents = hostSessionEvents(dshHome, firstSessionId)
+    if (firstEvents === undefined) {
+      fail('C_COMMAND_SETTLEMENT_FAILURE', `no durable Session log for the first committed Session ${firstSessionId}`)
+    }
+    const runs = firstEvents.filter(event => event?.type === 'command/run' && event?.data?.name === 'new')
+    if (runs.length !== 1) {
+      fail('C_COMMAND_SETTLEMENT_FAILURE', `the replaced Session ${firstSessionId} must persist exactly one /new command/run, got ${runs.length}: ${JSON.stringify(firstEvents.map(event => event?.type))}`)
+    }
+    const commandId = runs[0].data.commandId
+    const dones = firstEvents.filter(event => event?.type === 'command/done' && event?.data?.commandId === commandId)
+    if (dones.length !== 1) {
+      fail('C_COMMAND_SETTLEMENT_FAILURE', `the replaced Session ${firstSessionId} must persist exactly one matching command/done for ${String(commandId)}, got ${dones.length}: ${JSON.stringify(firstEvents.map(event => event?.type))}`)
+    }
+    if (dones[0].data.kind !== 'success') {
+      fail('C_COMMAND_SETTLEMENT_FAILURE', `the /new command/done on ${firstSessionId} must be a success, got ${JSON.stringify(dones[0].data.kind)}`)
+    }
+    if (!(Number(runs[0].seq) < Number(dones[0].seq))) {
+      fail('C_COMMAND_SETTLEMENT_FAILURE', `the /new command/run (seq ${String(runs[0].seq)}) must precede its command/done (seq ${String(dones[0].seq)})`)
+    }
     // Both /new commits of this run are durable: the run created exactly TWO
     // new session artifacts (the exit banner names only the LAST one).
     const artifactsAfterC = countSessionArtifacts(sessionsRoot)

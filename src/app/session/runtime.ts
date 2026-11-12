@@ -781,12 +781,59 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // so this covers the window where the old owner was re-woken by a
         // Host-side continuation and releases its handle.
         if (oldOwner !== undefined) {
-          const report = await deps.retirement.retire(oldOwner, 'transition')
-          for (const failure of report.failures) {
-            // A failed dispose means the old session may still have writers; the
-            // child stays current and the failure is recorded (the DSH
-            // SessionWriteLease still guards the session cross-process).
-            retired.push(`old ${failure.phase}: ${failure.error}`)
+          if (deps.retirement.navigationKind === 'stop-and-quiesce' && commandExecutionDepth > 0) {
+            // A DSH command executor still owns an append on the OLD Session:
+            // its `command/done` lands only AFTER this handler returns, so
+            // detaching the old owner here makes that append throw "cannot
+            // append outside a SessionStore". Defer ONLY the physical
+            // retirement to the existing command-settlement ledger (the same
+            // queue a committed `/fork` uses) and keep the exact-source release
+            // pin registered, so an immediate reopen of the old id waits for
+            // its real release. The committed child's checkpoint above and its
+            // surface/catalog work below stay at their original positions.
+            //
+            // The enqueue below is SYNCHRONOUS, and `commandExecutionDepth > 0`
+            // was proven in this same stack, so it always returns `undefined`
+            // (queued, not started). Awaiting the settlement HERE would be the
+            // circular wait this branch exists to remove: the settlement only
+            // runs after this handler returns.
+            const sourceSessionId = from
+            if (sourceSessionId === undefined) {
+              throw new Error('ordinary transition replaced an owner without a session id')
+            }
+            const pin = core.beginForkSourcePin(sourceSessionId)
+            try {
+              retireSourceOwnerAfterSettlement(sourceSessionId, async () => {
+                const report = await deps.retirement.retire(oldOwner, 'transition')
+                for (const failure of report.failures) {
+                  // The summary of this transaction already reported (the child
+                  // is committed and visible), so the deferred retirement's
+                  // failure goes straight to the diagnostics with its own
+                  // attribution. Never rewritten as a success.
+                  deps.diag.error('old-owner retirement failed (child committed)', {
+                    from: sourceSessionId,
+                    to: committedSessionId,
+                    phase: failure.phase,
+                    error: failure.error,
+                  })
+                }
+              }, pin.release)
+            } catch (error) {
+              // The synchronous enqueue never rejects in production; if it
+              // ever did, the pin must not outlive this transaction (an
+              // un-released ledger entry would block every later reopen of the
+              // old id). `pin.release` is idempotent.
+              pin.release()
+              throw error
+            }
+          } else {
+            const report = await deps.retirement.retire(oldOwner, 'transition')
+            for (const failure of report.failures) {
+              // A failed dispose means the old session may still have writers; the
+              // child stays current and the failure is recorded (the DSH
+              // SessionWriteLease still guards the session cross-process).
+              retired.push(`old ${failure.phase}: ${failure.error}`)
+            }
           }
         }
         try {
@@ -1050,8 +1097,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
 
   // The fork + source-retirement ledgers (A2-3b-3): they moved out of the
   // runner together with the flows that fill them. The command-settlement
-  // window state lives here too, because a committed `/fork` QUEUES its source
-  // retirement while an executor is still appending `command/done`.
+  // window state lives here too, because a SOURCE transition (a committed
+  // `/fork`, or an ordinary Direct transition performed inside a command
+  // handler) QUEUES its source retirement while an executor is still appending
+  // `command/done` to the Session it is leaving.
   const pendingForks = new Set<Promise<unknown>>()
   const pendingSourceRetirements = new Set<Promise<void>>()
   // In-flight command settlements / nested submissions (reachable only from a
@@ -1097,7 +1146,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    */
   const startSourceRetirement = (sessionId: string, retire: () => Promise<void>): Promise<void> | undefined => {
     let pending: Promise<void> | undefined
-    runOwned('fork source retirement', () => {
+    runOwned('source retirement', () => {
       const task = retire()
       pending = task
       return task
@@ -1111,12 +1160,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   }
 
   /**
-   * Retire the source owner. A DSH command defers it to its own settlement (the
-   * executor's `command/done` append must land first) and returns `undefined`;
-   * outside a command the retirement promise is returned so the caller keeps the
-   * baseline ordering.
+   * Retire a replaced SOURCE owner. A DSH command defers it to its own
+   * settlement (the executor's `command/done` append must land first) and
+   * returns `undefined`; outside a command the retirement promise is returned so
+   * the caller keeps the baseline ordering.
    *
-   * `finishRelease` settles the fork's admission pin when the retirement has
+   * `finishRelease` settles the source-owner release pin when the retirement has
    * FINISHED — success or a CONTAINED failure: a failed phase is recorded in the
    * retirement report (never a rejection), and holding the pin on a failed
    * dispose would leave `open`/`resume` pending forever.
@@ -1151,9 +1200,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     return started
   }
 
-  /** Open one command-settlement window: while any is open a committed `/fork`
-   *  QUEUES its source retirement instead of detaching the Session whose
-   *  executor is still appending `command/done`. */
+  /** Open one command-settlement window: while any is open a committed source
+   *  transition QUEUES its source retirement instead of detaching the Session
+   *  whose executor is still appending `command/done`. */
   const beginCommandSettlement = (): void => { commandExecutionDepth += 1 }
   /** Close a window whose handler never ran: nothing was queued. */
   const abortCommandSettlement = (): void => { commandExecutionDepth -= 1 }
