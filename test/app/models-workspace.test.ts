@@ -2476,6 +2476,47 @@ test('an UNCONFIRMED record delete never claims failure and only offers a fresh 
   assert.match(viewText(page), /Models & Credentials/u, 'the unconfirmed view is exit-able')
 })
 
+test('a FAILED refresh after an unconfirmed delete stays unconfirmed, never Not cleared (F7B)', async () => {
+  const { source, calls } = fakeSource()
+  let reads = 0
+  source.storedCredentials = async () => {
+    reads += 1
+    // The opening read confirms the target; every later refresh FAILS.
+    if (reads === 1) {
+      return {
+        rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }],
+        recordCleanupUnavailable: false,
+        referenceReadFailures: [],
+      }
+    }
+    throw new Error('the Host record list could not be re-read')
+  }
+  source.deleteRecord = async (key: string) => {
+    calls.push(`delete:${key}`)
+    const error = new Error('the stored credential record delete outcome is unconfirmed: carrier lost')
+    Object.assign(error, { code: 'RECORD_DELETE_UNCONFIRMED' })
+    throw error
+  }
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, 24)
+  await flush()
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /Outcome unconfirmed/u)
+  // The user's manual refresh reads the CURRENT Host and that read FAILS: the
+  // dispatched delete remains an unknown outcome, never "Not cleared".
+  page.handleInput('r')
+  await flush()
+  const text = viewText(page)
+  assert.match(text, /Outcome unconfirmed — refresh stored credentials before retrying\./u)
+  assert.match(text, /Refresh records \[r\]/u)
+  assert.doesNotMatch(text, /Not cleared/u)
+  assert.doesNotMatch(text, /Still stored/u)
+  assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'], 'the failed refresh never re-sends the delete')
+})
+
 test('the UNCONFIRMED safety outcome survives a 10-row frame (F7B)', async () => {
   const { source } = fakeSource()
   source.storedCredentials = async () => ({

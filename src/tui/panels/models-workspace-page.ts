@@ -1068,6 +1068,13 @@ export class ModelsWorkspacePage implements Component {
     if (this.clear?.phase === 'pending') return
     const key = this.view.target.key
     const serial = this.clearSerial
+    // A delete was already DISPATCHED and its current presence was never
+    // authoritatively re-read (unconfirmed), or its presence observation can no
+    // longer be re-confirmed (done / still-stored). A failed refresh in those
+    // states may not become a definite "Not cleared" claim.
+    const priorPhase = this.clear?.phase
+    const dispatchedUnknown = priorPhase === 'unconfirmed' || priorPhase === 'done'
+      || (priorPhase === 'failed' && this.clear?.failure === 'still-stored')
     const readSerial = ++this.clearReadSerial
     this.clear = { phase: 'reading', configured: false }
     // The stored-credential read scans the provider configuration
@@ -1090,9 +1097,22 @@ export class ModelsWorkspacePage implements Component {
             this.clear = { phase: 'ready', configured: present }
           })
         } catch (error) {
+          const reason = errorText(error)
           this.settle(() => {
             if (readSerial !== this.clearReadSerial || serial !== this.clearSerial || this.view.kind !== 'logout' || this.view.target.kind !== 'record' || this.view.target.key !== key) return
-            this.clear = { phase: 'failed', configured: false, reason: errorText(error) }
+            if (dispatchedUnknown) {
+              // The method was dispatched: the failed CURRENT-presence read is
+              // an unknown outcome, never proof that the delete did not run.
+              // Fence every older record snapshot and keep the read-only
+              // refresh as the only next step.
+              this.recordsSerial += 1
+              this.records = undefined
+              this.recordPresenceSerial += 1
+              this.recordPresence = { kind: 'unknown', reason: `the record list could not be re-read: ${reason}` }
+              this.clear = { phase: 'unconfirmed', configured: true, reason: `the record list could not be re-read: ${reason}` }
+              return
+            }
+            this.clear = { phase: 'failed', configured: false, reason }
           })
         }
       })
