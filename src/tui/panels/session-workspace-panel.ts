@@ -1389,7 +1389,7 @@ export class SessionWorkspacePanel implements Component {
       : this.searchMode
         ? this.selectedSearchSessionId
         : this.selectedBrowseSessionId()
-    if (target === undefined || target === this.options.currentSessionId) return
+    if (target === undefined) return
     const listed = this.searchMode
       ? this.snapshot.searchResults.map(result => result.row.id)
       : this.view().listIds
@@ -1398,6 +1398,14 @@ export class SessionWorkspacePanel implements Component {
       ? [target]
       : this.searchMode ? this.lastPaintedResultIds : this.lastPaintedBrowseIds
     if (!painted.includes(target)) return
+    // Activating the Session this Browser was opened from returns to it: the
+    // Browser closes and the Session, draft, turn and writer stay untouched.
+    // This is the SAME guarded admission as a Resume, decided only after the
+    // listed/painted gates, and it never emits a Resume intent.
+    if (target === this.options.currentSessionId) {
+      this.host.onClose()
+      return
+    }
     this.host.onResume(target)
   }
 
@@ -2507,7 +2515,9 @@ export class SessionWorkspacePanel implements Component {
       case 'showMore':
         return { text: 'Enter More sessions', short: 'More', hint: 'Enter More sessions' }
       case 'session':
-        return { text: 'Open [Enter]', short: 'Open', hint: 'Enter Open' }
+        return row.sessionId === this.options.currentSessionId
+          ? { text: 'Return [Enter]', short: 'Return', hint: 'Enter Return' }
+          : { text: 'Open [Enter]', short: 'Open', hint: 'Enter Open' }
     }
   }
 
@@ -2536,9 +2546,17 @@ export class SessionWorkspacePanel implements Component {
       return segments
     }
     if (this.focus === 'peek') {
-      const openable = this.peek?.sessionId !== this.options.currentSessionId && !this.snapshot.resumePending
+      // The Peek Enter is the one explicit resume of its PINNED Session. The
+      // action exists only when a pinned target really exists and no switch is
+      // pending; the current Session returns (closes) instead of resuming.
+      const hasTarget = this.peek?.sessionId !== undefined && !this.snapshot.resumePending
+      const current = this.peek?.sessionId === this.options.currentSessionId
       const segments: SessionBarSegment[] = [{ text: 'Up/Down scroll', priority: 6, short: 'Scroll' }]
-      if (openable) segments.push({ text: 'Open [Enter]', priority: 7, short: 'Open', action: 'open', ink: 'primary' })
+      if (hasTarget) {
+        segments.push(current
+          ? { text: 'Return [Enter]', priority: 7, short: 'Return', action: 'open', ink: 'secondary' }
+          : { text: 'Open [Enter]', priority: 7, short: 'Open', action: 'open', ink: 'primary' })
+      }
       segments.push({ text: 'Back [Esc]', priority: 9, short: 'Esc', action: 'close', ink: 'secondary' })
       return segments
     }
@@ -2548,9 +2566,11 @@ export class SessionWorkspacePanel implements Component {
       const segments: SessionBarSegment[] = []
       if (painted.size >= 2) segments.push({ text: 'Up/Down move', priority: 6, short: 'Move' })
       if (selectedPainted && !this.snapshot.resumePending) {
-        // The opened Session is a legal search hit, but Enter on it is the
-        // same deliberate no-op as in the browse tree.
-        if (this.selectedSearchSessionId !== this.options.currentSessionId) {
+        // The second Enter on a result is the one explicit resume; on the
+        // Session this Browser was opened from it returns instead.
+        if (this.selectedSearchSessionId === this.options.currentSessionId) {
+          segments.push({ text: 'Return [Enter]', priority: 7, short: 'Return', action: 'open', ink: 'secondary' })
+        } else {
           segments.push({ text: 'Open [Enter]', priority: 7, short: 'Open', action: 'open', ink: 'primary' })
         }
         segments.push({ text: 'Peek [Space]', priority: 4, short: 'Peek', action: 'peek', ink: 'secondary' })
@@ -2588,8 +2608,10 @@ export class SessionWorkspacePanel implements Component {
     if (selected !== undefined && selectedPainted
       && !(selected.kind === 'session' && this.snapshot.resumePending)) {
       if (selected.kind === 'session' && selected.sessionId === this.options.currentSessionId) {
-        // Enter on the opened Session is a deliberate no-op: advertise only
-        // the read-only Peek it really supports.
+        // Enter on the opened Session returns to it. The bar advertises that
+        // real action (secondary navigation ink) and keeps the read-only Peek.
+        const enter = this.enterAction(selected)
+        segments.push({ text: enter.text, priority: 7, short: enter.short, action: 'activate-row', ink: 'secondary' })
         segments.push({ text: 'Peek [Space]', priority: 4, short: 'Peek', action: 'peek', ink: 'secondary' })
       } else if (selected.kind === 'folder' || selected.kind === 'session') {
         const enter = this.enterAction(selected)

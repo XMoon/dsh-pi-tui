@@ -634,6 +634,52 @@ test('an interactive resume is successful only on the runtime committed outcome 
   assert.equal(h.switchCalls.length, 1, 'a committed switch is never retried')
   assert.equal(h.facts.handles[0]!.disposed, 1, 'the per-open Workspace follow is disposed once')
 })
+test('the current Session Return closes the real lease once with zero switch and an untouched draft', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  h.app.setDraft('draft stays byte-identical')
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  h.facts.handles[0]!.push(baseline(
+    { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
+  ))
+  await waitUntil(() => h.view().includes('project-a · 1'), 'the official baseline is proved')
+  assert.ok(/^> {3}● current-/m.test(h.view()), `the current Session is the initial cursor:\n${h.view()}`)
+  assert.ok(h.view().includes('Return [Enter]'), `the real screen advertises the Return verb:\n${h.view()}`)
+
+  h.vt.sendInput('\r')
+  await waitUntil(() => !h.view().includes('Sessions'), 'Return retires the fullscreen lease')
+  await h.vt.waitForRender()
+  assert.equal(h.app.isFullscreen(), false, 'the ONE fullscreen lease is gone')
+  assert.deepEqual(h.switchCalls, [], 'Return never starts a Session switch')
+  assert.equal(h.facts.handles[0]!.disposed, 1, 'the per-open Workspace follow is disposed exactly once')
+  assert.equal(h.app.getDraft(), 'draft stays byte-identical', 'the draft is byte-identical after Return')
+  assert.equal(h.runner.currentSessionId, CURRENT, 'the current Agent/Session identity is unchanged')
+  assert.equal(h.listCalls, 1, 'Return performs no second roster read')
+
+  // A late frame from the closed open can never repaint or reopen a Browser.
+  h.facts.handles[0]!.push(baseline(
+    { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
+  ))
+  h.facts.handles[0]!.finish()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Sessions'), 'the retired open cannot paint a late frame')
+
+  // Reopening starts ONE fresh Workspace follow; the old identity stays inert.
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  assert.equal(h.facts.followCalls, 2, 'the new open owns its own per-open follow')
+  h.facts.handles[1]!.push(baseline(
+    { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
+  ))
+  await waitUntil(() => h.view().includes('project-a · 1'), 'the newer Browser proves its own baseline')
+  assert.equal(h.facts.handles[1]!.disposed, 0, 'the newer follow stays live')
+  assert.equal(h.facts.handles[0]!.disposed, 1, 'the old follow is still disposed exactly once')
+  h.vt.sendInput('\r')
+  await waitUntil(() => !h.view().includes('Sessions'), 'the newer Browser has its own Return')
+  assert.equal(h.facts.handles[1]!.disposed, 1, 'the newer follow retires once with its own Return')
+  assert.deepEqual(h.switchCalls, [], 'neither Return starts a Session switch')
+})
 
 test('a failed interactive resume keeps the workspace and never reports success or retries', async () => {
   const h = harness({ currentSessionId: CURRENT })

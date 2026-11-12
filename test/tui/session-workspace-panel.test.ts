@@ -270,7 +270,7 @@ test('a retained first-submit path enters Browser directly, submits once, and ex
   await h.paint()
   assert.equal(h.closes, 1, 'success returns through the existing chooser owner')
 })
-test('the browse list paints the header, current marker, selection and guarded Resume', async () => {
+test('the browse list paints the header, current marker, and the Return verb', async () => {
   const h = harness()
   h.handle.setSnapshot(snapshot())
   await h.paint()
@@ -282,19 +282,35 @@ test('the browse list paints the header, current marker, selection and guarded R
   assert.ok(/^> {3}● current-/m.test(view), `Current keeps only its own row marker:\n${view}`)
   const lines = view.split('\n')
   assert.ok(lines[lines.length - 1]!.includes('Close [Esc]'), 'the action bar is the last physical row')
+  assert.ok(lines[lines.length - 1]!.includes('Return [Enter]'),
+    `Enter on the selected current row advertises the real Return:\n${lines[lines.length - 1]}`)
 
-  // Enter on the selected CURRENT row is a no-op: currentness is not selection.
+  // Enter returns to the Session this Browser was opened from: one close, no Resume.
   h.vt.sendInput('\r')
   await h.paint()
-  assert.deepEqual(h.resumes, [], 'Enter on the current Session never resumes')
+  assert.deepEqual(h.resumes, [], 'Return on the current Session never resumes')
+  assert.equal(h.closes, 1, 'Return closes the Browser exactly once')
+  assert.equal(h.handle.isDisposed(), true, 'the same leased open really retired')
+  assert.equal(h.app.isFullscreen(), false, 'no fullscreen lease survives the Return')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.equal(h.closes, 1, 'a stale old handle cannot close the Browser twice')
+})
 
-  // Down selects the next listed row; Enter produces ONE logical intent.
+test('the browse list Enter on a listed non-current row emits one guarded Resume', async () => {
+  const h = harness()
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
   h.vt.sendInput('\x1b[B')
   await h.paint()
   assert.ok(/^> /m.test(h.view()), `the selection marker is the ASCII arrow:\n${h.view()}`)
+  const footer = panelFrame(h)[panelFrame(h).length - 1]!
+  assert.ok(footer.includes('Open [Enter]') && !footer.includes('Return [Enter]'),
+    `a non-current row keeps Open:\n${footer}`)
   h.vt.sendInput('\r')
   await h.paint()
   assert.deepEqual(h.resumes, [OTHER], 'Enter on a listed non-current row emits one resume intent')
+  assert.equal(h.closes, 0, 'the non-current path is unchanged: the owner, not the panel, closes')
 })
 
 test('the one-shot seed writes the editor once; a real edit wins and never overwrites it', async () => {
@@ -1924,11 +1940,12 @@ test('a short frame advertises only actions the painted body can really run', as
   squeezed.vt.sendInput('\r')
   await squeezed.paint()
   assert.deepEqual(squeezed.resumes, [], 'the withheld Enter can never open an unpainted row')
+  assert.equal(squeezed.closes, 0, 'the withheld Enter can never return through an unpainted current row')
   squeezed.app.dispose()
   started.delete(squeezed.app)
 
   // The same 3-row frame WITH a painted row advertises the real verb and keeps
-  // Esc last; the current Session never advertises its deliberate no-op Enter.
+  // Esc last; the current Session advertises Return, never Open.
   const painted = harness({ columns: 80, rows: 3 })
   painted.handle.setSnapshot(snapshot())
   painted.handle.setActivityFacts({
@@ -1941,7 +1958,9 @@ test('a short frame advertises only actions the painted body can really run', as
   })
   await painted.paint()
   let footer = panelFrame(painted)[2]!
-  assert.ok(footer.includes('Peek [Space]') && !footer.includes('[Enter]'), `the current row advertises Peek only:\n${footer}`)
+  assert.ok(footer.includes('Return [Enter]') && !footer.includes('Open [Enter]'),
+    `the current row advertises Return:\n${footer}`)
+  assert.ok(footer.includes('Peek [Space]'), `the current row still advertises Peek:\n${footer}`)
   assert.ok(footer.includes('Close [Esc]'))
   painted.vt.sendInput('\x1b[B')
   await painted.paint()
@@ -2148,7 +2167,7 @@ test('a synchronous owner close from New/Choose leaves no stale panel write', as
   assert.equal(chooser.closes, 0, 'an owner-origin close never re-enters the close notification')
 })
 
-test('a current Session search hit never advertises the deliberate no-op Enter', async () => {
+test('a current Session search hit advertises Return and its second Enter returns', async () => {
   const h = harness({ columns: 100, rows: 24, initialMode: 'search' })
   h.handle.setSnapshot(snapshot({
     query: 'needle',
@@ -2163,20 +2182,17 @@ test('a current Session search hit never advertises the deliberate no-op Enter',
   await h.paint()
   let footer = panelFrame(h)[panelFrame(h).length - 1]!
   assert.ok(footer.includes('Peek [Space]'), `the current result still advertises Peek:\n${footer}`)
-  assert.ok(!footer.includes('Open [Enter]'), `the current result never advertises its no-op Enter:\n${footer}`)
+  assert.ok(footer.includes('Return [Enter]'), `the current result advertises its real Return:\n${footer}`)
+  assert.ok(!footer.includes('Open [Enter]'), `the current result never advertises Open:\n${footer}`)
   h.vt.sendInput('\r')
   await h.paint()
-  assert.deepEqual(h.resumes, [], 'Enter on the current search hit is a no-op')
-  h.vt.sendInput('\x1b[B') // the non-current result
-  await h.paint()
-  footer = panelFrame(h)[panelFrame(h).length - 1]!
-  assert.ok(footer.includes('Open [Enter]'), `the non-current result advertises Open:\n${footer}`)
-  h.vt.sendInput('\r')
-  await h.paint()
-  assert.deepEqual(h.resumes, [OTHER], 'the advertised Open on a non-current result really resumes')
+  assert.deepEqual(h.resumes, [], 'Return on the current search hit never resumes')
+  assert.equal(h.closes, 1, 'Return on the current search hit closes the Browser once')
+  assert.equal(h.handle.isDisposed(), true)
+  assert.equal(h.app.isFullscreen(), false)
 })
 
-test('the current Session Peek never advertises its no-op Enter', async () => {
+test('the current Session Peek advertises Return and its Enter returns', async () => {
   const h = harness({ columns: 120, rows: 30 })
   h.handle.setSnapshot(snapshot())
   await h.paint()
@@ -2186,13 +2202,224 @@ test('the current Session Peek never advertises its no-op Enter', async () => {
   assert.ok(view.includes('Peek · curren'), `the current Session Peek opens:\n${view}`)
   assert.ok(!view.includes('Open [Enter]') && !view.includes('Open: Enter'),
     `neither the body hint nor the footer advertises Open:\n${view}`)
+  const footer = panelFrame(h)[panelFrame(h).length - 1]!
+  assert.ok(footer.includes('Return [Enter]'), `the current Peek advertises Return:\n${footer}`)
   assert.ok(view.includes('Back [Esc]') && !view.includes('Space close'), 'the Peek Back stays on the ONE global bar')
   h.vt.sendInput('\r')
   await h.paint()
-  assert.deepEqual(h.resumes, [], 'Enter on the current Peek is a no-op')
+  assert.deepEqual(h.resumes, [], 'Return on the current Peek never resumes')
+  assert.equal(h.closes, 1, 'Return on the current Peek closes the Browser once')
+  assert.equal(h.handle.isDisposed(), true)
+  assert.equal(h.app.isFullscreen(), false)
+})
+
+test('current Peek Space and Esc back out without switching or closing', async () => {
+  const h = harness({ columns: 120, rows: 30 })
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
   h.vt.sendInput(' ')
   await h.paint()
-  assert.ok(!h.view().includes('Peek ·'), 'Space still closes the Peek')
+  assert.ok(h.view().includes('Peek · curren'))
+  h.vt.sendInput(' ')
+  await h.paint()
+  assert.ok(!h.view().includes('Peek ·'), 'Space still closes the Peek layer')
+  assert.ok(h.view().includes('Return [Enter]'), 'the browse Return is back')
+  assert.equal(h.closes, 0, 'Space on the Peek never closes the Browser')
+  assert.deepEqual(h.resumes, [])
+  h.vt.sendInput(' ')
+  await h.paint()
+  assert.ok(h.view().includes('Peek · curren'))
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.ok(!h.view().includes('Peek ·'), 'Esc still closes the Peek layer')
+  assert.equal(h.closes, 0, 'Esc on the Peek never closes the Browser')
+  assert.deepEqual(h.resumes, [])
+})
+
+test('a non-current Session Peek keeps Open and Enter emits its one Resume', async () => {
+  const h = harness({ columns: 120, rows: 30 })
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  h.vt.sendInput(' ')
+  await h.paint()
+  const footer = panelFrame(h)[panelFrame(h).length - 1]!
+  assert.ok(footer.includes('Open [Enter]') && !footer.includes('Return [Enter]'),
+    `the non-current Peek keeps Open:\n${footer}`)
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(h.resumes, [OTHER], 'the non-current Peek Enter is the pre-existing guarded Resume')
+  assert.equal(h.closes, 0)
+})
+
+test('the painted Return segment really returns from Browse, Search results and Peek', async () => {
+  const browse = harness()
+  browse.handle.setSnapshot(snapshot())
+  await browse.paint()
+  await clickBarAction(browse, 'Return [Enter]')
+  assert.equal(browse.closes, 1, 'the Browse Return press+release closes the Browser once')
+  assert.deepEqual(browse.resumes, [], 'the Browse Return never emits a Resume')
+  assert.equal(browse.handle.isDisposed(), true)
+  browse.app.dispose()
+  started.delete(browse.app)
+
+  const results = harness({ columns: 100, rows: 24, initialMode: 'search' })
+  results.handle.setSnapshot(snapshot({
+    query: 'needle',
+    searchState: 'ready',
+    searchResults: [
+      { row: row(CURRENT, 3_000, { title: 'Current session' }), source: 'Both', snippet: 'needle current' },
+      { row: row(OTHER, 2_000, { title: 'Other session' }), source: 'Content', snippet: 'needle other' },
+    ],
+  }), 'needle')
+  await results.paint()
+  results.vt.sendInput('\r') // editor -> the first (current) result
+  await results.paint()
+  await clickBarAction(results, 'Return [Enter]')
+  assert.equal(results.closes, 1, 'the Search-results Return press+release closes the Browser once')
+  assert.deepEqual(results.resumes, [])
+  results.app.dispose()
+  started.delete(results.app)
+
+  const peek = harness({ columns: 120, rows: 30 })
+  peek.handle.setSnapshot(snapshot())
+  await peek.paint()
+  peek.vt.sendInput(' ')
+  await peek.paint()
+  await clickBarAction(peek, 'Return [Enter]')
+  assert.equal(peek.closes, 1, 'the Peek Return press+release closes the Browser once')
+  assert.deepEqual(peek.resumes, [])
+  peek.app.dispose()
+  started.delete(peek.app)
+})
+
+test('a current Session row click only selects; the painted bar is the only Return', async () => {
+  const h = harness()
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  const frame = panelFrame(h)
+  await clickCell(h, 4, lineIndexOf(frame, '● current-'))
+  assert.equal(h.closes, 0, 'a Session row click never returns to a session')
+  assert.deepEqual(h.resumes, [], 'a Session row click never resumes another session')
+  assert.ok(/^> {3}● current-/m.test(h.view()), `the click only moved the selection:\n${h.view()}`)
+  await clickBarAction(h, 'Return [Enter]')
+  assert.equal(h.closes, 1, 'the painted Return bar segment is the one return action')
+})
+
+test('a Return press invalidated by a resize cannot act on release', async () => {
+  const h = harness()
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
+  const frame = panelFrame(h)
+  const bar = frame[frame.length - 1]!
+  const x = bar.indexOf('Return [Enter]') + 2
+  const y = frame.length
+  h.vt.sendInput(`\x1b[<0;${x};${y}M`)
+  await h.paint()
+  h.vt.resize(90, 28)
+  await h.paint()
+  h.vt.sendInput(`\x1b[<0;${x};${y}m`)
+  await h.paint()
+  assert.equal(h.closes, 0, 'a stale press revision drops the release without a Return')
+  assert.deepEqual(h.resumes, [])
+  await clickBarAction(h, 'Return [Enter]')
+  assert.equal(h.closes, 1, 'a fresh press+release on the repainted frame still returns')
+})
+
+test('an old Return click and its handle never close a newer Browser', async () => {
+  const h = harness()
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
+  const frame = panelFrame(h)
+  const bar = frame[frame.length - 1]!
+  const x = bar.indexOf('Return [Enter]') + 2
+  const y = frame.length
+  h.vt.sendInput(`\x1b[<0;${x};${y}M`)
+  await h.paint()
+  h.handle.close()
+  let secondCloses = 0
+  const second = h.app.openSessionWorkspace({
+    subject: { currentSessionId: CURRENT, currentCwd: '/ws/project', isCurrent: () => true },
+    onQueryChange: () => {},
+    onResume: () => {},
+    onClose: () => { secondCloses += 1 },
+    initialMode: 'browse',
+    initialBrowseScope: 'all',
+  })
+  second.setSnapshot(snapshot())
+  await h.paint()
+  h.vt.sendInput(`\x1b[<0;${x};${y}m`)
+  await h.paint()
+  assert.equal(secondCloses, 0, 'a press held by the retired panel never activates the newer Browser')
+  assert.equal(second.isDisposed(), false, 'the newer Browser stays open')
+  await clickBarAction(h, 'Return [Enter]')
+  assert.equal(secondCloses, 1, 'the newer Browser still owns its own Return')
+  second.close()
+})
+
+test('Return is withheld while pending, empty, or without a painted listed current row', async () => {
+  const pending = harness()
+  pending.handle.setSnapshot(snapshot({ resumePending: true }))
+  await pending.paint()
+  let footer = panelFrame(pending)[panelFrame(pending).length - 1]!
+  assert.ok(!footer.includes('Return [Enter]') && !footer.includes('Open [Enter]'),
+    `a pending switch advertises no activation:\n${footer}`)
+  pending.vt.sendInput('\r')
+  await pending.paint()
+  assert.equal(pending.closes, 0, 'a pending switch never returns through Enter')
+  assert.deepEqual(pending.resumes, [])
+  pending.app.dispose()
+  started.delete(pending.app)
+
+  const empty = harness()
+  empty.handle.setSnapshot(snapshot({ listState: 'empty', rows: [] }))
+  await empty.paint()
+  empty.vt.sendInput('\r')
+  await empty.paint()
+  assert.equal(empty.closes, 0, 'an empty roster never returns through a leftover cursor')
+  assert.deepEqual(empty.resumes, [])
+  empty.app.dispose()
+  started.delete(empty.app)
+
+  const squeezed = harness({ columns: 80, rows: 24 })
+  squeezed.handle.setSnapshot(snapshot())
+  await squeezed.paint()
+  squeezed.handle.setSnapshot(snapshot({ projectionError: 'projection failed' }))
+  squeezed.vt.resize(80, 3)
+  await squeezed.paint()
+  footer = panelFrame(squeezed)[panelFrame(squeezed).length - 1]!
+  assert.ok(!footer.includes('Return [Enter]'), `an unpainted current row advertises no Return:\n${footer}`)
+  squeezed.vt.sendInput('\r')
+  await squeezed.paint()
+  assert.equal(squeezed.closes, 0, 'a stale cursor on an unpainted current row never returns')
+  assert.deepEqual(squeezed.resumes, [])
+})
+
+test('Return stays readable, clickable and inside the frame at the frozen sizes', async () => {
+  for (const [columns, rows] of [[120, 40], [80, 10], [44, 20]] as const) {
+    const h = harness({ columns, rows })
+    h.handle.setSnapshot(snapshot())
+    await h.paint()
+    const frame = panelFrame(h)
+    assert.ok(frame.length <= rows, `${columns}x${rows}: the frame fits its budget`)
+    for (const line of frame) {
+      assert.ok(visibleWidth(line) <= columns, `${columns}x${rows}: no overflow: ${JSON.stringify(line)}`)
+    }
+    const bar = frame[frame.length - 1]!
+    // The existing whole-segment layout may fall back to its short form on a
+    // narrow bar; the segment must still be a complete, real Return verb.
+    assert.ok(/\bReturn\b/u.test(bar), `${columns}x${rows}: Return is painted:\n${bar}`)
+    assert.ok(bar.includes('Close [Esc]'), `${columns}x${rows}: Esc stays last:\n${bar}`)
+    const x = bar.indexOf('Return') + 1
+    await clickCell(h, x, frame.length - 1)
+    assert.equal(h.closes, 1, `${columns}x${rows}: the painted Return really closes once`)
+    assert.deepEqual(h.resumes, [])
+    h.app.dispose()
+    started.delete(h.app)
+  }
 })
 
 test('a late settlement from a disposed open is inert for the next open', async () => {

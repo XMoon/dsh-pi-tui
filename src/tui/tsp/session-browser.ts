@@ -993,8 +993,11 @@ export class TspSessionBrowser {
         return
       case 'resume': {
         if (panel.snapshot.resumePending || !visibleRows(panel).some((row) => row.id === intent.sessionId)) return
+        // Activating the Session this Browser was opened from closes it: it is
+        // a return to the same Session, never a Resume intent. The native
+        // Footer Resume stays disabled for that row with its existing reason.
         if (intent.sessionId === panel.request.subject.currentSessionId) {
-          this.notify('The current session is already active.', 'info')
+          this.close(panel, true)
           return
         }
         panel.selected = intent.sessionId

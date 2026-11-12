@@ -284,30 +284,52 @@ test('Resume intent stays scoped to a listed non-current row and captured subjec
   assert.deepEqual(intents, [{ sessionId: 'session-other', currentSessionId: 'session-current', source: 'activate' }])
 })
 
-test('typed direct resume matches main-session rows in Reader order only', async (t) => {
+test('typed direct resume matches a unique main-session prefix only', async (t) => {
   const presentation = new PresentationProbe()
   const intents: SessionBrowserResumeIntent[] = []
+  let listCalls = 0
   const { owner, diag } = ownerFor(presentation, reader({
-    list: async () => [
-      row('session-subagent-first', { origin: 'subagent' }),
-      row('session-main-second'),
-    ],
+    list: async () => {
+      listCalls += 1
+      return [
+        row('session-subagent-first', { origin: 'subagent' }),
+        row('session-main-second'),
+      ]
+    },
   }), { onResumeIntent: (intent) => intents.push(intent) })
   t.after(() => { owner.dispose(); diag.dispose() })
-  const handle = owner.open({ directMatch: { query: 'session-', find: findSessionMatch } })
+  const handle = owner.open({ directMatch: { query: 'session-main-sec', find: findSessionMatch } })
 
   assert.deepEqual(await handle.settlement, { kind: 'matched', sessionId: 'session-main-second' })
   assert.deepEqual(intents, [{
     sessionId: 'session-main-second',
     currentSessionId: 'session-current',
     source: 'direct',
-  }], 'after excluding subagents, the first main-session match retains official Reader order')
+  }], 'after excluding subagents, the unique main-session prefix starts the one direct switch')
   assert.deepEqual(presentation.latest()?.rows.map((entry) => entry.id), ['session-main-second'],
     'the Browser presentation still excludes every subagent row')
   assert.equal(presentation.closed[0], true, 'a direct match closes after the existing switch handoff starts')
+  assert.equal(listCalls, 1, 'the typed match still uses the panel\'s ONE official list read')
 })
 
-test('typed direct resume preserves Reader order across ambiguous main prefix and exact candidates', async (t) => {
+test('an empty session- prefix never auto-resumes and seeds the global search', async (t) => {
+  const presentation = new PresentationProbe()
+  const intents: SessionBrowserResumeIntent[] = []
+  const { owner, diag } = ownerFor(presentation, reader({
+    list: async () => [row('session-subagent-first', { origin: 'subagent' }), row('session-main-second')],
+  }), { onResumeIntent: (intent) => intents.push(intent) })
+  t.after(() => { owner.dispose(); diag.dispose() })
+  const handle = owner.open({ directMatch: { query: 'session-', find: findSessionMatch } })
+
+  assert.deepEqual(await handle.settlement, { kind: 'ready' })
+  assert.deepEqual(intents, [], 'an empty prefix never resolves a main row and never starts a switch')
+  assert.equal(presentation.closed[0], false, 'the Browser stays open on the shared search')
+  assert.deepEqual(presentation.initialQueries.filter((query) => query !== undefined), ['session-'],
+    'the same original text seeds the global search once')
+  assert.equal(presentation.latest()?.query, 'session-')
+})
+
+test('typed direct resume lets a full exact id win over an earlier main prefix candidate', async (t) => {
   const presentation = new PresentationProbe()
   const intents: SessionBrowserResumeIntent[] = []
   const { owner, diag } = ownerFor(presentation, reader({
@@ -321,18 +343,50 @@ test('typed direct resume preserves Reader order across ambiguous main prefix an
   t.after(() => { owner.dispose(); diag.dispose() })
   const handle = owner.open({ directMatch: { query: 'session-alpha', find: findSessionMatch } })
 
-  assert.deepEqual(await handle.settlement, { kind: 'matched', sessionId: 'session-alpha-first-main' })
+  assert.deepEqual(await handle.settlement, { kind: 'matched', sessionId: 'session-alpha' })
   assert.deepEqual(intents, [{
-    sessionId: 'session-alpha-first-main',
+    sessionId: 'session-alpha',
     currentSessionId: 'session-current',
     source: 'direct',
-  }], 'the first listed main prefix candidate wins ahead of a later exact-id candidate')
+  }], 'the full exact id wins ahead of an earlier listed main prefix candidate')
   assert.deepEqual(presentation.latest()?.rows.map((entry) => entry.id), [
     'session-alpha-first-main',
     'session-alpha',
     'session-alpha-second-main',
   ], 'the excluded subagent does not disturb the ordered main candidate corpus')
   assert.equal(presentation.closed[0], true)
+})
+
+test('an ambiguous main-session prefix keeps the Browser open on the same global search', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  t.after(() => t.mock.timers.reset())
+  const presentation = new PresentationProbe()
+  const intents: SessionBrowserResumeIntent[] = []
+  const searchQueries: string[] = []
+  let listCalls = 0
+  const { owner, diag } = ownerFor(presentation, reader({
+    list: async () => {
+      listCalls += 1
+      return [row('session-alpha-first-main'), row('session-alpha-second-main')]
+    },
+    search: async (query) => {
+      searchQueries.push(query)
+      return { items: [], hasMore: false }
+    },
+  }), { onResumeIntent: (intent) => intents.push(intent) })
+  t.after(() => { owner.dispose(); diag.dispose() })
+  const handle = owner.open({ directMatch: { query: 'session-al', find: findSessionMatch } })
+
+  assert.deepEqual(await handle.settlement, { kind: 'ready' })
+  assert.deepEqual(intents, [], 'two main rows share the prefix: nothing is resumed')
+  assert.equal(presentation.closed[0], false, 'the same Browser stays open on the ambiguous query')
+  assert.deepEqual(presentation.initialQueries.filter((query) => query !== undefined), ['session-al'])
+  assert.equal(presentation.latest()?.query, 'session-al', 'the original text is the search query')
+  t.mock.timers.tick(249)
+  assert.deepEqual(searchQueries, [], 'the Host content search still waits for its debounce')
+  t.mock.timers.tick(1)
+  assert.deepEqual(searchQueries, ['session-al'], 'one debounced Host search carries the same original text')
+  assert.equal(listCalls, 1, 'the ambiguous fallback never starts a second list read')
 })
 
 test('closing a pending direct-match read settles its request and ignores a late matching list', async (t) => {

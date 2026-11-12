@@ -139,7 +139,11 @@ production default; TSP keeps the experimental opt-in described in
   toggles only that Workspace; Left/Right collapse/expand it. `Show more` is a
   selectable action row whose Enter/activate reveals the next five ordinary
   history rows. None of those folder actions can fall through to Resume of a
-  previously selected Session. A valid non-current Session row enables the
+  previously selected Session. A listed Current Session row's keyboard Enter or
+  native activate closes the Browser and returns to that same Session, with no
+  Resume intent and no Session switch; native `select` only selects, the Current
+  row keeps the Footer Resume action disabled with its existing reason, and the
+  Details Reader's Enter stays Back. A valid non-current Session row enables the
   primary Resume action; Details stays read-only.
 
 ## Commands and Resume
@@ -153,10 +157,13 @@ production default; TSP keeps the experimental opt-in described in
   opens its global Cards view with the initial query; empty `/search` is rejected
   before listing. None of these commands creates a Session.
 - `/resume <id-or-prefix>` uses the single official `SessionReader.list()` read
-  for that open and the existing `findSessionMatch()` order over `panel.rows`
-  (listed main-session rows only). The first listed main-session match starts the
-  switch without a second list; a miss, including a subagent-only target, becomes
-  the initial global query. A manual Browser query entered while the list loads
+  for that open and the pure `findSessionMatch()` over `panel.rows` (listed
+  main-session rows only): a full exact ID wins over the listed order; without
+  one, only a UNIQUE non-empty `session-`/`session_`/short-id prefix starts the
+  switch, still without a second list. An ambiguous prefix, an empty prefix
+  (bare `session-`/`session_`), and a miss — including a subagent-only target —
+  never switch: the same original text seeds the ONE global Browser search for
+  the user to choose from. A manual Browser query entered while the list loads
   takes precedence and suppresses a matching typed `/resume` switch. The PiTUI
   renderer consumes the SAME `SessionBrowserReadOwner` through its own
   fullscreen Session Workspace Presenter (`TuiApp.openSessionWorkspace` +
