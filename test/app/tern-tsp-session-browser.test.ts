@@ -169,12 +169,14 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
   let presentedInitialDirectoryEntry: boolean | undefined
   let presentedInitialDirectoryPath: string | undefined
   let presentedHandleDisposed: boolean | undefined
+  let latestPresentedHandle: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserPanelHandle | undefined
   const readPresentation = {
     open: (request: Parameters<typeof browserPresentation.open>[0]) => {
       presentedDirectoryEntry = request.initialDirectoryChooser
       presentedInitialDirectoryEntry = request.initialDirectoryEntry
       presentedInitialDirectoryPath = request.initialDirectoryPath
       const handle = browserPresentation.open(request)
+      latestPresentedHandle = handle
       presentedHandleDisposed = handle.isDisposed()
       return handle
     },
@@ -223,6 +225,7 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
     presentedInitialDirectoryEntry: () => presentedInitialDirectoryEntry,
     presentedInitialDirectoryPath: () => presentedInitialDirectoryPath,
     presentedHandleDisposed: () => presentedHandleDisposed,
+    presentedHandleIsDisposed: () => latestPresentedHandle?.isDisposed(),
     moveSubject: () => { current = false },
   }
 }
@@ -788,8 +791,8 @@ test('native Browser flat fallback keeps all listed Sessions, then a global card
   const currentResume = pickerActionByBase(pane, 'resume', BROWSER)
   assert.equal(currentResume?.disabled, 'The current session is already active.')
   sendPickerAction(pane, 'resume', BROWSER)
-  sendActivate(pane, 'session:session-current', pickerId)
-  assert.equal(m.resumeIntents.length, 0, 'Current cannot emit a Footer or row-activation Resume intent')
+  assert.equal(m.resumeIntents.length, 0, 'Current cannot emit a Footer Resume intent')
+  assert.ok(picker(pane) !== undefined, 'the disabled Footer Resume is inert, never a Return')
   sendSelect(pane, 'session:session-other', pickerId)
   await waitUntil('a non-current row is selected', () => props(pane).selected === 'session:session-other')
   assert.deepEqual(props(pane).current, ['session:session-current'])
@@ -843,6 +846,77 @@ test('native Browser flat fallback keeps all listed Sessions, then a global card
   assert.equal(props(pane).total, 2)
   assert.match(String(props(pane).message), /refine the query/u, 'hasMore is a refine hint, never a page request')
   assert.equal(m.fatals.length, 0)
+})
+
+test('Current keyboard Enter closes the native Browser with no Resume intent', async (t) => {
+  const m = await mounted(t)
+  const { pane } = m
+  assert.equal(props(pane).selected, 'session:session-current', 'the current row is the initial selection')
+  assert.deepEqual(props(pane).current, ['session:session-current'])
+  assert.equal(pickerActionByBase(pane, 'resume', BROWSER)?.disabled, 'The current session is already active.')
+  pane.key('\r')
+  await waitUntil('Current Enter closes the Browser', () => picker(pane) === undefined)
+  assert.deepEqual(m.resumeIntents, [], 'Current Enter is a Return, never a Resume intent')
+  assert.equal(m.presentedHandleIsDisposed(), true, 'the same read handle is disposed by the Return')
+  assert.equal(m.fatals.length, 0, 'returning to the same Session never fails')
+})
+
+test('Current native activate closes while native select only selects', async (t) => {
+  const m = await mounted(t)
+  const { pane } = m
+  const pickerId = picker(pane)!.id
+  sendSelect(pane, 'session:session-current', pickerId)
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.ok(picker(pane) !== undefined, 'a native select on the current row only selects')
+  assert.equal(props(pane).selected, 'session:session-current')
+  assert.deepEqual(m.resumeIntents, [], 'native select never emits a Resume intent')
+  sendActivate(pane, 'session:session-current', pickerId)
+  await waitUntil('Current activate closes the Browser', () => picker(pane) === undefined)
+  assert.deepEqual(m.resumeIntents, [], 'Current activate is a Return, never a Resume intent')
+  assert.equal(m.presentedHandleIsDisposed(), true, 'the same read handle is disposed by the Return')
+  assert.equal(m.fatals.length, 0)
+})
+
+test('disabled current Resume is inert while native Close still closes', async (t) => {
+  const m = await mounted(t)
+  const { pane } = m
+  sendPickerAction(pane, 'resume', BROWSER)
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.ok(picker(pane) !== undefined, 'the disabled Footer Resume never closes the Browser')
+  assert.deepEqual(m.resumeIntents, [], 'the disabled Footer Resume emits no intent')
+  assert.equal(pickerActionByBase(pane, 'resume', BROWSER)?.disabled, 'The current session is already active.')
+  sendPickerAction(pane, 'close', BROWSER)
+  await waitUntil('native Close retires the Browser', () => picker(pane) === undefined)
+  assert.deepEqual(m.resumeIntents, [])
+})
+
+test('a retired native Picker identity never closes or resumes the newer Browser', async (t) => {
+  const m = await mounted(t)
+  const { pane } = m
+  const oldPickerId = picker(pane)!.id
+  const oldSurface = pane.frames().at(-1)!.sf
+  pane.key('\r')
+  await waitUntil('the first Browser returns on the current row', () => picker(pane) === undefined)
+
+  m.owner.open()
+  await waitUntil('the second Browser is ready', () => picker(pane) !== undefined && props(pane).state === 'ready')
+  const newPickerId = picker(pane)!.id
+  assert.notEqual(newPickerId, oldPickerId, 'a new open gets its own Picker identity')
+  pane.event({ ev: 'activate', sf: oldSurface, id: oldPickerId, item: 'session:session-current' })
+  pane.event({ ev: 'select', sf: oldSurface, id: oldPickerId, item: 'session:session-other' })
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.ok(picker(pane) !== undefined, 'the retired identity cannot close the newer Browser')
+  assert.equal(props(pane).selected, 'session:session-current', 'the retired identity cannot select in the newer Browser')
+  assert.deepEqual(m.resumeIntents, [], 'the retired identity cannot resume')
+
+  // A LIVE non-current activate keeps the pre-existing guarded Resume intent.
+  sendSelect(pane, 'session:session-other', newPickerId)
+  await waitUntil('the newer Browser selects the non-current row', () => props(pane).selected === 'session:session-other')
+  sendActivate(pane, 'session:session-other', newPickerId)
+  await waitUntil('the live non-current activate reaches the read owner', () => m.resumeIntents.length === 1)
+  assert.deepEqual(m.resumeIntents[0], {
+    sessionId: 'session-other', currentSessionId: 'session-current', source: 'activate',
+  })
 })
 
 test('footer keyboard focus visits only enabled actions', async (t) => {
@@ -1163,10 +1237,11 @@ test('Details preserves search state, scrolls its own body, and emits read-only 
   assert.equal(props(pane).selected, 'session:session-current', 'clearing search restores the pre-search selection')
   sendSelect(pane, 'session:session-current', picker(pane)!.id)
   await waitUntil('Current is independently selected', () => props(pane).selected === 'session:session-current')
-  pane.key('\r')
+  // A row SELECT never activates: the current row is deliberately not returned
+  // from this selection path (the dedicated Current Enter case owns the Return).
   sendSelect(pane, 'session:session-content', picker(pane)!.id)
-  await waitUntil('later selection processes after Current Enter', () => props(pane).selected === 'session:session-content')
-  assert.equal(m.resumeIntents.length, 0, 'the current Session cannot be resumed')
+  await waitUntil('a later selection still processes', () => props(pane).selected === 'session:session-content')
+  assert.equal(m.resumeIntents.length, 0, 'selecting the current Session never resumes it')
   sendActivate(pane, 'session:session-content', picker(pane)!.id)
   await waitUntil('activation emits only a Resume intent', () => m.resumeIntents.length === 1)
   assert.deepEqual(m.resumeIntents[0], {

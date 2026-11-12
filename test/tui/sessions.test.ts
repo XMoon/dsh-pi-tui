@@ -290,16 +290,44 @@ test('picker Esc cancels', async () => {
   handle.close()
 })
 
-test('findSessionMatch resolves full ids, session- prefixes, and short ids', () => {
+test('findSessionMatch resolves a full exact id ahead of an earlier prefix match', () => {
+  const rows: SessionPickerRow[] = [
+    { id: 'session-alpha-first-main', updatedAt: 3, createdAt: 3, live: false },
+    { id: 'session-alpha', updatedAt: 2, createdAt: 2, live: false },
+    { id: 'session-alpha-second-main', updatedAt: 1, createdAt: 1, live: false },
+  ]
+  assert.equal(findSessionMatch(rows, 'session-alpha')?.id, 'session-alpha',
+    'the exact id wins even though an earlier row carries the same prefix')
+  assert.equal(findSessionMatch(rows, 'session-alpha-second-main')?.id, 'session-alpha-second-main')
+})
+
+test('findSessionMatch resolves only a unique non-empty prefix, never row order', () => {
   const rows: SessionPickerRow[] = [
     { id: 'session-11111111-2222-3333-4444-555555555555', updatedAt: 2, createdAt: 2, live: false },
     { id: 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', updatedAt: 3, createdAt: 3, live: false },
     { id: 'session-99999999-8888-7777-6666-555555555555', updatedAt: 1, createdAt: 1, live: false },
   ]
-  assert.equal(findSessionMatch(rows, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')?.id, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
   assert.equal(findSessionMatch(rows, 'session-aaaaaaaa-bbbb')?.id, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
   assert.equal(findSessionMatch(rows, 'aaaaaaa')?.id, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+  assert.equal(findSessionMatch(rows, 'session-9999')?.id, 'session-99999999-8888-7777-6666-555555555555')
   assert.equal(findSessionMatch(rows, 'nope'), undefined)
+  assert.equal(findSessionMatch(rows, ''), undefined)
+
+  const duplicates: SessionPickerRow[] = [
+    { id: 'session-dupe-newest', updatedAt: 9, createdAt: 9, live: false },
+    { id: 'session-dupe-older', updatedAt: 1, createdAt: 1, live: false },
+  ]
+  assert.equal(findSessionMatch(duplicates, 'session-dupe'), undefined,
+    'a duplicate prefix is ambiguous even when the first row is the newest')
+  assert.equal(findSessionMatch(duplicates, 'dupe'), undefined,
+    'the short-id form is ambiguous exactly like the session- prefix form')
+  assert.equal(findSessionMatch(duplicates, 'session-'), undefined,
+    'an empty session- prefix never matches every listed row')
+  assert.equal(findSessionMatch(duplicates, 'session_'), undefined,
+    'an empty session_ prefix never matches every listed row')
+  assert.equal(findSessionMatch(duplicates, 'session-'), undefined)
+  assert.equal(findSessionMatch([{ id: 'session-only', updatedAt: 1, createdAt: 1, live: false }], 'session-'), undefined,
+    'an empty prefix is not resolved by a single-row roster either')
 })
 
 

@@ -567,6 +567,29 @@ test('/resume with a unique match switches without starting a content search', a
   assert.equal(h.searchCalls.length, 0, 'the direct fast path must not start a content search')
 })
 
+test('/resume with an ambiguous prefix seeds the same global search and never switches', async (t) => {
+  const h = harness({
+    rows: [
+      { id: 'session-alpha', updatedAt: 300, cwd: '/ws' },
+      { id: 'session-alpine', updatedAt: 200, cwd: '/ws' },
+    ],
+    search: async (query) => ({ items: [{ sessionId: 'session-alpha', snippet: `hit ${query}` }], hasMore: false }),
+  })
+  t.after(() => h.app.stop())
+  await h.runResume('session-al')
+  await waitUntil(() => h.searchCalls.length === 1)
+  assert.equal(h.searchCalls[0]!.query, 'session-al',
+    'the ambiguous typed text becomes the one canonical Host search query')
+  assert.deepEqual(h.switched, [], 'an ambiguous prefix never switches a Session')
+  await waitUntil(() => h.view().includes('Search: session-al'))
+  assert.ok(h.view().includes('Search all workspaces'), 'the ambiguous /resume stays in the SAME global search')
+  // A real edit supersedes the one-shot seed and drives the next Host search.
+  h.vt.sendInput('x')
+  await waitUntil(() => h.searchCalls.length === 2)
+  assert.equal(h.searchCalls[1]!.query, 'session-alx', 'the user edit, not the seed, owns the next search')
+  assert.deepEqual(h.switched, [], 'editing the fallback query remains a read')
+})
+
 test('/resume with no match keeps the workspace and starts a content search', async (t) => {
   const h = harness({
     rows: rows(),

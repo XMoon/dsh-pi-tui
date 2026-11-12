@@ -459,15 +459,26 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   page by the browse scope; only a real editor text change reaches the read
   owner's one debounced Host search generation. `Enter` in the editor only moves
   focus to the first real result; a second `Enter` from the results list is the
-  ONE Resume intent. Results are never re-grouped by Activity.
+  ONE activation: it returns when that result is the Current Session and is the
+  guarded Resume otherwise. Results are never re-grouped by Activity.
+- **Current row Enter returns.** A listed, painted Current Session row's `Enter`
+  (Browse, the Search-results second `Enter`, or Peek `Enter`) closes the Browser
+  and returns to the Session that opened it: no Resume intent and no Session
+  switch, with the Session id, draft, turn and writer untouched. Every other
+  Session row keeps the guarded Resume. The action bar names the real verb —
+  `Return [Enter]` in secondary navigation ink for Current, `Open [Enter]` primary
+  otherwise — and the Current branch is decided only after the same listed and
+  painted admission a Resume needs. A Session row click still only selects;
+  returning requires the physical bar segment or `Enter`.
 - **`Space` is a read-only Peek.** It opens a plain-text detail of the selected
   painted Session row (full Session id, identity, official Workspace
   membership, cwd, preset, updated, running, pending, source) and nothing else:
   no Agent, no Question/Approval form, no Session `open`/`retain`, no writer and
   no Host call. Folder, New, Add and Show more rows have no Peek and never
   inherit the last Session. `Esc` returns to the previous focus with the same
-  selection, query and scroll; `Enter` opens the PINNED Session and still has to
-  pass the read owner's eligibility/currentness before any switch. The Peek is
+  selection, query and scroll; `Enter` activates the PINNED Session — returning
+  when it is Current, otherwise an open that still has to pass the read owner's
+  eligibility/currentness before any switch. The Peek is
   pinned to ITS Session id: if a roster/search refresh no longer lists that
   Session, the Peek exits to its previous focus and the list re-anchors on a
   listed row — it never silently
@@ -501,16 +512,17 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   commits that existing official Workspace and returns, while its disclosure
   only toggles. A Session row click only selects; `+ New session`,
   `Add directory` and `Show more` clicks run their named explicit action;
-  Resume stays the guarded Enter verb. The ONE physical Action Bar is
+  Resume is the guarded `Enter` verb and the Current row's `Enter` is its Return.
+  The ONE physical Action Bar is
   pointer-capable for its complete painted `Verb [Key]` segments only
-  (`Open [Enter]`, `Peek [Space]`, `Close [Esc]`, `Back [Esc]`,
+  (`Return [Enter]`, `Open [Enter]`, `Peek [Space]`, `Close [Esc]`, `Back [Esc]`,
   `Results [Enter]`, `Verify [Enter]`, `Cancel [Esc]`, and the selected row's
   real Enter verb); each runs the existing method (`resumeSelected`,
   `openPeek`, `handleEscape`, `handleSearchInput`, `handleDirectorySubmit`,
   `handleDirectoryCancel`, `activateSelectedBrowseRow`) and never starts a
   second navigation state machine. The Peek pane paints NO local action line:
-  the global bar is the only navigation row, and its `Open [Enter]` is the one
-  explicit resume. A press records the LIVE terminal grant beside the frame
+  the global bar is the only navigation row, and its `Open [Enter]`/`Return
+  [Enter]` is the one explicit activation. A press records the LIVE terminal grant beside the frame
   revision, so a resize that has not repainted yet also drops the gesture. A
   same-row double click on the same word stays the terminal's word-selection
   gesture, so one fast double click toggles a Folder at most once.

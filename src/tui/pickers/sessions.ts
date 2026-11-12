@@ -170,19 +170,32 @@ export function sessionLabelParts(label: string): { prefix: string; title: strin
 }
 
 /**
- * Resolve one session row for a resume query: an exact id, a
- * `session-`-prefixed prefix, or a short-id prefix. Rows are newest-first,
- * so the first match is the most recent candidate.
- * @param rows - the picker rows, newest first.
- * @param query - the resume query (trimmed).
+ * Resolve one session row for a typed resume query. A full id wins over the
+ * row order; otherwise only a UNIQUE non-empty prefix (the `session-` form or
+ * the short id) is resolved. An ambiguous or missing prefix returns undefined
+ * so the read owner seeds the same global Browser search instead of guessing.
+ * @param rows - the listed main-session rows (never re-filtered here).
+ * @param query - the resume query.
  * @returns the matching row, or undefined.
  */
 export function findSessionMatch(rows: readonly SessionPickerRow[], query: string): SessionPickerRow | undefined {
+  const exact = rows.find(row => row.id === query)
+  if (exact !== undefined) return exact
+
   // Strip an optional session- prefix before prefix matching so both
-  // `session-aaaaaaaa-bbbb` and `aaaaaaaa-bbbb` resolve.
+  // `session-aaaaaaaa-bbbb` and `aaaaaaaa-bbbb` resolve. An empty bare
+  // query must never match every listed row.
   const bare = query.replace(/^session[-_]/i, '')
-  return rows.find(row =>
-    row.id === query
-    || row.id.startsWith(`session-${bare}`)
-    || shortSessionId(row.id).startsWith(bare))
+  if (bare === '') return undefined
+
+  let candidate: SessionPickerRow | undefined
+  for (const row of rows) {
+    if (!row.id.startsWith(`session-${bare}`)
+      && !shortSessionId(row.id).startsWith(bare)) continue
+    // A row can satisfy both prefix forms; count it once. A second candidate
+    // means the query is ambiguous and the Browser search owns the choice.
+    if (candidate !== undefined) return undefined
+    candidate = row
+  }
+  return candidate
 }
