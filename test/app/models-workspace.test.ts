@@ -471,6 +471,44 @@ test('a transport-lost native attempt paints the unconfirmed outcome, never a bu
   assert.ok(catalogReads >= 1, 'the unconfirmed outcome re-reads the Host credential roster')
 })
 
+test('a dispatch-unknown sign-in is the unconfirmed outcome, not a failure, and re-reads the Host', async () => {
+  const { source } = fakeSource()
+  let catalogs = 0
+  source.readCatalog = async () => {
+    catalogs += 1
+    return { kind: 'ready', rows: makeRows() }
+  }
+  source.beginAuthorization = async () => {
+    const error = new Error('the Host did not acknowledge the authorization attempt')
+    ;(error as { code?: string }).code = 'DISPATCH_UNKNOWN'
+    throw error
+  }
+  const page = openWith(source, { view: 'provider', route: 'anthropic' }, 26)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+  const text = viewText(page)
+  assert.match(text, /sign-in outcome unknown — refresh credentials before retrying/u)
+  assert.doesNotMatch(text, /sign-in failed/u)
+  assert.ok(catalogs >= 2, 'the unknown outcome re-reads the Host catalog before another manual attempt')
+})
+
+test('a real official NO_FLOW refusal still paints the definite failure taxonomy', async () => {
+  const { source } = fakeSource()
+  source.beginAuthorization = async () => {
+    const error = new Error('no authorization flow is registered')
+    ;(error as { code?: string }).code = 'NO_FLOW'
+    throw error
+  }
+  const page = openWith(source, { view: 'provider', route: 'anthropic' }, 26)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /login method is no longer available/u)
+})
+
 test('the catalog authorization notice states that native sign-in is unavailable without hiding the API key list', async () => {
   const { source } = fakeSource()
   source.readCatalog = async () => ({
