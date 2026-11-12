@@ -1010,3 +1010,148 @@ test('folded Tools expose only trusted, bounded human summaries from the shared 
   assert.equal(openedRead?.props['collapsed'], false)
   assert.ok(nodeText(openedRead!).includes('src/a.ts'), 'the opened body is the real Tool content')
 })
+
+test('standalone Notice, Recall and Relay forms keep their own readable identity and bounded disclosure', () => {
+  const longNoticeSummary = `Agent completed\n第二行摘要 ${'很长'.repeat(60)}`
+  const relayLines = Array.from({ length: 12 }, (_, index) => `relay line ${index + 1}`)
+  const longSingleLine = `RELAY-${'z'.repeat(900)}`
+  const events: SessionEvent[] = [
+    ev('turn/start', { turn: 1 }, 0),
+    user(1, 'read the context forms'),
+    context(2, 'notice-long', 'notice payload detail', {
+      kind: 'subagent-settled', form: 'notice', summary: longNoticeSummary, label: 'subagent',
+    }),
+    context(3, 'notice-empty', 'unsummarized notice payload', { kind: 'subagent-settled', form: 'notice' }),
+    context(4, 'recall-labelled', 'recalled labelled detail', {
+      kind: 'session-reference', form: 'recall', references: [{ label: 'prior session' }],
+    }),
+    context(5, 'recall-unlabelled', 'recalled unlabelled detail', { kind: 'session-reference', form: 'recall' }),
+    context(6, 'relay-short', 'relayed short body', { kind: 'agent-message', form: 'relay', senderSessionId: 'agent-1' }),
+    context(7, 'relay-lines', relayLines.join('\n'), { kind: 'agent-message', form: 'relay', senderSessionId: 'agent-2' }),
+    context(8, 'relay-single', longSingleLine, { kind: 'agent-message', form: 'relay' }),
+    context(9, 'relay-sibling', 'a second relay from the same sender', { kind: 'agent-message', form: 'relay', senderSessionId: 'agent-2' }),
+    ev('llm/retry', {
+      retry: 1, delayMs: 2000, failure: { code: 'RATE', message: 'too many requests' }, turn: 1, step: 0,
+    }, 10),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 11),
+  ]
+  const messages = folder(events).messages()
+  const keys = new TranscriptNodeKeys()
+  const closed = flatten(messages, 'full', keys)
+  const rowOf = (predicate: (row: Extract<TranscriptMessage, { kind: 'system' }>) => boolean): Extract<TranscriptMessage, { kind: 'system' }> => {
+    const row = messages.find((entry): entry is Extract<TranscriptMessage, { kind: 'system' }> =>
+      entry.kind === 'system' && predicate(entry))
+    assert.ok(row !== undefined)
+    return row
+  }
+  const nodeFor = (row: Extract<TranscriptMessage, { kind: 'system' }>, nodes = closed): Tree | undefined =>
+    nodes.find(node => node.props['key'] === `s1-${keys.keyFor(row)}`)
+  const headChild = (node: Tree, key: string): Tree | undefined =>
+    node.children.find(child => child.props['key'] === 'head')?.children
+      .find(child => child.props['key'] === key)
+  const bodyOf = (nodes: Tree[], node: Tree, key = 'body'): Tree | undefined =>
+    nodes.find(entry => entry.id === `${node.id}.${key}`)
+
+  const notice = rowOf(row => row.text === 'notice payload detail')
+  const noticeNode = nodeFor(notice)!
+  assert.equal(noticeNode.kind, 'section')
+  assert.equal(noticeNode.props['collapsed'], true)
+  const title = headChild(noticeNode, 'title')
+  assert.equal(title?.props['text'], 'subagent-settled')
+  const summary = headChild(noticeNode, 'summary')
+  assert.equal(summary?.props['text'], longNoticeSummary, 'the producer summary keeps its full multi-line text')
+  assert.equal(summary?.props['truncate'], undefined, 'the summary is never forced onto one truncated line')
+  assert.equal(summary?.props['wrap'], undefined, 'the native text keeps word wrapping')
+  assert.equal(bodyOf(closed, noticeNode), undefined, 'the full notice payload starts closed')
+  const noticeOpen = flatten(messages, 'full', keys, { expandedContextRowOwners: new Set([notice]) })
+  assert.ok(bodyOf(noticeOpen, noticeNode)?.props['text'] === 'notice payload detail')
+
+  const emptyNotice = rowOf(row => row.text === 'unsummarized notice payload')
+  const emptyNoticeNode = nodeFor(emptyNotice)!
+  assert.equal(emptyNoticeNode.kind, 'card', 'a notice without a summary keeps the fail-open card')
+  assert.equal(emptyNoticeNode.props['collapsible'], undefined)
+  assert.ok(nodeText(emptyNoticeNode).includes('unsummarized notice payload'))
+
+  const recallLabel = rowOf(row => row.text === 'recalled labelled detail')
+  const recallLabelNode = nodeFor(recallLabel)!
+  assert.ok(nodeText(recallLabelNode).includes('Session recall · prior session'))
+  assert.equal(recallLabelNode.props['collapsed'], true)
+  const recallOpen = flatten(messages, 'full', keys, { expandedContextRowOwners: new Set([recallLabel]) })
+  assert.ok(bodyOf(recallOpen, recallLabelNode)?.props['text'] === 'recalled labelled detail')
+  const recallPlain = rowOf(row => row.text === 'recalled unlabelled detail')
+  assert.ok(nodeText(nodeFor(recallPlain)!).includes('Session recall'))
+  assert.ok(!nodeText(nodeFor(recallPlain)!).includes('Session recall · null'))
+
+  const short = rowOf(row => row.text === 'relayed short body')
+  const shortNode = nodeFor(short)!
+  assert.equal(shortNode.kind, 'card', 'a short Relay stays directly readable')
+  assert.equal(shortNode.props['collapsible'], undefined)
+  const shortText = nodeText(shortNode)
+  assert.ok(shortText.includes('Agent message · agent-1'))
+  assert.ok(shortText.includes('relayed short body'))
+
+  const lines = rowOf(row => row.text === relayLines.join('\n'))
+  const linesNode = nodeFor(lines)!
+  assert.equal(linesNode.kind, 'section')
+  assert.equal(linesNode.props['collapsed'], true)
+  assert.equal(headChild(linesNode, 'first')?.props['text'], 'First: relay line 1')
+  assert.equal(headChild(linesNode, 'last')?.props['text'], 'Last: relay line 12')
+  assert.equal(bodyOf(closed, linesNode), undefined)
+  const linesOpen = flatten(messages, 'full', keys, { expandedContextRowOwners: new Set([lines]) })
+  assert.equal(bodyOf(linesOpen, linesNode)?.props['text'], relayLines.join('\n'))
+
+  const single = rowOf(row => row.text === longSingleLine)
+  const singleNode = nodeFor(single)!
+  assert.equal(singleNode.kind, 'section', 'a single over-budget Relay line is a long Relay')
+  assert.equal(singleNode.props['collapsed'], true)
+  const firstPreview = String(headChild(singleNode, 'first')?.props['text'] ?? '')
+  const lastPreview = String(headChild(singleNode, 'last')?.props['text'] ?? '')
+  assert.ok(firstPreview.startsWith('First: RELAY-') && firstPreview.endsWith('…'))
+  assert.ok(lastPreview.startsWith('Last: …'))
+  assert.ok(firstPreview.length <= 'First: '.length + 100 && lastPreview.length <= 'Last: '.length + 100,
+    `each preview segment stays within 100 code points: ${firstPreview.length}/${lastPreview.length}`)
+
+  const sibling = rowOf(row => row.text === 'a second relay from the same sender')
+  const siblingNode = nodeFor(sibling)!
+  assert.equal(siblingNode.kind, 'card', 'the short sibling is independent of the long Relay state')
+  const siblingOpen = flatten(messages, 'full', keys, {
+    expandedContextRowOwners: new Set([lines, sibling]),
+  })
+  assert.equal(siblingNode.props['collapsed'], undefined)
+  assert.ok(nodeText(siblingNode).includes('a second relay from the same sender'))
+  assert.equal(bodyOf(siblingOpen, siblingNode)?.props['text'], 'a second relay from the same sender',
+    'a short sibling stays directly readable')
+  assert.equal(nodeFor(lines, siblingOpen)?.props['collapsed'], false, 'the long sibling keeps its own owner')
+
+  const retry = messages.find(row => row.kind === 'system' && row.origin === 'llm-retry')
+  assert.ok(retry !== undefined && retry.kind === 'system')
+  const retryNode = nodeFor(retry)!
+  assert.equal(retryNode.kind, 'card', 'non-context orchestration evidence never becomes a Context disclosure')
+  assert.ok(nodeText(retryNode).includes('llm retry 1 in 2s'))
+})
+
+test('a long Relay closed body is not a visible image/context member', () => {
+  const relayBody = Array.from({ length: 12 }, (_, index) => `relay visible line ${index + 1}`).join('\n')
+  const messages = folder([
+    ev('turn/start', { turn: 1 }, 0),
+    user(1, 'long relay'),
+    context(2, 'relay-hidden', relayBody, { kind: 'agent-message', form: 'relay', senderSessionId: 'agent-9' }),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3),
+  ]).messages()
+  const relay = messages.find((row): row is Extract<TranscriptMessage, { kind: 'system' }> => row.kind === 'system')
+  assert.ok(relay !== undefined)
+  const keys = new TranscriptNodeKeys()
+  const innerDisclosure = {
+    expandedThinkingOwners: new Set<TranscriptMessage>(),
+    expandedContextRowOwners: new Set<TranscriptMessage>(),
+    expandedClusterOwners: new Set<TranscriptMessage>(),
+    expandedCommandCompactionOwners: new Set<TranscriptMessage>(),
+  }
+  const closed = visibleTranscriptMembers(messages, { preset: 'full', window: WINDOW, innerDisclosure }, keys)
+  assert.equal(closed.has(relay), false, 'a closed long Relay body is not a visible member')
+  const opened = visibleTranscriptMembers(messages, {
+    preset: 'full', window: WINDOW,
+    innerDisclosure: { ...innerDisclosure, expandedContextRowOwners: new Set([relay]) },
+  }, keys)
+  assert.equal(opened.has(relay), true, 'opening the exact owner grants the body')
+})

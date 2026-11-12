@@ -1186,7 +1186,93 @@ function contextClusterMemberNode(
 function canCollapseContextRow(message: Extract<TranscriptMessage, { kind: 'system' }>): boolean {
   const kind = contextPresentationKind(message)
   if (kind === 'notice') return message.summary !== undefined && message.summary !== ''
+  if (kind === 'relay') return isLongRelayContext(message)
   return kind === 'ambient' || kind === 'recall'
+}
+
+/** TSP-specific bounded Relay disclosure thresholds. These are an explicit
+ *  renderer policy, NOT PiTui's visual-row measurement: the Tern surface has
+ *  no app-side physical-line oracle, so the row uses the display text's own
+ *  logical lines and Unicode code points. */
+const RELAY_DISCLOSURE_MAX_LINES = 10
+const RELAY_DISCLOSURE_MAX_CODE_POINTS = 800
+const RELAY_PREVIEW_CODE_POINTS = 100
+
+function isLongRelayContext(message: Extract<TranscriptMessage, { kind: 'system' }>): boolean {
+  if (contextPresentationKind(message) !== 'relay') return false
+  const text = sanitizeDisplayText(message.text)
+  if (Array.from(text).length > RELAY_DISCLOSURE_MAX_CODE_POINTS) return true
+  return text.split(/\r\n|\r|\n/).length > RELAY_DISCLOSURE_MAX_LINES
+}
+
+function relayTitle(message: Extract<TranscriptMessage, { kind: 'system' }>): string {
+  const sender = message.contextPresentation?.senderSessionId
+  return sender === undefined || sender === ''
+    ? 'Agent message'
+    : `Agent message · ${sanitizedPhysicalLine(sender)}`
+}
+
+function boundedRelayHead(value: string, edge: 'start' | 'end'): string | undefined {
+  const characters = Array.from(value.trim())
+  if (characters.length === 0) return undefined
+  if (characters.length <= RELAY_PREVIEW_CODE_POINTS) return characters.join('')
+  const keep = RELAY_PREVIEW_CODE_POINTS - 1
+  return edge === 'start'
+    ? `${characters.slice(0, keep).join('')}…`
+    : `…${characters.slice(-keep).join('')}`
+}
+
+/** The bounded first/last text preview of one long Relay body. */
+function relayHeadPreview(text: string): { readonly first?: string; readonly last?: string } {
+  const lines = text.split(/\r\n|\r|\n/)
+  if (lines.length === 1) {
+    return { first: boundedRelayHead(text, 'start'), last: boundedRelayHead(text, 'end') }
+  }
+  return {
+    first: boundedRelayHead(lines[0] ?? '', 'start'),
+    last: boundedRelayHead(lines[lines.length - 1] ?? '', 'end'),
+  }
+}
+
+/**
+ * T3-0B standalone Relay: a short body stays directly readable (no empty
+ * disclosure), and a long body uses the SAME `expandedContextRowOwners` as the
+ * other standalone Context forms. Only the official sender id is shown; no
+ * Host session lookup and no invented Agent name.
+ */
+function relayContextRowNode(
+  message: Extract<TranscriptMessage, { kind: 'system' }>,
+  key: string,
+  options: TranscriptViewOptions,
+  allowDisclosure: boolean,
+): Node {
+  const title = relayTitle(message)
+  const disclosure = options.innerDisclosure
+  if (!allowDisclosure || disclosure === undefined || !canCollapseContextRow(message)) {
+    // No operable owner (legacy/covered projection) -> directly readable body,
+    // never a dead chevron.
+    return ui.card({ key, head: title }, ...contextBodyNodes(message))
+  }
+  const expanded = disclosure.expandedContextRowOwners.has(message)
+  const preview = relayHeadPreview(sanitizeDisplayText(message.text))
+  return ui.section(
+    {
+      key,
+      head: ui.col(
+        { key: 'head', gap: 'none' },
+        ui.text({ key: 'title', text: title, wrap: 'none' }),
+        ...(preview.first === undefined ? [] : [ui.text({
+          key: 'first', text: `First: ${preview.first}`, wrap: 'none', truncate: 'end',
+        })]),
+        ...(preview.last === undefined ? [] : [ui.text({
+          key: 'last', text: `Last: ${preview.last}`, wrap: 'none', truncate: 'end',
+        })]),
+      ),
+      collapsible: true,
+      collapsed: !expanded,
+    },
+    ...(expanded ? contextBodyNodes(message) : []),
+  )
 }
 
 function contextRowNode(
@@ -1196,18 +1282,43 @@ function contextRowNode(
   allowDisclosure = true,
 ): Node {
   const disclosure = options.innerDisclosure
+  const kind = contextPresentationKind(message)
+  if (message.context === true && kind === 'relay') {
+    return relayContextRowNode(message, key, options, allowDisclosure)
+  }
   if (message.context !== true || !allowDisclosure || disclosure === undefined || !canCollapseContextRow(message)) {
     return contextMemberNode(message, key)
   }
-  const kind = contextPresentationKind(message)
-  const identity = kind === 'notice'
-    ? 'Notice'
-    : message.label ?? contextFormOf(message) ?? 'Context'
-  const summary = kind === 'notice' ? message.summary : undefined
-  const head = sanitizedPhysicalLine(summary === undefined ? identity : `${identity} · ${summary}`)
   const expanded = disclosure.expandedContextRowOwners.has(message)
+  if (kind === 'notice') {
+    // The producer summary is a NORMAL wrapped text row beside the header —
+    // never folded into one truncated physical line. The payload stays behind
+    // the native disclosure.
+    const title = message.label === undefined || message.label === ''
+      ? 'Notice'
+      : sanitizedPhysicalLine(message.label)
+    const summary = message.summary === undefined ? '' : sanitizeDisplayText(message.summary)
+    return ui.section(
+      {
+        key,
+        head: ui.col(
+          { key: 'head', gap: 'none' },
+          ui.text({ key: 'title', text: title, wrap: 'none' }),
+          ...(summary === '' ? [] : [ui.text({ key: 'summary', text: summary })]),
+        ),
+        collapsible: true,
+        collapsed: !expanded,
+      },
+      ...(expanded ? contextBodyNodes(message) : []),
+    )
+  }
+  const identity = kind === 'recall'
+    ? message.label === undefined || message.label === ''
+      ? 'Session recall'
+      : `Session recall · ${sanitizedPhysicalLine(message.label)}`
+    : message.label ?? contextFormOf(message) ?? 'Context'
   return ui.section(
-    { key, head, collapsible: true, collapsed: !expanded },
+    { key, head: sanitizedPhysicalLine(identity), collapsible: true, collapsed: !expanded },
     ...(expanded ? contextBodyNodes(message) : []),
   )
 }
