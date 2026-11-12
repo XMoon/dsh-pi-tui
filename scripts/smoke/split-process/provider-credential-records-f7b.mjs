@@ -125,17 +125,41 @@ async function exitModelsPage(client, label) {
   throw new SplitSmokeAssertionError(`${label}: the main editor never regained the seat`)
 }
 
+/** The Models page yields a bare Left to the Settings category rail, so a
+ *  freshly opened auth workspace can hold the RAIL focus. Move it INTO the
+ *  page exactly once (Right = confirm the selected category) before driving the
+ *  record rows; a page that already holds the focus is left untouched. */
+async function focusModelsPage(client) {
+  const frame = await client.viewport()
+  const railFocused = frame.some(line => /^\s*> (?:About|Models|Account|Agent|Appearance|Conversation|Input & Terminal|Tools|Plugins)\b/u.test(line))
+  if (!railFocused) return
+  client.send('\x1b[C')
+  await sleep(250)
+}
+
 /** Move the painted list cursor onto the row carrying one exact key. */
 async function selectStoredRow(client, key, label) {
+  await focusModelsPage(client)
+  // Normalize the cursor to the first candidate before walking down (the list
+  // may still carry the previous view's cursor).
+  client.send('\x1b[H')
+  await sleep(200)
+  // The Settings workspace composes the category rail and the page on the SAME
+  // physical rows: the page's own `> ` marker is NOT at the line start, so the
+  // selection is proven by a `>` before the exact key on that row.
+  const isSelected = line => {
+    const index = line.indexOf(key)
+    return index >= 0 && line.slice(0, index).includes('> ')
+  }
   for (let step = 0; step < 12; step += 1) {
     const frame = await client.viewport()
-    const selected = frame.find(line => line.trimStart().startsWith('> ') && line.includes(key))
-    if (selected !== undefined) return
+    if (frame.some(isSelected)) return
     client.send('\x1b[B')
-    await sleep(150)
+    await sleep(200)
   }
   const frame = await client.viewport()
-  throw new SplitSmokeAssertionError(`${label}: never selected ${key}: ${JSON.stringify(frame.slice(-16))}`)
+  console.error(`[f7b diagnostic] select ${key} frame:\n${frame.join('\n')}`)
+  throw new SplitSmokeAssertionError(`${label}: never selected ${key}: ${JSON.stringify(frame)}`)
 }
 
 /** Confirm the painted clear action and wait for the local-clear outcome. */
@@ -147,7 +171,9 @@ async function clearSelectedRecord(client, key, label) {
   // state: the confirmation cannot be dispatched before the Host read answers.
   await waitForScreenText(client, 'This clears the local stored credential', `${label} confirmation armed`)
   client.send('\r')
-  await waitForScreenText(client, 'local stored credential cleared (not revoked at the issuer', `${label} local clear`)
+  // The pane column truncates the full sentence: the outcome's own prefix is
+  // the stable needle (a failure/unknown outcome never paints it).
+  await waitForScreenText(client, 'local stored credential cleared', `${label} local clear`)
 }
 
 /** Read the Host work-event log (one JSON object per line). */
@@ -177,7 +203,7 @@ async function waitForEvent(root, predicate, label, timeoutMs = 60_000) {
 function evidenceCorpus(root, clients, host) {
   const parts = [readFileSync(join(root, 'events.jsonl'), 'utf8')]
   for (const client of clients) parts.push(client.raw)
-  parts.push(host.raw)
+  parts.push(typeof host.raw === 'string' ? host.raw : typeof host.stderr === 'string' ? host.stderr : '')
   return parts.join('\n')
 }
 
@@ -238,8 +264,14 @@ export async function runF7BCredentialRecords(context) {
     const updatedGrant = await waitForEvent(root, event => event.kind === 'f7b-record-updated' && event.key === GRANT_KEY,
       'F7B official record-updated event for the deleted grant')
     assert(updatedGrant.key === GRANT_KEY, 'F7B: the commit event names the exact deleted key')
-    await waitForScreenGone(clientA, GRANT_KEY, 'F7B A deleted grant row')
-    await waitForScreenText(clientA, API_KEY_KEY, 'F7B A preserved api-key row')
+    // The done page still names the TARGET (its facts) by design: re-open the
+    // CURRENT list to prove the deleted row is gone and the others remain.
+    await exitModelsPage(clientA, 'F7B A leaves the done clear page')
+    await submitLine(clientA, '/logout', 'F7B A re-opens the stored credentials list')
+    await waitForScreenText(clientA, 'Stored credentials', 'F7B A re-opened stored credentials list')
+    await waitForScreenText(clientA, API_KEY_KEY, 'F7B A preserved api-key row after the clear')
+    assert(!(await clientA.viewport()).join('\n').includes(GRANT_KEY),
+      'F7B: the deleted grant must be absent from the CURRENT client list')
     trace('f7b.deleted', { key: GRANT_KEY, hostEvent: true })
 
     // ── Client B re-reads the CURRENT Host (no optimistic patch). ──────────
@@ -254,8 +286,12 @@ export async function runF7BCredentialRecords(context) {
     await clearSelectedRecord(clientB, ORPHAN_KEY, 'F7B B orphan clear')
     await waitForEvent(root, event => event.kind === 'f7b-record-updated' && event.key === ORPHAN_KEY,
       'F7B official record-updated event for the removed orphan')
-    await waitForScreenGone(clientB, ORPHAN_KEY, 'F7B B deleted orphan row')
+    await exitModelsPage(clientB, 'F7B B leaves the done clear page')
+    await submitLine(clientB, '/logout', 'F7B B re-opens the stored credentials list')
+    await waitForScreenText(clientB, 'Stored credentials', 'F7B B re-opened stored credentials list')
     await waitForScreenText(clientB, API_KEY_KEY, 'F7B B remaining api-key row after the orphan clear')
+    assert(!(await clientB.viewport()).join('\n').includes(ORPHAN_KEY),
+      'F7B: the deleted foreign-scope orphan must be absent from the CURRENT client list')
     trace('f7b.orphan-deleted', { key: ORPHAN_KEY })
 
     // ── Account sign-out routing is unchanged (never a generic record clear).─
