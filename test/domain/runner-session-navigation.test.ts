@@ -4,6 +4,7 @@
  * stale-callback fencing, and Host-owned fork anchors. */
 
 import assert from 'node:assert/strict'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
@@ -3204,6 +3205,84 @@ test('a teardown during /new\'s command/done window waits for the replaced Sessi
     'teardown then retires the committed current Session exactly once')
 })
 
+// ── the deferred window cannot re-wake the replaced Agent ───────────────────
+
+test('a prompt submitted while the replaced owner awaits command/done is refused for that Session, never delivered to A', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-new-deferred-no-wake-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let releaseSettlement!: () => void
+  let signalSettlementReached!: () => void
+  const settlementReached = new Promise<void>(resolve => { signalSettlementReached = resolve })
+  const source = fakeSession({
+    id: 'new-deferred-no-wake-a',
+    header: { id: 'new-deferred-no-wake-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const harness = makeHarness(home, source)
+  ;(harness.commands as { settlementGate?: () => Promise<void> }).settlementGate = async () => {
+    signalSettlementReached()
+    await new Promise<void>(resolve => { releaseSettlement = resolve })
+  }
+  // A held gate always has a fallback release: a failed assertion must never
+  // park the teardown's command-settlement wait forever.
+  life.defer(() => { releaseSettlement?.() })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  app.setDraft('/new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await settlementReached
+  // Bounded observation window: the fresh Session is committed here.
+  await settle()
+  const child = harness.createdSessions[0]!
+  assert.equal(harness.retirementEvents.includes(`dispose:${source.id}`), false,
+    'the replaced owner is in the deferred window')
+
+  // A queued prompt typed against the SAME surface while the settlement is
+  // held: the Direct writer resolves the Agent through the ownership core's
+  // CURRENT owner (B), never the still-attached A. Nothing may deliver
+  // input to A in this window (the exact P1 hazard: waking a replaced but
+  // not-yet-retired Agent).
+  app.setDraft('hello after /new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  // Bounded observation window: the queued prompt has been admitted here.
+  await settle()
+  assert.equal(harness.delivered.filter(entry => entry.sessionId === source.id).length, 0,
+    `no prompt may reach the replaced Session while it awaits command/done: ${JSON.stringify(harness.delivered)}`)
+  const runMarkers = harness.retirementEvents.filter(event => event.startsWith('command-run:'))
+  assert.deepEqual(runMarkers, [`command-run:${source.id}`],
+    `only the /new command itself may start in this window: ${JSON.stringify(harness.retirementEvents)}`)
+
+  releaseSettlement()
+  // Bounded observation window: the released settlement drains the deferred retirement.
+  await settle()
+  assert.ok(harness.retirementEvents.includes(`dispose:${source.id}`),
+    'the deferred retirement completes once the settlement releases')
+  const aLog = source.snapshotEvents() as unknown as Array<{ type: string }>
+  assert.ok(!aLog.some(entry => entry.type === 'user/message'),
+    "A's durable log carries no user message from the deferred window")
+  // The hazard fence itself: the Direct writer never resolved A in the
+  // window, so A's status stayed idle — no agent wake, no model call. The
+  // keepInbox navigation cancel precedes the window and is the ONLY cancel.
+  assert.equal(harness.retirementEvents.filter(event => event === `cancel:keepInbox:${source.id}`).length, 1,
+    'exactly the one navigation stop, never a retirement cancel inside the window')
+})
+
 // ── the deferred source release blocks a reopen of the replaced Session ────
 
 test('a reopen of the Session a /new command replaced waits for its deferred release', async () => {
@@ -3335,4 +3414,70 @@ test('a reopen of the Session a /new command replaced waits for its deferred rel
     `A must be disposed BEFORE its reopen resumes it: ${JSON.stringify(events)}`)
   assert.deepEqual(diagnostics, [], 'a clean deferred retirement emits no failure diagnostic')
   disposed = true
+})
+
+// ── the deferred retirement of a command-backed /new fails honestly ────────
+
+test('/new reports a deferred old-owner retirement failure with both Session identities and still releases the pin', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-new-deferred-dispose-fail-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const diagFile = join(home, 'diag.log')
+  process.env.DSH_PI_TUI_LOG = diagFile
+  life.defer(() => { delete process.env.DSH_PI_TUI_LOG })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const source = fakeSession({
+    id: 'new-deferred-dispose-fail-a',
+    header: { id: 'new-deferred-dispose-fail-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const harness = makeHarness(home, source)
+  // The /new-created child is a DIFFERENT Session: failing only A's dispose
+  // keeps the failure injected exactly at the deferred old-owner retirement.
+  harness.disposeFailures.add(source.id)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  app.setDraft('/new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await waitUntil('the fresh Session', () => harness.createdSessions.length === 1, 15_000)
+  const child = harness.createdSessions[0]!
+  await waitUntil('A\'s failed dispose attempt', () =>
+    harness.retirementEvents.includes(`dispose:${source.id}`), 15_000)
+
+  // The command still settled completely: A's run/done pair landed (the done
+  // append needed A attached), and the settlement completed despite the
+  // deferred retirement failure — a failed phase never hangs the FIFO.
+  const settlements = harness.commandSettlements.filter(entry => entry.sessionId === source.id)
+  assert.deepEqual(settlements.map(entry => entry.phase), ['run', 'done'],
+    'the replaced Session command must still settle')
+  assert.equal(settlements.at(-1)?.ownerLive, true,
+    'the replaced owner stayed attached through its command/done')
+
+  // The failure keeps BOTH Session identities and the child-committed fact; a
+  // contained retirement failure is never rewritten as a clean success.
+  const diagText = existsSync(diagFile) ? readFileSync(diagFile, 'utf8') : ''
+  assert.match(diagText, /ERROR[^\n]*old-owner retirement failed \(child committed\)/u,
+    `the deferred retirement failure must be diagnosed: ${JSON.stringify(diagText.slice(-800))}`)
+  assert.ok(diagText.includes(source.id) && diagText.includes(child.id),
+    `the diagnostic names BOTH the replaced and the committed Session: ${JSON.stringify(diagText.slice(-800))}`)
+
+  // The pin was released with the contained failure: a reopen of A proceeds
+  // instead of waiting forever (the handle leaked, but the ledger settled).
+  app.setDraft(`/resume ${source.id}`)
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await waitUntil('the reopen resume attempt', () => harness.resumeSessionIds.includes(source.id), 15_000)
 })
