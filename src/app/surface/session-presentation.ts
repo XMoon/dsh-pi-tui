@@ -137,10 +137,6 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
    *  replacing the stats fold, so the footer never keeps rendering the
    *  pre-page figures. */
   readonly refreshStatusCheap: () => void
-  /** M6-1 F8: revoke the session-policy observation on a policy knob event
-   *  (forwarded to the event routing's canonical session-event sink).
-   *  Absent = this composition observes no session policy. */
-  readonly invalidateSessionPolicy?: (sessionId: string) => void
   /** Official DSH log folds the composition root owns. */
   readonly folds: {
     readonly title: (events: readonly Event[]) => string | undefined

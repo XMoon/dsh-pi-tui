@@ -1738,16 +1738,6 @@ export function applyRunnerWithRuntime(
       summaryKeys: toolSummaryKeys,
       isCleanedUp: () => cleanedUp,
       refreshStatusCheap: () => status.refresh(),
-      // M6-1 F8: a policy knob event revokes the observation's committed
-      // snapshots and starts ONE controlled re-read of the official Host
-      // store (never a local event-log fold).
-      invalidateSessionPolicy: sessionId => {
-        // Revoke only. The SAME event tick continues with the routing's cheap
-        // status refresh, whose `readSnapshot` starts the one controlled read
-        // (or an open Settings repaint already did) — an explicit refresh here
-        // would double-read and supersede the caller's own read.
-        sessionPolicyObservation.invalidate(sessionId)
-      },
       folds: { title: (events) => foldSessionTitle(events)?.title },
       direct: {
         installModelSelection: (agent) => { directRuntime()?.modelSelections.installForAgent(agent as Agent) },
