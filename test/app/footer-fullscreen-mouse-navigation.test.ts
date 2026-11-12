@@ -806,11 +806,7 @@ test('the task admission is re-checked on release: a runtime that lost its sourc
     release(h.vt, cell.x + 4, cell.row)
     await h.vt.waitForRender()
     assert.ok(!screen(h.vt).includes('build the project'), 'a mismatched release cannot open the browser')
-    // That un-dispatched press armed the fork's multi-click counter; one
-    // inert footer-cell click (dispatched, consumed, reset) clears it before
-    // the next deliberate same-cell gesture.
-    click(h.vt, cell.x + 45, cell.row)
-    await h.vt.waitForRender()
+
 
     // The REVOCATION case: detach the runtime's session source between press
     // and release — openTasksBrowser's own admission (sessionId === undefined)
@@ -1031,6 +1027,44 @@ test('closing the Task Center and immediately re-clicking the footer tasks cell 
     assert.ok(screen(h.vt).includes('build the project'), 'the immediate re-click reopens the browser')
   } finally {
     h.dispose()
+  }
+})
+
+test('an aborted footer gesture never poisons the immediately following valid click', async () => {
+  const tasks = await startHarness()
+  try {
+    const cell = cellOf(tasks.vt, 'task')
+    assert.ok(cell)
+    // Press the tasks cell, release on a DIFFERENT cell: the fork never
+    // synthesizes that click, yet its press armed the multi-click counter.
+    press(tasks.vt, cell.x, cell.row)
+    release(tasks.vt, cell.x + 4, cell.row)
+    await tasks.vt.waitForRender()
+    assert.ok(!screen(tasks.vt).includes('build the project'), 'the aborted gesture opened nothing')
+    // No compensation click: the very next valid same-cell click must be a
+    // single click and open the browser.
+    click(tasks.vt, cell.x, cell.row)
+    await tasks.vt.waitForRender()
+    await tasks.vt.waitForRender()
+    assert.ok(screen(tasks.vt).includes('build the project'), 'the next valid click opens the browser immediately')
+  } finally {
+    tasks.dispose()
+  }
+
+  const model = await startHarness()
+  try {
+    const cell = cellOf(model.vt, '[deepseek/deepseek-v4-flash]')
+    assert.ok(cell)
+    press(model.vt, cell.x, cell.row)
+    release(model.vt, cell.x + 20, cell.row)
+    await model.vt.waitForRender()
+    assert.ok(!screen(model.vt).includes('Models'), 'the aborted gesture opened nothing')
+    click(model.vt, cell.x, cell.row)
+    await model.vt.waitForRender()
+    await model.vt.waitForRender()
+    assert.ok(screen(model.vt).includes('Models'), 'the next valid click opens the picker immediately')
+  } finally {
+    model.dispose()
   }
 })
 

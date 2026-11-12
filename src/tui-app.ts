@@ -1013,10 +1013,20 @@ function parseApprovalWheel(data: string): { x: number; y: number; direction: -1
  * here and retire like any unknown protocol chunk); undefined for non-mouse
  * input.
  */
-function mouseChunkKind(data: string): { readonly button: number; readonly release: boolean } | undefined {
+function mouseChunkKind(data: string): {
+  readonly button: number
+  readonly release: boolean
+  readonly x: number
+  readonly y: number
+} | undefined {
   const sgr = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(data)
   if (sgr === null) return undefined
-  return { button: Number.parseInt(sgr[1]!, 10), release: sgr[4] === 'm' }
+  return {
+    button: Number.parseInt(sgr[1]!, 10),
+    release: sgr[4] === 'm',
+    x: Number.parseInt(sgr[2]!, 10) - 1,
+    y: Number.parseInt(sgr[3]!, 10) - 1,
+  }
 }
 
 /**
@@ -2988,6 +2998,11 @@ type FooterPressGesture = {
   readonly row: number
   readonly startCol: number
   readonly endCol: number
+  /** The exact pressed cell inside the hit span: a release at any OTHER cell
+   * never synthesizes a click, so the gesture retires and the fork's armed
+   * multi-click history is consumed. */
+  readonly pressX: number
+  readonly pressY: number
   readonly columns: number
   readonly termRows: number
   /* Painted-frame geometry fencing (plan §9.1): the footer is bottom-anchored
@@ -6749,6 +6764,17 @@ export class TuiApp {
     const mouseChunk = mouseChunkKind(data)
     if (mouseChunk === undefined || retiresPointerGesture(mouseChunk)) {
       this.footerPressGesture = undefined
+    } else if (mouseChunk.release) {
+      // A release at a DIFFERENT cell never synthesizes a click (the fork's
+      // same-cell rule): the footer gesture is dead AND its press armed the
+      // fork's multi-click counter. Consume that history here so the next
+      // valid same-cell click is a single click again — otherwise an aborted
+      // footer gesture would silently poison the following navigation.
+      const pressed = this.footerPressGesture
+      if (pressed !== undefined && (mouseChunk.x !== pressed.pressX || mouseChunk.y !== pressed.pressY)) {
+        pressed.screen.resetTextSelection()
+        this.footerPressGesture = undefined
+      }
     }
     // Terminal focus reports (CSI ? 1004 — ESC[I/ESC[O) are HOST-RESERVED:
     // they bypass the unstable raw stage entirely (a raw capture can
@@ -15247,6 +15273,8 @@ export class TuiApp {
       row: hit.row,
       startCol: hit.startCol,
       endCol: hit.endCol,
+      pressX: x,
+      pressY: y,
       columns: painted.columns,
       termRows: painted.termRows,
     }
