@@ -1440,12 +1440,20 @@ export class ModelsWorkspacePage implements Component {
         try {
           started = await this.source.beginAuthorization(row.key!, method, this.pageController.signal)
         } catch (error) {
+          // The Remote adapter already established the result taxonomy: a
+          // DISPATCH_UNKNOWN means the run WAS dispatched and the Host may have
+          // started/committed it, but the `started` frame was lost. That is the
+          // same fourth outcome as a lost settlement stream (`unconfirmed`),
+          // never a definite business failure. Refresh the Host facts read-only
+          // and let the user re-read before another manual attempt.
+          const dispatchUnknown = (error as { readonly code?: unknown } | null)?.code === 'DISPATCH_UNKNOWN'
           this.settle(() => {
             this.auth = {
               targetIdentity: row.identity,
-              phase: 'failed',
+              phase: dispatchUnknown ? 'unconfirmed' : 'failed',
               status: authorizationFailureText(error, errorText(error)),
             }
+            if (dispatchUnknown) this.refresh()
             if (this.pendingAfterAuth !== undefined) this.runPendingAfterAuth()
           })
           return
