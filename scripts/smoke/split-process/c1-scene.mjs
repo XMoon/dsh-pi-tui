@@ -103,7 +103,9 @@ export function createC1Scene(context, options = {}) {
       },
     })
     c1Hosts.push(host)
-    const ready = await host.waitFor(record => record.m4a0 === 'ready', `${label} Host ready`, 180_000)
+    const ready = await host.waitFor(record => record.m4a0 === 'ready' || record.m4a0 === 'failure', `${label} Host ready`, 180_000)
+    assert(ready.m4a0 === 'ready',
+      `${label} Host boot failed: ${JSON.stringify({ code: ready.code, error: ready.error, phase: ready.phase })}`)
     if (hostScopeId === undefined) hostScopeId = ready.localHost?.scopeId
     return { host, ready, workRoot }
   }
