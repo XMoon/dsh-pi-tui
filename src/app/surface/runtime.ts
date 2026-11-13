@@ -1824,7 +1824,6 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // `TaskBrowserRuntime`, the browser/viewer state and the catalog refresh gate.
   // Question attention crosses as an injected read/subscription only (the
   // controller stays with its own owner below).
-  let taskAttached = false
   const task = createTaskRuntime({
     mounted: () => mounted(),
     display: () => displaySeam(),
@@ -3384,7 +3383,6 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       extension.attachSeams(deps)
     },
     attachTasks(source, deps) {
-      taskAttached = true
       task.attachTasks(source, deps)
     },
     attachAgentContextIdentity(source) {
@@ -3684,8 +3682,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
           // The TSP Workflow scoped entry owns no browser of its own: the
           // SAME TaskRuntime and Task Center decide from the current action.
           openWorkflowScopedAgents: action => task.handleWorkflowAction(action),
-          workflowScopedAgentsAvailable: () => taskAttached
-            && displaySeam().supportsTaskCenter
+          workflowScopedAgentsAvailable: () => task.scopedBrowserAvailable()
             && displaySeam().supportsViewer === false,
         }
         inputBindTarget = mounted

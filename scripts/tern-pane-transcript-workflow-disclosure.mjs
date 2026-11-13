@@ -256,6 +256,8 @@ async function clickToggle(h, witness, targetId, expectedCollapsed, label) {
 
 const sectionHeadByText = (snapshot, h, text) => sectionHeadNodes(snapshot)
   .find(node => h.descendantsText(node).includes(text))
+const buttonByText = (snapshot, h, text) => snapshot.nodes
+  .find(node => node.tag === 'button' && h.descendantsText(node).includes(text))
 
 function findSectionNode(h, text) {
   return [...foldLive(h).values()].find(node => node.k === 'section' && subtreeText(foldLive(h), node.id).includes(text))
@@ -426,6 +428,38 @@ export default async function (h) {
     JSON.stringify(allButtons.map(node => ({ id: node.id, text: subtreeText(foldLive(h), node.id) }))))
   h.capture(`${preset}-workflow-phases-1280x800-dark`, 'the phase bodies with member rows and scoped browse buttons')
 
+  // A REAL control-injected click on the visible scoped button: the client's
+  // own `action` event must reach the production TaskRuntime, which opens the
+  // existing Work Hub. The exact childIds scope and its rows are proved by the
+  // L6 integration lane (the synthetic Direct workflow childIds have no live
+  // subagent catalog entries in this isolated pane).
+  const actionsBefore = records(h).filter(entry => entry.kind === 'client.action' && entry.act === WORKFLOW_ACTION).length
+  const browseWitness = await revealHead(h, 'Workflow scoped browse',
+    snapshot => buttonByText(snapshot, h, 'View all 8 agents'))
+  h.check('the scoped browse button has a visible clickable fragment', browseWitness !== undefined,
+    JSON.stringify(browseWitness === undefined ? null : rect(browseWitness.head)))
+  if (browseWitness === undefined) { finish(h, { ...extra, qualification: 'SCOPED_BROWSE_NOT_VISIBLE' }); return }
+  h.check('one control-injected click lands on the scoped browse button',
+    await h.click(browseWitness.snapshot.chains, browseWitness.head), JSON.stringify(rect(browseWitness.head)))
+  const actionReached = await waitUntil(h, 'the client action reaches the production iterator',
+    () => records(h).filter(entry => entry.kind === 'client.action' && entry.act === WORKFLOW_ACTION).length > actionsBefore)
+  const actionEvent = records(h).filter(entry => entry.kind === 'client.action' && entry.act === WORKFLOW_ACTION).at(-1)
+  h.check('the client action names the exact scoped button and action id',
+    actionReached && actionEvent?.id !== undefined && actionEvent.act === WORKFLOW_ACTION,
+    JSON.stringify(actionEvent ?? null))
+  if (!await waitUntil(h, 'the production TaskRuntime opens the existing Work Hub', () =>
+    [...foldLive(h).values()].some(node => node.k === 'picker'))) {
+    finish(h, { ...extra, qualification: 'SCOPED_HUB_NOT_OPEN' })
+    return
+  }
+  h.capture(`${preset}-workflow-scoped-hub-1280x800-dark`, 'the real scoped Work Hub opened by the native Workflow action')
+  await h.key('Escape', 600)
+  if (!await waitUntil(h, 'Escape closes the scoped Hub and restores the base surface', () =>
+    [...foldLive(h).values()].every(node => node.k !== 'picker'))) {
+    finish(h, { ...extra, qualification: 'SCOPED_HUB_NOT_CLOSED' })
+    return
+  }
+
   // Toggle a phase closed, then close and reopen the run: phase choice persists.
   const prepareWitness = await revealHead(h, 'Prepare phase',
     snapshot => sectionHeadByText(snapshot, h, 'Prepare'))
@@ -526,7 +560,7 @@ export default async function (h) {
     notVerified: [
       'OS physical keyboard/IME/wheel',
       'G8 Owner visual acceptance',
-      'the scoped Work Hub open round trip (needs the hub-kind pane with a live catalog; covered by the L6 integration lane, NOT this pane run)',
+      'the scoped Hub row catalog for these synthetic Direct workflow childIds is empty here; exact childIds scope and real rows are proved by the L6 integration lane',
     ],
   })
   finish(h, extra)
