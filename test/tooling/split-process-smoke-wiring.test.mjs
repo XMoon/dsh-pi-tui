@@ -528,6 +528,19 @@ test('selected dispatch fails closed on non-PASS Web and Account verdicts', () =
   assert.equal(assertSelectedVerdict('bootstrap.host-runtime-disabled', { exitCode: 1 }), undefined)
   assert.throws(() => assertSelectedVerdict('bootstrap.host-runtime-disabled', { status: 'NOT_RUN' }),
     /selected bootstrap\.host-runtime-disabled/u)
+  assert.equal(assertSelectedVerdict('herdr.h3-abrupt-lifecycle', {
+    status: 'PASS', rhH3ClientCrash: 'REAL_SPLIT_PROCESS_L6',
+    rhH3HostCrash: 'REAL_SPLIT_PROCESS_L6', hostReportedNothing: true,
+  }), undefined)
+  assert.throws(() => assertSelectedVerdict('herdr.h3-abrupt-lifecycle',
+    { status: 'PASS', rhH3ClientCrash: 'REAL_SPLIT_PROCESS_L6', hostReportedNothing: true }),
+    /selected herdr\.h3-abrupt-lifecycle/u)
+  assert.throws(() => assertSelectedVerdict('herdr.h3-abrupt-lifecycle',
+    { status: 'PASS', rhH3ClientCrash: 'REAL_SPLIT_PROCESS_L6', rhH3HostCrash: 'REAL_SPLIT_PROCESS_L6', hostReportedNothing: false }),
+    /selected herdr\.h3-abrupt-lifecycle/u)
+  assert.throws(() => assertSelectedVerdict('herdr.h3-abrupt-lifecycle',
+    { status: 'NOT_VERIFIED', rhH3ClientCrash: 'REAL_SPLIT_PROCESS_L6', rhH3HostCrash: 'REAL_SPLIT_PROCESS_L6', hostReportedNothing: true }),
+    /selected herdr\.h3-abrupt-lifecycle/u)
 })
 test('a selected result names only the selectable scope', () => {
   const first = listSelectableCases()[0]

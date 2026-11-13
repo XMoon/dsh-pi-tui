@@ -359,3 +359,291 @@ export async function runHerdrH2(context) {
     await scene.dispose()
   }
 }
+
+/**
+ * H3 abrupt lifecycle: the ONE independent forced-process-exit qualification.
+ *
+ * Two sub-scenes, each with its own scope/pid/Pane/fake-CLI log, both built on
+ * the SAME real `createC1Scene` Host/Client lifecycle as the H2 case above:
+ *
+ * 1. H3-S1 — a real SIGKILL on Pane A's OS PID. The killed process can never
+ *    run its own release; the Host keeps the held Turn, and Pane B (attached
+ *    to the same Session) keeps receiving the Host's facts, is never released
+ *    by A's death, and later exits with exactly ONE ordered release.
+ * 2. H3-S2 — a real SIGKILL on the Host OS PID (not the H2 frozen-Host mux
+ *    dropout). The stale generation must lose its business qualification: the
+ *    surviving Client fail-closes with the ordered reporter release and never
+ *    re-registers the stale generation, or the Client exits by itself and the
+ *    real Herdr Pane shell fallback owns the external cleanup. Re-entry
+ *    happens ONLY through the existing Host/Client launch entries.
+ *
+ * ```text
+ * PRODUCTION PREREQUISITES REPRODUCED:
+ *   built actual DSH distribution; real Linux Host OS PID;
+ *   authenticated official Split Client OS PID(s);
+ *   real Session owner/Agent/Turn, generation and real event stream;
+ *   actual Client-local Herdr reporter spawning real OS child processes;
+ *   actual SIGKILL target process and kernel exit observation.
+ * TEST STAND-INS / SUBSTITUTIONS:
+ *   executable fake Herdr CLI logs argv/exit; no real Herdr socket/server/UI;
+ *   deterministic held-turn barrier; isolated DSH_HOME/profile/workspace.
+ * DELIBERATELY ABSENT:
+ *   public Split attach CLI, Herdr App, Tern TSP,
+ *   true Herdr shell fallback, real Herdr named session restore.
+ * ```
+ */
+export async function runHerdrH3(context) {
+  const { workDir, dshHome, trace } = context
+  const scene = createC1Scene(context)
+  const unique = `${String(process.pid)}-${Date.now().toString(36)}`
+  const scriptPath = join(workDir, `herdr-h3-fake-cli-${unique}.sh`)
+  writeFileSync(scriptPath, FAKE_HERDR_CLI, { mode: 0o755 })
+  chmodSync(scriptPath, 0o755)
+  const {
+    startC1Host,
+    stopC1Host,
+    startC1Client,
+    exitC1Client,
+    openC1Session,
+    awaitSceneSeatFree,
+  } = scene
+  try {
+    // ── H3-S1: Client SIGKILL — the Host and the other Pane are untouched ───
+    const s1Hold = join(workDir, `herdr-h3-s1-hold-${unique}.barrier`)
+    const s1HostLog = join(workDir, `herdr-h3-s1-host-${unique}.log`)
+    // The Host receives a complete, deliberately different Herdr environment:
+    // its fake log MUST stay empty for the whole case (a Host never owns a
+    // Pane reporter).
+    const s1HostEnv = herdrClientEnv(scriptPath, s1HostLog, `host-must-never-report-s1-${unique}`)
+    const { host: s1Host, ready: s1Ready, workRoot: s1WorkRoot } = await startC1Host(
+      'long-turn',
+      `herdr-h3-s1-${unique}`,
+      { ...s1HostEnv, C1_HOLD_LONG_TURN: s1Hold },
+    )
+    const paneA = `herdr-h3-pane-a-${unique}`
+    const paneB = `herdr-h3-pane-b-${unique}`
+    const logA = join(workDir, `herdr-h3-client-a-${unique}.log`)
+    const logB = join(workDir, `herdr-h3-client-b-${unique}.log`)
+    const { client: clientA, ready: clientAReady } = await startC1Client(
+      `H3 Pane A ${unique}`,
+      herdrClientEnv(scriptPath, logA, paneA),
+    )
+    const sessionA = await openC1Session(clientA, `herdr h3 a ${unique}`, `H3 A ${unique}`)
+    await waitForC1WorkEvent(
+      s1WorkRoot,
+      event => event.kind === 'long-turn-held' && event.sessionId === sessionA,
+      `H3 A ${unique} Turn held`,
+    )
+    await waitForLog(logA, () => states(logA).at(-1) === 'working', `H3 A ${unique} working`)
+    // Pane B attaches to the SAME running Session: its opening snapshot is the
+    // Host's running truth, so Pane B starts at working, never a fake idle.
+    const { client: clientB, ready: clientBReady } = await startC1Client(
+      `H3 Pane B ${unique}`,
+      { ...herdrClientEnv(scriptPath, logB, paneB), SPLIT_PROCESS_CLIENT_SESSION: sessionA },
+    )
+    await clientB.waitFor(
+      record => record.m4b2s === 'surface-status' && record.transport === 'connected'
+        && record.sessionOpen === true && record.openSessionId === sessionA,
+      `H3 B ${unique} opened the same Session from the Host snapshot`,
+      120_000,
+    )
+    await waitForLog(logB, () => states(logB).at(-1) === 'working', `H3 B ${unique} opening working`)
+    assert(clientAReady.pid !== clientBReady.pid, 'H3 the two Clients must be distinct OS processes')
+
+    // The abrupt exit: SIGKILL Pane A's real OS process. The killed process
+    // CANNOT run its own dispose, and no assertion may pretend a release.
+    const pidA = clientAReady.pid
+    const bReleasesBeforeKill = states(logB).filter(state => state === 'release').length
+    process.kill(pidA, 'SIGKILL')
+    const exitA = await clientA.waitForExit(60_000)
+    assert(exitA.signal === 'SIGKILL' || exitA.code === 137,
+      `H3 Pane A was not SIGKILLed: ${JSON.stringify(exitA)}`)
+    // The negative controls: the Host and Pane B keep their authority.
+    assert(alive(s1Ready.pid), 'H3 the Host died with the SIGKILLed Pane A')
+    assert(!existsSync(s1Hold), 'H3 the Host cancelled the held Turn when Pane A crashed')
+    const bStatusAfterKill = lastSurfaceStatus(clientB)
+    assert(bStatusAfterKill?.transport === 'connected' && typeof bStatusAfterKill?.generationId === 'number',
+      `H3 Pane B lost its Host connection when Pane A crashed: ${JSON.stringify(bStatusAfterKill)}`)
+    await waitForLog(logB, () => states(logB).at(-1) === 'working', `H3 B ${unique} still working after A died`)
+    assertPaneOwnership(logB, paneB)
+    assert(states(logB).filter(state => state === 'release').length === bReleasesBeforeKill,
+      'H3 Pane B must not be released because Pane A died')
+
+    // The held Turn belongs to the Host: releasing the barrier finishes it and
+    // Pane B (not the dead Pane A) observes the real turn/end.
+    writeFileSync(s1Hold, 'release\n', { mode: 0o600 })
+    await waitForHostSessionEvent(dshHome, sessionA, event => event.type === 'turn/end', `H3 A ${unique} turn/end`)
+    await waitForLog(logB, () => states(logB).at(-1) === 'idle', `H3 B ${unique} idle after the held Turn`)
+    // A late in-flight CLI of the killed Pane A may finish by itself; it must
+    // never be mistaken for the release the killed process cannot send.
+    assert(states(logA).every(state => state !== 'release'),
+      `H3 the SIGKILLed Pane A reported a release: ${JSON.stringify(states(logA))}`)
+    // Pane B's own normal exit releases exactly Pane B once.
+    await exitC1Client(clientB, `H3 Pane B ${unique}`)
+    await waitForLog(logB,
+      () => states(logB).filter(state => state === 'release').length === bReleasesBeforeKill + 1,
+      `H3 B ${unique} exit release`, 60_000)
+    assert(alive(s1Ready.pid), 'H3 the Host died when Pane B exited')
+    await stopC1Host(s1Host)
+    assert(readInvocations(s1HostLog).length === 0,
+      `H3 the S1 Host process created a Pane reporter: ${JSON.stringify(readInvocations(s1HostLog))}`)
+    trace('herdr-h3-client-crash', {
+      scope: 'REAL_SPLIT_PROCESS_L6',
+      hostPid: s1Ready.pid,
+      paneA: { pid: pidA, pane: paneA, states: states(logA) },
+      paneB: { pid: clientBReady.pid, pane: paneB, states: states(logB) },
+      sessionA,
+      hostReportedNothing: true,
+    })
+
+    // ── H3-S2: Host SIGKILL — stale authority must not survive ─────────────
+    const s2Hold = join(workDir, `herdr-h3-s2-hold-${unique}.barrier`)
+    const s2HostLog = join(workDir, `herdr-h3-s2-host-${unique}.log`)
+    const s2HostEnv = herdrClientEnv(scriptPath, s2HostLog, `host-must-never-report-s2-${unique}`)
+    const { host: s2Host, ready: s2Ready, workRoot: s2WorkRoot } = await startC1Host(
+      'long-turn',
+      `herdr-h3-s2-${unique}`,
+      { ...s2HostEnv, C1_HOLD_LONG_TURN: s2Hold },
+    )
+    const paneC = `herdr-h3-pane-c-${unique}`
+    const logC = join(workDir, `herdr-h3-client-c-${unique}.log`)
+    const { client: clientC } = await startC1Client(
+      `H3 Pane C ${unique}`,
+      herdrClientEnv(scriptPath, logC, paneC),
+    )
+    const sessionC = await openC1Session(clientC, `herdr h3 c ${unique}`, `H3 C ${unique}`)
+    await waitForC1WorkEvent(
+      s2WorkRoot,
+      event => event.kind === 'long-turn-held' && event.sessionId === sessionC,
+      `H3 C ${unique} Turn held`,
+    )
+    await waitForLog(logC, () => states(logC).at(-1) === 'working', `H3 C ${unique} working`)
+    const staleStatus = lastSurfaceStatus(clientC)
+    assert(staleStatus?.transport === 'connected' && typeof staleStatus?.generationId === 'number',
+      `H3 C ${unique} never held an authenticated Host generation: ${JSON.stringify(staleStatus)}`)
+    const oldHostPid = s2Ready.pid
+    // The record boundary belongs BEFORE the abrupt exit: the Client reacts to
+    // the dead Host within milliseconds, so a boundary taken after the SIGKILL
+    // can already contain the very loss record it is meant to find.
+    const lossBoundary = clientC.records.length
+
+    // The abrupt Host death: a real SIGKILL on the Host OS process, observed
+    // to termination — never the H2 frozen-Host mux dropout.
+    process.kill(oldHostPid, 'SIGKILL')
+    const hostExit = await s2Host.waitForExit(60_000)
+    assert(hostExit.signal === 'SIGKILL' || hostExit.code === 137,
+      `H3 the Host was not SIGKILLed: ${JSON.stringify(hostExit)}`)
+    assert(!alive(oldHostPid), 'H3 the old Host process survived its SIGKILL')
+
+    // The stale generation loses its business qualification. The ONE hard
+    // contract "stale authority must not keep reporting" has two real
+    // observable process outcomes, and the case accepts exactly these two:
+    // a) the surviving Client fail-closes with the ordered reporter release
+    //    and never re-registers the stale generation;
+    // b) the Client exits by itself (recorded, never fabricated) and the real
+    //    Herdr Pane shell fallback owns the external cleanup.
+    let clientSurvived = true
+    try {
+      await clientC.waitFor(
+        record => clientC.records.indexOf(record) >= lossBoundary
+          && record.m4b2s === 'surface-status'
+          && record.transport !== 'connected'
+          && record.generationId === undefined,
+        `H3 C ${unique} observed the dead Host generation`,
+        90_000,
+      )
+    } catch (error) {
+      if (!clientC.exited) throw error
+      clientSurvived = false
+    }
+    if (clientSurvived) {
+      await waitForLog(logC, () => states(logC).filter(state => state === 'release').length > 0,
+        `H3 C ${unique} released its Pane on the stale generation`, 90_000)
+    } else {
+      const clientExit = await clientC.waitForExit(30_000)
+      trace('herdr-h3-host-crash-client-exit', {
+        scope: 'REAL_SPLIT_PROCESS_L6',
+        oldHostPid,
+        clientExit: { code: clientExit.code, signal: clientExit.signal },
+      })
+    }
+    // The stale authority must not keep reporting. The Client cannot reach a
+    // dead Host, so within this bounded observation window no new Pane fact
+    // and no requalified connection may appear (a bounded negative, not an
+    // impossibility claim).
+    const staleDeadline = Date.now() + 15_000
+    while (Date.now() < staleDeadline && !clientC.exited) {
+      if (clientSurvived) {
+        const commands = startCommands(logC)
+        const lastRelease = commands.lastIndexOf('release')
+        assert(lastRelease >= 0 && commands.slice(lastRelease).every(kind => kind === 'release'),
+          `H3 a new Pane fact followed the stale release: ${JSON.stringify(commands)}`)
+      }
+      assert(clientC.records.every((record, index) => index < lossBoundary
+          || !(record.m4b2s === 'surface-status' && record.transport === 'connected')),
+        'H3 the stale Client requalified against a dead Host')
+      await sleep(250)
+    }
+    assertPaneOwnership(logC, paneC)
+
+    // Re-enter ONLY through the existing launch entries: a NEW Host generation
+    // and a NEW Client Pane, each proving its own authenticated identity
+    // before any report. Nothing is guessed from the old instance.json or the
+    // old Client snapshot.
+    await awaitSceneSeatFree(30_000)
+    const s2bHold = join(workDir, `herdr-h3-s2b-hold-${unique}.barrier`)
+    const { host: s2bHost, ready: s2bReady, workRoot: s2bWorkRoot } = await startC1Host(
+      'long-turn',
+      `herdr-h3-s2b-${unique}`,
+      { ...s2HostEnv, C1_HOLD_LONG_TURN: s2bHold },
+    )
+    assert(s2bReady.pid !== oldHostPid, 'H3 the re-entry Host reused the dead Host OS PID')
+    const paneD = `herdr-h3-pane-d-${unique}`
+    const logD = join(workDir, `herdr-h3-client-d-${unique}.log`)
+    const { client: clientD, ready: clientDReady } = await startC1Client(
+      `H3 Pane D ${unique}`,
+      herdrClientEnv(scriptPath, logD, paneD),
+    )
+    const sessionD = await openC1Session(clientD, `herdr h3 d ${unique}`, `H3 D ${unique}`)
+    await waitForC1WorkEvent(
+      s2bWorkRoot,
+      event => event.kind === 'long-turn-held' && event.sessionId === sessionD,
+      `H3 D ${unique} Turn held`,
+    )
+    await waitForLog(logD, () => states(logD).at(-1) === 'working', `H3 D ${unique} working`)
+    await waitForLog(logD, () => sessionFacts(logD).some(fact => fact.sessionId === sessionD),
+      `H3 D ${unique} canonical Session`)
+    const dStatus = lastSurfaceStatus(clientD)
+    assert(dStatus?.transport === 'connected' && typeof dStatus?.generationId === 'number',
+      `H3 D ${unique} reported without an authenticated generation: ${JSON.stringify(dStatus)}`)
+    assert(sessionFacts(logD).every(fact => fact.resumeArgv === undefined),
+      'H3 the re-entry Split Client must never publish a resume argv')
+    writeFileSync(s2bHold, 'release\n', { mode: 0o600 })
+    await waitForHostSessionEvent(dshHome, sessionD, event => event.type === 'turn/end', `H3 D ${unique} turn/end`)
+    await waitForLog(logD, () => states(logD).at(-1) === 'idle', `H3 D ${unique} idle after the held Turn`)
+    assertPaneOwnership(logD, paneD)
+    await exitC1Client(clientD, `H3 Pane D ${unique}`)
+    await stopC1Host(s2bHost)
+    assert(readInvocations(s2HostLog).length === 0,
+      `H3 the S2 Host processes created a Pane reporter: ${JSON.stringify(readInvocations(s2HostLog))}`)
+    trace('herdr-h3-host-crash', {
+      scope: 'REAL_SPLIT_PROCESS_L6',
+      oldHostPid,
+      newHostPid: s2bReady.pid,
+      clientSurvived,
+      sessionC,
+      sessionD,
+      paneD: { pid: clientDReady.pid, pane: paneD, states: states(logD) },
+      hostReportedNothing: true,
+    })
+
+    return {
+      status: 'PASS',
+      rhH3ClientCrash: 'REAL_SPLIT_PROCESS_L6',
+      rhH3HostCrash: 'REAL_SPLIT_PROCESS_L6',
+      hostReportedNothing: true,
+    }
+  } finally {
+    await scene.dispose()
+  }
+}
