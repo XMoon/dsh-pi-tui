@@ -106,6 +106,25 @@ function compose(t: Parameters<typeof createHerdrCliFixture>[0], options: { read
   }
 }
 
+/**
+ * Wait until every started fake-CLI child has exited, so the reporter queue is
+ * provably idle before a negative observation.
+ */
+async function settleQueue(observation: Observation, label: string): Promise<void> {
+  await observation.fixture.waitFor(entries => entries.filter(entry => entry.phase === 'end').length
+    >= entries.filter(entry => entry.phase === 'start').length, label)
+}
+
+/**
+ * Yield the ONE coalesced official scope microtask: the ownership core schedules
+ * its notification with `queueMicrotask`, so this continuation is queued behind
+ * it. Two turns also drain any continuation that notification itself queued.
+ */
+async function scopeSettled(): Promise<void> {
+  await Promise.resolve()
+  await Promise.resolve()
+}
+
 /** Run the production ordinary-transition shape through the real core. */
 function ordinary(ownership: SessionOwnershipCore, sessionId: string, ref: SessionOwnerRef, publish = true): void {
   runOrdinaryCommit({
@@ -258,12 +277,14 @@ test('HSP-04 a failed-before-commit transition and a navigation epoch bump never
   // The navigation failed BEFORE the owner publication: the production shape
   // still bumps/blocks as its caller does, but no new owner was committed.
   ordinary(observation.ownership, SESSION_B, owner('failed'), false)
-  await new Promise<void>(resolve => setTimeout(resolve, 120))
+  await scopeSettled()
+  await settleQueue(observation, 'the queue after the failed-before-commit navigation')
   assert.deepEqual(observation.sessions(), [SESSION_A], 'a failed-before-commit navigation reports nothing')
 
   // A navigation epoch change is not a Session commit at all.
   observation.ownership.bumpNavigationEpoch()
-  await new Promise<void>(resolve => setTimeout(resolve, 120))
+  await scopeSettled()
+  await settleQueue(observation, 'the queue after the navigation epoch bump')
   assert.deepEqual(observation.sessions(), [SESSION_A])
 
   // Sessionless: the previous Direct resume argv must be withdrawn by ONE
@@ -288,11 +309,13 @@ test('HSP-05 a generation-only bump and a same-id re-publication are silent; a r
   await observation.waitForSessions(1, 'Session A')
 
   observation.ownership.bumpGeneration()
-  await new Promise<void>(resolve => setTimeout(resolve, 120))
+  await scopeSettled()
+  await settleQueue(observation, 'the queue after the generation-only bump')
   assert.deepEqual(observation.sessions(), [SESSION_A], 'a generation-only bump does not re-report')
 
   observation.ownership.setCurrentOwner(owner('a-again'), SESSION_A)
-  await new Promise<void>(resolve => setTimeout(resolve, 120))
+  await scopeSettled()
+  await settleQueue(observation, 'the queue after the same-id re-publication')
   assert.deepEqual(observation.sessions(), [SESSION_A], 'the same Session id re-published stays deduped')
 
   ordinary(observation.ownership, SESSION_B, owner('b'))
@@ -316,7 +339,8 @@ test('HSP-06 unsubscribe stops Session observation; dispose is the ONE ordered r
   observation.unsubscribe()
   observation.observed.length = 0
   ordinary(observation.ownership, SESSION_B, owner('b'))
-  await new Promise<void>(resolve => setTimeout(resolve, 120))
+  await scopeSettled()
+  await settleQueue(observation, 'the queue after the unsubscribed publication')
   assert.deepEqual(observation.observed, [], 'an unsubscribed owner observer is never called')
   assert.deepEqual(observation.sessions(), [SESSION_A], 'no Session may be reported after unsubscribe')
 
@@ -324,10 +348,12 @@ test('HSP-06 unsubscribe stops Session observation; dispose is the ONE ordered r
   observation.reporter.dispose()
   await observation.fixture.waitFor(entries => entries.filter(entry => entry.phase === 'start'
     && entry.argv?.[1] === 'release-agent').length === 1, 'the dispose release')
+  await settleQueue(observation, 'the queue after dispose')
   const afterDispose = observation.starts().length
   observation.reporter.setQualified(true)
   observation.reporter.publish({ state: 'idle' })
-  await new Promise<void>(resolve => setTimeout(resolve, 150))
+  await scopeSettled()
+  await settleQueue(observation, 'the queue after the refused requalification')
   assert.equal(observation.starts().length, afterDispose, 'dispose is idempotent and requalification is refused')
   assert.equal(observation.starts().filter(entry => entry.argv?.[1] === 'release-agent').length, 1)
 })
