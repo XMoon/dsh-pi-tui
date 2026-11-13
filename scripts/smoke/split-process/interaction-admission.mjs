@@ -339,9 +339,14 @@ export async function runInteractionNavigationFirst(context) {
       const exitIndex = eventsOf(sessionX).length
       await terminateClient(clientA, aReady.pid, 'G567-N2a A')
       await sleep(1_000)
-      assert(readC1WorkEvents(workRoot).every(event =>
-        event.kind !== 'question-settled' && event.kind !== 'question-failed'),
-      'G567-N2a A\'s process exit settled or cancelled the Host question')
+      // Self-diagnosing: name the offending event(s) so a spontaneous
+      // pre-exit settlement/failure (observed once at +104ms after the
+      // request with both Clients idle) is distinguishable from one caused
+      // by the teardown itself.
+      const prematureQuestionEvents = readC1WorkEvents(workRoot)
+        .filter(event => event.kind === 'question-settled' || event.kind === 'question-failed')
+      assert(prematureQuestionEvents.length === 0,
+        `G567-N2a A's process exit settled or cancelled the Host question: ${JSON.stringify(prematureQuestionEvents)}`)
       assert(eventsOf(sessionX).slice(exitIndex)
         .every(event => event.type !== 'tool/result' && event.type !== 'turn/end'),
       'G567-N2a A\'s process exit produced Host result activity')

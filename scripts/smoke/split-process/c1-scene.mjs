@@ -136,11 +136,13 @@ export function createC1Scene(context, options = {}) {
     } catch (error) {
       // The exit wait carries no frame by itself; capture the client's last
       // screen so a held exit is diagnosable (composer poison, open modal…).
+      // SplitSmokeAssertionError drops constructor `cause`; attach it after.
       const frame = await client.viewport().catch(() => [])
-      throw new SplitSmokeAssertionError(
+      const failure = new SplitSmokeAssertionError(
         `${label} exit timed out; last frame: ${JSON.stringify(frame.slice(-16))}`,
-        { cause: error },
       )
+      failure.cause = error
+      throw failure
     }
     assert(exit.code === 0 && exit.signal === null, `${label} exit was ${JSON.stringify(exit)}`)
     await client.dispose()
