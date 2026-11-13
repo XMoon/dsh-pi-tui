@@ -27,20 +27,20 @@ const dshPeerEntries = Object.entries(packageJson.peerDependencies ?? {})
 // tested with the same range semantics consumers use.
 test('all DSH runtime peers use the published npm lower bound', () => {
   assert.ok(dshPeerEntries.length > 0, 'the bundle must declare DSH runtime peers')
-  // The 0.2.2-rc.2 adaptation lifts the whole peer policy onto the 0.2.2-rc.2
+  // The 0.2.2-rc.3 adaptation lifts the whole peer policy onto the 0.2.2-rc.3
   // floor: the 0.5.7 candidate line is qualified against that exact published
-  // family and no longer claims 0.2.2-rc.1 (npm semver excludes a lower
-  // prerelease of the same tuple). The window stays open-ended above
-  // 0.2.2-rc.2; only the lower bound moved.
+  // family and no longer claims 0.2.2-rc.2 or 0.2.2-rc.1 (npm semver excludes a
+  // lower prerelease of the same tuple). The window stays open-ended above
+  // 0.2.2-rc.3; only the lower bound moved.
   for (const [name, range] of dshPeerEntries) {
     assert.equal(range, expectedWindow, `${name} must use the open-ended support lower bound`)
     assert.equal(semver.validRange(range) !== null, true, `${name} peer range must be valid semver syntax`)
-    assert.equal(semver.satisfies('0.2.2-rc.2', range), true, `${name} must include its published npm floor`)
+    assert.equal(semver.satisfies('0.2.2-rc.3', range), true, `${name} must include its published npm floor`)
+    assert.equal(semver.satisfies('0.2.2-rc.2', range), false, `${name} must reject the rc below the floor`)
     // A later prerelease of the SAME major.minor.patch tuple orders above the
     // floor; a lower prerelease of the same tuple and a different tuple's
-    // prerelease are excluded by npm range semantics (this is why 0.2.2-rc.1
-    // and the previous 0.2.1-rc.* family drop out entirely).
-    assert.equal(semver.satisfies('0.2.2-rc.3', range), true, `${name} must accept a later rc of the same tuple`)
+    // prerelease are excluded by npm range semantics (this is why 0.2.2-rc.2,
+    // 0.2.2-rc.1 and the previous 0.2.1-rc.* family drop out entirely).
     assert.equal(semver.satisfies('0.2.2-rc.1', range), false, `${name} must reject the rc below the floor`)
     assert.equal(semver.satisfies('0.2.2-rc.0', range), false, `${name} must reject the prerelease below the floor`)
     assert.equal(semver.satisfies('0.2.2-alpha.3', range), false, `${name} must reject the alpha line below the floor`)
@@ -73,7 +73,7 @@ test('engines.dsh restates the matrix support floor and the official evaluator e
   // ignored) and prereleases participate in the range.
   assert.equal(evaluatePluginCompatibility(packageJson, {}, supportedFloor), undefined,
     `the official evaluator must admit its own floor ${supportedFloor}`)
-  for (const rejected of ['0.2.2-rc.0', '0.2.1-rc.5', '0.2.1', '0.2.0-rc.2']) {
+  for (const rejected of ['0.2.2-rc.2', '0.2.2-rc.0', '0.2.1-rc.5', '0.2.1', '0.2.0-rc.2']) {
     const issue = evaluatePluginCompatibility(packageJson, {}, rejected)
     assert.notEqual(issue, undefined, `the official evaluator must reject ${rejected}`)
     assert.deepEqual(Object.keys(issue.requirements), ['engines.dsh'],

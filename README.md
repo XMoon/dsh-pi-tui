@@ -23,7 +23,7 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ```
 
-### 精确版本配对（0.5.6）
+### 精确版本配对（已发布稳定版 0.5.6）
 
 本版要求 DSH `>=0.2.2-rc.1`，精确验证目标为 `0.2.2-rc.1`，并要求 Node.js `>=24.9.0`。安装或升级前先正常结束 Agent 回合、退出旧 TUI/Host；不支持热升级。
 
@@ -31,6 +31,15 @@ dsh --profile pi-tui
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.1
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.6
 dsh --profile pi-tui
+```
+
+### 候选预览（0.5.7 × 0.2.2-rc.3，未发布）
+
+本 checkout 携带尚未发布的 `0.5.7` 候选，针对 DSH `0.2.2-rc.3` 精确验证：运行时最低与精确验证目标均为 `>=0.2.2-rc.3`（不兼容 `0.2.2-rc.2` 及更早），并要求 Node.js `>=24.9.0`。`0.5.7` 尚未发布到 npm，暂不提供安装型 `dsh plugin add ...@0.5.7` 命令；请从本 checkout 构建并用 `pnpm compat:dsh:npm` 验证该预览配对。安装或升级 DSH 前先正常结束 Agent 回合、退出旧 TUI/Host；不支持热升级。
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.3
+pnpm compat:dsh:npm
 ```
 
 ### Next / npm 线（验证）
@@ -64,20 +73,22 @@ pnpm compat:dsh:npm
 
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.5.6`（stable / `@latest`） | `dsh-v0.2.2-rc.1` | 当前正式版；最低与精确验证目标为 DSH `0.2.2-rc.1`，Node.js `>=24.9.0`；不兼容 `0.2.1-rc.*` |
+| `0.5.6`（stable / `@latest`） | `dsh-v0.2.2-rc.1` | 已发布稳定版；最低与精确验证目标为 DSH `0.2.2-rc.1`，Node.js `>=24.9.0`；不兼容 `0.2.1-rc.*` |
+| `0.5.7`（候选预览，未发布） | `dsh-v0.2.2-rc.3` | 本 checkout 候选；最低与精确验证目标为 DSH `0.2.2-rc.3`，Node.js `>=24.9.0`；不兼容 `0.2.2-rc.2` 及更早 |
 | `0.5.5`（stable，历史） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4`、`dsh-v0.2.1-rc.5` | 上一正式版；最低 DSH 版本为 `0.2.1-rc.2` |
 | `0.5.4`（stable，历史） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 上一稳定版；最低 DSH 版本为 0.2.1-rc.2，已在该三个 DSH 版本通过官方 preset assembly |
 | `0.5.3`（stable，历史） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 上一稳定版；最低 DSH 版本为 0.2.1-rc.2，已在该三个 DSH 版本通过官方 preset assembly |
 | `0.5.1`（stable，历史） | `dsh-v0.2.0-rc.2` | 上一稳定版；最低与精确验证目标均为 0.2.0-rc.2 family |
 | `0.5.2-rc.1`（next 通道预览，已发布） | `dsh-v0.2.0-rc.2` | 上一轮 next 预览：已发布到 npm `next` 通道（2026-10-17）；整套 peer floor 仍是 `>=0.2.0-rc.2`，不覆盖 0.2.1-rc.2 |
 | `dsh-v0.2.1-rc.1`（无配对 TUI） | 无 | 该中间版本没有本矩阵宣称兼容的已发布 TUI；不要为它复用 `0.5.5` |
+| `dsh-v0.2.2-rc.2`（无配对 TUI） | 无 | 该中间版本没有本矩阵宣称兼容的已发布/候选 TUI；不要为它复用 `0.5.6` |
 | `0.5.0`（stable，历史） | `dsh-v0.1.7-rc.2`、`dsh-v0.2.0-rc.1` | 上一稳定版；最低 0.1.7-rc.2，精确验证目标 0.2.0-rc.1 |
 | `0.4.9`（stable，历史） | `dsh-v0.1.7-rc.2` | 上一稳定版；0.1.7-rc.2 runtime 的兼容 TUI |
 | `0.4.8`（stable，历史） | `dsh-v0.1.7-rc.1` | 上一稳定版；0.1.7-rc.1 runtime 的兼容 TUI |
 | `0.4.6`（stable，历史） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 上一稳定版；0.1.5 runtime 的兼容 TUI |
 | `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
-不要混装稳定线与 `@next` 预发布线。`0.5.6` 是当前正式版，要求 DSH `>=0.2.2-rc.1`，且不兼容 `0.2.1-rc.*`。升级前让回合和后台任务结束，正常退出旧 TUI/Host，并备份 Profile/patch、Session 原始日志、Workspace 及所需 Host 资源与凭据引用；不支持热升级。0.2.2 写入的数据不保证能由 rc5 原地读取，回退时须恢复到独立目录并使用匹配的旧版 DSH/TUI。历史配对见上表；通用匹配和诊断方式见[兼容性指南](docs/guides/dsh-compatibility.md)，`@next` 集成状态见 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
+不要混装稳定线与 `@next` 预发布线。`0.5.6` 是已发布稳定版（`@latest`），要求 DSH `>=0.2.2-rc.1`，且不兼容 `0.2.1-rc.*`；`0.5.7` 是尚未发布的候选，目标 DSH `0.2.2-rc.3`。升级前让回合和后台任务结束，正常退出旧 TUI/Host，并备份 Profile/patch、Session 原始日志、Workspace 及所需 Host 资源与凭据引用；不支持热升级。0.2.2 写入的数据不保证能由 rc5 原地读取，回退时须恢复到独立目录并使用匹配的旧版 DSH/TUI。历史配对见上表；通用匹配和诊断方式见[兼容性指南](docs/guides/dsh-compatibility.md)，`@next` 集成状态见 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
 
 新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
 `code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。
@@ -217,7 +228,7 @@ Task Center 的 `ACTIVE` / `TRACKED` 是展示范围：`ACTIVE` 只显示当前�
 
 `/plugins` 是 `/settings → Plugins` 的深链：两者使用同一个 Settings 全屏 lease 与同一个 Plugin Manager 页面，不再有独立的插件全屏界面，也不会新建或切换 Session。目录固定为 TUI & Extensions / Official DSH / Third-party / Experimental（实验组最后），可搜索、筛选、查看来源与状态，并从官方目录执行安装、启用/禁用与删除；Host 标记可更新的第三方 Registry Profile bundle 还可查看可用版本并经确认更新；结果以 Host 实际返回的版本、重启要求和错误为准。≥120 列且能留出至少 6 行真实业务正文时同屏显示 `类别 | 插件列表 | 详情`；76–119 列按键盘焦点显示 `类别 | 列表` 或 `列表 | 详情`（`列表 | 详情` 同样要求至少 6 行真实业务正文，不足则退化为单栏），<76 列单栏；安装、危险确认与 Diagnostics 始终占满整宽，以免压缩风险文案。顶部身份/元数据/分隔线/面栏和最后一行操作栏由 Settings 统一绘制，插件只占业务正文。正在提供当前界面的 `dsh-pi-tui` 只读，不能从自身界面更新、禁用或移除。从 Settings 的 `Plugins` 分类预览或 `/plugins` 进入都保留同一个页面实例与后台安装请求：Esc 从列表回到 Settings 分类，再按一次 Esc 关闭。页面内按 `d` 打开只读的 **Diagnostics**：按 owner 分组显示 extension 贡献的 `active/failed/shadowed` 状态与完整 `lastError`、各 registry 计数、实际 capabilities，以及无法证明 Loader entry 归属的贡献（单列 `Unassociated extension contributions`）；`c` 复制所选事实、`C` 复制全部、`r` 重新读取、Esc 返回。Diagnostics 只读 extension ledger，不把 Host 包安装状态或安装日志混入其中；`copy` 仍只证明已发送，不证明操作系统剪贴板已收到。
 
-Experimental 组的 14 个官方 rc.2 实验包在 Detail 中给出固定的终端可用面与限制/风险说明（Web-only、Host-only、B04 的 WEB_ONLY/Host 行未挂载（Owner 已接受）、B13/B14 的已验证 one-shot/provider 边界等），这些说明只随精确官方包身份出现，不随启用状态伪装成 Host 能力通过；升级指引按 Host 事实区分「随 DSH 发行升级」「profile 包先 Remove 再显式 Install」「官方 on-demand 目标」和「当前 TUI 由外部管理」，不提供原地更新、版本选择器或静默重装。
+Experimental 组的官方实验包（含 rc.3 新增的 DeepSeek chat import Web-only 成员）在 Detail 中给出固定的终端可用面与限制/风险说明（Web-only、Host-only、B04 的 WEB_ONLY/Host 行未挂载（Owner 已接受）、B13/B14 的已验证 one-shot/provider 边界等），这些说明只随精确官方包身份出现，不随启用状态伪装成 Host 能力通过；升级指引按 Host 事实区分「随 DSH 发行升级」「profile 包先 Remove 再显式 Install」「官方 on-demand 目标」和「当前 TUI 由外部管理」，不提供原地更新、版本选择器或静默重装。
 
 Subagent 按完整 lineage 显示，包括嵌套创建的 descendant：
 

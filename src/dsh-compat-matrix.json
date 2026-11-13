@@ -28,10 +28,10 @@
   ],
   "current": {
     "since": "0.5.7",
-    "requires": "DeepSeek Harness 0.2.2-rc.2 or later",
-    "upgradeDsh": "0.2.2-rc.2",
-    "upgradeCommand": "npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.2",
-    "guidance": "The 0.5.7 candidate (unpublished) requires DeepSeek Harness 0.2.2-rc.2 or later; this checkout validates that runtime floor and targets 0.2.2-rc.2. The previous 0.2.2-rc.1 pairing is no longer claimed by this candidate, so finish in-flight turns and background jobs before upgrading. See README.en.md for the DSH/TUI pairing table, and docs/guides/dsh-compatibility.md for compatibility/recovery rules."
+    "requires": "DeepSeek Harness 0.2.2-rc.3 or later",
+    "upgradeDsh": "0.2.2-rc.3",
+    "upgradeCommand": "npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.3",
+    "guidance": "The 0.5.7 candidate (unpublished) requires DeepSeek Harness 0.2.2-rc.3 or later; this checkout validates that runtime floor and targets 0.2.2-rc.3. The previous 0.2.2-rc.2 and 0.2.2-rc.1 pairings are no longer claimed by this candidate, so finish in-flight turns and background jobs before upgrading. See README.en.md for the DSH/TUI pairing table, and docs/guides/dsh-compatibility.md for compatibility/recovery rules."
   },
   "floor": {
     "below": "0.1.0-rc.8",
@@ -173,9 +173,15 @@
     },
     {
       "dshFrom": "0.2.2-rc.2",
-      "tui": "0.5.7",
       "versions": [
         "0.2.2-rc.2"
+      ]
+    },
+    {
+      "dshFrom": "0.2.2-rc.3",
+      "tui": "0.5.7",
+      "versions": [
+        "0.2.2-rc.3"
       ]
     }
   ]
