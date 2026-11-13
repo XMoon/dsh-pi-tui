@@ -886,13 +886,21 @@ an OverlayBroker node. It is mutually exclusive with the Job, Settings and
 direct `/plugins` leases, and it obeys the same paused-return-surface,
 modal-pre-emption, exactly-once close and final-dispose rules.
 
-- **Why a screen, not an overlay.** The pinned renderer's overlay compositor
-  returns the BASE line unchanged when that line already contains an inline
-  image (`compositeTuiLine` → `isImageLine(baseLine)`), so a framed overlay
-  would silently drop its rows over transcript images and could not reliably
-  paint the image itself. A leased screen makes the image an ordinary BASE line
-  of its own `TuiAltScreen` — the proven `Image` rendering path — with the
-  transcript screen paused underneath.
+- **Why a screen, not an overlay.** `compositeTuiLine` still returns the BASE
+  line unchanged when that line already contains an inline image
+  (`isImageLine(baseLine)`), so a framed overlay cannot composite itself onto an
+  image anchor row. A Native Kitty placement is instead preempted BEFORE
+  compositing: `compositeOverlays` drops the whole covered `a=p`/`a=T` block
+  from that frame's projection — only the projection, never the component, the
+  overlay stack or the image owner — so the overlay paints on an empty base,
+  and the physical Screen deletes the old placement and re-places the same
+  image once the overlay is gone (X077 in
+  `packages/pi-tui/vendor-divergences.json`). That is a single-frame visual
+  yield, not a viewer. The workspace still needs its own list/viewer states,
+  focus owner, scroll and occurrence lifecycle, so it keeps the SAME temporary
+  physical-screen lease as §10.1/§10.3: a leased screen keeps the viewed image
+  an ordinary BASE line of its own `TuiAltScreen` — the proven `Image` rendering
+  path — with the transcript screen paused underneath.
 - **Two internal states, one screen owner.** The workspace panel hosts the
   mounted-window occurrence LIST (`SearchablePicker`, no full-text search) and
   the read-only VIEWER as mutually exclusive states of the SAME layout root.
