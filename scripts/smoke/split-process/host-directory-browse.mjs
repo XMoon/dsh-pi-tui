@@ -147,7 +147,20 @@ export async function runHostDirectoryBrowse(context) {
     }
 
     const sessionsBefore = sessionInventory(dshHome)
-    const workspacesBefore = await workspaceBaselineIds('PR1 before')
+    // The surface's OWN mount preflight may still be adopting its launch
+    // directory as a Host Workspace; a baseline taken mid-adoption would
+    // attribute that legitimate mount write to the browse reads. Take a
+    // baseline that is STABLE across three consecutive reads.
+    let workspacesBefore = await workspaceBaselineIds('PR1 before')
+    for (let settle = 0; settle < 30; settle += 1) {
+      await new Promise(resolve => setTimeout(resolve, 150))
+      const next = await workspaceBaselineIds(`PR1 before settle ${String(settle)}`)
+      if (JSON.stringify(next) === JSON.stringify(workspacesBefore)) {
+        if (settle >= 2) break
+      } else {
+        workspacesBefore = next
+      }
+    }
 
     // ── PR1-A: the Host home, with the Host-only marker directory ───────────
     const home = await probe({}, 'PR1 Host home')
@@ -250,8 +263,14 @@ export async function runHostDirectoryBrowse(context) {
     deepEqual(sessionsAfter, sessionsBefore,
       'PR1 the directory reads changed the durable Host Session inventory')
     const workspacesAfter = await workspaceBaselineIds('PR1 after')
-    deepEqual(workspacesAfter, workspacesBefore,
-      'PR1 the directory reads created or removed a Host Workspace')
+    const addedWorkspaces = workspacesAfter.filter(workspace =>
+      !workspacesBefore.some(before => before.workspaceId === workspace.workspaceId))
+    const removedWorkspaces = workspacesBefore.filter(before =>
+      !workspacesAfter.some(workspace => workspace.workspaceId === before.workspaceId))
+    deepEqual(removedWorkspaces, [],
+      `PR1 the directory reads REMOVED a Host Workspace: ${JSON.stringify(removedWorkspaces)}`)
+    deepEqual(addedWorkspaces, [],
+      `PR1 the directory reads created a Host Workspace: ${JSON.stringify(addedWorkspaces)}`)
     assert(afterDrop.listedSessions === home.listedSessions,
       'PR1 the directory reads changed the official Session list')
     assert(afterDrop.sessionOpen === false && afterDrop.openSessionId === null,
