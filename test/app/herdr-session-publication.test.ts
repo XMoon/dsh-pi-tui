@@ -110,9 +110,17 @@ function compose(t: Parameters<typeof createHerdrCliFixture>[0], options: { read
  * Wait until every started fake-CLI child has exited, so the reporter queue is
  * provably idle before a negative observation.
  */
+function settledPids(entries: readonly HerdrCliEntry[]): boolean {
+  // Compare by PID: every started child must have its OWN end line. Counting
+  // starts against ends alone can observe an "equal" prefix while the next
+  // child is already starting, which makes a negative observation racy.
+  const started = new Set(entries.filter(entry => entry.phase === 'start').map(entry => entry.pid))
+  const ended = new Set(entries.filter(entry => entry.phase === 'end').map(entry => entry.pid))
+  return started.size > 0 && [...started].every(pid => ended.has(pid))
+}
+
 async function settleQueue(observation: Observation, label: string): Promise<void> {
-  await observation.fixture.waitFor(entries => entries.filter(entry => entry.phase === 'end').length
-    >= entries.filter(entry => entry.phase === 'start').length, label)
+  await observation.fixture.waitFor(settledPids, label)
 }
 
 /**
@@ -356,4 +364,86 @@ test('HSP-06 unsubscribe stops Session observation; dispose is the ONE ordered r
   await settleQueue(observation, 'the queue after the refused requalification')
   assert.equal(observation.starts().length, afterDispose, 'dispose is idempotent and requalification is refused')
   assert.equal(observation.starts().filter(entry => entry.argv?.[1] === 'release-agent').length, 1)
+})
+
+// ── H2 abnormal recovery through the REAL publication path (review F1/F2) ────
+
+test('HSP-07 a failed cleanup withdrawal is retried by the NEXT real owner commit, and the new owner is reported', async (t) => {
+  const fixture = createHerdrCliFixture(t, { sessionDelayMs: 20 })
+  const reporter = createHerdrReporter(fixture.env, true)
+  assert.ok(reporter !== undefined)
+  const ownership = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
+  const publishCurrent = (): void => {
+    reporter.observeSession(herdrSessionProjection(ownership.currentSessionId(), 'pi-tui'))
+  }
+  ownership.subscribeScopeInvalidation(publishCurrent)
+  // The install-time sample is what the composition performs after subscribing.
+  publishCurrent()
+  const sessions = (): string[] => fixture.sessions().map(entry => entry.sessionId)
+  const releases = (): number => fixture.starts().filter(entry => entry.argv?.[1] === 'release-agent').length
+
+  reporter.publish({ state: 'idle' })
+  await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'start'
+    && entry.argv?.[1] === 'report-agent').length === 1, 'the idle registration')
+  ordinary(ownership, SESSION_A, owner('a'))
+  await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'start'
+    && entry.argv?.[1] === 'report-agent-session').length === 1, 'Session A')
+  await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'end').length
+    >= entries.filter(entry => entry.phase === 'start').length, 'the queue settled after A')
+
+  // The owner goes away while the withdrawal of A's resume target FAILS.
+  fixture.env.HERDR_FAKE_EXIT_CODE = '3'
+  ownership.setCurrentOwner(undefined, undefined)
+  await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'start'
+    && entry.argv?.[1] === 'release-agent').length === 1, 'the failed cleanup withdrawal')
+  await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'end').length
+    >= entries.filter(entry => entry.phase === 'start').length, 'the failed withdrawal settled')
+  assert.equal(sessions().length, 1, 'a failed withdrawal must not claim a new Session')
+
+  // Herdr recovers and the NEXT real owner commit is the lifecycle event that
+  // retries the outstanding cleanup; only its SUCCESS may re-register.
+  fixture.env.HERDR_FAKE_EXIT_CODE = '0'
+  ordinary(ownership, SESSION_B, owner('b'))
+  await fixture.waitFor(entries => releases() === 2, 'the retried cleanup withdrawal')
+  await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'end').length
+    >= entries.filter(entry => entry.phase === 'start').length, 'the retried cleanup settled')
+  await fixture.waitFor(entries => sessions().length === 2, 'Session B after the successful retry')
+  assert.deepEqual(sessions(), [SESSION_A, SESSION_B],
+    'the committed owner is reported after the retried cleanup succeeded')
+  // Every started child has its OWN end line, so this sequence is the DISPATCH
+  // order and not a partially written log.
+  await fixture.waitFor(settledPids, 'the whole queue settled')
+  const commands = fixture.starts().map(entry => entry.argv?.[1] === 'release-agent'
+    ? 'release'
+    : entry.argv?.[1] === 'report-agent-session' ? 'session' : 'state')
+  assert.deepEqual(commands, ['state', 'session', 'release', 'release', 'state', 'session'],
+    `the retried cleanup precedes the re-registration and the new Session: ${JSON.stringify(commands)}`)
+  assert.deepEqual(fixture.sessions()[1].resumeArgv,
+    ['dsh', '--profile', 'pi-tui', '--session', SESSION_B])
+})
+
+test('HSP-08 a first registration failure is repaired by a Session-only commit (no Agent-state change)', async (t) => {
+  const fixture = createHerdrCliFixture(t)
+  const reporter = createHerdrReporter(fixture.env, true)
+  assert.ok(reporter !== undefined)
+  const ownership = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
+  ownership.subscribeScopeInvalidation(() => {
+    reporter.observeSession(herdrSessionProjection(ownership.currentSessionId(), 'pi-tui'))
+  })
+  fixture.env.HERDR_FAKE_EXIT_CODE = '3'
+  reporter.publish({ state: 'idle' })
+  await fixture.waitFor(entries => entries.some(entry => entry.phase === 'end' && entry.code === 3),
+    'the failed first registration')
+
+  // Herdr recovers; the ONLY new fact is the committed owner. The Agent state
+  // stays idle, so the H1 state dedupe alone would never dispatch again.
+  fixture.env.HERDR_FAKE_EXIT_CODE = '0'
+  ordinary(ownership, SESSION_B, owner('b'))
+  await fixture.waitFor(entries => fixture.sessions().length === 1, 'the repaired Session report')
+  const commands = fixture.starts().map(entry => entry.argv?.[1] === 'release-agent'
+    ? 'release'
+    : entry.argv?.[1] === 'report-agent-session' ? 'session' : 'state')
+  assert.deepEqual(commands, ['state', 'state', 'session'],
+    `the Session-only commit re-registers the Pane first: ${JSON.stringify(commands)}`)
+  assert.deepEqual(fixture.sessions().map(entry => entry.sessionId), [SESSION_B])
 })

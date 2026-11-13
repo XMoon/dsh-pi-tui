@@ -560,3 +560,110 @@ test('H2-R10 external failures stay contained, leave no backlog and never leak S
   assert.equal(sessionStarts(disposing).length, 1, 'no Session after dispose')
   assert.deepEqual(startPhases(disposing.entries()), ['state', 'session', 'release'])
 })
+
+// ── H2 abnormal-recovery contract (external review F1/F2/F3) ─────────────────
+
+test('H2-R11 a FAILED cleanup release claims nothing: no re-registration until a later real event retries it', async (t) => {
+  const fixture = createHerdrCliFixture(t, { sessionDelayMs: 20 })
+  const recorder = recordingDiag()
+  const reporter = reporterOf(fixture, true, recorder.diag)
+  reporter.publish({ state: 'idle' })
+  await fixture.waitFor(entries => starts(fixture, 'report-agent').length === 1, 'the idle registration')
+  reporter.observeSession(directSession(SESSION_A))
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 1, 'Session A with a resume argv')
+
+  // The withdrawal of the saved resume target FAILS (non-zero exit).
+  fixture.env.HERDR_FAKE_EXIT_CODE = '3'
+  reporter.observeSession(undefined)
+  await fixture.waitFor(entries => entries.some(entry => entry.phase === 'end'
+    && entry.code === 3
+    && starts(fixture, 'release-agent').length === 1), 'the failed cleanup release')
+  await delay(150)
+  assert.equal(starts(fixture, 'report-agent').length, 1,
+    'a failed withdrawal must NOT re-register the Pane (the resume target may still be saved)')
+  assert.equal(sessionStarts(fixture).length, 1, 'no Session may be claimed after a failed cleanup')
+  assert.deepEqual(startPhases(fixture.entries()), ['state', 'session', 'release'],
+    'the failed withdrawal must not be followed by a re-registration')
+  assert.ok(recorder.lines.some(line => line.includes('"reason":"release"') && line.includes('"code":3')),
+    `the failed withdrawal is diagnosed without argv: ${JSON.stringify(recorder.lines)}`)
+
+  // A LATER real lifecycle event (the same logical state is still a real fact)
+  // retries the outstanding cleanup exactly once; only its success re-registers.
+  fixture.env.HERDR_FAKE_EXIT_CODE = '0'
+  reporter.publish({ state: 'idle' })
+  await fixture.waitFor(entries => starts(fixture, 'release-agent').length === 2, 'the retried cleanup')
+  await fixture.waitFor(entries => starts(fixture, 'report-agent').length === 2,
+    'the re-registration after the SUCCESSFUL retried cleanup')
+  await delay(150)
+  assert.deepEqual(startPhases(fixture.entries()), ['state', 'session', 'release', 'release', 'state'],
+    'the Pane is re-registered only after the withdrawal really succeeded')
+  assert.equal(sessionStarts(fixture).length, 1, 'the sessionless target still reports no Session')
+  const [firstRelease, secondRelease] = fixture.starts().filter(entry => commandOf(entry) === 'release-agent')
+  assert.ok(seqOf(secondRelease) > seqOf(firstRelease), 'both withdrawals share the one monotone seq')
+})
+
+test('H2-R12 a first state-registration failure is repaired by a Session-only change', async (t) => {
+  const fixture = createHerdrCliFixture(t, { firstDelayMs: 0 })
+  const reporter = reporterOf(fixture)
+  // The FIRST `report-agent` fails: the Pane is never held.
+  fixture.env.HERDR_FAKE_EXIT_CODE = '3'
+  reporter.publish({ state: 'idle' })
+  await fixture.waitFor(entries => entries.some(entry => entry.phase === 'end'
+    && entry.code === 3 && starts(fixture, 'report-agent').length === 1), 'the failed first registration')
+
+  // Herdr recovers, and the ONLY change is the main Session (the Agent stays
+  // idle, so the H1 state dedupe alone would never dispatch again).
+  fixture.env.HERDR_FAKE_EXIT_CODE = '0'
+  reporter.observeSession({ sessionId: SESSION_B })
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 1,
+    'the Session after the repaired registration')
+  const phases = startPhases(fixture.entries())
+  assert.deepEqual(phases, ['state', 'state', 'session'],
+    `the Session-only change must re-register the Pane first; the log is ${JSON.stringify(phases)}`)
+  assert.deepEqual(fixture.sessions(), [{ sessionId: SESSION_B }],
+    'the Remote-shaped Session is reported without a resume argv')
+})
+
+test('H2-R13 dispose during an in-flight cleanup release never starts a second one', async (t) => {
+  // `delayMs` keeps the cleanup withdrawal IN FLIGHT long enough for the
+  // dispose below to arrive while it is still the active child (and still
+  // inside the reporter's own 500 ms bound).
+  const fixture = createHerdrCliFixture(t, { delayMs: 400 })
+  const reporter = reporterOf(fixture)
+  reporter.publish({ state: 'idle' })
+  await fixture.waitFor(entries => starts(fixture, 'report-agent').length === 1, 'the idle registration')
+  reporter.observeSession(directSession(SESSION_A))
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 1, 'the in-flight Session A')
+  // The cleanup withdrawal waits behind the in-flight Session child.
+  reporter.observeSession(undefined)
+  await fixture.waitFor(entries => starts(fixture, 'release-agent').length === 1, 'the cleanup release')
+  // Dispose WHILE that release is still running: it already covers the teardown.
+  const releasePid = starts(fixture, 'release-agent')[0].pid
+  reporter.dispose()
+  reporter.dispose()
+  await fixture.waitFor(entries => entries.some(entry => entry.phase === 'end' && entry.pid === releasePid),
+    'the cleanup release settled')
+  await delay(150)
+  assert.equal(starts(fixture, 'release-agent').length, 1,
+    `dispose must not duplicate an already-owed withdrawal: ${JSON.stringify(startPhases(fixture.entries()))}`)
+  assert.deepEqual(startPhases(fixture.entries()), ['state', 'session', 'release'])
+})
+
+test('H2-R14 a startup sample during the first state child never duplicates the registration', async (t) => {
+  // The composition samples the owner immediately after subscribing. On a
+  // sessionless start that sample has no Session AND typically arrives while the
+  // very first `report-agent` child is still in flight.
+  const fixture = createHerdrCliFixture(t, { firstDelayMs: 300, delayMs: 0 })
+  const reporter = reporterOf(fixture)
+  reporter.publish({ state: 'idle' })
+  reporter.observeSession(undefined)
+  await fixture.waitFor(entries => starts(fixture, 'report-agent').length >= 1, 'the first state child')
+  await fixture.waitFor(entries => entries.some(entry => entry.phase === 'end'), 'the first state settled')
+  await delay(200)
+  assert.deepEqual(startPhases(fixture.entries()), ['state'],
+    'a sessionless sample must not duplicate the in-flight state registration')
+  // A later REAL Session is still reported exactly once, after that state.
+  reporter.observeSession({ sessionId: SESSION_A })
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 1, 'the Session after the state')
+  assert.deepEqual(startPhases(fixture.entries()), ['state', 'session'])
+})
