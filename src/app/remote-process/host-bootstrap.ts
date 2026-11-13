@@ -27,6 +27,7 @@ import { PI_TUI_SKILLS_NAMESPACE } from '../../runtime/remote/pi-tui-skills-cont
 import { PI_TUI_AUTHORIZATION_NAMESPACE } from '../../runtime/remote/pi-tui-authorization-contract.ts'
 import { PI_TUI_CREDENTIAL_RECORDS_NAMESPACE } from '../../runtime/remote/pi-tui-credential-records-contract.ts'
 import { PI_TUI_SESSION_POLICY_NAMESPACE } from '../../runtime/remote/pi-tui-session-policy-contract.ts'
+import { PI_TUI_DEFAULT_MODEL_NAMESPACE } from '../../runtime/remote/pi-tui-default-model-contract.ts'
 
 /** Cordis `FiberState.ACTIVE` (the enum is a const enum with no runtime value). */
 const FIBER_ACTIVE = 2
@@ -199,6 +200,7 @@ const PRIVATE_TYPERT_BINDINGS = [
   { serviceKey: 'piTuiAuthorization', namespace: PI_TUI_AUTHORIZATION_NAMESPACE },
   { serviceKey: PI_TUI_CREDENTIAL_RECORDS_NAMESPACE, namespace: PI_TUI_CREDENTIAL_RECORDS_NAMESPACE },
   { serviceKey: PI_TUI_SESSION_POLICY_NAMESPACE, namespace: PI_TUI_SESSION_POLICY_NAMESPACE },
+  { serviceKey: PI_TUI_DEFAULT_MODEL_NAMESPACE, namespace: PI_TUI_DEFAULT_MODEL_NAMESPACE },
 ] as const
 
 /**
@@ -286,6 +288,7 @@ export function collectHostEntryStatus(
     PI_TUI_AUTHORIZATION_NAMESPACE,
     PI_TUI_CREDENTIAL_RECORDS_NAMESPACE,
     PI_TUI_SESSION_POLICY_NAMESPACE,
+    PI_TUI_DEFAULT_MODEL_NAMESPACE,
     PI_TUI_HOST_READY_SERVICE,
     'piTuiPerformanceReady',
   ]) {

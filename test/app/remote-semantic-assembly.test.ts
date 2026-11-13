@@ -93,6 +93,9 @@ function runtimeSource(): {
     },
     skills: { list: async () => ({ ok: true as const, value: { skills: [] } }) },
     fileReferences: { list: async () => ({ ok: true as const, value: [] }) },
+    // The PRIVATE sessionless default-model namespace (M6): the model catalog's
+    // ONE sessionless write path. The SAME mounted contribution publishes it.
+    piTuiDefaultModel: { saveSelection: async () => ({ ok: true as const, value: { kind: 'saved' as const } }) },
     commands: { execute: async () => ({ ok: true as const, value: undefined }) },
     userQuestions: {
       attachWait: () => (async function* () { /* no frames */ })(),

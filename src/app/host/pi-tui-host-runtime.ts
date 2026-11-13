@@ -16,6 +16,7 @@
  * the private `piTuiAuthorization` Host service (provider-native sign-in)
  * the private `piTuiCredentialRecords` Host service (stored record metadata)
  * the private `piTuiSessionPolicy` Host service (exact-Session policy)
+ * the private `piTuiDefaultModel` Host service (sessionless default model)
  * ```
  *
  * The row publishes the data-free `piTuiHostReady` gate only after the
@@ -73,7 +74,9 @@ import {
   type SandboxPolicyServiceLike,
   type SessionLike,
 } from './features/session-policy.ts'
+import { PiTuiDefaultModelHostService } from './features/default-model.ts'
 import { PI_TUI_SESSION_POLICY_NAMESPACE } from '../../runtime/remote/pi-tui-session-policy-contract.ts'
+import { PI_TUI_DEFAULT_MODEL_NAMESPACE } from '../../runtime/remote/pi-tui-default-model-contract.ts'
 
 /** Stable Cordis plugin name (the Loader row id in the Host-only overlay). */
 export const name = 'pi-tui-host-runtime'
@@ -245,6 +248,15 @@ export async function apply(ctx: Context, config: TuiConfigValue): Promise<void>
     })
     fibers.push(sessionPolicyFiber)
     await sessionPolicyFiber
+    // The sessionless default-model bridge delegates to the OFFICIAL
+    // `agentDefaultModel.saveSelection`; the service resolves the official
+    // service faces per call, so this Host stays Ready even without them and a
+    // write is a truthful refusal instead of a hard startup dependency.
+    const defaultModelFiber = ctx.inject(PiTuiDefaultModelHostService.inject, pluginCtx => {
+      new PiTuiDefaultModelHostService(pluginCtx)
+    })
+    fibers.push(defaultModelFiber)
+    await defaultModelFiber
     assertPrivateBinding(ctx, 'piTuiFileReferences', PI_TUI_FILE_REFERENCES_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiTerminalProgress', PI_TUI_TERMINAL_PROGRESS_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiWebAccess', PI_TUI_WEB_ACCESS_NAMESPACE)
@@ -253,6 +265,7 @@ export async function apply(ctx: Context, config: TuiConfigValue): Promise<void>
     assertPrivateBinding(ctx, 'piTuiAuthorization', PI_TUI_AUTHORIZATION_NAMESPACE)
     assertPrivateBinding(ctx, PI_TUI_CREDENTIAL_RECORDS_NAMESPACE, PI_TUI_CREDENTIAL_RECORDS_NAMESPACE)
     assertPrivateBinding(ctx, PI_TUI_SESSION_POLICY_NAMESPACE, PI_TUI_SESSION_POLICY_NAMESPACE)
+    assertPrivateBinding(ctx, PI_TUI_DEFAULT_MODEL_NAMESPACE, PI_TUI_DEFAULT_MODEL_NAMESPACE)
     ctx.provide(PI_TUI_HOST_READY_SERVICE, {})
   } catch (error) {
     const cleanupErrors: unknown[] = []

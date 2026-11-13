@@ -118,8 +118,10 @@ export interface ModelCatalog {
   defaultSelection(): ModelSelectionDto | undefined
   /** Persist the global default (`agentDefaultModel.saveSelection`) as a
    *  semantic settlement: a proven pre-write refusal is `rejected`, an
-   *  ambiguous write failure is `indeterminate`, and the Remote backend (which
-   *  has no TUI global-default write) is `unsupported`. */
+   *  ambiguous write failure is `indeterminate`. Direct writes in-process; the
+   *  Remote backend delegates to the Owner-only private
+   *  `piTuiDefaultModel/saveSelection` Host service (which calls the official
+   *  `agentDefaultModel.saveSelection`), never a settings/config-RPC write. */
   saveDefaultSelection(selection: ModelSelectionDto): Promise<WriteOutcome<void>>
   /** The effective selection of one currently live ordinary Session. */
   sessionSelection(sessionId: string): ModelSelectionDto | undefined

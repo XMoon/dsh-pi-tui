@@ -10,7 +10,12 @@
  *
  * Rules (D2.3 plan §9.1):
  * - no Host imports, no Direct model owner, no custom reasoning normalization;
- * - NO second global-default write from the TUI;
+ * - the Session write has NO second global-default write from the TUI (the
+ *   official `session.selectModel` already performs the Host's best-effort save);
+ * - the SESSIONLESS default write goes through the ONE private, Owner-only
+ *   `piTuiDefaultModel/saveSelection` service, which delegates to the official
+ *   `agentDefaultModel.saveSelection`; it is the only expression of a
+ *   sessionless `/model Save default`;
  * - no blind retry; a captured Connection generation fences the binding;
  * - the Host return supplies the normalized accepted selection and the durable
  *   projection remains display authority.
@@ -34,6 +39,13 @@ import { SupersededReadError } from '../read-error.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import { remoteRejected, remoteNotDispatched, remoteFailureCode, remoteFailureMessage, copyFailureDetails, settledWriteMessage, type RemoteWriteFailure } from './write-failure.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
+import { normalizeModelSelection } from '../../domain/session/model-selection.ts'
+import type {
+  PiTuiDefaultModelNamespace,
+  PiTuiDefaultModelSaveRefusal,
+  PiTuiDefaultModelSaveResult,
+  PiTuiDefaultModelSelection,
+} from './pi-tui-default-model-contract.ts'
 
 /** The official generated `session` Remote read/write face the catalog needs. */
 export interface RemoteModelRemotes {
@@ -192,6 +204,44 @@ export function classifyRemoteModelFailure(error: unknown): RemoteWriteFailure {
   }
 }
 
+/** User-facing message for one Host default-model refusal reason (the reason
+ *  code stays machine-readable on the semantic error). */
+const DEFAULT_MODEL_REFUSAL_MESSAGES: Readonly<Record<PiTuiDefaultModelSaveRefusal, string>> = {
+  'owner-required': 'only the authenticated Owner peer may change the Host default model',
+  'default-model-service-unavailable': 'the Host default-model service is not available',
+  'profile-persistence-unavailable': 'this Host has no persisted profile to store the default model',
+  'profile-entry-unavailable': 'the Host profile has no active agent-default-model entry to save into',
+}
+
+/**
+ * Settlement for ONE dispatched `piTuiDefaultModel/saveSelection` failure.
+ *
+ * Only a PROVEN Gateway pre-invocation code (the Gateway refused BEFORE the Host
+ * method ran) is a rejection. Every other dispatched failure — `gateway/internal`,
+ * `gateway/cancelled`, `gateway/result-invalid`, a code-less HTTP drop — leaves
+ * the commit state unproven and stays `indeterminate`. The generic D2.2
+ * `isRemoteBusinessRefusalCode` is deliberately NOT used: no domain code on this
+ * endpoint proves the official save did not run.
+ */
+export function classifyRemoteDefaultModelFailure(error: unknown): RemoteWriteFailure {
+  const code = remoteFailureCode(error)
+  const details = copyFailureDetails(error)
+  if (code !== undefined && (code === 'gateway/bad-request' || GATEWAY_PRE_INVOCATION_CODES.has(code))) {
+    return {
+      kind: 'rejected',
+      error: { code, message: settledWriteMessage(code, error), ...details === undefined ? {} : { details } },
+    }
+  }
+  return {
+    kind: 'indeterminate',
+    error: {
+      code: code ?? 'piTuiDefaultModel/indeterminate',
+      message: remoteFailureMessage(error),
+      ...details === undefined ? {} : { details },
+    },
+  }
+}
+
 /** Read `projection.next ?? projection.lastUsed` off an official face value. */
 function projectedSelection(value: unknown): ModelSelectionDto | undefined {
   if (typeof value !== 'object' || value === null) return undefined
@@ -203,6 +253,7 @@ function projectedSelection(value: unknown): ModelSelectionDto | undefined {
 export class RemoteModelCatalog implements ModelCatalog {
   private readonly session: RemoteModelRemotes
   private readonly llm: RemoteLlmRemotes | undefined
+  private readonly piTuiDefaultModel: PiTuiDefaultModelNamespace | undefined
   private readonly sessions: RemoteModelSessionsSource
   private readonly generation: RemoteConnectionGenerationSource
   /** The last successfully loaded Host-generation directory (default fallback):
@@ -224,11 +275,13 @@ export class RemoteModelCatalog implements ModelCatalog {
     sessions: RemoteModelSessionsSource,
     generation: RemoteConnectionGenerationSource,
     llm?: RemoteLlmRemotes,
+    piTuiDefaultModel?: PiTuiDefaultModelNamespace,
   ) {
     this.session = session
     this.sessions = sessions
     this.generation = generation
     this.llm = llm
+    this.piTuiDefaultModel = piTuiDefaultModel
   }
 
   available(): boolean {
@@ -274,14 +327,67 @@ export class RemoteModelCatalog implements ModelCatalog {
     return directory === undefined ? undefined : { ...directory.default }
   }
 
-  saveDefaultSelection(_selection: ModelSelectionDto): Promise<WriteOutcome<void>> {
-    // The Remote path has NO global-default write from the TUI (plan §9.1):
-    // `session.selectModel` already performs the Host's best-effort default
-    // save. A sessionless /model choice therefore has no Remote expression.
-    return Promise.resolve({
-      kind: 'unsupported',
-      reason: 'the Remote backend has no global-default model write; select a model in a Session instead',
-    })
+  /**
+   * Persist the sessionless default through the ONE private, Owner-only
+   * `piTuiDefaultModel/saveSelection` service (which delegates to the official
+   * `agentDefaultModel.saveSelection`). Exactly one dispatch; the Client only
+   * maps the settlement, it never retains a second authority.
+   */
+  async saveDefaultSelection(selection: ModelSelectionDto): Promise<WriteOutcome<void>> {
+    // Client-boundary validation: the SAME normalizeModelSelection contract the
+    // Direct adapter applies (provider/model non-empty, effort present-or-absent).
+    const next = normalizeModelSelection(selection)
+    if (next === undefined) {
+      return { kind: 'rejected', error: { code: 'session/model-invalid', message: 'invalid model selection' } }
+    }
+    const captured = this.generation.getSnapshot()
+    if (captured === undefined) return remoteNotDispatched()
+    const remotes = this.piTuiDefaultModel
+    if (remotes === undefined) {
+      // A Client without the mounted private namespace must not claim a write.
+      return {
+        kind: 'rejected',
+        error: { code: 'piTuiDefaultModel/unsupported', message: 'the Host sessionless default-model service is not mounted' },
+      }
+    }
+    const wire: PiTuiDefaultModelSelection = {
+      provider: next.provider,
+      model: next.model,
+      ...next.reasoningEffort === undefined ? {} : { reasoningEffort: next.reasoningEffort },
+    }
+    // ONE private dispatch. The generated Remote THROWS on transport/envelope
+    // failure, so normalize the throw to the result shape: a post-dispatch
+    // failure is classified (never leaked as a bare rejection).
+    const result = await remotes.saveSelection(wire).catch((error: unknown) => ({ ok: false as const, error }))
+    let outcome: WriteOutcome<void>
+    if (!result.ok) {
+      outcome = classifyRemoteDefaultModelFailure(result.error)
+    } else {
+      const value: PiTuiDefaultModelSaveResult | undefined = result.value
+      if (value !== undefined && value.kind === 'saved') {
+        outcome = { kind: 'committed', value: undefined }
+      } else if (value !== undefined && value.kind === 'refused') {
+        outcome = {
+          kind: 'rejected',
+          error: { code: `piTuiDefaultModel/${value.reason}`, message: DEFAULT_MODEL_REFUSAL_MESSAGES[value.reason] },
+        }
+      } else {
+        // A malformed success payload is never a fabricated commit.
+        outcome = {
+          kind: 'indeterminate',
+          error: { code: 'piTuiDefaultModel/result-invalid', message: 'the Host returned an unusable default-model save result' },
+        }
+      }
+    }
+    // A committed/indeterminate write invalidates the SAME-generation cached
+    // default (it may have changed without a provable value); a replacement
+    // generation's cache is never touched. A proven rejection invalidates
+    // nothing.
+    if (!generationChanged(this.generation, captured)
+      && (outcome.kind === 'committed' || outcome.kind === 'indeterminate')) {
+      this.invalidateDirectory()
+    }
+    return outcome
   }
 
   sessionSelection(sessionId: string): ModelSelectionDto | undefined {

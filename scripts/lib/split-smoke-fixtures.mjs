@@ -110,11 +110,18 @@ export function writeC1WorkFixture(profileDir, workDir, options = {}) {
     '    - id: split-process-host-work',
     `      name: '${pathToFileURL(fixturePath).href}'`,
     `      inject: [llm, tools, jobs, subagents, agents, typertGateway, connection, skills${options.shellPolicyPatches === true ? ', settings' : ''}${options.fileProbe === true ? ', attachments' : ''}${options.webSettingsProbe === true ? ', settings, credentials' : ''}]`,
-    '- id: agent-default-model',
-    '  config:',
-    '    provider: c1-qualification',
-    '    model: c1',
-    '',
+    // The default agent route is normally forced to the offline fixture. A case
+    // that must exercise the OFFICIAL writable `agent-default-model` profile
+    // entry (the sessionless default-model save) sets `keepBaseDefaultModel` so
+    // the base profile row is neither overridden (which the ConfigEditor
+    // refuses to edit) nor masked across a restart.
+    ...(options.keepBaseDefaultModel === true ? [] : [
+      '- id: agent-default-model',
+      '  config:',
+      '    provider: c1-qualification',
+      '    model: c1',
+      '',
+    ]),
   ]
   const patchPath = join(workDir, 'm4-c1-work.patch.yml')
   writeFileSync(patchPath, rows.join('\n'), { mode: 0o600 })
