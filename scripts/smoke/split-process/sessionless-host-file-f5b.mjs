@@ -30,7 +30,7 @@
 
 import { deepEqual } from 'node:assert/strict'
 import { mkdirSync, realpathSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { hostStatus, waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
@@ -103,13 +103,20 @@ export async function runSessionlessHostFileF5B(context) {
   const betaHome = join(workDir, `f5b-beta-home-${unique}`)
   const manualHome = join(workDir, `f5b-manual-home-${unique}`)
   const invalidHome = join(workDir, `f5b-invalid-home-${unique}`)
-  for (const home of [alphaHome, betaHome, manualHome, invalidHome]) {
+  const explHome = join(workDir, `f5b-explicit-home-${unique}`)
+  for (const home of [alphaHome, betaHome, manualHome, invalidHome, explHome]) {
     mkdirSync(home, { recursive: true, mode: 0o700 })
   }
   const alphaMarker = `alpha-marker-${unique}.ts`
   const betaMarker = `beta-marker-${unique}.ts`
   writeFileSync(join(alphaDir, alphaMarker), 'alpha\n', { mode: 0o600 })
   writeFileSync(join(betaDir, betaMarker), 'beta\n', { mode: 0o600 })
+  // An EXTERNAL directory OUTSIDE the alpha Host Workspace: an explicit
+  // `@../<sibling>/` or absolute query must enumerate it, a bare query must not.
+  const sharedDir = join(workDir, `f5b-shared-${unique}`)
+  mkdirSync(sharedDir, { recursive: true, mode: 0o700 })
+  const sharedMarker = `shared-marker-${unique}.ts`
+  writeFileSync(join(sharedDir, sharedMarker), 'shared\n', { mode: 0o600 })
   const canonicalAlpha = realpathSync(alphaDir)
   const canonicalBeta = realpathSync(betaDir)
   assert(canonicalAlpha !== canonicalBeta, 'F5B the two Workspace fixtures are the same directory')
@@ -129,6 +136,54 @@ export async function runSessionlessHostFileF5B(context) {
     // The auto proof runs at mount: the Welcome states the Host-confirmed
     // directory once the official workspace.create settles.
     await waitForConfirmedDirectory(alpha, canonicalAlpha, 'F5B alpha confirmed Host directory')
+
+    // ── F5B-A0: explicit Host path navigation, BEFORE any Session exists ───
+    // A sessionless explicit `@../<sibling>/` (and an absolute Host path)
+    // enumerates a directory OUTSIDE the registered Workspace root, keeps the
+    // user-typed prefix, and is ACCEPTED into the editor as the Host-located
+    // value. A dedicated throwaway sessionless Client keeps alpha's editor
+    // pristine for the original F5B-A flow below.
+    const { client: expl, ready: explReady } = await startC1Client('F5B explicit client', {
+      HOME: explHome,
+    }, { cwd: alphaDir })
+    assert(explReady.sessionOpen === false && explReady.surfaceMounted === true,
+      `F5B explicit client is not a mounted sessionless surface: ${JSON.stringify(explReady)}`)
+    await waitForConfirmedDirectory(expl, canonicalAlpha, 'F5B explicit client confirmed Host directory')
+    const hardClear = async () => { expl.send('\x15'); await sleep(200) }
+    const acceptExplicit = async (query, draft, label) => {
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        await hardClear()
+        expl.send(query)
+        await sleep(1_500)
+        expl.send('\t')
+        try {
+          await expl.waitForComposerDraft(draft, 10_000)
+          await hardClear()
+          return
+        } catch {
+          // The candidate list had not settled yet; clear and retry.
+        }
+      }
+      throw new SplitSmokeAssertionError(`${label}: the explicit Host candidate was never accepted into the editor`)
+    }
+    const relativeDraft = `@../${basename(sharedDir)}/${sharedMarker}`
+    await acceptExplicit(`@../${basename(sharedDir)}/${sharedMarker.slice(0, 12)}`, relativeDraft, 'F5B explicit relative')
+    const absoluteDraft = `@${sharedDir}/${sharedMarker}`
+    await acceptExplicit(`@${sharedDir}/${sharedMarker.slice(0, 12)}`, absoluteDraft, 'F5B explicit absolute')
+    // Negative control on the SAME sessionless Client: a BARE query stays inside
+    // the registered Workspace and never reaches the external marker.
+    expl.send(`@${sharedMarker.slice(0, 12)}`)
+    await sleep(ABSENCE_WINDOW_MS)
+    const bareExternalView = (await expl.viewport()).join('\n')
+    assert(!bareExternalView.includes(sharedMarker),
+      'F5B a bare sessionless @ query reached a file OUTSIDE the registered Workspace')
+    await hardClear()
+    const sessionlessBefore = await waitForSurfaceStatus(expl,
+      record => record.sessionOpen === false, 'F5B explicit client stays sessionless', 60_000)
+    assert(sessionlessBefore.sessionOpen === false, 'F5B the explicit Host path route created a Session')
+    await hardClear()
+    await exitC1Client(expl, 'F5B explicit client')
+
     await alpha.send(`@${alphaMarker.slice(0, 8)}`)
     await alpha.waitForScreen(alphaMarker, 'F5B alpha @ candidate', 120_000)
     const alphaView = (await alpha.viewport()).join('\n')
@@ -229,6 +284,9 @@ export async function runSessionlessHostFileF5B(context) {
       instanceId: ready.localHost?.instanceId,
       autoSameObject: true,
       alphaDurableCwd: alphaHeader.cwd,
+      explicitRelativeHostPath: relativeDraft,
+      explicitAbsoluteHostPath: absoluteDraft,
+      bareStaysInWorkspaceRoot: true,
       twoTuIsIsolated: true,
       samePathDifferentObject: 'NOT_VERIFIED',
       refusedManualCreatedNothing: true,

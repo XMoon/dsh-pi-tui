@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join } from 'node:path'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import {
@@ -33,6 +33,7 @@ import {
   type FileReferencesServiceLike,
   type PiTuiFileReferenceHostDeps,
 } from '../../src/app/host/features/file-reference.ts'
+import { DirectHostDiscoveryDriver } from '../../src/runtime/direct/file-completion/host-discovery.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
 const abort = new AbortController().signal
@@ -295,8 +296,11 @@ test('listWorkspace refuses without an Owner invocation BEFORE any registry read
   const deps = hostDeps(life, { 'a.ts': 'x' })
   for (const invocation of [undefined, { peer: { id: 'viewer', principal: { kind: 'viewer' }, signal: abort }, signal: abort }]) {
     const { service, ctx } = await mountService(deps, invocation)
-    const result = await service.listWorkspace('workspace-a', 'a', abort)
-    assert.equal(result.kind, 'unavailable', 'only the authenticated Owner peer may read Host workspace files')
+    // BOTH routes refuse identically: the bare query AND an explicit path scope.
+    for (const query of ['a', '../outside/', '/abs/path/']) {
+      const result = await service.listWorkspace('workspace-a', query, abort)
+      assert.equal(result.kind, 'unavailable', 'only the authenticated Owner peer may read Host workspace files')
+    }
     assert.deepEqual(deps.registry.calls, [], 'a non-Owner request never touches the registry')
     await ctx.fiber.dispose()
   }
@@ -363,6 +367,109 @@ test('listWorkspace rejects an EMPTY WorkspaceId before any registry lookup', as
     assert.equal(result.kind, 'unavailable')
     assert.deepEqual(deps.registry.calls, [], 'an empty id never reaches the registry')
   } finally {
+    await ctx.fiber.dispose()
+  }
+})
+
+/** Spy the PRODUCTION Host discovery driver through its prototype. The saved
+ *  originals are NOT bound: `original.call(this, …)` keeps the real receiver,
+ *  and teardown restores the SAME function identities. */
+interface SpyableDiscoveryDriver {
+  find(baseDir: string, term: string, signal: AbortSignal): Promise<readonly unknown[] | null>
+  listDirectory(baseDir: string, relativeDir: string, signal: AbortSignal): Promise<readonly unknown[] | null>
+}
+
+function spyDriver(calls: string[], onList?: () => void): () => void {
+  const target = DirectHostDiscoveryDriver.prototype as unknown as SpyableDiscoveryDriver
+  const originalFind = target.find
+  const originalList = target.listDirectory
+  target.find = function (baseDir, term, signal) {
+    calls.push(`find:${baseDir}:${term}`)
+    return originalFind.call(this, baseDir, term, signal)
+  }
+  target.listDirectory = function (baseDir, relativeDir, signal) {
+    calls.push(`list:${baseDir}:${relativeDir}`)
+    onList?.()
+    return originalList.call(this, baseDir, relativeDir, signal)
+  }
+  return () => {
+    target.find = originalFind
+    target.listDirectory = originalList
+  }
+}
+
+test('listWorkspace answers an EXPLICIT scope through the shared Host scanner, never the official provider', async (t) => {
+  const life = testLifecycle(t)
+  const deps = hostDeps(life, { 'src/deep/utility.ts': 'x', 'src/top.ts': 'x' })
+  const { service, ctx } = await mountService(deps, ownerInvocation())
+  try {
+    assert.deepEqual(await service.listWorkspace('workspace-a', 'src/deep/uti', abort),
+      { kind: 'ok', items: [{ path: 'src/deep/utility.ts', kind: 'file' }] })
+    assert.deepEqual(deps.officialCalls, [], 'an explicit workspace scope never consults the official provider')
+  } finally {
+    await ctx.fiber.dispose()
+  }
+})
+
+test('listWorkspace enumerates an explicit parent scope OUTSIDE the registered root', async (t) => {
+  const life = testLifecycle(t)
+  const deps = hostDeps(life, { 'inside.ts': 'x' })
+  // A sibling directory next to the registry root: `../<sibling>/` from the
+  // root must enumerate it, keeping the user-typed `../` prefix.
+  const sibling = `${deps.root}-sibling`
+  mkdirSync(sibling)
+  writeFileSync(join(sibling, 'sib.ts'), 'x')
+  const { service, ctx } = await mountService(deps, ownerInvocation())
+  try {
+    assert.deepEqual(await service.listWorkspace('workspace-a', `../${basename(sibling)}/`, abort),
+      { kind: 'ok', items: [{ path: `../${basename(sibling)}/sib.ts`, kind: 'file' }] })
+  } finally {
+    await ctx.fiber.dispose()
+  }
+})
+
+test('listWorkspace withdraws an EXPLICIT answer whose Workspace changed during the scan', async (t) => {
+  const life = testLifecycle(t)
+  const deps = hostDeps(life, { 'src/a.ts': 'x' })
+  const { service, ctx } = await mountService(deps, ownerInvocation())
+  try {
+    deps.registry.setResultAfterFirst({ path: join(deps.root, 'elsewhere') })
+    const result = await service.listWorkspace('workspace-a', 'src/', abort)
+    assert.equal(result.kind, 'unavailable', 'a replaced root during an explicit scan never returns the old candidates')
+  } finally {
+    await ctx.fiber.dispose()
+  }
+})
+
+test('listWorkspace honors an abort that fires mid explicit-scope read', async (t) => {
+  const life = testLifecycle(t)
+  const deps = hostDeps(life, { 'src/a.ts': 'x' })
+  const { service, ctx } = await mountService(deps, ownerInvocation())
+  const controller = new AbortController()
+  const calls: string[] = []
+  const restore = spyDriver(calls, () => controller.abort())
+  try {
+    await assert.rejects(service.listWorkspace('workspace-a', 'src/', controller.signal), /aborted/u)
+    assert.ok(calls.some(entry => entry.startsWith('list:')), 'the scoped route entered the Host driver before the abort')
+  } finally {
+    restore()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a BARE workspace query stays on the official WorkspaceFileSearch and never enters the Host scanner', async (t) => {
+  const life = testLifecycle(t)
+  const deps = hostDeps(life, { 'src/a.ts': 'x' })
+  const { service, ctx } = await mountService(deps, ownerInvocation())
+  const calls: string[] = []
+  const restore = spyDriver(calls)
+  try {
+    assert.deepEqual(await service.listWorkspace('workspace-a', 'a', abort),
+      { kind: 'ok', items: [{ path: 'src/a.ts', kind: 'file' }] })
+    assert.deepEqual(calls, [], 'a bare workspace query never enters the scoped discovery driver')
+    assert.deepEqual(deps.officialCalls, [], 'the workspace bare route is not the Session official provider either')
+  } finally {
+    restore()
     await ctx.fiber.dispose()
   }
 })

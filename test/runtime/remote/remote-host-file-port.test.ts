@@ -173,6 +173,15 @@ test('a CONFIRMED workspace scope sends the exact workspaceId and the official q
   assert.equal((workspaceCalls[0]! as { selectionRevision?: number }).selectionRevision, undefined)
 })
 
+test('an EXPLICIT workspace query crosses the wire UNCHANGED — the Client port never classifies paths', async () => {
+  const { port, workspaceCalls } = harness()
+  await port.listReferences({ kind: 'workspace', workspaceId: 'workspace-7', selectionRevision: 2 }, '../shared/foo')
+  await port.listReferences({ kind: 'workspace', workspaceId: 'workspace-7', selectionRevision: 2 }, '/abs/dir/')
+  assert.deepEqual(workspaceCalls.map(call => call.query), ['../shared/foo', '/abs/dir/'],
+    'the raw explicit query is forwarded verbatim; the HOST decides the route')
+  assert.deepEqual(workspaceCalls.map(call => call.workspaceId), ['workspace-7', 'workspace-7'])
+})
+
 test('a Host-business unavailable VALUE from listWorkspace crosses as unavailable', async () => {
   const { port } = harness({
     workspaceResult: { ok: true, value: { kind: 'unavailable', reason: 'Workspace "gone" is not registered on the Host' } },
@@ -223,6 +232,10 @@ test('the adapter module never touches the Client filesystem', async () => {
   // of the wire; this Client adapter must not import it either.
   assert.ok(!/DirectHostDiscoveryDriver|host-discovery|runtime\/direct/u.test(adapterSource),
     'no Direct Host discovery capability')
+  // The bare/explicit route decision belongs to the HOST (the shared classifier
+  // runs there); the Client port forwards the raw query unchanged.
+  assert.ok(!/isExplicitHostFileQuery|host-file-augmentation/u.test(adapterSource),
+    'the Client port never classifies the path itself')
 })
 
 test('the child scope carries the CHILD session id — never a parent cwd', async () => {
