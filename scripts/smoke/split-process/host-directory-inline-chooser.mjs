@@ -220,7 +220,21 @@ export async function runHostDirectoryInlineChooser(context) {
     // its own card; the EDITOR's suggestion block and its Esc verb must be gone.
     assert(!welcome.includes('Suggestions (Host)') && !welcome.includes('Esc cancel'),
       `PR3 the inline editor survived the Browser close:\n${welcome}`)
-    assert(welcome.includes(realpathSync(childPath)),
+    // The Welcome wraps a long value path over rows. Match the FACTS column
+    // only: slice every row at the Host-directory label's column so the whale
+    // art never interleaves a wrapped path, then flatten.
+    const welcomeRows = welcome.split('\n')
+    const labelRow = welcomeRows.find(row => row.includes('Host directory:'))
+    const factsStart = labelRow === undefined ? -1 : labelRow.indexOf('Host directory:')
+    const flatWelcome = factsStart < 0
+      ? welcomeRows.join('').replace(/\s+/gu, '')
+      : welcomeRows
+        .map(row => (row.length > factsStart ? row.slice(factsStart) : ''))
+        .join('')
+        .replace(/[\u2502\u256d\u256e\u2570\u256f\u2500]/gu, '')
+        .replace(/\s+/gu, '')
+    const flatChildPath = realpathSync(childPath).replace(/\s+/gu, '')
+    assert(flatWelcome.includes(flatChildPath),
       `PR3 the Welcome does not state the verified next-create directory:\n${welcome}`)
     await exitC1Client(client, 'PR3 inline chooser client')
 

@@ -44,18 +44,37 @@ function assert(condition, message) {
 /** Wait for the Welcome's CONFIRMED Host directory across a wrapped row. */
 async function waitForConfirmedDirectory(client, canonicalPath, label, timeoutMs = 120_000) {
   const started = Date.now()
+  // The card paints the confirmed directory on ONE row when it fits the value
+  // column, or WRAPS the path over several rows when it does not (the host
+  // home/work root length and the whale variant both change the column). The
+  // match therefore flattens the painted frame: box glyphs and whitespace are
+  // removed so a wrapped path becomes contiguous again, while the confirmed
+  // LABEL stays distinct from `Checking Host directory:` and the unavailable
+  // state.
+  const flatPath = canonicalPath.replace(/\s+/gu, '')
   while (Date.now() - started < timeoutMs) {
     const rows = await client.viewport()
-    for (let index = 0; index < rows.length; index += 1) {
-      const row = String(rows[index])
-      if (!row.includes('Host directory:') || row.includes('unavailable')) continue
-      // The card paints the confirmed path on the SAME row when it fits the
-      // value column, or WRAPPED onto the next row when it does not (whale
-      // variants change the column width). Both are the confirmed state;
-      // `Checking`/`Proposed`/`unavailable` never match this predicate.
-      if (row.includes(canonicalPath)
-        || (index + 1 < rows.length && String(rows[index + 1]).includes(canonicalPath))) return
+    // The Welcome is a side-by-side card: the whale art owns the left columns
+    // and the FACTS column (label plus the value, wrapped by the card width)
+    // starts at the label's column. Slicing each row from that exact column
+    // keeps the whale's continuation-row art out of a wrapped path.
+    const labelRow = rows.find(row => String(row).includes('Host directory:'))
+    if (labelRow === undefined) {
+      await sleep(50)
+      continue
     }
+    const factsStart = String(labelRow).indexOf('Host directory:')
+    const flat = rows
+      .map(row => {
+        const text = String(row)
+        return text.length > factsStart ? text.slice(factsStart) : ''
+      })
+      .join('')
+      .replace(/[\u2502\u256d\u256e\u2570\u256f\u2500]/gu, '')
+      .replace(/\s+/gu, '')
+    if (!flat.includes('CheckingHostdirectory:')
+      && !flat.includes('Hostdirectoryunavailable:')
+      && flat.includes(flatPath)) return
     await sleep(50)
   }
   const rows = await client.viewport()
