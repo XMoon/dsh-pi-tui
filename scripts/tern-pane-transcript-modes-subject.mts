@@ -1,5 +1,5 @@
 /**
- * TSP canonical Full/Compact transcript mode qualification SUBJECT.
+ * TSP canonical Full/Compact/Focus transcript qualification SUBJECT.
  *
  * Boots the PRODUCTION Direct application (`createDirectTspFixture({
  * externalTern: true, tuiConfig: { displayPreset: <mode> } })`) inside ONE real
@@ -22,7 +22,8 @@
  * EVIDENCE THIS SUBJECT CANNOT PROVE (declared, never claimed): input is
  * CONTROL_INJECTED (`tern ctl type|key|click`) — no physical keyboard, IME,
  * wheel or OS clipboard; the real GUI/OS appearance and G8 are NOT_VERIFIED.
- * Focus TSP is NOT_IMPLEMENTED in this PR and is not exercised here.
+ * Focus visibility follows the official Focus projection; a qualification flow
+ * expands its native Thought roots before reading a nested Workflow row.
  *
  * Usage: `TERN_PANE_TRANSCRIPT_MODE=full|compact` through
  * `scripts/tern-pane-drive.mjs scripts/tern-pane-transcript-modes.mjs`.
@@ -47,7 +48,7 @@ const scenario = modeConfig.scenario ?? 'modes'
 if (mode !== 'full' && mode !== 'compact' && mode !== 'focus') {
   throw new Error('the flow must select exactly full, compact or focus')
 }
-if (scenario !== 'modes' && scenario !== 'inner-disclosure' && scenario !== 'ptc-error-note' && scenario !== 'card-disclosure') {
+if (scenario !== 'modes' && scenario !== 'inner-disclosure' && scenario !== 'ptc-error-note' && scenario !== 'card-disclosure' && scenario !== 'workflow-disclosure') {
   throw new Error(`unknown transcript Tern scenario ${scenario}`)
 }
 const workRoot = join(paneRoot, 'dsh-home')
@@ -129,18 +130,22 @@ const PROMPT = scenario === 'ptc-error-note'
     ? `INNER-${mode.toUpperCase()} Inspect the live reasoning, tool details and context disclosures.`
     : scenario === 'card-disclosure'
       ? `CARD-${mode.toUpperCase()} Inspect the native command, compaction, tool and context cards.`
-      : 'MODES-01 Please list the background jobs and then answer with one short plain note '
-        + 'about the canonical transcript reading flow, mixing English with 中文混排 so the real client wraps it.'
+      : scenario === 'workflow-disclosure'
+        ? `WORKFLOW-${mode.toUpperCase()} Inspect the native Workflow run and phase disclosure.`
+        : 'MODES-01 Please list the background jobs and then answer with one short plain note '
+          + 'about the canonical transcript reading flow, mixing English with 中文混排 so the real client wraps it.'
 writeFileSync(promptsPath, `${JSON.stringify({
   mode,
   scenario,
   assistantMarker: scenario === 'ptc-error-note' ? `PTC-NOTE-${mode.toUpperCase()}-ANSWER`
     : scenario === 'inner-disclosure' ? `INNER-${mode.toUpperCase()}-ANSWER`
-      : scenario === 'card-disclosure' ? `CARD-${mode.toUpperCase()}-ANSWER` : 'MODES-DIRECT-ANSWER',
+      : scenario === 'card-disclosure' ? `CARD-${mode.toUpperCase()}-ANSWER`
+        : scenario === 'workflow-disclosure' ? `WORKFLOW-${mode.toUpperCase()}-ANSWER` : 'MODES-DIRECT-ANSWER',
   toolName: scenario === 'ptc-error-note' ? 'run_code' : 'job_list',
   prompts: [{ ordinal: 1, marker: scenario === 'ptc-error-note' ? `PTC-NOTE-${mode.toUpperCase()}`
     : scenario === 'inner-disclosure' ? `INNER-${mode.toUpperCase()}`
-      : scenario === 'card-disclosure' ? `CARD-${mode.toUpperCase()}` : 'MODES-01', text: PROMPT }],
+      : scenario === 'card-disclosure' ? `CARD-${mode.toUpperCase()}`
+        : scenario === 'workflow-disclosure' ? `WORKFLOW-${mode.toUpperCase()}` : 'MODES-01', text: PROMPT }],
 }, null, 1)}\n`)
 
 // ── ONE-TO-ONE recorder around the production mount (append-only) ──
@@ -444,6 +449,38 @@ const appendCardDisclosure = (): void => {
   session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
 }
 
+const appendWorkflowDisclosure = (): void => {
+  if (fixture === undefined || mainSessionId === undefined) {
+    throw new Error('the production Direct writer has not selected the main Session')
+  }
+  const agent = fixture.ctx.agents.get(mainSessionId as never) as { session: CardEventSession } | undefined
+  if (agent === undefined) throw new Error('the Direct Session agent is not available')
+  const session = agent.session as CardEventSession
+  session.append('turn/start', { turn: 2 })
+  session.append('step/start', { turn: 2, step: 0 })
+  // Run A: two phases, 8 members, one failed member (abnormal, still running),
+  // null/empty/named phase identities all present.
+  session.append('tool-workflow/run-start', { runId: 'wf-run-a', name: 'deploy-backend' })
+  session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 1, label: 'build-1', phase: 'Prepare', childId: 'wf-child-a1' })
+  session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 1, outcome: 'completed' })
+  session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 2, label: 'build-2', phase: 'Prepare', childId: 'wf-child-a2' })
+  session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 2, outcome: 'failed' })
+  session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 3, label: 'verify-1', phase: 'Prepare', childId: 'wf-child-a3' })
+  session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 4, label: 'unassigned-1', childId: 'wf-child-a4' })
+  session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 5, label: 'empty-1', phase: '', childId: 'wf-child-a5' })
+  session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 6, label: 'node-east', phase: 'Rollout', childId: 'wf-child-a6' })
+  session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 6, outcome: 'cancelled' })
+  session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 7, label: 'node-west', phase: 'Rollout', childId: 'wf-child-a7' })
+  session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 8, label: 'node-south', phase: 'Rollout', childId: 'wf-child-a8' })
+  // Run B: a cold-replayed settled clean run (default closed, no fake edge).
+  session.append('tool-workflow/run-start', { runId: 'wf-run-b', name: 'audit-done' })
+  session.append('tool-workflow/agent-start', { runId: 'wf-run-b', seq: 1, label: 'checker-1', phase: 'Review', childId: 'wf-child-b1' })
+  session.append('tool-workflow/agent-end', { runId: 'wf-run-b', seq: 1, outcome: 'completed' })
+  session.append('tool-workflow/run-end', { runId: 'wf-run-b', stopReason: 'completed' })
+  session.append('step/end', { turn: 2, step: 0 })
+  session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+}
+
 let lastHandledSeq = 0
 let handling: Promise<void> | undefined
 let polling = false
@@ -551,6 +588,39 @@ const handleOneBatch = async (): Promise<void> => {
       note({ kind: 'case.finished', ...payload })
       return
     }
+    if (kind === 'workflow-disclosure') {
+      appendWorkflowDisclosure()
+      const payload = { seq, command: kind, status: 'ok' }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
+    if (kind === 'workflow-late-settle') {
+      if (fixture === undefined || mainSessionId === undefined) {
+        throw new Error('the production Direct writer has not selected the main Session')
+      }
+      const agent = fixture.ctx.agents.get(mainSessionId as never) as { session: CardEventSession } | undefined
+      if (agent === undefined) throw new Error('the Direct Session agent is not available')
+      const session = agent.session as CardEventSession
+      // A same-source late official update: two more Rollout members + two
+      // settled outcomes, then the run's terminal event.
+      session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 9, label: 'node-north', phase: 'Rollout', childId: 'wf-child-a9' })
+      session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 10, label: 'node-test', phase: 'Rollout', childId: 'wf-child-a10' })
+      session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 7, outcome: 'completed' })
+      session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 8, outcome: 'completed' })
+      session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 9, outcome: 'completed' })
+      session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 10, outcome: 'completed' })
+      session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 3, outcome: 'completed' })
+      session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 4, outcome: 'completed' })
+      session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 5, outcome: 'completed' })
+      session.append('tool-workflow/run-end', { runId: 'wf-run-a', stopReason: 'completed' })
+      const payload = { seq, command: kind, status: 'ok' }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
     if (kind === 'late-command-error') {
       if (fixture === undefined || mainSessionId === undefined) {
         throw new Error('the production Direct writer has not selected the main Session')
@@ -633,7 +703,9 @@ try {
     tuiConfig: { displayPreset: mode },
     deltas: scenario === 'ptc-error-note' ? []
       : scenario === 'inner-disclosure' ? [`INNER-${mode.toUpperCase()}-`, 'ANSWER']
-        : scenario === 'card-disclosure' ? [`CARD-${mode.toUpperCase()}-`, 'ANSWER'] : ['MODES-', 'DIRECT-', 'ANSWER'],
+        : scenario === 'card-disclosure' ? [`CARD-${mode.toUpperCase()}-`, 'ANSWER']
+          : scenario === 'workflow-disclosure' ? [`WORKFLOW-${mode.toUpperCase()}-`, 'ANSWER']
+            : ['MODES-', 'DIRECT-', 'ANSWER'],
     ...(scenario === 'inner-disclosure' ? {
       scriptedToolCalls: [{ text: 'the production Agent is checking the jobs', toolCall: { callId: 'call-inner-jobs', name: 'job_list', arguments: '{}' } }],
       scriptedReasoningDeltas: ['checking the first row\n', 'latest reasoning line'],
@@ -703,7 +775,7 @@ try {
       'the fixed prompt written to prompts.json (isolated deterministic test input)',
       'case.json reproject: TEST-ONLY re-commit of the SAME already-committed message objects',
       'GUI / PHYSICAL_OS / IME / wheel / OS clipboard: NOT_VERIFIED (tern ctl injects control input)',
-      'FOCUS_TSP_NOT_YET_IMPLEMENTED: this PR does not project Focus on TSP',
+      'Focus roots are expanded through their native heads before a nested Workflow row is read (official Focus visibility)',
     ],
   })
   console.log(`transcript modes pane ready (${mode})`)

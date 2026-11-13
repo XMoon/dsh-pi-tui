@@ -115,6 +115,28 @@ the Reader was open repaints from the current projection without resetting the
 reading anchor; a row that no longer exists is retired by the Reader's existing
 currentness rules rather than silently replaced by a neighbour.
 
+## Workflow-scoped read-only dataset
+
+The native Workflow Run/Phase card may carry one scoped browse entry when the
+same facts that paint it also admit the Work Hub. The entry is a fixed local
+action id; the exact target is never captured in the painted node. On arrival
+the renderer re-checks the current frame, source scope, seat and live scoped
+entry, re-resolves the canonical Workflow row from the current transcript, and
+builds the dataset from that row's CURRENT phase/run members. The payload is the
+same `open-phase-agents` / `open-run-agents` action the shared Task Runtime
+already consumes, so the existing `TaskRuntime.handleWorkflowAction` opens the
+ONE read-only Work Hub with a `TaskBrowserDatasetScope` containing exactly those
+`childIds`. A run whose membership changed since the frame therefore opens its
+current members, and a retired owner/phase refuses instead of routing stale ids.
+
+This entry is a read entry only. It opens the same native Picker/Inspector and
+Work Details Reader described above; it never enters a child transcript Viewer,
+never stops or interrupts a work item, never answers a Question and never opens
+the global `/tasks` dataset in place of the scoped one. The Work Hub's header is
+client-presented, so the contract does not promise a Workflow-specific title.
+When the Task Center, its scoped entry or the seat admission is unavailable, no
+browse control is painted at all.
+
 ## Input, focus and return
 
 - Up/Down, Home/End, PageUp/PageDown and pointer selection change the Hub's
