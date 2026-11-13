@@ -85,6 +85,7 @@ class BoundedTerminalWriter {
 
 interface KittyImageHeader {
 	ids: number[];
+	placementIds: number[];
 	rows: number;
 }
 
@@ -96,6 +97,7 @@ function parseKittyImageHeader(line: string): KittyImageHeader | undefined {
 	if (paramsEnd === -1) return undefined;
 
 	const ids: number[] = [];
+	const placementIds: number[] = [];
 	let rows = 1;
 	for (const param of line.slice(paramsStart, paramsEnd).split(",")) {
 		const [key, value] = param.split("=", 2);
@@ -103,9 +105,10 @@ function parseKittyImageHeader(line: string): KittyImageHeader | undefined {
 		const numberValue = Number(value);
 		if (!Number.isInteger(numberValue) || numberValue <= 0 || numberValue > 0xffffffff) continue;
 		if (key === "i") ids.push(numberValue);
+		else if (key === "p") placementIds.push(numberValue);
 		else if (key === "r") rows = numberValue;
 	}
-	return { ids, rows };
+	return { ids, placementIds, rows };
 }
 
 function extractKittyImageIds(line: string): number[] {
@@ -114,6 +117,17 @@ function extractKittyImageIds(line: string): number[] {
 
 function extractKittyImageRows(line: string): number {
 	return parseKittyImageHeader(line)?.rows ?? 1;
+}
+
+/** The explicit placement id of one image line, or undefined when it has none. */
+function extractKittyPlacementId(line: string): number | undefined {
+	return parseKittyImageHeader(line)?.placementIds[0];
+}
+
+/** Whether a line is the same explicit image placement (same image and placement id). */
+function isSameKittyPlacement(line: string, imageId: number, placementId: number): boolean {
+	const header = parseKittyImageHeader(line);
+	return header !== undefined && header.ids.includes(imageId) && header.placementIds.includes(placementId);
 }
 
 function isTermuxSession(): boolean {
@@ -468,27 +482,31 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		return { firstChanged: expandedFirstChanged, lastChanged: expandedLastChanged };
 	}
 
-	private deleteChangedKittyImages(firstChanged: number, lastChanged: number): string {
+	private deleteChangedKittyImages(firstChanged: number, lastChanged: number, newLines: readonly string[]): string {
 		if (firstChanged < 0 || lastChanged < firstChanged) return "";
 
 		const ids = new Set<number>();
-		const preemptedIds = new Set<number>();
+		let buffer = "";
 		const maxLine = Math.min(lastChanged, this.previousLines.length - 1);
 		for (let i = firstChanged; i <= maxLine; i++) {
+			const previousLine = this.previousLines[i] ?? "";
+			const newLine = newLines[i] ?? "";
 			for (const id of this.previousLineImageIds[i] ?? EMPTY_IMAGE_IDS) {
-				// A block this frame's overlay preemption blanked is expected back
-				// next frame, and an `a=p` placement carries no payload of its own:
-				// remove only its placement so the image data stays resident, even
-				// for an occurrence this Core does not own. (X077.)
-				if (this.preemptedKittyImageIds.has(id)) preemptedIds.add(id);
-				else ids.add(id);
+				// An `a=p` placement carries no payload of its own. Remove ONLY the
+				// placement the previous frame showed — addressed by its own placement
+				// id — and keep the data resident when the block is coming back:
+				// either this frame's overlay preemption blanked it (X077), or the same
+				// placement is still on this row and this frame is about to write it
+				// again. A sibling placement of the same image is never removed.
+				const placementId = extractKittyPlacementId(previousLine);
+				if (placementId !== undefined && (this.preemptedKittyImageIds.has(id) || isSameKittyPlacement(newLine, id, placementId))) {
+					buffer += deleteKittyImagePlacement(id, placementId);
+					continue;
+				}
+				ids.add(id);
 			}
 		}
 
-		let buffer = "";
-		for (const id of preemptedIds) {
-			buffer += deleteKittyImagePlacement(id);
-		}
 		return buffer + this.deleteKittyImages(ids);
 	}
 
@@ -828,7 +846,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			if (this.previousLines.length > newLines.length) {
 				const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
 				output.append("\x1b[?2026h");
-				output.append(this.deleteChangedKittyImages(firstChanged, lastChanged));
+				output.append(this.deleteChangedKittyImages(firstChanged, lastChanged, newLines));
 				// Move to end of new content (clamp to 0 for empty content)
 				const targetRow = Math.max(0, newLines.length - 1);
 				if (targetRow < prevViewportTop) {
@@ -890,7 +908,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Keep updates wrapped in synchronized output while writing bounded chunks.
 		const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
 		output.append("\x1b[?2026h"); // Begin synchronized output
-		output.append(this.deleteChangedKittyImages(firstChanged, lastChanged));
+		output.append(this.deleteChangedKittyImages(firstChanged, lastChanged, newLines));
 		const prevViewportBottom = prevViewportTop + height - 1;
 		const moveTargetRow = appendStart ? firstChanged - 1 : firstChanged;
 		if (moveTargetRow > prevViewportBottom) {

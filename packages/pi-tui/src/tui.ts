@@ -793,17 +793,19 @@ export function compositeTuiLine(
  */
 function nativeKittyBlock(
 	line: string,
-): { rows: number; action: "p" | "T"; imageId: number | undefined } | undefined {
+): { rows: number; action: "p" | "T"; imageId: number | undefined; placementId: number | undefined } | undefined {
 	const controls = /\x1b_G([^;]*);/.exec(line)?.[1];
 	if (controls === undefined) return undefined;
 	const action = /(?:^|,)a=([A-Za-z])(?:,|$)/.exec(controls)?.[1];
 	if (action !== "p" && action !== "T") return undefined;
 	if (/(?:^|,)U=1(?:,|$)/.test(controls)) return undefined;
 	const idText = /(?:^|,)i=(\d{1,10})(?:,|$)/.exec(controls)?.[1];
+	const placementText = /(?:^|,)p=(\d{1,10})(?:,|$)/.exec(controls)?.[1];
 	return {
 		rows: getKittyImagePlacementRows(line) ?? 1,
 		action,
 		imageId: idText === undefined ? undefined : Number.parseInt(idText, 10),
+		placementId: placementText === undefined ? undefined : Number.parseInt(placementText, 10),
 	};
 }
 
@@ -2204,7 +2206,18 @@ export abstract class TuiBase extends Container implements TUI {
 						overlayLines.length > 0 && overlayRow <= last && overlayRow + overlayLines.length - 1 >= first,
 				);
 				if (!covered) continue;
-				if (block.action === "p" && block.imageId !== undefined) preempted.add(block.imageId);
+				// An inline `a=T` line carries its own payload and re-transmits on
+				// restore, so it keeps the existing hard-delete path. An `a=p` block is
+				// recorded only when it names its placement: the Screen can then remove
+				// exactly that placement and never widens the deletion to a sibling
+				// placement of the same image. A placement without an id keeps the
+				// pre-existing behaviour instead of guessing an identity.
+				if (block.action === "T") {
+					result[row] = "";
+					continue;
+				}
+				if (block.imageId === undefined || block.placementId === undefined) continue;
+				preempted.add(block.imageId);
 				result[row] = "";
 			}
 		}
