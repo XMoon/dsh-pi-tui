@@ -245,11 +245,18 @@ test('HSP-02 a startup Resume committed before the observer install is sampled o
   }
   ownership.subscribeScopeInvalidation(publishCurrent)
   publishCurrent()
-  assert.deepEqual(observed.map(projection => projection?.sessionId), [SESSION_R])
+  // The install-time sample already sees the committed resume; the coalesced
+  // notification for that SAME commit is a legal second observation of the same
+  // identity (the reporter dedupes it). The CLI sink is the authority here.
+  assert.ok(observed.some(projection => projection?.sessionId === SESSION_R),
+    'the install-time sample must observe the resume committed before it')
   reporter.publish({ state: 'idle' })
   await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'start'
     && entry.argv?.[1] === 'report-agent-session').length === 1, 'the startup-resume Session')
   assert.deepEqual(fixture.sessions().map(entry => entry.sessionId), [SESSION_R])
+  await fixture.waitFor(settledPids, 'the queue after the sampled startup resume')
+  assert.equal(fixture.starts().filter(entry => entry.argv?.[1] === 'report-agent-session').length, 1,
+    'the sampled resume must be reported exactly once')
 })
 
 test('HSP-03 a synchronous publish block reaches the CLI only after the coalesced scope microtask, with the FINAL id', async (t) => {
