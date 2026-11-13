@@ -801,11 +801,20 @@ function nativeKittyBlock(
 	if (/(?:^|,)U=1(?:,|$)/.test(controls)) return undefined;
 	const idText = /(?:^|,)i=(\d{1,10})(?:,|$)/.exec(controls)?.[1];
 	const placementText = /(?:^|,)p=(\d{1,10})(?:,|$)/.exec(controls)?.[1];
+	// The protocol treats an absent `p` and `p=0` as "no explicit placement id",
+	// and an image id must not be zero. The admission predicate must match the
+	// Screen's own header parser (which only accepts positive numbers), or a
+	// `p=0` anchor would be preempted and then fall back to a hard delete.
+	const positive = (text: string | undefined): number | undefined => {
+		if (text === undefined) return undefined;
+		const value = Number.parseInt(text, 10);
+		return Number.isInteger(value) && value > 0 && value <= 0xffffffff ? value : undefined;
+	};
 	return {
 		rows: getKittyImagePlacementRows(line) ?? 1,
 		action,
-		imageId: idText === undefined ? undefined : Number.parseInt(idText, 10),
-		placementId: placementText === undefined ? undefined : Number.parseInt(placementText, 10),
+		imageId: positive(idText),
+		placementId: positive(placementText),
 	};
 }
 

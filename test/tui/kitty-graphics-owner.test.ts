@@ -1155,3 +1155,49 @@ test('a covered placement never removes a sibling placement of the same image id
     setCellDimensions({ widthPx: 9, heightPx: 18 })
   }
 })
+
+/**
+ * Kitty treats an absent `p` and `p=0` as "no explicit placement id". Such a
+ * placement cannot be addressed exactly, so it must never be preempted: the old
+ * image-wide hard delete would otherwise free the foreign data with no way back.
+ */
+test('a p=0 foreign placement is never preempted and never loses its data', () => {
+  const { terminal, core, facade } = harness()
+  setCellDimensions({ widthPx: 10, heightPx: 10 })
+  try {
+    let foreignId = 0x123456
+    while (core.ownsIdSpace(foreignId)) foreignId += 1
+    facade.write(`\x1b_Ga=t,f=100,i=${foreignId},q=2;AAAA\x1b\\`)
+    const screen = new TuiMainScreen(facade)
+    const zero = `\x1b_Ga=p,i=${foreignId},p=0,c=2,r=2,C=1,q=2;\x1b\\`
+    screen.addChild({ render: () => ['header', zero, ''], invalidate: () => {} })
+    screen.start()
+    screen.renderNow()
+    assert.ok(terminal.text.includes(zero), 'the p=0 placement passes through untouched')
+
+    // The overlay covers ONLY the anchor row: the pre-existing image-line rule
+    // drops the overlay text there and emits nothing. A p=0 admission would
+    // instead blank the anchor and then fall back to the hard delete.
+    terminal.writes.length = 0
+    const handle = screen.showOverlay({ render: () => ['MODAL'], invalidate: () => {} }, {
+      row: 1,
+      col: 0,
+      width: 20,
+    })
+    screen.renderNow()
+    const covered = terminal.text
+    assert.ok(!covered.includes(encodeKittyDeleteImage(foreignId)), 'a p=0 placement never frees data')
+    assert.ok(!covered.includes(`a=d,d=i,i=${foreignId}`), 'a p=0 placement is not deleted at all')
+    assert.ok(!covered.includes('a=d,d=A'), 'no global image delete reaches the terminal')
+    assert.ok(!covered.includes('\x1b_G'), 'a p=0 placement emits no image command')
+    assert.ok(!covered.includes(zero), 'the unaddressable anchor is not re-written')
+
+    terminal.writes.length = 0
+    handle.hide()
+    screen.renderNow()
+    assert.ok(!terminal.text.includes(encodeKittyDeleteImage(foreignId)), 'closing frees no p=0 data either')
+    screen.stop()
+  } finally {
+    setCellDimensions({ widthPx: 9, heightPx: 18 })
+  }
+})
