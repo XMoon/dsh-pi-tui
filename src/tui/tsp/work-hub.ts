@@ -40,9 +40,16 @@ const WIDE_PANE_PIXELS = 1120
  * The internal pane floor. Below ~40 terminal columns the native cards/action
  * bar cannot keep an actionable surface reachable, so A1 renders an explicit
  * unavailable line instead of a clipped picker. (The FINAL product gate is
- * A3's; this only keeps the internal presenter honest.)
+ * A3's; this only keeps the internal presenter honest.) The Workflow scoped
+ * browse entry consumes the SAME floor: a pane below it never paints a scoped
+ * button, because the Hub it opens would refuse itself.
  */
-const MIN_PANE_PIXELS = 320
+export const WORK_HUB_MIN_PANE_PIXELS = 320
+
+/** Whether the pane is wide enough for the Work Hub to present a usable Picker. */
+export function workHubPaneWidthSupported(paneWidth: number): boolean {
+  return paneWidth >= WORK_HUB_MIN_PANE_PIXELS
+}
 /** The native dismissal action id (idempotent, so it carries no revision). */
 const CLOSE_ACTION_ID = 'close'
 /**
@@ -622,7 +629,7 @@ export class TspWorkHub {
   }
 
   private tooNarrow(): boolean {
-    return this.paneWidth() < MIN_PANE_PIXELS
+    return !workHubPaneWidthSupported(this.paneWidth())
   }
 
   /**

@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { View, type JsonObject, type Node, type Tree } from '@stencil-hq/tern'
+import { MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import type { TranscriptMessage } from '../../src/domain/transcript/types.ts'
@@ -305,6 +306,49 @@ test('an unchanged canonical row keeps its top-level descriptor and one Workflow
   assert.equal(after.filter((block, index) => JSON.stringify(block.stamp) !== JSON.stringify(before[index]?.stamp)).length, 1)
   const changed = after.findIndex((block, index) => JSON.stringify(block.stamp) !== JSON.stringify(before[index]?.stamp))
   assert.equal(changed, 0, 'only this Workflow root changes; there is no unrelated row in this fixture')
+})
+
+test('a Workflow disclosure change leaves user, assistant and sibling Run descriptors untouched', () => {
+  const folder = folderOf([
+    ev('turn/start', { turn: 1 }, 0),
+    ev('user/message', {
+      id: MessageId('inc-user'), role: 'user', content: [{ type: 'text', text: 'keep me' }], source: { kind: 'user' },
+    }, 1),
+    ev('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('inc-assistant'), role: 'assistant',
+        content: [{ type: 'text', text: 'and me' }], source: { kind: 'model', provider: 'p', model: 'm' }, stream: [],
+      },
+    }, 2),
+    ev('tool-workflow/run-start', { runId: 'inc-run-1', name: 'one' }, 3),
+    ev('tool-workflow/agent-start', { runId: 'inc-run-1', seq: 1, label: 'a', phase: 'P', childId: 'inc-child-1' }, 4),
+    ev('tool-workflow/agent-end', { runId: 'inc-run-1', seq: 1, outcome: 'completed' }, 5),
+    ev('tool-workflow/run-end', { runId: 'inc-run-1', stopReason: 'completed' }, 6),
+    ev('tool-workflow/run-start', { runId: 'inc-run-2', name: 'two' }, 7),
+    ev('tool-workflow/agent-start', { runId: 'inc-run-2', seq: 1, label: 'b', phase: 'P', childId: 'inc-child-2' }, 8),
+    ev('tool-workflow/agent-end', { runId: 'inc-run-2', seq: 1, outcome: 'completed' }, 9),
+  ])
+  const messages = folder.messages()
+  const workflows = messages.filter(row => row.kind === 'workflow')
+  assert.equal(workflows.length, 2)
+  const states = new Map(workflows.map(row => [row.runId, advanceWorkflowDisclosureState(undefined, row).state]))
+  const keys = new TranscriptNodeKeys()
+  const options = { preset: 'full' as const, scopePrefix: 's1-', workflowDisclosure: { states, browseAvailable: true } }
+  const before = describeTranscriptMainBlocksForPreset(messages, keys, options)
+  const changedIndex = before.findIndex(block => block.owners.some(owner => owner.kind === 'workflow' && owner.runId === 'inc-run-1'))
+  assert.ok(changedIndex >= 0)
+  states.get('inc-run-1' as never)!.userOpen = true
+  const after = describeTranscriptMainBlocksForPreset(messages, keys, options)
+  assert.deepEqual(after.map(block => block.key), before.map(block => block.key),
+    'the source-scoped row identities are unchanged')
+  for (const [index, block] of after.entries()) {
+    if (index === changedIndex) continue
+    assert.deepEqual(block.stamp, before[index]?.stamp,
+      `unrelated root ${String(block.key)} must keep its exact stamp`)
+  }
+  assert.notDeepEqual(after[changedIndex]?.stamp, before[changedIndex]?.stamp,
+    'only the toggled Workflow row changes')
 })
 
 test('two Runs with the same name and Phase labels keep different SDK node identities', () => {

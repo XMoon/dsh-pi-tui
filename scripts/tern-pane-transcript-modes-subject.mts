@@ -460,29 +460,80 @@ const appendWorkflowDisclosure = (): void => {
   const agent = fixture.ctx.agents.get(mainSessionId as never) as { session: CardEventSession } | undefined
   if (agent === undefined) throw new Error('the Direct Session agent is not available')
   const session = agent.session as CardEventSession
+  const workflowAgent = (
+    runId: string,
+    seq: number,
+    label: string,
+    phase?: string | null,
+    outcome?: 'completed' | 'failed' | 'cancelled',
+  ): void => {
+    session.append('tool-workflow/agent-start', {
+      runId,
+      seq,
+      label,
+      ...(phase === undefined ? {} : { phase }),
+      childId: `wf-child-${runId}-${seq}`,
+    })
+    if (outcome !== undefined) session.append('tool-workflow/agent-end', { runId, seq, outcome })
+  }
   session.append('turn/start', { turn: 2 })
   session.append('step/start', { turn: 2, step: 0 })
-  // Run A: two phases, 8 members, one failed member (abnormal, still running),
-  // null/empty/named phase identities all present.
+  // Run A: four phase identities, 10 initial members. Prepare starts at the
+  // inline floor (5) and is grown to 6 by the late `workflow-grow` case, so the
+  // real client observes the 5→6 inline→summary switch. One failed member keeps
+  // the run abnormal while it is still running; null/empty/named phases coexist.
   session.append('tool-workflow/run-start', { runId: 'wf-run-a', name: 'deploy-backend' })
-  session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 1, label: 'build-1', phase: 'Prepare', childId: 'wf-child-a1' })
-  session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 1, outcome: 'completed' })
-  session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 2, label: 'build-2', phase: 'Prepare', childId: 'wf-child-a2' })
-  session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 2, outcome: 'failed' })
-  session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 3, label: 'verify-1', phase: 'Prepare', childId: 'wf-child-a3' })
-  session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 4, label: 'unassigned-1', childId: 'wf-child-a4' })
-  session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 5, label: 'empty-1', phase: '', childId: 'wf-child-a5' })
-  session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 6, label: 'node-east', phase: 'Rollout', childId: 'wf-child-a6' })
-  session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 6, outcome: 'cancelled' })
-  session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 7, label: 'node-west', phase: 'Rollout', childId: 'wf-child-a7' })
-  session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 8, label: 'node-south', phase: 'Rollout', childId: 'wf-child-a8' })
+  workflowAgent('wf-run-a', 1, 'build-1', 'Prepare', 'completed')
+  workflowAgent('wf-run-a', 2, 'build-2', 'Prepare', 'failed')
+  workflowAgent('wf-run-a', 3, 'verify-1', 'Prepare')
+  workflowAgent('wf-run-a', 4, 'build-3', 'Prepare', 'completed')
+  workflowAgent('wf-run-a', 5, 'build-4', 'Prepare', 'completed')
+  workflowAgent('wf-run-a', 6, 'node-east', 'Rollout', 'cancelled')
+  workflowAgent('wf-run-a', 7, 'node-west', 'Rollout')
+  workflowAgent('wf-run-a', 8, 'node-south', 'Rollout')
+  workflowAgent('wf-run-a', 9, 'unassigned-1')
+  workflowAgent('wf-run-a', 10, 'empty-1', '')
   // Run B: a cold-replayed settled clean run (default closed, no fake edge).
   session.append('tool-workflow/run-start', { runId: 'wf-run-b', name: 'audit-done' })
-  session.append('tool-workflow/agent-start', { runId: 'wf-run-b', seq: 1, label: 'checker-1', phase: 'Review', childId: 'wf-child-b1' })
-  session.append('tool-workflow/agent-end', { runId: 'wf-run-b', seq: 1, outcome: 'completed' })
+  workflowAgent('wf-run-b', 1, 'checker-1', 'Review', 'completed')
   session.append('tool-workflow/run-end', { runId: 'wf-run-b', stopReason: 'completed' })
+  // Run C: 100 members in ONE phase — the real client must stay bounded to
+  // counts + the first three abnormal rows + the hidden count + one button.
+  session.append('tool-workflow/run-start', { runId: 'wf-run-c', name: 'bulk-100' })
+  for (let seq = 1; seq <= 90; seq += 1) workflowAgent('wf-run-c', seq, `bulk-done-${seq}`, 'Migration', 'completed')
+  for (let seq = 91; seq <= 95; seq += 1) workflowAgent('wf-run-c', seq, `bulk-run-${seq}`, 'Migration')
+  for (let seq = 96; seq <= 99; seq += 1) workflowAgent('wf-run-c', seq, `bulk-fail-${seq}`, 'Migration', 'failed')
+  workflowAgent('wf-run-c', 100, 'bulk-cancel-100', 'Migration', 'cancelled')
   session.append('step/end', { turn: 2, step: 0 })
   session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+}
+
+/** Same-source late official update: grow Prepare from 5 to 6 members so the
+ *  real client must switch that Phase to summary mode. */
+const growWorkflowPhase = (): void => {
+  if (fixture === undefined || mainSessionId === undefined) {
+    throw new Error('the production Direct writer has not selected the main Session')
+  }
+  const agent = fixture.ctx.agents.get(mainSessionId as never) as { session: CardEventSession } | undefined
+  if (agent === undefined) throw new Error('the Direct Session agent is not available')
+  agent.session.append('tool-workflow/agent-start', {
+    runId: 'wf-run-a', seq: 11, label: 'build-5', phase: 'Prepare', childId: 'wf-child-wf-run-a-11',
+  })
+}
+
+/** Settle every remaining Run A member and close the run (still abnormal, so
+ *  the completed run stays open with its real status word). */
+const settleWorkflowRun = (): void => {
+  if (fixture === undefined || mainSessionId === undefined) {
+    throw new Error('the production Direct writer has not selected the main Session')
+  }
+  const agent = fixture.ctx.agents.get(mainSessionId as never) as { session: CardEventSession } | undefined
+  if (agent === undefined) throw new Error('the Direct Session agent is not available')
+  const session = agent.session as CardEventSession
+  for (const seq of [3, 7, 8, 9, 10, 11]) {
+    session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq, outcome: 'completed' })
+  }
+  session.append('tool-workflow/run-end', { runId: 'wf-run-a', stopReason: 'completed' })
 }
 
 let lastHandledSeq = 0
@@ -600,25 +651,19 @@ const handleOneBatch = async (): Promise<void> => {
       note({ kind: 'case.finished', ...payload })
       return
     }
+    if (kind === 'workflow-grow') {
+      growWorkflowPhase()
+      const payload = { seq, command: kind, status: 'ok' }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
     if (kind === 'workflow-late-settle') {
       if (fixture === undefined || mainSessionId === undefined) {
         throw new Error('the production Direct writer has not selected the main Session')
       }
-      const agent = fixture.ctx.agents.get(mainSessionId as never) as { session: CardEventSession } | undefined
-      if (agent === undefined) throw new Error('the Direct Session agent is not available')
-      const session = agent.session as CardEventSession
-      // A same-source late official update: two more Rollout members + two
-      // settled outcomes, then the run's terminal event.
-      session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 9, label: 'node-north', phase: 'Rollout', childId: 'wf-child-a9' })
-      session.append('tool-workflow/agent-start', { runId: 'wf-run-a', seq: 10, label: 'node-test', phase: 'Rollout', childId: 'wf-child-a10' })
-      session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 7, outcome: 'completed' })
-      session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 8, outcome: 'completed' })
-      session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 9, outcome: 'completed' })
-      session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 10, outcome: 'completed' })
-      session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 3, outcome: 'completed' })
-      session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 4, outcome: 'completed' })
-      session.append('tool-workflow/agent-end', { runId: 'wf-run-a', seq: 5, outcome: 'completed' })
-      session.append('tool-workflow/run-end', { runId: 'wf-run-a', stopReason: 'completed' })
+      settleWorkflowRun()
       const payload = { seq, command: kind, status: 'ok' }
       writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
       renameSync(`${caseResultPath}.tmp`, caseResultPath)
