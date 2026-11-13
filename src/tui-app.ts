@@ -330,12 +330,18 @@ import {
 import {
   workflowCountsText,
   workflowPhasePresentations,
-  workflowRunMode,
   workflowRunSummaryText,
   workflowRunViewAllVisible,
   workflowStatusCounts,
   type WorkflowPhasePresentation,
 } from './tui/transcript/workflow-presentation.ts'
+import {
+  advanceWorkflowDisclosureState,
+  effectiveWorkflowPhaseOpen,
+  effectiveWorkflowRunOpen,
+  type WorkflowPhaseDisclosureState,
+  type WorkflowRunDisclosureState,
+} from './tui/transcript/workflow-disclosure.ts'
 import { finalizedBlockFallbackText, openOpaqueBlockFallbackText } from './domain/transcript/content-blocks.ts'
 import { latestLine } from './domain/transcript/text.ts'
 import { rawSourceRangeForNormalizedMatch } from './domain/transcript/search.ts'
@@ -586,39 +592,6 @@ function workflowMemberMark(status: WorkflowRunStatus): string {
     case 'cancelled':
     case 'interrupted': return color.warning('!')
   }
-}
-
-/** One phase's disclosure state inside a Workflow run (PR2 plan §7, Web
- * advanceDisclosureState parity): the user's explicit choice wins forever
- * once set — EXCEPT across a NEW CYCLE: a clean phase (all members
- * completed) that gains a new running/abnormal member reopens (plan
- * §7.7), overriding a prior user close. `previousMode` +
- * `previousActivityCount` are the edge detectors (Web's
- * `phaseStartedCycle`): running → running is an ordinary update (the
- * user's close persists), clean → anything (or a clean phase whose
- * member count changed) is a new cycle (reopen). */
-interface WorkflowPhaseDisclosureState {
-  /** The user's explicit open/closed choice (undefined = fact-driven). */
-  userOpen?: boolean
-  /** The phase's mode at the last advance (edge detection). */
-  previousMode: 'clean' | 'running' | 'abnormal'
-  /** The phase's member count at the last advance (edge detection). */
-  previousActivityCount: number
-}
-
-/** One Workflow run's disclosure state (PR2 plan §7). Keyed by the durable
- * `runId`; phase state is keyed by `workflowPhaseKey(phase)` — never the
- * display label, never an array index. The run's open/closed value is
- * derived from the CURRENT facts at render time (completed → closed,
- * otherwise open) unless the user set an explicit choice; a phase starting
- * a new cycle reopens a user-closed run (plan §7.7). */
-interface WorkflowRunDisclosureState {
-  /** The user's explicit open/closed choice (undefined = fact-driven). */
-  userOpen?: boolean
-  /** The run's mode at the last advance (edge detection). */
-  previousMode: 'clean' | 'running' | 'abnormal'
-  /** Per-phase disclosure state by exact phase identity key. */
-  phases: Map<string, WorkflowPhaseDisclosureState>
 }
 
 /** One Workflow card row hit target (PR2 plan §12.5): the minimal per-line
@@ -17084,28 +17057,18 @@ export class TuiApp {
     this.rebuildMessages()
   }
 
-  /** The effective Run disclosure of one Workflow card: the user's explicit
-   * choice wins forever once set; otherwise the CURRENT FACTS decide via
-   * the single {@link workflowRunMode} (Web runDisclosureFacts parity) —
-   * a clean run closes, a running/abnormal run opens. A completed run with
-   * a failed member is abnormal and stays open (PR2 goal: abnormal first). */
+  /** The effective Run disclosure of one Workflow card: a temporary search
+   * reveal wins; otherwise the shared presentation policy resolves the user's
+   * choice against the current canonical facts. */
   private workflowRunOpen(message: Extract<TranscriptMessage, { kind: 'workflow' }>): boolean {
     if (this.searchForcesWorkflowRunOpen(message.runId)) return true
-    const state = this.workflowDisclosure.get(message.runId)
-    if (state?.userOpen !== undefined) return state.userOpen
-    return workflowRunMode(message.status, message.members) !== 'clean'
+    return effectiveWorkflowRunOpen(this.workflowDisclosure.get(message.runId), message)
   }
 
-  /** The effective Phase disclosure of one Workflow phase: user choice
-   * first, then the CURRENT FACTS — a clean phase (all members completed)
-   * closes, a running/abnormal phase opens. Re-derived at every change,
-   * so any number of running→clean cycles fold and unfold (Web
-   * advanceDisclosureState parity). */
+  /** The effective Phase disclosure; the PiTui search reveal still wins. */
   private workflowPhaseOpen(runId: string, phaseKey: string, phase: WorkflowPhasePresentation): boolean {
     if (this.searchForcesWorkflowPhaseOpen(runId, phaseKey)) return true
-    const state = this.workflowDisclosure.get(runId)?.phases.get(phaseKey)
-    if (state?.userOpen !== undefined) return state.userOpen
-    return phase.counts.completed !== phase.members.length
+    return effectiveWorkflowPhaseOpen(this.workflowDisclosure.get(runId), phase)
   }
 
   /** Toggle one Workflow Run disclosure (click on the run header). The
@@ -17144,114 +17107,15 @@ export class TuiApp {
     this.rebuildMessages()
   }
 
-  /** Advance the Workflow disclosure state for one changed run (PR2 plan
-   * §7, Web advanceDisclosureState parity): the open/closed value is
-   * derived from the CURRENT FACTS at render time (completed/clean →
-   * closed, running/abnormal → open), so any number of running→clean
-   * cycles fold and unfold correctly. The stored EDGES consume the user's
-   * choice exactly like Web:
-   * - entering clean (running/abnormal → clean, or a clean phase whose
-   *   member count changed): the clean facts auto-close — the user's
-   *   choice is consumed (Web: new clean facts => close). Reopening AFTER
-   *   the card is already clean persists (no facts change);
-   * - clean → running/abnormal: a NEW CYCLE — the phase reopens and the
-   *   outer run reopens too (plan §7.7), overriding a prior user close;
-   * - non-abnormal → abnormal: the first abnormal edge opens once
-   *   (plan §7.5), overriding a prior user close;
-   * - running → running: an ordinary update — the user's choice persists.
-   * The caller has already verified the run's content actually changed. */
+  /** Advance one Workflow run's presentation disclosure state. The shared
+   * policy owns the exact fact edges; PiTui keeps its local state map, the
+   * seen-snapshot comparison and its own render revision. */
   private advanceWorkflowDisclosure(
     message: Extract<TranscriptMessage, { kind: 'workflow' }>,
   ): void {
-    // The run's disclosure mode is the SINGLE shared definition (Web
-    // runDisclosureFacts parity): abnormal when the run status OR any
-    // member is abnormal — a completed run with a failed member is
-    // abnormal, never clean. Cold replay pre-settles the mode so a
-    // terminal run never re-triggers an edge.
-    const runMode = workflowRunMode(message.status, message.members)
-    let state = this.workflowDisclosure.get(message.runId)
-    if (state === undefined) {
-      // First sight: the current mode is the pre-settled edge baseline (a
-      // cold-replayed terminal run never re-triggers an edge).
-      state = { previousMode: runMode, phases: new Map() }
-      this.workflowDisclosure.set(message.runId, state)
-    }
-    let changed = false
-    const previousRunMode = state.previousMode
-    state.previousMode = runMode
-    if (runMode === 'clean' && previousRunMode !== 'clean') {
-      // Normal completion: the clean facts consume the user's choice — the
-      // run auto-closes (Web: new clean facts => close). A user who
-      // reopens AFTER the run is already clean keeps their choice.
-      if (state.userOpen !== undefined) {
-        state.userOpen = undefined
-        changed = true
-      }
-    } else if (previousRunMode === 'clean' && runMode !== 'clean') {
-      // A completed run resumed (unreachable today — run-end is terminal —
-      // kept symmetric with the phase rule).
-      if (state.userOpen === false) { state.userOpen = undefined; changed = true }
-    } else if (previousRunMode !== 'abnormal' && runMode === 'abnormal') {
-      // First abnormal edge: override ONLY a prior user CLOSE so the
-      // exception is not hidden behind an earlier fold (plan §7.5). An
-      // explicit user OPEN is preserved (review finding).
-      if (state.userOpen === false) { state.userOpen = undefined; changed = true }
-    }
-    // Phase-level edges over the CURRENT phase groups. A phase that
-    // disappears (impossible today — members are append-only) simply keeps
-    // its state; the renderer only consults present phases.
-    let phaseStartedCycle = false
-    for (const phase of workflowPhasePresentations(message.members)) {
-      const phaseHasAbnormal = phase.counts.failed + phase.counts.cancelled + phase.counts.interrupted > 0
-      const phaseMode: 'clean' | 'running' | 'abnormal' = phaseHasAbnormal
-        ? 'abnormal'
-        : phase.counts.completed === phase.members.length ? 'clean' : 'running'
-      let phaseState = state.phases.get(phase.key)
-      if (phaseState === undefined) {
-        phaseState = { previousMode: phaseMode, previousActivityCount: phase.members.length }
-        state.phases.set(phase.key, phaseState)
-        continue
-      }
-      const previousPhaseMode = phaseState.previousMode
-      const previousActivityCount = phaseState.previousActivityCount
-      const phaseFactsChanged = previousPhaseMode !== phaseMode
-        || previousActivityCount !== phase.members.length
-      phaseState.previousMode = phaseMode
-      phaseState.previousActivityCount = phase.members.length
-      if (phaseMode === 'clean' && phaseFactsChanged) {
-        // Normal completion (incl. clean→clean with a changed member
-        // count): the clean facts consume the user's choice — the phase
-        // auto-closes (Web: new clean facts => close). A clean phase
-        // whose member count changed is still a NEW CYCLE for the outer
-        // run (Web phaseStartedCycle: the run reopens, the phase stays
-        // folded).
-        if (phaseState.userOpen !== undefined) {
-          phaseState.userOpen = undefined
-          changed = true
-        }
-        if (previousPhaseMode === 'clean' && phase.members.length !== previousActivityCount) {
-          phaseStartedCycle = true
-        }
-      } else if (previousPhaseMode === 'clean' && phaseMode !== 'clean') {
-        // NEW CYCLE (plan §7.7): a completed phase gained a new running or
-        // abnormal member — reopen the phase and mark the run for reopen.
-        if (phaseState.userOpen === false) { phaseState.userOpen = undefined; changed = true }
-        phaseStartedCycle = true
-      } else if (previousPhaseMode !== 'abnormal' && phaseMode === 'abnormal') {
-        // First abnormal edge: same one-shot override as the run level.
-        if (phaseState.userOpen === false) { phaseState.userOpen = undefined; changed = true }
-      }
-      // running → running: ordinary update — the user's choice persists.
-    }
-    if (phaseStartedCycle && runMode !== 'clean' && state.userOpen === false) {
-      // The outer run reopens with the new cycle (Web parity, plan §7.7):
-      // a user who folded the whole run must not keep the second batch
-      // hidden. A clean run is never force-reopened (Web's
-      // `runFacts.mode !== 'clean'` guard).
-      state.userOpen = undefined
-      changed = true
-    }
-    if (changed) this.workflowDisclosureRevision += 1
+    const result = advanceWorkflowDisclosureState(this.workflowDisclosure.get(message.runId), message)
+    this.workflowDisclosure.set(message.runId, result.state)
+    if (result.choiceChanged) this.workflowDisclosureRevision += 1
   }
 
   /** Fold the Workflow disclosure transitions for the CURRENT transcript
