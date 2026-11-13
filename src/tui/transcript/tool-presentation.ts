@@ -546,6 +546,8 @@ export function summarizeAgentListResult(text: string): AgentListSummary | undef
   for (const line of trimmed.split(/\r\n|\r|\n/)) {
     if (/\[running\](?:\s|$)/.test(line)) { running += 1; matched += 1; continue }
     if (/\[idle\](?:\s|$)/.test(line)) { idle += 1; matched += 1; continue }
+    // rc.2's real render marks a non-running, resumable child `inactive`.
+    if (/\[inactive\](?:\s|$)/.test(line)) { ready += 1; matched += 1; continue }
     if (/\[ready\](?:\s|$)/.test(line)) { ready += 1; matched += 1; continue }
     if (/\[diagnostic:[^\]]+\]/.test(line)) { diagnostics += 1; matched += 1; continue }
     // Any other bracketed status token is an unrecognized row: count it as a

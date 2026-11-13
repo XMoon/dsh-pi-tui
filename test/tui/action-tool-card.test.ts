@@ -208,6 +208,15 @@ test('list_agents summarizes structured and rendered historical snapshots', () =
     { kind: 'diagnostic', id: 'x', reason: 'unavailable' },
   ]))!), '1 entry · 1 diagnostic')
   assert.equal(formatAgentListSummary(summarizeAgentListResult('1 [running] — a\n2 [idle] — b\n3 [ready] — c')!), '3 agents · 1 running · 1 idle · 1 ready')
+  // The REAL rc.2 render uses `[inactive]` for the root/non-running child; it
+  // is a resumable agent, never a diagnostic. Keep the official text form
+  // alongside the structured snapshot and the historical rc.1 text replay.
+  const officialRc2Text = 'lead [inactive] — root agent\nreviewer [running] — Review the diff\n'
+    + 'broken [corrupt] — corrupt row\nlegacy [unsupported] — unsupported row\ngone [unavailable] — unavailable row'
+  assert.equal(formatAgentListSummary(summarizeAgentListResult(officialRc2Text)!),
+    '5 entries · 1 running · 1 ready · 3 diagnostics')
+  assert.equal(compactToolPresentation('list_agents', '{}', officialRc2Text)?.result,
+    '5 entries · 1 running · 1 ready · 3 diagnostics')
   assert.equal(formatAgentListSummary(summarizeAgentListResult('(no subagents)')!), 'no subagents')
   assert.equal(formatAgentListSummary(summarizeAgentListResult('x [diagnostic: corrupt]')!), '1 entry · 1 diagnostic')
   // Descendants rows carry parent/depth position; the status regex must not
