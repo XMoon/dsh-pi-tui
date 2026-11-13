@@ -776,23 +776,30 @@ describe("TUI Native Kitty overlay preemption (X077)", () => {
 			const tui: TUI = new TuiMainScreen(terminal);
 			const component = new TestComponent();
 			tui.addChild(component);
-			const anchor = "\x1b_Ga=p,i=71717,c=2,r=2,C=1,q=2;\x1b\\";
-			component.lines = ["top", anchor, "", "bottom"];
-			tui.start();
-			await terminal.waitForRender();
-			terminal.clearWrites();
+			const anchors = [
+				"\x1b_Ga=p,i=71717,c=2,r=2,C=1,q=2;\x1b\\", // no p key
+				"\x1b_Ga=p,i=71717,p=0,c=2,r=2,C=1,q=2;\x1b\\", // p=0 is the same "no explicit placement id"
+			];
+			for (const anchor of anchors) {
+				component.lines = ["top", anchor, "", "bottom"];
+				tui.renderNow();
+				await terminal.waitForRender();
+				terminal.clearWrites();
 
-			const overlay = new TestComponent();
-			overlay.lines = ["MODAL"];
-			const handle = tui.showOverlay(overlay, { row: 1, col: 0, width: 10 });
-			tui.renderNow();
-			await terminal.waitForRender();
-			const covered = terminal.getWrites();
-			// No placement id means the Screen cannot address that exact placement:
-			// it must not yield the block nor widen any deletion.
-			assert.ok(!covered.includes("\x1b_G"), "no image command is emitted for an unaddressable placement");
-			assert.ok(!covered.includes("MODAL"), "the pre-existing image-line behaviour is unchanged");
-			handle.hide();
+				const overlay = new TestComponent();
+				overlay.lines = ["MODAL"];
+				const handle = tui.showOverlay(overlay, { row: 1, col: 0, width: 10 });
+				tui.renderNow();
+				await terminal.waitForRender();
+				const covered = terminal.getWrites();
+				// No positive placement id means the Screen cannot address that exact
+				// placement: it must not yield the block nor widen any deletion.
+				assert.ok(!covered.includes("\x1b_G"), "no image command is emitted for an unaddressable placement");
+				assert.ok(!covered.includes("MODAL"), "the pre-existing image-line behaviour is unchanged");
+				handle.hide();
+				tui.renderNow();
+				await terminal.waitForRender();
+			}
 			tui.stop();
 		} finally {
 			resetCapabilitiesCache();
