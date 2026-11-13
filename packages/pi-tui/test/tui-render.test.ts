@@ -9,6 +9,7 @@ import { Input } from "../src/components/input.ts";
 import type { Terminal } from "../src/terminal.ts";
 import {
 	deleteKittyImage,
+	deleteKittyImagePlacement,
 	encodeKitty,
 	resetCapabilitiesCache,
 	setCapabilities,
@@ -568,7 +569,11 @@ describe("TUI Native Kitty overlay preemption (X077)", () => {
 			tui.renderNow();
 			await terminal.waitForRender();
 			const covered = terminal.getWrites();
-			assert.ok(covered.includes(deleteKittyImage(4242)), "the covered placement is deleted before the overlay text");
+			assert.ok(
+				covered.includes(deleteKittyImagePlacement(4242)),
+				"the covered placement is removed before the overlay text, keeping its data",
+			);
+			assert.ok(!covered.includes(deleteKittyImage(4242)), "a covered a=p placement never frees its data");
 			assert.ok(!covered.includes(anchor), "the covered placement is not painted in this frame");
 			assert.ok(covered.includes("MODAL"), "the overlay text itself is painted");
 			assert.ok(!covered.includes("\x1b[2J"), "covering an image does not clear the screen");
@@ -582,6 +587,7 @@ describe("TUI Native Kitty overlay preemption (X077)", () => {
 			const restored = terminal.getWrites();
 			assert.ok(restored.includes(anchor), "the same placement returns after the overlay closes");
 			assert.ok(!restored.includes(deleteKittyImage(4242)), "closing does not delete the image again");
+			assert.ok(!restored.includes(deleteKittyImagePlacement(4242)), "closing frees nothing");
 			assert.equal(terminal.getViewport()[1], "", "the image row carries no stale overlay text");
 			tui.stop();
 		} finally {
@@ -611,7 +617,8 @@ describe("TUI Native Kitty overlay preemption (X077)", () => {
 			tui.renderNow();
 			await terminal.waitForRender();
 			const covered = terminal.getWrites();
-			assert.ok(covered.includes(deleteKittyImage(5151)), "the covered block is deleted as a whole");
+			assert.ok(covered.includes(deleteKittyImagePlacement(5151)), "the covered block yields its placement as a whole");
+			assert.ok(!covered.includes(deleteKittyImage(5151)), "a body-row hit never frees the block data");
 			assert.ok(!covered.includes(anchor), "a body-row hit must not keep painting the placement");
 			assert.ok(covered.includes("MODAL"), "the overlay body row is painted");
 			assert.ok(terminal.getViewport()[2]?.includes("MODAL"), "the overlay body row is readable");
@@ -649,8 +656,9 @@ describe("TUI Native Kitty overlay preemption (X077)", () => {
 			tui.renderNow();
 			await terminal.waitForRender();
 			const covered = terminal.getWrites();
-			assert.ok(covered.includes(deleteKittyImage(7171)), "the covered block is deleted");
+			assert.ok(covered.includes(deleteKittyImagePlacement(7171)), "the covered block yields its placement");
 			assert.ok(!covered.includes(deleteKittyImage(6161)), "the untouched block above is never deleted");
+			assert.ok(!covered.includes(deleteKittyImagePlacement(6161)), "the untouched block above is never touched");
 			assert.ok(!covered.includes(above), "the untouched block above is not repainted");
 			assert.ok(covered.includes("MODAL"), "the overlay itself is painted");
 
@@ -659,6 +667,70 @@ describe("TUI Native Kitty overlay preemption (X077)", () => {
 			tui.renderNow();
 			await terminal.waitForRender();
 			assert.ok(!terminal.getWrites().includes(deleteKittyImage(6161)), "closing never touches the far block");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("a preempted native `a=p` placement is removed by placement only", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const anchor = nativeAnchor(8181, 8, 2, 2);
+			component.lines = ["top", anchor, "", "bottom"];
+			tui.start();
+			await terminal.waitForRender();
+			terminal.clearWrites();
+
+			const overlay = new TestComponent();
+			overlay.lines = ["MODAL"];
+			const handle = tui.showOverlay(overlay, { row: 1, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			const covered = terminal.getWrites();
+			assert.ok(
+				covered.includes(deleteKittyImagePlacement(8181)),
+				"a preempted a=p placement is removed without freeing its data",
+			);
+			assert.ok(!covered.includes(deleteKittyImage(8181)), "a preempted a=p placement never frees its data");
+
+			handle.hide();
+			terminal.clearWrites();
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(terminal.getWrites().includes(anchor), "the same placement returns after close");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("a changed a=p line outside an overlay keeps the hard delete", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			component.lines = ["top", nativeAnchor(9191, 9, 2, 2), "", "bottom"];
+			tui.start();
+			await terminal.waitForRender();
+			terminal.clearWrites();
+
+			// No overlay: an ordinary changed placement keeps the upstream hard delete.
+			component.lines = ["top", nativeAnchor(9191, 9, 3, 2), "", "bottom"];
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(terminal.getWrites().includes(deleteKittyImage(9191)), "the non-overlay change keeps the hard delete");
+			assert.ok(!terminal.getWrites().includes(deleteKittyImagePlacement(9191)), "placement-only is not used off the overlay path");
 			tui.stop();
 		} finally {
 			resetCapabilitiesCache();

@@ -6561,7 +6561,7 @@ Transcript search must map a semantic source range to the exact terminal cells a
 - Status: `ACTIVE`
 - Category: `BUGFIX_MISSING_UPSTREAM`
 - Risk: `MEDIUM`
-- Files: `src/tui.ts`
+- Files: `src/tui.ts`, `src/terminal-image.ts`, `src/tui-main-screen.ts`
 - Last audited: `2026-11-13`
 - Baseline compared: `earendil-works/pi@f9a26365568127461c47a07a37dcb42c140a3ac5`
 
@@ -6574,6 +6574,7 @@ compositeTuiLine() protects a Kitty/iTerm2 APC from being sliced as text, but wh
 - TuiBase.compositeOverlays() scans only the visible viewport of the frame it is about to composite and reads each Kitty anchor's FIRST APC header: `a=p` (managed placement) and `a=T` (vendored Image inline transmit-and-display) are candidates, while `U=1` virtual placements and every other action (upload, query, delete) are not.
 - A candidate block whose row span intersects a visible overlay that renders at least one row is removed from THIS frame's projection by blanking its anchor line; the overlay then composites normally on that empty base, so the whole placement yields instead of only the touched row.
 - Nothing persistent is added: the input lines, components, overlay stack, renderedOverlayLayouts and image owners are untouched, each visible overlay is still rendered exactly once, and a frame without a visible overlay or without a candidate anchor emits the same bytes as before.
+- A preempted `a=p` placement is removed by PLACEMENT ONLY (`a=d,d=i`): its id is recorded per frame and `TuiMainScreen.deleteChangedKittyImages()` keeps the image data resident, so an occurrence this Core does not own can be shown again after the overlay closes. An `a=T` line keeps the existing hard delete because its payload is inline and is re-transmitted on restore.
 
 #### Dependency map
 
@@ -6582,6 +6583,7 @@ compositeTuiLine() protects a Kitty/iTerm2 APC from being sliced as text, but wh
 - The block height comes from the existing getKittyImagePlacementRows() over the frame's real anchor line; the scan adds no parser, registry, cache or second image owner.
 - A blanked anchor is an ordinary empty base line: TuiMainScreen's existing changed-range and per-id placement delete, and TuiAltScreen's existing deleteAllKittyPlacements() plus re-place, keep owning erase and restore.
 - compositeTuiLine() itself is untouched, so its public image-line early return and every other caller keep their current semantics.
+- The new per-id placement-delete encoder and the per-frame preempted-id set are the only additions; no durable state, registry or second image owner is created, and a frame without a visible overlay clears the set.
 - Audit note: One viewport-bounded scan inside the existing compositor; no constructor, option, cache or lifecycle change.
 
 **Inheritance / structural**
@@ -6594,6 +6596,7 @@ compositeTuiLine() protects a Kitty/iTerm2 APC from being sliced as text, but wh
 - The Host's NativeKittyImage paints a managed `a=p` anchor and registers its real geometry; no Host call, capability, protocol setting or option is added.
 - Image deletion remains the Core/facade's permission: the main screen's writer delete for a managed id is still translated by KittyTerminalFacade into a scoped `a=d,d=i` whose data stays resident for the re-place.
 - No Host/Direct/Remote state, session data or attachment is read or written by the compositor.
+- A foreign `a=p` occurrence (uploaded by another owner) keeps its data: the Core injects no transmission for it and never translates its scoped placement delete into a data free.
 - Audit note: Client-local presentation only; the graphics Core stays the single image owner.
 
 **Public / extension**
@@ -6614,6 +6617,8 @@ compositeTuiLine() protects a Kitty/iTerm2 APC from being sliced as text, but wh
 - packages/pi-tui/test/tui-render.test.ts: X077 - a native placement covered on its anchor row yields the overlay and restores after close; a body-row hit yields the whole placement; an uncovered block above the changed range is neither deleted nor repainted; a legacy `a=T` Image line follows the same preemption; upload-only, virtual, iTerm2 and plain lines keep their exact bytes and their existing compositing; a visible overlay renders once per frame and opening/closing emits no `CSI 2J`/`CSI 3J`; a frame with no visible overlay, only hidden overlays or a zero-height overlay emits no extra Kitty APC and no destructive clear.
 - packages/pi-tui/test/tui-alt-screen.test.ts: X077 - a displayed native placement covered on a body row is cleared with `deleteAllKittyPlacements()`, is not placed in that frame and returns with the same image id after the overlay closes; no `d=I` and no overlay text survives.
 - test/tui/kitty-graphics-owner.test.ts: X077 - the real NativeKittyImage -> TuiMainScreen -> KittyTerminalFacade -> terminal chain transmits once, turns the writer delete into a scoped `a=d,d=i`, paints the overlay text, restores the same id and placement without re-transmission, and never claims a foreign id.
+- packages/pi-tui/test/tui-render.test.ts: X077 - a preempted `a=p` placement is removed by placement only and never frees its data, while a changed `a=p` line outside an overlay keeps the upstream hard delete.
+- test/tui/kitty-graphics-owner.test.ts: X077 - a preempted FOREIGN `a=p` placement (uploaded outside the Core) is removed by placement only, no data-free or global delete reaches the wire, and the same placement is written again after close.
 
 #### Upstream comparison
 

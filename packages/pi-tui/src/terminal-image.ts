@@ -519,6 +519,18 @@ export function deleteKittyImage(imageId: number): string {
 }
 
 /**
+ * Delete one Kitty image PLACEMENT by image id while keeping the uploaded
+ * image data resident (lowercase 'i').
+ *
+ * The Screen uses this when a line yields only for a frame — a visible overlay
+ * preemption (X077) — so the block can be placed again without a new
+ * transmission and an image the Screen does not own never loses its data.
+ */
+export function deleteKittyImagePlacement(imageId: number): string {
+	return `\x1b_Ga=d,d=i,i=${imageId},q=2\x1b\\`;
+}
+
+/**
  * Delete all visible Kitty graphics images.
  * Uses uppercase 'A' to also free the image data.
  */
