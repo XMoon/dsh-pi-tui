@@ -17,8 +17,8 @@
  *          directory picker re-targets the completion to the CURRENT
  *          Workspace: the intermediate Workspace's marker is not offered
  *          after the switch back.
- *   G14-D  a Host Workspace whose directory disappears paints NO candidate and
- *          the Client never falls back to its own same-prefix files.
+ *   G14-D  an unreadable Host Workspace paints NO candidate and the Client
+ *          never falls back to its own same-prefix files.
  *   G14-E  a Sessionless Client whose Workspace proposal was REFUSED (unselected
  *          target) paints NO candidate at all.
  *
@@ -27,6 +27,10 @@
  * authoritative empty `ok([])`, and the unselected ZERO-dispatch guarantee, are
  * contract facts proven by the L2 host-service and L3 Remote-adapter tests (a
  * `!` dropdown cannot paint that distinction); this case does not re-claim them.
+ * The A→B→A witness proves the CURRENT-selection answer after a real keyboard
+ * switch; the HELD in-flight answer fence (an old answer released after the
+ * switch can never paint/apply) is proven by the discriminating L4 unit test,
+ * because no production fault hook may delay a Host completion for a smoke.
  *
  * Nothing here creates a Session/Agent: the whole case runs with every Client
  * `sessionOpen === false`, an unchanged durable Host Session inventory and an
@@ -35,7 +39,7 @@
  * @module split-process/sessionless-shell-completion-g14
  */
 
-import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
@@ -61,6 +65,29 @@ function sessionInventory(dshHome) {
     if (error !== null && typeof error === 'object' && error.code === 'ENOENT') return []
     throw error
   }
+}
+
+/** Wait for the Welcome's CONFIRMED Host directory. The card paints the label
+ *  and the long path on SEPARATE rows when the path does not fit the card's
+ *  value column, so the wait matches the confirmed label row followed by the
+ *  canonical path row (never `Checking`/`Proposed`/`unavailable`). */
+async function waitForConfirmedDirectory(client, canonicalPath, label, timeoutMs = 120_000) {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    const rows = await client.viewport()
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = String(rows[index])
+      if (!row.includes('Host directory:') || row.includes('unavailable')) continue
+      // The card paints the confirmed path on the SAME row when it fits the
+      // value column, or WRAPPED onto the next row when it does not (whale
+      // variants change the column width). Both are the confirmed state;
+      // `Checking`/`Proposed`/`unavailable` never match this predicate.
+      if (row.includes(canonicalPath)
+        || (index + 1 < rows.length && String(rows[index + 1]).includes(canonicalPath))) return
+    }
+    await sleep(50)
+  }
+  throw new SplitSmokeAssertionError(`${label}: the Welcome never confirmed ${canonicalPath} (got ${JSON.stringify((await client.viewport()).slice(0, 12))}`)
 }
 
 /** The absence window for a completion that must paint NOTHING. */
@@ -154,7 +181,7 @@ export async function runSessionlessShellCompletionG14(context) {
     }, { cwd: clientDirA })
     assert(readyA.sessionOpen === false && readyA.surfaceMounted === true,
       `G14 alpha is not a mounted sessionless surface: ${JSON.stringify(readyA)}`)
-    await clientA.waitForScreen('Host directory', 'G14 alpha Host directory', 120_000)
+    await waitForConfirmedDirectory(clientA, realpathSync(alphaDir), 'G14 alpha confirmed Host directory')
     const aView = (await clientA.viewport()).join('\n')
     assert(!aView.includes(betaMarker), 'G14 alpha painted the OTHER Workspace marker before any completion')
 
@@ -179,7 +206,7 @@ export async function runSessionlessShellCompletionG14(context) {
     }, { cwd: clientDirB })
     assert(readyB.sessionOpen === false && readyB.surfaceMounted === true,
       `G14 beta is not a mounted sessionless surface: ${JSON.stringify(readyB)}`)
-    await clientB.waitForScreen('Host directory', 'G14 beta Host directory', 120_000)
+    await waitForConfirmedDirectory(clientB, realpathSync(betaDir), 'G14 beta confirmed Host directory')
     const bView = (await clientB.viewport()).join('\n')
     assert(!bView.includes(alphaMarker), 'G14 beta painted the OTHER Workspace marker before any completion')
     await completeFromTui(clientB, '!cat g14-beta-', betaMarker, betaClientTwin,
@@ -219,8 +246,10 @@ export async function runSessionlessShellCompletionG14(context) {
     await completeFromTui(clientA, '!cat g14-alpha-', alphaMarker, betaMarker,
       'G14-C alpha completion after A→B→A')
 
-    // ── G14-D: a Host Workspace whose directory disappeared is unavailable ──
-    rmSync(betaDir, { recursive: true, force: true })
+    // ── G14-D: an unreadable Host Workspace is unavailable ───────────────────
+    // The directory is made UNREADABLE instead of deleted: the shared-lane
+    // profile must never be left with a registered path that no longer exists.
+    chmodSync(betaDir, 0o000)
     await waitForComposerMode(clientB, 'prompt', 'G14-D beta prompt preparation')
     clientB.send('!')
     await waitForComposerMode(clientB, '!', 'G14-D beta shell-mode activation')
@@ -237,6 +266,7 @@ export async function runSessionlessShellCompletionG14(context) {
     await waitForComposerMode(clientB, '!', 'G14-D beta draft reset')
     clientB.send('\x1b')
     await waitForComposerMode(clientB, 'prompt', 'G14-D beta prompt mode')
+    chmodSync(betaDir, 0o700)
 
     // ── G14-E: a refused Workspace proposal is unselected: NO candidate ─────
     const { client: clientC, ready: readyC } = await startC1Client('G14 client C', {
@@ -292,6 +322,7 @@ export async function runSessionlessShellCompletionG14(context) {
       unreadableWorkspaceNoCandidate: true,
       unselectedNoCandidate: true,
       unavailableVsEmptyAndZeroDispatch: 'proven at L2/L3, not observable in the dropdown',
+      heldLateAnswerFence: 'L4 discriminating unit test (no production fault hook)',
       sessionsCreated: sessionsAfter.length - sessionsBefore.length,
     })
     return { status: 'PASS' }

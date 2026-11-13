@@ -41,6 +41,27 @@ function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
 }
 
+/** Wait for the Welcome's CONFIRMED Host directory across a wrapped row. */
+async function waitForConfirmedDirectory(client, canonicalPath, label, timeoutMs = 120_000) {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    const rows = await client.viewport()
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = String(rows[index])
+      if (!row.includes('Host directory:') || row.includes('unavailable')) continue
+      // The card paints the confirmed path on the SAME row when it fits the
+      // value column, or WRAPPED onto the next row when it does not (whale
+      // variants change the column width). Both are the confirmed state;
+      // `Checking`/`Proposed`/`unavailable` never match this predicate.
+      if (row.includes(canonicalPath)
+        || (index + 1 < rows.length && String(rows[index + 1]).includes(canonicalPath))) return
+    }
+    await sleep(50)
+  }
+  const rows = await client.viewport()
+  throw new SplitSmokeAssertionError(`${label}: the Welcome never confirmed ${canonicalPath} (got ${JSON.stringify(rows.slice(0, 14))})`)
+}
+
 const ABSENCE_WINDOW_MS = 2_000
 
 function sleep(ms) {
@@ -88,7 +109,7 @@ export async function runSessionlessHostFileF5B(context) {
       `F5B alpha is not a mounted sessionless surface: ${JSON.stringify(alphaReady)}`)
     // The auto proof runs at mount: the Welcome states the Host-confirmed
     // directory once the official workspace.create settles.
-    await alpha.waitForScreen('Host directory', 'F5B alpha Host directory', 120_000)
+    await waitForConfirmedDirectory(alpha, canonicalAlpha, 'F5B alpha confirmed Host directory')
     await alpha.send(`@${alphaMarker.slice(0, 8)}`)
     await alpha.waitForScreen(alphaMarker, 'F5B alpha @ candidate', 120_000)
     const alphaView = (await alpha.viewport()).join('\n')
@@ -110,7 +131,7 @@ export async function runSessionlessHostFileF5B(context) {
     const { client: beta } = await startC1Client('F5B beta client', {
       HOME: betaHome,
     }, { cwd: betaDir })
-    await beta.waitForScreen('Host directory', 'F5B beta Host directory', 120_000)
+    await waitForConfirmedDirectory(beta, canonicalBeta, 'F5B beta confirmed Host directory')
     await beta.send(`@${betaMarker.slice(0, 8)}`)
     await beta.waitForScreen(betaMarker, 'F5B beta @ candidate', 120_000)
     const betaView = (await beta.viewport()).join('\n')
@@ -163,7 +184,7 @@ export async function runSessionlessHostFileF5B(context) {
       SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH: betaDir,
       HOME: manualHome,
     }, { cwd: manualClientDir })
-    await manual.waitForScreen('Host directory', 'F5B manual Host directory', 120_000)
+    await waitForConfirmedDirectory(manual, canonicalBeta, 'F5B manual confirmed Host directory')
     await manual.send(`@${betaMarker.slice(0, 8)}`)
     await manual.waitForScreen(betaMarker, 'F5B manual @ candidate', 120_000)
 

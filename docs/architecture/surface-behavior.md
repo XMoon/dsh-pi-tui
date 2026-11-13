@@ -351,8 +351,11 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   Host resolve remains the final judge, and dispatches at most one Host
   resolution until it settles; a rejection keeps the text and the previously confirmed intent, while
   a success commits the next-create intent. That chooser returns to the Welcome
-  only after success; ordinary Browser Add returns to Browse and never creates a
-  Session. `New session` on a Folder reuses the existing `/new` transaction with
+  only after success; ordinary Browser Add returns to Browse, never creates a
+  Session, and its official Verify commits that existing Workspace as the
+  next-create intent — so a sessionless Add IS the standing-Workspace switch
+  (there is no separate Use directory gesture in the ordinary tree).
+  `New session` on a Folder reuses the existing `/new` transaction with
   that `workspaceId`, keeps the old Session until the commit, reports a refusal,
   and retires the Browser only after a committed switch.
 - **Only a proven PRE-CREATE Workspace refusal opens recovery navigation.** A

@@ -815,9 +815,10 @@ export async function runNonDestructiveClientLifecycle(context) {
       assert(!alive(aPid), 'M5N3 Client A survived its exit')
       await clientA.dispose()
       assert(alive(bReady.pid) && alive(hostBefore.hostPid), 'M5N3 A\'s departure killed the Host or Client B')
-      assert((hostSessionEvents(dshHome, sessionX) ?? []).slice(leaveIndex)
-        .every(event => event.type !== 'tool/result' && event.type !== 'turn/end'),
-      'M5N3 A\'s departure settled the Host question or the Turn')
+      const settling = (hostSessionEvents(dshHome, sessionX) ?? []).slice(leaveIndex)
+        .filter(event => event.type === 'tool/result' || event.type === 'turn/end')
+      assert(settling.length === 0,
+        `M5N3 A's departure settled the Host question or the Turn: ${JSON.stringify(settling).slice(0, 1500)}`)
       assert(readC1WorkEvents(workRoot)
         .every(event => event.kind !== 'question-settled'),
       'M5N3 A\'s departure settled the Host question')

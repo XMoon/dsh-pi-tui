@@ -38,9 +38,6 @@ function assert(condition, message) {
 }
 
 const HOME = '\x1b[H'
-const DOWN = '\x1b[B'
-const RIGHT = '\x1b[C'
-const TAB = '\t'
 const BODY_MARKER = 'F6-SKILL-BODY-MUST-NEVER-BE-PAINTED'
 
 /** Host project skill file (the standard `.agents/skills/<name>/SKILL.md`). */
@@ -168,15 +165,31 @@ async function waitForPaintedSkills(client, query, { visible, absent = [] }, lab
 /** The real painted frame of one Surface Client. */
 const viewportText = async client => (await client.viewport()).join('\n')
 
-/** Focus the Workspace action bar and prove the action row is painted. */
-async function focusWorkspaceActions(client, label) {
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    client.send(TAB)
-    await sleep(250)
-    const frame = await viewportText(client)
-    if (frame.includes('Add directory') || frame.includes('Use directory')) return frame
-  }
-  throw new SplitSmokeAssertionError(`${label}: the Workspace action bar never accepted focus`)
+/** Open the real /sessions Workspace tree (the frozen row header + the root
+ *  Add-directory row are the anchors the tree paints when it is ready). */
+async function openWorkspaceTree(client, label) {
+  await submit(client, '/sessions', `${label} /sessions`)
+  await client.waitForScreen('Sessions ·', `${label} Workspace tree`, 120_000)
+  await client.waitForScreen('Add directory', `${label} Add directory row`, 60_000)
+}
+
+/**
+ * Add one Host directory THROUGH the real inline editor: Home selects the root
+ * `Add directory` row, Enter opens the `Host directory:` editor prefilled with
+ * the Host HOME, the typed name gains the official `> name/` candidate, Tab
+ * accepts it and Enter verifies it through the ONE existing Workspace resolve.
+ */
+async function addHostDirectory(client, name, label) {
+  client.send(HOME)
+  await sleep(200)
+  client.send('\r')
+  await client.waitForScreen('Host directory:', `${label} inline Host editor`, 60_000)
+  client.send(name)
+  await client.waitForScreen(`> ${name}/`, `${label} official Host candidate`, 60_000)
+  client.send('\t')
+  await client.waitForScreen(`${name}/`, `${label} accepted Host path`, 60_000)
+  client.send('\r')
+  await client.waitForScreen('Directory added:', `${label} registered directory fact`, 120_000)
 }
 
 /** The Sessionless surface record the cases require. */
@@ -195,8 +208,12 @@ export async function runSessionlessSkillsHot(context) {
   const { dshHome, workDir, trace } = context
   const scene = createC1Scene(context)
   const root = join(workDir, 'f6-skills')
-  const w1 = makeProjectRoot(join(root, 'f6-w1'))
-  const w2 = makeProjectRoot(join(root, 'f6-w2'))
+  // W1/W2 live under the isolated Host HOME: the Add-directory editor prefills
+  // the Host HOME, so the real typed path is `HOME/f6-w1` / `HOME/f6-w2` (never
+  // a Client fact). The ordinary Add's official Verify commits the next-create
+  // intent, so ADDING a directory IS the sessionless workspace switch.
+  const w1 = makeProjectRoot(join(context.installation.home, 'f6-w1'))
+  const w2 = makeProjectRoot(join(context.installation.home, 'f6-w2'))
   const clientLocal = makeProjectRoot(join(root, 'f6-client-local'))
   const alphaDescription = 'F6 ALPHA WORKSPACE W1'
   const updatedDescription = 'F6 ALPHA UPDATED BY THE HOST WATCHER'
@@ -275,44 +292,13 @@ export async function runSessionlessSkillsHot(context) {
     trace('f6-incomplete-recovery', { hostPid: hostFacts.hostPid, lastGoodKept: true, recovered: true })
 
     // ── B: Client-local launch Workspace → real Add/Use of Host W2 ─────────
-    await submit(clientB, '/sessions', 'F6 B open the Session Workspace')
-    await clientB.waitForScreen('Workspace: ', 'F6 B Session Workspace', 60_000)
-    // A durable registry from earlier cases may pre-select a folder: select the
-    // first row explicitly so the action bar is deterministically
-    // [use,new,add,close], then move to `Add` (index 2).
-    clientB.send(HOME)
-    await sleep(200)
-    await focusWorkspaceActions(clientB, 'F6 B Add directory focus')
-    clientB.send(RIGHT)
-    await sleep(120)
-    clientB.send(RIGHT)
-    await sleep(120)
-    clientB.send('\r')
-    await clientB.waitForScreen('Add Host directory', 'F6 B Add directory entry', 30_000)
-    clientB.send(w2)
-    clientB.send('\r')
-    await clientB.waitForScreen('Directory added', 'F6 B Host directory registered', 60_000)
-    // The official Workspace follow stream must paint the new folder BEFORE
-    // Home selects row 0, or the Use action would adopt a different Workspace.
-    {
-      const deadline = Date.now() + 60_000
-      let frame = await viewportText(clientB)
-      while (!frame.includes(basename(w2)) && Date.now() < deadline) {
-        await sleep(100)
-        frame = await viewportText(clientB)
-      }
-      assert(frame.includes(basename(w2)),
-        `F6 B never painted the newly added Workspace folder:\n${frame}`)
-    }
-    clientB.send(HOME)
-    await sleep(150)
-    clientB.send('\r')
-    await sleep(150)
-    clientB.send(TAB)
-    await sleep(150)
-    clientB.send('\r')
-    await clientB.waitForScreenGone('Workspace: ', 'F6 B Use directory closed the workspace', 60_000)
-    await waitForSurfaceStatus(clientB, sessionless, 'F6 B still sessionless after Use directory', 60_000)
+    await openWorkspaceTree(clientB, 'F6 B Session Workspace')
+    // The ordinary Add's official Verify commits the next-create intent: THIS
+    // IS the sessionless switch (no separate Use gesture exists in the tree).
+    await addHostDirectory(clientB, basename(w2), 'F6 B Add directory')
+    clientB.send('\x1b')
+    await clientB.waitForScreenGone('Sessions ·', 'F6 B Add directory closed the workspace', 60_000)
+    await waitForSurfaceStatus(clientB, sessionless, 'F6 B still sessionless after the W2 switch', 60_000)
 
     await waitForPaintedSkills(clientB, '/f6-', {
       visible: [betaDescription],
@@ -371,24 +357,12 @@ export async function runSessionlessSkillsHot(context) {
     const startsBeforeSwitch = phaseCount('start')
     writeSkill(w1, 'f6-invalidate', 'F6 INVALIDATION MARKER FOR THE SWITCH')
     await waitForFaultPhase('start', startsBeforeSwitch, 'F6 the pre-switch invalidation discovery')
-    await submit(clientB, '/sessions', 'F6 B reopen the Session Workspace')
-    await clientB.waitForScreen('Workspace: ', 'F6 B Workspace for the switch back', 60_000)
-    // Registry order is newest-first, so after W2 was added the rows are
-    // [W2, launch, W1, …]: select W1 (index 2) explicitly.
-    clientB.send(HOME)
-    await sleep(150)
-    clientB.send(DOWN)
-    await sleep(150)
-    clientB.send(DOWN)
-    await sleep(150)
-    clientB.send('\r')
-    await sleep(200)
-    await focusWorkspaceActions(clientB, 'F6 B switch-back focus')
-    const switchActions = await viewportText(clientB)
-    assert(switchActions.includes('Use directory'),
-      `F6 the switch-back action bar does not offer Use directory:\n${switchActions}`)
-    clientB.send('\r')
-    await clientB.waitForScreenGone('Workspace: ', 'F6 B Use directory W1 closed the workspace', 60_000)
+    await openWorkspaceTree(clientB, 'F6 B Workspace for the switch back')
+    // W1 is already registered: the editor Verify resolves the SAME official
+    // Workspace id and commits the next-create intent back to W1.
+    await addHostDirectory(clientB, basename(w1), 'F6 B switch back to W1')
+    clientB.send('\x1b')
+    await clientB.waitForScreenGone('Sessions ·', 'F6 B switch back closed the workspace', 60_000)
     // CAUSAL BARRIER: the pre-switch discovery is still held; wait for the
     // SECOND discovery (the W1 target-change read) to START, so the frame
     // below is observed strictly while the target-change read is in flight.
@@ -517,18 +491,13 @@ export async function runLiveSkillsHot(context) {
 
     // ── RFL-001 negative: Add directory from a LIVE Session Workspace must
     // NOT switch the catalog to a sessionless standing target. ──────────────
-    const addTarget = makeProjectRoot(join(workDir, 'f6-live-add'))
-    await submit(clientA, '/sessions', 'F6 live A open the Session Workspace')
-    await clientA.waitForScreen('Workspace: ', 'F6 live A Workspace', 60_000)
-    clientA.send(TAB)
-    await sleep(150)
-    clientA.send('\r')
-    await clientA.waitForScreen('Add Host directory', 'F6 live A Add directory', 30_000)
-    clientA.send(addTarget)
-    clientA.send('\r')
-    await clientA.waitForScreen('Directory added', 'F6 live A Host directory registered', 60_000)
+    // The Add target lives under the isolated Host HOME: the inline editor
+    // prefills the Host HOME, so the typed path is the real `HOME/f6-live-add`.
+    const addTarget = makeProjectRoot(join(context.installation.home, 'f6-live-add'))
+    await openWorkspaceTree(clientA, 'F6 live A Workspace')
+    await addHostDirectory(clientA, basename(addTarget), 'F6 live A Add directory')
     clientA.send('\x1b')
-    await clientA.waitForScreenGone('Workspace: ', 'F6 live A Workspace closed', 60_000)
+    await clientA.waitForScreenGone('Sessions ·', 'F6 live A Workspace closed', 60_000)
     await waitForPaintedSkills(clientA, '/f6-live', {
       visible: [liveDescription],
       absent: [BODY_MARKER],

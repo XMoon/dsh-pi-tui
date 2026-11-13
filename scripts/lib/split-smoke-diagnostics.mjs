@@ -182,6 +182,9 @@ const MAX_PROCESS_EVENTS = 8
 const MAX_ARTIFACTS = 3
 const MAX_NAME_CHARS = 80
 const MAX_LABEL_CHARS = 120
+/** Bounded painted rows carried by a frame-wait failure (never the ANSI scrollback). */
+const MAX_FRAME_TAIL_ROWS = 24
+const MAX_FRAME_TAIL_WIDTH = 120
 /** The raw failure text kept in the report: generous, bounded, UTF-8 intact. */
 const MAX_ERROR_MESSAGE_CHARS = 16_000
 const MAX_ERROR_STACK_CHARS = 64_000
@@ -305,6 +308,11 @@ export class SplitSmokeWaitError extends Error {
     this.processSummary = facts.process
     /** Every process this wait observed, for a failure that outlived the set. */
     this.processSummaries = Array.isArray(facts.processes) ? facts.processes : undefined
+    /** The bounded last painted rows at the timeout (screens are the fact a
+     *  FRAME_WAIT failure is about; the failure report must carry them). */
+    this.frameTail = Array.isArray(facts.frameTail)
+      ? facts.frameTail.slice(-MAX_FRAME_TAIL_ROWS).map(line => boundedText(String(line), MAX_FRAME_TAIL_WIDTH)).filter(line => line !== undefined)
+      : undefined
   }
 }
 
@@ -571,6 +579,10 @@ export function projectFailureReport(input = {}) {
   if (expected !== undefined) report.expected = expected
   const observed = reloadNoticeTypeOrUndefined(input.observed)
   if (observed !== undefined) report.observed = observed
+  const frameTail = Array.isArray(input.frameTail)
+    ? input.frameTail.slice(-MAX_FRAME_TAIL_ROWS).map(line => boundedText(String(line), MAX_FRAME_TAIL_WIDTH)).filter(line => line !== undefined)
+    : undefined
+  if (frameTail !== undefined && frameTail.length > 0) report.frameTail = frameTail
   const progress = (Array.isArray(input.progress) ? input.progress : [])
     .map(step => {
       const name = boundedName(step?.name)
@@ -942,6 +954,7 @@ export function createSmokeDiagnostics({ lane, heading, marker, runtimeDshPin, a
         elapsedMs: extra.elapsedMs ?? error?.elapsedMs,
         expected: extra.expected ?? error?.expected,
         observed: extra.observed ?? error?.observed,
+        frameTail: extra.frameTail ?? error?.frameTail,
         runtimeDshPin: pinned,
         artifacts: identity,
         progress: steps,
