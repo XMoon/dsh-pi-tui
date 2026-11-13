@@ -41,6 +41,8 @@ export interface HerdrCliFixtureOptions {
   readonly delayMs?: number
   /** Delay of every `report-agent-session` invocation, in ms (default 0). */
   readonly sessionDelayMs?: number
+  /** Exit code of `report-agent-session` ONLY (defaults to `exitCode`). */
+  readonly sessionExitCode?: number
   /** Process exit code every invocation uses (default 0). */
   readonly exitCode?: number
   /** An explicit CLI path override (the `spawn ENOENT` negative control). */
@@ -88,7 +90,10 @@ try {
 const first = Number(process.env.HERDR_FAKE_FIRST_DELAY_MS ?? '0')
 const delay = Number(process.env.HERDR_FAKE_DELAY_MS ?? '0')
 const sessionDelay = Number(process.env.HERDR_FAKE_SESSION_DELAY_MS ?? '0')
-const code = Number(process.env.HERDR_FAKE_EXIT_CODE ?? '0')
+const sessionCode = process.env.HERDR_FAKE_SESSION_EXIT_CODE ?? ''
+const code = argv[1] === 'report-agent-session' && sessionCode !== ''
+  ? Number(sessionCode)
+  : Number(process.env.HERDR_FAKE_EXIT_CODE ?? '0')
 const wait = argv[1] === 'report-agent-session' ? sessionDelay : (prior === 0 ? first : delay)
 appendFileSync(log, JSON.stringify({ phase: 'start', pid: process.pid, argv }) + '\\n')
 setTimeout(() => {
@@ -121,6 +126,7 @@ export function createHerdrCliFixture(t: TestContext, options: HerdrCliFixtureOp
     HERDR_FAKE_FIRST_DELAY_MS: String(options.firstDelayMs ?? 0),
     HERDR_FAKE_DELAY_MS: String(options.delayMs ?? 0),
     HERDR_FAKE_SESSION_DELAY_MS: String(options.sessionDelayMs ?? 0),
+    HERDR_FAKE_SESSION_EXIT_CODE: String(options.sessionExitCode ?? ''),
     HERDR_FAKE_EXIT_CODE: String(options.exitCode ?? 0),
   }
   const entries = (): HerdrCliEntry[] => {

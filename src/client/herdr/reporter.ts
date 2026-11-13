@@ -485,6 +485,45 @@ export function createHerdrReporter(
     if (active === undefined) advanceQueue()
   }
 
+  /**
+   * Reconcile the DESIRED main-Session fact with what was actually DELIVERED,
+   * after any real Agent/Session lifecycle event.
+   *
+   * This is the recovery path for a FAILED `report-agent-session`: the intent
+   * leaves `pendingSession` when it is dispatched, so after a failure only this
+   * process's own exit-0 record (`lastSession`) proves what Herdr holds. Without
+   * this step Herdr keeps the superseded Session's resume command until some
+   * unrelated event happens to re-report it.
+   *
+   * It adds no authority: the desired fact is `latestSession` from the
+   * composition and the delivered fact is the local exit-0 record. It never
+   * retries by itself — only a real lifecycle event calls it — and it keeps the
+   * one-child / `release` > state > Session ordering: a Session is queued and
+   * `advanceQueue` dispatches it behind the state registration.
+   */
+  const reconcileDesiredSession = (): void => {
+    if (disposed || !qualified) return
+    if (cleanupRequired) {
+      // The withdrawal of a possibly-saved target is the owed action: nothing
+      // may be claimed until it succeeds.
+      reattemptRegistration()
+      return
+    }
+    const desired = latestSession
+    // No Session fact of its own means no Session work: an Agent-state dedupe is
+    // NOT a reason to re-register the Pane (H1 already owns state delivery).
+    if (desired === undefined) return
+    if (sameSession(pendingSession ?? activeSession ?? lastSession, desired)) return
+    pendingSession = desired
+    if (!paneAcknowledged) {
+      // The Pane is not held, so the Session cannot be delivered yet: the owed
+      // action is the ordered registration, not the Session report.
+      reattemptRegistration()
+      return
+    }
+    if (active === undefined) advanceQueue()
+  }
+
   return {
     publish(status) {
       const state = agentStateOf(status)
@@ -496,15 +535,10 @@ export function createHerdrReporter(
       // 100-flip burst that returns to the state already in flight (or already
       // waiting) has no physical work to do.
       const queued = pendingReport ?? activeState ?? lastDispatched
-      if (queued === state) {
-        // Nothing to dispatch for this state, but a REAL state fact is still a
-        // lifecycle event: it may re-attempt the registration or the cleanup
-        // whose previous attempt failed. The deduped state itself carries no
-        // physical work, so this never becomes a self-retry loop.
-        if (!paneAcknowledged || cleanupRequired) reattemptRegistration()
-        return
-      }
-      enqueue({ kind: 'report', state })
+      if (queued !== state) enqueue({ kind: 'report', state })
+      // EVERY real state fact reconciles an owed cleanup or an undelivered
+      // Session, whether or not it produced a new state dispatch.
+      reconcileDesiredSession()
     },
     observeSession(session) {
       if (disposed) return
@@ -517,9 +551,11 @@ export function createHerdrReporter(
       }
       reconcileSession()
       // A new main-owner Session fact is a real lifecycle event: when this
-      // registration cycle has no Pane authority yet (the first state report
-      // failed), it may re-attempt the ordered registration so the new Session
-      // is not stranded until the Agent state happens to change again.
+      // registration cycle has no Pane authority yet, it re-attempts the ordered
+      // registration (a Session report is illegal before the Pane is held). An
+      // outstanding cleanup is NOT retried from here: `reconcileSession` has just
+      // dispatched that withdrawal, and this same event must not queue a second
+      // attempt behind it.
       if (!paneAcknowledged && !cleanupRequired) reattemptRegistration()
     },
     setQualified(next) {
