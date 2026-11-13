@@ -4672,6 +4672,106 @@ test('a current-schema schedule list page folds to counts and keeps its exact JS
   app.stop()
 })
 
+/** A minimal legal official Team task value for the folded-card cases. */
+function teamTaskResult(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    id: 'task-1',
+    revision: 1,
+    subject: 'Scout the config',
+    description: 'Read the config and report the timeout value.',
+    status: 'pending',
+    blockedBy: [],
+    writeScopes: [],
+    ready: true,
+    writeScopeWarnings: [],
+    ...overrides,
+  })
+}
+
+/** Normalize a painted viewport to single-spaced text (undoes physical wrap). */
+function flattenView(text: string): string {
+  return stripTerminalSequences(text).replace(/\s+/gu, ' ')
+}
+
+test('a folded team_task_create card shows a bounded status note, never the raw JSON or description', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'team_task_create', args: JSON.stringify({ subject: 'Scout the config', description: 'Read the config and report the timeout value.' }), result: teamTaskResult(), status: 'ok' },
+  ])
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('Create team task'), `the fixed card identity is missing:\n${folded}`)
+  assert.ok(folded.includes('pending · ready · unowned · rev 1'), `the bounded status note is missing:\n${folded}`)
+  assert.ok(!folded.includes('"id"'), `raw task JSON leaked into the fold:\n${folded}`)
+  assert.ok(!folded.includes('Read the config and report'), `the description leaked into the fold:\n${folded}`)
+
+  app.setTranscriptDetailExpanded(true)
+  const expanded = await viewport(vt)
+  const flatExpanded = flattenView(expanded)
+  assert.ok(flatExpanded.includes('Read the config and report the timeout value.'), `the full task body must be visible expanded:\n${expanded}`)
+  assert.ok(flatExpanded.includes('"id":"task-1"'), `the exact raw task JSON must be visible expanded:\n${expanded}`)
+  app.stop()
+})
+
+test('a folded team_task_list card reports count and cursor, leaving the full page to the expanded body', async () => {
+  const result = JSON.stringify({
+    tasks: [
+      { id: 'task-a', revision: 1, subject: 'First', description: 'a', status: 'pending', blockedBy: [], writeScopes: [], ready: true, writeScopeWarnings: [] },
+      { id: 'task-b', revision: 2, subject: 'Second', description: 'b', status: 'in_progress', owner: 'scout', blockedBy: [], writeScopes: [], ready: false, writeScopeWarnings: [] },
+    ],
+    nextCursor: 2,
+  })
+  const { vt, app } = startApp()
+  app.setTranscript([{ kind: 'tool', turn: 0, name: 'team_task_list', args: '{}', result, status: 'ok' }])
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('List team tasks'), `the fixed card identity is missing:\n${folded}`)
+  assert.ok(folded.includes('2 team tasks · more'), `the list fold is missing the count/cursor:\n${folded}`)
+  assert.ok(!/team tasks? of /u.test(folded), `a fabricated total leaked into the fold:\n${folded}`)
+  assert.ok(!folded.includes('"tasks"'), `raw page JSON leaked into the fold:\n${folded}`)
+
+  app.setTranscriptDetailExpanded(true)
+  const expanded = await viewport(vt)
+  const flatExpanded = flattenView(expanded)
+  assert.ok(flatExpanded.includes('"status":"in_progress"'), `the expanded body must carry the real status:\n${expanded}`)
+  assert.ok(flatExpanded.includes('"owner":"scout"'), `the expanded body must carry the real owner:\n${expanded}`)
+  app.stop()
+})
+
+test('a folded wait_agent card reports input state, never an agent or task outcome', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'wait_agent', args: '{}', result: JSON.stringify({ timedOut: false }), status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'wait_agent', args: '{"timeout_ms":30000}', result: JSON.stringify({ timedOut: true }), status: 'ok' },
+  ])
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('Wait for input'), `the fixed card identity is missing:\n${folded}`)
+  assert.ok(folded.includes('input pending'), `timedOut:false must fold to input pending:\n${folded}`)
+  assert.ok(folded.includes('timed out'), `timedOut:true must fold to timed out:\n${folded}`)
+  assert.ok(!/finished|completed|task ready/u.test(folded), `the wait fold must not claim an outcome:\n${folded}`)
+  assert.ok(!folded.includes('{"timedOut"'), `raw wait JSON leaked into the fold:\n${folded}`)
+
+  app.setTranscriptDetailExpanded(true)
+  const expanded = await viewport(vt)
+  assert.ok(flattenView(expanded).includes('"timedOut":false'), `the official wait JSON must stay expanded:\n${expanded}`)
+  app.stop()
+})
+
+test('a failed team_task card keeps its [error] identity and never shows a success summary', async () => {
+  const rejection = JSON.stringify({ code: 'APPROVAL_REJECTED', message: 'the approval was rejected' })
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'team_task_update', args: JSON.stringify({ task_id: 'task-1', expected_revision: 1, action: 'claim' }), result: rejection, status: 'error', error: { name: 'ApprovalError', code: 'APPROVAL_REJECTED' } },
+  ])
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('Update team task'), `the fixed card identity is missing:\n${folded}`)
+  assert.ok(folded.includes('[error]'), `the durable error status must stay painted:\n${folded}`)
+  assert.ok(!/in_progress|completed|owner |rev \d/u.test(folded), `a success summary leaked into the failed fold:\n${folded}`)
+
+  app.setTranscriptDetailExpanded(true)
+  const expanded = await viewport(vt)
+  assert.ok(flattenView(expanded).includes('APPROVAL_REJECTED'), `the structured error identity must stay visible:\n${expanded}`)
+  app.stop()
+})
+
 test('a failed rc1 schedule_edit card keeps [error], the error code and the result detail', async () => {
   const result = '{"id":"s1","code":"schedule_conflict","message":"the task changed after that result"}'
   const { vt, app } = startApp()
