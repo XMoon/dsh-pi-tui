@@ -110,6 +110,7 @@ import {
   type TuiApp,
   type TuiAppEvents,
   type TuiAppOptions,
+  type WorkflowAction,
   type NoAnswerNavigationControl,
   type EditorWorkspaceEntryControl,
 } from '../../tui-app.ts'
@@ -464,6 +465,13 @@ export interface SurfaceInputBinding {
    *  the live mounted Task Center capability) — the fact the TSP status
    *  segment paints its action from. */
   tasksBrowserUiAvailable(): boolean
+  /**
+   * Open the existing read-only Work Hub scoped to one Workflow Phase or Run.
+   * The ONE TaskRuntime resolves the action from its current authoritative row.
+   */
+  openWorkflowScopedAgents?(action: Extract<WorkflowAction, { kind: 'open-phase-agents' | 'open-run-agents' }>): void
+  /** Whether that scoped entry and its Work Hub are live on this mount. */
+  workflowScopedAgentsAvailable?(): boolean
 }
 
 /**
@@ -1816,6 +1824,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // `TaskBrowserRuntime`, the browser/viewer state and the catalog refresh gate.
   // Question attention crosses as an injected read/subscription only (the
   // controller stays with its own owner below).
+  let taskAttached = false
   const task = createTaskRuntime({
     mounted: () => mounted(),
     display: () => displaySeam(),
@@ -3375,6 +3384,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       extension.attachSeams(deps)
     },
     attachTasks(source, deps) {
+      taskAttached = true
       task.attachTasks(source, deps)
     },
     attachAgentContextIdentity(source) {
@@ -3671,6 +3681,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
             open()
           },
           tasksBrowserUiAvailable: () => options.tasksBrowserUiAvailable?.() ?? false,
+          // The TSP Workflow scoped entry owns no browser of its own: the
+          // SAME TaskRuntime and Task Center decide from the current action.
+          openWorkflowScopedAgents: action => task.handleWorkflowAction(action),
+          workflowScopedAgentsAvailable: () => taskAttached
+            && displaySeam().supportsTaskCenter
+            && displaySeam().supportsViewer === false,
         }
         inputBindTarget = mounted
         return

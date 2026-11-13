@@ -41,6 +41,8 @@ import { toolSummaryKeys } from '../../src/tui/transcript/tool-presentation.ts'
 import type { AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
 import type { ComposerSubmitRequest } from '../../src/tui-app.ts'
 import type { SurfaceEventRoutingSource } from '../../src/app/surface/event-routing.ts'
+import type { TaskSurfaceSource } from '../../src/app/surface/task-runtime.ts'
+import type { TaskSubagentEntry } from '../../src/runtime/task-read-port.ts'
 import {
   createSurfaceRuntime,
   type SurfaceRuntime,
@@ -273,6 +275,9 @@ async function mountTspHarness(options: {
   openTasksBrowserUi?: () => void
   /** Mouse PR4: the real `/tasks` business-entry availability read. */
   tasksBrowserUiAvailable?: () => boolean
+  /** The narrow Workflow scoped-action sink and its live availability. */
+  openWorkflowScopedAgents?: (action: { kind: 'open-phase-agents' | 'open-run-agents'; childIds: readonly string[] }) => void
+  workflowScopedAgentsAvailable?: () => boolean
   /** Observe the same injected Client-local copy capability used by the renderer. */
   copyVisual?: (text: string) => Promise<boolean>
   /** TSP I-A: the ONE application submit entry the real `pendingInputBinding`
@@ -413,6 +418,15 @@ async function mountTspHarness(options: {
         get(target, prop, receiver) {
           if (prop === 'bindInput') {
             return (handlers: Parameters<TspRenderer['bindInput']>[0]) => {
+              // The narrow Workflow scoped entry is injected on the SAME binding
+              // object the production `pendingInputBinding` built, exactly like a
+              // composition that wires it before the renderer input is bound.
+              if (options.openWorkflowScopedAgents !== undefined) {
+                handlers.openWorkflowScopedAgents = options.openWorkflowScopedAgents as never
+              }
+              if (options.workflowScopedAgentsAvailable !== undefined) {
+                handlers.workflowScopedAgentsAvailable = options.workflowScopedAgentsAvailable
+              }
               boundHandlers = handlers
               innerBind(handlers)
             }
@@ -456,7 +470,6 @@ async function mountTspHarness(options: {
     imageFallbackColor: text => text,
   }
   surface.start(startDeps)
-
   return {
     surface,
     startDeps,
@@ -512,6 +525,30 @@ function harnessFreeInput(tern: ScriptedTern, event: Record<string, unknown>): v
 
 async function settle(): Promise<void> {
   for (let index = 0; index < 40; index += 1) await new Promise(resolve => setTimeout(resolve, 3))
+}
+
+/** Attach the REAL TaskRuntime source used below the production seam. The
+ *  rows are the exact `childIds` the official Workflow events name. */
+function attachWorkflowTaskSource(surface: SurfaceRuntime<SessionEvent>, descendants: readonly TaskSubagentEntry[]): void {
+  const subject = {}
+  surface.attachTasks({
+    sessionId: () => SESSION_ID,
+    captureSubject: () => subject,
+    subjectMatches: candidate => candidate === subject,
+    enterView: async () => { throw new Error('a read-only scoped Workflow action must never enter a child viewer') },
+    interruptSubagent: async () => ({ kind: 'committed' } as never),
+    rowSelectionDisposition: (_row, jobDetail) => jobDetail,
+    subagentJobTranscriptId: () => undefined,
+    subagentJobViewHint: status => status,
+    jobObservation: { open: () => () => {}, stop: async () => ({ kind: 'requested' } as never) },
+    jobs: { list: () => [], subscribe: () => () => {} },
+    taskRead: {
+      currentKey: () => `g1:${SESSION_ID}`,
+      currentSessionId: () => SESSION_ID,
+      readTask: async () => ({ parentSessionId: SESSION_ID, parentAvailable: true, descendants, jobs: [] }),
+      activityOf: () => 'running',
+    },
+  }, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
 }
 
 // ── A-04: cold hydration + live delta on the same node ──────────────────────
@@ -4695,6 +4732,210 @@ test('routed Tool notes and Notice/Recall/Relay forms keep exact current native 
     assert.equal(mountedNodes(harness).find(node => node.id === relay.id)?.p['collapsed'], false)
     assert.equal(mountedNodes(harness).find(node => node.id === notice.id)?.p['collapsed'], false)
     assert.equal(mountedNodes(harness).find(node => node.id === recall.id)?.p['collapsed'], true)
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('current Workflow Run and Phase toggles use the exact SDK node and a current scoped browse action reaches the business sink', async () => {
+  const scopedActions: Array<{ readonly kind: string; readonly childIds: readonly string[] }> = []
+  const harness = await mountTspHarness({
+    displayState: { preset: 'full' },
+    sessionBrowserCapabilities: true,
+    openWorkflowScopedAgents: action => { scopedActions.push(action) },
+    workflowScopedAgentsAvailable: () => true,
+  })
+  try {
+    harness.surface.bindRendererInput()
+    const workflowEvents: SessionEvent[] = [
+      ev('turn/start', { turn: 1 }, 0),
+      ev('tool-workflow/run-start', { runId: 'run-live', name: 'deploy' }, 1),
+      ev('tool-workflow/agent-start', { runId: 'run-live', seq: 1, label: 'prepare-a', phase: 'Prepare', childId: 'child-a' }, 2),
+      ev('tool-workflow/agent-start', { runId: 'run-live', seq: 2, label: 'rollout-a', phase: 'Rollout', childId: 'child-b' }, 3),
+      ev('tool-workflow/agent-start', { runId: 'run-live', seq: 3, label: 'rollout-b', phase: 'Rollout', childId: 'child-c' }, 4),
+      ev('tool-workflow/agent-start', { runId: 'run-live', seq: 4, label: 'rollout-c', phase: 'Rollout', childId: 'child-d' }, 5),
+      ev('tool-workflow/agent-start', { runId: 'run-live', seq: 5, label: 'rollout-d', phase: 'Rollout', childId: 'child-e' }, 6),
+      ev('tool-workflow/agent-start', { runId: 'run-live', seq: 6, label: 'rollout-e', phase: 'Rollout', childId: 'child-f' }, 7),
+      ev('tool-workflow/agent-end', { runId: 'run-live', seq: 1, outcome: 'failed' }, 8),
+    ]
+    for (const event of workflowEvents) harness.route(event)
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedSections(harness).some(node => nodeText(node).includes('Workflow deploy [running]')),
+      'the official Workflow events reach one native Run Section')
+
+    const current = (): ModeWireNode[] => mountedNodes(harness)
+    const run = current().find(node => node.k === 'section' && nodeText(node).includes('Workflow deploy [running]'))
+    assert.ok(run !== undefined)
+    assert.equal(run.p['collapsed'], false, 'an abnormal Run opens by default')
+    assert.ok(nodeText(run).includes('6 agents'), 'the head keeps the exact run summary')
+    // The Run Section's head is its own slot child; the Phase Sections are the
+    // collapsible sections whose SDK key is the injective `phase-<base64url>`.
+    const sections = current().filter(node => node.k === 'section'
+      && String(node.p['key'] ?? '').startsWith('phase-'))
+    assert.equal(sections.length, 2, 'the two Phase Sections are materialized')
+    // Phase LABELS live in each head slot, not in the bounded member body.
+    const headText = (node: ModeWireNode): string => {
+      const parts: string[] = []
+      const visit = (current: ModeWireNode): void => {
+        if (current.id.endsWith('.head') || typeof current.p['head'] === 'string') {
+          if (typeof current.p['head'] === 'string') parts.push(current.p['head'])
+        }
+        for (const child of current.c ?? []) visit(child)
+      }
+      visit(node)
+      return parts.join(' ')
+    }
+    const prepare = sections.find(node => headText(node).includes('Prepare'))
+    const rollout = sections.find(node => headText(node).includes('Rollout'))
+    assert.ok(prepare !== undefined && rollout !== undefined)
+    const button = current().find(node => node.k === 'button'
+      && (node.p['actions'] as { readonly click?: unknown } | undefined)?.click === 'dsh-workflow-scoped-agents'
+      && nodeText(node).includes('View all 6 agents'))
+    assert.ok(button !== undefined, 'the frame paints a real native scoped browse button')
+
+    const sf = harness.tern.frames.at(-1)!.sf
+    const toggle = (id: string, collapsed: boolean): void => {
+      harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id, collapsed, raw: {} })
+    }
+    toggle(prepare.id, true)
+    await awaitWireFact(() => current().find(node => node.id === prepare.id)?.p['collapsed'] === true,
+      'the exact Phase toggle closes only Prepare')
+    assert.equal(current().find(node => node.id === rollout.id)?.p['collapsed'], false)
+    toggle(run.id, true)
+    await awaitWireFact(() => current().find(node => node.id === run.id)?.p['collapsed'] === true,
+      'the exact Run toggle closes the Run')
+    assert.equal(current().some(node => node.id === prepare.id), false, 'a closed Run materializes no child')
+    toggle(run.id, false)
+    await awaitWireFact(() => current().some(node => node.id === prepare.id), 'reopening the Run restores its Phases')
+    assert.equal(current().find(node => node.id === prepare.id)?.p['collapsed'], true,
+      'the Phase manual choice survives the parent close/open')
+    assert.equal(current().find(node => node.id === rollout.id)?.p['collapsed'], false,
+      'the sibling Phase choice survives the parent close/open')
+
+    const freshButton = current().find(node => node.k === 'button'
+      && (node.p['actions'] as { readonly click?: unknown } | undefined)?.click === 'dsh-workflow-scoped-agents'
+      && nodeText(node).includes('View all 6 agents'))
+    assert.ok(freshButton !== undefined && freshButton.id === button.id)
+    harnessFreeInput(harness.tern, {
+      ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: freshButton.id,
+      act: 'dsh-workflow-scoped-agents', raw: {},
+    })
+    await awaitWireFact(() => scopedActions.length === 1, 'the current native action reaches the scoped business sink')
+    assert.equal(scopedActions[0]?.kind, 'open-run-agents')
+    assert.deepEqual(scopedActions[0]?.childIds, ['child-a', 'child-b', 'child-c', 'child-d', 'child-e', 'child-f'])
+
+    // A stale/foreign node id, a foreign surface and a modal seat all refuse.
+    const before = scopedActions.length
+    harnessFreeInput(harness.tern, {
+      ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: `${freshButton.id}.stale`,
+      act: 'dsh-workflow-scoped-agents', raw: {},
+    })
+    harnessFreeInput(harness.tern, {
+      ev: 'action', sf: 'foreign-surface', id: freshButton.id,
+      act: 'dsh-workflow-scoped-agents', raw: {},
+    })
+    const pending = harness.renderer().interaction.askQuestions([{ id: 'workflow-seat-q', question: 'Wait?' }], undefined, undefined, false)
+    pending.catch(() => {})
+    await awaitWireFact(() => harness.tern.output.text().includes('Wait?'), 'the modal seat')
+    harnessFreeInput(harness.tern, {
+      ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: freshButton.id,
+      act: 'dsh-workflow-scoped-agents', raw: {},
+    })
+    await settle() // bounded window: a covered action must paint no frame and reach no sink
+    assert.equal(scopedActions.length, before, 'stale, foreign and covered actions never reach the business sink')
+    harness.renderer().interaction.withdrawPending()
+    await pending.catch(() => {})
+
+    // A late official member changes the CURRENT childIds at action time.
+    harness.route(ev('tool-workflow/agent-start', { runId: 'run-live', seq: 7, label: 'late', phase: 'Prepare', childId: 'child-late' }, 9))
+    harness.surface.paintNow()
+    await awaitWireFact(() => current().some(node => nodeText(node).includes('7 agents')), 'the same-source official update')
+    const lateButton = current().find(node => node.k === 'button'
+      && (node.p['actions'] as { readonly click?: unknown } | undefined)?.click === 'dsh-workflow-scoped-agents'
+      && nodeText(node).includes('View all 7 agents'))
+    assert.ok(lateButton !== undefined)
+    harnessFreeInput(harness.tern, {
+      ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: lateButton.id,
+      act: 'dsh-workflow-scoped-agents', raw: {},
+    })
+    await awaitWireFact(() => scopedActions.length === before + 1, 'the current scoped action runs after the late update')
+    assert.deepEqual(scopedActions.at(-1)?.childIds,
+      ['child-a', 'child-b', 'child-c', 'child-d', 'child-e', 'child-f', 'child-late'])
+    assert.equal(sf !== undefined, true)
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a current Workflow scoped button reaches the REAL TaskRuntime and opens its exact child rows', async () => {
+  const children: TaskSubagentEntry[] = [
+    { kind: 'child', id: 'child-a', label: 'prepare-a', mode: 'one-shot', activity: 'running', hasChildren: false, parentId: '', depth: 1 },
+    { kind: 'child', id: 'child-b', label: 'prepare-b', mode: 'one-shot', activity: 'running', hasChildren: false, parentId: '', depth: 1 },
+    { kind: 'child', id: 'unrelated', label: 'unrelated', mode: 'one-shot', activity: 'running', hasChildren: false, parentId: '', depth: 1 },
+  ]
+  const harness = await mountTspHarness({
+    displayState: { preset: 'full' },
+    sessionBrowserCapabilities: true,
+  })
+  try {
+    attachWorkflowTaskSource(harness.surface, children)
+    harness.surface.bindRendererInput()
+    for (const event of [
+      ev('turn/start', { turn: 1 }, 0),
+      ev('tool-workflow/run-start', { runId: 'run-real', name: 'deploy' }, 1),
+      ev('tool-workflow/agent-start', { runId: 'run-real', seq: 1, label: 'prepare-a', phase: 'Prepare', childId: 'child-a' }, 2),
+      ev('tool-workflow/agent-start', { runId: 'run-real', seq: 2, label: 'prepare-b', phase: 'Prepare', childId: 'child-b' }, 3),
+    ]) harness.route(event)
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'button'
+      && (node.p['actions'] as { readonly click?: unknown } | undefined)?.click === 'dsh-workflow-scoped-agents'),
+    'the production frame paints the scoped button')
+    const button = mountedNodes(harness).find(node => node.k === 'button'
+      && (node.p['actions'] as { readonly click?: unknown } | undefined)?.click === 'dsh-workflow-scoped-agents')
+    assert.ok(button !== undefined)
+    harnessFreeInput(harness.tern, {
+      ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: button.id,
+      act: 'dsh-workflow-scoped-agents', raw: {},
+    })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'picker'
+      && Array.isArray(node.p['items'])), 'the REAL TaskRuntime opens the scoped Work Hub')
+    const hub = mountedNodes(harness).find(node => node.k === 'picker')
+    const items = (hub?.p['items'] ?? []) as Array<{ readonly id: string }>
+    assert.deepEqual(items.map(item => item.id).filter(id => id.startsWith('agent:')), ['agent:child-a', 'agent:child-b'],
+      'the Hub rows are exactly the current Workflow childIds, never the unrelated catalog row')
+    assert.equal(items.some(item => item.id === 'agent:unrelated'), false)
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a Workflow row committed before bindInput gains its scoped button when the business entry binds', async () => {
+  const children: TaskSubagentEntry[] = [
+    { kind: 'child', id: 'child-a', label: 'prepare-a', mode: 'one-shot', activity: 'running', hasChildren: false, parentId: '', depth: 1 },
+    { kind: 'child', id: 'child-b', label: 'prepare-b', mode: 'one-shot', activity: 'running', hasChildren: false, parentId: '', depth: 1 },
+  ]
+  const harness = await mountTspHarness({ displayState: { preset: 'full' }, sessionBrowserCapabilities: true })
+  try {
+    attachWorkflowTaskSource(harness.surface, children)
+    for (const event of [
+      ev('turn/start', { turn: 1 }, 0),
+      ev('tool-workflow/run-start', { runId: 'run-bind', name: 'deploy' }, 1),
+      ev('tool-workflow/agent-start', { runId: 'run-bind', seq: 1, label: 'prepare-a', phase: 'Prepare', childId: 'child-a' }, 2),
+      ev('tool-workflow/agent-start', { runId: 'run-bind', seq: 2, label: 'prepare-b', phase: 'Prepare', childId: 'child-b' }, 3),
+    ]) harness.route(event)
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedSections(harness).some(node => nodeText(node).includes('Workflow deploy [running]')),
+      'the Workflow row committed before the input bind')
+    assert.equal(mountedNodes(harness).some(node => node.k === 'button'
+      && (node.p['actions'] as { readonly click?: unknown } | undefined)?.click === 'dsh-workflow-scoped-agents'), false,
+    'an unbound renderer paints no dead scoped action')
+    harness.surface.bindRendererInput()
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'button'
+      && (node.p['actions'] as { readonly click?: unknown } | undefined)?.click === 'dsh-workflow-scoped-agents'),
+    'binding the real TaskRuntime entry repaints the same Workflow row with its live scoped button')
   } finally {
     await harness.dispose()
     await harness.session.close()
