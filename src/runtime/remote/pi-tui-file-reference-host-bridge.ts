@@ -6,12 +6,15 @@
  * - `list` binds the SAME Host-scoped Session authority the Direct adapter
  *   uses (`runtime/direct/host-file-augmentation-direct.ts` + the Direct Host
  *   discovery driver) — unchanged by F5-B.
- * - `listWorkspace` binds the OFFICIAL Host Workspace discovery: the Host
+ * - `listWorkspace` binds the sessionless Host Workspace discovery through the
+ *   SAME classifier/helper the Direct Workspace route uses: after the Host
  *   `workspaceRegistry` resolves the confirmed `workspaceId` to its canonical
- *   root and the published `@deepseek-ai/dsh-file-reference-local/search`
- *   `WorkspaceFileSearch` answers with the official defaults. It never creates
- *   an Agent/Session, never reads a Client fact and never falls back to the
- *   retired Direct fd scanner.
+ *   root, a BARE query is answered by the published
+ *   `@deepseek-ai/dsh-file-reference-local/search` `WorkspaceFileSearch`
+ *   (official defaults/ranking/exclusions), an EXPLICIT path scope by the
+ *   shared Host scanner anchored at that same root. It never creates an
+ *   Agent/Session, never reads a Client fact and never falls back to a Client
+ *   filesystem.
  *
  * It owns NO Cordis service, NO Typert registration and NO lifecycle policy —
  * the Cordis service, its Owner-invocation gate, its Typert contribution
@@ -33,6 +36,8 @@ import {
 } from '../direct/file-completion/host-discovery.ts'
 import { OfficialWorkspaceSearchPool } from '../direct/file-completion/official-workspace-search.ts'
 import {
+  isExplicitHostFileQuery,
+  listPiTuiExplicitHostFileReferences,
   listPiTuiHostFileReferences,
   type FileReferencesServiceLike,
   type LiveAgentLike,
@@ -121,7 +126,18 @@ export function createPiTuiHostFileReferenceRuntime(
       if (!isReadableDirectory(workspace.path)) {
         return { kind: 'unavailable', reason: 'the Host Workspace directory is unreadable' }
       }
-      const items = await workspaceSearch.list({ workspaceId, path: workspace.path }, query, signal)
+      // The SAME Host-dialect classifier the Direct Workspace route uses: a
+      // BARE query stays the official `WorkspaceFileSearch` (index, ranking,
+      // bounds, exclusions, cache), an EXPLICIT path scope enumerates the scope
+      // the user typed — `..`/absolute OUTSIDE the registered root included —
+      // through the shared Host scanner anchored at THIS request's registry
+      // root. The root, the driver and the OS environment are the HOST's only.
+      const answer: HostFileListResult = isExplicitHostFileQuery(query, environment)
+        ? await listPiTuiExplicitHostFileReferences(workspace.path, query, signal, { driver, environment })
+        : {
+            kind: 'ok',
+            items: [...await workspaceSearch.list({ workspaceId, path: workspace.path }, query, signal)],
+          }
       signal.throwIfAborted()
       // A registry replacement/removal during the scan retires the old answer:
       // the candidate list must belong to the CURRENT id AND the same path.
@@ -129,7 +145,7 @@ export function createPiTuiHostFileReferenceRuntime(
       if (current === undefined || current.path !== workspace.path) {
         return { kind: 'unavailable', reason: 'the Host Workspace changed during discovery' }
       }
-      return { kind: 'ok', items: [...items] }
+      return answer
     },
     invalidateWorkspaceSearches() {
       workspaceSearch.invalidateAll()

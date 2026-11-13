@@ -241,15 +241,23 @@ test('a SESSION-scoped absolute @ path keeps the Host explicit route', async (t)
   assert.ok(result.items.some(item => item.value.startsWith(`@${target}`)))
 })
 
-test('the OFFICIAL workspace discovery never enumerates an absolute Host path outside its root', async (t) => {
+test('an EXPLICIT workspace absolute @ path enumerates OUTSIDE its root; a bare query does not', async (t) => {
   const life = testLifecycle(t)
   const root = outsideCwdFixture(life).root
   const target = life.tempDir('dsh-conv-abs-out-')
   writeFileSync(join(target, 'deep-abs.txt'), 'x')
   const provider = new MentionProvider([], root, workspacePort(root), undefined, workspaceScope(root))
+  // An EXPLICIT absolute Host path is the scope the user typed: it enumerates
+  // the outside directory through the shared Host scoped scanner.
   const query = `@${target}/abs`
   const result = await provider.getSuggestions([query], 0, query.length, { signal: abort })
-  assert.equal(result, null, 'an absolute path outside the registered root is not enumerable')
+  assert.ok(result !== null, `an explicit absolute workspace scope must suggest:\n${JSON.stringify(result)}`)
+  assert.ok(result.items.some(item => item.value.startsWith(`@${target}`)),
+    `explicit absolute host value missing:\n${JSON.stringify(result.items)}`)
+  // A BARE fuzzy query stays inside the official WorkspaceFileSearch index and
+  // never reaches the outside file.
+  const bare = await provider.getSuggestions(['@deep-abs'], 0, '@deep-abs'.length, { signal: abort })
+  assert.equal(bare, null, 'a bare workspace query must not enumerate outside the registered root')
 })
 
 test('matrix: attachment commands share the scoped forms (../, ~/, absolute, directory continuation)', async (t) => {

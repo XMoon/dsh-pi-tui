@@ -11,13 +11,17 @@
  *                                           to)
  *                      explicit `@src/`  -> dsh-pi-tui Host scoped discovery
  *                                           (`host-discovery.ts`)
- * workspace scope -> the OFFICIAL Host Workspace discovery: the registry
- *                    resolves the confirmed `workspaceId` to its canonical
- *                    root and the published
- *                    `@deepseek-ai/dsh-file-reference-local/search`
- *                    `WorkspaceFileSearch` answers (same defaults/ranking/
- *                    exclusions as the official Host provider; no `cwd`,
- *                    no fd/fdfind, no client filesystem).
+ * workspace scope -> the registry resolves the confirmed `workspaceId` to its
+ *                    canonical root, then the SAME Host-dialect classifier the
+ *                    Session router uses splits the route:
+ *                      bare `@foo`       -> the officially published
+ *                                           `@deepseek-ai/dsh-file-reference-local/search`
+ *                                           `WorkspaceFileSearch` over that root
+ *                                           (same defaults/ranking/exclusions
+ *                                           as the official Host provider)
+ *                      explicit `@src/`  -> the shared Host scoped discovery
+ *                                           anchored at the registry root
+ *                                           (`..` / absolute / `~/` included)
  * ```
  *
  * The official service owns the workspace root, ranking, result bounds,
@@ -42,6 +46,8 @@ import {
 } from './file-completion/host-discovery.ts'
 import { OfficialWorkspaceSearchPool } from './file-completion/official-workspace-search.ts'
 import {
+  isExplicitHostFileQuery,
+  listPiTuiExplicitHostFileReferences,
   listPiTuiHostFileReferences,
   type FileReferencesServiceLike,
   type LiveAgentLike,
@@ -167,10 +173,14 @@ export class DirectHostFilePort implements HostFilePort {
       })
     }
 
-    // WORKSPACE scope: the sessionless surface's official discovery. The
-    // authority is the Host Workspace registry identity plus the published
-    // `WorkspaceFileSearch` primitive — NEVER the retired Direct fd scanner
-    // and never a cwd. An unselected scope dispatches nothing.
+    // WORKSPACE scope: the sessionless surface's discovery. The authority is
+    // the Host Workspace registry identity. Once the readable root is proven,
+    // the SAME Host-dialect classifier the Session router uses decides the
+    // route: a BARE query stays the official `WorkspaceFileSearch` (index,
+    // ranking, bounds, exclusions, cache), an EXPLICIT path scope enumerates
+    // the scope the user typed — including a parent `..` or an absolute Host
+    // path OUTSIDE the registered root — through the shared Host scanner with
+    // `cwd = the registry root`. An unselected scope dispatches nothing.
     if (scope.workspaceId === undefined) {
       return { kind: 'unavailable', reason: 'Choose a Host workspace first' }
     }
@@ -186,20 +196,31 @@ export class DirectHostFilePort implements HostFilePort {
       return { kind: 'unavailable', reason: 'the Host Workspace directory is unreadable' }
     }
     const signal = options?.signal ?? new AbortController().signal
-    const items = await this.workspaceSearch.list(
-      { workspaceId: scope.workspaceId, path: workspace.path },
-      query,
-      signal,
-    )
+    const environment = hostPathQueryEnvironment()
+    const answer: HostFileListResult = isExplicitHostFileQuery(query, environment)
+      ? await listPiTuiExplicitHostFileReferences(workspace.path, query, signal, {
+          driver: this.hostDiscovery,
+          environment,
+        })
+      : {
+          kind: 'ok',
+          items: [
+            ...await this.workspaceSearch.list(
+              { workspaceId: scope.workspaceId, path: workspace.path },
+              query,
+              signal,
+            ),
+          ],
+        }
     signal.throwIfAborted()
     // The registry stays the authority AFTER the scan: a Workspace removed or
-    // re-rooted while the official index answered must not present its stale
+    // re-rooted while the answer was produced must not present its stale
     // candidates (the same currentness fence the Remote bridge applies).
     const current = registry.get(scope.workspaceId)
     if (current === undefined || current.path !== workspace.path) {
       return { kind: 'unavailable', reason: 'the Host Workspace changed during discovery' }
     }
-    return { kind: 'ok', items: [...items] }
+    return answer
   }
 
   async resolveReference(

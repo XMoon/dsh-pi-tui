@@ -18,6 +18,7 @@ import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from 'no
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { DirectHostFilePort, resolveFdPath } from '../../src/runtime/direct/host-file-direct.ts'
+import { isExplicitHostFileQuery } from '../../src/runtime/direct/host-file-augmentation-direct.ts'
 import { RemoteHostFilePort } from '../../src/runtime/remote/host-file-remote.ts'
 import { createPiTuiHostFileReferenceRuntime } from '../../src/runtime/remote/pi-tui-file-reference-host-bridge.ts'
 import { createObservableGenerationHarness } from '../support/remote-generation.ts'
@@ -204,17 +205,86 @@ test('an UNSELECTED workspace scope answers unavailable without any Host read', 
   assert.ok(root !== '')
 })
 
-test('the official workspace discovery never enumerates OUTSIDE the registered root', async (t) => {
+test('an EXPLICIT workspace path scope enumerates the Host scope the user typed, bare fuzzy still bounds to the root', async (t) => {
   const life = testLifecycle(t)
-  const { root, parent } = nestedWorkspace(life)
+  const { parent, root } = nestedWorkspace(life)
   const port = fallbackPort(root)
-  // An explicit parent escape is enumerated as nothing (the official
-  // `resolveDisplayDirectory` refuses a path outside the workspace root).
+  // BARE fuzzy keeps the official index: a file OUTSIDE the registered root is
+  // never auto-discovered by a bare query (the official WorkspaceFileSearch
+  // only walks the root).
+  assert.deepEqual(await port.listReferences(workspaceScope(), 'foo'),
+    { kind: 'ok', items: [] }, 'bare fuzzy never scans outside the registered root')
+  // An explicit parent scope enumerates the outside directory and keeps the
+  // `../` prefix the user typed (Host cwd = the registry root).
   assert.deepEqual(await port.listReferences(workspaceScope(), '../shared/'),
-    { kind: 'ok', items: [] })
-  // An absolute Host path is refused the same way.
+    { kind: 'ok', items: [{ path: '../shared/foo.txt', kind: 'file' }] })
+  // An explicit ABSOLUTE Host scope enumerates outside with its absolute path.
   assert.deepEqual(await port.listReferences(workspaceScope(), `${parent}/shared/`),
-    { kind: 'ok', items: [] })
+    { kind: 'ok', items: [{ path: `${parent}/shared/foo.txt`, kind: 'file' }] })
+  // The home shorthand returns ABSOLUTE Host paths (never a literal `~/...`).
+  const home = await port.listReferences(workspaceScope(), '~/')
+  assert.equal(home.kind, 'ok')
+  if (home.kind === 'ok') {
+    assert.ok(home.items.length > 0, 'the Host HOME directory lists')
+    for (const item of home.items) {
+      assert.ok(isAbsolute(item.path) && !item.path.startsWith('~'),
+        `every home-shorthand candidate is an ABSOLUTE Host path: ${item.path}`)
+      assert.ok(item.path.startsWith(homedir()), `the Host HOME scope drives discovery: ${item.path}`)
+    }
+  }
+})
+
+test('an explicit workspace scope reaches officially-excluded and symlinked directories', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-hostfile-ws-excluded-')
+  mkdirSync(join(root, '.git'))
+  writeFileSync(join(root, '.git', 'config'), 'x')
+  const target = life.tempDir('dsh-hostfile-ws-target-')
+  writeFileSync(join(target, 'inside.ts'), 'x')
+  symlinkSync(target, join(root, 'shared-link'))
+  const port = fallbackPort(root)
+  // An explicitly named officially-excluded directory is searchable when typed.
+  assert.deepEqual(okItems(await port.listReferences(workspaceScope(), './.git/')),
+    [{ path: './.git/config', kind: 'file' }])
+  // An explicitly named symlink scope: searchable, never recursively descended.
+  assert.deepEqual(okItems(await port.listReferences(workspaceScope(), 'shared-link/')),
+    [{ path: 'shared-link/inside.ts', kind: 'file' }])
+})
+
+test('explicit workspace candidates are bare path/kind DTOs, keep the typed prefix and literal mentions', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const port = fallbackPort(root)
+  const result = okItems(await port.listReferences(workspaceScope(), 'src/'))
+  const [item] = result
+  assert.ok(item !== undefined)
+  assert.deepEqual(Object.keys(item).sort(), ['kind', 'path'])
+  assert.deepEqual(result, [{ path: 'src/deep-nested.ts', kind: 'file' }])
+  // A quote/mention typed in the prompt stays literal on the workspace scope.
+  assert.equal(
+    await port.canonicalizeMentions(workspaceScope(), 'see @src/deep-nested.ts and "../shared/foo"'),
+    'see @src/deep-nested.ts and "../shared/foo"',
+  )
+})
+
+test('the bare/explicit classifier is a PURE token decision (POSIX and Windows adjacency)', () => {
+  const posix = { homeDir: '/home/x', windowsHost: false }
+  const windows = { homeDir: 'C:\\Users\\x', windowsHost: true }
+  // POSIX: `/` is the only separator; `\` is a filename character and is left
+  // to the official provider (fail closed), never claimed as a scope.
+  for (const raw of ['', 'foo', 'a\\b']) {
+    assert.equal(isExplicitHostFileQuery(raw, posix), false, `POSIX bare ${JSON.stringify(raw)}`)
+  }
+  for (const raw of ['.', '..', '~', 'src/', 'a/b', '/abs', '../shared', './']) {
+    assert.equal(isExplicitHostFileQuery(raw, posix), true, `POSIX explicit ${JSON.stringify(raw)}`)
+  }
+  // Windows: `\` is a separator too, and any win32-absolute form is explicit.
+  for (const raw of ['', 'foo']) {
+    assert.equal(isExplicitHostFileQuery(raw, windows), false, `Windows bare ${JSON.stringify(raw)}`)
+  }
+  for (const raw of ['.', '..', '~', 'C:/x', 'C:\\x', 'a\\b', '\\\\server\\share', 'src/']) {
+    assert.equal(isExplicitHostFileQuery(raw, windows), true, `Windows explicit ${JSON.stringify(raw)}`)
+  }
 })
 
 test('the workspace scope returns RAW paths — quoting is the official grammar, ranking is the Host authority\'s', async (t) => {
@@ -613,15 +683,19 @@ test('the provider-level Session @ path never falls back to the Client filesyste
   }
 })
 
-test('Direct and Remote resolve the SAME workspace query through the ONE official search semantics', async (t) => {
+test('Direct and Remote resolve the SAME workspace query through the ONE shared bare + explicit Host semantics', async (t) => {
   const life = testLifecycle(t)
-  const root = fixtureWorkspace(life)
+  const { parent, root } = nestedWorkspace(life)
+  writeFileSync(join(root, 'my file.txt'), 'x')
   mkdirSync(join(root, 'node_modules'))
   writeFileSync(join(root, 'node_modules', 'dep.ts'), 'x')
   const direct = fallbackPort(root)
   const runtime = createPiTuiHostFileReferenceRuntime({
     agentFor: () => undefined,
     official: () => undefined,
+    // Deterministic bounded fallback on BOTH sides so the parity compares the
+    // shared policy, never a machine-specific fd availability.
+    fdPath: null,
     workspaces: () => ({ get: id => id === WORKSPACE_ID ? { path: root } : undefined }),
   })
   const generation = createObservableGenerationHarness()
@@ -633,15 +707,17 @@ test('Direct and Remote resolve the SAME workspace query through the ONE officia
     }),
   }, generation.source)
   try {
-    for (const query of ['', 'file', 'my file', 'src', 'src/', 'deep', 'no-such-zzz/']) {
+    // BARE fuzzy, a bare directory name, and EXPLICIT scopes (relative,
+    // absolute, parent `..`) must all answer identically across the backends.
+    for (const query of ['', 'file', 'my file', 'src', 'src/', 'deep', 'no-such-zzz/', './', 'src/de', '../shared/', `${parent}/shared/`]) {
       assert.deepEqual(
         await remote.listReferences(workspaceScope(1), query),
         await direct.listReferences(workspaceScope(1), query),
-        `the two backends must return the same official candidates for ${JSON.stringify(query)}`,
+        `the two backends must return the same candidates for ${JSON.stringify(query)}`,
       )
     }
     // The official exclusions hold on both: the ONLY `hidden` match lives in
-    // node_modules, so both backends answer an authoritative empty list.
+    // node_modules, so both backends answer an authoritative empty bare list.
     assert.deepEqual(await direct.listReferences(workspaceScope(), 'hidden'),
       { kind: 'ok', items: [] })
     assert.deepEqual(await remote.listReferences(workspaceScope(), 'hidden'),

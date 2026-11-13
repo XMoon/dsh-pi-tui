@@ -133,7 +133,7 @@ const CASE_REGISTRY = Object.freeze([
   Object.freeze({
     suite: 'surface',
     id: 'surface.sessionless-host-file-f5b',
-    title: 'two real sessionless TUIs list their own Host Workspace @file markers while a different mount view and an unproved launch cwd adopt nothing',
+    title: 'two real sessionless TUIs list their own Host Workspace @file markers, an explicit `@../`/absolute query reaches OUTSIDE the registered root by Host path while a bare query stays inside, and a different mount view and an unproved launch cwd adopt nothing',
     run: runSessionlessHostFileF5B,
   }),
   Object.freeze({

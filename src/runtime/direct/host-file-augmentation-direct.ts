@@ -45,6 +45,14 @@
  * official `[]` stays empty and never falls back to the scanner. The scoped
  * route never calls the official provider and needs no capability from it.
  *
+ * The explicit-scope route is ONE shared implementation
+ * (`listPiTuiExplicitHostFileReferences`): the Session router below, the Direct
+ * Workspace route and the Remote sessionless bridge all converge on it with
+ * their OWN authority-resolved Host cwd (the Session's effective cwd, the
+ * Workspace registry root), so a sessionless explicit query answers with the
+ * same classification, discovery and ranking the Session scope has always had
+ * — never a second scanner or a Client filesystem fact.
+ *
  * Home shorthand (`@~`, `@~/Down`) is dsh-pi-tui INPUT syntax: discovery runs
  * against the Host HOME, but every returned candidate is materialized as an
  * ABSOLUTE Host path — DSH path resolution performs no shell-style `~`
@@ -121,8 +129,13 @@ export interface PiTuiHostFileReferenceDeps {
  * literal POSIX scope, so the official provider keeps it.
  *
  * A Windows host treats `\` as a separator as well and accepts any
- * win32-absolute form (drive/UNC) even before its first separator is visible. */
-function isExplicitPathNavigation(raw: string, environment: PathQueryEnvironment): boolean {
+ * win32-absolute form (drive/UNC) even before its first separator is visible.
+ *
+ * The ONE classifier every Host-side caller shares (the Session router, the
+ * Direct Workspace route and the Remote sessionless bridge): the bare/explicit
+ * decision is the token's spelling against the HOST dialect, never the scope
+ * the caller resolved, a filesystem fact or an official result count. */
+export function isExplicitHostFileQuery(raw: string, environment: PathQueryEnvironment): boolean {
   if (raw === '') return false
   if (environment.windowsHost) {
     return raw === '.' || raw === '..' || raw === '~'
@@ -197,6 +210,62 @@ function scopeSearchBase(
   return PARENT_SEGMENT.test(physicalScope) ? physicalScope : resolved.searchBase
 }
 
+/** The Host facts ONE explicit-scope answer needs: the HOST discovery driver
+ *  and the HOST path environment — exactly the two facts the Session router
+ *  already receives, never a Client cwd, home or platform. */
+export interface PiTuiExplicitHostFileQueryDeps {
+  readonly driver: LocalDiscoveryDriver
+  readonly environment: PathQueryEnvironment
+}
+
+/**
+ * Answer ONE explicit Host path scope (`@src/`, `@../shared/`, `@/abs`,
+ * `@~/Down`) with the shared TS8-A machinery, anchored at `hostCwd`.
+ *
+ * The caller has already decided the query is EXPLICIT (through
+ * {@link isExplicitHostFileQuery}) and owns everything else: the bare-fuzzy
+ * route, the Owner/authorization gate, the WorkspaceId/Agent lifecycle, the
+ * search base's authority and the file-existence safety policy. This helper
+ * answers ONE question — for a scope the user explicitly named, how does the
+ * HOST (its cwd dialect, its OS) complete it — with the frozen pipeline
+ * `resolvePathQuery → scopeSearchBase → discoverForQuery → rankPathCandidates`
+ * and the frozen output shapes (`~` emits ABSOLUTE Host paths, other scopes
+ * reattach the user's display base). No path/ranking algorithm is duplicated
+ * anywhere: every Session and Workspace caller converges here.
+ *
+ * Cancellation (the caller's `signal`) outranks every outcome: an aborted
+ * request rejects at entry and after each await.
+ */
+export async function listPiTuiExplicitHostFileReferences(
+  hostCwd: string,
+  query: string,
+  signal: AbortSignal,
+  deps: PiTuiExplicitHostFileQueryDeps,
+): Promise<HostFileListResult> {
+  signal.throwIfAborted()
+  const resolved = resolvePathQuery(query, hostCwd, deps.environment)
+  const searchBase = scopeSearchBase(resolved, query, hostCwd, deps.environment)
+  const scope = searchBase === resolved.searchBase ? resolved : { ...resolved, searchBase }
+  const discovered = await discoverForQuery(scope, deps.driver, signal)
+  signal.throwIfAborted()
+  // RANK BEFORE the final path shape is chosen. The home shorthand must return
+  // an ABSOLUTE Host path, but scoring those absolute paths would let the HOME
+  // prefix itself satisfy the full-path substring tier — a query naming the home
+  // directory would then match every candidate. The scoring model always sees
+  // the scope-relative candidate; only the accepted value is materialized.
+  const homeToken = isHomeToken(query)
+  const scored = homeToken
+    ? discovered
+    : discovered.map(candidate => reattachDisplayBase(candidate, resolved))
+  const ranked = rankPathCandidates(scored, resolved.searchTerm)
+  return {
+    kind: 'ok',
+    items: ranked.map(candidate => homeToken
+      ? materializeHostPath(candidate, resolved.searchBase, deps.environment.windowsHost)
+      : { path: candidate.path, kind: candidate.kind }),
+  }
+}
+
 /**
  * Answer one session `@` completion query over the Host facts.
  *
@@ -218,7 +287,7 @@ export async function listPiTuiHostFileReferences(
 ): Promise<HostFileListResult> {
   signal.throwIfAborted()
 
-  if (!isExplicitPathNavigation(query, deps.environment)) {
+  if (!isExplicitHostFileQuery(query, deps.environment)) {
     // BARE workspace fuzzy: the OFFICIAL Host authority owns the workspace
     // index, ranking, bounds, exclusions and caching. An authoritative empty
     // answer is final — the scanner is never a fallback.
@@ -239,25 +308,5 @@ export async function listPiTuiHostFileReferences(
   // never the immutable header once `working_directory` moved the Session) and
   // discover inside that scope with the shared TS8-A path/query machinery.
   const workspaceCwd = effectiveAgentCwd(deps.workingDirectory, agent) ?? process.cwd()
-  const resolved = resolvePathQuery(query, workspaceCwd, deps.environment)
-  const searchBase = scopeSearchBase(resolved, query, workspaceCwd, deps.environment)
-  const scope = searchBase === resolved.searchBase ? resolved : { ...resolved, searchBase }
-  const discovered = await discoverForQuery(scope, deps.driver, signal)
-  signal.throwIfAborted()
-  // RANK BEFORE the final path shape is chosen. The home shorthand must return
-  // an ABSOLUTE Host path, but scoring those absolute paths would let the HOME
-  // prefix itself satisfy the full-path substring tier — a query naming the home
-  // directory would then match every candidate. The scoring model always sees
-  // the scope-relative candidate; only the accepted value is materialized.
-  const homeToken = isHomeToken(query)
-  const scored = homeToken
-    ? discovered
-    : discovered.map(candidate => reattachDisplayBase(candidate, resolved))
-  const ranked = rankPathCandidates(scored, resolved.searchTerm)
-  return {
-    kind: 'ok',
-    items: ranked.map(candidate => homeToken
-      ? materializeHostPath(candidate, resolved.searchBase, deps.environment.windowsHost)
-      : { path: candidate.path, kind: candidate.kind }),
-  }
+  return listPiTuiExplicitHostFileReferences(workspaceCwd, query, signal, deps)
 }

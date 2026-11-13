@@ -393,17 +393,27 @@ An `@file` query made without a Session is a HOST WORKSPACE discovery, never a
 Client filesystem read:
 
 - **Authority.** The Host-issued `workspaceId` from the official
-  `workspaceRegistry` is the target; the published
-  `@deepseek-ai/dsh-file-reference-local/search` `WorkspaceFileSearch` over that
-  registry-resolved root is the ONLY discovery engine, with the official
-  published defaults (`maxResults` 20, `maxEntries` 50 000 and the exported
-  excluded directory basenames). The Client sends the exact `workspaceId`, the
-  official query form and its cancellation through the single private
+  `workspaceRegistry` is the target; the registry is re-read per request and
+  resolves the canonical root. Once that readable root is proven, the SAME
+  Host-dialect classifier the Session router uses decides the route from the
+  raw token: a BARE query (`@foo`, `@.env`) is answered by the published
+  `@deepseek-ai/dsh-file-reference-local/search` `WorkspaceFileSearch` over the
+  root, with the official published defaults (`maxResults` 20, `maxEntries`
+  50 000 and the exported excluded directory basenames); an EXPLICIT path scope
+  (`@src/`, `@../shared/`, `@/abs`, `@~/Down`, a Windows drive/UNC form)
+  enumerates exactly the scope the user typed through the shared scoped Host
+  scanner anchored at the registry root — a parent `..` or an absolute Host
+  path may therefore name a directory outside the registered root, because the
+  user, not the workspace index, selected it. Ranking, ordering and the result
+  bound for the bare route stay with the official engine, and explicit
+  spellings/ranking are the shared TS8-A policy, so Direct and Remote answer the
+  same query with the same semantics. The Client sends the exact `workspaceId`,
+  the official query form and its cancellation through the single private
   `piTuiFileReferences/listWorkspace(workspaceId, query, signal)` endpoint; it
   never sends a cwd, a path guess, a Client filesystem fact or its Client-local
-  selection revision. Ranking, ordering, exclusions and the result bound stay
-  with the official engine, so Direct and Remote answer the same query with the
-  same semantics.
+  selection revision. The registry-derived root is the ONLY cwd of an explicit
+  sessionless scope — the Client's launch directory, home and OS never
+  participate.
 - **Zero Session/Agent IO.** The Host service performs no `Session.create`, no
   Agent lookup and no Workspace registration for a discovery; it re-reads the
   registry per request, re-checks that the same id still resolves to the same
