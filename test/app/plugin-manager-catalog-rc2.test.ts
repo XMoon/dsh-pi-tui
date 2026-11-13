@@ -386,6 +386,53 @@ test('the REAL Host listBundles discovers the complete official optional/on-dema
     'the real page exposes no TUI import action for the Web-only member')
 })
 
+test('the mounted Plugin Manager page paints the rc.3 chat-import Web-only disclosure on a real search', async (t) => {
+  // The plan's L2/L6 reachability proof for the rc.3 member: the card the user
+  // reaches through the REAL page (search -> Details -> painted frame), not
+  // only the detached Detail projection asserted above.
+  const IMPORT_BUNDLE = '@deepseek-ai/dsh-deepseek-chat-import'
+  const life = testLifecycle(t)
+  const workRoot = life.tempDir('chat-import-page-')
+  const seeded = seedProfile(workRoot)
+  const page = await mountRealHostPage(t, seeded.profileContext)
+  const cardOf = (): ReturnType<WorkspaceHarness['controller']['model']>['cards'][number] | undefined =>
+    page.controller.model().cards.find(candidate => candidate.name === IMPORT_BUNDLE)
+
+  // The REAL Host facts the page consumes before anything is painted.
+  const card = cardOf()!
+  assert.equal(card.official, true)
+  assert.equal(card.availability, 'installation')
+  assert.equal(card.section, 'experimental')
+  assert.equal(card.canInstall, false, 'a shipped Web-only bundle has no catalog Install route')
+
+  // The REAL user path: explicit search -> Details -> the painted frame.
+  searchFor(page.harness, IMPORT_BUNDLE)
+  await page.harness.waitForFrame()
+  const painted = card.title ?? IMPORT_BUNDLE
+  await page.waitFor(() => page.frame().includes(painted), 'the explicit search finds the Web-only bundle')
+  page.harness.vt.sendInput('\r') // Details
+  await page.waitFor(() => page.frame().includes('[Details]'), 'the Details focus frame')
+  // Scroll the Detail to its Actions block (real focus navigation in the SAME
+  // seat; no second page). The bottom view then paints the whole Compatibility
+  // copy AND the executable Host action in one frame.
+  page.harness.vt.sendInput('\x1b[B')
+  await page.harness.waitForFrame()
+  page.harness.vt.sendInput('\x1b[B')
+  await page.harness.waitForFrame()
+  page.harness.vt.sendInput('\x1b[A')
+  await page.harness.waitForFrame()
+  await page.waitFor(() => /Owner-only Web upload/u.test(page.frame()), 'the Owner-only upload risk is painted')
+  const detail = page.frame()
+  // The terminal wraps the sentence across lines, so match with whitespace.
+  assert.match(detail, /available through\s+the Web UI, not as a PiTui import\s+action/u,
+    'the Web-only TUI surface copy is painted on the mounted page')
+  assert.match(detail, /Owner-only Web upload of a DeepSeek/u)
+  assert.match(detail, /512 MiB per upload\s+by default/u)
+  assert.match(detail, /> Enable…/u, 'the shipped bundle keeps its executable Host Enable action')
+  assert.match(detail, /\bBack\b/u, 'the real Actions block is painted')
+  assert.ok(!/Install…/u.test(detail), 'no phantom Import/Install action is painted for the Web-only member')
+})
+
 test('the TUI self package is the only Current-TUI card when the real Host lists it', async (t) => {
   const life = testLifecycle(t)
   const workRoot = life.tempDir('self-catalog-')
