@@ -91,8 +91,8 @@
 
 ## Summary
 
-- Records: 77
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 60, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 4
+- Records: 78
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 61, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 4
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -173,6 +173,7 @@
 | X074 | ACTIVE | HIGH | HARD_HOST_API | NO |
 | X075 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 | X076 | ACTIVE | HIGH | PUBLIC_COMPONENT_CONTRACT | NO |
+| X077 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 
 ## Divergences
 
@@ -6554,3 +6555,91 @@ Transcript search must map a semantic source range to the exact terminal cells a
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: First audit at introduction. Normal-render equivalence is guarded by the proof tests' cached-array/byte assertions; the ledger gate, fork typecheck, fork suite, pi-surface-compat and pi-vendor-diff gates are run in the same state.
+
+### X077 — Native Kitty image-block preemption by visible overlays
+
+- Status: `ACTIVE`
+- Category: `BUGFIX_MISSING_UPSTREAM`
+- Risk: `MEDIUM`
+- Files: `src/tui.ts`
+- Last audited: `2026-11-13`
+- Baseline compared: `earendil-works/pi@f9a26365568127461c47a07a37dcb42c140a3ac5`
+
+#### Why it exists
+
+compositeTuiLine() protects a Kitty/iTerm2 APC from being sliced as text, but when a Native Kitty placement shares a row with a visible overlay it returns the image anchor and silently drops the overlay text, while the placement's other rows keep painting over the framed overlay. Only TuiBase.compositeOverlays() knows both the real overlay layout and the final frame it is about to write, so it is the one place that can preempt the block before compositing; the physical Screen keeps owning the old placement's delete and the later re-place.
+
+#### Changed surface
+
+- TuiBase.compositeOverlays() scans only the visible viewport of the frame it is about to composite and reads each Kitty anchor's FIRST APC header: `a=p` (managed placement) and `a=T` (vendored Image inline transmit-and-display) are candidates, while `U=1` virtual placements and every other action (upload, query, delete) are not.
+- A candidate block whose row span intersects a visible overlay that renders at least one row is removed from THIS frame's projection by blanking its anchor line; the overlay then composites normally on that empty base, so the whole placement yields instead of only the touched row.
+- Nothing persistent is added: the input lines, components, overlay stack, renderedOverlayLayouts and image owners are untouched, each visible overlay is still rendered exactly once, and a frame without a visible overlay or without a candidate anchor emits the same bytes as before.
+
+#### Dependency map
+
+**Vendor internal**
+- TuiBase.compositeOverlays() is the one compositor both screens call: TuiMainScreen.doRender() and TuiAltScreen.doRender() consume the same projected lines, so the rule is not duplicated per screen.
+- The block height comes from the existing getKittyImagePlacementRows() over the frame's real anchor line; the scan adds no parser, registry, cache or second image owner.
+- A blanked anchor is an ordinary empty base line: TuiMainScreen's existing changed-range and per-id placement delete, and TuiAltScreen's existing deleteAllKittyPlacements() plus re-place, keep owning erase and restore.
+- compositeTuiLine() itself is untouched, so its public image-line early return and every other caller keep their current semantics.
+- Audit note: One viewport-bounded scan inside the existing compositor; no constructor, option, cache or lifecycle change.
+
+**Inheritance / structural**
+- TuiMainScreen and TuiAltScreen inherit the compositor unchanged; neither screen gets a copy of the rule.
+- Overlay rows and heights are the compositor's own already-resolved layout values, not a second geometry calculation.
+- A screen with no overlays takes the identical upstream path: compositeOverlays() returns the input lines before any scan.
+- Audit note: Shared primitive change with an explicit sibling guard in the Alt Screen suite.
+
+**Host**
+- The Host's NativeKittyImage paints a managed `a=p` anchor and registers its real geometry; no Host call, capability, protocol setting or option is added.
+- Image deletion remains the Core/facade's permission: the main screen's writer delete for a managed id is still translated by KittyTerminalFacade into a scoped `a=d,d=i` whose data stays resident for the re-place.
+- No Host/Direct/Remote state, session data or attachment is read or written by the compositor.
+- Audit note: Client-local presentation only; the graphics Core stays the single image owner.
+
+**Public / extension**
+- No exported name, option or signature changes: existing showOverlay() callers need no new entry point.
+- An extension overlay gets the same preemption as a Host overlay because visibility comes from the live overlay stack, not from a component allowlist.
+- An overlay can only make a frame's pixels yield; it cannot free, transmit or re-place any image data.
+- Audit note: Behavioral addition through the existing overlay surface.
+
+**Behavioral coupling**
+- A Native placement that intersects a visible overlay paints no pixels in that frame; the overlay text lands on the anchor row and on the covered body rows.
+- A block with no row intersection stays byte-identical; a frame with no visible overlay, with only hidden overlays or with a zero-height overlay emits no additional APC.
+- The same image id and placement id return after the overlay closes, with no re-transmission while the payload is resident and no `CSI 2J`/`CSI 3J`.
+- SIXEL, iTerm2, `a=t` upload-only and `U=1` virtual lines keep their existing paths; Alt Screen keeps its placement clear and re-place contract.
+- Audit note: Frame projection only: no destructive clear, no second overlay render and no new durable state.
+
+#### Guarding tests
+
+- packages/pi-tui/test/tui-render.test.ts: X077 - a native placement covered on its anchor row yields the overlay and restores after close; a body-row hit yields the whole placement; an uncovered block above the changed range is neither deleted nor repainted; a legacy `a=T` Image line follows the same preemption; upload-only, virtual, iTerm2 and plain lines keep their exact bytes and their existing compositing; a visible overlay renders once per frame and opening/closing emits no `CSI 2J`/`CSI 3J`.
+- packages/pi-tui/test/tui-alt-screen.test.ts: X077 - a displayed native placement covered on a body row is cleared with `deleteAllKittyPlacements()`, is not placed in that frame and returns with the same image id after the overlay closes; no `d=I` and no overlay text survives.
+- test/tui/kitty-graphics-owner.test.ts: X077 - the real NativeKittyImage -> TuiMainScreen -> KittyTerminalFacade -> terminal chain transmits once, turns the writer delete into a scoped `a=d,d=i`, paints the overlay text, restores the same id and placement without re-transmission, and never claims a foreign id.
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@f9a26365568127461c47a07a37dcb42c140a3ac5`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@f9a26365568127461c47a07a37dcb42c140a3ac5`
+- Relevant upstream files:
+- src/tui.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream's compositeTuiLine() returns the base line unchanged for any image line, so an overlay that lands on a Native Kitty placement drops its own text and the picture keeps painting over the overlay's other rows. The fork additionally preempts a covered `a=p`/`a=T` block from the frame's projection before compositing; SIXEL, iTerm2, `U=1`, upload-only and text-only behaviour is unchanged.
+
+#### Retirement conditions
+
+- Retire when upstream's overlay compositor can guarantee the same native-placement occlusion, erase and same-image restore without a destructive clear or a second image owner.
+- Retirement must re-run the X077 group in packages/pi-tui/test/tui-render.test.ts, packages/pi-tui/test/tui-alt-screen.test.ts and test/tui/kitty-graphics-owner.test.ts.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Source-verified against the pinned v1.5.0 tree: the pinned compositeTuiLine() has no native-placement/overlay contract and the main screen never suppresses a covered Kitty placement. Evidence level is fork presentation plus Client-local composition; the real GUI verification belongs to the PR record, not this ledger.

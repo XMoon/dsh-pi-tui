@@ -14,6 +14,7 @@ import {
 } from "./terminal-colors.ts";
 import {
 	getCapabilities,
+	getKittyImagePlacementRows,
 	isImageLine,
 	setCellDimensions,
 	type SixelScreenFootprint,
@@ -779,6 +780,24 @@ export function compositeTuiLine(
 		" ".repeat(afterPad);
 
 	return visibleWidth(result) <= totalWidth ? result : sliceByColumn(result, 0, totalWidth, true);
+}
+
+/**
+ * The rows one line's FIRST Kitty APC paints as a device layer, or 0 when the
+ * line is not a Native Kitty placement anchor (X077).
+ *
+ * `a=p` is the managed placement shape and `a=T` the vendored `Image`'s inline
+ * transmit-and-display sibling; every other action (upload, query, delete) is
+ * not a placement. `U=1` is excluded: its pixels belong to the visible
+ * placeholder cells, so a writer-side placement delete cannot remove it.
+ */
+function nativeKittyBlockRows(line: string): number {
+	const controls = /\x1b_G([^;]*);/.exec(line)?.[1];
+	if (controls === undefined) return 0;
+	const action = /(?:^|,)a=([A-Za-z])(?:,|$)/.exec(controls)?.[1];
+	if (action !== "p" && action !== "T") return 0;
+	if (/(?:^|,)U=1(?:,|$)/.test(controls)) return 0;
+	return getKittyImagePlacementRows(line) ?? 1;
 }
 
 export type TuiMode = "regular" | "fullscreen";
@@ -2140,6 +2159,32 @@ export abstract class TuiBase extends Container implements TUI {
 		}
 
 		const viewportStart = Math.max(0, workingHeight - termHeight);
+
+		// A Native Kitty placement paints its pixels OVER the cells this frame
+		// writes, and `compositeTuiLine` keeps an image anchor instead of the
+		// overlay text on its row. A visible overlay whose rows intersect the
+		// block therefore makes the WHOLE block yield this frame's projection: one
+		// placement covers every row, so a per-row decision would leave the rest of
+		// the picture over the overlay. The anchor line becomes an empty base, the
+		// overlay then composites normally, and the Screen's existing image
+		// bookkeeping deletes the old placement and re-places the same managed
+		// image once the overlay is gone. Only this frame's projection changes:
+		// the input lines, the components, the overlay stack and the context are
+		// untouched. (dsh-pi-tui divergence X077.)
+		if (rendered.length > 0) {
+			for (let row = viewportStart; row < result.length; row++) {
+				const rows = nativeKittyBlockRows(result[row] ?? "");
+				if (rows === 0) continue;
+				const first = row - viewportStart;
+				const last = first + rows - 1;
+				const covered = rendered.some(
+					({ overlayLines, row: overlayRow }) =>
+						overlayLines.length > 0 && overlayRow <= last && overlayRow + overlayLines.length - 1 >= first,
+				);
+				if (!covered) continue;
+				result[row] = "";
+			}
+		}
 
 		// Composite each overlay
 		for (const { overlayLines, row, col, w } of rendered) {

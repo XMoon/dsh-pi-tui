@@ -1359,6 +1359,54 @@ describe("TuiAltScreen", () => {
 		}
 	});
 
+	it("yields a displayed native Kitty placement to an overlay and re-places it afterwards", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		try {
+			const terminal = new RecordingTerminal(20, 6);
+			const tui = new TuiAltScreen(terminal);
+			const imageId = 4242;
+			const imageLine = encodeKitty("AAAA", { columns: 2, rows: 3, imageId, moveCursor: false });
+			registerKittyImageMetadata({ imageId, columns: 2, rows: 3, widthPx: 100, heightPx: 100 });
+			tui.addChild({ render: () => ["header", imageLine, "", "", "tail"], invalidate: () => {} });
+			const wire = (): string =>
+				terminal.events
+					.filter((event): event is { type: "write"; data: string } => event.type === "write")
+					.map((event) => event.data)
+					.join("");
+			tui.start();
+			await terminal.waitForRender();
+			assert.ok(wire().includes(`i=${imageId}`), "the placement paints while nothing covers it");
+
+			// The overlay lands on the block's third row: a body row, not the anchor.
+			terminal.events.length = 0;
+			const overlay = { render: () => ["MODAL"], invalidate: () => {} };
+			const handle = tui.showOverlay(overlay, { row: 3, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			const covered = wire();
+			assert.ok(covered.includes("\x1b_Ga=d,d=a,q=2\x1b\\"), "the old placement is removed for the frame");
+			assert.ok(!covered.includes("a=p,"), "the covered placement is not placed this frame");
+			assert.ok(covered.includes("MODAL"), "the overlay itself is painted");
+			assert.ok(!covered.includes("a=d,d=I"), "no image data is freed");
+
+			handle.hide();
+			terminal.events.length = 0;
+			tui.renderNow();
+			await terminal.waitForRender();
+			const restored = wire();
+			assert.ok(restored.includes("a=p,"), "the placement returns after close");
+			assert.ok(restored.includes(`i=${imageId}`), "the same image id is re-placed");
+			assert.ok(!restored.includes("a=d,d=I"), "closing frees no image data");
+			assert.ok(
+				terminal.getViewport().every((line) => !line.includes("MODAL")),
+				"the overlay text is gone from the screen",
+			);
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
 	it("retains recently offscreen Kitty images for placement-only reuse", async () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 		try {
