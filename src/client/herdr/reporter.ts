@@ -22,7 +22,13 @@
  *   it (latest wins), so rapid status churn cannot build a backlog;
  * - a child is bounded to 500 ms and every failure is contained: the reporter
  *   never throws into the Agent/Session/render path and never logs argv,
- *   stderr or environment values.
+ *   stderr or environment values;
+ * - ONLY a `release-agent` that really exited 0 may claim a saved resume target
+ *   was withdrawn. A failed/timed-out withdrawal keeps that cleanup outstanding
+ *   and also keeps the Pane unregistered, so nothing can claim a wrong restore
+ *   target; a LATER real lifecycle event (a new main-owner Session fact, a real
+ *   Agent state change or a requalification) retries it once — never a loop, a
+ *   timer or a poll.
  *
  * The Remote branch's qualification is owned by the composition root: the
  * reporter starts UNqualified there and only a valid Host snapshot can
@@ -152,10 +158,17 @@ export function createHerdrReporter(
    *  external Pane authority every Session report must wait for. */
   let paneAcknowledged = false
   /** Whether THIS process dispatched a resume argv that Herdr may have saved.
-   *  Only a release can withdraw it; it is not a second Session authority. */
+   *  Only a release that really exited 0 may clear it; it is not a second
+   *  Session authority. */
   let reportedResumePresent = false
-  /** A cleanup release must re-register the Pane and the CURRENT projection. */
-  let requeueAfterRelease = false
+  /** An outstanding withdrawal of a possibly-saved resume target. It is set
+   *  when such a cleanup is needed and survives a failed release, so a LATER
+   *  real lifecycle event can retry it; it is never retried by itself. */
+  let cleanupRequired = false
+  /** A real lifecycle event arrived while the registration cycle had no Pane
+   *  authority, so ONE ordered re-registration is owed when the queue drains.
+   *  A boolean (never a counter) keeps this a single attempt per event. */
+  let registrationRetryOwed = false
   /** The one live child, or `undefined` when the queue is idle. */
   let active: { readonly child: ChildProcess; readonly timer: NodeJS.Timeout; readonly kind: Intent['kind'] } | undefined
   /** At most one newer report waits behind the live child (latest wins). */
@@ -181,14 +194,27 @@ export function createHerdrReporter(
     return lastSeq
   }
 
-  /** After an ordered withdrawal, a cleanup release must re-register the Pane
-   *  with the CURRENT H1 state and then the CURRENT Session projection. */
-  const requeueAfterWithdrawal = (): void => {
-    if (!requeueAfterRelease) return
-    requeueAfterRelease = false
+  /** Re-establish the Pane registration with the CURRENT facts. Only a proven
+   *  clean state may call this: never on the strength of a failed withdrawal. */
+  const requeueCurrentFacts = (): void => {
     if (disposed || !qualified) return
     pendingReport = latest
     pendingSession = latestSession
+  }
+
+  /** A withdrawal that ended SUCCESSFULLY (exit code 0) is the only proof that
+   *  the Pane registration and every resume target of this source are gone.
+   *  `finishActive` then re-queues the CURRENT facts behind the clean state. */
+  const withdrawalSucceeded = (): void => {
+    reportedResumePresent = false
+    cleanupRequired = false
+  }
+
+  /** A withdrawal that FAILED (non-zero, ENOENT, spawn throw, timeout) proves
+   *  nothing: keep the cleanup outstanding so the next real lifecycle event
+   *  retries it, and never re-register the Pane on the strength of it. */
+  const withdrawalFailed = (): void => {
+    if (reportedResumePresent) cleanupRequired = true
   }
 
   /** Dispatch the next queued intent, if any. A withdrawal always precedes a
@@ -200,6 +226,10 @@ export function createHerdrReporter(
       dispatch({ kind: 'release' })
       return
     }
+    // An unproven cleanup outranks every report: the Pane must not be
+    // re-registered (and no Session claimed) while a wrong restore target may
+    // still be saved upstream.
+    if (cleanupRequired) return
     const state = pendingReport
     if (state !== undefined) {
       pendingReport = undefined
@@ -217,6 +247,49 @@ export function createHerdrReporter(
     }
   }
 
+  /**
+   * A real lifecycle event arrived while this registration cycle has no Pane
+   * authority yet (the first `report-agent` failed) or while a cleanup is still
+   * outstanding. Re-attempt exactly the one thing that is owed — the cleanup
+   * release, otherwise the ordered registration — ONCE from THIS event: a
+   * successful state re-registers the Pane and lets `advanceQueue` deliver the
+   * current Session after it. Nothing here schedules its own retry.
+   *
+   * The event may arrive while a FAILED child is still settling (its `close`
+   * has not run yet). The attempt is therefore REMEMBERED as one boolean and
+   * consumed by `finishActive`, so the event cannot be silently swallowed — and
+   * still cannot become a loop, because a later event only ever sets it again.
+   */
+  const reattemptRegistration = (): void => {
+    if (disposed || !qualified) return
+    if (active !== undefined || pendingRelease) {
+      registrationRetryOwed = true
+      return
+    }
+    if (cleanupRequired) {
+      dispatch({ kind: 'release' })
+      return
+    }
+    if (latest === undefined) return
+    pendingReport = latest
+    advanceQueue()
+  }
+
+  /**
+   * Consume a remembered re-registration attempt, if one is owed.
+   *
+   * The event was recorded while a child was still in flight, so the decision
+   * is taken HERE, on the settled facts: a registration that really succeeded
+   * needs no duplicate `report-agent` (its baseline already dedupes the state);
+   * only an unestablished Pane or an outstanding cleanup is retried.
+   */
+  const consumeRegistrationRetry = (): void => {
+    if (!registrationRetryOwed) return
+    registrationRetryOwed = false
+    if (!paneAcknowledged || cleanupRequired) reattemptRegistration()
+    else advanceQueue()
+  }
+
   const finishActive = (): void => {
     const settled = active
     if (settled === undefined) return
@@ -224,8 +297,11 @@ export function createHerdrReporter(
     activeState = undefined
     activeSession = undefined
     clearTimeout(settled.timer)
-    if (settled.kind === 'release') requeueAfterWithdrawal()
+    // A failed withdrawal leaves the cleanup outstanding; in that case the Pane
+    // is NOT re-registered and no current fact is queued behind it.
+    if (settled.kind === 'release' && !cleanupRequired) requeueCurrentFacts()
     advanceQueue()
+    consumeRegistrationRetry()
   }
 
   /** One bounded, shell-free external invocation. */
@@ -266,8 +342,10 @@ export function createHerdrReporter(
         reason: intent.kind,
         error: error instanceof Error ? error.name : 'spawn',
       })
-      // No child was created, so the queue continues exactly like a settle.
-      if (intent.kind === 'release') requeueAfterWithdrawal()
+      // No child was created: a withdrawal proves nothing, and a failed attempt
+      // to register the Pane leaves it unregistered.
+      if (intent.kind === 'release') withdrawalFailed()
+      else if (intent.kind === 'report') paneAcknowledged = false
       advanceQueue()
       return
     }
@@ -288,18 +366,29 @@ export function createHerdrReporter(
         reason: intent.kind,
         error: error.code ?? error.name,
       })
+      // A child that never ran (ENOENT) proves nothing about the Pane.
+      if (intent.kind === 'release') withdrawalFailed()
+      else if (intent.kind === 'report') paneAcknowledged = false
       finish()
     })
     child.once('close', (code) => {
       if (settled) return
-      if (code !== 0 && code !== null) {
+      if (code === 0) {
+        if (intent.kind === 'report') {
+          // The Pane is now held by this source: only from here may a Session
+          // report follow (Herdr would reject it earlier).
+          paneAcknowledged = true
+        } else if (intent.kind === 'session') {
+          lastSession = intent.session
+        } else {
+          withdrawalSucceeded()
+        }
+      } else {
+        // Non-zero (including a killed timed-out child) or a null code: the
+        // external effect is UNKNOWN, so nothing may be claimed.
         diag?.warn('herdr pane report failed', { reason: intent.kind, code })
-      } else if (code === 0 && intent.kind === 'report') {
-        // The Pane is now held by this source: only from here may a Session
-        // report follow (Herdr would reject it earlier).
-        paneAcknowledged = true
-      } else if (code === 0 && intent.kind === 'session') {
-        lastSession = intent.session
+        if (intent.kind === 'release') withdrawalFailed()
+        else if (intent.kind === 'report') paneAcknowledged = false
       }
       finish()
     })
@@ -311,13 +400,16 @@ export function createHerdrReporter(
       lastDispatched = intent.state
     } else if (intent.kind === 'session') {
       activeSession = intent.session
-      // A dispatched resume argv may already be persisted by Herdr: only an
-      // ordered release can withdraw it from this process's point of view.
-      if (intent.session.resumeArgv !== undefined) reportedResumePresent = true
+      // A dispatched resume argv may already be persisted by Herdr: only a
+      // release that really exited 0 can withdraw it from this point of view.
+      if (intent.session.resumeArgv !== undefined) {
+        reportedResumePresent = true
+        cleanupRequired = false
+      }
     } else {
       activeState = undefined
-      // The registration (and any saved resume target) is being withdrawn.
-      reportedResumePresent = false
+      // The withdrawal is IN FLIGHT: nothing is proven yet, so the previous
+      // registration facts are neither cleared nor re-queued here.
       paneAcknowledged = false
       lastSession = undefined
     }
@@ -334,8 +426,13 @@ export function createHerdrReporter(
       else pendingRelease = true
       return
     }
-    if (active === undefined) dispatch(intent)
-    else pendingReport = intent.state
+    // While a cleanup is unproven, no state may re-register the Pane: the
+    // current fact waits behind the successful withdrawal.
+    if (cleanupRequired || active !== undefined) {
+      pendingReport = intent.state
+      return
+    }
+    dispatch(intent)
   }
 
   /** Queue the CURRENT Session fact from the retained desired projection.
@@ -343,6 +440,14 @@ export function createHerdrReporter(
    *  older resume target through Herdr's ordered release -> re-register cycle. */
   const reconcileSession = (): void => {
     const desired = latestSession
+    if (cleanupRequired) {
+      // An earlier cleanup withdrawal failed. A real Session fact is exactly the
+      // lifecycle event allowed to retry that ONE outstanding release; until it
+      // succeeds the Pane stays unregistered, so a wrong restore target can
+      // never be re-claimed.
+      reattemptRegistration()
+      return
+    }
     if (desired !== undefined && desired.resumeArgv !== undefined) {
       if (sameSession(pendingSession ?? activeSession ?? lastSession, desired)) return
       pendingSession = desired
@@ -351,9 +456,10 @@ export function createHerdrReporter(
     }
     if (reportedResumePresent) {
       // No public Herdr command clears only the resume argv: withdraw this
-      // source's registration, then re-acquire it with the current facts.
+      // source's registration, then re-acquire it with the current facts. Until
+      // that withdrawal SUCCEEDS the cleanup stays outstanding.
       pendingSession = undefined
-      requeueAfterRelease = true
+      cleanupRequired = true
       enqueue({ kind: 'release' })
       return
     }
@@ -377,7 +483,14 @@ export function createHerdrReporter(
       // 100-flip burst that returns to the state already in flight (or already
       // waiting) has no physical work to do.
       const queued = pendingReport ?? activeState ?? lastDispatched
-      if (queued === state) return
+      if (queued === state) {
+        // Nothing to dispatch for this state, but a REAL state fact is still a
+        // lifecycle event: it may re-attempt the registration or the cleanup
+        // whose previous attempt failed. The deduped state itself carries no
+        // physical work, so this never becomes a self-retry loop.
+        if (!paneAcknowledged || cleanupRequired) reattemptRegistration()
+        return
+      }
       enqueue({ kind: 'report', state })
     },
     observeSession(session) {
@@ -390,23 +503,32 @@ export function createHerdrReporter(
         return
       }
       reconcileSession()
+      // A new main-owner Session fact is a real lifecycle event: when this
+      // registration cycle has no Pane authority yet (the first state report
+      // failed), it may re-attempt the ordered registration so the new Session
+      // is not stranded until the Agent state happens to change again.
+      if (!paneAcknowledged && !cleanupRequired) reattemptRegistration()
     },
     setQualified(next) {
       if (disposed || qualified === next) return
       qualified = next
       if (!next) {
-        // Never withdraw a registration this reporter never started, but every
-        // per-registration Session fact is already void.
+        // Every per-registration Session fact is void, but an outstanding
+        // cleanup obligation is NOT: the resume target may still be saved
+        // upstream and only a successful release can withdraw it.
+        const hadRegistration = lastDispatched !== undefined || active?.kind === 'report'
         pendingSession = undefined
-        requeueAfterRelease = false
         paneAcknowledged = false
         lastSession = undefined
-        if (registered === undefined) return
         registered = undefined
         // The withdrawn baseline can never dedupe the first report of a later
         // qualification.
         lastDispatched = undefined
-        enqueue({ kind: 'release' })
+        // A withdrawal is owed only when this reporter may have registered the
+        // Pane (a dispatched state) or dispatched a resume target.
+        if (hadRegistration || reportedResumePresent || cleanupRequired || active !== undefined || pendingRelease) {
+          enqueue({ kind: 'release' })
+        }
         return
       }
       // Requalification re-registers only the CURRENT facts: the state caller
@@ -415,6 +537,13 @@ export function createHerdrReporter(
       paneAcknowledged = false
       lastSession = undefined
       pendingSession = latestSession
+      // An outstanding cleanup is not stale: requalification is a real lifecycle
+      // event and must finish withdrawing a possibly-saved resume target before
+      // the Pane may be registered again.
+      if (cleanupRequired) {
+        reattemptRegistration()
+        return
+      }
       if (latest === undefined) return
       registered = latest
       enqueue({ kind: 'report', state: latest })
@@ -424,11 +553,15 @@ export function createHerdrReporter(
       disposed = true
       qualified = false
       pendingSession = undefined
-      requeueAfterRelease = false
       paneAcknowledged = false
       lastSession = undefined
-      if (registered === undefined) return
+      // Dispose still owes AT MOST ONE withdrawal: an in-flight or queued
+      // release already covers this cleanup, so a second one is never started.
+      const releaseCovered = (active !== undefined && active.kind === 'release') || pendingRelease
+      const owed = registered !== undefined || reportedResumePresent || cleanupRequired
+        || (active !== undefined && !releaseCovered)
       registered = undefined
+      if (releaseCovered || !owed) return
       enqueue({ kind: 'release' })
     },
   }
