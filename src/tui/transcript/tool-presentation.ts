@@ -104,6 +104,16 @@ const TOOL_TITLES: Record<string, string> = {
   schedule_edit: 'Edit scheduled task',
   schedule_update: 'Update reminder',
   schedule_delete: 'Delete reminder',
+  // The rc.3 Team task-board family and the wait control carry no
+  // tool-authored `presentCall`, so this fixed fallback keeps the card
+  // identity when a Direct definition was unloaded, a historical Session has
+  // no live registration, or a Remote Client only has the durable log. Exact
+  // names only; an unregistered lookalike keeps the generic Web row.
+  team_task_create: 'Create team task',
+  team_task_list: 'List team tasks',
+  team_task_get: 'View team task',
+  team_task_update: 'Update team task',
+  wait_agent: 'Wait for input',
 }
 
 /**
@@ -165,6 +175,37 @@ const SCHEDULE_TASK_STATUSES: ReadonlySet<string> = new Set(['active', 'paused',
 /** The historical rc5 task state values (`state`, never `status`). */
 const SCHEDULE_TASK_STATES: ReadonlySet<string> = new Set(['scheduled', 'overdue'])
 
+/** The official Team task RESULT status values (a result snapshot, not live state). */
+const TEAM_TASK_RESULT_STATUSES: ReadonlySet<string> = new Set([
+  'pending',
+  'in_progress',
+  'completed',
+  'deleted',
+])
+
+/** The official team_task_list status FILTER values (a deleted task is not filterable). */
+const TEAM_TASK_LIST_STATUS_VALUES: ReadonlySet<string> = new Set([
+  'pending',
+  'in_progress',
+  'completed',
+])
+
+/** The official team_task_update action enum. */
+const TEAM_TASK_UPDATE_ACTIONS: ReadonlySet<string> = new Set([
+  'claim',
+  'release',
+  'edit',
+  'set_dependencies',
+  'complete',
+  'reopen',
+  'reassign',
+  'delete',
+])
+
+/** The official wait_agent timeout range, in milliseconds. */
+const WAIT_AGENT_MIN_TIMEOUT_MS = 10_000
+const WAIT_AGENT_MAX_TIMEOUT_MS = 3_600_000
+
 /**
  * Tools whose folded result preview must never leak the raw result JSON
  * (web parity: the web's folded row shows only the args summary, never the
@@ -173,10 +214,11 @@ const SCHEDULE_TASK_STATES: ReadonlySet<string> = new Set(['scheduled', 'overdue
  *
  * `ralph`'s render already leads with a friendly line ("Ralph worker
  * reported completion after N rounds.") before the JSON report, so its
- * summary IS that first line. The agent-team family is deliberately NOT in
- * the set: it is experimental (not in the production bundle) and two of its
- * tools (`send_message`, `interrupt_agent`) share names with subagent tools
- * whose render text is friendly — a name-keyed set cannot tell them apart.
+ * summary IS that first line. The four rc.3 `team_task_*` result tools and
+ * `wait_agent` are safe to name here: their names collide with no subagent
+ * tool. Only the SHARED `send_message` / `interrupt_agent` names stay
+ * excluded — a name-keyed set cannot tell them apart from subagent tools
+ * whose render text is friendly.
  */
 export const FOLDED_JSON_RESULT_TOOLS: ReadonlySet<string> = new Set([
   'ralph',
@@ -184,6 +226,11 @@ export const FOLDED_JSON_RESULT_TOOLS: ReadonlySet<string> = new Set([
   'cordis_inspect_list',
   'cordis_inspect_query',
   'cordis_inspect_self',
+  'team_task_create',
+  'team_task_list',
+  'team_task_get',
+  'team_task_update',
+  'wait_agent',
 ])
 
 /** Parse a result text as JSON, tolerating a friendly prefix line before
@@ -272,6 +319,75 @@ function schedulePageSummary(value: unknown): string | undefined {
 }
 
 /**
+ * The folded one-line summary of one official Team task result snapshot
+ * (`team_task_create` / `get` / `update`). Validates only the fields this row
+ * actually prints — `id`, `revision`, `status`, the optional `owner` and
+ * `ready` — never the whole upstream schema. An error-code object, a mixed
+ * error object, an unknown status or a missing/mistyped identity field yields
+ * undefined, so the row keeps its `isError` / error identity and invents no
+ * success phrase. `ownerName` / `ownerId` are NEVER used as an owner fallback;
+ * an absent owner renders `unowned`. `ready` is a pending-only snapshot fact
+ * (ready=false is not "blocked"), and `status:deleted` is a team-task state,
+ * not a filesystem deletion.
+ */
+function teamTaskSummary(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  // An error object is the tool's failure identity, not a task snapshot.
+  if (stringField(record.code) !== undefined) return undefined
+  if (typeof record.id !== 'string' || record.id === '') return undefined
+  const revision = record.revision
+  if (!isNonNegativeInteger(revision)) return undefined
+  const status = record.status
+  if (typeof status !== 'string' || !TEAM_TASK_RESULT_STATUSES.has(status)) return undefined
+  const ready = record.ready
+  if (typeof ready !== 'boolean') return undefined
+  const owner = record.owner
+  if (owner !== undefined && typeof owner !== 'string') return undefined
+  const parts: string[] = [status]
+  if (status === 'pending' && ready) parts.push('ready')
+  parts.push(owner !== undefined && owner !== '' ? `owner ${owner}` : 'unowned')
+  parts.push(`rev ${revision}`)
+  return parts.join(' · ')
+}
+
+/**
+ * The folded summary of one `team_task_list` page: `no team tasks`,
+ * `N team task(s)`, with ` · more` when the page reports a next cursor.
+ * Every task must prove the same minimum identity the single card prints — a
+ * single malformed entry makes the WHOLE page unprovable rather than
+ * miscounting a pseudo-task. There is no `N of total`: the official value
+ * carries no total.
+ */
+function teamTaskListSummary(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  if (stringField(record.code) !== undefined) return undefined
+  const tasks = record.tasks
+  if (!Array.isArray(tasks)) return undefined
+  if (!tasks.every(task => teamTaskSummary(task) !== undefined)) return undefined
+  const nextCursor = record.nextCursor
+  if (nextCursor !== undefined && !isNonNegativeInteger(nextCursor)) return undefined
+  const base = tasks.length === 0 ? 'no team tasks' : `${tasks.length} team task${tasks.length === 1 ? '' : 's'}`
+  return nextCursor === undefined ? base : `${base} · more`
+}
+
+/**
+ * The folded summary of one `wait_agent` result: `input pending` for
+ * `{timedOut:false}` (new input waits for the model) and `timed out` for
+ * `{timedOut:true}` (the wait window elapsed — NOT a task or agent outcome).
+ * Any other shape yields undefined; this never claims an agent finished.
+ */
+function waitAgentSummary(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  if (stringField(record.code) !== undefined) return undefined
+  if (record.timedOut === false) return 'input pending'
+  if (record.timedOut === true) return 'timed out'
+  return undefined
+}
+
+/**
  * The folded preview summary for one of {@link FOLDED_JSON_RESULT_TOOLS}:
  * a short human phrase derived from the parsed result JSON. Returns
  * undefined when nothing useful can be derived — the caller then shows NO
@@ -300,6 +416,11 @@ export function foldedResultSummaryFor(name: string, text: string): string | und
     return undefined
   }
   const parsed = parseJsonValue(text)
+  if (name === 'team_task_create' || name === 'team_task_get' || name === 'team_task_update') {
+    return teamTaskSummary(parsed)
+  }
+  if (name === 'team_task_list') return teamTaskListSummary(parsed)
+  if (name === 'wait_agent') return waitAgentSummary(parsed)
   if (name === 'schedule_list') {
     // The rc5 result is the bare task array (historical replay only); each
     // entry must still prove a canonical Task, never a pseudo-object.
@@ -861,6 +982,68 @@ function deriveSummary(name: string, argsRaw: string): string {
  * @returns the tool-specific summary, or undefined when none applies.
  */
 function summarizeToolArgs(name: string, argsRaw: string): string | undefined {
+  if (
+    name === 'team_task_create'
+    || name === 'team_task_list'
+    || name === 'team_task_get'
+    || name === 'team_task_update'
+  ) {
+    // The fixed rc.3 Team fallback reads ONLY documented identity/filter fields
+    // and never falls through to the generic first-string derivation (which
+    // would leak a description, a prompt-shaped value or raw JSON). An absent,
+    // mistyped or unparseable arguments value keeps the fixed title with an
+    // empty summary.
+    const parsedArgs = parseArgs(argsRaw)
+    if (typeof parsedArgs !== 'object' || parsedArgs === null || Array.isArray(parsedArgs)) return ''
+    const args = parsedArgs as Record<string, unknown>
+    if (name === 'team_task_create') {
+      const subject = args.subject
+      return typeof subject === 'string' ? firstLine(subject) : ''
+    }
+    if (name === 'team_task_get') {
+      const taskId = args.task_id
+      return typeof taskId === 'string' ? firstLine(taskId) : ''
+    }
+    if (name === 'team_task_update') {
+      // The official action enum plus the task id form the one-line identity;
+      // subject/description/owner/expected_revision are request values, never
+      // the identity.
+      const action = args.action
+      const taskId = args.task_id
+      if (typeof action !== 'string' || !TEAM_TASK_UPDATE_ACTIONS.has(action)) return ''
+      if (typeof taskId !== 'string' || taskId === '') return ''
+      return `${action} · ${taskId}`
+    }
+    // team_task_list: only verifiable filters, in the official display order.
+    // cursor/limit are execution parameters, never identity. The official tool
+    // rejects owner+unowned together, so that pair shows no guessed filter.
+    const parts: string[] = []
+    const status = args.status
+    if (typeof status === 'string' && TEAM_TASK_LIST_STATUS_VALUES.has(status)) parts.push(`status ${status}`)
+    const ownerValid = typeof args.owner === 'string' && args.owner !== ''
+    const unownedValid = typeof args.unowned === 'boolean'
+    if (ownerValid && unownedValid) return ''
+    if (ownerValid) parts.push(`owner ${args.owner as string}`)
+    if (unownedValid) parts.push(`unowned ${args.unowned === true ? 'yes' : 'no'}`)
+    if (typeof args.ready === 'boolean') parts.push(`ready ${args.ready ? 'yes' : 'no'}`)
+    return parts.join(' · ')
+  }
+  if (name === 'wait_agent') {
+    // Only an explicit LEGAL timeout is identity; an omitted/invalid value
+    // shows nothing (never the implied 30s default as a confirmed fact).
+    const parsedArgs = parseArgs(argsRaw)
+    if (typeof parsedArgs !== 'object' || parsedArgs === null || Array.isArray(parsedArgs)) return ''
+    const timeoutMs = (parsedArgs as Record<string, unknown>).timeout_ms
+    if (
+      typeof timeoutMs === 'number'
+      && Number.isSafeInteger(timeoutMs)
+      && timeoutMs >= WAIT_AGENT_MIN_TIMEOUT_MS
+      && timeoutMs <= WAIT_AGENT_MAX_TIMEOUT_MS
+    ) {
+      return `${timeoutMs} ms`
+    }
+    return ''
+  }
   if (SCHEDULE_TOOL_NAMES.has(name)) {
     // The fixed Schedule fallback reads ONLY the documented identity field:
     // never the prompt/instruction (a raw-args fallback would leak it) and
