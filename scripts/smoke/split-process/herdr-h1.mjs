@@ -220,9 +220,14 @@ export async function runHerdrH1(context) {
     // and only then check the whole log: the release command is queued behind
     // the in-flight `working` report, so an immediate read can race it.
     await waitForLog(longLog, () => lastIndex(longLog, 'release') !== -1, 'RH-02 ordered release on transport loss', 60_000)
-    const addedDuringLoss = states(longLog).slice(beforeRolloverStates.length)
-    assert(addedDuringLoss.length > 0 && addedDuringLoss.every(state => state === 'release'),
-      `RH-02 a lost Remote transport must withdraw the Pane without a fabricated idle; the Pane saw ${JSON.stringify(states(longLog))}`)
+    const lossStates = states(longLog)
+    const releaseAt = lossStates.lastIndexOf('release', lossStates.length - 1)
+    // The window under judgment ends at the ordered release. A later
+    // requalified `working` (the NEW generation's opening snapshot) may already
+    // be in the log by the time this read runs; it is not a lost-transport fact.
+    const addedDuringLoss = lossStates.slice(beforeRolloverStates.length, releaseAt)
+    assert(releaseAt >= beforeRolloverStates.length && !addedDuringLoss.includes('idle'),
+      `RH-02 a lost Remote transport must withdraw the Pane without a fabricated idle; the Pane saw ${JSON.stringify(lossStates)}`)
     const rolled = await longClient.waitFor(
       record => longClient.records.indexOf(record) >= rolloverBoundary
         && record.m4b2s === 'surface-status'
