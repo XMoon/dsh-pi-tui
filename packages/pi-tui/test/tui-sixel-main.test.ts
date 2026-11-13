@@ -501,9 +501,12 @@ it("a released history fallback is width-clamped before a full render can write 
 	// cache swaps to the fallback (no write).
 	document.lines = [token, "a", "b", "c", ...Array.from({ length: 20 }, (_, index) => `line ${index}`)];
 	await frame(screen);
-	// A REAL change above the viewport forces a same-width full render, which writes
-	// the cached fallback at row 0: it must be clamped like any text row. The token
-	// stays at row 0 (only row 1 changes), so the released fallback is really written.
+	// A full render writes the cached fallback at row 0: it must be clamped like
+	// any text row. A height change forces the full render at the SAME width
+	// (X078: a text change above the viewport no longer clears scrollback), and
+	// the real row-1 change rides along, so the released fallback is really
+	// written.
+	terminal.rows = 13;
 	document.lines = [token, "changed", ...document.lines.slice(2)];
 	terminal.clear();
 	await frame(screen);
