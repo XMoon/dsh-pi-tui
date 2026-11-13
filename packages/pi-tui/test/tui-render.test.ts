@@ -788,6 +788,8 @@ describe("TUI Native Kitty overlay preemption (X077)", () => {
 			await terminal.waitForRender();
 			assert.ok(!terminal.getWrites().includes("\x1b_G"), "a zero-height overlay emits no Kitty APC at all");
 			assert.ok(!terminal.getWrites().includes(deleteKittyImage(3131)), "a zero-height overlay deletes nothing");
+			assert.ok(!terminal.getWrites().includes("\x1b[2J"), "a zero-height overlay clears no screen");
+			assert.ok(!terminal.getWrites().includes("\x1b[3J"), "a zero-height overlay clears no scrollback");
 			emptyHandle.hide();
 
 			// A hidden overlay with real content is invisible: same rule.
@@ -801,6 +803,8 @@ describe("TUI Native Kitty overlay preemption (X077)", () => {
 			assert.ok(!terminal.getWrites().includes("\x1b_G"), "a hidden overlay emits no Kitty APC at all");
 			assert.ok(!terminal.getWrites().includes(deleteKittyImage(3131)), "a hidden overlay deletes nothing");
 			assert.ok(!terminal.getWrites().includes("MODAL"), "a hidden overlay paints nothing");
+			assert.ok(!terminal.getWrites().includes("\x1b[2J"), "a hidden overlay clears no screen");
+			assert.ok(!terminal.getWrites().includes("\x1b[3J"), "a hidden overlay clears no scrollback");
 			hiddenHandle.hide();
 
 			// A frame with no overlay at all keeps the original bytes.
