@@ -7971,6 +7971,102 @@
     ],
     "notes": "Source-verified against the pinned v1.5.0 tree: the pinned compositeTuiLine() has no native-placement/overlay contract and the main screen never suppresses a covered Kitty placement. Evidence level is fork presentation plus Client-local composition; the real GUI verification belongs to the PR record, not this ledger."
    }
+  },
+  "X078": {
+   "title": "Changes above the viewport never clear the screen or scrollback",
+   "status": "ACTIVE",
+   "category": [
+    "BUGFIX_MISSING_UPSTREAM"
+   ],
+   "risk": "HIGH",
+   "files": [
+    "src/tui-main-screen.ts"
+   ],
+   "why": "The differential renderer compared every document row from 0, so any change ABOVE the physical viewport (e.g. a spinner pushed into scrollback that keeps animating, or a streaming block that scrolled off) set firstChanged below prevViewportTop and forced fullRender(true): CSI 2J + CSI H + CSI 3J plus a full repaint of the whole document on every animation tick. In a small pane this is a continuous whole-screen flicker and it also rewrites (destroys) the terminal scrollback, including pre-TUI history. The physical screen cannot address rows above the viewport top without clearing them, so committed scrollback must be treated as immutable by the incremental path; only a full render (width/height change, shrink that would move the viewport up, or an image-range expansion) may rewrite it.",
+   "changedSurface": [
+    "doRender() starts the first/last-changed scan at the current viewport top (diffScanStart = heightChanged ? 0 : prevViewportTop): text changes in rows [0, prevViewportTop) no longer produce a changed row and no longer force a full redraw. Height changes keep the whole-buffer scan (Termux relies on it; non-Termux already full-rendered above).",
+    "The full-redraw guard above the paint path keeps the image-expansion case (firstChanged < prevViewportTop, still reachable through expandChangedRangeForImages) and additionally fires when the new content no longer fills the previous viewport (frameViewportTop < prevViewportTop): the viewport cannot move UP differentially, so the shrink case restores the tail view with a full redraw instead of leaving blank rows at the bottom.",
+    "The no-changes fast path keeps the previous raw-line cache for the skipped prefix [0, diffScanStart): the terminal still holds the committed text there, so the raw cache stays paired with the untouched processed lines and a later full render reprocesses those rows from their current raw instead of replaying a stale processed line.",
+    "Committed scrollback consequently keeps the text as it was when the row was last painted (or as a later full render rewrote it); an off-screen animation tick writes NOTHING to the terminal."
+   ],
+   "dependencies": {
+    "vendorInternal": {
+     "audited": true,
+     "items": [
+      "TuiMainScreen.doRender() owns the diff scan, the full-redraw guard and the no-changes fast path; expandChangedRangeForImages() may still lift firstChanged above the viewport and keeps its full-redraw fallback.",
+      "projectSixelCandidates() (X073) reads previousLines/previousRawLines for rows above the viewport; its preservation and text-fallback transitions only involve UNCHANGED raw tokens, for which the skipped-prefix raw restore is a no-op."
+     ],
+     "notes": "The change is confined to the differential-rendering flow of the main screen; SIXEL/kitty projection contracts are unchanged and covered by the existing X073/X077 suites."
+    },
+    "inheritanceStructural": {
+     "audited": true,
+     "items": [
+      "TuiMainScreen extends TuiBase; TuiAltScreen renders the alt screen and has its own diff loop that is NOT touched by this divergence."
+     ],
+     "notes": "No subclass or sibling consumer of the main-screen diff scan exists in the fork."
+    },
+    "host": {
+     "audited": true,
+     "items": [
+      "The host renders the regular transcript through TuiMainScreen; every component above the viewport (spinner ticks, streaming tool cards) previously forced a full clear per tick."
+     ],
+     "notes": "Host-visible behavior change: off-screen updates no longer clear the screen; the visible viewport is untouched and full renders keep the existing 2J/H/3J contract for width/height/shrink."
+    },
+    "publicExtension": {
+     "audited": true,
+     "items": [],
+     "notes": "The Screen's diff internals are not part of the extension surface; custom components keep rendering whole-line arrays and observe only that off-screen rows are no longer rewritten per tick."
+    },
+    "behavioral": {
+     "audited": true,
+     "items": [
+      "An off-screen-only change produces zero terminal writes and no fullRedraws growth.",
+      "A change inside the viewport stays differential and is repainted.",
+      "A mixed frame (off-screen + in-viewport change) repaints only the in-viewport rows without clearing.",
+      "A shrink that would move the viewport up still full-renders and restores the tail view.",
+      "A released SIXEL history fallback is still width-clamped before any full render writes it (X073 invariant, now exercised through a height-change full render)."
+     ],
+     "notes": "The visible contract is: committed scrollback is immutable for the incremental path; the physical viewport follows the tail for first render, append, resize and shrink."
+    }
+   },
+   "tests": [
+    "packages/pi-tui/test/tui-render.test.ts: X078 - an off-screen spinner tick loop (20 ticks, 30 lines in a 10-row terminal) produces no full redraw and no CSI 2J/3J while the viewport stays unchanged; a real in-viewport change stays differential and is repainted; a mixed frame repaints the in-viewport row without clearing.",
+    "packages/pi-tui/test/tui-render.test.ts: the existing full-redraw suite still pins width/height/shrink full renders, including 'full re-renders when deleted lines move the viewport upward' and the transient-component branch switch.",
+    "packages/pi-tui/test/tui-sixel-main.test.ts: X073 - 'a released history fallback is width-clamped before a full render can write it' now forces the same-width full render through a height change instead of an above-viewport text change (X078 removed that trigger); the clamp assertions are unchanged."
+   ],
+   "upstream": {
+    "equivalence": "NO",
+    "checkedAgainst": {
+     "repo": "earendil-works/pi",
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
+    },
+    "relevantFiles": [
+     "packages/tui/src/tui-main-screen.ts"
+    ],
+    "relevantIssues": [],
+    "semanticDelta": "Upstream scans the whole buffer from row 0 and full-renders (CSI 2J/3J + full repaint) whenever any row above the viewport changes, so an animating component in scrollback clears and repaints the screen on every tick. The fork clamps the differential scan to the viewport, keeps committed scrollback immutable on the incremental path, and confines full renders to width/height changes, viewport-moving shrinks and image-range expansions."
+   },
+   "retirement": {
+    "conditions": [
+     "Retire when upstream adopts viewport-clamped differential rendering with immutable committed scrollback and the same viewport-move-up full-render guard.",
+     "Retirement must re-run the X078 group in packages/pi-tui/test/tui-render.test.ts and the X073 group in packages/pi-tui/test/tui-sixel-main.test.ts."
+    ],
+    "replacementMapping": [],
+    "evidence": []
+   },
+   "audit": {
+    "lastAuditedAt": "2026-11-13",
+    "scope": [
+     "vendor-internal",
+     "inheritance-structural",
+     "host",
+     "public-extension",
+     "behavioral",
+     "tests"
+    ],
+    "notes": "Source-verified against the pinned v1.5.0 tree (f9a2636): the upstream diff loop starts at row 0 and full-renders on firstChanged < prevViewportTop. Evidence level is the fork test suite (1481 pass incl. the new X078 group); the real-terminal flicker reproduction belongs to the PR record, not this ledger."
+   }
   }
  }
 }

@@ -1724,3 +1724,105 @@ describe("TUI fake cursor", () => {
 		}
 	});
 });
+
+describe("Main-screen changes above the viewport (dsh-pi-tui divergence X078)", () => {
+	const HISTORY_LINES = 29;
+	const VIEWPORT_ROWS = 10;
+	const TICKS = 20;
+
+	function buildLines(spinner: string, viewportLast?: string): string[] {
+		const lines = Array.from({ length: HISTORY_LINES }, (_, i) => `history ${i}`);
+		lines.push(viewportLast ?? "history 29");
+		lines[0] = spinner;
+		return lines;
+	}
+
+	it("does not clear the screen or scrollback when only lines above the viewport change", async () => {
+		const terminal = new LoggingVirtualTerminal(60, VIEWPORT_ROWS);
+		const tui = new TuiMainScreen(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		// 30 lines in a 10-row terminal: rows 0-19 are committed scrollback above
+		// the viewport, rows 20-29 are the physical viewport.
+		component.lines = buildLines("spinner 0");
+		tui.start();
+		await terminal.waitForRender();
+
+		const redrawsBefore = tui.fullRedraws;
+		terminal.clearWrites();
+		for (let tick = 1; tick <= TICKS; tick++) {
+			component.lines = buildLines(`spinner ${tick}`);
+			tui.requestRender();
+			await terminal.waitForRender();
+		}
+
+		assert.strictEqual(
+			tui.fullRedraws,
+			redrawsBefore,
+			"an off-screen spinner tick must not force a full redraw",
+		);
+		const writes = terminal.getWrites();
+		assert.ok(!writes.includes("\x1b[2J"), "off-screen changes must not clear the screen");
+		assert.ok(!writes.includes("\x1b[3J"), "off-screen changes must not clear scrollback");
+		const viewport = terminal.getViewport();
+		assert.ok(
+			viewport.some((line) => line.includes("history 29")),
+			"the viewport content is unchanged",
+		);
+		tui.stop();
+	});
+
+	it("still repaints a real change inside the viewport", async () => {
+		const terminal = new LoggingVirtualTerminal(60, VIEWPORT_ROWS);
+		const tui = new TuiMainScreen(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		component.lines = buildLines("spinner 0");
+		tui.start();
+		await terminal.waitForRender();
+
+		const redrawsBefore = tui.fullRedraws;
+		terminal.clearWrites();
+		// Only the visible tail changes; the off-screen spinner keeps its text.
+		component.lines = buildLines("spinner 0", "updated tail");
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.strictEqual(tui.fullRedraws, redrawsBefore, "an in-viewport change must stay differential");
+		const writes = terminal.getWrites();
+		assert.ok(!writes.includes("\x1b[2J"), "an in-viewport change must not clear the screen");
+		assert.ok(!writes.includes("\x1b[3J"), "an in-viewport change must not clear scrollback");
+		const viewport = terminal.getViewport();
+		assert.ok(
+			viewport.some((line) => line.includes("updated tail")),
+			"the changed viewport row is repainted",
+		);
+		tui.stop();
+	});
+
+	it("repaints a viewport change that accompanies an off-screen change without clearing", async () => {
+		const terminal = new LoggingVirtualTerminal(60, VIEWPORT_ROWS);
+		const tui = new TuiMainScreen(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		component.lines = buildLines("spinner 0");
+		tui.start();
+		await terminal.waitForRender();
+
+		const redrawsBefore = tui.fullRedraws;
+		terminal.clearWrites();
+		component.lines = buildLines("spinner 1", "updated tail");
+		tui.requestRender();
+		await terminal.waitForRender();
+		const viewport = terminal.getViewport();
+		assert.ok(
+			viewport.some((line) => line.includes("updated tail")),
+			"the changed viewport row is repainted even though row 0 also changed",
+		);
+		const writes = terminal.getWrites();
+		assert.ok(!writes.includes("\x1b[2J"), "a mixed frame must not clear the screen");
+		assert.ok(!writes.includes("\x1b[3J"), "a mixed frame must not clear scrollback");
+		assert.strictEqual(tui.fullRedraws, redrawsBefore, "a mixed frame must stay differential");
+		tui.stop();
+	});
+});

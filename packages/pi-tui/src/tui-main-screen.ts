@@ -791,11 +791,19 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			return;
 		}
 
-		// Find first and last changed lines
+		// Find first and last changed lines. Rows above the viewport are
+		// committed scrollback: the physical screen cannot address them without
+		// clearing it (2J/3J), so a change there must not force a full redraw —
+		// a spinner pushed above the viewport keeps animating and would
+		// otherwise clear and repaint the whole screen on every tick
+		// (dsh-pi-tui divergence X078). Height changes recompute the viewport
+		// top, so they keep the whole-buffer scan (Termux relies on it; other
+		// terminals full-rendered above already).
 		let firstChanged = -1;
 		let lastChanged = -1;
 		const maxLines = Math.max(newLines.length, this.previousLines.length);
-		for (let i = 0; i < maxLines; i++) {
+		const diffScanStart = heightChanged ? 0 : prevViewportTop;
+		for (let i = diffScanStart; i < maxLines; i++) {
 			const oldLine = i < this.previousLines.length ? this.previousLines[i] : "";
 			const newLine = i < newLines.length ? newLines[i] : "";
 
@@ -834,7 +842,15 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			// Processed output is unchanged, but keep the raw/image-id caches in
 			// sync so future frames keep hitting the reuse fast path (e.g. the
 			// cursor-marker line gets a fresh string every frame).
-			this.previousRawLines = rawLines;
+			// Rows skipped above the viewport keep their COMMITTED raw cache: the
+			// terminal still holds the old text, so the raw cache must stay
+			// paired with the untouched processed line and a later full render
+			// reprocesses the row from its current raw instead of replaying the
+			// stale one (dsh-pi-tui divergence X078).
+			this.previousRawLines =
+				diffScanStart > 0
+					? [...this.previousRawLines.slice(0, diffScanStart), ...rawLines.slice(diffScanStart)]
+					: rawLines;
 			this.previousLineImageIds = lineImageIds;
 			this.previousLineImageRows = lineImageRows;
 			this.previousLineSixelRows = lineSixelRows;
@@ -896,10 +912,20 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			return;
 		}
 
-		// Differential rendering can only touch what was actually visible.
-		// If the first changed line is above the previous viewport, we need a full redraw.
-		if (firstChanged < prevViewportTop) {
-			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
+		// Differential rendering can only touch what was actually visible. If the
+		// first changed line is above the previous viewport (only reachable via
+		// image-range expansion now that the diff starts at the viewport), we
+		// need a full redraw. The same applies when the new content no longer
+		// fills the previous viewport: the viewport cannot move UP
+		// differentially, so the tail view must be restored with a full redraw
+		// instead of leaving blank rows at the bottom. (dsh-pi-tui divergence
+		// X078)
+		if (firstChanged < prevViewportTop || frameViewportTop < prevViewportTop) {
+			logRedraw(
+				firstChanged < prevViewportTop
+					? `firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`
+					: `viewport would move up (${frameViewportTop} < ${prevViewportTop})`,
+			);
 			fullRender(true);
 			return;
 		}
