@@ -460,7 +460,6 @@ export async function runHerdrH3(context) {
       `H3 Pane A was not SIGKILLed: ${JSON.stringify(exitA)}`)
     // The negative controls: the Host and Pane B keep their authority.
     assert(alive(s1Ready.pid), 'H3 the Host died with the SIGKILLed Pane A')
-    assert(!existsSync(s1Hold), 'H3 the Host cancelled the held Turn when Pane A crashed')
     const bStatusAfterKill = lastSurfaceStatus(clientB)
     assert(bStatusAfterKill?.transport === 'connected' && typeof bStatusAfterKill?.generationId === 'number',
       `H3 Pane B lost its Host connection when Pane A crashed: ${JSON.stringify(bStatusAfterKill)}`)
@@ -470,8 +469,16 @@ export async function runHerdrH3(context) {
       'H3 Pane B must not be released because Pane A died')
 
     // The held Turn belongs to the Host: releasing the barrier finishes it and
-    // Pane B (not the dead Pane A) observes the real turn/end.
+    // Pane B (not the dead Pane A) observes the real turn/end. The fixture
+    // records `long-turn-released` ONLY after the barrier is observed, so this
+    // event is the decisive proof that the Host kept the Turn alive across the
+    // Client crash instead of cancelling it.
     writeFileSync(s1Hold, 'release\n', { mode: 0o600 })
+    await waitForC1WorkEvent(
+      s1WorkRoot,
+      event => event.kind === 'long-turn-released' && event.sessionId === sessionA,
+      `H3 A ${unique} Turn released by the Host after the barrier`,
+    )
     await waitForHostSessionEvent(dshHome, sessionA, event => event.type === 'turn/end', `H3 A ${unique} turn/end`)
     await waitForLog(logB, () => states(logB).at(-1) === 'idle', `H3 B ${unique} idle after the held Turn`)
     // A late in-flight CLI of the killed Pane A may finish by itself; it must
@@ -524,8 +531,11 @@ export async function runHerdrH3(context) {
     const oldHostPid = s2Ready.pid
     // The record boundary belongs BEFORE the abrupt exit: the Client reacts to
     // the dead Host within milliseconds, so a boundary taken after the SIGKILL
-    // can already contain the very loss record it is meant to find.
+    // can already contain the very loss record it is meant to find. The same
+    // pre-kill baseline anchors the fail-close release: a release that already
+    // existed while the Host was connected must never satisfy the stale one.
     const lossBoundary = clientC.records.length
+    const cReleasesBeforeKill = states(logC).filter(state => state === 'release').length
 
     // The abrupt Host death: a real SIGKILL on the Host OS process, observed
     // to termination — never the H2 frozen-Host mux dropout.
@@ -557,7 +567,8 @@ export async function runHerdrH3(context) {
       clientSurvived = false
     }
     if (clientSurvived) {
-      await waitForLog(logC, () => states(logC).filter(state => state === 'release').length > 0,
+      await waitForLog(logC,
+        () => states(logC).filter(state => state === 'release').length > cReleasesBeforeKill,
         `H3 C ${unique} released its Pane on the stale generation`, 90_000)
     } else {
       const clientExit = await clientC.waitForExit(30_000)
