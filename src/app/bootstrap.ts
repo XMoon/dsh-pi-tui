@@ -117,6 +117,7 @@ import { createPresentationBridge } from './bootstrap/presentation-bridge.ts'
 import { createTaskSource } from './bootstrap/task-source.ts'
 import { installRuntimeEventWiring, installSessionEventWiring } from './bootstrap/event-wiring.ts'
 import { armRemoteInitRetry } from './bootstrap/remote-init-retry.ts'
+import { armRemoteProgressWatchGeneration } from './bootstrap/remote-progress-watch.ts'
 import {
   IDLE_REMOTE_REFOLD_REQUEST,
   requestRemoteRefold,
@@ -1884,6 +1885,22 @@ export function applyRunnerWithRuntime(
      *  watch after a transport rollover. Owned by the live surface; disposed
      *  with it. No timer, no poll and no separate running/status owner. */
     let remoteProgressGenerationHandle: { dispose(): void } | undefined
+    /** Retire that lifecycle without letting a throwing official unsubscribe
+     *  escape an abort listener; the failure is still recorded through diag. */
+    const retireRemoteProgressGeneration = (): void => {
+      const handle = remoteProgressGenerationHandle
+      remoteProgressGenerationHandle = undefined
+      if (handle === undefined) return
+      try {
+        handle.dispose()
+      } catch (error) {
+        try {
+          diag.error('remote progress generation unsubscribe failed', { error: safeErrorMessage(error) })
+        } catch {
+          // No lower sink.
+        }
+      }
+    }
     /** S3-R0: the ONE pending re-init of a Remote live surface whose hydrate
      *  could not commit because the transport was unavailable. Driven by the
      *  OFFICIAL Connection generation channel — never a timer or a poll. */
@@ -1900,6 +1917,7 @@ export function applyRunnerWithRuntime(
       // old watch is still the authority (never a fabricated `idle`).
       herdrReporter?.setQualified(false)
       disposeRemoteInitRetry()
+      retireRemoteProgressGeneration()
       remoteIngressHandle?.dispose()
       remoteIngressHandle = undefined
       remoteProgressHandle?.dispose()
@@ -2139,48 +2157,17 @@ export function applyRunnerWithRuntime(
       // re-asserts the Host's authoritative display state; a settled snapshot is
       // committed by `Surface.applyRemoteMainProgress` (never notified).
       surface.setCompletionOwner(sessionId)
-      /** Start the ONE progress watch of this committed owner. A Connection
-       *  generation rollover invalidates the watch's captured identity; the
-       *  official generation subscription re-runs THIS same entry so exactly
-       *  one watch exists for the new identity. */
-      const startProgressWatch = (): void => {
-        remoteProgressGenerationHandle?.dispose()
-        remoteProgressGenerationHandle = undefined
+      /** Start the ONE progress watch pinned to one official generation. */
+      const startProgressWatch = (watchedGeneration: unknown): void => {
         remoteProgressHandle?.dispose()
         remoteProgressHandle = undefined
-        const watchedGeneration = remoteSources.commandSource.connectionGeneration()
-        if (watchedGeneration === undefined) return
         const progressController = new AbortController()
         remoteProgressHandle = {
           dispose: () => { progressController.abort(new Error('remote terminal progress watch disposed')) },
         }
-        // H1: a transport rollover is not an Agent completion. It only voids
-        // this watch's generation fence; the next official generation causes
-        // ONE fresh watch whose opening snapshot is the requalifying fact.
-        const generationUnsubscribe = remoteSources.commandSource.subscribeConnectionGeneration(() => {
-          const now = remoteSources.commandSource.connectionGeneration()
-          if (now === undefined || Object.is(now, watchedGeneration)) return
-          if (cleanedUp || ownership.currentSessionId() !== sessionId
-            || ownership.generation() !== initGeneration) return
-          herdrReporter?.setQualified(false)
-          // Invalidate this generation's watch and re-establish it on the new
-          // official identity. A throwing unsubscribe stays inside the
-          // non-truncating surface disposal batch (one real attempt, never a
-          // swallowed error and never a fabricated recovery).
-          // The old handle's unsubscribe runs exactly once; startProgressWatch
-          // disposes only the NEW handle after it replaces the slot.
-          remoteProgressGenerationHandle = undefined
-          generationUnsubscribe()
-          startProgressWatch()
-        })
-        remoteProgressGenerationHandle = { dispose: generationUnsubscribe }
         runDetached('remote terminal progress watch', async () => {
           let failed = true
           try {
-            // The consumption RE-ESTABLISHES the authority when the Host retires
-            // the watch (an Agent disposal / same-id replacement) while this owner
-            // is still current; only an owner switch, a generation change, an abort
-            // or a real failure stops it (plan §6.4/§7.1).
             await consumeRemoteTerminalProgress(
               remoteSources.terminalProgress,
               sessionId,
@@ -2201,33 +2188,22 @@ export function applyRunnerWithRuntime(
             )
             failed = false
           } catch (error) {
-            // An official Connection generation rollover voids THIS watch's
-            // captured identity. That is an expected retirement, not a failed
-            // detached task or an Agent completion: the generation subscription
-            // above owns the replacement watch. Any other error keeps its real
-            // failure semantics (no broad catch, no silent fallback).
+            // A generation change voids the watch's captured identity: the
+            // generation lifecycle owns the replacement, not the detached task.
             if (!Object.is(remoteSources.commandSource.connectionGeneration(), watchedGeneration)) {
               failed = false
               return
             }
             throw error
           } finally {
-            // A FAILED stream (contract violation, lost transport identity, a Host
-            // that never answers) must not leave a stale `working` on the terminal:
-            // fail closed to idle. An expected stop (abort / owner or generation
-            // change) leaves the Host's last authoritative state untouched. A
-            // generation rollover is handled by the official subscription above,
-            // NEVER as an idle completion.
+            // A real stream failure must not leave a stale `working` on the
+            // terminal. A generation change is handled by the official
+            // lifecycle above and never fabricates an idle completion.
             if (failed && !cleanedUp
               && ownership.currentSessionId() === sessionId
               && ownership.generation() === initGeneration
               && !progressController.signal.aborted
               && Object.is(remoteSources.commandSource.connectionGeneration(), watchedGeneration)) {
-              // H1: the conservative terminal fail-closed below is a PRESENTATION
-              // cleanup, not proof the Agent finished. Invalidate the external
-              // Pane qualification BEFORE that idle fallback runs, so the fallback
-              // can never be published to Herdr as a completed Agent; only a new
-              // valid snapshot can requalify this Pane.
               herdrReporter?.setQualified(false)
               surface.applyRemoteMainProgress(
                 { kind: 'snapshot', restart: true, running: false, outcome: 'idle' },
@@ -2237,7 +2213,26 @@ export function applyRunnerWithRuntime(
           }
         }, { diag, sessionId: () => sessionId })
       }
-      startProgressWatch()
+      /** The ONE generation lifecycle of this owner attempt: valid -> undefined
+       *  releases immediately; undefined -> valid starts the first/next watch;
+       *  a first arm that is already `undefined` keeps the official listener. */
+      const progressGeneration = armRemoteProgressWatchGeneration({
+        isCleanedUp: () => cleanedUp,
+        currentSessionId: () => ownership.currentSessionId(),
+        ownerGeneration: () => ownership.generation(),
+        sessionId,
+        ownerGenerationAtInit: initGeneration,
+        connectionGeneration: () => remoteSources.commandSource.connectionGeneration(),
+        subscribeConnectionGeneration: listener => remoteSources.commandSource.subscribeConnectionGeneration(listener),
+        release: () => { herdrReporter?.setQualified(false) },
+        disposeWatch: () => {
+          remoteProgressHandle?.dispose()
+          remoteProgressHandle = undefined
+        },
+        startWatch: generation => { startProgressWatch(generation) },
+      })
+      remoteProgressGenerationHandle = progressGeneration
+      progressGeneration.observeCurrent()
     }
 
     /** The transition gate protects ordinary session surface changes — `/new`,
@@ -3080,10 +3075,7 @@ export function applyRunnerWithRuntime(
       // H1: the ONE Client-local Pane reporter is released inside the same
       // ordered, non-truncating surface batch (before the mounted app dies).
       disposeHerdrReporter: () => { herdrReporter?.dispose() },
-      disposeRemoteProgressGeneration: () => {
-        remoteProgressGenerationHandle?.dispose()
-        remoteProgressGenerationHandle = undefined
-      },
+      disposeRemoteProgressGeneration: retireRemoteProgressGeneration,
       retireOwnedSession: sessionRuntime.retireOwnedSession,
       disposeSelectedTransport,
       registerDisposal: (dispose) => { ctx.effect(function* () { yield dispose }) },

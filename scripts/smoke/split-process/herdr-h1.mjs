@@ -214,12 +214,23 @@ export async function runHerdrH1(context) {
       'RH-02 the Client observed the official lost generation',
       60_000,
     )
-    // While the transport is down the Pane must not be told the Agent finished:
-    // the last Herdr fact stays `working` and an ordered release withdraws the
-    // registration instead of a fabricated `idle`. Wait for the release FIRST
-    // and only then check the whole log: the release command is queued behind
-    // the in-flight `working` report, so an immediate read can race it.
-    await waitForLog(longLog, () => lastIndex(longLog, 'release') !== -1, 'RH-02 ordered release on transport loss', 60_000)
+    // While the generation is INVALID and no replacement has been accepted,
+    // the Pane must already be withdrawn. This is the controlled disconnect
+    // window: it cannot wait for the new generation or the requalified
+    // `working`; an extended outage must never keep a stale working/blocked.
+    // Freeze the Host so the official Connection loop cannot form the
+    // replacement generation while we read the loss window. The release must
+    // already be there: an extended outage never keeps a stale Agent state.
+    process.kill(longReady.pid, 'SIGSTOP')
+    try {
+      await waitForLog(longLog, () => lastIndex(longLog, 'release') !== -1,
+        'RH-02 ordered release while the generation is still invalid', 60_000)
+      const lossWindow = lastSurfaceStatus(longClient)
+      assert(lossWindow?.generationId === undefined && lossWindow?.transport !== 'connected',
+        `RH-02 the release must land before reconnect; the Client status was ${JSON.stringify(lossWindow)}`)
+    } finally {
+      process.kill(longReady.pid, 'SIGCONT')
+    }
     const lossStates = states(longLog)
     const releaseAt = lossStates.lastIndexOf('release', lossStates.length - 1)
     // The window under judgment ends at the ordered release. A later
