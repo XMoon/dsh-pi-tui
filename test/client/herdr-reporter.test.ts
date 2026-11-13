@@ -282,3 +282,281 @@ test('HR-09 two fresh reporters start their sequence from the wall clock, never 
   assert.notEqual(firstSeq, 1)
   assert.notEqual(secondSeq, 1)
 })
+
+// ── H2 (plan §4.1): the main-Session report on the SAME ordered queue ───────
+
+const SESSION_A = `session-${'a'.repeat(32)}`
+const SESSION_B = `session-${'b'.repeat(32)}`
+const SESSION_C = `session-${'c'.repeat(32)}`
+const SESSION_T = `session-${'d'.repeat(32)}`
+const PROFILE = 'pi-tui'
+
+function sessionStarts(fixture: HerdrCliFixture): HerdrCliEntry[] {
+  return starts(fixture, 'report-agent-session')
+}
+
+function resumeArgvOf(entry: HerdrCliEntry): readonly string[] | undefined {
+  const argv = entry.argv ?? []
+  const separator = argv.indexOf('--')
+  return separator < 0 ? undefined : argv.slice(separator + 1)
+}
+
+function sessionIdOf(entry: HerdrCliEntry): string {
+  return argAfter(entry.argv ?? [], '--agent-session-id')
+}
+
+function directSession(id: string): { sessionId: string; resumeArgv: readonly string[] } {
+  return { sessionId: id, resumeArgv: ['dsh', '--profile', PROFILE, '--session', id] }
+}
+
+function startPhases(entries: readonly HerdrCliEntry[]): string[] {
+  return entries.filter(entry => entry.phase === 'start').map(entry => {
+    if (entry.argv?.[1] === 'release-agent') return 'release'
+    if (entry.argv?.[1] === 'report-agent-session') return 'session'
+    return 'state'
+  })
+}
+
+test('H2-R01 a Direct initial Session reports AFTER the first successful state with the exact five-word argv', async (t) => {
+  const fixture = createHerdrCliFixture(t)
+  const reporter = reporterOf(fixture)
+  const session = directSession(SESSION_A)
+  reporter.publish({ state: 'idle' })
+  reporter.observeSession(session)
+  await fixture.waitFor(entries => startCount(entries) >= 2, 'the state and session reports')
+  const [state, sessionEntry] = fixture.starts()
+  assert.equal(commandOf(state), 'report-agent', 'the state report must be the FIRST Pane command')
+  assert.equal(commandOf(sessionEntry), 'report-agent-session', 'the Session report must follow the state')
+  assert.deepEqual(sessionEntry.argv, [
+    'pane', 'report-agent-session', fixture.paneId,
+    '--source', 'dsh-pi-tui',
+    '--agent', 'dsh-pi-tui',
+    '--seq', String(seqOf(sessionEntry)),
+    '--agent-session-id', SESSION_A,
+    '--', 'dsh', '--profile', PROFILE, '--session', SESSION_A,
+  ])
+  assert.ok(seqOf(sessionEntry) > seqOf(state), 'state and Session share one monotone seq')
+  assert.deepEqual(fixture.sessions(), [{ sessionId: SESSION_A, resumeArgv: session.resumeArgv }])
+})
+
+test('H2-R02 a sessionless start buffers the first Session and never fabricates a predecessor', async (t) => {
+  const fixture = createHerdrCliFixture(t)
+  const reporter = reporterOf(fixture)
+  reporter.publish({ state: 'idle' })
+  await fixture.waitFor(entries => startCount(entries) >= 1, 'the initial idle report')
+  assert.deepEqual(sessionStarts(fixture), [], 'a sessionless Pane must report no Session')
+  reporter.observeSession(directSession(SESSION_A))
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 1, 'the first Session')
+  assert.deepEqual(fixture.sessions().map(entry => entry.sessionId), [SESSION_A])
+  assert.deepEqual(startPhases(fixture.entries()), ['state', 'session'])
+})
+
+test('H2-R03 a recoverable A -> B switch reports only B, with no release and no Agent-state touch', async (t) => {
+  const fixture = createHerdrCliFixture(t)
+  const reporter = reporterOf(fixture)
+  reporter.publish({ state: 'idle' })
+  await fixture.waitFor(entries => startCount(entries) >= 1, 'the idle report')
+  reporter.observeSession(directSession(SESSION_A))
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 1, 'Session A')
+  reporter.observeSession(directSession(SESSION_B))
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 2, 'Session B')
+  assert.deepEqual(fixture.sessions().map(entry => entry.sessionId), [SESSION_A, SESSION_B])
+  assert.equal(starts(fixture, 'release-agent').length, 0, 'a normal recoverable switch never releases')
+  assert.equal(starts(fixture, 'report-agent').length, 1, 'the Agent state was not republished')
+})
+
+test('H2-R04 A -> B -> C with a blocked first Session child collapses to A then the FINAL C', async (t) => {
+  const fixture = createHerdrCliFixture(t, { sessionDelayMs: 350 })
+  const reporter = reporterOf(fixture)
+  reporter.publish({ state: 'idle' })
+  await fixture.waitFor(entries => starts(fixture, 'report-agent').length === 1, 'the idle report')
+  reporter.observeSession(directSession(SESSION_A))
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 1, 'the slow Session A')
+  reporter.observeSession(directSession(SESSION_B))
+  reporter.observeSession(directSession(SESSION_C))
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 2, 'the final Session C')
+  await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'end').length >= 3, 'the state and both sessions ended')
+  assert.deepEqual(fixture.sessions().map(entry => entry.sessionId), [SESSION_A, SESSION_C],
+    'B was superseded before it ever dispatched')
+  const timeline = startPhases(fixture.entries())
+  assert.deepEqual(timeline, ['state', 'session', 'session'], 'a second child never starts before the first exits')
+  const [firstSession, secondSession] = fixture.entries()
+    .filter(entry => entry.phase === 'start' && entry.argv?.[1] === 'report-agent-session')
+  assert.notEqual(firstSession.pid, secondSession.pid)
+})
+
+test('H2-R05 losing the recoverable target withdraws the old resume exactly once and re-registers', async (t) => {
+  // Sessionless: Direct resume A -> no Session.
+  const sessionless = createHerdrCliFixture(t, { sessionDelayMs: 20 })
+  const sessionlessReporter = reporterOf(sessionless)
+  sessionlessReporter.publish({ state: 'idle' })
+  await sessionless.waitFor(entries => starts(sessionless, 'report-agent').length === 1, 'the idle report')
+  sessionlessReporter.observeSession(directSession(SESSION_A))
+  await sessionless.waitFor(entries => sessionStarts(sessionless).length === 1, 'Session A')
+  sessionlessReporter.observeSession(undefined)
+  await sessionless.waitFor(entries => starts(sessionless, 'release-agent').length === 1, 'the cleanup release')
+  await sessionless.waitFor(entries => starts(sessionless, 'report-agent').length === 2, 'the re-registration')
+  await delay(150)
+  assert.deepEqual(startPhases(sessionless.entries()), ['state', 'session', 'release', 'state'],
+    'the cleanup is an ORDERED release then re-acquire, and no Session follows a sessionless target')
+  assert.equal(sessionStarts(sessionless).length, 1)
+
+  // A recoverable A -> a canonical B WITHOUT a legal resume (Remote-shaped):
+  // the old A resume must be withdrawn, then B's id reported without `--`.
+  const remoteShaped = createHerdrCliFixture(t, { sessionDelayMs: 20 })
+  const remoteShapedReporter = reporterOf(remoteShaped)
+  remoteShapedReporter.publish({ state: 'idle' })
+  await remoteShaped.waitFor(entries => starts(remoteShaped, 'report-agent').length === 1, 'the idle report')
+  remoteShapedReporter.observeSession(directSession(SESSION_A))
+  await remoteShaped.waitFor(entries => sessionStarts(remoteShaped).length === 1, 'Session A')
+  remoteShapedReporter.observeSession({ sessionId: SESSION_B })
+  await remoteShaped.waitFor(entries => sessionStarts(remoteShaped).length === 2, 'Session B without resume')
+  await remoteShaped.waitFor(entries => starts(remoteShaped, 'release-agent').length === 1, 'the cleanup release')
+  assert.deepEqual(remoteShaped.sessions().map(entry => entry.sessionId), [SESSION_A, SESSION_B])
+  assert.deepEqual(remoteShaped.sessions()[1].resumeArgv, undefined)
+  assert.deepEqual(startPhases(remoteShaped.entries()), ['state', 'session', 'release', 'state', 'session'])
+})
+
+test('H2-R06 a Remote Session is reported without any resume argv and only after qualification', async (t) => {
+  const fixture = createHerdrCliFixture(t)
+  const reporter = reporterOf(fixture, false)
+  reporter.publish({ state: 'idle' })
+  reporter.observeSession({ sessionId: SESSION_A })
+  await delay(120)
+  assert.deepEqual(fixture.entries(), [], 'an unqualified Remote Client must spawn nothing')
+
+  reporter.setQualified(true)
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 1, 'the Remote Session A')
+  reporter.observeSession({ sessionId: SESSION_T })
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 2, 'the Remote Session T')
+  assert.deepEqual(fixture.sessions(), [{ sessionId: SESSION_A }, { sessionId: SESSION_T }])
+  for (const entry of sessionStarts(fixture)) {
+    assert.equal(resumeArgvOf(entry), undefined, 'Remote must never carry a resume argv')
+    assert.equal(entry.argv?.includes('--'), false)
+  }
+  assert.equal(starts(fixture, 'release-agent').length, 0)
+})
+
+test('H2-R07 a lost Remote generation releases first and requalification reports only the CURRENT Session T', async (t) => {
+  const fixture = createHerdrCliFixture(t)
+  const reporter = reporterOf(fixture)
+  reporter.publish({ state: 'idle' })
+  await fixture.waitFor(entries => starts(fixture, 'report-agent').length === 1, 'the idle report')
+  reporter.observeSession({ sessionId: SESSION_A })
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 1, 'Session A')
+  reporter.setQualified(false)
+  reporter.observeSession({ sessionId: SESSION_T })
+  await fixture.waitFor(entries => starts(fixture, 'release-agent').length === 1, 'the ordered release')
+  await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'end').length >= 3, 'the release settled')
+  reporter.setQualified(true)
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 2, 'the requalified Session T')
+  await fixture.waitFor(entries => starts(fixture, 'report-agent').length === 2, 'the requalified state')
+  assert.deepEqual(startPhases(fixture.entries()), ['state', 'session', 'release', 'state', 'session'])
+  const afterRelease = fixture.entries().slice(fixture.entries().findIndex(entry => entry.phase === 'start' && entry.argv?.[1] === 'release-agent'))
+  assert.equal(afterRelease.some(entry => entry.phase === 'start' && entry.argv?.[1] === 'report-agent-session' && sessionIdOf(entry) === SESSION_A), false,
+    'the lost generation Session A must never be replayed')
+  assert.deepEqual(fixture.sessions().map(entry => entry.sessionId), [SESSION_A, SESSION_T])
+})
+
+test('H2-R08 a generation-only re-notification with the same identity is deduped, a real change is not lost', async (t) => {
+  const fixture = createHerdrCliFixture(t)
+  const reporter = reporterOf(fixture)
+  reporter.publish({ state: 'idle' })
+  await fixture.waitFor(entries => starts(fixture, 'report-agent').length === 1, 'the idle report')
+  const projection = directSession(SESSION_A)
+  reporter.observeSession(projection)
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 1, 'Session A')
+  // Same committed owner notified again (a generation-only bump), and again
+  // without any StatusStore change: no physical Session command may appear.
+  reporter.observeSession(projection)
+  reporter.observeSession(directSession(SESSION_A))
+  await delay(150)
+  assert.equal(sessionStarts(fixture).length, 1, 'the same id/argv notification is deduped')
+  // A real owner change must be reported even when no Agent status changes.
+  reporter.observeSession(directSession(SESSION_T))
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 2, 'the real Session change')
+  assert.deepEqual(fixture.sessions().map(entry => entry.sessionId), [SESSION_A, SESSION_T])
+})
+
+test('H2-R09 a blocked Agent state and a Session change share one seq and neither erases the other', async (t) => {
+  const fixture = createHerdrCliFixture(t, { delayMs: 20 })
+  const recorder = recordingDiag()
+  const reporter = reporterOf(fixture, true, recorder.diag)
+  reporter.publish({ state: 'idle' })
+  await fixture.waitFor(entries => starts(fixture, 'report-agent').length === 1, 'the idle report')
+  reporter.publish({ state: 'blocked', kind: 'question' })
+  reporter.observeSession(directSession(SESSION_A))
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 1, 'the Session after blocked')
+  const blocked = starts(fixture, 'report-agent')[1]
+  const session = sessionStarts(fixture)[0]
+  assert.equal(stateOf(blocked), 'blocked')
+  assert.ok(seqOf(session) > seqOf(blocked), 'the Session report shares the blocked report seq order')
+  assert.deepEqual(startPhases(fixture.entries()), ['state', 'state', 'session'])
+  assert.ok(!recorder.lines.some(line => line.includes(SESSION_A)), 'diagnostics never carry the Session id')
+})
+
+test('H2-R10 external failures stay contained, leave no backlog and never leak Session data', async (t) => {
+  // Non-zero status exit: the Session stays buffered, never dispatched.
+  const failing = createHerdrCliFixture(t, { exitCode: 3 })
+  const failingReporter = reporterOf(failing)
+  failingReporter.publish({ state: 'working' })
+  failingReporter.observeSession(directSession(SESSION_A))
+  await failing.waitFor(entries => entries.some(entry => entry.phase === 'end' && entry.code === 3), 'the failed first report')
+  failingReporter.publish({ state: 'blocked', kind: 'permission' })
+  await failing.waitFor(entries => starts(failing, 'report-agent').length === 2, 'the later status attempt')
+  await delay(100)
+  assert.deepEqual(sessionStarts(failing), [], 'no Session may follow an unacknowledged Pane')
+
+  // Spawn ENOENT: contained, diagnosed without the Session id or profile.
+  const secretProfile = `profile-secret-${String(process.pid)}`
+  const missing = createHerdrCliFixture(t, {
+    binPath: join(tmpdir(), `herdr-missing-${String(process.pid)}-${Date.now().toString(36)}`),
+  })
+  const recorder = recordingDiag()
+  const missingReporter = reporterOf(missing, true, recorder.diag)
+  const secretProjection = {
+    sessionId: SESSION_A,
+    resumeArgv: ['dsh', '--profile', secretProfile, '--session', SESSION_A],
+  }
+  assert.doesNotThrow(() => {
+    missingReporter.publish({ state: 'working' })
+    missingReporter.observeSession(secretProjection)
+  })
+  await delay(120)
+  assert.ok(recorder.lines.some(line => line.includes('ENOENT')), `ENOENT is diagnosed: ${JSON.stringify(recorder.lines)}`)
+  for (const line of recorder.lines) {
+    assert.ok(!line.includes(SESSION_A), `diagnostics leaked the Session id: ${line}`)
+    assert.ok(!line.includes(secretProfile), `diagnostics leaked the profile: ${line}`)
+  }
+
+  // A timed-out Session child is killed and a later real Session still reports.
+  const slow = createHerdrCliFixture(t, { sessionDelayMs: 900 })
+  const slowReporter = reporterOf(slow)
+  slowReporter.publish({ state: 'idle' })
+  await slow.waitFor(entries => starts(slow, 'report-agent').length === 1, 'the idle report')
+  slowReporter.observeSession(directSession(SESSION_A))
+  await slow.waitFor(entries => sessionStarts(slow).length === 1, 'the slow Session A')
+  slowReporter.observeSession(directSession(SESSION_T))
+  await slow.waitFor(entries => sessionStarts(slow).length === 2, 'the Session after the timeout', 5_000)
+  assert.deepEqual(slow.sessions().map(entry => entry.sessionId), [SESSION_A, SESSION_T])
+  // The second Session child is still inside its 500 ms timeout window: let the
+  // reporter's own bound kill it so no child outlives this test process group.
+  await delay(600)
+
+  // Dispose while a Session child is in flight: exactly one ordered release,
+  // then no later child of any kind.
+  const disposing = createHerdrCliFixture(t, { sessionDelayMs: 250 })
+  const disposingReporter = reporterOf(disposing)
+  disposingReporter.publish({ state: 'idle' })
+  await disposing.waitFor(entries => starts(disposing, 'report-agent').length === 1, 'the idle report')
+  disposingReporter.observeSession(directSession(SESSION_A))
+  await disposing.waitFor(entries => sessionStarts(disposing).length === 1, 'the in-flight Session')
+  disposingReporter.dispose()
+  disposingReporter.observeSession(directSession(SESSION_T))
+  disposingReporter.setQualified(true)
+  await disposing.waitFor(entries => starts(disposing, 'release-agent').length === 1, 'the dispose release')
+  await delay(150)
+  assert.equal(starts(disposing, 'release-agent').length, 1, 'dispose is idempotent')
+  assert.equal(sessionStarts(disposing).length, 1, 'no Session after dispose')
+  assert.deepEqual(startPhases(disposing.entries()), ['state', 'session', 'release'])
+})

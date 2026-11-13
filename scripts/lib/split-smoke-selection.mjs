@@ -55,6 +55,7 @@ import { runF7BCredentialRecords } from '../smoke/split-process/provider-credent
 import { runF8SessionPolicy } from '../smoke/split-process/session-policy-f8.mjs'
 import { runHerdrH1 } from '../smoke/split-process/herdr-h1.mjs'
 import { runWebProviderSettingsF3 } from '../smoke/split-process/web-provider-settings-f3.mjs'
+import { runHerdrH2 } from '../smoke/split-process/herdr-h2.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -290,6 +291,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'herdr.h1-split-surface',
     title: 'real Split Clients report the Host Agent idle/working/blocked state to their own Herdr Pane, and only the Client owns that registration',
     run: runHerdrH1,
+  }),
+  Object.freeze({
+    suite: 'herdr',
+    id: 'herdr.h2-session-publication',
+    title: 'a real Split Client reports the committed main Session to its Herdr Pane without a resume argv, keeps only the latest owner, and re-registers it after a real transport rollover',
+    run: runHerdrH2,
   }),
 ])
 

@@ -90,6 +90,7 @@ import { runDetached, runOwned } from '../runtime/process/tasks.ts'
 import { captureScheduleSessionSwitch, openScheduleWorkspace } from './schedule/runtime.ts'
 import { FileHistorySearchSource } from '../client/history/search.ts'
 import { createHerdrReporter } from '../client/herdr/reporter.ts'
+import { herdrSessionProjection } from '../client/herdr/session.ts'
 import { safeErrorMessage } from '../runtime/process/errors.ts'
 import { DraftImageStore } from '../client/media/image/draft-store.ts'
 import { DraftFileStore } from '../client/media/attachment/file-draft.ts'
@@ -737,6 +738,32 @@ export function applyRunnerWithRuntime(
      * never imports or constructs a reporter.
      */
     const herdrReporter = createHerdrReporter(process.env, override === undefined, diag)
+    /**
+     * H2: the ONE Client-local bridge from the committed main-owner Session to
+     * the H1 reporter. The Direct branch pins the ACTUAL running profile once;
+     * the Split Client deliberately passes `undefined`, so it can never publish
+     * a resume command that would create a new Direct Host.
+     *
+     * The owner notification is the official `SessionOwnershipCore` scope
+     * invalidation (coalesced after every successful create/resume/switch/fork
+     * commit and generation-only bump). The initial sample covers a startup
+     * Resume that committed before this subscription; the reporter dedupes the
+     * immediately following notification.
+     */
+    if (herdrReporter !== undefined) {
+      const directProfile = override === undefined ? hostRunningProfile(ctx) : undefined
+      const observeCurrentSession = (): void => {
+        herdrReporter.observeSession(herdrSessionProjection(ownership.currentSessionId(), directProfile))
+      }
+      const unsubscribe = ownership.subscribeScopeInvalidation(observeCurrentSession)
+      let observing = true
+      lifecycleController.signal.addEventListener('abort', () => {
+        if (!observing) return
+        observing = false
+        unsubscribe()
+      }, { once: true })
+      observeCurrentSession()
+    }
     const surface = createSurfaceRuntime<SessionEvent>({
       tuiVersion: bundleVersion(),
       notificationPresentation,

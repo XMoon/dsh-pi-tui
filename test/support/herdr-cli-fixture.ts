@@ -39,10 +39,19 @@ export interface HerdrCliFixtureOptions {
   readonly firstDelayMs?: number
   /** Delay of every later invocation, in ms (default 0). */
   readonly delayMs?: number
+  /** Delay of every `report-agent-session` invocation, in ms (default 0). */
+  readonly sessionDelayMs?: number
   /** Process exit code every invocation uses (default 0). */
   readonly exitCode?: number
   /** An explicit CLI path override (the `spawn ENOENT` negative control). */
   readonly binPath?: string
+}
+
+/** One parsed `report-agent-session` invocation (H2). */
+export interface HerdrSessionInvocation {
+  readonly sessionId: string
+  /** The recovery command AFTER `--`, parsed strictly as one argv array. */
+  readonly resumeArgv?: readonly string[]
 }
 
 export interface HerdrCliFixture {
@@ -58,6 +67,8 @@ export interface HerdrCliFixture {
   entries(): HerdrCliEntry[]
   /** Every `start` entry (one per spawned child). */
   starts(): HerdrCliEntry[]
+  /** Every `report-agent-session` invocation, with its recovery argv. */
+  sessions(): HerdrSessionInvocation[]
   /** Wait until `predicate(entries)` holds. Bounded; never a busy sleep loop. */
   waitFor(predicate: (entries: readonly HerdrCliEntry[]) => boolean, label: string, deadlineMs?: number): Promise<void>
 }
@@ -76,12 +87,14 @@ try {
 }
 const first = Number(process.env.HERDR_FAKE_FIRST_DELAY_MS ?? '0')
 const delay = Number(process.env.HERDR_FAKE_DELAY_MS ?? '0')
+const sessionDelay = Number(process.env.HERDR_FAKE_SESSION_DELAY_MS ?? '0')
 const code = Number(process.env.HERDR_FAKE_EXIT_CODE ?? '0')
+const wait = argv[1] === 'report-agent-session' ? sessionDelay : (prior === 0 ? first : delay)
 appendFileSync(log, JSON.stringify({ phase: 'start', pid: process.pid, argv }) + '\\n')
 setTimeout(() => {
   appendFileSync(log, JSON.stringify({ phase: 'end', pid: process.pid, code }) + '\\n')
   process.exit(code)
-}, prior === 0 ? first : delay)
+}, wait)
 `
 
 /**
@@ -107,6 +120,7 @@ export function createHerdrCliFixture(t: TestContext, options: HerdrCliFixtureOp
     HERDR_FAKE_LOG: logPath,
     HERDR_FAKE_FIRST_DELAY_MS: String(options.firstDelayMs ?? 0),
     HERDR_FAKE_DELAY_MS: String(options.delayMs ?? 0),
+    HERDR_FAKE_SESSION_DELAY_MS: String(options.sessionDelayMs ?? 0),
     HERDR_FAKE_EXIT_CODE: String(options.exitCode ?? 0),
   }
   const entries = (): HerdrCliEntry[] => {
@@ -130,6 +144,20 @@ export function createHerdrCliFixture(t: TestContext, options: HerdrCliFixtureOp
     logPath,
     entries,
     starts: () => entries().filter(entry => entry.phase === 'start'),
+    sessions: () => entries()
+      .filter(entry => entry.phase === 'start' && entry.argv?.[1] === 'report-agent-session')
+      .map((entry) => {
+        const argv = entry.argv ?? []
+        const idIndex = argv.indexOf('--agent-session-id')
+        const separator = argv.indexOf('--')
+        if (idIndex < 0 || argv[idIndex + 1] === undefined) {
+          throw new Error(`a report-agent-session invocation carried no --agent-session-id: ${JSON.stringify(argv)}`)
+        }
+        return {
+          sessionId: argv[idIndex + 1],
+          ...(separator < 0 ? {} : { resumeArgv: argv.slice(separator + 1) }),
+        }
+      }),
     async waitFor(predicate, label, deadlineMs = 10_000) {
       const deadline = Date.now() + deadlineMs
       for (;;) {

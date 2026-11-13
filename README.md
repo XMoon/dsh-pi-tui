@@ -150,7 +150,9 @@ dsh --profile pi-tui --continue            # 继续当前 Host Workspace 中最�
 
 ### Herdr 终端集成
 
-在 Herdr Pane 内启动 `dsh --profile pi-tui`（Direct 或内部 Split Client）时，TUI 会自动把主 Agent 的 `idle` / `working` / `blocked` 状态上报给当前 Pane，`herdr agent list` 与 Pane UI 无需任何配置即可识别 `dsh-pi-tui`。上报复用 TUI 已经判定的 Agent 状态：它不依赖 Terminal progress 设置，不会把仅属客户端的 `/login` 等交互显示为阻塞，并在退出时撤销本 Pane 的注册。它只提供状态显示，不恢复 Session、不浏览会话，也不能通过 Herdr 操作 Agent；普通终端或缺少完整 Herdr 环境时不会启动额外后台进程，Herdr 不可用也不影响 TUI 工作。
+在 Herdr Pane 内启动 `dsh --profile pi-tui`（Direct 或内部 Split Client）时，TUI 会自动把主 Agent 的 `idle` / `working` / `blocked` 状态上报给当前 Pane，`herdr agent list` 与 Pane UI 无需任何配置即可识别 `dsh-pi-tui`。上报复用 TUI 已经判定的 Agent 状态：它不依赖 Terminal progress 设置，不会把仅属客户端的 `/login` 等交互显示为阻塞，并在退出时撤销本 Pane 的注册。
+
+在旧版 Herdr TUI（>= 0.9.2）中，Direct 运行期间如果已有提交的规范完整主 Session ID，Herdr 会保存公开的恢复命令 `dsh --profile <实际 profile> --session <Session ID>`，Herdr 命名 session 重启后会以此冷打开同一个持久 Session。当前没有可恢复的规范 Session、Profile 不满足 Herdr 的参数规则，或使用内部 Split Client 时不会提供自动恢复命令；Split Client 只上报 Session ID 作为兼容字段，旧版 Herdr 尚不能把第三方 source 的该字段持久识别为原生 Session，因此这不表示 Split Remote 已能重新附着原 Host。`--session` 是持久 Session 的冷打开，不会恢复旧进程中正在执行的 Agent/Turn，也不绕过 DSH 的 SessionWriteLease；Herdr 的自动恢复开关可禁用此行为。Herdr App 的 OSC 7501 状态通道与旧版 CLI 的恢复机制不同，本功能不声明新版 App 的 Session 恢复。普通终端或缺少完整 Herdr 环境时不会启动额外后台进程，Herdr 不可用也不影响 TUI 工作。
 
 ### Conversation display
 
