@@ -217,6 +217,19 @@ test('list_agents summarizes structured and rendered historical snapshots', () =
     '5 entries · 1 running · 1 ready · 3 diagnostics')
   assert.equal(compactToolPresentation('list_agents', '{}', officialRc2Text)?.result,
     '5 entries · 1 running · 1 ready · 3 diagnostics')
+  // Agent descriptions are untrusted text: a `[status]`-looking token INSIDE
+  // the description must never override the authoritative field before the
+  // separator. This is a valid official row, not damaged data.
+  assert.equal(formatAgentListSummary(summarizeAgentListResult(
+    'lead [inactive] — root agent\nreviewer [running] — Review the diff')!),
+  '2 agents · 1 running · 1 ready')
+  const pollutedDescriptions = 'lead [inactive] — Check the [running] state\n'
+    + 'reviewer [running] — Mentions [inactive] in the brief\n'
+    + 'broken [corrupt] — Description says [running] but the row is corrupt'
+  assert.equal(formatAgentListSummary(summarizeAgentListResult(pollutedDescriptions)!),
+    '3 entries · 1 running · 1 ready · 1 diagnostic')
+  assert.equal(compactToolPresentation('list_agents', '{}', pollutedDescriptions)?.result,
+    '3 entries · 1 running · 1 ready · 1 diagnostic')
   assert.equal(formatAgentListSummary(summarizeAgentListResult('(no subagents)')!), 'no subagents')
   assert.equal(formatAgentListSummary(summarizeAgentListResult('x [diagnostic: corrupt]')!), '1 entry · 1 diagnostic')
   // Descendants rows carry parent/depth position; the status regex must not

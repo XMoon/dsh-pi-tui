@@ -544,16 +544,22 @@ export function summarizeAgentListResult(text: string): AgentListSummary | undef
   let diagnostics = 0
   let matched = 0
   for (const line of trimmed.split(/\r\n|\r|\n/)) {
-    if (/\[running\](?:\s|$)/.test(line)) { running += 1; matched += 1; continue }
-    if (/\[idle\](?:\s|$)/.test(line)) { idle += 1; matched += 1; continue }
+    // The official row is `<name> [status] — <description>`. Only the status
+    // FIELD before the description separator is authoritative: an agent
+    // description is untrusted model text and may contain `[running]`,
+    // `[inactive]`, `[corrupt]`, … without changing the row's status.
+    const separator = line.search(/\s—\s/u)
+    const statusField = separator === -1 ? line : line.slice(0, separator)
+    if (/\[running\](?:\s|$)/.test(statusField)) { running += 1; matched += 1; continue }
+    if (/\[idle\](?:\s|$)/.test(statusField)) { idle += 1; matched += 1; continue }
     // rc.2's real render marks a non-running, resumable child `inactive`.
-    if (/\[inactive\](?:\s|$)/.test(line)) { ready += 1; matched += 1; continue }
-    if (/\[ready\](?:\s|$)/.test(line)) { ready += 1; matched += 1; continue }
-    if (/\[diagnostic:[^\]]+\]/.test(line)) { diagnostics += 1; matched += 1; continue }
+    if (/\[inactive\](?:\s|$)/.test(statusField)) { ready += 1; matched += 1; continue }
+    if (/\[ready\](?:\s|$)/.test(statusField)) { ready += 1; matched += 1; continue }
+    if (/\[diagnostic:[^\]]+\]/.test(statusField)) { diagnostics += 1; matched += 1; continue }
     // Any other bracketed status token is an unrecognized row: count it as a
     // diagnostic instead of silently dropping it (mirrors the structured
     // path's default branch, so a mixed snapshot never undercounts `total`).
-    if (/\[[a-z][^\]]*\]/.test(line)) { diagnostics += 1; matched += 1 }
+    if (/\[[a-z][^\]]*\]/.test(statusField)) { diagnostics += 1; matched += 1 }
   }
   if (matched === 0) return undefined
   const total = running + idle + ready + diagnostics
