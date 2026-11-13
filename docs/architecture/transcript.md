@@ -1212,8 +1212,24 @@ Every card renders through the Web parity render intents in
   preview row — never raw JSON. A failed call's error identity is never replaced
   by a success phrase: a normal (non-`isError`) result object that carries an
   error `code` folds to that code, and an `isError` result keeps its structured
-  error while the folded summary may add the code. Agent-team tools are excluded
-  by name because they collide with subagent tool names.
+  error while the folded summary may add the code. Only the SHARED
+  `send_message` / `interrupt_agent` subagent-named tools stay excluded: their
+  name collides with subagent tools whose render text is friendly.
+- Team task tools (`team_task_create` / `list` / `get` / `update`) and
+  `wait_agent`: the folded row is a DISPLAY-level result projection only, never
+  live Team state and never a second owner. A single task folds to
+  `<status> [· ready] · <owner|unowned> · rev N` (ready prints only for a
+  pending ready task; an absent owner is `unowned`; a legacy
+  `ownerName`/`ownerId` is never used as an owner fallback; `status:deleted` is
+  a task state, not a filesystem deletion). A list page folds to
+  `no team tasks` / `N team task(s)`, plus ` · more` for a next cursor and NEVER
+  a fabricated `N of total`. `wait_agent` folds `{"timedOut":false}` to
+  `input pending` and `{"timedOut":true}` to `timed out` — never
+  `agent finished`/`task ready`. The call identity is the fixed title plus the
+  documented subject / task id / action (or a legal explicit `timeout_ms`); a
+  description, raw JSON, or an error `code` object never becomes a header or a
+  success summary. The expanded body keeps the complete official JSON and a
+  failed call keeps its `isError` identity.
 - Schedule tools: the current `schedule_create`/`list`/`view`/`edit` family and
   the historical `schedule_create`/`list`/`update`/`delete` pair share ONE
   header fallback and ONE folded summarizer (TSP reuses the same header helper;
@@ -1241,9 +1257,15 @@ answer", "folded JSON-result cards show the summary, never the raw JSON",
 "a current-schema schedule list page folds to counts and keeps its exact JSON
 expanded", "a failed rc1 schedule_edit card keeps [error], the error code and
 the result detail", "settled ask_user_question cards show the answered count",
-"goal cards without a goal say no goal set") and
+"goal cards without a goal say no goal set", "a folded team_task_create card
+shows a bounded status note, never the raw JSON or description", "a folded
+team_task_list card reports count and cursor, leaving the full page to the
+expanded body", "a folded wait_agent card reports input state, never an agent or
+task outcome") and
 `test/tui/action-tool-card.test.ts` ("schedule cards use the fixed no-registry
-fallback titles and identities").
+fallback titles and identities", "team task and wait tools use fixed titles and
+safe call identities", "team task result snapshots fold to bounded facts and
+never infer an owner").
 
 ## Assistant-owned published visuals
 
