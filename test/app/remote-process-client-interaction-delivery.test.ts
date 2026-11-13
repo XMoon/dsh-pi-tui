@@ -560,6 +560,39 @@ test('root disposal withholds an in-flight delivery without delegating to next',
   assert.equal(nextCalls, 0)
 })
 
+test('a disposed root settles only when the official request lifetime ends', async () => {
+  const { seat, delivery } = createDelivery()
+  let nextCalls = 0
+  let settled = false
+  const controller = new AbortController()
+  const result = seat.emitQuestion(
+    { questions: QUESTIONS, wait: { callId: 'call-dispose-signal' }, signal: controller.signal },
+    async () => {
+      nextCalls += 1
+      return PROCEED
+    },
+  )
+  result.then(() => { settled = true }, () => { settled = true })
+  delivery.attachSurface(1, {
+    onQuestion: async () => await new Promise<never>(() => {}),
+    onApproval: () => 'rejected',
+  })
+  await tick()
+  delivery.dispose()
+  await tick()
+  await tick()
+  assert.equal(settled, false,
+    'the disposed root must not answer the official invocation on its own')
+  controller.abort(new Error('the official delivery task was released'))
+  await tick()
+  await tick()
+  assert.equal(settled, true,
+    'the request lifetime ending settles the withheld invocation')
+  await assert.rejects(result, /the official delivery task was released/u,
+    'the withheld invocation settles with the official abort reason, never the disposal')
+  assert.equal(nextCalls, 0)
+})
+
 test('root disposal withholds an in-flight approval without delegating to next', async () => {
   const { seat, delivery } = createDelivery()
   let nextCalls = 0
