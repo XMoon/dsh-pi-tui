@@ -519,15 +519,19 @@ export function deleteKittyImage(imageId: number): string {
 }
 
 /**
- * Delete one Kitty image PLACEMENT by image id while keeping the uploaded
- * image data resident (lowercase 'i').
+ * Delete Kitty image placements while keeping the uploaded image data resident
+ * (lowercase `d=i`).
+ *
+ * With a `placementId`, ONLY that placement is removed (the protocol contract:
+ * `a=d,d=i,i=<id>,p=<placement>`). Without one, every placement of the image
+ * id is removed — still data-retaining, so it is never a destructive delete.
  *
  * The Screen uses this when a line yields only for a frame — a visible overlay
  * preemption (X077) — so the block can be placed again without a new
  * transmission and an image the Screen does not own never loses its data.
  */
-export function deleteKittyImagePlacement(imageId: number): string {
-	return `\x1b_Ga=d,d=i,i=${imageId},q=2\x1b\\`;
+export function deleteKittyImagePlacement(imageId: number, placementId?: number): string {
+	return `\x1b_Ga=d,d=i,i=${imageId}${placementId === undefined ? "" : `,p=${placementId}`},q=2\x1b\\`;
 }
 
 /**

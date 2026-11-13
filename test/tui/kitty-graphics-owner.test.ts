@@ -1078,7 +1078,14 @@ test('a preempted foreign a=p placement is removed by placement only and can be 
     screen.renderNow()
     const covered = terminal.text
     assert.ok(covered.includes('MODAL'), 'the overlay is painted over the foreign block')
-    assert.ok(covered.includes(encodeKittyDeletePlacement(foreignId)), 'only the foreign PLACEMENT is removed')
+    assert.ok(
+      covered.includes(`\x1b_Ga=d,d=i,i=${foreignId},p=9,q=2\x1b\\`),
+      'only the foreign PLACEMENT is removed',
+    )
+    assert.ok(
+      !covered.includes(`\x1b_Ga=d,d=i,i=${foreignId},q=2\x1b\\`),
+      'no image-wide placement delete is emitted',
+    )
     assert.ok(!covered.includes(encodeKittyDeleteImage(foreignId)), 'the foreign data is never freed')
     assert.ok(!covered.includes('\x1b_Ga=d,d=A'), 'no global image delete reaches the terminal')
 
@@ -1089,6 +1096,60 @@ test('a preempted foreign a=p placement is removed by placement only and can be 
     assert.ok(restored.includes(foreign), 'the same foreign placement is written again after close')
     assert.ok(!restored.includes(encodeKittyDeleteImage(foreignId)), 'closing frees no foreign data either')
     assert.ok(!restored.includes('\x1b_Ga=d,d=A'), 'closing emits no global delete')
+    screen.stop()
+  } finally {
+    setCellDimensions({ widthPx: 9, heightPx: 18 })
+  }
+})
+
+/**
+ * Kitty allows one uploaded image to be placed several times with different
+ * placement ids. Covering one placement must remove ONLY that placement: an
+ * image-wide delete would also remove the sibling placement, whose unchanged
+ * line the Main Screen would never re-send.
+ */
+test('a covered placement never removes a sibling placement of the same image id', () => {
+  const { terminal, core, facade } = harness()
+  setCellDimensions({ widthPx: 10, heightPx: 10 })
+  try {
+    let foreignId = 0x123456
+    while (core.ownsIdSpace(foreignId)) foreignId += 1
+    facade.write(`\x1b_Ga=t,f=100,i=${foreignId},q=2;AAAA\x1b\\`)
+    const screen = new TuiMainScreen(facade)
+    const first = encodeKittyPlacement(foreignId, 1, { columns: 2, rows: 2 })
+    const sibling = encodeKittyPlacement(foreignId, 2, { columns: 2, rows: 2 })
+    screen.addChild({ render: () => ['top', first, '', 'mid', sibling, '', 'bottom'], invalidate: () => {} })
+    screen.start()
+    screen.renderNow()
+    assert.ok(terminal.text.includes(first), 'the first placement is painted')
+    assert.ok(terminal.text.includes(sibling), 'the sibling placement is painted')
+
+    terminal.writes.length = 0
+    const handle = screen.showOverlay({ render: () => ['MODAL'], invalidate: () => {} }, {
+      row: 1,
+      col: 0,
+      width: 20,
+    })
+    screen.renderNow()
+    const covered = terminal.text
+    assert.ok(covered.includes('MODAL'), 'the overlay is painted over the first placement only')
+    assert.ok(
+      covered.includes(`\x1b_Ga=d,d=i,i=${foreignId},p=1,q=2\x1b\\`),
+      'only the covered placement (p=1) is removed',
+    )
+    assert.ok(
+      !covered.includes(`\x1b_Ga=d,d=i,i=${foreignId},q=2\x1b\\`),
+      'the sibling placement is never removed image-wide',
+    )
+    assert.ok(!covered.includes(encodeKittyDeleteImage(foreignId)), 'the shared image data is never freed')
+    assert.ok(!covered.includes('\x1b_Ga=d,d=A'), 'no global image delete reaches the terminal')
+
+    terminal.writes.length = 0
+    handle.hide()
+    screen.renderNow()
+    const restored = terminal.text
+    assert.ok(restored.includes(first), 'the covered placement returns after close')
+    assert.ok(!restored.includes(encodeKittyDeleteImage(foreignId)), 'closing frees no shared data')
     screen.stop()
   } finally {
     setCellDimensions({ widthPx: 9, heightPx: 18 })
