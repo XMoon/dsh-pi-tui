@@ -175,6 +175,10 @@ async function runCase(h, kind) {
 /** Bring one native head into the real client's viewport (real wheel scroll). */
 async function revealHead(h, label, findHead) {
   const viewport = () => h.ctl('stats').viewport ?? [1280, 800]
+  // A head at the very top of the viewport can sit under the client's own
+  // block chrome/menu hit area; keep a safe top margin so a synthetic click
+  // addresses the section head, not that chrome.
+  const safeTop = 72
   let wheelSign = 1
   let step = 80
   let lastY
@@ -185,7 +189,8 @@ async function revealHead(h, label, findHead) {
     const texts = snapshot.nodes.filter(node => snapshot.chains.get(node)?.includes(head)
       && typeof node.text === 'string' && node.text !== '')
     const clickable = visibleSpan(snapshot.chains, head, 'x') >= 4 && visibleSpan(snapshot.chains, head, 'y') >= 4
-    if (texts.length > 0 && texts.every(node => visibleSpan(snapshot.chains, node, 'y') >= 4) && clickable) {
+    if (texts.length > 0 && rect(head)[1] >= safeTop
+      && texts.every(node => visibleSpan(snapshot.chains, node, 'y') >= 4) && clickable) {
       await h.sleep(300)
       const stable = h.snapshot()
       const stableHead = findHead(stable)
@@ -203,7 +208,7 @@ async function revealHead(h, label, findHead) {
     const dockRect = rect(dock ?? {})
     const visibleTop = 24
     const visibleBottom = dock === undefined ? viewportHeight - 8 : dockRect[1] - 8
-    const wantIncrease = headRect[1] < visibleTop
+    const wantIncrease = headRect[1] < safeTop
     const point = {
       x: Math.max(1, Math.min(viewportWidth - 1, viewportWidth / 2)),
       y: Math.max(visibleTop + 12, Math.min(visibleBottom - 12, (visibleTop + visibleBottom) / 2)),
@@ -397,7 +402,7 @@ export default async function (h) {
   const run = findRunNode(h, 'deploy-backend')
   h.check('the abnormal live Run opens by default and its head keeps status + exact summary',
     run.p.collapsed === false && subtreeText(foldLive(h), run.id).includes('[running]')
-      && subtreeText(foldLive(h), run.id).includes('8 agents'),
+      && subtreeText(foldLive(h), run.id).includes('10 agents'),
     JSON.stringify(run ?? null))
   h.check('the cold-replayed clean Run stays closed with its real status',
     findRunNode(h, 'audit-done')?.p.collapsed === true
@@ -415,18 +420,53 @@ export default async function (h) {
   // The Prepare phase: member rows with readable status words and the scoped
   // browse button (the hub negotiated kinds cover the real Task Center entry).
   const prepare = phases.find(node => subtreeText(foldLive(h), node.id).includes('build-1'))
-  h.check('the small Prepare phase lists every member with its distinct status word',
+  h.check('the five-member Prepare phase lists every member with its distinct status word',
     prepare !== undefined && subtreeText(foldLive(h), prepare.id).includes('build-1 — completed')
       && subtreeText(foldLive(h), prepare.id).includes('build-2 — failed')
-      && subtreeText(foldLive(h), prepare.id).includes('verify-1 — running'),
+      && subtreeText(foldLive(h), prepare.id).includes('verify-1 — running')
+      && subtreeText(foldLive(h), prepare.id).includes('build-3 — completed')
+      && subtreeText(foldLive(h), prepare.id).includes('build-4 — completed'),
     JSON.stringify(prepare ?? null))
   const allButtons = [...foldLive(h).values()].filter(node => node.k === 'button'
     && node.p.actions?.click === WORKFLOW_ACTION)
   h.check('the scoped browse buttons carry the fixed local action id and cover the whole run',
-    allButtons.length === 5 && allButtons.some(node => subtreeText(foldLive(h), node.id).includes('View all 8 agents'))
-      && allButtons.some(node => subtreeText(foldLive(h), node.id).includes('View 3 agents')),
+    allButtons.length === 6 && allButtons.some(node => subtreeText(foldLive(h), node.id).includes('View all 10 agents'))
+      && allButtons.some(node => subtreeText(foldLive(h), node.id).includes('View 5 agents'))
+      && allButtons.some(node => subtreeText(foldLive(h), node.id).includes('View 100 agents')),
     JSON.stringify(allButtons.map(node => ({ id: node.id, text: subtreeText(foldLive(h), node.id) }))))
-  h.capture(`${preset}-workflow-phases-1280x800-dark`, 'the phase bodies with member rows and scoped browse buttons')
+
+  // Run C: 100 members in ONE phase inside the real client. The proof is what
+  // the client actually painted, not what the mapper could build: counts, only
+  // the first three abnormal rows, the hidden count and one button.
+  const bulkRun = findRunNode(h, 'bulk-100')
+  h.check('the 100-member Run opens with its exact bounded summary',
+    bulkRun !== undefined && bulkRun.p.collapsed === false
+      && subtreeText(foldLive(h), bulkRun.id).includes('[running]')
+      && subtreeText(foldLive(h), bulkRun.id).includes('100 agents · 5 running · 90 completed · 4 failed · 1 cancelled'),
+    JSON.stringify(bulkRun ?? null))
+  if (bulkRun !== undefined) {
+    const bulkPhase = phaseNodes(h, bulkRun.id)[0]
+    const bulkText = bulkPhase === undefined ? '' : subtreeText(foldLive(h), bulkPhase.id)
+    const bulkChildren = bulkPhase === undefined
+      ? []
+      : [...foldLive(h).values()].filter(node => node.id.startsWith(`${bulkPhase.id}.`))
+    h.check('the 100-member Phase is bounded to counts, three anomalies and the hidden count',
+      bulkText.includes('5 running · 90 completed · 4 failed · 1 cancelled')
+        && bulkText.includes('bulk-fail-96 — failed')
+        && bulkText.includes('bulk-fail-97 — failed')
+        && bulkText.includes('bulk-fail-98 — failed')
+        && !bulkText.includes('bulk-fail-99')
+        && !bulkText.includes('bulk-cancel-100')
+        && bulkText.includes('… 2 more abnormal')
+        && !bulkText.includes('bulk-done-')
+        && bulkText.includes('View 100 agents')
+        && bulkChildren.length < 14,
+      JSON.stringify({ id: bulkPhase?.id ?? null, childCount: bulkChildren.length, text: bulkText.slice(0, 400) }))
+    h.check('the single large Phase paints no duplicate run-level View all entry',
+      !subtreeText(foldLive(h), bulkRun.id).includes('View all 100 agents'),
+      JSON.stringify(bulkRun ?? null))
+  }
+  h.capture(`${preset}-workflow-phases-1280x800-dark`, 'the phase bodies with member rows, the bounded 100-member phase and scoped browse buttons')
 
   // A REAL control-injected click on the visible scoped button: the client's
   // own `action` event must reach the production TaskRuntime, which opens the
@@ -435,7 +475,7 @@ export default async function (h) {
   // subagent catalog entries in this isolated pane).
   const actionsBefore = records(h).filter(entry => entry.kind === 'client.action' && entry.act === WORKFLOW_ACTION).length
   const browseWitness = await revealHead(h, 'Workflow scoped browse',
-    snapshot => buttonByText(snapshot, h, 'View all 8 agents'))
+    snapshot => buttonByText(snapshot, h, 'View all 10 agents'))
   h.check('the scoped browse button has a visible clickable fragment', browseWitness !== undefined,
     JSON.stringify(browseWitness === undefined ? null : rect(browseWitness.head)))
   if (browseWitness === undefined) { finish(h, { ...extra, qualification: 'SCOPED_BROWSE_NOT_VISIBLE' }); return }
@@ -487,7 +527,7 @@ export default async function (h) {
   h.check('the folded Run still paints its head status and exact summary',
     foldLive(h).get(run.id)?.p.collapsed === true
       && subtreeText(foldLive(h), run.id).includes('[running]')
-      && subtreeText(foldLive(h), run.id).includes('8 agents'),
+      && subtreeText(foldLive(h), run.id).includes('10 agents'),
     JSON.stringify(foldLive(h).get(run.id) ?? null))
   h.capture(`${preset}-workflow-closed-1280x800-dark`, 'the folded Run keeps its head facts')
   const reopenWitness = await revealHead(h, 'Workflow run reopen', snapshot => sectionHeadByText(snapshot, h, 'Workflow deploy-backend'))
@@ -504,6 +544,43 @@ export default async function (h) {
     foldLive(h).get(prepare.id)?.p.collapsed === true,
     JSON.stringify(foldLive(h).get(prepare.id) ?? null))
 
+  // Reopen the manually closed Phase so the growth is observable, then let a
+  // same-source official update grow Prepare 5→6: the real client must switch
+  // that Phase to summary mode, retain its key/id, and repaint the Run summary
+  // from that same canonical row.
+  const prepareReopen = await revealHead(h, 'Prepare phase reopen',
+    snapshot => sectionHeadByText(snapshot, h, 'Prepare'))
+  if (!await clickToggle(h, prepareReopen, prepare.id, false, 'Prepare phase reopen')) {
+    finish(h, { ...extra, qualification: 'PHASE_REOPEN_NOT_DELIVERED' })
+    return
+  }
+  if (!await waitUntil(h, 'the exact Prepare section reopens before the growth',
+    () => foldLive(h).get(prepare.id)?.p.collapsed === false)) {
+    finish(h, { ...extra, qualification: 'PHASE_REOPEN_NOT_RENDERED' })
+    return
+  }
+  h.check('the late Phase growth is appended through the real Session writer',
+    (await runCase(h, 'workflow-grow'))?.status === 'ok')
+  // The client's own painted text is the authority for the summary switch; the
+  // SDK wire recorder can lag a large (100-member) frame, and the PNG/text pair
+  // is what the user actually sees.
+  const paintedText = () => h.texts(h.snapshot()).join('\n')
+  if (!await waitUntil(h, 'the same Prepare section id switches to summary mode', () =>
+    paintedText().includes('2 running · 3 completed · 1 failed')
+      && !paintedText().includes('build-1 — completed'))) {
+    finish(h, { ...extra, qualification: 'PHASE_SUMMARY_NOT_RENDERED' })
+    return
+  }
+  h.check('the grown Phase keeps exactly one bounded anomaly preview and its own View button',
+    paintedText().includes('build-2 — failed')
+      && paintedText().includes('View 6 agents')
+      && !paintedText().includes('build-1'),
+    JSON.stringify(paintedText().slice(0, 400)))
+  h.check('the Run head summary follows the same-source member growth',
+    paintedText().includes('11 agents'),
+    JSON.stringify(paintedText().slice(0, 400)))
+  h.capture(`${preset}-workflow-grown-1280x800-dark`, 'the same Phase after the real 5→6 summary switch')
+
   // Same-source late official events: the run settles clean.
   h.check('the late official settle is appended through the real Session writer',
     (await runCase(h, 'workflow-late-settle'))?.status === 'ok')
@@ -513,9 +590,17 @@ export default async function (h) {
     finish(h, { ...extra, qualification: 'LATE_SETTLE_NOT_RENDERED' })
     return
   }
-  h.check('one Workflow row update did not remount unrelated history',
-    foldLive(h).has(run.id), JSON.stringify({ runId: run.id }))
-  h.capture(`${preset}-workflow-settled-1280x800-dark`, 'the settled clean Run after the late official events')
+  h.check('the settled Run keeps its real completed status and still-open abnormal facts',
+    subtreeText(foldLive(h), run.id).includes('[completed]')
+      && foldLive(h).get(run.id)?.p.collapsed === false
+      && subtreeText(foldLive(h), run.id).includes('11 agents'),
+    JSON.stringify(foldLive(h).get(run.id) ?? null))
+  h.measure('same-source settle kept the sibling Run/Bulk identities stable', JSON.stringify({
+    runId: run.id,
+    cleanRunId: findRunNode(h, 'audit-done')?.id ?? null,
+    bulkRunId: findRunNode(h, 'bulk-100')?.id ?? null,
+  }))
+  h.capture(`${preset}-workflow-settled-1280x800-dark`, 'the settled Run after the late official events')
 
   // Viewport matrix over the still-mounted Workflow run.
   const matrix = []

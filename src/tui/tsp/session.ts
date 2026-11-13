@@ -95,7 +95,7 @@ import { welcomeView, TSP_WELCOME_SHEET, TSP_WELCOME_STYLES } from './welcome-vi
 import { pickWelcomeWhaleVariant, welcomeWhalePlainLines } from '../components/welcome-whale.ts'
 import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
 import type { TspFooterAffordances } from '../../domain/footer/layout.ts'
-import { TspWorkHub } from './work-hub.ts'
+import { TspWorkHub, workHubPaneWidthSupported } from './work-hub.ts'
 import {
   WORK_DETAILS_REGION,
   buildWorkDetails,
@@ -807,6 +807,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * semantic stamp and how to materialize that ONE block.
    */
   let lastMainBlocks: readonly TranscriptMainBlockDescriptor[] = []
+  /** The scoped-browse admission the current descriptors were built with. The
+   *  Workflow button's existence is part of the committed Main, so a live
+   *  admission flip (resize crossing the Hub floor, seat change, late bind)
+   *  converges the descriptors before the next frame instead of leaving a
+   *  painted entry whose click the same predicate would refuse. `undefined`
+   *  means no Main projection was built yet. */
+  let committedBrowseAdmission: boolean | undefined
   let modelPicker: TspModelPicker | undefined
   let queueManagerPresenter: TspQueueManager | undefined
   /** TSP-7 PR-G: the composer's anchored quick Model/Effort selector. A local
@@ -2038,6 +2045,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         rebuildLastMain()
       }
     }
+    // The Workflow scoped entry is painted from the same predicate that admits
+    // its click. When the live admission flips without a transcript commit (a
+    // resize crossing the Work Hub's pane floor, a seat change, the late input
+    // bind), converge the descriptors BEFORE this frame so the committed button
+    // and the click can never disagree.
+    if (committedBrowseAdmission !== undefined
+      && committedBrowseAdmission !== scopedBrowseAdmitted()
+      && !rebuildLastMain()) return
     const draftStates = prepareDockDraftImageStates()
     if (imageProjectionAborted) return
     const dockNode = dockView(draftStates)
@@ -3056,6 +3071,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
       phaseKeysByOwner.set(message, phases)
     }
+    // ONE admission fact for this descriptor pass: the painted Workflow button
+    // and the click route must both consume it.
+    const workflowBrowseAdmitted = scopedBrowseAdmitted()
     const viewOptions = {
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       scopePrefix,
@@ -3082,9 +3100,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       ...(selectedVisual === undefined ? {} : { selectedVisual }),
       workflowDisclosure: {
         states: workflowDisclosureStates,
-        browseAvailable: scopedBrowseAdmitted(),
+        browseAvailable: workflowBrowseAdmitted,
       },
     }
+    // Capture the SAME admission fact the descriptors were stamped with.
+    committedBrowseAdmission = workflowBrowseAdmitted
     // ONE lightweight descriptor pass: keys, canonical ownership and the exact
     // semantic stamps. Node materialization belongs to the journal, which only
     // builds the blocks whose stamp changed.
@@ -3952,10 +3972,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     && !hydrating
 
   /** ONE predicate decides both whether a Workflow browse button is painted and
-   *  whether its current-frame action may reach the TaskRuntime. */
+   *  whether its current-frame action may reach the TaskRuntime. The Work Hub's
+   *  OWN pane floor is part of it: below that width the Hub refuses to present
+   *  itself, so painting the entry would be a dead control. */
   const scopedBrowseAdmitted = (): boolean => transcriptCopyAdmitted()
     && detailsCloseTask === undefined
     && projectionScope !== undefined
+    && workHubPaneWidthSupported(session.caps.cols * session.caps.cell.w)
     && taskCenterCapabilitiesNegotiated()
     && boundHandlers?.workflowScopedAgentsAvailable?.() === true
     && boundHandlers?.openWorkflowScopedAgents !== undefined
@@ -5557,10 +5580,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       inputBound = true
       boundHandlers = handlers
       // The scoped Workflow browse entry is admitted by the BOUND business
-      // entry. A transcript already committed before the bind must repaint
-      // once now, or a historical Workflow card would stay without its real
-      // button until an unrelated official event happened.
-      if (lastMessages.some(message => message.kind === 'workflow') && rebuildLastMain()) render()
+      // entry. `render()` converges the descriptors when this bind flipped the
+      // admission, so a transcript committed before the bind gains its real
+      // button now instead of waiting for an unrelated official event.
+      render()
       // Consume the held pre-bind keys ONCE, in arrival order. An exit
       // intent among them (possible only when held edits emptied the draft)
       // routes the exit through the same bound handler; the caller's

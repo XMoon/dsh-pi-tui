@@ -4941,3 +4941,44 @@ test('a Workflow row committed before bindInput gains its scoped button when the
     await harness.session.close()
   }
 })
+
+test('the Workflow scoped button follows the Work Hub pane floor across resize round trips', async () => {
+  const children: TaskSubagentEntry[] = [
+    { kind: 'child', id: 'child-a', label: 'prepare-a', mode: 'one-shot', activity: 'running', hasChildren: false, parentId: '', depth: 1 },
+    { kind: 'child', id: 'child-b', label: 'prepare-b', mode: 'one-shot', activity: 'running', hasChildren: false, parentId: '', depth: 1 },
+  ]
+  const harness = await mountTspHarness({ displayState: { preset: 'full' }, sessionBrowserCapabilities: true })
+  const browseButton = (): ModeWireNode | undefined => mountedNodes(harness).find(node => node.k === 'button'
+    && (node.p['actions'] as { readonly click?: unknown } | undefined)?.click === 'dsh-workflow-scoped-agents')
+  try {
+    attachWorkflowTaskSource(harness.surface, children)
+    harness.surface.bindRendererInput()
+    for (const event of [
+      ev('turn/start', { turn: 1 }, 0),
+      ev('tool-workflow/run-start', { runId: 'run-width', name: 'deploy' }, 1),
+      ev('tool-workflow/agent-start', { runId: 'run-width', seq: 1, label: 'prepare-a', phase: 'Prepare', childId: 'child-a' }, 2),
+      ev('tool-workflow/agent-start', { runId: 'run-width', seq: 2, label: 'prepare-b', phase: 'Prepare', childId: 'child-b' }, 3),
+    ]) harness.route(event)
+    harness.surface.paintNow()
+    await awaitWireFact(() => browseButton() !== undefined, 'the scoped button at the wide pane')
+    const wideId = browseButton()!.id
+    // 39 columns × the scripted 8px cell = 312px, below the Work Hub's 320px floor.
+    harnessFreeInput(harness.tern, { ev: 'resize', sf: harness.tern.frames.at(-1)!.sf, cols: 39 })
+    await awaitWireFact(() => harness.session.caps.cols === 39 && browseButton() === undefined,
+      'the wide→narrow resize retires the scoped button with the Hub floor')
+    harnessFreeInput(harness.tern, {
+      ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: wideId,
+      act: 'dsh-workflow-scoped-agents', raw: {},
+    })
+    await settle() // bounded window: the retired wide id must not paint or open a Hub
+    assert.equal(mountedNodes(harness).some(node => node.k === 'picker'), false,
+      'the retired wide id cannot open the Hub from a too-narrow pane')
+    harnessFreeInput(harness.tern, { ev: 'resize', sf: harness.tern.frames.at(-1)!.sf, cols: 120 })
+    await awaitWireFact(() => harness.session.caps.cols === 120 && browseButton() !== undefined,
+      'the narrow→wide resize repaints the accepted scoped button')
+    assert.equal(browseButton()!.id, wideId, 'the same Workflow root keeps its presentation identity')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
