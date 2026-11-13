@@ -6665,14 +6665,16 @@ compositeTuiLine() protects a Kitty/iTerm2 APC from being sliced as text, but wh
 
 #### Why it exists
 
-The differential renderer compared every document row from 0, so any change ABOVE the physical viewport (e.g. a spinner pushed into scrollback that keeps animating, or a streaming block that scrolled off) set firstChanged below prevViewportTop and forced fullRender(true): CSI 2J + CSI H + CSI 3J plus a full repaint of the whole document on every animation tick. In a small pane this is a continuous whole-screen flicker and it also rewrites (destroys) the terminal scrollback, including pre-TUI history. The physical screen cannot address rows above the viewport top without clearing them, so committed scrollback must be treated as immutable by the incremental path; only a full render (width/height change, shrink that would move the viewport up, or an image-range expansion) may rewrite it.
+The differential renderer compared every document row from 0, so any change ABOVE the physical viewport (e.g. a spinner pushed into scrollback that keeps animating, or a streaming block that scrolled off) set firstChanged below prevViewportTop and forced fullRender(true): CSI 2J + CSI H + CSI 3J plus a full repaint of the whole document on every animation tick. In a small pane this is a continuous whole-screen flicker and it also rewrites (destroys) the terminal scrollback, including pre-TUI history. The physical screen cannot address rows above the viewport top without clearing them, so committed scrollback must be treated as immutable by the incremental path; only a full render (width/height change, shrink that would move the viewport up, or an image-range expansion) may rewrite it. The same immutability covers image state: a skipped off-screen image swap must not replace the cleanup record for the image the terminal still holds, or a later destructive clear would leave that placement orphaned.
 
 #### Changed surface
 
 - doRender() starts the first/last-changed scan at the current viewport top (diffScanStart = heightChanged ? 0 : prevViewportTop): text changes in rows [0, prevViewportTop) no longer produce a changed row and no longer force a full redraw. Height changes keep the whole-buffer scan (Termux relies on it; non-Termux already full-rendered above).
 - The full-redraw guard above the paint path keeps the image-expansion case (firstChanged < prevViewportTop, still reachable through expandChangedRangeForImages) and additionally fires when the new content no longer fills the previous viewport (frameViewportTop < prevViewportTop): the viewport cannot move UP differentially, so the shrink case restores the tail view with a full redraw instead of leaving blank rows at the bottom.
 - The no-changes fast path keeps the previous raw-line cache for the skipped prefix [0, diffScanStart): the terminal still holds the committed text there, so the raw cache stays paired with the untouched processed lines and a later full render reprocesses those rows from their current raw instead of replaying a stale processed line.
-- Committed scrollback consequently keeps the text as it was when the row was last painted (or as a later full render rewrote it); an off-screen animation tick writes NOTHING to the terminal.
+- Committed scrollback consequently keeps the text as it was when the row was last painted (or as a later full render rewrote it); an off-screen animation tick writes no rows, no clear sequences (2J/3J) and no image commands (only the per-frame hardware-cursor bookkeeping sequence emitted by positionHardwareCursor remains).
+- Every incremental commit (no-change, deleted-lines and painted paths) keeps the PREVIOUS text, raw and image-metadata caches for the skipped prefix [0, diffScanStart) and rebuilds previousKittyImageIds from the merged ids, so the model keeps matching committed scrollback: an off-screen Kitty swap is never recorded as emitted, the still-placed image stays in the cleanup record, and a later full render deletes exactly the images still physically placed.
+- The deleted-lines path applies the same viewport-move-up rule as the paint path (frameViewportTop < prevViewportTop); it subsumes the old targetRow < prevViewportTop check, so a pure tail deletion that would move the viewport up restores the tail view instead of leaving blank rows at the bottom.
 
 #### Dependency map
 
@@ -6694,11 +6696,13 @@ The differential renderer compared every document row from 0, so any change ABOV
 - Audit note: The Screen's diff internals are not part of the extension surface; custom components keep rendering whole-line arrays and observe only that off-screen rows are no longer rewritten per tick.
 
 **Behavioral coupling**
-- An off-screen-only change produces zero terminal writes and no fullRedraws growth.
+- An off-screen-only change produces no row, clear or image writes (only the per-frame hardware-cursor bookkeeping sequence remains) and no fullRedraws growth.
 - A change inside the viewport stays differential and is repainted.
 - A mixed frame (off-screen + in-viewport change) repaints only the in-viewport rows without clearing.
 - A shrink that would move the viewport up (frameViewportTop < prevViewportTop) still full-renders and restores the tail view, including the variant whose changed rows stay inside the old viewport (previously differential with blank bottom rows).
 - A released SIXEL history fallback is still width-clamped before any full render writes it (X073 invariant, now exercised through a height-change full render).
+- A pure tail deletion that would move the viewport up full-renders and restores the tail view.
+- An off-screen Kitty image swap keeps the still-placed image in the cleanup record; a later full render deletes it and paints the current image.
 - Audit note: The visible contract is: committed scrollback is immutable for the incremental path; the physical viewport follows the tail for first render, append, resize and shrink.
 
 #### Guarding tests
@@ -6707,6 +6711,8 @@ The differential renderer compared every document row from 0, so any change ABOV
 - packages/pi-tui/test/tui-render.test.ts: the existing full-redraw suite still pins width/height/shrink full renders, including 'full re-renders when deleted lines move the viewport upward' and the transient-component branch switch.
 - packages/pi-tui/test/tui-sixel-main.test.ts: X073 - 'a released history fallback is width-clamped before a full render can write it' now forces the same-width full render through a height change instead of an above-viewport text change (X078 removed that trigger); the clamp assertions are unchanged.
 - packages/pi-tui/test/tui-render.test.ts: X078 - a shrink that would move the viewport up while a viewport row changed (clearOnShrink explicitly off) full-renders and restores the exact tail viewport, pinning the second full-redraw disjunct with its own witness.
+- packages/pi-tui/test/tui-render.test.ts: X078 - a pure tail deletion that would move the viewport up (clearOnShrink explicitly off) full-renders and restores the exact tail viewport, pinning the deleted-lines viewport rule.
+- packages/pi-tui/test/tui-render.test.ts: X078 - an off-screen Kitty image swap next to a visible text change stays differential, never touches the placed image, and the next full render deletes the still-held image and paints the current one; removal of either the merged-prefix commit or the deleted-path rule turns the corresponding test red.
 
 #### Upstream comparison
 
@@ -6735,4 +6741,4 @@ The differential renderer compared every document row from 0, so any change ABOV
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Source-verified against the pinned v1.5.0 tree (f9a2636): the upstream diff loop starts at row 0 and full-renders on firstChanged < prevViewportTop. Evidence level is the fork test suite (1481 pass incl. the new X078 group); the real-terminal flicker reproduction belongs to the PR record, not this ledger. Transient cache pairing (known, convergent): the no-changes path commits the image-metadata caches wholesale while keeping previousLines for the skipped prefix, so an above-viewport SIXEL candidate whose raw changed can hold previousLines[row]=old DCS against zeroed metadata until the next full render; the incremental path never repaints those rows (prevViewportTop never shrinks there) and deleteChangedKittyImages/commitSixelFrame never read them, so this stays within the declared immutable-scrollback convergence semantics.
+- Notes: Source-verified against the pinned v1.5.0 tree (f9a2636): the upstream diff loop starts at row 0 and full-renders on firstChanged < prevViewportTop. Evidence level is the fork test suite (1481 pass incl. the new X078 group); the real-terminal flicker reproduction belongs to the PR record, not this ledger. Every incremental commit now keeps the full previous cache (raw, processed text and image metadata) for the skipped above-viewport prefix, so the model equals committed scrollback; a later full render reprocesses the raw, repaints the row and deletes exactly the images the model still holds.

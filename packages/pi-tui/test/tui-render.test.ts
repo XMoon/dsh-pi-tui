@@ -1856,4 +1856,86 @@ describe("Main-screen changes above the viewport (dsh-pi-tui divergence X078)", 
 		]);
 		tui.stop();
 	});
+
+	it("full re-renders a pure tail deletion that would move the viewport up", async () => {
+		const terminal = new LoggingVirtualTerminal(60, VIEWPORT_ROWS);
+		const tui = new TuiMainScreen(terminal);
+		tui.setClearOnShrink(false); // the viewport-move-up guard itself must fire
+		const component = new TestComponent();
+		tui.addChild(component);
+		component.lines = Array.from({ length: 30 }, (_, i) => `Line ${i}`);
+		tui.start();
+		await terminal.waitForRender();
+
+		const redrawsBefore = tui.fullRedraws;
+		// Pure tail deletion: rows 0-24 are unchanged, rows 25-29 disappear. The
+		// deleted-lines path must apply the same viewport-move-up rule as the
+		// paint path, or the screen keeps rows 20-24 with blank rows below.
+		component.lines = Array.from({ length: 25 }, (_, i) => `Line ${i}`);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.ok(tui.fullRedraws > redrawsBefore, "a viewport-moving pure deletion must full-render");
+		assert.deepStrictEqual(terminal.getViewport(), [
+			"Line 15",
+			"Line 16",
+			"Line 17",
+			"Line 18",
+			"Line 19",
+			"Line 20",
+			"Line 21",
+			"Line 22",
+			"Line 23",
+			"Line 24",
+		]);
+		tui.stop();
+	});
+
+	it("keeps an off-screen kitty image in the cleanup record until a full render", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const kittyAnchor = (imageId: number): string =>
+				`\x1b_Ga=p,i=${imageId},p=1,c=2,r=2,C=1,q=2;\x1b\\`;
+			const terminal = new LoggingVirtualTerminal(60, VIEWPORT_ROWS);
+			const tui = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const lines = Array.from({ length: 30 }, (_, i) => `history ${i}`);
+			lines[0] = kittyAnchor(1); // image 1, above the viewport, committed
+			lines[1] = "";
+			component.lines = lines;
+			tui.start();
+			await terminal.waitForRender();
+
+			// Row 0 swaps image 1 -> image 2 (off-screen) while a visible row
+			// changes: the skipped swap must not touch the placed image, and the
+			// cleanup record must keep it until a full render rewrites scrollback.
+			const swapped = [...lines];
+			swapped[0] = kittyAnchor(2);
+			swapped[29] = "updated tail";
+			component.lines = swapped;
+			terminal.clearWrites();
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			const mixed = terminal.getWrites();
+			assert.ok(!mixed.includes("\x1b[2J"), "the mixed frame must not clear the screen");
+			assert.ok(!mixed.includes("\x1b[3J"), "the mixed frame must not clear scrollback");
+			assert.ok(mixed.includes("updated tail"), "the visible change is painted");
+			assert.ok(!mixed.includes(deleteKittyImage(1)), "the skipped swap never touches the placed image");
+
+			// A later full render must delete the image the terminal still holds.
+			terminal.clearWrites();
+			terminal.resize(61, VIEWPORT_ROWS);
+			await terminal.waitForRender();
+			const full = terminal.getWrites();
+			assert.ok(full.includes(deleteKittyImage(1)), "the full render deletes the still-placed image");
+			assert.ok(full.includes(kittyAnchor(2)), "the full render paints the current image");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
 });
