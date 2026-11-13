@@ -77,6 +77,19 @@ import { isLocalShellCard } from '../components/transcript/local-shell-card.ts'
 import { toolTargetFactsOf, toolTargetKind } from '../transcript/tool-target-semantics.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayLog, sanitizeDisplayText } from '../presentation/terminal-text.ts'
+import {
+  WORKFLOW_ANOMALY_PREVIEW_LIMIT,
+  workflowCountsText,
+  workflowPhasePresentations,
+  workflowRunSummaryText,
+  workflowRunViewAllVisible,
+  workflowStatusCounts,
+} from '../transcript/workflow-presentation.ts'
+import {
+  effectiveWorkflowPhaseOpen,
+  effectiveWorkflowRunOpen,
+  type WorkflowRunDisclosureState,
+} from '../transcript/workflow-disclosure.ts'
 import { formatTokens } from '../token-format.ts'
 import { chartHumanText, chartProjection, chartValueRows, type ChartFact } from '../../domain/visual/chart.ts'
 import { svgDetailRows, type SvgFact } from '../../domain/visual/svg.ts'
@@ -89,6 +102,7 @@ import {
   type SelectedVisualState,
 } from './assistant-visual.ts'
 import { TRANSCRIPT_COPY_ACTION, transcriptCopyPayload } from './transcript-copy.ts'
+import { TSP_WORKFLOW_BROWSE_ACTION } from './workflow-actions.ts'
 
 /**
  * One replay-local allocator of presentation keys, scoped to a single
@@ -238,6 +252,16 @@ export interface TranscriptViewOptions {
   readonly transcriptCopyPayloads?: ReadonlyMap<TranscriptMessage, string>
   /** Settled final-Assistant metadata derived once from the current turn snapshot. */
   readonly transcriptStats?: ReadonlyMap<Extract<TranscriptMessage, { kind: 'assistant' }>, readonly string[]>
+  /**
+   * The source-scoped Workflow disclosure owner read by the mapper. Absent
+   * preserves the historical static card for pure projections and tests: no
+   * owner means no operable Run/Phase Section and no browse action.
+   */
+  readonly workflowDisclosure?: {
+    readonly states: ReadonlyMap<string, WorkflowRunDisclosureState>
+    /** Whether the current frame can open an existing read-only scoped Work Hub. */
+    readonly browseAvailable: boolean
+  }
 }
 
 /** Explicit inputs for the typed Full/Compact entry. It keeps the old
@@ -1567,11 +1591,111 @@ function compactionNode(message: TranscriptCompactionRow, key: string, options: 
   )
 }
 
-function workflowNode(message: Extract<TranscriptMessage, { kind: 'workflow' }>, key: string): Node {
-  return ui.card(
-    { key, head: sanitizedPhysicalLine(message.name) },
-    ui.badge({ key: 'state', text: message.status }),
-    ui.badge({ key: 'members', text: `${message.members.length} members` }),
+type WorkflowRow = Extract<TranscriptMessage, { kind: 'workflow' }>
+
+/** The readable status token of one Workflow member or anomaly preview. */
+function workflowMemberMark(status: WorkflowRow['status']): string {
+  switch (status) {
+    case 'completed': return '✓'
+    case 'running': return '●'
+    case 'failed': return '✗'
+    case 'cancelled': return '!'
+    case 'interrupted': return '! interrupted'
+  }
+}
+
+/** A dot-safe, injective SDK child key; business identity stays the raw phase key. */
+function workflowPhaseNodeKey(phaseKey: string): string {
+  return `phase-${Buffer.from(phaseKey, 'utf8').toString('base64url')}`
+}
+
+/** One read-only scoped Work Hub button. The frame's action index resolves its
+ *  exact target from the current canonical row; the action carries no ids. */
+function workflowBrowseNode(key: string, label: string): Node {
+  return ui.button({
+    key,
+    role: 'dsh.transcript.workflow.browse',
+    variant: 'default',
+    size: 'sm',
+    text: label,
+    actions: { click: TSP_WORKFLOW_BROWSE_ACTION },
+  })
+}
+
+function workflowNode(message: WorkflowRow, key: string, options: TranscriptViewOptions): Node {
+  const workflow = options.workflowDisclosure
+  if (workflow === undefined) {
+    return ui.card(
+      { key, head: sanitizedPhysicalLine(message.name) },
+      ui.badge({ key: 'state', text: message.status }),
+      ui.badge({ key: 'members', text: `${message.members.length} members` }),
+    )
+  }
+
+  const state = workflow.states.get(message.runId)
+  const runOpen = effectiveWorkflowRunOpen(state, message)
+  const runSummary = workflowRunSummaryText(workflowStatusCounts(message.members))
+  const headTitle = `Workflow ${sanitizedPhysicalLine(message.name)} [${message.status}]`
+  const children: Node[] = []
+  if (runOpen) {
+    const phases = workflowPhasePresentations(message.members)
+    for (const phase of phases) {
+      const phaseKey = workflowPhaseNodeKey(phase.key)
+      const phaseOpen = effectiveWorkflowPhaseOpen(state, phase)
+      const phaseHead = `${sanitizedPhysicalLine(phase.label)} · ${phase.members.length} agent${phase.members.length === 1 ? '' : 's'}`
+      const body: Node[] = []
+      if (phaseOpen) {
+        if (phase.mode === 'inline') {
+          for (const member of phase.members) {
+            body.push(ui.text({
+              key: `member-${member.seq}`,
+              text: sanitizeDisplayText(`${workflowMemberMark(member.status)} ${member.label} — ${member.status}`),
+              wrap: 'word',
+            }))
+          }
+        } else {
+          const counts = workflowCountsText(phase.counts)
+          if (counts !== '') body.push(ui.text({ key: 'counts', text: sanitizeDisplayText(counts), wrap: 'word' }))
+          for (const member of phase.anomalyPreview.slice(0, WORKFLOW_ANOMALY_PREVIEW_LIMIT)) {
+            body.push(ui.text({
+              key: `anomaly-${member.seq}`,
+              text: sanitizeDisplayText(`${workflowMemberMark(member.status)} ${member.label} — ${member.status}`),
+              wrap: 'word',
+            }))
+          }
+          if (phase.hiddenAnomalyCount > 0) {
+            body.push(ui.text({
+              key: 'anomaly-hidden',
+              text: sanitizeDisplayText(`… ${phase.hiddenAnomalyCount} more abnormal`),
+              tone: 'muted',
+            }))
+          }
+        }
+        if (workflow.browseAvailable) {
+          body.push(workflowBrowseNode('browse', `View ${phase.members.length} agents`))
+        }
+      }
+      children.push(ui.section(
+        { key: phaseKey, head: phaseHead, collapsible: true, collapsed: !phaseOpen },
+        ...body,
+      ))
+    }
+    if (workflow.browseAvailable && workflowRunViewAllVisible(message.members.length, phases.length)) {
+      children.push(workflowBrowseNode('browse-all', `View all ${message.members.length} agents`))
+    }
+  }
+  return ui.section(
+    {
+      key,
+      head: ui.col(
+        { key: 'head', gap: 'none' },
+        ui.text({ key: 'title', text: headTitle, wrap: 'word' }),
+        ...(runSummary === '' ? [] : [ui.text({ key: 'summary', text: sanitizeDisplayText(runSummary), wrap: 'word' })]),
+      ),
+      collapsible: true,
+      collapsed: !runOpen,
+    },
+    ...children,
   )
 }
 
@@ -1693,7 +1817,7 @@ function messageNode(message: TranscriptMessage, key: string, options: Transcrip
     case 'compaction':
       return compactionNode(message, commandCompactionNodeKey(message, key, options), options)
     case 'workflow':
-      return workflowNode(message, key)
+      return workflowNode(message, key, options)
     case 'summary':
       return ui.card({ key, head: 'Earlier turns' }, ui.md({ key: 'body', text: sanitizeDisplayText(message.text) }))
   }
@@ -2118,6 +2242,20 @@ function messageStampOf(
     case 'compaction':
       parts.push(disclosureTokenOf(message, key, options))
       break
+    case 'workflow': {
+      const state = options.workflowDisclosure?.states.get(message.runId)
+      parts.push(options.workflowDisclosure === undefined ? -1 : effectiveWorkflowRunOpen(state, message) ? 1 : 0)
+      parts.push(state?.userOpen === undefined ? 0 : state.userOpen ? 1 : -1)
+      // Whether a scoped button is painted is part of this row's content.
+      parts.push(options.workflowDisclosure?.browseAvailable === true ? 1 : 0)
+      for (const phase of workflowPhasePresentations(message.members)) {
+        parts.push(phase.key)
+        parts.push(effectiveWorkflowPhaseOpen(state, phase) ? 1 : 0)
+        const userOpen = state?.phases.get(phase.key)?.userOpen
+        parts.push(userOpen === undefined ? 0 : userOpen ? 1 : -1)
+      }
+      break
+    }
     default:
       break
   }
