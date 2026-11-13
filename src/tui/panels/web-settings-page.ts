@@ -33,6 +33,7 @@
  */
 
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
+import { maskWebProviderOverrideUrl } from '../../domain/web-provider-settings.ts'
 import type { WebProviderSettings } from '../../runtime/config-port.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
@@ -90,17 +91,6 @@ export function webBillingLabel(mode: string): string {
   return WEB_BILLING_CANDIDATES.find(candidate => candidate.id === mode)?.label ?? mode
 }
 
-/** Mask the credential-bearing parts of one DISPLAYED URL override: the
- *  userinfo segment becomes `***` and any query/fragment is dropped, so a URL
- *  fact is paintable without ever exposing a credential. */
-function maskOverrideUrl(value: string): string {
-  const withoutSuffix = value.replace(/[?#].*$/u, '')
-  const match = /^([a-z][a-z0-9+.-]*:\/\/)([^/@\s]+)@/iu.exec(withoutSuffix)
-  return match === null
-    ? withoutSuffix
-    : `${match[1]}***@${withoutSuffix.slice(match[0].length)}`
-}
-
 /** One capability's NON-EMPTY rc.2 YAML-only override fields, with their
  *  configured values (a masked URL or an env NAME — never a secret value).
  *  Masking is applied HERE, centrally, so every paintable consumer (the
@@ -119,7 +109,7 @@ export function webAdvancedOverrideFields(
     if (typeof value !== 'string' || value === '') return []
     return [{
       field,
-      value: field === 'searchBaseURL' || field === 'fetchBaseURL' ? maskOverrideUrl(value) : value,
+      value: field === 'searchBaseURL' || field === 'fetchBaseURL' ? maskWebProviderOverrideUrl(value) : value,
     }]
   })
 }

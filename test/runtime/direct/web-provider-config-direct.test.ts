@@ -21,6 +21,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DirectConfigPort, DirectWebProviderConfig } from '../../../src/runtime/direct/config-direct.ts'
+import { UNPARSEABLE_WEB_OVERRIDE_URL } from '../../../src/domain/web-provider-settings.ts'
 import type { HostContextLike } from '../../../src/runtime/direct/config-direct.ts'
 
 interface Descriptor {
@@ -180,6 +181,28 @@ test('a displayed URL override is MASKED: userinfo and query/fragment never reac
   const serialized = JSON.stringify(read)
   assert.doesNotMatch(serialized, /secret|user:|token=/u,
     `no credential material survives the projection:\n${serialized}`)
+
+  // URL userinfo may itself contain `@`: structured URL parsing treats the
+  // LAST `@` as the userinfo/host boundary, so no fragment of the password
+  // may survive as a host or path.
+  const multipleAt = host({ api: {
+    searchBaseURL: 'https://alice:p1@p2@api.example.test/v1/tools',
+  } })
+  const multipleRead = await new DirectWebProviderConfig(multipleAt.ctx).read()
+  assert.equal(multipleRead?.advanced.searchBaseURL, 'https://***@api.example.test/v1/tools',
+    'multiple userinfo @ characters are fully masked')
+  assert.doesNotMatch(JSON.stringify(multipleRead), /alice|p1|p2/u,
+    'no userinfo fragment survives the multi-@ projection')
+
+  // A control-bearing URL is not safe to echo at all; report only configured.
+  const newlineUrl = host({ api: {
+    searchBaseURL: 'https://api.example.test/v1?token=abc\nSECRET_AFTER_NL',
+  } })
+  const newlineRead = await new DirectWebProviderConfig(newlineUrl.ctx).read()
+  assert.equal(newlineRead?.advanced.searchBaseURL, UNPARSEABLE_WEB_OVERRIDE_URL,
+    'an unparseable/control-bearing URL is reported as configured only')
+  assert.doesNotMatch(JSON.stringify(newlineRead), /SECRET_AFTER_NL|token=/u,
+    'the unparseable URL value never survives the DTO')
 })
 
 test('read() reports UNAVAILABLE for a missing section, an unreadable count or a foreign billing value', async () => {

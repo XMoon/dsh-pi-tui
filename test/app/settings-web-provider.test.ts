@@ -1738,7 +1738,7 @@ test('the page states the rc.2 defaults, billing and read-only overrides', async
       fetchProvider: 'http',
       api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
       advanced: {
-        searchBaseURL: 'https://user:secret@search.example.test/v1?token=x',
+        searchBaseURL: 'https://alice:p1@p2@search.example.test/v1?token=x',
         searchApiKeyEnv: 'SEARCH_API_KEY_ENV',
       },
       credential: { configured: true, source: 'file' },
@@ -1786,6 +1786,8 @@ test('the page states the rc.2 defaults, billing and read-only overrides', async
     const advancedFrame = stripTerminalSequences(overridden.render(140).join('\n'))
     assert.match(advancedFrame, /Current: Host YAML: searchBaseURL=https:\/\/\*\*\*@search\.example\.test\/v1/u)
     assert.match(advancedFrame, /searchApiKeyEnv=SEARCH_API_KEY_ENV/u)
+    assert.doesNotMatch(advancedFrame, /alice|p1|p2|token=/u,
+      'multiple userinfo @ characters and query never survive the page')
     assert.doesNotMatch(advancedFrame, /secret|user:|token=/u, 'no credential material is ever painted')
   } finally {
     overridden.dispose()
@@ -1935,9 +1937,10 @@ test('Host override values are terminal-sanitized before the Configured override
     for (let step = 0; step < 4; step += 1) page.handleInput('\x1b[B')
     page.handleInput('\r')
     const raw = page.render(140).join('\n')
-    // The URL remains masked; the Host-origin values never carry terminal
-    // control sequences or row breaks into the rendered frame.
-    assert.ok(raw.includes('https://***@search.example.test/v1'), 'the masked URL fact stays visible')
+    // An unparseable URL is reported only as configured (never echoed); the
+    // Host-origin values never carry terminal control sequences or row breaks
+    // into the rendered frame.
+    assert.ok(raw.includes('configured URL unavailable'), 'the unparseable URL is reported as configured only')
     assert.equal(raw.includes('\x1b[5;5H'), false, 'ANSI cursor controls are stripped')
     assert.equal(raw.includes('\x1b]0;'), false, 'OSC title controls are stripped')
     assert.equal(raw.includes('pwn-title'), false, 'OSC payload never reaches the terminal')

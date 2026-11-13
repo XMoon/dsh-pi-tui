@@ -82,15 +82,31 @@ export interface WebApiAdvancedFacts {
   legacyOverrideDetected?: boolean
 }
 
-/** Mask the credential-bearing parts of one DISPLAYED URL override fact: the
- *  userinfo segment becomes `***` and any query/fragment is dropped, so the
- *  detached fact can never carry a credential into the UI or a diagnostic. */
-function maskedOverrideUrl(value: string): string {
-  const withoutSuffix = value.replace(/[?#].*$/u, '')
-  const match = /^([a-z][a-z0-9+.-]*:\/\/)([^/@\s]+)@/iu.exec(withoutSuffix)
-  return match === null
-    ? withoutSuffix
-    : `${match[1]}***@${withoutSuffix.slice(match[0].length)}`
+/** The display fact for a configured URL the Host cannot prove parseable.
+ *  The value is deliberately NOT echoed: reporting only that it is configured
+ *  is safer than guessing which bytes are credentials. */
+export const UNPARSEABLE_WEB_OVERRIDE_URL = '[configured URL unavailable]'
+
+/** Mask the credential-bearing parts of one DISPLAYED URL override fact.
+ *  Structured URL parsing is the authority: the LAST `@` separates the
+ *  userinfo from the host (so a password containing `@` cannot leak), while
+ *  query/fragment and every raw control character are dropped. A value that
+ *  cannot be parsed as an http(s) URL is reported only as configured, never
+ *  echoed. */
+export function maskWebProviderOverrideUrl(value: string): string {
+  if (/[\u0000-\u001f\u007f]/u.test(value)) return UNPARSEABLE_WEB_OVERRIDE_URL
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    return UNPARSEABLE_WEB_OVERRIDE_URL
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return UNPARSEABLE_WEB_OVERRIDE_URL
+  if (parsed.host === '') return UNPARSEABLE_WEB_OVERRIDE_URL
+  const authority = `${parsed.protocol}//${parsed.host}${parsed.pathname}`
+  return parsed.username === '' && parsed.password === ''
+    ? authority
+    : `${parsed.protocol}//***@${parsed.host}${parsed.pathname}`
 }
 
 /** Project one `web-deepseek-api` descriptor value into the advanced override
@@ -101,7 +117,7 @@ export function webApiAdvancedFactsOf(value: Record<string, unknown>): WebApiAdv
   const copyField = (field: 'searchBaseURL' | 'searchApiKeyEnv' | 'fetchBaseURL' | 'fetchApiKeyEnv'): string | undefined => {
     const raw = value[field]
     if (typeof raw !== 'string' || raw === '') return undefined
-    return field === 'searchBaseURL' || field === 'fetchBaseURL' ? maskedOverrideUrl(raw) : raw
+    return field === 'searchBaseURL' || field === 'fetchBaseURL' ? maskWebProviderOverrideUrl(raw) : raw
   }
   const searchBaseURL = copyField('searchBaseURL')
   const searchApiKeyEnv = copyField('searchApiKeyEnv')

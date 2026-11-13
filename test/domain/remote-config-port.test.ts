@@ -22,6 +22,7 @@ import { RemoteConfigPort } from '../../src/runtime/remote/config-remote.ts'
 import { DirectWebProviderConfig, type HostContextLike } from '../../src/runtime/direct/config-direct.ts'
 import type { ProviderCatalogEntry } from '../../src/domain/catalog/provider.ts'
 import { serializeTuiSettingsMutation, type ProviderProfileConfig, type TuiSettingsDoc } from '../../src/runtime/config-port.ts'
+import { UNPARSEABLE_WEB_OVERRIDE_URL } from '../../src/domain/web-provider-settings.ts'
 import { createObservableGenerationHarness } from '../support/remote-generation.ts'
 import { CredentialWorkflow, resolveLoginDestination, resolveLogoutDestination } from '../../src/app/command/credential-workflow.ts'
 
@@ -1906,6 +1907,34 @@ test('a displayed Remote URL override is MASKED: userinfo and query/fragment nev
   const serialized = JSON.stringify(read)
   assert.doesNotMatch(serialized, /secret|user:|token=/u,
     `no credential material survives the projection:\n${serialized}`)
+
+  const multipleAt = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_API_NS)!.value = {
+      ...WEB_API_DEFAULTS,
+      fetchBaseURL: 'https://alice:p1@p2@fetch.example.test/v1?token=x',
+    }
+  })
+  await multipleAt.port.describe()
+  const multipleRead = await multipleAt.port.web.read()
+  assert.equal(multipleRead?.advanced.fetchBaseURL, 'https://***@fetch.example.test/v1',
+    'multiple userinfo @ characters are fully masked on the Remote path')
+  assert.doesNotMatch(JSON.stringify(multipleRead), /alice|p1|p2|token=/u,
+    'no userinfo fragment survives the Remote multi-@ projection')
+
+  const newline = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_API_NS)!.value = {
+      ...WEB_API_DEFAULTS,
+      fetchBaseURL: 'https://api.example.test/v1?token=abc\nSECRET_AFTER_NL',
+    }
+  })
+  await newline.port.describe()
+  const newlineRead = await newline.port.web.read()
+  assert.equal(newlineRead?.advanced.fetchBaseURL, UNPARSEABLE_WEB_OVERRIDE_URL,
+    'an unparseable/control-bearing URL is reported as configured only on the Remote path')
+  assert.doesNotMatch(JSON.stringify(newlineRead), /SECRET_AFTER_NL|token=/u,
+    'the unparseable Remote URL value never survives the DTO')
 })
 
 test('a foreign Remote billing value is UNAVAILABLE, never a silent auto', async () => {
