@@ -15,7 +15,7 @@ import { herdrSessionProjection } from '../../src/client/herdr/session.ts'
 const ID = 'session-0123456789abcdef0123456789abcdef'
 const UUID_ID = 'session-123e4567-e89b-12d3-a456-426614174000'
 
-test('HS-01 a legal Direct Session projects the exact five-word public cold-open argv', () => {
+test('a legal Direct Session projects the exact five-word public cold-open argv', () => {
   assert.deepEqual(herdrSessionProjection(ID, 'pi-tui'), {
     sessionId: ID,
     resumeArgv: ['dsh', '--profile', 'pi-tui', '--session', ID],
@@ -27,13 +27,13 @@ test('HS-01 a legal Direct Session projects the exact five-word public cold-open
     'the argv order is fixed: dsh --profile <actual> --session <id>')
 })
 
-test('HS-02 a Remote Session reports the canonical id only', () => {
+test('a Remote Session reports the canonical id only', () => {
   assert.deepEqual(herdrSessionProjection(ID, undefined), { sessionId: ID })
   assert.equal(Object.hasOwn(herdrSessionProjection(ID, undefined) ?? {}, 'resumeArgv'), false,
     'Remote must not carry any resume argv field')
 })
 
-test('HS-03 both canonical id forms are accepted', () => {
+test('both canonical id forms are accepted as reportable Sessions', () => {
   for (const id of [
     ID,
     'session_0123456789abcdef0123456789abcdef',
@@ -44,7 +44,7 @@ test('HS-03 both canonical id forms are accepted', () => {
   }
 })
 
-test('HS-04 sessionless and non-canonical ids never become a resume target', () => {
+test('sessionless and non-canonical ids never become a resume target', () => {
   for (const id of [
     undefined,
     '',
@@ -61,7 +61,7 @@ test('HS-04 sessionless and non-canonical ids never become a resume target', () 
   }
 })
 
-test('HS-05 an illegal Direct profile drops only the resume argv, never the Session id', () => {
+test('an illegal Direct profile drops only the resume argv, never the Session id', () => {
   for (const profile of [
     "pro'file",
     'pro\nfile',
@@ -75,7 +75,7 @@ test('HS-05 an illegal Direct profile drops only the resume argv, never the Sess
   }
 })
 
-test('HS-06 the upstream 8192-byte argv ceiling drops the resume argv', () => {
+test('the upstream 8192-byte argv ceiling drops the resume argv', () => {
   const fixedBytes = ['dsh', '--profile', '--session', ID]
     .reduce((total, arg) => total + Buffer.byteLength(arg, 'utf8'), 0)
   const fitting = herdrSessionProjection(ID, 'x'.repeat(8192 - fixedBytes))
@@ -87,7 +87,7 @@ test('HS-06 the upstream 8192-byte argv ceiling drops the resume argv', () => {
   assert.deepEqual(over, { sessionId: ID }, 'one byte over the ceiling drops only the resume argv')
 })
 
-test('HS-07 the projection is deterministic for the same id/profile and leaks nothing else', () => {
+test('the projection is deterministic and carries no environment value', () => {
   const secret = 'herdr-hidden-secret-0123456789'
   const previous = process.env.HERDR_TEST_SECRET
   process.env.HERDR_TEST_SECRET = secret
