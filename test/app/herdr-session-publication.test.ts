@@ -249,7 +249,7 @@ test('HSP-02 a startup Resume committed before the observer install is sampled o
   // notification and make this test pass without any sample).
   await Promise.resolve()
   await Promise.resolve()
-  assert.deepEqual(observed, [], 'no observer existed for the pre-install commit')
+  assert.equal(observed.length, 0, 'no observer existed for the pre-install commit')
   ownership.subscribeScopeInvalidation(publishCurrent)
   publishCurrent()
   assert.deepEqual(observed.map(projection => projection?.sessionId), [SESSION_R],
