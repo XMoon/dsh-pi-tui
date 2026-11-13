@@ -826,10 +826,10 @@ export async function runWebProviderSettingsF3(context) {
     assert(snapshot(namespaceConfig(documentPath, WEB_API_NS)) === beforeNegativeApi,
       'UI_L6 negative: an invalid provider/count write reached the official API section')
     // The web section's provider values must be EXACTLY what the case's own
-    // earlier UI edits left (search: Search API from P2; fetch: the custom-route
-    // probe's official restore to 'http'): the four ILLEGAL writes changed none
-    // of them. Comparing against the shipped defaults would be wrong — P2's
-    // edits are legitimate.
+    // earlier UI edits left, plus the custom-route probe's official restore
+    // when the seed succeeded: the four ILLEGAL writes changed none of them.
+    // Comparing against the shipped defaults would be wrong — P2's edits are
+    // legitimate.
     const webAfterNegative = namespaceConfig(documentPath, WEB_NS) ?? {}
     const webBeforeNegativeParsed = JSON.parse(beforeNegativeWeb === 'undefined' ? '{}' : beforeNegativeWeb)
     const providerUntouched = field =>
@@ -837,14 +837,23 @@ export async function runWebProviderSettingsF3(context) {
         || webAfterNegative[field] === webBeforeNegativeParsed[field]
     assert(providerUntouched('searchProvider'),
       `UI_L6 negative: the web section's search provider changed during the negative probe: before=${beforeNegativeWeb} after=${JSON.stringify(webAfterNegative)}`)
-    assert(webAfterNegative.fetchProvider === undefined || webAfterNegative.fetchProvider === 'http',
-      `UI_L6 negative: the custom-route restore left a non-default fetch provider: ${JSON.stringify(webAfterNegative)}`)
+    // The probe restores fetchProvider to the official 'http' ONLY when the
+    // official schema accepted the custom-route seed; when it refused the seed
+    // the field is untouched and keeps the pre-probe (P2) value.
+    const customRouteSeeded = negative.customRouteSeeded === true
+    if (customRouteSeeded) {
+      assert((webAfterNegative.fetchProvider ?? OFFICIAL.fetchProvider) === OFFICIAL.fetchProvider,
+        `UI_L6 negative: the custom-route restore did not return the official fetch provider: ${JSON.stringify(webAfterNegative)}`)
+    } else {
+      assert(providerUntouched('fetchProvider'),
+        `UI_L6 negative: the refused custom-route seed still changed the fetch provider: before=${beforeNegativeWeb} after=${JSON.stringify(webAfterNegative)}`)
+    }
     // Custom provider route protection: seed an UNOFFICIAL provider id through
     // the real official settings namespace, prove the port refuses to replace
     // it, then restore the official value through the same official write. When
     // the official schema itself refuses such a seed, a custom route cannot
     // exist on a real Host and the branch is reported as NOT_VERIFIED.
-    if (negative.customRouteSeeded === true) {
+    if (customRouteSeeded) {
       assert(negative.customRouteRefusal?.rejected === true,
         `UI_L6 negative: the port accepted replacing a CUSTOM provider route: ${JSON.stringify(negative.customRouteRefusal)}`)
       assert(/custom route/u.test(negative.customRouteRefusal?.message ?? ''),
@@ -858,13 +867,15 @@ export async function runWebProviderSettingsF3(context) {
       })
     }
     await reopenWebPage(clientA, 'UI_L6 negative controls A')
-    // The custom-route probe RESTORED the fetch provider to the official `http`
-    // through the real settings namespace, so the page must show HTTP now; the
-    // search provider (P2's Search API edit) and the count/base URL are untouched.
+    // When the seed succeeded the custom-route probe RESTORED the fetch
+    // provider to the official `http` through the real settings namespace, so
+    // the page must show HTTP; when the schema refused the seed the page keeps
+    // P2's Fetch API choice. The search provider (P2's Search API edit) and the
+    // count/base URL are untouched in both branches.
     await assertPageFacts(clientA, {
       ...OFFICIAL,
       searchProviderLabel: SEARCH_API_PROVIDER_LABEL,
-      fetchProviderLabel: OFFICIAL.fetchProviderLabel,
+      fetchProviderLabel: customRouteSeeded ? OFFICIAL.fetchProviderLabel : FETCH_API_PROVIDER_LABEL,
       count: casDurableValue,
       sendOriginalQuestion: true,
       baseURL: CONSUMER_ENDPOINT,
@@ -874,9 +885,9 @@ export async function runWebProviderSettingsF3(context) {
       verdict: 'UI_L6_PASS',
       phase: 'negative-controls',
       refused: ['invalid-search-provider', 'invalid-fetch-provider', 'count-zero', 'count-51'],
-      hostWrites: 0,
-      customRouteSeeded: true,
-      customRouteReplaceRefused: true,
+      illegalHostWrites: 0,
+      customRouteSeeded,
+      customRouteReplaceRefused: negative.customRouteRefusal?.rejected === true,
       evidence: 'real Client Remote ConfigPort over the authenticated Host',
     })
 
