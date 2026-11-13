@@ -87,7 +87,7 @@ export async function runInteractionNavigationFirst(context) {
   /** Alt+W from the live modal and stop in the workspace (no navigation). */
   const enterNavigationHold = async (client, label) => {
     client.send('\x1bw')
-    await client.waitForScreen('Workspace: All workspaces', `${label} workspace opened`, 30_000)
+    await client.waitForScreen('Sessions ·', `${label} workspace opened`, 30_000)
     await client.waitForScreenGone('[1] Proceed', `${label} modal withdrawn for the hold`, 30_000)
   }
 
@@ -108,7 +108,7 @@ export async function runInteractionNavigationFirst(context) {
    */
   const holdAndNavigateTo = async (client, targetSessionId, label) => {
     client.send('\x1bw')
-    await client.waitForScreen('Workspace: All workspaces', `${label} workspace opened`, 30_000)
+    await client.waitForScreen('Sessions ·', `${label} workspace opened`, 30_000)
     client.send('/')
     await client.waitForScreen('Search all workspaces', `${label} search entered`, 15_000)
     client.send(targetSessionId)
@@ -393,7 +393,7 @@ export async function runInteractionNavigationFirst(context) {
       await clientA.waitForScreen('[y] Allow once', 'G567-N2b A approval sheet', 120_000)
       // A suspends the live sheet for navigation (hold + workspace, still on X).
       clientA.send('\x1bw')
-      await clientA.waitForScreen('Workspace: All workspaces', 'G567-N2b workspace opened', 30_000)
+      await clientA.waitForScreen('Sessions ·', 'G567-N2b workspace opened', 30_000)
       await clientA.waitForScreenGone('[y] Allow once', 'G567-N2b sheet withdrawn for the hold', 30_000)
       // The OFFICIAL Host Agent cancel aborts the pending request while A is
       // inside the hold: not a Client exit, the request lifetime itself ends.

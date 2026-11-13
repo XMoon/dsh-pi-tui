@@ -537,7 +537,11 @@ export async function runReadAuthority(context) {
         })
       // B is admitted but sessionless: it proposes no Workspace of its own, and
       // its different launch environment must not become a membership fact.
-      const baselineNonce = signalProbe(clientA, { op: 'workspaces', windowMs: 30_000, maxFrames: 3 })
+      // The stream must stay OPEN across the whole membership sequence: the
+      // `/new` create happens after the second client's baseline probe, and a
+      // slow shared-lane run must not let the window expire (or a frame budget
+      // run out on an unrelated Workspace change) before the increment frame.
+      const baselineNonce = signalProbe(clientA, { op: 'workspaces', windowMs: 90_000, maxFrames: 32 })
       await waitProbe(clientA, baselineNonce, record => record.phase === 'workspaces-open',
         'UA workspaces stream opened', 30_000)
       const baseline = await waitProbe(clientA, baselineNonce,
@@ -592,8 +596,11 @@ export async function runReadAuthority(context) {
         assert(updated !== undefined && updated.sessionIds.includes(sessionX),
           'UA the full Workspace replacement does not carry the created Session X membership')
       }
+      // The A stream closes at its OWN window (90s): the ended wait must outlast
+      // it, and the window must outlast the whole membership sequence (the B
+      // probe plus the `/new` create).
       await waitProbe(clientA, baselineNonce, record => record.phase === 'workspaces-ended',
-        'UA workspaces stream ended', 60_000)
+        'UA workspaces stream ended', 150_000)
       assert((hostSessionEvents(dshHome, sessionY) ?? []).length >= createIndex,
         'UA the Host Session log lost events during the Workspace observation')
       // A REAL mux rollover: the next read runs on the NEW generation.
