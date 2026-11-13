@@ -280,8 +280,9 @@ test('the real Host catalog paints the 13 verified B02–B14 boundaries through 
 
 // ── D3-6: rc.2 base Team and B03 in the mounted application ────────────────
 
-import { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { startS4D3Application } from '../support/application-fixture.ts'
 import { profileSelectsBundle, skippedInstallationReason, type OptionalBundleId } from '../support/optional-bundle-fixture.ts'
 
@@ -614,7 +615,7 @@ test('the mounted TUI keeps rc.2 base Team capability in the existing Tool/Activ
   await agent.whenIdle()
   // The base Team authority is mounted but OFF per Session, and the retired
   // model tool does not exist: the root must enable the mode explicitly.
-  const resolveStepTools = async (): Promise<readonly string[]> => {
+  const resolveTools = async (): Promise<{ view(scope: Agent): ReadonlyMap<string, unknown>; dispose(): void }> => {
     const tools = app.host.ctx.tools as unknown as {
       resolve(context: {
         readonly agent: Agent
@@ -622,11 +623,14 @@ test('the mounted TUI keeps rc.2 base Team capability in the existing Tool/Activ
         readonly signal: AbortSignal
       }): Promise<{ view(scope: Agent): ReadonlyMap<string, unknown>; dispose(): void }>
     }
-    const toolSet = await tools.resolve({
+    return tools.resolve({
       agent,
       modelSelection: { provider: 'scripted', model: 'review-model' },
       signal: new AbortController().signal,
     })
+  }
+  const resolveStepTools = async (): Promise<readonly string[]> => {
+    const toolSet = await resolveTools()
     try {
       return [...toolSet.view(agent).keys()]
     } finally {
@@ -637,6 +641,30 @@ test('the mounted TUI keeps rc.2 base Team capability in the existing Tool/Activ
   assert.equal(app.host.hasTool('subagent', agent), true, 'teammates use the standard subagent tool')
   assert.equal((await resolveStepTools()).includes('team_task_create'), false,
     'base Team tools start OFF in the real step admission')
+
+  // Default OFF: the conditional tool is not in the model admission, so a real
+  // model-admitted call fails with the official UNKNOWN_TOOL code and paints
+  // NO success card.
+  {
+    const toolSet = await resolveTools()
+    try {
+      const denied = await executeModelToolFixture(app.host.ctx, {
+        signal: new AbortController().signal,
+        callId: ToolCallId('s4d3-b01-off-task'),
+        name: 'team_task_create',
+        arguments: { subject: 'must not exist', description: 'the disabled Team authority must refuse creation' },
+        agent,
+        toolSet: toolSet as never,
+      })
+      assert.equal(denied.isError, true, 'a disabled Team session cannot create a task')
+      assert.match(JSON.stringify(denied.error), /UNKNOWN_TOOL/u,
+        'the conditional Team tool is not admitted to the model executor while Team mode is off')
+    } finally {
+      toolSet.dispose()
+    }
+  }
+  assert.ok(!app.view().includes('Create team task'), 'no success card is painted for the rejected OFF call')
+
   const teams = app.host.ctx.get('agentTeams') as { setEnabled(agent: unknown, enabled: boolean): Promise<void> }
   await teams.setEnabled(agent, true)
   assert.equal((await resolveStepTools()).includes('team_task_create'), true,
@@ -645,10 +673,10 @@ test('the mounted TUI keeps rc.2 base Team capability in the existing Tool/Activ
     .list(agent).map(command => command.name)
   assert.equal(commands.includes('team'), false, 'no dedicated Team command/board is created by the TUI')
 
-  // The REAL scoped Team operation travels through the same Agent/loop and
-  // lands in the existing Tool output (no Team board is involved).
+  // ── Create: the REAL scoped Team operation travels through the same
+  // Agent/loop and lands in the existing Tool output (no Team board).
   adapter.scripts.push(
-    { kind: 'tool', name: 'team_task_create', callId: 's4d3-b01-task', arguments: JSON.stringify({ subject: 'Scout one file', description: 'Read one file and report its content.' }) },
+    { kind: 'tool', name: 'team_task_create', callId: 's4d3-b01-task', arguments: JSON.stringify({ subject: 'Scout the config', description: 'Read the config and report the timeout.' }) },
     { kind: 'text', text: 'Team task created.' },
   )
   followup(agent, 'Create one shared Team task')
@@ -660,13 +688,15 @@ test('the mounted TUI keeps rc.2 base Team capability in the existing Tool/Activ
     readonly status?: string
   }
   assert.equal(typeof created.id, 'string', 'the EXACT team_task_create result is the official JSON task record')
-  assert.equal(created.subject, 'Scout one file')
+  assert.equal(created.subject, 'Scout the config')
   assert.equal(created.status, 'pending')
   assert.equal(typeof created.revision, 'number')
-  await app.waitFor(() => app.view().includes('team_task_create'), 'the real Team create Tool card')
+  await app.waitFor(() => app.view().includes('Create team task'), 'the real Team create Tool card')
+  // The model-facing description never becomes the card header identity.
+  assert.ok(!app.view().includes('report the timeout'), 'the description must never be used as the header identity')
 
-  // The shared board read returns the created subject through the same Agent
-  // and the existing Tool output (never a Team board).
+  // ── List: the shared board read returns the created subject through the same
+  // Agent and the existing Tool output (never a Team board).
   adapter.scripts.push(
     { kind: 'tool', name: 'team_task_list', callId: 's4d3-b01-list', arguments: '{}' },
     { kind: 'text', text: 'Team task listed.' },
@@ -678,9 +708,43 @@ test('the mounted TUI keeps rc.2 base Team capability in the existing Tool/Activ
   }
   assert.equal(listed.tasks?.length, 1, 'the EXACT team_task_list result is the official shared-board JSON')
   assert.equal(listed.tasks?.[0]?.id, created.id, 'the Host-generated task id crosses create -> list')
-  assert.equal(listed.tasks?.[0]?.subject, 'Scout one file')
+  assert.equal(listed.tasks?.[0]?.subject, 'Scout the config')
   assert.equal(listed.tasks?.[0]?.status, 'pending')
-  await app.waitFor(() => app.view().includes('team_task_list'), 'the real Team list Tool card')
+  await app.waitFor(() => app.view().includes('List team tasks'), 'the real Team list Tool card')
+
+  // ── Get: the fixed identity is the task id from the real create result.
+  adapter.scripts.push(
+    { kind: 'tool', name: 'team_task_get', callId: 's4d3-b01-get', arguments: JSON.stringify({ task_id: created.id }) },
+    { kind: 'text', text: 'Team task read.' },
+  )
+  followup(agent, 'Read the shared Team task')
+  await agent.whenIdle()
+  const read = JSON.parse(toolResultOf(agent, 's4d3-b01-get') ?? '') as { readonly id?: string; readonly revision?: number }
+  assert.equal(read.id, created.id, 'the EXACT team_task_get result is the same shared task')
+  assert.equal(read.revision, created.revision, 'a read does not change the revision')
+  await app.waitFor(() => app.view().includes('View team task'), 'the real Team get Tool card')
+
+  // ── Update: a real CAS edit using the revision the create returned.
+  adapter.scripts.push(
+    { kind: 'tool', name: 'team_task_update', callId: 's4d3-b01-update', arguments: JSON.stringify({ task_id: created.id, expected_revision: created.revision, action: 'edit', subject: 'Scout the config (edited)' }) },
+    { kind: 'text', text: 'Team task updated.' },
+  )
+  followup(agent, 'Update the shared Team task')
+  await agent.whenIdle()
+  const updated = JSON.parse(toolResultOf(agent, 's4d3-b01-update') ?? '') as { readonly id?: string; readonly revision?: number; readonly subject?: string }
+  assert.equal(updated.id, created.id, 'the EXACT team_task_update result is the same shared task')
+  assert.equal(updated.subject, 'Scout the config (edited)')
+  assert.equal(updated.revision, (created.revision as number) + 1, 'the edit bumps the CAS revision')
+  await app.waitFor(() => app.view().includes('Update team task'), 'the real Team update Tool card')
+
+  // The durable Session carries the ORIGINAL model tool-call JSON and the
+  // official result JSON; the display titles are never persisted into events.
+  const eventsJson = JSON.stringify(agent.session.snapshotEvents())
+  assert.ok(eventsJson.includes('Scout the config'), 'the raw create arguments stay in the Session')
+  for (const title of ['Create team task', 'List team tasks', 'View team task', 'Update team task']) {
+    assert.equal(eventsJson.includes(title), false, `the display title ${title} must not be rewritten into the Session events`)
+  }
+
   // The Host-generated id exists in NO tool argument; after expanding the
   // cards it is a result-exclusive painted fact, and `{"tasks"` is list-only.
   app.vt.sendInput('\x0f')
