@@ -22,6 +22,7 @@ import {
 interface Harness {
   readonly deps: RemoteProgressWatchGenerationDeps
   readonly releases: number[]
+  readonly failClosed: number[]
   readonly starts: unknown[]
   readonly disposed: number[]
   setGeneration(value: unknown): void
@@ -40,6 +41,7 @@ function harness(initial: { generation: unknown; ownerGeneration?: number }): Ha
   let unsubscribed = 0
   const listeners = new Set<() => void>()
   const releases: number[] = []
+  const failClosed: number[] = []
   const starts: unknown[] = []
   const disposed: number[] = []
   return {
@@ -57,11 +59,13 @@ function harness(initial: { generation: unknown; ownerGeneration?: number }): Ha
           unsubscribed += 1
         }
       },
-      release: () => { releases.push(0) },
+      revokeQualification: () => { releases.push(0) },
+      failClosedPresentation: () => { failClosed.push(0) },
       disposeWatch: () => { disposed.push(0) },
       startWatch: value => { starts.push(value) },
     },
     releases,
+    failClosed,
     starts,
     disposed,
     setGeneration: value => { generation = value },
@@ -72,6 +76,38 @@ function harness(initial: { generation: unknown; ownerGeneration?: number }): Ha
     unsubscribed: () => unsubscribed,
   }
 }
+
+test('F5: a lost generation revokes the Pane BEFORE the terminal fail-closed', () => {
+  const order: string[] = []
+  const h = harness({ generation: { id: 1 } })
+  const deps: RemoteProgressWatchGenerationDeps = {
+    ...h.deps,
+    revokeQualification: () => { order.push('revoke') },
+    failClosedPresentation: () => { order.push('fail-closed') },
+  }
+  const lifecycle = armRemoteProgressWatchGeneration(deps)
+  lifecycle.observeCurrent()
+  assert.deepEqual(order, [], 'the first registration has no terminal cleanup to run')
+  h.setGeneration(undefined)
+  h.notify()
+  assert.deepEqual(order, ['revoke', 'fail-closed'],
+    'the Pane is revoked before the native terminal fail-closed runs')
+})
+
+test('F5: a real failure keeps the terminal fail-closed, a requalification does not repeat it', () => {
+  const h = harness({ generation: { id: 1 } })
+  const lifecycle = armRemoteProgressWatchGeneration(h.deps)
+  lifecycle.observeCurrent()
+  h.setGeneration(undefined)
+  h.notify()
+  assert.equal(h.releases.length, 1)
+  assert.equal(h.failClosed.length, 1)
+  h.setGeneration({ id: 2 })
+  h.notify()
+  assert.equal(h.failClosed.length, 2,
+    'the new generation starts with the same fail-closed-then-snapshot order')
+  assert.deepEqual(h.starts, [{ id: 1 }, { id: 2 }])
+})
 
 test('a first arm with a valid generation starts exactly ONE watch, without releasing', () => {
   const h = harness({ generation: { id: 1 } })
