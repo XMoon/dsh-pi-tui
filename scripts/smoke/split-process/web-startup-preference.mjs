@@ -173,7 +173,7 @@ export async function runWebStartupPreference(context) {
     const first = await startHost('PC-07 default-off')
     const origin = first.ready.localHost.origin
     assertFullyOff(first.ready, 'PC-07a')
-    assert(rowStates(first.ready).get('office-to-pdf') !== 'active',
+    assert(rowStates(first.ready).get('office-kit') !== 'active',
       'PC-07a the Office provider must be absent or inactive with Web off')
     const offHttp = await assertHttpOff(origin, 'PC-07a')
     const firstPid = first.ready.pid
@@ -379,7 +379,7 @@ export async function runWebStartupPreference(context) {
     const autostarted = await startHost('PC-07 auto-start')
     assert(autostarted.ready.pid !== thirdPid, 'PC-07 the auto-start Host must be a NEW process')
     assertFullyOn(autostarted.ready, 'PC-07 auto-start')
-    assert(rowStates(autostarted.ready).get('office-to-pdf') === 'active',
+    assert(rowStates(autostarted.ready).get('office-kit') === 'active',
       'PC-07 auto-start must activate the Office provider')
     assert(autostarted.host.records.some(record => record.m4a0 === 'web-autostart' && record.status === 'enabled'),
       'PC-07 the Host did not record the applied auto-start')

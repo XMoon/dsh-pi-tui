@@ -81,8 +81,11 @@ test('the base keeps the shipped web defaults and the overlay adds no web provid
   const web = base.get('web')
   assert.ok(web, 'the 0.2.1-rc.2 base must declare the web row')
   assert.equal(web.name, '@deepseek-ai/dsh-web')
-  assert.deepEqual(web.config, { searchProvider: 'deepseek-official', fetchProvider: 'http' },
-    'the base web row must keep the shipped Messages-search + HTTP-fetch defaults')
+  // rc.2 changed the shipped Search default to the separately billed Search
+  // API; the Messages route remains an explicit stored choice and HTTP fetch is
+  // unchanged.
+  assert.deepEqual(web.config, { searchProvider: 'deepseek-search-api', fetchProvider: 'http' },
+    'the base web row must keep the rc.2 Search API + HTTP-fetch defaults')
   // Every web provider row belongs to the base; a TUI copy would be a second
   // provider registry (and `web-deepseek-api` must never be re-mounted here).
   for (const id of ['web', 'web-search-deepseek', 'web-deepseek-api']) {

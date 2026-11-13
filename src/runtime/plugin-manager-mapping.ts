@@ -122,7 +122,7 @@ function detachBundle(bundle: BundleInfo): PluginBundleFact {
     optional: bundle.optional,
     ...(bundle.source === undefined ? {} : { source: bundle.source }),
     removable: bundle.removable,
-    updatable: bundle.updatable,
+    ...(bundle.update === undefined ? {} : { update: bundle.update }),
     ...(bundle.readOnlyReason === undefined ? {} : { readOnlyReason: bundle.readOnlyReason }),
     ...(bundle.error === undefined ? {} : { error: detachError(bundle.error) }),
     rows: Object.freeze(rows),

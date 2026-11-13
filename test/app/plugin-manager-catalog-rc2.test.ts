@@ -110,7 +110,10 @@ function seedProfile(workRoot: string, selectedBundles: readonly string[] = []):
       name,
       version: RUNTIME_VERSION,
       private: true,
-      dsh: { bundle: { patch: [] } },
+      // Input fact copied from the official package manifest: the CUA bundle is
+      // darwin-only (rc.2 moved it from the on-demand catalog to the shipped
+      // Optional roster, so the Host reads THIS installed manifest).
+      dsh: { bundle: { patch: [], ...(name === CUA_BUNDLE ? { platforms: ['darwin'] } : {}) } },
     }, null, 2))
   }
   return {
@@ -263,10 +266,13 @@ test('the REAL Host listBundles discovers the complete official optional/on-dema
     assert.equal(bundle.installed, false)
     assert.equal(bundle.installTarget?.version, RUNTIME_VERSION)
     assert.equal(bundle.installTarget?.spec, `${entry.packageName}@${RUNTIME_VERSION}`)
-    // A platform-scoped entry stays OUT of the default listing: being in the
-    // Host roster is not a claim that the TUI can enable it here.
-    assert.equal(bundle.listedByDefault, entry.listedByDefault === false ? false : undefined,
-      `${entry.packageName} keeps its official default-listing decision`)
+    // rc.2 removed the catalog-level default-listing flag: the Host derives
+    // visibility from the package's own manifest and its platform check. A
+    // platform-scoped entry on an unsupported Host stays OUT of the listing,
+    // and no TUI projection may re-derive the decision from catalog data.
+    const platformSupported = entry.platforms === undefined || entry.platforms.includes(process.platform)
+    assert.equal(bundle.listedByDefault, platformSupported ? undefined : false,
+      `${entry.packageName} keeps the Host's own default-listing decision`)
   }
 
   // REAL Host records -> the SHARED mapping -> stable identity -> classifier.
@@ -339,11 +345,17 @@ test('the REAL Host listBundles discovers the complete official optional/on-dema
     } else {
       assert.equal(card.availability, 'installation')
       assert.equal(card.canInstall, false)
-      assert.equal(
-        card.canToggle,
-        true,
-        `${card.name}: ${card.toggleBlockedReason ?? 'no blocked reason'}; Host error: ${JSON.stringify(card.error ?? null)}`,
-      )
+      if (card.error?.code === 'unsupported-platform') {
+        // rc.2 ships CUA as an Optional bundle; on this Host the platform
+        // refusal blocks enabling it while the card stays manageable.
+        assert.equal(card.canToggle, false, `${card.name} cannot be enabled on this Host platform`)
+      } else {
+        assert.equal(
+          card.canToggle,
+          true,
+          `${card.name}: ${card.toggleBlockedReason ?? 'no blocked reason'}; Host error: ${JSON.stringify(card.error ?? null)}`,
+        )
+      }
       assert.equal(card.canRemove, false, 'a shipped bundle is never removable')
       assert.equal(upgrade!.value, 'Upgrade: Shipped with DSH. Upgrade the DSH installation to change this bundle version; Plugin Manager cannot update it in place.')
       assert.ok(!detail.actions.some(action => action.value === 'action:remove'), 'F10 never adds a Remove action to a shipped bundle')
@@ -744,9 +756,12 @@ test('a selected bundle the Host refuses is disabled through the Host and leaves
   page.harness.vt.sendInput('\r') // Details
   await page.waitFor(() => page.frame().includes('[Details]'), 'the Details focus frame')
   assert.match(page.frame(), /Selected in profile/u)
-  // A missing bundle's actions are `Install…` then `Disable…`: one navigation
-  // selects the recovery action and reveals the Actions block.
+  // rc.2 ships CUA as an Optional installation bundle: its only recovery
+  // action is the executable Disable (there is no Install action for a
+  // shipped package). The card's Detail is longer than the pane, so one
+  // down+up reveals the Actions block while keeping Disable selected.
   page.harness.vt.sendInput('\x1b[B')
+  page.harness.vt.sendInput('\x1b[A')
   await page.harness.waitForFrame()
   const detail = page.frame()
   assert.match(detail, /> Disable…/u, 'a selected refused bundle keeps an executable Disable')
@@ -778,33 +793,36 @@ test('a selected bundle the Host refuses is disabled through the Host and leaves
 test('a profile-owned bundle the Host refuses keeps Disable and the Host-permitted Remove separately executable', async (t) => {
   const life = testLifecycle(t)
   const workRoot = life.tempDir('cua-profile-owned-')
-  const seeded = seedProfile(workRoot, [CUA_BUNDLE])
+  // CUA is a SHIPPED Optional bundle in rc.2, so a profile-owned platform
+  // refusal is proven with an independent profile package instead.
+  const PROFILE_REFUSED_BUNDLE = '@fixture/darwin-only-profile-bundle'
+  const seeded = seedProfile(workRoot, [PROFILE_REFUSED_BUNDLE])
   const profileDir = seeded.profileContext.dir as string
   // Narrow deterministic INPUT control (not darwin hardware evidence): this
   // profile's OWN dependency declares the platform, so the REAL Host reports
   // availability:'profile', installed:true, selected:true, removable:true and
   // the unsupported-platform error on every platform.
-  const packageDir = join(profileDir, 'node_modules', CUA_BUNDLE)
+  const packageDir = join(profileDir, 'node_modules', PROFILE_REFUSED_BUNDLE)
   mkdirSync(packageDir, { recursive: true })
   writeFileSync(join(packageDir, 'package.json'), JSON.stringify({
-    name: CUA_BUNDLE,
-    version: RUNTIME_VERSION,
+    name: PROFILE_REFUSED_BUNDLE,
+    version: '1.0.0',
     dsh: { bundle: { patch: [], platforms: ['darwin'] } },
   }, null, 2))
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
     name: 'catalog-fixture-profile',
     private: true,
-    dependencies: { [CUA_BUNDLE]: `file:./node_modules/${CUA_BUNDLE}` },
-    dsh: { profile: { bundles: [CUA_BUNDLE], patch: 'cordis.patch.yml' } },
+    dependencies: { [PROFILE_REFUSED_BUNDLE]: `file:./node_modules/${PROFILE_REFUSED_BUNDLE}` },
+    dsh: { profile: { bundles: [PROFILE_REFUSED_BUNDLE], patch: 'cordis.patch.yml' } },
   }, null, 2))
 
   const page = await mountRealHostPage(t, seeded.profileContext)
   const cardOf = (): ReturnType<WorkspaceHarness['controller']['model']>['cards'][number] | undefined =>
-    page.controller.model().cards.find(candidate => candidate.name === CUA_BUNDLE)
+    page.controller.model().cards.find(candidate => candidate.name === PROFILE_REFUSED_BUNDLE)
 
   // C: the Host proves every fact the recovery actions depend on.
   const card = cardOf()!
-  const painted = card.title ?? CUA_BUNDLE
+  const painted = card.title ?? PROFILE_REFUSED_BUNDLE
   assert.equal(card.availability, 'profile')
   assert.equal(card.installed, true)
   assert.equal(card.enabled, true)
@@ -813,7 +831,7 @@ test('a profile-owned bundle the Host refuses keeps Disable and the Host-permitt
   assert.equal(card.canToggle, true, 'the enable error does not lock Disable')
   assert.equal(card.canRemove, true, 'the enable error does not lock Remove')
 
-  searchFor(page.harness, CUA_BUNDLE)
+  searchFor(page.harness, PROFILE_REFUSED_BUNDLE)
   await page.harness.waitForFrame()
   page.harness.vt.sendInput('\r') // Details
   await page.waitFor(() => page.frame().includes('[Details]'), 'the Details focus frame')
@@ -831,7 +849,7 @@ test('a profile-owned bundle the Host refuses keeps Disable and the Host-permitt
   await page.harness.waitForFrame()
   assert.match(page.frame(), /> Remove…/u, 'the confirmation returns to the same action')
   const afterCancel = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
-  assert.equal(afterCancel.dependencies[CUA_BUNDLE], `file:./node_modules/${CUA_BUNDLE}`,
+  assert.equal(afterCancel.dependencies[PROFILE_REFUSED_BUNDLE], `file:./node_modules/${PROFILE_REFUSED_BUNDLE}`,
     'cancel dispatched no Host removal')
 
   // Disable is independent: the same card is disabled through the real Host

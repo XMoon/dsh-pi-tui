@@ -22,6 +22,7 @@ import { RemoteConfigPort } from '../../src/runtime/remote/config-remote.ts'
 import { DirectWebProviderConfig, type HostContextLike } from '../../src/runtime/direct/config-direct.ts'
 import type { ProviderCatalogEntry } from '../../src/domain/catalog/provider.ts'
 import { serializeTuiSettingsMutation, type ProviderProfileConfig, type TuiSettingsDoc } from '../../src/runtime/config-port.ts'
+import { UNPARSEABLE_WEB_OVERRIDE_URL } from '../../src/domain/web-provider-settings.ts'
 import { createObservableGenerationHarness } from '../support/remote-generation.ts'
 import { CredentialWorkflow, resolveLoginDestination, resolveLogoutDestination } from '../../src/app/command/credential-workflow.ts'
 
@@ -93,8 +94,10 @@ const WEB_DEFAULTS = {
   searchProvider: 'deepseek-official',
   fetchProvider: 'http',
 }
+/** The pure rc.2 default section (the schema-resolved shipped values). */
 const WEB_API_DEFAULTS = {
-  baseURL: 'https://api.deepseek.com/v1/tools',
+  searchBilling: 'auto',
+  fetchBilling: 'auto',
   count: 10,
   sendOriginalQuestion: true,
 }
@@ -1834,7 +1837,8 @@ test('the Remote Web adapter reads both Host sections and writes each exact fiel
   assert.deepEqual(await port.web.read(), {
     searchProvider: 'deepseek-official',
     fetchProvider: 'http',
-    api: WEB_API_DEFAULTS,
+    api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+    advanced: {},
     credential: { configured: true, source: 'file' },
   })
 
@@ -1842,20 +1846,104 @@ test('the Remote Web adapter reads both Host sections and writes each exact fiel
   await port.web.setFetchProvider('deepseek-fetch-api')
   await port.web.setSearchApiCount(20)
   await port.web.setSendOriginalQuestion(false)
-  await port.web.setSearchApiBaseURL('https://gateway.example.test/v1/tools')
+  await port.web.setSearchBilling('account')
+  await port.web.setFetchBilling('api-key')
   assert.deepEqual(state.mutateCalls.map(call => ({ ns: call.ns, ops: call.ops })), [
     { ns: WEB_NS, ops: [{ op: 'set', path: ['searchProvider'], value: 'deepseek-search-api' }] },
     { ns: WEB_NS, ops: [{ op: 'set', path: ['fetchProvider'], value: 'deepseek-fetch-api' }] },
     { ns: WEB_API_NS, ops: [{ op: 'set', path: ['count'], value: 20 }] },
     { ns: WEB_API_NS, ops: [{ op: 'set', path: ['sendOriginalQuestion'], value: false }] },
-    { ns: WEB_API_NS, ops: [{ op: 'set', path: ['baseURL'], value: 'https://gateway.example.test/v1/tools' }] },
+    { ns: WEB_API_NS, ops: [{ op: 'set', path: ['searchBilling'], value: 'account' }] },
+    { ns: WEB_API_NS, ops: [{ op: 'set', path: ['fetchBilling'], value: 'api-key' }] },
   ])
   assert.deepEqual(await port.web.read(), {
     searchProvider: 'deepseek-search-api',
     fetchProvider: 'deepseek-fetch-api',
-    api: { baseURL: 'https://gateway.example.test/v1/tools', count: 20, sendOriginalQuestion: false },
+    api: { searchBilling: 'account', fetchBilling: 'api-key', count: 20, sendOriginalQuestion: false },
+    advanced: {},
     credential: { configured: true, source: 'file' },
   }, 'the values come from the authoritative post-write describe')
+})
+
+test('the Remote Web adapter projects the YAML-only overrides and legacy presence as detached facts', async () => {
+  const { port } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_API_NS)!.value = {
+      ...WEB_API_DEFAULTS,
+      searchBaseURL: 'https://search-gateway.example.test/v1/tools',
+      searchApiKeyEnv: 'SEARCH_API_KEY_ENV',
+      // Legacy single-endpoint keys are NOT rc.2 schema fields; when a
+      // descriptor happens to project them only their presence is reported.
+      baseURL: 'https://old.example.test/v1/tools',
+      apiKey: 'sk-legacy-value-never-echo',
+    }
+  })
+  await port.describe()
+  const read = await port.web.read()
+  assert.deepEqual(read?.advanced, {
+    searchBaseURL: 'https://search-gateway.example.test/v1/tools',
+    searchApiKeyEnv: 'SEARCH_API_KEY_ENV',
+    legacyOverrideDetected: true,
+  }, 'only non-empty string override fields are copied; legacy keys contribute presence only')
+  assert.equal(read?.api.searchBilling, 'auto', 'the legacy keys never become effective billing/endpoint values')
+  assert.equal(JSON.stringify(read).includes('sk-legacy-value-never-echo'), false,
+    'the legacy apiKey value is never echoed through the port')
+  assert.equal(JSON.stringify(read).includes('https://old.example.test/v1/tools'), false,
+    'the legacy baseURL value is never echoed through the port')
+})
+
+test('a displayed Remote URL override is MASKED: userinfo and query/fragment never reach the port', async () => {
+  const { port } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_API_NS)!.value = {
+      ...WEB_API_DEFAULTS,
+      fetchBaseURL: 'https://user:secret@fetch.example.test/v1?token=x#frag',
+    }
+  })
+  await port.describe()
+  const read = await port.web.read()
+  assert.equal(read?.advanced.fetchBaseURL, 'https://***@fetch.example.test/v1',
+    'the userinfo is replaced and the query/fragment dropped')
+  const serialized = JSON.stringify(read)
+  assert.doesNotMatch(serialized, /secret|user:|token=/u,
+    `no credential material survives the projection:\n${serialized}`)
+
+  const multipleAt = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_API_NS)!.value = {
+      ...WEB_API_DEFAULTS,
+      fetchBaseURL: 'https://alice:p1@p2@fetch.example.test/v1?token=x',
+    }
+  })
+  await multipleAt.port.describe()
+  const multipleRead = await multipleAt.port.web.read()
+  assert.equal(multipleRead?.advanced.fetchBaseURL, 'https://***@fetch.example.test/v1',
+    'multiple userinfo @ characters are fully masked on the Remote path')
+  assert.doesNotMatch(JSON.stringify(multipleRead), /alice|p1|p2|token=/u,
+    'no userinfo fragment survives the Remote multi-@ projection')
+
+  const newline = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_API_NS)!.value = {
+      ...WEB_API_DEFAULTS,
+      fetchBaseURL: 'https://api.example.test/v1?token=abc\nSECRET_AFTER_NL',
+    }
+  })
+  await newline.port.describe()
+  const newlineRead = await newline.port.web.read()
+  assert.equal(newlineRead?.advanced.fetchBaseURL, UNPARSEABLE_WEB_OVERRIDE_URL,
+    'an unparseable/control-bearing URL is reported as configured only on the Remote path')
+  assert.doesNotMatch(JSON.stringify(newlineRead), /SECRET_AFTER_NL|token=/u,
+    'the unparseable Remote URL value never survives the DTO')
+})
+
+test('a foreign Remote billing value is UNAVAILABLE, never a silent auto', async () => {
+  const { port } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_API_NS)!.value.fetchBilling = 'subscription'
+  })
+  await port.describe()
+  assert.equal(await port.web.read(), undefined, 'an outside-the-enum value cannot be read as a billing fact')
 })
 
 test('the Remote Web adapter preserves a valid Host count outside the UI presets', async () => {
@@ -1911,26 +1999,32 @@ test('invalid Remote Web candidates match Direct validation and never read or mu
     })
     assert.equal(remoteMessage, directMessage)
   }
-  for (const url of [
-    'http://api.example.test/tools',
-    'not-a-url',
-    'https://user:secret@api.example.test/tools',
-    'https://api.example.test/tools?key=x',
-    'https://api.example.test/tools#fragment',
-    'https://api.example.test/tools/search',
-    'https://api.example.test/tools/fetch',
-  ]) {
-    let remoteMessage = ''
-    let directMessage = ''
-    await assert.rejects(remote.port.web.setSearchApiBaseURL(url), error => {
-      remoteMessage = (error as Error).message
+  // The billing mode is the official closed enum on BOTH backends, with the
+  // same refusal vocabulary and zero Host contact. The invalid values are cast
+  // through the enum type on purpose: the RUNTIME guard is the subject.
+  for (const mode of ['subscription', 'AUTO', 'api_key', ''] as readonly string[]) {
+    let remoteSearchMessage = ''
+    let remoteFetchMessage = ''
+    let directSearchMessage = ''
+    let directFetchMessage = ''
+    await assert.rejects(remote.port.web.setSearchBilling(mode as 'auto' | 'account' | 'api-key'), error => {
+      remoteSearchMessage = (error as Error).message
       return true
     })
-    await assert.rejects(direct.setSearchApiBaseURL(url), error => {
-      directMessage = (error as Error).message
+    await assert.rejects(remote.port.web.setFetchBilling(mode as 'auto' | 'account' | 'api-key'), error => {
+      remoteFetchMessage = (error as Error).message
       return true
     })
-    assert.equal(remoteMessage, directMessage)
+    await assert.rejects(direct.setSearchBilling(mode as 'auto' | 'account' | 'api-key'), error => {
+      directSearchMessage = (error as Error).message
+      return true
+    })
+    await assert.rejects(direct.setFetchBilling(mode as 'auto' | 'account' | 'api-key'), error => {
+      directFetchMessage = (error as Error).message
+      return true
+    })
+    assert.equal(remoteSearchMessage, directSearchMessage)
+    assert.equal(remoteFetchMessage, directFetchMessage)
   }
   assert.equal(remote.state.describeCalls, 0)
   assert.deepEqual(remote.state.mutateCalls, [])

@@ -876,7 +876,7 @@ export class PluginManagerController {
   }
 
   /**
-   * Enter the ONE Update page for a Host-updatable bundle, or reuse the
+   * Enter the ONE Update page for a Host registry-updatable bundle, or reuse the
    * existing lifecycle for the same bundle (a completed list/result is never
    * re-queried implicitly). A terminal `done` update for ANOTHER bundle may be
    * replaced; an indeterminate outcome must be acknowledged first.

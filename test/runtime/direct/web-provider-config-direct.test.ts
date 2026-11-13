@@ -1,11 +1,14 @@
 /**
- * S2/PR-B §3.2 — the Direct Web provider config contract.
+ * S2/PR-B §3.2 — the Direct Web provider config contract (rc.2 schema).
  *
  * The adapter is the ONLY write path to the official `web` / `web-deepseek-api`
  * settings sections: every case here asserts the exact namespace, path and
  * revision the Host receives, the read-back the UI must use, and the refusal
- * paths (missing section, non-volatile/absent value, rejected revision,
- * invalid human input) that must never be reported as a save.
+ * paths (missing section, unreadable value, rejected revision, invalid human
+ * input) that must never be reported as a save. rc.2 has NO single `baseURL`
+ * requirement: the read stays ready without one, the two billing modes are the
+ * official closed enum, and the YAML-only advanced overrides are detached
+ * read-only facts (legacy keys contribute presence only, never values).
  *
  * FIXTURE: a scripted Host `settings` + `credentials` service pair that
  * records every describe/mutate call and applies the official path ops with the
@@ -18,6 +21,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DirectConfigPort, DirectWebProviderConfig } from '../../../src/runtime/direct/config-direct.ts'
+import { UNPARSEABLE_WEB_OVERRIDE_URL } from '../../../src/domain/web-provider-settings.ts'
 import type { HostContextLike } from '../../../src/runtime/direct/config-direct.ts'
 
 interface Descriptor {
@@ -61,6 +65,16 @@ function settingsService(initial: Record<string, Descriptor>) {
   }
 }
 
+/** The pure rc.2 default section the schema resolves for a fresh profile: the
+ *  official defaults are APPLIED, the unset override fields are absent, and no
+ *  legacy single-endpoint key is projected. */
+const PURE_RC2_API_DEFAULTS = {
+  searchBilling: 'auto',
+  fetchBilling: 'auto',
+  count: 10,
+  sendOriginalQuestion: true,
+}
+
 /** One live Web settings store: the two official sections with their shipped
  *  values, plus the credential presence the Direct adapter reports. */
 function host(options: {
@@ -70,6 +84,9 @@ function host(options: {
   readonly omitApi?: boolean
   readonly omitWeb?: boolean
   readonly credentialService?: boolean
+  /** Overrides for the `web-deepseek-api` section value (merged over the pure
+   *  rc.2 defaults; use `undefined` fields deliberately). */
+  readonly api?: Record<string, unknown>
 } = {}) {
   const settings = settingsService({
     ...options.omitWeb === true ? {} : {
@@ -86,7 +103,7 @@ function host(options: {
       'web-deepseek-api': {
         ns: 'web-deepseek-api',
         revision: 5,
-        value: { baseURL: 'https://api.deepseek.com/v1/tools', count: 10, sendOriginalQuestion: true },
+        value: { ...PURE_RC2_API_DEFAULTS, ...options.api },
       },
     },
   })
@@ -103,21 +120,92 @@ function host(options: {
   return { settings, credentials, describes, ctx }
 }
 
-test('read() maps the official sections, the credential presence and nothing else', async () => {
+test('read() maps the pure rc.2 defaults, the credential presence and nothing else', async () => {
   const h = host({ credential: { configured: true, source: 'file' }, searchProvider: 'acme-search' })
   const config = new DirectWebProviderConfig(h.ctx)
   const settings = await config.read()
   assert.deepEqual(settings, {
     searchProvider: 'acme-search',
     fetchProvider: 'http',
-    api: { baseURL: 'https://api.deepseek.com/v1/tools', count: 10, sendOriginalQuestion: true },
+    api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+    advanced: {},
     credential: { configured: true, source: 'file' },
   })
+  assert.equal('baseURL' in (settings?.api ?? {}), false, 'no single-endpoint fact exists on the DTO')
   assert.deepEqual(h.describes, ['DEEPSEEK_API_KEY'], 'presence is read from the official reference, never a value')
   assert.equal(config.available(), true)
 })
 
-test('read() reports UNAVAILABLE for a missing section instead of shipped defaults', async () => {
+test('read() stays ready WITHOUT any baseURL: rc.2 routes follow the conversation', async () => {
+  // The rc.2 schema has no `baseURL` field at all (the pure-default section
+  // above carries none), and a stored LEGACY `baseURL` is not an effective
+  // value either: the read succeeds and reports its presence as a fact only.
+  const legacy = host({ api: { baseURL: 'https://old.example.test/v1/tools', apiKeyEnv: 'DEEPSEEK_API_KEY', apiKey: 'sk-legacy-value-never-echo' } })
+  const config = new DirectWebProviderConfig(legacy.ctx)
+  const read = await config.read()
+  assert.equal(read?.api.searchBilling, 'auto', 'the legacy keys never become effective values')
+  assert.deepEqual(read?.advanced, { legacyOverrideDetected: true },
+    'a projected legacy key is detected as presence only')
+  assert.equal(JSON.stringify(read).includes('sk-legacy-value-never-echo'), false,
+    'the legacy apiKey value is never copied into the DTO')
+  assert.equal(JSON.stringify(read).includes('https://old.example.test/v1/tools'), false,
+    'the legacy baseURL value is never copied into the DTO')
+  assert.deepEqual(legacy.settings.recorded, [], 'a read never writes')
+})
+
+test('read() reports the YAML-only advanced overrides as detached facts per capability', async () => {
+  const h = host({ api: {
+    searchBaseURL: 'https://search-gateway.example.test/v1/tools',
+    searchApiKeyEnv: 'SEARCH_API_KEY_ENV',
+    fetchBaseURL: 'https://fetch-gateway.example.test/v1/tools',
+  } })
+  const read = await new DirectWebProviderConfig(h.ctx).read()
+  assert.deepEqual(read?.advanced, {
+    searchBaseURL: 'https://search-gateway.example.test/v1/tools',
+    searchApiKeyEnv: 'SEARCH_API_KEY_ENV',
+    fetchBaseURL: 'https://fetch-gateway.example.test/v1/tools',
+  }, 'only non-empty string fields are copied, one capability each')
+  assert.equal(read?.api.searchBilling, 'auto', 'the billing values stay the Host\'s own answer')
+})
+
+test('a displayed URL override is MASKED: userinfo and query/fragment never reach the DTO', async () => {
+  const h = host({ api: {
+    searchBaseURL: 'https://user:secret@search.example.test/v1?token=x#frag',
+    fetchBaseURL: 'https://fetch.example.test/v1/tools?token=y',
+  } })
+  const read = await new DirectWebProviderConfig(h.ctx).read()
+  assert.equal(read?.advanced.searchBaseURL, 'https://***@search.example.test/v1',
+    'the userinfo is replaced and the query/fragment dropped')
+  assert.equal(read?.advanced.fetchBaseURL, 'https://fetch.example.test/v1/tools',
+    'a credential-free URL still loses its query/fragment')
+  const serialized = JSON.stringify(read)
+  assert.doesNotMatch(serialized, /secret|user:|token=/u,
+    `no credential material survives the projection:\n${serialized}`)
+
+  // URL userinfo may itself contain `@`: structured URL parsing treats the
+  // LAST `@` as the userinfo/host boundary, so no fragment of the password
+  // may survive as a host or path.
+  const multipleAt = host({ api: {
+    searchBaseURL: 'https://alice:p1@p2@api.example.test/v1/tools',
+  } })
+  const multipleRead = await new DirectWebProviderConfig(multipleAt.ctx).read()
+  assert.equal(multipleRead?.advanced.searchBaseURL, 'https://***@api.example.test/v1/tools',
+    'multiple userinfo @ characters are fully masked')
+  assert.doesNotMatch(JSON.stringify(multipleRead), /alice|p1|p2/u,
+    'no userinfo fragment survives the multi-@ projection')
+
+  // A control-bearing URL is not safe to echo at all; report only configured.
+  const newlineUrl = host({ api: {
+    searchBaseURL: 'https://api.example.test/v1?token=abc\nSECRET_AFTER_NL',
+  } })
+  const newlineRead = await new DirectWebProviderConfig(newlineUrl.ctx).read()
+  assert.equal(newlineRead?.advanced.searchBaseURL, UNPARSEABLE_WEB_OVERRIDE_URL,
+    'an unparseable/control-bearing URL is reported as configured only')
+  assert.doesNotMatch(JSON.stringify(newlineRead), /SECRET_AFTER_NL|token=/u,
+    'the unparseable URL value never survives the DTO')
+})
+
+test('read() reports UNAVAILABLE for a missing section, an unreadable count or a foreign billing value', async () => {
   assert.equal(await new DirectWebProviderConfig(host({ omitWeb: true }).ctx).read(), undefined,
     'without the provider section there is no fact to report')
   assert.equal(new DirectWebProviderConfig(host({ omitWeb: true }).ctx).available(), false)
@@ -127,52 +215,62 @@ test('read() reports UNAVAILABLE for a missing section instead of shipped defaul
   // exist (available() answers true) while the validated read answers
   // undefined, which is why the UI gates its WRITE ADMISSION on the readable
   // facts, not on the descriptor pair alone.
-  const countMalformed = host()
-  countMalformed.settings.descriptors.set('web-deepseek-api', {
-    ns: 'web-deepseek-api',
-    revision: 1,
-    value: { baseURL: 'https://api.deepseek.com/v1/tools', count: 'ten', sendOriginalQuestion: true },
-  })
+  const countMalformed = host({ api: { count: 'ten' } })
   assert.equal(new DirectWebProviderConfig(countMalformed.ctx).available(), true)
   assert.equal(await new DirectWebProviderConfig(countMalformed.ctx).read(), undefined,
     'an invalid count makes the whole section unreadable')
   assert.equal(new DirectWebProviderConfig(host({ omitApi: true }).ctx).available(), false,
     'availability is the SAME authority read() needs: a half-mounted configuration is unavailable')
-  // A malformed value is unavailable too (never coerced).
-  const malformed = host()
-  malformed.settings.descriptors.set('web-deepseek-api', {
-    ns: 'web-deepseek-api',
-    revision: 1,
-    value: { baseURL: 'https://api.deepseek.com/v1/tools', count: 'ten', sendOriginalQuestion: true },
-  })
-  assert.equal(await new DirectWebProviderConfig(malformed.ctx).read(), undefined)
+  // A missing or foreign billing value is UNAVAILABLE too (never silently
+  // defaulted to `auto`).
+  const billingMissing = host({ api: { searchBilling: undefined } })
+  assert.equal(await new DirectWebProviderConfig(billingMissing.ctx).read(), undefined)
+  const billingForeign = host({ api: { fetchBilling: 'subscription' } })
+  assert.equal(await new DirectWebProviderConfig(billingForeign.ctx).read(), undefined)
+  assert.equal(await new DirectWebProviderConfig(billingForeign.ctx).available(), true)
   // An unmounted credential store answers "not configured" exactly like the
   // Direct /login port does, and never invents a source.
   assert.deepEqual((await new DirectWebProviderConfig(host({ credentialService: false }).ctx).read())?.credential, { configured: false })
 })
 
-test('the provider selections and API options write the exact official path with the CURRENT revision', async () => {
+test('the provider selections, API options and billing modes write the exact official path with the CURRENT revision', async () => {
   const h = host()
   const config = new DirectWebProviderConfig(h.ctx)
   await config.setSearchProvider('deepseek-search-api')
   await config.setFetchProvider('deepseek-fetch-api')
   await config.setSearchApiCount(20)
   await config.setSendOriginalQuestion(false)
-  await config.setSearchApiBaseURL('https://api.example.com/v1/tools')
+  await config.setSearchBilling('account')
+  await config.setFetchBilling('api-key')
   assert.deepEqual(h.settings.recorded, [
     { ns: 'web', ops: [{ op: 'set', path: ['searchProvider'], value: 'deepseek-search-api' }], revision: 3 },
     { ns: 'web', ops: [{ op: 'set', path: ['fetchProvider'], value: 'deepseek-fetch-api' }], revision: 4 },
     { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['count'], value: 20 }], revision: 5 },
     { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['sendOriginalQuestion'], value: false }], revision: 6 },
-    { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['baseURL'], value: 'https://api.example.com/v1/tools' }], revision: 7 },
+    { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['searchBilling'], value: 'account' }], revision: 7 },
+    { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['fetchBilling'], value: 'api-key' }], revision: 8 },
   ])
-  // The read-back is the authority the UI must display.
+  // The read-back is the authority the UI must display: the two billing modes
+  // are independent and each stays the raw official enum.
   assert.deepEqual(await config.read(), {
     searchProvider: 'deepseek-search-api',
     fetchProvider: 'deepseek-fetch-api',
-    api: { baseURL: 'https://api.example.com/v1/tools', count: 20, sendOriginalQuestion: false },
+    api: { searchBilling: 'account', fetchBilling: 'api-key', count: 20, sendOriginalQuestion: false },
+    advanced: {},
     credential: { configured: false },
   })
+})
+
+test('an explicit `auto` billing write is a real persisted choice, never a reset of the overrides', async () => {
+  const h = host({ api: { searchBaseURL: 'https://search-gateway.example.test/v1/tools' } })
+  const config = new DirectWebProviderConfig(h.ctx)
+  await config.setSearchBilling('auto')
+  assert.deepEqual(h.settings.recorded, [
+    { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['searchBilling'], value: 'auto' }], revision: 5 },
+  ])
+  const read = await config.read()
+  assert.deepEqual(read?.advanced, { searchBaseURL: 'https://search-gateway.example.test/v1/tools' },
+    'the override survives an explicit Automatic choice (the Host owns the precedence)')
 })
 
 test('a custom configured provider id is reported as-is and never silently replaced', async () => {
@@ -207,29 +305,34 @@ test('invalid human input is refused BEFORE any Host write', async () => {
   for (const count of [0, 51, 2.5, Number.NaN]) {
     await assert.rejects(config.setSearchApiCount(count), /count must be an integer from 1 through 50/u)
   }
-  for (const url of [
-    'http://api.example.com/v1/tools',
-    'not-a-url',
-    'https://user:secret@api.example.com/v1/tools',
-    'https://api.example.com/v1/tools?key=x',
-    'https://api.example.com/v1/tools#frag',
-    'https://api.example.com/v1/tools/search',
-    'https://api.example.com/v1/tools/fetch',
-  ]) {
-    await assert.rejects(config.setSearchApiBaseURL(url), /endpoint/u, `refused: ${url}`)
+  // The billing mode is the official CLOSED enum; legacy free-form values and
+  // typos are refused before the Host settings service is ever consulted. The
+  // invalid values are cast through the enum type on purpose: the RUNTIME guard
+  // is the subject.
+  for (const mode of ['subscription', 'AUTO', 'api_key', '', 'auto '] as readonly string[]) {
+    await assert.rejects(config.setSearchBilling(mode as 'auto' | 'account' | 'api-key'), /billing mode/u, `refused: ${mode}`)
+    await assert.rejects(config.setFetchBilling(mode as 'auto' | 'account' | 'api-key'), /billing mode/u, `refused: ${mode}`)
   }
   assert.deepEqual(h.settings.recorded, [], 'a refused input never reaches the Host settings service')
-  // The same rule accepts the official base and a custom https base.
-  await config.setSearchApiBaseURL('https://api.deepseek.com/v1/tools')
-  await config.setSearchApiBaseURL('https://gateway.example.com/deepseek/v1/tools')
-  assert.equal(h.settings.recorded.length, 2)
+  // The three official modes write their exact field.
+  await config.setSearchBilling('api-key')
+  await config.setFetchBilling('auto')
+  assert.deepEqual(h.settings.recorded, [
+    { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['searchBilling'], value: 'api-key' }], revision: 5 },
+    { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['fetchBilling'], value: 'auto' }], revision: 6 },
+  ])
 })
 
 test('an unmounted settings section refuses the write instead of inventing a namespace', async () => {
   const h = host({ omitWeb: true })
   const config = new DirectWebProviderConfig(h.ctx)
   await assert.rejects(config.setSearchProvider('deepseek-official'), /is not mounted/u)
+  const apiHost = host({ omitApi: true })
+  const apiConfig = new DirectWebProviderConfig(apiHost.ctx)
+  await assert.rejects(apiConfig.setSearchBilling('account'), /is not mounted/u)
+  await assert.rejects(apiConfig.setFetchBilling('account'), /is not mounted/u)
   assert.deepEqual(h.settings.recorded, [])
+  assert.deepEqual(apiHost.settings.recorded, [])
 })
 
 test('a rejected settings mutation surfaces with its own reason (never a silent success)', async () => {
@@ -237,6 +340,7 @@ test('a rejected settings mutation surfaces with its own reason (never a silent 
   h.settings.mutate = async () => { throw new Error('SETTINGS_CONFLICT: revision moved') }
   const config = new DirectWebProviderConfig(h.ctx)
   await assert.rejects(config.setSearchProvider('deepseek-search-api'), /SETTINGS_CONFLICT/u)
+  await assert.rejects(config.setFetchBilling('account'), /SETTINGS_CONFLICT/u)
 })
 
 test('the DirectConfigPort exposes the same sub-domain through the assembly', async () => {

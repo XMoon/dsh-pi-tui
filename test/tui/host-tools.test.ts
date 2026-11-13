@@ -17,7 +17,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage, LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { sanitizeDisplayText } from '../../src/tui/presentation/terminal-text.ts'
 import {
   profileSelectsBundle,
   skippedInstallationReason,
@@ -149,96 +148,28 @@ test('an official Optional bundle goes off→enable→restart-required→restart
   // file fails if the fixture silently renames an identity).
 })
 
-// ── B07 persistent terminal ────────────────────────────────────────────────
+// ── B07 terminal backend composition ───────────────────────────────────────
 
 const B07 = '@deepseek-ai/dsh-experimental-terminal-bundle' satisfies OptionalBundleId
 const B08 = '@deepseek-ai/dsh-experimental-session-search' satisfies OptionalBundleId
 
-test('retained terminal process, output read, background job and restart cleanup', { skip: skippedInstallationReason([B07]) }, async t => {
-  let host = await startOptionalBundleHost(t, { bundles: [B07] })
+test('the Host-only B07 composition never claims a working shell backend without terminalController', { skip: skippedInstallationReason([B07]) }, async t => {
+  const host = await startOptionalBundleHost(t, { bundles: [B07] })
   const work = join(host.root, 'work')
-  const agent = await host.createAgent(SessionId('optional-bundle-b07'), { cwd: work })
+  const agent = await host.createAgent(SessionId('optional-bundle-b07-negative'), { cwd: work })
 
+  // The bundle's tools are active, but the rc.2 terminal-panel backend needs
+  // the Web/Desktop `terminalController` service and this Host-only profile
+  // does not compose it. The first real call must fail closed instead of
+  // pretending the removed headless Bash/PowerShell backend exists.
+  assert.equal(host.hasTool('terminal_open'), true, 'the B07 terminal tools are active')
   const opened = await execute(host, 'terminal_open', agent, { type: 'shell', name: 'main', cwd: work })
-  assert.notEqual(opened.isError, true, resultText(opened))
-  const sessionId = /started terminal session (\S+)/u.exec(resultText(opened))?.[1]
-  assert.ok(sessionId !== undefined, resultText(opened))
-
-  const sent = await execute(host, 'terminal_send', agent, { sessionId, text: 'echo TERMINAL_OK' })
-  assert.notEqual(sent.isError, true, resultText(sent))
-  assert.match(resultText(sent), /TERMINAL_OK/)
-  assert.match(resultText(sent), /\[session: running\]/u)
-
-  const read = await execute(host, 'terminal_read', agent, { sessionId })
-  assert.notEqual(read.isError, true, resultText(read))
-  assert.match(resultText(read), /TERMINAL_OK/)
-
-  // The retained raw output may carry terminal control bytes; the EXISTING
-  // terminal-text consumer boundary removes them before any TUI paint.
-  await execute(host, 'terminal_send', agent, { sessionId, text: "printf '\\033[31mRED_ESCAPE\\033[0m\\n'" })
-  const colored = await execute(host, 'terminal_read', agent, { sessionId })
-  const coloredText = resultText(colored)
-  assert.ok(coloredText.includes('RED_ESCAPE'))
-  assert.equal(sanitizeDisplayText(coloredText).includes('\u001b'), false,
-    'the existing terminal-text sanitizer removes control sequences from the consumer text')
-
+  assert.equal(opened.isError, true, resultText(opened))
+  assert.match(resultText(opened), /no PTY backend registered for "shell"/u,
+    `the Host-only composition must expose the missing backend: ${resultText(opened)}`)
   const listed = await execute(host, 'terminal_list', agent, {})
-  assert.match(resultText(listed), new RegExp(sessionId.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')))
-  const pidText = /pid=(\d+)/u.exec(resultText(listed))?.[1]
-  const pid = pidText === undefined ? undefined : Number(pidText)
-
-  // A background send really creates a Host Job the official consumer reads.
-  const background = await execute(host, 'terminal_send', agent, {
-    sessionId,
-    text: 'sleep 0.2; echo BG_OK',
-    run_in_background: true,
-  })
-  assert.notEqual(background.isError, true, resultText(background))
-  const jobId = /started background job (\S+)/u.exec(resultText(background))?.[1]
-  assert.ok(jobId !== undefined, resultText(background))
-  const jobRead = await execute(host, 'job_output', agent, { job_id: jobId, wait: true, timeout_ms: 30_000 })
-  assert.notEqual(jobRead.isError, true, resultText(jobRead))
-  assert.match(resultText(jobRead), /BG_OK/)
-
-  // Closing really releases the retained session: a later read cannot control it.
-  const closed = await execute(host, 'terminal_close', agent, { sessionId })
-  assert.notEqual(closed.isError, true, resultText(closed))
-  assert.match(resultText(closed), /closed terminal session/u)
-  const afterClose = await execute(host, 'terminal_read', agent, { sessionId })
-  assert.equal(afterClose.isError, true, 'a closed terminal can no longer be read')
-  assert.match(resultText(afterClose), /unknown|closed|lost/i)
-  const emptyNow = await execute(host, 'terminal_list', agent, {})
-  assert.match(resultText(emptyNow), /no terminal sessions/i)
-  if (pid !== undefined) {
-    // REAL process termination: the captured owned process tree is gone, not
-    // merely unreachable through the registry.
-    await waitFor(() => {
-      try {
-        process.kill(pid, 0)
-        return false
-      } catch {
-        return true
-      }
-    })
-  }
-
-  // Restart with the bundle still composed: the new Host owns no terminal and
-  // the old process tree was released with the old composition.
-  const restarted = await host.restart()
-  host = restarted
-  const second = await restarted.createAgent(SessionId('optional-bundle-b07-after'), { cwd: work })
-  const empty = await execute(restarted, 'terminal_list', second, {})
-  assert.match(resultText(empty), /no terminal sessions/i)
-
-  // OFF: the official manager deselects the bundle and a restart removes the
-  // tools and the terminal service from the real registry.
-  const disabled = await restarted.pluginManager.setBundleEnabled(B07, false) as { application: string }
-  assert.equal(disabled.application, 'restart-required')
-  const off = await restarted.restart()
-  host = off
-  assert.equal(off.hasTool('terminal_open'), false, 'the terminal tools are gone after the disabling restart')
-  assert.equal(off.ctx.get('terminals'), undefined,
-    'the isolated terminal service is not reachable from the root after the disabling restart')
+  assert.doesNotMatch(resultText(listed), /started terminal session|pid=\d+/u,
+    'the Host-only composition never claims a live terminal session')
 })
 
 // ── B08 session search ─────────────────────────────────────────────────────

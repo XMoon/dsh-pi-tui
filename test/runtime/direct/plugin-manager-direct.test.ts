@@ -87,7 +87,6 @@ test('snapshot maps bundles/plugins/registries/exemptions onto frozen detached f
         installed: true,
         optional: false,
         removable: true,
-        updatable: false,
         rows: [{ rowId: 'tui-app', moduleName: '@xmoon76/dsh-pi-tui', meta: { title: 'App' }, entryId: 'e-app' as never }],
         overrides: ['tool-bash'],
       },
@@ -112,7 +111,7 @@ test('snapshot maps bundles/plugins/registries/exemptions onto frozen detached f
   assert.equal(bundle.source, 'file:/home/user/plugins/dsh-pi-tui')
   assert.equal(bundle.installTarget, undefined)
   // A Host bundle always carries the declared update capability…
-  assert.equal(bundle.updatable, false)
+  assert.equal(bundle.update, undefined)
   // …while an absent default-listing decision stays ABSENT (never `false`).
   assert.equal('listedByDefault' in bundle, false)
   assert.equal(bundle.rows[0]!.title, 'App')
@@ -220,7 +219,6 @@ test('a missing official catalog entry keeps official/availability/installTarget
       installed: false,
       optional: true,
       removable: false,
-      updatable: false,
       rows: [],
       overrides: [],
     }],
@@ -251,7 +249,6 @@ test('the rc.1 default-listing, update capability and platform refusal survive t
         installed: false,
         optional: false,
         removable: false,
-        updatable: false,
         error: { code: 'unsupported-platform', diagnostic: 'This package supports darwin only.' },
         rows: [],
         overrides: [],
@@ -264,7 +261,6 @@ test('the rc.1 default-listing, update capability and platform refusal survive t
         installed: true,
         optional: true,
         removable: false,
-        updatable: false,
         rows: [],
         overrides: [],
       },
@@ -278,7 +274,7 @@ test('the rc.1 default-listing, update capability and platform refusal survive t
         installed: true,
         optional: false,
         removable: true,
-        updatable: true,
+        update: 'registry',
         rows: [],
         overrides: [],
       },
@@ -288,7 +284,7 @@ test('the rc.1 default-listing, update capability and platform refusal survive t
   const snapshot = await port.snapshot()
   const platformRefused = snapshot.bundles[0]!
   assert.equal(platformRefused.listedByDefault, false, 'the Host default-listing decision is carried verbatim')
-  assert.equal(platformRefused.updatable, false)
+  assert.equal(platformRefused.update, undefined)
   // The official code AND its diagnostic text survive; nothing is normalized.
   assert.deepEqual(platformRefused.error, {
     code: 'unsupported-platform',
@@ -297,9 +293,9 @@ test('the rc.1 default-listing, update capability and platform refusal survive t
   assert.equal(platformRefused.installTarget?.spec, '@deepseek-ai/dsh-cua-bundle@0.2.2-rc.1')
   // An ABSENT Host decision is never masked with a fabricated default.
   assert.equal('listedByDefault' in snapshot.bundles[1]!, false)
-  assert.equal(snapshot.bundles[1]!.updatable, false, 'a shipped bundle declares no update capability unless the Host says so')
+  assert.equal('update' in snapshot.bundles[1]!, false, 'a shipped bundle declares no update source unless the Host says so')
   assert.equal(snapshot.bundles[2]!.listedByDefault, true)
-  assert.equal(snapshot.bundles[2]!.updatable, true, 'the Host-declared update capability is preserved')
+  assert.equal(snapshot.bundles[2]!.update, 'registry', 'the Host-declared update source is preserved')
   assert.ok(Object.isFrozen(snapshot.bundles[2]))
 })
 

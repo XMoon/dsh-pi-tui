@@ -117,6 +117,11 @@ readable through the official persistence contract.
   format is refused with the official diagnostic instead of being read as an
   empty Session. A generation the current runtime cannot represent keeps its
   bytes; open it with the runtime that wrote it.
+- A shared physical format version is not by itself a forward-read guarantee:
+  the reader's known event types and payload generations decide readability.
+  For example a newer `team/mode` record or a newer subagent-catalog payload is
+  refused by an older reader even though the Session format number is unchanged;
+  such a file must be opened by the runtime that wrote it.
 - Back up a Session file before downgrading. Never hand-edit JSONL: an
   unsupported or malformed artifact must fail through the official reader.
 - Preset state is read through the official `agentPreset` Session projection:

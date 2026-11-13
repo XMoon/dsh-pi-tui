@@ -57,8 +57,15 @@ test('action call presenters normalize standard and Team shapes', () => {
   assert.deepEqual(terminalSendCallPresentation(JSON.stringify({ sessionId: 'pty-3', text: 'make test' })), {
     sessionId: 'pty-3', text: 'make test',
   })
-  assert.deepEqual(listAgentsCallPresentation('{}'), { scope: 'children' })
-  assert.deepEqual(listAgentsCallPresentation(''), { scope: 'children' })
+  // rc.2 renamed the target field to `agent`; it wins over historical names.
+  assert.deepEqual(sendMessageCallPresentation(JSON.stringify({ agent: 'named-child', agent_id: 'old-id', target: 'team', message: 'hi' })), {
+    target: 'named-child', message: 'hi',
+  })
+  assert.deepEqual(interruptAgentCallPresentation(JSON.stringify({ agent: 'named-child', agent_id: 'old-id' })), { target: 'named-child' })
+  // rc.2 list_agents takes no arguments: there is no scope to present.
+  assert.deepEqual(listAgentsCallPresentation('{}'), {})
+  assert.deepEqual(listAgentsCallPresentation(''), {})
+  // A persisted rc.1 scope stays readable for historical replay only.
   assert.deepEqual(listAgentsCallPresentation('{"scope":"descendants"}'), { scope: 'descendants' })
 
   assert.equal(sendMessageCallPresentation(JSON.stringify({ agent_id: 'child-1' })), undefined)
@@ -146,7 +153,7 @@ test('compact action presentations are payload-first and receipt-safe', () => {
   assert.equal(focusToolDisplay({ name: 'send_message', args: JSON.stringify({ target: 'reviewer', message: 'Inspect the card.' }) }), 'Send message reviewer · Inspect the card.')
   assert.equal(focusToolDisplay({ name: 'terminal_send', args: JSON.stringify({ sessionId: 'pty-3', text: 'make test' }) }), 'Terminal pty-3 · make test')
   assert.equal(focusToolDisplay({ name: 'interrupt_agent', args: JSON.stringify({ agent_id: 'child-1' }) }), 'Interrupt agent child-1')
-  assert.equal(focusToolDisplay({ name: 'list_agents', args: '{}' }), 'List agents children')
+  assert.equal(focusToolDisplay({ name: 'list_agents', args: '{}' }), 'List agents')
 })
 
 test('schedule cards use the fixed no-registry fallback titles and identities', () => {
@@ -201,6 +208,28 @@ test('list_agents summarizes structured and rendered historical snapshots', () =
     { kind: 'diagnostic', id: 'x', reason: 'unavailable' },
   ]))!), '1 entry · 1 diagnostic')
   assert.equal(formatAgentListSummary(summarizeAgentListResult('1 [running] — a\n2 [idle] — b\n3 [ready] — c')!), '3 agents · 1 running · 1 idle · 1 ready')
+  // The REAL rc.2 render uses `[inactive]` for the root/non-running child; it
+  // is a resumable agent, never a diagnostic. Keep the official text form
+  // alongside the structured snapshot and the historical rc.1 text replay.
+  const officialRc2Text = 'lead [inactive] — root agent\nreviewer [running] — Review the diff\n'
+    + 'broken [corrupt] — corrupt row\nlegacy [unsupported] — unsupported row\ngone [unavailable] — unavailable row'
+  assert.equal(formatAgentListSummary(summarizeAgentListResult(officialRc2Text)!),
+    '5 entries · 1 running · 1 ready · 3 diagnostics')
+  assert.equal(compactToolPresentation('list_agents', '{}', officialRc2Text)?.result,
+    '5 entries · 1 running · 1 ready · 3 diagnostics')
+  // Agent descriptions are untrusted text: a `[status]`-looking token INSIDE
+  // the description must never override the authoritative field before the
+  // separator. This is a valid official row, not damaged data.
+  assert.equal(formatAgentListSummary(summarizeAgentListResult(
+    'lead [inactive] — root agent\nreviewer [running] — Review the diff')!),
+  '2 agents · 1 running · 1 ready')
+  const pollutedDescriptions = 'lead [inactive] — Check the [running] state\n'
+    + 'reviewer [running] — Mentions [inactive] in the brief\n'
+    + 'broken [corrupt] — Description says [running] but the row is corrupt'
+  assert.equal(formatAgentListSummary(summarizeAgentListResult(pollutedDescriptions)!),
+    '3 entries · 1 running · 1 ready · 1 diagnostic')
+  assert.equal(compactToolPresentation('list_agents', '{}', pollutedDescriptions)?.result,
+    '3 entries · 1 running · 1 ready · 1 diagnostic')
   assert.equal(formatAgentListSummary(summarizeAgentListResult('(no subagents)')!), 'no subagents')
   assert.equal(formatAgentListSummary(summarizeAgentListResult('x [diagnostic: corrupt]')!), '1 entry · 1 diagnostic')
   // Descendants rows carry parent/depth position; the status regex must not
@@ -221,11 +250,58 @@ test('list_agents summarizes structured and rendered historical snapshots', () =
 
   const list = compactToolPresentation('list_agents', '{}', '1 [running] — a\n2 [idle] — b\n3 [ready] — c')
   assert.equal(list?.title, 'List agents')
-  assert.equal(list?.summary, 'children')
+  assert.equal(list?.summary, undefined, 'a no-argument rc.2 call advertises no scope')
   assert.equal(list?.result, '3 agents · 1 running · 1 idle · 1 ready')
+
+  // rc.2 returns the whole tree including the root `lead`; corrupt/unsupported/
+  // unavailable rows are diagnostics, never idle/ready agents.
+  const rc2 = summarizeAgentListResult(JSON.stringify([
+    { name: 'lead', status: 'inactive' },
+    { name: 'reviewer', status: 'running', description: 'reviews the diff' },
+    { name: 'broken', status: 'corrupt' },
+    { name: 'legacy', status: 'unsupported' },
+    { name: 'gone', status: 'unavailable' },
+  ]))!
+  assert.equal(formatAgentListSummary(rc2), '5 entries · 1 running · 1 ready · 3 diagnostics')
   assert.deepEqual(compactToolExpandedLines('list_agents', '{}', '1 [running] — a\n2 [idle] — b'), [
     '1 [running] — a', '2 [idle] — b',
   ])
+})
+
+test('rc.2 agent targets and list rows render without legacy scope or terminal escapes', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript([
+    actionMessage('send_message', { agent: 'named-child', message: 'Review the diff.' }, JSON.stringify({ accepted: true })),
+    actionMessage('interrupt_agent', { agent: 'named-child' }, JSON.stringify({ accepted: true })),
+    actionMessage('list_agents', {}, JSON.stringify([
+      { name: 'lead', status: 'inactive' },
+      { name: 'reviewer', status: 'running', description: 'reviews' },
+      { name: 'bad\u001b[31mname', status: 'corrupt', description: 'esc \u001b[2Jdesc' },
+    ])),
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Send message · named-child'), view)
+  assert.ok(view.includes('Interrupt agent · named-child'), view)
+  assert.ok(view.includes('List agents [ok]'), 'the rc.2 no-argument call carries no scope label')
+  assert.equal(view.includes('List agents · children'), false, 'no legacy scope is presented as a capability')
+  // The expanded card keeps the structured snapshot; the folded summary counts
+  // the same rows without inventing agents from corrupt/unsupported entries.
+  const rc2Rows = JSON.stringify([
+    { name: 'lead', status: 'inactive' },
+    { name: 'reviewer', status: 'running', description: 'reviews' },
+    { name: 'bad', status: 'corrupt' },
+  ])
+  assert.equal(compactToolPresentation('list_agents', '{}', rc2Rows)?.result,
+    '3 entries · 1 running · 1 ready · 1 diagnostic')
+  // Untrusted rc.2 name/description text must never reach the terminal as a raw
+  // control sequence; the structured snapshot JSON-escapes it instead.
+  assert.equal(view.includes('\u001b[31mname'), false, 'raw SGR from a name is never painted')
+  assert.equal(view.includes('\u001b[2Jdesc'), false, 'raw control sequence from a description is never painted')
+  assert.ok(view.includes('\\u001b[31mname'), view)
 })
 
 test('CompactTextPreview is Unicode-safe, capped, and re-derived on resize', () => {

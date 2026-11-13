@@ -22,7 +22,7 @@
  *   C1_NON_ANSWERING_PEER_PROBE = absolute barrier path for the negative control
  */
 
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { isAbsolute, join } from 'node:path'
 import { credentialKey } from '@deepseek-ai/dsh-credentials'
@@ -501,12 +501,23 @@ export async function apply(ctx) {
   }
 
   if (scenario === 'web-settings-f3') {
-    // Seed the OFFICIAL Web settings baseline with KNOWN values through the
-    // real `ctx.settings` (SettingsForms) write path, and plant a NON-FUNCTIONAL
-    // unique credential sentinel through the official `ctx.credentials.set`
-    // path. Nothing here is a product input; the case supplies the sentinel and
-    // the base URL through its own environment and later proves neither the
-    // sentinel nor a Client guess reached any observable surface.
+    // Seed the OFFICIAL rc.2 Web settings baseline with KNOWN values through
+    // the real `ctx.settings` (SettingsForms) write path, and plant a
+    // NON-FUNCTIONAL unique credential sentinel through the official
+    // `ctx.credentials.set` path. Nothing here is a product input; the case
+    // supplies the sentinel and the Search API override URL through its own
+    // environment and later proves neither the sentinel nor a Client guess
+    // reached any observable surface.
+    //
+    // rc.2 schema ONLY: the retired single-endpoint keys `baseURL`, `apiKeyEnv`
+    // and `apiKey` are NEVER written (they no longer control Search/Fetch).
+    // The initial section has NO advanced override: both Billing rows are
+    // writable through the real TUI. AFTER those CAS phases the smoke asks this
+    // fixture (one file-triggered official `ctx.settings.mutate`, never the
+    // TUI) to set `searchBaseURL`, so the Search API override becomes a
+    // read-only Host YAML fact that owns Search Billing while Fetch Billing
+    // stays independently writable, and later clears it again so the shared
+    // lane's profile is left without a fabricated endpoint.
     // The writes are FULLY DEFERRED (loader settled, own detached task): a
     // settings write from inside apply() would deadlock the plugin-row startup
     // the same way the f1-shell row reads settings only from event callbacks.
@@ -516,14 +527,84 @@ export async function apply(ctx) {
       throw new Error('m4-c1-host-work: web-settings-f3 requires C1_F3_BASE_URL and C1_F3_SECRET')
     }
     const apiNamespace = 'web-deepseek-api'
+    const webNamespace = 'web'
+    const plainValue = descriptor => descriptor?.value !== null && typeof descriptor?.value === 'object'
+      ? descriptor.value
+      : undefined
+    const apiFactsOf = value => value === null || typeof value !== 'object'
+      ? undefined
+      : {
+          count: value.count,
+          sendOriginalQuestion: value.sendOriginalQuestion,
+          searchBilling: value.searchBilling,
+          fetchBilling: value.fetchBilling,
+          searchBaseURL: value.searchBaseURL,
+          fetchBaseURL: value.fetchBaseURL,
+          // Proof that the rc.2 seed/override wrote NONE of the retired keys.
+          legacyKeys: ['baseURL', 'apiKeyEnv', 'apiKey'].filter(field => value[field] !== undefined),
+        }
     void (async () => {
       try {
         await new Promise(resolve => ctx.root.loader.await().then(resolve, resolve))
+        // Both Billing rows need their API provider selected: only the
+        // Search/Fetch API consumes a billing mode.
+        await ctx.settings.mutate(webNamespace, [
+          { op: 'set', path: ['searchProvider'], value: 'deepseek-search-api' },
+          { op: 'set', path: ['fetchProvider'], value: 'deepseek-fetch-api' },
+        ])
         await ctx.settings.mutate(apiNamespace, [
+          // Start from a KNOWN no-override state even if an earlier run of this
+          // case left the YAML-only override in the shared isolated profile.
+          { op: 'unset', path: ['searchBaseURL'] },
+          { op: 'unset', path: ['fetchBaseURL'] },
           { op: 'set', path: ['count'], value: 10 },
           { op: 'set', path: ['sendOriginalQuestion'], value: false },
-          { op: 'set', path: ['baseURL'], value: seedBaseURL },
+          { op: 'set', path: ['searchBilling'], value: 'auto' },
+          { op: 'set', path: ['fetchBilling'], value: 'auto' },
         ])
+        // The late-override control: ONE qualification-only file trigger; the
+        // Host applies the rc.2 YAML field through the official Settings
+        // mutation (never a hand edit, never a TUI write) and records the
+        // resulting effective facts so the smoke can assert the true values.
+        const overrideRequestPath = join(root, 'f3-search-override-request.json')
+        let overrideBusy = false
+        const applySearchOverride = async request => {
+          await ctx.settings.mutate(apiNamespace, [request.op === 'set'
+            ? { op: 'set', path: ['searchBaseURL'], value: seedBaseURL }
+            : { op: 'unset', path: ['searchBaseURL'] }])
+          const descriptor = ctx.settings.describe().find(entry => entry.ns === apiNamespace)
+          record('f3-search-override', {
+            nonce: request.nonce,
+            op: request.op,
+            api: apiFactsOf(plainValue(descriptor)),
+            revision: descriptor?.revision,
+          })
+        }
+        const overrideTimer = setInterval(() => {
+          if (overrideBusy || !existsSync(overrideRequestPath)) return
+          overrideBusy = true
+          let request
+          try {
+            request = JSON.parse(readFileSync(overrideRequestPath, 'utf8'))
+          } catch (error) {
+            rmSync(overrideRequestPath, { force: true })
+            overrideBusy = false
+            record('f3-search-override-failed', {
+              message: error instanceof Error ? error.message : String(error),
+            })
+            return
+          }
+          // Consume the request BEFORE the write: one request means one
+          // mutation, and a repeated poll can never apply it twice.
+          rmSync(overrideRequestPath, { force: true })
+          void applySearchOverride(request)
+            .catch(error => record('f3-search-override-failed', {
+              nonce: request?.nonce,
+              message: error instanceof Error ? error.message : String(error),
+            }))
+            .finally(() => { overrideBusy = false })
+        }, 40)
+        ctx.effect(() => () => clearInterval(overrideTimer))
         const { credentialRef } = await import('@deepseek-ai/dsh-credentials')
         const ref = credentialRef('DEEPSEEK_API_KEY')
         // The sentinel reference is fixture state on the shared lane's ONE
@@ -539,20 +620,21 @@ export async function apply(ctx) {
         }, 'f3-credential-restorer')
         const descriptors = ctx.settings.describe()
         const revisions = Object.fromEntries(descriptors.map(descriptor => [descriptor.ns, descriptor.revision]))
-        const apiValue = descriptors.find(descriptor => descriptor.ns === apiNamespace)?.value
-        const api = apiValue !== null && typeof apiValue === 'object'
-          ? {
-              baseURL: apiValue.baseURL,
-              count: apiValue.count,
-              sendOriginalQuestion: apiValue.sendOriginalQuestion,
+        const apiValue = plainValue(descriptors.find(descriptor => descriptor.ns === apiNamespace))
+        const webValue = plainValue(descriptors.find(descriptor => descriptor.ns === webNamespace))
+        const web = webValue === undefined
+          ? undefined
+          : {
+              searchProvider: webValue.searchProvider,
+              fetchProvider: webValue.fetchProvider,
             }
-          : undefined
         // The sentinel VALUE never enters the proof: only its bounded digest proves
         // which value the store holds.
         const sentinelDigest = createHash('sha256').update(sentinel).digest('hex').slice(0, 16)
         record('f3-host-seed', {
           namespace: apiNamespace,
-          api,
+          api: apiFactsOf(apiValue),
+          web,
           revisions,
           credentialReference: 'DEEPSEEK_API_KEY',
           sentinelDigest,

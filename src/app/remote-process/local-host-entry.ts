@@ -58,19 +58,19 @@ import { cleanupOwnedFiles, type LocalInstanceRecord } from './local-discovery.t
 /** The official Web-only rows of the Host overlay, rendered from the ONE
  * production roster (`host/features/web-roster.ts`). Pure template data: no
  * parser, no discovery and no state — the same table the `piTuiWebAccess`
- * service verifies the live Loader against. */
-const WEB_ONLY_ROWS_YAML = PI_TUI_WEB_ACCESS_ROWS.map(({ id, name }) => [
-  `    - id: ${id}`,
-  `      name: '${name}'`,
+ * service verifies the live Loader against. `inject`/`config` come from that
+ * same row record; `yaml` is the fixed official macro fragment for the ONE
+ * `!!js`-configured row (office-kit's Host data output directory). */
+const WEB_ONLY_ROWS_YAML = PI_TUI_WEB_ACCESS_ROWS.flatMap(row => [
+  `    - id: ${row.id}`,
+  `      name: '${row.name}'`,
   '      disabled: true',
-  ...(id === 'web-runtime' ? [
-    '      inject: [webServer]',
-    '      config:',
-    '        openBrowser: false',
-    '        printUrl: false',
-    '        surfaceContext: false',
-  ] : []),
-].join('\n')).join('\n')
+  ...(row.inject === undefined ? [] : [`      inject: [${row.inject.join(', ')}]`]),
+  ...(row.config === undefined
+    ? []
+    : ['      config:', ...Object.entries(row.config).map(([key, value]) => `        ${key}: ${String(value)}`)]),
+  ...(row.yaml ?? []),
+]).join('\n')
 
 /**
  * The Host-only overlay applied over the profile's own patch stack. It keeps
@@ -171,12 +171,6 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
     - id: split-host-settings-controller
       name: '@deepseek-ai/dsh-api-settings-controller'
       inject: [typert]
-
-    # The official DeepSeek Account Remote owner is Host-only and remains live
-    # regardless of the optional Browser Web frontend roster.
-    - id: split-host-account-controller
-      name: '@deepseek-ai/dsh-api-account-controller'
-      inject: [deepseekAccount, agents]
 
     - id: split-host-session-log-download
       name: '@deepseek-ai/dsh-session-log-export'

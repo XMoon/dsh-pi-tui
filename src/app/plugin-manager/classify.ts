@@ -69,7 +69,6 @@ export type PluginOrigin = 'official' | 'third-party' | 'unknown'
  * discrepancy, not a generated card.
  */
 export const EXPERIMENTAL_BUNDLE_IDS: readonly string[] = Object.freeze([
-  '@deepseek-ai/dsh-experimental-agent-team-profile',
   '@deepseek-ai/dsh-experimental-voice-input-bundle',
   '@deepseek-ai/dsh-experimental-auto-review',
   '@deepseek-ai/dsh-experimental-inspector-profile',

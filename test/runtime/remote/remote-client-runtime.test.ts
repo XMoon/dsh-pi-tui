@@ -1222,15 +1222,15 @@ test('WS1-TABLE. the frozen /remote tables agree by package identity and the Cli
     'both tables must name the same packages in the same frozen order',
   )
   const settingsIndex = packages.indexOf('@deepseek-ai/dsh-api-settings-controller')
-  const accountIndex = packages.indexOf('@deepseek-ai/dsh-api-account-controller')
+  const accountIndex = packages.indexOf('@deepseek-ai/dsh-deepseek-account')
   assert.ok(settingsIndex >= 0 && accountIndex === settingsIndex + 1,
     'the generated Account namespace follows Settings in the /remote contribution order')
   const workspaceIndex = packages.indexOf('@deepseek-ai/dsh-api-workspace-controller')
   const scheduleIndex = packages.indexOf('@deepseek-ai/dsh-schedule')
   assert.ok(workspaceIndex >= 0 && scheduleIndex > workspaceIndex,
     'the generated Workspace and Schedule capabilities keep their dependency order')
-  assert.equal(OFFICIAL_CLIENT_BUNDLES.some(bundle => /workspace-controller|account-controller/u.test(bundle.specifier)), false,
-    'Workspace and Account Controllers are /remote descriptors, never extra Client plugins')
+  assert.equal(OFFICIAL_CLIENT_BUNDLES.some(bundle => /workspace-controller|deepseek-account/u.test(bundle.specifier)), false,
+    'Workspace and Account owners are /remote descriptors, never extra Client plugins')
 })
 
 test('WORKSPACE. the official workspace namespace creates and follows the Host Workspace registry', async (t) => {

@@ -98,9 +98,12 @@ export interface PluginBundleFact {
    * information removed by the Host), when one is declared. */
   readonly source?: string
   readonly removable: boolean
-  /** Whether the Host accepts `listVersions`/`updateBundle` for this bundle: a
-   * declared Host capability only. It never answers which version is newer. */
-  readonly updatable: boolean
+  /** How the Host can update this bundle, absent when it cannot: `registry`
+   *  (a registry version update accepted by `listVersions`/`updateBundle`) or
+   *  `git` (a Git-sourced profile dependency). The value is a Host declaration
+   *  only: it never answers which version is newer, and the TUI must not infer
+   *  it from a source string. */
+  readonly update?: 'registry' | 'git'
   readonly readOnlyReason?: PluginReadOnlyReason
   readonly error?: PluginErrorFact
   readonly rows: readonly PluginBundleRowFact[]

@@ -511,8 +511,9 @@ that grant instead of the whole terminal height.
   only one that did, for its `Theme`, `Keyboard shortcuts`, `Subagent allowed
   models`, Web endpoint and Web credential rows. Each of those fields is now
   edited by the workspace's own choice, by a same-lease specialist page, or by
-  the embedded Web page (which reuses `WebEndpointPanel` as its own draft
-  editor, not as a row submenu). The component's `submenu` slot and its budget
+  the embedded Web page (whose rows are choice/read-only facts; the rc.1
+  endpoint draft editor was retired with the rc.2 schema, not moved into a row
+  submenu). The component's `submenu` slot and its budget
   forwarding stay as the fork's contract, exercised by its own divergences and
   by the picker unit tests rather than by a live settings row. The fork's
   SettingsList still lacks filtered-state Home/End paging, and such a list still

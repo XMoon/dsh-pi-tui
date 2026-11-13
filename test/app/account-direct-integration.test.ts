@@ -2,7 +2,7 @@
  * Phase 3C / C2-MA — the REAL DeepSeek Account browser-callback contract.
  *
  * PRODUCTION PREREQUISITES REPRODUCED:
- *   - the official `@deepseek-ai/dsh-deepseek-account-platform` service, with
+ *   - the official `@deepseek-ai/dsh-deepseek-account` service, with
  *     the official `@deepseek-ai/dsh-authorization` registry and the official
  *     file-backed `@deepseek-ai/dsh-credentials-local` store;
  *   - the official `@deepseek-ai/dsh-host-webserver`, listening on a real
@@ -30,7 +30,7 @@ import { Context } from '@deepseek-ai/cordis'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
 import AuthorizationService from '@deepseek-ai/dsh-authorization'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
-import PlatformAccount from '@deepseek-ai/dsh-deepseek-account-platform'
+import DeepSeekAccount from '@deepseek-ai/dsh-deepseek-account'
 import { DirectAccountConfig, DirectAuthorizationConfig } from '../../src/runtime/direct/config-direct.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { ACCOUNT_AUTHORIZATION_KEY, genericAuthorizationTargets, resolveLoginDestination } from '../../src/app/command/credential-workflow.ts'
@@ -121,7 +121,7 @@ async function waitFor<T>(probe: () => Promise<T | undefined>, timeoutMs = 3000)
   }
 }
 
-test('REAL PlatformAccount + official WebServer callback: state, PKCE, grant, profile, balance and sign-out', async t => {
+test('REAL DeepSeekAccount + official WebServer callback: state, PKCE, grant, profile, balance and sign-out', async t => {
   const life = testLifecycle(t)
   const platform = await startPlatform()
   life.defer(() => new Promise<void>(resolve => platform.server.close(() => resolve())))
@@ -132,7 +132,7 @@ test('REAL PlatformAccount + official WebServer callback: state, PKCE, grant, pr
     await ctx.plugin(LocalCredentialProvider, { path: join(home, '.credentials.yaml'), watch: false })
     await ctx.plugin(AuthorizationService)
     await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
-    await ctx.plugin(PlatformAccount, {
+    await ctx.plugin(DeepSeekAccount, {
       platformOrigin: platform.origin,
       allowLoopbackHttp: true,
       inferenceOrigin: platform.origin,

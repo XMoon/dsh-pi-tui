@@ -36,10 +36,10 @@ checksum = "sha256:ca1bff5d8ead13c9f2ea404a176db46bd430704d5b5113734049fa365e779
 url = "https://nodejs.org/dist/v24.22.2/node-v24.22.2-win-x64.zip"
 
 [[tools."npm:@deepseek-ai/dsh"]]
-version = "0.2.2-rc.1"
-aube = { path = ".mise/locks/npm-deepseek-ai-dsh/0.2.2-rc.1~753e43e4", digest = "sha256:41c5180804253e22dc98d57979fb9879e16285af7d47fd7e01b494764db208e8" }
+version = "0.2.2-rc.2"
+aube = { path = ".mise/locks/npm-deepseek-ai-dsh/0.2.2-rc.2~753e43e4", digest = "sha256:0280f28c89e20df727f4470cd1256dd69cc055159b2efc9e2357746163060275" }
 backend = "npm:@deepseek-ai/dsh"
-specifiers = ["0.2.2-rc.1"]
+specifiers = ["0.2.2-rc.2"]
 
 [tools."npm:@deepseek-ai/dsh".options]
 allow_builds = '["@deepseek-ai/dsh-subprocess-local", "koffi", "node-pty"]'

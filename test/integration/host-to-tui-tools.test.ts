@@ -1,5 +1,5 @@
 /**
- * S4-D3 B05/B07/B08 — the OFFICIAL rc.2 Optional bundle result in the
+ * S4-D3 B05/B08 — the OFFICIAL rc.2 Optional bundle result in the
  * MOUNTED PiTui application (D3-4).
  *
  * `PRODUCTION PREREQUISITES REPRODUCED`: the published rc.2 Optional bundle
@@ -30,7 +30,6 @@ import {
 import { startS4D3Application } from '../support/application-fixture.ts'
 
 const B05 = '@deepseek-ai/dsh-experimental-tool-worktree' satisfies OptionalBundleId
-const B07 = '@deepseek-ai/dsh-experimental-terminal-bundle' satisfies OptionalBundleId
 const B08 = '@deepseek-ai/dsh-experimental-session-search' satisfies OptionalBundleId
 
 function git(cwd: string, ...args: readonly string[]): string {
@@ -179,134 +178,17 @@ test('the real create_worktree result and effective cwd reach the mounted TUI', 
   assert.equal(git(project, 'status', '--porcelain'), '', 'the source worktree stays clean')
 })
 
-// ── B07 persistent terminal ────────────────────────────────────────────────
-
-/** The exact durable tool result of one call id (never a sibling result). */
+/** The committed text of one tool/result by call id. */
 function toolResultOf(agent: Agent, callId: string): string | undefined {
-  for (const event of agent.session.snapshotEvents() as readonly { readonly type?: string; data?: unknown }[]) {
+  const events = agent.session.snapshotEvents() as readonly { readonly type?: string; readonly data?: unknown }[]
+  for (const event of events) {
     if (event.type !== 'tool/result') continue
-    const message = (event.data as { message?: { toolCallId?: unknown; content?: readonly { text?: string }[] } }).message
-    if (String(message?.toolCallId) !== callId) continue
-    return (message?.content ?? []).map(block => block.text ?? '').join('')
+    const message = (event.data as { message?: { toolCallId?: string; content?: readonly { type?: string; text?: string }[] } }).message
+    if (message?.toolCallId !== callId) continue
+    return (message.content ?? []).map(block => block.text ?? '').join('')
   }
   return undefined
 }
-
-function toolResultTexts(agent: Agent): string[] {
-  const events = agent.session.snapshotEvents() as readonly { readonly type?: string; readonly data?: unknown }[]
-  const texts: string[] = []
-  for (const event of events) {
-    if (event.type !== 'tool/result') continue
-    const message = (event.data as { message?: { content?: readonly { type?: string; text?: string }[] } }).message
-    const text = (message?.content ?? []).map(block => block.text ?? '').join('')
-    if (text !== '') texts.push(text)
-  }
-  return texts
-}
-
-const sleep = async (ms: number): Promise<void> => { await new Promise<void>(resolve => setTimeout(resolve, ms)) }
-
-test('the real retained terminal result, Job and close state reach the mounted TUI', { skip: skippedInstallationReason([B07]) }, async t => {
-  const app = await startS4D3Application(t, {
-    bundles: [B07],
-    presets: true,
-    patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
-  })
-  const adapter = new ScriptedAdapter()
-  app.host.ctx.llm.registerAdapter(['scripted'], adapter)
-  const work = join(app.host.root, 'work')
-
-  adapter.scripts.push(
-    { kind: 'tool', name: 'terminal_open', callId: 's4d3-b07-open', arguments: JSON.stringify({ type: 'shell', name: 'main', cwd: work }) },
-    { kind: 'text', text: 'Terminal opened.' },
-  )
-  const agent = await app.submitFirstPrompt('Open a persistent terminal')
-  await agent.whenIdle()
-  const opened = toolResultTexts(agent).find(text => text.includes('started terminal session'))
-  assert.ok(opened !== undefined, `the real terminal_open result is committed:\n${toolResultTexts(agent).join('\n---\n')}`)
-  const terminalId = /started terminal session (\S+)/u.exec(opened!)![1]!
-  await app.waitFor(() => app.view().includes('terminal_open'), 'the real terminal tool card')
-
-  adapter.scripts.push(
-    { kind: 'tool', name: 'terminal_send', callId: 's4d3-b07-send', arguments: JSON.stringify({ sessionId: terminalId, text: 'echo TERMINAL_OK' }) },
-    { kind: 'tool', name: 'terminal_read', callId: 's4d3-b07-read', arguments: JSON.stringify({ sessionId: terminalId }) },
-    { kind: 'tool', name: 'terminal_send', callId: 's4d3-b07-ansi', arguments: JSON.stringify({ sessionId: terminalId, text: "printf '\\033[31mRED_ESCAPE\\033[0m\\n'" }) },
-    { kind: 'tool', name: 'terminal_read', callId: 's4d3-b07-read-ansi', arguments: JSON.stringify({ sessionId: terminalId }) },
-    { kind: 'tool', name: 'terminal_list', callId: 's4d3-b07-list', arguments: '{}' },
-    { kind: 'tool', name: 'terminal_send', callId: 's4d3-b07-background', arguments: JSON.stringify({ sessionId: terminalId, text: 'sleep 0.2; echo BG_OK', run_in_background: true }) },
-    { kind: 'text', text: 'Terminal round completed.' },
-  )
-  followup(agent, 'Run the retained terminal commands')
-  await agent.whenIdle()
-  await app.waitFor(() => app.view().includes('TERMINAL_OK'), 'the real terminal output in the transcript')
-  assert.match(app.view(), /RED_ESCAPE/u, 'the sanitized ANSI output is visible')
-  assert.doesNotMatch(app.view(), /\u001b\[31m/u, 'no raw terminal escape sequence is painted by the transcript')
-
-  const results = toolResultTexts(agent)
-  const listed = results.findLast(text => /pid=\d+/u.test(text))!
-  const pid = Number(/pid=(\d+)/u.exec(listed)![1]!)
-  const background = results.find(text => text.includes('started background job'))
-  assert.ok(background !== undefined, 'the background send really created a Host Job')
-  const jobId = /started background job (\S+)/u.exec(background!)![1]!
-
-  adapter.scripts.push(
-    { kind: 'tool', name: 'job_output', callId: 's4d3-b07-job', arguments: JSON.stringify({ job_id: jobId, wait: true, timeout_ms: 30_000 }) },
-    { kind: 'tool', name: 'terminal_close', callId: 's4d3-b07-close', arguments: JSON.stringify({ sessionId: terminalId }) },
-    { kind: 'tool', name: 'terminal_read', callId: 's4d3-b07-read-closed', arguments: JSON.stringify({ sessionId: terminalId }) },
-    { kind: 'text', text: 'Terminal closed.' },
-  )
-  followup(agent, 'Read the background Job and close the terminal')
-  await agent.whenIdle()
-  await app.waitFor(() => app.view().includes('BG_OK'), 'the real background Job output in the transcript')
-  const closed = toolResultOf(agent, 's4d3-b07-close')
-  assert.match(closed ?? '', /closed terminal session/iu, 'the exact close call succeeded')
-  const afterClose = toolResultOf(agent, 's4d3-b07-read-closed')
-  assert.match(afterClose ?? '', /unknown PTY session|unknown|closed|lost/iu,
-    'the SPECIFIC post-close read is the official refusal, not the close success')
-  await app.waitFor(() => /unknown PTY session/iu.test(app.view()), 'the post-close refusal is painted')
-
-  // The existing Task Center observes the SAME Host Job without a second
-  // registry: open `/tasks` and read the job row, then its retained output.
-  for (const character of '/tasks') app.vt.sendInput(character)
-  await app.settle()
-  app.vt.sendInput('\r')
-  await app.settle()
-  await app.waitFor(() => /Job|jobs|Task/iu.test(app.view()), 'the real Task Center')
-  const taskFrame = app.view()
-  // Isolate the Task Center overlay cells; the retained transcript behind it
-  // already contains terminal/job text and can never witness the roster.
-  const frameLines = taskFrame.split('\n')
-  const overlayTop = frameLines.findIndex(line => line.includes('Tasks [TRACKED]'))
-  assert.ok(overlayTop >= 0, `the real Task Center painted:\n${taskFrame}`)
-  const overlayBottom = frameLines.findIndex((line, index) => index > overlayTop && line.includes('╰'))
-  assert.ok(overlayBottom > overlayTop, 'the Task Center overlay has a painted bottom border')
-  const overlay = frameLines.slice(overlayTop, overlayBottom + 1).join('\n')
-  assert.match(overlay.replace(/\s+/gu, ' '), /Tasks \[TRACKED\]/u)
-  assert.match(overlay.replace(/\s+/gu, ' '), /pty-send · pty-1: sleep 0\.2; echo BG_OK/u,
-    `the exact Host Job row is in the Task Center overlay:\n${overlay}`)
-  assert.match(overlay.replace(/\s+/gu, ' '), /status completed/iu)
-  // Enter opens the existing Job reader as a dedicated SCREEN; the pinned
-  // retained-preview disclosure is unique to that reader (the transcript's
-  // earlier BG_OK cannot witness it). The selected Job's output is then read
-  // from the same reader.
-  app.vt.sendInput('\r')
-  await app.settle()
-  await app.waitFor(() => app.view().includes('Retained preview · not full history'), 'the selected Job reader')
-  assert.match(app.view(), /BG_OK/u, 'the selected Job reader shows the retained output')
-
-  // A closed terminal truly released its process tree.
-  await app.waitFor(() => {
-    try {
-      process.kill(pid, 0)
-      return false
-    } catch {
-      return true
-    }
-  }, 'the retained terminal process to exit')
-  // The one-shot `!`/`!!` behavior is a separate shell owner; this test never
-  // merges it with the persistent terminal and does not touch it.
-  await sleep(10)
-})
 
 // ── B08 session search ─────────────────────────────────────────────────────
 

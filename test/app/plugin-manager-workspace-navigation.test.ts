@@ -870,7 +870,7 @@ test('a Host default-hidden installation bundle appears only on explicit search 
 const UPDATABLE_BUNDLES = (): readonly PluginBundleFact[] => [
   bundle({
     name: 'updatable',
-    updatable: true,
+    update: 'registry',
     version: '1.0.0',
     source: 'https://registry.example/updatable',
     enabled: false,
@@ -1129,7 +1129,7 @@ test('a read-only Check updates preview never blocks disabling its bundle', asyn
     rows: 40,
     bundles: [bundle({
       name: 'updatable',
-      updatable: true,
+      update: 'registry',
       version: '1.0.0',
       source: 'https://registry.example/updatable',
       enabled: true,
@@ -1158,7 +1158,7 @@ test('a completed update can be checked and applied again from the same Bundle D
     rows: 40,
     bundles: [bundle({
       name: 'updatable',
-      updatable: true,
+      update: 'registry',
       version: '1.0.0',
       source: 'https://registry.example/updatable',
       enabled: false,

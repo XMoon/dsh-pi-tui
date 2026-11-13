@@ -92,7 +92,7 @@ function fakeRuntime(settingsDescribe: () => Promise<unknown>): {
       skills: { list: async () => ({ ok: true, value: { skills: [] } }) },
       fileReferences: { list: async () => ({ ok: true, value: [] }) },
       commands: { execute: async () => ({ ok: true, value: undefined }) },
-      subagents: { prompt: async () => ({ ok: true, value: { messageId: 'm' } }), interruptByParent: async () => ({ ok: true, value: {} }) },
+      subagents: { prompt: async () => ({ ok: true, value: { messageId: 'm' } }), interruptByUser: async () => ({ ok: true, value: {} }) },
       userQuestions: { attachWait: () => Object.assign((async function* () {})(), { dispose: () => {} }), answer: async () => ({ ok: true, value: true }) },
       // M5-U-A: the passive read-authority faces the assembly hands the ONE
       // facts adapter. The assembly never calls them during construction.

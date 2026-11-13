@@ -104,7 +104,7 @@ function makePort(options: {
     },
     running: false,
   }
-  const stream = new AccountStream(state.view)
+  const stream = new AccountStream({ type: 'snapshot', state: state.view })
   const streams = [stream]
   let watchCalls = 0
   let account: RemoteAccountRemotes
@@ -149,7 +149,7 @@ function makePort(options: {
       calls.push({ method: 'watch', args: [] })
       watchCalls += 1
       if (watchCalls === 1) return stream
-      const next = new AccountStream(state.view)
+      const next = new AccountStream({ type: 'snapshot', state: state.view })
       streams.push(next)
       return next
     },
@@ -373,10 +373,19 @@ test('watch supplies its initial snapshot and releases only its own stream once'
   assert.deepEqual(first.value.observation.view, ACCOUNT_VIEW)
   assert.equal(harness.port.account.isObservationCurrent(first.value.observation.lease), true)
   const lease = first.value.observation.lease
+  // rc.2 `account/watch` frames are `{type, state}`: a `credentials-changed`
+  // frame is a fresh Host snapshot (not a sign-out), and its `state` is what
+  // the Client may surface.
+  const changedView = { status: 'credential-stored', links: ACCOUNT_VIEW.links, attempt: null }
+  harness.streams[0]!.push({ type: 'credentials-changed', state: changedView })
+  const changed = await iterator.next()
+  if (changed.value?.kind !== 'current') assert.fail('a credentials-changed frame must surface a current observation')
+  assert.deepEqual(changed.value.observation.view, changedView)
+  assert.equal(harness.port.account.isObservationCurrent(changed.value.observation.lease), true)
   controller.abort()
   const ended = await iterator.next()
   assert.equal(ended.done, true)
-  assert.equal(harness.port.account.isObservationCurrent(lease), false)
+  assert.equal(harness.port.account.isObservationCurrent(changed.value.observation.lease), false)
   assert.equal(harness.streams[0]?.disposeCalls, 1)
   harness.port.dispose()
   assert.equal(harness.streams[0]?.disposeCalls, 1, 'port disposal does not release the same watch twice')

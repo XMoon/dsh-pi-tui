@@ -44,7 +44,7 @@ test('Direct Watch failure revokes read and watch leases before any later mutati
     getProfile: async () => null,
     getBalance: async () => null,
     watch: async function* (signal: AbortSignal) {
-      yield state
+      yield { type: 'snapshot', state }
       await new Promise<void>((_resolve, reject) => {
         rejectWatch = reject
         signalWatchReady()
@@ -89,7 +89,7 @@ test('a replaced Direct Host Account service immediately invalidates its previou
   const makeHostAccount = () => ({
     getState: async () => view,
     watch: async function* (signal: AbortSignal) {
-      yield view
+      yield { type: 'snapshot', state: view }
       await new Promise<void>(resolve => {
         watchPendingResolve()
         signal.addEventListener('abort', () => resolve(), { once: true })
@@ -134,4 +134,53 @@ test('a missing Direct Host Agent authority rejects instead of claiming no runni
   const adapter = directAccount(undefined)
   const observation = await adapter.getState()
   await assert.rejects(adapter.hasRunningAccountTasks(observation.lease), /Host Agent service unavailable/u)
+})
+
+test('Direct Watch unwraps the rc.2 AccountUpdate envelope for both frame types', async () => {
+  const signedOut = { status: 'signed-out' as const, links: { usageUrl: '', topUpUrl: '' }, attempt: null }
+  const stored = {
+    status: 'credential-stored' as const,
+    links: { usageUrl: 'https://platform.example/usage', topUpUrl: 'https://platform.example/topup' },
+    attempt: null,
+  }
+  const account = {
+    getState: async () => signedOut,
+    watch: async function* (signal: AbortSignal) {
+      yield { type: 'snapshot', state: signedOut }
+      yield { type: 'credentials-changed', state: stored }
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+    },
+  }
+  const adapter = new DirectAccountConfig({ get: name => name === 'deepseekAccount' ? account : undefined })
+  const controller = new AbortController()
+  const iterator = adapter.watch(controller.signal)[Symbol.asyncIterator]()
+  const initial = await iterator.next()
+  if (initial.value?.kind !== 'current') assert.fail('the snapshot frame must surface its current Host state')
+  assert.deepEqual(initial.value.observation.view, signedOut)
+  const changed = await iterator.next()
+  if (changed.value?.kind !== 'current') assert.fail('a credentials-changed frame must surface its current Host state')
+  assert.deepEqual(changed.value.observation.view, stored,
+    'a credentials-changed frame is a fresh snapshot, not a sign-out')
+  assert.equal(adapter.isObservationCurrent(changed.value.observation.lease), true)
+  const ended = iterator.next()
+  controller.abort()
+  assert.equal((await ended).done, true)
+})
+
+test('Direct Watch rejects a non-envelope frame instead of surfacing undefined state', async () => {
+  const bareView = { status: 'signed-out' as const, links: { usageUrl: '', topUpUrl: '' }, attempt: null }
+  const account = {
+    getState: async () => bareView,
+    watch: async function* () {
+      // The rc.1 bare-`AccountView` payload is NOT the rc.2 wire shape: the
+      // adapter must fail closed (invalidated), never show an empty state.
+      yield bareView as never
+    },
+  }
+  const adapter = new DirectAccountConfig({ get: name => name === 'deepseekAccount' ? account : undefined })
+  const controller = new AbortController()
+  const iterator = adapter.watch(controller.signal)[Symbol.asyncIterator]()
+  assert.deepEqual((await iterator.next()).value, { kind: 'invalidated', reason: 'watch-failed' })
+  controller.abort()
+  assert.equal((await iterator.next()).done, true)
 })

@@ -48,9 +48,7 @@ function deps(overrides: Partial<SubagentViewerSubmitDeps> = {}): SubagentViewer
 
 interface RecordedCall {
   requestId: string
-  parentSessionId: string
   childSessionId: string
-  mode: string
   delivery: string
   content: readonly SubagentPromptContentPart[]
   clientTimeZone: string | undefined
@@ -62,10 +60,8 @@ function service(calls: RecordedCall[]): SubagentPromptService {
     prompt: async (payload, signal) => {
       calls.push({
         requestId: payload.requestId,
-        parentSessionId: payload.parentSessionId,
         childSessionId: payload.childSessionId,
-        mode: payload.mode,
-         delivery: payload.delivery,
+        delivery: payload.delivery,
         content: payload.content,
         clientTimeZone: payload.clientTimeZone,
         signal,
@@ -87,10 +83,11 @@ test('delivers through the official prompt call with the official request vocabu
   if (outcome.kind === 'ok') assert.equal(outcome.messageId, 'inbox-session-child-1')
   assert.equal(calls.length, 1, 'prompt called exactly once')
   assert.equal(calls[0]!.requestId, 'minted-request-id', 'the caller-minted id is persisted on the call')
-  assert.equal(calls[0]!.parentSessionId, 'session-parent')
   assert.equal(calls[0]!.childSessionId, 'session-child')
-  assert.equal(calls[0]!.mode, 'continuable', 'the browser control address keeps the continuable discriminator')
-   assert.equal(calls[0]!.delivery, 'queue', 'viewer prompts are distinct FIFO continuation turns')
+  assert.equal('parentSessionId' in calls[0]!, false,
+    'the viewer parent relation never crosses the rc.2 official request boundary')
+  assert.equal('mode' in calls[0]!, false, 'the rc.1 continuable discriminator no longer exists on the wire')
+  assert.equal(calls[0]!.delivery, 'queue', 'viewer prompts are distinct FIFO continuation turns')
   assert.deepEqual(calls[0]!.content, request.content)
   assert.equal(calls[0]!.signal, signal, 'the caller-owned signal is forwarded to the official call')
 })

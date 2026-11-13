@@ -205,7 +205,8 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         setFetchProvider: async () => {},
         setSearchApiCount: async () => {},
         setSendOriginalQuestion: async () => {},
-        setSearchApiBaseURL: async () => {},
+        setSearchBilling: async () => {},
+        setFetchBilling: async () => {},
       },
       visualTools: {
         read: () => undefined,

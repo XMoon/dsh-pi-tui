@@ -41,8 +41,6 @@ const QUESTION = 'what changed in the last release of the harness?'
 const MESSAGES_ENDPOINT = 'https://api.deepseek.com/anthropic/v1/messages'
 const SEARCH_ENDPOINT = 'https://api.deepseek.com/v1/tools/search'
 const FETCH_ENDPOINT = 'https://api.deepseek.com/v1/tools/fetch'
-/** The base the NEW test confirms through the UI endpoint editor. */
-const CONSUMER_BASE = 'https://gateway.example.test/r4/v1/tools'
 
 interface RecordedRequest {
   readonly url: string
@@ -80,10 +78,6 @@ function installTransport(): Transport {
         return { status: 200, json: { results: [{ url: 'https://example.test/api', title: 'API result', snippet: 'api snippet', date: null }] } }
       }
       if (url === FETCH_ENDPOINT) return { status: 200, json: { content: '# fetched page' } }
-      if (url === `${CONSUMER_BASE}/search`) {
-        return { status: 200, json: { results: [{ url: 'https://example.test/r4-consumer', title: 'R4 consumer result', snippet: 'r4', date: null }] } }
-      }
-      if (url === `${CONSUMER_BASE}/fetch`) return { status: 200, json: { content: '# r4 fetched page' } }
       return { status: 404, json: { error: { message: `unexpected endpoint ${url}` } } }
     },
     restore() { globalThis.fetch = original },
@@ -111,14 +105,22 @@ interface Booted {
 }
 
 /** Mount the real Web provider composition over the real configuration plane. */
-async function boot(life: TestLifecycle): Promise<Booted> {
+async function boot(
+  life: TestLifecycle,
+  options: {
+    /** The `web` row's shipped provider configuration (see the plane fixture). */
+    readonly providers?: 'messages' | 'base-defaults'
+    /** Whether the official credential reference is pre-configured. */
+    readonly credential?: boolean
+  } = {},
+): Promise<Booted> {
   const workRoot = life.tempDir('dsh-s2b-web-')
   const ctx = new Context()
   life.defer(() => ctx.fiber.dispose())
   await mountAgentLoopTestDependencies(ctx)
   await ctx.plugin(Loader)
   await ctx.plugin(LocalCredentials, { path: join(workRoot, '.credentials.yaml'), watch: false })
-  await mountWebProviderPlane(ctx, workRoot)
+  await mountWebProviderPlane(ctx, workRoot, { providers: options.providers })
   const harness: AgentLoopTestHarness = await mountAgentLoopTestHarness(ctx)
   const agent = await harness.create(SessionId(SESSION), {}, { cwd: workRoot })
   // One completed human turn: the official provider reads the latest human
@@ -131,8 +133,10 @@ async function boot(life: TestLifecycle): Promise<Booted> {
     source: { kind: 'user' },
   } as never, { surfaceOp: 'append' } as never)
   agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
-  await (ctx.get('credentials') as { set(ref: unknown, secret: string): Promise<unknown> })
-    .set(credentialRef('DEEPSEEK_API_KEY'), 'l5-test-key')
+  if (options.credential !== false) {
+    await (ctx.get('credentials') as { set(ref: unknown, secret: string): Promise<unknown> })
+      .set(credentialRef('DEEPSEEK_API_KEY'), 'l5-test-key')
+  }
   const transport = installTransport()
   life.defer(transport.restore)
   return { ctx, agent, config: new DirectWebProviderConfig(ctx as never), transport }
@@ -147,7 +151,31 @@ function searchAsInitiator(booted: Booted, query: string): Promise<{ sources: re
       .search({ query }))
 }
 
-test('the shipped defaults select the Messages search and the HTTP fetch providers', async t => {
+test('the pure rc.2 defaults read ready and route the default search to the Search API', async t => {
+  // The EXACT rc.2 `dsh-base` patch (no stored provider, no web-deepseek-api
+  // config at all) and NO configured credential: the read is ready with the
+  // official defaults, the YAML-only overrides are unset, and the missing
+  // DEEPSEEK_API_KEY does NOT make the Web settings unavailable.
+  const life = testLifecycle(t)
+  const booted = await boot(life, { providers: 'base-defaults', credential: false })
+  assert.deepEqual(await booted.config.read(), {
+    searchProvider: 'deepseek-search-api',
+    fetchProvider: 'http',
+    api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+    advanced: {},
+    credential: { configured: false },
+  }, 'the official rc.2 defaults are the read authority (no single-endpoint requirement)')
+  // The default search is the DeepSeek Search API (billed separately): without
+  // a credential the real call fails closed instead of falling back.
+  await assert.rejects(searchAsInitiator(booted, 'default route probe'), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, 'WEB_PROVIDER_CREDENTIAL_MISSING')
+    assert.match((error as { message?: string }).message ?? '', /DEEPSEEK_API_KEY/u)
+    return true
+  })
+  assert.deepEqual(booted.transport.requests, [], 'no request is dispatched without a credential')
+})
+
+test('a stored Messages selection keeps applying over the rc.2 shipped default', async t => {
   const life = testLifecycle(t)
   const booted = await boot(life)
 
@@ -177,10 +205,13 @@ test('a TUI settings write switches the NEXT search to the DeepSeek Search API w
 
   await booted.config.setSearchProvider('deepseek-search-api')
   await booted.config.setSearchApiCount(20)
+  // The billing CAS write lands on the EXACT official field and reads back.
+  await booted.config.setSearchBilling('api-key')
   assert.deepEqual(await booted.config.read(), {
     searchProvider: 'deepseek-search-api',
     fetchProvider: 'http',
-    api: { baseURL: 'https://api.deepseek.com/v1/tools', count: 20, sendOriginalQuestion: true },
+    api: { searchBilling: 'api-key', fetchBilling: 'auto', count: 20, sendOriginalQuestion: true },
+    advanced: {},
     credential: { configured: true, source: 'file' },
   }, 'the read-back is the authority the UI displays')
 
@@ -201,16 +232,33 @@ test('a TUI settings write switches the NEXT search to the DeepSeek Search API w
   await searchAsInitiator(booted, 'third query')
   assert.deepEqual(booted.transport.requests[1]?.body, { query: 'third query', count: 20, need_content: false })
 
-  // A custom endpoint is used verbatim (the human confirmed it in the UI), and
-  // the reset back to the default provider reaches the Messages endpoint again.
-  await booted.config.setSearchApiBaseURL('https://gateway.example.test/deepseek/v1/tools')
+  // The YAML-only Search override is a HOST settings write (never a TUI port
+  // method): the real Search API consumer uses that route while the port
+  // reports it as a detached read-only fact and the Fetch billing stays
+  // untouched.
+  const searchOverride = 'https://gateway.example.test/deepseek/v1/tools'
+  const settings = booted.ctx.get('settings') as {
+    mutate(ns: string, ops: readonly { op: 'set'; path: readonly string[]; value: unknown }[], expectedRevision?: number): Promise<unknown>
+  }
+  await settings.mutate('web-deepseek-api', [{ op: 'set', path: ['searchBaseURL'], value: searchOverride }])
   const respondDefault = booted.transport.respond
-  booted.transport.respond = url => url === 'https://gateway.example.test/deepseek/v1/tools/search'
+  booted.transport.respond = url => url === `${searchOverride}/search`
     ? { status: 200, json: { results: [{ url: 'https://example.test/gateway', title: 'Gateway result', snippet: '', date: null }] } }
     : respondDefault(url)
   const custom = await searchAsInitiator(booted, 'fourth query')
   assert.deepEqual(custom.sources.map(source => source.url), ['https://example.test/gateway'])
-  assert.equal(booted.transport.requests[2]?.url, 'https://gateway.example.test/deepseek/v1/tools/search')
+  assert.equal(booted.transport.requests[2]?.url, `${searchOverride}/search`,
+    'the Host YAML override is the real Search API route')
+  const overriddenRead = await booted.config.read()
+  assert.equal(overriddenRead?.advanced.searchBaseURL, searchOverride,
+    'the override is a detached read-only fact, never an effective api value')
+  assert.equal(overriddenRead?.api.fetchBilling, 'auto',
+    'a Search-only override never touches the Fetch capability')
+  assert.equal(overriddenRead?.api.searchBilling, 'api-key',
+    'the stored billing mode stays the Host value under an override')
+
+  // The stored Messages selection still selects the Messages route (the Search
+  // API override belongs to the DeepSeek Search API provider only).
   await booted.config.setSearchProvider('deepseek-official')
   await searchAsInitiator(booted, 'fifth query')
   assert.equal(booted.transport.requests[3]?.url, MESSAGES_ENDPOINT, 'the reset is live too')
@@ -385,8 +433,6 @@ interface WebTuiWrites {
   readonly oriOff?: boolean
   /** Confirm the DeepSeek Fetch API provider. */
   readonly fetchDeepSeekApi?: boolean
-  /** Replace the endpoint draft with this base and confirm it. */
-  readonly endpoint?: string
 }
 
 /** Drive the REAL `/settings → Tools → Web Search / Fetch` page (C2-R4):
@@ -465,19 +511,7 @@ async function writeWebSettingsThroughTui(
     await app.waitFor(() => app.view().includes('Current: DeepSeek Fetch API') && app.view().includes('Verified'),
       'the verified fetch provider write')
   }
-  if (writes.endpoint !== undefined) {
-    await listTop()
-    await openRow(4) // the endpoint row opens its editor on Enter
-    await renderFrames(app)
-    app.vt.sendInput(KEY.clearLine) // replace the seeded draft
-    for (const character of writes.endpoint) app.vt.sendInput(character)
-    await renderFrames(app)
-    app.vt.sendInput(KEY.enter)
-    await renderFrames(app)
-    await app.waitFor(() => app.view().includes(`Current: ${writes.endpoint}`) && app.view().includes('Verified'),
-      'the verified endpoint write')
-  }
-  app.vt.sendInput(KEY.esc) // Detail/editor -> list
+  app.vt.sendInput(KEY.esc) // Detail -> list
   await renderFrames(app)
   // A pending authoritative reload may swallow a close gesture; Esc is
   // idempotent, so close until the workspace really leaves the frame.
@@ -510,7 +544,8 @@ async function openWebPageInApp(app: S4D3Application): Promise<void> {
 }
 
 /** Open `/settings → Tools → Web Search / Fetch` and select the credential row
- *  (Home + five Downs inside the page list). */
+ *  (Home + eight Downs inside the page list: the credential row is the ninth
+ *  frozen row). */
 async function openWebCredentialRowInApp(app: S4D3Application): Promise<void> {
   for (const character of '/settings') app.vt.sendInput(character)
   await renderFrames(app)
@@ -529,10 +564,12 @@ async function openWebCredentialRowInApp(app: S4D3Application): Promise<void> {
   }
   await app.waitFor(() => app.view().includes('Web Search Provider') && !app.view().includes('Loading…'),
     'the Web Search / Fetch page')
-  for (const key of [KEY.home, KEY.down, KEY.down, KEY.down, KEY.down, KEY.down, KEY.enter]) {
-    app.vt.sendInput(key)
+  for (let step = 0; step < 8; step += 1) {
+    app.vt.sendInput(KEY.down)
     await renderFrames(app)
   }
+  app.vt.sendInput(KEY.enter)
+  await renderFrames(app)
   await app.waitFor(() => app.view().includes('Reference: DEEPSEEK_API_KEY'),
     'the Web credential row Detail')
 }
@@ -566,7 +603,8 @@ test('an EXTERNAL custom provider installed after the page read is never overwri
   await openWebPageInApp(app)
   app.vt.sendInput(KEY.enter) // the search-provider row Detail
   await app.settle()
-  assert.match(app.view(), /Current: Messages/u, 'the page snapshot is the official default')
+  assert.match(app.view(), /Current: DeepSeek Search API/u,
+    'the page snapshot is the rc.2 shipped default (the billed Search API)')
 
   // Another HOST settings writer installs a CUSTOM provider id while the page
   // still holds its older snapshot.
@@ -577,7 +615,9 @@ test('an EXTERNAL custom provider installed after the page read is never overwri
 
   // Confirm the stale candidate: the queue head re-reads the Host, sees the
   // custom route and refuses with ZERO writes instead of overwriting it.
-  app.vt.sendInput(KEY.down) // Messages -> DeepSeek Search API
+  // (The Detail opens on the shipped default candidate; Down is a no-op at the
+  // last candidate, and Enter submits that painted candidate into the guard.)
+  app.vt.sendInput(KEY.down) // stays on the last candidate (DeepSeek Search API)
   app.vt.sendInput(KEY.enter)
   await app.settle()
   await app.waitFor(() => app.view().includes('Not saved') && app.view().includes('custom route'),
@@ -627,9 +667,10 @@ test('a TUI Web settings write reaches the NEXT real tool call and the mounted t
   assert.equal(transport.requests[0]?.authorization, 'Bearer d3-web-key')
   assert.deepEqual(transport.requests[0]?.body, {
     query: 'harness release',
-    // The web_search TOOL declares its own smaller per-request bound (8), which
-    // the row copy documents as winning over the configured 20.
-    count: 8,
+    // rc.2's web_search tool declares its own per-request source bound
+    // (`searchMaxResults`, shipped default 10), which wins over the configured
+    // 20 — the row copy documents exactly this precedence.
+    count: 10,
     need_content: false,
     ori_question: 'Search the release notes',
   }, 'the effective count and the triggering human question ride the official request')
@@ -656,23 +697,23 @@ test('a TUI Web settings write reaches the real search and fetch consumers with 
   t.after(transport.restore)
   const config = new DirectWebProviderConfig(app.host.ctx as never)
   // EVERY write below is an explicit confirm in the real Web page: search
-  // provider, count, Share Original Question off, DeepSeek Fetch API and a new
-  // endpoint base.
+  // provider, count, Share Original Question off and the DeepSeek Fetch API
+  // provider. rc.2 has no single-endpoint write: the search and fetch reach
+  // their OFFICIAL routes with the TUI-confirmed values.
   await writeWebSettingsThroughTui(app, config, {
     oriOff: true,
     fetchDeepSeekApi: true,
-    endpoint: CONSUMER_BASE,
   })
   // The settings recompose re-read the persisted profile: re-pin the scripted
   // transport before the next turn (the official default-model write path).
-  await (app.host.ctx.get('agentDefaultModel') as { saveSelection(next: unknown): Promise<void> })
+  await (app.host.ctx.get('agentDefaultModel') as { saveSelection(next: unknown): Promise<unknown> })
     .saveSelection({ provider: 'scripted', model: 'review-model' })
   const written = await config.read()
   assert.equal(written?.searchProvider, 'deepseek-search-api', 'the UI write is the authoritative search provider')
   assert.equal(written?.fetchProvider, 'deepseek-fetch-api', 'the UI write is the authoritative fetch provider')
   assert.equal(written?.api.count, 20, 'the UI count write is the authoritative settings value')
   assert.equal(written?.api.sendOriginalQuestion, false, 'the UI off write is the authoritative question-sharing value')
-  assert.equal(written?.api.baseURL, CONSUMER_BASE, 'the UI endpoint write is the authoritative base')
+  assert.deepEqual(written?.advanced, {}, 'the UI writes no YAML-only override and the section stays empty')
 
   // ONE real Session/Agent anchors the initiator boundary the official Web
   // service reads for ori_question.
@@ -686,12 +727,12 @@ test('a TUI Web settings write reaches the real search and fetch consumers with 
   const agents = app.host.ctx.get('agents') as { withInitiator<T>(agent: Agent, operation: () => T): T }
 
   // The REAL search consumer: count 20 is the actual request value (no tool
-  // per-request clamp masks it), the custom endpoint is the HTTP target, and
-  // Share Original Question off omits ori_question entirely.
+  // per-request clamp masks it), the official Search API route is the target,
+  // and Share Original Question off omits ori_question entirely.
   const search = await agents.withInitiator(agent, () => web.search({ query: 'r4 query' }))
-  assert.deepEqual(search.sources.map(source => source.url), ['https://example.test/r4-consumer'])
+  assert.deepEqual(search.sources.map(source => source.url), ['https://example.test/api'])
   const searchRequest = transport.requests.at(-1)
-  assert.equal(searchRequest?.url, `${CONSUMER_BASE}/search`, 'the UI-confirmed endpoint is the real search target')
+  assert.equal(searchRequest?.url, `${SEARCH_ENDPOINT}`, 'the official Search API route is the real search target')
   assert.deepEqual(searchRequest?.body, {
     query: 'r4 query',
     count: 20,
@@ -699,16 +740,16 @@ test('a TUI Web settings write reaches the real search and fetch consumers with 
   }, 'the UI-confirmed count and off value reach the official request')
   assert.equal(searchRequest?.authorization, 'Bearer d3-r4-key')
 
-  // The REAL fetch consumer: the UI-confirmed DeepSeek Fetch API provider and
-  // the same endpoint base are what the next fetch uses.
+  // The REAL fetch consumer: the UI-confirmed DeepSeek Fetch API provider is
+  // what the next fetch uses, on the official Fetch API route.
   const fetched = await web.fetch({ url: 'https://example.test/r4-page' })
   const fetchRequest = transport.requests.at(-1)
-  assert.equal(fetchRequest?.url, `${CONSUMER_BASE}/fetch`, 'the UI-confirmed fetch provider/base is the real fetch target')
+  assert.equal(fetchRequest?.url, `${FETCH_ENDPOINT}`, 'the UI-confirmed fetch provider is the real fetch target')
   assert.deepEqual(fetchRequest?.body, { url: 'https://example.test/r4-page' })
   assert.equal(fetchRequest?.authorization, 'Bearer d3-r4-key')
   assert.equal(fetched.url, 'https://example.test/r4-page')
   assert.equal(fetched.statusCode, 200)
-  assert.deepEqual(fetched.body, { kind: 'text', content: '# r4 fetched page' })
+  assert.deepEqual(fetched.body, { kind: 'text', content: '# fetched page' })
 })
 
 test('the Web credential deeplink completes a real store set and clear and the page re-reads the fresh presence', { skip: skippedInstallationReason([]) }, async t => {

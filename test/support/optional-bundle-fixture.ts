@@ -55,7 +55,6 @@ const BIN_NAME = 'dsh'
 /** The verified TUI boundary identities (B01–B14). This is the frozen
  *  presentation contract, NOT the complete official catalog. */
 export const OPTIONAL_BUNDLE_IDS = [
-  '@deepseek-ai/dsh-experimental-agent-team-profile',
   '@deepseek-ai/dsh-experimental-voice-input-bundle',
   '@deepseek-ai/dsh-experimental-auto-review',
   '@deepseek-ai/dsh-experimental-inspector-profile',

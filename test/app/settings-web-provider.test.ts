@@ -84,10 +84,6 @@ interface Harness {
     readUndefined: boolean
     /** Artificial delay for one Host write (the FIFO order proof). */
     writeDelayMs: number
-    /** The value the Host actually KEEPS after a successful endpoint write (the
-     *  official store's canonical form of the submitted base); undefined = the
-     *  submitted URL verbatim. */
-    endpointStoredValue: string | undefined
     /** The provider id the Host actually KEEPS after a successful mutation (a
      *  competing external writer / the official store's own answer); undefined =
      *  the submitted id verbatim. */
@@ -130,6 +126,8 @@ function setup(options: {
   readonly configured?: boolean
   /** Whether the official credential STORE is mounted (`credentials.available`). */
   readonly credentialStore?: boolean
+  /** The rc.2 YAML-only advanced override facts the Host descriptor reports. */
+  readonly advanced?: WebProviderSettings['advanced']
 }
 = {}): Harness {
   const columns = options.columns ?? 140
@@ -153,12 +151,12 @@ function setup(options: {
     /** The message a throwing read reports (may carry hostile control text). */
     readErrorMessage: 'settings descriptor unreadable',
     writeDelayMs: 0,
-    endpointStoredValue: undefined as string | undefined,
     keptProviderValue: undefined as string | undefined,
     web: {
       searchProvider: options.searchProvider ?? 'deepseek-official',
       fetchProvider: 'http',
-      api: { baseURL: 'https://api.deepseek.com/v1/tools', count: options.count ?? 10, sendOriginalQuestion: true },
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: options.count ?? 10, sendOriginalQuestion: true },
+      advanced: options.advanced ?? {},
       credential: options.configured === false ? { configured: false } : { configured: true, source: 'file' },
     } as WebProviderSettings,
   }
@@ -283,7 +281,8 @@ function setup(options: {
         setFetchProvider: async (id: string) => { await write(`fetch:${id}`, () => { store.web.fetchProvider = id }) },
         setSearchApiCount: async (count: number) => { await write(`count:${count}`, () => { store.web.api.count = count }) },
         setSendOriginalQuestion: async (enabled: boolean) => { await write(`ori:${String(enabled)}`, () => { store.web.api.sendOriginalQuestion = enabled }) },
-        setSearchApiBaseURL: async (url: string) => { await write(`endpoint:${url}`, () => { store.web.api.baseURL = store.endpointStoredValue ?? url }) },
+        setSearchBilling: async (mode: string) => { await write(`searchBilling:${mode}`, () => { store.web.api.searchBilling = mode as 'auto' | 'account' | 'api-key' }, store.writeDelayMs) },
+        setFetchBilling: async (mode: string) => { await write(`fetchBilling:${mode}`, () => { store.web.api.fetchBilling = mode as 'auto' | 'account' | 'api-key' }) },
       },
     }),
     catalog: { models: { available: () => false } },
@@ -558,23 +557,6 @@ async function closeWorkspace(h: Harness): Promise<void> {
   assert.doesNotMatch(h.view(), /Settings ·/u, 'the workspace really closed')
 }
 
-/** Append to the endpoint editor's seeded draft. The editor opens on the
- *  authoritative value; a REAL write needs a different draft (an unchanged
- *  draft is a zero-write `verified`). */
-async function editEndpointDraft(h: Harness, suffix: string): Promise<void> {
-  for (const character of suffix) await key(h, character)
-}
-
-/** The endpoint editor's settle: its own verdict is PAINTED (a verified save
- *  closes it; Not saved/Outcome unknown stays with its message). */
-async function settleEndpointPanel(h: Harness): Promise<string> {
-  const submitted = `endpoint:${h.store.web.api.baseURL}`
-  return await settlePainted(h, `the endpoint write's painted verdict (${submitted})`, frame =>
-    !frame.includes('Saving…')
-    && (!frame.includes('Enter confirm · Esc cancel')
-      || /Not saved|Outcome unknown/u.test(frame)))
-}
-
 test('the workspace row reports the configured providers and opens the Web page focused', async t => {
   const h = setup()
   t.after(h.dispose)
@@ -602,16 +584,17 @@ test('the workspace row reports the configured providers and opens the Web page 
   await key(h, ENTER)
   const page = await settleWebPage(h)
   assert.match(page, /Settings · Tools · Web Search \/ Fetch/u, 'the page is the Tools row sub-view')
-  // The six frozen rows, in order, on one frame (120x40 paints the whole list).
+  // The nine frozen rows, in order, on one frame (120x40 paints the whole list).
   let previous = -1
   for (const label of ['Web Search Provider', 'Web Fetch Provider', 'Search API Result Count',
-    'Share Original Question', 'Search / Fetch API Endpoint', 'DeepSeek API Key']) {
+    'Share Original Question', 'Search Billing', 'Fetch Billing', 'Search API Override',
+    'Fetch API Override', 'DeepSeek API Key']) {
     const at = page.indexOf(label)
     assert.ok(at > previous, `the frozen row order holds (${label}):\n${page}`)
     previous = at
   }
   assert.match(page, /Current: Messages/u, 'the selected row states the real Host value')
-  assert.match(page, /› Messages · built-in default \[current\]/u,
+  assert.match(page, /› Messages · Messages route \[current\]/u,
     'the current candidate carries the [current] chip')
   assert.equal(h.readCount() >= 1, true, 'opening the page really read the Host')
 
@@ -803,7 +786,7 @@ test('the credential row shows the reference and hands the Models deeplink to th
   const h = setup()
   t.after(h.dispose)
   await openWebPage(h)
-  await openWebRow(h, 5)
+  await openWebRow(h, 8)
   const detail = h.view()
   assert.match(detail, /Reference: DEEPSEEK_API_KEY/u, 'the official credential reference is named')
   assert.match(detail, /State: Configured · source: file/u, 'presence/source come from the store')
@@ -836,7 +819,7 @@ test('a configured custom provider id stays visible and offers no candidate', as
   assert.deepEqual(h.writes, [], 'a custom route is never silently replaced')
 })
 
-test('the endpoint editor joins the SAME FIFO: no Web write overlaps another', async t => {
+test('a billing write joins the SAME FIFO: no Web write overlaps another', async t => {
   const h = setup()
   t.after(h.dispose)
   h.store.writeDelayMs = 150
@@ -845,22 +828,23 @@ test('the endpoint editor joins the SAME FIFO: no Web write overlaps another', a
   await openWebRow(h, 0)
   await chooseCandidate(h, 1)
   await key(h, ENTER)
-  // Then open the endpoint editor and confirm its draft: with ONE owner FIFO the
-  // endpoint write starts only after the provider write settled.
+  // Then confirm a Search billing choice: with ONE owner FIFO the billing write
+  // starts only after the provider write settled.
   await webListTop(h)
-  await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
-  await editEndpointDraft(h, '/v2')
-  const markEndpoint = settledWritesMark(h)
-  await key(h, ENTER) // confirm the endpoint draft
-  await awaitWriteSettlement(h, 'endpoint:https://api.deepseek.com/v1/tools/v2', markEndpoint)
+  await openWebRow(h, 4) // the Search Billing row
+  await chooseCandidate(h, 1) // Automatic -> Account
+  const markBilling = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'searchBilling:account', markBilling)
   assert.deepEqual(h.log, [
     'begin:search:deepseek-search-api',
     'search:deepseek-search-api',
-    'begin:endpoint:https://api.deepseek.com/v1/tools/v2',
-    'endpoint:https://api.deepseek.com/v1/tools/v2',
-  ], 'the endpoint write does not even START until the pending selection settled')
+    'begin:searchBilling:account',
+    'searchBilling:account',
+  ], 'the billing write does not even START until the pending selection settled')
   assert.equal(h.maxConcurrentWrites(), 1, 'never two Web writes in flight at once')
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+  assert.equal(h.store.web.api.searchBilling, 'account')
 })
 
 test('an unreadable authority after a successful read drops to Unavailable, never a stale current', async t => {
@@ -1116,43 +1100,30 @@ test('a superseded readback settling while the newer read is STILL pending never
   assert.doesNotMatch(settled, /Not saved|Outcome unknown/u, `the newest facts win:\n${settled}`)
 })
 
-test('a verified endpoint save closes the editor on the Host value', async t => {
-  const h = setup()
+test('a verified billing write reads back the committed mode on its own row', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
   t.after(h.dispose)
   await openWebPage(h)
-  await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
-  assert.match(h.view(), /Enter confirm · Esc cancel/u)
-  await editEndpointDraft(h, '/v2')
-  await key(h, ENTER) // confirm the edited draft value
-  await settleEndpointPanel(h)
-  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v2'], 'the mutation committed')
-  assert.doesNotMatch(h.view(), /Enter confirm · Esc cancel/u, 'the verified save closed the editor')
-  assert.ok(h.view().includes('Current: https://api.deepseek.com/v1/tools'),
-    `the row states the verified endpoint:\n${h.view()}`)
-})
-
-test('the endpoint editor reports Not saved with the value the Host actually kept', async t => {
-  const h = setup()
-  t.after(h.dispose)
-  await openWebPage(h)
-  h.store.endpointStoredValue = 'https://other.example/v1'
-  await openWebRow(h, 4)
-  await editEndpointDraft(h, '/v2')
+  await openWebRow(h, 4) // the Search Billing row
+  assert.match(h.view(), /Current: Automatic/u)
+  assert.match(h.view(), /Enter confirm/u)
+  await chooseCandidate(h, 1) // Automatic -> Account
+  const mark = settledWritesMark(h)
   await key(h, ENTER)
-  await settleEndpointPanel(h)
-  const frame = h.view()
-  assert.match(frame, /Not saved/u, `the editor states the Host's own answer:\n${frame}`)
-  assert.ok(frame.includes('the Host keeps "https://other.example/v1"'),
-    `the editor reports the value the Host kept:\n${frame}`)
-  assert.ok(frame.includes('Enter confirm · Esc cancel'), 'the draft stays in the editor for correction')
+  await awaitWriteSettlement(h, 'searchBilling:account', mark)
+  await settlePainted(h, 'the verified billing write', frame =>
+    frame.includes('Verified') && frame.includes('Current: Account'))
+  assert.deepEqual(h.writes, ['searchBilling:account'], 'the mutation committed to the exact field')
+  assert.equal(h.store.web.api.searchBilling, 'account')
+  assert.equal(h.store.web.api.fetchBilling, 'auto', 'the Search billing write never touches Fetch')
 })
 
-test('the endpoint editor reports Outcome unknown when the read-back is unreadable', async t => {
-  const h = setup()
+test('a billing write reports Outcome unknown when the read-back is unreadable', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 4)
-  await editEndpointDraft(h, '/v2')
+  await chooseCandidate(h, 1)
   // The pre-read is readable; the write's verification readback is unreadable.
   const releasePre = h.holdRead()
   const readsBefore = h.readCount()
@@ -1163,35 +1134,36 @@ test('the endpoint editor reports Outcome unknown when the read-back is unreadab
   releasePre()
   await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 2,
     () => h.vt.waitForRender(), 'the write readback R1 to be issued')
-  await settleEndpointPanel(h)
+  await settlePainted(h, 'the billing Outcome unknown verdict', frame =>
+    frame.includes('Outcome unknown') && !frame.includes('Saving…'))
   const frame = h.view()
   assert.match(frame, /Outcome unknown/u, `an unobservable result is never a save:\n${frame}`)
   assert.ok(frame.includes('the Host write could not be verified'),
-    `the editor states what could not be observed:\n${frame}`)
-  assert.doesNotMatch(frame, /Not saved/u, 'an unreadable read-back is never reported as not-saved')
+    `the Detail states what could not be observed:\n${frame}`)
+  assert.doesNotMatch(frame, /Verified/u, 'an unreadable read-back is never a save')
 })
 
-/** One SUPERSEDED endpoint-readback scenario over the frozen sizes: R1 (the
+/** One SUPERSEDED billing-readback scenario over the frozen sizes: R1 (the
  *  write's verification read) observes an UNREADABLE Host and is held; R2 (the
  *  page's `r`) observes the NEWEST facts and is also held. R1 settles while R2
  *  is pending, then R2 decides. A verdict from the superseded R1 would be wrong
  *  in every scenario. */
-function supersededEndpointCase(
+function supersededBillingCase(
   name: string,
   arrangeNewest: (h: Harness) => void,
   assertVerdict: (frame: string, h: Harness) => Promise<void> | void,
 ): void {
   for (const [columns, rows] of SUPERSEDED_SIZES) {
-    test(`a superseded endpoint readback is judged by the NEWEST read at ${columns}x${rows}: ${name}`, async t => {
-      const h = setup({ columns, rows })
+    test(`a superseded billing readback is judged by the NEWEST read at ${columns}x${rows}: ${name}`, async t => {
+      const h = setup({ columns, rows, searchProvider: 'deepseek-search-api' })
       t.after(h.dispose)
       await openWebPage(h)
-      await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
-      await editEndpointDraft(h, '/v2')
+      await openWebRow(h, 4) // the Search Billing row
+      await chooseCandidate(h, 1) // Automatic -> Account
       // Readable pre-read; the write's readback R1 is unreadable and held.
       const releasePre = h.holdRead()
       const readsBefore = h.readCount()
-      await key(h, ENTER) // dispatch the endpoint write
+      await key(h, ENTER) // dispatch the billing write
       await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 1,
         () => h.vt.waitForRender(), 'the queue-head fresh pre-read to be issued')
       h.store.readUndefined = true
@@ -1200,14 +1172,14 @@ function supersededEndpointCase(
       releasePre()
       await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 2,
         () => h.vt.waitForRender(), 'the write readback R1 to be issued')
-      await settlePainted(h, 'the endpoint editor to state Saving…', frame => frame.includes('Saving…'))
+      await settlePainted(h, 'the billing row to state Saving…', frame => frame.includes('Saving…'))
 
       h.store.readUndefined = false
       arrangeNewest(h)
       const releaseR2 = h.holdAllReads()
       t.after(releaseR2)
-      // Leave the editor (zero write): the dispatced write keeps settling in the
-      // command owner, and the page's own `r` then starts the NEWER read R2.
+      // Leave the Detail (zero write): the dispatched write keeps settling in
+      // the command owner, and the page's own `r` then starts the NEWER read R2.
       await key(h, ESC)
       await key(h, 'r')
       assert.match(h.view(), /Loading…/u, 'the newer read R2 is pending')
@@ -1231,40 +1203,42 @@ function supersededEndpointCase(
 /** The frozen sizes for the changed verdict sink. */
 const SUPERSEDED_SIZES = [[120, 40], [80, 10], [44, 20]] as const
 
-supersededEndpointCase(
-  'the newest read observed the submitted endpoint',
+supersededBillingCase(
+  'the newest read observed the submitted billing mode',
   () => {},
   async (frame, h) => {
     assert.doesNotMatch(frame, /Not saved|Outcome unknown/u, `a verified write leaves no verdict:\n${frame}`)
-    // The endpoint editor always opens on the authoritative value: seeing it
-    // there proves the newest read decided (the row's own slot truncates).
+    // The billing row's Detail paints the authoritative mode: the candidate
+    // carrying the [current] chip is positioned from the committed identity, so
+    // seeing Account highlighted as current proves the newest read decided
+    // (a tiny viewport may crop the Current: line itself).
     await openWebRow(h, 4)
-    assert.ok(h.view().includes('https://api.deepseek.com/v1/tools'),
-      `the editor opens on the verified endpoint:\n${h.view()}`)
+    assert.match(h.view(), /› Account · signed-in account only \[current\]/u,
+      `the row opens on the verified billing mode:\n${h.view()}`)
     await key(h, ESC)
   },
 )
 
-supersededEndpointCase(
-  'the Host kept another value',
-  h => { h.store.web.api.baseURL = 'https://other.example/v1' },
+supersededBillingCase(
+  'the Host kept another billing mode',
+  h => { h.store.web.api.searchBilling = 'api-key' },
   async (frame, h) => {
     // R1 was UNREADABLE: an `Outcome unknown` here would be the superseded
     // snapshot's answer, so `Not saved` proves the NEWEST facts decided.
     assert.match(frame, /Not saved/u, `a kept value is reported as Not saved:\n${frame}`)
     assert.doesNotMatch(frame, /Outcome unknown/u, `the superseded snapshot never decides:\n${frame}`)
-    if (!frame.includes('the Host keeps "https://other.example/v1"')) {
-      // The narrow page paints only the list, so the kept value is read from
-      // the endpoint editor, which always opens on the authoritative value.
+    if (!frame.includes('the Host keeps "API key"')) {
+      // The narrow page paints only the list, so the kept mode is read from the
+      // row Detail, which always paints the authoritative value.
       await openWebRow(h, 4)
-      assert.ok(h.view().includes('https://other.example/v1'),
-        `the editor opens on the value the Host keeps:\n${h.view()}`)
+      assert.match(h.view(), /Current: API key/u,
+        `the row paints the value the Host keeps:\n${h.view()}`)
       await key(h, ESC)
     }
   },
 )
 
-supersededEndpointCase(
+supersededBillingCase(
   'the newest read could not read the Host',
   h => { h.store.readUndefined = true },
   (frame) => {
@@ -1294,7 +1268,7 @@ test('Clear in Models… is painted as a disabled fact and is never focusable', 
   const h = setup({ configured: false })
   t.after(h.dispose)
   await openWebPage(h)
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER)
   const detail = h.view()
   assert.match(detail, /State: Not configured/u)
@@ -1314,7 +1288,7 @@ test('no credential action is offered when the store is unavailable, and the bar
   const h = setup({ credentialStore: false })
   t.after(h.dispose)
   await openWebPage(h)
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER)
   const detail = h.view()
   assert.match(detail, /The official credential store is unavailable/u)
@@ -1354,7 +1328,7 @@ test('an external clear while the cursor sits on Clear clamps it to the still-en
   const h = setup()
   t.after(h.dispose)
   await openWebPage(h)
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER) // credential Detail
   await key(h, DOWN) // Configure -> Clear (both enabled)
   assert.match(h.view(), /› Clear in Models…/u)
@@ -1374,43 +1348,11 @@ test('an external clear while the cursor sits on Clear clamps it to the still-en
   assert.match(h.view(), /DEEPSEEK_API_KEY/u)
 })
 
-test('a stale backend closes an open endpoint draft with zero writes and recovers after reconnect', async t => {
-  const h = setup()
-  t.after(h.dispose)
-  await openWebPage(h)
-  await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
-  assert.match(h.view(), /Enter confirm · Esc cancel/u)
-  h.setReadiness('stale')
-  // The key that discovers the non-current backend must NOT reach the draft.
-  await key(h, 'x')
-  const closed = h.view()
-  assert.doesNotMatch(closed, /Enter confirm · Esc cancel/u, `the draft closed without a Confirm:\n${closed}`)
-  assert.match(closed, /read-only until it reconnects/u, `the reason is painted:\n${closed}`)
-  // The endpoint DETAIL must not advertise the editor either: the backend is
-  // non-current, so the editor would refuse the next Confirm.
-  assert.doesNotMatch(closed, /Enter edit endpoint/u, `the stale Detail advertises no editor:\n${closed}`)
-  assert.match(closed, /r refresh · Back \[Esc\]/u, 'the bar offers only the read refresh')
-  assert.deepEqual(h.writes, [], 'closing the draft writes nothing')
-  await key(h, ENTER)
-  assert.doesNotMatch(h.view(), /Enter confirm · Esc cancel/u, 'Enter on the stale Detail never opens the editor')
-  assert.deepEqual(h.writes, [], 'Enter on the read-only Detail dispatches nothing')
-  // Recovery: a current backend + a fresh read restore the explicit editor path.
-  h.setReadiness('ready')
-  await key(h, 'r')
-  await settlePainted(h, 'the recovered endpoint row', frame => frame.includes('Enter edit endpoint'))
-  await key(h, ENTER)
-  assert.match(h.view(), /Enter confirm · Esc cancel/u)
-  await editEndpointDraft(h, '/v3')
-  await key(h, ENTER)
-  await settleEndpointPanel(h)
-  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v3'])
-})
-
 test('a resize that clips the credential actions removes the Enter affordance and the hit target', async t => {
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
   await openWebPage(h)
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER) // credential Detail
   await key(h, DOWN) // Configure -> Clear
   assert.match(h.view(), /Enter open in Models/u)
@@ -1429,64 +1371,6 @@ test('a resize that clips the credential actions removes the Enter affordance an
   await h.vt.waitForRender()
   assert.match(h.view(), /› Clear in Models…/u, 'the restored frame paints the action cursor')
   assert.match(h.view(), /Enter open in Models/u, 'the restored frame advertises the Enter')
-})
-
-test('an endpoint grant too short for the trust disclosure refuses the confirm', async t => {
-  const h = setup({ columns: 44, rows: 3 })
-  t.after(h.dispose)
-  await openWebPage(h)
-  await openWebRow(h, 4) // the endpoint row opens its editor with a 1-line body
-  const tiny = h.view()
-  assert.doesNotMatch(tiny, /Enter confirm/u, `a cropped disclosure offers no Confirm:\n${tiny}`)
-  assert.match(tiny, /enlarge for the warning/u, 'the bar states how to reveal the disclosure')
-  await key(h, ENTER)
-  assert.deepEqual(h.writes, [], 'a blind Confirm dispatches nothing')
-  // Revealing the disclosure re-enables the explicit confirm path.
-  h.vt.resize(44, 8)
-  await h.vt.waitForRender()
-  const revealed = await settlePainted(h, 'the revealed disclosure', frame => frame.includes('Enter confirm · Esc cancel'))
-  const disclosure = revealed.replace(/\s+/gu, ' ')
-  assert.match(disclosure, /it receives the API key and the query/u)
-  assert.match(disclosure, /The URL shape is not a trust check/u)
-  await editEndpointDraft(h, '/v4')
-  await key(h, ENTER)
-  await settleEndpointPanel(h)
-  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v4'])
-})
-
-test('a dispatched write keeps its live state visible on a grant too short for the disclosure', async t => {
-  const h = setup({ columns: 44, rows: 8 })
-  t.after(h.dispose)
-  await openWebPage(h)
-  await openWebRow(h, 4) // editor with the complete disclosure
-  h.store.failNext = 'mutate rejected'
-  const release = h.holdRead() // the refused write's reread stays pending => Saving…
-  t.after(release)
-  await editEndpointDraft(h, '/v5')
-  await key(h, ENTER) // dispatch the write
-  // Shrink below the disclosure: the live state must stay visible and the bar
-  // must not imply the dispatched mutation can be cancelled.
-  h.vt.resize(44, 3)
-  await h.vt.waitForRender()
-  const tinySaving = h.view()
-  assert.match(tinySaving, /Saving…/u, `the in-flight state survives the resize:\n${tinySaving}`)
-  assert.doesNotMatch(tinySaving, /Esc cancel/u,
-    `a dispatched write is never described as cancellable:\n${tinySaving}`)
-  release()
-  // The refusal settles while the grant is still tiny: its verdict stays visible.
-  const tinyRefused = await settlePainted(h, 'the refused verdict on the tiny grant', frame =>
-    frame.includes('Not saved'))
-  assert.match(tinyRefused, /Not saved/u)
-  assert.doesNotMatch(tinyRefused, /Esc cancel/u, 'a refused write is not a cancelled draft')
-  assert.deepEqual(h.writes, [], 'the failed setter dispatched no Host write')
-  // Enlarging reveals the full reason and restores the explicit confirm path;
-  // the draft survives, and a corrected confirm really writes.
-  h.vt.resize(44, 8)
-  await h.vt.waitForRender()
-  assert.match(h.view(), /Not saved · mutate rejected/u, `the full verdict is revealed:\n${h.view()}`)
-  await key(h, ENTER)
-  await settleEndpointPanel(h)
-  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v5'])
 })
 
 test('an EXTERNAL provider change after the page read is never overwritten by a stale base', async t => {
@@ -1526,17 +1410,17 @@ test('a HOST error reason with ANSI/OSC/CR/LF is sanitized at the display bounda
   assert.deepEqual(h.writes, [])
 })
 
-test('a HOST failure reason with control text is sanitized inside the endpoint editor', async t => {
-  const h = setup()
+test('a HOST failure reason with control text is sanitized inside the billing verdict', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 4)
+  await chooseCandidate(h, 1)
   h.store.failNext = 'rejected \u001b[31mred\u001b[0m \u001b]0;title\u0007'
-  await editEndpointDraft(h, '/v9')
   await key(h, ENTER)
-  const frame = await settlePainted(h, 'the sanitized endpoint error', frame => frame.includes('Not saved'))
+  const frame = await settlePainted(h, 'the sanitized billing error', frame => frame.includes('Not saved'))
   assert.match(frame, /rejected red/u, `the readable reason survives:\n${frame}`)
-  assert.doesNotMatch(frame, /\u001b/u, 'no escape byte reaches the editor frame')
+  assert.doesNotMatch(frame, /\u001b/u, 'no escape byte reaches the frame')
   assert.doesNotMatch(frame, /title/u, 'the OSC payload is never painted')
 })
 
@@ -1554,8 +1438,8 @@ test('the wheel scrolls a cropped list by moving the visible selection (44 and 8
       await narrow.vt.waitForRender()
     }
     const scrolled = narrow.view()
-    assert.match(scrolled, /> Search \/ Fetch API Endpoint/u, `the list really scrolled to the later row:\n${scrolled}`)
-    assert.match(scrolled, /Search \/ Fetch API Endpoint/u)
+    assert.match(scrolled, /> Search Billing/u, `the list really scrolled to the later row:\n${scrolled}`)
+    assert.match(scrolled, /Search Billing/u)
   } finally {
     narrow.dispose()
   }
@@ -1610,7 +1494,7 @@ test('a list wheel re-anchors the Detail on the NEW row authoritative candidates
   await h.vt.waitForRender()
   const after = h.view()
   assert.match(after, /Current: HTTP/u, 'the Detail followed the scrolled row')
-  assert.match(after, /› HTTP · anonymous default/u,
+  assert.match(after, /› HTTP · official default · anonymous/u,
     `the NEW row's current candidate is highlighted, never the stale index:\n${after}`)
   assert.doesNotMatch(after, /› DeepSeek Fetch API/u)
   // Enter confirms the NEW row's CURRENT value (already-current → zero writes).
@@ -1620,11 +1504,11 @@ test('a list wheel re-anchors the Detail on the NEW row authoritative candidates
 
   // The credential row's action cursor converges the same way.
   await key(h, ESC) // Detail -> list
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER) // credential Detail
   await key(h, DOWN) // Configure -> Clear
   assert.match(h.view(), /› Clear in Models…/u)
-  h.vt.sendInput(`\x1b[<64;5;${listY}M`) // wheel up -> endpoint row
+  h.vt.sendInput(`\x1b[<64;5;${listY}M`) // wheel up -> the billing row
   await h.vt.waitForRender()
   h.vt.sendInput(`\x1b[<65;5;${listY}M`) // wheel down -> credential row again
   await h.vt.waitForRender()
@@ -1658,7 +1542,7 @@ test('an Enter on a credential action invalidated by a fresh read is refused and
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
   await openWebPage(h)
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER) // credential Detail
   await key(h, DOWN) // Configure -> Clear
   assert.match(h.view(), /› Clear in Models…/u)
@@ -1685,7 +1569,7 @@ test('a Detail scroll projection cannot advance the painted action before the fr
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
   await openWebPage(h)
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER)
   await key(h, DOWN) // cursor on Clear, painted
   h.store.web.credential = { configured: false }
@@ -1709,7 +1593,7 @@ test('a list frame cannot retain the credential action a previous Detail painted
   const h = setup({ columns: 44, rows: 20 }) // narrow: the list frame paints no Detail at all
   t.after(h.dispose)
   await openWebPage(h)
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER) // credential Detail, Configure painted
   assert.match(h.view(), /› Configure in Models…/u)
   await key(h, ESC) // back to the list; this frame paints NO credential action
@@ -1730,7 +1614,7 @@ test('a mouse click on a credential action invalidated by a fresh read is refuse
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
   await openWebPage(h)
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER)
   await key(h, DOWN) // cursor on Clear
   const line = h.view().split('\n').findIndex(text => text.includes('Clear in Models…'))
@@ -1803,32 +1687,111 @@ test('a long Host failure reason is wholly readable in the Detail', async t => {
 
 // ── D3-2: the page states the real rc.2 facts ──────────────────────────────
 
-test('the page states defaults, billing, the ori_question boundary and the endpoint trust warning', async t => {
-  const h = setup()
+test('the page states the rc.2 defaults, billing and read-only overrides', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
   t.after(h.dispose)
   await openWebPage(h)
   const compact = (): string => h.view().replace(/[\u2500-\u257f│]/gu, ' ').replace(/\s+/gu, ' ')
-  assert.match(compact(), /Messages is the official default and does not call the billed Search API/u)
-  assert.match(compact(), /DeepSeek Search API is opt-in and separately billed/u)
+  assert.match(compact(), /official default is the DeepSeek Search API/u)
   assert.match(compact(), /a Messages plan does not guarantee coverage/u)
   assert.match(compact(), /No write happens without an explicit Enter/u)
   // The Share Original Question row states the packed ON default and the exact
-  // payload boundary (not the full history/system prompt).
+  // payload boundary (not the full history/system prompt). The two-column
+  // frame interleaves list rows with the wrapped Detail column, so the long
+  // boundary sentence is asserted in its wrapped fragments.
   await pageListSelect(h, 3)
   assert.match(compact(), /Current: on/u)
   assert.match(compact(), /packed default for the DeepSeek Search API/u)
-  assert.match(compact(), /up to 128 characters of the triggering human question as ori_question/u)
+  assert.match(compact(), /up to 128 characters of the/u)
+  assert.match(compact(), /triggering human question as ori_question/u)
   assert.match(compact(), /never the full history or the system prompt/u)
-  // The endpoint row is base-owned Web configuration, not a Bundle, and states
-  // the trusted-HTTPS/credential boundary.
+  // The Search provider row states the rc.2 official default (the billed Search
+  // API) and the stored Messages route, never the retired "opt-in" default.
+  await pageListSelect(h, 0)
+  assert.match(compact(), /official default is the DeepSeek Search API/u)
+  assert.match(compact(), /billed separately per/u)
+  assert.doesNotMatch(compact(), /opt-in/u)
+  // The Search billing row states the three explicit modes' credential claims
+  // and the per-call billing fact; Automatic is a persisted choice, not a reset.
   await pageListSelect(h, 4)
-  assert.match(compact(), /Enter opens the endpoint editor/u)
-  assert.match(compact(), /Changing it sends the/u)
-  assert.match(compact(), /DeepSeek API credential and the query to that target/u)
-  assert.match(compact(), /confirm only a trusted HTTPS base/u)
-  assert.match(compact(), /the URL shape/u)
-  assert.match(compact(), /is checked, not the host's trust/u)
-  assert.match(compact(), /Official base: https:\/\/api\.deepseek\.com\/v1\/tools/u)
+  assert.match(compact(), /Current: Automatic/u)
+  assert.match(compact(), /follows the credential the CURRENT conversation's DeepSeek route selects/u)
+  assert.match(compact(), /Account uses only the signed-in account/u)
+  assert.match(compact(), /API key uses only the DEEPSEEK_API_KEY credential/u)
+  assert.match(compact(), /billed separately per call/u)
+  assert.match(compact(), /Automatic is NOT a reset of an override/u)
+  // The read-only Search override row: the unset fact names the conversation
+  // route (never a fabricated fixed URL) and the legacy keys are stated inert.
+  await pageListSelect(h, 6)
+  assert.match(compact(), /Current: Host YAML: not set — follows current conversation's DeepSeek route/u)
+  assert.match(compact(), /Legacy web-deepseek-api\.baseURL\/apiKeyEnv\/apiKey no longer control Search\/Fetch/u)
+  assert.match(compact(), /no automatic conversion/u)
+  assert.match(compact(), /read-only here, Enter never opens/u)
+  // An OVERRIDE-bearing capability shows its fields (masked URL/env NAME, no
+  // secret) and states that the override owns the configuration over the
+  // billing row. The URL carries userinfo ON PURPOSE: the painted fact must
+  // mask it (and any query/fragment) instead of exposing the credential.
+  const overrideFacts = (): WebSettingsFacts => ({
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-search-api',
+      fetchProvider: 'http',
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {
+        searchBaseURL: 'https://alice:p1@p2@search.example.test/v1?token=x',
+        searchApiKeyEnv: 'SEARCH_API_KEY_ENV',
+      },
+      credential: { configured: true, source: 'file' },
+    },
+  })
+  const overriddenWrites: string[] = []
+  const overridden = new WebSettingsPage({
+    readFacts: overrideFacts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => true,
+    commit: async (id, requested) => {
+      overriddenWrites.push(`${id}:${requested}`)
+      return { kind: 'not-saved', reason: 'the commit path must never run' }
+    },
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: () => {},
+    done: () => {},
+  })
+  try {
+    overridden.setMaxRows(24)
+    overridden.render(140)
+    overridden.handleInput('\x1b[H')
+    for (let step = 0; step < 4; step += 1) overridden.handleInput('\x1b[B')
+    overridden.handleInput('\r') // open the Search billing Detail
+    const billingFrame = stripTerminalSequences(overridden.render(140).join('\n'))
+    assert.match(billingFrame, /Overridden by Host YAML \(stored: Automatic\)/u,
+      `the overridden billing row states the override and its stored mode:\n${billingFrame}`)
+    assert.match(billingFrame, /the advanced searchBaseURL and searchApiKeyEnv field\(s\) own this capability/u)
+    assert.match(billingFrame, /searchBaseURL=https:\/\/\*\*\*@search\.example\.test\/v1/u,
+      'the Billing Detail paints the MASKED override URL (userinfo/query never)')
+    assert.match(billingFrame, /searchApiKeyEnv=SEARCH_API_KEY_ENV/u,
+      'the override env NAME is allowed as a fact')
+    assert.doesNotMatch(billingFrame, /secret|user:|token=/u,
+      `no credential material is painted on the billing Detail:\n${billingFrame}`)
+    assert.doesNotMatch(billingFrame, /Enter confirm/u,
+      'an overridden billing row offers no Confirm affordance')
+    overridden.handleInput('\r') // Enter with no candidate: zero writes
+    assert.deepEqual(overriddenWrites, [], 'the overridden billing row never dispatches a write')
+    // The Search override row itself paints the masked fields read-only.
+    overridden.handleInput('\x1b')
+    for (let step = 0; step < 2; step += 1) overridden.handleInput('\x1b[B')
+    overridden.handleInput('\r')
+    const advancedFrame = stripTerminalSequences(overridden.render(140).join('\n'))
+    assert.match(advancedFrame, /Current: Host YAML: searchBaseURL=https:\/\/\*\*\*@search\.example\.test\/v1/u)
+    assert.match(advancedFrame, /searchApiKeyEnv=SEARCH_API_KEY_ENV/u)
+    assert.doesNotMatch(advancedFrame, /alice|p1|p2|token=/u,
+      'multiple userinfo @ characters and query never survive the page')
+    assert.doesNotMatch(advancedFrame, /secret|user:|token=/u, 'no credential material is ever painted')
+  } finally {
+    overridden.dispose()
+  }
 })
 
 test('the page bar publishes the complete Esc span in its OWN content columns', () => {
@@ -1837,7 +1800,8 @@ test('the page bar publishes the complete Esc span in its OWN content columns', 
     settings: {
       searchProvider: 'deepseek-official',
       fetchProvider: 'http',
-      api: { baseURL: 'https://api.deepseek.com/v1/tools', count: 10, sendOriginalQuestion: true },
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {},
       credential: { configured: true, source: 'file' },
     },
   }
@@ -1883,6 +1847,105 @@ test('the page bar publishes the complete Esc span in its OWN content columns', 
     // No wording fits at all: the bar is empty and carries no geometry.
     page.render(8)
     assert.equal(page.paintedEscapeSpan(), undefined, 'a dropped wording advertises no Esc')
+  } finally {
+    page.dispose()
+  }
+})
+
+test('Billing rows are Not selected and inert when their API provider is not the current route', async () => {
+  const facts = (): WebSettingsFacts => ({
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-official',
+      fetchProvider: 'http',
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {},
+      credential: { configured: false },
+    },
+  })
+  const writes: string[] = []
+  const page = new WebSettingsPage({
+    readFacts: facts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => false,
+    commit: async (id, requested) => {
+      writes.push(`${id}:${requested}`)
+      return { kind: 'not-saved', reason: 'the inert row must never dispatch' }
+    },
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: () => {},
+    done: () => {},
+  })
+  try {
+    page.setMaxRows(24)
+    page.render(140)
+    // Rows: search provider, fetch provider, count, question, search billing.
+    page.handleInput('\x1b[H')
+    for (let step = 0; step < 4; step += 1) page.handleInput('\x1b[B')
+    page.handleInput('\r')
+    const search = stripTerminalSequences(page.render(140).join('\n'))
+    assert.match(search, /Current: Not selected/u)
+    assert.match(search, /only the DeepSeek Search API uses Search Billing/u)
+    assert.doesNotMatch(search, /Automatic · follows/u,
+      'a non-API Search route never paints the billing credential claim')
+    page.handleInput('\r')
+    assert.deepEqual(writes, [], 'the non-API Search route dispatches zero writes')
+    // Back to the list, then the Fetch Billing row (HTTP is not the API route).
+    page.handleInput('\x1b')
+    page.handleInput('\x1b[B')
+    page.handleInput('\r')
+    const fetch = stripTerminalSequences(page.render(140).join('\n'))
+    assert.match(fetch, /Current: Not selected/u)
+    assert.match(fetch, /only the DeepSeek Fetch API uses Fetch Billing/u)
+    page.handleInput('\r')
+    assert.deepEqual(writes, [], 'the non-API Fetch route dispatches zero writes')
+  } finally {
+    page.dispose()
+  }
+})
+
+test('Host override values are terminal-sanitized before the Configured override line', async () => {
+  const hostileUrl = 'https://user:secret@search.example.test/v1\x1b[5;5H\x1b]0;pwn-title\x07\r\nnext'
+  const hostileEnv = 'SEARCH_ENV\x1b[5;5H\x1b]0;env-title\x07'
+  const facts = (): WebSettingsFacts => ({
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-search-api',
+      fetchProvider: 'deepseek-fetch-api',
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: { searchBaseURL: hostileUrl, searchApiKeyEnv: hostileEnv },
+      credential: { configured: true, source: 'file' },
+    },
+  })
+  const page = new WebSettingsPage({
+    readFacts: facts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => true,
+    commit: async () => ({ kind: 'verified', actual: '10' }),
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: () => {},
+    done: () => {},
+  })
+  try {
+    page.setMaxRows(24)
+    page.render(140)
+    page.handleInput('\x1b[H')
+    for (let step = 0; step < 4; step += 1) page.handleInput('\x1b[B')
+    page.handleInput('\r')
+    const raw = page.render(140).join('\n')
+    // An unparseable URL is reported only as configured (never echoed); the
+    // Host-origin values never carry terminal control sequences or row breaks
+    // into the rendered frame.
+    assert.ok(raw.includes('configured URL unavailable'), 'the unparseable URL is reported as configured only')
+    assert.equal(raw.includes('\x1b[5;5H'), false, 'ANSI cursor controls are stripped')
+    assert.equal(raw.includes('\x1b]0;'), false, 'OSC title controls are stripped')
+    assert.equal(raw.includes('pwn-title'), false, 'OSC payload never reaches the terminal')
+    assert.equal(raw.includes('\r'), false, 'raw carriage returns never reach a physical row')
+    assert.equal(raw.includes('SEARCH_ENV'), true, 'the environment NAME remains visible')
   } finally {
     page.dispose()
   }

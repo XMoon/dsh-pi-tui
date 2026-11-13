@@ -44,7 +44,7 @@ const BUNDLE: BundleInfo = {
   installed: true,
   optional: false,
   removable: true,
-  updatable: true,
+  update: 'registry',
   rows: [{ rowId: 'row-1', moduleName: 'module-1', meta: { title: 'Row one' }, entryId: entryId('entry-1') }],
   overrides: ['builtin-row'],
 }
@@ -305,7 +305,7 @@ test('the Remote snapshot maps bundles, plugins, registries and exemptions like 
     installed: true,
     optional: false,
     removable: true,
-    updatable: true,
+    update: 'registry',
     rows: [{ rowId: 'row-1', moduleName: 'module-1', title: 'Row one', entryId: 'entry-1' }],
     overrides: ['builtin-row'],
   })

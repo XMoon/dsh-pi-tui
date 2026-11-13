@@ -458,12 +458,86 @@ test('a newer stored format is refused explicitly, never read as an empty Sessio
     'a refused open publishes nothing')
 })
 
+test('the rc.2 Session reader accepts historical catalog generations and the new team/mode record', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-s2b-b1-catalog-generations-')
+  const booted = await boot(life, root)
+  const id = SessionId('session-b1-rc2-catalog-generations')
+  const header: SessionHeader = {
+    id,
+    createdAt: 1_700_000_000_000,
+    version: SESSION_FORMAT_VERSION,
+    cwd: '/work',
+    isSeeded: false,
+    delegationDepth: 0,
+  }
+  const handle = await booted.persistence.create(header)
+  await handle.append([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+    { type: 'step/start', seq: 1, time: 2, data: { turn: 1, step: 1 } },
+    // rc.1 generations: v0 records local modes, v1 adds unknown children, v2
+    // records external executions. The rc.2 reader must accept all three.
+    { type: 'subagent/catalog', seq: 2, time: 3, data: {
+      childId: 'catalog-v0',
+      childCreatedAt: 1_700_000_000_001,
+      version: 0,
+      mode: 'one-shot',
+    } },
+    { type: 'subagent/catalog', seq: 3, time: 4, data: {
+      childId: 'catalog-v1',
+      childCreatedAt: 1_700_000_000_002,
+      version: 1,
+      mode: 'unknown',
+      label: 'historical child',
+    } },
+    { type: 'subagent/catalog', seq: 4, time: 5, data: {
+      childId: 'catalog-v2',
+      childCreatedAt: 1_700_000_000_003,
+      version: 2,
+      mode: 'external',
+      label: 'external run',
+    } },
+    // rc.2 content generation: catalog v3 adds the child's unique name, and
+    // `team/mode` is a log-only required Team record.
+    { type: 'subagent/catalog', seq: 5, time: 6, data: {
+      childId: 'catalog-v3',
+      childCreatedAt: 1_700_000_000_004,
+      version: 3,
+      mode: 'continuable',
+      label: 'Review child',
+      name: 'reviewer',
+    } },
+    { type: 'team/mode' as never, seq: 6, time: 7, data: { enabled: true } },
+    { type: 'step/end', seq: 7, time: 8, data: { turn: 1, step: 1 } },
+    { type: 'turn/end', seq: 8, time: 9, data: { turn: 1, reason: { kind: 'completed' } } },
+  ] as never)
+  await handle.flush()
+  await handle.close()
+
+  const readHandle = await booted.persistence.open(id, 'read')
+  const read = await readHandle.read()
+  await readHandle.close()
+  const catalogs = read.events
+    .filter(event => event.type === 'subagent/catalog')
+    .map(event => event.data as { readonly version?: unknown; readonly name?: unknown; readonly mode?: unknown })
+  assert.deepEqual(catalogs.map(entry => [entry.version, entry.mode, entry.name]), [
+    [0, 'one-shot', undefined],
+    [1, 'unknown', undefined],
+    [2, 'external', undefined],
+    [3, 'continuable', 'reviewer'],
+  ], 'the current official reader keeps every catalog generation readable')
+  const teamMode = read.events.find(event => String(event.type) === 'team/mode')
+  assert.deepEqual(teamMode?.data, { enabled: true },
+    'the rc.2 log-only team/mode record round-trips through the real persistence')
+  assert.equal(read.events.length, 9)
+})
+
 test('the released-v3 reader refuses every rc.2 vocabulary event (old-reader refusal evidence)', () => {
   // NOT an executed old reader: the OFFICIAL released-v3 restore runs over an
   // artifact whose rows carry rc.2 vocabulary, with the released-v3 reader's
   // own known-type set — the exact admission an old generation's reader owns.
   const header = { version: 3, id: 'released-v3-admission', createdAt: 1, cwd: '/work', isSeeded: false, delegationDepth: 0 }
-  for (const type of ['job/registered', 'job/settled', 'working-directory/change']) {
+  for (const type of ['job/registered', 'job/settled', 'working-directory/change', 'team/mode']) {
     assert.equal(RELEASED_V3_EVENT_TYPES.has(type), false, `${type} is not part of the released-v3 vocabulary`)
     assert.throws(
       () => restoreReleasedV3Artifact(
@@ -482,6 +556,14 @@ test('the released-v3 reader refuses every rc.2 vocabulary event (old-reader ref
   assert.doesNotThrow(
     () => restoreReleasedV3Artifact({ header, inheritedEventCount: 0, events: [] }, RELEASED_V3_EVENT_TYPES),
   )
+  // `subagent/catalog` IS a released-v3 event TYPE, so the type admission alone
+  // cannot refuse it: the released-v3 reader rejects the rc.2 catalog v3 PAYLOAD
+  // inside its catalog-fact validator. That validator (`catalogFact`) is not
+  // exported from the installed runtime entry and Node cannot strip the
+  // package's `./src/*.ts` subpath, so the payload-level refusal is
+  // NOT_VERIFIED here; the real rc.2 round-trip above proves the current
+  // reader accepts v0–v3 and team/mode, and this test proves the type-level
+  // refusal for the genuinely new team/mode event.
 })
 
 test('an rc.2 catalog v2 external leaf is carried through and never becomes a browsable child row', () => {

@@ -43,7 +43,7 @@ import llmRemote from '@deepseek-ai/dsh-llm/remote'
 import sessionRemote from '@deepseek-ai/dsh-api-session-controller/remote'
 import jobRemote from '@deepseek-ai/dsh-api-job-controller/remote'
 import settingsRemote from '@deepseek-ai/dsh-api-settings-controller/remote'
-import accountRemote from '@deepseek-ai/dsh-api-account-controller/remote'
+import accountRemote from '@deepseek-ai/dsh-deepseek-account/remote'
 import userQuestionsRemote from '@deepseek-ai/dsh-user-questions/remote'
 import fileUploadsRemote from '@deepseek-ai/dsh-client-file-upload/remote'
 import workspaceFilesRemote from '@deepseek-ai/dsh-api-workspace-files/remote'
@@ -378,7 +378,7 @@ export const REMOTE_CONTRIBUTION_SPECIFIERS = [
   '@deepseek-ai/dsh-agent-preset-registry/remote',
   '@deepseek-ai/dsh-plugin-manager/remote',
   '@deepseek-ai/dsh-api-settings-controller/remote',
-  '@deepseek-ai/dsh-api-account-controller/remote',
+  '@deepseek-ai/dsh-deepseek-account/remote',
   '@deepseek-ai/dsh-permission-presets/remote',
   '@deepseek-ai/dsh-llm/remote',
   '@deepseek-ai/dsh-client-file-upload/remote',
