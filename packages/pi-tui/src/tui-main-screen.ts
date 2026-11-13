@@ -1,7 +1,12 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { deleteKittyImage, isImageLine, type SixelScreenPort } from "./terminal-image.ts";
+import {
+	deleteKittyImage,
+	deleteKittyImagePlacement,
+	isImageLine,
+	type SixelScreenPort,
+} from "./terminal-image.ts";
 import type { Terminal } from "./terminal.ts";
 import { SEGMENT_RESET, type TUI, TuiBase, type TuiStopOptions } from "./tui.ts";
 import { asciiVisibleWidthEarlyExit, normalizeTerminalOutput, sliceByColumn, visibleWidth } from "./utils.ts";
@@ -467,14 +472,24 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		if (firstChanged < 0 || lastChanged < firstChanged) return "";
 
 		const ids = new Set<number>();
+		const preemptedIds = new Set<number>();
 		const maxLine = Math.min(lastChanged, this.previousLines.length - 1);
 		for (let i = firstChanged; i <= maxLine; i++) {
 			for (const id of this.previousLineImageIds[i] ?? EMPTY_IMAGE_IDS) {
-				ids.add(id);
+				// A block this frame's overlay preemption blanked is expected back
+				// next frame, and an `a=p` placement carries no payload of its own:
+				// remove only its placement so the image data stays resident, even
+				// for an occurrence this Core does not own. (X077.)
+				if (this.preemptedKittyImageIds.has(id)) preemptedIds.add(id);
+				else ids.add(id);
 			}
 		}
 
-		return this.deleteKittyImages(ids);
+		let buffer = "";
+		for (const id of preemptedIds) {
+			buffer += deleteKittyImagePlacement(id);
+		}
+		return buffer + this.deleteKittyImages(ids);
 	}
 
 	/**
@@ -578,6 +593,10 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// commands: the final viewport below decides which occurrences are
 		// granted pixels. (X073.)
 		let rawLines = this.resolveFakeCursors(this.render(width).map((line) => line.replace(OSC133_ZONE_PREFIX, "")));
+
+		// Only a visible-overlay frame can preempt a Native Kitty block (X077).
+		// Reset before the compositor may record this frame's set.
+		this.preemptedKittyImageIds = new Set<number>();
 
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.hasOverlayEntries) {

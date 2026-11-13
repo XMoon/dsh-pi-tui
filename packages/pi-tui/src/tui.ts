@@ -783,21 +783,28 @@ export function compositeTuiLine(
 }
 
 /**
- * The rows one line's FIRST Kitty APC paints as a device layer, or 0 when the
- * line is not a Native Kitty placement anchor (X077).
+ * The rows and image id one line's FIRST Kitty APC paints as a device layer,
+ * or undefined when the line is not a Native Kitty placement anchor (X077).
  *
  * `a=p` is the managed placement shape and `a=T` the vendored `Image`'s inline
  * transmit-and-display sibling; every other action (upload, query, delete) is
  * not a placement. `U=1` is excluded: its pixels belong to the visible
  * placeholder cells, so a writer-side placement delete cannot remove it.
  */
-function nativeKittyBlockRows(line: string): number {
+function nativeKittyBlock(
+	line: string,
+): { rows: number; action: "p" | "T"; imageId: number | undefined } | undefined {
 	const controls = /\x1b_G([^;]*);/.exec(line)?.[1];
-	if (controls === undefined) return 0;
+	if (controls === undefined) return undefined;
 	const action = /(?:^|,)a=([A-Za-z])(?:,|$)/.exec(controls)?.[1];
-	if (action !== "p" && action !== "T") return 0;
-	if (/(?:^|,)U=1(?:,|$)/.test(controls)) return 0;
-	return getKittyImagePlacementRows(line) ?? 1;
+	if (action !== "p" && action !== "T") return undefined;
+	if (/(?:^|,)U=1(?:,|$)/.test(controls)) return undefined;
+	const idText = /(?:^|,)i=(\d{1,10})(?:,|$)/.exec(controls)?.[1];
+	return {
+		rows: getKittyImagePlacementRows(line) ?? 1,
+		action,
+		imageId: idText === undefined ? undefined : Number.parseInt(idText, 10),
+	};
 }
 
 export type TuiMode = "regular" | "fullscreen";
@@ -905,6 +912,14 @@ export abstract class TuiBase extends Container implements TUI {
 	 * gesture-liveness check reads the CURRENT painted placement of a
 	 * retained target). */
 	protected renderedOverlayLayouts: RenderedOverlayLayout[] = [];
+	/**
+	 * The Native Kitty image ids THIS frame's projection preempted for a
+	 * visible overlay (X077). They are a per-frame fact, never durable state:
+	 * the Main Screen must remove only their placement and keep the data
+	 * resident, because the block is expected back the moment the overlay
+	 * closes and a foreign occurrence cannot re-transmit its own upload.
+	 */
+	protected preemptedKittyImageIds: ReadonlySet<number> = new Set<number>();
 
 	get hasOverlayEntries(): boolean {
 		return this.overlayStack.length > 0;
@@ -2106,6 +2121,7 @@ export abstract class TuiBase extends Container implements TUI {
 	protected compositeOverlays(lines: string[], termWidth: number, termHeight: number): string[] {
 		if (this.overlayStack.length === 0) {
 			this.renderedOverlayLayouts = [];
+			this.preemptedKittyImageIds = new Set<number>();
 			return lines;
 		}
 		const result = [...lines];
@@ -2168,23 +2184,31 @@ export abstract class TuiBase extends Container implements TUI {
 		// the picture over the overlay. The anchor line becomes an empty base, the
 		// overlay then composites normally, and the Screen's existing image
 		// bookkeeping deletes the old placement and re-places the same managed
-		// image once the overlay is gone. Only this frame's projection changes:
-		// the input lines, the components, the overlay stack and the context are
-		// untouched. (dsh-pi-tui divergence X077.)
+		// image once the overlay is gone. An `a=p` placement carries no payload,
+		// so its id is recorded as preempted: the Main Screen MUST remove only
+		// its placement and keep the data resident, or a foreign occurrence (not
+		// owned by this Core) could never be shown again. An `a=T` line carries
+		// its own payload and re-transmits on restore, so it keeps the existing
+		// hard delete. Only this frame's projection changes: the input lines, the
+		// components, the overlay stack and the context are untouched.
+		// (dsh-pi-tui divergence X077.)
+		const preempted = new Set<number>();
 		if (rendered.length > 0) {
 			for (let row = viewportStart; row < result.length; row++) {
-				const rows = nativeKittyBlockRows(result[row] ?? "");
-				if (rows === 0) continue;
+				const block = nativeKittyBlock(result[row] ?? "");
+				if (block === undefined) continue;
 				const first = row - viewportStart;
-				const last = first + rows - 1;
+				const last = first + block.rows - 1;
 				const covered = rendered.some(
 					({ overlayLines, row: overlayRow }) =>
 						overlayLines.length > 0 && overlayRow <= last && overlayRow + overlayLines.length - 1 >= first,
 				);
 				if (!covered) continue;
+				if (block.action === "p" && block.imageId !== undefined) preempted.add(block.imageId);
 				result[row] = "";
 			}
 		}
+		this.preemptedKittyImageIds = preempted;
 
 		// Composite each overlay
 		for (const { overlayLines, row, col, w } of rendered) {

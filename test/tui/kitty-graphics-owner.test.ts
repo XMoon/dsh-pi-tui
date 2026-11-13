@@ -1046,25 +1046,28 @@ test('a visible overlay preempts the managed placement and the same image return
 })
 
 /**
- * The facade only ever claims the ids of its own Core. The fork's compositor
- * preempts a native placement from its PROTOCOL, not from Core ownership, so a
- * foreign occurrence is preempted for the frame while its bytes stay foreign:
- * the Core injects no transmission and never translates its delete into a
- * scoped placement removal.
+ * A foreign `a=p` occurrence (uploaded by some other owner, placed with an id
+ * this Core does not own) is preempted by PROTOCOL for the frame, but its data
+ * must survive: the compositor records the id as preempted and the Main Screen
+ * removes only the PLACEMENT. The closed loop is: no data-free ever reaches the
+ * wire for that id, and the same placement is written again when the overlay
+ * closes (its data stayed resident for the foreign owner to re-show).
  */
-test('a foreign image id is never claimed by the preemption path', () => {
+test('a preempted foreign a=p placement is removed by placement only and can be re-shown', () => {
   const { terminal, core, facade } = harness()
   setCellDimensions({ widthPx: 10, heightPx: 10 })
   try {
     let foreignId = 0x123456
     while (core.ownsIdSpace(foreignId)) foreignId += 1
+    // The foreign owner uploads its own payload, separate from any placement.
+    facade.write(`\x1b_Ga=t,f=100,i=${foreignId},q=2;AAAA\x1b\\`)
     const screen = new TuiMainScreen(facade)
     const foreign = encodeKittyPlacement(foreignId, 9, { columns: 2, rows: 2 })
     screen.addChild({ render: () => ['header', foreign, ''], invalidate: () => {} })
     screen.start()
     screen.renderNow()
     assert.ok(terminal.text.includes(foreign), 'a placement outside the Core passes through untouched')
-    assert.ok(!terminal.text.includes('a=t,f=100'), 'the Core never transmits a foreign image')
+    assert.ok(!terminal.text.includes(encodeKittyDeleteImage(foreignId)), 'the Core never frees a foreign image')
 
     terminal.writes.length = 0
     const handle = screen.showOverlay({ render: () => ['MODAL'], invalidate: () => {} }, {
@@ -1073,14 +1076,19 @@ test('a foreign image id is never claimed by the preemption path', () => {
       width: 20,
     })
     screen.renderNow()
-    assert.ok(terminal.text.includes('MODAL'), 'the overlay is painted over the foreign block')
-    assert.ok(!terminal.text.includes(encodeKittyDeletePlacement(foreignId)), 'the foreign id is never reclaimed')
-    assert.ok(
-      terminal.text.includes(encodeKittyDeleteImage(foreignId)),
-      "the writer's own foreign delete keeps its exact bytes",
-    )
+    const covered = terminal.text
+    assert.ok(covered.includes('MODAL'), 'the overlay is painted over the foreign block')
+    assert.ok(covered.includes(encodeKittyDeletePlacement(foreignId)), 'only the foreign PLACEMENT is removed')
+    assert.ok(!covered.includes(encodeKittyDeleteImage(foreignId)), 'the foreign data is never freed')
+    assert.ok(!covered.includes('\x1b_Ga=d,d=A'), 'no global image delete reaches the terminal')
+
+    terminal.writes.length = 0
     handle.hide()
     screen.renderNow()
+    const restored = terminal.text
+    assert.ok(restored.includes(foreign), 'the same foreign placement is written again after close')
+    assert.ok(!restored.includes(encodeKittyDeleteImage(foreignId)), 'closing frees no foreign data either')
+    assert.ok(!restored.includes('\x1b_Ga=d,d=A'), 'closing emits no global delete')
     screen.stop()
   } finally {
     setCellDimensions({ widthPx: 9, heightPx: 18 })
