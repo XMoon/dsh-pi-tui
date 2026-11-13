@@ -42,7 +42,16 @@ import { connect as sdkConnect, html, ui, View } from '@stencil-hq/tern'
 import type { Key, Node, ScrollTo, Session, SessionInput, Surface, Tree, TspEvent } from '@stencil-hq/tern'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { StatusSnapshot, StatusSnapshotReader } from '../../domain/status/types.ts'
-import type { ComposerSubmitRequest } from '../../tui-app.ts'
+import type { ComposerSubmitRequest, WorkflowAction } from '../../tui-app.ts'
+import { workflowPhasePresentations, workflowRunViewAllVisible } from '../transcript/workflow-presentation.ts'
+import {
+  advanceWorkflowDisclosureState,
+  effectiveWorkflowPhaseOpen,
+  effectiveWorkflowRunOpen,
+  type WorkflowRunDisclosureState,
+} from '../transcript/workflow-disclosure.ts'
+import type { WorkflowMemberView, WorkflowRunId, WorkflowRunStatus } from '../../domain/transcript/workflow-projection.ts'
+import { TSP_WORKFLOW_BROWSE_ACTION } from './workflow-actions.ts'
 import { createHistoryRecallScope } from '../../client/history/recall-scope.ts'
 import type {
   DisplayDockNotice,
@@ -131,10 +140,22 @@ import {
 import type { ToolImageState } from './transcript-view.ts'
 import { TRANSCRIPT_COPY_ACTION, transcriptCopyPayload } from './transcript-copy.ts'
 
+type WorkflowRow = Extract<TranscriptMessage, { kind: 'workflow' }>
+type WorkflowScopedAction = Extract<WorkflowAction, { kind: 'open-phase-agents' | 'open-run-agents' }>
+type WorkflowBrowseTarget = {
+  readonly kind: 'phase' | 'run'
+  readonly owner: WorkflowRow
+  readonly source: object
+  readonly scopePrefix: string
+  readonly phaseKey?: string
+}
+
 type InnerDisclosurePathTarget =
   | { readonly kind: 'thinking'; readonly owner: Extract<TranscriptMessage, { kind: 'thinking' }> }
   | { readonly kind: 'context-row'; readonly owner: Extract<TranscriptMessage, { kind: 'system' }> }
   | { readonly kind: 'context-cluster'; readonly owner: Extract<TranscriptMessage, { kind: 'system' }> }
+  | { readonly kind: 'workflow-run'; readonly owner: WorkflowRow }
+  | { readonly kind: 'workflow-phase'; readonly owner: WorkflowRow; readonly phaseKey: string }
   | {
     readonly kind: 'command-compaction'
     readonly owner: Extract<TranscriptMessage, { kind: 'command' | 'compaction' }>
@@ -359,6 +380,14 @@ export interface TspInputHandlers {
    * to this ONE application entry, which runs the registered handler.
    */
   openTasksBrowserUi(): void
+  /**
+   * Open the existing read-only Work Hub scoped to one Workflow Phase or Run.
+   * The action is composed from the CURRENT canonical row, never from a cached
+   * frame target; the ONE TaskRuntime remains the business owner.
+   */
+  openWorkflowScopedAgents?(action: WorkflowScopedAction): void
+  /** Whether the scoped TaskRuntime entry and its Work Hub are live now. */
+  workflowScopedAgentsAvailable?(): boolean
   /** Whether that `/tasks` business entry is actually usable now (registered
    *  AND this mount's live Task Center capability holds). The status segment
    *  paints its click action from this fact, never from a painted badge. */
@@ -1476,6 +1505,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * reset by closing a Work/Focus ancestor.
    */
   const expandedCommandCompactionOwners = new Set<TranscriptMessage>()
+  /** T3-0C: the ONE source-scoped Workflow disclosure owner and its exact
+   *  last-seen official facts (members array reference + run status). */
+  const workflowDisclosureStates = new Map<WorkflowRunId, WorkflowRunDisclosureState>()
+  const workflowSeen = new Map<WorkflowRunId, { members: readonly WorkflowMemberView[]; status: WorkflowRunStatus }>()
+  /** Exact current-frame Workflow browse button ids and their canonical owners. */
+  let workflowBrowseButtons: ReadonlyMap<string, WorkflowBrowseTarget> = new Map()
   const innerDisclosureByPath = new Map<string, InnerDisclosurePathTarget>()
   /**
    * PR-D RFL-016: the tool-card keys the user EXPANDED via the Tern `toggle`
@@ -1507,6 +1542,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     expandedClusterOwners.clear()
     expandedCommandCompactionOwners.clear()
     innerDisclosureByPath.clear()
+    workflowDisclosureStates.clear()
+    workflowSeen.clear()
+    workflowBrowseButtons = new Map()
   }
   /**
    * PR3: the CURRENT committed frame's Assistant figures — the published refs
@@ -2565,6 +2603,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     readonly workDisclosure: readonly (readonly [string, TranscriptMessage])[]
     readonly focusDisclosure: readonly (readonly [string, number])[]
     readonly innerDisclosure: readonly (readonly [string, InnerDisclosurePathTarget])[]
+    readonly workflowBrowseButtons: readonly (readonly [string, WorkflowBrowseTarget])[]
   }
 
   /** The per-root contributions of the CURRENT frame, keyed by block key. */
@@ -2595,6 +2634,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       readonly workOwnersBySectionKey: ReadonlyMap<string, TranscriptMessage>
       readonly focusWorkBySectionKey: ReadonlyMap<string, { readonly owner: TranscriptMessage; readonly turn: number }>
       readonly innerOwnersByNodeKey: ReadonlyMap<string, InnerDisclosurePathTarget>
+      readonly workflowOwnersByNodeKey: ReadonlyMap<string, WorkflowRow>
+      readonly phaseKeysByOwner: ReadonlyMap<WorkflowRow, ReadonlyMap<string, string>>
       readonly compactWork: boolean
       readonly focus: boolean
     },
@@ -2606,7 +2647,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const workDisclosure: (readonly [string, TranscriptMessage])[] = []
     const focusDisclosure: (readonly [string, number])[] = []
     const innerDisclosure: (readonly [string, InnerDisclosurePathTarget])[] = []
-    const recordDisclosures = (current: Node, path: string, parentTool: string | undefined): void => {
+    const workflowBrowseButtons: (readonly [string, WorkflowBrowseTarget])[] = []
+    const recordDisclosures = (current: Node, path: string, parentTool: string | undefined, workflowRow: WorkflowRow | undefined): void => {
       const nodeKey = (current.props as { key?: string }).key
       let tool = parentTool
       if (current.kind === 'tool' && (current.props as { collapsible?: boolean }).collapsible === true && nodeKey !== undefined) {
@@ -2616,7 +2658,18 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         tool = own ?? (parentTool !== undefined ? `${parentTool}/${nodeKey}` : undefined)
         if (tool !== undefined) toolDisclosure.push([path, tool])
       }
+      let currentWorkflow = workflowRow ?? (nodeKey === undefined ? undefined : context.workflowOwnersByNodeKey.get(nodeKey))
       if (current.kind === 'section' && (current.props as { collapsible?: boolean }).collapsible === true && nodeKey !== undefined) {
+        const workflowOwner = currentWorkflow
+        if (workflowOwner !== undefined) {
+          const phaseKey = context.phaseKeysByOwner.get(workflowOwner)?.get(nodeKey)
+          if (phaseKey !== undefined) {
+            innerDisclosure.push([path, { kind: 'workflow-phase', owner: workflowOwner, phaseKey }])
+          } else if (nodeKey === scopeKeys.keyFor(workflowOwner)
+            || nodeKey === `${scopePrefix}${scopeKeys.keyFor(workflowOwner)}`) {
+            innerDisclosure.push([path, { kind: 'workflow-run', owner: workflowOwner }])
+          }
+        }
         const inner = context.innerOwnersByNodeKey.get(nodeKey)
         if (inner !== undefined) innerDisclosure.push([path, inner])
         if (context.focus) {
@@ -2631,18 +2684,24 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
       for (const [index, child] of current.children.entries()) {
         const childKey = (child.props as { key?: string }).key
-        recordDisclosures(child, `${path}.${childKey ?? String(index)}`, tool)
+        recordDisclosures(child, `${path}.${childKey ?? String(index)}`, tool, currentWorkflow)
       }
     }
-    recordDisclosures(node, rootKey, undefined)
+    recordDisclosures(node, rootKey, undefined, context.workflowOwnersByNodeKey.get(rootKey))
 
     const visit = (
       current: Tree,
       figure: VisualCopyTarget | undefined,
       assistant: AssistantTranscriptRow | undefined,
+      workflowRow: WorkflowRow | undefined,
+      phaseKey: string | undefined,
     ): void => {
       const props = current.props as Record<string, unknown>
       const key = props['key']
+      const rootWorkflow = workflowRow ?? (typeof key === 'string' ? context.workflowOwnersByNodeKey.get(key) : undefined)
+      const currentPhaseKey = rootWorkflow !== undefined && typeof key === 'string'
+        ? context.phaseKeysByOwner.get(rootWorkflow)?.get(key) ?? phaseKey
+        : phaseKey
       const entry = typeof key === 'string' ? context.figureSources.get(key) : undefined
       let currentFigure = figure
       if (entry !== undefined) {
@@ -2685,11 +2744,26 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
             nodeId: current.id,
           }])
         }
+      } else if (current.kind === 'button' && props['role'] === 'dsh.transcript.workflow.browse'
+        && rootWorkflow !== undefined) {
+        const actions = props['actions'] as { readonly click?: unknown } | undefined
+        if (actions?.click === TSP_WORKFLOW_BROWSE_ACTION) {
+          workflowBrowseButtons.push([current.id, {
+            kind: key === 'browse-all' ? 'run' : 'phase',
+            owner: rootWorkflow,
+            source: context.source,
+            scopePrefix,
+            ...(currentPhaseKey === undefined ? {} : { phaseKey: currentPhaseKey }),
+          }])
+        }
       }
-      for (const child of current.children) visit(child, currentFigure, currentAssistant)
+      for (const child of current.children) visit(child, currentFigure, currentAssistant, rootWorkflow, currentPhaseKey)
     }
-    visit(tree, undefined, undefined)
-    return { figures, visualCopyButtons, transcriptCopyButtons, toolDisclosure, workDisclosure, focusDisclosure, innerDisclosure }
+    visit(tree, undefined, undefined, undefined, undefined)
+    return {
+      figures, visualCopyButtons, transcriptCopyButtons, toolDisclosure,
+      workDisclosure, focusDisclosure, innerDisclosure, workflowBrowseButtons,
+    }
   }
 
   /** Merge the current per-root contributions, in Main order, into the frame. */
@@ -2703,6 +2777,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const workPaths = new Map<string, TranscriptMessage>()
     const focusPaths = new Map<string, number>()
     const innerPaths = new Map<string, InnerDisclosurePathTarget>()
+    const browseButtons = new Map<string, WorkflowBrowseTarget>()
     for (const key of mainJournal.order) {
       const contribution = frameContributions.get(key)
       if (contribution === undefined) continue
@@ -2717,6 +2792,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       for (const [path, owner] of contribution.workDisclosure) workPaths.set(path, owner)
       for (const [path, turn] of contribution.focusDisclosure) focusPaths.set(path, turn)
       for (const [path, target] of contribution.innerDisclosure) innerPaths.set(path, target)
+      for (const [id, target] of contribution.workflowBrowseButtons) browseButtons.set(id, target)
     }
     visualOrder = order
     figureNodeIds = nodeIds
@@ -2731,6 +2807,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     for (const [path, turn] of focusPaths) focusDisclosureByPath.set(path, turn)
     innerDisclosureByPath.clear()
     for (const [path, target] of innerPaths) innerDisclosureByPath.set(path, target)
+    workflowBrowseButtons = browseButtons
     return { order, nodeIds, targets, copyButtons, transcriptCopyButtons: transcriptCopies }
   }
 
@@ -2820,6 +2897,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     visualTargets = new Map()
     visualCopyButtons = new Map()
     transcriptCopyButtons = new Map()
+    workflowBrowseButtons = new Map()
     selectedVisual = undefined
   }
 
@@ -2965,6 +3043,19 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       messagesByKey.set(key, message)
       messagesByKey.set(`${scopePrefix}${key}`, message)
     }
+    const workflowOwnersByNodeKey = new Map<string, WorkflowRow>()
+    const phaseKeysByOwner = new Map<WorkflowRow, Map<string, string>>()
+    for (const message of lastMessages) {
+      if (message.kind !== 'workflow') continue
+      const bareKey = scopeKeys.keyFor(message)
+      workflowOwnersByNodeKey.set(bareKey, message)
+      workflowOwnersByNodeKey.set(`${scopePrefix}${bareKey}`, message)
+      const phases = new Map<string, string>()
+      for (const phase of workflowPhasePresentations(message.members)) {
+        phases.set(`phase-${Buffer.from(phase.key, 'utf8').toString('base64url')}`, phase.key)
+      }
+      phaseKeysByOwner.set(message, phases)
+    }
     const viewOptions = {
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       scopePrefix,
@@ -2989,6 +3080,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       nativeImagesSupported: nativeImagesSupported(),
       requestPublishedSvgBlob,
       ...(selectedVisual === undefined ? {} : { selectedVisual }),
+      workflowDisclosure: {
+        states: workflowDisclosureStates,
+        browseAvailable: scopedBrowseAdmitted(),
+      },
     }
     // ONE lightweight descriptor pass: keys, canonical ownership and the exact
     // semantic stamps. Node materialization belongs to the journal, which only
@@ -3060,6 +3155,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
             workOwnersBySectionKey,
             focusWorkBySectionKey,
             innerOwnersByNodeKey,
+            workflowOwnersByNodeKey,
+            phaseKeysByOwner,
             compactWork,
             focus,
           }))
@@ -3392,6 +3489,26 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     lastStreamingToolPreviews = streamingToolPreviews ?? []
     lastTurnActivities = activities
     lastWindowState = window
+    // Advance the source-scoped Workflow policy only on the official facts that
+    // changed: the members array reference or the authoritative run status.
+    const loadedRunIds = new Set<WorkflowRunId>()
+    for (const message of messages) {
+      if (message.kind !== 'workflow') continue
+      loadedRunIds.add(message.runId)
+      const previous = workflowSeen.get(message.runId)
+      if (previous?.members === message.members && previous.status === message.status) continue
+      workflowSeen.set(message.runId, { members: message.members, status: message.status })
+      const result = advanceWorkflowDisclosureState(workflowDisclosureStates.get(message.runId), message)
+      workflowDisclosureStates.set(message.runId, result.state)
+    }
+    // A run that left the current window loses its manual and last-seen state;
+    // a same-source retained run keeps it even while folded.
+    for (const runId of workflowDisclosureStates.keys()) {
+      if (!loadedRunIds.has(runId)) workflowDisclosureStates.delete(runId)
+    }
+    for (const runId of workflowSeen.keys()) {
+      if (!loadedRunIds.has(runId)) workflowSeen.delete(runId)
+    }
     if (expandedFocusTurns.size > 0) {
       const focusBlocks = projectFocus(messages, activities ?? new Map(), expandedFocusTurns, true)
       const visibleTurns = new Set(focusBlocks.flatMap(block => block.kind === 'activity' ? [block.activity.turn] : []))
@@ -3832,6 +3949,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     && taskCenterCapabilitiesNegotiated()
     && boundHandlers?.tasksBrowserUiAvailable() === true
     && presentedStatus !== undefined
+    && !hydrating
+
+  /** ONE predicate decides both whether a Workflow browse button is painted and
+   *  whether its current-frame action may reach the TaskRuntime. */
+  const scopedBrowseAdmitted = (): boolean => transcriptCopyAdmitted()
+    && detailsCloseTask === undefined
+    && projectionScope !== undefined
+    && taskCenterCapabilitiesNegotiated()
+    && boundHandlers?.workflowScopedAgentsAvailable?.() === true
+    && boundHandlers?.openWorkflowScopedAgents !== undefined
     && !hydrating
 
   /**
@@ -4975,6 +5102,30 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           : input.event.id
         const innerTarget = innerDisclosureByPath.get(input.event.id) ?? innerDisclosureByPath.get(framePath)
         if (innerTarget !== undefined) {
+          if (innerTarget.kind === 'workflow-run' || innerTarget.kind === 'workflow-phase') {
+            const state = workflowDisclosureStates.get(innerTarget.owner.runId)
+            if (state !== undefined) {
+              const targetExpanded = input.event.collapsed !== true
+              const phaseState = innerTarget.kind === 'workflow-phase'
+                ? state.phases.get(innerTarget.phaseKey)
+                : undefined
+              const wasExpanded = innerTarget.kind === 'workflow-run'
+                ? effectiveWorkflowRunOpen(state, innerTarget.owner)
+                : phaseState !== undefined
+                  ? (() => {
+                    const phase = workflowPhasePresentations(innerTarget.owner.members)
+                      .find(candidate => candidate.key === innerTarget.phaseKey)
+                    return phase !== undefined && effectiveWorkflowPhaseOpen(state, phase)
+                  })()
+                  : false
+              if (wasExpanded !== targetExpanded) {
+                if (innerTarget.kind === 'workflow-run') state.userOpen = targetExpanded
+                else if (phaseState !== undefined) phaseState.userOpen = targetExpanded
+                if (rebuildLastMain()) render()
+              }
+            }
+            return false
+          }
           const set = innerTarget.kind === 'thinking'
             ? expandedThinkingOwners
             : innerTarget.kind === 'context-row'
@@ -5042,6 +5193,40 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
             && tasksActionNodeIds.has(input.event.id)
             && nativeTasksActionAdmitted()) {
             handlers.openTasksBrowserUi()
+          }
+          return false
+        }
+        if (input.event.ev === 'action' && input.event.act === TSP_WORKFLOW_BROWSE_ACTION) {
+          if (scopedBrowseAdmitted()) {
+            const target = workflowBrowseButtons.get(input.event.id)
+            const handlers = boundHandlers
+            if (target !== undefined && handlers !== undefined && projectionScope !== undefined
+              && target.source === projectionScope && target.scopePrefix === scopePrefix) {
+              const owner = lastMessages.find(message => message === target.owner && message.kind === 'workflow')
+              if (owner !== undefined && owner.kind === 'workflow') {
+                if (target.kind === 'phase' && target.phaseKey !== undefined) {
+                  const phase = workflowPhasePresentations(owner.members)
+                    .find(candidate => candidate.key === target.phaseKey)
+                  if (phase !== undefined) {
+                    handlers.openWorkflowScopedAgents?.({
+                      kind: 'open-phase-agents',
+                      runId: String(owner.runId),
+                      name: owner.name,
+                      phaseLabel: phase.label,
+                      childIds: phase.members.map(member => String(member.childId)),
+                    })
+                  }
+                } else if (target.kind === 'run'
+                  && workflowRunViewAllVisible(owner.members.length, workflowPhasePresentations(owner.members).length)) {
+                  handlers.openWorkflowScopedAgents?.({
+                    kind: 'open-run-agents',
+                    runId: String(owner.runId),
+                    name: owner.name,
+                    childIds: owner.members.map(member => String(member.childId)),
+                  })
+                }
+              }
+            }
           }
           return false
         }
@@ -5371,6 +5556,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       if (inputBound) throw new Error('the TSP renderer input is already bound')
       inputBound = true
       boundHandlers = handlers
+      // The scoped Workflow browse entry is admitted by the BOUND business
+      // entry. A transcript already committed before the bind must repaint
+      // once now, or a historical Workflow card would stay without its real
+      // button until an unrelated official event happened.
+      if (lastMessages.some(message => message.kind === 'workflow') && rebuildLastMain()) render()
       // Consume the held pre-bind keys ONCE, in arrival order. An exit
       // intent among them (possible only when held edits emptied the draft)
       // routes the exit through the same bound handler; the caller's

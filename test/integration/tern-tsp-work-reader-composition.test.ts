@@ -539,6 +539,35 @@ test('Mouse PR4 L6: a click on the visible Tasks badge runs the registered /task
   assert.equal(composition.entryCalls.length, 1, 'an occupied presenter seat refuses the background click')
 })
 
+test('a Workflow scoped browse action opens the real TaskRuntime Hub with the current exact childIds', async (t) => {
+  const descendants: TaskSubagentEntry[] = [
+    { kind: 'child', id: 'child-1', label: 'prepare-1', mode: 'one-shot', activity: 'running', hasChildren: false, parentId: '', depth: 1 },
+    { kind: 'child', id: 'child-2', label: 'prepare-2', mode: 'one-shot', activity: 'running', hasChildren: false, parentId: '', depth: 1 },
+    { kind: 'child', id: 'other', label: 'not-in-phase', mode: 'one-shot', activity: 'running', hasChildren: false, parentId: '', depth: 1 },
+  ]
+  const action = {
+    kind: 'open-phase-agents',
+    runId: 'run-1',
+    name: 'deploy',
+    phaseLabel: 'Prepare',
+    childIds: ['child-1', 'child-2'],
+  } as const
+  const composition = await compose(t, descendants, [], {
+    pane: { sessionBrowser: true, workDetails: true },
+    openHub: false,
+  })
+  composition.tasks.handleWorkflowAction(action)
+  await waitForHub(composition, 'the scoped Workflow Hub', 'agent:child-1')
+  const ids = hubItemIds(composition)
+  assert.deepEqual(ids.filter(id => id.startsWith('agent:')), ['agent:child-1', 'agent:child-2'],
+    'the exact childIds scope excludes unrelated agents')
+  await selectRow(composition, 'agent:child-1')
+  const reader = await enterReader(composition)
+  assert.equal(surfaceTexts(composition.pane, reader)[0], '← Work')
+  assert.equal(composition.stops.length, 0, 'the read-only scope never offers or runs a Stop')
+  assert.equal(composition.selects.length, 0, 'the Reader did not reach the business selection router')
+})
+
 test('Mouse PR4 L6: the open Reader keeps the background Tasks badge inert', async (t) => {
   const composition = await compose(t, DESCENDANTS, [], {
     pane: { sessionBrowser: true, workDetails: true },
