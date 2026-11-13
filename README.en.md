@@ -24,7 +24,7 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ```
 
-### Exact version pairing (0.5.6)
+### Exact version pairing (published stable 0.5.6)
 
 This release requires DSH `>=0.2.2-rc.1`, targets `0.2.2-rc.1` for exact validation, and requires Node.js `>=24.9.0`. Finish Agent turns and exit the old TUI/Host normally before installing or upgrading; hot upgrade is not supported.
 
@@ -32,6 +32,15 @@ This release requires DSH `>=0.2.2-rc.1`, targets `0.2.2-rc.1` for exact validat
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.1
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.6
 dsh --profile pi-tui
+```
+
+### Candidate preview (0.5.7 × 0.2.2-rc.3, unpublished)
+
+This checkout carries the unpublished `0.5.7` candidate, validated against DSH `0.2.2-rc.3`: the runtime minimum and the exact validation target are both `>=0.2.2-rc.3` (incompatible with `0.2.2-rc.2` and earlier), and Node.js `>=24.9.0` is required. `0.5.7` is not published to npm yet, so no install-form `dsh plugin add ...@0.5.7` command is offered; build this checkout and validate that preview pairing with `pnpm compat:dsh:npm`. Finish Agent turns and exit the old TUI/Host normally before installing or upgrading DSH; hot upgrade is not supported.
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.3
+pnpm compat:dsh:npm
 ```
 
 ### Next / npm line (validation)
@@ -66,20 +75,22 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.5.6` (stable / `@latest`) | `dsh-v0.2.2-rc.1` | Current stable release; minimum and exact validation target DSH is `0.2.2-rc.1`, Node.js `>=24.9.0`; incompatible with `0.2.1-rc.*` |
+| `0.5.6` (stable / `@latest`) | `dsh-v0.2.2-rc.1` | Published stable release; minimum and exact validation target DSH is `0.2.2-rc.1`, Node.js `>=24.9.0`; incompatible with `0.2.1-rc.*` |
+| `0.5.7` (candidate preview, unpublished) | `dsh-v0.2.2-rc.3` | This checkout's candidate; minimum and exact validation target DSH is `0.2.2-rc.3`, Node.js `>=24.9.0`; incompatible with `0.2.2-rc.2` and earlier |
 | `0.5.5` (previous stable) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4`, `dsh-v0.2.1-rc.5` | Previous stable release; minimum DSH version `0.2.1-rc.2` |
 | `0.5.4` (stable, previous) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Previous stable line; the minimum DSH version is 0.2.1-rc.2, and it passes the official preset assembly on all three DSH versions |
 | `0.5.3` (stable, previous) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Previous stable line; the minimum DSH version is 0.2.1-rc.2, and it passes the official preset assembly on all three DSH versions |
 | `0.5.1` (stable, previous) | `dsh-v0.2.0-rc.2` | Previous stable line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
 | `0.5.2-rc.1` (published next-channel preview) | `dsh-v0.2.0-rc.2` | Previous next preview: published to the npm `next` dist-tag on 2026-10-17; its whole peer floor stays `>=0.2.0-rc.2`, so it does not cover 0.2.1-rc.2 |
 | `dsh-v0.2.1-rc.1` (no paired TUI) | none | No released TUI in this matrix claims that intermediate release; never reuse `0.5.5` for it |
+| `dsh-v0.2.2-rc.2` (no paired TUI) | none | No published or candidate TUI in this matrix claims that intermediate release; never reuse `0.5.6` for it |
 | `0.5.0` (stable, previous) | `dsh-v0.1.7-rc.2`, `dsh-v0.2.0-rc.1` | Previous stable; 0.1.7-rc.2 minimum, exact validation target 0.2.0-rc.1 |
 | `0.4.9` (stable, previous) | `dsh-v0.1.7-rc.2` | Previous stable; the compatible TUI for a 0.1.7-rc.2 runtime |
 | `0.4.8` (stable, previous) | `dsh-v0.1.7-rc.1` | Previous stable; the compatible TUI for a 0.1.7-rc.1 runtime |
 | `0.4.6` (stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; the compatible TUI for a 0.1.5 runtime |
 | `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
 
-Do not mix the stable and `@next` prerelease lines. `0.5.6` is the current stable release: it requires DSH `>=0.2.2-rc.1` and is not compatible with `0.2.1-rc.*`. Before upgrading, let turns and background work finish, exit the old TUI/Host normally, and back up the Profile/patch, raw Session logs, Workspace and necessary Host resources or credential references. Hot upgrade is not supported. Data written under 0.2.2 semantics is not guaranteed readable by rc5 in place; restore a backup to a separate directory and use the matching old DSH/TUI pair to roll back. Historical pairings are in the table above. See the [compatibility guide](docs/guides/dsh-compatibility.md) for matching and diagnosis, and the [next branch README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md) for its integration status.
+Do not mix the stable and `@next` prerelease lines. `0.5.6` is the published stable release (`@latest`): it requires DSH `>=0.2.2-rc.1` and is not compatible with `0.2.1-rc.*`; `0.5.7` is the unpublished candidate targeting DSH `0.2.2-rc.3`. Before upgrading, let turns and background work finish, exit the old TUI/Host normally, and back up the Profile/patch, raw Session logs, Workspace and necessary Host resources or credential references. Hot upgrade is not supported. Data written under 0.2.2 semantics is not guaranteed readable by rc5 in place; restore a backup to a separate directory and use the matching old DSH/TUI pair to roll back. Historical pairings are in the table above. See the [compatibility guide](docs/guides/dsh-compatibility.md) for matching and diagnosis, and the [next branch README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md) for its integration status.
 
 New agent sessions use the official roster's selected preset id. A custom DSH
 preset literally named `code` is valid and remains `code` when it exists in the
@@ -261,8 +272,9 @@ owner under `Unassociated extension contributions`. `c` copies the selected fact
 extension ledger; Host package state and install logs stay out of it. `copy`
 still proves emission only, never an OS-clipboard receipt.
 
-The 14 official rc.2 Experimental bundles carry a bounded, identity-exact
-Detail statement of their terminal surface and limits/risks (Web-only,
+The official Experimental bundles (including the rc.3 DeepSeek chat import
+Web-only member) carry a bounded, identity-exact Detail statement of their
+terminal surface and limits/risks (Web-only,
 Host-only, the B04 WEB_ONLY/Host-row-pending boundary accepted by the Owner,
 and the B13/B14 verified one-shot/provider boundaries). That copy never follows
 enablement and never claims a live Host capability PASS. Upgrade guidance is
