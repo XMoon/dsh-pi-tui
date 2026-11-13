@@ -74,6 +74,25 @@ async function delay(ms: number): Promise<void> {
   await new Promise<void>(resolve => setTimeout(resolve, ms))
 }
 
+/** Wait for a diagnostic line produced by the parent's asynchronous child
+ *  `close` handler; the fake CLI's `end` log entry alone does not prove that
+ *  callback has run yet. */
+async function waitForDiagnosed(
+  lines: readonly string[],
+  predicate: (lines: readonly string[]) => boolean,
+  label: string,
+  deadlineMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + deadlineMs
+  for (;;) {
+    if (predicate(lines)) return
+    if (Date.now() > deadline) {
+      throw new Error(`${label} did not occur within ${String(deadlineMs)}ms; diagnostics: ${JSON.stringify(lines)}`)
+    }
+    await delay(10)
+  }
+}
+
 test('HR-01 an incomplete Herdr Pane environment creates no reporter and no process', async (t) => {
   const fixture = createHerdrCliFixture(t)
   const base = fixture.env
@@ -615,13 +634,14 @@ test('a failed cleanup release claims nothing and a later real event retries it'
     && entry.code === 3
     && starts(fixture, 'release-agent').length === 1), 'the failed cleanup release')
   await settleThroughDispatch(fixture)
+  await waitForDiagnosed(recorder.lines,
+    lines => lines.some(line => line.includes('"reason":"release"') && line.includes('"code":3')),
+    'the failed withdrawal is diagnosed without argv')
   assert.equal(starts(fixture, 'report-agent').length, 1,
     'a failed withdrawal must NOT re-register the Pane (the resume target may still be saved)')
   assert.equal(sessionStarts(fixture).length, 1, 'no Session may be claimed after a failed cleanup')
   assert.deepEqual(startPhases(fixture.entries()), ['state', 'session', 'release'],
     'the failed withdrawal must not be followed by a re-registration')
-  assert.ok(recorder.lines.some(line => line.includes('"reason":"release"') && line.includes('"code":3')),
-    `the failed withdrawal is diagnosed without argv: ${JSON.stringify(recorder.lines)}`)
 
   // A LATER real lifecycle event (the same logical state is still a real fact)
   // retries the outstanding cleanup exactly once; only its success re-registers.
