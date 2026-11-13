@@ -915,8 +915,22 @@ export async function runDetachedTurnInteractions(context) {
         'T55c HMR duplicated the root interaction startup gate')
       await client.waitForScreen(confirmText, 'T55c new surface shows the same Host pending', 120_000)
       if (kind === 'question') {
-        client.send(answer)
-        await client.waitForScreen('Review your answer before submit', 'T55c question review', 30_000)
+        // The post-HMR input fence can swallow a keystroke sent in the same
+        // instant as the swap (observed once in four full-lane runs: the
+        // option choice vanished with no effect anywhere). Redeliver the
+        // idempotent option choice until the review view shows; three dropped
+        // deliveries still fail the case.
+        let reviewShown = false
+        for (let attempt = 1; attempt <= 3 && !reviewShown; attempt += 1) {
+          client.send(answer)
+          try {
+            await client.waitForScreen('Review your answer before submit', `T55c question review (attempt ${String(attempt)})`, 20_000)
+            reviewShown = true
+          } catch (error) {
+            if (attempt === 3) throw error
+            trace('t55c-question.answer-resent', { attempt })
+          }
+        }
         client.send('\r')
         // The official non-timed `ask()` attaches no `wait`, so its waterfall
         // request — and therefore the fixture's request/settlement records —
@@ -939,6 +953,14 @@ export async function runDetachedTurnInteractions(context) {
           event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === questionCallId,
           'T55c question tool result', 120_000)
         assert(result.data?.message?.isError !== true, 'T55c the answered question failed at the Host')
+        // A redelivered keystroke the input gate dumped late must not poison
+        // the composer before the shared '/exit' line: record the pre-exit
+        // screen, clear any stray draft, then leave.
+        trace('t55c-question.pre-exit-frame', {
+          frame: (await client.viewport()).slice(-8),
+        })
+        client.send('\x15')
+        await sleep(150)
       } else {
         client.send(answer)
         await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/decided', 'T55c approval/decided', 120_000)

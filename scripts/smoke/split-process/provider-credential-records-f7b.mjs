@@ -229,6 +229,10 @@ export async function runF7BCredentialRecords(context) {
         && seeded.keys.includes(ORPHAN_KEY) && seeded.keys.includes(ACCOUNT_KEY),
       `F7B: the official store must really contain the four seeded records: ${JSON.stringify(seeded)}`,
     )
+    // A pre-existing fixture key would be RESTORED at teardown, contradicting
+    // the must-disappear assertion below: rule that premise out at the start.
+    assert(seeded.baselineKeys.every(key => ![GRANT_KEY, API_KEY_KEY, ORPHAN_KEY, ACCOUNT_KEY].includes(key)),
+      `F7B: a fixture record key already existed before the case: ${JSON.stringify(seeded.baselineKeys)}`)
     // The SAME Host publishes BOTH private services.
     const hostFacts = await hostStatus(host)
     assert(hostFacts.services?.piTuiAuthorization === true, 'F7B: the F7A authorization service must stay Ready on this Host')
