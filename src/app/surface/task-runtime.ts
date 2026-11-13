@@ -266,6 +266,8 @@ export interface TaskRuntime {
   openJobView(jobId: string): 'close' | 'keep-open'
   /** The Workflow card action sink (PR2 plan §9/§10/§14.5). */
   handleWorkflowAction(action: WorkflowAction): void
+  /** Whether a Workflow-scoped browser can really open the Task Runtime now. */
+  scopedBrowserAvailable(): boolean
   /** Repaint the OPEN browser's rows after a Question-attention change. */
   refreshAttentionRows(): void
   /**
@@ -1636,6 +1638,11 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     },
     handleWorkflowAction(action) {
       handleWorkflowAction(action)
+    },
+    scopedBrowserAvailable() {
+      return options.display().supportsTaskCenter
+        && taskRuntime !== undefined
+        && taskSource?.sessionId() !== undefined
     },
     refreshAttentionRows() {
       // The Question-attention subscription is a PRESENTATION-only refresh: it

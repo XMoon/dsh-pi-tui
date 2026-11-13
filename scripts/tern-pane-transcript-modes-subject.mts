@@ -180,6 +180,10 @@ mountTspRenderer = function (...args) {
             if (event.collapsed !== undefined) fields.collapsed = event.collapsed
             if (event.key !== undefined) fields.key = event.key
             __tmNote(fields)
+          } else if (event.ev === 'action') {
+            const fields = { kind: 'client.action', id: event.id, act: event.act }
+            if (event.sf !== undefined) fields.sf = event.sf
+            __tmNote(fields)
           } else if (event.ev === 'error') {
             const fields = { kind: 'sdk.error', msg: event.msg }
             if (event.sf !== undefined) fields.sf = event.sf
@@ -693,6 +697,11 @@ try {
   fixture = await createDirectTspFixture(life, {
     externalTern: true,
     workRoot,
+    // The workflow scenario needs the real subagent task-read half, or the
+    // scoped browse button must not paint at all.
+    ...(scenario === 'workflow-disclosure'
+      ? { workingDirectory: true, officialServices: { subagentRuntime: true } }
+      : {}),
     ...(scenario === 'ptc-error-note' ? {
       ptcMode: { runtime: ptcFailureRuntime },
       startup: { sessionId: ptcFailureSessionId },

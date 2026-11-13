@@ -533,7 +533,7 @@ function attachWorkflowTaskSource(surface: SurfaceRuntime<SessionEvent>, descend
   const subject = {}
   surface.attachTasks({
     sessionId: () => SESSION_ID,
-    captureSubject: () => subject,
+    captureSubject: () => subject as never,
     subjectMatches: candidate => candidate === subject,
     enterView: async () => { throw new Error('a read-only scoped Workflow action must never enter a child viewer') },
     interruptSubagent: async () => ({ kind: 'committed' } as never),
