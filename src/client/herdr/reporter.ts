@@ -476,13 +476,7 @@ export function createHerdrReporter(
       reattemptRegistration()
       return
     }
-    if (desired !== undefined && desired.resumeArgv !== undefined) {
-      if (sameSession(pendingSession ?? activeSession ?? lastSession, desired)) return
-      pendingSession = desired
-      if (active === undefined) advanceQueue()
-      return
-    }
-    if (reportedResumePresent) {
+    if (reportedResumePresent && (desired === undefined || desired.resumeArgv === undefined)) {
       // No public Herdr command clears only the resume argv: withdraw this
       // source's registration, then re-acquire it with the current facts. Until
       // that withdrawal SUCCEEDS the cleanup stays outstanding, and the cleanup
@@ -498,7 +492,15 @@ export function createHerdrReporter(
       pendingSession = undefined
       return
     }
-    if (sameSession(pendingSession ?? activeSession ?? lastSession, desired)) return
+    if (sameSession(lastSession, desired)) {
+      // Already delivered: a QUEUED target for another Session is stale and must
+      // never be dispatched as the current one. An IN-FLIGHT stale target cannot
+      // be cancelled; `reconcileDesiredSession` remembers it so the settle
+      // re-reports the desired Session.
+      pendingSession = undefined
+      return
+    }
+    if (sameSession(pendingSession ?? activeSession, desired)) return
     pendingSession = desired
     if (active === undefined) advanceQueue()
   }
@@ -530,7 +532,11 @@ export function createHerdrReporter(
     const desired = latestSession
     // No Session fact of its own means no Session work: an Agent-state dedupe is
     // NOT a reason to re-register the Pane (H1 already owns state delivery).
-    if (desired === undefined) return
+    if (desired === undefined) {
+      // Sessionless: a queued target can never become the current Session.
+      pendingSession = undefined
+      return
+    }
     if (sameSession(pendingSession ?? activeSession, desired)) {
       // The desired Session is already queued or in flight. Whether it is
       // DELIVERED is only known when its child settles, so this real event is
@@ -538,7 +544,16 @@ export function createHerdrReporter(
       sessionRetryOwed = true
       return
     }
-    if (sameSession(lastSession, desired)) return
+    // A queued or in-flight intent for a DIFFERENT Session is STALE after this
+    // event. A queued one is dropped (it must never be delivered as current); an
+    // in-flight one cannot be cancelled, so the settle decides — `lastSession`
+    // then says whether the desired Session still needs to be re-reported.
+    if (pendingSession !== undefined) pendingSession = undefined
+    if (activeSession !== undefined) sessionRetryOwed = true
+    if (sameSession(lastSession, desired)) {
+      if (active === undefined) advanceQueue()
+      return
+    }
     pendingSession = desired
     if (!paneAcknowledged) {
       // The Pane is not held, so the Session cannot be delivered yet: the owed
@@ -567,6 +582,10 @@ export function createHerdrReporter(
     },
     observeSession(session) {
       if (disposed) return
+      // Capture what was ALREADY in flight when this event arrived: only such an
+      // attempt may be retried from this event. An attempt this event dispatches
+      // itself is detected by the change below and must never count as a retry.
+      const attemptInFlight = activeSession
       latestSession = session
       if (!qualified) {
         // The last Host generation's Session intent never survives a
@@ -575,13 +594,18 @@ export function createHerdrReporter(
         return
       }
       reconcileSession()
-      // A new main-owner Session fact is a real lifecycle event: when this
-      // registration cycle has no Pane authority yet, it re-attempts the ordered
-      // registration (a Session report is illegal before the Pane is held). An
-      // outstanding cleanup is NOT retried from here: `reconcileSession` has just
-      // dispatched that withdrawal, and this same event must not queue a second
-      // attempt behind it.
-      if (!paneAcknowledged && !cleanupRequired) reattemptRegistration()
+      // An outstanding cleanup is NOT retried from here: `reconcileSession` has
+      // just dispatched that withdrawal, and this same event must not queue a
+      // second attempt behind it.
+      if (cleanupRequired) return
+      if (!paneAcknowledged) {
+        reattemptRegistration()
+        return
+      }
+      // A Session this very event dispatched is not a retry of itself; only one
+      // that was ALREADY in flight (and still is) may be reconciled from here.
+      if (activeSession !== attemptInFlight) return
+      if (attemptInFlight !== undefined) reconcileDesiredSession()
     },
     setQualified(next) {
       if (disposed || qualified === next) return

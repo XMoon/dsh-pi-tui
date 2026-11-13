@@ -189,7 +189,7 @@ function resume(ownership: SessionOwnershipCore, sessionId: string, ref: Session
   }, ref)
 }
 
-test('HSP-01 all four production commit shapes report the committed canonical Session after the H1 state', async (t) => {
+test('all four production commit shapes report the committed canonical Session after the state', async (t) => {
   const observation = compose(t)
   observation.reporter.publish({ state: 'idle' })
   await observation.waitForStates(1, 'the initial idle state')
@@ -224,7 +224,7 @@ test('HSP-01 all four production commit shapes report the committed canonical Se
   for (let index = 1; index < seqs.length; index += 1) assert.ok(seqs[index] > seqs[index - 1])
 })
 
-test('HSP-02 a startup Resume committed before the observer install is sampled once', async (t) => {
+test('a startup resume committed before the observer install is sampled once', async (t) => {
   const ownership = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
   resume(ownership, SESSION_R, owner('startup-resume'))
   // The owner committed BEFORE the Client observer existed (the pre-mount
@@ -263,7 +263,7 @@ test('HSP-02 a startup Resume committed before the observer install is sampled o
     'the sampled resume must be reported exactly once')
 })
 
-test('HSP-03 a synchronous publish block reaches the CLI only after the coalesced scope microtask, with the FINAL id', async (t) => {
+test('a synchronous publish block reaches the CLI only after the coalesced microtask, with the final id', async (t) => {
   const observation = compose(t)
   observation.reporter.publish({ state: 'idle' })
   await observation.waitForStates(1, 'the initial idle state')
@@ -286,7 +286,7 @@ test('HSP-03 a synchronous publish block reaches the CLI only after the coalesce
   assert.deepEqual(observation.sessions(), [SESSION_B], 'the superseded A was never reported')
 })
 
-test('HSP-04 a failed-before-commit transition and a navigation epoch bump never report a Session; sessionless cleans up', async (t) => {
+test('a failed-before-commit transition and a navigation-epoch bump report nothing, and sessionless cleans up', async (t) => {
   const observation = compose(t)
   observation.reporter.publish({ state: 'idle' })
   await observation.waitForStates(1, 'the initial idle state')
@@ -320,7 +320,7 @@ test('HSP-04 a failed-before-commit transition and a navigation epoch bump never
   assert.deepEqual(observation.sessions(), [SESSION_A, SESSION_B])
 })
 
-test('HSP-05 a generation-only bump and a same-id re-publication are silent; a real owner change is not', async (t) => {
+test('a generation-only bump and a same-id re-publication are silent, while a real owner change is not', async (t) => {
   const observation = compose(t)
   observation.reporter.publish({ state: 'idle' })
   await observation.waitForStates(1, 'the initial idle state')
@@ -348,7 +348,7 @@ test('HSP-05 a generation-only bump and a same-id re-publication are silent; a r
   assert.equal(lastState?.argv?.[lastState.argv.indexOf('--state') + 1], 'blocked')
 })
 
-test('HSP-06 unsubscribe stops Session observation; dispose is the ONE ordered release and never respawns', async (t) => {
+test('unsubscribe stops Session observation and dispose is the one ordered release', async (t) => {
   const observation = compose(t)
   observation.reporter.publish({ state: 'idle' })
   await observation.waitForStates(1, 'the initial idle state')
@@ -379,7 +379,7 @@ test('HSP-06 unsubscribe stops Session observation; dispose is the ONE ordered r
 
 // ── H2 abnormal recovery through the REAL publication path (review F1/F2) ────
 
-test('HSP-07 a failed cleanup withdrawal is retried by the NEXT real owner commit, and the new owner is reported', async (t) => {
+test('a failed cleanup withdrawal is retried by the next real owner commit and the new owner is reported', async (t) => {
   const fixture = createHerdrCliFixture(t, { sessionDelayMs: 20 })
   const reporter = createHerdrReporter(fixture.env, true)
   assert.ok(reporter !== undefined)
@@ -433,7 +433,7 @@ test('HSP-07 a failed cleanup withdrawal is retried by the NEXT real owner commi
     ['dsh', '--profile', 'pi-tui', '--session', SESSION_B])
 })
 
-test('HSP-08 a first registration failure is repaired by a Session-only commit (no Agent-state change)', async (t) => {
+test('a first registration failure is repaired by a Session-only commit with no Agent-state change', async (t) => {
   const fixture = createHerdrCliFixture(t)
   const reporter = createHerdrReporter(fixture.env, true)
   assert.ok(reporter !== undefined)
