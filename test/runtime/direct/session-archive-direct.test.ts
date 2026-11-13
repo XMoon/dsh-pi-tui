@@ -80,6 +80,23 @@ function fileEvent(id: string, name = 'notes.txt'): unknown {
   }
 }
 
+/** A user/message event carrying one image reference. */
+function imageEvent(id: string, mediaType = 'image/png'): unknown {
+  return {
+    type: 'user/message',
+    seq: 1,
+    time: 1000,
+    data: { content: [{ type: 'image', attachment: { attachmentId: id, mediaType } }] },
+  }
+}
+
+/** An Error carrying the upstream attachment machine code. */
+function codedError(message: string, code: string): Error & { code: string } {
+  const error = new Error(message) as Error & { code: string }
+  error.code = code
+  return error
+}
+
 /** A fake host context answering the export deps. */
 function host(services: Record<string, unknown>): { get: (name: string) => unknown } {
   return { get: (name) => services[name] }
@@ -255,4 +272,167 @@ test('integration: the produced ZIP contains the root log, a descendant log and 
   const fileEntry = entries.get('files/fi/file-1/notes.txt')
   assert.ok(fileEntry !== undefined, 'generic file entry present')
   assert.deepEqual([...fileEntry], [1, 2, 3, 4, 5], 'generic file bytes are exact')
+})
+
+// ── rc.3 missing-attachment semantics (upstream sessionLogZipEntries) ──────
+// The TUI adapter adds NO error handling here: the upstream ZIP producer calls
+// readFileStream/readImage, ignores exactly `ATTACHMENT_NOT_FOUND` /
+// `INVALID_ATTACHMENT_REF` into one `attachments-missing.txt`, and rethrows
+// every other failure. These cases prove that behavior reaches the adapter
+// contract without the TUI decoding attachments or rewriting the archive.
+
+test('the archive keeps readable attachments and reports unreadable references in one missing manifest', async () => {
+  const okBytes = new Uint8Array([9, 8, 7, 6])
+  const root = storedLog('session-root', undefined, [
+    fileEvent('file-ok', 'ok.txt'),
+    fileEvent('file-gone', 'gone.txt'),
+  ])
+  const archive = new DirectSessionArchive(host({
+    sessionQuery: sessionQuery(),
+    sessionPersistence: persistence({ 'session-root': root }),
+    attachments: {
+      readImage: async () => { throw new Error('fixture has no images') },
+      readFileStream: async function* (ref: { attachmentId: unknown; name: string }) {
+        if (String(ref.attachmentId) === 'file-gone') {
+          // Thrown BEFORE the first iterator.next(): the missing reference is
+          // discovered while the ZIP is still being produced, not mid-file.
+          throw codedError('attachment file-gone is not stored', 'ATTACHMENT_NOT_FOUND')
+        }
+        yield okBytes
+      },
+    },
+  }))
+  const result = await archive.open('session-root')
+  assert.equal(result.kind, 'ready')
+  if (result.kind !== 'ready') return
+  const entries = await archiveEntries(result.artifact.stream)
+  assert.ok(entries.get('session.v4.jsonl') !== undefined, 'the root log is still exported')
+  const okEntry = entries.get('files/fi/file-ok/ok.txt')
+  assert.ok(okEntry !== undefined, 'the readable attachment is exported')
+  assert.deepEqual([...okEntry!], [...okBytes], 'the readable attachment bytes are exact')
+  assert.equal(entries.get('files/fi/file-gone/gone.txt'), undefined,
+    'the unreadable reference contributes no file entry')
+  const manifest = entries.get('attachments-missing.txt')
+  assert.ok(manifest !== undefined, 'the missing-attachment manifest is present')
+  const manifestText = new TextDecoder().decode(manifest)
+  const manifestLines = manifestText.split('\n').filter(line => line !== '')
+  assert.equal(manifestLines.length, 1, 'exactly ONE missing reference is recorded')
+  assert.match(manifestText, /files\/fi\/file-gone\/gone\.txt\t/mu,
+    'the manifest names the failed reference relative path')
+  assert.match(manifestText, /attachment file-gone is not stored/u,
+    'the manifest keeps the upstream error text')
+})
+
+test('an archive with every attachment readable omits the missing manifest', async () => {
+  const root = storedLog('session-root', undefined, [fileEvent('file-1', 'a.txt')])
+  const archive = new DirectSessionArchive(host({
+    sessionQuery: sessionQuery(),
+    sessionPersistence: persistence({ 'session-root': root }),
+    attachments: attachments({ 'file-1': new Uint8Array([1, 2, 3]) }),
+  }))
+  const result = await archive.open('session-root')
+  assert.equal(result.kind, 'ready')
+  if (result.kind !== 'ready') return
+  const entries = await archiveEntries(result.artifact.stream)
+  assert.ok(entries.get('files/fi/file-1/a.txt') !== undefined, 'the attachment is exported')
+  assert.equal(entries.get('attachments-missing.txt'), undefined,
+    'no manifest when every attachment is readable')
+})
+
+test('an INVALID_ATTACHMENT_REF file and an unreadable image both join the missing manifest', async () => {
+  const root = storedLog('session-root', undefined, [
+    fileEvent('file-bad', 'bad.txt'),
+    imageEvent('img-gone', 'image/png'),
+  ])
+  const archive = new DirectSessionArchive(host({
+    sessionQuery: sessionQuery(),
+    sessionPersistence: persistence({ 'session-root': root }),
+    attachments: {
+      readImage: async () => { throw codedError('image img-gone was deleted', 'ATTACHMENT_NOT_FOUND') },
+      readFileStream: async function* () { throw codedError('the reference is malformed', 'INVALID_ATTACHMENT_REF') },
+    },
+  }))
+  const result = await archive.open('session-root')
+  assert.equal(result.kind, 'ready')
+  if (result.kind !== 'ready') return
+  const entries = await archiveEntries(result.artifact.stream)
+  const manifest = entries.get('attachments-missing.txt')
+  assert.ok(manifest !== undefined, 'both unreadable references share ONE manifest')
+  const manifestText = new TextDecoder().decode(manifest)
+  assert.equal(manifestText.split('\n').filter(line => line !== '').length, 2,
+    'each unreadable reference is one line')
+  assert.match(manifestText, /files\/fi\/file-bad\/bad\.txt/u, 'the invalid file reference path is listed')
+  assert.match(manifestText, /the reference is malformed/u)
+  assert.match(manifestText, /media\/img-gone\.png/u, 'the unreadable image path is listed')
+  assert.match(manifestText, /image img-gone was deleted/u)
+})
+
+test('a readable image attachment is exported under media/ and needs no manifest', async () => {
+  const imgBytes = new Uint8Array([4, 5, 6])
+  const root = storedLog('session-root', undefined, [imageEvent('img-ok', 'image/png')])
+  const archive = new DirectSessionArchive(host({
+    sessionQuery: sessionQuery(),
+    sessionPersistence: persistence({ 'session-root': root }),
+    attachments: {
+      readImage: async () => ({ data: imgBytes }),
+      readFileStream: async function* () { throw new Error('fixture has no files') },
+    },
+  }))
+  const result = await archive.open('session-root')
+  assert.equal(result.kind, 'ready')
+  if (result.kind !== 'ready') return
+  const entries = await archiveEntries(result.artifact.stream)
+  const mediaEntry = entries.get('media/img-ok.png')
+  assert.ok(mediaEntry !== undefined, 'the readable image is content-addressed under media/')
+  assert.deepEqual([...mediaEntry!], [...imgBytes], 'the image bytes are exact')
+  assert.equal(entries.get('attachments-missing.txt'), undefined, 'a readable image needs no manifest')
+})
+
+test('a non-whitelisted attachment error fails the stream instead of producing a manifest ZIP', async () => {
+  const root = storedLog('session-root', undefined, [fileEvent('file-denied', 'denied.txt')])
+  const archive = new DirectSessionArchive(host({
+    sessionQuery: sessionQuery(),
+    sessionPersistence: persistence({ 'session-root': root }),
+    attachments: {
+      readImage: async () => { throw new Error('no images') },
+      readFileStream: async function* () { throw codedError('EACCES: permission denied', 'EACCES') },
+    },
+  }))
+  const result = await archive.open('session-root')
+  // The missing-root / missing-service paths answer before streaming; a real
+  // attachment I/O failure is discovered only while the stream is consumed.
+  assert.equal(result.kind, 'ready', 'a real attachment I/O failure is not `none`/`unavailable`')
+  if (result.kind !== 'ready') return
+  // The whole stream MUST reject: never a successful-looking manifest ZIP.
+  await assert.rejects(archiveEntries(result.artifact.stream), /EACCES/u)
+})
+
+test('an unreadable file reference releases its stream iterator through return()', async () => {
+  let returned = false
+  const stream = {
+    [Symbol.asyncIterator]() {
+      return {
+        next: async (): Promise<IteratorResult<Uint8Array>> => { throw codedError('gone', 'ATTACHMENT_NOT_FOUND') },
+        return: async (): Promise<IteratorResult<Uint8Array>> => {
+          returned = true
+          return { done: true, value: undefined }
+        },
+      }
+    },
+  }
+  const root = storedLog('session-root', undefined, [fileEvent('file-gone', 'gone.txt')])
+  const archive = new DirectSessionArchive(host({
+    sessionQuery: sessionQuery(),
+    sessionPersistence: persistence({ 'session-root': root }),
+    attachments: {
+      readImage: async () => { throw new Error('no images') },
+      readFileStream: () => stream,
+    },
+  }))
+  const result = await archive.open('session-root')
+  assert.equal(result.kind, 'ready')
+  if (result.kind !== 'ready') return
+  const entries = await archiveEntries(result.artifact.stream)
+  assert.equal(returned, true, 'the abandoned stream iterator is released via return()')
+  assert.ok(entries.get('attachments-missing.txt') !== undefined, 'the unreadable reference is still reported')
 })
