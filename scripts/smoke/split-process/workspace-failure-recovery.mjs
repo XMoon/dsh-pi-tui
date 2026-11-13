@@ -202,6 +202,7 @@ export async function runWorkspaceNewFailureRecovery(context) {
     const sessionsBefore = sessionInventory(dshHome)
     const workspacesBefore = await readWorkspaces('PR4-new before')
     assert(!workspacesBefore.some(workspace => workspace.path !== undefined
+      && existsSync(workspace.path)
       && realpathSync(workspace.path) === realpathSync(recoverablePath)),
     'PR4 the recoverable Host directory was registered before the user action')
 
@@ -248,6 +249,7 @@ export async function runWorkspaceNewFailureRecovery(context) {
     'PR4 Add switched or created a Session')
     const afterAdd = await readWorkspaces('PR4-new after Add')
     const registered = afterAdd.filter(workspace => workspace.path !== undefined
+      && existsSync(workspace.path)
       && realpathSync(workspace.path) === realpathSync(recoverablePath))
     assert(registered.length === 1,
       `PR4 the official Workspace follow does not list the verified Host directory: ${JSON.stringify(afterAdd)}`)
@@ -364,7 +366,8 @@ export async function runWorkspaceFirstSubmitFailureRecovery(context) {
       'Verify created a Session; it must only register the next-create Workspace')
     assert(sessionLogText(dshHome) === '', 'Verify wrote a Host Session log')
     assert(await readWorkspaces('PR4-first after Verify').then(rows => rows.some(workspace =>
-      workspace.path !== undefined && realpathSync(workspace.path) === realpathSync(recoverablePath))),
+      workspace.path !== undefined && existsSync(workspace.path)
+      && realpathSync(workspace.path) === realpathSync(recoverablePath))),
     'Verify did not register the official Host Workspace')
 
     // ── The user must submit again: exactly one Session, marker once ────────

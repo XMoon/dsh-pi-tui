@@ -200,7 +200,8 @@ export async function runHostDirectoryInlineChooser(context) {
     const registered = await workspaceBaselineIds('PR3 after verify')
     const expectedPath = realpathSync(childPath)
     const newWorkspaces = registered.filter(workspace =>
-      workspace.path !== undefined && realpathSync(workspace.path) === expectedPath)
+      workspace.path !== undefined && existsSync(workspace.path)
+      && realpathSync(workspace.path) === expectedPath)
     assert(newWorkspaces.length === 1,
       `PR3 the official Workspace follow does not list the verified Host directory ${expectedPath}: ${JSON.stringify(registered)}`)
     assert(newWorkspaces[0].workspaceId !== undefined, 'PR3 the new Workspace row carries no official id')
