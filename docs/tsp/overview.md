@@ -182,6 +182,40 @@ folded by a second business state machine.
   owners that root projects. The application never writes business state from
   a disclosure toggle.
 
+### Native Workflow disclosure
+
+The canonical `TranscriptWorkflowMessage` remains the only Workflow business
+authority: run/member terminal facts come from the official `tool-workflow/*`
+events through `WorkflowProjection`, and a step/turn/idle fact never settles a
+run. The TSP mapper renders that one row as a native Run `ui.section` whose head
+always carries the real run status and the exact `workflowRunSummaryText`
+counts, including while the Run is collapsed. When the Run is open, each phase
+is a nested native `ui.section`; a phase with at most `WORKFLOW_INLINE_MEMBER_LIMIT`
+members shows every member in durable order with a textual status word, while a
+larger phase shows only its exact counts, an abnormal preview capped at
+`WORKFLOW_ANOMALY_PREVIEW_LIMIT`, and the hidden abnormal count. No TSP-specific
+Workflow fold state machine exists: `workflowPhasePresentations()` and
+`workflowRunMode()` own the presentation rules.
+
+Manual Run/Phase choices live in ONE source-scoped renderer map
+(`WorkflowRunDisclosureState` per canonical `runId`) and are advanced by the
+shared `advanceWorkflowDisclosureState()` edge policy only when the official
+members array reference or run status changed. The map is cleared with the
+projection source, hydration and disposal; a run that leaves the loaded window
+loses its state, while a retained run keeps a valid manual choice. A cold
+replay establishes its facts as the baseline rather than replaying historical
+edges. Closing a parent never recursively clears a legal child preference.
+
+Every toggle is admitted only from the exact current SDK frame's materialized
+Section head and the current input seat; a stale/foreign id, a replaced source,
+a modal/Reader/Hub seat or a hidden folded descendant never changes business
+state. The Workflow row never emits a child-transcript Viewer action: this
+renderer's `supportsViewer` remains `false`, and member rows are static text.
+Only when the live Task Center and its scoped TaskRuntime entry are both
+available does the frame paint one native scoped browse button (per phase, and
+one run-wide button when `workflowRunViewAllVisible()` holds); clicking it opens
+the existing read-only Work Hub, never a second task source.
+
 ### The Main empty state (Welcome)
 
 The TSP renderer paints its invitation in **Main only**. The Dock stays the ONE
