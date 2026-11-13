@@ -683,6 +683,9 @@ const B11 = '@deepseek-ai/dsh-experimental-ralph-bundle'
 const B12 = '@deepseek-ai/dsh-experimental-plugin-market-bundle'
 const B13 = '@deepseek-ai/dsh-subagent-claude-code'
 const B14 = '@deepseek-ai/dsh-subagent-codex'
+/** The rc.3-only Official Experimental catalog member (shipped Optional bundle,
+ *  Web-only capability). It is NOT part of the frozen legacy B01–B14 order. */
+const DEEPSEEK_CHAT_IMPORT = '@deepseek-ai/dsh-deepseek-chat-import'
 
 function experimentalBundles(
   state: { readonly availability: 'installation' | 'profile' | 'missing'; readonly installed: boolean; readonly enabled: boolean } = {
@@ -833,6 +836,97 @@ test('same-name official:false packages and standalone entries never inherit the
   const entryModel = experimentalModel({ extraRows: [row({ entryId: 'include:fake-b02', moduleName: B02, patchId: 'fake-b02' })] })
   const entry = entryModel.cards.find(card => card.value === entryValue('include:fake-b02'))!
   assert.equal(fact(entry, 'TUI surface'), undefined)
+})
+
+test('the rc.3 DeepSeek chat import catalog member gets Web-only Owner-only disclosure and no phantom TUI import', () => {
+  // The INSTALLED release owns this Experimental identity; the TUI never
+  // infers it from the package name or a scope.
+  assert.equal(EXPERIMENTAL_BUNDLES.has(DEEPSEEK_CHAT_IMPORT), true,
+    'the installed official release marks the DeepSeek chat import bundle Experimental')
+
+  const importCardFact = (state: { installed: boolean; enabled: boolean }): PluginBundleFact => bundle({
+    name: DEEPSEEK_CHAT_IMPORT,
+    official: true,
+    availability: 'installation',
+    installed: state.installed,
+    enabled: state.enabled,
+    optional: true,
+    removable: false,
+  })
+
+  // Positive: a REAL Host official card of this identity classifies into
+  // Experimental and carries the Web-only / Owner-only disclosure copy.
+  const model = experimentalModel({ extraBundles: [importCardFact({ installed: false, enabled: false })] })
+  const card = cardByName(model, DEEPSEEK_CHAT_IMPORT)!
+  assert.equal(card.section, 'experimental')
+  assert.equal(card.origin, 'official')
+  assert.equal(card.experimental, true)
+  assert.equal(card.unverified, false)
+  const surface = fact(card, 'TUI surface')
+  assert.ok(surface !== undefined, 'the Web-only Host bundle states its TUI surface')
+  assert.equal(surface!.tone, 'normal')
+  assert.match(surface!.value, /available through the Web UI, not as a PiTui import action/)
+  const risk = fact(card, 'Risk')
+  assert.ok(risk !== undefined, 'the Owner-only upload persistence risk is disclosed')
+  assert.equal(risk!.tone, 'warning')
+  assert.match(risk!.value, /Owner-only Web upload/u)
+  assert.match(risk!.value, /up to 512 MiB per upload by default/u)
+  assert.match(risk!.value, /cannot upload, inspect or cancel that import/u)
+  assert.match(risk!.value, /Imported Sessions remain after the bundle is disabled/u)
+  // No phantom TUI import action is invented: an installation bundle only
+  // exposes Host Enable/Disable + Back.
+  const actions = buildPluginDetailView(card).actions.map(action => action.value)
+  assert.ok(!actions.some(value => /import/i.test(value)), 'no phantom TUI import action')
+
+  // enablement/installed only change the Host state, never the disclosure copy
+  // and never the action set.
+  const enabledCard = cardByName(
+    experimentalModel({ extraBundles: [importCardFact({ installed: true, enabled: true })] }),
+    DEEPSEEK_CHAT_IMPORT,
+  )!
+  const copyOf = (target: PluginCardView) => buildPluginDetailView(target).groups
+    .flatMap(group => group.facts)
+    .filter(entry => entry.label === 'TUI surface' || entry.label === 'Risk' || entry.label === 'Limit')
+  assert.deepEqual(copyOf(enabledCard), copyOf(card), 'installed/enabled never changes the disclosure copy')
+  assert.deepEqual(
+    buildPluginDetailView(enabledCard).actions.map(action => action.value),
+    buildPluginDetailView(card).actions.map(action => action.value),
+    'installed/enabled adds no action',
+  )
+
+  // Negative A: a same-name official:false package stays Third-party and never
+  // inherits the official Web-only copy.
+  const fake = buildPluginManagerModel(
+    snapshot([bundle({
+      name: DEEPSEEK_CHAT_IMPORT,
+      official: false,
+      availability: 'profile',
+      installed: true,
+      removable: true,
+      source: 'file:/tmp/not-official',
+    })], []),
+    classifyPluginPackages(inputs([{
+      key: bundleValue(DEEPSEEK_CHAT_IMPORT),
+      bundleName: DEEPSEEK_CHAT_IMPORT,
+      entryIds: [],
+      availability: 'profile',
+      installed: true,
+      source: 'file:/tmp/not-official',
+    }]), []),
+  ).cards.find(candidate => candidate.name === DEEPSEEK_CHAT_IMPORT && candidate.section === 'third-party')
+  assert.ok(fake !== undefined, 'the same-name non-official package is a Third-party card')
+  assert.equal(fact(fake!, 'TUI surface'), undefined)
+  assert.equal(fact(fake!, 'Risk'), undefined)
+
+  // Negative B: a standalone entry with the same module name never inherits it.
+  const entryModel = experimentalModel({ extraRows: [row({ entryId: 'include:fake-import', moduleName: DEEPSEEK_CHAT_IMPORT, patchId: 'fake-import' })] })
+  const entry = entryModel.cards.find(candidate => candidate.value === entryValue('include:fake-import'))!
+  assert.equal(fact(entry, 'TUI surface'), undefined)
+
+  // Negative C: when the Host does not return the card, no card is synthesized.
+  const noCard = experimentalModel()
+  assert.equal(noCard.cards.some(candidate => candidate.name === DEEPSEEK_CHAT_IMPORT), false,
+    'the TUI never fabricates a catalog card for an absent Host row')
 })
 
 test('state their WEB_ONLY boundaries and expose no phantom terminal page action', () => {

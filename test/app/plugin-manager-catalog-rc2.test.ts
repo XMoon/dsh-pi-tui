@@ -369,6 +369,21 @@ test('the REAL Host listBundles discovers the complete official optional/on-dema
     assert.match(risk?.value ?? '', /no Continue\/Resume/u)
     assert.doesNotMatch(risk?.value ?? '', /EXTERNAL_UNVERIFIED/u)
   }
+  // The rc.3 release-only Web-only catalog member reaches the SAME real page
+  // with its Owner-only / Web-only limitation copy and NO TUI import action.
+  const importCard = experimental.find(card => card.name === '@deepseek-ai/dsh-deepseek-chat-import')
+  assert.ok(importCard !== undefined, 'the rc.3 DeepSeek chat import member is a real Host catalog card')
+  assert.equal(importCard!.availability, 'installation')
+  assert.equal(importCard!.official, true)
+  const importFacts = buildPluginDetailView(importCard!).groups.flatMap(group => group.facts)
+  assert.match(importFacts.find(fact => fact.label === 'TUI surface')?.value ?? '',
+    /available through the Web UI, not as a PiTui import action/u)
+  const importRisk = importFacts.find(fact => fact.label === 'Risk')
+  assert.ok(importRisk !== undefined && importRisk.tone === 'warning',
+    'the real page paints the Owner-only upload risk with warning tone')
+  assert.match(importRisk!.value, /Owner-only Web upload/u)
+  assert.ok(!buildPluginDetailView(importCard!).actions.some(action => /import/i.test(action.value)),
+    'the real page exposes no TUI import action for the Web-only member')
 })
 
 test('the TUI self package is the only Current-TUI card when the real Host lists it', async (t) => {
