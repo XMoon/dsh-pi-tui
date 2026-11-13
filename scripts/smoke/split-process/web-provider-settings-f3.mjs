@@ -5,11 +5,11 @@
  * fixture row) and TWO real authenticated TUI Clients prove, WITHOUT an open
  * Session (the Settings surface is sessionless):
  *
- *   1. the Host's OFFICIAL Settings service serves the isolated `web` /
- *      `web-deepseek-api` sections; Client A reads the shipped baseline back
- *      from the real page (`Messages`, `HTTP`, the official API base, `10`,
- *      Share Original Question `on`), and Client B reads the same Host facts —
- *      neither Client paints a locally guessed value (the page stays
+ *   1. the Host fixture seeds a KNOWN baseline through the OFFICIAL Settings
+ *      service (`web-deepseek-api`: count `10`, Share Original Question `off`,
+ *      a unique https base) and records its revisions; Client A reads that
+ *      baseline back from the real page, and Client B reads the same Host
+ *      facts — neither Client paints a locally guessed value (the page stays
  *      `Loading…` until the Host read answers, and `Unavailable` when it does
  *      not);
  *   2. every minimal edit through `/settings → Tools → Web Search / Fetch`
@@ -33,8 +33,15 @@
  *      change (no in-flight read is held across the generation here — the
  *      stale-generation settlement contract is proven by the ConfigPort unit
  *      and wire generation tests);
- *   7. the credential row stays a metadata-only reference witness: the official
- *      reference name plus presence/source, never a value.
+ *   7. the Host fixture stored a NON-FUNCTIONAL unique credential sentinel
+ *      through the official `ctx.credentials.set` path; the credential row
+ *      stays a metadata-only reference witness (name + configured state, never
+ *      a value) and the sentinel appears in NO pane, settings document, Host
+ *      work proof or Client telemetry record;
+ *   8. the MOUNTED Remote ConfigPort refuses an invalid provider id and an
+ *      out-of-range count BEFORE any Host dispatch (the document is untouched)
+ *      and refuses to replace a CUSTOM provider route seeded through the real
+ *      official settings namespace.
  *
  * The trace and every failure label separate the two verdicts this case owns:
  *   - `UI_L6`              → the real TUI edits, cross-client read-back and the
@@ -54,17 +61,16 @@
  *
  * Evidence scope: the page only ever offers the two official provider
  * candidates and the four count presets, so an invalid provider id / an
- * out-of-range count cannot reach the Host through this surface (they are
- * Client-side refusals). A CUSTOM provider route or a pre-seeded non-preset
- * count needs a Host-side fixture write; no C1 scenario writes the `web`
- * sections and this case never edits the profile document itself. The
- * `HOST_GATEWAY_CAS` witness is the deterministic sequential official-CAS
- * probe described above.
+ * out-of-range count cannot be TYPED into it; item 8 drives them through the
+ * same mounted Remote ConfigPort the TUI uses, over the real authenticated
+ * Host, and proves the refusals happen before any Host write. A non-preset
+ * stored count is not seeded (the page can only restore the four presets).
+ * This case never edits the profile document itself.
  *
  * @module split-process/web-provider-settings-f3
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -73,6 +79,7 @@ import { parse as parseYaml } from 'yaml'
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { hostStatus, waitForCondition } from '../../lib/split-smoke-processes.mjs'
 import { createC1Scene } from './c1-scene.mjs'
+import { waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
@@ -110,14 +117,18 @@ const ROW = Object.freeze({
 })
 
 /** The official shipped baseline the isolated profile serves. */
+/** The KNOWN baseline the Host fixture seeds through the official Settings
+ *  service (never a shipped-default guess): a unique https base and Share
+ *  Original Question off prove the page read really came from this Host. */
+const SEED_BASE_URL = 'https://f3-seed.example.test/v1/tools'
 const OFFICIAL = Object.freeze({
   searchProvider: 'deepseek-official',
   searchProviderLabel: 'Messages',
   fetchProvider: 'http',
   fetchProviderLabel: 'HTTP',
-  baseURL: 'https://api.deepseek.com/v1/tools',
+  baseURL: SEED_BASE_URL,
   count: 10,
-  sendOriginalQuestion: true,
+  sendOriginalQuestion: false,
 })
 const SEARCH_API_PROVIDER_LABEL = 'DeepSeek Search API'
 const FETCH_API_PROVIDER_LABEL = 'DeepSeek Fetch API'
@@ -540,7 +551,7 @@ async function restoreWebPageAfterReconnect(client, label) {
  */
 export async function runWebProviderSettingsF3(context) {
   const { trace, installation } = context
-  const scene = createC1Scene(context)
+  const scene = createC1Scene(context, { webSettingsProbe: true })
   const root = scene.c1WorkRoot('f3-web-provider-settings')
   mkdirSync(root, { recursive: true, mode: 0o700 })
   const requestPath = join(context.workDir, 'f3-settings-stale-cas-request.json')
@@ -555,15 +566,31 @@ export async function runWebProviderSettingsF3(context) {
     // official Settings service serves for this isolated profile: the shipped
     // defaults. Every later value is produced by that SAME service through the
     // real `/settings` page (the case never edits the profile document).
-    const started = await scene.startC1Host('skills-standing', 'F3 Web provider settings Host', {}, root)
+    // A NON-FUNCTIONAL unique credential sentinel. The Host fixture stores it
+    // through the official `ctx.credentials.set` path; every scan below proves
+    // it never reaches a pane, the settings document or ordinary diagnostics.
+    const sentinel = `sk-f3sentinel-${String(process.pid)}-${Date.now().toString(36)}`
+    const started = await scene.startC1Host('web-settings-f3', 'F3 Web provider settings Host', {
+      C1_F3_BASE_URL: SEED_BASE_URL,
+      C1_F3_SECRET: sentinel,
+    }, root)
     host = started.host
     const hostPid = started.ready.pid
+    // The fixture's seed IS the authority: the page baseline below must match it.
+    const seed = await waitForC1WorkEvent(root, event => event.kind === 'f3-host-seed', 'F3 official Host seed')
+    assert(seed.api?.baseURL === SEED_BASE_URL && seed.api?.count === OFFICIAL.count
+      && seed.api?.sendOriginalQuestion === OFFICIAL.sendOriginalQuestion,
+    `F3 the official Host seed is not the frozen baseline: ${JSON.stringify(seed.api)}`)
+    assert(typeof seed.revisions?.[WEB_API_NS] === 'number',
+      `F3 the official seed recorded no revision: ${JSON.stringify(seed.revisions)}`)
     trace('f3.ui-l6', {
       verdict: 'UI_L6_PASS',
       phase: 'host',
       hostPid,
       sections: [WEB_NS, WEB_API_NS],
       baseline: OFFICIAL,
+      seededRevision: seed.revisions[WEB_API_NS],
+      credentialSeeded: true,
     })
 
     const a = await scene.startC1Client('F3 Web settings Client A', { SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF: requestPath })
@@ -638,11 +665,11 @@ export async function runWebProviderSettingsF3(context) {
       [WEB_API_NS]: snapshot(namespaceConfig(documentPath, WEB_API_NS)),
     }
     await openWebRow(clientA, ROW.sendOriginalQuestion, 'UI_L6 A original question')
-    await selectCandidate(clientA, QUESTION_OFF, 'UI_L6 A original question', 'off')
-    await confirmCandidate(clientA, 'off', 'UI_L6 A original question write')
+    await selectCandidate(clientA, QUESTION_ON, 'UI_L6 A original question', 'on')
+    await confirmCandidate(clientA, 'on', 'UI_L6 A original question write')
     assertNamespaceWrite(documentPath, WEB_API_NS, beforeQuestion, config => {
-      assert(config.sendOriginalQuestion === false,
-        `UI_L6 A original question: the official user layer must hold off: ${JSON.stringify(config)}`)
+      assert(config.sendOriginalQuestion === true,
+        `UI_L6 A original question: the official user layer must hold on: ${JSON.stringify(config)}`)
     }, 'UI_L6 A original question')
 
     await writeEndpoint(clientA, CONSUMER_ENDPOINT, CONSUMER_ENDPOINT, 'UI_L6 A endpoint write')
@@ -659,7 +686,7 @@ export async function runWebProviderSettingsF3(context) {
       searchProvider: 'deepseek-search-api',
       fetchProvider: 'deepseek-fetch-api',
       count: 20,
-      sendOriginalQuestion: false,
+      sendOriginalQuestion: true,
       baseURL: CONSUMER_ENDPOINT,
     })
 
@@ -674,7 +701,7 @@ export async function runWebProviderSettingsF3(context) {
       searchProviderLabel: SEARCH_API_PROVIDER_LABEL,
       fetchProviderLabel: FETCH_API_PROVIDER_LABEL,
       count: 20,
-      sendOriginalQuestion: false,
+      sendOriginalQuestion: true,
       baseURL: CONSUMER_ENDPOINT,
     }, 'UI_L6 B cross-client')
     await returnToWebList(clientB, 'UI_L6 B cross-client list')
@@ -763,6 +790,96 @@ export async function runWebProviderSettingsF3(context) {
       bothClientsReread: true,
     })
 
+    // ── 5b. L5 REAL-PATH negative controls. ──────────────────────────────────
+    // The mounted Remote ConfigPort refuses an invalid provider id and an
+    // out-of-range count BEFORE any Host dispatch, and refuses to replace a
+    // CUSTOM provider route. The page itself cannot send these values (it only
+    // offers official candidates / four presets), so the negative is driven
+    // through the SAME real Client composition the TUI uses.
+    const beforeNegativeApi = snapshot(namespaceConfig(documentPath, WEB_API_NS))
+    const beforeNegativeWeb = snapshot(namespaceConfig(documentPath, WEB_NS))
+    const negativeNonce = `f3-neg-${String(Date.now())}`
+    writeFileSync(requestPath, JSON.stringify({ nonce: negativeNonce, op: 'settings-negative-writes' }), { mode: 0o600 })
+    clientA.signalBusiness('SIGUSR2')
+    const negative = await clientA.waitFor(record => record.m4b2s === 'qualification'
+      && record.op === 'read-authority-proof'
+      && record.nonce === negativeNonce
+      && record.phase === 'settings-negative-writes',
+    'UI_L6 real-path settings negative controls', 120_000)
+    const attemptOf = label => (negative.attempts ?? []).find(entry => entry.attempt === label)
+    const expectRejected = (label, pattern) => {
+      const attempt = attemptOf(label)
+      assert(attempt?.rejected === true,
+        `UI_L6 negative: ${label} was NOT rejected by the mounted Remote ConfigPort: ${JSON.stringify(negative.attempts)}`)
+      assert(pattern.test(attempt?.message ?? ''),
+        `UI_L6 negative: ${label} rejection does not carry the official reason: ${JSON.stringify(attempt)}`)
+    }
+    expectRejected('invalid-search-provider', /unsupported web search provider id/u)
+    expectRejected('invalid-fetch-provider', /unsupported web fetch provider id/u)
+    expectRejected('count-zero', /must be an integer from 1 through 50/u)
+    expectRejected('count-51', /must be an integer from 1 through 50/u)
+    // The four refusals happened BEFORE any Host write: the API section is
+    // byte-identical. The WEB section may legitimately differ — the probe's
+    // custom-route seed/restore is an OFFICIAL write of the fetchProvider field
+    // — so the four illegal writes are proven by the API section plus the web
+    // section's provider fields still holding only official values.
+    assert(snapshot(namespaceConfig(documentPath, WEB_API_NS)) === beforeNegativeApi,
+      'UI_L6 negative: an invalid provider/count write reached the official API section')
+    // The web section's provider values must be EXACTLY what the case's own
+    // earlier UI edits left (search: Search API from P2; fetch: the custom-route
+    // probe's official restore to 'http'): the four ILLEGAL writes changed none
+    // of them. Comparing against the shipped defaults would be wrong — P2's
+    // edits are legitimate.
+    const webAfterNegative = namespaceConfig(documentPath, WEB_NS) ?? {}
+    const webBeforeNegativeParsed = JSON.parse(beforeNegativeWeb === 'undefined' ? '{}' : beforeNegativeWeb)
+    const providerUntouched = field =>
+      (webAfterNegative[field] ?? webBeforeNegativeParsed[field]) === webBeforeNegativeParsed[field]
+        || webAfterNegative[field] === webBeforeNegativeParsed[field]
+    assert(providerUntouched('searchProvider'),
+      `UI_L6 negative: the web section's search provider changed during the negative probe: before=${beforeNegativeWeb} after=${JSON.stringify(webAfterNegative)}`)
+    assert(webAfterNegative.fetchProvider === undefined || webAfterNegative.fetchProvider === 'http',
+      `UI_L6 negative: the custom-route restore left a non-default fetch provider: ${JSON.stringify(webAfterNegative)}`)
+    // Custom provider route protection: seed an UNOFFICIAL provider id through
+    // the real official settings namespace, prove the port refuses to replace
+    // it, then restore the official value through the same official write. When
+    // the official schema itself refuses such a seed, a custom route cannot
+    // exist on a real Host and the branch is reported as NOT_VERIFIED.
+    if (negative.customRouteSeeded === true) {
+      assert(negative.customRouteRefusal?.rejected === true,
+        `UI_L6 negative: the port accepted replacing a CUSTOM provider route: ${JSON.stringify(negative.customRouteRefusal)}`)
+      assert(/custom route/u.test(negative.customRouteRefusal?.message ?? ''),
+        `UI_L6 negative: the custom-route refusal lacks the official reason: ${JSON.stringify(negative.customRouteRefusal)}`)
+    } else {
+      trace('f3.ui-l6', {
+        verdict: 'UI_L6_PASS',
+        phase: 'custom-route-protection',
+        status: 'NOT_VERIFIED',
+        reason: `the official Host refused the custom-route seed: ${String(negative.customRouteSeedMessage)}`,
+      })
+    }
+    await reopenWebPage(clientA, 'UI_L6 negative controls A')
+    // The custom-route probe RESTORED the fetch provider to the official `http`
+    // through the real settings namespace, so the page must show HTTP now; the
+    // search provider (P2's Search API edit) and the count/base URL are untouched.
+    await assertPageFacts(clientA, {
+      ...OFFICIAL,
+      searchProviderLabel: SEARCH_API_PROVIDER_LABEL,
+      fetchProviderLabel: OFFICIAL.fetchProviderLabel,
+      count: casDurableValue,
+      sendOriginalQuestion: true,
+      baseURL: CONSUMER_ENDPOINT,
+    }, 'UI_L6 negatives kept the UI facts')
+    await returnToWebList(clientA, 'UI_L6 negatives list')
+    trace('f3.ui-l6', {
+      verdict: 'UI_L6_PASS',
+      phase: 'negative-controls',
+      refused: ['invalid-search-provider', 'invalid-fetch-provider', 'count-zero', 'count-51'],
+      hostWrites: 0,
+      customRouteSeeded: true,
+      customRouteReplaceRefused: true,
+      evidence: 'real Client Remote ConfigPort over the authenticated Host',
+    })
+
     // ── 6. Both Clients drop and re-establish their Gateway carrier. ────────
     const documentBeforeReconnect = readFileSync(documentPath, 'utf8')
     const apiBeforeReconnect = snapshot(namespaceConfig(documentPath, WEB_API_NS))
@@ -805,8 +922,8 @@ export async function runWebProviderSettingsF3(context) {
     await selectCandidate(clientA, COUNT_CANDIDATES.indexOf(String(OFFICIAL.count)), 'UI_L6 restore result count', String(OFFICIAL.count))
     await confirmCandidate(clientA, String(OFFICIAL.count), 'UI_L6 restore result count write')
     await openWebRow(clientA, ROW.sendOriginalQuestion, 'UI_L6 restore original question')
-    await selectCandidate(clientA, QUESTION_ON, 'UI_L6 restore original question', 'on')
-    await confirmCandidate(clientA, 'on', 'UI_L6 restore original question write')
+    await selectCandidate(clientA, QUESTION_OFF, 'UI_L6 restore original question', 'off')
+    await confirmCandidate(clientA, 'off', 'UI_L6 restore original question write')
     await writeEndpoint(clientA, OFFICIAL.baseURL, OFFICIAL.baseURL, 'UI_L6 restore endpoint write')
     // The official Settings service PRUNES a user layer whose values all equal
     // the shipped defaults (the whole section row may disappear). The authority
@@ -826,24 +943,44 @@ export async function runWebProviderSettingsF3(context) {
     await assertPageFacts(clientA, OFFICIAL, 'UI_L6 restored effective')
 
     // ── 8. The credential reference stays metadata-only. ────────────────────
+    // The Host fixture really STORED the sentinel through the official
+    // `ctx.credentials.set` path, so "the secret never appears" is a real
+    // negative: the same value exists in the credential store while this scan
+    // covers both panes, the settings document, the Host work proof and the
+    // Client telemetry records.
     await openWebRow(clientA, ROW.credential, 'UI_L6 credential reference', 'Reference: ')
     await waitForScreenText(clientA, `Reference: ${CREDENTIAL_REF}`, 'UI_L6 credential reference name')
-    assert(/Reference: DEEPSEEK_API_KEY/u.test(await frameOf(clientA)), 'UI_L6 credential: the official reference is painted by name')
+    await waitForScreenText(clientA, 'State: Configured', 'UI_L6 credential configured state')
+    assert(!(await frameOf(clientA)).includes(sentinel),
+      'UI_L6 credential: the stored secret value reached the Settings pane')
     assert(!/^\s*apiKey:/mu.test(readFileSync(documentPath, 'utf8')),
       'UI_L6 credential: a secret value must never be persisted into the settings document')
+    const proofPath = join(root, 'events.jsonl')
+    // The Client telemetry files live in the runner work dir (one per process).
+    const corpusFiles = [
+      proofPath,
+      ...readdirSync(context.workDir).filter(name => name.startsWith('surface-client-')).map(name => join(context.workDir, name)),
+    ]
     const corpus = [
       await frameOf(clientA),
       await frameOf(clientB),
-      typeof host.raw === 'string' ? host.raw : typeof host.stderr === 'string' ? host.stderr : '',
+      typeof host.raw === 'string' ? host.raw : '',
+      typeof host.stderr === 'string' ? host.stderr : '',
       readFileSync(documentPath, 'utf8'),
+      ...corpusFiles.filter(path => existsSync(path)).map(path => readFileSync(path, 'utf8')),
     ].join('\n')
+    assert(!corpus.includes(sentinel),
+      'UI_L6 credential: the stored secret value leaked into a pane, the document or a diagnostics record')
     assert(!/\bsk-[A-Za-z0-9]{8,}/u.test(corpus), 'UI_L6 credential: a secret-shaped token must never appear in a pane or diagnostic record')
     trace('f3.ui-l6', {
       verdict: 'UI_L6_PASS',
       phase: 'credential-reference',
       reference: CREDENTIAL_REF,
+      configuredState: true,
+      sentinelStored: true,
       secretPainted: false,
       secretPersisted: false,
+      scanned: 'panes+document+host-proof+client-telemetry',
     })
     trace('f3.ui-l6', {
       verdict: 'UI_L6_PASS',

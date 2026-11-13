@@ -402,7 +402,26 @@ export function createSplitProcessScope() {
         processRole: this.role,
         elapsedMs: Date.now() - started,
         process: this,
+        frameTail: this.viewportFrameTail(),
       })
+    }
+
+    /**
+     * The LAST painted rows, bounded, for a failure report: the operator's
+     * frame at wait-timeout without the whole ANSI scrollback.
+     */
+    viewportFrameTail(rows = 60, width = 120) {
+      try {
+        const buffer = this.term.buffer.active
+        const lines = []
+        for (let index = 0; index < this.term.rows; index += 1) {
+          const line = buffer.getLine(buffer.viewportY + index)
+          lines.push(line === undefined ? '' : line.translateToString(true))
+        }
+        return lines.slice(-rows).map(text => text.replace(/\s+$/u, '').slice(0, width)).filter(text => text !== '')
+      } catch {
+        return []
+      }
     }
 
     /**
@@ -511,6 +530,7 @@ export function createSplitProcessScope() {
         processRole: this.role,
         elapsedMs: Date.now() - started,
         process: this,
+        frameTail: this.viewportFrameTail(),
       })
     }
 

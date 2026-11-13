@@ -76,6 +76,9 @@ const SCENARIOS = new Set([
   // a FRESH Host to prove the durable projection replay.
   'session-policy-f8',
   'session-policy-f8-replay',
+  // M6-1 F3 closure: seed the official Web settings baseline + a non-functional
+  // credential sentinel through the official Services (never a hand edit).
+  'web-settings-f3',
 ])
 
 /** Quote one token for the Host shell used by the harmless fixture commands. */
@@ -495,6 +498,60 @@ export async function apply(ctx) {
       },
       get: async () => undefined,
     }))
+  }
+
+  if (scenario === 'web-settings-f3') {
+    // Seed the OFFICIAL Web settings baseline with KNOWN values through the
+    // real `ctx.settings` (SettingsForms) write path, and plant a NON-FUNCTIONAL
+    // unique credential sentinel through the official `ctx.credentials.set`
+    // path. Nothing here is a product input; the case supplies the sentinel and
+    // the base URL through its own environment and later proves neither the
+    // sentinel nor a Client guess reached any observable surface.
+    // The writes are FULLY DEFERRED (loader settled, own detached task): a
+    // settings write from inside apply() would deadlock the plugin-row startup
+    // the same way the f1-shell row reads settings only from event callbacks.
+    const seedBaseURL = process.env.C1_F3_BASE_URL
+    const sentinel = process.env.C1_F3_SECRET
+    if (seedBaseURL === undefined || seedBaseURL === '' || sentinel === undefined || sentinel === '') {
+      throw new Error('m4-c1-host-work: web-settings-f3 requires C1_F3_BASE_URL and C1_F3_SECRET')
+    }
+    const apiNamespace = 'web-deepseek-api'
+    void (async () => {
+      try {
+        await new Promise(resolve => ctx.root.loader.await().then(resolve, resolve))
+        await ctx.settings.mutate(apiNamespace, [
+          { op: 'set', path: ['count'], value: 10 },
+          { op: 'set', path: ['sendOriginalQuestion'], value: false },
+          { op: 'set', path: ['baseURL'], value: seedBaseURL },
+        ])
+        const { credentialRef } = await import('@deepseek-ai/dsh-credentials')
+        await ctx.credentials.set(credentialRef('DEEPSEEK_API_KEY'), sentinel)
+        const descriptors = ctx.settings.describe()
+        const revisions = Object.fromEntries(descriptors.map(descriptor => [descriptor.ns, descriptor.revision]))
+        const apiValue = descriptors.find(descriptor => descriptor.ns === apiNamespace)?.value
+        const api = apiValue !== null && typeof apiValue === 'object'
+          ? {
+              baseURL: apiValue.baseURL,
+              count: apiValue.count,
+              sendOriginalQuestion: apiValue.sendOriginalQuestion,
+            }
+          : undefined
+        // The sentinel VALUE never enters the proof: only its bounded digest proves
+        // which value the store holds.
+        const sentinelDigest = createHash('sha256').update(sentinel).digest('hex').slice(0, 16)
+        record('f3-host-seed', {
+          namespace: apiNamespace,
+          api,
+          revisions,
+          credentialReference: 'DEEPSEEK_API_KEY',
+          sentinelDigest,
+        })
+      } catch (error) {
+        record('f3-host-seed-failed', {
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    })()
   }
 
   if (scenario === 'f1-shell') {

@@ -1125,6 +1125,31 @@ async function startSurfaceLocalClient(
           nonce = request.nonce
           const backend = currentRevision?.application?.selected.backend
           if (backend === undefined) throw new Error('read-authority probe: no mounted surface revision')
+          /** The REAL generated Client `settings` namespace (the same face the
+           *  ConfigPort mirror consumes), as the qualification probes address it. */
+          const officialSettingsFace = (): {
+            describe(): Promise<{
+              readonly ok: boolean
+              readonly value?: { readonly namespaces?: readonly { readonly ns?: unknown; readonly revision?: unknown }[] }
+            }>
+            mutate(
+              ns: string,
+              ops: readonly { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }[],
+              expectedRevision: number | undefined,
+            ): Promise<{ readonly ok: boolean; readonly error?: { readonly code?: unknown; readonly message?: unknown } }>
+          } | undefined => (domains.remote as unknown as {
+            readonly settings?: {
+              describe(): Promise<{
+                readonly ok: boolean
+                readonly value?: { readonly namespaces?: readonly { readonly ns?: unknown; readonly revision?: unknown }[] }
+              }>
+              mutate(
+                ns: string,
+                ops: readonly { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }[],
+                expectedRevision: number | undefined,
+              ): Promise<{ readonly ok: boolean; readonly error?: { readonly code?: unknown; readonly message?: unknown } }>
+            }
+          }).settings
           if (request.op === 'read') {
             const rows = await backend.sessionReader.list(undefined)
             if (rows === undefined) throw new Error('read-authority probe: the Host Session list is unavailable')
@@ -1300,20 +1325,7 @@ async function startSurfaceLocalClient(
             // can never SEND a stale revision. Two literal mutations against the
             // one revision `describe()` returned prove the Host accepted the
             // first and rejected the second with the official conflict.
-            const remote = domains.remote as unknown as {
-              readonly settings?: {
-                describe(): Promise<{
-                  readonly ok: boolean
-                  readonly value?: { readonly namespaces?: readonly { readonly ns?: unknown; readonly revision?: unknown }[] }
-                }>
-                mutate(
-                  ns: string,
-                  ops: readonly { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }[],
-                  expectedRevision: number | undefined,
-                ): Promise<{ readonly ok: boolean; readonly error?: { readonly code?: unknown; readonly message?: unknown } }>
-              }
-            }
-            const settings = remote.settings
+            const settings = officialSettingsFace()
             if (settings === undefined) throw new Error('settings-stale-cas probe: the official settings namespace is not mounted')
             const ns = typeof request.namespace === 'string' ? request.namespace : 'web-deepseek-api'
             const described = await settings.describe()
@@ -1331,6 +1343,75 @@ async function startSurfaceLocalClient(
               secondOk: second.ok === true,
               secondCode: second.ok === true ? undefined : String(second.error?.code ?? ''),
               secondMessage: second.ok === true ? undefined : String(second.error?.message ?? ''),
+            })
+            return
+          }
+          if (request.op === 'settings-negative-writes') {
+            // L5 real-path negative controls for the Web provider Settings: the
+            // MOUNTED Remote ConfigPort must refuse an invalid provider id / an
+            // out-of-range count BEFORE any Host dispatch, and must refuse to
+            // replace a CUSTOM provider route. The custom route itself is seeded
+            // through the real official `settings` namespace (the same write path
+            // the Host serves); when that schema refuses the custom value the
+            // probe records the official refusal instead of claiming the guard.
+            const web = backend.config.web
+            const attempts: { readonly attempt: string; readonly rejected: boolean; readonly message?: string }[] = []
+            const attempt = async (label: string, operation: () => Promise<void>): Promise<void> => {
+              try {
+                await operation()
+                attempts.push({ attempt: label, rejected: false })
+              } catch (error) {
+                attempts.push({
+                  attempt: label,
+                  rejected: true,
+                  message: error instanceof Error ? error.message : String(error),
+                })
+              }
+            }
+            {
+              await attempt('invalid-search-provider', () => web.setSearchProvider('legacy-custom-search' as never))
+              await attempt('invalid-fetch-provider', () => web.setFetchProvider('legacy-custom-fetch' as never))
+              await attempt('count-zero', () => web.setSearchApiCount(0))
+              await attempt('count-51', () => web.setSearchApiCount(51))
+            }
+            const settings = officialSettingsFace()
+            let customRouteSeeded = false
+            let customRouteSeedMessage: string | undefined
+            let customRouteRefusal: { readonly rejected: boolean; readonly message?: string } | undefined
+            if (settings !== undefined) {
+              const seed = await settings.mutate('web', [{ op: 'set', path: ['fetchProvider'], value: 'legacy-custom-fetch' }], undefined)
+              customRouteSeeded = seed.ok === true
+              if (!seed.ok) customRouteSeedMessage = String(seed.error?.message ?? '')
+              if (customRouteSeeded) {
+                // Wait until the mounted port's own authoritative read sees the
+                // custom value, or the guard would be probed against the old one.
+                let visible = false
+                for (let attempt = 0; attempt < 40; attempt += 1) {
+                  const facts = await web.read()
+                  visible = facts?.fetchProvider === 'legacy-custom-fetch'
+                  if (visible) break
+                  await new Promise(resolve => setTimeout(resolve, 50))
+                }
+                if (visible) {
+                  try {
+                    await web.setFetchProvider('http')
+                    customRouteRefusal = { rejected: false }
+                  } catch (error) {
+                    customRouteRefusal = { rejected: true, message: error instanceof Error ? error.message : String(error) }
+                  }
+                } else {
+                  customRouteRefusal = { rejected: false, message: 'the mounted port never observed the seeded custom route' }
+                }
+                await settings.mutate('web', [{ op: 'set', path: ['fetchProvider'], value: 'http' }], undefined)
+                await web.read()
+              }
+            }
+            emit({
+              phase: 'settings-negative-writes',
+              attempts,
+              customRouteSeeded,
+              ...(customRouteSeedMessage === undefined ? {} : { customRouteSeedMessage }),
+              ...(customRouteRefusal === undefined ? {} : { customRouteRefusal }),
             })
             return
           }
