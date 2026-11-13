@@ -16,12 +16,15 @@
  * Herdr Pane environments each update only their own Pane id; one Client's exit
  * neither cancels the Host nor withdraws the other Pane.
  *
- * RH-02 (disconnect/reconnect): NOT claimed by this case. A real Split Client
- * does not expose a recoverable progress-watch failure without ending the whole
- * surface (the transport loss path tears the Client down), so the disconnect
- * half is qualified structurally by the reporter's `setQualified(false)`
- * contract (`HR-06`) and the Host reconnect half is `NOT_VERIFIED` here. The
- * case result records that scope instead of inventing evidence.
+ * RH-02 (disconnect/reconnect): the qualification-only `SIGUSR1` mux drop
+ * (the M5D-03 manual: the REAL physical transport is lost, the official
+ * generation is invalidated, and a NEW generation re-adopts the exact Session
+ * with the Client PID, surface revision and held Host turn untouched) is
+ * applied to a real Split Client whose Host turn is held. The held turn must
+ * NEVER be reported as `idle` (a lost transport is not an Agent completion);
+ * an ordered `release-agent` withdraws the Pane while the transport is down,
+ * and the re-adopted owner reports `working` again from the NEW generation's
+ * authoritative snapshot before the turn settles to `idle`.
  *
  * The Host ALSO receives a Herdr environment pointing at its OWN fake CLI log:
  * the Host process must never create a reporter or spawn a Pane command. That
@@ -34,7 +37,7 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
-import { alive } from '../../lib/split-smoke-processes.mjs'
+import { alive, lastSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
 import { waitForHostSessionEvent } from '../../lib/split-smoke-sessions.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
@@ -175,7 +178,7 @@ export async function runHerdrH1(context) {
       C1_HOLD_LONG_TURN: longBarrier,
     })
     const longPane = `herdr-pane-long-${unique}`
-    const { client: longClient } = await startC1Client(
+    const { client: longClient, ready: longClientReady } = await startC1Client(
       `H1 long-turn Client ${unique}`,
       herdrClientEnv(scriptPath, longLog, longPane),
     )
@@ -183,6 +186,56 @@ export async function runHerdrH1(context) {
     await waitForStateSequence(longLog, ['working'], 'RH-01a working', 120_000)
     assert(states(longLog).at(-1) === 'working',
       'H1 a held real Host turn must not be reported as idle')
+
+    // ── RH-02 inside the SAME held turn: the real transport rollover ───────
+    // The M5D-03 manual, applied to this Client: SIGUSR1 drops the REAL mux
+    // socket; the official generation is invalidated and a NEW generation
+    // re-adopts the exact Session with the PID/surface revision untouched.
+    const aBefore = lastSurfaceStatus(longClient)
+    assert(typeof aBefore?.generationId === 'number',
+      'RH-02 the Client never observed an official transport generation')
+    const rolloverBoundary = longClient.records.length
+    longClient.signalBusiness('SIGUSR1')
+    await longClient.waitFor(
+      record => longClient.records.indexOf(record) >= rolloverBoundary
+        && record.m4b2s === 'qualification' && record.op === 'drop-websocket',
+      'RH-02 the qualification mux drop was injected',
+      30_000,
+    )
+    await longClient.waitFor(
+      record => longClient.records.indexOf(record) >= rolloverBoundary
+        && record.m4b2s === 'surface-status'
+        && record.transport !== 'connected'
+        && record.generationId === undefined,
+      'RH-02 the Client observed the official lost generation',
+      60_000,
+    )
+    // While the transport is down the Pane must not be told the Agent finished:
+    // the last Herdr fact stays `working` and an ordered release withdraws the
+    // registration instead of a fabricated `idle`.
+    await waitForLog(longLog, () => lastIndex(longLog, 'release') !== -1, 'RH-02 ordered release on transport loss', 60_000)
+    assert(lastIndex(longLog, 'idle') === -1,
+      'RH-02 a lost Remote transport must never be reported as idle')
+    const rolled = await longClient.waitFor(
+      record => longClient.records.indexOf(record) >= rolloverBoundary
+        && record.m4b2s === 'surface-status'
+        && typeof record.generationId === 'number'
+        && record.generationId !== aBefore.generationId
+        && record.transport === 'connected'
+        && record.sessionOpen === true
+        && record.openSessionId === longSessionId
+        && record.surfaceMounted === true,
+      'RH-02 the Client reconnected on a NEW official generation with the Session current',
+      120_000,
+    )
+    assert(rolled.pid === aBefore.pid && rolled.surfaceRevision === aBefore.surfaceRevision,
+      'RH-02 the rollover must keep the same business PID and surface revision')
+    assert(alive(longReady.pid), 'H1 the Host died during the transport rollover')
+    assert(!existsSync(longBarrier), 'RH-02 the rollover released the held Host turn')
+    // The NEW generation's authoritative snapshot re-registers the Pane with
+    // the still-current `working` fact; the turn then settles to `idle`.
+    await waitForStateSequence(longLog, ['working', 'working'], 'RH-02 requalified working on the new generation', 120_000)
+
     writeFileSync(longBarrier, 'release\n', { mode: 0o600 })
     await waitForHostSessionEvent(dshHome, longSessionId, event => event.type === 'turn/end', `H1 long ${unique} turn/end`, 120_000)
     await waitForStateSequence(longLog, ['working', 'idle'], 'RH-01a idle after the turn', 120_000)
@@ -198,6 +251,15 @@ export async function runHerdrH1(context) {
       hostPid: longReady.pid,
       sessionId: longSessionId,
       states: states(longLog),
+    })
+    trace('herdr-h1-rh02', {
+      scope: 'REAL_SPLIT_PROCESS_L6',
+      generationBefore: aBefore.generationId,
+      generationAfter: rolled.generationId,
+      clientPid: longClientReady.pid,
+      surfaceRevisionKept: true,
+      holdBarrierUntouched: !existsSync(longBarrier),
+      noIdleDuringLoss: true,
     })
 
     // ── RH-01b: a REAL Agent Question: blocked -> working -> idle ──────────
@@ -289,14 +351,10 @@ export async function runHerdrH1(context) {
     assert(alive(multiReady.pid), 'H1 the multi-client Host died before its own stop')
     await stopC1Host(multiHost)
 
-    trace('herdr-h1-rh02', {
-      scope: 'STRUCTURAL_ONLY',
-      reason: 'a real Split Client progress-watch failure is not recoverable without ending the surface; the disconnect half is covered by HR-06 and the reconnect half is NOT_VERIFIED',
-    })
     return {
       status: 'PASS',
       rh01: 'REAL_SPLIT_PROCESS_L6',
-      rh02: 'STRUCTURAL_ONLY',
+      rh02: 'REAL_SPLIT_PROCESS_L6',
       rh03: 'REAL_SPLIT_PROCESS_L6',
       hostReportedNothing: true,
     }
