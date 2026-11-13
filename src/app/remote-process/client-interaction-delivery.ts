@@ -282,14 +282,27 @@ export function createSplitClientInteractionDelivery(
     /**
      * The ROOT is gone while the official invocation is still pending: the
      * request lifetime (or another delegate of the same invocation) still owns
-     * it. Answering with the disposal error would turn a local teardown into a
-     * Host decision — the exact contract this delivery exists to keep — so the
-     * dying root simply never answers: the pending promise dies with the
-     * process, its carrier drops, and the remaining delegate settles the
-     * invocation. A replacement surface may also present it again while this
-     * root still lives.
+     * it. A local teardown is never a Host decision, so the disposed root stops
+     * presenting and does NOT answer with the disposal error. The request's OWN
+     * lifetime remains the authority: when it ends (the Gateway releases its
+     * delivery task through its own generation signal, which is what lets the
+     * Client's transport disposal drain), settle exactly like every other
+     * abort — the Gateway classifies by its own abort, not by a local answer.
+     * The disposed root merely stops presenting; it never wins a race.
      */
-    const withholdForDisposedRoot = async (): Promise<T> => await new Promise<T>(() => {})
+    const withholdForDisposedRoot = async (): Promise<T> => {
+      if (requestSignal !== undefined) {
+        await new Promise<never>((_resolve, reject) => {
+          if (requestSignal.aborted) {
+            reject(abortReason(requestSignal))
+            return
+          }
+          requestSignal.addEventListener('abort', () => { reject(abortReason(requestSignal)) }, { once: true })
+        })
+      }
+      // No official request lifetime to wait for: nothing can answer now.
+      return await new Promise<T>(() => {})
+    }
     for (;;) {
       if (disposed) return await withholdForDisposedRoot()
       try {
