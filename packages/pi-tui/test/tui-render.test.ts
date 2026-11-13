@@ -1825,4 +1825,35 @@ describe("Main-screen changes above the viewport (dsh-pi-tui divergence X078)", 
 		assert.strictEqual(tui.fullRedraws, redrawsBefore, "a mixed frame must stay differential");
 		tui.stop();
 	});
+
+	it("full re-renders a shrink that would move the viewport up while a viewport row changed", async () => {
+		// Witness for the second full-redraw disjunct (X078): without it, a shrink
+		// whose changed rows stay inside the old viewport paints differentially
+		// and leaves blank rows at the bottom instead of restoring the tail view.
+		const terminal = new LoggingVirtualTerminal(20, 5);
+		const tui = new TuiMainScreen(terminal);
+		tui.setClearOnShrink(false); // the guard itself must trigger, not clearOnShrink
+		const component = new TestComponent();
+		tui.addChild(component);
+		component.lines = Array.from({ length: 12 }, (_, i) => `Line ${i}`);
+		tui.start();
+		await terminal.waitForRender();
+
+		const redrawsBefore = tui.fullRedraws;
+		// 9 lines: rows 7-11 are deleted, row 8 changes INSIDE the old viewport
+		// (7 = previous viewport top), so the clamped diff lands on the paint path.
+		component.lines = [...Array.from({ length: 8 }, (_, i) => `Line ${i}`), "CHANGED 8"];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.ok(tui.fullRedraws > redrawsBefore, "a viewport-moving shrink must full-render");
+		assert.deepStrictEqual(terminal.getViewport(), [
+			"Line 4",
+			"Line 5",
+			"Line 6",
+			"Line 7",
+			"CHANGED 8",
+		]);
+		tui.stop();
+	});
 });
