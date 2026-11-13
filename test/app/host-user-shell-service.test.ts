@@ -1,7 +1,4 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
@@ -20,6 +17,7 @@ import {
   MAX_HOST_USER_SHELL_STREAM_BYTES,
 } from '../../src/runtime/host-user-shell-port.ts'
 import { parseHostUserShellRunOutcome } from '../../src/runtime/remote/pi-tui-host-user-shell-contract.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 async function mount(deps: PiTuiHostUserShellHostDeps, remoteInvocation?: unknown): Promise<{ service: PiTuiHostUserShellService; ctx: Context }> {
   const ctx = new Context()
@@ -901,13 +899,14 @@ function fakeWorkspaceRegistry(pathOf: (id: string) => string | undefined) {
   }
 }
 
-test('Workspace completion answers from the official registry path, not a Session or the Client', async () => {
+test('Workspace completion answers from the official registry path, not a Session or the Client', async (t) => {
+  const life = testLifecycle(t)
   const signal = new AbortController().signal
   const { Readable } = await import('node:stream')
   const spawns: SubprocessSpawnSpec[] = []
   // A registered path DISTINCT from process.cwd() (and from the Session working
   // directory): a bug that used either would resolve the wrong directory.
-  const workspacePath = mkdtempSync(join(tmpdir(), 'g14-registry-'))
+  const workspacePath = life.tempDir('g14-registry-')
   const { lookups, registry } = fakeWorkspaceRegistry(() => workspacePath)
   const { deps } = hostDeps({
     agentFor: () => { throw new Error('sessionless completion must not resolve a Host Agent') },
@@ -940,14 +939,14 @@ test('Workspace completion answers from the official registry path, not a Sessio
     assert.notEqual(spawns[0]!.cwd, process.cwd(), 'the path is not the process cwd (a cwd fallback would be visible)')
   } finally {
     await ctx.fiber.dispose()
-    rmSync(workspacePath, { recursive: true, force: true })
   }
 })
 
-test('Workspace path completion uses the same Host path bridge under the Workspace path', async () => {
+test('Workspace path completion uses the same Host path bridge under the Workspace path', async (t) => {
+  const life = testLifecycle(t)
   const signal = new AbortController().signal
   const seen: string[] = []
-  const workspacePath = mkdtempSync(join(tmpdir(), 'g14-registry-'))
+  const workspacePath = life.tempDir('g14-registry-')
   const { registry } = fakeWorkspaceRegistry(() => workspacePath)
   const { deps } = hostDeps({
     workspaces: () => registry,
@@ -961,7 +960,6 @@ test('Workspace path completion uses the same Host path bridge under the Workspa
     assert.deepEqual(seen, [`${workspacePath}|sr`])
   } finally {
     await ctx.fiber.dispose()
-    rmSync(workspacePath, { recursive: true, force: true })
   }
 })
 
@@ -1030,7 +1028,7 @@ test('a Workspace replaced during the completion retires the old answer', async 
     workspaces: () => registry,
     pathCompletion: {
       complete: async () => {
-        path = join(tmpdir(), 'm6-g14-replaced-workspace')
+        path = '/definitely/not/a/host/directory/m6-g14-replaced'
         return { kind: 'ok', candidates: ['old-answer'] }
       },
     },
