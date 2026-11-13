@@ -776,6 +776,8 @@ describe("TUI Native Kitty overlay preemption (X077)", () => {
 			const tui: TUI = new TuiMainScreen(terminal);
 			const component = new TestComponent();
 			tui.addChild(component);
+			tui.start();
+			await terminal.waitForRender();
 			const anchors = [
 				"\x1b_Ga=p,i=71717,c=2,r=2,C=1,q=2;\x1b\\", // no p key
 				"\x1b_Ga=p,i=71717,p=0,c=2,r=2,C=1,q=2;\x1b\\", // p=0 is the same "no explicit placement id"
