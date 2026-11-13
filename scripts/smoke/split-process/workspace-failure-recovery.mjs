@@ -67,25 +67,25 @@ function sessionLogs(dshHome) {
     .sort()
 }
 
-/** One bounded wait for the durable Host Session log count. */
-async function waitForSessionLogCount(dshHome, count, label, timeoutMs = 120_000) {
+/** The durable Host Session logs this run added beyond a captured baseline.
+ *  The full lane shares ONE dshHome across every case, so an absolute count
+ *  would include prior cases' Sessions; only the delta is this run's evidence. */
+function newSessionLogs(dshHome, baseline) {
+  const before = new Set(baseline)
+  return sessionLogs(dshHome).filter(entry => !before.has(entry))
+}
+
+/** One bounded wait for exactly `count` NEW durable Host Session logs. */
+async function waitForNewSessionLogs(dshHome, baseline, count, label, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs
   for (;;) {
-    const logs = sessionLogs(dshHome)
+    const logs = newSessionLogs(dshHome, baseline)
     if (logs.length === count) return logs
     if (Date.now() >= deadline) {
-      throw new SplitSmokeAssertionError(`${label}: expected ${String(count)} durable Session log(s), found ${JSON.stringify(logs)}`)
+      throw new SplitSmokeAssertionError(`${label}: expected ${String(count)} new durable Session log(s), found ${JSON.stringify(logs)}`)
     }
     await sleep(100)
   }
-}
-
-/** The decompressed text of every durable Host Session log. */
-function sessionLogText(dshHome) {
-  const root = join(dshHome, 'sessions')
-  return sessionLogs(dshHome)
-    .map(entry => zstdDecompressSync(readFileSync(join(root, entry))).toString('utf8'))
-    .join('\n')
 }
 
 /** The durable `user/message` events of every Host Session log carrying `marker`. */
@@ -200,6 +200,7 @@ export async function runWorkspaceNewFailureRecovery(context) {
       })})`)
     const readWorkspaces = workspaceBaselineIds(client)
     const sessionsBefore = sessionInventory(dshHome)
+    const logsBefore = sessionLogs(dshHome)
     const workspacesBefore = await readWorkspaces('PR4-new before')
     assert(!workspacesBefore.some(workspace => workspace.path !== undefined
       && existsSync(workspace.path)
@@ -270,7 +271,7 @@ export async function runWorkspaceNewFailureRecovery(context) {
       record => record.sessionOpen === true && typeof record.openSessionId === 'string',
       'PR4-new one committed Session', 180_000)
     await client.waitForScreenGone('Sessions ·', 'PR4-new Browser collapses after commit', 60_000)
-    const logs = await waitForSessionLogCount(dshHome, 1, 'PR4-new exactly one Session log')
+    const logs = await waitForNewSessionLogs(dshHome, logsBefore, 1, 'PR4-new exactly one Session log')
     assert(logs.length === 1, 'PR4 the run created more than one Session')
     const afterCommit = await readWorkspaces('PR4-new after commit')
     const member = afterCommit.find(workspace => workspace.workspaceId === workspaceId)
@@ -335,6 +336,7 @@ export async function runWorkspaceFirstSubmitFailureRecovery(context) {
       })})`)
     const readWorkspaces = workspaceBaselineReader(client, requestPath)
     const sessionsBefore = sessionInventory(dshHome)
+    const logsBefore = sessionLogs(dshHome)
     const workspacesBefore = await readWorkspaces('PR4-first before')
     const prompt = `${marker} keep this draft`
 
@@ -346,7 +348,7 @@ export async function runWorkspaceFirstSubmitFailureRecovery(context) {
     assert(!editorFrame.includes(clientOnlyName), 'the Client-only directory leaked into the Host editor')
     assert(JSON.stringify(sessionInventory(dshHome)) === JSON.stringify(sessionsBefore),
       'the refused first submit created a Session')
-    assert(sessionLogText(dshHome) === '', 'the refused first submit wrote a Host Session log')
+    assert(newSessionLogs(dshHome, logsBefore).length === 0, 'the refused first submit wrote a Host Session log')
     assert((await waitForSurfaceStatus(client, record => record.sessionOpen === false,
       'PR4-first Sessionless after the refusal', 30_000)).sessionOpen === false,
     'the refused first submit opened a Session')
@@ -364,7 +366,7 @@ export async function runWorkspaceFirstSubmitFailureRecovery(context) {
     await client.waitForScreen(marker, 'PR4-first restored draft stays in the editor', 60_000)
     assert(JSON.stringify(sessionInventory(dshHome)) === JSON.stringify(sessionsBefore),
       'Verify created a Session; it must only register the next-create Workspace')
-    assert(sessionLogText(dshHome) === '', 'Verify wrote a Host Session log')
+    assert(newSessionLogs(dshHome, logsBefore).length === 0, 'Verify wrote a Host Session log')
     assert(await readWorkspaces('PR4-first after Verify').then(rows => rows.some(workspace =>
       workspace.path !== undefined && existsSync(workspace.path)
       && realpathSync(workspace.path) === realpathSync(recoverablePath))),
@@ -375,7 +377,7 @@ export async function runWorkspaceFirstSubmitFailureRecovery(context) {
     const opened = await waitForSurfaceStatus(client,
       record => record.sessionOpen === true && typeof record.openSessionId === 'string',
       'PR4-first one committed Session', 180_000)
-    await waitForSessionLogCount(dshHome, 1, 'PR4-first exactly one Session log')
+    await waitForNewSessionLogs(dshHome, logsBefore, 1, 'PR4-first exactly one Session log')
     await waitForUserMessageMarker(dshHome, marker, 1, 'PR4-first Host user message written exactly once')
     const afterCommit = await readWorkspaces('PR4-first after commit')
     assert(afterCommit.some(workspace => workspace.sessionIds.includes(opened.openSessionId)),
