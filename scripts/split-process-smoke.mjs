@@ -507,9 +507,9 @@ export function assertSelectedVerdict(caseId, result) {
     return
   }
   if (caseId === 'herdr.h1-split-surface') {
-    assert(result?.rh01 === 'REAL_SPLIT_PROCESS_L6' && result?.rh03 === 'REAL_SPLIT_PROCESS_L6'
-      && result?.hostReportedNothing === true,
-    `selected ${caseId}: the Herdr Split verdict ended as ${String(result?.rh01 ?? 'missing')}/${String(result?.rh03 ?? 'missing')}`)
+    assert(result?.rh01 === 'REAL_SPLIT_PROCESS_L6' && result?.rh02 === 'REAL_SPLIT_PROCESS_L6'
+      && result?.rh03 === 'REAL_SPLIT_PROCESS_L6' && result?.hostReportedNothing === true,
+    `selected ${caseId}: the Herdr Split verdict ended as ${String(result?.rh01 ?? 'missing')}/${String(result?.rh02 ?? 'missing')}/${String(result?.rh03 ?? 'missing')}`)
     return
   }
   if (caseId === 'web.product-browser-tui') {

@@ -3012,6 +3012,7 @@ function disposeThroughProductionLifecycle(h: SurfaceHarness): () => void {
     disposeLocalShell: () => {},
     disposePastedImageIntake: () => {},
     disposeHerdrReporter: () => {},
+    disposeRemoteProgressGeneration: () => {},
     retireOwnedSession: async () => ({}) as never,
     disposeSelectedTransport: async () => {},
     registerDisposal: () => {},
