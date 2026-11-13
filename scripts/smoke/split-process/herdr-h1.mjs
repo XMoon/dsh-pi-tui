@@ -186,6 +186,10 @@ export async function runHerdrH1(context) {
     await waitForStateSequence(longLog, ['working'], 'RH-01a working', 120_000)
     assert(states(longLog).at(-1) === 'working',
       'H1 a held real Host turn must not be reported as idle')
+    /** The complete Pane fact list BEFORE the transport loss: the mount idle
+     *  and the held turn's working. Only facts added AFTER this prefix may be
+     *  judged by RH-02; the initial mount idle is a legal earlier fact. */
+    const beforeRolloverStates = states(longLog)
 
     // ── RH-02 inside the SAME held turn: the real transport rollover ───────
     // The M5D-03 manual, applied to this Client: SIGUSR1 drops the REAL mux
@@ -212,10 +216,13 @@ export async function runHerdrH1(context) {
     )
     // While the transport is down the Pane must not be told the Agent finished:
     // the last Herdr fact stays `working` and an ordered release withdraws the
-    // registration instead of a fabricated `idle`.
+    // registration instead of a fabricated `idle`. Wait for the release FIRST
+    // and only then check the whole log: the release command is queued behind
+    // the in-flight `working` report, so an immediate read can race it.
     await waitForLog(longLog, () => lastIndex(longLog, 'release') !== -1, 'RH-02 ordered release on transport loss', 60_000)
-    assert(lastIndex(longLog, 'idle') === -1,
-      'RH-02 a lost Remote transport must never be reported as idle')
+    const addedDuringLoss = states(longLog).slice(beforeRolloverStates.length)
+    assert(addedDuringLoss.length > 0 && addedDuringLoss.every(state => state === 'release'),
+      `RH-02 a lost Remote transport must withdraw the Pane without a fabricated idle; the Pane saw ${JSON.stringify(states(longLog))}`)
     const rolled = await longClient.waitFor(
       record => longClient.records.indexOf(record) >= rolloverBoundary
         && record.m4b2s === 'surface-status'
@@ -230,14 +237,27 @@ export async function runHerdrH1(context) {
     )
     assert(rolled.pid === aBefore.pid && rolled.surfaceRevision === aBefore.surfaceRevision,
       'RH-02 the rollover must keep the same business PID and surface revision')
+    assert(rolled.host?.hostPid === aBefore.host?.hostPid
+      && rolled.host?.scopeId === aBefore.host?.scopeId,
+      'RH-02 the rollover must stay on the SAME authenticated Host')
     assert(alive(longReady.pid), 'H1 the Host died during the transport rollover')
     assert(!existsSync(longBarrier), 'RH-02 the rollover released the held Host turn')
     // The NEW generation's authoritative snapshot re-registers the Pane with
-    // the still-current `working` fact; the turn then settles to `idle`.
-    await waitForStateSequence(longLog, ['working', 'working'], 'RH-02 requalified working on the new generation', 120_000)
+    // the still-current `working` fact (`release` is not a state), so the Pane
+    // must observe working AFTER the ordered release and BEFORE any idle.
+    await waitForLog(longLog, () => {
+      const observed = states(longLog)
+      const release = observed.lastIndexOf('release')
+      if (release < 0) return false
+      const requalified = observed.indexOf('working', release + 1)
+      const idled = observed.indexOf('idle', release + 1)
+      return requalified >= 0 && (idled < 0 || requalified < idled)
+    }, 'RH-02 requalified working on the new generation', 120_000)
 
     writeFileSync(longBarrier, 'release\n', { mode: 0o600 })
     await waitForHostSessionEvent(dshHome, longSessionId, event => event.type === 'turn/end', `H1 long ${unique} turn/end`, 120_000)
+    await waitForStateSequence(longLog, ['working', 'release', 'working', 'idle'],
+      'RH-02 working -> release -> working -> idle across the real generation rollover', 120_000)
     await waitForStateSequence(longLog, ['working', 'idle'], 'RH-01a idle after the turn', 120_000)
     assertPaneOwnership(longLog, longPane)
     assert(alive(longReady.pid), 'H1 the Host died during the long-turn scene')

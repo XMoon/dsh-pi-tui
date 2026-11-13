@@ -94,6 +94,14 @@ export interface SurfaceLifecycleDeps {
    * mounted app dies and must never block or throw into the surface teardown.
    */
   readonly disposeHerdrReporter: () => void
+  /**
+   * H1: release the official Connection-generation subscription that
+   * re-establishes the ONE Remote progress watch after a transport rollover.
+   * It is an independent ordered teardown step: a throwing real unsubscribe
+   * must be recorded by the non-truncating batch, never escape a lifecycle
+   * abort listener as an uncaught failure.
+   */
+  readonly disposeRemoteProgressGeneration: () => void
   /** The memoized session-retirement coordinator (settles before the transport). */
   readonly retireOwnedSession: () => Promise<SessionRetirementReport>
   /** The selected runtime's transport disposer (awaited after the retirement). */
@@ -145,6 +153,7 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     disposeLocalShell,
     disposePastedImageIntake,
     disposeHerdrReporter,
+    disposeRemoteProgressGeneration,
     retireOwnedSession,
     disposeSelectedTransport,
     registerDisposal,
@@ -258,6 +267,7 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
       // leave the ordered `release-agent` to the reporter's own short-lived CLI
       // queue (it never blocks the surface teardown).
       () => disposeHerdrReporter(),
+      () => disposeRemoteProgressGeneration(),
       // The mounted TuiApp, the plugin keybinding sync, the theme-unload hook
       // and the extension surface bridge are released by their surface owner
       // (A4): the runner steps around this call release only what the runner

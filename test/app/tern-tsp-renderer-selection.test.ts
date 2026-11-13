@@ -713,6 +713,7 @@ function mountLifecycle(options: {
     disposeLocalShell: noop,
     disposePastedImageIntake: noop,
     disposeHerdrReporter: noop,
+    disposeRemoteProgressGeneration: noop,
     retireOwnedSession: async () => ({ } as never),
     disposeSelectedTransport: async () => {},
     registerDisposal: () => {},
