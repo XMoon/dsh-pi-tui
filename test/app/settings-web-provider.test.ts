@@ -1903,3 +1903,47 @@ test('Billing rows are Not selected and inert when their API provider is not the
     page.dispose()
   }
 })
+
+test('Host override values are terminal-sanitized before the Configured override line', async () => {
+  const hostileUrl = 'https://user:secret@search.example.test/v1\x1b[5;5H\x1b]0;pwn-title\x07\r\nnext'
+  const hostileEnv = 'SEARCH_ENV\x1b[5;5H\x1b]0;env-title\x07'
+  const facts = (): WebSettingsFacts => ({
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-search-api',
+      fetchProvider: 'deepseek-fetch-api',
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: { searchBaseURL: hostileUrl, searchApiKeyEnv: hostileEnv },
+      credential: { configured: true, source: 'file' },
+    },
+  })
+  const page = new WebSettingsPage({
+    readFacts: facts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => true,
+    commit: async () => ({ kind: 'verified', actual: '10' }),
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: () => {},
+    done: () => {},
+  })
+  try {
+    page.setMaxRows(24)
+    page.render(140)
+    page.handleInput('\x1b[H')
+    for (let step = 0; step < 4; step += 1) page.handleInput('\x1b[B')
+    page.handleInput('\r')
+    const raw = page.render(140).join('\n')
+    // The URL remains masked; the Host-origin values never carry terminal
+    // control sequences or row breaks into the rendered frame.
+    assert.ok(raw.includes('https://***@search.example.test/v1'), 'the masked URL fact stays visible')
+    assert.equal(raw.includes('\x1b[5;5H'), false, 'ANSI cursor controls are stripped')
+    assert.equal(raw.includes('\x1b]0;'), false, 'OSC title controls are stripped')
+    assert.equal(raw.includes('pwn-title'), false, 'OSC payload never reaches the terminal')
+    assert.equal(raw.includes('\r'), false, 'raw carriage returns never reach a physical row')
+    assert.equal(raw.includes('SEARCH_ENV'), true, 'the environment NAME remains visible')
+  } finally {
+    page.dispose()
+  }
+})

@@ -1326,6 +1326,14 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       + 'reference. Each choice is explicit and persistent (Automatic is NOT a reset of an override) and applies to '
       + 'the NEXT call; the Search API is billed separately per call, and a Messages plan does not guarantee coverage.'
 
+  /** Host-origin override facts as ONE sanitized physical line. URL masking
+   *  happens in the domain projection; this display boundary additionally
+   *  strips ANSI/OSC and control characters before the text reaches
+   *  `wrapTextWithAnsi` (which is a wrapper, not a terminal sanitizer). */
+  private overrideFactsLine(overrides: readonly { readonly field: string; readonly value: string }[]): string {
+    return overrides.map(entry => `${entry.field}=${sanitizedPhysicalLine(entry.value)}`).join(' · ')
+  }
+
   /** The row's static explanation, wrapped to the Detail column. These are the
    *  durable product facts (defaults, billing, payload boundary, override
    *  ownership) this page freezes; they are never derived from the request. */
@@ -1377,7 +1385,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
             : 'Not selected: only the DeepSeek Fetch API uses Fetch Billing. The current Fetch route is HTTP, '
               + 'which calls no billed API; select the DeepSeek Fetch API provider first. This row cannot write here.')
           if (overrides.length > 0) {
-            notes.push(`Configured override: ${overrides.map(entry => `${entry.field}=${entry.value}`).join(' · ')}`)
+            notes.push(`Configured override: ${this.overrideFactsLine(overrides)}`)
           }
           break
         }
@@ -1386,7 +1394,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
             + `${overrides.map(entry => entry.field).join(' and ')} field(s) own this capability's endpoint/credential `
             + 'configuration, so this billing choice cannot be written here. Review profile YAML to change it; '
             + 'the stored billing mode below stays the Host value and is not lost.')
-          notes.push(`Configured override: ${overrides.map(entry => `${entry.field}=${entry.value}`).join(' · ')}`)
+          notes.push(`Configured override: ${this.overrideFactsLine(overrides)}`)
         }
         notes.push(WebSettingsPage.BILLING_NOTE)
         break
