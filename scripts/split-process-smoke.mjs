@@ -512,6 +512,11 @@ export function assertSelectedVerdict(caseId, result) {
     `selected ${caseId}: the Herdr Split verdict ended as ${String(result?.rh01 ?? 'missing')}/${String(result?.rh02 ?? 'missing')}/${String(result?.rh03 ?? 'missing')}`)
     return
   }
+  if (caseId === 'herdr.h2-session-publication') {
+    assert(result?.rhH2Session === 'REAL_SPLIT_PROCESS_L6' && result?.hostReportedNothing === true,
+      `selected ${caseId}: the Herdr H2 Split verdict ended as ${String(result?.rhH2Session ?? 'missing')}`)
+    return
+  }
   if (caseId === 'web.product-browser-tui') {
     assert(result?.browserSubset === 'PASS'
       && (result?.status === 'PASS' || result?.status === 'DEFERRED_WITH_OWNER'),

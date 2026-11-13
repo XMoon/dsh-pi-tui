@@ -1,13 +1,16 @@
 /**
- * Herdr pane agent-state reporter (H1).
+ * Herdr pane agent-state reporter (H1) and main-Session reporter (H2).
  *
- * ONE Client-local owner of the `pane report-agent` / `pane release-agent`
- * external IO of the Pane this TUI Client really occupies. It is fed ONLY with
- * the already-derived main-Agent logical status (`TuiApp.effectiveProgramStatus`
- * through the read-only `onProgramStatus` observation) and maps it onto the
- * closed Herdr three-state vocabulary: `idle` / `working` / `blocked`. The
- * non-running `done`/`error` records are Herdr `idle`; a `clear` presentation
- * record is not a business change and is ignored.
+ * ONE Client-local owner of the `pane report-agent` / `report-agent-session` /
+ * `pane release-agent` external IO of the Pane this TUI Client really occupies.
+ * It is fed ONLY with the already-derived main-Agent logical status
+ * (`TuiApp.effectiveProgramStatus` through the read-only `onProgramStatus`
+ * observation) and with the already-committed main Session projection
+ * (`observeSession`, built by the Client composition from the official
+ * ownership core). The status maps onto the closed Herdr three-state
+ * vocabulary: `idle` / `working` / `blocked`. The non-running `done`/`error`
+ * records are Herdr `idle`; a `clear` presentation record is not a business
+ * change and is ignored.
  *
  * The external contract (Herdr `add-herdr-support`):
  * - qualification is the Herdr-injected environment (`HERDR_ENV=1` plus the
@@ -32,6 +35,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { ProgramStatus } from '../../domain/terminal-progress/program-status.ts'
+import type { HerdrSessionProjection } from './session.ts'
 
 /** The three states Herdr `pane report-agent --state` accepts. */
 export type HerdrAgentState = 'idle' | 'working' | 'blocked'
@@ -43,6 +47,12 @@ export type HerdrAgentState = 'idle' | 'working' | 'blocked'
 export interface HerdrReporter {
   /** Observe one already-derived main-Agent logical status. */
   publish(status: ProgramStatus): void
+  /**
+   * Observe the CURRENT committed main-owner Session projection, or undefined
+   * when there is no reportable Session. The composition decides the owner;
+   * the reporter never re-reads Session or Host state.
+   */
+  observeSession(session: HerdrSessionProjection | undefined): void
   /** Whether this Client currently owns a valid Pane registration source. */
   setQualified(qualified: boolean): void
   /** Stop new publication and withdraw a started registration (best effort). */
@@ -62,15 +72,20 @@ interface HerdrTarget {
   readonly binPath: string
 }
 
-/** One queued intent: a state report or the ordered registration withdrawal. */
+/** One queued intent: a state report, a Session report or the ordered
+ *  registration withdrawal. All three share one queue and one sequence. */
 interface ReportIntent {
   readonly kind: 'report'
   readonly state: HerdrAgentState
 }
+interface SessionIntent {
+  readonly kind: 'session'
+  readonly session: HerdrSessionProjection
+}
 interface ReleaseIntent {
   readonly kind: 'release'
 }
-type Intent = ReportIntent | ReleaseIntent
+type Intent = ReportIntent | SessionIntent | ReleaseIntent
 
 /** Read the Herdr qualification facts from the Pane environment. */
 function herdrTarget(env: NodeJS.ProcessEnv): HerdrTarget | undefined {
@@ -125,14 +140,39 @@ export function createHerdrReporter(
   let activeState: HerdrAgentState | undefined
   /** The last report dispatched by this reporter, for idle-queue dedupe. */
   let lastDispatched: HerdrAgentState | undefined
+  /** The newest main-owner Session projection, retained while unqualified. */
+  let latestSession: HerdrSessionProjection | undefined
+  /** At most one newer Session projection waits behind the live child. */
+  let pendingSession: HerdrSessionProjection | undefined
+  /** The Session projection of the live child, when it is a session intent. */
+  let activeSession: HerdrSessionProjection | undefined
+  /** The last Session intent this reporter DELIVERED (exit code 0). */
+  let lastSession: HerdrSessionProjection | undefined
+  /** Whether a `report-agent` child exited 0 in this registration cycle: the
+   *  external Pane authority every Session report must wait for. */
+  let paneAcknowledged = false
+  /** Whether THIS process dispatched a resume argv that Herdr may have saved.
+   *  Only a release can withdraw it; it is not a second Session authority. */
+  let reportedResumePresent = false
+  /** A cleanup release must re-register the Pane and the CURRENT projection. */
+  let requeueAfterRelease = false
   /** The one live child, or `undefined` when the queue is idle. */
-  let active: { readonly child: ChildProcess; readonly timer: NodeJS.Timeout } | undefined
+  let active: { readonly child: ChildProcess; readonly timer: NodeJS.Timeout; readonly kind: Intent['kind'] } | undefined
   /** At most one newer report waits behind the live child (latest wins). */
   let pendingReport: HerdrAgentState | undefined
   /** The ordered withdrawal barrier: it always precedes a newer report. */
   let pendingRelease = false
   /** The newest `--seq` value this process dispatched. */
   let lastSeq = 0
+
+  /** Exact Session-intent identity: same id and same resume argv. */
+  const sameSession = (a: HerdrSessionProjection | undefined, b: HerdrSessionProjection | undefined): boolean => {
+    if (a === undefined || b === undefined) return a === b
+    if (a.sessionId !== b.sessionId) return false
+    if (a.resumeArgv === undefined || b.resumeArgv === undefined) return a.resumeArgv === b.resumeArgv
+    return a.resumeArgv.length === b.resumeArgv.length
+      && a.resumeArgv.every((arg, index) => arg === b.resumeArgv?.[index])
+  }
 
   /** D6: each ACTUAL dispatch takes `max(last+1, Date.now()*1000)`; reports
    *  and releases share the one sequence. */
@@ -141,8 +181,19 @@ export function createHerdrReporter(
     return lastSeq
   }
 
+  /** After an ordered withdrawal, a cleanup release must re-register the Pane
+   *  with the CURRENT H1 state and then the CURRENT Session projection. */
+  const requeueAfterWithdrawal = (): void => {
+    if (!requeueAfterRelease) return
+    requeueAfterRelease = false
+    if (disposed || !qualified) return
+    pendingReport = latest
+    pendingSession = latestSession
+  }
+
   /** Dispatch the next queued intent, if any. A withdrawal always precedes a
-   *  newer report, and at most one report is retained (latest wins). */
+   *  newer report, then the latest state, then the current Session; at most one
+   *  report and one Session projection are retained (latest wins). */
   const advanceQueue = (): void => {
     if (pendingRelease) {
       pendingRelease = false
@@ -153,6 +204,16 @@ export function createHerdrReporter(
     if (state !== undefined) {
       pendingReport = undefined
       dispatch({ kind: 'report', state })
+      return
+    }
+    const session = pendingSession
+    if (session !== undefined) {
+      // A Session report is only legal once this registration cycle has a REAL
+      // successful `report-agent`; otherwise Herdr answers resume_not_accepted.
+      // Until then the latest projection stays buffered (no retry loop).
+      if (!paneAcknowledged) return
+      pendingSession = undefined
+      dispatch({ kind: 'session', session })
     }
   }
 
@@ -161,7 +222,9 @@ export function createHerdrReporter(
     if (settled === undefined) return
     active = undefined
     activeState = undefined
+    activeSession = undefined
     clearTimeout(settled.timer)
+    if (settled.kind === 'release') requeueAfterWithdrawal()
     advanceQueue()
   }
 
@@ -175,12 +238,21 @@ export function createHerdrReporter(
         '--state', intent.state,
         '--seq', String(nextSeq()),
       ]
-      : [
-        'pane', 'release-agent', target.paneId,
-        '--source', HERDR_SOURCE,
-        '--agent', HERDR_AGENT,
-        '--seq', String(nextSeq()),
-      ]
+      : intent.kind === 'release'
+        ? [
+          'pane', 'release-agent', target.paneId,
+          '--source', HERDR_SOURCE,
+          '--agent', HERDR_AGENT,
+          '--seq', String(nextSeq()),
+        ]
+        : [
+          'pane', 'report-agent-session', target.paneId,
+          '--source', HERDR_SOURCE,
+          '--agent', HERDR_AGENT,
+          '--seq', String(nextSeq()),
+          '--agent-session-id', intent.session.sessionId,
+          ...(intent.session.resumeArgv === undefined ? [] : ['--', ...intent.session.resumeArgv]),
+        ]
     let child: ChildProcess
     try {
       child = spawn(target.binPath, args, {
@@ -195,6 +267,7 @@ export function createHerdrReporter(
         error: error instanceof Error ? error.name : 'spawn',
       })
       // No child was created, so the queue continues exactly like a settle.
+      if (intent.kind === 'release') requeueAfterWithdrawal()
       advanceQueue()
       return
     }
@@ -219,7 +292,15 @@ export function createHerdrReporter(
     })
     child.once('close', (code) => {
       if (settled) return
-      if (code !== 0 && code !== null) diag?.warn('herdr pane report failed', { reason: intent.kind, code })
+      if (code !== 0 && code !== null) {
+        diag?.warn('herdr pane report failed', { reason: intent.kind, code })
+      } else if (code === 0 && intent.kind === 'report') {
+        // The Pane is now held by this source: only from here may a Session
+        // report follow (Herdr would reject it earlier).
+        paneAcknowledged = true
+      } else if (code === 0 && intent.kind === 'session') {
+        lastSession = intent.session
+      }
       finish()
     })
     // The CLI is a short-lived, stdio-detached helper: it must never keep the
@@ -228,23 +309,61 @@ export function createHerdrReporter(
     if (intent.kind === 'report') {
       activeState = intent.state
       lastDispatched = intent.state
+    } else if (intent.kind === 'session') {
+      activeSession = intent.session
+      // A dispatched resume argv may already be persisted by Herdr: only an
+      // ordered release can withdraw it from this process's point of view.
+      if (intent.session.resumeArgv !== undefined) reportedResumePresent = true
     } else {
       activeState = undefined
+      // The registration (and any saved resume target) is being withdrawn.
+      reportedResumePresent = false
+      paneAcknowledged = false
+      lastSession = undefined
     }
-    active = { child, timer }
+    active = { child, timer, kind: intent.kind }
   }
 
-  const enqueue = (intent: Intent): void => {
+  const enqueue = (intent: ReportIntent | ReleaseIntent): void => {
     if (intent.kind === 'release') {
-      // A withdrawal clears every queued status: an old state must never be
-      // written after the registration it belonged to was withdrawn.
+      // A withdrawal clears every queued status and Session: an old fact must
+      // never be written after the registration it belonged to was withdrawn.
       pendingReport = undefined
+      pendingSession = undefined
       if (active === undefined) dispatch(intent)
       else pendingRelease = true
       return
     }
     if (active === undefined) dispatch(intent)
     else pendingReport = intent.state
+  }
+
+  /** Queue the CURRENT Session fact from the retained desired projection.
+   *  A Session target without a recoverable resume argv can only replace an
+   *  older resume target through Herdr's ordered release -> re-register cycle. */
+  const reconcileSession = (): void => {
+    const desired = latestSession
+    if (desired !== undefined && desired.resumeArgv !== undefined) {
+      if (sameSession(pendingSession ?? activeSession ?? lastSession, desired)) return
+      pendingSession = desired
+      if (active === undefined) advanceQueue()
+      return
+    }
+    if (reportedResumePresent) {
+      // No public Herdr command clears only the resume argv: withdraw this
+      // source's registration, then re-acquire it with the current facts.
+      pendingSession = undefined
+      requeueAfterRelease = true
+      enqueue({ kind: 'release' })
+      return
+    }
+    if (desired === undefined) {
+      pendingSession = undefined
+      return
+    }
+    if (sameSession(pendingSession ?? activeSession ?? lastSession, desired)) return
+    pendingSession = desired
+    if (active === undefined) advanceQueue()
   }
 
   return {
@@ -261,11 +380,27 @@ export function createHerdrReporter(
       if (queued === state) return
       enqueue({ kind: 'report', state })
     },
+    observeSession(session) {
+      if (disposed) return
+      latestSession = session
+      if (!qualified) {
+        // The last Host generation's Session intent never survives a
+        // qualification loss; the CURRENT projection is re-sampled on requalify.
+        pendingSession = undefined
+        return
+      }
+      reconcileSession()
+    },
     setQualified(next) {
       if (disposed || qualified === next) return
       qualified = next
       if (!next) {
-        // Never withdraw a registration this reporter never started.
+        // Never withdraw a registration this reporter never started, but every
+        // per-registration Session fact is already void.
+        pendingSession = undefined
+        requeueAfterRelease = false
+        paneAcknowledged = false
+        lastSession = undefined
         if (registered === undefined) return
         registered = undefined
         // The withdrawn baseline can never dedupe the first report of a later
@@ -274,9 +409,12 @@ export function createHerdrReporter(
         enqueue({ kind: 'release' })
         return
       }
-      // Requalification republishes only the CURRENT logical fact: the caller
-      // has just accepted a fresh authoritative snapshot, so no older state
-      // from the previous qualification is replayed.
+      // Requalification re-registers only the CURRENT facts: the state caller
+      // just accepted plus the CURRENT main-owner Session projection. A stale
+      // Session from the previous registration can never be replayed.
+      paneAcknowledged = false
+      lastSession = undefined
+      pendingSession = latestSession
       if (latest === undefined) return
       registered = latest
       enqueue({ kind: 'report', state: latest })
@@ -285,6 +423,10 @@ export function createHerdrReporter(
       if (disposed) return
       disposed = true
       qualified = false
+      pendingSession = undefined
+      requeueAfterRelease = false
+      paneAcknowledged = false
+      lastSession = undefined
       if (registered === undefined) return
       registered = undefined
       enqueue({ kind: 'release' })
