@@ -7,8 +7,8 @@
  * enabled/read-only/removable/availability/official/source/installTarget facts
  * are rendered exactly as the port delivers them. The ONLY local policies are
  * the Current-TUI surface-safety layer (which NARROWS effective actions) and
- * the version-limited rc.2 presentation identity lists (which SELECT a section,
- * never create a card or fabricate catalog facts).
+ * the version-limited legacy presentation identity lists (which SELECT a
+ * section, never create a card or fabricate catalog facts).
  *
  * @module @xmoon76/dsh-pi-tui/app/plugin-manager/model
  */
@@ -76,11 +76,13 @@ interface ExperimentalBundleSupport {
 }
 
 /**
- * The FROZEN rc.2 product-support copy (§3). This is bounded presentation
- * evidence for the exact package identities, NOT Host capability state: it
- * never reads enablement/fiber/availability and never claims a live Host PASS.
- * It is deliberately module-private — no runtime qualification store is built
- * from it (the live ledger stays in `docs/architecture/host-client.md`).
+ * The FROZEN official product-support copy (§3) — the historical rc.2 Bxx set
+ * plus the rc.3 `@deepseek-ai/dsh-deepseek-chat-import` Web-only member. This is
+ * bounded presentation evidence for the exact package identities, NOT Host
+ * capability state: it never reads enablement/fiber/availability and never
+ * claims a live Host PASS. It is deliberately module-private — no runtime
+ * qualification store is built from it (the live ledger stays in
+ * `docs/architecture/host-client.md`).
  */
 const EXPERIMENTAL_BUNDLE_SUPPORT: Readonly<Record<string, ExperimentalBundleSupport>> = Object.freeze({
   '@deepseek-ai/dsh-experimental-voice-input-bundle': {
@@ -153,6 +155,11 @@ const EXPERIMENTAL_BUNDLE_SUPPORT: Readonly<Record<string, ExperimentalBundleSup
   '@deepseek-ai/dsh-experimental-forge-bundle': {
     surface: 'Host Git/worktree/change-request capability with an optional Web Forge panel; this TUI has no native Forge panel.',
     limit: 'Requires a Git repository; GitHub authorization/writes and worktree/Session ownership are external. Only provable state is shown; no TUI approval flow is promised.',
+    risk: true,
+  },
+  '@deepseek-ai/dsh-deepseek-chat-import': {
+    surface: 'Official optional Host bundle; DeepSeek chat export import is available through the Web UI, not as a PiTui import action.',
+    limit: 'Owner-only Web upload of a DeepSeek export ZIP can create persistent Sessions in a selected Workspace. The Host buffers up to 512 MiB per upload by default; importing again creates duplicates. PiTui cannot upload, inspect or cancel that import. Imported Sessions remain after the bundle is disabled.',
     risk: true,
   },
   '@deepseek-ai/dsh-cua-bundle': {

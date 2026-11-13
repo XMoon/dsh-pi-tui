@@ -62,11 +62,14 @@ export type PluginPresentationRole = 'current-tui' | 'tui-extension' | 'dsh-plug
 export type PluginOrigin = 'official' | 'third-party' | 'unknown'
 
 /**
- * The 14 rc.2 B01–B14 Optional/On-demand identities, in the frozen display
- * order (§4.4). This is the LEGACY PRESENTATION ORDER only: it no longer
- * answers which package is official Experimental (`EXPERIMENTAL_BUNDLES` does)
- * and it is never catalog authority — a missing Host item is a catalog
- * discrepancy, not a generated card.
+ * The legacy B01–B14 Optional/On-demand identities, in the frozen display
+ * order (§4.4). This is the historical presentation order carried over from the
+ * 0.2.2-rc.2 line. It is the LEGACY PRESENTATION ORDER only: official
+ * Experimental identity now comes from the installed release's
+ * `EXPERIMENTAL_BUNDLES` (a new release member such as the rc.3
+ * `@deepseek-ai/dsh-deepseek-chat-import` is Experimental by that set, not by
+ * this list), and it is never catalog authority — a missing Host item is a
+ * catalog discrepancy, not a generated card.
  */
 export const EXPERIMENTAL_BUNDLE_IDS: readonly string[] = Object.freeze([
   '@deepseek-ai/dsh-experimental-voice-input-bundle',
@@ -85,10 +88,10 @@ export const EXPERIMENTAL_BUNDLE_IDS: readonly string[] = Object.freeze([
 ])
 
 /**
- * The exact rc.2 built-in base bundle ids (the shipped `PROFILE_TEMPLATES`
- * bundle sets plus the default profile bundle). `official:false` on these is
- * NOT third-party evidence: the DSH installation ships them. This list is
- * version-limited evidence, never a name heuristic.
+ * The exact built-in base bundle ids carried over from the 0.2.2-rc.2 line (the
+ * shipped `PROFILE_TEMPLATES` bundle sets plus the default profile bundle).
+ * `official:false` on these is NOT third-party evidence: the DSH installation
+ * ships them. This list is version-limited evidence, never a name heuristic.
  */
 export const OFFICIAL_BASE_BUNDLE_IDS: readonly string[] = Object.freeze([
   '@deepseek-ai/dsh-base',
