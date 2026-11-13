@@ -212,7 +212,12 @@ export function createHerdrReporter(
 
   /** A withdrawal that FAILED (non-zero, ENOENT, spawn throw, timeout) proves
    *  nothing: keep the cleanup outstanding so the next real lifecycle event
-   *  retries it, and never re-register the Pane on the strength of it. */
+   *  retries it, and never re-register the Pane on the strength of it.
+   *
+   *  An attempt remembered by a real event that arrived WHILE this withdrawal
+   *  was in flight is NOT cleared here: that event is newer than the failed
+   *  attempt, so its one retry is still owed (an attempt recorded before the
+   *  cleanup obligation existed was already discarded when it was created). */
   const withdrawalFailed = (): void => {
     if (reportedResumePresent) cleanupRequired = true
   }
@@ -282,9 +287,14 @@ export function createHerdrReporter(
    * is taken HERE, on the settled facts: a registration that really succeeded
    * needs no duplicate `report-agent` (its baseline already dedupes the state);
    * only an unestablished Pane or an outstanding cleanup is retried.
+   *
+   * It stays OWED while the queue is busy: acting then would start a second
+   * child (the one-live-child invariant) and could dispatch the Session before
+   * the state report it must follow. The next settle consumes it.
    */
   const consumeRegistrationRetry = (): void => {
     if (!registrationRetryOwed) return
+    if (active !== undefined || pendingRelease) return
     registrationRetryOwed = false
     if (!paneAcknowledged || cleanupRequired) reattemptRegistration()
     else advanceQueue()
@@ -457,9 +467,12 @@ export function createHerdrReporter(
     if (reportedResumePresent) {
       // No public Herdr command clears only the resume argv: withdraw this
       // source's registration, then re-acquire it with the current facts. Until
-      // that withdrawal SUCCEEDS the cleanup stays outstanding.
+      // that withdrawal SUCCEEDS the cleanup stays outstanding, and the cleanup
+      // is now the ONLY owed action — a registration attempt remembered from an
+      // earlier event must not fire as a self-made retry of the withdrawal.
       pendingSession = undefined
       cleanupRequired = true
+      registrationRetryOwed = false
       enqueue({ kind: 'release' })
       return
     }
