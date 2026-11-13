@@ -525,7 +525,18 @@ export async function apply(ctx) {
           { op: 'set', path: ['baseURL'], value: seedBaseURL },
         ])
         const { credentialRef } = await import('@deepseek-ai/dsh-credentials')
-        await ctx.credentials.set(credentialRef('DEEPSEEK_API_KEY'), sentinel)
+        const ref = credentialRef('DEEPSEEK_API_KEY')
+        // The sentinel reference is fixture state on the shared lane's ONE
+        // dshHome: snapshot the prior reference value and restore the exact
+        // pre-case state at row disposal (same lifecycle as the f7a/f7b record
+        // seeds) so no later case inherits the sentinel.
+        const previous = await ctx.credentials.resolve(ref)
+        await ctx.credentials.set(ref, sentinel)
+        ctx.effect(() => async () => {
+          if (previous === undefined) await ctx.credentials.unset(ref)
+          else await ctx.credentials.set(ref, previous.value)
+          record('f3-credential-restored', { hadPrevious: previous !== undefined })
+        }, 'f3-credential-restorer')
         const descriptors = ctx.settings.describe()
         const revisions = Object.fromEntries(descriptors.map(descriptor => [descriptor.ns, descriptor.revision]))
         const apiValue = descriptors.find(descriptor => descriptor.ns === apiNamespace)?.value
@@ -1358,7 +1369,6 @@ export async function apply(ctx) {
     }
     register('f7a-main', 'F7A main', runMain)
     register('f7a-other', 'F7A other', runOther)
-    record('f7a-flows-registered', { keys: ['llm-pi-ai/f7a-main', 'llm-pi-ai/f7a-other'] })
     // The committed flow records are fixture products on the shared lane's ONE
     // dshHome: snapshot and restore them through the official store at row
     // disposal so no later case inherits them (same lifecycle as the F7B
@@ -1373,6 +1383,7 @@ export async function apply(ctx) {
     for (const key of flowKeys) {
       baseline.push({ key, pre: await credentials.readRecord(key) })
     }
+    record('f7a-flows-registered', { keys: ['llm-pi-ai/f7a-main', 'llm-pi-ai/f7a-other'], baselineKeys })
     ctx.effect(() => async () => {
       for (const { key, pre } of baseline) {
         if (pre === undefined) await credentials.deleteRecord(key)
@@ -1439,6 +1450,7 @@ export async function apply(ctx) {
     record('f7b-records-seeded', {
       keys: listed.map(entry => String(entry.key)).sort(),
       kinds: listed.map(entry => `${String(entry.key)}:${entry.kind}`).sort(),
+      baselineKeys,
     })
     // The REAL official record-updated event is the observable commit proof the
     // smoke waits for after a delete (one key, never a payload).

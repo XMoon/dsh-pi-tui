@@ -559,6 +559,7 @@ export async function runWebProviderSettingsF3(context) {
   let clientA
   let clientB
   let host
+  let disposed = false
 
   try {
     // The qualification fixture has NO scenario that writes the official Web
@@ -1003,8 +1004,18 @@ export async function runWebProviderSettingsF3(context) {
       sendOriginalQuestion: OFFICIAL.sendOriginalQuestion,
     })
 
+    // ── Teardown restores the pre-case credential reference (RFL-010). ──────
+    // The fixture's disposal unsets its sentinel reference through the same
+    // official authority, so a later case of the shared lane inherits the
+    // exact pre-case reference state.
+    await scene.dispose()
+    disposed = true
+    const restored = await waitForC1WorkEvent(root, event => event.kind === 'f3-credential-restored', 'F3 credential restore')
+    assert(!readFileSync(join(context.dshHome, '.credentials.yaml'), 'utf8').includes(sentinel),
+      'F3: the fixture sentinel reference survived teardown')
+    trace('f3.credential-restored', { hadPrevious: restored.hadPrevious === true })
     return { status: 'PASS' }
   } finally {
-    await scene.dispose()
+    if (!disposed) await scene.dispose()
   }
 }

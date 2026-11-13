@@ -176,7 +176,11 @@ export async function runF7AProviderAuthorization(context) {
 
   try {
     const { host } = await scene.startC1Host('f7a-authorization', 'F7A authorization Host', {}, root)
-    await waitForEvent(root, event => event.kind === 'f7a-flows-registered', 'F7A qualification flows registered on the official authorization service')
+    const registered = await waitForEvent(root, event => event.kind === 'f7a-flows-registered', 'F7A qualification flows registered on the official authorization service')
+    // A pre-existing fixture key would be RESTORED at teardown, contradicting
+    // the must-disappear assertion below: rule that premise out at the start.
+    assert(registered.baselineKeys.every(key => ![MAIN_KEY, OTHER_KEY].includes(key)),
+      `F7A: a fixture record key already existed before the case: ${JSON.stringify(registered.baselineKeys)}`)
 
     // ── Client A opens the provider detail; Client B opens it BEFORE A starts,
     // so B's roster snapshot still says inFlight=false when it tries the same

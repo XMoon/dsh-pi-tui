@@ -130,7 +130,18 @@ export function createC1Scene(context, options = {}) {
   }
   const exitC1Client = async (client, label) => {
     client.send('/exit\r')
-    const exit = await client.waitForExit(60_000)
+    let exit
+    try {
+      exit = await client.waitForExit(60_000)
+    } catch (error) {
+      // The exit wait carries no frame by itself; capture the client's last
+      // screen so a held exit is diagnosable (composer poison, open modal…).
+      const frame = await client.viewport().catch(() => [])
+      throw new SplitSmokeAssertionError(
+        `${label} exit timed out; last frame: ${JSON.stringify(frame.slice(-16))}`,
+        { cause: error },
+      )
+    }
     assert(exit.code === 0 && exit.signal === null, `${label} exit was ${JSON.stringify(exit)}`)
     await client.dispose()
     return exit
