@@ -11,10 +11,17 @@ import test from 'node:test'
 import {
   RemoteModelCatalog,
   classifyRemoteModelFailure,
+  classifyRemoteDefaultModelFailure,
   type RemoteModelBinding,
   type RemoteModelRemotes,
   type RemoteModelSessionsSource,
 } from '../../../src/runtime/remote/model-remote.ts'
+import type {
+  PiTuiDefaultModelNamespace,
+  PiTuiDefaultModelSaveCall,
+  PiTuiDefaultModelSaveResult,
+  PiTuiDefaultModelSelection,
+} from '../../../src/runtime/remote/pi-tui-default-model-contract.ts'
 import { createObservableGenerationHarness, type GenerationHarness } from '../../support/remote-generation.ts'
 
 /** A structural official Remote failure (code is the only discriminator). */
@@ -61,6 +68,12 @@ interface ModelHarness {
   /** Model a same-id release + re-retain: the next borrow yields a NEW binding
    * generation on the SAME connection. */
   replaceBinding(sessionId: string): void
+  /** Every selection passed to the private sessionless default-model service. */
+  readonly defaultModelCalls: PiTuiDefaultModelSelection[]
+  setDefaultModelResult(result: { ok: true; value: PiTuiDefaultModelSaveResult } | { ok: false; error: unknown }): void
+  setDefaultModelThrow(error: unknown): void
+  /** Run inside the private save call before it resolves (e.g. a reconnect). */
+  setDefaultModelHook(hook: () => void): void
 }
 
 function modelHarness(): ModelHarness {
@@ -121,9 +134,24 @@ function modelHarness(): ModelHarness {
       return binding
     },
   }
+  let defaultModelResult: { ok: true; value: PiTuiDefaultModelSaveResult } | { ok: false; error: unknown } = {
+    ok: true,
+    value: { kind: 'saved' },
+  }
+  let defaultModelThrow: unknown
+  let defaultModelHook: (() => void) | undefined
+  const defaultModelCalls: PiTuiDefaultModelSelection[] = []
+  const piTuiDefaultModel: PiTuiDefaultModelNamespace = {
+    saveSelection: async (selection) => {
+      defaultModelCalls.push(selection)
+      defaultModelHook?.()
+      if (defaultModelThrow !== undefined) throw defaultModelThrow
+      return defaultModelResult as unknown as PiTuiDefaultModelSaveCall
+    },
+  }
   const generation = createObservableGenerationHarness()
   return {
-    catalog: new RemoteModelCatalog(session, sessions, generation.source),
+    catalog: new RemoteModelCatalog(session, sessions, generation.source, undefined, piTuiDefaultModel),
     generation,
     sources: { session, sessions, generation: generation.source },
     calls,
@@ -138,6 +166,10 @@ function modelHarness(): ModelHarness {
     replaceBinding: (sessionId) => { bindings.delete(sessionId) },
     setCatalogHook: (hook) => { catalogHook = hook },
     queueCatalogResults: (...results) => { catalogQueue.push(...results) },
+    defaultModelCalls,
+    setDefaultModelResult: (result) => { defaultModelResult = result },
+    setDefaultModelThrow: (error) => { defaultModelThrow = error },
+    setDefaultModelHook: (hook) => { defaultModelHook = hook },
   }
 }
 
@@ -224,11 +256,124 @@ test('sessionSelection follows the durable projection and falls back to the Host
   assert.equal(harness.catalog.sessionSelection('session-missing'), undefined)
 })
 
-test('the Remote adapter never performs a second global-default write', async () => {
+test('a sessionless Save default dispatches EXACTLY once through the private Host service and commits', async () => {
   const harness = modelHarness()
-  const outcome = await harness.catalog.saveDefaultSelection({ provider: 'p', model: 'm1' })
-  assert.equal(outcome.kind, 'unsupported')
-  if (outcome.kind === 'unsupported') assert.match(outcome.reason, /no global-default model write/)
+  await harness.catalog.loadDirectory()
+  assert.deepEqual(harness.catalog.defaultSelection(), { provider: 'p', model: 'm-default' })
+  const selection = { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'high' }
+  const outcome = await harness.catalog.saveDefaultSelection(selection)
+  assert.deepEqual(outcome, { kind: 'committed', value: undefined })
+  assert.deepEqual(harness.defaultModelCalls, [selection], 'the exact selection crosses once')
+  // A committed default write invalidates the cached Host default: the previous
+  // value is no longer provable, so the sessionless surface reloads.
+  assert.equal(harness.catalog.defaultSelection(), undefined,
+    'a committed sessionless save drops the now-unprovable cached default')
+})
+
+test('a Host refused save is a proven rejection with an actionable reason and no retry', async () => {
+  for (const reason of [
+    'owner-required',
+    'default-model-service-unavailable',
+    'profile-persistence-unavailable',
+    'profile-entry-unavailable',
+  ] as const) {
+    const harness = modelHarness()
+    await harness.catalog.loadDirectory()
+    harness.setDefaultModelResult({ ok: true, value: { kind: 'refused', reason } })
+    const outcome = await harness.catalog.saveDefaultSelection({ provider: 'deepseek-official', model: 'deepseek-v4-pro' })
+    assert.equal(outcome.kind, 'rejected', `reason ${reason} must be a rejection`)
+    if (outcome.kind === 'rejected') {
+      assert.equal(outcome.error.code, `piTuiDefaultModel/${reason}`)
+      assert.ok(outcome.error.message.length > 0, 'the rejection carries an actionable message')
+    }
+    assert.equal(harness.defaultModelCalls.length, 1, 'the official save is dispatched exactly once, never retried')
+    // A proven rejection invalidates nothing: a pre-write refusal keeps the cache.
+    assert.deepEqual(harness.catalog.defaultSelection(), { provider: 'p', model: 'm-default' },
+      'a proven refusal leaves the previously loaded Host default intact')
+  }
+})
+
+test('a malformed success payload is indeterminate, never a fabricated commit', async () => {
+  const harness = modelHarness()
+  harness.setDefaultModelResult({ ok: true, value: { kind: 'applied' } as never })
+  const outcome = await harness.catalog.saveDefaultSelection({ provider: 'p', model: 'm' })
+  assert.equal(outcome.kind, 'indeterminate')
+  if (outcome.kind === 'indeterminate') assert.equal(outcome.error.code, 'piTuiDefaultModel/result-invalid')
+})
+
+test('a disconnected generation is cancelled with zero dispatch', async () => {
+  const harness = modelHarness()
+  harness.generation.set(undefined)
+  const outcome = await harness.catalog.saveDefaultSelection({ provider: 'p', model: 'm' })
+  assert.deepEqual(outcome, { kind: 'cancelled' })
+  assert.deepEqual(harness.defaultModelCalls, [], 'no dispatch without a live connection')
+})
+
+test('an invalid selection is rejected at the Client boundary with zero dispatch', async () => {
+  const harness = modelHarness()
+  const outcome = await harness.catalog.saveDefaultSelection({ provider: '', model: 'm' })
+  assert.equal(outcome.kind, 'rejected')
+  if (outcome.kind === 'rejected') assert.equal(outcome.error.code, 'session/model-invalid')
+  assert.deepEqual(harness.defaultModelCalls, [])
+})
+
+test('a proven Gateway pre-invocation failure is rejected; every other dispatched failure is indeterminate', async () => {
+  const preInvocation = modelHarness()
+  preInvocation.setDefaultModelThrow({ code: 'gateway/arguments-invalid', message: 'bad args' })
+  const rejected = await preInvocation.catalog.saveDefaultSelection({ provider: 'p', model: 'm' })
+  assert.equal(rejected.kind, 'rejected', 'a Gateway pre-invocation refusal proves the save never ran')
+
+  for (const error of [
+    { code: 'gateway/internal', message: 'carrier lost' },
+    { code: 'gateway/cancelled', message: 'cancelled after dispatch' },
+    { code: 'gateway/result-invalid', message: 'malformed envelope' },
+    new Error('no code'),
+  ]) {
+    const harness = modelHarness()
+    await harness.catalog.loadDirectory()
+    harness.setDefaultModelThrow(error)
+    const outcome = await harness.catalog.saveDefaultSelection({ provider: 'p', model: 'm' })
+    assert.equal(outcome.kind, 'indeterminate',
+      `a dispatched failure (${JSON.stringify(error)}) must stay indeterminate, never a blind rejection`)
+    // An indeterminate same-generation write invalidates the cached default.
+    assert.equal(harness.catalog.defaultSelection(), undefined)
+  }
+})
+
+test('a generation replaced during the save keeps the commit but never pollutes the new cache', async () => {
+  const harness = modelHarness()
+  await harness.catalog.loadDirectory()
+  harness.setDefaultModelHook(() => harness.generation.set({ id: 2 }))
+  const outcome = await harness.catalog.saveDefaultSelection({ provider: 'deepseek-official', model: 'deepseek-v4-pro' })
+  assert.equal(outcome.kind, 'committed', 'a real Host commit is not undone by a later reconnect')
+  // The replacement generation has no cache; a fresh read serves ITS own value.
+  assert.equal(harness.catalog.defaultSelection(), undefined,
+    'the old write must not leave a stale default visible on the new generation')
+})
+
+test('a miss-only custom dispatch classifier is NOT applied to this endpoint', () => {
+  // A domain code that is NOT a Gateway pre-invocation code is not a proof.
+  assert.equal(classifyRemoteDefaultModelFailure({ code: 'agent-default-model/write-failed', message: 'x' }).kind,
+    'indeterminate')
+  assert.equal(classifyRemoteDefaultModelFailure({ code: 'gateway/arguments-invalid', message: 'x' }).kind, 'rejected')
+  assert.equal(classifyRemoteDefaultModelFailure(new Error('no code')).kind, 'indeterminate')
+})
+
+test('a Live Session selectSessionModel performs NO private default-model save', async () => {
+  const harness = modelHarness()
+  await harness.catalog.selectSessionModel('session-a', { provider: 'p', model: 'm1' })
+  assert.deepEqual(harness.defaultModelCalls, [],
+    'a Live Session model write stays on official session.selectModel, never the sessionless private save')
+})
+
+test('two sequential sessionless saves each dispatch once, in call order', async () => {
+  const harness = modelHarness()
+  await harness.catalog.saveDefaultSelection({ provider: 'p', model: 'm1' })
+  await harness.catalog.saveDefaultSelection({ provider: 'p', model: 'm2' })
+  assert.deepEqual(harness.defaultModelCalls, [
+    { provider: 'p', model: 'm1' },
+    { provider: 'p', model: 'm2' },
+  ], 'each save dispatches exactly once, in the actual call order')
 })
 
 test('a reconnect invalidates the cached directory projection', async () => {

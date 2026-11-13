@@ -59,6 +59,7 @@ import type { PiTuiHostUserShellNamespace } from '../../runtime/remote/pi-tui-ho
 import type { PiTuiAuthorizationNamespace } from '../../runtime/remote/pi-tui-authorization-contract.ts'
 import type { PiTuiCredentialRecordsNamespace } from '../../runtime/remote/pi-tui-credential-records-contract.ts'
 import type { PiTuiSessionPolicyNamespace } from '../../runtime/remote/pi-tui-session-policy-contract.ts'
+import type { PiTuiDefaultModelNamespace } from '../../runtime/remote/pi-tui-default-model-contract.ts'
 import {
   RemoteSchedulePort,
   type RemoteScheduleEvents,
@@ -190,6 +191,11 @@ export interface RemoteM3ARuntimeSource {
      *  mounted contribution publishes it; the Remote session-policy port is
      *  its only consumer. */
     readonly piTuiSessionPolicy: PiTuiSessionPolicyNamespace
+    /** The PRIVATE `piTuiDefaultModel` namespace (M6): the sessionless default
+     *  model write delegated to the official `agentDefaultModel.saveSelection`.
+     *  The SAME mounted contribution publishes it; the Remote model catalog is
+     *  its only consumer. */
+    readonly piTuiDefaultModel: PiTuiDefaultModelNamespace
     /** The PRIVATE `piTuiWebAccess` namespace (M5-W PR-C): the Split-Client
      *  Web frontend control (`/web`). The SAME mounted contribution publishes
      *  it; `/web` is its only consumer. */
@@ -264,7 +270,7 @@ export function createRemoteM3ASemantics(
   const forwardedEvents = remote.$on.bind(remote) as unknown as
     RemoteInteractionRuntimeSource['remote']['$on']
       & RemotePluginManagerSource['$on']
-  const modelCatalog = new RemoteModelCatalog(remote.session, sessions, generation, remote.llm)
+  const modelCatalog = new RemoteModelCatalog(remote.session, sessions, generation, remote.llm, remote.piTuiDefaultModel)
   const interaction = new RemoteInteractionPort({
     sessions,
     remote: { userQuestions: remote.userQuestions, $on: forwardedEvents },

@@ -22,8 +22,9 @@
  *
  * The features here are file references, terminal progress, the official
  * Web frontend availability toggle, Host one-shot Shell/completion, Skills,
- * the provider-native authorization + stored-credential-record bridges, and
- * the exact-Session policy (approval/sandbox) bridge.
+ * the provider-native authorization + stored-credential-record bridges, the
+ * exact-Session policy (approval/sandbox) bridge, and the sessionless
+ * default-model save bridge.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/pi-tui-remote-contribution
  */
@@ -63,6 +64,7 @@ import {
   PI_TUI_SESSION_POLICY_READ,
   PI_TUI_SESSION_POLICY_SET_APPROVAL,
 } from './pi-tui-session-policy-contract.ts'
+import { PI_TUI_DEFAULT_MODEL_SAVE_SELECTION } from './pi-tui-default-model-contract.ts'
 
 /** The npm package that owns every private Remote invocation here. A test
  *  guards that it equals each contract module's own package constant. */
@@ -94,6 +96,7 @@ export const PI_TUI_HOST_CONTRIBUTION: TypertContribution = {
     PI_TUI_CREDENTIAL_RECORDS_DELETE,
     PI_TUI_SESSION_POLICY_READ,
     PI_TUI_SESSION_POLICY_SET_APPROVAL,
+    PI_TUI_DEFAULT_MODEL_SAVE_SELECTION,
   ],
 }
 
@@ -120,5 +123,6 @@ export const PI_TUI_CLIENT_CONTRIBUTION: TypertRemoteContribution = {
     PI_TUI_CREDENTIAL_RECORDS_DELETE,
     PI_TUI_SESSION_POLICY_READ,
     PI_TUI_SESSION_POLICY_SET_APPROVAL,
+    PI_TUI_DEFAULT_MODEL_SAVE_SELECTION,
   ],
 }

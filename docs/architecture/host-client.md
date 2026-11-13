@@ -438,6 +438,33 @@ Client filesystem read:
   spellings). The two scopes share the port and the result vocabulary but not a
   directory authority.
 
+### Sessionless default-model write
+
+A sessionless `/model` `Save default` is a HOST-owned write, never a Client
+settings edit:
+
+- **One Owner-only private service.** The Host exposes exactly one private method,
+  `piTuiDefaultModel/saveSelection(selection, signal)`, delegating to the OFFICIAL
+  `agentDefaultModel.saveSelection()` business service. The wire carries only the
+  three model-selection fields (provider, model, optional reasoning effort) — no
+  Session id, cwd, settings namespace or config patch. The Host refuses
+  `owner-required` BEFORE reading any default-model/config/Loader service, and a
+  `saved` reply is only possible on a profile-backed Host whose ConfigEditor and
+  active `@deepseek-ai/dsh-agent-default-model` Loader entry actually exist (the
+  upstream save silently resolves without them). The Client never invents a
+  settings write, never calls `settings.replace`/`ConfigEditor.edit`, and never
+  creates a Session to persist the default.
+- **The write and the UI are different axes.** The Host result is the durable
+  business settlement (`saved`/`refused`); the Client's own currentness — picker
+  supersession, the pending/unconfirmed footer marker, Connection generation —
+  only decides whether a result may still paint the surface. A committed Host
+  write is never downgraded because a later Client read failed, and a dispatched
+  failure (lost ACK, `gateway/internal`, no code) stays `indeterminate`, never a
+  blind rejection or an automatic retry.
+- **Live Session selection is unchanged.** A live Session's model choice keeps
+  the official `session.selectModel` (the Host best-effort default save is its
+  side effect); the TUI performs no second global-default write for it.
+
 Host directory browsing is a separate READ authority with exactly one owner:
 the official `directory-picker` bundle row
 (`@deepseek-ai/dsh-host-directory-picker-browse`, the `browse` capability; not

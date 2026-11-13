@@ -173,7 +173,14 @@ class C1Model extends LlmAdapter {
   }
 
   async listModels() {
-    return [{ provider: 'c1-qualification', id: 'c1', name: 'c1' }]
+    const models = [{ provider: 'c1-qualification', id: 'c1', name: 'c1' }]
+    // Qualification-only: a SECOND offline route so the sessionless default
+    // save case can prove a REAL default change. No other case sets this env.
+    const extra = process.env.C1_EXTRA_MODEL
+    if (typeof extra === 'string' && extra !== '') {
+      models.push({ provider: 'c1-qualification', id: extra, name: extra })
+    }
+    return models
   }
 
   async *stream(options) {

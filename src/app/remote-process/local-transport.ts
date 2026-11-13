@@ -213,6 +213,14 @@ function cookieFetch(
   // write. Production never sets this variable.
   const dropPromptAck = process.env.SPLIT_PROCESS_CLIENT_DROP_PROMPT_ACK === '1'
   let promptAckDropped = false
+  // Qualification-only post-dispatch ACK drop for the sessionless default-model
+  // save: the request reaches the Host (which performs the official
+  // `agentDefaultModel.saveSelection`) and then the response is discarded, so the
+  // Client observes a real post-write transport failure and can only report
+  // `indeterminate`. Fires exactly once and never replays the write. Production
+  // never sets this variable.
+  const dropModelAck = process.env.SPLIT_PROCESS_CLIENT_DROP_MODEL_ACK === '1'
+  let modelAckDropped = false
   return async (input, init = {}) => {
     const url = new URL(typeof input === 'string' ? input : input.href, `${origin}/`)
     if (url.origin !== origin) {
@@ -234,6 +242,13 @@ function cookieFetch(
         await response.body?.cancel()
         throw new Error('local transport: qualification dropped the session/prompt ACK after Host receipt')
       }
+    }
+    if (dropModelAck && !modelAckDropped && typeof init.body === 'string'
+      && init.body.includes('piTuiDefaultModel/saveSelection')) {
+      modelAckDropped = true
+      const response = await fetch(url, request)
+      await response.body?.cancel()
+      throw new Error('local transport: qualification dropped the piTuiDefaultModel/saveSelection ACK after Host receipt')
     }
     return await fetch(url, request)
   }

@@ -31,6 +31,7 @@ import { PI_TUI_AUTHORIZATION_NAMESPACE } from '../../src/runtime/remote/pi-tui-
 import { PI_TUI_CREDENTIAL_RECORDS_NAMESPACE } from '../../src/runtime/remote/pi-tui-credential-records-contract.ts'
 import { PI_TUI_WEB_ACCESS_ROWS } from '../../src/app/host/features/web-roster.ts'
 import { PI_TUI_SESSION_POLICY_NAMESPACE } from '../../src/runtime/remote/pi-tui-session-policy-contract.ts'
+import { PI_TUI_DEFAULT_MODEL_NAMESPACE } from '../../src/runtime/remote/pi-tui-default-model-contract.ts'
 
 /** One row of a real patch file (in-place override or `insert` entry). */
 interface OverlayRow {
@@ -1117,6 +1118,8 @@ function hostContext(rows: FixtureRow[], overrides: Record<string, unknown> = {}
     typertService(PI_TUI_CREDENTIAL_RECORDS_NAMESPACE, PI_TUI_CREDENTIAL_RECORDS_NAMESPACE))
   services.set(PI_TUI_SESSION_POLICY_NAMESPACE,
     typertService(PI_TUI_SESSION_POLICY_NAMESPACE, PI_TUI_SESSION_POLICY_NAMESPACE))
+  services.set(PI_TUI_DEFAULT_MODEL_NAMESPACE,
+    typertService(PI_TUI_DEFAULT_MODEL_NAMESPACE, PI_TUI_DEFAULT_MODEL_NAMESPACE))
   services.set(PI_TUI_HOST_READY_SERVICE, {})
   services.set('piTuiPerformanceReady', {})
   for (const [name, value] of Object.entries(overrides)) services.set(name, value)
