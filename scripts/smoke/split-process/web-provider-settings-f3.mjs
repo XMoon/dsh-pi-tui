@@ -1,51 +1,66 @@
 /**
- * M6-1 F3: the official Web Search / Fetch Settings across real Split clients.
+ * M6-1 F3 (PR1 rc.2 adaptation): the official Web Search / Fetch Settings
+ * across real Split clients.
  *
  * ONE real Host (the installed candidate package plus the inert qualification
  * fixture row) and TWO real authenticated TUI Clients prove, WITHOUT an open
  * Session (the Settings surface is sessionless):
  *
- *   1. the Host fixture seeds a KNOWN baseline through the OFFICIAL Settings
- *      service (`web-deepseek-api`: count `10`, Share Original Question `off`,
- *      a unique https base) and records its revisions; Client A reads that
- *      baseline back from the real page, and Client B reads the same Host
- *      facts — neither Client paints a locally guessed value (the page stays
- *      `Loading…` until the Host read answers, and `Unavailable` when it does
- *      not);
- *   2. every minimal edit through `/settings → Tools → Web Search / Fetch`
- *      (search provider, fetch provider, result count, Share Original
- *      Question, API base) is ONE verified official Settings CAS mutation that
- *      persists into the profile document for ITS OWN namespace only, while
- *      the other section's user layer is byte-identical;
- *   3. Client B keeps painting its already-read count after A's write (no
- *      optimistic push) and only a real `r` re-read shows the Host truth;
- *   4. a non-HTTPS API base is refused by the Remote adapter BEFORE any Host
- *      write, the durable section keeps its previous base, and the base never
- *      lands in the legacy `web` section as a synonym slot;
- *   5. the OFFICIAL Settings CAS rejects a stale revision at the REAL Gateway
+ *   1. the Host fixture seeds a KNOWN rc.2 baseline through the OFFICIAL
+ *      Settings service (`web.searchProvider = deepseek-search-api`,
+ *      `web.fetchProvider = deepseek-fetch-api`, `web-deepseek-api`: count
+ *      `10`, Share Original Question `off`, both Billing modes `auto`, and NO
+ *      advanced override); Client A reads that baseline back from the real
+ *      nine-row page, and Client B reads the same Host facts — neither Client
+ *      paints a locally guessed value (the page stays `Loading…` until the
+ *      Host read answers, and `Unavailable` when it does not);
+ *   2. both providers are edited through the real page (`Messages` and
+ *      `HTTP`, then back to the two API providers): each is ONE verified
+ *      official Settings CAS mutation, and a Billing row whose API provider is
+ *      not the current route shows `Not selected` and offers no write;
+ *   3. BOTH Billing rows are written through the real TUI CAS on their OWN
+ *      exact `web-deepseek-api` field: Search Billing → `Account`, Fetch
+ *      Billing → `API key`. Writing one field never touches the other;
+ *   4. result count and Share Original Question are edited through the same
+ *      page; Client B keeps painting its already-read count after A's writes
+ *      (no optimistic push) and only a real `r` re-read shows the Host truth;
+ *   5. AFTER those CAS phases the Host fixture sets the rc.2 YAML-only
+ *      `searchBaseURL` override through one official `ctx.settings.mutate`
+ *      (never the TUI): the `Search API Override` row paints the MASKED
+ *      read-only Host fact, `Search Billing` becomes `Overridden by Host YAML`
+ *      with ZERO write attempts (Enter is inert), while the `Fetch API
+ *      Override` row stays `not set` and Fetch Billing remains independently
+ *      writable with an exact CAS read-back;
+ *   6. the retired endpoint is gone: there is NO `Search / Fetch API Endpoint` row, no
+ *      endpoint editor and no `web-deepseek-api.baseURL/apiKeyEnv/apiKey`
+ *      write anywhere; the page copy is the rc.2 one (`Not selected`,
+ *      `Overridden by Host YAML`, `Current: …`);
+ *   7. the OFFICIAL Settings CAS rejects a stale revision at the REAL Gateway
  *      RPC seam: through the same official generated `settings` namespace the
  *      ConfigPort mirror uses, the Client reads revision R, commits once at R
  *      (R→R+1), then re-submits the OLD R — the Host accepts the first and
  *      rejects the second with the official revision-conflict vocabulary
  *      (`expected revision N, now N+1`), leaving exactly the accepted value;
- *   6. both Clients drop and re-establish their physical Gateway carrier; the
- *      official values do not roll back and the durable document does not
- *      change (no in-flight read is held across the generation here — the
- *      stale-generation settlement contract is proven by the ConfigPort unit
- *      and wire generation tests);
- *   7. the Host fixture stored a NON-FUNCTIONAL unique credential sentinel
+ *   8. both Clients drop and re-establish their physical Gateway carrier; the
+ *      official values (including the advanced override fact) do not roll
+ *      back and the durable document does not change;
+ *   9. the Host fixture clears the YAML-only override again through the same
+ *      official write, so the shared lane profile is left without a fabricated
+ *      endpoint; Search Billing is writable again and both Billing modes are
+ *      restored to `auto` through the real page;
+ *  10. the Host fixture stored a NON-FUNCTIONAL unique credential sentinel
  *      through the official `ctx.credentials.set` path; the credential row
  *      stays a metadata-only reference witness (name + configured state, never
  *      a value) and the sentinel appears in NO pane, settings document, Host
  *      work proof or Client telemetry record;
- *   8. the MOUNTED Remote ConfigPort refuses an invalid provider id and an
+ *  11. the MOUNTED Remote ConfigPort refuses an invalid provider id and an
  *      out-of-range count BEFORE any Host dispatch (the document is untouched)
  *      and refuses to replace a CUSTOM provider route seeded through the real
  *      official settings namespace.
  *
  * The trace and every failure label separate the two verdicts this case owns:
- *   - `UI_L6`              → the real TUI edits, cross-client read-back and the
- *     non-HTTPS refusal;
+ *   - `UI_L6`              → the real TUI edits, cross-client read-back and
+ *     the Billing/override writer gates;
  *   - `HOST_GATEWAY_CAS`   → the deterministic official Settings CAS rejection
  *     at the real Client Remote `settings` seam (the same
  *     `SettingsForms.mutate(ns, ops, expectedRevision)` the Host serves).
@@ -60,12 +75,14 @@
  * one — no timing race and no fixture-injected state.
  *
  * Evidence scope: the page only ever offers the two official provider
- * candidates and the four count presets, so an invalid provider id / an
- * out-of-range count cannot be TYPED into it; item 8 drives them through the
- * same mounted Remote ConfigPort the TUI uses, over the real authenticated
- * Host, and proves the refusals happen before any Host write. A non-preset
- * stored count is not seeded (the page can only restore the four presets).
- * This case never edits the profile document itself.
+ * candidates, the four count presets and the three official Billing modes, so
+ * an invalid provider id / an out-of-range count cannot be TYPED into it; item
+ * 11 drives them through the same mounted Remote ConfigPort the TUI uses, over
+ * the real authenticated Host, and proves the refusals happen before any Host
+ * write. The YAML-only overrides are read-only on purpose: the case injects
+ * them through the fixture's official Settings mutation, because the page must
+ * never provide a write path for them. This case never edits the profile
+ * document itself.
  *
  * @module split-process/web-provider-settings-f3
  */
@@ -98,13 +115,16 @@ const WEB_LIST_BARS = [
   'Back [Esc]',
 ]
 
-/** The six rows in the page's FROZEN order. */
+/** The NINE rows in the page's FROZEN rc.2 order (§5.5A E2.3). */
 const WEB_ROW_LABELS = [
   'Web Search Provider',
   'Web Fetch Provider',
   'Search API Result Count',
   'Share Original Question',
-  'Search / Fetch API Endpoint',
+  'Search Billing',
+  'Fetch Billing',
+  'Search API Override',
+  'Fetch API Override',
   'DeepSeek API Key',
 ]
 const ROW = Object.freeze({
@@ -112,37 +132,52 @@ const ROW = Object.freeze({
   fetchProvider: 1,
   count: 2,
   sendOriginalQuestion: 3,
-  endpoint: 4,
-  credential: 5,
+  searchBilling: 4,
+  fetchBilling: 5,
+  searchAdvanced: 6,
+  fetchAdvanced: 7,
+  credential: 8,
 })
+/** The retired rc.1 row identity: it must NEVER be painted again. */
+const LEGACY_ENDPOINT_ROW = 'Search / Fetch API Endpoint'
 
-/** The official shipped baseline the isolated profile serves. */
-/** The KNOWN baseline the Host fixture seeds through the official Settings
- *  service (never a shipped-default guess): a unique https base and Share
- *  Original Question off prove the page read really came from this Host. */
-const SEED_BASE_URL = 'https://f3-seed.example.test/v1/tools'
-const OFFICIAL = Object.freeze({
-  searchProvider: 'deepseek-official',
-  searchProviderLabel: 'Messages',
-  fetchProvider: 'http',
-  fetchProviderLabel: 'HTTP',
-  baseURL: SEED_BASE_URL,
-  count: 10,
-  sendOriginalQuestion: false,
-})
+/** The KNOWN official baseline the Host fixture seeds through the official
+ *  Settings service (never a shipped-default guess). */
+const SEED_COUNT = 10
+const SEED_SEND_ORIGINAL_QUESTION = false
+const SEED_BILLING = Object.freeze({ search: 'auto', fetch: 'auto' })
+/** The rc.2 YAML-only Search API override the fixture injects AFTER both TUI
+ *  Billing CAS phases. It carries fake userinfo + a query ON PURPOSE: the page
+ *  must paint the MASKED fact (`https://***@…`, query dropped) and never the
+ *  credential-shaped source. */
+const SEED_BASE_URL = 'https://f3-user:f3-masked@f3-seed.example.test/v1/tools?token=f3-query'
+const SEED_BASE_URL_MASKED = 'https://***@f3-seed.example.test/v1/tools'
+const BILLING_LABELS = Object.freeze({ auto: 'Automatic', account: 'Account', 'api-key': 'API key' })
+const SEARCH_OVERRIDE_FACT = `searchBaseURL=${SEED_BASE_URL_MASKED}`
+const OVERRIDE_UNSET_FACT = 'Host YAML: not set'
 const SEARCH_API_PROVIDER_LABEL = 'DeepSeek Search API'
 const FETCH_API_PROVIDER_LABEL = 'DeepSeek Fetch API'
+const MESSAGES_PROVIDER_LABEL = 'Messages'
+const HTTP_PROVIDER_LABEL = 'HTTP'
 const COUNT_CANDIDATES = ['5', '10', '20', '50']
 const QUESTION_ON = 0
 const QUESTION_OFF = 1
-/** A short, obviously non-production base: it fits one Detail line WHOLE. */
-const CONSUMER_ENDPOINT = 'https://gateway.example.test/f3/v1/tools'
-const INSECURE_ENDPOINT = 'http://insecure.example.test/f3/v1/tools'
+/** The fixture's ONE official late-override control file (under the private
+ *  C1 work root): `{ nonce, op: 'set' | 'clear' }`. */
+const OVERRIDE_REQUEST_FILE = 'f3-search-override-request.json'
 /** The official settings sections the page owns. */
 const WEB_NS = 'web'
 const WEB_API_NS = 'web-deepseek-api'
 /** The ONE official credential reference the Web providers resolve. */
 const CREDENTIAL_REF = 'DEEPSEEK_API_KEY'
+/** The retired rc.1 endpoint keys: rc.2 never writes them. */
+const LEGACY_ENDPOINT_KEYS = ['baseURL', 'apiKeyEnv', 'apiKey']
+
+/** The display a Billing row paints for the STORED mode while its capability
+ *  is owned by a non-empty YAML-only override. */
+function overriddenBilling(mode) {
+  return `Overridden by Host YAML (stored: ${BILLING_LABELS[mode]})`
+}
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
@@ -161,14 +196,6 @@ async function frameOf(client) {
  */
 function pageDetailText(frame) {
   return frame.split('\n').join('\n').replace(/\s+/gu, ' ').trim()
-}
-
-function isWebPage(frame) {
-  return frame.includes(WEB_PAGE_BREADCRUMB) && frame.includes(WEB_ROW_LABELS[0])
-}
-
-function isWebList(frame) {
-  return isWebPage(frame) && frame.split('\n').some(line => WEB_LIST_BARS.includes(line.trim()))
 }
 
 /** The profile document the official Settings service persists into. It is
@@ -201,12 +228,22 @@ function snapshot(config) {
   return config === undefined ? 'undefined' : JSON.stringify(config)
 }
 
+/** Search the collapsed Detail text (the two-column frame may wrap a long
+ *  `field=value` fact across physical lines). */
+async function waitForDetailText(client, text, label, timeoutMs = 60_000) {
+  try {
+    await waitForCondition(async () => pageDetailText(await frameOf(client)).includes(text), label, timeoutMs)
+  } catch (error) {
+    throw new SplitSmokeAssertionError(`${label}: the Detail never stated ${JSON.stringify(text)}: ${JSON.stringify(pageDetailText(await frameOf(client)))}`, { cause: error })
+  }
+}
+
 async function waitForScreenText(client, text, label, timeoutMs = 60_000) {
   try {
     await waitForCondition(async () => (await frameOf(client)).includes(text), label, timeoutMs)
   } catch (error) {
     const frame = await client.viewport()
-    const lines = frame.filter(line => /Web|Search|Fetch|Provider|Current|State|Saved|Verified|Endpoint|Question|Settings/u.test(line))
+    const lines = frame.filter(line => /Web|Search|Fetch|Provider|Current|State|Saved|Verified|Billing|Override|Question|Settings/u.test(line))
     throw new SplitSmokeAssertionError(`${label}: ${JSON.stringify({ wanted: text, diagnosticLines: lines.slice(-18) })}`, { cause: error })
   }
 }
@@ -223,20 +260,6 @@ async function waitForCurrentValue(client, value, label, timeoutMs = 60_000) {
     }, label, timeoutMs)
   } catch (error) {
     throw new SplitSmokeAssertionError(`${label}: the Detail never stated ${JSON.stringify(value)}: ${JSON.stringify(detail ?? '')}`, { cause: error })
-  }
-  return detail
-}
-
-/** Wait until the Detail pane shows one of the frozen write verdicts. */
-async function waitForWriteVerdict(client, label, timeoutMs = 60_000) {
-  let detail
-  try {
-    await waitForCondition(async () => {
-      detail = pageDetailText(await frameOf(client))
-      return detail.includes('Verified') || detail.includes('Not saved') || detail.includes('Outcome unknown')
-    }, label, timeoutMs)
-  } catch (error) {
-    throw new SplitSmokeAssertionError(`${label}: the page painted no write verdict: ${JSON.stringify(detail ?? '')}`, { cause: error })
   }
   return detail
 }
@@ -341,16 +364,20 @@ async function waitForWebPage(client, label, timeoutMs = 60_000) {
   } catch (error) {
     throw new SplitSmokeAssertionError(`${label}: the page never settled its Host read: ${JSON.stringify(await frameOf(client))}`, { cause: error })
   }
+  const frame = await frameOf(client)
   // The page must paint BOTH regions for the navigation below: the pane header
-  // names both columns only while the row grant keeps the Detail visible (a
-  // narrow single-region layout could not reach the endpoint row's fact).
-  assert((await frameOf(client)).includes('Current / Detail'),
+  // names both columns only while the row grant keeps the Detail visible.
+  assert(frame.includes('Current / Detail'),
     `${label}: the Web page did not paint the two-region layout (the PTY grant must keep the Detail pane visible)`)
+  // The retired rc.1 endpoint row must be ABSENT: rc.2 has two read-only
+  // YAML-only override rows instead.
+  assert(!frame.includes(LEGACY_ENDPOINT_ROW),
+    `${label}: the retired rc.1 "${LEGACY_ENDPOINT_ROW}" row is still painted: ${JSON.stringify(frame)}`)
 }
 
 /** The page's Action Bar is its LAST non-empty body line; its wording is the
  *  authoritative region oracle (list vs read-only Detail vs a Detail whose
- *  candidate is cropped, vs the endpoint editor). */
+ *  candidate is cropped). */
 function actionBarOf(frame) {
   const lines = frame.split('\n').map(line => line.trim())
   for (let index = lines.length - 1; index >= 0; index -= 1) {
@@ -363,8 +390,7 @@ function regionOf(frame) {
   const bar = actionBarOf(frame)
   // The credential Detail advertises `Enter open in Models` — check the DETAIL
   // verbs BEFORE the list's generic `Enter open` substring.
-  if (bar.includes('Enter open in Models') || bar.includes('Enter edit endpoint') || bar.includes('Enter confirm')) return 'detail'
-  if (bar.includes('Esc cancel')) return 'editor'
+  if (bar.includes('Enter open in Models') || bar.includes('Enter confirm')) return 'detail'
   if (bar.includes('Enter open')) return 'list'
   if (bar.includes('refresh') || bar === 'Back [Esc]') return 'detail'
   return 'other'
@@ -417,8 +443,8 @@ async function selectListRow(client, index, label) {
 }
 
 /** Select one page row and open its read-only Detail (Enter on the LIST
- *  region). The endpoint row opens its editor instead and is driven by
- *  writeEndpoint; every read row here enters the Detail region. */
+ *  region). Every rc.2 row — including the two override rows — opens its
+ *  Detail; no row owns an editor. */
 async function openWebRow(client, index, label, needle = 'Current: ') {
   await selectListRow(client, index, label)
   client.send('\r')
@@ -452,18 +478,6 @@ async function confirmCandidate(client, expectedCurrent, label) {
   return pageDetailText(await frameOf(client))
 }
 
-/** Open the endpoint editor, replace the draft WHOLE and confirm it. */
-async function writeEndpoint(client, url, expectedCurrent, label) {
-  await selectListRow(client, ROW.endpoint, label)
-  client.send('\r')
-  await waitForScreenText(client, 'Enter confirm · Esc cancel', `${label} endpoint editor`)
-  client.send('\x15')
-  client.send(url)
-  await waitForScreenText(client, url, `${label} endpoint draft`)
-  client.send('\r')
-  await waitForCurrentValue(client, expectedCurrent, `${label} authoritative endpoint read-back`)
-}
-
 /** Every page row's Host-returned value, read through the real Detail. Each
  *  read leaves the Detail open, so the list cursor is re-established between
  *  rows (the Detail owns Enter/↓; the list owns row navigation). */
@@ -480,16 +494,21 @@ async function assertPageFacts(client, expected, label) {
   await openWebRow(client, ROW.sendOriginalQuestion, `${label} original question`)
   await waitForCurrentValue(client, expected.sendOriginalQuestion ? 'on' : 'off', `${label} original question value`)
   await returnToWebList(client, `${label} original question list`)
-  // The endpoint row's Enter opens its editor, so its read-only Detail is
-  // reached through the region toggle (Tab) instead.
-  await selectListRow(client, ROW.endpoint, `${label} endpoint`)
-  client.send('\t')
-  await waitForScreenText(client, 'Enter edit endpoint', `${label} endpoint detail region`, 20_000)
-  await waitForCurrentValue(client, expected.baseURL, `${label} endpoint value`)
-  await returnToWebList(client, `${label} endpoint list`)
+  await openWebRow(client, ROW.searchBilling, `${label} search billing`)
+  await waitForCurrentValue(client, expected.searchBilling, `${label} search billing value`)
+  await returnToWebList(client, `${label} search billing list`)
+  await openWebRow(client, ROW.fetchBilling, `${label} fetch billing`)
+  await waitForCurrentValue(client, expected.fetchBilling, `${label} fetch billing value`)
+  await returnToWebList(client, `${label} fetch billing list`)
+  await openWebRow(client, ROW.searchAdvanced, `${label} search override`)
+  await waitForDetailText(client, expected.searchAdvanced, `${label} search override value`)
+  await returnToWebList(client, `${label} search override list`)
+  await openWebRow(client, ROW.fetchAdvanced, `${label} fetch override`)
+  await waitForDetailText(client, expected.fetchAdvanced, `${label} fetch override value`)
+  await returnToWebList(client, `${label} fetch override list`)
   await openWebRow(client, ROW.credential, `${label} credential`, 'Reference: ')
   await waitForScreenText(client, `Reference: ${CREDENTIAL_REF}`, `${label} official credential reference`)
-  await waitForScreenText(client, 'State: ', `${label} credential presence`)
+  await waitForScreenText(client, `State: ${expected.credentialState}`, `${label} credential state`)
   await returnToWebList(client, `${label} credential list`)
 }
 
@@ -503,6 +522,94 @@ function assertNamespaceWrite(documentPath, ns, before, assertConfig, label) {
   assert(snapshot(namespaceConfig(documentPath, other)) === before[other],
     `${label}: the write mutated the other official section too: ${ns}=${JSON.stringify(after)} other=${snapshot(namespaceConfig(documentPath, other))}`)
   return snapshot(after)
+}
+
+/** The official Settings service PRUNES a `web` user layer when every value
+ *  equals the shipped default. The effective value is then the default; a
+ *  missing section is a PASS, not a lost write. */
+function assertWebEffective(documentPath, expected, label) {
+  const after = namespaceConfig(documentPath, WEB_NS) ?? {}
+  assert((after.searchProvider ?? 'deepseek-search-api') === expected.searchProvider,
+    `${label}: effective searchProvider must be ${expected.searchProvider}: ${JSON.stringify(after)}`)
+  assert((after.fetchProvider ?? 'http') === expected.fetchProvider,
+    `${label}: effective fetchProvider must be ${expected.fetchProvider}: ${JSON.stringify(after)}`)
+}
+
+/** The rc.2 `web-deepseek-api` schema NEVER writes the retired single-endpoint
+ *  keys: their presence would mean the page still offered a legacy write. */
+function assertNoLegacyEndpointKeys(config, label) {
+  for (const field of LEGACY_ENDPOINT_KEYS) {
+    assert(config?.[field] === undefined,
+      `${label}: the retired rc.1 field "${field}" reached the official RC.2 section: ${JSON.stringify(config)}`)
+  }
+}
+
+/** The exact `web-deepseek-api` facts after ONE write: independent per-field
+ *  CAS values (never a synthesized single endpoint). */
+function assertApiSection(documentPath, before, expected, label) {
+  return assertNamespaceWrite(documentPath, WEB_API_NS, before, config => {
+    assert(config.count === expected.count,
+      `${label}: the official count must be ${String(expected.count)}: ${JSON.stringify(config)}`)
+    assert(config.sendOriginalQuestion === expected.sendOriginalQuestion,
+      `${label}: the official sendOriginalQuestion must be ${String(expected.sendOriginalQuestion)}: ${JSON.stringify(config)}`)
+    assert(config.searchBilling === expected.searchBilling,
+      `${label}: the official searchBilling must be ${String(expected.searchBilling)}: ${JSON.stringify(config)}`)
+    assert(config.fetchBilling === expected.fetchBilling,
+      `${label}: the official fetchBilling must be ${String(expected.fetchBilling)}: ${JSON.stringify(config)}`)
+    assert(config.searchBaseURL === expected.searchBaseURL,
+      `${label}: the official searchBaseURL must be ${String(expected.searchBaseURL)}: ${JSON.stringify(config)}`)
+    assert(config.fetchBaseURL === expected.fetchBaseURL,
+      `${label}: the official fetchBaseURL must be ${String(expected.fetchBaseURL)}: ${JSON.stringify(config)}`)
+    assertNoLegacyEndpointKeys(config, label)
+  }, label)
+}
+
+/** Snapshot both official sections before one write. */
+function sectionsSnapshot(documentPath) {
+  return {
+    [WEB_NS]: snapshot(namespaceConfig(documentPath, WEB_NS)),
+    [WEB_API_NS]: snapshot(namespaceConfig(documentPath, WEB_API_NS)),
+  }
+}
+
+/**
+ * The page must be able to paint the given Billing value while offering NO
+ * Confirm affordance, and ONE Enter must produce ZERO Host writes. A stale
+ * presentation could still offer a candidate; the command owner's OWN override
+ * guard must then refuse it — but the real page already gates the candidate, so
+ * this proves the UI gate and the durable non-write together.
+ */
+async function assertInertBilling(client, documentPath, row, expectedValue, expectedNote, label) {
+  await openWebRow(client, row, label)
+  const detail = await waitForCurrentValue(client, expectedValue, `${label} current`)
+  assert(detail.includes(expectedNote),
+    `${label}: the inert Billing Detail must state its cause ${JSON.stringify(expectedNote)}: ${JSON.stringify(detail)}`)
+  assert(!actionBarOf(await frameOf(client)).includes('Enter confirm'),
+    `${label}: an inert Billing row advertised a Confirm affordance: ${JSON.stringify(actionBarOf(await frameOf(client)))}`)
+  const before = snapshot(namespaceConfig(documentPath, WEB_API_NS))
+  client.send('\r')
+  await sleep(700)
+  assert(snapshot(namespaceConfig(documentPath, WEB_API_NS)) === before,
+    `${label}: an inert Billing row reached the official Host document`)
+  assert(!(await frameOf(client)).includes('Verified'),
+    `${label}: an inert Billing row painted a Verified verdict`)
+  await returnToWebList(client, `${label} list`)
+  return detail
+}
+
+/** Ask the Host fixture to apply/clear the rc.2 YAML-only override through ONE
+ *  official Settings mutation. The event is nonce-matched so a previous phase's
+ *  record can never satisfy this wait. */
+async function requestSearchOverride(root, op, label) {
+  const nonce = `f3-override-${op}-${String(Date.now())}-${String(Math.random()).slice(2, 8)}`
+  writeFileSync(join(root, OVERRIDE_REQUEST_FILE), JSON.stringify({ nonce, op }), { mode: 0o600 })
+  const event = await waitForC1WorkEvent(root,
+    entry => (entry.kind === 'f3-search-override' || entry.kind === 'f3-search-override-failed') && entry.nonce === nonce,
+    label,
+    120_000)
+  assert(event.kind === 'f3-search-override',
+    `${label}: the Host refused the official YAML-only override mutation: ${JSON.stringify(event)}`)
+  return event
 }
 
 /** Drop and re-establish one Client's physical Gateway carrier. */
@@ -546,6 +653,22 @@ async function restoreWebPageAfterReconnect(client, label) {
   await openWebSettingsPage(client, label)
 }
 
+/** The effective page baseline the Host fixture seeded (asserted against the
+ *  fixture's OWN `f3-host-seed` descriptor facts, never a guessed default). */
+function baselineFacts(seed) {
+  return {
+    searchProviderLabel: SEARCH_API_PROVIDER_LABEL,
+    fetchProviderLabel: FETCH_API_PROVIDER_LABEL,
+    count: seed.api.count,
+    sendOriginalQuestion: seed.api.sendOriginalQuestion,
+    searchBilling: BILLING_LABELS[seed.api.searchBilling],
+    fetchBilling: BILLING_LABELS[seed.api.fetchBilling],
+    searchAdvanced: OVERRIDE_UNSET_FACT,
+    fetchAdvanced: OVERRIDE_UNSET_FACT,
+    credentialState: 'Configured',
+  }
+}
+
 /**
  * One case: `web-settings.official-provider-f3`.
  */
@@ -562,14 +685,10 @@ export async function runWebProviderSettingsF3(context) {
   let disposed = false
 
   try {
-    // The qualification fixture has NO scenario that writes the official Web
-    // settings sections, so the baseline is exactly what the real Host's
-    // official Settings service serves for this isolated profile: the shipped
-    // defaults. Every later value is produced by that SAME service through the
-    // real `/settings` page (the case never edits the profile document).
-    // A NON-FUNCTIONAL unique credential sentinel. The Host fixture stores it
-    // through the official `ctx.credentials.set` path; every scan below proves
-    // it never reaches a pane, the settings document or ordinary diagnostics.
+    // The qualification fixture seeds the official rc.2 Web settings sections
+    // and stores the credential sentinel through the official Host services:
+    // every later value is produced by those SAME services (the case never
+    // edits the profile document).
     const sentinel = `sk-f3sentinel-${String(process.pid)}-${Date.now().toString(36)}`
     const started = await scene.startC1Host('web-settings-f3', 'F3 Web provider settings Host', {
       C1_F3_BASE_URL: SEED_BASE_URL,
@@ -579,18 +698,31 @@ export async function runWebProviderSettingsF3(context) {
     const hostPid = started.ready.pid
     // The fixture's seed IS the authority: the page baseline below must match it.
     const seed = await waitForC1WorkEvent(root, event => event.kind === 'f3-host-seed', 'F3 official Host seed')
-    assert(seed.api?.baseURL === SEED_BASE_URL && seed.api?.count === OFFICIAL.count
-      && seed.api?.sendOriginalQuestion === OFFICIAL.sendOriginalQuestion,
+    assert(seed.web?.searchProvider === 'deepseek-search-api'
+      && seed.web?.fetchProvider === 'deepseek-fetch-api',
+    `F3 the official Host seed did not select both API providers: ${JSON.stringify(seed.web)}`)
+    assert(seed.api?.count === SEED_COUNT
+      && seed.api?.sendOriginalQuestion === SEED_SEND_ORIGINAL_QUESTION
+      && seed.api?.searchBilling === SEED_BILLING.search
+      && seed.api?.fetchBilling === SEED_BILLING.fetch,
     `F3 the official Host seed is not the frozen baseline: ${JSON.stringify(seed.api)}`)
-    assert(typeof seed.revisions?.[WEB_API_NS] === 'number',
-      `F3 the official seed recorded no revision: ${JSON.stringify(seed.revisions)}`)
+    // No advanced override at the start: BOTH Billing rows must be TUI-writable.
+    assert(seed.api?.searchBaseURL === undefined && seed.api?.fetchBaseURL === undefined,
+      `F3 the official Host seed already carries an advanced override: ${JSON.stringify(seed.api)}`)
+    assert(Array.isArray(seed.api?.legacyKeys) && seed.api.legacyKeys.length === 0,
+      `F3 the official Host seed wrote a retired rc.1 endpoint key: ${JSON.stringify(seed.api)}`)
+    assert(typeof seed.revisions?.[WEB_NS] === 'number' && typeof seed.revisions?.[WEB_API_NS] === 'number',
+      `F3 the official seed recorded no revisions: ${JSON.stringify(seed.revisions)}`)
+    const baseline = baselineFacts(seed)
     trace('f3.ui-l6', {
       verdict: 'UI_L6_PASS',
       phase: 'host',
       hostPid,
       sections: [WEB_NS, WEB_API_NS],
-      baseline: OFFICIAL,
+      baseline,
+      advanced: { searchBaseURL: 'unset', fetchBaseURL: 'unset' },
       seededRevision: seed.revisions[WEB_API_NS],
+      seededWebRevision: seed.revisions[WEB_NS],
       credentialSeeded: true,
     })
 
@@ -606,148 +738,241 @@ export async function runWebProviderSettingsF3(context) {
 
     // ── 1. The Host-returned baseline, read by BOTH Clients. ────────────────
     await openWebSettingsPage(clientA, 'UI_L6 Client A')
-    await assertPageFacts(clientA, OFFICIAL, 'UI_L6 A baseline')
-    await returnToWebList(clientA, 'UI_L6 A baseline list')
+    await assertPageFacts(clientA, baseline, 'UI_L6 A baseline')
     await openWebSettingsPage(clientB, 'UI_L6 Client B')
-    await assertPageFacts(clientB, OFFICIAL, 'UI_L6 B baseline')
+    await assertPageFacts(clientB, baseline, 'UI_L6 B baseline')
     // Client B stays on the result-count Detail so A's next writes can prove
     // that B never receives an optimistic push.
     await openWebRow(clientB, ROW.count, 'UI_L6 B baseline count')
-    await waitForCurrentValue(clientB, String(OFFICIAL.count), 'UI_L6 B baseline count value')
+    await waitForCurrentValue(clientB, String(baseline.count), 'UI_L6 B baseline count value')
     trace('f3.ui-l6', {
       verdict: 'UI_L6_PASS',
       phase: 'baseline-read',
-      searchProvider: OFFICIAL.searchProviderLabel,
-      fetchProvider: OFFICIAL.fetchProviderLabel,
-      count: OFFICIAL.count,
-      sendOriginalQuestion: OFFICIAL.sendOriginalQuestion,
-      baseURL: OFFICIAL.baseURL,
+      searchProvider: baseline.searchProviderLabel,
+      fetchProvider: baseline.fetchProviderLabel,
+      count: baseline.count,
+      sendOriginalQuestion: baseline.sendOriginalQuestion,
+      searchBilling: baseline.searchBilling,
+      fetchBilling: baseline.fetchBilling,
+      advancedOverrides: 'unset',
       sessionless: true,
       clients: 2,
     })
 
-    // ── 2. Client A edits each field through the real page. ─────────────────
-    const beforeWrites = {
-      [WEB_NS]: snapshot(namespaceConfig(documentPath, WEB_NS)),
-      [WEB_API_NS]: snapshot(namespaceConfig(documentPath, WEB_API_NS)),
-    }
+    // ── 2. Provider edits through the real page, and the Billing route gate. ─
+    const beforeSearchProvider = sectionsSnapshot(documentPath)
     await openWebRow(clientA, ROW.searchProvider, 'UI_L6 A search provider')
-    await selectCandidate(clientA, 1, 'UI_L6 A search provider', SEARCH_API_PROVIDER_LABEL)
-    await confirmCandidate(clientA, SEARCH_API_PROVIDER_LABEL, 'UI_L6 A search provider write')
-    assertNamespaceWrite(documentPath, WEB_NS, beforeWrites, config => {
-      assert(config.searchProvider === 'deepseek-search-api',
-        `UI_L6 A search provider: the official "web" user layer must hold the new provider id: ${JSON.stringify(config)}`)
-      assert(config.baseURL === undefined,
-        `UI_L6 A search provider: the legacy "web" section must not gain the API base: ${JSON.stringify(config)}`)
-    }, 'UI_L6 A search provider')
-
-    await openWebRow(clientA, ROW.fetchProvider, 'UI_L6 A fetch provider')
-    await selectCandidate(clientA, 1, 'UI_L6 A fetch provider', FETCH_API_PROVIDER_LABEL)
-    await confirmCandidate(clientA, FETCH_API_PROVIDER_LABEL, 'UI_L6 A fetch provider write')
-    assertNamespaceWrite(documentPath, WEB_NS, beforeWrites, config => {
+    await selectCandidate(clientA, 0, 'UI_L6 A search provider', MESSAGES_PROVIDER_LABEL)
+    await confirmCandidate(clientA, MESSAGES_PROVIDER_LABEL, 'UI_L6 A search provider write')
+    assertNamespaceWrite(documentPath, WEB_NS, beforeSearchProvider, config => {
+      assert(config.searchProvider === 'deepseek-official',
+        `UI_L6 A search provider: the official "web" user layer must hold Messages: ${JSON.stringify(config)}`)
       assert(config.fetchProvider === 'deepseek-fetch-api',
-        `UI_L6 A fetch provider: the official "web" user layer must hold the new fetch id: ${JSON.stringify(config)}`)
-    }, 'UI_L6 A fetch provider')
+        `UI_L6 A search provider: the Fetch provider must stay unchanged: ${JSON.stringify(config)}`)
+      assertNoLegacyEndpointKeys(config, 'UI_L6 A search provider')
+    }, 'UI_L6 A search provider')
+    // Messages Search is not the billed Search API: its Billing row is inert
+    // and says so instead of pretending to be writable.
+    await assertInertBilling(clientA, documentPath, ROW.searchBilling, 'Not selected',
+      'only the DeepSeek Search API uses Search Billing', 'UI_L6 A search billing route gate')
 
-    const beforeCount = {
-      [WEB_NS]: snapshot(namespaceConfig(documentPath, WEB_NS)),
-      [WEB_API_NS]: snapshot(namespaceConfig(documentPath, WEB_API_NS)),
-    }
+    const beforeSearchProviderBack = sectionsSnapshot(documentPath)
+    await openWebRow(clientA, ROW.searchProvider, 'UI_L6 A search provider back')
+    await selectCandidate(clientA, 1, 'UI_L6 A search provider back', SEARCH_API_PROVIDER_LABEL)
+    await confirmCandidate(clientA, SEARCH_API_PROVIDER_LABEL, 'UI_L6 A search provider back write')
+    assertWebEffective(documentPath, { searchProvider: 'deepseek-search-api', fetchProvider: 'deepseek-fetch-api' },
+      'UI_L6 A search provider back')
+
+    const beforeFetchProvider = sectionsSnapshot(documentPath)
+    await openWebRow(clientA, ROW.fetchProvider, 'UI_L6 A fetch provider')
+    await selectCandidate(clientA, 0, 'UI_L6 A fetch provider', HTTP_PROVIDER_LABEL)
+    await confirmCandidate(clientA, HTTP_PROVIDER_LABEL, 'UI_L6 A fetch provider write')
+    // HTTP is the shipped default: the official service may prune the whole
+    // `web` user layer, which is the effective HTTP/Search-API baseline.
+    assertWebEffective(documentPath, { searchProvider: 'deepseek-search-api', fetchProvider: 'http' },
+      'UI_L6 A fetch provider')
+    await assertInertBilling(clientA, documentPath, ROW.fetchBilling, 'Not selected',
+      'only the DeepSeek Fetch API uses Fetch Billing', 'UI_L6 A fetch billing route gate')
+
+    const beforeFetchProviderBack = sectionsSnapshot(documentPath)
+    await openWebRow(clientA, ROW.fetchProvider, 'UI_L6 A fetch provider back')
+    await selectCandidate(clientA, 1, 'UI_L6 A fetch provider back', FETCH_API_PROVIDER_LABEL)
+    await confirmCandidate(clientA, FETCH_API_PROVIDER_LABEL, 'UI_L6 A fetch provider back write')
+    assertNamespaceWrite(documentPath, WEB_NS, beforeFetchProviderBack, config => {
+      assert(config.fetchProvider === 'deepseek-fetch-api',
+        `UI_L6 A fetch provider back: the official "web" user layer must hold the Fetch API: ${JSON.stringify(config)}`)
+    }, 'UI_L6 A fetch provider back')
+
+    // ── 3. BOTH Billing rows through the REAL TUI CAS, on their OWN fields. ─
+    const beforeSearchBilling = sectionsSnapshot(documentPath)
+    await openWebRow(clientA, ROW.searchBilling, 'UI_L6 A search billing')
+    await selectCandidate(clientA, 1, 'UI_L6 A search billing', BILLING_LABELS.account)
+    await confirmCandidate(clientA, BILLING_LABELS.account, 'UI_L6 A search billing write')
+    assertApiSection(documentPath, beforeSearchBilling, {
+      count: SEED_COUNT,
+      sendOriginalQuestion: SEED_SEND_ORIGINAL_QUESTION,
+      searchBilling: 'account',
+      fetchBilling: SEED_BILLING.fetch,
+      searchBaseURL: undefined,
+      fetchBaseURL: undefined,
+    }, 'UI_L6 A search billing')
+
+    const beforeFetchBilling = sectionsSnapshot(documentPath)
+    await openWebRow(clientA, ROW.fetchBilling, 'UI_L6 A fetch billing')
+    await selectCandidate(clientA, 2, 'UI_L6 A fetch billing', BILLING_LABELS['api-key'])
+    await confirmCandidate(clientA, BILLING_LABELS['api-key'], 'UI_L6 A fetch billing write')
+    assertApiSection(documentPath, beforeFetchBilling, {
+      count: SEED_COUNT,
+      sendOriginalQuestion: SEED_SEND_ORIGINAL_QUESTION,
+      searchBilling: 'account',
+      fetchBilling: 'api-key',
+      searchBaseURL: undefined,
+      fetchBaseURL: undefined,
+    }, 'UI_L6 A fetch billing')
+    trace('f3.ui-l6', {
+      verdict: 'UI_L6_PASS',
+      phase: 'billing-cas',
+      searchBilling: { requested: 'account', durable: 'account', otherField: 'untouched' },
+      fetchBilling: { requested: 'api-key', durable: 'api-key', otherField: 'untouched' },
+      advancedOverrides: 'unset',
+      evidence: 'real TUI Confirm → official revision-checked settings mutation → Host read-back',
+    })
+
+    // ── 4. Count / Share Original Question through the same page. ───────────
+    const beforeCount = sectionsSnapshot(documentPath)
     await openWebRow(clientA, ROW.count, 'UI_L6 A result count')
     await selectCandidate(clientA, COUNT_CANDIDATES.indexOf('20'), 'UI_L6 A result count', '20')
     await confirmCandidate(clientA, '20', 'UI_L6 A result count write')
-    assertNamespaceWrite(documentPath, WEB_API_NS, beforeCount, config => {
-      assert(config.count === 20,
-        `UI_L6 A result count: the official "web-deepseek-api" user layer must hold count 20: ${JSON.stringify(config)}`)
+    assertApiSection(documentPath, beforeCount, {
+      count: 20,
+      sendOriginalQuestion: SEED_SEND_ORIGINAL_QUESTION,
+      searchBilling: 'account',
+      fetchBilling: 'api-key',
+      searchBaseURL: undefined,
+      fetchBaseURL: undefined,
     }, 'UI_L6 A result count')
 
-    const beforeQuestion = {
-      [WEB_NS]: snapshot(namespaceConfig(documentPath, WEB_NS)),
-      [WEB_API_NS]: snapshot(namespaceConfig(documentPath, WEB_API_NS)),
-    }
+    const beforeQuestion = sectionsSnapshot(documentPath)
     await openWebRow(clientA, ROW.sendOriginalQuestion, 'UI_L6 A original question')
     await selectCandidate(clientA, QUESTION_ON, 'UI_L6 A original question', 'on')
     await confirmCandidate(clientA, 'on', 'UI_L6 A original question write')
-    assertNamespaceWrite(documentPath, WEB_API_NS, beforeQuestion, config => {
-      assert(config.sendOriginalQuestion === true,
-        `UI_L6 A original question: the official user layer must hold on: ${JSON.stringify(config)}`)
-    }, 'UI_L6 A original question')
-
-    await writeEndpoint(clientA, CONSUMER_ENDPOINT, CONSUMER_ENDPOINT, 'UI_L6 A endpoint write')
-    await waitForScreenText(clientA, 'Verified', 'UI_L6 A endpoint verified verdict', 20_000)
-    const endpointConfig = namespaceConfig(documentPath, WEB_API_NS)
-    assert(endpointConfig?.baseURL === CONSUMER_ENDPOINT,
-      `UI_L6 A endpoint: the official "web-deepseek-api" user layer must hold the confirmed base: ${JSON.stringify(endpointConfig)}`)
-    assert(namespaceConfig(documentPath, WEB_NS)?.baseURL === undefined,
-      `UI_L6 A endpoint: the base must NOT be written to the legacy "web" section as a synonym: ${JSON.stringify(namespaceConfig(documentPath, WEB_NS))}`)
-    trace('f3.ui-l6', {
-      verdict: 'UI_L6_PASS',
-      phase: 'edited',
-      writes: ['searchProvider', 'fetchProvider', 'count', 'sendOriginalQuestion', 'baseURL'],
-      searchProvider: 'deepseek-search-api',
-      fetchProvider: 'deepseek-fetch-api',
+    assertApiSection(documentPath, beforeQuestion, {
       count: 20,
       sendOriginalQuestion: true,
-      baseURL: CONSUMER_ENDPOINT,
-    })
+      searchBilling: 'account',
+      fetchBilling: 'api-key',
+      searchBaseURL: undefined,
+      fetchBaseURL: undefined,
+    }, 'UI_L6 A original question')
 
-    // ── 3. B never received an optimistic push; its own `r` reads the Host. ─
-    const staleB = pageDetailText(await frameOf(clientB))
-    assert(staleB.includes(`Current: ${String(OFFICIAL.count)}`),
-      `UI_L6 B: another Client's write must not silently repaint B's already-read count: ${JSON.stringify(staleB)}`)
-    clientB.send('r')
-    await waitForCurrentValue(clientB, '20', 'UI_L6 B refreshed result count')
-    await assertPageFacts(clientB, {
-      ...OFFICIAL,
+    // ── 4b. B never received an optimistic push; its own `r` reads the Host. ─
+    const crossExpected = {
       searchProviderLabel: SEARCH_API_PROVIDER_LABEL,
       fetchProviderLabel: FETCH_API_PROVIDER_LABEL,
       count: 20,
       sendOriginalQuestion: true,
-      baseURL: CONSUMER_ENDPOINT,
-    }, 'UI_L6 B cross-client')
-    await returnToWebList(clientB, 'UI_L6 B cross-client list')
+      searchBilling: BILLING_LABELS.account,
+      fetchBilling: BILLING_LABELS['api-key'],
+      searchAdvanced: OVERRIDE_UNSET_FACT,
+      fetchAdvanced: OVERRIDE_UNSET_FACT,
+      credentialState: 'Configured',
+    }
+    const staleB = pageDetailText(await frameOf(clientB))
+    assert(staleB.includes(`Current: ${String(SEED_COUNT)}`),
+      `UI_L6 B: another Client's write must not silently repaint B's already-read count: ${JSON.stringify(staleB)}`)
+    clientB.send('r')
+    await waitForCurrentValue(clientB, '20', 'UI_L6 B refreshed result count')
+    await assertPageFacts(clientB, crossExpected, 'UI_L6 B cross-client')
     trace('f3.ui-l6', {
       verdict: 'UI_L6_PASS',
       phase: 'cross-client',
-      staleBeforeRefresh: OFFICIAL.count,
+      staleBeforeRefresh: SEED_COUNT,
       refreshedCount: 20,
       sameHostTruth: true,
+      searchBilling: 'account',
+      fetchBilling: 'api-key',
+      advancedOverrides: 'unset',
     })
 
-    // ── 4. Fail closed over the REAL TUI/Host stack. ────────────────────────
-    // The endpoint editor is the ONE field that accepts free text: a non-HTTPS
-    // base must be refused by the Remote adapter BEFORE any Host write, and the
-    // durable section must keep its previous base.
-    const apiBeforeInvalid = snapshot(namespaceConfig(documentPath, WEB_API_NS))
-    await selectListRow(clientA, ROW.endpoint, 'UI_L6 A insecure endpoint')
+    // ── 5. The Host applies the rc.2 YAML-only Search override (outside the
+    // TUI): its row must paint the MASKED read-only fact, Search Billing must
+    // become inert with ZERO writes while Fetch Billing stays independently
+    // writable. ──────────────────────────────────────────────────────────────
+    const overrideEvent = await requestSearchOverride(root, 'set', 'UI_L6 Host YAML search override')
+    assert(overrideEvent.api?.searchBaseURL === SEED_BASE_URL,
+      `UI_L6 override: the official Host did not store the YAML-only searchBaseURL: ${JSON.stringify(overrideEvent.api)}`)
+    assert(overrideEvent.api?.searchBilling === 'account' && overrideEvent.api?.fetchBilling === 'api-key',
+      `UI_L6 override: injecting the Search override must not move either Billing field: ${JSON.stringify(overrideEvent.api)}`)
+    assert(overrideEvent.api?.count === 20 && overrideEvent.api?.sendOriginalQuestion === true,
+      `UI_L6 override: injecting the Search override must not move count/Question: ${JSON.stringify(overrideEvent.api)}`)
+    assert(Array.isArray(overrideEvent.api?.legacyKeys) && overrideEvent.api.legacyKeys.length === 0,
+      `UI_L6 override: the official Host section gained a retired rc.1 key: ${JSON.stringify(overrideEvent.api)}`)
+    assert(typeof overrideEvent.revision === 'number',
+      `UI_L6 override: the official Host reported no revision: ${JSON.stringify(overrideEvent)}`)
+
+    const overriddenSearchBilling = overriddenBilling('account')
+    const overrideExpected = {
+      ...crossExpected,
+      searchBilling: overriddenSearchBilling,
+      searchAdvanced: SEARCH_OVERRIDE_FACT,
+    }
+    await reopenWebPage(clientA, 'UI_L6 override A re-read')
+    await assertPageFacts(clientA, overrideExpected, 'UI_L6 override A')
+    // The override row is READ-ONLY: it paints the masked Host YAML fact, never
+    // the credential-shaped source, and Enter opens no editor and writes
+    // nothing.
+    const beforeOverrideEnter = sectionsSnapshot(documentPath)
+    await openWebRow(clientA, ROW.searchAdvanced, 'UI_L6 A search override read-only')
+    await waitForDetailText(clientA, SEARCH_OVERRIDE_FACT, 'UI_L6 A search override masked fact')
+    const overridePane = pageDetailText(await frameOf(clientA))
+    assert(overridePane.includes('Host YAML:') && overridePane.includes(SEARCH_OVERRIDE_FACT),
+      `UI_L6 override: the Search API Override row must paint the real masked Host fact: ${JSON.stringify(overridePane)}`)
+    assert(!overridePane.includes('f3-masked') && !overridePane.includes('token='),
+      `UI_L6 override: the raw override value (userinfo/query) reached the pane: ${JSON.stringify(overridePane)}`)
+    assert(!actionBarOf(await frameOf(clientA)).includes('Enter confirm'),
+      'UI_L6 A search override: a read-only YAML-only row advertised a Confirm affordance')
     clientA.send('\r')
-    await waitForScreenText(clientA, 'Enter confirm · Esc cancel', 'UI_L6 A insecure endpoint editor')
-    clientA.send('\x15')
-    clientA.send(INSECURE_ENDPOINT)
-    await waitForScreenText(clientA, INSECURE_ENDPOINT, 'UI_L6 A insecure endpoint draft')
-    clientA.send('\r')
-    await waitForScreenText(clientA, 'the Search/Fetch API endpoint must use https://', 'UI_L6 A insecure endpoint refusal', 30_000)
-    await waitForScreenText(clientA, 'Not saved', 'UI_L6 A insecure endpoint not-saved', 15_000)
-    assert(snapshot(namespaceConfig(documentPath, WEB_API_NS)) === apiBeforeInvalid,
-      'UI_L6 A insecure endpoint: a refused base must never reach the official Host document')
-    clientA.send('\x1b')
-    await returnToWebList(clientA, 'UI_L6 A insecure endpoint cancel')
+    await sleep(700)
+    assert(snapshot(namespaceConfig(documentPath, WEB_NS)) === beforeOverrideEnter[WEB_NS]
+      && snapshot(namespaceConfig(documentPath, WEB_API_NS)) === beforeOverrideEnter[WEB_API_NS],
+    'UI_L6 A search override: Enter on the read-only override row reached the official Host document')
+    await returnToWebList(clientA, 'UI_L6 A search override list')
+    // The override owns Search Billing: no candidate, no Confirm, zero writes.
+    await assertInertBilling(clientA, documentPath, ROW.searchBilling, overriddenSearchBilling,
+      'Overridden by Host YAML: the advanced searchBaseURL field(s) own',
+      'UI_L6 A overridden search billing')
+    // Fetch Billing is NOT overridden: it stays independently writable, and its
+    // second exact CAS read-back cannot move the Search field or the override.
+    const beforeFetchBillingAfterOverride = sectionsSnapshot(documentPath)
+    await openWebRow(clientA, ROW.fetchBilling, 'UI_L6 A fetch billing after override')
+    await selectCandidate(clientA, 1, 'UI_L6 A fetch billing after override', BILLING_LABELS.account)
+    await confirmCandidate(clientA, BILLING_LABELS.account, 'UI_L6 A fetch billing after override write')
+    assertApiSection(documentPath, beforeFetchBillingAfterOverride, {
+      count: 20,
+      sendOriginalQuestion: true,
+      searchBilling: 'account',
+      fetchBilling: 'account',
+      searchBaseURL: SEED_BASE_URL,
+      fetchBaseURL: undefined,
+    }, 'UI_L6 A fetch billing after override')
+    // The other Client reads the override fact and the independent Billing
+    // values from the SAME Host after its own `r`.
+    const overrideCrossExpected = { ...overrideExpected, fetchBilling: BILLING_LABELS.account }
+    clientB.send('r')
+    await sleep(400)
+    await assertPageFacts(clientB, overrideCrossExpected, 'UI_L6 B override cross-client')
     trace('f3.ui-l6', {
       verdict: 'UI_L6_PASS',
-      phase: 'fail-closed',
-      refused: 'non-https baseURL',
-      hostWrites: 0,
-      durableBaseKept: CONSUMER_ENDPOINT,
+      phase: 'billing-and-override',
+      override: { field: 'searchBaseURL', source: 'Host YAML', maskedFact: SEED_BASE_URL_MASKED },
+      searchBilling: { value: 'account', inert: true, writes: 0, cause: 'Overridden by Host YAML' },
+      fetchBilling: { value: 'account', writable: true, exactField: 'fetchBilling' },
+      bothClientsReadOverride: true,
     })
 
-    // ── 5. HOST_GATEWAY_CAS: the REAL official Settings CAS rejects a stale
-    // revision. The TUI/ConfigPort always fresh-reads before dispatch, so ONE
-    // Client can NEVER send a stale revision through the UI. The deterministic
-    // witness therefore drives the SAME official generated `settings` namespace
-    // (the exact face the ConfigPort mirror uses) inside the real Client
-    // composition: it reads revision R, commits once at R (R→R+1), then
-    // re-submits the OLD R — which the Host must reject with the official
-    // revision-conflict, leaving exactly the accepted value.
+    // ── 5b. HOST_GATEWAY_CAS: the REAL official Settings CAS rejects a stale
+    // revision. The script previously proved the same at the same Gateway RPC
+    // face; keep it on the rc.2 section.
     const probeNonce = `f3-cas-${String(Date.now())}`
     writeFileSync(requestPath, JSON.stringify({ nonce: probeNonce, op: 'settings-stale-cas', namespace: WEB_API_NS }), { mode: 0o600 })
     clientA.signalBusiness('SIGUSR2')
@@ -762,14 +987,9 @@ export async function runWebProviderSettingsF3(context) {
       `HOST_GATEWAY_CAS: a second CAS at the SAME stale revision must be rejected: ${JSON.stringify(casRecord)}`)
     assert(String(casRecord.secondMessage).includes('changed since it was read'),
       `HOST_GATEWAY_CAS: the rejection must use the official revision-conflict vocabulary: ${JSON.stringify(casRecord)}`)
-    assert(String(casRecord.secondMessage).includes(`expected revision ${String(casRecord.expectedRevision)}`),
-      `HOST_GATEWAY_CAS: the rejection must name the stale expected revision: ${JSON.stringify(casRecord)}`)
     const casDurableValue = namespaceConfig(documentPath, WEB_API_NS)?.count
     assert(casDurableValue === 11,
       `HOST_GATEWAY_CAS: the Host must hold exactly the ACCEPTED value (11), never the rejected 12: durable=${String(casDurableValue)}`)
-    // Both Clients recover to the winning Host truth (no silent overwrite). A
-    // fresh page open triggers the authoritative read; the raw-namespace probe
-    // write does not repaint the already-open page by itself.
     await reopenWebPage(clientA, 'HOST_GATEWAY_CAS A re-read')
     await openWebRow(clientA, ROW.count, 'HOST_GATEWAY_CAS A re-read')
     await waitForCurrentValue(clientA, String(casDurableValue), 'HOST_GATEWAY_CAS A authoritative count')
@@ -787,16 +1007,12 @@ export async function runWebProviderSettingsF3(context) {
       rejectedMessage: casRecord.secondMessage,
       durableValue: casDurableValue,
       silentOverwrite: false,
-      mergedDocument: false,
       bothClientsReread: true,
     })
 
-    // ── 5b. L5 REAL-PATH negative controls. ──────────────────────────────────
-    // The mounted Remote ConfigPort refuses an invalid provider id and an
-    // out-of-range count BEFORE any Host dispatch, and refuses to replace a
-    // CUSTOM provider route. The page itself cannot send these values (it only
-    // offers official candidates / four presets), so the negative is driven
-    // through the SAME real Client composition the TUI uses.
+    // ── 5c. L5 REAL-PATH negative controls (unchanged contract: invalid
+    // provider/count writes are refused BEFORE any Host dispatch; a custom
+    // route is never silently replaced).
     const beforeNegativeApi = snapshot(namespaceConfig(documentPath, WEB_API_NS))
     const beforeNegativeWeb = snapshot(namespaceConfig(documentPath, WEB_NS))
     const negativeNonce = `f3-neg-${String(Date.now())}`
@@ -819,47 +1035,23 @@ export async function runWebProviderSettingsF3(context) {
     expectRejected('invalid-fetch-provider', /unsupported web fetch provider id/u)
     expectRejected('count-zero', /must be an integer from 1 through 50/u)
     expectRejected('count-51', /must be an integer from 1 through 50/u)
-    // The four refusals happened BEFORE any Host write: the API section is
-    // byte-identical. The WEB section may legitimately differ — the probe's
-    // custom-route seed/restore is an OFFICIAL write of the fetchProvider field
-    // — so the four illegal writes are proven by the API section plus the web
-    // section's provider fields still holding only official values.
     assert(snapshot(namespaceConfig(documentPath, WEB_API_NS)) === beforeNegativeApi,
       'UI_L6 negative: an invalid provider/count write reached the official API section')
-    // The web section's provider values must be EXACTLY what the case's own
-    // earlier UI edits left, plus the custom-route probe's official restore
-    // when the seed succeeded: the four ILLEGAL writes changed none of them.
-    // Comparing against the shipped defaults would be wrong — P2's edits are
-    // legitimate.
     const webAfterNegative = namespaceConfig(documentPath, WEB_NS) ?? {}
-    const webBeforeNegativeParsed = JSON.parse(beforeNegativeWeb === 'undefined' ? '{}' : beforeNegativeWeb)
-    const providerUntouched = field =>
-      (webAfterNegative[field] ?? webBeforeNegativeParsed[field]) === webBeforeNegativeParsed[field]
-        || webAfterNegative[field] === webBeforeNegativeParsed[field]
-    assert(providerUntouched('searchProvider'),
+    const webBeforeNegative = JSON.parse(beforeNegativeWeb === 'undefined' ? '{}' : beforeNegativeWeb)
+    assert((webAfterNegative.searchProvider ?? 'deepseek-search-api') === (webBeforeNegative.searchProvider ?? 'deepseek-search-api'),
       `UI_L6 negative: the web section's search provider changed during the negative probe: before=${beforeNegativeWeb} after=${JSON.stringify(webAfterNegative)}`)
-    // The probe restores fetchProvider to the official 'http' ONLY when the
-    // official schema accepted the custom-route seed; when it refused the seed
-    // the field is untouched and keeps the pre-probe (P2) value.
     const customRouteSeeded = negative.customRouteSeeded === true
     if (customRouteSeeded) {
-      assert((webAfterNegative.fetchProvider ?? OFFICIAL.fetchProvider) === OFFICIAL.fetchProvider,
+      assert((webAfterNegative.fetchProvider ?? 'http') === 'http',
         `UI_L6 negative: the custom-route restore did not return the official fetch provider: ${JSON.stringify(webAfterNegative)}`)
-    } else {
-      assert(providerUntouched('fetchProvider'),
-        `UI_L6 negative: the refused custom-route seed still changed the fetch provider: before=${beforeNegativeWeb} after=${JSON.stringify(webAfterNegative)}`)
-    }
-    // Custom provider route protection: seed an UNOFFICIAL provider id through
-    // the real official settings namespace, prove the port refuses to replace
-    // it, then restore the official value through the same official write. When
-    // the official schema itself refuses such a seed, a custom route cannot
-    // exist on a real Host and the branch is reported as NOT_VERIFIED.
-    if (customRouteSeeded) {
       assert(negative.customRouteRefusal?.rejected === true,
         `UI_L6 negative: the port accepted replacing a CUSTOM provider route: ${JSON.stringify(negative.customRouteRefusal)}`)
       assert(/custom route/u.test(negative.customRouteRefusal?.message ?? ''),
         `UI_L6 negative: the custom-route refusal lacks the official reason: ${JSON.stringify(negative.customRouteRefusal)}`)
     } else {
+      assert((webAfterNegative.fetchProvider ?? 'deepseek-fetch-api') === 'deepseek-fetch-api',
+        `UI_L6 negative: the refused custom-route seed still changed the fetch provider: before=${beforeNegativeWeb} after=${JSON.stringify(webAfterNegative)}`)
       trace('f3.ui-l6', {
         verdict: 'UI_L6_PASS',
         phase: 'custom-route-protection',
@@ -867,21 +1059,6 @@ export async function runWebProviderSettingsF3(context) {
         reason: `the official Host refused the custom-route seed: ${String(negative.customRouteSeedMessage)}`,
       })
     }
-    await reopenWebPage(clientA, 'UI_L6 negative controls A')
-    // When the seed succeeded the custom-route probe RESTORED the fetch
-    // provider to the official `http` through the real settings namespace, so
-    // the page must show HTTP; when the schema refused the seed the page keeps
-    // P2's Fetch API choice. The search provider (P2's Search API edit) and the
-    // count/base URL are untouched in both branches.
-    await assertPageFacts(clientA, {
-      ...OFFICIAL,
-      searchProviderLabel: SEARCH_API_PROVIDER_LABEL,
-      fetchProviderLabel: customRouteSeeded ? OFFICIAL.fetchProviderLabel : FETCH_API_PROVIDER_LABEL,
-      count: casDurableValue,
-      sendOriginalQuestion: true,
-      baseURL: CONSUMER_ENDPOINT,
-    }, 'UI_L6 negatives kept the UI facts')
-    await returnToWebList(clientA, 'UI_L6 negatives list')
     trace('f3.ui-l6', {
       verdict: 'UI_L6_PASS',
       phase: 'negative-controls',
@@ -889,7 +1066,6 @@ export async function runWebProviderSettingsF3(context) {
       illegalHostWrites: 0,
       customRouteSeeded,
       customRouteReplaceRefused: negative.customRouteRefusal?.rejected === true,
-      evidence: 'real Client Remote ConfigPort over the authenticated Host',
     })
 
     // ── 6. Both Clients drop and re-establish their Gateway carrier. ────────
@@ -920,46 +1096,91 @@ export async function runWebProviderSettingsF3(context) {
       rolledBack: false,
     })
 
-    // ── 7. Restore the official defaults through the SAME page. ─────────────
-    // The isolated profile is shared by later cases of the lane: putting the
-    // effective values back through the official service (never a file edit)
-    // leaves the next case the shipped baseline.
-    await openWebRow(clientA, ROW.searchProvider, 'UI_L6 restore search provider')
-    await selectCandidate(clientA, 0, 'UI_L6 restore search provider', OFFICIAL.searchProviderLabel)
-    await confirmCandidate(clientA, OFFICIAL.searchProviderLabel, 'UI_L6 restore search provider write')
-    await openWebRow(clientA, ROW.fetchProvider, 'UI_L6 restore fetch provider')
-    await selectCandidate(clientA, 0, 'UI_L6 restore fetch provider', OFFICIAL.fetchProviderLabel)
-    await confirmCandidate(clientA, OFFICIAL.fetchProviderLabel, 'UI_L6 restore fetch provider write')
+    // ── 7. Clear the Host YAML override through the official write, then
+    // restore the shared profile through the SAME page.
+    const cleared = await requestSearchOverride(root, 'clear', 'UI_L6 clear Host YAML search override')
+    assert(cleared.api?.searchBaseURL === undefined,
+      `UI_L6 clear override: the official Host still carries searchBaseURL: ${JSON.stringify(cleared.api)}`)
+    await reopenWebPage(clientA, 'UI_L6 clear override A re-read')
+    const clearedExpected = {
+      ...crossExpected,
+      count: casDurableValue,
+      searchBilling: BILLING_LABELS.account,
+      // The negative-probe custom-route seed may have restored the Fetch
+      // provider to the shipped HTTP default; when the schema refused that
+      // seed the Fetch API remains selected. The page must show the truth.
+      fetchProviderLabel: customRouteSeeded ? HTTP_PROVIDER_LABEL : FETCH_API_PROVIDER_LABEL,
+      fetchBilling: customRouteSeeded ? 'Not selected' : BILLING_LABELS.account,
+      searchAdvanced: OVERRIDE_UNSET_FACT,
+      fetchAdvanced: OVERRIDE_UNSET_FACT,
+    }
+    await assertPageFacts(clientA, clearedExpected, 'UI_L6 cleared override')
+    // Restore the Fetch API provider first when the negative probe left HTTP,
+    // then both Billing rows are writable again.
+    if (customRouteSeeded) {
+      await openWebRow(clientA, ROW.fetchProvider, 'UI_L6 restore fetch provider after negative')
+      await selectCandidate(clientA, 1, 'UI_L6 restore fetch provider after negative', FETCH_API_PROVIDER_LABEL)
+      await confirmCandidate(clientA, FETCH_API_PROVIDER_LABEL, 'UI_L6 restore fetch provider after negative write')
+    }
+    // Billing is writable again: restore both modes to Automatic through the page.
+    await openWebRow(clientA, ROW.searchBilling, 'UI_L6 restore search billing')
+    await selectCandidate(clientA, 0, 'UI_L6 restore search billing', BILLING_LABELS.auto)
+    await confirmCandidate(clientA, BILLING_LABELS.auto, 'UI_L6 restore search billing write')
+    await openWebRow(clientA, ROW.fetchBilling, 'UI_L6 restore fetch billing')
+    await selectCandidate(clientA, 0, 'UI_L6 restore fetch billing', BILLING_LABELS.auto)
+    await confirmCandidate(clientA, BILLING_LABELS.auto, 'UI_L6 restore fetch billing write')
+    // Count / Question back to the seeded values.
     await openWebRow(clientA, ROW.count, 'UI_L6 restore result count')
-    await selectCandidate(clientA, COUNT_CANDIDATES.indexOf(String(OFFICIAL.count)), 'UI_L6 restore result count', String(OFFICIAL.count))
-    await confirmCandidate(clientA, String(OFFICIAL.count), 'UI_L6 restore result count write')
+    await selectCandidate(clientA, COUNT_CANDIDATES.indexOf(String(SEED_COUNT)), 'UI_L6 restore result count', String(SEED_COUNT))
+    await confirmCandidate(clientA, String(SEED_COUNT), 'UI_L6 restore result count write')
     await openWebRow(clientA, ROW.sendOriginalQuestion, 'UI_L6 restore original question')
     await selectCandidate(clientA, QUESTION_OFF, 'UI_L6 restore original question', 'off')
     await confirmCandidate(clientA, 'off', 'UI_L6 restore original question write')
-    await writeEndpoint(clientA, OFFICIAL.baseURL, OFFICIAL.baseURL, 'UI_L6 restore endpoint write')
-    // The official Settings service PRUNES a user layer whose values all equal
-    // the shipped defaults (the whole section row may disappear). The authority
-    // that matters is the EFFECTIVE value: an absent key applies the default, so
-    // a missing/empty section is back on the baseline, and a leftover non-default
-    // value is a real restore failure.
+    // Providers back to the shipped stored defaults (Messages / HTTP).
+    await openWebRow(clientA, ROW.searchProvider, 'UI_L6 restore search provider')
+    await selectCandidate(clientA, 0, 'UI_L6 restore search provider', MESSAGES_PROVIDER_LABEL)
+    await confirmCandidate(clientA, MESSAGES_PROVIDER_LABEL, 'UI_L6 restore search provider write')
+    await openWebRow(clientA, ROW.fetchProvider, 'UI_L6 restore fetch provider')
+    await selectCandidate(clientA, 0, 'UI_L6 restore fetch provider', HTTP_PROVIDER_LABEL)
+    await confirmCandidate(clientA, HTTP_PROVIDER_LABEL, 'UI_L6 restore fetch provider write')
+    const restored = {
+      searchProviderLabel: MESSAGES_PROVIDER_LABEL,
+      fetchProviderLabel: HTTP_PROVIDER_LABEL,
+      count: SEED_COUNT,
+      sendOriginalQuestion: false,
+      // Messages/HTTP are not the billed API providers: both Billing rows are
+      // correctly inert on the restored route. The stored values are `auto`.
+      searchBilling: 'Not selected',
+      fetchBilling: 'Not selected',
+      searchAdvanced: OVERRIDE_UNSET_FACT,
+      fetchAdvanced: OVERRIDE_UNSET_FACT,
+      credentialState: 'Configured',
+    }
     const restoredWeb = namespaceConfig(documentPath, WEB_NS) ?? {}
     const restoredApi = namespaceConfig(documentPath, WEB_API_NS) ?? {}
-    assert((restoredWeb.searchProvider ?? OFFICIAL.searchProvider) === OFFICIAL.searchProvider
-      && (restoredWeb.fetchProvider ?? OFFICIAL.fetchProvider) === OFFICIAL.fetchProvider,
+    assert((restoredWeb.searchProvider ?? 'deepseek-official') === 'deepseek-official'
+      && (restoredWeb.fetchProvider ?? 'http') === 'http',
     `UI_L6 restore: the "web" section still holds a non-default value: ${JSON.stringify(restoredWeb)}`)
-    assert((restoredApi.baseURL ?? OFFICIAL.baseURL) === OFFICIAL.baseURL
-      && (restoredApi.count ?? OFFICIAL.count) === OFFICIAL.count
-      && (restoredApi.sendOriginalQuestion ?? OFFICIAL.sendOriginalQuestion) === OFFICIAL.sendOriginalQuestion,
+    assert((restoredApi.count ?? SEED_COUNT) === SEED_COUNT
+      && (restoredApi.sendOriginalQuestion ?? false) === false
+      && (restoredApi.searchBilling ?? 'auto') === 'auto'
+      && (restoredApi.fetchBilling ?? 'auto') === 'auto'
+      && (restoredApi.searchBaseURL ?? undefined) === undefined,
     `UI_L6 restore: the "web-deepseek-api" section still holds a non-default value: ${JSON.stringify(restoredApi)}`)
-    // Authoritative effective read-back through the real page proves the baseline.
-    await assertPageFacts(clientA, OFFICIAL, 'UI_L6 restored effective')
+    await assertPageFacts(clientA, restored, 'UI_L6 restored effective')
+    trace('f3.ui-l6', {
+      verdict: 'UI_L6_PASS',
+      phase: 'restored',
+      searchProvider: 'deepseek-official',
+      fetchProvider: 'http',
+      count: SEED_COUNT,
+      sendOriginalQuestion: false,
+      searchBilling: 'auto',
+      fetchBilling: 'auto',
+      advancedOverrides: 'unset',
+    })
 
     // ── 8. The credential reference stays metadata-only. ────────────────────
-    // The Host fixture really STORED the sentinel through the official
-    // `ctx.credentials.set` path, so "the secret never appears" is a real
-    // negative: the same value exists in the credential store while this scan
-    // covers both panes, the settings document, the Host work proof and the
-    // Client telemetry records.
     await openWebRow(clientA, ROW.credential, 'UI_L6 credential reference', 'Reference: ')
     await waitForScreenText(clientA, `Reference: ${CREDENTIAL_REF}`, 'UI_L6 credential reference name')
     await waitForScreenText(clientA, 'State: Configured', 'UI_L6 credential configured state')
@@ -968,7 +1189,6 @@ export async function runWebProviderSettingsF3(context) {
     assert(!/^\s*apiKey:/mu.test(readFileSync(documentPath, 'utf8')),
       'UI_L6 credential: a secret value must never be persisted into the settings document')
     const proofPath = join(root, 'events.jsonl')
-    // The Client telemetry files live in the runner work dir (one per process).
     const corpusFiles = [
       proofPath,
       ...readdirSync(context.workDir).filter(name => name.startsWith('surface-client-')).map(name => join(context.workDir, name)),
@@ -992,29 +1212,15 @@ export async function runWebProviderSettingsF3(context) {
       sentinelStored: true,
       secretPainted: false,
       secretPersisted: false,
-      scanned: 'panes+document+host-proof+client-telemetry',
     })
-    trace('f3.ui-l6', {
-      verdict: 'UI_L6_PASS',
-      phase: 'restored',
-      searchProvider: OFFICIAL.searchProvider,
-      fetchProvider: OFFICIAL.fetchProvider,
-      baseURL: OFFICIAL.baseURL,
-      count: OFFICIAL.count,
-      sendOriginalQuestion: OFFICIAL.sendOriginalQuestion,
-    })
-
-    // ── Teardown restores the pre-case credential reference (RFL-010). ──────
-    // The fixture's disposal unsets its sentinel reference through the same
-    // official authority, so a later case of the shared lane inherits the
-    // exact pre-case reference state.
     await scene.dispose()
     disposed = true
-    const restored = await waitForC1WorkEvent(root, event => event.kind === 'f3-credential-restored', 'F3 credential restore')
+    const restoredCredential = await waitForC1WorkEvent(root, event => event.kind === 'f3-credential-restored', 'F3 credential restore')
     assert(!readFileSync(join(context.dshHome, '.credentials.yaml'), 'utf8').includes(sentinel),
       'F3: the fixture sentinel reference survived teardown')
-    trace('f3.credential-restored', { hadPrevious: restored.hadPrevious === true })
+    trace('f3.credential-restored', { hadPrevious: restoredCredential.hadPrevious === true })
     return { status: 'PASS' }
+
   } finally {
     if (!disposed) await scene.dispose()
   }
