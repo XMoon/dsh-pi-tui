@@ -1016,13 +1016,14 @@ function summarizeToolArgs(name: string, argsRaw: string): string | undefined {
     }
     // team_task_list: only verifiable filters, in the official display order.
     // cursor/limit are execution parameters, never identity. The official tool
-    // rejects owner+unowned together, so that pair shows no guessed filter.
+    // rejects any call where BOTH an owner key and an unowned key are present
+    // (regardless of value, e.g. owner:""), so that pair shows no guessed filter.
     const parts: string[] = []
     const status = args.status
     if (typeof status === 'string' && TEAM_TASK_LIST_STATUS_VALUES.has(status)) parts.push(`status ${status}`)
+    if (args.owner !== undefined && args.unowned !== undefined) return ''
     const ownerValid = typeof args.owner === 'string' && args.owner !== ''
     const unownedValid = typeof args.unowned === 'boolean'
-    if (ownerValid && unownedValid) return ''
     if (ownerValid) parts.push(`owner ${args.owner as string}`)
     if (unownedValid) parts.push(`unowned ${args.unowned === true ? 'yes' : 'no'}`)
     if (typeof args.ready === 'boolean') parts.push(`ready ${args.ready ? 'yes' : 'no'}`)

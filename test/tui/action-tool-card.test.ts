@@ -235,6 +235,11 @@ test('team task and wait tools use fixed titles and safe call identities', () =>
   assert.deepEqual(toolCardHeader('team_task_list', JSON.stringify({ owner: 'scout', unowned: false })), {
     title: 'List team tasks', summary: '',
   })
+  // Exclusivity is key-presence based: an empty-string owner still counts as a
+  // present owner key, so the officially-rejected pair shows no filter either.
+  assert.deepEqual(toolCardHeader('team_task_list', JSON.stringify({ owner: '', unowned: true })), {
+    title: 'List team tasks', summary: '',
+  })
   // cursor/limit are execution parameters, never part of the identity.
   assert.deepEqual(toolCardHeader('team_task_list', JSON.stringify({ cursor: 10, limit: 5 })), {
     title: 'List team tasks', summary: '',
