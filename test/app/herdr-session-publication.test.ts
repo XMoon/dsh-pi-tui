@@ -243,13 +243,17 @@ test('HSP-02 a startup Resume committed before the observer install is sampled o
   const publishCurrent = (): void => {
     recording.observeSession(herdrSessionProjection(ownership.currentSessionId(), 'pi-tui'))
   }
+  // Drain the commit's coalesced notification BEFORE subscribing, so the ONLY
+  // thing that can deliver the pre-install resume to the observer is the
+  // install-time sample itself (a subscriber would otherwise receive that same
+  // notification and make this test pass without any sample).
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(observed, [], 'no observer existed for the pre-install commit')
   ownership.subscribeScopeInvalidation(publishCurrent)
   publishCurrent()
-  // The install-time sample already sees the committed resume; the coalesced
-  // notification for that SAME commit is a legal second observation of the same
-  // identity (the reporter dedupes it). The CLI sink is the authority here.
-  assert.ok(observed.some(projection => projection?.sessionId === SESSION_R),
-    'the install-time sample must observe the resume committed before it')
+  assert.deepEqual(observed.map(projection => projection?.sessionId), [SESSION_R],
+    'the install-time sample must be what observes the resume committed before it')
   reporter.publish({ state: 'idle' })
   await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'start'
     && entry.argv?.[1] === 'report-agent-session').length === 1, 'the startup-resume Session')
