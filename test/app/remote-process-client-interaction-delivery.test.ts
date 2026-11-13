@@ -538,19 +538,24 @@ test('the eligibility read view notifies on add and remove but never answers', a
   delivery.dispose()
 })
 
-test('root disposal terminates an in-flight delivery without delegating to next', async () => {
+test('root disposal withholds an in-flight delivery without delegating to next', async () => {
   const { seat, delivery } = createDelivery()
   let nextCalls = 0
+  let settled = false
   const result = seat.emitQuestion({ questions: QUESTIONS, wait: { callId: 'call-dispose' } }, async () => {
     nextCalls += 1
     return PROCEED
   })
+  result.then(() => { settled = true }, () => { settled = true })
   delivery.attachSurface(1, {
     onQuestion: async () => await new Promise<never>(() => {}),
     onApproval: () => 'rejected',
   })
   await tick()
   delivery.dispose()
-  await assert.rejects(result, /disposed before the official request settled/u)
+  await tick()
+  await tick()
+  assert.equal(settled, false,
+    'root disposal must not answer the official invocation: a local teardown is never a Host decision')
   assert.equal(nextCalls, 0)
 })

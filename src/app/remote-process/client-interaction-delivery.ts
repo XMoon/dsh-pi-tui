@@ -279,8 +279,25 @@ export function createSplitClientInteractionDelivery(
     invoke: (attachment: SurfaceAttachment) => Promise<T> | T,
   ): Promise<T> => {
     const lifetime = lifetimeOf(requestSignal)
+    /**
+     * The ROOT is gone while the official invocation is still pending: the
+     * request lifetime (or another delegate of the same invocation) still owns
+     * it. Answering with the disposal error would turn a local teardown into a
+     * Host decision — the exact contract this delivery exists to keep — so the
+     * dying root simply never answers: the pending promise dies with the
+     * process, its carrier drops, and the remaining delegate settles the
+     * invocation. A replacement surface may also present it again while this
+     * root still lives.
+     */
+    const withholdForDisposedRoot = async (): Promise<T> => await new Promise<T>(() => {})
     for (;;) {
-      await waitForAdmission(sessionId, lifetime)
+      if (disposed) return await withholdForDisposedRoot()
+      try {
+        await waitForAdmission(sessionId, lifetime)
+      } catch (error) {
+        if (disposed) return await withholdForDisposedRoot()
+        throw error
+      }
       const attachment = current
       if (attachment === undefined) continue
       const hold = navigationHold
@@ -308,6 +325,7 @@ export function createSplitClientInteractionDelivery(
           return result
         }
       } catch (error) {
+        if (disposed) return await withholdForDisposedRoot()
         if (lifetime.aborted) throw abortReason(lifetime)
         if (current === attachment
           && navigationHold === hold

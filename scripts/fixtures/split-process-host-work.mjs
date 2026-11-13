@@ -896,6 +896,9 @@ export async function apply(ctx) {
         callId: callId === undefined ? undefined : String(callId),
         sessionId,
         error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error
+          ? String(error.stack ?? '').split('\n').slice(0, 12).join(' | ').slice(0, 2000)
+          : undefined,
       })
       record('question-projection', {
         callId: callId === undefined ? undefined : String(callId),
