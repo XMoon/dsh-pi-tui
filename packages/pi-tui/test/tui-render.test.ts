@@ -764,6 +764,59 @@ describe("TUI Native Kitty overlay preemption (X077)", () => {
 		}
 	});
 
+	it("emits no image APC when the overlay is absent, hidden or zero-height", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const anchor = nativeAnchor(3131, 7, 2, 2);
+			component.lines = ["top", anchor, "", "bottom"];
+			tui.start();
+			await terminal.waitForRender();
+			const anchored = terminal.getWrites();
+			assert.ok(anchored.includes(anchor), "the placement paints when no overlay exists");
+
+			// A zero-height overlay covers no row: the block must not yield.
+			terminal.clearWrites();
+			const empty = new TestComponent();
+			empty.lines = [];
+			const emptyHandle = tui.showOverlay(empty, { row: 1, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(!terminal.getWrites().includes("\x1b_G"), "a zero-height overlay emits no Kitty APC at all");
+			assert.ok(!terminal.getWrites().includes(deleteKittyImage(3131)), "a zero-height overlay deletes nothing");
+			emptyHandle.hide();
+
+			// A hidden overlay with real content is invisible: same rule.
+			terminal.clearWrites();
+			const hidden = new TestComponent();
+			hidden.lines = ["MODAL"];
+			const hiddenHandle = tui.showOverlay(hidden, { row: 1, col: 0, width: 10 });
+			hiddenHandle.setHidden(true);
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(!terminal.getWrites().includes("\x1b_G"), "a hidden overlay emits no Kitty APC at all");
+			assert.ok(!terminal.getWrites().includes(deleteKittyImage(3131)), "a hidden overlay deletes nothing");
+			assert.ok(!terminal.getWrites().includes("MODAL"), "a hidden overlay paints nothing");
+			hiddenHandle.hide();
+
+			// A frame with no overlay at all keeps the original bytes.
+			terminal.clearWrites();
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(!terminal.getWrites().includes("\x1b_G"), "an unoverlaid frame emits no extra Kitty APC");
+			assert.ok(!terminal.getWrites().includes("\x1b[2J"), "an unoverlaid frame clears nothing");
+			assert.ok(!terminal.getWrites().includes("\x1b[3J"), "an unoverlaid frame clears no scrollback");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
 	it("renders a visible overlay once per frame and emits no destructive clear", async () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 		setCellDimensions({ widthPx: 10, heightPx: 10 });
