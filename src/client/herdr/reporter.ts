@@ -169,6 +169,10 @@ export function createHerdrReporter(
    *  authority, so ONE ordered re-registration is owed when the queue drains.
    *  A boolean (never a counter) keeps this a single attempt per event. */
   let registrationRetryOwed = false
+  /** A real event arrived while the desired Session was already queued/in
+   *  flight. The delivery is only decidable at settle, so the event is remembered
+   *  here and a FAILED child is retried from it instead of being lost. */
+  let sessionRetryOwed = false
   /** The one live child, or `undefined` when the queue is idle. */
   let active: { readonly child: ChildProcess; readonly timer: NodeJS.Timeout; readonly kind: Intent['kind'] } | undefined
   /** At most one newer report waits behind the live child (latest wins). */
@@ -300,6 +304,19 @@ export function createHerdrReporter(
     else advanceQueue()
   }
 
+  /** Retry a Session delivery whose in-flight child FAILED, using the event that
+   *  arrived during that flight. Kept while the queue is busy; never self-started. */
+  const consumeSessionRetry = (): void => {
+    if (!sessionRetryOwed) return
+    if (active !== undefined || pendingRelease) return
+    sessionRetryOwed = false
+    if (disposed || !qualified || cleanupRequired) return
+    const desired = latestSession
+    if (desired === undefined || sameSession(lastSession, desired)) return
+    pendingSession = desired
+    advanceQueue()
+  }
+
   const finishActive = (): void => {
     const settled = active
     if (settled === undefined) return
@@ -312,6 +329,7 @@ export function createHerdrReporter(
     if (settled.kind === 'release' && !cleanupRequired) requeueCurrentFacts()
     advanceQueue()
     consumeRegistrationRetry()
+    consumeSessionRetry()
   }
 
   /** One bounded, shell-free external invocation. */
@@ -513,7 +531,14 @@ export function createHerdrReporter(
     // No Session fact of its own means no Session work: an Agent-state dedupe is
     // NOT a reason to re-register the Pane (H1 already owns state delivery).
     if (desired === undefined) return
-    if (sameSession(pendingSession ?? activeSession ?? lastSession, desired)) return
+    if (sameSession(pendingSession ?? activeSession, desired)) {
+      // The desired Session is already queued or in flight. Whether it is
+      // DELIVERED is only known when its child settles, so this real event is
+      // remembered: a failed child is retried from it instead of dropped.
+      sessionRetryOwed = true
+      return
+    }
+    if (sameSession(lastSession, desired)) return
     pendingSession = desired
     if (!paneAcknowledged) {
       // The Pane is not held, so the Session cannot be delivered yet: the owed
@@ -567,6 +592,7 @@ export function createHerdrReporter(
         // upstream and only a successful release can withdraw it.
         const hadRegistration = lastDispatched !== undefined || active?.kind === 'report'
         pendingSession = undefined
+        sessionRetryOwed = false
         paneAcknowledged = false
         lastSession = undefined
         registered = undefined
@@ -602,6 +628,7 @@ export function createHerdrReporter(
       disposed = true
       qualified = false
       pendingSession = undefined
+      sessionRetryOwed = false
       paneAcknowledged = false
       lastSession = undefined
       // Dispose still owes AT MOST ONE withdrawal: an in-flight or queued

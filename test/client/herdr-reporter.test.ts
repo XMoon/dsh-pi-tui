@@ -754,3 +754,43 @@ test('H2-R16 a FAILED cleanup release is retried by a CHANGED Agent state fact',
   assert.deepEqual(starts(fixture, 'report-agent').map(entry => stateOf(entry)), ['idle', 'working'],
     'the re-registration carries the CURRENT state, not the stale one')
 })
+
+test('H2-R17 an event landing while Session B is IN FLIGHT still retries B when that child fails', async (t) => {
+  // `sessionDelayMs` holds B's child in flight long enough for a real Agent
+  // state fact to arrive during that flight, which is the window RFL-007 is
+  // about: the event must not be dropped because the Session is already active.
+  const fixture = createHerdrCliFixture(t, { sessionDelayMs: 300 })
+  const reporter = reporterOf(fixture)
+  reporter.publish({ state: 'idle' })
+  await fixture.waitFor(entries => starts(fixture, 'report-agent').length === 1, 'the idle registration')
+  reporter.observeSession(directSession(SESSION_A))
+  await fixture.waitFor(entries => deliveredSessions(fixture).length === 1, 'Session A delivered')
+  await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'end').length
+    >= entries.filter(entry => entry.phase === 'start').length, 'the queue settled after A')
+
+  // B is dispatched and FAILS; the state fact arrives while it is in flight.
+  fixture.env.HERDR_FAKE_SESSION_EXIT_CODE = '3'
+  reporter.observeSession(directSession(SESSION_B))
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 2, 'the in-flight Session B')
+  reporter.publish({ state: 'working' })
+  // The event is remembered; the failed B must be retried WITHOUT a new event.
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 3, 'Session B retried from the in-flight event')
+  await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'end').length
+    >= entries.filter(entry => entry.phase === 'start').length, 'the retry settled')
+  assert.deepEqual(deliveredSessions(fixture), [SESSION_A],
+    'both attempts failed, so nothing new may be claimed as delivered')
+
+  // Still no additional event: the retry is NOT repeated a second time.
+  await delay(150)
+  assert.equal(sessionStarts(fixture).length, 3, 'one retry per remembered event, never a loop')
+
+  // A later real event, with the CLI healthy, delivers the current Session.
+  fixture.env.HERDR_FAKE_SESSION_EXIT_CODE = ''
+  reporter.publish({ state: 'idle' })
+  await fixture.waitFor(entries => deliveredSessions(fixture).length === 2, 'Session B delivered')
+  await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'end').length
+    >= entries.filter(entry => entry.phase === 'start').length, 'the queue settled after the recovery')
+  assert.deepEqual(deliveredSessions(fixture), [SESSION_A, SESSION_B])
+  assert.deepEqual(fixture.sessions()[2].resumeArgv,
+    ['dsh', '--profile', PROFILE, '--session', SESSION_B])
+})

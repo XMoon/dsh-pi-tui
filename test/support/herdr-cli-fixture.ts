@@ -143,6 +143,22 @@ export function createHerdrCliFixture(t: TestContext, options: HerdrCliFixtureOp
     }
     return parsed
   }
+  // Teardown guard: a fake CLI child appends its `end` line just before it
+  // exits, so removing the fixture root while a child is still writing can fail
+  // with ENOTEMPTY. Disposers run BEFORE the temp-dir removal, so waiting here
+  // keeps the two from racing (bounded: a child killed by the reporter's timeout
+  // never writes its end line).
+  life.defer(async () => {
+    const deadline = Date.now() + 1_000
+    const allSettled = (): boolean => {
+      const started = new Set(entries().filter(entry => entry.phase === 'start').map(entry => entry.pid))
+      const ended = new Set(entries().filter(entry => entry.phase === 'end').map(entry => entry.pid))
+      return [...started].every(pid => ended.has(pid))
+    }
+    while (!allSettled() && Date.now() < deadline) {
+      await new Promise<void>(resolve => setTimeout(resolve, 5))
+    }
+  })
   return {
     binPath: env.HERDR_BIN_PATH ?? '',
     paneId,
