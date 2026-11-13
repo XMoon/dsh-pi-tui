@@ -559,3 +559,43 @@ test('root disposal withholds an in-flight delivery without delegating to next',
     'root disposal must not answer the official invocation: a local teardown is never a Host decision')
   assert.equal(nextCalls, 0)
 })
+
+test('root disposal withholds an in-flight approval without delegating to next', async () => {
+  const { seat, delivery } = createDelivery()
+  let nextCalls = 0
+  let settled = false
+  const result = Promise.resolve(seat.emitApproval({ toolName: 'bash', callId: 'call-dispose-approval' }, async () => {
+    nextCalls += 1
+    return 'next'
+  }))
+  result.then(() => { settled = true }, () => { settled = true })
+  delivery.attachSurface(1, {
+    onQuestion: async () => PROCEED,
+    onApproval: async () => await new Promise<never>(() => {}),
+  })
+  await tick()
+  delivery.dispose()
+  await tick()
+  await tick()
+  assert.equal(settled, false,
+    'root disposal must not answer the official approval: a local teardown is never a Host decision')
+  assert.equal(nextCalls, 0)
+})
+
+test('root disposal while the admission wait is still pending withholds the invocation', async () => {
+  const { seat, delivery } = createDelivery()
+  let nextCalls = 0
+  let settled = false
+  const result = seat.emitQuestion({ questions: QUESTIONS, wait: { callId: 'call-dispose-admission' } }, async () => {
+    nextCalls += 1
+    return PROCEED
+  })
+  result.then(() => { settled = true }, () => { settled = true })
+  await tick()
+  delivery.dispose()
+  await tick()
+  await tick()
+  assert.equal(settled, false,
+    'a request waiting for a surface must be withheld, never answered by the disposal')
+  assert.equal(nextCalls, 0)
+})
