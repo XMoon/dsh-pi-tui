@@ -79,6 +79,15 @@ function states(logPath) {
     })
 }
 
+/** The ordered Pane command kinds on this log (state | session | release). */
+function startCommands(logPath) {
+  return readInvocations(logPath).map(({ argv }) => {
+    if (argv[1] === 'release-agent') return 'release'
+    if (argv[1] === 'report-agent-session') return 'session'
+    return 'state'
+  })
+}
+
 /** Every H2 Session report, with its recovery argv parsed strictly after `--`. */
 function sessionFacts(logPath) {
   return readInvocations(logPath)
@@ -173,7 +182,12 @@ export async function runHerdrH2(context) {
 
     // ── Sessionless: no Session report may exist ─────────────────────────────
     assert(clientReady.sessionOpen === false, 'H2 the Client must start sessionless')
-    await sleep(1000)
+    // The negative is anchored on a REAL fact, not on a time window: the Ready
+    // record itself proves no Session was ever opened, so no Session command may
+    // exist at this point. The positive A/B Sessions below prove the Client
+    // would have reported one (the same log then carries them).
+    assert(!client.records.some(record => record.m4b2s === 'surface-status' && record.sessionOpen === true),
+      'H2 the Client opened a Session before the first prompt')
     assert(sessionFacts(clientLog).length === 0, 'H2 a sessionless Client reported a Session')
 
     // ── Session A: the real first prompt is held by the Host fixture ────────
@@ -187,8 +201,13 @@ export async function runHerdrH2(context) {
       'H2 the first canonical Session A')
     assert(sessionFacts(clientLog).every(fact => fact.resumeArgv === undefined),
       'H2 a Remote Client must never report a resume argv')
-    assert(states(clientLog).includes('working') || states(clientLog).includes('idle'),
-      'H2 the Session A report must follow a real H1 state registration')
+    // The registration order is a fact of the log: the first H1 state command
+    // must precede the first Session command (Herdr rejects a Session report
+    // before the Pane is held).
+    const firstStateAt = startCommands(clientLog).indexOf('state')
+    const firstSessionAt = startCommands(clientLog).indexOf('session')
+    assert(firstStateAt >= 0 && firstSessionAt > firstStateAt,
+      `H2 the Session report must follow the first state registration; the log is ${JSON.stringify(startCommands(clientLog))}`)
     assertPaneOwnership(clientLog, paneId)
 
     // ── A -> B through the real /new owner change ───────────────────────────
