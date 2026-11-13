@@ -218,6 +218,7 @@ export async function runF7BCredentialRecords(context) {
   let clientA
   let clientB
   let host
+  let disposed = false
 
   try {
     const started = await scene.startC1Host('f7b-credential-records', 'F7B credential records Host', {}, root)
@@ -309,8 +310,23 @@ export async function runF7BCredentialRecords(context) {
       'F7B: no seeded secret may appear after the full flow')
 
     trace('f7b.account-and-f7a', { accountSurface: true, f7aStillLive: true })
+
+    // ── Teardown restores the pre-case record state; prove the zero delta. ──
+    // The fixture's disposal (a clean Host shutdown) undoes every seed through
+    // the official Credentials authority; a later case of the shared lane must
+    // inherit exactly the pre-case record set.
+    await scene.dispose()
+    disposed = true
+    const restored = await waitForEvent(root, event => event.kind === 'f7b-records-restored', 'F7B record restore')
+    assert(![GRANT_KEY, API_KEY_KEY, ORPHAN_KEY, ACCOUNT_KEY].some(key => restored.keys.includes(key)),
+      `F7B: fixture records survived teardown: ${JSON.stringify(restored)}`)
+    assert(restored.baselineKeys.every(key => restored.keys.includes(key)),
+      `F7B: teardown lost a pre-case record: ${JSON.stringify(restored)}`)
+    assert(restored.keys.every(key => restored.baselineKeys.includes(key)),
+      `F7B: teardown left new records behind: ${JSON.stringify(restored)}`)
+    trace('f7b.records-restored', { zeroDelta: true, keys: restored.keys })
     return { status: 'PASS' }
   } finally {
-    await scene.dispose()
+    if (!disposed) await scene.dispose()
   }
 }
