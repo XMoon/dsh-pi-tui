@@ -76,13 +76,20 @@ function readInvocations(logPath) {
   })
 }
 
-/** The ordered Pane facts one Client log observed. */
+/**
+ * The ordered H1 Pane facts one Client log observed: `report-agent` states and
+ * `release-agent` releases ONLY. H2 adds `report-agent-session` invocations on
+ * the SAME queue; they are not Agent states and must not enter this list (its
+ * own list is parsed by the H2 case).
+ */
 function states(logPath) {
-  return readInvocations(logPath).map(({ argv }) => {
-    if (argv[1] === 'release-agent') return 'release'
-    const index = argv.indexOf('--state')
-    return index < 0 ? '(missing-state)' : argv[index + 1]
-  })
+  return readInvocations(logPath)
+    .filter(({ argv }) => argv[1] === 'report-agent' || argv[1] === 'release-agent')
+    .map(({ argv }) => {
+      if (argv[1] === 'release-agent') return 'release'
+      const index = argv.indexOf('--state')
+      return index < 0 ? '(missing-state)' : argv[index + 1]
+    })
 }
 
 /** Wait for a bounded predicate over the current fake-CLI log. */
@@ -132,6 +139,13 @@ function herdrClientEnv(scriptPath, logPath, paneId) {
   }
 }
 
+/** The value after one flag; the `--seq` of a Session report is not last. */
+function argAfter(argv, flag) {
+  const index = argv.indexOf(flag)
+  assert(index >= 0 && argv[index + 1] !== undefined, `H1 missing ${flag} in ${JSON.stringify(argv)}`)
+  return argv[index + 1]
+}
+
 /** Every invocation on this log belongs to the declared Pane and source. */
 function assertPaneOwnership(logPath, paneId) {
   for (const invocation of readInvocations(logPath)) {
@@ -140,7 +154,10 @@ function assertPaneOwnership(logPath, paneId) {
     assert(argv[2] === paneId, `H1 the Pane ${JSON.stringify(paneId)} log received ${JSON.stringify(argv)}`)
     assert(argv[3] === '--source' && argv[4] === 'dsh-pi-tui', `H1 wrong source in ${JSON.stringify(argv)}`)
     assert(argv[5] === '--agent' && argv[6] === 'dsh-pi-tui', `H1 wrong agent in ${JSON.stringify(argv)}`)
-    assert(argv[argv.length - 2] === '--seq', `H1 a Pane command carried no seq: ${JSON.stringify(argv)}`)
+    // Read the seq by FLAG, not by position: an H2 session report carries
+    // `--agent-session-id ID [-- resume…]` AFTER it.
+    assert(Number.isSafeInteger(Number(argAfter(argv, '--seq'))),
+      `H1 a Pane command carried no seq: ${JSON.stringify(argv)}`)
   }
 }
 
