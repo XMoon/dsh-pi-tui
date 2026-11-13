@@ -309,6 +309,15 @@ function directSession(id: string): { sessionId: string; resumeArgv: readonly st
   return { sessionId: id, resumeArgv: ['dsh', '--profile', PROFILE, '--session', id] }
 }
 
+/** Session invocations whose own child exited 0 (Herdr actually accepted them). */
+function deliveredSessions(fixture: HerdrCliFixture): string[] {
+  const entries = fixture.entries()
+  const endedOk = new Set(entries.filter(entry => entry.phase === 'end' && entry.code === 0).map(entry => entry.pid))
+  return fixture.sessions()
+    .filter((_, index) => endedOk.has(sessionStarts(fixture)[index].pid))
+    .map(session => session.sessionId)
+}
+
 function startPhases(entries: readonly HerdrCliEntry[]): string[] {
   return entries.filter(entry => entry.phase === 'start').map(entry => {
     if (entry.argv?.[1] === 'release-agent') return 'release'
@@ -666,4 +675,82 @@ test('H2-R14 a startup sample during the first state child never duplicates the 
   reporter.observeSession({ sessionId: SESSION_A })
   await fixture.waitFor(entries => sessionStarts(fixture).length === 1, 'the Session after the state')
   assert.deepEqual(startPhases(fixture.entries()), ['state', 'session'])
+})
+
+test('H2-R15 a FAILED Session B report is retried by the next real Agent state fact', async (t) => {
+  const fixture = createHerdrCliFixture(t, { sessionDelayMs: 10 })
+  const reporter = reporterOf(fixture)
+  reporter.publish({ state: 'idle' })
+  await fixture.waitFor(entries => starts(fixture, 'report-agent').length === 1, 'the idle registration')
+  reporter.observeSession(directSession(SESSION_A))
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 1, 'Session A delivered')
+  await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'end').length
+    >= entries.filter(entry => entry.phase === 'start').length, 'the queue settled after A')
+
+  // B's report FAILS: the dispatched intent left the queue, so only the
+  // delivered baseline (`lastSession` = A) still proves what Herdr holds.
+  fixture.env.HERDR_FAKE_SESSION_EXIT_CODE = '3'
+  reporter.observeSession(directSession(SESSION_B))
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 2, 'the Session B child')
+  const failedSessionPid = sessionStarts(fixture)[1].pid
+  await fixture.waitFor(entries => entries.some(entry => entry.phase === 'end'
+    && entry.pid === failedSessionPid && entry.code === 3), 'the failed Session B')
+  await delay(120)
+  assert.deepEqual(deliveredSessions(fixture), [SESSION_A],
+    'the failed report must not be treated as delivered')
+  assert.deepEqual(startPhases(fixture.entries()), ['state', 'session', 'session'],
+    'the failed session dispatch is the last child: nothing retried it by itself')
+
+  // A REAL Agent state fact is the lifecycle event that reconciles it.
+  fixture.env.HERDR_FAKE_SESSION_EXIT_CODE = ''
+  reporter.publish({ state: 'working' })
+  // Wait on DELIVERY (exit 0), not on a dispatch count: the failed B already
+  // occupies one dispatch slot, so a count would pass before the retry exists.
+  await fixture.waitFor(() => deliveredSessions(fixture).length === 2, 'Session B delivered')
+  await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'end').length
+    >= entries.filter(entry => entry.phase === 'start').length, 'the retry settled')
+  await delay(100)
+  assert.deepEqual(deliveredSessions(fixture), [SESSION_A, SESSION_B],
+    'the CURRENT Session must win after the retry')
+  assert.deepEqual(fixture.sessions()[1].resumeArgv,
+    ['dsh', '--profile', PROFILE, '--session', SESSION_B])
+  assert.deepEqual(startPhases(fixture.entries()), ['state', 'session', 'session', 'state', 'session'],
+    'the retried Session follows the new state registration')
+  const statesSeq = starts(fixture, 'report-agent').map(entry => stateOf(entry))
+  assert.deepEqual(statesSeq, ['idle', 'working'], 'the Agent state is still reported once per real change')
+})
+
+test('H2-R16 a FAILED cleanup release is retried by a CHANGED Agent state fact', async (t) => {
+  const fixture = createHerdrCliFixture(t, { sessionDelayMs: 10 })
+  const reporter = reporterOf(fixture)
+  reporter.publish({ state: 'idle' })
+  await fixture.waitFor(entries => starts(fixture, 'report-agent').length === 1, 'the idle registration')
+  reporter.observeSession(directSession(SESSION_A))
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 1, 'Session A delivered')
+  await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'end').length
+    >= entries.filter(entry => entry.phase === 'start').length, 'the queue settled after A')
+
+  // The cleanup withdrawal FAILS while the Agent is idle.
+  fixture.env.HERDR_FAKE_EXIT_CODE = '3'
+  reporter.observeSession(undefined)
+  await fixture.waitFor(entries => starts(fixture, 'release-agent').length === 1, 'the cleanup release child')
+  const failedReleasePid = starts(fixture, 'release-agent')[0].pid
+  await fixture.waitFor(entries => entries.some(entry => entry.phase === 'end'
+    && entry.pid === failedReleasePid && entry.code === 3), 'the failed cleanup release')
+  await delay(120)
+  assert.equal(starts(fixture, 'release-agent').length, 1, 'the failed withdrawal is not retried by itself')
+  assert.equal(starts(fixture, 'report-agent').length, 1, 'the Pane must stay unregistered')
+
+  // The Agent moves idle -> working: a state CHANGE (not a deduped repeat) must
+  // still retry the outstanding cleanup, then re-register the current fact.
+  fixture.env.HERDR_FAKE_EXIT_CODE = '0'
+  reporter.publish({ state: 'working' })
+  await fixture.waitFor(entries => starts(fixture, 'release-agent').length === 2, 'the retried cleanup')
+  await fixture.waitFor(entries => starts(fixture, 'report-agent').length === 2, 'the re-registration')
+  await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'end').length
+    >= entries.filter(entry => entry.phase === 'start').length, 'the recovery settled')
+  assert.deepEqual(startPhases(fixture.entries()), ['state', 'session', 'release', 'release', 'state'],
+    'the cleanup retry precedes the re-registration and no Session follows a sessionless target')
+  assert.deepEqual(starts(fixture, 'report-agent').map(entry => stateOf(entry)), ['idle', 'working'],
+    'the re-registration carries the CURRENT state, not the stale one')
 })
