@@ -199,37 +199,43 @@ export async function runHerdrH1(context) {
     assert(typeof aBefore?.generationId === 'number',
       'RH-02 the Client never observed an official transport generation')
     const rolloverBoundary = longClient.records.length
-    longClient.signalBusiness('SIGUSR1')
-    await longClient.waitFor(
-      record => longClient.records.indexOf(record) >= rolloverBoundary
-        && record.m4b2s === 'qualification' && record.op === 'drop-websocket',
-      'RH-02 the qualification mux drop was injected',
-      30_000,
-    )
-    await longClient.waitFor(
-      record => longClient.records.indexOf(record) >= rolloverBoundary
-        && record.m4b2s === 'surface-status'
-        && record.transport !== 'connected'
-        && record.generationId === undefined,
-      'RH-02 the Client observed the official lost generation',
-      60_000,
-    )
-    // While the generation is INVALID and no replacement has been accepted,
-    // the Pane must already be withdrawn. This is the controlled disconnect
-    // window: it cannot wait for the new generation or the requalified
-    // `working`; an extended outage must never keep a stale working/blocked.
-    // Freeze the Host so the official Connection loop cannot form the
-    // replacement generation while we read the loss window. The release must
-    // already be there: an extended outage never keeps a stale Agent state.
+    // F6: freeze the Host BEFORE the drop. The Client's own socket termination
+    // still loses the generation locally, but the official Connection loop can
+    // no longer form the replacement generation, so the loss window below is
+    // deterministic instead of racing a fast reconnect.
     process.kill(longReady.pid, 'SIGSTOP')
+    let resumed = false
+    const resumeHost = () => {
+      if (resumed) return
+      resumed = true
+      process.kill(longReady.pid, 'SIGCONT')
+    }
     try {
+      longClient.signalBusiness('SIGUSR1')
+      await longClient.waitFor(
+        record => longClient.records.indexOf(record) >= rolloverBoundary
+          && record.m4b2s === 'qualification' && record.op === 'drop-websocket',
+        'RH-02 the qualification mux drop was injected',
+        30_000,
+      )
+      await longClient.waitFor(
+        record => longClient.records.indexOf(record) >= rolloverBoundary
+          && record.m4b2s === 'surface-status'
+          && record.transport !== 'connected'
+          && record.generationId === undefined,
+        'RH-02 the Client observed the official lost generation',
+        60_000,
+      )
+      // While the generation is INVALID and no replacement has been accepted,
+      // the Pane must already be withdrawn: an extended outage never keeps a
+      // stale working/blocked registration.
       await waitForLog(longLog, () => lastIndex(longLog, 'release') !== -1,
         'RH-02 ordered release while the generation is still invalid', 60_000)
       const lossWindow = lastSurfaceStatus(longClient)
       assert(lossWindow?.generationId === undefined && lossWindow?.transport !== 'connected',
         `RH-02 the release must land before reconnect; the Client status was ${JSON.stringify(lossWindow)}`)
     } finally {
-      process.kill(longReady.pid, 'SIGCONT')
+      resumeHost()
     }
     const lossStates = states(longLog)
     const releaseAt = lossStates.lastIndexOf('release', lossStates.length - 1)

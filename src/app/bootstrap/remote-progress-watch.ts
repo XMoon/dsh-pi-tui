@@ -28,7 +28,14 @@ export interface RemoteProgressWatchGenerationDeps {
   readonly connectionGeneration: () => unknown
   readonly subscribeConnectionGeneration: (listener: () => void) => () => void
   /** Invalidate the external Pane qualification (ordered release). */
-  readonly release: () => void
+  readonly revokeQualification: () => void
+  /**
+   * The EXISTING terminal presentation fail-closed (OSC 9;4 / 7501). It runs
+   * AFTER the revocation so the conservative idle can never reach the Pane,
+   * and it keeps the pre-H1 behavior where a lost generation cleans up the
+   * native terminal state instead of leaving it on `working`.
+   */
+  readonly failClosedPresentation: () => void
   /** Stop the current watch, if any. */
   readonly disposeWatch: () => void
   /** Start exactly ONE watch pinned to the observed generation. */
@@ -66,7 +73,10 @@ export function armRemoteProgressWatchGeneration(
     // survive the outage, and a reconnect must never look idle. The very first
     // observation has no earlier registration to withdraw.
     if (!firstObservation) {
-      deps.release()
+      // ORDER IS THE CONTRACT: revoke the Pane first, then run the original
+      // terminal fail-closed. Reversing it would publish a fabricated idle.
+      deps.revokeQualification()
+      deps.failClosedPresentation()
       deps.disposeWatch()
     }
     if (now !== undefined) deps.startWatch(now)

@@ -39,6 +39,7 @@ import type { ApprovalOutcome } from '../../src/tui/panels/approval-dialog.ts'
 import { isTernTerminal } from '../../src/tui/terminal/tern.ts'
 import type { ProgramStatus } from '../../src/tui/terminal/program-status.ts'
 import { createHerdrReporter, type HerdrReporter } from '../../src/client/herdr/reporter.ts'
+import { armRemoteProgressWatchGeneration } from '../../src/app/bootstrap/remote-progress-watch.ts'
 import { createHerdrCliFixture, type HerdrCliEntry, type HerdrCliFixture } from '../support/herdr-cli-fixture.ts'
 import type {
   ApprovalRequestLike,
@@ -3360,6 +3361,56 @@ test('HS-08 an $EDITOR round trip never releases the Pane and republishes the la
     assert.equal(herdrReleaseCount(fixture), 0)
   } finally {
     app.dispose()
+    reporter.dispose()
+  }
+})
+
+test('HS-10 a lost Remote generation releases the Pane and fail-closes the native record (F5)', async (t) => {
+  const { fixture, reporter, harness } = mountHerdrSurface(t, (controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  })
+  try {
+    await waitForHerdrState(fixture, 1, 'working')
+    assert.deepEqual(harness.programWrites, [WORKING], 'the running interval owns the native record')
+    // Drive the REAL generation lifecycle with the exact wiring the composition
+    // root uses: revoke the Pane, then run the pre-H1 native fail-closed.
+    let generation: unknown = { id: 1 }
+    const listeners = new Set<() => void>()
+    const lifecycle = armRemoteProgressWatchGeneration({
+      isCleanedUp: () => false,
+      currentSessionId: () => 'main',
+      ownerGeneration: () => 1,
+      sessionId: 'main',
+      ownerGenerationAtInit: 1,
+      connectionGeneration: () => generation,
+      subscribeConnectionGeneration: listener => {
+        listeners.add(listener)
+        return () => { listeners.delete(listener) }
+      },
+      revokeQualification: () => reporter.setQualified(false),
+      failClosedPresentation: () => {
+        harness.surfaceRuntime.applyRemoteMainProgress(
+          { kind: 'snapshot', restart: true, running: false, outcome: 'idle' },
+          'main',
+        )
+      },
+      disposeWatch: () => {},
+      startWatch: () => {},
+    })
+    lifecycle.observeCurrent()
+    generation = undefined
+    for (const listener of [...listeners]) listener()
+    await drain()
+    await waitForHerdrState(fixture, 2, 'release')
+    await drain()
+    assert.equal(harness.programWrites.at(-1), IDLE,
+      'the native terminal fails closed after the generation loss')
+    assert.deepEqual(herdrStates(fixture), ['working', 'release'],
+      'the conservative idle never reaches the released Pane')
+    lifecycle.dispose()
+  } finally {
+    harness.dispose()
     reporter.dispose()
   }
 })

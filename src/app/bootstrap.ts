@@ -2224,7 +2224,18 @@ export function applyRunnerWithRuntime(
         ownerGenerationAtInit: initGeneration,
         connectionGeneration: () => remoteSources.commandSource.connectionGeneration(),
         subscribeConnectionGeneration: listener => remoteSources.commandSource.subscribeConnectionGeneration(listener),
-        release: () => { herdrReporter?.setQualified(false) },
+        // H1 plan Step 4: revoke the external qualification FIRST, then run
+        // the ORIGINAL terminal presentation fail-closed, so the conservative
+        // idle can never be published to the Pane while the native OSC 9;4 /
+        // 7501 state is still cleaned up. A new generation requalifies only
+        // through the next watch's authoritative Host snapshot.
+        revokeQualification: () => { herdrReporter?.setQualified(false) },
+        failClosedPresentation: () => {
+          surface.applyRemoteMainProgress(
+            { kind: 'snapshot', restart: true, running: false, outcome: 'idle' },
+            sessionId,
+          )
+        },
         disposeWatch: () => {
           remoteProgressHandle?.dispose()
           remoteProgressHandle = undefined
