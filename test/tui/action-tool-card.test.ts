@@ -6,10 +6,13 @@ import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import {
   compactToolExpandedLines,
   compactToolPresentation,
+  FOLDED_JSON_RESULT_TOOLS,
+  foldedResultSummaryFor,
   formatAgentListSummary,
   presentCallPresentation,
   focusToolDisplay,
   interruptAgentCallPresentation,
+  isCompactActionTool,
   listAgentsCallPresentation,
   sendMessageCallPresentation,
   summarizeAgentListResult,
@@ -194,6 +197,186 @@ test('schedule cards use the fixed no-registry fallback titles and identities', 
   const unknown = toolCardHeader('totally_custom', '{"id":"s1"}')
   assert.equal(unknown.title, 'Tool call')
   assert.match(unknown.summary, /^totally_custom · s1$/u)
+})
+
+// ── PR3: the five rc.3 Team / wait tools carry fixed card identities and a
+// bounded, schema-derived result preview, never a first-string or raw-JSON
+// fallback. These are the exact official names; every other name stays generic.
+test('team task and wait tools use fixed titles and safe call identities', () => {
+  assert.deepEqual(toolCardHeader('team_task_create', JSON.stringify({ subject: 'Scout one file', description: 'SECRET description' })), {
+    title: 'Create team task', summary: 'Scout one file',
+  })
+  // A malicious / reordered description is never the header, and a multiline
+  // subject collapses to its first line.
+  assert.deepEqual(toolCardHeader('team_task_create', JSON.stringify({ description: 'SECRET first field', subject: 'Real subject' })), {
+    title: 'Create team task', summary: 'Real subject',
+  })
+  assert.deepEqual(toolCardHeader('team_task_create', JSON.stringify({ subject: 'Line one\nLine two', description: 'x' })), {
+    title: 'Create team task', summary: 'Line one',
+  })
+  assert.deepEqual(toolCardHeader('team_task_create', JSON.stringify({ description: 'only a description' })), {
+    title: 'Create team task', summary: '',
+  })
+  assert.deepEqual(toolCardHeader('team_task_create', 'not json'), { title: 'Create team task', summary: '' })
+  assert.deepEqual(toolCardHeader('team_task_create', '{"subject":"unterminated'), { title: 'Create team task', summary: '' })
+
+  assert.deepEqual(toolCardHeader('team_task_list', '{}'), { title: 'List team tasks', summary: '' })
+  assert.deepEqual(toolCardHeader('team_task_list', ''), { title: 'List team tasks', summary: '' })
+  assert.deepEqual(toolCardHeader('team_task_list', JSON.stringify({ status: 'pending', owner: 'scout', ready: true })), {
+    title: 'List team tasks', summary: 'status pending · owner scout · ready yes',
+  })
+  assert.deepEqual(toolCardHeader('team_task_list', JSON.stringify({ unowned: true })), {
+    title: 'List team tasks', summary: 'unowned yes',
+  })
+  assert.deepEqual(toolCardHeader('team_task_list', JSON.stringify({ status: 'in_progress', unowned: false })), {
+    title: 'List team tasks', summary: 'status in_progress · unowned no',
+  })
+  // The official tool rejects owner + unowned together: show no guessed filter.
+  assert.deepEqual(toolCardHeader('team_task_list', JSON.stringify({ owner: 'scout', unowned: false })), {
+    title: 'List team tasks', summary: '',
+  })
+  // cursor/limit are execution parameters, never part of the identity.
+  assert.deepEqual(toolCardHeader('team_task_list', JSON.stringify({ cursor: 10, limit: 5 })), {
+    title: 'List team tasks', summary: '',
+  })
+  // An unknown status filter is not a verifiable fact; it is dropped, never shown raw.
+  assert.deepEqual(toolCardHeader('team_task_list', JSON.stringify({ status: 'bogus' })), {
+    title: 'List team tasks', summary: '',
+  })
+  assert.deepEqual(toolCardHeader('team_task_list', 'not json'), { title: 'List team tasks', summary: '' })
+
+  assert.deepEqual(toolCardHeader('team_task_get', JSON.stringify({ task_id: 'task-1' })), {
+    title: 'View team task', summary: 'task-1',
+  })
+  assert.deepEqual(toolCardHeader('team_task_get', JSON.stringify({ task_id: '' })), {
+    title: 'View team task', summary: '',
+  })
+  assert.deepEqual(toolCardHeader('team_task_get', JSON.stringify({})), { title: 'View team task', summary: '' })
+
+  assert.deepEqual(toolCardHeader('team_task_update', JSON.stringify({ task_id: 'task-1', expected_revision: 1, action: 'claim' })), {
+    title: 'Update team task', summary: 'claim · task-1',
+  })
+  // subject/description/owner/expected_revision are request values, not identity.
+  assert.deepEqual(
+    toolCardHeader('team_task_update', JSON.stringify({ task_id: 'task-1', expected_revision: 3, action: 'edit', subject: 'SECRET', description: 'd', owner: 'scout' })),
+    { title: 'Update team task', summary: 'edit · task-1' },
+  )
+  // An action outside the official enum falls back to the fixed title and no summary.
+  assert.deepEqual(toolCardHeader('team_task_update', JSON.stringify({ task_id: 't', expected_revision: 1, action: 'bogus' })), {
+    title: 'Update team task', summary: '',
+  })
+  assert.deepEqual(toolCardHeader('team_task_update', JSON.stringify({ expected_revision: 1, action: 'claim' })), {
+    title: 'Update team task', summary: '',
+  })
+
+  assert.deepEqual(toolCardHeader('wait_agent', '{}'), { title: 'Wait for input', summary: '' })
+  assert.deepEqual(toolCardHeader('wait_agent', ''), { title: 'Wait for input', summary: '' })
+  assert.deepEqual(toolCardHeader('wait_agent', JSON.stringify({ timeout_ms: 30000 })), {
+    title: 'Wait for input', summary: '30000 ms',
+  })
+  // 0 / string / fractional / out-of-range are not an explicit legal timeout.
+  for (const timeoutMs of [0, '30000', 30000.5, 4000000, 9999]) {
+    assert.deepEqual(toolCardHeader('wait_agent', JSON.stringify({ timeout_ms: timeoutMs })), {
+      title: 'Wait for input', summary: '',
+    })
+  }
+
+  // An unregistered lookalike keeps the generic Web row, never a prefix guess.
+  const lookalike = toolCardHeader('team_task_assign', '{"id":"t"}')
+  assert.equal(lookalike.title, 'Tool call')
+  assert.match(lookalike.summary, /^team_task_assign · t$/u)
+
+  // The compact Focus line reuses the same fixed identity.
+  assert.equal(focusToolDisplay({ name: 'team_task_create', args: JSON.stringify({ subject: 'Scout one file', description: 'x' }) }), 'Create team task Scout one file')
+  assert.equal(focusToolDisplay({ name: 'wait_agent', args: '{}' }), 'Wait for input')
+  assert.equal(focusToolDisplay({ name: 'team_task_update', args: JSON.stringify({ task_id: 'task-1', expected_revision: 1, action: 'claim' }) }), 'Update team task claim · task-1')
+})
+
+/** A minimal legal official Team task value for the folded-result matrix. */
+function teamTaskValue(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'task-1',
+    revision: 1,
+    subject: 'Scout one file',
+    description: 'Read one file and report its content.',
+    status: 'pending',
+    blockedBy: [],
+    writeScopes: [],
+    ready: false,
+    writeScopeWarnings: [],
+    ...overrides,
+  }
+}
+
+test('team task result snapshots fold to bounded facts and never infer an owner', () => {
+  // The four official statuses with their ready/owner projection.
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify(teamTaskValue({ status: 'pending', ready: true }))), 'pending · ready · unowned · rev 1')
+  assert.equal(foldedResultSummaryFor('team_task_get', JSON.stringify(teamTaskValue({ status: 'pending', ready: false }))), 'pending · unowned · rev 1')
+  assert.equal(foldedResultSummaryFor('team_task_get', JSON.stringify(teamTaskValue({ status: 'in_progress', owner: 'scout', revision: 2 }))), 'in_progress · owner scout · rev 2')
+  assert.equal(foldedResultSummaryFor('team_task_update', JSON.stringify(teamTaskValue({ status: 'completed', owner: 'lead', revision: 3 }))), 'completed · owner lead · rev 3')
+  assert.equal(foldedResultSummaryFor('team_task_update', JSON.stringify(teamTaskValue({ status: 'deleted', owner: 'lead', revision: 4 }))), 'deleted · owner lead · rev 4')
+  // ready only prints for a PENDING task; ready=false is not "blocked".
+  assert.equal(foldedResultSummaryFor('team_task_get', JSON.stringify(teamTaskValue({ status: 'in_progress', ready: true }))), 'in_progress · unowned · rev 1')
+
+  // Missing / mistyped identity fields and an unknown status yield NO note.
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify({ revision: 1, status: 'pending', ready: true })), undefined, 'missing id')
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify({ id: 't', revision: -1, status: 'pending', ready: true })), undefined, 'negative revision')
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify({ id: 't', revision: 1.5, status: 'pending', ready: true })), undefined, 'fractional revision')
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify({ id: 't', revision: 1, status: 'running', ready: true })), undefined, 'unknown status')
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify({ id: 't', revision: 1, status: 'pending' })), undefined, 'missing ready')
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify({ id: 't', revision: 1, status: 'pending', ready: true, owner: 7 })), undefined, 'non-string owner')
+  // An error object (or a success shape carrying a code) is failure identity only.
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify({ code: 'TEAM_TASK_NOT_FOUND', message: 'gone' })), undefined, 'error code object')
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify({ code: 'CONFLICT', id: 't', revision: 1, status: 'pending', ready: true })), undefined, 'mixed error object')
+  assert.equal(foldedResultSummaryFor('team_task_create', 'not json'), undefined, 'non-JSON result')
+
+  // A legacy ownerName/ownerId is never promoted into the displayed owner.
+  assert.equal(
+    foldedResultSummaryFor('team_task_get', JSON.stringify(teamTaskValue({ status: 'pending', ready: false, ownerName: 'scout', ownerId: 'sess-1' }))),
+    'pending · unowned · rev 1',
+  )
+})
+
+test('team task list and wait results fold to bounded counts and input state', () => {
+  const a = teamTaskValue({ id: 'task-a' })
+  const b = teamTaskValue({ id: 'task-b', status: 'in_progress', owner: 'scout', revision: 2 })
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [] })), 'no team tasks')
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [a] })), '1 team task')
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [a, b] })), '2 team tasks')
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [a, b], nextCursor: 2 })), '2 team tasks · more')
+  // No fabricated `N of total`: the official value carries no total.
+  assert.ok(!foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [a, b], nextCursor: 2 }))!.includes(' of '))
+  // A malformed entry invalidates the WHOLE page (never a silent miscount).
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [a, { id: 'task-c' }] })), undefined, 'pseudo task entry')
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: 'x' })), undefined, 'tasks not an array')
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [], nextCursor: -1 })), undefined, 'negative cursor')
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [], nextCursor: 1.5 })), undefined, 'fractional cursor')
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [], nextCursor: '2' })), undefined, 'string cursor')
+
+  assert.equal(foldedResultSummaryFor('wait_agent', JSON.stringify({ timedOut: false })), 'input pending')
+  assert.equal(foldedResultSummaryFor('wait_agent', JSON.stringify({ timedOut: true })), 'timed out')
+  for (const bad of ['null', '"false"', '1', '{"timedOut":null}', '{"timedOut":"false"}', '{"timedOut":0}', '{"code":"WAIT_INVALID_TIMEOUT"}', 'finished']) {
+    assert.equal(foldedResultSummaryFor('wait_agent', bad), undefined, `wait_agent ${bad} is not an outcome`)
+  }
+  // The wait fold never claims an agent/task outcome.
+  const waitSummaries = [foldedResultSummaryFor('wait_agent', '{"timedOut":false}'), foldedResultSummaryFor('wait_agent', '{"timedOut":true}')]
+  for (const phrase of waitSummaries) {
+    assert.ok(!/finished|completed|task ready|succeeded/iu.test(phrase ?? ''), `wait fold leaked an outcome: ${phrase}`)
+  }
+})
+
+test('the five Team/wait tools are result-folded but never action-compacted', () => {
+  for (const name of ['team_task_create', 'team_task_list', 'team_task_get', 'team_task_update', 'wait_agent']) {
+    assert.ok(FOLDED_JSON_RESULT_TOOLS.has(name), `${name} must be in the folded JSON-result family`)
+    // The result snapshot tools must remain ordinary full tool results (their
+    // compact lines would REPLACE the raw task fields); only folded previews.
+    assert.equal(compactToolPresentation(name, '{}', ''), undefined, `${name} must not use the action compact fallback`)
+    assert.equal(isCompactActionTool(name, '{}'), false)
+    assert.equal(compactToolExpandedLines(name, '{}', ''), undefined)
+  }
+  // The shared-name subagent tools stay excluded from the name-keyed set.
+  assert.equal(FOLDED_JSON_RESULT_TOOLS.has('send_message'), false)
+  assert.equal(FOLDED_JSON_RESULT_TOOLS.has('interrupt_agent'), false)
 })
 
 test('list_agents summarizes structured and rendered historical snapshots', () => {
