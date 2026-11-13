@@ -1359,6 +1359,31 @@ export async function apply(ctx) {
     register('f7a-main', 'F7A main', runMain)
     register('f7a-other', 'F7A other', runOther)
     record('f7a-flows-registered', { keys: ['llm-pi-ai/f7a-main', 'llm-pi-ai/f7a-other'] })
+    // The committed flow records are fixture products on the shared lane's ONE
+    // dshHome: snapshot and restore them through the official store at row
+    // disposal so no later case inherits them (same lifecycle as the F7B
+    // seeds). The case asserts the restored listing after shutdown.
+    const credentials = ctx.reflect.get('credentials')
+    if (credentials === undefined || typeof credentials.modifyRecord !== 'function') {
+      throw new Error('m4-c1-host-work: f7a-authorization requires the official ctx.credentials service')
+    }
+    const flowKeys = [credentialKey('llm-pi-ai', 'f7a-main'), credentialKey('llm-pi-ai', 'f7a-other')]
+    const baselineKeys = (await credentials.listRecords()).map(entry => String(entry.key)).sort()
+    const baseline = []
+    for (const key of flowKeys) {
+      baseline.push({ key, pre: await credentials.readRecord(key) })
+    }
+    ctx.effect(() => async () => {
+      for (const { key, pre } of baseline) {
+        if (pre === undefined) await credentials.deleteRecord(key)
+        else await credentials.modifyRecord(key, async () => pre)
+      }
+      const restored = await credentials.listRecords()
+      record('f7a-records-restored', {
+        baselineKeys,
+        keys: restored.map(entry => String(entry.key)).sort(),
+      })
+    }, 'f7a-records-restorer')
   }
 
   if (scenario === 'f7b-credential-records') {
@@ -1395,6 +1420,18 @@ export async function apply(ctx) {
         record: { kind: 'grant', payload: { token: 'f7b-account-token-sentinel-20261112' } },
       },
     ]
+    // The shared lane reuses ONE dshHome across cases: snapshot every seed key
+    // BEFORE its write so disposal can restore the exact pre-case record state
+    // through the SAME official authority (a pre-existing record is written
+    // back, a fixture-only record is deleted). Every path that reaches a clean
+    // Host shutdown — case success, assertion failure, exception — disposes
+    // this row, and the restored listing is recorded so the case can assert a
+    // zero record delta before the next case boots.
+    const baselineKeys = (await credentials.listRecords()).map(entry => String(entry.key)).sort()
+    const baseline = []
+    for (const seed of seeds) {
+      baseline.push({ key: seed.key, pre: await credentials.readRecord(seed.key) })
+    }
     for (const seed of seeds) {
       await credentials.modifyRecord(seed.key, async () => seed.record)
     }
@@ -1408,6 +1445,17 @@ export async function apply(ctx) {
     ctx.effect(() => ctx.on('credentials/record-updated', (key) => {
       record('f7b-record-updated', { key: String(key) })
     }), 'f7b-record-updated-observer')
+    ctx.effect(() => async () => {
+      for (const { key, pre } of baseline) {
+        if (pre === undefined) await credentials.deleteRecord(key)
+        else await credentials.modifyRecord(key, async () => pre)
+      }
+      const restored = await credentials.listRecords()
+      record('f7b-records-restored', {
+        baselineKeys,
+        keys: restored.map(entry => String(entry.key)).sort(),
+      })
+    }, 'f7b-records-restorer')
   }
 
   if (scenario === 'session-policy-f8' || scenario === 'session-policy-f8-replay') {

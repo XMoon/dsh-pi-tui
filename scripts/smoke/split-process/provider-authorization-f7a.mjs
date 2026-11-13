@@ -172,6 +172,7 @@ export async function runF7AProviderAuthorization(context) {
   const root = scene.c1WorkRoot('f7a-authorization')
   const credentialsPath = join(context.dshHome, '.credentials.yaml')
   mkdirSync(root, { recursive: true, mode: 0o700 })
+  let disposed = false
 
   try {
     const { host } = await scene.startC1Host('f7a-authorization', 'F7A authorization Host', {}, root)
@@ -314,8 +315,23 @@ export async function runF7AProviderAuthorization(context) {
     await waitForAttemptsReleased(host, 'F7A Host attempt released after the cancel race')
 
     trace('f7a.cancel-race', { key: MAIN_KEY, officialAuthorizedWon: true })
+
+    // ── Teardown restores the pre-case record state; prove the zero delta. ──
+    // The fixture's disposal (a clean Host shutdown) undoes the committed flow
+    // records through the official Credentials authority; a later case of the
+    // shared lane must inherit exactly the pre-case record set.
+    await scene.dispose()
+    disposed = true
+    const restored = await waitForEvent(root, event => event.kind === 'f7a-records-restored', 'F7A record restore')
+    assert(![MAIN_KEY, OTHER_KEY].some(key => restored.keys.includes(key)),
+      `F7A: fixture records survived teardown: ${JSON.stringify(restored)}`)
+    assert(restored.baselineKeys.every(key => restored.keys.includes(key)),
+      `F7A: teardown lost a pre-case record: ${JSON.stringify(restored)}`)
+    assert(restored.keys.every(key => restored.baselineKeys.includes(key)),
+      `F7A: teardown left new records behind: ${JSON.stringify(restored)}`)
+    trace('f7a.records-restored', { zeroDelta: true, keys: restored.keys })
     return { status: 'PASS' }
   } finally {
-    await scene.dispose()
+    if (!disposed) await scene.dispose()
   }
 }
