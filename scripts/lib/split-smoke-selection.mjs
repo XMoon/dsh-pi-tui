@@ -55,7 +55,7 @@ import { runF7BCredentialRecords } from '../smoke/split-process/provider-credent
 import { runF8SessionPolicy } from '../smoke/split-process/session-policy-f8.mjs'
 import { runHerdrH1 } from '../smoke/split-process/herdr-h1.mjs'
 import { runWebProviderSettingsF3 } from '../smoke/split-process/web-provider-settings-f3.mjs'
-import { runHerdrH2 } from '../smoke/split-process/herdr-h2.mjs'
+import { runHerdrH2, runHerdrH3 } from '../smoke/split-process/herdr-h2.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -297,6 +297,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'herdr.h2-session-publication',
     title: 'a real Split Client reports the committed main Session to its Herdr Pane without a resume argv, keeps only the latest owner, and re-registers it after a real transport rollover',
     run: runHerdrH2,
+  }),
+  Object.freeze({
+    suite: 'herdr',
+    id: 'herdr.h3-abrupt-lifecycle',
+    title: 'real Client and Host OS process abrupt exits prove Pane authority withdrawal, the untouched sibling Pane, and re-confirmation on a new authenticated generation',
+    run: runHerdrH3,
   }),
 ])
 

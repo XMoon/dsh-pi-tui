@@ -517,6 +517,14 @@ export function assertSelectedVerdict(caseId, result) {
       `selected ${caseId}: the Herdr H2 Split verdict ended as ${String(result?.rhH2Session ?? 'missing')}`)
     return
   }
+  if (caseId === 'herdr.h3-abrupt-lifecycle') {
+    assert(result?.status === 'PASS'
+      && result?.rhH3ClientCrash === 'REAL_SPLIT_PROCESS_L6'
+      && result?.rhH3HostCrash === 'REAL_SPLIT_PROCESS_L6'
+      && result?.hostReportedNothing === true,
+    `selected ${caseId}: the Herdr H3 abrupt-lifecycle verdict ended as ${String(result?.rhH3ClientCrash ?? 'missing')}/${String(result?.rhH3HostCrash ?? 'missing')}/${String(result?.status ?? 'missing')}`)
+    return
+  }
   if (caseId === 'web.product-browser-tui') {
     assert(result?.browserSubset === 'PASS'
       && (result?.status === 'PASS' || result?.status === 'DEFERRED_WITH_OWNER'),
