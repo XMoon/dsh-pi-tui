@@ -174,9 +174,12 @@ test('the Folder corpus owns the Tool body text that a client may not index', ()
     'compact: the collapsed Activity head keeps the Tool body out of the document')
   // Full/Focus materialize the tool result node, but the client's own document
   // is NOT the mapper output: the real-pane lane measured zero native Find
-  // hits for the same body while the card was still collapsed, and one hit
-  // after a real click opened it. This unit test therefore asserts only the
-  // mapper/row difference, never a client hit count.
+  // hits for the same body while the card was still collapsed. After a real
+  // click opened the card the lane measured ONE hit in the full and compact
+  // presets; in focus the opened Thought root carries no nested Tool card on
+  // the wire at all, so the lane measured ZERO hits there (the projection
+  // never sends the body under that root). This unit test therefore asserts
+  // only the mapper/row difference, never a client hit count.
   for (const preset of ['full', 'focus'] as const) {
     const nodes = flatten(folder.messages(), { preset, scopePrefix: 's1-', window: LATEST_WINDOW })
     const resultNode = nodes.find(node => node.kind === 'code' && textOf(node).includes(INNER_ONLY))

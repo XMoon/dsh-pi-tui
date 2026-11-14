@@ -36,7 +36,9 @@ const VIEWPORTS = [
   { width: 400, height: 600, appearance: 'dark' },
   { width: 900, height: 360, appearance: 'light' },
 ]
-const OTHER_PANE_TOKEN = 'T3A_OTHER_PANE_F4C7'
+// KNOWN_T2_ISSUE: the pre-existing T2 900x360 short-height Main/Dock clipping
+// limitation stays G8_LIMITATION_PENDING_OWNER (T2 native-reading plan §251);
+// the 900x360 cells below assert only THIS journey's own Find readability.
 
 export function presetFromEnvironment(value = process.env.TERN_TRANSCRIPT_FIND_PRESET) {
   const preset = value ?? 'full'
@@ -349,12 +351,22 @@ export default async function (h) {
   }
   const hello = wire(h).find(row => row.dir === 'in' && row.verb === 'r' && row.body?.r === 'hello')?.body
   h.check('the client negotiated Section nodes', hello?.kinds?.includes('section'), JSON.stringify(hello?.kinds))
+  // Plan C2 item 2: the environment record also carries the negotiated
+  // capability hello and the actual viewport (both are runtime facts that only
+  // exist after the mount, so they merge into the ledger here).
+  const environmentPath = join(h.root, 'environment.json')
+  writeFileSync(environmentPath, `${JSON.stringify({
+    ...(existsSync(environmentPath) ? JSON.parse(readFileSync(environmentPath, 'utf8')) : {}),
+    hello: { ver: hello?.body?.ver, term: hello?.body?.term, kinds: hello?.body?.kinds, features: hello?.body?.features, dark: hello?.body?.dark },
+    viewport: h.ctl('stats').viewport,
+  }, null, 1)}\n`)
 
   const prompts = JSON.parse(readFileSync(join(h.root, 'prompts.json'), 'utf8'))
   const markers = prompts.nativeFind
   h.check('the scenario metadata carries the fixed native-find markers', markers !== undefined
     && typeof markers.archive === 'string' && typeof markers.shared === 'string' && typeof markers.tail === 'string'
-    && typeof markers.liveAppend === 'string' && typeof markers.nonExistent === 'string' && typeof markers.innerOnly === 'string',
+    && typeof markers.liveAppend === 'string' && typeof markers.nonExistent === 'string' && typeof markers.innerOnly === 'string'
+    && typeof markers.otherPane === 'string',
     JSON.stringify(markers ?? null))
   if (markers === undefined) { finish(h, { ...extra, qualification: 'SCENARIO_METADATA_MISSING' }); return }
   const prompt = prompts.prompts[0]
@@ -532,13 +544,16 @@ export default async function (h) {
     JSON.stringify(openedSharedAgain.state))
   await closeFind(h, 'B11 close')
 
-  // ── B12/B14: the collapsed Tool body is NOT searchable until materialized ──
+  // ── B12/B14: the client's own Find document excludes a folded card's body ──
+  // Precisely: the preset mapper may EMIT the tool result node (the boundary
+  // test proves that for full/focus), but the client paints a folded card
+  // without its body, so its own Find document does not contain the text.
   const treeBeforeFold = h.snapshot()
-  h.check('B12: the INNER_ONLY token is absent from the folded client tree',
+  h.check('B12: the INNER_ONLY token is absent from the client document while the card is folded',
     !mainNodes(treeBeforeFold).some(node => String(node.text ?? '').includes(markers.innerOnly)),
     JSON.stringify({ mainHasToken: mainNodes(treeBeforeFold).some(node => String(node.text ?? '').includes(markers.innerOnly)) }))
   const openedInner = await openFind(h, markers.innerOnly, 'collapsed tool')
-  h.check('B12: the native Find reports zero hits for the unmaterialized Tool body',
+  h.check('B12: the native Find reports zero hits for the folded card body',
     openedInner.state !== null && (openedInner.state.hits ?? 0) === 0,
     JSON.stringify(openedInner.state))
   h.capture(`${preset}-find-collapsed-tool-1280x800-dark`, 'the native Find over the still-collapsed Turn 10 Tool')
@@ -581,10 +596,10 @@ export default async function (h) {
       // materialize the Tool's body under that root at all. The plan's rule is
       // FACT CONSISTENCY, not a forced pass: record the absence and keep the
       // Find claim limited to what the client really indexes.
-      h.measure('B16: the opened Focus Thought root materializes no nested Tool card',
+      h.measure('B16: the opened Focus Thought root carries no nested Tool card on the wire (its Find document excludes the tool body)',
         JSON.stringify({ rootId: rootToggle?.id ?? null, innerToolNodes: 0 }))
       const openedInnerFocus = await openFind(h, markers.innerOnly, 'focus inner')
-      h.check('B16: the native Find reports zero hits while the Focus root materializes no Tool body',
+      h.check('B16: the native Find reports zero hits while the opened Focus root carries no Tool card on its wire',
         openedInnerFocus.state !== null && (openedInnerFocus.state.hits ?? 0) === 0,
         JSON.stringify(openedInnerFocus.state))
       h.capture(`${preset}-find-focus-root-no-tool-body`, 'the opened Focus Thought root with no nested Tool body')
@@ -620,7 +635,7 @@ export default async function (h) {
   const bodyNowInTree = toolBodyMaterialized()
   h.check(bodyNowInTree
     ? 'B15: the native Find hits the Tool body once it is really materialized'
-    : 'B16: the native Find reports zero hits while the Focus root materializes no Tool body',
+    : 'B16: the native Find reports zero hits while the opened Focus root carries no Tool card on its wire',
   openedInnerAfter.state !== null
     && (bodyNowInTree ? (openedInnerAfter.state.hits ?? 0) >= 1 : (openedInnerAfter.state.hits ?? 0) === 0),
   JSON.stringify({ bodyNowInTree, find: openedInnerAfter.state }))
@@ -679,6 +694,13 @@ export default async function (h) {
     matrix.push({
       id, viewport: [viewport.width, viewport.height], appearance: viewport.appearance,
       actualViewport: stats.viewport, exact, theme: state.theme, find: openedViewport.state,
+      // KNOWN_T2_ISSUE: the pre-existing T2 900x360 short-height Main/Dock
+      // clipping stays G8_LIMITATION_PENDING_OWNER from the T2 native-reading
+      // plan; THIS journey asserts only its own Find bar/query readability,
+      // which the check/measure above covers for the 900x360 cell.
+      knownT2Issue: viewport.width === 900 && viewport.height === 360
+        ? '900x360 short-height Main/Dock clipping is the T2 G8_LIMITATION_PENDING_OWNER; this lane asserts only Find readability'
+        : null,
     })
   }
   writeLedger(h, 'native-find-viewport-matrix.json', matrix)
@@ -704,15 +726,28 @@ export default async function (h) {
     h.send('focus', 'right')
     await h.sleep(400)
   }
-  h.send('run', JSON.stringify(`printf ${OTHER_PANE_TOKEN}`))
+  h.send('run', JSON.stringify(`printf ${markers.otherPane}`))
   await h.sleep(700)
+  // The POSITIVE control for the negative below: while the RIGHT pane is
+  // focused, the client's own Find must hit the freshly painted shell token.
+  // A lost `run` would otherwise make the zero-hit claim vacuous.
+  const focusedRight = h.ctl('state').focused?.id ?? null
+  h.check('B18: the focus identity before the printf lands on the right shell pane',
+    rightPane !== null && focusedRight === rightPane,
+    JSON.stringify({ rightPane, focusedRight }))
+  const openedRight = await openFind(h, markers.otherPane, 'right pane positive control')
+  h.check('B18: the right shell pane Find hits its own freshly painted token',
+    openedRight.state !== null && (openedRight.state.hits ?? 0) >= 1,
+    JSON.stringify(openedRight.state))
+  h.capture(`${preset}-find-right-pane-positive-control`, 'the right shell pane with its own printf token hit')
+  await closeFind(h, 'B18 positive control close')
   h.send('focus', 'left')
   await h.sleep(500)
   const focusedLeft = h.ctl('state').focused?.id ?? null
   h.check('B18: the focus identity round-trips back to the original TSP pane',
     focusedBefore !== null && focusedLeft === focusedBefore,
     JSON.stringify({ focusedBefore, focusedAfterSplit, focusedLeft }))
-  const openedOtherPane = await openFind(h, OTHER_PANE_TOKEN, 'other pane')
+  const openedOtherPane = await openFind(h, markers.otherPane, 'other pane')
   h.check('B18: the TSP pane Find reports zero hits for the other pane shell token',
     openedOtherPane.state !== null && (openedOtherPane.state.hits ?? 0) === 0,
     JSON.stringify(openedOtherPane.state))
@@ -737,6 +772,8 @@ export default async function (h) {
       'OS physical keyboard/IME/wheel',
       'G8 Owner visual acceptance',
       'any realtime refresh of an OPEN Find result list after a live append (reopened Find is the measured behaviour)',
+      'B19 NOT_VERIFIED: no real Session source switch is driven in this lane; the pre-switch/post-switch row-identity evidence stays with the T2/T3-0 source-generation lanes (this lane keeps scope.changed===1 throughout)',
+      'B20 NOT_EXERCISED_REAL_GONE: no client retention/gone event occurred on the 28-Turn document in these runs; the gone contract evidence stays with the T2 real-path lanes; this lane claims no retention promise either way',
     ],
   })
   finish(h, extra)
