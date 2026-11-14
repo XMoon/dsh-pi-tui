@@ -27,6 +27,7 @@ function directLifecycle(
     compose?: (presetId?: string) => Promise<{ agentPreset?: string; setup: () => void }>
     services?: Record<string, unknown>
     preset?: string
+    defaultSelection?: { provider: string; model: string; reasoningEffort?: string }
   } = {},
 ) {
   const calls: Array<Record<string, unknown>> = []
@@ -48,7 +49,9 @@ function directLifecycle(
           resume: async () => { throw new Error('resume should not run') },
         }
       }
-      if (name === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'p', model: 'm' }) }
+      if (name === 'agentDefaultModel') {
+        return { currentSelection: () => options.defaultSelection ?? { provider: 'p', model: 'm' } }
+      }
       if (name in (options.services ?? {})) return (options.services as Record<string, unknown>)[name]
       return undefined
     },
@@ -67,7 +70,10 @@ test('Direct exact turn/end cut uses the official buildForkSeed and Host metadat
     ],
     projections: { values: { agentPreset: 'minimal' } },
   })
-  const { lifecycle, calls } = directLifecycle(source)
+  const { lifecycle, calls } = directLifecycle(source, {
+    // A Host default WITH an effort proves the fork sibling stays provider/model-only.
+    defaultSelection: { provider: 'p', model: 'm', reasoningEffort: 'high' },
+  })
 
   const result = await lifecycle.fork({ sourceSessionId: 'session-source', atSeq: 2 })
   assert.equal(result.outcome.kind, 'forked')
@@ -79,7 +85,8 @@ test('Direct exact turn/end cut uses the official buildForkSeed and Host metadat
   const seed = calls[0]?.seed as Array<Record<string, unknown>>
   assert.equal(seed.length, 4, 'a closed-turn cut appends exactly the end-seed marker')
   assert.deepEqual(seed[3], { type: 'session/end-seed', seq: 3, time: T0, data: { inherited: true } })
-  assert.deepEqual(calls[0]?.agentOptions, { provider: 'p', model: 'm' })
+  assert.deepEqual(calls[0]?.agentOptions, { provider: 'p', model: 'm' },
+    'the official fork sibling takes provider/model only, never the global default effort')
   assert.deepEqual(calls[0]?.meta, {
     cwd: '/ws',
     isSeeded: true,

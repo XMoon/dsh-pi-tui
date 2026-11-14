@@ -89,7 +89,7 @@ function createRegistry(options: {
 }
 
 function host(agents: unknown, options: {
-  defaultSelection?: { provider: string; model: string }
+  defaultSelection?: { provider: string; model: string; reasoningEffort?: string }
   registry?: WorkspaceRegistryLike
   observedHeaders?: Record<string, { readonly cwd?: string } | undefined>
   observationFailure?: Error
@@ -149,7 +149,7 @@ function agents(created: Array<{ sessionId: unknown; meta: unknown; agentOptions
 test('create resolves the preset composition internally and delegates with the Direct shapes', async () => {
   const calls: Array<{ sessionId: unknown; meta: unknown; agentOptions: unknown; setup: unknown }> = []
   const lifecycle = new DirectSessionLifecycle(host(agents(calls), {
-    defaultSelection: { provider: 'p', model: 'm' },
+    defaultSelection: { provider: 'p', model: 'm', reasoningEffort: 'high' },
   }), compose('preset-a'))
   const handle = requireCreated(await lifecycle.create(createRequest))
   assert.equal(handle.session.id, 'session-new')
@@ -160,7 +160,8 @@ test('create resolves the preset composition internally and delegates with the D
   assert.equal(calls[0].sessionId, 'session-new')
   // The activation fallback is the Host default, never a cross-backend request
   // input (D2.3 convergence).
-  assert.deepEqual(calls[0].agentOptions, { provider: 'p', model: 'm' })
+  assert.deepEqual(calls[0].agentOptions, { provider: 'p', model: 'm', reasoningEffort: 'high' },
+    'the activation fallback is the COMPLETE Host default selection')
   // WS-2: the durable Session cwd is the Host registry's canonical Workspace
   // path, never a request-supplied directory.
   assert.deepEqual(calls[0].meta, { cwd: '/ws', agentPreset: 'preset-a' },
@@ -353,13 +354,14 @@ test('open resolves the persisted preset internally and delegates with the Direc
       calls.push({ resumeSessionId: options.resumeSessionId, agentOptions: options.agentOptions, setup: options.setup })
       return { agent: { session: { id: 'session-old' } }, dispose: async () => {} }
     },
-  }, { defaultSelection: { provider: 'p', model: 'm' } }), compose('preset-a'))
+  }, { defaultSelection: { provider: 'p', model: 'm', reasoningEffort: 'high' } }), compose('preset-a'))
   const handle = requireOpened(await lifecycle.open(openRequest))
   assert.equal(handle.session.id, 'session-old')
   assert.equal(handle.direct !== undefined, true)
   assert.equal(calls.length, 1)
   assert.equal(calls[0].resumeSessionId, 'session-old')
-  assert.deepEqual(calls[0].agentOptions, { provider: 'p', model: 'm' })
+  assert.deepEqual(calls[0].agentOptions, { provider: 'p', model: 'm', reasoningEffort: 'high' },
+    'open/resume carries the COMPLETE activation fallback')
   assert.equal(typeof calls[0].setup, 'function')
 })
 
@@ -654,7 +656,7 @@ test('Direct create persists the COMPOSED preset as the single ordinary-create a
 })
 
 test('Direct create captures the Host default at ADMISSION (a later /model write must not rewrite it)', async () => {
-  let selection = { provider: 'p', model: 'm-admission' }
+  let selection = { provider: 'p1', model: 'm1', reasoningEffort: 'high' }
   let releaseCompose!: () => void
   const composeGate = new Promise<void>((resolve) => { releaseCompose = resolve })
   const captured: unknown[] = []
@@ -675,10 +677,10 @@ test('Direct create captures the Host default at ADMISSION (a later /model write
   const pending = lifecycle.create({ sessionId: 'session-new', workspaceId: 'ws-a' })
   await Promise.resolve()
   // A later sessionless /model default write lands while compose is in flight.
-  selection = { provider: 'p', model: 'm-later' }
+  selection = { provider: 'p2', model: 'm2', reasoningEffort: 'low' }
   releaseCompose()
   const result = await pending
   assert.equal(result.outcome.kind, 'created')
-  assert.deepEqual(captured[0], { provider: 'p', model: 'm-admission' },
-    'the create must use the Host default captured at admission, not a later write')
+  assert.deepEqual(captured[0], { provider: 'p1', model: 'm1', reasoningEffort: 'high' },
+    'the create must freeze the COMPLETE Host default captured at admission, not a later write')
 })

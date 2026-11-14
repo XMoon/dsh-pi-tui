@@ -25,6 +25,10 @@
  *   credentials-backed provider; `saveSelection` is a no-op. With
  *   `profileDefault`, this substitution is removed: the real default service,
  *   Loader profile row, ConfigEditor and SettingsForms are mounted instead
+ * - TEST STAND-IN: with `reasoningFixtureModel`, the scripted exact model
+ *   advertises `low`/`high` reasoning metadata (default `low`) so the official
+ *   LLM accepts a REAL explicit effort for the request/header qualification.
+ *   The endpoint, the session and the Agent loop stay real
  * - the empty `fileReferences` stand-in (the workspace index)
  * - the scripted tty in the default mode; `externalTern` uses Tern-owned stdio
  *
@@ -42,6 +46,7 @@
 import { mkdirSync } from 'node:fs'
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -61,7 +66,7 @@ import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
-import { LlmAdapter, ToolCallId, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, ReasoningEffortId, ToolCallId, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { WriteOutcome } from '../../src/runtime/session-writer-port.ts'
 import { DirectSessionWriter } from '../../src/runtime/direct/session-writer-direct.ts'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
@@ -424,6 +429,9 @@ export interface DirectTspFixtureOptions {
   /** Replace the historical default stand-in with the official isolated
    * profile/configuration plane for Model persistence qualification. */
   readonly profileDefault?: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
+  /** TEST STAND-IN: advertise `low`/`high` reasoning on the scripted exact model
+   *  so the official LLM accepts a real explicit effort (default: absent). */
+  readonly reasoningFixtureModel?: true
   /** Extra agent presets registered into the REAL registry beside the
    *  fixture's own (a second real switch target). */
   readonly presets?: ReadonlyArray<{ readonly id: string; readonly name?: string; readonly description?: string }>
@@ -599,6 +607,11 @@ export async function createDirectTspFixture(
   }
   try {
   ctx = new Context()
+  // Production `boot()` gives the root context a module-resolution base before
+  // mounting Loader. The profile compatibility preflight refuses a composition
+  // that carries a `profileContext` without one, so the reproduction must
+  // supply it exactly like the real launcher does.
+  ctx.baseUrl = pathToFileURL(join(workRoot, 'profile')).href + '/'
   ownCleanup(() => ctx.fiber.dispose())
 
   if (options.ptcMode !== undefined) ctx.provide('ptcRuntime', options.ptcMode.runtime as never)
@@ -622,6 +635,23 @@ export async function createDirectTspFixture(
     : options.scriptedToolCall === undefined
       ? new ScriptedStreamingAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.streamHold)
       : new ScriptedToolCallAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.scriptedToolCall, options.streamHold)
+  if (options.reasoningFixtureModel === true) {
+    // TEST STAND-IN: exact-model reasoning metadata only. The official LLM rejects
+    // an explicit effort the resolved model does not advertise, so the endpoint's
+    // own advertised capability — not a request shortcut — must carry `low`/`high`.
+    llmAdapter.resolveModel = async (provider, model) => ({
+      provider,
+      id: model,
+      name: model,
+      reasoning: {
+        efforts: [
+          { id: ReasoningEffortId('low'), name: 'Low' },
+          { id: ReasoningEffortId('high'), name: 'High' },
+        ],
+        defaultEffort: ReasoningEffortId('low'),
+      },
+    })
+  }
   ctx.llm.registerAdapter([DIRECT_TSP_PROVIDER], llmAdapter)
   await ctx.plugin(CommandRuntime)
   for (const command of options.hostCommands ?? []) {
