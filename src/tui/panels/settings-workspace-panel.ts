@@ -1630,17 +1630,21 @@ export class SettingsWorkspacePanel implements Component {
   // ── rendering ────────────────────────────────────────────────────────────
 
   /**
-   * Revoke an OPEN candidate choice for ONE writable field after that row's
-   * authority changed (e.g. the Connection generation that produced its
-   * candidates is gone). The selection intent must NOT survive an authority
-   * change: a stale choice must never be confirmed into a write against another
-   * Host. The user re-enters the choice against the new authority. A `pending`
-   * write is NOT cancelled (its owner keeps settling it); only the `choosing`
-   * phase is dropped and its request identity bumped so a late confirm is inert.
+   * Revoke the ENTIRE transient ACP edit intent for ONE writable field after
+   * that row's Host authority changed (a Connection generation change). This
+   * covers EVERY transient phase — `choosing`, `pending` and `settled`
+   * (including a stale `Retry save`) — so no old-Host selection, pending ack or
+   * retry can ever be confirmed into a write against another Host. It reuses the
+   * ONE existing lifecycle primitive (`discardTransientEdit`, which bumps the
+   * request identity so a late settlement/confirm is inert) instead of inventing
+   * a second state. A `pending` write is NOT cancelled: its app-owned writer
+   * keeps settling and reporting health/diagnostics; only its UI presentation is
+   * retired. The user re-enters the edit against the new authority.
    */
   invalidateChoice(field: SettingsWorkspaceWritableField): void {
     if (this.disposed) return
-    if (this.editPhase.kind !== 'choosing' || this.editPhase.field !== field) return
+    const phase = this.editPhase
+    if (phase.kind === 'browsing' || phase.field !== field) return
     this.discardTransientEdit()
     this.bumpRevision()
     this.intents.requestRender()

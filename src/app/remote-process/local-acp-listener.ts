@@ -550,22 +550,50 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
     }
   }
 
+  /**
+   * Remove ONLY this process's owned socket inode. Identity-checked against the
+   * exact saved (dev, ino, uid): a foreign inode that has since replaced the
+   * pathname is never unlinked. Used by graceful retire, bind-failure cleanup and
+   * the synchronous process-exit mirror.
+   */
+  const cleanupSync = (): void => {
+    if (saved === undefined) return
+    let current: ReturnType<typeof lstatSync>
+    try {
+      current = lstatSync(logicalPath)
+    } catch {
+      return
+    }
+    if (!current.isSocket() || current.uid !== saved.uid) return
+    if (current.dev !== saved.dev || current.ino !== saved.ino) return
+    try {
+      unlinkSync(logicalPath)
+    } catch {
+      // Another owner retired it first; the inode no longer needs this cleanup.
+    }
+  }
+
   const retireServer = (): Promise<void> => {
     if (closed !== undefined) return closed
     stopping = true
     closed = (async () => {
-      if (server === undefined) return
-      const serverClose = new Promise<void>((resolveClose, rejectClose) => {
-        server!.close(error => (error === undefined ? resolveClose() : rejectClose(error)))
-      })
-      for (const socket of context.connections) socket.destroy()
-      try {
-        await serverClose
-      } finally {
-        // Node unlinks the bound fd-shortened path while the dirfd is still
-        // open, so the real inode retires before the fd is released.
+      if (server === undefined) {
         closeDirFd()
+        return
       }
+      for (const socket of context.connections) socket.destroy()
+      // Release the fd-shortened bind path BEFORE close. Node's `net.Server.close`
+      // unlinks the pathname it was told to listen on, and that automatic unlink
+      // is NOT protected by our inode check. Closing the dirfd first makes the
+      // stored `/proc/self/fd/<n>/acp.sock` unresolvable, so the automatic unlink
+      // becomes a no-op and can never delete a foreign inode (a replacement file
+      // or another live server's socket) that has since taken the path. We then
+      // remove ONLY our owned inode, identity-checked.
+      closeDirFd()
+      await new Promise<void>(resolveClose => {
+        server!.close(() => resolveClose())
+      })
+      cleanupSync()
     })()
     return closed
   }
@@ -633,7 +661,14 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
       diag.warn('local-acp.error', { code: (error as NodeJS.ErrnoException).code ?? 'LOCAL_ACP_SERVER_ERROR' })
     })
 
-    // 3. Force and prove the 0600 owned socket inode BEFORE returning.
+    // 3. Capture the bound socket inode identity IMMEDIATELY so any later
+    //    startup failure can remove ONLY our inode (never a foreign one).
+    const boundInfo = lstatSync(physicalPath)
+    if (!boundInfo.isSocket() || boundInfo.uid !== uid) {
+      throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the bound socket is not a socket owned by this uid')
+    }
+    saved = { dev: boundInfo.dev, ino: boundInfo.ino, uid: boundInfo.uid }
+    // Force and prove the 0600 owned socket inode BEFORE returning.
     chmodSync(physicalPath, 0o600)
     const info = lstatSync(physicalPath)
     if (!info.isSocket() || info.uid !== uid || (info.mode & 0o777) !== 0o600) {
@@ -642,35 +677,25 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
     saved = { dev: info.dev, ino: info.ino, uid: info.uid }
     diag.info('local-acp.listen', { connections: 0 })
   } catch (error) {
-    // Any failure after bind must not leave the bound socket behind.
+    // Any failure after bind must not leave OUR bound socket behind, and must
+    // never delete a foreign inode that replaced the pathname. Same safe order:
+    // destroy connections, release the dirfd (so Node's close unlink can't
+    // resolve the path), close, then remove only the owned inode.
     if (server !== undefined) {
+      for (const socket of context.connections) socket.destroy()
+      closeDirFd()
       try {
-        await new Promise<void>(resolveClose => server!.close(() => resolveClose()))
+        await new Promise<void>(resolveClose => {
+          server!.close(() => resolveClose())
+        })
       } catch {
         // The bind may never have completed; closing is best effort here.
       }
+      cleanupSync()
+    } else {
+      closeDirFd()
     }
-    closeDirFd()
     throw error
-  }
-
-  const cleanupSync = (): void => {
-    // After a graceful close the path is already gone (ENOENT): no-op. Only the
-    // exact saved inode, still a socket owned by this uid, is ever unlinked.
-    if (saved === undefined) return
-    let current: ReturnType<typeof lstatSync>
-    try {
-      current = lstatSync(logicalPath)
-    } catch {
-      return
-    }
-    if (!current.isSocket() || current.uid !== saved.uid) return
-    if (current.dev !== saved.dev || current.ino !== saved.ino) return
-    try {
-      unlinkSync(logicalPath)
-    } catch {
-      // Another owner retired it first; the inode no longer needs this cleanup.
-    }
   }
 
   const isListening = (): boolean => {

@@ -16,7 +16,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { lstatSync, mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { closeSync, openSync } from 'node:fs'
-import { connect } from 'node:net'
+import { connect, createServer } from 'node:net'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
@@ -574,4 +574,46 @@ test('a second listener after close re-binds the same pathname and reports liste
   assert.equal(second.socketPath, path, 'a re-enable reuses the same logical socket pathname')
   assert.equal(second.isListening(), true)
   await second.close()
+})
+
+/**
+ * PO-1B / Finding 1 — retirement must never delete an inode this process does
+ * not own. Node's `net.Server.close()` unlinks the pathname it was told to
+ * listen on; after the owned inode is gone and the path is replaced (a regular
+ * file, or a newer live server's socket), that automatic unlink must NOT delete
+ * the foreign entry. Two real negative controls on the target runtime.
+ */
+test('retiring a listener never deletes a foreign replacement file at the path', async t => {
+  const { scope } = newScope(t)
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+  const path = listener.socketPath
+  // A foreign process removes our socket inode and drops a regular file in place.
+  unlinkSync(path)
+  writeFileSync(path, 'REPLACEMENT')
+  await listener.close()
+  assert.ok(pathExists(path), 'the foreign replacement file must survive retirement')
+  assert.equal(lstatSync(path).isFile(), true, 'the replacement is still the foreign file')
+})
+
+test('retiring an old listener never deletes a newer live server\'s socket path', async t => {
+  const { dir, scope } = newScope(t)
+  const old = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+  const logical = old.socketPath
+  unlinkSync(logical)
+  // A newer listener binds a fresh inode at the SAME logical pathname.
+  const newerDirFd = openSync(dir, 'r')
+  const newer = createServer(s => s.destroy())
+  await new Promise<void>((resolveListen, rejectListen) => {
+    newer.once('error', rejectListen)
+    newer.listen(`/proc/self/fd/${String(newerDirFd)}/acp.sock`, () => {
+      newer.off('error', rejectListen)
+      resolveListen()
+    })
+  })
+  assert.equal(lstatSync(logical).isSocket(), true, 'the newer server owns a socket at the path')
+  await old.close()
+  assert.equal(newer.listening, true, 'the newer server must keep listening after the old retirement')
+  assert.ok(pathExists(logical), 'the newer server pathname must survive the old listener retirement')
+  await new Promise<void>(resolveClose => newer.close(() => resolveClose()))
+  closeSync(newerDirFd)
 })

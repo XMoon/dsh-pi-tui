@@ -59,7 +59,16 @@ interface Harness {
   readonly vt: VirtualTerminal
   readonly view: () => string
   readonly invoke: () => unknown
-  readonly acp: { status: AcpAccessStatus; setEnabledCalls: boolean[]; failure: string | undefined }
+  readonly acp: {
+    status: AcpAccessStatus
+    setEnabledCalls: boolean[]
+    failure: string | undefined
+    /** Throw BEFORE applying the reached state (a clean rejection / not-saved). */
+    failBeforeApply: boolean
+    /** Hold the dispatched write until released (a pending, unsettled operation). */
+    gate: Promise<void> | undefined
+    release: (() => void) | undefined
+  }
   readonly pref: { state: AcpStartupPreferenceState | undefined; writes: boolean[]; failNext: string | undefined }
   readonly setReadiness: (readiness: 'ready' | 'stale' | 'unavailable') => void
   /** Simulate a Connection generation change (Host A -> Host B): replace the
@@ -107,6 +116,9 @@ function setup(options: {
     status: options.status ?? { state: 'disabled' as const },
     setEnabledCalls: [] as boolean[],
     failure: undefined as string | undefined,
+    failBeforeApply: false,
+    gate: undefined as Promise<void> | undefined,
+    release: undefined as (() => void) | undefined,
   }
   const pref = {
     state: 'pref' in options ? options.pref : { autoStart: false, revision: 1, userOverridden: false },
@@ -127,6 +139,8 @@ function setup(options: {
         throw new Error('superseded: the Host generation changed before dispatch')
       }
       acp.setEnabledCalls.push(enabled)
+      if (acp.gate !== undefined) await acp.gate
+      if (acp.failBeforeApply) throw new Error('rejected before apply')
       // Apply the reached state BEFORE any fault, so a "dispatched but reply
       // lost" fault models an INDETERMINATE outcome (the reread shows the
       // target while the call still threw), distinct from a clean rejection.
@@ -447,6 +461,66 @@ test('an OPEN ACP choice is revoked on a Host generation change and cannot write
     await h.vt.waitForRender()
     assert.equal(h.acp.setEnabledCalls.length, 0,
       'the old Host-A Off selection must never be written to Host B')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('a settled not-saved ACP retry is revoked on generation change (no cross-Host write)', async () => {
+  const h = setup({ status: { state: 'enabled' } }) // Host A: ACP On
+  try {
+    await openTools(h)
+    await highlightRow(h, 'ACP Server')
+    await key(h, ENTER)
+    await settle(h, 'the ACP choice to open', frame => frame.includes('Choose value'))
+    await key(h, DOWN) // On -> Off
+    h.acp.failBeforeApply = true // a clean rejection (nothing applied) -> Not saved
+    await key(h, ENTER)
+    await settle(h, 'the not-saved verdict', frame => /Not saved/u.test(frame))
+    // Host A -> Host B (also On). The settled Retry must be revoked.
+    h.acp.failBeforeApply = false
+    h.setReadiness('stale')
+    h.acp.status = { state: 'enabled' }
+    h.setReadiness('ready')
+    h.bumpGeneration()
+    await settle(h, 'the stale not-saved retry to be revoked', frame => !/Not saved|Retry save/u.test(frame))
+    const before = h.acp.setEnabledCalls.length
+    await key(h, ENTER)
+    await h.vt.waitForRender()
+    assert.equal(h.acp.setEnabledCalls.length, before, 'the old Host-A retry must never be written to Host B')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('a pending ACP write that settles after a generation change leaves no cross-Host retry', async () => {
+  const h = setup({ status: { state: 'enabled' } }) // Host A: ACP On
+  try {
+    await openTools(h)
+    await highlightRow(h, 'ACP Server')
+    await key(h, ENTER)
+    await settle(h, 'the ACP choice to open', frame => frame.includes('Choose value'))
+    await key(h, DOWN) // On -> Off
+    let releaseGate: (() => void) | undefined
+    h.acp.gate = new Promise<void>(resolve => { releaseGate = resolve })
+    h.acp.failBeforeApply = true // after release the dispatched write rejects (not-saved)
+    await key(h, ENTER) // dispatch -> pending (setEnabled awaits the gate)
+    // Host A -> Host B (also On) WHILE the write is still pending.
+    h.setReadiness('stale')
+    h.acp.status = { state: 'enabled' }
+    h.setReadiness('ready')
+    h.bumpGeneration()
+    // Release the pending old-Host write; its late settlement must be inert.
+    h.acp.gate = undefined
+    releaseGate?.()
+    await h.vt.waitForRender()
+    await new Promise<void>(resolve => setTimeout(resolve, 25))
+    await h.vt.waitForRender()
+    assert.doesNotMatch(h.view(), /Retry save|Not saved/u, 'a cross-generation pending settlement must not create a retry')
+    const before = h.acp.setEnabledCalls.length
+    await key(h, ENTER)
+    await h.vt.waitForRender()
+    assert.equal(h.acp.setEnabledCalls.length, before, 'no additional write to Host B after the stale pending settlement')
   } finally {
     h.dispose()
   }
