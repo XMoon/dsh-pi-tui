@@ -49,12 +49,24 @@ test('webserver is conditionally disabled under the daemon supervisor', () => {
   assert.ok(block.includes(DAEMON_DISABLED), 'webserver carries the daemon disable condition')
 })
 
-for (const id of ['pi-tui-visual-tools', 'job-controller', 'workspace', 'file-reference-local', 'deliverable-file-references']) {
+for (const id of ['pi-tui-visual-tools', 'mcp-manager', 'job-controller', 'workspace', 'file-reference-local', 'deliverable-file-references']) {
   test(`${id} is conditionally disabled under the daemon supervisor`, () => {
     const block = rowBlock(id)
     assert.ok(block.includes(DAEMON_DISABLED), `${id} must not mount in the daemon supervisor`)
   })
 }
+
+test('the shared MCP manager row is declared exactly once with its official inject', () => {
+  const rows = patch.split('\n').filter(line => line.trim() === '- id: mcp-manager')
+  assert.equal(rows.length, 1, 'the Host composition must own exactly ONE mcp-manager row')
+  const block = rowBlock('mcp-manager')
+  assert.match(block, /name: '@deepseek-ai\/dsh-mcp-manager'/u)
+  assert.match(block, /inject: \[credentials\]/u,
+    'the manager resolves credential templates through the already-mounted provider')
+  // The user profile's own servers must be inherited through the row id: this
+  // composition layer never writes mcp-manager config.
+  assert.ok(!/^ {6}config:/mu.test(block), 'the row must not declare a config block')
+})
 
 test('the web-preferences schema row is NOT disabled (it only projects Config)', () => {
   const block = rowBlock('pi-tui-web-preferences')

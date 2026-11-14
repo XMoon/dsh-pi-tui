@@ -71,12 +71,21 @@ const FIBER_ACTIVE = 2
 /**
  * The official Web services whose live binding is what `enabled` claims:
  * `webApp` owns the SPA fallback, `clientModules` owns the `/plugins` graph,
- * `terminalController` is the Web Browser's Host-side terminal owner,
+ * `terminalController` is the Web Browser's Host-side terminal owner, and
  * `officeKit` is the Browser document-preview conversion provider (rc.2
- * renamed the service from `officeToPdf`), and `mcpManager` is the shared MCP
- * server fleet the Browser settings surface reads.
+ * renamed the service from `officeToPdf`).
  */
-const REQUIRED_WEB_SERVICES = ['webApp', 'clientModules', 'terminalController', 'officeKit', 'mcpManager'] as const
+const REQUIRED_WEB_SERVICES = ['webApp', 'clientModules', 'terminalController', 'officeKit'] as const
+
+/**
+ * The SHARED Host services the Web frontend consumes but never owns. They are
+ * NOT part of the toggle and MUST survive an off → on → off sequence; an
+ * `enabled` claim additionally requires the first one to be live, because the
+ * Browser settings surface would otherwise advertise an MCP page whose Host
+ * authority is missing. A `disabled` claim never checks them (they belong to
+ * Direct / Host-only, not to the Web roster).
+ */
+const SHARED_HOST_SERVICES = ['mcpManager'] as const
 
 /** The Browser graph rows that must be assembled first and released last. */
 const BROWSER_GRAPH_ROWS = ['modules', 'client-hmr', 'cordis-client-runner', 'terminal-controller'] as const
@@ -456,6 +465,16 @@ export class PiTuiWebAccessHostService extends TypertRemoteService {
       return {
         state: 'unavailable',
         reason: `web access: the official Web services are missing: ${missing.join(', ')}`,
+      }
+    }
+    // The Web rows are live, but a shared Host authority the Browser surface
+    // reads (the MCP manager) must be present too: without it the Web graph is
+    // serving a settings page whose backend does not exist.
+    const missingShared = SHARED_HOST_SERVICES.filter(service => this.ctx.reflect.get(service) === undefined)
+    if (missingShared.length > 0) {
+      return {
+        state: 'unavailable',
+        reason: `web access: the shared Host services are missing: ${missingShared.join(', ')}`,
       }
     }
     return { state: 'enabled' }

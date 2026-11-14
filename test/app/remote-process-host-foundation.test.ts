@@ -478,7 +478,6 @@ const WEB_ROWS: ReadonlyArray<{ id: string; name: string }> = [
   { id: 'modules', name: '@deepseek-ai/dsh-client-modules' },
   { id: 'client-hmr', name: '@deepseek-ai/dsh-client-hmr' },
   { id: 'cordis-client-runner', name: '@deepseek-ai/dsh-cordis-client-runner' },
-  { id: 'mcp-manager', name: '@deepseek-ai/dsh-mcp-manager' },
   { id: 'ui-file-actions', name: '@deepseek-ai/dsh-client-ui-file-actions' },
   { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
   { id: 'ui-open-in-app', name: '@deepseek-ai/dsh-client-ui-open-in-app' },
@@ -629,13 +628,6 @@ function assertWebRoster(
         'web-runtime must inject the existing webserver, not a second listener')
       assert.deepEqual(candidate.config, WEB_RUNTIME_CONFIG,
         'web-runtime must stay silent: no browser launch, no printed token URL, no DSH_WEB_URL')
-      continue
-    }
-    if (candidate.id === 'mcp-manager') {
-      // Official rc.2 row: the MCP fleet resolves credential templates through
-      // the already-mounted credentials provider.
-      assert.deepEqual(candidate.inject, ['credentials'])
-      assert.equal(candidate.config, undefined)
       continue
     }
     if (candidate.id === 'skill-office') {

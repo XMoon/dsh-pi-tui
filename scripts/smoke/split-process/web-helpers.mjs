@@ -41,7 +41,6 @@ export const PR_A_WEB_ROWS = [
   { id: 'modules', name: '@deepseek-ai/dsh-client-modules' },
   { id: 'client-hmr', name: '@deepseek-ai/dsh-client-hmr' },
   { id: 'cordis-client-runner', name: '@deepseek-ai/dsh-cordis-client-runner' },
-  { id: 'mcp-manager', name: '@deepseek-ai/dsh-mcp-manager' },
   { id: 'ui-file-actions', name: '@deepseek-ai/dsh-client-ui-file-actions' },
   { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
   { id: 'ui-open-in-app', name: '@deepseek-ai/dsh-client-ui-open-in-app' },
