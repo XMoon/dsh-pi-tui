@@ -593,11 +593,56 @@ function canonicalPath(path: string): string {
 }
 
 /** Parse a `systemctl --user show-environment` body into a KEY->value map. */
+/**
+ * Decode one `systemctl --user show-environment` VALUE. systemd prints a plain
+ * value when it needs no quoting, but wraps a value containing whitespace or
+ * shell-special characters in `$'...'` with C-style (`\n`, `\t`, `\\`, `\'`,
+ * `\xHH`, octal `\NNN`) escapes. This decodes that form WITHOUT eval/shell.
+ */
+function decodeSystemdEnvValue(value: string): string {
+  if (!(value.length >= 3 && value.startsWith("$'") && value.endsWith("'"))) return value
+  const inner = value.slice(2, -1)
+  let out = ''
+  for (let i = 0; i < inner.length; i += 1) {
+    const character = inner[i]
+    if (character !== '\\') { out += character; continue }
+    const next = inner[i + 1]
+    if (next === undefined) { out += '\\'; break }
+    i += 1
+    switch (next) {
+      case '\\': out += '\\'; break
+      case "'": out += "'"; break
+      case '"': out += '"'; break
+      case 'n': out += '\n'; break
+      case 't': out += '\t'; break
+      case 'r': out += '\r'; break
+      case 'a': out += '\x07'; break
+      case 'b': out += '\b'; break
+      case 'f': out += '\f'; break
+      case 'v': out += '\v'; break
+      case 'x': {
+        const hex = inner.slice(i + 1, i + 3)
+        if (/^[0-9a-fA-F]{2}$/u.test(hex)) { out += String.fromCharCode(parseInt(hex, 16)); i += 2 } else { out += 'x' }
+        break
+      }
+      default:
+        if (/[0-7]/u.test(next)) {
+          let octal = next
+          while (octal.length < 3 && /[0-7]/u.test(inner[i + 1] ?? '')) { octal += inner[i + 1]; i += 1 }
+          out += String.fromCharCode(parseInt(octal, 8))
+        } else {
+          out += next
+        }
+    }
+  }
+  return out
+}
+
 export function parseManagerEnvironment(stdout: string): Record<string, string> {
   const env: Record<string, string> = {}
   for (const line of stdout.split('\n')) {
     const at = line.indexOf('=')
-    if (at > 0) env[line.slice(0, at)] = line.slice(at + 1)
+    if (at > 0) env[line.slice(0, at)] = decodeSystemdEnvValue(line.slice(at + 1))
   }
   return env
 }
