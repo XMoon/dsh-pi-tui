@@ -205,3 +205,34 @@ test('Remote board subscription re-arms on binding arrival and generation change
   rebuilt.face.set(board([task()]))
   assert.equal(calls, callsAfter, 'a disposed subscription never fires again')
 })
+
+test('Remote board subscribe is Root-only: a confirmed child binding never attaches', () => {
+  const child = makeSession({ face: new FakeFace(board([task()])), subagent: { parent: 'root' } })
+  const s = makeSessions({ session: child.session })
+  const port = new RemoteTeamBoardReadPort({ sessions: s.sessions, connection: { generation: generation({ id: 'g' }) } })
+  let calls = 0
+  const dispose = port.subscribe('root', () => { calls += 1 })
+  assert.equal(child.face.size(), 0, 'a child binding never gets a face listener')
+  assert.equal(calls, 0)
+  dispose()
+})
+
+test('Remote board disposer is idempotent even when a lower-layer off is not', () => {
+  let genOffCalls = 0
+  const gen = {
+    getSnapshot: () => ({ id: 'g' }) as never,
+    subscribe: () => () => { genOffCalls += 1; if (genOffCalls > 1) throw new Error('double generation off') },
+  }
+  let faceOffCalls = 0
+  const face = {
+    getSnapshot: () => board([task()]),
+    subscribe: () => () => { faceOffCalls += 1; if (faceOffCalls > 1) throw new Error('double face off') },
+  }
+  const session = { projections: { faceOf: (key: string) => { if (key === AGENT_TEAM) return face; throw new Error('key') } }, getSnapshot: () => ({ subagent: null }) }
+  const port = new RemoteTeamBoardReadPort({ sessions: makeSessions({ session }).sessions, connection: { generation: gen } })
+  const dispose = port.subscribe('root', () => {})
+  assert.equal(faceOffCalls, 0)
+  assert.doesNotThrow(() => { dispose(); dispose() })
+  assert.equal(genOffCalls, 1, 'the generation off runs once')
+  assert.equal(faceOffCalls, 1, 'the face off runs once')
+})

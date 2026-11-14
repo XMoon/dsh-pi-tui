@@ -152,6 +152,10 @@ export class DirectTeamBoardReadPort implements TeamBoardReadPort {
   subscribe(sessionId: string, listener: () => void): () => void {
     const agent = this.agentFor(sessionId)
     if (agent === undefined) return () => {}
+    const subagents = this.ctx.get('subagents') as DirectTeamBoardSubagentsLike | undefined
+    if (subagents === undefined) return () => {}
+    // Root-only: a confirmed child never receives the Root board feed.
+    if (subagents.rootOf(agent) !== agent) return () => {}
     const projections = this.ctx.get('sessionProjections') as DirectTeamBoardProjectionsLike | undefined
     if (projections === undefined) return () => {}
     let disposed = false

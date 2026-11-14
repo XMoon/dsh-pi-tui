@@ -1713,12 +1713,12 @@ test('FR2: Enter on a Team task toggles its single disclosure; a member row has 
   })
   panel.handleInput('\t') // Team page; the only selectable row is the task
   const before = rendered().map(strip).join('\n')
-  assert.ok(before.includes('Ship it') && !before.includes('status    completed'), `not expanded yet:\n${before}`)
+  assert.ok(before.includes('Ship it') && !before.includes('desc: a read-only board'), `not expanded yet:\n${before}`)
   panel.handleInput('\r')
   const after = rendered().map(strip).join('\n')
-  assert.ok(after.includes('status    completed'), `Enter expands the task detail:\n${after}`)
+  assert.ok(after.includes('desc: a read-only board'), `Enter expands the task detail:\n${after}`)
   panel.handleInput('\r')
-  assert.ok(!rendered().map(strip).join('\n').includes('status    completed'), 'Enter again collapses it')
+  assert.ok(!rendered().map(strip).join('\n').includes('desc: a read-only board'), 'Enter again collapses it')
   panel.dispose()
 })
 
@@ -1780,5 +1780,26 @@ test('FR2: a Team task row is never a Work Open/Stop route; a member Enter is in
   panel.handleInput('\x1b[A') // back onto the lead member
   panel.handleInput('\r') // member Enter is inert
   assert.equal(opens, 0, 'Enter on a Team member never opens anything')
+  panel.dispose()
+})
+
+test('FR2: at 88 columns Enter reveals description/blockedBy/scopes/warnings inline', () => {
+  const task = teamTask({
+    subject: 'Ship', status: 'pending', ready: false, description: 'the detail line',
+    blockedBy: ['task-0'], writeScopes: ['src/x'], writeScopeWarnings: ['overlap with task-9'],
+  })
+  const { panel } = makePanel([], { enableSearch: true, team: teamDto({ kind: 'ready', enabled: true, tasks: [task] }, []) })
+  panel.handleInput('\t')
+  panel.handleInput('\r')
+  const frame = panel.render(88).map(strip).join('\n')
+  assert.ok(frame.includes('desc: the detail line'), `description reachable at 88:\n${frame}`)
+  assert.ok(frame.includes('blocked by: task-0'), `blockedBy reachable at 88:\n${frame}`)
+  assert.ok(frame.includes('scopes: src/x'), `writeScopes reachable at 88:\n${frame}`)
+  assert.ok(frame.includes('warning: overlap with task-9'), `writeScopeWarnings reachable at 88:\n${frame}`)
+  // A 44x8 grant may degrade the detail lines away, but must keep the selected
+  // row reachable and an exit hint.
+  panel.setMaxRows(8)
+  const tiny = panel.render(44).map(strip).join('\n')
+  assert.ok(tiny.includes('Ship') || tiny.includes('Esc close'), `44x8 keeps the selected row or Esc:\n${tiny}`)
   panel.dispose()
 })

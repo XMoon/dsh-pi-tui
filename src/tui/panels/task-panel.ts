@@ -272,6 +272,9 @@ export class TaskBrowserPanel implements Component, Focusable {
       else this.onCancel()
     }
     this.teamSearchInput.onSubmit = () => this.toggleTeamSelected()
+    // Seed the Team selection so an Enter that arrives before the first paint
+    // still targets the first selectable row.
+    if (this.team !== undefined) this.teamSelectedValue = this.teamSelectableValues()[0]
     this.rebuildTypeCycle()
     // A restored type filter that no row satisfies produces a dead view;
     // validate it against the initial row set exactly like setItems does.
@@ -708,6 +711,20 @@ export class TaskBrowserPanel implements Component, Focusable {
     return lines.map(sanitizedPhysicalLine)
   }
 
+  /** The compact inline detail shown under the SELECTED, expanded Team task at
+   *  widths below 110 — it must expose the SAME contracted read-only facts
+   *  (description, blockers, write scopes and advisory warnings) the >=110 side
+   *  pane does, never just status/owner. */
+  private teamTaskInlineDetail(task: TeamBoardTask): string[] {
+    const lines: string[] = []
+    if (task.description !== '') lines.push(`desc: ${task.description}`)
+    if (task.blockedBy.length > 0) lines.push(`blocked by: ${task.blockedBy.join(', ')}`)
+    if (task.writeScopes.length > 0) lines.push(`scopes: ${task.writeScopes.join(', ')}`)
+    for (const warning of task.writeScopeWarnings) lines.push(`warning: ${warning}`)
+    if (lines.length === 0) lines.push('no extra details')
+    return lines.map(sanitizedPhysicalLine)
+  }
+
   private teamSearchLine(width: number): string {
     const value = this.teamSearchInput.getValue() ?? ''
     const rendered = this.teamSearchInput.render(Math.max(1, width - 2))[0] ?? ''
@@ -764,7 +781,7 @@ export class TaskBrowserPanel implements Component, Focusable {
         listLines.push(this.teamRowMain(row, selected, safeWidth))
         listHits.push({ kind: 'item', value: row.value, index })
         if (safeWidth < 110 && selected && row.kind === 'task' && this.teamExpandedTaskId === row.task.id) {
-          for (const detail of this.teamDetailLines(row.task).slice(1, 3)) {
+          for (const detail of this.teamTaskInlineDetail(row.task)) {
             listLines.push(color.textDim(truncateToWidth(`    ${detail}`, safeWidth, '…')))
             listHits.push({ kind: 'inert' })
           }
