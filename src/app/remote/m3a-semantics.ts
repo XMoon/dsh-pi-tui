@@ -75,6 +75,7 @@ import type { SchedulePort } from '../../runtime/schedule-port.ts'
 import type { HostDirectoryBrowsePort } from '../../runtime/host-directory-browse-port.ts'
 import { RemoteHostDirectoryBrowsePort } from '../../runtime/remote/host-directory-browse-remote.ts'
 import type { RemoteTeamModeNamespace } from '../../runtime/remote/team-mode-remote.ts'
+import type { RemoteMcpServerRuntimeSource } from '../../runtime/remote/mcp-server-remote.ts'
 import type { ClientRemote } from '@deepseek-ai/dsh-api-gateway/client'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import { RemoteSessionReader } from '../../runtime/remote/session-reader-remote.ts'
@@ -234,6 +235,10 @@ export interface RemoteM3ARuntimeSource {
      *  mode write. Absent until the installed contribution is mounted, so the
      *  Team port fails closed instead of fabricating a Direct path. */
     readonly agentTeams: RemoteTeamModeNamespace | undefined
+    /** The official generated `mcpManager` namespace (FR3): the ONE Host MCP
+     *  manager's roster stream, probe and restart. Absent until the installed
+     *  contribution is mounted, so the port answers the truthful unavailable. */
+    readonly mcpManager: RemoteMcpServerRuntimeSource['remote']['mcpManager']
     /** The official generated config-plane namespaces (the SAME Client
      *  Remote service): settings, credentials and permission presets. The
      *  M3-3A adapters ignore them; the Remote Backend's ConfigPort reads them

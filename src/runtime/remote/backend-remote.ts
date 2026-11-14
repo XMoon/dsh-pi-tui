@@ -46,6 +46,7 @@ import type { HostDirectoryBrowsePort } from '../host-directory-browse-port.ts'
 import type { SessionPolicyPort } from '../session-policy-port.ts'
 import type { TeamModePort } from '../team-mode-port.ts'
 import type { TeamBoardReadPort } from '../team-board-read-port.ts'
+import type { McpServerPort } from '../mcp-server-port.ts'
 
 /** Every semantic port the Remote backend serves (one adapter each). */
 export interface RemoteBackendParts {
@@ -87,6 +88,8 @@ export interface RemoteBackendParts {
   readonly teamMode: TeamModePort
   /** The official `agentTeam` projection READ-ONLY board adapter (FR2). */
   readonly teamBoard: TeamBoardReadPort
+  /** The official generated `mcpManager` roster/probe/restart adapter (FR3). */
+  readonly mcpServers: McpServerPort
 }
 
 /** Assemble the experimental Remote `Backend` from its proven adapters. */

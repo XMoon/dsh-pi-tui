@@ -68,6 +68,7 @@ export const HOST_SERVICES = [
   'shell',
   'pluginManager',
   'jobController',
+  'mcpManager',
 ]
 
 const SERVICE_ALT = HOST_SERVICES.join('|')

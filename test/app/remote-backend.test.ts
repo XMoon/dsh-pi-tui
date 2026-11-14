@@ -41,6 +41,7 @@ test('the Remote backend advertises exactly its implemented capabilities', () =>
     sessionPolicy: {} as RemoteBackendParts['sessionPolicy'],
     teamMode: {} as RemoteBackendParts['teamMode'],
     teamBoard: {} as RemoteBackendParts['teamBoard'],
+    mcpServers: {} as RemoteBackendParts['mcpServers'],
   }
   const backend = createRemoteBackend(parts)
   assert.equal(backend.kind, 'remote')

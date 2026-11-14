@@ -964,6 +964,49 @@ export interface AccountConfig {
   hasRunningAccountTasks(lease: AccountObservationLease): Promise<boolean>
 }
 
+/**
+ * The configured MCP server KEY SET as the official Host Settings expose it —
+ * the ONLY evidence of which manager entries are configuration-owned.
+ *
+ * `ready` carries the EFFECTIVE `servers` keys of the `mcp-manager` settings
+ * namespace for a current Host read (plus that namespace's revision when the
+ * Host exposes one). `stale` means a last-known read is on screen but is not
+ * current; `unavailable` means no authority could be read at all. A consumer
+ * MUST turn both non-`ready` states into "source unknown": it may never infer
+ * `plugin-owned` from a missing key set, and an empty `ready` list is a real
+ * "no configured servers" fact, not an unavailable one.
+ */
+export type McpServerSources =
+  | {
+      readonly kind: 'ready'
+      /** The effective configured `servers` keys (never registration names). */
+      readonly configuredNames: readonly string[]
+      /** The namespace revision the keys were read at, when exposed. */
+      readonly revision?: number
+    }
+  | { readonly kind: 'stale'; readonly reason: string }
+  | { readonly kind: 'unavailable'; readonly reason: string }
+
+/**
+ * The MCP configuration-source read. It answers ONLY "which manager names are
+ * held by the official `mcp-manager.servers` configuration right now"; it
+ * exposes no namespace, entry, transport, credential or secret. There is no
+ * write path (server CRUD belongs to a later milestone).
+ */
+export interface McpServerSourcesConfig {
+  /** The current verdict for THIS Host generation. */
+  read(): McpServerSources
+  /**
+   * Ask the backend for a fresh authoritative read before the next
+   * {@link read}. Direct is always current and resolves immediately; Remote
+   * drives the existing settings `describe()` refresh so a just-opened page
+   * never has to wait for an unrelated invalidation. A rejection is recorded by
+   * the backend's own readiness fact (the following `read()` reports
+   * `stale`/`unavailable`), never presented as a source verdict.
+   */
+  refresh(): Promise<void>
+}
+
 /** The config assembly — one narrow sub-interface per config domain.
  * Consumers depend on the sub-interface they use, never on the whole
  * assembly (no generic settings god API). */
@@ -1014,4 +1057,6 @@ export interface ConfigPort {
   readonly backendStartupPreference: BackendStartupPreferenceConfig
   /** The profile-owned ACP startup preference for the NEXT Split Host launch. */
   readonly acpStartupPreference: AcpStartupPreferenceConfig
+  /** The READ-ONLY MCP configuration-source keys (FR3). */
+  readonly mcpServerSources: McpServerSourcesConfig
 }

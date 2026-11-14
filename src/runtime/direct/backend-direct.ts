@@ -49,6 +49,7 @@ import { DirectHostDirectoryBrowsePort } from './host-directory-browse-direct.ts
 import { DirectSessionPolicyPort } from './session-policy-direct.ts'
 import { DirectTeamModePort } from './team-mode-direct.ts'
 import { DirectTeamBoardReadPort } from './team-board-read-direct.ts'
+import { DirectMcpServerPort } from './mcp-server-direct.ts'
 import type { WebAccessPort, WebAccessStatus, WebAccessUrl } from '../web-access-port.ts'
 import type { AcpAccessPort, AcpAccessStatus } from '../acp-access-port.ts'
 
@@ -227,5 +228,9 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     // FR2: the official Root-only READ-ONLY Team board behind the ONE board
     // port. Same exact-live-Agent Root proof; no write is reachable here.
     new DirectTeamBoardReadPort(deps.ctx, sessionId => deps.agentFor(sessionId)),
+    // FR3: the ONE official in-process MCP manager behind the semantic port.
+    // The adapter owns no fleet: watch/probe/restart forward to `ctx.mcpManager`
+    // and every settlement is generation-bound.
+    new DirectMcpServerPort(deps.ctx),
   )
 }
