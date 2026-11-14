@@ -24,6 +24,7 @@ import {
   type HostAcpSessionAccess,
   type LiveAgentViewIdentity,
 } from '../../src/app/remote-process/local-acp-session-view.ts'
+import { createHostAcpSessionAccess } from '../../src/app/remote-process/local-host-entry.ts'
 
 const QUIET_DIAG: Diag = {
   debug: () => {},
@@ -155,14 +156,16 @@ test('session/new rejects an invalid cwd and an unsupported MCP server before an
   assert.equal(registry.phaseOf(conn), 'idle')
 })
 
-test('session/new rejects when the Host refuses the workspace directory', async () => {
+test('session/new reports an unconfirmed workspace outcome instead of a client directory error', async () => {
   const access = new FakeAccess()
-  access.createWorkspaceImpl = async () => ({ kind: 'rejected', code: 'workspace/invalid-path' })
+  // The official Workspace Controller wraps persistence failures as
+  // `workspace/invalid-path` too, so the Host cannot prove "not created".
+  access.createWorkspaceImpl = async () => ({ kind: 'indeterminate', code: 'workspace/invalid-path' })
   const registry = new AcpSessionViewRegistry(QUIET_DIAG)
   const conn = registry.createConnection()
 
-  await assert.rejects(registry.newSession(conn, access, NEW), isViewError('LOCAL_ACP_VIEW_WORKSPACE_REJECTED'))
-  assert.equal(access.createSessionCalls.length, 0, 'a refused workspace must not create a session')
+  await assert.rejects(registry.newSession(conn, access, NEW), isViewError('LOCAL_ACP_VIEW_WORKSPACE_UNAVAILABLE'))
+  assert.equal(access.createSessionCalls.length, 0, 'an unconfirmed workspace must not create a session')
   assert.equal(registry.phaseOf(conn), 'idle')
 })
 
@@ -414,15 +417,6 @@ test('resume then close then resume of the SAME session never lets a stale resul
 test('session/new classifies the HOST result instead of whichever await threw', async () => {
   {
     const access = new FakeAccess()
-    access.createWorkspaceImpl = async () => ({ kind: 'rejected', code: 'workspace/invalid-path' })
-    const registry = new AcpSessionViewRegistry(QUIET_DIAG)
-    const conn = registry.createConnection()
-    await assert.rejects(registry.newSession(conn, access, NEW), isViewError('LOCAL_ACP_VIEW_WORKSPACE_REJECTED'))
-    assert.equal(access.createSessionCalls.length, 0)
-    assert.equal(registry.phaseOf(conn), 'idle')
-  }
-  {
-    const access = new FakeAccess()
     access.createWorkspaceImpl = async () => ({ kind: 'indeterminate', code: 'workspace/internal' })
     const registry = new AcpSessionViewRegistry(QUIET_DIAG)
     const conn = registry.createConnection()
@@ -487,4 +481,55 @@ test('a cwd mismatch on resume is attached without changing the Host Session', a
   assert.equal(registry.phaseOf(conn), 'attached')
   assert.deepEqual(warnings, ['local-acp.view.cwd-mismatch'], 'the mismatch is a fixed non-sensitive note')
   assert.equal(access.createSessionCalls.length, 0)
+})
+
+test('the production Host access classifier maps official errors to the right create outcome', async () => {
+  let workspaceImpl: () => Promise<unknown> = async () => ({ workspace: { workspaceId: 'ws', path: '/w' }, created: true })
+  let sessionImpl: () => Promise<unknown> = async () => ({ sessionId: 'S' })
+  const context = {
+    reflect: {
+      get(name: string) {
+        if (name === 'workspaceController') return { create: async () => await workspaceImpl() }
+        if (name === 'sessionController') {
+          return {
+            create: async () => await sessionImpl(),
+            resolveAgent: async () => ({ error: { code: 'session/not-found', message: 'x' } }),
+          }
+        }
+        if (name === 'agents') return { get: () => undefined }
+        if (name === 'sessions') return { get: () => undefined }
+        return undefined
+      },
+    },
+  } as unknown as Parameters<typeof createHostAcpSessionAccess>[0]
+  const access = createHostAcpSessionAccess(context)
+
+  // The official Workspace Controller wraps a persistence failure as
+  // `workspace/invalid-path`: no official fact proves "no Workspace created".
+  workspaceImpl = async () => {
+    throw { isDSHRemoteError: true, code: 'workspace/invalid-path', details: { path: '/w' } }
+  }
+  assert.deepEqual(await access.createWorkspace('/w'), { kind: 'indeterminate', code: 'workspace/invalid-path' })
+
+  // Default Agent-preset composition rejects BEFORE the Session is minted.
+  for (const code of ['agent-preset/not-found', 'agent-preset/invalid']) {
+    sessionImpl = async () => {
+      throw { isDSHRemoteError: true, code, details: {} }
+    }
+    assert.deepEqual(await access.createSession('ws'), { kind: 'rejected', code })
+  }
+
+  // The official published-with-error keeps the authoritative created id.
+  sessionImpl = async () => {
+    throw { isDSHRemoteError: true, code: 'session/workspace-attach-failed', details: { sessionId: 'S-created', workspaceId: 'ws' } }
+  }
+  assert.deepEqual(await access.createSession('ws'), {
+    kind: 'published-with-error',
+    sessionId: 'S-created',
+    code: 'session/workspace-attach-failed',
+  })
+
+  // A confirmed create is created.
+  sessionImpl = async () => ({ sessionId: 'S-ok' })
+  assert.deepEqual(await access.createSession('ws'), { kind: 'created', sessionId: 'S-ok' })
 })

@@ -497,13 +497,12 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
         const result = await workspaceController.create({ path })
         return { kind: 'created', workspaceId: result.workspace.workspaceId, path: result.workspace.path }
       } catch (error) {
-        const code = remoteErrorCode(error) ?? 'workspace/internal'
-        // Only the official directory-validation failures are a definite client
-        // rejection; a persistence/registry failure cannot confirm the outcome.
-        if (code === 'workspace/invalid-path' || code === 'workspace/name-conflict') {
-          return { kind: 'rejected', code }
-        }
-        return { kind: 'indeterminate', code }
+        // The official Workspace Controller wraps EVERY non-RemoteError failure
+        // (including registry/persistence failures) as `workspace/invalid-path`,
+        // and even a path rejection can occur after a partial registry change.
+        // No official fact here can prove "no Workspace was created", so the
+        // outcome is unconfirmed, never a definite client directory rejection.
+        return { kind: 'indeterminate', code: remoteErrorCode(error) ?? 'workspace/internal' }
       }
     },
     async createSession(workspaceId: string): Promise<AcpCreateSessionOutcome> {
@@ -511,7 +510,15 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
         return { kind: 'created', sessionId: (await sessionController.create({ workspaceId })).sessionId }
       } catch (error) {
         const code = remoteErrorCode(error) ?? 'session/internal'
-        if (code === 'gateway/bad-request' || code === 'workspace/not-found') {
+        // These codes are thrown BEFORE the official Session is minted: the
+        // workspace lookup, the request shape and default Agent-preset
+        // composition all run first, so "no Session was created" is proven.
+        if (
+          code === 'gateway/bad-request'
+          || code === 'workspace/not-found'
+          || code === 'agent-preset/not-found'
+          || code === 'agent-preset/invalid'
+        ) {
           return { kind: 'rejected', code }
         }
         // Official `SessionController.create` can publish a Session then fail a
