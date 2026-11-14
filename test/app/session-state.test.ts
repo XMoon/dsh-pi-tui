@@ -1057,7 +1057,7 @@ test('a sessionless /model pick awaits its default save and reports the committe
   }
 })
 
-test('an AMBIGUOUS sessionless default save is reconciled by the automatic authoritative read (never fabricated as committed)', async () => {
+test('an AMBIGUOUS sessionless default save is NOT failed by an older-default read (never a fabricated commit)', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -1105,14 +1105,15 @@ test('an AMBIGUOUS sessionless default save is reconciled by the automatic autho
     // authoritative re-read then reconciles it against the Host truth — which
     // here still reports the old default, so the choice is cleared instead of
     // being fabricated as committed.
+    // A thrown settings write may or may not have landed: v2 §0.3.2 keeps the
+    // explicit unresolved state (never a failed choice) until a MATCHING Host
+    // read proves it landed. An automatic read that still reports the OLD
+    // default is NOT proof the write failed, so the marker survives.
     assert.ok(vt.getViewport().join('\n').includes('model default save'), 'the failure is surfaced')
     assert.deepEqual(persisted, { provider: 'p', model: 'original' }, 'the failed write is not persisted')
-    for (let index = 0; index < 25; index += 1) await Promise.resolve()
-    await vt.waitForRender()
-    assert.equal(proxy.defaultIntent, undefined,
-      'the automatic authoritative read disproves the ambiguous choice and clears it')
-    assert.equal(proxy.defaultIntentOutcome, 'failed',
-      'a choice the Host truth disproves is never kept as committed')
+    assert.deepEqual(proxy.defaultIntent, { provider: 'p', model: 'm1' }, 'the ambiguous intent stays explicit')
+    assert.equal(proxy.defaultIntentOutcome, 'unresolved',
+      'an older-default read never fails the in-flight write')
   } finally {
     app.stop()
   }
@@ -1826,11 +1827,12 @@ async function flushMicrotasks(rounds = 25): Promise<void> {
 
 /**
  * A sessionless-save catalog stub. The picker's FIRST directory read answers
- * `initialDefault`; the AUTOMATIC post-save reconcile read (the second one) is
- * GATED and answers whatever Host truth the test releases. `statusDefault()`
- * models the status-bar seam — the Host-authoritative cached default — which a
- * committed/indeterminate save INVALIDATES (undefined) until the reconcile
- * read repopulates it, exactly like the production adapter.
+ * `initialDefault`; every AUTOMATIC/authoritative reconcile read after a save is
+ * GATED and answers whatever Host truth the test releases (in call order), so
+ * both the transient unresolved phase and each reconciled end state are
+ * deterministic. `statusDefault()` models the status-bar seam (the
+ * Host-authoritative cached default), which a committed/indeterminate save
+ * INVALIDATES (undefined) until a read repopulates it — exactly like production.
  */
 function sessionlessSaveCatalog(options: {
   readonly saveOutcome: { kind: 'committed' } | { kind: 'indeterminate'; error: { code: string; message: string } }
@@ -1839,15 +1841,19 @@ function sessionlessSaveCatalog(options: {
   catalog: TuiCommandRunner['catalog']
   releaseRead: (hostDefault: { provider: string; model: string } | undefined, error?: unknown) => void
   directoryReads: () => number
+  saveCalls: () => number
   statusDefault: () => { provider: string; model: string } | undefined
 } {
   let reads = 0
+  let saves = 0
   let statusDefault: { provider: string; model: string } | undefined = options.initialDefault
-  let release!: (value: { provider: string; model: string } | undefined, error?: unknown) => void
-  const gate = new Promise<{ value: { provider: string; model: string } | undefined; error?: unknown }>(resolve => {
-    release = (value, error) => resolve({ value, error })
-  })
-  const invalidate = (): void => { statusDefault = undefined }
+  const waiters: Array<(arg: { value: { provider: string; model: string } | undefined; error?: unknown }) => void> = []
+  const queued: Array<{ value: { provider: string; model: string } | undefined; error?: unknown }> = []
+  const releaseRead = (value: { provider: string; model: string } | undefined, error?: unknown): void => {
+    const waiter = waiters.shift()
+    if (waiter !== undefined) waiter({ value, error })
+    else queued.push({ value, error })
+  }
   const directory = (hostDefault: { provider: string; model: string } | undefined) => ({
     default: hostDefault ?? { provider: '', model: '' },
     routableProviders: ['p'],
@@ -1860,17 +1866,18 @@ function sessionlessSaveCatalog(options: {
       loadDirectory: async () => {
         reads += 1
         if (reads === 1) return directory(options.initialDefault)
-        const settled = await gate
+        const settled = queued.length > 0
+          ? queued.shift()!
+          : await new Promise<{ value: { provider: string; model: string } | undefined; error?: unknown }>(resolve => { waiters.push(resolve) })
         if (settled.error !== undefined) throw settled.error
         statusDefault = settled.value
         return directory(settled.value)
       },
       defaultSelection: () => statusDefault,
       saveDefaultSelection: async () => {
-        // The production adapter invalidates the cached directory for a
-        // committed/indeterminate write BEFORE the command reconciles; this
-        // stub only produces those two outcomes, so every save invalidates.
-        invalidate()
+        saves += 1
+        // The production adapter invalidates the cached directory for a save.
+        statusDefault = undefined
         return options.saveOutcome as never
       },
       sessionSelection: () => undefined,
@@ -1884,10 +1891,14 @@ function sessionlessSaveCatalog(options: {
     presets: {} as never,
     skills: {} as never,
   } as TuiCommandRunner['catalog']
-  return { catalog, releaseRead: release, directoryReads: () => reads, statusDefault: () => statusDefault }
+  return { catalog, releaseRead, directoryReads: () => reads, saveCalls: () => saves, statusDefault: () => statusDefault }
 }
 
-test('an INDETERMINATE sessionless default write stays UNRESOLVED until its automatic authoritative read proves it landed', async () => {
+function sessionlessHarness(stub: ReturnType<typeof sessionlessSaveCatalog>): {
+  proxy: TuiCommandRunner
+  modelDef: { handler?: () => Promise<unknown> }
+  vt: VirtualTerminal
+} {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -1895,12 +1906,7 @@ test('an INDETERMINATE sessionless default write stays UNRESOLVED until its auto
   startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
-  const state = { agent: undefined, generation: 1 }
-  const runner = stubRunner(ctx, app, state)
-  const stub = sessionlessSaveCatalog({
-    saveOutcome: { kind: 'indeterminate', error: { code: 'session/model-default-indeterminate', message: 'possibly landed' } },
-    initialDefault: { provider: 'p', model: 'old-model' },
-  })
+  const runner = stubRunner(ctx, app, { agent: undefined, generation: 1 })
   const proxy = new Proxy(runner, {
     get(target, prop, receiver) {
       if (prop === 'catalog') return stub.catalog
@@ -1910,101 +1916,98 @@ test('an INDETERMINATE sessionless default write stays UNRESOLVED until its auto
   registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
-  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  const handler = modelDef!.handler as () => Promise<unknown>
+  return { proxy: proxy as unknown as TuiCommandRunner, modelDef: { handler }, vt }
+}
+
+test('an INDETERMINATE sessionless default write stays UNRESOLVED until a MATCHING authoritative read proves it landed', async () => {
+  const stub = sessionlessSaveCatalog({
+    saveOutcome: { kind: 'indeterminate', error: { code: 'session/model-default-indeterminate', message: 'possibly landed' } },
+    initialDefault: { provider: 'p', model: 'old-model' },
+  })
+  const { proxy, modelDef, vt } = sessionlessHarness(stub)
+  await pickFirstModel(vt, modelDef.handler!)
   await flushMicrotasks()
-  // Phase A — the write is indeterminate and the reconcile read is in flight:
-  // the intent stays EXPLICITLY unresolved (the footer's unconfirmed hint is
-  // derived from exactly this tracker state), never a failed choice.
-  assert.equal(proxy.defaultIntentOutcome, 'unresolved',
-    'an ambiguous default write is unresolved, never a failed choice')
-  assert.deepEqual(proxy.defaultIntent, { provider: 'p', model: 'm1' }, 'the unresolved intent stays explicit')
+  // The write is indeterminate and the automatic read is in flight: the intent
+  // stays EXPLICITLY unresolved (the footer's unconfirmed hint derives from it).
+  assert.equal(proxy.defaultIntentOutcome, 'unresolved')
+  assert.deepEqual(proxy.defaultIntent, { provider: 'p', model: 'm1' })
   assert.equal(stub.directoryReads(), 2, 'the automatic authoritative re-read started without reopening /model')
-  // Phase B — the Host truth lands (the official read carries the saved value):
-  // the tracker reconciles to committed and the STATUS default shows the saved
-  // model — with the picker still closed.
+  // The Host truth lands (the read carries the saved value) -> committed, and
+  // the status default shows the saved model with the picker closed.
   stub.releaseRead({ provider: 'p', model: 'm1' })
   await flushMicrotasks()
   await vt.waitForRender()
-  assert.equal(proxy.defaultIntentOutcome, 'committed', 'the Host read proves the ambiguous write landed')
-  assert.equal(proxy.defaultIntent, undefined, 'the resolved intent clears')
-  assert.deepEqual(stub.statusDefault(), { provider: 'p', model: 'm1' },
-    'the status-bar default is the Host-authoritative saved value without reopening /model')
-  app.stop()
+  assert.equal(proxy.defaultIntentOutcome, 'committed')
+  assert.equal(proxy.defaultIntent, undefined)
+  assert.deepEqual(stub.statusDefault(), { provider: 'p', model: 'm1' })
 })
 
-test('an indeterminate sessionless default write the authoritative read proves did NOT land clears the unresolved intent', async () => {
-  const ctx = new Context()
-  const vt = new VirtualTerminal(100, 30)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const state = { agent: undefined, generation: 1 }
-  const runner = stubRunner(ctx, app, state)
+test('an indeterminate default save is NOT failed by an authoritative read that still reports an OLDER default', async () => {
+  // The official save is async and may still commit AFTER this read: an old
+  // value is not proof that the write did not land, so the unresolved state and
+  // its unconfirmed hint MUST survive. Only display refreshes from the read.
   const stub = sessionlessSaveCatalog({
     saveOutcome: { kind: 'indeterminate', error: { code: 'session/model-default-indeterminate', message: 'possibly landed' } },
     initialDefault: { provider: 'p', model: 'old-model' },
   })
-  const proxy = new Proxy(runner, {
-    get(target, prop, receiver) {
-      if (prop === 'catalog') return stub.catalog
-      return Reflect.get(target, prop, receiver)
-    },
-  })
-  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
-  const modelDef = services.defs.find(entry => entry.name === 'model')
-  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
-  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  const { proxy, modelDef, vt } = sessionlessHarness(stub)
+  await pickFirstModel(vt, modelDef.handler!)
   await flushMicrotasks()
   assert.equal(proxy.defaultIntentOutcome, 'unresolved')
-  // The authoritative Host read still reports the OLD default: the write did
-  // not land. The tracker clears the unresolved intent (never seeded into a
-  // create) and the status default returns to the authoritative value.
   stub.releaseRead({ provider: 'p', model: 'old-model' })
   await flushMicrotasks()
   await vt.waitForRender()
-  assert.equal(proxy.defaultIntent, undefined, 'a choice the Host truth disproves is never kept')
-  assert.equal(proxy.defaultIntentOutcome, 'failed')
+  assert.equal(proxy.defaultIntentOutcome, 'unresolved',
+    'a non-matching read must NEVER infer the in-flight write failed')
+  assert.deepEqual(proxy.defaultIntent, { provider: 'p', model: 'm1' }, 'the unresolved intent stays explicit')
   assert.deepEqual(stub.statusDefault(), { provider: 'p', model: 'old-model' },
-    'the status default follows the authoritative Host read')
-  app.stop()
+    'the read refreshes the displayed current default without clearing the intent')
+  assert.equal(stub.saveCalls(), 1, 'the write is never retried automatically')
 })
 
-test('a COMMITTED sessionless default save repopulates the status default through the automatic re-read, and a failed re-read never downgrades it', async () => {
-  const ctx = new Context()
-  const vt = new VirtualTerminal(100, 30)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const state = { agent: undefined, generation: 1 }
-  const runner = stubRunner(ctx, app, state)
+test('a HELD Host write that completes after an old-value read is reconciled by the LATER matching read (no retry)', async () => {
+  // Deterministic async scene: Host write held pending -> Client already got
+  // indeterminate -> authoritative read returns the OLD default (must keep the
+  // unresolved state) -> Host then completes the write -> a later authoritative
+  // read (reopening /model) proves the match and commits, exactly once.
+  const stub = sessionlessSaveCatalog({
+    saveOutcome: { kind: 'indeterminate', error: { code: 'session/model-default-indeterminate', message: 'held then landed' } },
+    initialDefault: { provider: 'p', model: 'old-model' },
+  })
+  const { proxy, modelDef, vt } = sessionlessHarness(stub)
+  await pickFirstModel(vt, modelDef.handler!)
+  await flushMicrotasks()
+  assert.deepEqual(proxy.defaultIntent, { provider: 'p', model: 'm1' })
+  // Read still OLD: unresolved survives.
+  stub.releaseRead({ provider: 'p', model: 'old-model' })
+  await flushMicrotasks()
+  await vt.waitForRender()
+  assert.equal(proxy.defaultIntentOutcome, 'unresolved', 'the held write is not declared failed by an old read')
+  // Host completes the write; the user reopens /model -> a fresh authoritative
+  // read now reports the saved value and reconciles.
+  await modelDef.handler!()
+  await vt.waitForRender()
+  stub.releaseRead({ provider: 'p', model: 'm1' })
+  await flushMicrotasks()
+  await vt.waitForRender()
+  assert.equal(proxy.defaultIntentOutcome, 'committed', 'the later matching read proves the held write landed')
+  assert.equal(proxy.defaultIntent, undefined)
+  assert.equal(stub.saveCalls(), 1, 'the write is never retried')
+})
+
+test('a COMMITTED sessionless default save repopulates the status default through the automatic re-read', async () => {
   const stub = sessionlessSaveCatalog({
     saveOutcome: { kind: 'committed' },
     initialDefault: { provider: 'p', model: 'old-model' },
   })
-  const proxy = new Proxy(runner, {
-    get(target, prop, receiver) {
-      if (prop === 'catalog') return stub.catalog
-      return Reflect.get(target, prop, receiver)
-    },
-  })
-  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
-  const modelDef = services.defs.find(entry => entry.name === 'model')
-  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
-  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  const { proxy, modelDef, vt } = sessionlessHarness(stub)
+  await pickFirstModel(vt, modelDef.handler!)
   await flushMicrotasks()
-  // The committed save invalidated the cached directory; the reconcile read is
-  // in flight, so the status seam is (truthfully) empty — never the requested
-  // value fabricated as authority.
   assert.equal(stub.directoryReads(), 2, 'the automatic authoritative re-read started without reopening /model')
-  assert.equal(proxy.defaultIntentOutcome, 'committed', 'the confirmed save settles committed')
+  assert.equal(proxy.defaultIntentOutcome, 'committed')
   assert.equal(stub.statusDefault(), undefined,
     'the invalidated cache is not faked back with the requested value')
-  // The official read lands with the Host truth: the status default shows the
-  // saved model with the picker closed.
   stub.releaseRead({ provider: 'p', model: 'm1' })
   await flushMicrotasks()
   await vt.waitForRender()
@@ -2012,47 +2015,24 @@ test('a COMMITTED sessionless default save repopulates the status default throug
     'the status-bar default is the Host-authoritative saved value without reopening /model')
   assert.ok(!vt.getViewport().join('\n').includes('model default save'),
     'a committed save is never followed by a failure notice')
-  app.stop()
 })
 
 test('a FAILED automatic reconcile read never downgrades a confirmed sessionless default save', async () => {
-  // A failed re-read must never repaint the confirmed save as a failure: the
-  // outcome stays committed, no failure notice appears, and the display simply
-  // waits for the next authoritative read.
-  const ctx2 = new Context()
-  const vt2 = new VirtualTerminal(100, 30)
-  const app2 = new TuiApp(vt2, { onSubmit: () => {}, onExit: () => {} })
-  app2.start()
-  startedApps.add(app2)
-  const services2 = fakeServices()
-  ctx2.provide('commands', services2.commands as never)
-  const runner2 = stubRunner(ctx2, app2, { agent: undefined, generation: 1 })
-  const failing = sessionlessSaveCatalog({
+  const stub = sessionlessSaveCatalog({
     saveOutcome: { kind: 'committed' },
     initialDefault: { provider: 'p', model: 'old-model' },
   })
-  const proxy2 = new Proxy(runner2, {
-    get(target, prop, receiver) {
-      if (prop === 'catalog') return failing.catalog
-      return Reflect.get(target, prop, receiver)
-    },
-  })
-  registerTuiCommandsWithDirectSeams(proxy2 as unknown as typeof runner2)
-  const modelDef2 = services2.defs.find(entry => entry.name === 'model')
-  assert.ok(modelDef2?.handler !== undefined, '/model handler missing (failure half)')
-  await pickFirstModel(vt2, modelDef2.handler as () => Promise<unknown>)
+  const { proxy, modelDef, vt } = sessionlessHarness(stub)
+  await pickFirstModel(vt, modelDef.handler!)
   await flushMicrotasks()
-  failing.releaseRead(undefined, new Error('catalog read exploded'))
+  stub.releaseRead(undefined, new Error('catalog read exploded'))
   await flushMicrotasks()
-  await vt2.waitForRender()
-  assert.equal(proxy2.defaultIntentOutcome, 'committed', 'a failed re-read never downgrades the confirmed save')
-  assert.equal(failing.statusDefault(), undefined, 'the display waits for the next authoritative read')
-  assert.ok(!vt2.getViewport().join('\n').includes('model default save'),
+  await vt.waitForRender()
+  assert.equal(proxy.defaultIntentOutcome, 'committed', 'a failed re-read never downgrades the confirmed save')
+  assert.equal(stub.statusDefault(), undefined, 'the display waits for the next authoritative read')
+  assert.ok(!vt.getViewport().join('\n').includes('model default save'),
     'a failed reconcile must not repaint the confirmed save as a failure')
-  await flushMicrotasks()
-  app2.stop()
 })
-
 test('a /model picker opened on S1 cannot apply to S2 after a session switch (subject fence)', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 30)
