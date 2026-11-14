@@ -52,7 +52,6 @@ export interface LiveAgentViewIdentity {
  */
 export type AcpCreateWorkspaceOutcome =
   | { readonly kind: 'created'; readonly workspaceId: string; readonly path: string }
-  | { readonly kind: 'rejected'; readonly code: string }
   | { readonly kind: 'indeterminate'; readonly code: string }
 
 /**
@@ -101,7 +100,6 @@ export type LocalAcpViewErrorCode =
   | 'LOCAL_ACP_VIEW_SESSION_NOT_FOUND'
   | 'LOCAL_ACP_VIEW_SUBAGENT_OWNED'
   | 'LOCAL_ACP_VIEW_WRITER_HELD'
-  | 'LOCAL_ACP_VIEW_WORKSPACE_REJECTED'
   | 'LOCAL_ACP_VIEW_WORKSPACE_UNAVAILABLE'
   | 'LOCAL_ACP_VIEW_AGENT_UNAVAILABLE'
   | 'LOCAL_ACP_VIEW_CREATE_ATTACH_FAILED'
@@ -228,11 +226,11 @@ export class AcpSessionViewRegistry {
     }
 
     const workspace = await access.createWorkspace(request.cwd)
-    if (workspace.kind === 'rejected') {
-      this.resetIdleIfCurrent(state, op)
-      throw new LocalAcpViewError('LOCAL_ACP_VIEW_WORKSPACE_REJECTED', 'the Host refused the proposed workspace directory', JSONRPC_INVALID_PARAMS)
-    }
     if (workspace.kind === 'indeterminate') {
+      // The official Workspace Controller wraps non-path failures as
+      // `workspace/invalid-path`, so a failure here can NOT prove whether a
+      // partial Workspace/registry change happened. Report the outcome as
+      // unconfirmed (never as a definite client directory error).
       this.resetIdleIfCurrent(state, op)
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_WORKSPACE_UNAVAILABLE', 'the Host could not register the workspace; the outcome is unconfirmed', JSONRPC_INTERNAL_ERROR)
     }
