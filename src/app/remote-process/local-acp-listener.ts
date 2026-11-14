@@ -22,7 +22,7 @@
  * @module app/remote-process/local-acp-listener
  */
 
-import { chmodSync, constants, closeSync, lstatSync, mkdirSync, openSync, renameSync, rmdirSync, unlinkSync } from 'node:fs'
+import { chmodSync, constants, closeSync, linkSync, lstatSync, mkdirSync, openSync, rmdirSync, unlinkSync } from 'node:fs'
 import { connect as netConnect, createServer, type Server, type Socket } from 'node:net'
 import { join } from 'node:path'
 import {
@@ -699,29 +699,30 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
 
     // 3. Force the private inode to 0600, then RENAME it onto the contract path.
     chmodSync(join(privDir, SOCKET_FILE), 0o600)
-    // Refuse to clobber a foreign entry that appeared between the stale
-    // inspection and the rename: never overwrite an inode we do not own.
-    let appeared = true
+    // Publish the socket with a KERNEL-ATOMIC NO-REPLACE operation: hard-link the
+    // private socket inode onto the contract path. If ANY foreign entry occupies
+    // the path — including one that appeared during the race — linkSync fails
+    // EEXIST and we NEVER overwrite it. This closes the check-then-rename TOCTOU.
     try {
-      lstatSync(logicalPath)
+      linkSync(join(privDir, SOCKET_FILE), logicalPath)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the socket path is not accessible', error)
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'EEXIST') {
+        throw new LocalAcpError('LOCAL_ACP_SOCKET_IN_USE', 'local acp: a foreign entry occupies the socket path (refusing to overwrite it)')
       }
-      appeared = false
+      throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the socket path could not be published', error)
     }
-    if (appeared) {
-      throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: an entry appeared at the socket path during bind')
+    // The contract path now references OUR inode; capture identity immediately so
+    // any later failure removes only ours. Then drop the private name (the inode
+    // is kept by the contract link and the listening server fd); Node's later
+    // close-unlink targets this now-absent private name → ENOENT, never foreign.
+    const linked = lstatSync(logicalPath)
+    saved = { dev: linked.dev, ino: linked.ino, uid: linked.uid }
+    if (!linked.isSocket() || linked.uid !== uid) {
+      throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the published socket is not a socket owned by this uid')
     }
-    renameSync(join(privDir, SOCKET_FILE), logicalPath)
-    // Capture the contract-path inode identity IMMEDIATELY so any later startup
-    // failure can remove ONLY our inode (never a foreign one).
-    const info = lstatSync(logicalPath)
-    if (!info.isSocket() || info.uid !== uid) {
-      throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the renamed socket is not a socket owned by this uid')
-    }
-    saved = { dev: info.dev, ino: info.ino, uid: info.uid }
-    if ((info.mode & 0o777) !== 0o600) {
+    unlinkSync(join(privDir, SOCKET_FILE))
+    if ((linked.mode & 0o777) !== 0o600) {
       throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the bound socket is not a 0600 socket owned by this uid')
     }
     closeScopeDirFd()

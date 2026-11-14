@@ -653,3 +653,33 @@ test('retiring never deletes a foreign socket under concurrent fd-number churn',
     await worker.terminate()
   }
 })
+
+test('a live foreign socket at the contract path is refused and never overwritten', async t => {
+  const { dir, scope } = newScope(t)
+  const logical = join(scope.dir, 'acp.sock')
+  const scopeFd = openSync(dir, 'r')
+  const foreign = createServer(socket => socket.destroy())
+  await new Promise<void>((resolveListen, rejectListen) => {
+    foreign.once('error', rejectListen)
+    foreign.listen(`/proc/self/fd/${String(scopeFd)}/acp.sock`, () => { foreign.off('error', rejectListen); resolveListen() })
+  })
+  const ino = lstatSync(logical).ino
+  try {
+    await assert.rejects(
+      startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG }),
+      (error: unknown) => error instanceof LocalAcpError && error.code === 'LOCAL_ACP_SOCKET_IN_USE',
+      'a live foreign socket must make our bind refuse with LOCAL_ACP_SOCKET_IN_USE',
+    )
+    assert.equal(foreign.listening, true, 'the foreign server keeps listening')
+    assert.equal(lstatSync(logical).ino, ino, 'the foreign socket inode is untouched (never overwritten)')
+    const connectable = await new Promise<boolean>(resolve => {
+      const client = connect(logical)
+      client.once('connect', () => { client.destroy(); resolve(true) })
+      client.once('error', () => resolve(false))
+    })
+    assert.equal(connectable, true, 'the foreign socket remains connectable at its path')
+  } finally {
+    await new Promise<void>(resolveClose => foreign.close(() => resolveClose()))
+    closeSync(scopeFd)
+  }
+})
