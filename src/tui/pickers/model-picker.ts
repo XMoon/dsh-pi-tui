@@ -668,6 +668,9 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
           this.teamPhase = { kind: 'idle' }
           this.teamNotice = outcome.reason
         }
+        // A non-confirmed gesture owns the shared latch only for its one write:
+        // release it once the settlement is known.
+        attempt.abandon?.()
         this.deps.requestRender()
       },
       onError: (error) => {
@@ -677,6 +680,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
           target: attempt.enabled,
           message: error instanceof Error ? error.message : String(error),
         }
+        attempt.abandon?.()
         this.deps.requestRender()
       },
     })

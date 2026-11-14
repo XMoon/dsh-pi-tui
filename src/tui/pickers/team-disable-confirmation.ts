@@ -97,10 +97,11 @@ export class TeamDisableConfirmation implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.disposed) return
-    // An in-flight (or committed-but-unobserved) write owns this seat until an
-    // explicit settlement: Esc/Cancel must never relinquish it and let the
-    // picker behind start a second Team write.
-    if (this.phase === 'saving' || this.phase === 'checking') return
+    // An in-flight HOST REQUEST owns this seat: Esc must not be read as a
+    // business cancel. `checking` is different — the Host already answered and
+    // only the projection is unproven — so a safe Esc exit is allowed (it never
+    // claims Saved and never cancels the committed write).
+    if (this.phase === 'saving') return
     if (matchesKey(data, 'escape')) {
       this.cancel()
       return
@@ -158,7 +159,10 @@ export class TeamDisableConfirmation implements Component, Focusable {
    *  (saving/checking) must not be torn down: the operation owns the seat until
    *  an explicit settlement. */
   requestClose(): boolean {
-    return this.phase !== 'saving' && this.phase !== 'checking'
+    // Only an in-flight Host request is uncloseable. A still-unproven readback
+    // must never trap the seat with no exit (Connection loss / superseded
+    // Session): the owner may retire it, but it is never reported as Saved.
+    return this.phase !== 'saving'
   }
 
   render(width: number): string[] {
@@ -198,7 +202,7 @@ export class TeamDisableConfirmation implements Component, Focusable {
 
   private hintText(): string {
     if (this.phase === 'saving') return 'Waiting for the Host…'
-    if (this.phase === 'checking') return 'Checking saved state…'
+    if (this.phase === 'checking') return 'Checking saved state… · Esc close'
     if (this.phase === 'unknown') return 'Esc close · R recheck (read-only)'
     return 'Esc cancel · ←→ choose · Enter act'
   }
@@ -306,6 +310,14 @@ export class TeamDisableConfirmation implements Component, Focusable {
     if (this.disposed || this.phase !== 'checking') return
     const snapshot = this.options.read()
     if (snapshot.kind === 'ready' && snapshot.enabled === TARGET_ENABLED) {
+      this.close()
+      return
+    }
+    // A `stale` read means the captured Session/authority was superseded; the
+    // seat must retire safely rather than trap focus forever, and it must NOT
+    // claim the write landed. `unavailable` may be transient; keep checking
+    // but Esc/owner close remain available.
+    if (snapshot.kind === 'stale') {
       this.close()
       return
     }

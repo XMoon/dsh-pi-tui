@@ -416,11 +416,27 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
               return { kind: 'refused', reason: 'a Team write is already in progress' }
             }
             const enabled = !snapshot.enabled
+            // The latch is owned for the WHOLE admitted gesture, not one run:
+            // a confirmation Retry reuses this same attempt and must stay
+            // inside the same single-writer admission. It is released only by
+            // an explicit `abandon()` once no run is executing.
             let released = false
+            let state: 'admitted' | 'running' | 'settled' = 'admitted'
+            let abandonRequested = false
             const release = (): void => {
               if (released) return
               released = true
               teamWriteInFlight = false
+            }
+            const abandon = (): void => {
+              if (released) return
+              // Never relinquish the latch while a Host request is executing;
+              // defer the release until the in-flight run settles.
+              if (state === 'running') {
+                abandonRequested = true
+                return
+              }
+              release()
             }
             teamWriteInFlight = true
             return {
@@ -430,8 +446,12 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
                 // OFF may touch a Session whose model request history is
                 // recorded; that fact comes ONLY from the official projection.
                 confirmRequired: enabled === false && snapshot.modelRequestHistory === 'recorded',
-                abandon: release,
+                abandon,
                 run: async () => {
+                  if (released) {
+                    return { kind: 'cancelled', reason: 'the Team gesture was already released; start a new one' }
+                  }
+                  state = 'running'
                   try {
                     if (!runner.isSessionScopeCurrent(scope)) {
                       return { kind: 'cancelled', reason: 'the Session changed; no Team write was sent' }
@@ -461,7 +481,8 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
                       }
                     }
                   } finally {
-                    release()
+                    state = 'settled'
+                    if (abandonRequested) release()
                   }
                 },
               },

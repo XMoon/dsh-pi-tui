@@ -219,11 +219,50 @@ test('Esc during Saving does not close the seat or relinquish the write', async 
   pending.resolve({ kind: 'committed' })
   await flush()
   assert.ok(stripAnsi(component.render(60).join('\n')).includes('Checking saved state…'))
-  component.handleInput('\x1b') // still owned while checking
-  assert.equal(seat.closeCalls, 0, 'Esc during Checking must not close the seat')
+  // Checking is NOT an in-flight Host request: a safe exit is available and the
+  // owner may retire the seat, but it is never reported as Saved.
+  assert.equal(component.requestClose(), true, 'checking must not trap the seat')
   seat.setSnapshot(ready(false))
   await flush()
   assert.equal(seat.closeCalls, 1, 'the proven readback closes the seat once')
+})
+
+test('a committed write with an unprovable readback can be exited safely', async () => {
+  const seat = new FakeSeat(ready(true))
+  seat.queueOutcome({ kind: 'committed' })
+  const component = seat.mount()
+  component.render(60)
+  component.handleInput('\x1b[C')
+  component.render(60)
+  component.handleInput('\r')
+  await flush()
+  assert.ok(stripAnsi(component.render(60).join('\n')).includes('Checking saved state…'))
+  // The projection can never prove OFF (e.g. Connection loss): keep checking,
+  // but Esc must exit without claiming the write landed.
+  seat.setSnapshot({ kind: 'unavailable', reason: 'the Host connection is not ready' })
+  await flush()
+  assert.equal(seat.closeCalls, 0, 'an unavailable readback stays checking (no false Saved)')
+  component.handleInput('\x1b')
+  await flush()
+  assert.equal(seat.closeCalls, 1, 'Esc safely exits the unprovable checking seat')
+})
+
+test('a superseded Session retires the checking seat without claiming Saved', async () => {
+  const seat = new FakeSeat(ready(true))
+  seat.queueOutcome({ kind: 'committed' })
+  const component = seat.mount()
+  component.render(60)
+  component.handleInput('\x1b[C')
+  component.render(60)
+  component.handleInput('\r')
+  await flush()
+  assert.equal(seat.closeCalls, 0)
+  seat.setSnapshot({ kind: 'stale', reason: 'the Session was removed' })
+  await flush()
+  assert.equal(seat.closeCalls, 1, 'a stale authority auto-retires the seat once')
+  seat.setSnapshot({ kind: 'stale', reason: 'the Session was removed' })
+  await flush()
+  assert.equal(seat.closeCalls, 1, 'no double-close')
 })
 
 test('a mouse click on a complete action token acts; an incomplete token never hits', () => {

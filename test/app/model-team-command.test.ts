@@ -208,20 +208,41 @@ test('writer refusals are cancellations and an already-saved fresh read is not w
   assert.equal(already.setCalls.length, 0)
 })
 
-test('a second Team gesture is refused until the first admission settles or abandons', async () => {
+test('a second Team gesture is refused for the WHOLE admitted lifetime, including a Retry', async () => {
   const team = makeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
   const request = await openCommand({ team })
   const first = request.team!.begin()
   assert.equal(first.kind, 'admitted')
-  const second = request.team!.begin()
-  assert.equal(second.kind, 'refused')
-  assert.match(second.kind === 'refused' ? second.reason : '', /already in progress/u)
-  // Abandoning the admitted-but-unrun gesture releases the latch.
-  if (first.kind === 'admitted') first.attempt.abandon?.()
-  const third = request.team!.begin()
-  assert.equal(third.kind, 'admitted')
-  if (third.kind === 'admitted') assert.deepEqual(await third.attempt.run(), { kind: 'committed' })
+  assert.equal(request.team!.begin().kind, 'refused', 'a second gesture is refused while admitted')
+  if (first.kind !== 'admitted') return
+  // The attempt is held for its LIFETIME: the first settlement does NOT release
+  // the latch (a confirmation Retry reuses the same attempt).
+  assert.deepEqual(await first.attempt.run(), { kind: 'committed' })
   assert.deepEqual(team.setCalls, [{ sessionId: 's1', enabled: true }])
-  // After settlement a new gesture is admitted again.
+  const afterSettle = request.team!.begin()
+  assert.equal(afterSettle.kind, 'refused', 'settlement alone keeps the admission')
+  // Retry re-runs the SAME attempt while the latch is still held.
+  team.outcome = { kind: 'committed' }
+  assert.deepEqual(await first.attempt.run(), { kind: 'committed' })
+  // Only an explicit abandon (seat closed / gesture released) frees it.
+  first.attempt.abandon?.()
+  const freed = request.team!.begin()
+  assert.equal(freed.kind, 'admitted')
+  if (freed.kind === 'admitted') freed.attempt.abandon?.()
+})
+
+test('abandon during an in-flight run defers the release until it settles', async () => {
+  const team = makeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  const request = await openCommand({ team })
+  const admitted = request.team!.begin()
+  assert.equal(admitted.kind, 'admitted')
+  if (admitted.kind !== 'admitted') return
+  // run() executes synchronously up to its writer await, so it is `running`
+  // when abandon() is called; the release must be deferred.
+  const running = admitted.attempt.run()
+  admitted.attempt.abandon?.() // must NOT release while running
+  assert.equal(request.team!.begin().kind, 'refused', 'abandon during a run must not release the latch')
+  await running
+  // The deferred abandon releases only when the run settles.
   assert.equal(request.team!.begin().kind, 'admitted')
 })
