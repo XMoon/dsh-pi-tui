@@ -794,17 +794,34 @@ test('Draft JPEG/WebP and the transcript image Viewer keep their product paths',
 
 // ── ZE05: the Assistant SVG thumbnail and Viewer Preview ──────────────────
 
-test('an Assistant SVG thumbnail and the SVG Viewer Preview paint through the same SIXEL owner', async (t) => {
-  // The fixture's own rasterizer seam: the loader the app actually uses, with
-  // the real requested widths recorded. Nothing here replaces the native child —
-  // `rasterizeSvg` still runs, so the pixels this case asserts are real.
+test('an Assistant SVG thumbnail and Viewer Preview use distinct raster widths through one Zellij SIXEL owner', async (t) => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/></svg>'
   const rasterWidths: number[] = []
+
+  // This case owns the real TuiApp -> SVG loader -> Zellij SIXEL sink.
+  // Native OS-process rasterization is qualified in separate tests.
   const svgLoader = new SvgRasterLoader(async (source, options) => {
+    assert.equal(source, svg)
+    if (options.signal.aborted) throw new Error('cancelled')
+
     rasterWidths.push(options.targetWidth)
-    return rasterizeSvg(source, options)
+    const width = options.targetWidth
+    const height = Math.max(1, Math.round(width / 2))
+    const png = await pngFromRgba(
+      fill(width, height, () => [59, 130, 246, 255]),
+      width,
+      height,
+    )
+
+    if (options.signal.aborted) throw new Error('cancelled')
+    return {
+      png,
+      base64: Buffer.from(png).toString('base64'),
+      widthPx: width,
+      heightPx: height,
+    }
   })
   const h = await startZellijSixelApp(t, { svgLoader })
-  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/></svg>'
   const visual = assistantSvgVisual(svg)
   h.app.setFullscreen(true)
   h.terminal.writes.length = 0
@@ -850,6 +867,10 @@ test('an Assistant SVG thumbnail and the SVG Viewer Preview paint through the sa
     ),
   )
   assert.ok(decodeSixel(viewerDcs).width > 0)
+  assert.ok(
+    rasterWidths.at(-1)! > visual.admissionWidth,
+    'the Viewer requests a distinct, wider raster variant',
+  )
 
   h.terminal.writes.length = 0
   h.terminal.sendInput('\t')
