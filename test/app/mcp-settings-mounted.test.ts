@@ -561,8 +561,10 @@ test('the list and detail states stay truthful at the frozen sizes with one acti
     const listFrame = listLines.join('\n')
     assert.match(listFrame, /alpha/u, `${String(columns)}x${String(rows)}: the list paints the selected server`)
     assert.match(listFrame, /Back \[Esc\]/u, `${String(columns)}x${String(rows)}: the list keeps Esc`)
-    assert.equal(listLines.filter(line => line.includes('▸')).length <= 1, true,
-      `${String(columns)}x${String(rows)}: at most ONE selected marker`)
+    // The list must paint EXACTLY ONE selected-row marker (an "at most one"
+    // assertion would also pass when the marker disappeared entirely).
+    assert.equal(listLines.filter(line => line.includes('▸')).length, 1,
+      `${String(columns)}x${String(rows)}: exactly ONE selected-row marker`)
     for (const line of listLines) assert.ok(visibleWidth(line) <= columns)
     assert.equal(listLines.length, rows)
     h.app.dispose()

@@ -284,3 +284,27 @@ test('a Host refusal is reported with its real reason', async () => {
   assert.equal(outcome.failure.kind, 'rejected')
   assert.match(outcome.failure.reason, /requires "command"/u)
 })
+
+test('a Host replacement during the write is outcome-unconfirmed, never saved', async () => {
+  const settings = new FakeSettingsForms({ servers: {} }, { servers: { mine: stdioEntry() } })
+  let generation: object = GENERATION
+  const config = makeConfig(settings, () => generation)
+  const read = config.read()
+  assert.equal(read.kind, 'ready')
+  if (read.kind !== 'ready') return
+  // The Host is replaced WHILE the mutation settles: the read-back belongs to
+  // another authority, so the write's outcome is unobservable here.
+  const originalMutate = settings.mutate.bind(settings)
+  settings.mutate = async (ns, ops, revision) => {
+    await originalMutate(ns, ops, revision)
+    generation = Object.freeze({ id: 'host-b' })
+  }
+  const outcome = await config.mutate(
+    [{ op: 'set', path: ['servers', 'mine', 'enabled'], value: false }],
+    read.revision,
+    GENERATION,
+  )
+  assert.equal(outcome.kind, 'failed')
+  if (outcome.kind !== 'failed') return
+  assert.equal(outcome.failure.kind, 'outcome-unconfirmed')
+})

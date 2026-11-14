@@ -458,7 +458,7 @@ test('a clean form Esc closes the editor without a discard prompt', () => {
 test('the delete confirmation names the exact server and only `y` dispatches', () => {
   const { page, controller } = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
-    configConfirm: { kind: 'delete', name: 'alpha' },
+    configConfirm: { kind: 'delete', name: 'alpha', capturedRevision: 1 },
   }))
   const frame = render(page, 100, 14).join('\n')
   assert.match(frame, /Delete alpha\? This removes your added configuration permanently/u)
@@ -474,7 +474,7 @@ test('the delete confirmation names the exact server and only `y` dispatches', (
 test('the reset confirmation never uses Delete wording', () => {
   const { page } = makePage(snapshot({
     selectedConfig: { ...CONFIG_FACET, canDelete: false, canReset: true, provenance: 'overridden' },
-    configConfirm: { kind: 'reset', name: 'alpha' },
+    configConfirm: { kind: 'reset', name: 'alpha', capturedRevision: 1 },
   }))
   const frame = render(page, 100, 14).join('\n')
   assert.match(frame, /Remove your override and restore the inherited configuration for alpha\?/u)
@@ -484,7 +484,7 @@ test('the reset confirmation never uses Delete wording', () => {
 test('the toggle confirmation says the process may change', () => {
   const { page } = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
-    configConfirm: { kind: 'toggle', name: 'alpha', nextEnabled: false },
+    configConfirm: { kind: 'toggle', name: 'alpha', nextEnabled: false, capturedRevision: 1 },
   }))
   const frame = render(page, 100, 14).join('\n')
   assert.match(frame, /Change saved configuration\? The MCP process may stop or start/u)
@@ -515,7 +515,7 @@ test('a conflict status stays an error and keeps the draft visible', () => {
 test('a control-byte/CJK server name is sanitized in the confirmation bar', () => {
   const { page } = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
-    configConfirm: { kind: 'delete', name: 'bad\u0007name日本' },
+    configConfirm: { kind: 'delete', name: 'bad\u0007name日本', capturedRevision: 1 },
   }))
   const lines = render(page, 100, 14)
   const frame = lines.join('\n')
@@ -530,18 +530,18 @@ test('a confirmation bar never drops its target sentence, even at 100 columns', 
   // and no readable question. The target is a safety fact and outranks the
   // answer hints.
   for (const width of [100, 80, 72, 44]) {
-    const deletePage = makePage(snapshot({ selectedConfig: CONFIG_FACET, configConfirm: { kind: 'delete', name: 'alpha' } }))
+    const deletePage = makePage(snapshot({ selectedConfig: CONFIG_FACET, configConfirm: { kind: 'delete', name: 'alpha', capturedRevision: 1 } }))
     const deleteBar = render(deletePage.page, width, 14).at(-1) ?? ''
     assert.match(deleteBar, /Delete alpha\?/u, `width ${String(width)}: the Delete subject must survive`)
 
     const resetPage = makePage(snapshot({
       selectedConfig: { ...CONFIG_FACET, canDelete: false, canReset: true, provenance: 'overridden' },
-      configConfirm: { kind: 'reset', name: 'alpha' },
+      configConfirm: { kind: 'reset', name: 'alpha', capturedRevision: 1 },
     }))
     const resetBar = render(resetPage.page, width, 14).at(-1) ?? ''
     assert.match(resetBar, /override|Reset alpha\?/u, `width ${String(width)}: the Reset subject must survive`)
 
-    const togglePage = makePage(snapshot({ selectedConfig: CONFIG_FACET, configConfirm: { kind: 'toggle', name: 'alpha', nextEnabled: false } }))
+    const togglePage = makePage(snapshot({ selectedConfig: CONFIG_FACET, configConfirm: { kind: 'toggle', name: 'alpha', nextEnabled: false, capturedRevision: 1 } }))
     const toggleBar = render(togglePage.page, width, 14).at(-1) ?? ''
     assert.match(toggleBar, /Change (saved configuration|config)\?/u, `width ${String(width)}: the toggle subject must survive`)
 

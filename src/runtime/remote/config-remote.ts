@@ -128,7 +128,7 @@ import type { RemoteLlmRemotes } from './model-remote.ts'
 import type { RemotePresetRemotes } from './preset-remote.ts'
 import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
-import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
+import { classifyRemoteWriteFailure, remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
 import { isRemoteBusinessRefusalCode } from '../write-outcome.ts'
 import type { PermissionPresetApplyOutcome } from '../config-port.ts'
 
@@ -2816,10 +2816,21 @@ class RemoteMcpServerConfigurationConfig implements McpServerConfigurationConfig
     } catch (error) {
       const message = remoteFailureMessage(error)
       const code = remoteFailureCode(error)
-      const failure = code === 'settings/conflict' || /changed since it was read|SETTINGS_CONFLICT/u.test(message)
-        ? { kind: 'conflict' as const, reason: message }
-        : { kind: 'rejected' as const, reason: message }
-      return { kind: 'failed', failure }
+      if (code === 'settings/conflict' || /changed since it was read|SETTINGS_CONFLICT/u.test(message)) {
+        return { kind: 'failed', failure: { kind: 'conflict', reason: message } }
+      }
+      // A failure this classifier cannot prove was a pre-dispatch refusal is
+      // INDETERMINATE: the official controller may have committed the edit and
+      // failed only in its own post-write read, so reporting `rejected` would
+      // claim the configuration did not change. `outcome-unconfirmed` is the
+      // truthful settlement and is never replayed.
+      const settlement = classifyRemoteWriteFailure(error)
+      return {
+        kind: 'failed',
+        failure: settlement.kind === 'rejected'
+          ? { kind: 'rejected', reason: message }
+          : { kind: 'outcome-unconfirmed', reason: message },
+      }
     }
     // Saved is a READ-BACK fact: only a current committed snapshot that still
     // speaks for the same generation verifies the write.

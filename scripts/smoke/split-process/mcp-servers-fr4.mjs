@@ -263,23 +263,25 @@ export async function runMcpServersFr4(context) {
     // A Plugin-owned server offers no configuration action.
     await exitSettingsWorkspace(client, 'FR4 plugin-owned probe')
     await openMcpPage(client, 'FR4 plugin-owned')
-    if ((await frameOf(client)).includes(PLUGIN_NAME)) {
-      await openRow(client, PLUGIN_NAME, 'FR4 plugin-owned')
-      await waitForScreenText(client, 'Source: Plugin-owned', 'FR4 plugin-owned source')
-      const before = patchText(context.installation.profileDir)
-      for (const key of ['e', 't', 'd', 'u']) {
-        client.send(key)
-        await sleep(250)
-      }
-      await sleep(400)
-      assert(patchText(context.installation.profileDir) === before,
-        'FR4: a plugin-owned server must never trigger a configuration write')
-      assert(!(await frameOf(client)).includes('Saving configuration'),
-        'FR4: a plugin-owned server must never start a configuration write')
-      trace('fr4.plugin-owned-denied', { writes: 0 })
-    } else {
-      trace('fr4.plugin-owned-denied', { skipped: 'the plugin row was not listed' })
+    // The plugin-registered server MUST be listed and classified: the fixture
+    // registers it on the real Host, so a missing row means the registration
+    // or the classification is broken — never a silent skip.
+    await waitForScreenText(client, PLUGIN_NAME, 'FR4 plugin-owned row listed')
+    await openRow(client, PLUGIN_NAME, 'FR4 plugin-owned')
+    await waitForScreenText(client, 'Source: Plugin-owned', 'FR4 plugin-owned source')
+    assert(!(await frameOf(client)).includes('Configuration: User-added'),
+      'FR4: a plugin registration has no configuration provenance')
+    const before = patchText(context.installation.profileDir)
+    for (const key of ['e', 't', 'd', 'u']) {
+      client.send(key)
+      await sleep(250)
     }
+    await sleep(400)
+    assert(patchText(context.installation.profileDir) === before,
+      'FR4: a plugin-owned server must never trigger a configuration write')
+    assert(!(await frameOf(client)).includes('Saving configuration'),
+      'FR4: a plugin-owned server must never start a configuration write')
+    trace('fr4.plugin-owned-denied', { writes: 0 })
 
     // (2a) Add a User-added stdio server.
     await exitSettingsWorkspace(client, 'FR4 add stdio')
