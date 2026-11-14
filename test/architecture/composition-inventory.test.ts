@@ -421,6 +421,10 @@ const OTHER_HOST_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   // The Direct Account adapter invalidates local observations immediately when
   // Cordis replaces the official Host binding; this is not a business Account event.
   ['internal/service', 'src/runtime/direct/config-direct.ts'],
+  // FR3: the Direct MCP manager adapter invalidates its observation when Cordis
+  // replaces the official `mcpManager` binding (same Host-authority rule as the
+  // Account adapter above; no second manager service is created).
+  ['internal/service', 'src/runtime/direct/mcp-server-direct.ts'],
   // S5-PR4: the Direct Schedule adapter's ONE invalidation subscription. The
   // event carries no content, so the listener only re-reads the authoritative
   // catalog through the one controller.
