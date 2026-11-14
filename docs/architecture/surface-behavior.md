@@ -1458,6 +1458,48 @@ settlement repaint the current page, drive the visual-tools switch from a TUI
 preference, or claim its Host registry registration took effect when the
 backend has no registry evidence.
 
+### MCP servers page
+
+`/settings → Tools → MCP servers` is ONE embedded specialist page inside the
+shared Settings lease (no second alt-screen, modal or Settings workspace). It
+lists the ONE Host manager's servers in the manager's own order with `Name`,
+`Status` and `Source`; a row's Detail shows `Server`, `Source`, `Transport`
+(always `Not exposed` — the official list publishes no transport), `State`, the
+`Tool count` only when connected, `Attempt/retry` when the Host reports one, a
+sanitized `Last error`, and the last probe's stage/closure facts. Status words
+are the official ones; there is no invented `connected-ish`/`installed` flag.
+`Source` is `Configured`, `Plugin-owned`, `Retained/removed` or `Unknown`, and a
+non-current settings read never becomes `Plugin-owned`.
+
+Keys: list `↑/↓` move, `Enter` opens the detail, `/` filters by name, `r`
+re-observes, `Esc` cancels search / returns to Tools; detail `p` probes, `x`
+asks `Restart <name>? Live tools may be interrupted` (only `y` dispatches, `Esc`
+cancels), `r` refreshes, `Esc` returns to the list. While searching, `p/x/r/y`
+are query text only. Actions are offered only on a current observation with the
+server still listed and no in-flight operation; `loading`/`stale`/`unavailable`
+states explain themselves and expose no executable action. Probe reports a
+positive result only when the official result is `ok` AND cleanup is confirmed;
+a connected-but-unclean probe is its own `cleanup not confirmed` fact. A settled
+restart says `Restart settled · awaiting connected status` and waits for the
+watch; a lost settlement says `Outcome unconfirmed; refresh Host status before
+retrying` and is never retried.
+
+Layouts: `≥108` columns paint the list and the selected server side by side with
+one focus (`Enter` switches to the detail actions, `Esc` back to the list);
+`76–107` paint one compact column with a selected-row summary and an in-page
+detail state; `≤75` paint the list only. `44×8` keeps the selected row, its
+status and the complete `Back [Esc]`. Mouse targets are the last painted cells
+(a press whose frame repaints never completes), and the wheel scrolls only the
+one current region.
+
+Authority: `src/app/command/mcp-servers.ts` (`McpServersController`),
+`src/tui/panels/mcp-servers-page.ts`, the `McpServerPort` and
+`ConfigPort.mcpServerSources`, and the shared Settings panel.
+Must-not: write the profile or any configuration, spawn or speak MCP itself,
+own a second fleet/status cache, infer a source from `configured`, optimistically
+paint Connected after a restart, retry a restart, show a secret/URL/command
+credential, or let a late result from a replaced Host generation reach the page.
+
 ## Model picker (`/model`)
 
 The PiTui `/model` overlay is ONE capturing surface: one provider-grouped,

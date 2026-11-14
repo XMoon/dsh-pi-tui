@@ -49,6 +49,7 @@ import { runRuntimeArtifactRecovery } from '../smoke/split-process/runtime-artif
 import { runUnknownWriteHostDeath } from '../smoke/split-process/unknown-write-host-death.mjs'
 import { runWebProductQualification } from '../smoke/split-process/web-product.mjs'
 import { runWebRuntimeToggle } from '../smoke/split-process/web-runtime-toggle.mjs'
+import { runMcpServersFr3 } from '../smoke/split-process/mcp-servers-fr3.mjs'
 import { runWebStartupPreference } from '../smoke/split-process/web-startup-preference.mjs'
 import { runF2AccountComposition } from '../smoke/split-process/account-composition.mjs'
 import { runF7AProviderAuthorization } from '../smoke/split-process/provider-authorization-f7a.mjs'
@@ -270,6 +271,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'web.official-composition',
     title: 'the official Web composition stays default-off and a real Browser plus real TUI share one authenticated Host',
     run: runOfficialWebComposition,
+  }),
+  Object.freeze({
+    suite: 'mcp',
+    id: 'mcp.servers-fr3',
+    title: 'ONE real Split Host and Client mount the single official MCP manager, classify the configured source, probe and restart the real test server once, and keep the same manager fiber across /web off->on->off',
+    run: runMcpServersFr3,
   }),
   Object.freeze({
     suite: 'web',
