@@ -1089,7 +1089,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  settles. A newer/closed generation never receives the result. The repaint is
    *  ROW-scoped: the Web authority changed, so the TUI settings document is never
    *  read a second time (one guarded document read per surface). */
-  let activeSettingsWorkspace: { readonly token: object; readonly refreshWebRow: () => void; readonly refreshAcpRuntimeRow: () => void } | undefined
+  let activeSettingsWorkspace: { readonly token: object; readonly refreshWebRow: () => void; readonly refreshAcpRuntimeRow: () => void; readonly invalidateAcpChoice: () => void } | undefined
   /** The MOUNTED Web Search / Fetch page (C2-R4). It is created by the root's
    *  explicit activation, dies with the workspace, and is never a second
    *  settings authority: a fact settlement repaints the root, whose frame
@@ -1494,7 +1494,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         },
       },
     )
-    activeSettingsWorkspace = { token, refreshWebRow: () => handle?.refreshRow(WEB_LAUNCHER_ROW_ID, webWorkspaceRowFacts()), refreshAcpRuntimeRow: () => handle?.refreshRow('acp-runtime', { summary: acpRuntimeSummaryOf(), freshness: acpRuntimeFreshnessOf(), description: ACP_RUNTIME_DESCRIPTION }) }
+    activeSettingsWorkspace = { token, refreshWebRow: () => handle?.refreshRow(WEB_LAUNCHER_ROW_ID, webWorkspaceRowFacts()), refreshAcpRuntimeRow: () => handle?.refreshRow('acp-runtime', { summary: acpRuntimeSummaryOf(), freshness: acpRuntimeFreshnessOf(), description: ACP_RUNTIME_DESCRIPTION }), invalidateAcpChoice: () => handle?.invalidateChoice('acp-runtime') }
     // The observation's committed reads re-read THIS open workspace's rows
     // through the existing runtime-facts seam: a Host read that settles after
     // the first frame replaces `Checking…` without a key press.
@@ -1516,6 +1516,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     if (typeof subscribeAcpGeneration === 'function') {
       disposeAcpGenerationWatch = subscribeAcpGeneration.call(runner.acpAccess, () => {
         if (activeSettingsWorkspace?.token !== token) return
+        // Revoke the OLD Host's open selection FIRST (synchronously) so a stale
+        // choice can never be confirmed into the new Host, then re-read the new
+        // Host state. The user re-enters the choice against the new authority.
+        activeSettingsWorkspace?.invalidateAcpChoice()
         startAcpRuntimeRead()
       })
     }

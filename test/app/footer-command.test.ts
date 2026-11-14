@@ -78,6 +78,7 @@ function captureFooterSaves(app: TuiApp): {
     return {
       close: () => {},
       refreshRow: () => {},
+      invalidateChoice: () => {},
       whenInitialSpecialistSettled: async () => ({ ok: true as const }),
     }
   }) as TuiApp['openSettingsWorkspace']

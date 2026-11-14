@@ -2027,6 +2027,12 @@ export interface SettingsWorkspaceHandle {
    *  ONE guarded document read). A superseded/closed lease is inert. */
   refreshRow(rowId: SettingsWorkspaceRowId, facts: SettingsWorkspaceRowFacts): void
   /**
+   * Invalidate an OPEN candidate choice for ONE writable field whose authority
+   * changed (e.g. a Connection generation change). The stale selection exits
+   * `choosing` before any new Confirm can dispatch it to a different Host.
+   */
+  invalidateChoice(field: import('./tui/panels/settings-workspace-panel.ts').SettingsWorkspaceWritableField): void
+  /**
    * C2-R5: settles when the typed deeplink page really mounted on the leased
    * first frame, failed, or the workspace was torn down. Commands await this to
    * return a REAL error instead of leaving a silently empty row. Resolves
@@ -27348,6 +27354,11 @@ export class TuiApp {
       refreshRow: (rowId, facts) => {
         if (this.disposed || this.workspaceLease !== record || record.kind !== 'settings') return
         ;(record.panel as SettingsWorkspacePanel).refreshRow(rowId, facts)
+        this.requestRender()
+      },
+      invalidateChoice: (field) => {
+        if (this.disposed || this.workspaceLease !== record || record.kind !== 'settings') return
+        ;(record.panel as SettingsWorkspacePanel).invalidateChoice(field)
         this.requestRender()
       },
       whenInitialSpecialistSettled: () => {

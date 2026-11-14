@@ -1629,6 +1629,23 @@ export class SettingsWorkspacePanel implements Component {
 
   // ── rendering ────────────────────────────────────────────────────────────
 
+  /**
+   * Revoke an OPEN candidate choice for ONE writable field after that row's
+   * authority changed (e.g. the Connection generation that produced its
+   * candidates is gone). The selection intent must NOT survive an authority
+   * change: a stale choice must never be confirmed into a write against another
+   * Host. The user re-enters the choice against the new authority. A `pending`
+   * write is NOT cancelled (its owner keeps settling it); only the `choosing`
+   * phase is dropped and its request identity bumped so a late confirm is inert.
+   */
+  invalidateChoice(field: SettingsWorkspaceWritableField): void {
+    if (this.disposed) return
+    if (this.editPhase.kind !== 'choosing' || this.editPhase.field !== field) return
+    this.discardTransientEdit()
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
   render(width: number): string[] {
     // The conditional `Extensions` directory is reconciled BEFORE the chrome is
     // planned: a frame must never be composed against a membership the input

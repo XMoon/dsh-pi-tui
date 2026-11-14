@@ -426,6 +426,32 @@ test('a reconnect to a DIFFERENT Host revokes the prior ACP state without a key 
   }
 })
 
+test('an OPEN ACP choice is revoked on a Host generation change and cannot write to the new Host', async () => {
+  const h = setup({ status: { state: 'enabled' } }) // Host A: ACP On
+  try {
+    await openTools(h)
+    await highlightRow(h, 'ACP Server')
+    await key(h, ENTER) // open the inline choice (current On)
+    await settle(h, 'the ACP choice to open', frame => frame.includes('Choose value'))
+    await key(h, DOWN) // On -> Off: the user's PENDING selection, not yet confirmed
+    assert.equal(h.acp.setEnabledCalls.length, 0, 'choosing a candidate never writes')
+    // Host A -> Host B (also On); the Connection generation changes and notifies.
+    h.setReadiness('stale')
+    h.acp.status = { state: 'enabled' }
+    h.setReadiness('ready')
+    h.bumpGeneration()
+    // The stale choosing phase must be REVOKED (not merely re-painted).
+    await settle(h, 'the stale choice to be revoked', frame => !frame.includes('Choose value'))
+    // The old Enter must NOT dispatch the stale Off to Host B.
+    await key(h, ENTER)
+    await h.vt.waitForRender()
+    assert.equal(h.acp.setEnabledCalls.length, 0,
+      'the old Host-A Off selection must never be written to Host B')
+  } finally {
+    h.dispose()
+  }
+})
+
 test('an unreadable ACP preference offers no confirmable candidate', async () => {
   const h = setup({ pref: undefined })
   try {
