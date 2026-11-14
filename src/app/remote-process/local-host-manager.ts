@@ -115,46 +115,77 @@ function probeError(reason: string): UserManagerProbe {
   return { kind: 'error', reason }
 }
 
-/** The explicit "there is no user bus/manager" failures a probe may report. */
+/**
+ * A DEFINITIVE statement that this host has no systemd at all (systemctl exists
+ * but systemd is not PID 1). With no live manager endpoint this proves absence
+ * without needing a system-manager query.
+ */
+function isNoSystemdInit(text: string): boolean {
+  return /System has not been booted with systemd as init system/iu.test(text)
+}
+
+/**
+ * An explicit "there is no user bus/manager for this uid" failure. The message
+ * must name the missing bus/medium explicitly — a generic connect refusal
+ * (permission denied, connection refused, timeout) is NOT absence and is
+ * rejected by `isUnusableManagerError` first.
+ */
 function isExplicitNoUserBus(text: string): boolean {
   return /No medium found/iu.test(text)
-    || /Failed to connect to (?:the )?user scope bus/iu.test(text)
     || /Failed to connect to bus: No such file or directory/iu.test(text)
     || /Failed to connect to bus: No medium/iu.test(text)
-    || /System has not been booted with systemd as init system/iu.test(text)
+    || /Failed to connect to (?:the )?user scope bus: No such file or directory/iu.test(text)
+    || /Failed to connect to (?:the )?user scope bus: No medium/iu.test(text)
+}
+
+/** A manager channel that exists but cannot be used: always a hard error. */
+function isUnusableManagerError(text: string): boolean {
+  return /Permission denied/iu.test(text)
+    || /Access denied/iu.test(text)
+    || /Connection refused/iu.test(text)
+    || /Connection timed out/iu.test(text)
+    || /Protocol error/iu.test(text)
+    || /Too many levels of symbolic links/iu.test(text)
+    || /Transport endpoint is not connected/iu.test(text)
 }
 
 /**
  * The pure three-state classifier. It answers only "can the user manager be
  * used safely", from the observed probe outcome plus the corroborating kernel
- * endpoint facts. A missing/refusing/erroring manager is a stable `error`; only
- * an explicitly absent user bus corroborated by the real endpoint files and the
- * system manager's `user@<uid>.service` state is `absent`.
+ * endpoint facts. A present-but-unusable manager is a stable `error`; only a
+ * corroborated absence falls back. Absence is proven in two independent ways:
+ * (a) the fixed `systemctl` binary is missing (ENOENT) or systemd is not the
+ * init system — a definitive "no systemd" statement — with no live endpoint;
+ * (b) an explicit no-user-bus failure with no live endpoint and a system
+ * manager that reports `user@<uid>.service` as `inactive`/`not-found`. Any
+ * unconfirmed or contradictory state is `error`.
  */
 export function classifyUserManagerProbe(facts: UserManagerProbeFacts): UserManagerProbe {
   const { systemctl } = facts
   if (systemctl.kind === 'timeout') return probeError('the user manager probe timed out')
   if (systemctl.kind === 'output-overflow') return probeError('the user manager probe output exceeded the limit')
-  const corroborateAbsence = (detail: string): UserManagerProbe => {
-    if (facts.managerPrivatePresent || facts.userBusPresent) {
-      return probeError('the user manager endpoint exists but is not usable')
-    }
-    if (facts.systemdUserServiceState === 'active') {
-      return probeError('the system manager reports a live user service')
-    }
-    if (facts.systemdUserServiceState !== 'inactive') {
-      return probeError('cannot confirm the user manager is absent; treating it as unavailable')
-    }
-    return { kind: 'absent' }
+  const endpointsPresent = facts.managerPrivatePresent || facts.userBusPresent
+  const corroborateAbsence = (definitive: boolean): UserManagerProbe => {
+    if (endpointsPresent) return probeError('the user manager endpoint exists but is not usable')
+    if (facts.systemdUserServiceState === 'active') return probeError('the system manager reports a live user service')
+    if (definitive) return { kind: 'absent' }
+    if (facts.systemdUserServiceState === 'inactive') return { kind: 'absent' }
+    return probeError('cannot confirm the user manager is absent; treating it as unavailable')
   }
   if (systemctl.kind === 'spawn-error') {
-    return corroborateAbsence('the fixed systemctl executable is not runnable')
+    // The fixed systemctl cannot run. Only a MISSING binary (ENOENT) can prove a
+    // no-systemd host; any other spawn failure (EACCES, ...) stays a hard error.
+    if (systemctl.error.code === 'ENOENT') return corroborateAbsence(true)
+    return probeError('the fixed systemctl executable could not be spawned')
   }
   if (systemctl.code === 0) return { kind: 'available' }
-  const detail = sanitizeReason(`${systemctl.stderr}\n${systemctl.stdout}`)
-  if (isExplicitNoUserBus(systemctl.stderr) || isExplicitNoUserBus(systemctl.stdout)) {
-    return corroborateAbsence(detail)
+  const combined = `${systemctl.stderr}\n${systemctl.stdout}`
+  if (isUnusableManagerError(combined)) {
+    return probeError(`systemctl --user cannot be used: ${sanitizeReason(combined)}`)
   }
+  if (isNoSystemdInit(combined)) return corroborateAbsence(true)
+  if (isExplicitNoUserBus(combined)) return corroborateAbsence(false)
+  const detail = sanitizeReason(combined)
   return probeError(`systemctl --user failed: ${detail === '' ? 'non-zero exit' : detail}`)
 }
 
@@ -264,23 +295,27 @@ function parseUserServiceState(result: SystemctlResult): 'active' | 'inactive' |
 }
 
 /** Gather the real probe facts and classify the user manager three-state. */
-export async function probeUserManager(): Promise<UserManagerProbe> {
+export async function probeUserManager(
+  deps: { readonly systemctl?: SystemctlRunner; readonly pathExists?: (path: string) => boolean } = {},
+): Promise<UserManagerProbe> {
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
   if (process.platform !== 'linux' || uid === undefined) {
     throw new LocalScopeError('B1_PLATFORM_UNSUPPORTED', 'managed Host: the user manager probe requires Linux')
   }
+  const run = deps.systemctl ?? runSystemctl
+  const exists = deps.pathExists ?? pathExists
   const runtimeDir = selectRuntimeDir(uid)
-  const systemctl = await runSystemctl(['--user', '--no-pager', '--no-ask-password', 'show-environment'], runtimeDir)
+  const systemctl = await run(['--user', '--no-pager', '--no-ask-password', 'show-environment'], runtimeDir)
   // A real request to the user manager already succeeded: nothing else is needed.
   if (systemctl.kind === 'exited' && systemctl.code === 0) return { kind: 'available' }
-  const serviceState = await runSystemctl(
+  const serviceState = await run(
     ['--system', '--no-pager', '--no-ask-password', 'show', '-p', 'ActiveState', `user@${String(uid)}.service`],
     undefined,
   )
   return classifyUserManagerProbe({
     systemctl,
-    managerPrivatePresent: pathExists(`/run/user/${String(uid)}/systemd/private`),
-    userBusPresent: pathExists(`/run/user/${String(uid)}/bus`),
+    managerPrivatePresent: exists(`/run/user/${String(uid)}/systemd/private`),
+    userBusPresent: exists(`/run/user/${String(uid)}/bus`),
     systemdUserServiceState: parseUserServiceState(serviceState),
   })
 }
@@ -416,9 +451,34 @@ function inspectOwnedRegular(path: string, label: string, uid: number): string {
   return real
 }
 
+/**
+ * Validate a trusted EXECUTABLE the unit will run (the Node interpreter). Its
+ * trust is "an absolute, canonical, executable regular file", NOT "owned by this
+ * uid": a system Node such as `/usr/bin/node` is normally root-owned yet a
+ * normal user may run it. Only the product-private Host entry and the installed
+ * DSH anchor are held to the uid-ownership rule.
+ */
+export function inspectTrustedExecutable(path: string, label: string): string {
+  let real: string
+  try {
+    real = realpathSync(path)
+  } catch (error) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the ${label} is not readable`, error)
+  }
+  const info = lstatSync(real)
+  if (info.isSymbolicLink() || !info.isFile() || (info.mode & 0o111) === 0) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the ${label} must be an executable regular file`)
+  }
+  return real
+}
+
 /** Collect and validate the exact installed facts one unit is rendered from. */
 function collectUnitFacts(options: HostStartOptions, uid: number): UnitFacts {
-  const nodePath = inspectOwnedRegular(process.execPath, 'node executable', uid)
+  // The Node interpreter is a system executable: trust absolute + executable,
+  // never uid ownership (a root-owned /usr/bin/node must work for a normal user).
+  const nodePath = inspectTrustedExecutable(process.execPath, 'node executable')
+  // The Host entry and DSH anchor are product-private files installed under the
+  // user's own profile, so they keep the strict uid-ownership rule.
   const hostEntryPath = inspectOwnedRegular(options.hostEntryPath, 'Host entry', uid)
   const dshAnchor = inspectOwnedRegular(options.dshAnchor, 'DSH anchor', uid)
   let manifest: unknown
@@ -446,7 +506,13 @@ function collectUnitFacts(options: HostStartOptions, uid: number): UnitFacts {
 }
 
 /** Walk one owned directory chain, creating missing 0700 components and refusing symlinks. */
-function ensureOwnedUnitDir(home: string, uid: number): string {
+/**
+ * Walk one owned directory chain, creating missing 0700 components, refusing
+ * symlinks, foreign owners, AND any existing component that group/other can
+ * write. A writable parent lets another local user delete and replace the unit
+ * file after we validate it, so the write bit is part of the ownership check.
+ */
+export function ensureOwnedUnitDir(home: string, uid: number): string {
   let current = home
   for (const component of USER_UNIT_SUBDIR) {
     const next = join(current, component)
@@ -469,6 +535,9 @@ function ensureOwnedUnitDir(home: string, uid: number): string {
     if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== uid) {
       throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the unit directory ${component} must be a real directory owned by uid ${String(uid)}`)
     }
+    if ((info.mode & 0o022) !== 0) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the unit directory ${component} must not be group/other writable`)
+    }
     current = next
   }
   return current
@@ -485,6 +554,9 @@ export function resolveUserUnitDir(uid: number): string {
   const info = lstatSync(home)
   if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== uid) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the account home must be a real directory owned by uid ${String(uid)}`)
+  }
+  if ((info.mode & 0o022) !== 0) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the account home must not be group/other writable')
   }
   return ensureOwnedUnitDir(home, uid)
 }

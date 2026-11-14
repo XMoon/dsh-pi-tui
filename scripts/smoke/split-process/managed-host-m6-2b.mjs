@@ -15,7 +15,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { readFileSync, existsSync, realpathSync } from 'node:fs'
+import { readFileSync, existsSync, realpathSync, statSync, unlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { userInfo } from 'node:os'
@@ -86,7 +86,7 @@ function systemctl(args, runtimeDir) {
 }
 
 function showUnit(unit) {
-  const result = systemctl(['--user', '--no-pager', '--no-ask-password', 'show', '-p', 'LoadState', '-p', 'ActiveState', '-p', 'FragmentPath', '-p', 'MainPID', unit], undefined)
+  const result = systemctl(['--user', '--no-pager', '--no-ask-password', 'show', '-p', 'LoadState', '-p', 'ActiveState', '-p', 'FragmentPath', '-p', 'MainPID', '-p', 'UnitFileState', unit], undefined)
   if (result.status !== 0) throw new SplitSmokeAssertionError(`managed-host: systemctl show failed for ${unit}`)
   const props = {}
   for (const line of (result.stdout ?? '').split('\n')) {
@@ -94,6 +94,36 @@ function showUnit(unit) {
     if (at > 0) props[line.slice(0, at)] = line.slice(at + 1).trim()
   }
   return props
+}
+
+/**
+ * Stop and remove THIS installation's managed unit when (and only when) its
+ * ownership metadata names this exact scope. A test that created a managed Host
+ * must stop it through the manager (so `Restart=on-failure` does not resurrect
+ * it) and remove the owned unit file before the next scene, so no persistent
+ * unit or restarted Host leaks. Safe and a no-op when no owned unit exists.
+ */
+export function stopAndRemoveManagedUnit(installation, trace = () => {}) {
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  if (typeof uid !== 'number') return { removed: false }
+  let scopeId
+  try { scopeId = profileScopeId(uid, installation.profileDir) } catch { return { removed: false } }
+  const unit = unitName('pi-tui', scopeId)
+  let unitPath
+  try { unitPath = join(realpathSync(userInfo().homedir), '.config', 'systemd', 'user', unit) } catch { return { removed: false } }
+  if (!existsSync(unitPath)) return { removed: false }
+  let content
+  try { content = readFileSync(unitPath, 'utf8') } catch { return { removed: false } }
+  // Only touch OUR unit for THIS scope; never another profile's or another build's.
+  if (!content.includes('X-DshPiTuiOwner=local-host-manager-v1') || !content.includes(`X-DshPiTuiScopeId=${scopeId}`)) {
+    return { removed: false }
+  }
+  const runtimeDir = existsSync(`/run/user/${String(uid)}`) ? `/run/user/${String(uid)}` : undefined
+  systemctl(['--user', '--no-pager', '--no-ask-password', 'stop', unit], runtimeDir)
+  try { unlinkSync(unitPath) } catch { /* already gone */ }
+  systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload'], runtimeDir)
+  trace('managed-host-unit-removed', { unit })
+  return { removed: true }
 }
 
 function classify(pid) {
@@ -225,6 +255,7 @@ export async function runManagedHostSystemd({ installation, trace, dshHome }) {
     const stop = systemctl(['--user', '--no-pager', '--no-ask-password', 'stop', unit], runtimeDir)
     assert(stop.status === 0, 'systemctl --user stop failed')
     await waitNoHost(dshHome, 30_000)
+    assert(props.UnitFileState !== 'enabled', 'the profile unit must not be login auto-enabled')
     return {
       status: 'PASS',
       scope: 'REAL_SYSTEMD_USER_L6',
@@ -232,10 +263,13 @@ export async function runManagedHostSystemd({ installation, trace, dshHome }) {
       fragmentPathVerified: true,
       hostSurvivesClientExit: true,
       stoppedOnSigterm: true,
-      noEnableOrWantedBy: props.LoadState !== 'not-found',
+      noEnableOrWantedBy: props.UnitFileState !== 'enabled',
     }
   } finally {
     await screen.dispose()
+    // Stop through the manager + remove the owned unit BEFORE the kill backstop,
+    // so `Restart=on-failure` cannot resurrect the Host and no unit file leaks.
+    stopAndRemoveManagedUnit(installation, trace)
     killIsolatedProcesses(dshHome)
   }
 }
@@ -254,7 +288,9 @@ export async function runManagedHostFallback({ installation, trace, dshHome }) {
     await waitForCounts(dshHome, counts => counts.host >= 1 && counts.client >= 1, 'one fallback Host + one Client', 90_000)
     await screen.waitForAny(['type a message', '╭'], 'the fallback Client', 120_000)
     const hostLog = join(scopeDir, 'host.log')
-    assert(existsSync(hostLog), 'the fallback Host did not write its 0600 host.log')
+    assert(existsSync(hostLog), 'the fallback Host did not write its host.log')
+    const hostLogPrivate = (statSync(hostLog).mode & 0o777) === 0o600
+    assert(hostLogPrivate, 'the fallback host.log must be 0600')
     const identity = readInstance(dshHome, scopeId)
     assert(identity !== undefined && identity.scopeId === scopeId, 'the fallback Host published no scope identity')
     screen.send('/exit\r')
@@ -263,9 +299,10 @@ export async function runManagedHostFallback({ installation, trace, dshHome }) {
     await sleep(500)
     assert(hostPids(dshHome).length >= 1, 'the fallback Host died when the Client exited')
     trace('managed-host-fallback', { scopeId })
-    return { status: 'PASS', scope: 'REAL_ABSENT_MANAGER_FALLBACK_L6', usesDetachedSpawn: true, hostLogPrivate: true, hostSurvivesClientExit: true }
+    return { status: 'PASS', scope: 'REAL_ABSENT_MANAGER_FALLBACK_L6', usesDetachedSpawn: true, hostLogPrivate, hostSurvivesClientExit: true }
   } finally {
     await screen.dispose()
+    stopAndRemoveManagedUnit(installation, trace)
     killIsolatedProcesses(dshHome)
   }
 }
@@ -291,6 +328,7 @@ export async function runManagedHostManagerError({ installation, trace, dshHome 
     return { status: 'PASS', scope: 'REAL_MANAGER_ERROR_L6', failClosed: true, noFallbackHost: true }
   } finally {
     await screen.dispose()
+    stopAndRemoveManagedUnit(installation, trace)
     killIsolatedProcesses(dshHome)
   }
 }
