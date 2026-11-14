@@ -950,6 +950,43 @@ idle, while any other active row (an official autonomous service, a
 third-party plugin or a future row) fails closed as an unqualified Host source.
 The epoch invalidates overlapping reads but is not an atomic barrier.
 
+### MCP server management (ONE Host manager)
+
+The ONE official Host MCP manager (`@deepseek-ai/dsh-mcp-manager`,
+`ctx.mcpManager`) is a SHARED Host row, declared exactly once in the bundle's
+`cordis.patch.yml` (Direct and Host-only both mount it; the daemon supervisor
+does not). It is deliberately NOT part of the Web-only roster: `/web` on → off →
+on keeps the same manager instance, and a Web-off Host still owns the manager.
+The row resolves `${credential:…}` entry templates through the already-mounted
+`credentials` provider; no second manager service exists.
+
+The manager owns the ONLY fleet and status truth: the profile's
+`mcp-manager.servers` configuration plus plugin `register()`ed entries, and the
+`disabled`/`connecting`/`connected`/`reconnecting`/`waiting-credentials`/
+`failed`/`closed` runtime states. `McpServerPort`
+(`src/runtime/mcp-server-port.ts`) is the ONE transport-neutral management
+surface — `watch`, `probe`, `restart` — implemented in-process by the Direct
+adapter and by the generated `@deepseek-ai/dsh-mcp-manager/remote` contribution
+on the Split wire. Every observation and operation result is bound to an opaque
+Host generation identity; a result from a generation that is no longer current
+is discarded, never presented as a fact. `restart` is dispatched at most once
+and returns only that the Host settled the request — never "connected" (the new
+status arrives through `watch`). Failures are `unavailable`, `rejected`
+(a proven Host refusal), `superseded` (page/generation no longer current) and
+`outcome-unconfirmed` (dispatched, settlement unobservable — never retried).
+
+`McpManagedServerView.configured` only says that an entry still exists; it is
+NEVER the configuration-source verdict. The read-only
+`ConfigPort.mcpServerSources` projects the EFFECTIVE `mcp-manager.servers` key
+set from the official Host Settings (Direct in-process; Remote through the ONE
+existing settings mirror and its `describe()` refresh). Classification is
+`Configured` when that key set holds the name, `Retained/removed` for a manager
+record with no live entry, `Plugin-owned` only for a live entry the CURRENT key
+set does not hold, and `Unknown` whenever the key set is not current/unreadable
+or still settling (a non-atomic watch/Settings window may not be resolved into
+`Plugin-owned`). This surface is READ-ONLY: server CRUD, credential entry and
+configuration writes are a later milestone.
+
 ### Client composition, Session references and the real surface
 
 The split Client keeps ONE Cordis root and ONE official

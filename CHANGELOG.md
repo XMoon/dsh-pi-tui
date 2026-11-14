@@ -9,6 +9,7 @@
 
 ### 新增
 
+- **PiTui Settings 新增只读的 `Tools → MCP servers` 管理页。** Host 现在始终拥有唯一一个官方 MCP 管理器（Direct 默认即有，Split Host 在 `/web` 开/关/再开之间保持同一实例），TUI 在该页按官方顺序列出所有托管 Server，并显示官方状态（`Connected`、`Waiting credentials` 等）与来源（`Configured` / `Plugin-owned` / `Retained/removed` / `Unknown`）；`configured` 不会再被当成“来自配置”。可对单个 Server 执行 Probe（连接并列出工具，与清理结果分开呈现）和 Restart（一次显式 `y` 确认、只派发一次、不自动重试、不乐观显示 Connected）；未知 transport 显示 `Not exposed`，来源不能证实时显示 `Unknown`。该页只读：不写任何配置、不显示密钥。入口在 `/settings → Tools → MCP servers`，支持宽/中/窄与 44×8 布局、键鼠操作。
 - **可选的后台（Daemon）TUI 启动入口。** 设置 `DSH_PI_TUI_BACKEND=daemon`，或在 `/settings → General → Backend` 选择 `Daemon`（官方 Profile 配置项 `tui-startup.backend`）后，`dsh --profile pi-tui` 会在本地 Linux 上连接一个本地 Host，并用一个独立的真实 Client 打开 TUI；默认仍是原有的 Direct 进程内 TUI。选择只在下次冷启动生效，写入不会热切换当前进程或重启 Host；`DSH_PI_TUI_BACKEND` 只覆盖本次启动、不会写回 Profile，非法取值（空串、`wire-local` 等）会非零退出并给出稳定原因，绝不静默回退 Direct。此入口目前仅为技术预览：Daemon 的 `status/start/stop/…` 管理命令、systemd/Host 托管以及正式发行资格都尚未完成。
 
 - **无 Session 的 Split Client 也能补全 `!`/`!!` 命令。** 在 `/sessions` 选定 Host Workspace 后（不创建 Session），Shell 补全的命令名、变量、`git` 子命令和路径都来自该 Host Workspace 的 Host 环境，不会读客户端本机的 PATH 或目录；不同 Workspace 的候选互不串号，切回原 Workspace 后只提供当前选择的候选。未选定 Workspace 时不显示任何候选；Workspace 被移除或不可读时补全如实不可用，不会退回客户端文件。
