@@ -102,20 +102,31 @@ function makeBinding(options: {
 function makeSessions(binding: BindingFixture['binding'] | undefined): {
   readonly sessions: {
     binding(sessionId: string): BindingFixture['binding'] | undefined
-    readonly list: { getSnapshot(): { byId: Record<string, { origin?: 'subagent' } | undefined> } }
+    readonly list: {
+      getSnapshot(): { byId: Record<string, { origin?: 'subagent' } | undefined> }
+      subscribe?(listener: () => void): () => void
+    }
   }
   setBinding(next: BindingFixture['binding'] | undefined): void
   setOrigin(origin: 'subagent' | undefined): void
 } {
   let current = binding
   let row: { origin?: 'subagent' } | undefined = { origin: undefined }
+  const listListeners = new Set<() => void>()
+  const notify = (): void => { for (const listener of [...listListeners]) listener() }
   return {
     sessions: {
       binding: () => current,
-      list: { getSnapshot: () => ({ byId: { s1: row } }) },
+      list: {
+        getSnapshot: () => ({ byId: { s1: row } }),
+        subscribe(listener) {
+          listListeners.add(listener)
+          return () => { listListeners.delete(listener) }
+        },
+      },
     },
-    setBinding(next) { current = next },
-    setOrigin(origin) { row = { origin } },
+    setBinding(next) { current = next; notify() },
+    setOrigin(origin) { row = { origin }; notify() },
   }
 }
 
@@ -134,10 +145,15 @@ function makeNamespace(
   }
 }
 
+const READY_NAMESPACE: RemoteTeamModeNamespace = {
+  setEnabled: async () => ({ ok: true, value: undefined }),
+}
+
 function portOf(options: {
   readonly binding?: BindingFixture['binding']
   readonly generation?: unknown
-  readonly namespace?: RemoteTeamModeNamespace
+  /** `null` = the generated namespace is NOT mounted; omitted = a ready stub. */
+  readonly namespace?: RemoteTeamModeNamespace | null
 }): {
   readonly port: RemoteTeamModePort
   readonly sessions: ReturnType<typeof makeSessions>
@@ -149,7 +165,7 @@ function portOf(options: {
   )
   const port = new RemoteTeamModePort({
     sessions: sessions.sessions,
-    remote: { agentTeams: options.namespace },
+    remote: { agentTeams: options.namespace === null ? undefined : options.namespace ?? READY_NAMESPACE },
     connection: { generation: generation as never },
   })
   return { port, sessions, generation }
@@ -238,7 +254,7 @@ test('Remote Team port: the generated write settle is classified, never guessed'
   assert.equal((await portOf({ binding: makeBinding().binding, namespace: abortedNamespace.namespace })
     .port.setEnabled('s1', true, controller.signal)).kind, 'cancelled')
   assert.equal(abortedNamespace.calls.length, 0)
-  assert.equal((await portOf({ binding: makeBinding().binding }).port.setEnabled('s1', true, signal)).kind, 'rejected')
+  assert.equal((await portOf({ binding: makeBinding().binding, namespace: null }).port.setEnabled('s1', true, signal)).kind, 'rejected')
 })
 
 test('Remote Team port: subscribes the exact faces and re-arms across a rebind', () => {
@@ -261,17 +277,19 @@ test('Remote Team port: subscribes the exact faces and re-arms across a rebind',
   const second = makeBinding({ enabled: true })
   sessions.setBinding(second.binding)
   generation.set({ id: 'gen-2' })
-  assert.equal(notifications, 2, 'a generation replacement notifies')
+  // The Session-list invalidation (binding arrived/replaced) notifies once, and
+  // the Connection generation replacement notifies once more.
+  assert.equal(notifications, 3, 'the binding replacement and generation change notify')
   assert.equal(first.team.size(), 0, 'the retired binding face is released')
   assert.equal(second.team.size(), 1)
   second.team.set({ enabled: false, tasks: [] })
-  assert.equal(notifications, 3)
+  assert.equal(notifications, 4)
 
   dispose()
   dispose()
   assert.equal(second.team.size(), 0, 'the disposer releases every owned face')
   second.team.set({ enabled: true, tasks: [] })
-  assert.equal(notifications, 3, 'the disposer is idempotent and final')
+  assert.equal(notifications, 4, 'the disposer is idempotent and final')
 })
 
 test('Remote Team port: the Session-list origin resolves Root identity when the binding cannot', () => {
@@ -279,10 +297,39 @@ test('Remote Team port: the Session-list origin resolves Root identity when the 
   const sessions = makeSessions(structural.binding)
   const port = new RemoteTeamModePort({
     sessions: sessions.sessions,
-    remote: { agentTeams: undefined },
+    remote: { agentTeams: READY_NAMESPACE },
     connection: { generation: generationSource({ id: 'gen-1' }) as never },
   })
   assert.deepEqual(port.read('s1'), { kind: 'ready', enabled: false, modelRequestHistory: 'none' })
   sessions.setOrigin('subagent')
   assert.equal(port.read('s1').kind, 'unavailable')
+})
+
+test('Remote Team port: a readable projection without the mounted namespace is unavailable', () => {
+  const { port } = portOf({ binding: makeBinding({ enabled: false }).binding, namespace: null })
+  assert.deepEqual(port.read('s1'), {
+    kind: 'unavailable',
+    reason: 'the Agent Team Remote namespace is not mounted',
+  })
+})
+
+test('Remote Team port: an initially absent binding recovers when the Session arrives', () => {
+  const sessions = makeSessions(undefined)
+  const port = new RemoteTeamModePort({
+    sessions: sessions.sessions,
+    remote: { agentTeams: READY_NAMESPACE },
+    connection: { generation: generationSource({ id: 'gen-1' }) as never },
+  })
+  let notifications = 0
+  const dispose = port.subscribe('s1', () => { notifications += 1 })
+  assert.equal(port.read('s1').kind, 'unavailable')
+
+  const bound = makeBinding({ enabled: false })
+  sessions.setBinding(bound.binding)
+  assert.equal(notifications, 1, 'the arriving binding notifies the view')
+  assert.equal(bound.team.size(), 1, 'the faces are armed once the binding exists')
+  assert.deepEqual(port.read('s1'), { kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+
+  dispose()
+  assert.equal(bound.team.size(), 0)
 })

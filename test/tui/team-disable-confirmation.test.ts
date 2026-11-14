@@ -184,14 +184,46 @@ test('an unknown write offers only a read-only Recheck (never a re-send)', async
   const unknown = component.render(60).map(stripAnsi)
   assert.ok(unknown.some(line => line.includes('Recheck')), `the unknown state offers Recheck:\n${unknown.join('\n')}`)
   assert.ok(unknown.some(line => line.includes('Close')), `the unknown state offers Close:\n${unknown.join('\n')}`)
-  // R performs a READ-ONLY recheck: the still-ON projection proves it did not land.
+  // R performs a READ-ONLY recheck. A still-ON projection does NOT prove the
+  // dispatched write failed, so the seat must stay `unknown` with NO Retry.
   seat.snapshot = ready(true)
   component.handleInput('R')
   await flush()
   assert.equal(seat.runCalls, 1, 'Recheck never re-sends the write')
   const afterRecheck = component.render(60).map(stripAnsi)
-  assert.ok(afterRecheck.some(line => line.includes('did not land')),
-    `the read-only recheck reports the not-landed result:\n${afterRecheck.join('\n')}`)
+  assert.match(afterRecheck.join(' ').replace(/\s+/gu, ' '), /may still land/u,
+    `a still-On recheck stays unknown:\n${afterRecheck.join('\n')}`)
+  assert.ok(afterRecheck.some(line => line.includes('Recheck')) && afterRecheck.some(line => line.includes('Close')),
+    `the unknown state keeps only Recheck/Close:\n${afterRecheck.join('\n')}`)
+  assert.ok(!afterRecheck.some(line => line.includes('Retry')), 'an unknown write must never offer Retry')
+  component.handleInput('\r')
+  await flush()
+  assert.equal(seat.runCalls, 1, 'Enter in the unknown state never re-sends')
+})
+
+test('Esc during Saving does not close the seat or relinquish the write', async () => {
+  const seat = new FakeSeat(ready(true))
+  const pending = seat.queueManualRun()
+  const component = seat.mount()
+  component.render(60)
+  component.handleInput('\x1b[C') // focus Confirm
+  component.render(60)
+  component.handleInput('\r') // Confirmed -> run() stays pending (Saving…)
+  await flush()
+  assert.equal(seat.runCalls, 1)
+  assert.ok(stripAnsi(component.render(60).join('\n')).includes('Saving…'))
+  component.handleInput('\x1b') // Esc must be swallowed while the write owns the seat
+  await flush()
+  assert.equal(seat.closeCalls, 0, 'Esc during Saving must not close the seat')
+  assert.equal(component.requestClose(), false, 'the owner may not tear down a saving seat')
+  pending.resolve({ kind: 'committed' })
+  await flush()
+  assert.ok(stripAnsi(component.render(60).join('\n')).includes('Checking saved state…'))
+  component.handleInput('\x1b') // still owned while checking
+  assert.equal(seat.closeCalls, 0, 'Esc during Checking must not close the seat')
+  seat.setSnapshot(ready(false))
+  await flush()
+  assert.equal(seat.closeCalls, 1, 'the proven readback closes the seat once')
 })
 
 test('a mouse click on a complete action token acts; an incomplete token never hits', () => {

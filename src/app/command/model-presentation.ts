@@ -22,6 +22,13 @@ export interface ModelPickerTeamAttempt {
   readonly confirmRequired: boolean
   /** Run the admitted write; the command re-verifies the captured scope. */
   run(): Promise<TeamModeWriteOutcome>
+  /**
+   * Release an admitted-but-never-run gesture (the user cancelled the
+   * confirmation or the gesture became stale). Idempotent; a no-op after
+   * {@link run} started. The command's single Team-write latch stays held
+   * until this or the run settlement.
+   */
+  abandon?(): void
 }
 
 /** One Team gesture admission result. */

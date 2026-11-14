@@ -2354,7 +2354,10 @@ test('an unknown Team write offers only a read-only R recheck', async () => {
   await h.vt.waitForRender()
   assert.equal(team.beginCalls, 1, 'R does not admit another gesture')
   assert.equal(team.setEnabledCalls.length, writesBefore, 'R performs no write')
-  assert.ok(contentLinesOf(h.vt).some(line => line.includes('Save failed')), `recheck proves not-landed:\n${viewOf(h.vt)}`)
+  // A still-not-target readback cannot prove the dispatched write failed; the
+  // row must stay `unknown` and offer no Retry.
+  assert.ok(contentLinesOf(h.vt).some(line => line.includes('Outcome unknown')), `unknown must persist:\n${viewOf(h.vt)}`)
+  assert.ok(!contentLinesOf(h.vt).some(line => line.includes('Save failed')), `unknown must not become failed:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
@@ -2481,6 +2484,50 @@ test('an effort token press survives an ordinary focus repaint but not a resize'
   const resizedAfter = h.picker.render(60).map(stripAnsi)
   assert.ok(resizedAfter.some(line => line.includes('Effort: Low')),
     `a resize between press and release must not change the draft:\n${resizedAfter.join('\n')}`)
+  h.app.stop()
+})
+
+test('an effort token release after the selection moved never retargets another model', async () => {
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [
+      model('a', { name: 'Alpha', efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'low' }),
+      model('b', { name: 'Beta', efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'low' }),
+    ] }],
+    default: { provider: 'p1', model: 'a' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'a' } })
+  const lines = h.picker.render(72).map(stripAnsi)
+  const row = lines.findIndex(line => line.includes('Reasoning Effort'))
+  const col = visibleWidth(lines[row]!.slice(0, lines[row]!.indexOf('High')))
+  h.picker.handleMouse(mouse('press', col, row, 72, 24))
+  h.vt.sendInput(DOWN) // the selection moves to Beta (same candidate names)
+  await h.vt.waitForRender()
+  h.picker.handleMouse(mouse('click', col, row, 72, 24))
+  const after = h.picker.render(72).map(stripAnsi)
+  assert.ok(effortLineOf(after)?.includes('[Low]'),
+    `the stale press must never change Beta's draft:\n${after.join('\n')}`)
+  h.app.stop()
+})
+
+test('an indeterminate Team write stays unknown on recheck and never re-sends', async () => {
+  const team = new FakeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  team.queueOutcome({ kind: 'indeterminate', reason: 'connection lost' })
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, team })
+  // Enter the Team zone and toggle On (a non-confirmed write).
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.equal(team.beginCalls, 1)
+  assert.equal(team.setEnabledCalls.length, 1)
+  assert.ok(viewOf(h.vt).includes('Outcome unknown'), viewOf(h.vt))
+  // A second Enter is a READ-ONLY recheck: it must not dispatch another write.
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.equal(team.beginCalls, 1, 'recheck never begins a new gesture')
+  assert.equal(team.setEnabledCalls.length, 1, 'recheck never re-sends')
+  assert.ok(viewOf(h.vt).includes('Outcome unknown'), 'the old readback cannot downgrade unknown to failed')
+  assert.ok(!viewOf(h.vt).includes('Save failed'), 'unknown must never become a Retryable failure')
   h.app.stop()
 })
 

@@ -51,6 +51,8 @@ export interface RemoteTeamModeSessionsSource {
     getSnapshot(): {
       readonly byId: Readonly<Record<string, { readonly origin?: 'subagent' } | undefined>>
     }
+    /** Optional invalidation feed: lets an initially absent binding recover. */
+    subscribe?(listener: () => void): () => void
   }
 }
 
@@ -105,6 +107,11 @@ export class RemoteTeamModePort implements TeamModePort {
     if (generation === undefined) {
       return { kind: 'stale', reason: 'the Host connection is not ready' }
     }
+    if (this.namespace === undefined) {
+      // A readable projection set without the mounted write namespace is NOT a
+      // togglable Team mode: the UI must show unavailable, never a dead control.
+      return { kind: 'unavailable', reason: 'the Agent Team Remote namespace is not mounted' }
+    }
     const binding = this.sessions.binding(sessionId)
     if (binding === undefined) {
       return { kind: 'unavailable', reason: `Session "${sessionId}" is not available` }
@@ -129,12 +136,15 @@ export class RemoteTeamModePort implements TeamModePort {
   }
 
   subscribe(sessionId: string, listener: () => void): () => void {
-    if (this.sessions.binding(sessionId) === undefined) return () => {}
     let faceOffs: Array<() => void> = []
-    const armFaces = (): void => {
-      for (const off of faceOffs.splice(0)) off()
+    let lastBinding: unknown
+    /** (Re)arm the two projection faces against the CURRENT binding. */
+    const rearm = (force: boolean): boolean => {
       const binding = this.sessions.binding(sessionId)
-      if (binding === undefined) return
+      if (!force && Object.is(binding, lastBinding)) return false
+      for (const off of faceOffs.splice(0)) off()
+      lastBinding = binding
+      if (binding === undefined) return true
       try {
         faceOffs.push(binding.session.projections.faceOf(AGENT_TEAM_KEY).subscribe(listener))
         faceOffs.push(binding.session.projections.faceOf(MODEL_SELECTION_KEY).subscribe(listener))
@@ -142,17 +152,24 @@ export class RemoteTeamModePort implements TeamModePort {
         for (const off of faceOffs.splice(0)) off()
         throw error
       }
+      return true
     }
-    armFaces()
+    // An initially absent binding must not pin the row at Unavailable forever:
+    // the Session-list invalidation feed re-arms as soon as the binding arrives.
+    rearm(false)
     // A reconnect keeps the retained binding identity stable, but a retired +
     // same-id rebuilt owner produces NEW faces; re-arm on every generation
     // change so a retired binding's callback is never mistaken for current.
     const generationOff = this.generation.subscribe(() => {
-      armFaces()
+      rearm(true)
       listener()
+    })
+    const listOff = this.sessions.list.subscribe?.(() => {
+      if (rearm(false)) listener()
     })
     return () => {
       generationOff()
+      listOff?.()
       for (const off of faceOffs.splice(0)) off()
     }
   }

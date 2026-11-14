@@ -207,3 +207,21 @@ test('writer refusals are cancellations and an already-saved fresh read is not w
   if (done.kind === 'admitted') assert.deepEqual(await done.attempt.run(), { kind: 'committed' })
   assert.equal(already.setCalls.length, 0)
 })
+
+test('a second Team gesture is refused until the first admission settles or abandons', async () => {
+  const team = makeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  const request = await openCommand({ team })
+  const first = request.team!.begin()
+  assert.equal(first.kind, 'admitted')
+  const second = request.team!.begin()
+  assert.equal(second.kind, 'refused')
+  assert.match(second.kind === 'refused' ? second.reason : '', /already in progress/u)
+  // Abandoning the admitted-but-unrun gesture releases the latch.
+  if (first.kind === 'admitted') first.attempt.abandon?.()
+  const third = request.team!.begin()
+  assert.equal(third.kind, 'admitted')
+  if (third.kind === 'admitted') assert.deepEqual(await third.attempt.run(), { kind: 'committed' })
+  assert.deepEqual(team.setCalls, [{ sessionId: 's1', enabled: true }])
+  // After settlement a new gesture is admitted again.
+  assert.equal(request.team!.begin().kind, 'admitted')
+})

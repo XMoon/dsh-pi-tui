@@ -97,11 +97,14 @@ export class TeamDisableConfirmation implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.disposed) return
+    // An in-flight (or committed-but-unobserved) write owns this seat until an
+    // explicit settlement: Esc/Cancel must never relinquish it and let the
+    // picker behind start a second Team write.
+    if (this.phase === 'saving' || this.phase === 'checking') return
     if (matchesKey(data, 'escape')) {
       this.cancel()
       return
     }
-    if (this.phase === 'saving' || this.phase === 'checking') return
     if (matchesKey(data, 'left') || matchesKey(data, 'right') || matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
       this.focus = this.focus === 'cancel' ? 'confirm' : 'cancel'
       this.options.requestRender()
@@ -149,6 +152,13 @@ export class TeamDisableConfirmation implements Component, Focusable {
 
   invalidate(): void {
     // No cached paint state beyond the last-frame hit map, rebuilt per render.
+  }
+
+  /** Whether the owning host may hide this seat right now. An in-flight write
+   *  (saving/checking) must not be torn down: the operation owns the seat until
+   *  an explicit settlement. */
+  requestClose(): boolean {
+    return this.phase !== 'saving' && this.phase !== 'checking'
   }
 
   render(width: number): string[] {
@@ -312,17 +322,15 @@ export class TeamDisableConfirmation implements Component, Focusable {
       this.close()
       return
     }
-    if (snapshot.kind === 'ready') {
-      this.phase = 'failed'
-      this.message = sanitizedPhysicalLine(
-        `the Host reports Agent Team ${snapshot.enabled ? 'On' : 'Off'}; the disable did not land`,
-      )
-      this.focus = 'confirm'
-      this.options.requestRender()
-      return
-    }
+    // The readback proves the target only when it EQUALS it. A still-On
+    // readback cannot prove the earlier indeterminate write did not happen or
+    // will not land later, so it must stay `unknown` and offer no Retry.
     this.phase = 'unknown'
-    this.message = sanitizedPhysicalLine(`the Host Team state is not readable yet: ${snapshot.reason}`)
+    this.message = snapshot.kind === 'ready'
+      ? sanitizedPhysicalLine(
+        `the Host still reports Agent Team ${snapshot.enabled ? 'On' : 'Off'}; the earlier write may still land — recheck again`,
+      )
+      : sanitizedPhysicalLine(`the Host Team state is not readable yet: ${snapshot.reason}`)
     this.focus = 'confirm'
     this.options.requestRender()
   }

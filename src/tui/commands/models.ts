@@ -127,6 +127,10 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
   // newer selection supersedes an older one's pending-marker clear and error
   // notice even on the SAME Session generation (v2 §0.2.5).
   let modelOperationToken = 0
+  // ONE shared Team-write latch across every `/model` invocation in this TUI:
+  // while a Team gesture is admitted (confirmation pending) or writing, no
+  // second invocation may dispatch another Team write for the same surface.
+  let teamWriteInFlight = false
   // PRESENTATION ownership for `/model`: a newer invocation supersedes the
   // previous (loading or loaded) panel. It is DISTINCT from
   // modelOperationToken (which owns the WRITE): the surface token decides
@@ -406,7 +410,19 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             }
             const snapshot = teamModePort.read(sessionId)
             if (snapshot.kind !== 'ready') return { kind: 'refused', reason: snapshot.reason }
+            // A Team write already owns the surface: never admit a second one
+            // while a confirmation is pending or a write is unsettled.
+            if (teamWriteInFlight) {
+              return { kind: 'refused', reason: 'a Team write is already in progress' }
+            }
             const enabled = !snapshot.enabled
+            let released = false
+            const release = (): void => {
+              if (released) return
+              released = true
+              teamWriteInFlight = false
+            }
+            teamWriteInFlight = true
             return {
               kind: 'admitted',
               attempt: {
@@ -414,33 +430,38 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
                 // OFF may touch a Session whose model request history is
                 // recorded; that fact comes ONLY from the official projection.
                 confirmRequired: enabled === false && snapshot.modelRequestHistory === 'recorded',
+                abandon: release,
                 run: async () => {
-                  if (!runner.isSessionScopeCurrent(scope)) {
-                    return { kind: 'cancelled', reason: 'the Session changed; no Team write was sent' }
-                  }
-                  const fresh = teamModePort.read(sessionId)
-                  if (fresh.kind !== 'ready') return { kind: 'rejected', reason: fresh.reason }
-                  // A fresh official read already proving the target is the
-                  // settlement: never append a duplicate `team/mode` event.
-                  if (fresh.enabled === enabled) return { kind: 'committed' }
                   try {
-                    // The SAME Session writer barrier the model write uses.
-                    return await runner.withWriter(
-                      liveScope,
-                      () => teamModePort.setEnabled(sessionId, enabled, runner.signal),
-                    )
-                  } catch (error) {
-                    // Both refusals are proven pre-dispatch: nothing was sent.
-                    if (error instanceof TransitionInProgressError) {
-                      return { kind: 'cancelled', reason: 'another Session operation is in progress; try again' }
+                    if (!runner.isSessionScopeCurrent(scope)) {
+                      return { kind: 'cancelled', reason: 'the Session changed; no Team write was sent' }
                     }
-                    if (error instanceof SessionScopeSupersededError) {
-                      return { kind: 'cancelled', reason: 'the Session changed before the Team write' }
+                    const fresh = teamModePort.read(sessionId)
+                    if (fresh.kind !== 'ready') return { kind: 'rejected', reason: fresh.reason }
+                    // A fresh official read already proving the target is the
+                    // settlement: never append a duplicate `team/mode` event.
+                    if (fresh.enabled === enabled) return { kind: 'committed' }
+                    try {
+                      // The SAME Session writer barrier the model write uses.
+                      return await runner.withWriter(
+                        liveScope,
+                        () => teamModePort.setEnabled(sessionId, enabled, runner.signal),
+                      )
+                    } catch (error) {
+                      // Both refusals are proven pre-dispatch: nothing was sent.
+                      if (error instanceof TransitionInProgressError) {
+                        return { kind: 'cancelled', reason: 'another Session operation is in progress; try again' }
+                      }
+                      if (error instanceof SessionScopeSupersededError) {
+                        return { kind: 'cancelled', reason: 'the Session changed before the Team write' }
+                      }
+                      return {
+                        kind: 'indeterminate',
+                        reason: `the Team write could not be dispatched: ${safeErrorMessage(error)}`,
+                      }
                     }
-                    return {
-                      kind: 'indeterminate',
-                      reason: `the Team write could not be dispatched: ${safeErrorMessage(error)}`,
-                    }
+                  } finally {
+                    release()
                   }
                 },
               },

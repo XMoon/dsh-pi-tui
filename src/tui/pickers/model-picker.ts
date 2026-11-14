@@ -217,7 +217,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   } | undefined
   private pressed:
     | { readonly kind: 'team'; readonly enabled: boolean }
-    | { readonly kind: 'effort'; readonly value: string }
+    | { readonly kind: 'effort'; readonly modelKey: string; readonly value: string }
     | undefined
 
   get focused(): boolean {
@@ -608,6 +608,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     // A pointer gesture named a target: the admitted gesture must still name
     // the same state, or the read moved under the press and nothing may run.
     if (requested !== undefined && attempt.enabled !== requested) {
+      attempt.abandon?.()
       this.teamSnapshot = this.deps.team.read()
       this.deps.requestRender()
       return
@@ -625,6 +626,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
    *  depend on this overlay remaining mounted. */
   private openDisableConfirmation(attempt: ModelPickerTeamAttempt): void {
     if (this.deps.openTeamDisableConfirmation === undefined) {
+      attempt.abandon?.()
       this.teamNotice = 'the Agent Team disable confirmation is not available here'
       this.deps.requestRender()
       return
@@ -634,6 +636,9 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       read: () => this.deps.team!.read(),
       subscribe: (listener) => this.deps.team!.subscribe(listener),
       onClosed: () => {
+        // A seat closed without running (Cancel/Esc/owner teardown) releases
+        // the admitted gesture; after a real run this is a no-op.
+        attempt.abandon?.()
         // The seat may outlive THIS picker: never touch picker state after
         // disposal, but always ask for a repaint (the command's app owns it).
         if (!this.disposed) this.deps.requestRender()
@@ -703,14 +708,24 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       this.teamPhase = { kind: 'idle' }
     } else if (snapshot.kind === 'ready' && snapshot.enabled === target) {
       this.teamPhase = { kind: 'idle' }
-    } else if (snapshot.kind === 'ready') {
+    } else if (phase.kind === 'failed') {
+      // `failed` only ever means a PROVEN pre-dispatch refusal; its Retry is
+      // safe. A fresh read that still differs keeps the explicit failure.
       this.teamPhase = {
         kind: 'failed',
         target,
-        message: `the Host reports Agent Team ${snapshot.enabled ? 'On' : 'Off'}; the change did not land`,
+        message: `the Host reports Agent Team ${snapshot.kind === 'ready' ? (snapshot.enabled ? 'On' : 'Off') : 'unknown'}; retry is still available`,
       }
     } else {
-      this.teamPhase = { kind: 'unknown', target, message: `the Host Team state is not readable: ${snapshot.reason}` }
+      // An indeterminate write stays unknown: an old readback cannot prove the
+      // dispatched write did not (or will not) land, so no Retry is offered.
+      this.teamPhase = {
+        kind: 'unknown',
+        target,
+        message: snapshot.kind === 'ready'
+          ? `the Host still reports Agent Team ${snapshot.enabled ? 'On' : 'Off'}; the earlier write may still land — recheck again`
+          : `the Host Team state is not readable: ${snapshot.reason}`,
+      }
     }
     this.deps.requestRender()
   }
@@ -760,17 +775,21 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       if (event.type === 'wheel') return { handled: true }
       const hit = frame.effortHits.find(candidate => event.x >= candidate.start && event.x < candidate.end)
       if (hit === undefined) return { handled: true }
+      const selected = this.modelsList.getSelectedItem()
       if (event.type === 'press') {
         if (event.button !== 'left') return { handled: true }
-        this.pressed = { kind: 'effort', value: hit.value }
+        // Bind the gesture to the full model identity that owned the painted
+        // row; a selection move between press and release must not retarget it.
+        if (selected === null) return { handled: true }
+        this.pressed = { kind: 'effort', modelKey: selected.value, value: hit.value }
         return { handled: true, focus: true }
       }
       if (event.type !== 'click' || event.button !== 'left') return { handled: true }
-      if (pressed === undefined || pressed.kind !== 'effort' || pressed.value !== hit.value) {
+      if (pressed === undefined || pressed.kind !== 'effort'
+        || pressed.value !== hit.value || pressed.modelKey !== (selected?.value ?? '')) {
         return { handled: true }
       }
-      const item = this.modelsList.getSelectedItem()
-      if (item !== null) this.selectEffortDraft(item.value, hit.value)
+      if (selected !== null) this.selectEffortDraft(selected.value, hit.value)
       return { handled: true }
     }
     return this.modelsList.handleMouse?.(event)

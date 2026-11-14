@@ -97,6 +97,11 @@ export class DirectTeamModePort implements TeamModePort {
     if (subagents === undefined) {
       return { kind: 'unavailable', reason: 'Agent Team authority is unavailable' }
     }
+    if (this.ctx.get('agentTeams') === undefined) {
+      // The projection alone is not a write capability: never present a dead
+      // toggle when the official Team service is absent.
+      return { kind: 'unavailable', reason: 'Agent Team authority is unavailable' }
+    }
     if (subagents.rootOf(agent) !== agent) {
       return { kind: 'unavailable', reason: 'Agent Team mode is available only for the root Session' }
     }

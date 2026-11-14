@@ -4168,7 +4168,11 @@ export class TuiApp {
   private modelPickerFrame: ResponsiveOverlayFrame | undefined
   /** The independent Team-disable confirmation seat (a logical Root seat of
    *  its own: it outlives the /model overlay and owns its write admission). */
-  private teamConfirmationOverlay: { readonly handle: OverlayHandle; close(): void } | undefined
+  private teamConfirmationOverlay: {
+    readonly handle: OverlayHandle
+    readonly component: TeamDisableConfirmation
+    close(): void
+  } | undefined
   /** The injected Ctrl+R search source (the runner wires the file-backed
    * implementation; the host never touches the filesystem). */
   private readonly historySearchSource: HistorySearchSource | undefined
@@ -26754,13 +26758,19 @@ export class TuiApp {
       if (this.teamConfirmationOverlay?.handle === handle) this.teamConfirmationOverlay = undefined
       handle?.hide()
     }
-    this.teamConfirmationOverlay = { handle, close: closeHandle }
+    this.teamConfirmationOverlay = { handle, component, close: closeHandle }
     return closeHandle
   }
 
-  /** Close the Team-disable confirmation seat, if one is open. */
+  /** Close the Team-disable confirmation seat, if one is open and not
+   *  mid-write. An in-flight write owns the seat until settlement; a new
+   *  `/model` must not tear it down (the command's shared Team latch also
+   *  refuses a second write while it is unsettled). */
   private closeTeamDisableConfirmation(): void {
-    this.teamConfirmationOverlay?.close()
+    const seat = this.teamConfirmationOverlay
+    if (seat === undefined) return
+    if (!seat.component.requestClose()) return
+    seat.close()
   }
 
   /** Mount the `/model` picker frame around its (retained) component. The
