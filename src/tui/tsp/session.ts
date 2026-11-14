@@ -2897,12 +2897,41 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     readonly clusterOwners: ReadonlySet<TranscriptMessage>
     readonly commandCompactionOwners: ReadonlySet<TranscriptMessage>
     readonly toolKeys: ReadonlySet<string>
-    /** Workflow run/phase keys the CURRENT target's own run must present open. */
+    /** Workflow run ids the CURRENT target's own run must present open. */
     readonly workflowRuns: ReadonlySet<WorkflowRunId>
+    /** Workflow phase keys (per granted run) that must present open. */
+    readonly workflowPhases: ReadonlyMap<WorkflowRunId, ReadonlySet<string>>
   }
 
   /** The CURRENT frame's search grants (`undefined` = no search disclosure). */
   let searchGrants: SearchDisclosureGrants | undefined
+  /** The no-grant workflow facts (identity constants, never copied per frame). */
+  const EMPTY_WORKFLOW_GRANTS: ReadonlySet<WorkflowRunId> = new Set()
+  const EMPTY_WORKFLOW_PHASE_GRANTS: ReadonlyMap<WorkflowRunId, ReadonlySet<string>> = new Map()
+
+  /**
+   * T3-B1: the effective Workflow disclosure read of THIS frame.
+   *
+   * The returned map is the USER's own `workflowDisclosureStates` UNCHANGED when
+   * no grant exists. With a grant it is a shallow copy whose granted run (and
+   * phase, when the hit named one) presents `userOpen: true` — a temporary
+   * read-only projection the mapper consumes; the manual map is never mutated
+   * and `advanceWorkflowDisclosureState` keeps running against the real one.
+   */
+  const effectiveWorkflowDisclosureStates = (): ReadonlyMap<string, WorkflowRunDisclosureState> => {
+    const grants = searchGrants
+    if (grants === undefined || grants.workflowRuns.size === 0) return workflowDisclosureStates
+    const states = new Map(workflowDisclosureStates)
+    for (const runId of grants.workflowRuns) {
+      const base = workflowDisclosureStates.get(runId)
+      const phases = new Map(base?.phases ?? [])
+      for (const phaseKey of grants.workflowPhases.get(runId) ?? []) {
+        phases.set(phaseKey, { previousMode: base?.phases.get(phaseKey)?.previousMode ?? 'clean', previousActivityCount: base?.phases.get(phaseKey)?.previousActivityCount ?? 0, userOpen: true })
+      }
+      states.set(runId, { previousMode: base?.previousMode ?? 'clean', userOpen: true, phases })
+    }
+    return states
+  }
   /**
    * The navigation epoch whose grants the user has explicitly collapsed. A
    * manual collapse suppresses the automatic re-open until the NEXT explicit
@@ -2925,6 +2954,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     commandCompactionOwners: new Set(),
     toolKeys: new Set(),
     workflowRuns: new Set(),
+    workflowPhases: new Map(),
   }
 
   /**
@@ -2953,6 +2983,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const commandCompactionOwners = new Set<TranscriptMessage>()
     const toolKeys = new Set<string>()
     const workflowRuns = new Set<WorkflowRunId>()
+    const workflowPhases = new Map<WorkflowRunId, Set<string>>()
     // The message's own Turn is the Focus root that must open to reveal it. A
     // Command card carries no `turn` at all (its identity is the command run), so
     // only a message kind that really has one grants a Focus root.
@@ -2978,7 +3009,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // admits): a body that is folded behind the card opens for this target.
       toolKeys.add(scopeKeys.keyFor(message))
     } else if (message.kind === 'workflow') {
+      // The run opens for the target; a hit on a phase/member opens THAT phase
+      // (the match's own closed-vocabulary source carries the phase key).
       workflowRuns.add(message.runId)
+      const hitSource = target.match.source
+      if (hitSource.kind === 'workflow-phase' || hitSource.kind === 'workflow-member') {
+        const phases = workflowPhases.get(message.runId) ?? new Set<string>()
+        phases.add(hitSource.phaseKey)
+        workflowPhases.set(message.runId, phases)
+      }
     }
     return {
       targetKey: `${target.representativeId}`,
@@ -2990,6 +3029,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       commandCompactionOwners,
       toolKeys,
       workflowRuns,
+      workflowPhases,
     }
   }
 
@@ -3007,6 +3047,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     readonly clusterOwners: ReadonlySet<TranscriptMessage>
     readonly commandCompactionOwners: ReadonlySet<TranscriptMessage>
     readonly toolKeys: ReadonlySet<string>
+    readonly workflowRuns: ReadonlySet<WorkflowRunId>
+    readonly workflowPhases: ReadonlyMap<WorkflowRunId, ReadonlySet<string>>
   } => {
     const grants = searchGrants
     if (grants === undefined) {
@@ -3018,6 +3060,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         clusterOwners: expandedClusterOwners,
         commandCompactionOwners: expandedCommandCompactionOwners,
         toolKeys: expandedToolKeys,
+        workflowRuns: EMPTY_WORKFLOW_GRANTS,
+        workflowPhases: EMPTY_WORKFLOW_PHASE_GRANTS,
       }
     }
     const union = <T>(manual: ReadonlySet<T>, extra: ReadonlySet<T>): ReadonlySet<T> =>
@@ -3030,6 +3074,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       clusterOwners: union(expandedClusterOwners, grants.clusterOwners),
       commandCompactionOwners: union(expandedCommandCompactionOwners, grants.commandCompactionOwners),
       toolKeys: union(expandedToolKeys, grants.toolKeys),
+      workflowRuns: grants.workflowRuns,
+      workflowPhases: grants.workflowPhases,
     }
   }
 
@@ -3394,7 +3440,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       requestPublishedSvgBlob,
       ...(selectedVisual === undefined ? {} : { selectedVisual }),
       workflowDisclosure: {
-        states: workflowDisclosureStates,
+        states: effectiveWorkflowDisclosureStates(),
         browseAvailable: workflowBrowseAdmitted,
       },
     }
@@ -3663,15 +3709,44 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // Dock — never a `mode:'screen'`, never an overlay, never a second editor.
     const historyNode = historyDockNode()
     if (historyNode !== undefined) lines.push(historyNode)
+    // TSP-7 PR-A/PR-D/PR-E: the native status rows follow the composer. They
+    // are projected from the LAST FORMALLY COMMITTED snapshot through THIS
+    // mount's compiled footer presentation (the frozen PR-A/B default when no
+    // config was bound), suppressed for the whole hydration window, and — on
+    // the Quiet Composer branch — wrapped in the ONE transparent footer group
+    // so the Shell→Footer gap belongs to the presentation, never a synthetic
+    // row inside the dock. An empty projection adds NO wrapper and NO height.
+    // Mouse PR4: the first-party Tasks segment carries its click action ONLY
+    // while the live admission predicate allows the click; every other
+    // segment stays status-only. Absent action => the frozen read-only frame.
+    const tasksAction = nativeTasksActionAdmitted() ? TSP_FOOTER_TASKS_ACTION : undefined
+    const footerRows = presentedStatus !== undefined && !hydrating
+      ? nativeStatuslineRows(
+          presentedStatus,
+          footerPresentation,
+          nativeFooterAffordances(),
+          ...(tasksAction === undefined ? [] : [{ tasksAction }]),
+        )
+      : []
     // T3-B1: the Search card and the Composer are MUTUALLY EXCLUSIVE input
     // owners of this ONE Dock. While the card is open the Dock builds NO
     // composer editor, NO Quiet Composer shell and NO completion/permission/
     // quick node at all — the Composer is withdrawn, not hidden behind CSS, so
-    // there is never a second editable field and never a second Send. Closing
-    // the card re-materializes the SAME controller from its OWN state.
+    // there is never a second editable field and never a second Send. The
+    // Status/Footer owner above is NOT part of that exclusion (the frozen
+    // contract: the notices/status/footer keep their original owner in BOTH
+    // states). Closing the card re-materializes the SAME controller from its
+    // OWN state.
     const searchNode = transcriptSearchDockNode()
     if (searchNode !== undefined) {
       lines.push(searchNode)
+      if (footerRows.length > 0) {
+        if (composerActionsSupported()) {
+          lines.push(ui.col({ key: 'footer-group', role: QUIET_COMPOSER_ROLES.footerGroup, gap: 'none' }, ...footerRows))
+        } else {
+          lines.push(...footerRows)
+        }
+      }
       return ui.col({ key: 'dock' }, ...lines)
     }
     const editorNode = composerEditorNode()
@@ -3699,25 +3774,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
     }
     lines.push(quietShell ?? editorNode)
-    // TSP-7 PR-A/PR-D/PR-E: the native status rows follow the composer. They
-    // are projected from the LAST FORMALLY COMMITTED snapshot through THIS
-    // mount's compiled footer presentation (the frozen PR-A/B default when no
-    // config was bound), suppressed for the whole hydration window, and — on
-    // the Quiet Composer branch — wrapped in the ONE transparent footer group
-    // so the Shell→Footer gap belongs to the presentation, never a synthetic
-    // row inside the dock. An empty projection adds NO wrapper and NO height.
-    // Mouse PR4: the first-party Tasks segment carries its click action ONLY
-    // while the live admission predicate allows the click; every other
-    // segment stays status-only. Absent action => the frozen read-only frame.
-    const tasksAction = nativeTasksActionAdmitted() ? TSP_FOOTER_TASKS_ACTION : undefined
-    const footerRows = presentedStatus !== undefined && !hydrating
-      ? nativeStatuslineRows(
-          presentedStatus,
-          footerPresentation,
-          nativeFooterAffordances(),
-          ...(tasksAction === undefined ? [] : [{ tasksAction }]),
-        )
-      : []
+    // The footer rows were projected ABOVE the search branch so BOTH states
+    // paint the same owner; this is the same projection, not a second one.
     if (footerRows.length > 0) {
       if (composerActionsSupported()) {
         lines.push(ui.col({ key: 'footer-group', role: QUIET_COMPOSER_ROLES.footerGroup, gap: 'none' }, ...footerRows))
@@ -3899,6 +3957,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // set and reconciles image subscriptions before it prepares image states.
     // A collapsed Compact Work member therefore starts no read or blob demand.
     if (!rebuildLastMain()) return
+    // T3-B1 (B1-11): a same-source commit with a real Folder revision change
+    // re-queries the open card's current query (the seat's refresh probes the
+    // revision first, so an unchanged revision never re-scans history). The
+    // refresh's own navigationChanged already re-derived the grants above.
+    transcriptSearch?.refresh()
     render()
   }
 
@@ -6008,7 +6071,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       transcriptSearch = createTspTranscriptSearch({
         admitted: transcriptSearchSeatAdmitted,
         requestRender: () => render(),
-        setFocus: () => applyFocus(true),
+        setFocus: (control) => {
+          if (control === undefined) {
+            applyFocus(true)
+            return
+          }
+          // The seat's own Tab cycle: focus THAT control's real wire id. The
+          // query takes the hardware caret; a button focus is the client's to
+          // grant or decline, and the ring position is tracked either way.
+          const id = transcriptSearch?.controlFocusId(control)
+          if (id !== undefined) surface.focus(id)
+        },
         requestReveal: () => revealCurrentSearchTarget(),
         // T3-B1: the ONE point a search disclosure grant is ever granted. The
         // mount derives the CURRENT target's temporary grants and rebuilds the

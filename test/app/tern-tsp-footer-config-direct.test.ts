@@ -53,6 +53,7 @@ const INERT_SEMANTIC_SEARCH_BINDING = {
   snapshot: () => undefined,
   resolve: () => undefined,
   current: () => false,
+  revision: () => undefined,
 }
 
 /** One projection node's own props. */

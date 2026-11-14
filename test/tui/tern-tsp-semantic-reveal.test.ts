@@ -45,6 +45,8 @@ const T0 = 1_700_000_000_000
 const OLD_ONLY = 'T3B1_OLD_ARCHIVE_ONLY'
 const INNER_ONLY = 'T3B1_INNER_TOOL_ONLY'
 const SHARED = 'T3B1_SHARED'
+const WORKFLOW_MARKER = 'T3B1_WF_RUN_ONLY'
+const WORKFLOW_MEMBER_MARKER = 'T3B1_WF_MEMBER_LABEL'
 
 function ev(type: string, data: Record<string, unknown>, seq: number): SessionEvent {
   return { type, seq: SessionSeq(seq), time: T0 + seq * 1000, data } as SessionEvent
@@ -118,6 +120,32 @@ function seedFolder(): TranscriptFolder {
   events.push(ev('step/end', { turn: 2, step: 0 }, seq++))
   events.push(ev('turn/end', { turn: 2, reason: { kind: 'completed' } }, seq++))
   turn(3, 'a later request', `the later answer carries ${SHARED} again`)
+  // Turn 4: ONE Workflow run whose member label carries the workflow marker. The
+  // run starts fact-driven CLOSED, so the search grant is the only opener.
+  events.push(ev('turn/start', { turn: 4 }, seq++))
+  events.push(ev('user/message', {
+    id: MessageId('t3b1-u-4'), role: 'user', content: [{ type: 'text', text: 'run the deployment workflow' }], source: { kind: 'user' },
+  }, seq++))
+  events.push(ev('tool-workflow/run-start', { runId: 'wf-b1', name: `deploy ${WORKFLOW_MARKER}` }, seq++))
+  events.push(ev('tool-workflow/agent-start', {
+    runId: 'wf-b1', seq: 1, label: `build ${WORKFLOW_MEMBER_MARKER}`, phase: 'Build', childId: 'child-b1-1',
+  }, seq++))
+  events.push(ev('tool-workflow/agent-end', { runId: 'wf-b1', seq: 1, outcome: 'completed' }, seq++))
+  events.push(ev('tool-workflow/run-end', { runId: 'wf-b1', stopReason: 'completed' }, seq++))
+  events.push(ev('step/start', { turn: 4, step: 0 }, seq++))
+  events.push(ev('assistant/message', {
+    turn: 4,
+    step: 0,
+    message: {
+      id: MessageId('t3b1-a-4'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'the workflow finished' }],
+      source: { kind: 'model', provider: 'scripted', model: 'scripted' },
+    },
+    stream: [],
+  }, seq++))
+  events.push(ev('step/end', { turn: 4, step: 0 }, seq++))
+  events.push(ev('turn/end', { turn: 4, reason: { kind: 'completed' } }, seq++))
   folder.apply(events)
   return folder
 }
@@ -155,6 +183,7 @@ function folderBinding(folder: TranscriptFolder): {
       return folder.resolveSearchMatch(match)
     },
     current: (source) => state.live && source === SOURCE,
+    revision: (source) => (state.live && source === SOURCE ? folder.searchRevision() : undefined),
   }
   return { binding, state }
 }
@@ -184,10 +213,11 @@ const ALT_SHIFT_S = '\u001b[115;4u'
 
 async function mountSearchPane(
   t: { after(fn: () => unknown): void },
-  options: { readonly transcriptSearch?: boolean; readonly folder?: TranscriptFolder } = {},
+  options: { readonly transcriptSearch?: boolean; readonly folder?: TranscriptFolder; readonly cols?: number } = {},
 ): Promise<RevealPane> {
   const pane = installTspPane({
     composerActions: true,
+    ...(options.cols === undefined ? {} : { cols: options.cols }),
     ...(options.transcriptSearch === false ? {} : { transcriptSearch: true }),
   })
   t.after(() => pane.restore())
@@ -325,6 +355,30 @@ test('a pane without the negotiated capability paints NO Search entry and states
   assert.equal(h.cardPainted(), false, 'no fake card was opened')
 })
 
+test('the Status/Footer owner stays painted while the Search card owns the Dock', async (t) => {
+  const h = await mountSearchPane(t)
+  // A real status commit gives the footer rows content.
+  h.renderer.display.commitDisplaySubject({}, {}, undefined)
+  await h.painted(() => wireNodes(h.pane).some(node => node.id === 'dock.footer-group'), 'the footer painted')
+  h.key(ALT_SHIFT_S)
+  await h.painted(() => h.cardPainted(), 'the card painted')
+  assert.equal(wireNodes(h.pane).some(node => node.id === 'dock.footer-group'), true,
+    'the SAME footer owner is still in the search-open frame')
+})
+
+test('a NARROW pane carries exactly ONE Send (the actions move to their own row)', async (t) => {
+  // 44 cols < the narrow threshold (56): the narrow branch is the ONE honest
+  // way to test the re-arranged action row.
+  const h = await mountSearchPane(t, { cols: 44 })
+  const ids = wireNodes(h.pane).map(node => node.id)
+  assert.equal(ids.filter(id => id.includes('composer-send')).length, 1,
+    `exactly ONE Send on a narrow pane :: ${JSON.stringify(ids.filter(id => id.includes('composer')))}`)
+  assert.equal(ids.filter(id => id.includes('composer-stop')).length <= 1, true)
+  // The actions row exists and the controls row keeps only Permission/Model.
+  assert.equal(ids.some(id => id.includes('composer-actions-narrow')), true,
+    'the narrow action row is present')
+})
+
 test('the Quiet Composer carries ONE Send and ONE Search session entry, never a second Send', async (t) => {
   const h = await mountSearchPane(t)
   const ids = wireNodes(h.pane).map(node => node.id)
@@ -428,12 +482,15 @@ test('every printable key, Enter and paste is consumed by the card and never edi
   assert.equal(h.composerNode()?.text, 'k', 'the draft is exactly what the user left')
 })
 
-test('Ctrl+C is forwarded to the original cancel owner exactly once', async (t) => {
+test('Ctrl+C retires the card FIRST and then reaches the cancel owner exactly once', async (t) => {
   const h = await mountSearchPane(t)
+  h.key(char('c'))
+  await h.painted(() => h.composerNode()?.text === 'c', 'the draft installed')
   h.key(ALT_SHIFT_S)
   await h.painted(() => h.cardPainted(), 'the card painted')
   h.key(CTRL_C)
-  await h.absent()
+  await h.painted(() => h.cardPainted() === false, 'the card retired')
+  assert.equal(h.composerNode()?.text, 'c', 'the draft was never touched by the interrupt')
   assert.equal(h.calls.cancels, 1, 'the cancel intent reached its owner exactly once')
   assert.equal(h.calls.exits, 0, 'Ctrl+C is never an exit')
 })
@@ -474,6 +531,28 @@ test('a passive repaint never grants disclosure; only an explicit navigation doe
   await h.absent()
   assert.equal(h.texts().some(text => text.includes(INNER_ONLY)), false,
     'a passive repaint never opens a folded card')
+})
+
+test('a hit on a workflow member label opens the run and that phase for the CURRENT target only', async (t) => {
+  const h = await mountSearchPane(t)
+  // Before the search the workflow run is presented fact-driven CLOSED (all
+  // members settled = clean), so the member label is not readable in Main.
+  assert.equal(h.texts().some(text => text.includes(WORKFLOW_MEMBER_MARKER)), false,
+    'the seed really keeps the workflow run folded before any search')
+  h.key(ALT_SHIFT_S)
+  await h.painted(() => h.cardPainted(), 'the card painted')
+  for (const ch of WORKFLOW_MEMBER_MARKER.toLowerCase()) h.key(char(ch))
+  await h.painted(() => (h.queryField()?.text ?? '') === WORKFLOW_MEMBER_MARKER.toLowerCase(), 'the query installed')
+  await h.painted(() => h.texts().some(text => text.includes('/1 targets')), 'one target')
+  h.key(ENTER)
+  // The grant opens the run and the phase for THIS frame: the member label is
+  // readable, and the manual workflowDisclosureStates were never written.
+  await h.painted(() => h.texts().some(text => text.includes(WORKFLOW_MEMBER_MARKER)),
+    `the temporary grant opened the workflow run :: ${JSON.stringify(h.texts().slice(-6))}`)
+  h.key(ESCAPE)
+  await h.painted(() => h.composerNode() !== undefined, 'the Composer restored')
+  assert.equal(h.texts().some(text => text.includes(WORKFLOW_MEMBER_MARKER)), false,
+    'closing the search retracts the workflow grant (the manual state is untouched)')
 })
 
 // ── E. Currentness: a dead source retires the card ───────────────────────────

@@ -212,6 +212,9 @@ export function installTspPane(options: {
    * like the real client.
    */
   readonly queueManager?: boolean
+  /** Override the pane's column count (the narrow-composer threshold is a real
+   *  product fact: the narrow branch is the ONE honest way to test it). */
+  readonly cols?: number
   readonly kinds?: readonly string[]
   readonly features?: readonly string[]
 } = {}): TspPane {
@@ -265,13 +268,16 @@ export function installTspPane(options: {
   // client's 65536 limit and its chunking belong to the real-pane lanes, never
   // to this scripted pane, so widening it here changes no product behavior.
   const apc = options.historySearch === true ? 4 * 1024 * 1024 : HELLO.apc
-  const hello = options.kinds !== undefined || options.features !== undefined
+  // A `cols` override is NOT a kind/feature override: it keeps the opt-in sets
+  // this case asked for. Only an explicit `kinds`/`features` replaces them.
+  const hello = options.cols !== undefined || options.kinds !== undefined || options.features !== undefined
     ? {
         ...HELLO,
         ver: '0.7.2',
         apc,
-        kinds: options.kinds ?? HELLO.kinds,
-        features: options.features ?? HELLO.features,
+        ...(options.cols === undefined ? {} : { cols: options.cols }),
+        kinds: options.kinds ?? [...HELLO.kinds, ...native],
+        features: options.features ?? [...HELLO.features, ...nativeFeatures],
       }
     : native.length === 0
       ? HELLO

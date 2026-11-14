@@ -336,6 +336,11 @@ existing native Main to the card that owns the hit.
   the navigation projection groups them by representative card, so `N/M
   targets` counts cards and a single card with many hits is never navigated as
   many positions.
+- **A live revision refreshes, a passive repaint does not.** A same-source
+  `setTranscript` commit whose Folder `searchRevision()` really changed
+  re-queries the open card's current query and keeps the current representative
+  card when it still exists; an unchanged revision is a no-op (one counter read,
+  never a re-scan of history).
 - **Temporary disclosure, never a manual edit.** A hit inside a folded
   Thought/Work/Tool/Context/Command/Workflow card opens that card's canonical
   ancestry for the CURRENT target only. The grants are frame-scoped unions of
@@ -350,15 +355,24 @@ existing native Main to the card that owns the hit.
   source yields `Unavailable in current pane` instead of an op that cannot
   land. Because `Surface.reveal()` returns `void`, the card states
   `Source-only · position unverified · <static kind>`: it never claims a
-  character-exact position or a painted highlight.
+  character-exact position or a painted highlight. A Workflow hit opens the
+  target's own run and — when the hit named one — that phase, through a
+  frame-scoped read projection; the official `workflowDisclosureStates` and its
+  fact-driven advance are never written.
 - **Search and Composer are mutually exclusive input owners of ONE Dock.** While
   the search card is open the Dock builds no composer editor, no Quiet Composer
   shell and no completion/permission/quick node at all; closing it
   re-materializes the SAME `TspComposer` from its own state (draft, caret,
-  selection, undo and staged attachments untouched). The card's query is a
-  controlled field the renderer's key route edits — the pinned client delivers
-  no native `EditEvent` — and every key except `Ctrl+C` (which still reaches the
-  original interrupt/cancel owner exactly once) is consumed by the seat.
+  selection, undo and staged attachments untouched). The Status/Footer rows are
+  NOT part of that exclusion: their original owner keeps painting them in both
+  states. The card's query is a controlled field the renderer's key route edits —
+  the pinned client delivers no native `EditEvent` — and every key is consumed by
+  the seat except `Ctrl+C`, which RETIRES the card first and then reaches the
+  original interrupt/cancel owner exactly once.
+- **The seat's own key ring.** `Enter`/`Shift+Enter` step the card targets,
+  `Tab`/`Shift+Tab` cycle the seat's focus ring (query → Prev → Next → Close) and
+  never reach the hidden Composer, a second entry chord re-focuses the query
+  without rebuilding the card, and `Escape` closes it.
 - **Higher seats win.** A Modal, the temporary Reader, the Work Hub, the Session
   Browser, a picker or the Queue sheet retires the search card before it takes
   input; the card is never parked and never restored across a Modal.

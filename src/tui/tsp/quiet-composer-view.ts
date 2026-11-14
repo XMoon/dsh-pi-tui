@@ -437,8 +437,8 @@ export function quietComposerView(input: QuietComposerViewInput): Node {
             : []),
         ),
         ...(input.searchSession.narrow || searchButton() === undefined ? [] : [searchButton()]),
-        ...(input.busy ? [stopButton()] : []),
-        sendButton(),
+        ...(input.busy && input.searchSession.narrow !== true ? [stopButton()] : []),
+        ...(input.searchSession.narrow ? [] : [sendButton()]),
       ),
     ),
   )

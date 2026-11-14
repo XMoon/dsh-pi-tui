@@ -60,6 +60,7 @@ const INERT_SEMANTIC_SEARCH_BINDING = {
   snapshot: () => undefined,
   resolve: () => undefined,
   current: () => false,
+  revision: () => undefined,
 }
 
 const TASKS_ACTION = TSP_FOOTER_TASKS_ACTION
