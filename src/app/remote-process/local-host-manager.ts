@@ -561,6 +561,8 @@ export interface UnitLoadState {
   readonly loadState: string
   readonly activeState: string
   readonly fragmentPath: string
+  /** The drop-in override paths the manager actually loaded (empty when none). */
+  readonly dropInPaths: string
 }
 
 /** The injectable `systemctl` runner shape (production uses `runSystemctl`). */
@@ -573,10 +575,10 @@ export interface HostManagerDeps {
   readonly systemctl?: SystemctlRunner
 }
 
-/** Run `systemctl --user show -p ... <unit>` and parse the three properties. */
+/** Run `systemctl --user show -p ... <unit>` and parse the properties. */
 async function showUnit(unitName: string, runtimeDir: string | undefined, systemctl: SystemctlRunner): Promise<UnitLoadState> {
   const result = await systemctl(
-    ['--user', '--no-pager', '--no-ask-password', 'show', '-p', 'LoadState', '-p', 'ActiveState', '-p', 'FragmentPath', unitName],
+    ['--user', '--no-pager', '--no-ask-password', 'show', '-p', 'LoadState', '-p', 'ActiveState', '-p', 'FragmentPath', '-p', 'DropInPaths', unitName],
     runtimeDir,
   )
   if (result.kind !== 'exited' || result.code !== 0) {
@@ -586,10 +588,21 @@ async function showUnit(unitName: string, runtimeDir: string | undefined, system
     const match = new RegExp(`^${key}=(.*)$`, 'mu').exec(result.stdout)
     return match === null ? '' : match[1].trim()
   }
-  return { loadState: read('LoadState'), activeState: read('ActiveState'), fragmentPath: read('FragmentPath') }
+  return {
+    loadState: read('LoadState'),
+    activeState: read('ActiveState'),
+    fragmentPath: read('FragmentPath'),
+    dropInPaths: read('DropInPaths'),
+  }
 }
 
-/** Verify the manager actually loads THIS controlled target from THIS file. */
+/**
+ * Verify the manager actually loads THIS controlled target from THIS file and
+ * from NO drop-in override. A `FragmentPath` alone is not enough: a same-named
+ * `*.d/*.conf` drop-in can override `ExecStart`/`Environment`/`Restart` while
+ * `FragmentPath` still names our owned file, so any loaded drop-in is a
+ * `HOST_MANAGER_UNIT_CONFLICT` and the manager is never started.
+ */
 function assertUnitOwned(state: UnitLoadState, finalPath: string): void {
   if (state.loadState === '' || state.loadState === 'not-found') {
     throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: the installed unit is not loaded by the manager')
@@ -605,6 +618,10 @@ function assertUnitOwned(state: UnitLoadState, finalPath: string): void {
   }
   if (realFragment !== realpathSync(finalPath)) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the manager loaded a different unit file than the installed target')
+  }
+  const dropIns = state.dropInPaths.split(/\s+/u).filter(path => path !== '')
+  if (dropIns.length > 0) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the loaded unit has one or more drop-in overrides')
   }
 }
 
