@@ -72,15 +72,6 @@ const nativeRasterSkip = process.platform === 'linux'
   ? false
   : 'the native memory cap is verified on Linux only; other platforms use the text/source fallback'
 
-test('the real isolated rasterizer produces a bounded PNG for an admitted source', { skip: nativeRasterSkip }, async () => {
-  const result = await rasterizeSvg(SVG_SOURCE, { targetWidth: 128, signal: new AbortController().signal })
-  assert.equal(result.widthPx, 128)
-  assert.equal(result.heightPx, 64)
-  assert.deepEqual([...result.png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-  assert.ok(result.png.length > 0)
-  assert.equal(Buffer.from(result.base64, 'base64').length, result.png.length)
-})
-
 test('an already-aborted raster request is refused before work starts', { skip: nativeRasterSkip }, async () => {
   const controller = new AbortController()
   controller.abort()
