@@ -19,12 +19,40 @@
 
 import type { TaskPanelItem } from './task-presentation.ts'
 import type { TaskBrowserSummary } from './task-browser-runtime.ts'
+import type { TeamBoardSnapshot } from '../../runtime/team-board-read-port.ts'
+
+/** One read-only Team board member (Root + official subagent catalog rows). */
+export interface TeamMemberPresentation {
+  /** Stable row id (`member:<session id>`). */
+  readonly value: string
+  readonly id: string
+  /** Durable member name: `lead` for the Root, else the official `path`
+   *  (falling back to the child Session id when no complete path exists). */
+  readonly name: string
+  readonly activity: 'running' | 'inactive' | 'idle' | 'unknown'
+  readonly kind: 'root' | 'subagent' | 'external'
+  readonly depth: number
+}
+
+/**
+ * The READ-ONLY Team page DTO. `snapshot` is the official `agentTeam`
+ * projection read (tasks + enabled + failure/stale/unavailable cause);
+ * `members` are the Root plus the already-read Subagent catalog rows. It is a
+ * PRESENTATION fact only — no `onClaim`/`onStop`/`onAssign` exists.
+ */
+export interface TeamBrowserPresentation {
+  readonly snapshot: TeamBoardSnapshot
+  readonly members: readonly TeamMemberPresentation[]
+}
 
 /** A renderer-owned browser's PRESENTATIONAL handle; no business authority. */
 export interface TaskBrowserPresentationHandle {
   close(): void
   setItems(items: readonly TaskPanelItem[], preferredValue?: string): void
   setRefreshState(state: 'loading' | 'ready' | 'stale', error?: string): void
+  /** Replace the Team page DTO (PiTui only). Optional so the TSP Work Hub
+   *  handle (which never shows a Team tab) need not implement it. */
+  setTeamPage?(value: TeamBrowserPresentation): void
 }
 
 /** The already-decided opening facts of one Task Browser presentation. */
@@ -44,6 +72,13 @@ export interface TaskBrowserPresentationOpen {
   readonly onStop: (value: string) => void
   readonly onViewportExpose: (ids: readonly string[]) => void
   readonly onRetired: (reason: string) => void
+  /** FR2: the READ-ONLY Team page DTO. Absent = Work-only (a Child, a
+   * Workflow-scoped browser, a TSP Work Hub, or no Team board source). */
+  readonly team?: TeamBrowserPresentation
+  /** FR2: the physical pointer final admission for the tab/filter/Team page:
+   *  the runtime synchronously confirms the captured subject / browser token /
+   *  non-cleanup state. Absent = pointer admission is refused. */
+  readonly interactionCurrent?: () => boolean
 }
 
 export interface TaskAgentBadge {

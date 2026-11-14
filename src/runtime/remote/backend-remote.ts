@@ -45,6 +45,7 @@ import type { SchedulePort } from '../schedule-port.ts'
 import type { HostDirectoryBrowsePort } from '../host-directory-browse-port.ts'
 import type { SessionPolicyPort } from '../session-policy-port.ts'
 import type { TeamModePort } from '../team-mode-port.ts'
+import type { TeamBoardReadPort } from '../team-board-read-port.ts'
 
 /** Every semantic port the Remote backend serves (one adapter each). */
 export interface RemoteBackendParts {
@@ -84,6 +85,8 @@ export interface RemoteBackendParts {
   readonly sessionPolicy: SessionPolicyPort
   /** The official generated `agentTeams` namespace adapter (FR1). */
   readonly teamMode: TeamModePort
+  /** The official `agentTeam` projection READ-ONLY board adapter (FR2). */
+  readonly teamBoard: TeamBoardReadPort
 }
 
 /** Assemble the experimental Remote `Backend` from its proven adapters. */

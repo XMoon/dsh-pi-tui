@@ -35,6 +35,7 @@ import type { SchedulePort } from './schedule-port.ts'
 import type { HostDirectoryBrowsePort } from './host-directory-browse-port.ts'
 import type { SessionPolicyPort } from './session-policy-port.ts'
 import type { TeamModePort } from './team-mode-port.ts'
+import type { TeamBoardReadPort } from './team-board-read-port.ts'
 
 /** The transport backends the TUI can run on. `direct` remains the
  * production/default; `remote` is the experimental M3-3B assembly that can be
@@ -120,6 +121,10 @@ export interface Backend {
    *  its model-request history and the single official Team mode write. Both
    *  backends serve the SAME contract; no client-side Team truth exists. */
   readonly teamMode: TeamModePort
+  /** The exact-Root READ-ONLY Agent Team board port (FR2): the official
+   *  `agentTeam` projection's shared task board. No Team write is reachable
+   *  through this port; `/model` keeps the only Team write (`teamMode`). */
+  readonly teamBoard: TeamBoardReadPort
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -150,6 +155,7 @@ export function createDirectBackend(
   hostDirectoryBrowse: HostDirectoryBrowsePort,
   sessionPolicy: SessionPolicyPort,
   teamMode: TeamModePort,
+  teamBoard: TeamBoardReadPort,
 ): Backend {
   return {
     kind: 'direct',
@@ -178,5 +184,6 @@ export function createDirectBackend(
     hostDirectoryBrowse,
     sessionPolicy,
     teamMode,
+    teamBoard,
   }
 }

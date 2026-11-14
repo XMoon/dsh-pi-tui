@@ -4319,6 +4319,10 @@ export function applyRunnerWithRuntime(
           subscribe: (listener) => remoteSources.task.subscribeJobs(() => listener({ type: 'state' })),
         },
       taskRead: taskSource.taskRead,
+      // FR2: the READ-ONLY Team board of the exact captured Root Session. The
+      // board is an official `agentTeam` projection read, never a Team write
+      // (the `/model` Team mode keeps the ONE write, FR1).
+      teamBoard: backend.teamBoard,
     }, {
       diag,
       isCleanedUp: () => cleanedUp,

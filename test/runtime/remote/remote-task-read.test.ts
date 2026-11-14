@@ -934,3 +934,69 @@ test('Direct and Remote expose the SAME unsupported diagnostic for an official u
   assert.deepEqual(directChild, remoteChild)
   assert.deepEqual(directChild, { kind: 'diagnostic', id: 'child-unknown', reason: 'unsupported', parentId: 'parent', depth: 1 })
 })
+
+// ── FR2: the official member path passthrough (Direct + Remote) ─────────────
+
+test('Direct retains the official path verbatim and never fabricates one', async () => {
+  const source: DirectTaskReadSource = {
+    agentFor: (id) => ({ status: id === 'root' ? 'running' : 'inactive' }),
+    subagents: {
+      async listDescendants() {
+        return [
+          { kind: 'child', id: 'a', label: 'child a', mode: 'continuable', activity: 'inactive', hasChildren: true, parentId: 'root', depth: 1, path: 'reviewer' },
+          { kind: 'child', id: 'b', label: 'child b', mode: 'continuable', activity: 'inactive', hasChildren: false, parentId: 'a', depth: 2, path: 'reviewer/checker' },
+          // A same-name LABEL with no official path must never become a path.
+          { kind: 'child', id: 'c', label: 'reviewer', mode: 'continuable', activity: 'inactive', hasChildren: false, parentId: 'root', depth: 1 },
+        ]
+      },
+    },
+    jobs: { list: () => [] },
+  }
+  const snapshot = await new DirectTaskReader(source).readDescendants('root')
+  const byId = new Map(snapshot!.descendants.map(entry => [entry.id, entry]))
+  const pathOf = (id: string): string | undefined => {
+    const entry = byId.get(id)
+    return entry?.kind === 'child' ? entry.path : undefined
+  }
+  assert.equal(pathOf('a'), 'reviewer')
+  assert.equal(pathOf('b'), 'reviewer/checker')
+  assert.equal(pathOf('c'), undefined, 'a label equal to a name is never used as a path')
+})
+
+test('Remote computes Root-relative paths from official names (nested / unnamed ancestor / external)', async () => {
+  const generations = createSnapshotGenerationHarness()
+  const client = sessionsFixture({
+    byId: { root: { running: true } },
+    projections: {
+      root: {
+        state: 'ready',
+        entries: [
+          { id: 's-rev', createdAt: 10, mode: 'continuable', label: 'child s-rev', name: 'reviewer' },
+          { id: 's-unnamed', createdAt: 10, mode: 'continuable', label: 'child unnamed' },
+          { id: 's-ext', createdAt: 10, mode: 'external', label: 'external run', name: 'ext-run' },
+          // A same-name LABEL with no name must never become a path.
+          { id: 's-label', createdAt: 10, mode: 'continuable', label: 'reviewer' },
+        ],
+      },
+      's-rev': { state: 'ready', entries: [{ id: 's-check', createdAt: 10, mode: 'continuable', label: 'child check', name: 'checker' }] },
+      's-unnamed': { state: 'ready', entries: [{ id: 's-deep', createdAt: 10, mode: 'continuable', label: 'deep', name: 'deep' }] },
+      's-ext': { state: 'ready', entries: [] },
+      's-label': { state: 'ready', entries: [] },
+      's-check': { state: 'ready', entries: [] },
+      's-deep': { state: 'ready', entries: [] },
+    },
+  })
+  const reader = new RemoteTaskReader(client, jobsFixture({}), generations.source)
+  const snapshot = await reader.readDescendants('root')
+  const byId = new Map(snapshot!.descendants.map(entry => [entry.id, entry]))
+  const pathOf = (id: string): string | undefined => {
+    const entry = byId.get(id)
+    return entry?.kind === 'child' ? entry.path : undefined
+  }
+  assert.equal(pathOf('s-rev'), 'reviewer', 'a direct child path is its own name')
+  assert.equal(pathOf('s-check'), 'reviewer/checker', 'a nested child joins the parent path')
+  assert.equal(pathOf('s-ext'), 'ext-run', 'an external leaf carries its name path')
+  assert.equal(pathOf('s-unnamed'), undefined, 'an unnamed child has no path')
+  assert.equal(pathOf('s-deep'), undefined, 'an unnamed ancestor below the root makes the whole path undefined')
+  assert.equal(pathOf('s-label'), undefined, 'a same-name label is never a path')
+})

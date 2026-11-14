@@ -30,11 +30,12 @@ import { fullQuestionRows, questionIdentityOf, quickQuestionRows } from './task-
 import type { QuestionAttentionRow } from './question-controller.ts'
 import type { JobInspectorHandle, TuiApp, WorkflowAction } from '../../tui-app.ts'
 import type { SurfaceDisplaySeam, DisplayActivityFacts } from './display-seam.ts'
-import type { TaskBrowserPresentationHandle, TaskCenterPresentationPort } from './task-presentation-port.ts'
+import type { TaskBrowserPresentationHandle, TaskCenterPresentationPort, TeamBrowserPresentation, TeamMemberPresentation } from './task-presentation-port.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { SessionSubject } from '../session/subject.ts'
 import type { JobObservationPort, JobObservedSnapshot, JobStopOutcome } from '../../runtime/job-observation-port.ts'
 import type { SubagentInterruptOutcome } from '../../runtime/subagent-port.ts'
+import type { TeamBoardReadPort } from '../../runtime/team-board-read-port.ts'
 import { runOwned } from '../../runtime/process/tasks.ts'
 import { runSyncDisposalSteps, runSyncDisposalStepsWithPrimary } from '../../runtime/process/disposal.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
@@ -118,6 +119,13 @@ export interface TaskSurfaceSource {
   readonly jobObservation: JobObservationPort
   readonly jobs?: TaskSurfaceJobs
   readonly taskRead?: TaskSurfaceRead
+  /**
+   * FR2: the READ-ONLY Team board source of the exact captured Root Session
+   * (`backend.teamBoard`). Optional so a composition without a Team board
+   * (tests, a backend without the projection) simply presents Work-only;
+   * production always supplies it. It NEVER carries a Team write.
+   */
+  readonly teamBoard?: TeamBoardReadPort
 }
 
 /** The task-center lifetime inputs the surface borrows from the runner. */
@@ -477,6 +485,8 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
   let taskBrowserScope: TaskBrowserDatasetScope = { kind: 'all' }
   let activeTaskBrowser: TaskBrowserPresentationHandle | undefined
   let activeTaskBrowserToken: object | undefined
+  /** FR2: the ONE Team board subscription of the CURRENT browser lifetime. */
+  let activeTeamSubscription: (() => void) | undefined
   /** The open browser's mode (always `'full'` when a browser is open — the
    *  Quick modal is retired; Full lists every actionable attention row).
    *  `undefined` = no browser open. */
@@ -604,6 +614,68 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     taskBrowserScope = { kind: 'all' }
     taskRuntime?.setScope({ kind: 'all' })
   }
+  /** Release the CURRENT browser lifetime's ONE Team board subscription. */
+  const releaseTeamSubscription = (): void => {
+    const sub = activeTeamSubscription
+    activeTeamSubscription = undefined
+    sub?.()
+  }
+  /**
+   * The READ-ONLY Team page members: the official Subagent catalog rows the
+   * current commit already produced (member NAME is the official `path ?? childId`),
+   * plus the Root (`lead`, its activity read from the live source). Never a
+   * second catalog traversal and never the task owner fields.
+   */
+  const projectTeamMembers = (rootSessionId: string): TeamMemberPresentation[] => {
+    const source = taskCenter()
+    const rootActivityRaw = source.taskRead?.activityOf(rootSessionId)
+    const rootActivity: TeamMemberPresentation['activity'] = rootActivityRaw === 'running'
+      ? 'running' : rootActivityRaw === 'idle' ? 'idle' : 'unknown'
+    const members: TeamMemberPresentation[] = [{
+      value: `member:${rootSessionId}`,
+      id: rootSessionId,
+      name: 'lead',
+      activity: rootActivity,
+      kind: 'root',
+      depth: 0,
+    }]
+    for (const row of taskBrowserGlobalRows) {
+      if (row.kind === 'subagent') {
+        members.push({
+          value: `member:${row.childId}`,
+          id: row.childId,
+          name: row.path ?? row.childId,
+          activity: row.activity,
+          kind: 'subagent',
+          depth: row.depth,
+        })
+      } else if (row.kind === 'external') {
+        members.push({
+          value: `member:${row.childId}`,
+          id: row.childId,
+          name: row.path ?? row.childId,
+          activity: 'unknown',
+          kind: 'external',
+          depth: row.depth,
+        })
+      }
+    }
+    return members
+  }
+  /**
+   * Build the READ-ONLY Team page DTO for one captured Root Session. Returns
+   * undefined ONLY for a CONFIRMED child (`not-root`) or when no Team board
+   * source exists — both are Work-only. A `session-missing` / `authority-missing`
+   * / `stale` board is NOT a child, so it presents an explicit Team error page
+   * (never fabricated empty tasks) and keeps its subscription for recovery.
+   */
+  const buildTeamPresentation = (sessionId: string): TeamBrowserPresentation | undefined => {
+    const board = taskSource?.teamBoard
+    if (board === undefined) return undefined
+    const snapshot = board.read(sessionId)
+    if (snapshot.kind === 'unavailable' && snapshot.cause === 'not-root') return undefined
+    return { snapshot, members: projectTeamMembers(sessionId) }
+  }
   // The four coordinator commits: the row-identity source for the open
   // browser's select path always reflects the latest commit, and the repaint
   // targets ONLY the open handle. Every commit keeps the runner's `cleanedUp`
@@ -654,6 +726,16 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     if (activeTaskBrowserMode === undefined) {
       // No browser open: only the select-path identity source is updated.
       return
+    }
+    // FR2: an OPEN Team page re-projects its members from THIS commit (the same
+    // global rows) and its snapshot from the live board — never a second
+    // catalog traverse. The panel repaints only while the Team page is visible.
+    if (activeTeamSubscription !== undefined) {
+      const sessionId = taskCenter().sessionId()
+      if (sessionId !== undefined) {
+        const next = buildTeamPresentation(sessionId)
+        if (next !== undefined) activeTaskBrowser?.setTeamPage?.(next)
+      }
     }
     activeTaskBrowser?.setItems(taskPanelItemsWithAttention(rows), preferred)
   }
@@ -1183,6 +1265,10 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     options.attention.publish()
     const initialPreferred = taskBrowserRows.find(row => row.kind === 'subagent' && row.activity === 'running')?.value
       ?? taskBrowserRows.find(row => row.kind === 'job' && isActiveJobStatus(row.status))?.value
+    // FR2: an ordinary (non scoped) browser reads the Team board SYNCHRONOUSLY
+    // for the captured Root Session — never for a Workflow scope, whose browser
+    // stays Work-only by contract. A confirmed child / no board yields Work-only.
+    const teamPresentation = scope === undefined ? buildTeamPresentation(browserSessionId) : undefined
     const handle = options.presentation().openBrowser(
       taskPanelItemsWithAttention(taskBrowserRows),
       // Selection disposition decides whether the browser survives: a Job
@@ -1205,6 +1291,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
           activeTaskBrowserToken = undefined
           activeTaskBrowserMode = undefined
           resetTaskBrowserScope()
+          releaseTeamSubscription()
         }
         return 'close'
       },
@@ -1221,6 +1308,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
           activeTaskBrowserToken = undefined
           activeTaskBrowserMode = undefined
           resetTaskBrowserScope()
+          releaseTeamSubscription()
         }
         // B4-B: the Quick→Full promotion restore tail is retired with the
         // modal Quick — a Full browser closes to the editor (the on-demand
@@ -1238,6 +1326,15 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         maxVisible: 18,
         loading: runtime !== undefined && taskBrowserRows.length === 0,
         groupLabels: true,
+        ...(teamPresentation === undefined ? {} : {
+          team: teamPresentation,
+          // The physical pointer final admission: the captured subject is still
+          // current, the browser token still owns the slot, and cleanup has not
+          // started. Read lazily by the panel's tab/filter/Team hit paths.
+          interactionCurrent: () => !options.isCleanedUp()
+            && activeTaskBrowserToken === browserToken
+            && source.subjectMatches(browserSubject),
+        }),
         onRefresh: () => {
           if (options.isCleanedUp()) return
           if (runtime === undefined) {
@@ -1274,6 +1371,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
           // preservation branch with the modal Quick.)
           const childCloser = activeJobViewerClose
           runSyncDisposalSteps('task browser retire', [
+            () => releaseTeamSubscription(),
             () => resetTaskBrowserScope(),
             () => childCloser?.(),
           ])
@@ -1287,6 +1385,22 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       activeTaskBrowserMode = viewMode
     } else {
       handle.close()
+    }
+    // FR2: ONE Team board subscription per browser lifetime, registered ONLY
+    // when the browser really presents the Team page. Its callback re-checks
+    // the same fences as every other late result before repainting.
+    if (teamPresentation !== undefined && activeTaskBrowserToken === browserToken) {
+      releaseTeamSubscription()
+      const board = source.teamBoard
+      if (board !== undefined) {
+        activeTeamSubscription = board.subscribe(browserSessionId, () => {
+          if (options.isCleanedUp()) return
+          if (activeTaskBrowserToken !== browserToken) return
+          if (!source.subjectMatches(browserSubject)) return
+          const next = buildTeamPresentation(browserSessionId)
+          if (next !== undefined) activeTaskBrowser?.setTeamPage?.(next)
+        })
+      }
     }
     // Acknowledging failures is CONTINUOUS, not one-shot-at-open: the
     // panel reports each attention row the first time it enters the
@@ -1596,6 +1710,9 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       activeTaskBrowser = undefined
       activeTaskBrowserToken = undefined
       activeTaskBrowserMode = undefined
+      // The old session's Team board subscription is retired with the browser
+      // BEFORE any closer runs (a reentrant callback must not repaint it).
+      releaseTeamSubscription()
       // Retire the browser GENERATION as part of the same precommit, BEFORE any
       // closer runs: a pending navigation tail that closed over the retired
       // browser (a reset triggered synchronously from a plugin focus callback
@@ -1685,6 +1802,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       activeTaskBrowser = undefined
       activeTaskBrowserToken = undefined
       activeTaskBrowserMode = undefined
+      releaseTeamSubscription()
       taskBrowserEpoch += 1
     },
   }

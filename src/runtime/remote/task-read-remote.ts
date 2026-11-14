@@ -70,6 +70,12 @@ export interface RemoteSubagentCatalogEntry {
   readonly createdAt: number
   readonly mode: 'one-shot' | 'continuable' | 'external' | 'unknown'
   readonly label?: string
+  /**
+   * The child's name among its creator's children (official
+   * `SubagentCatalogEntry.name`); absent on historical entries. It is the ONE
+   * durable path segment — never derived from a label or task owner.
+   */
+  readonly name?: string
 }
 
 /** The official client-safe job projection fields the Task Center rows read. */
@@ -115,6 +121,19 @@ interface CatalogPosition {
   readonly entry: RemoteSubagentCatalogEntry
   readonly parentId: string
   readonly depth: number
+  /** The creator's Root-relative path, or undefined when an ancestor is unnamed. */
+  readonly parentPath: string | undefined
+}
+
+/**
+ * The official `joinAgentPath` semantics (dsh-subagent/names): the root's path
+ * is `''`, a child of the root is its own name, a deeper child is
+ * `${parentPath}/${name}`, and ANY undefined link (unnamed child or unnamed
+ * ancestor) makes the whole path undefined. Never fabricated.
+ */
+function joinAgentPath(parentPath: string | undefined, name: string | undefined): string | undefined {
+  if (parentPath === undefined || name === undefined) return undefined
+  return parentPath === '' ? name : `${parentPath}/${name}`
 }
 
 /**
@@ -281,16 +300,19 @@ export class RemoteTaskReader implements TaskReader {
     if (rootEntries === undefined) return undefined
 
     const stack: CatalogPosition[] = rootEntries
-      .map(entry => ({ entry, parentId: parentSessionId, depth: 1 }))
+      .map(entry => ({ entry, parentId: parentSessionId, depth: 1, parentPath: '' }))
       .reverse()
     const visited = new Set<string>([parentSessionId])
     const descendants: TaskSubagentEntry[] = []
     for (let position = stack.pop(); position !== undefined; position = stack.pop()) {
       signal?.throwIfAborted()
       if (!this.isCurrent(capturedGeneration, epoch)) return undefined
-      const { entry, parentId, depth } = position
+      const { entry, parentId, depth, parentPath } = position
       if (visited.has(entry.id)) continue
       visited.add(entry.id)
+      // The durable Root-relative path this child would carry; propagated to
+      // its children below (undefined once any link in the chain is unnamed).
+      const path = joinAgentPath(parentPath, entry.name)
       // The child's OWN catalog settles `hasChildren` and drives recursion. Its
       // failure stops ONLY this branch and becomes a diagnostic (see the catch
       // below): the branch-isolation policy is the owner-ruled Remote contract, and
@@ -355,11 +377,12 @@ export class RemoteTaskReader implements TaskReader {
           hasChildren: children.length > 0,
           parentId,
           depth,
+          ...(path === undefined ? {} : { path }),
         }))
       }
       // Catalog event order defines siblings; the stack visits the first one next.
       for (const child of [...children].reverse()) {
-        stack.push({ entry: child, parentId: entry.id, depth: depth + 1 })
+        stack.push({ entry: child, parentId: entry.id, depth: depth + 1, parentPath: path })
       }
     }
 

@@ -35,6 +35,7 @@ export type TaskReadMismatchField =
   | 'child.hasChildren'
   | 'child.parentId'
   | 'child.depth'
+  | 'child.path'
   | 'diagnostic.reason'
   | 'diagnostic.parentId'
   | 'diagnostic.depth'
@@ -214,6 +215,7 @@ function compareChild(
   pushFieldMismatch(mismatches, 'child.hasChildren', expected.id, expected.hasChildren, actual.hasChildren)
   pushFieldMismatch(mismatches, 'child.parentId', expected.id, expected.parentId, actual.parentId)
   pushFieldMismatch(mismatches, 'child.depth', expected.id, expected.depth, actual.depth)
+  pushFieldMismatch(mismatches, 'child.path', expected.id, expected.path, actual.path)
 }
 
 function compareChildren(
@@ -279,6 +281,7 @@ function taskRowsOf(snapshot: TaskReadSnapshot): readonly TaskBrowserRow[] {
       hasChildren: entry.hasChildren,
       parentId: entry.parentId,
       depth: entry.depth,
+      ...(entry.path === undefined ? {} : { path: entry.path }),
     }
     : {
       kind: 'diagnostic',

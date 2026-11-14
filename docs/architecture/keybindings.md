@@ -150,6 +150,21 @@ fullscreen footers, the disabled action, the pure-remap case (the conditional
 re-enabling restores both the hint and the real route through the keymap
 rebuild alone.
 
+### The Task Center Work/Team component keys
+
+The Full Task Center (`/tasks`) owns its own non-configurable `tasks.*` keys
+while it holds the focused seat. `Tab`/`Shift+Tab` — the `tasks.tab.next` /
+`tasks.tab.previous` actions — switch between the `Work` and `Team` pages; the
+former `tasks.type.next` / `tasks.type.previous` type-cycling actions are
+RETIRED. The explicit `tasks.type.filter` (`f`) opens the Work type list (`All`
+plus the types the current Work rows own), applied with `Enter` and cancelled
+with `Esc`. In Work search mode a printable `f` is query text, while
+`Tab`/`Shift+Tab` switch pages and preserve each page's own query, cursor and
+search mode. A pending Work Stop consumes `Tab`/`Shift+Tab` WITHOUT switching
+pages, and the open type list consumes them without leaving the list. These
+keys are scope `tasks`, `configurable: false`, and never alter the global Host
+keymap or `app.tasks.open`.
+
 ## Key decisions
 
 1. **One canonical physical-key identity.** Every key spelling collapses

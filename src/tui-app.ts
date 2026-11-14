@@ -193,6 +193,7 @@ import type { WorkspaceFactsFrame } from './runtime/session-workspace-facts-port
 import type { ScheduleIntent, ScheduleWorkspaceSnapshot } from './app/schedule/presentation.ts'
 import type { TaskPanelItem } from './app/surface/task-presentation.ts'
 import type { JobInspectorState, TaskBrowserViewState } from './app/surface/task-runtime.ts'
+import type { TeamBrowserPresentation } from './app/surface/task-presentation-port.ts'
 import type { TaskBrowserSummary } from './app/surface/task-browser-runtime.ts'
 import type { StatusStore } from './domain/status/store.ts'
 import type { DisplayState, DisplayPreset, DisplayPresetApplyResult } from './domain/display/preset.ts'
@@ -1789,6 +1790,11 @@ export interface TaskBrowserOptions {
    * observer that lives under this browser.
    */
   onRetired?: (reason: TaskBrowserCloseReason) => void
+  /** FR2: the READ-ONLY Team page DTO. Absent = Work-only (no Team tab). */
+  team?: TeamBrowserPresentation
+  /** FR2: physical pointer final admission (captured subject / browser token /
+   *  non-cleanup), read by the tab/filter/Team hit paths. */
+  interactionCurrent?: () => boolean
 }
 
 /** Live control of an open picker. */
@@ -2195,6 +2201,8 @@ export interface TaskBrowserHandle {
   setItems(items: readonly TaskPanelItem[], preferredValue?: string): void
   /** Update loading/ready/stale state without replacing cached rows. */
   setRefreshState?(state: 'loading' | 'ready' | 'stale', error?: string): void
+  /** FR2: replace the READ-ONLY Team page DTO (PiTui only). */
+  setTeamPage?(value: TeamBrowserPresentation): void
   /** Read the presentation state for tests/embedders (the full projection
    *  snapshot; the Quick→Full restore consumer retired with the modal
    *  Quick, B4-B). */
@@ -26166,6 +26174,8 @@ export class TuiApp {
         loading: options.loading,
         refreshError: options.refreshError,
         groupLabels: options.groupLabels,
+        ...(options.team === undefined ? {} : { team: options.team }),
+        ...(options.interactionCurrent === undefined ? {} : { interactionCurrent: options.interactionCurrent }),
       },
       (value) => {
         // Run the selection FIRST: a child-detail selection opens its
@@ -26252,6 +26262,10 @@ export class TuiApp {
       },
       setRefreshState: (state, error) => {
         panel.setRefreshState(state, error)
+        this.requestRender()
+      },
+      setTeamPage: (value: TeamBrowserPresentation) => {
+        panel.setTeamPage(value)
         this.requestRender()
       },
       getViewState: () => panel.getViewState(),

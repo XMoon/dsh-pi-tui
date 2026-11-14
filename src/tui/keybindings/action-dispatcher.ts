@@ -176,8 +176,9 @@ export class AppActionDispatcher {
       case 'tasks.search.enter':
       case 'tasks.search.exit':
       case 'tasks.scope.toggle':
-      case 'tasks.type.next':
-      case 'tasks.type.previous':
+      case 'tasks.tab.next':
+      case 'tasks.tab.previous':
+      case 'tasks.type.filter':
       case 'tasks.tree.expand':
       case 'tasks.tree.collapse':
       case 'tasks.stop':

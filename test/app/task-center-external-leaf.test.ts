@@ -183,7 +183,13 @@ for (const [columns, rows] of SIZES) test(`the REAL Task Center external leaf fr
   // known to the Task Center (narrow grants paint fewer rows, never fewer
   // facts). The row itself and its durable classification stay DISCERNIBLE at
   // the frozen narrow sizes (the label truncates, `external`/`External` do not).
-  assert.match(frame, /1\/1 shown/u, `the Task Center knows the external entry:\n${frame}`)
+  // FR2 adds the Work/Team tabs to a Root header, so the `n/N shown` counter —
+  // a secondary fact the short-width degradation sheds first — is only
+  // guaranteed when the header has room; the row/classification checks below
+  // are the roster fact at every size.
+  if (columns >= 120) {
+    assert.match(frame, /1\/1 shown/u, `the Task Center knows the external entry:\n${frame}`)
+  }
   assert.ok(frame.includes(LABEL) || frame.includes('exte'),
     `the external row is painted at ${columns} columns:\n${frame}`)
   assert.match(frame, /External/u, `the classification word is painted at ${columns} columns:\n${frame}`)
