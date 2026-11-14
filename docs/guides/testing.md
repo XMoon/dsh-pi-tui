@@ -317,8 +317,14 @@ redactor is applied only to Web-case scopes. `SPLIT_PROCESS_TRACE=<path>` still
 appends optional JSONL business facts and is not required to diagnose a failure.
 
 The lane has one command entry with a strict selector. The DEFAULT form (no
-selector) is the complete qualification: it runs every registered case in the
-registry order and emits T60 only from the actual successful case results:
+selector) is the complete qualification of the DEFAULT LANE: it runs every
+registry case that is not marked selectable-only, in registry order, and emits
+T60 only from the actual successful case results. Environment-gated native real-OS
+cases (for example the `managed-host` systemd suite) carry `defaultLane: false`;
+the default lane never invokes them and reports
+`managed-host native cases NOT_RUN (selectable-only)`, so it stays safe and stable
+on hosts with no isolated test environment. Run those cases explicitly with
+`--case` / `--suite`:
 
 ```sh
 pnpm smoke:split-process -- <candidate.tgz>               # complete lane
@@ -328,9 +334,9 @@ pnpm smoke:split-process -- <candidate.tgz> --case <id>
 pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> [--evidence <file>]
 ```
 
-`--list` prints the selectable registry (`SPLIT_PROCESS_SELECTABLE_CASES
-scope=SELECTABLE_ONLY`) and exits without resolving a candidate, creating a
-work root or installing anything. `--suite` and `--case` run only the
+`--list` prints the full selectable registry — including the selectable-only
+native cases — (`SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY`) and exits
+without resolving a candidate, creating a work root or installing anything. `--suite` and `--case` run only the
 registered cases of that suite/id through their own isolated installation and
 print one `SPLIT_PROCESS_SELECTED_PASS id=… scope=SELECTABLE_ONLY` per case;
 that output names the selectable subset only — it never claims the complete
