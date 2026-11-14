@@ -355,9 +355,11 @@ export function createTspTranscriptSearch(
     const revision = binding.revision(owner.source)
     if (revision === undefined || revision === owner.lastRevision) return
     diagnostics.refreshes += 1
-    const previousRevision = owner.queryRevision
     owner.queryRevision += 1
-    query(owner, previousRevision)
+    // NO refinement here: the Folder revision moved, so the previous matches can
+    // never satisfy the Folder's own revision check — asking for a full scan
+    // directly is the honest form of the same answer.
+    query(owner)
     change(owner)
   }
 
@@ -424,10 +426,12 @@ export function createTspTranscriptSearch(
   /** Start one query round: bump the revision FIRST so any intent or frame of
    *  the previous round is refused by identity. */
   const schedule = (owner: SearchSeatState): void => {
-    const previousRevision = owner.queryRevision
     owner.queryRevision += 1
     diagnostics.queries += 1
-    query(owner, previousRevision)
+    // The refinement's `revision` is the FOLDER revision the current matches
+    // were computed on (the Folder rejects anything else and falls back to a
+    // full scan), never this seat's own fence counter.
+    query(owner, owner.lastRevision)
     change(owner)
   }
 
@@ -682,7 +686,12 @@ export function createTspTranscriptSearch(
     desiredFocusId: () => {
       const owner = state
       if (owner === undefined || owner.retired || owner.phase !== 'open') return undefined
-      return frameIds.get(queryKeyOf(owner.openSerial))
+      // The caret follows THE RING: after a Tab the ladder must not pull it back
+      // to the query on the next commit. ONE fact serves both the Tab cycle and
+      // the post-commit focus (the same mapping, never a second copy).
+      return frameIds.get(owner.focusControl === 'query'
+        ? queryKeyOf(owner.openSerial)
+        : actionKeyOf(owner, owner.focusControl))
     },
     controlFocusId: (control) => {
       const owner = state

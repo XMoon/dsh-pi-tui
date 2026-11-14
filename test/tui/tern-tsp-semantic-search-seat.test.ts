@@ -422,6 +422,19 @@ test('Tab / Shift+Tab cycle the seat\'s own focus ring (Query → Prev → Next 
   assert.deepEqual(seen, ['close'], 'Shift+Tab walks the ring backwards')
 })
 
+test('the refinement offers the FOLDER revision the current matches were computed on', () => {
+  const scripted = scriptedBinding([match(1, { kind: 'message' })])
+  const { ports: seatPorts } = ports()
+  const seat = createTspTranscriptSearch(seatPorts, scripted.binding, () => true)
+  seat.open()
+  seat.handleKey(key('x', { text: 'x' }))
+  // The scripted Folder's revision is 1 (nothing changed it): the refinement the
+  // seat offered must carry THAT value, not the seat's own fence counter.
+  const refinement = scripted.calls.at(-1)?.refinement as { revision?: number } | undefined
+  assert.equal(refinement?.revision, 1,
+    `the refinement names the Folder revision :: ${JSON.stringify(scripted.calls.at(-1))}`)
+})
+
 test('refresh is a NO-OP while the Folder revision is unchanged, and re-queries on a real change', () => {
   const scripted = scriptedBinding([match(1, { kind: 'message' })])
   const { ports: seatPorts } = ports()

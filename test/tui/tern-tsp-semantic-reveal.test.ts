@@ -555,6 +555,83 @@ test('a hit on a workflow member label opens the run and that phase for the CURR
     'closing the search retracts the workflow grant (the manual state is untouched)')
 })
 
+test('the Tab ring survives a repaint: the caret is not pulled back to the query', async (t) => {
+  const h = await mountSearchPane(t)
+  h.key(ALT_SHIFT_S)
+  await h.painted(() => h.cardPainted(), 'the card painted')
+  h.key('\t')
+  await h.absent()
+  const afterTab = h.focusOps().at(-1)
+  assert.ok(typeof afterTab === 'string' && !afterTab.includes('-query'),
+    `Tab moved the caret off the query field :: ${String(afterTab)}`)
+  // Any status/revision repaint must NOT pull the caret back to the query.
+  h.renderer.display.commitDisplaySubject({}, {}, undefined)
+  await h.absent()
+  const afterRepaint = h.focusOps().at(-1)
+  assert.equal(afterRepaint, afterTab,
+    `the ring survived the repaint :: ${String(afterRepaint)}`)
+})
+
+test('the Tasks footer action is NOT advertised while the Search card owns the Dock', async (t) => {
+  // The Tasks action needs the picker + Reader capabilities AND the real bound
+  // business entry: this is the ONE honest way to paint it at all.
+  const pane = installTspPane({
+    composerActions: true,
+    transcriptSearch: true,
+    workDetails: true,
+    modelPicker: true,
+  })
+  t.after(() => pane.restore())
+  const session = await connect({ timeout: 500, exitHooks: false })
+  assert.ok(session)
+  const folder = seedFolder()
+  const scripted = folderBinding(folder)
+  const renderer = mountTspRenderer(session, {
+    copyVisual: async () => true,
+    requestExit: () => {},
+    onFatal: (error) => { throw error },
+    displayState: { preset: 'full' },
+  })
+  t.after(() => renderer.dispose())
+  renderer.bindTranscriptSemanticSearch(scripted.binding)
+  renderer.bindInput({
+    exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {},
+    pasteMedia: () => {}, pastedPath: () => {}, selectPermission: () => {},
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
+    noteUserInput: () => {}, listContinuedQuestions: () => [],
+    reopenContinuedQuestion: () => false, openModelPicker: () => {},
+    openModelQuick: () => {}, modelPickerAvailable: () => false,
+    openSessionBrowser: () => {}, sessionBrowserAvailable: () => false,
+    openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
+  })
+  // The Tasks segment renders only with a REAL task fact, so the positive
+  // control needs a live task count in the committed status.
+  const tasksStatus = {
+    ...emptyStatusSnapshot(),
+    activity: { ...emptyStatusSnapshot().activity, taskCount: 1 },
+  }
+  renderer.bindStatusReader({ snapshot: () => tasksStatus })
+  renderer.display.commitDisplaySubject({}, {}, undefined)
+  renderer.display.setTranscript(folder.messages(), undefined, { mode: 'latest', hasNewer: false }, [], undefined, SOURCE)
+  await waitUntil('the composer painted', () => wireNodes(pane).some(node => node.id === 'dock.quiet-composer.composer'))
+  // reason: the transcript/status frames land only when the pane's ack returns
+  // credit, so the observation window lets that async ack flush the frames.
+  await settle(300)
+  // The Tasks action rides a segment's `actions` OBJECT ({click: act}), not an
+  // array: serialize whatever the node carries so the assertion reads the real
+  // wire shape.
+  const actionsOf = () => wireNodes(pane)
+    .map(node => JSON.stringify(node.p['actions'] ?? ''))
+    .filter(text => text.includes('dsh.footer.tasks'))
+  // The closed frame DOES advertise the Tasks action (the positive control).
+  assert.equal(actionsOf().some(act => act.includes('tasks')), true,
+    'the closed frame carries the Tasks action')
+  await pane.key(ALT_SHIFT_S)
+  await waitUntil('the card painted', () => wireNodes(pane).some(node => node.id.includes('search-card')))
+  assert.equal(actionsOf().some(act => act.includes('tasks')), false,
+    'the search-open frame paints NO Tasks click affordance')
+})
+
 // ── E. Currentness: a dead source retires the card ───────────────────────────
 
 test('a source that stops being current retires the card and restores the Composer', async (t) => {
