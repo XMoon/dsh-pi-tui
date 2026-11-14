@@ -253,3 +253,17 @@ test('Remote board disposer is idempotent even when a lower-layer off is not', (
   assert.equal(genOffCalls, 1, 'the generation off runs once')
   assert.equal(faceOffCalls, 1, 'the face off runs once')
 })
+
+test('Remote board subscribe refuses a binding-absent Session whose list origin proves a child', () => {
+  const s = makeSessions(undefined)
+  s.setOrigin('subagent')
+  const gen = generation({ id: 'g' })
+  const port = new RemoteTeamBoardReadPort({ sessions: s.sessions, connection: { generation: gen } })
+  let calls = 0
+  const dispose = port.subscribe('root', () => { calls += 1 })
+  gen.set({ id: 'g2' })
+  s.emitList()
+  assert.equal(calls, 0, 'a list-origin child receives no callback')
+  assert.equal(s.listSize(), 0, 'no Session-list listener is installed for a list-origin child')
+  dispose()
+})
