@@ -68,11 +68,13 @@ export class TeamDisableConfirmation implements Component, Focusable {
   private focus: Focus = 'cancel'
   private disposed = false
   private readonly unsubscribe: () => void
-  /** Painted-frame identity for the click gesture fence. */
-  private frameSeq = 0
+  /** Last painted action geometry for the click gesture fence. A real click's
+   *  release arrives after the press's own focus repaint, so the fence is the
+   *  painted WIDTH + action identity, never a render counter. */
   private lastFrameWidth = 0
+  private lastActionRow = -1
   private lastActionHits: readonly ActionHit[] = []
-  private pressed: { readonly action: 'cancel' | 'confirm'; readonly frameSeq: number } | undefined
+  private pressed: { readonly action: 'cancel' | 'confirm' } | undefined
 
   get focused(): boolean {
     return true
@@ -120,20 +122,20 @@ export class TeamDisableConfirmation implements Component, Focusable {
     if (this.disposed) return undefined
     const pressed = this.pressed
     if (event.type === 'click' || (event.type === 'press' && event.button === 'left')) this.pressed = undefined
-    if (event.width !== this.lastFrameWidth) return undefined
+    if (event.width !== this.lastFrameWidth || event.y !== this.lastActionRow) return undefined
     const hit = this.lastActionHits.find(candidate => event.x >= candidate.start && event.x < candidate.end)
     if (hit === undefined) return undefined
     if (event.type === 'press') {
       if (event.button !== 'left') return undefined
-      this.pressed = { action: hit.action, frameSeq: this.frameSeq }
+      this.pressed = { action: hit.action }
       this.focus = hit.action
       this.options.requestRender()
       return { handled: true, focus: true }
     }
     if (event.type !== 'click' || event.button !== 'left') return undefined
-    // Only the SAME action on the SAME painted frame may activate: a repaint,
-    // resize, re-hydration or focus change invalidates the gesture.
-    if (pressed === undefined || pressed.action !== hit.action || pressed.frameSeq !== this.frameSeq) return undefined
+    // Only the SAME action at the CURRENT painted geometry may activate: a
+    // resize/re-hydration changes the width/row/segment and rejects.
+    if (pressed === undefined || pressed.action !== hit.action) return undefined
     this.activate(hit.action)
     return { handled: true }
   }
@@ -151,7 +153,6 @@ export class TeamDisableConfirmation implements Component, Focusable {
 
   render(width: number): string[] {
     const lines: string[] = []
-    this.frameSeq += 1
     this.lastFrameWidth = width
     this.lastActionHits = []
     lines.push(truncateToWidth(color.textStrong('Disable Agent Team'), width, ''))
@@ -171,6 +172,7 @@ export class TeamDisableConfirmation implements Component, Focusable {
     lines.push('')
     const status = this.statusLine()
     if (status !== undefined) lines.push(truncateToWidth(status, width, ''))
+    this.lastActionRow = lines.length
     const actionRow = this.renderActions(width)
     lines.push(actionRow.line)
     this.lastActionHits = actionRow.hits

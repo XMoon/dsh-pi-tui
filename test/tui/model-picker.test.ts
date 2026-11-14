@@ -2403,6 +2403,13 @@ test('an 88x28 overlay shows more than eight model rows for a tall directory', a
     default: { provider: 'p1', model: 'm0' },
   })
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'm0' }, columns: 88, rows: 28 })
+  // The overlay must actually request the 88-wide step, not merely be mounted
+  // on an 88-column terminal.
+  const topBorder = linesOf(h.vt).find(line => line.includes('╭'))
+  assert.ok(topBorder !== undefined, `the frame must paint a top border:
+${viewOf(h.vt)}`)
+  assert.equal(visibleWidth(topBorder!), 88, `the /model frame must be 88 wide, got ${visibleWidth(topBorder!)}:
+${viewOf(h.vt)}`)
   const modelRows = contentLinesOf(h.vt).filter(line => /(?:^|\s)Model \d\d/u.test(line))
   assert.ok(modelRows.length > 8, `the 88x28 layout must show >8 model rows, got ${modelRows.length}:\n${viewOf(h.vt)}`)
   assert.ok(rowLine(h.vt, 'Agent Team') !== undefined, `the Team row stays inside:\n${viewOf(h.vt)}`)
@@ -2452,18 +2459,28 @@ test('an effort candidate token press+click changes the draft only (never submit
   h.app.stop()
 })
 
-test('an effort token press invalidated by a repaint never acts', async () => {
+test('an effort token press survives an ordinary focus repaint but not a resize', async () => {
   const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
-  const width = 72
-  const lines = h.picker.render(width).map(stripAnsi)
+  const lines = h.picker.render(72).map(stripAnsi)
   const row = lines.findIndex(line => line.includes('Reasoning Effort'))
   const col = visibleWidth(lines[row]!.slice(0, lines[row]!.indexOf('Low')))
-  h.picker.handleMouse(mouse('press', col, row, width, 24))
-  h.picker.render(width) // a repaint advances the frame sequence
-  h.picker.handleMouse(mouse('click', col, row, width, 24))
-  const after = h.picker.render(width).map(stripAnsi)
-  assert.equal(effortLineOf(after) && /\[Medium\]/u.test(effortLineOf(after)!), true,
-    `a press invalidated by a repaint must not change the draft:\n${after.join('\n')}`)
+  h.picker.handleMouse(mouse('press', col, row, 72, 24))
+  h.picker.render(72) // the press's own focus repaint must NOT drop the click
+  h.picker.handleMouse(mouse('click', col, row, 72, 24))
+  const after = h.picker.render(72).map(stripAnsi)
+  assert.ok(effortLineOf(after)?.includes('[Low]'), `a normal press→repaint→release must act:\n${after.join('\n')}`)
+
+  // A genuine WIDTH change invalidates the last-painted geometry: press at 72,
+  // repaint at 60, then release at 60 must not act on a re-derived token.
+  const wide = h.picker.render(72).map(stripAnsi)
+  const wideRow = wide.findIndex(line => line.includes('Reasoning Effort'))
+  const wideCol = visibleWidth(wide[wideRow]!.slice(0, wide[wideRow]!.indexOf('Medium')))
+  h.picker.handleMouse(mouse('press', wideCol, wideRow, 72, 24))
+  h.picker.render(60) // the resize repaint at a different width
+  h.picker.handleMouse(mouse('click', wideCol, wideRow, 60, 24))
+  const resizedAfter = h.picker.render(60).map(stripAnsi)
+  assert.ok(resizedAfter.some(line => line.includes('Effort: Low')),
+    `a resize between press and release must not change the draft:\n${resizedAfter.join('\n')}`)
   h.app.stop()
 })
 
@@ -2476,6 +2493,8 @@ test('a Team token press+click toggles via the admitted write', async () => {
   assert.ok(row >= 0, lines.join('\n'))
   const col = visibleWidth(lines[row]!.slice(0, lines[row]!.indexOf('On')))
   assert.equal(h.picker.handleMouse(mouse('press', col, row, width, 24))?.handled, true, 'the press hits the On token')
+  // A normal focus repaint between press and release must still commit.
+  h.picker.render(width)
   assert.equal(h.picker.handleMouse(mouse('click', col, row, width, 24))?.handled, true, 'the click hits the On token')
   await h.vt.waitForRender()
   assert.equal(team.beginCalls, 1)

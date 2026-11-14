@@ -203,10 +203,12 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   /** One gesture-level refusal/notice (e.g. "another operation is in progress"). */
   private teamNotice: string | undefined
   private readonly unsubscribeTeam: (() => void) | undefined
-  /** Last painted geometry for the Team/Effort hit testing. */
-  private frameSeq = 0
+  /** Last painted geometry for the Team/Effort hit testing. The press latch is
+   *  fenced on the painted WIDTH + token identity (the SearchablePicker
+   *  contract), not a render counter: an ordinary focus repaint between press
+   *  and release must NOT drop a valid click, while a resize/re-hydration that
+   *  changes the hit geometry still rejects it. */
   private lastFrame: {
-    readonly seq: number
     readonly width: number
     readonly teamRow: number
     readonly effortRow: number
@@ -214,8 +216,8 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     readonly effortHits: readonly EffortHit[]
   } | undefined
   private pressed:
-    | { readonly kind: 'team'; readonly enabled: boolean; readonly seq: number }
-    | { readonly kind: 'effort'; readonly value: string; readonly seq: number }
+    | { readonly kind: 'team'; readonly enabled: boolean }
+    | { readonly kind: 'effort'; readonly value: string }
     | undefined
 
   get focused(): boolean {
@@ -741,14 +743,15 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       if (hit === undefined) return { handled: true }
       if (event.type === 'press') {
         if (event.button !== 'left') return { handled: true }
-        this.pressed = { kind: 'team', enabled: hit.enabled, seq: frame.seq }
+        this.pressed = { kind: 'team', enabled: hit.enabled }
         this.interactionMode = { kind: 'team' }
         this.deps.requestRender()
         return { handled: true, focus: true }
       }
       if (event.type !== 'click' || event.button !== 'left') return { handled: true }
-      if (pressed === undefined || pressed.kind !== 'team'
-        || pressed.seq !== frame.seq || pressed.enabled !== hit.enabled) return { handled: true }
+      if (pressed === undefined || pressed.kind !== 'team' || pressed.enabled !== hit.enabled) {
+        return { handled: true }
+      }
       this.interactionMode = { kind: 'team' }
       this.beginTeam(hit.enabled)
       return { handled: true }
@@ -759,12 +762,13 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       if (hit === undefined) return { handled: true }
       if (event.type === 'press') {
         if (event.button !== 'left') return { handled: true }
-        this.pressed = { kind: 'effort', value: hit.value, seq: frame.seq }
+        this.pressed = { kind: 'effort', value: hit.value }
         return { handled: true, focus: true }
       }
       if (event.type !== 'click' || event.button !== 'left') return { handled: true }
-      if (pressed === undefined || pressed.kind !== 'effort'
-        || pressed.seq !== frame.seq || pressed.value !== hit.value) return { handled: true }
+      if (pressed === undefined || pressed.kind !== 'effort' || pressed.value !== hit.value) {
+        return { handled: true }
+      }
       const item = this.modelsList.getSelectedItem()
       if (item !== null) this.selectEffortDraft(item.value, hit.value)
       return { handled: true }
@@ -777,7 +781,6 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   }
 
   render(width: number): string[] {
-    this.frameSeq += 1
     // A model apply keeps the strips visible: the Team row must still show the
     // current Host state while the model write is in flight.
     const inner = this.selecting ? ['  Selecting…'] : this.modelsList.render(width)
@@ -790,7 +793,6 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     if (budget < FIXED_ROWS + 2) {
       const lines = [team.line, hint].slice(0, budget)
       this.lastFrame = {
-        seq: this.frameSeq,
         width,
         teamRow: 0,
         effortRow: -1,
@@ -810,7 +812,6 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     const effortRow = inner.length + 1
     const teamRow = inner.length + 2
     this.lastFrame = {
-      seq: this.frameSeq,
       width,
       teamRow,
       effortRow,

@@ -26772,14 +26772,14 @@ export class TuiApp {
     this.modelPickerFrame = frame
     const handle = this.showOverlayOnHost(
       frame,
-      { width: 72, maxHeight: 28 },
+      { width: 88, maxHeight: 28 },
       {
         remountable: true,
         remount: (logical) => {
           if (this.modelPickerComponent !== component) return
           const next = this.createModelPickerFrame(component)
           this.modelPickerFrame = next
-          this.rebindOverlayRaw(logical, next, { width: 72, maxHeight: 28 })
+          this.rebindOverlayRaw(logical, next, { width: 88, maxHeight: 28 })
         },
       },
     )
@@ -26787,7 +26787,7 @@ export class TuiApp {
   }
 
   private createModelPickerFrame(component: Component & RowBudgetAware): ResponsiveOverlayFrame {
-    const configuredWidth = 72
+    const configuredWidth = 88
     const configuredMaxHeight = 28
     const geometryOf = (): ResponsiveOverlayGeometry => {
       const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
