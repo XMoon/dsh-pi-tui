@@ -68,6 +68,7 @@ import {
   runManagedHostFallback,
   runManagedHostManagerError,
   runManagedHostSystemd,
+  runManagedHostTwoProfileIsolation,
 } from '../smoke/split-process/managed-host-m6-2b.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
@@ -370,6 +371,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'managed-host.m6-2b-crash-restart',
     title: 'a SIGKILLed managed Host is restarted by systemd Restart=on-failure as a NEW authenticated instance under the SAME owned unit',
     run: runManagedHostCrashRestart,
+  }),
+  Object.freeze({
+    suite: 'managed-host',
+    id: 'managed-host.m6-2b-two-profile-isolation',
+    title: 'two real Profile installations under one isolated account stay isolated: distinct scopes, Host instances and units, and stopping one profile never affects the other',
+    run: runManagedHostTwoProfileIsolation,
   }),
   Object.freeze({
     suite: 'managed-host',
