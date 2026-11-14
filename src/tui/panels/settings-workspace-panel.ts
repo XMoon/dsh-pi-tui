@@ -109,6 +109,7 @@ export type SettingsWorkspaceRowId =
   | 'footer-mode'
   | 'footer-configurator'
   | 'keyboard-shortcuts'
+  | 'mcp-servers'
   | `ext-setting:${string}`
 
 /** The prefix that separates a dynamic extension-setting row from the static
@@ -217,7 +218,7 @@ export interface SettingsWorkspaceRow {
    *  Search / Fetch settings page). It is a presentation seam only — no
    *  document field, no writer, no second lease. A row without it never has a
    *  specialist page. */
-  readonly specialist?: 'subagent-allowlist' | 'web-settings' | 'footer-configurator' | 'keybindings'
+  readonly specialist?: 'subagent-allowlist' | 'web-settings' | 'footer-configurator' | 'keybindings' | 'mcp-servers'
   /** Whether the row's specialist page may be opened RIGHT NOW. Absent = yes.
    *  A non-current authority (a stale/unavailable backend) paints the row and
    *  its last-known facts but offers no Manage action, because the page could
@@ -421,6 +422,12 @@ export interface SettingsWorkspacePanelIntents {
     done: () => void,
     onAuthoritativeChange: () => void,
   ) => EmbeddedSpecialistPage | undefined
+  /**
+   * FR3: the ONE MCP servers page factory. It returns the per-open page over
+   * the existing Settings lease; `done` returns to the Tools row that opened
+   * it. There is no writable document field and no second Observation owner.
+   */
+  readonly createMcpServersPage?: (done: () => void) => EmbeddedSpecialistPage | undefined
   /** The live terminal row budget (the panel never reads the terminal itself). */
   readonly rows: () => number
   /** The live terminal column budget (the projection's width). */
@@ -778,6 +785,7 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
     || id === 'footer-mode'
     || id === 'footer-configurator'
     || id === 'keyboard-shortcuts'
+    || id === 'mcp-servers'
     || id.startsWith(EXTENSION_SETTING_ROW_PREFIX)
 }
 
@@ -3189,18 +3197,35 @@ export class SettingsWorkspacePanel implements Component {
     // carries the specialist page, the composition supplies its factory AND the
     // row has not been refused availability.
     if (row.specialist !== undefined && row.specialistAvailable !== false) {
-      const factoryAvailable = row.specialist === 'subagent-allowlist'
-        ? this.intents.createSubagentAllowlistPicker !== undefined
-        : this.intents.createWebSettingsPage !== undefined
-      if (factoryAvailable) {
-        buttons.push({
-          verb: 'manage',
-          text: row.specialist === 'subagent-allowlist' ? 'Manage allowed models…' : 'Configure Web…',
-          id: row.id,
-        })
+      const special = this.specialistEntryFor(row.specialist)
+      if (special !== undefined) {
+        buttons.push({ verb: 'manage', text: special.label, id: row.id })
       }
     }
     return buttons
+  }
+
+  /**
+   * The ONE explicit Manage entry of a specialist row: its factory (present
+   * only when the composition supplied it) and its exact label. Each route has
+   * its own wording — an MCP row must never inherit the Web page's
+   * `Configure Web…`.
+   */
+  private specialistEntryFor(
+    specialist: NonNullable<SettingsWorkspaceRow['specialist']>,
+  ): { readonly label: string } | undefined {
+    switch (specialist) {
+      case 'subagent-allowlist':
+        return this.intents.createSubagentAllowlistPicker === undefined ? undefined : { label: 'Manage allowed models…' }
+      case 'web-settings':
+        return this.intents.createWebSettingsPage === undefined ? undefined : { label: 'Configure Web…' }
+      case 'footer-configurator':
+        return this.intents.createFooterConfiguratorPage === undefined ? undefined : { label: 'Configure footer…' }
+      case 'keybindings':
+        return this.intents.createKeybindingsPage === undefined ? undefined : { label: 'Configure shortcuts…' }
+      case 'mcp-servers':
+        return this.intents.createMcpServersPage === undefined ? undefined : { label: 'Manage MCP servers…' }
+    }
   }
 
   /** Paint the pinned action row, dropping every button that cannot fit WHOLE:
@@ -3686,7 +3711,11 @@ export class SettingsWorkspacePanel implements Component {
     // (its list or its detail) above the single Action Bar. The two C2-R5 pages
     // may be mounted with ZERO content rows (bar-only) because a command
     // deeplink must still land on them and their own bar keeps Esc reachable.
-    const floor = row.specialist === 'subagent-allowlist' ? 2 : row.specialist === 'web-settings' ? 1 : 0
+    const floor = row.specialist === 'subagent-allowlist'
+      ? 2
+      : row.specialist === 'web-settings' || row.specialist === 'mcp-servers'
+        ? 1
+        : 0
     if (this.bodyFloor() < floor) return
     let page: EmbeddedSpecialistPage | undefined
     // The page's own `done` closes THIS instance only: a stale late callback of a
@@ -3719,6 +3748,9 @@ export class SettingsWorkspacePanel implements Component {
         break
       case 'keybindings':
         page = this.intents.createKeybindingsPage?.(done, changed)
+        break
+      case 'mcp-servers':
+        page = this.intents.createMcpServersPage?.(done)
         break
     }
     if (page === undefined) return

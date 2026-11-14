@@ -2002,6 +2002,13 @@ export interface SettingsWorkspaceOpenOptions {
     done: () => void,
     onAuthoritativeChange: () => void,
   ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
+  /**
+   * FR3: the ONE same-lease MCP servers page factory. The page's controller
+   * starts its single watch only after this factory runs on the live lease.
+   */
+  readonly createMcpServersPage?: (
+    done: () => void,
+  ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
 }
 
 /** The live row handle of an OPEN `SettingsList` overlay: a section whose
@@ -27310,6 +27317,9 @@ export class TuiApp {
       ...(options.createKeybindingsPage === undefined
         ? {}
         : { createKeybindingsPage: options.createKeybindingsPage }),
+      ...(options.createMcpServersPage === undefined
+        ? {}
+        : { createMcpServersPage: options.createMcpServersPage }),
       // The clipboard capability stays the SAME Client-local `copySelection` the
       // rest of the surface already uses; the settlement re-proves THIS workspace
       // record before it may notify.

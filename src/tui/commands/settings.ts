@@ -64,6 +64,8 @@ import {
   type WebSettingsFacts,
 } from '../panels/web-settings-page.ts'
 import { ModelsWorkspacePage, type ModelsInitialView, type ModelsWorkspaceSource } from '../panels/models-workspace-page.ts'
+import { McpServersPage } from '../panels/mcp-servers-page.ts'
+import { McpServersController } from '../../app/command/mcp-servers.ts'
 import { AccountWorkspacePage, type AccountInitialView } from '../panels/account-workspace-page.ts'
 import { CredentialWorkflow, type AuthDestination } from '../../app/command/credential-workflow.ts'
 import { AccountWorkflow } from '../../app/command/account-workflow.ts'
@@ -113,6 +115,7 @@ type SettingsCommandRunner = Pick<
   | 'diag'
   | 'displayPreset'
   | 'extensions'
+  | 'mcpServers'
   | 'focusEnabled'
   | 'forceContextMeasurementResult'
   | 'gitAttributionState'
@@ -368,6 +371,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   /** The `Tools`-category Web page row id (a NAVIGATION row: it never becomes a
    *  Workspace editable field, so the editable-row count is unchanged). */
   const WEB_LAUNCHER_ROW_ID = 'web-settings'
+  /** FR3: the Tools navigation row that opens the embedded MCP servers page. */
+  const MCP_SERVERS_ROW_LABEL = 'MCP servers'
+  const MCP_SERVERS_ROW_SUMMARY = 'Inspect · probe · restart'
   /** The ACP listener runtime row's fixed description (one string so the async
    *  `refreshRow` repaint and the initial paint stay identical). */
   const ACP_RUNTIME_DESCRIPTION = 'Enable or disable the local ACP v1 Unix socket listener on THIS Split Host. '
@@ -1433,6 +1439,30 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         // workspace's body and never opens a second overlay.
         createFooterConfiguratorPage: (done, onAuthoritativeChange) => createFooterWorkspacePage(done, onAuthoritativeChange),
         createKeybindingsPage: (done, onAuthoritativeChange) => createKeybindingsWorkspacePage(done, onAuthoritativeChange),
+        // FR3: the ONE per-open MCP servers page. The controller holds only
+        // this open's transient state; it starts its ONE watch only after the
+        // real Settings lease is live (here), and the page's dispose retires it.
+        createMcpServersPage: (done) => {
+          const port = runner.mcpServers
+          if (port === undefined) return undefined
+          const controller = new McpServersController({
+            port,
+            sources: runner.config.mcpServerSources,
+            requestRender: () => { if (!app.isDisposed()) app.requestRender() },
+            runOwned: (label, task, options) => runOwned(label, task, {
+              diag: runner.diag,
+              sessionId: () => runner.currentSessionId,
+              ...(options?.signal === undefined ? {} : { isCancellation: () => options.signal?.aborted === true }),
+            }),
+          })
+          const page = new McpServersPage({
+            controller,
+            requestRender: () => { if (!app.isDisposed()) app.requestRender() },
+            done: () => { done() },
+          })
+          controller.start()
+          return page
+        },
         // The About page's two version facts: read ONCE per workspace open on
         // the Client side. `tui` is this bundle's own version and `dsh` the
         // installed Harness version — neither is derived from the other, and
@@ -3865,6 +3895,21 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // C2-R5/C2-R6/C2-R7: Footer layout, Keyboard shortcuts and the Extensions
     // rows are same-lease pages and rows of THIS workspace; no row hands the
     // user off to a second settings editor.
+    const mcpServersRow: SettingsWorkspaceRow | undefined = runner.mcpServers === undefined ? undefined : {
+      // FR3: the ONE read-only/Probe/Restart MCP management row. It carries NO
+      // `edit`: this page writes no configuration (server CRUD is a later
+      // milestone), and its Enter/Manage opens the embedded page in THIS lease.
+      id: 'mcp-servers',
+      category: 'tools',
+      label: MCP_SERVERS_ROW_LABEL,
+      summary: MCP_SERVERS_ROW_SUMMARY,
+      scope: 'DSH Host MCP manager · running instance',
+      freshness: 'runtime',
+      description: 'Inspect the ONE Host MCP manager fleet, including plugin-registered servers and retained cleanup records. '
+        + 'Probe connects to one server and lists its tools without touching the live instance; Restart rebuilds one server from its current configuration. '
+        + 'Both act on the running Host only: this page writes no configuration and shows no secret. Configuration source is shown as Unknown when the Host settings read is not current.',
+      specialist: 'mcp-servers',
+    }
     return {
       configReadiness,
       capturedAt: Date.now(),
@@ -4344,6 +4389,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           scope: 'Host Web provider settings',
           specialist: 'web-settings',
         },
+        ...(mcpServersRow === undefined ? [] : [mcpServersRow]),
         // C2-R6: the registry's live directory IS the row list. Every record is
         // projected in the Registry's own global order (order ASC, id ASC); the
         // command layer never groups or re-sorts, because the plugin GROUPS are

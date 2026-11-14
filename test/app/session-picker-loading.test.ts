@@ -10,7 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { unavailableAcpAccess, unavailableWebAccess } from '../support/web-access-fake.ts'
+import { unavailableAcpAccess, unavailableWebAccess, unavailableMcpServers } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -116,6 +116,7 @@ function harness(
     awaitWorkspacePreflight: async () => { preflight.calls += 1 },
     webAccess: unavailableWebAccess(),
     acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,

@@ -11,7 +11,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { unavailableAcpAccess, unavailableWebAccess } from '../support/web-access-fake.ts'
+import { unavailableAcpAccess, unavailableWebAccess, unavailableMcpServers } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -225,6 +225,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     deliveredFilesSnapshot: () => undefined,
     webAccess: unavailableWebAccess(),
     acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
         ...sessionScopeFacts(() => undefined, () => 0),
         sessionPolicy: unconfiguredSessionPolicyPort(),
