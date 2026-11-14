@@ -62,7 +62,9 @@ import { runPublicDaemonEntry } from '../smoke/split-process/public-daemon-entry
 import { runAcpPo1bOptInControl } from '../smoke/split-process/acp-po1b.mjs'
 import { runAcpPo2SessionView } from '../smoke/split-process/acp-po2-session-view.mjs'
 import {
+  runManagedHostAuthFailureNegative,
   runManagedHostConcurrentColdStart,
+  runManagedHostCrashRestart,
   runManagedHostFallback,
   runManagedHostManagerError,
   runManagedHostSystemd,
@@ -353,9 +355,21 @@ const CASE_REGISTRY = Object.freeze([
   }),
   Object.freeze({
     suite: 'managed-host',
+    id: 'managed-host.m6-2b-auth-failure-negative',
+    title: 'an ACTIVE managed unit is not Host readiness: a new cold Client with tampered launch identity fails closed and the live Host/unit are neither killed nor replaced',
+    run: runManagedHostAuthFailureNegative,
+  }),
+  Object.freeze({
+    suite: 'managed-host',
     id: 'managed-host.m6-2b-concurrent-cold-start',
     title: 'two public daemon Clients cold-start with no Host yet and converge to exactly one authenticated Host and one owned unit (both authenticate to the same Host PID)',
     run: runManagedHostConcurrentColdStart,
+  }),
+  Object.freeze({
+    suite: 'managed-host',
+    id: 'managed-host.m6-2b-crash-restart',
+    title: 'a SIGKILLed managed Host is restarted by systemd Restart=on-failure as a NEW authenticated instance under the SAME owned unit',
+    run: runManagedHostCrashRestart,
   }),
   Object.freeze({
     suite: 'managed-host',
