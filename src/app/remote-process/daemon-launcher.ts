@@ -19,7 +19,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { constants as osConstants } from 'node:os'
-import { lstatSync } from 'node:fs'
+import { lstatSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { installedPackageRootFromEntry } from './local-scope.ts'
@@ -265,6 +265,27 @@ export function apply(ctx: Context): void {
   // The daemon supervisor paints nothing: keep its diagnostics off the terminal.
   const diag = createEntryDiag('host', () => {})
   const reportFatal = (line: string): void => { try { process.stderr.write(`${line}\n`) } catch { /* best effort */ } }
+  // Qualification-only (env-gated) runtime Loader-state dump: writes every entry's
+  // EVALUATED `disabled` + fiber state from the real supervisor Context, so the
+  // isolation proof reads real admission state, not composed config strings.
+  const loaderDumpPath = process.env.M62A_LOADER_DUMP
+  if (loaderDumpPath !== undefined && loaderDumpPath !== '') {
+    const dumpLoader = (): void => {
+      try {
+        const loader = ctx.get('loader') as { entries?: () => Iterable<{ id: string; disabled?: boolean; fiber?: { state?: unknown } }> } | undefined
+        const rows: Array<{ id: string; disabled: boolean; state: unknown }> = []
+        if (loader !== undefined && typeof loader.entries === 'function') {
+          for (const entry of loader.entries()) rows.push({ id: entry.id, disabled: entry.disabled === true, state: entry.fiber !== undefined ? entry.fiber.state : null })
+        }
+        writeFileSync(loaderDumpPath, JSON.stringify(rows))
+      } catch (error) {
+        try { writeFileSync(loaderDumpPath, JSON.stringify({ error: String(error instanceof Error ? error.message : error) })) } catch { /* give up */ }
+      }
+    }
+    const readyForDump = ctx.get('appReady') as { onReady?: (listener: () => void) => () => void } | undefined
+    if (readyForDump !== undefined && typeof readyForDump.onReady === 'function') readyForDump.onReady(() => setTimeout(dumpLoader, 800))
+    setTimeout(dumpLoader, 4000)
+  }
   const coordinator = new DaemonCoordinator({ spawnImpl: spawn, entry, env, appExit, diag, reportFatal })
 
   // The launcher row is successfully assembled: report it to the startup row's
