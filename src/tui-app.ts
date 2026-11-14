@@ -17365,6 +17365,10 @@ export class TuiApp {
    * `'error'` renders red with a ✗ — pass it explicitly for failures.
    */
   notify(text: string, kind: 'error' | 'info' = 'info'): void {
+    // A disposed surface is finally detached: a late async callback must not
+    // arm a new auto-clear timer (or repaint) after `dispose()` retired the
+    // one it owned. Old-generation callbacks are benign no-ops.
+    if (this.disposed) return
     this.notifyText = text
     this.notifyKind = kind
     if (this.notifyTimer !== undefined) clearTimeout(this.notifyTimer)

@@ -125,6 +125,18 @@ test('stale surface calls are benign no-ops after disposal', async () => {
   await settle()
 })
 
+test('a notify after disposal arms no auto-clear timer', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { notifyDurationMs: 60_000 })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  app.dispose()
+  app.notify('after death')
+  const timer = (app as unknown as { notifyTimer: NodeJS.Timeout | undefined }).notifyTimer
+  assert.equal(timer, undefined, 'a disposed surface must not arm the notify auto-clear timer')
+})
+
 test('a pending external-editor round-trip finishing after dispose restarts nothing', async () => {
   const vt = new VirtualTerminal(80, 24)
   let release!: (text: string) => void
