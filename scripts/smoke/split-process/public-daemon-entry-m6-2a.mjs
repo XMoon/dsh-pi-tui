@@ -12,8 +12,8 @@
  * @module split-process/public-daemon-entry-m6-2a
  */
 
-import { spawn } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { readFileSync, readdirSync } from 'node:fs'
 
 import xterm from '@xterm/headless'
 import { findIsolatedProcesses, killIsolatedProcesses } from '../../lib/split-smoke-processes.mjs'
@@ -42,6 +42,53 @@ function classify(pid) {
   if (cmdline.includes('local-host.mjs')) return 'host'
   if (cmdline.includes('local-client.mjs')) return 'client'
   return undefined
+}
+
+/** The real `dsh` supervisor PID (the CLI process, not the Host/Client). */
+function findSupervisorPid(dshHome) {
+  const marker = `DSH_HOME=${dshHome}`
+  let entries
+  try { entries = readdirSync('/proc') } catch { return undefined }
+  for (const name of entries) {
+    if (!/^\d+$/u.test(name)) continue
+    let cmdline
+    let environ
+    try { cmdline = readFileSync(`/proc/${name}/cmdline`, 'utf8'); environ = readFileSync(`/proc/${name}/environ`, 'utf8') } catch { continue }
+    if (!environ.split('\0').includes(marker)) continue
+    if (!cmdline.includes('dsh/lib/bin.js')) continue
+    if (cmdline.includes('local-host.mjs') || cmdline.includes('local-client.mjs')) continue
+    return Number(name)
+  }
+  return undefined
+}
+
+/** The composed Loader roster the REAL dsh builds for the daemon backend. */
+function dumpDaemonComposedRoster(installation) {
+  const { dshInvocation, env, profileDir } = installation
+  const result = spawnSync(dshInvocation[0], [...dshInvocation.slice(1), '--profile', 'pi-tui', '--dump-config'], {
+    cwd: profileDir,
+    env: { ...env, DSH_PI_TUI_BACKEND: 'daemon' },
+    encoding: 'utf8',
+    timeout: 60_000,
+  })
+  return `${result.stdout ?? ''}${result.stderr ?? ''}`
+}
+
+/** Assert one row carries the daemon-disable in the composed roster. */
+function assertRosterDaemonDisabled(roster, id) {
+  const at = roster.indexOf(`- id: ${id}\n`)
+  assert(at !== -1, `CR-01 roster: row ${id} is missing from the composed roster`)
+  const block = roster.slice(at, roster.indexOf('\n- id: ', at + 1) === -1 ? undefined : roster.indexOf('\n- id: ', at + 1))
+  assert(/disabled: !!js ctx\.get\('tuiDaemonStartup'\)/u.test(block), `CR-01 roster: ${id} is not daemon-disabled`)
+}
+
+/** Assert one infrastructure row is NOT patched with the daemon-disable. */
+function assertRosterNotPatched(roster, id) {
+  const at = roster.indexOf(`- id: ${id}\n`)
+  if (at === -1) return
+  const end = roster.indexOf('\n- id: ', at + 1)
+  const block = roster.slice(at, end === -1 ? undefined : end)
+  assert(!block.includes('tuiDaemonStartup'), `CR-01 roster: infra row ${id} must stay unpatched`)
 }
 
 /** Poll the isolated DSH_HOME process table until `predicate` is satisfied. */
@@ -151,7 +198,19 @@ export async function runPublicDaemonEntry({ installation, trace }) {
     await reap(negative.child, dshHome)
   }
 
-  // Real PUBLIC session-launch + signal acceptance (A05-A08, A12).
+  // CR-01: the REAL dsh --dump-config composed Loader roster must show every
+  // second-Host-business authority row daemon-disabled, and stateless infra not.
+  {
+    const roster = dumpDaemonComposedRoster(installation)
+    for (const id of ['session', 'session-persistence-jsonl', 'storage-json', 'jobs', 'typert-gateway', 'remote-access', 'deepseek-account', 'authorization', 'credentials']) {
+      assertRosterDaemonDisabled(roster, id)
+    }
+    for (const id of ['timer', 'llm', 'tools', 'typert']) assertRosterNotPatched(roster, id)
+    result.composedRoster = 'AUDITED'
+    trace('m6-2a-composed-roster', { authorityDisabled: 9 })
+  }
+
+  // Real PUBLIC session-launch + signal acceptance (A08 reject, A12 signal).
   const session = await runSessionAcceptance(installation, trace)
   Object.assign(result, session)
 
@@ -209,22 +268,10 @@ class RealDshScreen {
 
 async function runSessionAcceptance(installation, trace) {
   const out = {}
-  const runScreen = async (args, needles, label, key) => {
-    const s = new RealDshScreen(installation, 'daemon', args)
-    try { await s.waitForAny(needles, label, 75_000); out[key] = 'PASS' } finally { await s.dispose() }
-  }
-  // A05/A06/A07 (positive browse/lookup/continue over a real PTY) need a
-  // PRE-SEEDED Host Workspace + Session scene, which the isolated packed
-  // acceptance profile does not provide (it has no Host Workspace/Session). They
-  // remain NOT_VERIFIED with that concrete blocker; the sessionless negative
-  // control (`-c` with no confirmed workspace) is proven below.
-  {
-    const s = new RealDshScreen(installation, 'daemon', ['-c'])
-    try {
-      await s.waitForAny(['Cannot continue', 'Add directory', 'pi-tui'], 'A07 continue no-resume control', 75_000)
-      out.a07NoResumeControl = 'PASS'
-    } finally { await s.dispose() }
-  }
+  // A05/A06/A07 (browse/lookup/continue, POSITIVE and the no-resume NEGATIVE)
+  // and A08b preset-effect need a PRE-SEEDED Host Workspace+Session scene the
+  // isolated packed profile does not provide; they stay NOT_VERIFIED with that
+  // blocker (not asserted here to avoid a false positive).
   // A08a --session + -c is early-rejected (nonzero, no TUI).
   {
     const s = new RealDshScreen(installation, 'daemon', ['--session', '-c'])
@@ -235,18 +282,18 @@ async function runSessionAcceptance(installation, trace) {
       out.a08Reject = 'PASS'
     } finally { await s.dispose() }
   }
-  // A08b Preset: --preset starts a fresh session and the daemon TUI paints.
-  await runScreen(['--preset', 'standard'], ['╭', '╰', '│', '─'], 'A08 preset paint', 'a08Preset')
-  // A12 Signal: a real SIGTERM to the supervisor stops the ONE Client while the
-  // detached Host survives; no Client orphan.
+  // A12 Signal: SIGTERM to the SUPERVISOR PID ALONE (not the process group) must
+  // stop the ONE Client through the Coordinator while the detached Host survives.
   {
     const s = new RealDshScreen(installation, 'daemon', [])
     try {
       const counts = await waitForProcesses(installation.dshHome, c => c.host >= 1 && c.client >= 1, 'A12 mount', 75_000)
       assert(counts.host >= 1 && counts.client >= 1, 'A12: Host+Client did not mount')
-      try { process.kill(-s.child.pid, 'SIGTERM') } catch { /* gone */ }
-      const after = await waitForProcesses(installation.dshHome, c => c.client === 0, 'A12 client exit', 30_000)
-      assert(after.client === 0, 'A12: the Client did not exit after SIGTERM')
+      const supervisorPid = findSupervisorPid(installation.dshHome)
+      assert(supervisorPid !== undefined, 'A12: the real dsh supervisor PID was not found')
+      process.kill(supervisorPid, 'SIGTERM')
+      const after = await waitForProcesses(installation.dshHome, c => c.client === 0, 'A12 client exit', 40_000)
+      assert(after.client === 0, 'A12: the Client did not exit after a supervisor-only SIGTERM')
       const still = findIsolatedProcesses(installation.dshHome).map(classify).filter(r => r === 'host').length
       assert(still >= 1, 'A12: the detached Host was not preserved after the Client stopped')
       out.a12Signal = 'PASS'

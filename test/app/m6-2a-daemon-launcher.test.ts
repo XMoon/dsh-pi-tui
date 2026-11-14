@@ -138,12 +138,18 @@ test('a nonzero child exit maps to that code', () => {
   assert.deepEqual(exitCodes, [3])
 })
 
-test('a spawn throw fails closed with exit 1', () => {
+test('a spawn throw fails closed with exit 1 and one sanitized fatal line', () => {
   const exitCodes: number[] = []
-  const spawnImpl = (() => { throw new Error('boom') }) as unknown as typeof import('node:child_process').spawn
-  const c = coordinator([], exitCodes, spawnImpl)
+  const fatalLines: string[] = []
+  const spawnError = Object.assign(new Error('spawn failed at /home/secret/dsh/lib/bin.js for http://10.0.0.1/x'), { code: 'ENOENT' })
+  const spawnImpl = (() => { throw spawnError }) as unknown as typeof import('node:child_process').spawn
+  const c = new DaemonCoordinator({ spawnImpl, entry: '/x/pkg/dist/local-client.mjs', env: {}, appExit: code => { exitCodes.push(code) }, diag: silentDiag, reportFatal: line => { fatalLines.push(line) } })
   c.start()
   assert.deepEqual(exitCodes, [1])
+  assert.equal(fatalLines.length, 1, 'exactly one fatal line')
+  // R2-01: a safe errno name is allowed; the raw message/path/url is NOT.
+  assert.match(fatalLines[0], /could not start the daemon Client process \(ENOENT\)/u)
+  assert.ok(!fatalLines[0].includes('/home/secret') && !fatalLines[0].includes('10.0.0.1'), 'no path or URL leaks')
 })
 
 test('dispose before start cancels the spawn', () => {

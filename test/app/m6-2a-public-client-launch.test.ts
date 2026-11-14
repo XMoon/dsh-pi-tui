@@ -148,3 +148,28 @@ test('rejects an illegal backendSource value or source', () => {
   assert.throws(() => decodeClientLaunchEnvelope(JSON.stringify({ version: 1, backendSource: { value: 'wire-local', source: 'env' } })), /backendSource/u)
   assert.throws(() => decodeClientLaunchEnvelope(JSON.stringify({ version: 1, backendSource: { value: 'daemon', source: 'bogus' } })), /backendSource/u)
 })
+
+// ── surface failure sanitization (R2-02) ─────────────────────────────────
+
+import { surfaceStartupFailureLine, sanitizeSurfaceText } from '../../src/app/remote-process/local-client-entry.ts'
+
+test('surface failure line strips paths, URLs and control characters from an entry error', () => {
+  const error = new Error('local client entry: could not open /home/user/.dsh/profiles/pi-tui/x at http://127.0.0.1:9999/launch\u001b[31mBOOM')
+  const line = surfaceStartupFailureLine(error)
+  assert.ok(!line.includes('/home/user'), 'no absolute path')
+  assert.ok(!line.includes('127.0.0.1'), 'no host URL')
+  assert.ok(!/[\u0000-\u001f]/u.test(line), 'no control characters')
+  assert.match(line, /could not open/u)
+})
+
+test('an unknown surface failure is a fixed concise reason, never the raw message', () => {
+  const line = surfaceStartupFailureLine(new Error('boom at /etc/passwd http://host/x'))
+  assert.match(line, /startup failed before the TUI mounted/u)
+  assert.ok(!line.includes('/etc/passwd') && !line.includes('http://host'), 'raw detail not surfaced')
+})
+
+test('sanitizeSurfaceText bounds length and replaces path/url', () => {
+  const out = sanitizeSurfaceText('a '.repeat(300) + '/a/b/c http://x/y')
+  assert.ok(out.length <= 200)
+  assert.ok(!out.includes('/a/b/c') && !out.includes('http://x/y'))
+})

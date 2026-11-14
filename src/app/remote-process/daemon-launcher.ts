@@ -129,6 +129,9 @@ export class DaemonCoordinator {
   private readonly env: NodeJS.ProcessEnv
   private readonly appExit: (code: number) => void
   private readonly diag: Diag
+  /** A sanitized human line for the supervisor TTY when the Client cannot be
+   *  spawned at all (never a JSON record, never a raw error/message/path). */
+  private readonly reportFatal: (line: string) => void
   private child: ChildProcess | undefined
   private started = false
   private disposed = false
@@ -142,12 +145,14 @@ export class DaemonCoordinator {
     env: NodeJS.ProcessEnv
     appExit: (code: number) => void
     diag: Diag
+    reportFatal?: (line: string) => void
   }) {
     this.spawnImpl = options.spawnImpl
     this.entry = options.entry
     this.env = options.env
     this.appExit = options.appExit
     this.diag = options.diag
+    this.reportFatal = options.reportFatal ?? (() => {})
   }
 
   /** Spawn the ONE foreground Client. No-op after a prior start or dispose. */
@@ -175,7 +180,15 @@ export class DaemonCoordinator {
   private settle(code: number, error: Error | undefined): void {
     if (this.settled) return
     this.settled = true
-    if (error !== undefined) this.diag.warn('pi-tui daemon: client process failed', { error: error.message })
+    if (error !== undefined) {
+      this.diag.warn('pi-tui daemon: client process failed', { error: error.message })
+      // R2-01: the supervisor TTY must get ONE actionable, sanitized line — never
+      // a bare nonzero exit, and never the raw error (which can carry a path). The
+      // spawn errno code is safe to name; everything else is fixed text.
+      const errno = (error as { code?: unknown }).code
+      const safeErrno = typeof errno === 'string' && /^[A-Z][A-Z0-9_]{1,31}$/u.test(errno) ? ` (${errno})` : ''
+      this.reportFatal(`dsh-pi-tui: could not start the daemon Client process${safeErrno}; the Host was not started. Reinstall the profile and re-run: DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui`)
+    }
     this.appExit(code)
   }
 
@@ -209,7 +222,8 @@ export function apply(ctx: Context): void {
   const env = buildChildEnvironment(profileContext, encodeLaunchEnvelope(startup))
   // The daemon supervisor paints nothing: keep its diagnostics off the terminal.
   const diag = createEntryDiag('host', () => {})
-  const coordinator = new DaemonCoordinator({ spawnImpl: spawn, entry, env, appExit, diag })
+  const reportFatal = (line: string): void => { try { process.stderr.write(`${line}\n`) } catch { /* best effort */ } }
+  const coordinator = new DaemonCoordinator({ spawnImpl: spawn, entry, env, appExit, diag, reportFatal })
 
   // The launcher row is successfully assembled: report it to the startup row's
   // cold-ready handshake. Setting this synchronously (during mount, before the
