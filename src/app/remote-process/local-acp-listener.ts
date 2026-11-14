@@ -463,23 +463,29 @@ function buildAgentApp(
       beginRequest()
       try {
         requireInitialized()
-        return views.closeSession(view, params.sessionId)
+        return await views.closeSession(view, access, params.sessionId)
       } catch (error) {
         throw asRequestError(error)
       } finally {
         state.pendingRequests -= 1
       }
     })
-    // PO-3A: ONE text prompt per attached View. The request's own SDK context
-    // supplies the abort lifecycle and the ONLY notification sink — this
-    // connection's client. Nothing here captures a mutable connection or
-    // invents a second sender.
+    // PO-3B: ONE text prompt per attached View. The request's own SDK context
+    // supplies the abort lifecycle and the ONLY notification + reverse-request
+    // sinks — this connection's client. Nothing here captures a mutable
+    // connection or invents a second sender.
     app.onRequest(methods.agent.session.prompt, async ({ params, signal, client }) => {
       beginRequest()
       try {
         requireInitialized()
         return await views.promptSession(view, access, params, signal, async update => {
           await client.notify(methods.client.session.update, { sessionId: params.sessionId, update })
+        }, async (permissionParams, options) => {
+          return await client.request(methods.client.session.requestPermission, {
+            sessionId: permissionParams.sessionId,
+            toolCall: permissionParams.toolCall,
+            options: permissionParams.options,
+          }, options === undefined ? undefined : { cancellationSignal: options.signal })
         })
       } catch (error) {
         throw asRequestError(error)
@@ -500,10 +506,22 @@ function buildAgentApp(
   app.onRequest(methods.agent.session.list, acceptAnyParams, rejectSessionOperation)
   app.onRequest(methods.agent.session.setConfigOption, acceptAnyParams, rejectSessionOperation)
 
-  // A `session/cancel` notification carries no response. PO-3A owns no Host
-  // cancellation business, so the handler stays an explicit no-op: it must
-  // never touch a Host Agent or fabricate a `cancelled` StopReason.
-  app.onNotification(methods.agent.session.cancel, () => {})
+  if (access !== undefined && views !== undefined && view !== undefined) {
+    // A `session/cancel` notification carries no response. PO-3B scopes it to
+    // THIS connection's own unsettled View flight only: an idle View (or a
+    // Session this connection does not hold) is a no-op that never touches a
+    // Host Agent; a queued/running flight is addressed through the same scoped
+    // cancellation the close path uses, and the request settles on the real
+    // Host facts alone.
+    app.onNotification(methods.agent.session.cancel, ({ params }) => {
+      if (!state.initialized) return
+      if (typeof params?.sessionId !== 'string' || params.sessionId === '') return
+      views.cancelSession(view, access, params.sessionId)
+    })
+  } else {
+    // No Host Session View installed: a cancel notification stays a no-op.
+    app.onNotification(methods.agent.session.cancel, () => {})
+  }
 
   return app
 }
@@ -534,9 +552,11 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
     tornDown = true
     state.closed = true
     // BOTH `session/close` and a physical socket end/error/destroy (or Host Off)
-    // release through the SAME idempotent View path: only this connection's
-    // claim is dropped; no Host Agent/Session is cancelled, disposed or flushed.
-    if (view !== undefined) context.views?.releaseConnection(view)
+    // release through the SAME idempotent View path. PO-3B: a claim with an
+    // open flight keeps its scoped cancellation running (late insertions
+    // included) and is released only by its proven settlement; no Host
+    // Agent/Session is disposed or flushed.
+    if (view !== undefined) context.views?.releaseConnection(view, context.sessionAccess)
     try {
       connection?.close()
     } catch {
@@ -675,10 +695,15 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
 
   // The prompt-flight fact subscription belongs to THIS listener lifetime: it
   // is installed BEFORE the socket can accept a request and removed exactly
-  // once when the listener retires (or fails to bind).
-  let disposePromptFacts = sessionAccess === undefined || context.views === undefined
-    ? undefined
-    : sessionAccess.observePromptFacts(context.views)
+  // once when the listener retires (or fails to bind). The same installation
+  // binds the ONE Host access the fact callbacks (and the scoped
+  // cancellations) act through.
+  const views = context.views
+  let disposePromptFacts: (() => void) | undefined
+  if (views !== undefined && sessionAccess !== undefined) {
+    views.bindAccess(sessionAccess)
+    disposePromptFacts = sessionAccess.observePromptFacts(views)
+  }
   const releasePromptFacts = (): void => {
     const dispose = disposePromptFacts
     disposePromptFacts = undefined

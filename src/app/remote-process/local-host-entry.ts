@@ -463,9 +463,29 @@ interface SessionControllerLike {
 }
 interface AgentRegistryLike {
   get(id: string): LiveAgentViewIdentity | undefined
+  /** The official current turn/step boundary projection of one Session. */
+  turnBoundaryOf(session: object): {
+    readonly openTurnStartSeq: number | null
+    readonly lastTurn: number
+  }
 }
 interface SessionRegistryLike {
   get(id: string): object | undefined
+}
+
+/**
+ * The synchronous cancel seam of one live Agent. PO-3B calls these two official
+ * methods only, always on the EXACT attached object and in the same Host
+ * callback stack that read the current-turn fence.
+ */
+interface AgentCancelSeamLike {
+  readonly inbox: { remove(messageId: string): boolean }
+  cancel(cause: { readonly kind: 'user' }, options?: { readonly keepInbox?: boolean }): void
+}
+
+/** The official running/idle phase the turn fence cross-checks. */
+interface AgentStatusSeamLike {
+  readonly status: 'idle' | 'running'
 }
 
 /**
@@ -540,11 +560,40 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
     currentAgent: sessionId => agents.get(sessionId),
     currentSession: sessionId => sessions.get(sessionId),
     prompt: (request, signal) => sessionController.prompt(request, signal),
+    cancelPending: (sessionId, agent, session, messageId) => {
+      // The EXACT live identity is re-verified synchronously: only the very
+      // Agent/Session objects this View attached may be touched.
+      const liveAgent = agents.get(sessionId)
+      const liveSession = sessions.get(sessionId)
+      if (liveAgent !== agent || liveSession !== session || agent.session !== session) return 'stale'
+      return (agent as unknown as AgentCancelSeamLike).inbox.remove(messageId) === true ? 'removed' : 'not-pending'
+    },
+    cancelCurrentTurn: (sessionId, agent, session, turn) => {
+      const liveAgent = agents.get(sessionId)
+      const liveSession = sessions.get(sessionId)
+      if (liveAgent !== agent || liveSession !== session || agent.session !== session) return 'stale'
+      // The official current-turn fence must STILL point at this exact turn.
+      const boundary = agents.turnBoundaryOf(session)
+      if (boundary.openTurnStartSeq === null || boundary.lastTurn !== turn) return 'not-current'
+      if ((agent as unknown as AgentStatusSeamLike).status !== 'running') return 'not-current'
+      ;(agent as unknown as AgentCancelSeamLike).cancel({ kind: 'user' }, { keepInbox: true })
+      return 'addressed'
+    },
+    currentTurn: (sessionId, agent, session) => {
+      const liveAgent = agents.get(sessionId)
+      const liveSession = sessions.get(sessionId)
+      if (liveAgent !== agent || liveSession !== session || agent.session !== session) return { kind: 'stale' }
+      const boundary = agents.turnBoundaryOf(session)
+      return { kind: 'current', openTurn: boundary.openTurnStartSeq === null ? null : boundary.lastTurn }
+    },
     /**
      * Subscribe the View owner to the exact Host facts a prompt flight is
      * correlated against. The Host Context, registries and Agent/Session objects
      * stay on this side: only the observed identity payloads are forwarded, and
-     * the returned disposer removes exactly these listeners.
+     * the returned disposer removes exactly these listeners. The ONE approval
+     * classification seat is registered with `prepend: true` so it runs AHEAD
+     * of the TUI forwarding listener: a proven ACP-owned approval is answered
+     * (or fail-closed) without ever reaching `next()`.
      */
     observePromptFacts(listener: AcpPromptFactListener): () => void {
       const disposers = [
@@ -563,6 +612,18 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
         context.on('agent/disposed', payload => {
           listener.onAgentDisposed(payload.agent)
         }),
+        context.on('approval/request', (request, next) => {
+          return listener.onApprovalRequest(
+            {
+              agent: request.agent,
+              toolName: request.toolName,
+              ...(request.callId === undefined ? {} : { callId: request.callId }),
+              ...(request.reason === undefined ? {} : { reason: request.reason }),
+              ...(request.signal === undefined ? {} : { signal: request.signal }),
+            },
+            async () => await next(),
+          )
+        }, { prepend: true }),
       ]
       return () => {
         for (const dispose of disposers) dispose()

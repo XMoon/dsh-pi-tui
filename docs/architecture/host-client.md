@@ -504,18 +504,64 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     request `cwd` never changes the Session cwd/model/workspace; a difference is
     only recorded as a fixed non-sensitive note. A second ACP connection for a
     Session already held is refused, and the TUI is never subject to that limit.
-  - `session/close` detaches ONLY this connection's View/reservation. It never
-    cancels, waits for idle, disposes, flushes or resumes the Agent/Session, so a
-    TUI referencing the same Session keeps working and a later connection may
-    resume again. A repeated close on the same connection is idempotent.
+  - `session/close` detaches ONLY this connection's View/reservation: it never
+    disposes, flushes or resumes the Agent/Session, so a TUI referencing the
+    same Session keeps working and a later connection may resume again. With an
+    open prompt flight it first performs the scoped cancellation below and
+    settles before detaching; a repeated close on the same connection is
+    idempotent.
   - A physical socket end/error/destroy, runtime Off or Host shutdown releases
-    the connection's View with the same detach-only semantics; the Session,
-    Agent and writer keep their Host authority, and a pending create/resume whose
-    connection closed never publishes an attached View.
-  - `session/list`, `session/set_config_option`, approval, image/MCP prompts and
-    client-driven turn cancellation are NOT provided by this View and fail closed
-    with their stable `LOCAL_ACP_*` code; a `session/cancel` notification has no
-    Host side effect.
+    the connection's View through the scoped-cancellation contract above (an
+    open flight with its durable fact is cancelled exactly and the claim is
+    released on the proven settlement; a fact-less flight fails closed); the
+    Session, Agent and writer keep their Host authority, and a pending
+    create/resume whose connection closed never publishes an attached View.
+  - `session/list`, `session/set_config_option` and image/MCP prompts are NOT
+    provided by this View and fail closed with their stable `LOCAL_ACP_*` code.
+  - **Scoped cancellation (PO-3B).** `session/cancel` addresses ONLY this
+    connection's own unsettled prompt flight, decided from authoritative Host
+    facts — never an Agent-global cancel, a status/timing guess or an
+    AbortSignal:
+    - an idle View (or a Session this connection does not hold) is a no-op with
+      no Host side effect while another owner's turn keeps running;
+    - a QUEUED own message is cancelled by the official synchronous exact
+      `inbox.remove(messageId)` on the still-exact Agent/Session (the durable
+      `agent/inbox/spliced {outcome:'canceled'}` is the proof), and the request
+      answers `cancelled` only after the admission path is classified;
+    - a RUNNING own turn is cancelled only when the official current-turn
+      fence still points at that exact turn in the same Host callback stack
+      (`agent.cancel({kind:'user'}, {keepInbox:true})`); the request answers
+      `cancelled` only after that turn's real
+      `turn/end {reason:{kind:'aborted',reason:{kind:'user'}}}` plus the
+      ordered notification drain. A turn that already reached its real terminal
+      keeps its real result (`end_turn`/`max_tokens`/the true failure);
+    - a MIXED turn (a TUI steer claimed into the same turn) is NEVER
+      Agent-cancelled: the request keeps its `LOCAL_ACP_PROMPT_MIXED_TURN`
+      failure and the TUI steer keeps its authority;
+    - a cancellation that cannot prove either fact fails closed with
+      `LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED` instead of fabricating `cancelled`.
+    `session/close` with an open flight performs the SAME scoped cancellation
+    and detaches only after the proven settlement (a repeated close awaits the
+    same settlement; never a second removal/cancel). A physical disconnect of a
+    flight that already owns its durable message fact drives the same scoped
+    cancellation before the claim is released; a flight with no durable fact
+    yet keeps the fail-closed release.
+  - **Approval ownership (PO-3B).** The official Agent-scoped
+    `approval/request` waterfall has exactly ONE classification seat ahead of
+    the TUI forwarding listener. A request whose exact Agent matches a View
+    claim AND whose turn is that claim's live flight turn (or its transient
+    retired-turn fence — a flight that settled before its `turn/end`) is
+    ACP-owned: it is answered ONLY through a standard reverse
+    `session/request_permission` on that View's own ACP connection with the
+    fixed `allow-once`/`reject-once` one-shot options, and NEVER delegated to
+    the TUI channel. Any unprovable, stale, cancelled, mixed, disconnected,
+    unknown-option or malformed outcome fails closed as `unavailable` (never an
+    automatic allow and never a fallback to the TUI). A turn proven NOT
+    ACP-owned keeps the TUI's own approval sheet; the Host `approval.policy`
+    (e.g. `never`) and sandbox policy stay ahead of the waterfall and are
+    never bypassed. The official `approval/asked`/`approval/decided` audit
+    pair stays the single decision record; this View adds no second audit
+    writer.
   - **One prompt flight per View.** `session/prompt` is admitted only on
     an attached View that already holds the exact Session claim. The View mints
     ONE stable `requestId`, submits exactly ONE official
@@ -530,11 +576,10 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     is projected and the request fails closed with
     `LOCAL_ACP_PROMPT_MIXED_TURN`, never a fabricated success. A completed turn
     without real non-empty assistant text fails
-    `LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT`. `session/close` with an unsettled prompt
-    returns `LOCAL_ACP_PROMPT_IN_FLIGHT` and never cancels the shared turn; a
-    physical disconnect releases only the View and never cancels the Host turn.
-    Message ordering, the bounded per-connection output cap and the
-    one-View-per-Session rule are unchanged.
+    `LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT`. Message ordering, the bounded
+    per-connection output cap and the one-View-per-Session rule are unchanged;
+    `session/close` and physical-dispatch release semantics are owned by the
+    scoped-cancellation contract above.
 - **Bounded per Host and per connection.** The Host start-time
   `DSH_PI_TUI_ACP_MAX_CONNECTIONS` integer (default 4, valid 1..16, an invalid
   value is a startup failure) caps live connections; an over-limit connection

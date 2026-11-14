@@ -854,6 +854,43 @@ test('the ACP prompt/turn/event selected verdict accepts only the complete real-
   assert.throws(() => assertSelectedVerdict('acp.po3a-turn-events', { ...complete, status: 'NOT_VERIFIED' }),
     /selected acp\.po3a-turn-events/u)
 })
+
+test('the ACP PO-3B scoped-cancel/approval selected verdict accepts only the complete real-L6 proof', () => {
+  const complete = {
+    status: 'PASS',
+    scope: 'REAL_SPLIT_PROCESS_L6',
+    acpVersionFromInstalledDsh: true,
+    queuedCancelRemoved: true,
+    runningCancelExactTurn: true,
+    idleCancelNoOp: true,
+    claimRaceSafe: true,
+    cancelDrainBeforeStop: true,
+    closeDrainedAndDetached: true,
+    acpApprovalOnly: true,
+    tuiApprovalOnly: true,
+    policyNeverUnbypassed: true,
+    lateApprovalNoLeak: true,
+    twoViewsIsolated: true,
+    tuiAndAcpShareSession: true,
+    hostIdentityKept: true,
+    l6EvidenceRecorded: true,
+  }
+  assert.equal(assertSelectedVerdict('acp.po3b-cancel-approval', complete), undefined)
+  // A missing proof field is a rejected verdict.
+  const missing = { ...complete }
+  delete missing.runningCancelExactTurn
+  assert.throws(() => assertSelectedVerdict('acp.po3b-cancel-approval', missing), /selected acp\.po3b-cancel-approval/u)
+  // A proof field that is present but false is a rejected verdict.
+  assert.throws(() => assertSelectedVerdict('acp.po3b-cancel-approval', { ...complete, acpApprovalOnly: false }),
+    /selected acp\.po3b-cancel-approval/u)
+  // A NOT_VERIFIED status never becomes a selected PASS.
+  assert.throws(() => assertSelectedVerdict('acp.po3b-cancel-approval', { ...complete, status: 'NOT_VERIFIED' }),
+    /selected acp\.po3b-cancel-approval/u)
+  // The new case is registered in the selectable registry (wired, not a stub).
+  const registered = listSelectableCases().find(entry => entry.id === 'acp.po3b-cancel-approval')
+  assert.ok(registered, 'the PO-3B case must be registered in the selectable registry')
+  assert.equal(typeof registered.run, 'function', 'the registered case must carry its real runner')
+})
 test('a selected result names only the selectable scope', () => {
   const first = listSelectableCases()[0]
   assert.ok(first, 'the registry must expose a case')

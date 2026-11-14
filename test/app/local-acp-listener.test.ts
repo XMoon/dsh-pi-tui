@@ -131,6 +131,25 @@ class RawClient {
     return this.failure
   }
 
+  /** Prove a bounded window of silence (a NOT-YET fact, not a timing guess). */
+  async silent(windowMs: number): Promise<boolean> {
+    if (this.queue.length > 0) return false
+    return await new Promise(resolveSilent => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const finish = (silent: boolean): void => {
+        if (this.waiter === waiter) this.waiter = undefined
+        clearTimeout(timer)
+        resolveSilent(silent)
+      }
+      const waiter = (value: unknown): void => {
+        this.queue.unshift(value)
+        finish(false)
+      }
+      this.waiter = waiter
+      timer = setTimeout(() => finish(true), windowMs)
+    })
+  }
+
   close(): void {
     this.socket.destroy()
   }
@@ -745,9 +764,15 @@ function makeFakeAccess(): {
   agentOf: (id: string) => LiveAgentViewIdentity | undefined
   prompts: AcpSessionPromptRequest[]
   facts: () => AcpPromptFactListener | undefined
+  removedMessageIds: string[]
+  cancelledTurns: Array<{ readonly turn: number; readonly keepInbox: boolean }>
+  turnFence: { openTurnStartSeq: number | null; lastTurn: number }
 } {
   const agents = new Map<string, { id: string; session: { id: string; header: { cwd: string } } }>()
   const prompts: AcpSessionPromptRequest[] = []
+  const removedMessageIds: string[] = []
+  const cancelledTurns: Array<{ readonly turn: number; readonly keepInbox: boolean }> = []
+  const turnFence = { openTurnStartSeq: null as number | null, lastTurn: 0 }
   let facts: AcpPromptFactListener | undefined
   let counter = 0
   return {
@@ -777,6 +802,22 @@ function makeFakeAccess(): {
         prompts.push(request)
         return { accepted: true as const }
       },
+      cancelPending(sessionId: string, agent: LiveAgentViewIdentity, session: object, messageId: string) {
+        if (agents.get(sessionId) !== agent || agents.get(sessionId)?.session !== session) return 'stale'
+        removedMessageIds.push(messageId)
+        return 'removed'
+      },
+      cancelCurrentTurn(sessionId: string, agent: LiveAgentViewIdentity, session: object, turn: number) {
+        if (agents.get(sessionId) !== agent || agents.get(sessionId)?.session !== session) return 'stale'
+        if (turnFence.openTurnStartSeq === null || turnFence.lastTurn !== turn) return 'not-current'
+        cancelledTurns.push({ turn, keepInbox: true })
+        turnFence.openTurnStartSeq = null
+        return 'addressed'
+      },
+      currentTurn(sessionId: string, agent: LiveAgentViewIdentity, session: object) {
+        if (agents.get(sessionId) !== agent || agents.get(sessionId)?.session !== session) return { kind: 'stale' }
+        return { kind: 'current' as const, openTurn: turnFence.openTurnStartSeq === null ? null : turnFence.lastTurn }
+      },
       observePromptFacts(listener: AcpPromptFactListener) {
         facts = listener
         return () => { facts = undefined }
@@ -790,6 +831,9 @@ function makeFakeAccess(): {
       agents.set(id, agent)
       return agent
     },
+    removedMessageIds,
+    cancelledTurns,
+    turnFence,
   }
 }
 
@@ -907,6 +951,15 @@ test('session/new carries the authoritative created session id in JSON-RPC error
     },
     async prompt() {
       return { accepted: true as const }
+    },
+    cancelPending() {
+      return 'stale' as const
+    },
+    cancelCurrentTurn() {
+      return 'stale' as const
+    },
+    currentTurn() {
+      return { kind: 'stale' as const }
     },
     observePromptFacts() {
       return () => {}
@@ -1035,17 +1088,28 @@ test('session/prompt keeps uninitialized, unattached, invalid and in-flight requ
     assert.equal(fake.prompts.length, 0, 'no refused request reached the Host')
 
     // ONE in-flight prompt; a second request on the same View is refused while
-    // session/close reports the real in-flight state instead of faking a cancel.
+    // session/close with an open flight performs the SCOPED cancellation and
+    // settles only after the real Host facts prove it.
     client.send({ jsonrpc: '2.0', id: 9, method: 'session/prompt', params: { sessionId: 'session-resume', prompt: [{ type: 'text', text: 'first' }] } })
-    await waitForFact(() => fake.prompts[0], 'the first Host prompt')
+    const request = await waitForFact(() => fake.prompts[0], 'the first Host prompt')
     client.send({ jsonrpc: '2.0', id: 10, method: 'session/prompt', params: { sessionId: 'session-resume', prompt: [{ type: 'text', text: 'second' }] } })
     const inFlight = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
     assert.equal(inFlight.error?.code, -32602)
     assert.equal(inFlight.error?.data?.code, 'LOCAL_ACP_PROMPT_IN_FLIGHT')
     client.send({ jsonrpc: '2.0', id: 11, method: 'session/close', params: { sessionId: 'session-resume' } })
-    const closeRefused = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
-    assert.equal(closeRefused.error?.code, -32602)
-    assert.equal(closeRefused.error?.data?.code, 'LOCAL_ACP_PROMPT_IN_FLIGHT')
+    // The message is durably inserted and still pending: the close's scoped
+    // cancellation removes exactly it, then the close detaches.
+    const facts = fake.facts()
+    const agent = fake.agentOf('session-resume')
+    assert.ok(facts !== undefined && agent !== undefined)
+    facts.onInboxInserted(agent, { id: 'm-close', source: { kind: 'user', rpcId: request.requestId } })
+    const promptResponse = (await client.next()) as { id?: number; result?: { stopReason?: string } }
+    assert.equal(promptResponse.id, 9)
+    assert.equal(promptResponse.result?.stopReason, 'cancelled', 'the cancelled queued prompt answers cancelled')
+    const closeSettled = (await client.next()) as { id?: number; result?: unknown }
+    assert.equal(closeSettled.id, 11)
+    assert.deepEqual(closeSettled.result, {}, 'the close detaches after the proven removal')
+    assert.deepEqual(fake.removedMessageIds, ['m-close'], 'exactly the queued message was removed')
     assert.equal(fake.prompts.length, 1, 'only the admitted prompt reached the Host')
   } finally {
     client.close()
@@ -1096,6 +1160,150 @@ test('a physical connection end with an in-flight prompt never affects an indepe
     assert.equal(update.params?.update?.sessionUpdate, 'agent_message_chunk')
     const response = (await b.next()) as { result?: { stopReason?: string } }
     assert.equal(response.result?.stopReason, 'end_turn')
+  } finally {
+    a.close()
+    b.close()
+  }
+})
+
+// ── PO-3B: scoped cancel + reverse permission over the REAL socket ──
+
+test('session/cancel over the real socket removes the exact queued message and answers cancelled', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    fake.seed('session-cancel', '/host/proj')
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-cancel', cwd: '/host/proj' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'session-cancel', prompt: [{ type: 'text', text: 'cancel me' }] } })
+    const request = await waitForFact(() => fake.prompts[0], 'the queued prompt')
+    const facts = fake.facts()
+    const agent = fake.agentOf('session-cancel')
+    assert.ok(facts !== undefined && agent !== undefined)
+    facts.onInboxInserted(agent, { id: 'm-cancel', source: { kind: 'user', rpcId: request.requestId } })
+    // The standard cancel notification carries no response.
+    client.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: 'session-cancel' } })
+    const response = (await client.next()) as { id?: number; result?: { stopReason?: string }; error?: unknown }
+    assert.equal(response.id, 3)
+    assert.equal(response.error, undefined)
+    assert.equal(response.result?.stopReason, 'cancelled', 'the cancelled queued prompt answers cancelled')
+    assert.deepEqual(fake.removedMessageIds, ['m-cancel'], 'exactly the queued message was removed')
+    assert.deepEqual(fake.cancelledTurns, [], 'no Agent cancel was issued')
+    // The View stays attached and serves the next prompt normally.
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId: 'session-cancel', prompt: [{ type: 'text', text: 'after cancel' }] } })
+    const secondRequest = await waitForFact(() => fake.prompts[1], 'the follow-up prompt')
+    facts.onInboxInserted(agent, { id: 'm-next', source: { kind: 'user', rpcId: secondRequest.requestId } })
+    facts.onInboxClaimed(agent, { id: 'm-next', source: { kind: 'user', rpcId: secondRequest.requestId } }, 1)
+    facts.onSessionEvent(agent.session, {
+      type: 'assistant/message',
+      data: { turn: 1, message: { id: 'm-next', content: [{ type: 'text', text: 'next answer' }] } },
+    })
+    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    const update = (await client.next()) as { method?: string; params?: { update?: { sessionUpdate?: string } } }
+    assert.equal(update.method, 'session/update')
+    assert.equal(update.params?.update?.sessionUpdate, 'agent_message_chunk')
+    const second = (await client.next()) as { result?: { stopReason?: string } }
+    assert.equal(second.result?.stopReason, 'end_turn')
+  } finally {
+    client.close()
+  }
+})
+
+test('an approval of the ACP-owned turn arrives as a REVERSE session/request_permission with the two one-shot options', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    fake.seed('session-approval', '/host/proj')
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-approval', cwd: '/host/proj' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'session-approval', prompt: [{ type: 'text', text: 'ask me' }] } })
+    const request = await waitForFact(() => fake.prompts[0], 'the approval prompt')
+    const facts = fake.facts()
+    const agent = fake.agentOf('session-approval')
+    assert.ok(facts !== undefined && agent !== undefined)
+    facts.onInboxInserted(agent, { id: 'm-ap', source: { kind: 'user', rpcId: request.requestId } })
+    fake.turnFence.openTurnStartSeq = 42
+    fake.turnFence.lastTurn = 1
+    facts.onInboxClaimed(agent, { id: 'm-ap', source: { kind: 'user', rpcId: request.requestId } }, 1)
+    // The Host approval request for the OWNED turn reaches the SAME connection
+    // as a reverse request with the standard one-shot options.
+    const decided = facts.onApprovalRequest({ agent, toolName: 'bash', callId: 'call-ap' }, async () => 'unavailable')
+    const reverse = (await client.next(10_000)) as {
+      id?: number
+      method?: string
+      params?: { sessionId?: string; toolCall?: { toolCallId?: string }; options?: Array<{ optionId?: string; kind?: string }> }
+    }
+    assert.equal(reverse.method, 'session/request_permission')
+    assert.equal(reverse.params?.sessionId, 'session-approval')
+    assert.equal(reverse.params?.toolCall?.toolCallId, 'call-ap')
+    assert.deepEqual(reverse.params?.options?.map(option => option.optionId), ['allow-once', 'reject-once'])
+    assert.deepEqual(reverse.params?.options?.map(option => option.kind), ['allow_once', 'reject_once'])
+    client.send({ jsonrpc: '2.0', id: reverse.id, result: { outcome: { outcome: 'selected', optionId: 'allow-once' } } })
+    assert.equal(await decided, 'allowed-once')
+    // The turn settles and the prompt completes normally.
+    facts.onSessionEvent(agent.session, {
+      type: 'assistant/message',
+      data: { turn: 1, message: { id: 'm-ap', content: [{ type: 'text', text: 'approved answer' }] } },
+    })
+    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    // The committed answer arrives first as a session/update notification.
+    const update = (await client.next()) as { method?: string; params?: { update?: { sessionUpdate?: string } } }
+    assert.equal(update.method, 'session/update')
+    assert.equal(update.params?.update?.sessionUpdate, 'agent_message_chunk')
+    const response = (await client.next()) as { id?: number; result?: { stopReason?: string } }
+    assert.equal(response.id, 3)
+    assert.equal(response.result?.stopReason, 'end_turn')
+  } finally {
+    client.close()
+  }
+})
+
+test('a TUI-owned approval never reaches the ACP connection and a second Session stays isolated', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-tui-owned', '/host/a')
+  fake.seed('session-other', '/host/b')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const a = await RawClient.open(listener.socketPath)
+  const b = await RawClient.open(listener.socketPath)
+  try {
+    initialize(a, 1)
+    await a.next()
+    initialize(b, 1)
+    await b.next()
+    a.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-tui-owned', cwd: '/host/a' } })
+    assert.deepEqual(((await a.next()) as { result?: unknown }).result, {})
+    b.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-other', cwd: '/host/b' } })
+    assert.deepEqual(((await b.next()) as { result?: unknown }).result, {})
+    // The TUI-owned turn (open on the official fence, NOT claimed by any ACP
+    // flight) delegates to the TUI channel; the ACP connection sees nothing.
+    fake.turnFence.openTurnStartSeq = 10
+    fake.turnFence.lastTurn = 5
+    const facts = fake.facts()
+    const agentA = fake.agentOf('session-tui-owned')
+    assert.ok(facts !== undefined && agentA !== undefined)
+    let delegated = 0
+    assert.equal(await facts.onApprovalRequest({ agent: agentA, toolName: 'bash', callId: 'call-tui' }, async () => {
+      delegated += 1
+      return 'rejected'
+    }), 'rejected')
+    assert.equal(delegated, 1, 'the TUI-owned approval is delegated exactly once')
+    assert.equal(await a.silent(300), true, 'no reverse request reached the ACP connection')
+    // A cancel aimed at a Session this connection holds but with NO flight is inert.
+    a.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: 'session-tui-owned' } })
+    assert.equal(await a.silent(300), true, 'an idle cancel notification produces no response and no side effect')
+    assert.deepEqual(fake.cancelledTurns, [], 'the open TUI turn was never cancelled')
   } finally {
     a.close()
     b.close()

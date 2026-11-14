@@ -102,6 +102,24 @@ export interface HostAcpSessionAccess {
   /** Submit ONE prompt through the official Session Controller (queue mode only). */
   prompt(request: AcpSessionPromptRequest, signal: AbortSignal): Promise<{ readonly accepted: true }>
   /**
+   * Synchronously remove one still-pending inbox message on the exact Agent.
+   * Only a durable official `true` removal is `'removed'`; a message that is
+   * no longer pending is `'not-pending'`; a lost exact identity is `'stale'`.
+   */
+  cancelPending(sessionId: string, agent: LiveAgentViewIdentity, session: object, messageId: string):
+    'removed' | 'not-pending' | 'stale'
+  /**
+   * Synchronously address the official user cancel at the CURRENT open turn of
+   * the exact Agent. The turn must be open, be the last turn, and belong to a
+   * running Agent in the SAME Host callback stack; `'addressed'` means the
+   * official cancel was invoked, never that the turn already ended.
+   */
+  cancelCurrentTurn(sessionId: string, agent: LiveAgentViewIdentity, session: object, turn: number):
+    'addressed' | 'not-current' | 'stale'
+  /** The current official turn fence of the exact Agent/Session, or `stale`. */
+  currentTurn(sessionId: string, agent: LiveAgentViewIdentity, session: object):
+    { readonly kind: 'current'; readonly openTurn: number | null } | { readonly kind: 'stale' }
+  /**
    * Register the exact Agent/Session facts a prompt flight is correlated
    * against. The subscription belongs to the listener lifetime; the returned
    * disposer removes exactly these listeners.
@@ -158,6 +176,12 @@ export type LocalAcpPromptErrorCode =
   | 'LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT'
   /** The owned turn ended blocked/error/aborted/interrupted or the Agent died. */
   | 'LOCAL_ACP_PROMPT_TURN_FAILED'
+  /**
+   * A close (or a settling cancellation) could not prove the queued removal or
+   * the running turn's real termination: the View never fabricates a
+   * `cancelled` stop reason or a successful detach on unproven facts.
+   */
+  | 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'
 
 /** Every stable local ACP classification the View owner can raise. */
 export type LocalAcpSessionErrorCode = LocalAcpViewErrorCode | LocalAcpPromptErrorCode
@@ -243,7 +267,26 @@ export interface AcpPromptFactListener {
   onAgentError(agent: LiveAgentViewIdentity, turn: number): void
   /** The exact live Agent was disposed. */
   onAgentDisposed(agent: LiveAgentViewIdentity): void
+  /**
+   * The ONE approval classification entry of the shared Host waterfall. It is
+   * registered with `prepend: true` ahead of the TUI forwarding listener: a
+   * proven ACP-owned request is answered (or fail-closed) here and NEVER
+   * delegated through `next()`; only a proven TUI-owned request calls `next()`.
+   */
+  onApprovalRequest(request: AcpApprovalRequest, next: () => Promise<AcpApprovalOutcome>): Promise<AcpApprovalOutcome>
 }
+
+/** The official `approval/request` facts the View reads. */
+export interface AcpApprovalRequest {
+  readonly agent: LiveAgentViewIdentity
+  readonly toolName: string
+  readonly callId?: string
+  readonly reason?: string
+  readonly signal?: AbortSignal
+}
+
+/** The official closed approval outcome vocabulary (fail-closed union). */
+export type AcpApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
 
 /** The inbox message facts the View reads (`UserMessage` is structurally wider). */
 export interface AcpUserMessageLike {
@@ -260,6 +303,24 @@ export interface AcpSessionEventLike {
 /** One ACP prompt result: only a real legal stop reason is ever returned. */
 export interface AcpPromptResult {
   readonly stopReason: StopReason
+}
+
+/** The standard reverse `session/request_permission` params the View sends. */
+export interface AcpRequestPermissionParams {
+  readonly sessionId: string
+  readonly toolCall: { readonly toolCallId: string }
+  readonly options: ReadonlyArray<{
+    readonly optionId: string
+    readonly name: string
+    readonly kind: 'allow_once' | 'reject_once'
+  }>
+}
+
+/** The standard response the client may answer a permission request with. */
+export type AcpRequestPermissionResponse = {
+  readonly outcome:
+    | { readonly outcome: 'cancelled' }
+    | { readonly outcome: 'selected'; readonly optionId?: unknown }
 }
 
 /** One connection's transient protocol view state. */
@@ -286,6 +347,21 @@ interface ViewClaim {
   exactSession?: object
   /** At most ONE unsettled ACP prompt flight, correlated by real Host facts only. */
   inflight?: InflightPrompt
+  /**
+   * PO-3B: serializes an in-flight `session/close` settlement. A repeated
+   * close on the same View awaits the SAME real settlement instead of running
+   * a second cancellation.
+   */
+  closing?: Promise<Record<string, never>>
+  /**
+   * PO-3B: the retired turn attribution fence. A flight that already obtained
+   * the official claimed turn but settled (or was released) BEFORE its
+   * `turn/end` keeps exactly this transient record so a LATE `approval/request`
+   * of that still-running turn can never be delegated to the TUI. It dies on
+   * the matching `turn/end` (or the Agent's disposal) and is never reused for
+   * output or a new prompt.
+   */
+  retiringTurn?: { readonly turn: number }
 }
 
 /** The maximum number of not-yet-written notifications ONE prompt flight may queue. */
@@ -314,9 +390,49 @@ interface InflightPrompt {
   pendingUpdates: number
   outputTail: Promise<void>
   readonly sendUpdate: (update: SessionUpdate) => Promise<void>
+  /**
+   * PO-3B: the narrow reverse-request channel of THIS flight's own ACP
+   * connection (the SDK client of the `session/prompt` request). It is the
+   * only path a permission question may take; absent keeps approval
+   * fail-closed.
+   */
+  readonly requestPermission?: (params: AcpRequestPermissionParams, options?: { readonly signal?: AbortSignal }) => Promise<AcpRequestPermissionResponse>
   readonly settled: PromiseWithResolvers<AcpPromptResult>
   settledDone: boolean
   detachAbort?: () => void
+  /**
+   * PO-3B: the requester wants this prompt gone. It is INTENT ONLY — never a
+   * proof that a Host cancellation was committed; the committed proofs are
+   * `cancelKind` plus the correlated Host facts.
+   */
+  cancelRequested: boolean
+  /**
+   * The committed cancellation fact this flight is settling on:
+   * `'queued-removed'` after the exact durable inbox removal, or
+   * `'running-addressed'` after the official same-stack user cancel of the
+   * exact current turn.
+   */
+  cancelKind?: 'queued-removed' | 'running-addressed'
+  /** The admission call resolved (accepted or classified failure). */
+  admissionSettled: boolean
+  /** Resolves exactly when the admission call's classification completed. */
+  readonly admissionSettledPromise: Promise<void>
+  /** The resolver behind `admissionSettledPromise`; flight-private. */
+  readonly settleAdmission: () => void
+  /** PO-3B: output delivery is closed; queued-but-unsent updates are dropped. */
+  deliveryClosed: boolean
+  /**
+   * PO-3B: pending reverse permission requests keyed by their exact callId,
+   * alive only for THIS flight's lifetime (never a second global registry).
+   */
+  readonly permissionRequests: Map<string, PendingPermissionRequest>
+}
+
+/** One in-flight reverse `session/request_permission` of one flight. */
+interface PendingPermissionRequest {
+  readonly promise: Promise<AcpApprovalOutcome>
+  /** Abort the SDK `cancellationSignal` (close/cancel/disconnect path). */
+  abort(): void
 }
 
 const JSONRPC_INVALID_PARAMS = -32602
@@ -348,6 +464,16 @@ function turnEndReasonKind(data: unknown): string | undefined {
 }
 
 /**
+ * Whether one committed `turn/end` proves a USER cancellation: the official
+ * `aborted` reason whose nested cause is exactly `{kind:'user'}`. Any other
+ * abort cause (parent/hook/disposed/legacy) is NOT this user's cancellation.
+ */
+function turnEndUserAborted(data: unknown): boolean {
+  const reason = (data as { readonly reason?: { readonly kind?: unknown; readonly reason?: { readonly kind?: unknown } } } | undefined)?.reason
+  return reason?.kind === 'aborted' && (reason as { readonly reason?: { readonly kind?: unknown } }).reason?.kind === 'user'
+}
+
+/**
  * The pure View/claim lifecycle for ONE listener lifetime. A fresh registry is
  * created on every `setEnabled(true)` bind; a rebind never shares a previous
  * connection's claims.
@@ -355,9 +481,20 @@ function turnEndReasonKind(data: unknown): string | undefined {
 export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private readonly claims = new Map<string, ViewClaim>()
   private readonly diag: Diag
+  /**
+   * The Host access the fact callbacks may act through. It is bound exactly
+   * once when the listener installs its fact subscription (the same lifetime
+   * that owns these callbacks) and is never a second authority.
+   */
+  private access?: HostAcpSessionAccess
 
   constructor(diag: Diag) {
     this.diag = diag
+  }
+
+  /** Bind the ONE Host access the prompt-fact lifecycle may act through. */
+  bindAccess(access: HostAcpSessionAccess): void {
+    this.access = access
   }
 
   /** Create a fresh connection-scoped view state. */
@@ -496,33 +633,180 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
-   * Detach ONLY this connection's View for one Session. The Host Agent and
-   * Session stay alive; a repeated close on the same connection is idempotent.
-   * No other connection's claim and no Host Agent lifecycle is touched.
+   * Detach ONLY this connection's View for one Session. PO-3B: when a prompt
+   * flight is still open, the close FIRST drives the same scoped cancellation
+   * and waits for its real settlement (durable queued removal or the exact
+   * running turn's terminal plus the output drain); only a proven settlement
+   * detaches the View. A repeated close awaits the SAME settlement; a close of
+   * a Session this connection never held is still refused. The Host Agent and
+   * Session always stay alive; no other connection's claim is touched.
    */
-  closeSession(state: ConnectionViewState, sessionId: string): Record<string, never> {
+  async closeSession(
+    state: ConnectionViewState,
+    access: HostAcpSessionAccess,
+    sessionId: string,
+  ): Promise<Record<string, never>> {
     const claim = this.claims.get(sessionId)
     if (claim !== undefined && claim.connectionIdentity === state) {
-      if (claim.inflight !== undefined) {
-        // PO-3A cannot cancel a shared Host turn; pretending the View detached
-        // would leave an unanswerable request behind. PO-3B owns that policy.
-        throw promptError(
-          'LOCAL_ACP_PROMPT_IN_FLIGHT',
-          'a prompt is still in flight for this session view',
-          JSONRPC_INVALID_PARAMS,
-        )
+      const closing = claim.closing
+      if (closing !== undefined) return await closing
+      const flight = claim.inflight
+      if (flight !== undefined) {
+        // Serialize the close: every later close (and a physical disconnect
+        // racing it) joins this ONE real settlement; no second removal/cancel.
+        const settlement = this.cancelOwnedFlight(claim, flight, access, 'closing')
+          .then(() => this.finishClose(state, sessionId, claim))
+        claim.closing = settlement
+        return await settlement
       }
-      this.claims.delete(sessionId)
-      // This close also cancels any in-flight attach for this connection: the
-      // op generation is unchanged, but the claim is gone and the phase is idle,
-      // so the pending continuation sees `!isCurrentOp`/`claims.get !== claim`
-      // and never commits.
-      state.phase = 'idle'
-      state.lastClosedSessionId = sessionId
-      return {}
+      return this.finishClose(state, sessionId, claim)
     }
     if (state.lastClosedSessionId === sessionId) return {}
     throw new LocalAcpViewError('LOCAL_ACP_VIEW_NOT_OWNED', 'this ACP connection holds no view for that session', JSONRPC_INVALID_PARAMS)
+  }
+
+  /** Release one settled claim and record the idempotent close fact. */
+  private finishClose(state: ConnectionViewState, sessionId: string, claim: ViewClaim): Record<string, never> {
+    if (this.claims.get(sessionId) === claim) this.claims.delete(sessionId)
+    // This close also cancels any in-flight attach for this connection (same
+    // generation semantics as PO-2); a superseded op can never re-commit.
+    state.phase = 'idle'
+    state.lastClosedSessionId = sessionId
+    return {}
+  }
+
+  /**
+   * PO-3B scoped `session/cancel`: ONLY this connection's own unsettled flight
+   * is addressed — a queued message by its exact durable inbox removal, a
+   * running turn by the official same-stack user cancel of that exact current
+   * turn. An idle View (and any Session this connection does not own) is a
+   * no-op that never touches a Host Agent; a mixed owned turn is NOT cancelled
+   * (the TUI steer inside it keeps its authority) and keeps the D23 failure.
+   */
+  cancelSession(state: ConnectionViewState, access: HostAcpSessionAccess, sessionId: string): void {
+    const claim = this.claims.get(sessionId)
+    if (claim === undefined || claim.connectionIdentity !== state) return
+    const flight = claim.inflight
+    if (flight === undefined || flight.settledDone) return
+    // Commit the intent FIRST so a late insertion/claim still observes it.
+    flight.cancelRequested = true
+    this.addressCancelIntent(claim, flight, access)
+  }
+
+  /**
+   * Drive ONE scoped cancellation to its real settlement. The returned promise
+   * resolves only when the cancellation is PROVEN (durable removal committed
+   * and the admission classified, or the exact turn's real `turn/end` plus the
+   * output drain); it rejects with `LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED` when
+   * no legal proof can be obtained. The ACP request's own settlement (a real
+   * `cancelled` stop reason or its true failure) happens through the SAME
+   * flight settlement path this method feeds, never beside it.
+   */
+  private async cancelOwnedFlight(
+    claim: ViewClaim,
+    flight: InflightPrompt,
+    access: HostAcpSessionAccess,
+    reason: 'cancel' | 'closing' | 'disconnect',
+  ): Promise<void> {
+    // A disconnect cannot deliver any further output; close delivery first.
+    if (reason === 'disconnect') flight.deliveryClosed = true
+    flight.cancelRequested = true
+    this.addressCancelIntent(claim, flight, access)
+    // Wait for the flight's own settlement, which the fact callbacks drive.
+    // observeSettled already guards the rejection against going unhandled.
+    const outcome = await flight.settled.promise.then(() => 'settled', (error: unknown) => error)
+    if (reason !== 'disconnect') {
+      if (outcome !== 'settled') throw outcome
+      return
+    }
+    // A disconnected View cannot answer the ACP request, but the Host turn may
+    // still be running: the flight settled (or failed) is all this side owns.
+    return
+  }
+
+  /**
+   * Address the cancellation intent against the CURRENT Host facts. This is
+   * the single decision point for every entry (notification, close, insert
+   * callback, claim callback): a queued message is removed exactly; a running
+   * owned turn is user-cancelled in the same stack only when the official
+   * current-turn fence still matches; a mixed turn is never cancelled; an
+   * admission still in flight keeps its intent for the insertion callback.
+   */
+  private addressCancelIntent(claim: ViewClaim, flight: InflightPrompt, access: HostAcpSessionAccess): void {
+    if (flight.settledDone || flight.cancelKind !== undefined) return
+    const session = claim.exactSession
+    const agent = claim.exactAgent
+    const sessionId = claim.sessionId
+    if (session === undefined || agent === undefined) return
+    if (flight.turn === undefined) {
+      if (flight.messageId === undefined) {
+        // Not inserted yet: the insertion callback re-runs this exactly when
+        // the durable id exists. Nothing can be removed before that fact.
+        return
+      }
+      if (flight.mixed) {
+        // The turn claiming this message also carried a foreign message: D23.
+        // The flight settles with its real mixed failure at its turn/end.
+        return
+      }
+      const removed = access.cancelPending(sessionId, agent, session, flight.messageId)
+      if (removed === 'removed') {
+        flight.cancelKind = 'queued-removed'
+        this.settleQueuedRemoval(claim, flight)
+        return
+      }
+      if (removed === 'stale') {
+        // The exact Agent/Session identity is gone; the official facts cannot
+        // prove a removal. Fail closed — never guess "probably removed".
+        this.failPrompt(claim, flight, promptError(
+          'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED',
+          'the queued cancellation could not be proven on the exact live Agent',
+          JSONRPC_INTERNAL_ERROR,
+        ))
+        return
+      }
+      // 'not-pending': the message left the pending lists between the intent
+      // and this read. It was either claimed (the claim callback will observe
+      // the real turn) or already settled; wait for that authoritative fact.
+      return
+    }
+    if (flight.mixed) {
+      // D23 fail-closed: the owned turn also carries a TUI steer; cancelling
+      // the Agent would kill the human's work. The flight keeps its mixed
+      // settlement; no Agent cancel is issued.
+      return
+    }
+    const addressed = access.cancelCurrentTurn(sessionId, agent, session, flight.turn)
+    if (addressed === 'addressed') {
+      flight.cancelKind = 'running-addressed'
+      return
+    }
+    if (addressed === 'stale') {
+      this.failPrompt(claim, flight, promptError(
+        'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED',
+        'the running-turn cancellation could not be proven on the exact live Agent',
+        JSONRPC_INTERNAL_ERROR,
+      ))
+      return
+    }
+    // 'not-current': the turn already left the current fence (its real
+    // terminal is on the wire or the next turn began); the durable turn/end
+    // settles the request with its TRUE outcome.
+  }
+
+  /**
+   * Complete a proven queued removal: the durable splice committed. The
+   * completion waits for the admission path's classification (accepted or a
+   * definite rejection) through the flight's `admissionSettled` promise so the
+   * client never learns "cancelled" for a prompt the Host actually rejected.
+   */
+  private settleQueuedRemoval(claim: ViewClaim, flight: InflightPrompt): void {
+    runDetached('local acp: queued-cancel settlement', async () => {
+      await flight.admissionSettledPromise
+      await flight.outputTail
+      if (flight.settledDone) return
+      this.completePrompt(claim, flight, { stopReason: 'cancelled' })
+    }, { diag: this.diag })
   }
 
   /**
@@ -542,6 +826,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     request: AcpPromptSessionParams,
     requestSignal: AbortSignal,
     sendUpdate: (update: SessionUpdate) => Promise<void>,
+    requestPermission?: (params: AcpRequestPermissionParams, options?: { readonly signal?: AbortSignal }) => Promise<AcpRequestPermissionResponse>,
   ): Promise<AcpPromptResult> {
     if (typeof request.sessionId !== 'string' || request.sessionId.length === 0) {
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'a non-empty sessionId is required', JSONRPC_INVALID_PARAMS)
@@ -579,6 +864,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       )
     }
 
+    const admission = Promise.withResolvers<void>()
     const flight: InflightPrompt = {
       requestId: randomUUID(),
       phase: 'admitting',
@@ -587,8 +873,19 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       pendingUpdates: 0,
       outputTail: Promise.resolve(),
       sendUpdate,
+      requestPermission,
       settled: Promise.withResolvers<AcpPromptResult>(),
       settledDone: false,
+      cancelRequested: false,
+      admissionSettled: false,
+      admissionSettledPromise: admission.promise,
+      settleAdmission: () => {
+        if (flight.admissionSettled) return
+        flight.admissionSettled = true
+        admission.resolve()
+      },
+      deliveryClosed: false,
+      permissionRequests: new Map(),
     }
     // Observe the settlement promise BEFORE the first await: an abort, physical
     // disconnect or Agent disposal can reject it while this method is still
@@ -654,6 +951,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           ))
         }
       }
+    } finally {
+      flight.settleAdmission()
     }
     return await flight.settled.promise
   }
@@ -679,7 +978,14 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         continue
       }
       if (flight.messageId !== undefined) continue
-      if (rpcId !== undefined && rpcId === flight.requestId) flight.messageId = message.id
+      if (rpcId !== undefined && rpcId === flight.requestId) {
+        // Save the durable id FIRST so every later path addresses the exact
+        // message; a cancellation that arrived before this fact now sees it.
+        flight.messageId = message.id
+        if (flight.cancelRequested && this.access !== undefined) {
+          this.addressCancelIntent(claim, flight, this.access)
+        }
+      }
     }
   }
 
@@ -699,6 +1005,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           if (flight.phase === 'admitting' || flight.phase === 'queued') flight.phase = 'claimed'
           if (flight.foreignTurn === turn) flight.mixed = true
           flight.foreignTurn = undefined
+          // A pending cancellation now has its authoritative turn: address it
+          // in this SAME callback stack before the Agent can run further.
+          if (flight.cancelRequested && this.access !== undefined) {
+            this.addressCancelIntent(claim, flight, this.access)
+          }
         }
         continue
       }
@@ -717,15 +1028,20 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   onSessionEvent(session: object, event: AcpSessionEventLike): void {
     for (const claim of this.claims.values()) {
       if (claim.exactSession !== session) continue
-      const flight = claim.inflight
-      if (flight === undefined || flight.settledDone) return
       const data = event.data as { readonly turn?: unknown } | undefined
-      if (typeof data?.turn !== 'number' || flight.turn === undefined || data.turn !== flight.turn) return
+      // The retired-turn fence dies on its own terminal record even when no
+      // flight is open any more (the flight settled before this turn/end).
+      if (event.type === 'turn/end' && typeof data?.turn === 'number' && claim.retiringTurn?.turn === data.turn) {
+        claim.retiringTurn = undefined
+      }
+      const flight = claim.inflight
+      if (flight === undefined || flight.settledDone) continue
+      if (typeof data?.turn !== 'number' || flight.turn === undefined || data.turn !== flight.turn) continue
       if (flight.mixed) {
         // A mixed turn projects NOTHING further; it can only settle as a
         // failure once the turn reaches its own terminal record.
         if (event.type === 'turn/end') this.settleTurnEnd(claim, flight, data)
-        return
+        continue
       }
       switch (event.type) {
         case 'assistant/message':
@@ -743,7 +1059,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         default:
           break
       }
-      return
     }
   }
 
@@ -768,6 +1083,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   onAgentDisposed(agent: LiveAgentViewIdentity): void {
     for (const claim of this.claims.values()) {
       if (claim.exactAgent !== agent) continue
+      claim.retiringTurn = undefined
       const flight = claim.inflight
       if (flight === undefined || flight.settledDone) continue
       this.failPrompt(claim, flight, promptError(
@@ -780,12 +1096,149 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
+   * PO-3B approval classification entry (the ONE prepended waterfall seat).
+   *
+   * The decision is made ONLY from authoritative facts: the request's exact
+   * Agent against every claim's exact identity, the claim's live flight turn
+   * or its transient retired-turn fence, and the official current-turn fence.
+   * A turn proven ACP-owned is answered here — standard reverse
+   * `session/request_permission` when the channel allows it, `'unavailable'`
+   * (fail closed) when it does not — and NEVER delegated through `next()`. A
+   * turn proven NOT owned by any ACP View is delegated exactly once.
+   */
+  async onApprovalRequest(
+    request: AcpApprovalRequest,
+    next: () => Promise<AcpApprovalOutcome>,
+  ): Promise<AcpApprovalOutcome> {
+    const agent = request.agent
+    // Find the one claim whose EXACT Agent object matches the request's Agent.
+    let owner: ViewClaim | undefined
+    for (const claim of this.claims.values()) {
+      if (claim.exactAgent === agent) {
+        owner = claim
+        break
+      }
+    }
+    if (owner === undefined) {
+      // No ACP View holds this exact Agent: the TUI keeps its own channel.
+      return await next()
+    }
+    const flight = owner.inflight
+    const owningTurn = flight !== undefined && !flight.settledDone && flight.turn !== undefined
+      ? flight.turn
+      : owner.retiringTurn?.turn
+    if (owningTurn === undefined) {
+      // This Agent has a View but no provable turn ownership: the request may
+      // belong to a TUI-owning turn (e.g. an idle ACP View beside a running
+      // TUI turn). Verify against the official current fence before delegating.
+      const session = owner.exactSession
+      const fence = session === undefined || this.access === undefined
+        ? undefined
+        : this.access.currentTurn(owner.sessionId, agent, session)
+      if (fence === undefined || fence.kind === 'stale') {
+        // Stale identity: the ownership cannot be proven either way; fail
+        // closed rather than guess (never delegate an unprovable request).
+        return 'unavailable'
+      }
+      if (fence.openTurn === null) {
+        return await next()
+      }
+      // An open official turn exists but no ACP flight owns it and no retired
+      // fence covers it: it is not this View's turn (the ACP prompt has not
+      // been claimed or already fully settled); the TUI owns it.
+      return await next()
+    }
+    // The turn is PROVEN ACP-owned: never delegate it to the TUI.
+    if (flight === undefined || flight.settledDone || flight.cancelRequested || flight.mixed
+      || request.callId === undefined) {
+      // No live channel to ask (settled/retired, cancelled, mixed, or a
+      // request without a tool callId): fail closed; the official service
+      // records its own audit pair with this outcome.
+      return 'unavailable'
+    }
+    const pending = flight.permissionRequests.get(request.callId)
+    if (pending !== undefined) return await pending.promise
+    const channel = flight.requestPermission
+    if (channel === undefined) return 'unavailable'
+    // Wait for this flight's queued output first (ordered channel), then ask
+    // through the SAME connection the prompt arrived on.
+    const asked = this.askPermission(flight, owner, request, channel)
+    flight.permissionRequests.set(request.callId, asked)
+    try {
+      return await asked.promise
+    } finally {
+      flight.permissionRequests.delete(request.callId)
+    }
+  }
+
+  /** Issue ONE reverse permission request on the flight's own channel. */
+  private askPermission(
+    flight: InflightPrompt,
+    owner: ViewClaim,
+    request: AcpApprovalRequest,
+    channel: NonNullable<InflightPrompt['requestPermission']>,
+  ): PendingPermissionRequest {
+    const upstreamSignal = request.signal
+    const cancellation = new AbortController()
+    const onUpstreamAbort = (): void => { cancellation.abort() }
+    upstreamSignal?.addEventListener('abort', onUpstreamAbort, { once: true })
+    const promise = (async (): Promise<AcpApprovalOutcome> => {
+      if (upstreamSignal?.aborted === true) return 'cancelled'
+      try {
+        // Ordered: the client sees the turn's updates before the question.
+        await flight.outputTail
+        if (flight.settledDone || flight.deliveryClosed) return 'unavailable'
+        const response = await channel({
+          sessionId: owner.sessionId,
+          toolCall: { toolCallId: request.callId as string },
+          options: [
+            { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+            { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
+          ],
+        }, { signal: cancellation.signal })
+        if (flight.settledDone || flight.deliveryClosed) return 'unavailable'
+        // A response racing an upstream abort: the abort already decided this
+        // question; a late answer (even a valid allow) must not grant it.
+        const raced = upstreamSignal
+        if ((raced?.aborted ?? false) === true) return 'cancelled'
+        const outcome = response?.outcome
+        if (outcome?.outcome === 'cancelled') return 'cancelled'
+        if (outcome?.outcome === 'selected') {
+          if (outcome.optionId === 'allow-once') return 'allowed-once'
+          if (outcome.optionId === 'reject-once') return 'rejected'
+        }
+        // An unknown optionId or malformed response never grants anything.
+        return 'unavailable'
+      } catch {
+        // A transport failure, a timeout or an aborted reverse request fails
+        // closed; it never falls through to the TUI.
+        const signal = upstreamSignal
+        const aborted = (signal?.aborted ?? false) || cancellation.signal.aborted
+        return aborted ? 'cancelled' : 'unavailable'
+      } finally {
+        upstreamSignal?.removeEventListener('abort', onUpstreamAbort)
+      }
+    })()
+    return {
+      promise,
+      abort: () => { cancellation.abort() },
+    }
+  }
+
+  /**
    * Release every claim owned by one connection and mark it closed. Used by
-   * BOTH an explicit `session/close` teardown path and a physical `socket`
+   * BOTH an explicit teardown completion and a physical `socket`
    * end/error/destroy or Host Off; it is idempotent and never touches another
    * connection's claim or any Host Agent/Session.
+   *
+   * PO-3B: a flight that already owns a real Host fact (its durable message
+   * id) is no longer dropped synchronously — the SAME scoped cancellation runs
+   * (a queued removal or the exact turn's user cancel) and only the proven
+   * settlement releases the claim. A flight with no durable fact yet has no
+   * Host object any cancellation could address, so it keeps the PO-3A
+   * fail-closed release.
    */
-  releaseConnection(state: ConnectionViewState): void {
+  releaseConnection(state: ConnectionViewState, access?: HostAcpSessionAccess): void {
     state.phase = 'closed'
     // Bump the generation so any in-flight continuation is treated as stale and
     // can never mutate this (closed) connection's state.
@@ -794,17 +1247,38 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (claim.connectionIdentity !== state) continue
       const flight = claim.inflight
       if (flight !== undefined) {
-        // A physical connection end cannot answer the ACP request any more and
-        // must not cancel the shared Host turn; the flight settles as failed
-        // and this View stops projecting. The Host Agent keeps running.
-        this.failPrompt(claim, flight, new LocalAcpViewError(
-          'LOCAL_ACP_VIEW_CLOSED',
-          'the ACP connection closed before the prompt settled',
-          JSONRPC_INTERNAL_ERROR,
-        ))
+        const bound = access ?? this.access
+        if (bound === undefined || flight.messageId === undefined) {
+          // No Host access was bound, or the flight has no durable Host fact
+          // to cancel: keep the PO-3A fail-closed release.
+          this.failPrompt(claim, flight, new LocalAcpViewError(
+            'LOCAL_ACP_VIEW_CLOSED',
+            'the ACP connection closed before the prompt settled',
+            JSONRPC_INTERNAL_ERROR,
+          ))
+          this.claims.delete(sessionId)
+          continue
+        }
+        // The flight owns a real Host fact: the same scoped cancellation runs;
+        // its proven settlement (or its real failure) releases the claim.
+        runDetached('local acp: disconnect cancellation', async () => {
+          try {
+            await this.cancelOwnedFlight(claim, flight, bound, 'disconnect')
+          } catch {
+            // The flight settled with its real failure; the claim is released
+            // below either way.
+          }
+          this.releaseClaimAfterDisconnect(sessionId, claim)
+        }, { diag: this.diag })
+        continue
       }
       this.claims.delete(sessionId)
     }
+  }
+
+  /** Release one disconnect claim after its flight settled. */
+  private releaseClaimAfterDisconnect(sessionId: string, claim: ViewClaim): void {
+    if (this.claims.get(sessionId) === claim) this.claims.delete(sessionId)
   }
 
   /**
@@ -966,6 +1440,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         flight.assistantText = true
         continue
       }
+      if (type === 'tool-call') {
+        // The official `assistant/message` carries its tool-call blocks AND
+        // the Host appends each of them as its OWN durable `tool/call` event;
+        // the dedicated event (with the real callId/name) is the projection
+        // source, so the block here is skipped instead of duplicated.
+        continue
+      }
       // Images/audio/unknown blocks belong to PO-4: never truncate or fake one.
       this.failPrompt(claim, flight, unsupportedContent())
       return
@@ -1040,10 +1521,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
     flight.outputTail = flight.outputTail.then(async () => {
       for (const update of updates) {
-        // A mixed turn stops ALL output that has not yet been handed to the
-        // transport. Notifications already sent cannot be retracted, but a
-        // queued one is still ours to drop.
-        if (flight.settledDone || flight.mixed) {
+        // A mixed turn, a settled flight or a closed delivery stops ALL output
+        // that has not yet been handed to the transport. Notifications already
+        // sent cannot be retracted, but a queued one is still ours to drop.
+        if (flight.settledDone || flight.mixed || flight.deliveryClosed) {
           flight.pendingUpdates -= 1
           continue
         }
@@ -1081,6 +1562,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         ))
         return
       }
+      // A PROVEN user cancellation of this exact turn answers `cancelled`: the
+      // official `turn/end {kind:'aborted', reason:{kind:'user'}}` of the turn
+      // this flight cancelled is the authoritative fact.
+      if (flight.cancelKind === 'running-addressed' && turnEndUserAborted(data)) {
+        this.completePrompt(claim, flight, { stopReason: 'cancelled' })
+        return
+      }
       // The REAL terminal reason decides first: a blocked/error/aborted/
       // interrupted turn keeps its actual classification even when it produced
       // no assistant text. Only a successful candidate needs the text check.
@@ -1114,6 +1602,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     flight.detachAbort?.()
     flight.detachAbort = undefined
     flight.foreignTurn = undefined
+    flight.deliveryClosed = true
+    this.abortPermissionRequests(flight)
+    // A flight that already holds its official claimed turn but settles before
+    // that turn's `turn/end` keeps a transient retired-turn fence: a LATE
+    // approval/request of the still-running turn stays ACP-owned (never
+    // delegated to the TUI) until the real terminal record arrives.
+    if (flight.turn !== undefined) claim.retiringTurn = { turn: flight.turn }
     if (claim.inflight === flight) claim.inflight = undefined
     flight.settled.reject(error)
   }
@@ -1126,8 +1621,16 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     flight.detachAbort?.()
     flight.detachAbort = undefined
     flight.foreignTurn = undefined
+    flight.deliveryClosed = true
+    this.abortPermissionRequests(flight)
     if (claim.inflight === flight) claim.inflight = undefined
     flight.settled.resolve(result)
+  }
+
+  /** Abort every pending reverse permission request of one settling flight. */
+  private abortPermissionRequests(flight: InflightPrompt): void {
+    for (const pending of flight.permissionRequests.values()) pending.abort()
+    flight.permissionRequests.clear()
   }
 
   private validateNew(request: AcpNewSessionParams): void {
