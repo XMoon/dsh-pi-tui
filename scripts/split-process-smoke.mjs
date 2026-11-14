@@ -498,7 +498,7 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.hostReadyAfterAcp === true
       && result?.independentConnections === true
       && result?.capacityAndBackpressure === true
-      && result?.noBusinessSessionBeforePo2 === true
+      && result?.unsupportedSessionMethodsFailClosed === true
       && result?.stoppedAndUnlinked === true
       && result?.staleReclaimedSafely === true
       && result?.noTcpOrStdoutPollution === true
@@ -518,6 +518,26 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.recomposeKeepsSameHost === true
       && result?.originalSplitClientIntact === true,
     `selected ${caseId}: the ACP opt-in control verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
+    return
+  }
+  if (caseId === 'acp.po2-session-view') {
+    assert(result?.status === 'PASS'
+      && result?.scope === 'REAL_SPLIT_PROCESS_L6'
+      && result?.acpVersionFromInstalledDsh === true
+      && result?.socketPermissions0700And0600 === true
+      && result?.tuiAndAcpShareSession === true
+      && result?.secondConnectionConflict === true
+      && result?.closeReleasesOnlyView === true
+      && result?.tuiTurnAfterClose === true
+      && result?.newSessionViaHostWorkspace === true
+      && result?.closeKeepsSessionResumable === true
+      && result?.coldRestartResume === true
+      && result?.disconnectReleasesView === true
+      && result?.runtimeToggleDisconnects === true
+      && result?.negativesRejected === true
+      && result?.hostIdentityKept === true
+      && result?.originalSplitClientIntact === true,
+    `selected ${caseId}: the ACP shared Session View verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
     return
   }
   if (caseId === 'account.official-composition') {

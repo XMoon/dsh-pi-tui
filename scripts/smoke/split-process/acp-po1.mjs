@@ -292,11 +292,18 @@ export async function runAcpPo1(context) {
       assert(capacity?.error?.data?.code === 'LOCAL_ACP_CAPACITY_EXCEEDED', 'the capacity rejection must name LOCAL_ACP_CAPACITY_EXCEEDED')
       await c5.closed
 
-      // Session methods fail closed; an oversized frame closes only its own connection.
-      c1.send({ jsonrpc: '2.0', id: 5, method: 'session/new', params: { cwd: '/tmp', mcpServers: [] } })
-      const sessionReject = await c1.next()
-      assert(sessionReject?.error?.code === -32042, 'session/new must fail closed with -32042')
-      assert(sessionReject?.error?.data?.code === 'LOCAL_ACP_SESSION_NOT_READY', 'session/new must name LOCAL_ACP_SESSION_NOT_READY')
+      // The STILL-unsupported Session methods fail closed; PO-2 now implements
+      // `session/new|resume|close` on a real Host, so this raw socket contract
+      // checks the methods that remain unimplemented. An oversized frame closes
+      // only its own connection.
+      c1.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: 'unused', prompt: [] } })
+      const promptReject = await c1.next()
+      assert(promptReject?.error?.code === -32042, 'session/prompt must fail closed with -32042')
+      assert(promptReject?.error?.data?.code === 'LOCAL_ACP_SESSION_NOT_READY', 'session/prompt must name LOCAL_ACP_SESSION_NOT_READY')
+      c1.send({ jsonrpc: '2.0', id: 6, method: 'session/list', params: {} })
+      const listReject = await c1.next()
+      assert(listReject?.error?.code === -32042, 'session/list must fail closed with -32042')
+      assert(listReject?.error?.data?.code === 'LOCAL_ACP_SESSION_NOT_READY', 'session/list must name LOCAL_ACP_SESSION_NOT_READY')
 
       c3.sendRaw('{"jsonrpc":"2.0","id":9,"method":"initialize","params":{"x":"')
       c3.sendRaw('a'.repeat(1024 * 1024 + 16))
@@ -395,7 +402,7 @@ export async function runAcpPo1(context) {
       hostReadyAfterAcp: true,
       independentConnections: true,
       capacityAndBackpressure: true,
-      noBusinessSessionBeforePo2: true,
+      unsupportedSessionMethodsFailClosed: true,
       stoppedAndUnlinked: true,
       staleReclaimedSafely: true,
       noTcpOrStdoutPollution: true,

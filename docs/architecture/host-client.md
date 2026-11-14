@@ -415,14 +415,40 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
   safety checks. A stop admitted while the listener is binding never emits Ready;
   the one official shutdown quiesces and closes the controller before it runs.
   A SIGKILL leaves a stale inode for the next seat winner's safe reclaim.
-- **ACP v1 handshake, no Session capability yet.** The listener answers only
-  the ACP v1 `initialize` (protocol version 1, `agentInfo.name` `dsh-pi-tui`,
-  `agentInfo.version` the installed `@xmoon76/dsh-pi-tui` bundle version —
-  never the DSH engine version) with no business capability advertised. Every
-  `session/new|list|resume|set_config_option|prompt|close` request fails closed
-  with the stable `LOCAL_ACP_SESSION_NOT_READY` code, and a `session/cancel`
-  notification has no Host side effect. `initialize` is a protocol front door,
-  not a Session attach or a claim that an Agent run is possible.
+- **ACP v1 handshake and a connection-scoped shared Session View.** The
+  listener answers the ACP v1 `initialize` (protocol version 1, `agentInfo.name`
+  `dsh-pi-tui`, `agentInfo.version` the installed `@xmoon76/dsh-pi-tui` bundle
+  version — never the DSH engine version). When the Host installs the shared
+  Session View it advertises exactly `sessionCapabilities: { resume: {}, close:
+  {} }` and never `loadSession`, prompt/image/MCP capability, `session/list` or
+  config options. The View is a BORROW of the Host's own Agent and Session,
+  never a second owner:
+  - One ACP connection may borrow **at most one** Host Session (one View), and
+    one Host Session carries **at most one** ACP View at a time, while any
+    number of human Split TUI Clients may still reference the same Session.
+  - `session/new` treats the request `cwd` as a proposal only: the Host
+    Workspace Controller validates/realpaths it into a `workspaceId`, the Host
+    Session Controller creates ONE Session in that Workspace, and the official
+    `resolveAgent` borrows the live Agent. The client cwd never becomes a Host
+    directory authority, and one request performs exactly one creation (never
+    auto-retried).
+  - `session/resume` borrows the live Agent through the single official
+    `resolveAgent` (live-first, one cold resume, concurrent-resume dedup). The
+    request `cwd` never changes the Session cwd/model/workspace; a difference is
+    only recorded as a fixed non-sensitive note. A second ACP connection for a
+    Session already held is refused, and the TUI is never subject to that limit.
+  - `session/close` detaches ONLY this connection's View/reservation. It never
+    cancels, waits for idle, disposes, flushes or resumes the Agent/Session, so a
+    TUI referencing the same Session keeps working and a later connection may
+    resume again. A repeated close on the same connection is idempotent.
+  - A physical socket end/error/destroy, runtime Off or Host shutdown releases
+    the connection's View with the same detach-only semantics; the Session,
+    Agent and writer keep their Host authority, and a pending create/resume whose
+    connection closed never publishes an attached View.
+  - `session/prompt`, `session/list`, `session/set_config_option`, approval and
+    turn semantics are NOT provided by this View; they fail closed with the
+    stable `LOCAL_ACP_SESSION_NOT_READY` code, and a `session/cancel`
+    notification has no Host side effect.
 - **Bounded per Host and per connection.** The Host start-time
   `DSH_PI_TUI_ACP_MAX_CONNECTIONS` integer (default 4, valid 1..16, an invalid
   value is a startup failure) caps live connections; an over-limit connection

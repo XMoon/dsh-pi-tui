@@ -27,6 +27,7 @@ import {
   startLocalAcpListener,
   type LocalAcpListener,
 } from '../../src/app/remote-process/local-acp-listener.ts'
+import type { HostAcpSessionAccess, LiveAgentViewIdentity } from '../../src/app/remote-process/local-acp-session-view.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const QUIET_DIAG: Diag = {
@@ -234,14 +235,14 @@ test('two connections reuse JSON-RPC id 1 independently and one closing does not
   }
 })
 
-test('Session methods fail closed with LOCAL_ACP_SESSION_NOT_READY before and after initialize', async t => {
+test('unsupported Session methods fail closed with LOCAL_ACP_SESSION_NOT_READY before and after initialize', async t => {
   const { scope } = newScope(t)
   const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
   t.after(() => listener.close())
   const client = await RawClient.open(listener.socketPath)
   try {
     // Before initialize: still a deterministic, non-success rejection.
-    client.send({ jsonrpc: '2.0', id: 10, method: 'session/new', params: { cwd: '/tmp', mcpServers: [] } })
+    client.send({ jsonrpc: '2.0', id: 10, method: 'session/prompt', params: { sessionId: 's', prompt: [{ type: 'text', text: 'hi' }] } })
     const early = (await client.next()) as { id: number; error?: { code: number; data?: { code?: string } } }
     assert.equal(early.error?.code, -32042)
     assert.equal(early.error?.data?.code, 'LOCAL_ACP_SESSION_NOT_READY')
@@ -250,12 +251,9 @@ test('Session methods fail closed with LOCAL_ACP_SESSION_NOT_READY before and af
     await client.next()
 
     const calls = [
-      { id: 20, method: 'session/new', params: { cwd: '/tmp', mcpServers: [] } },
       { id: 21, method: 'session/list', params: {} },
-      { id: 22, method: 'session/resume', params: { sessionId: 's' } },
       { id: 23, method: 'session/set_config_option', params: { sessionId: 's', configId: 'c', value: 'v' } },
       { id: 24, method: 'session/prompt', params: { sessionId: 's', prompt: [{ type: 'text', text: 'hi' }] } },
-      { id: 25, method: 'session/close', params: { sessionId: 's' } },
     ]
     for (const call of calls) {
       client.send({ jsonrpc: '2.0', ...call })
@@ -266,6 +264,31 @@ test('Session methods fail closed with LOCAL_ACP_SESSION_NOT_READY before and af
     }
     // A session/cancel notification has no response and no side effect.
     client.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: 's' } })
+  } finally {
+    client.close()
+  }
+})
+
+test('without a Host Session View the lifecycle methods stay fail-closed (raw socket fallback)', async t => {
+  const { scope } = newScope(t)
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    const calls = [
+      { id: 30, method: 'session/new', params: { cwd: '/tmp', mcpServers: [] } },
+      { id: 31, method: 'session/resume', params: { sessionId: 's', cwd: '/tmp' } },
+      { id: 32, method: 'session/close', params: { sessionId: 's' } },
+    ]
+    for (const call of calls) {
+      client.send({ jsonrpc: '2.0', ...call })
+      const response = (await client.next()) as { id: number; error?: { code: number; data?: { code?: string } } }
+      assert.equal(response.id, call.id)
+      assert.equal(response.error?.code, -32042, `${call.method} must fail closed without a Host Session View`)
+      assert.equal(response.error?.data?.code, 'LOCAL_ACP_SESSION_NOT_READY')
+    }
   } finally {
     client.close()
   }
@@ -707,4 +730,135 @@ test('a stale PRIVATE bind socket left by SIGKILL is recovered on the next start
   }
   assert.equal(pathExists(listener.socketPath), false, 'normal close retires the contract inode')
   assert.equal(pathExists(privSock), false, 'the private bind name stays gone after close')
+})
+
+/** A minimal in-memory Host Session access that keeps EXACT object identity. */
+function makeFakeAccess(): {
+  access: HostAcpSessionAccess
+  seed: (id: string, cwd: string) => LiveAgentViewIdentity
+} {
+  const agents = new Map<string, { id: string; session: { id: string; header: { cwd: string } } }>()
+  let counter = 0
+  return {
+    access: {
+      async createWorkspace(path: string) {
+        return { workspaceId: `ws-${path}`, path }
+      },
+      async createSession(workspaceId: string) {
+        counter += 1
+        const id = `session-${String(counter)}`
+        agents.set(id, { id, session: { id, header: { cwd: `/host/${workspaceId}` } } })
+        return { sessionId: id }
+      },
+      async resolveAgent(sessionId: string) {
+        const agent = agents.get(sessionId)
+        return agent === undefined
+          ? { error: { code: 'session/not-found', message: 'not found' } }
+          : { agent }
+      },
+      currentAgent(sessionId: string) {
+        return agents.get(sessionId)
+      },
+      currentSession(sessionId: string) {
+        return agents.get(sessionId)?.session
+      },
+    },
+    seed: (id: string, cwd: string) => {
+      const agent = { id, session: { id, header: { cwd } } }
+      agents.set(id, agent)
+      return agent
+    },
+  }
+}
+
+test('a Host Session View advertises resume/close and serves new/close over the real ACP socket', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    // Before initialize a lifecycle request is refused with the View code.
+    client.send({ jsonrpc: '2.0', id: 1, method: 'session/new', params: { cwd: '/host/x', mcpServers: [] } })
+    const pre = (await client.next()) as { error?: { data?: { code?: string } } }
+    assert.equal(pre.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_INITIALIZED')
+
+    initialize(client, 2)
+    const init = (await client.next()) as {
+      result?: { agentCapabilities: { loadSession: boolean; sessionCapabilities: { resume?: unknown; close?: unknown } } }
+    }
+    assert.equal(init.result?.agentCapabilities.loadSession, false)
+    assert.ok(init.result?.agentCapabilities.sessionCapabilities.resume !== undefined, 'resume capability is advertised')
+    assert.ok(init.result?.agentCapabilities.sessionCapabilities.close !== undefined, 'close capability is advertised')
+
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/new', params: { cwd: '/host/proj', mcpServers: [] } })
+    const created = (await client.next()) as { result?: { sessionId?: string } }
+    assert.equal(typeof created.result?.sessionId, 'string')
+    const sessionId = created.result?.sessionId as string
+
+    // A second new while attached is refused as busy (no second Host create).
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/new', params: { cwd: '/host/proj', mcpServers: [] } })
+    const busy = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(busy.error?.code, -32602)
+    assert.equal(busy.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY')
+
+    client.send({ jsonrpc: '2.0', id: 5, method: 'session/close', params: { sessionId } })
+    const closed = (await client.next()) as { result?: unknown }
+    assert.deepEqual(closed.result, {})
+    client.send({ jsonrpc: '2.0', id: 6, method: 'session/close', params: { sessionId } })
+    const again = (await client.next()) as { result?: unknown }
+    assert.deepEqual(again.result, {}, 'a repeated close on the same connection is idempotent')
+
+    // A still-unsupported method keeps the misleading-free fail-closed code.
+    client.send({ jsonrpc: '2.0', id: 7, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'hi' }] } })
+    const prompt = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(prompt.error?.code, -32042)
+    assert.equal(prompt.error?.data?.code, 'LOCAL_ACP_SESSION_NOT_READY')
+  } finally {
+    client.close()
+  }
+})
+
+test('a second ACP connection cannot attach an already-held Session; invalid requests fail before dispatch', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-resume', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const a = await RawClient.open(listener.socketPath)
+  const b = await RawClient.open(listener.socketPath)
+  try {
+    initialize(a, 1)
+    await a.next()
+    initialize(b, 1)
+    await b.next()
+
+    a.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-resume', cwd: 'relative' } })
+    const badCwd = (await a.next()) as { error?: { data?: { code?: string } } }
+    assert.equal(badCwd.error?.data?.code, 'LOCAL_ACP_VIEW_INVALID_REQUEST')
+
+    a.send({ jsonrpc: '2.0', id: 3, method: 'session/new', params: { cwd: '/host/proj', mcpServers: [{ name: 'srv', command: 'x', args: [], env: [] }] } })
+    const badMcp = (await a.next()) as { error?: { data?: { code?: string } } }
+    assert.equal(badMcp.error?.data?.code, 'LOCAL_ACP_VIEW_INVALID_REQUEST')
+
+    a.send({ jsonrpc: '2.0', id: 4, method: 'session/resume', params: { sessionId: 'session-resume', cwd: '/host/proj' } })
+    const ok = (await a.next()) as { result?: unknown }
+    assert.deepEqual(ok.result, {})
+
+    b.send({ jsonrpc: '2.0', id: 5, method: 'session/resume', params: { sessionId: 'session-resume', cwd: '/host/proj' } })
+    const conflict = (await b.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(conflict.error?.code, -32602)
+    assert.equal(conflict.error?.data?.code, 'LOCAL_ACP_VIEW_ALREADY_ATTACHED')
+
+    // Connection A is unaffected and can still detach; then B may attach.
+    a.send({ jsonrpc: '2.0', id: 6, method: 'session/close', params: { sessionId: 'session-resume' } })
+    const closedA = (await a.next()) as { result?: unknown }
+    assert.deepEqual(closedA.result, {})
+    b.send({ jsonrpc: '2.0', id: 7, method: 'session/resume', params: { sessionId: 'session-resume', cwd: '/host/proj' } })
+    const okB = (await b.next()) as { result?: unknown }
+    assert.deepEqual(okB.result, {})
+  } finally {
+    a.close()
+    b.close()
+  }
 })
