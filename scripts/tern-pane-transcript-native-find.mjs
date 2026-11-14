@@ -353,11 +353,12 @@ export default async function (h) {
   h.check('the client negotiated Section nodes', hello?.kinds?.includes('section'), JSON.stringify(hello?.kinds))
   // Plan C2 item 2: the environment record also carries the negotiated
   // capability hello and the actual viewport (both are runtime facts that only
-  // exist after the mount, so they merge into the ledger here).
+  // exist after the mount, so they merge into the ledger here). `hello` is
+  // already the reply's body — its fields live at that level.
   const environmentPath = join(h.root, 'environment.json')
   writeFileSync(environmentPath, `${JSON.stringify({
     ...(existsSync(environmentPath) ? JSON.parse(readFileSync(environmentPath, 'utf8')) : {}),
-    hello: { ver: hello?.body?.ver, term: hello?.body?.term, kinds: hello?.body?.kinds, features: hello?.body?.features, dark: hello?.body?.dark },
+    hello: { ver: hello?.ver, term: hello?.term, kinds: hello?.kinds, features: hello?.features, dark: hello?.dark },
     viewport: h.ctl('stats').viewport,
   }, null, 1)}\n`)
 
