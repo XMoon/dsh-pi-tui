@@ -61,6 +61,7 @@ interface Harness {
   readonly invoke: () => unknown
   readonly acp: { status: AcpAccessStatus; setEnabledCalls: boolean[]; failure: string | undefined }
   readonly pref: { state: AcpStartupPreferenceState | undefined; writes: boolean[]; failNext: string | undefined }
+  readonly setReadiness: (readiness: 'ready' | 'stale' | 'unavailable') => void
   readonly dispose: () => void
 }
 
@@ -71,6 +72,7 @@ function setup(options: {
   readonly status?: AcpAccessStatus
   readonly acpUnavailable?: boolean
   readonly pref?: AcpStartupPreferenceState | undefined
+  readonly readiness?: 'ready' | 'stale' | 'unavailable'
 } = {}): Harness {
   const columns = options.columns ?? 200
   const rows = options.rows ?? 40
@@ -97,6 +99,7 @@ function setup(options: {
     find: () => undefined,
     execute: async () => undefined,
   }
+  let readiness: 'ready' | 'stale' | 'unavailable' = options.readiness ?? 'ready'
   const acp = {
     status: options.status ?? { state: 'disabled' as const },
     setEnabledCalls: [] as boolean[],
@@ -169,7 +172,7 @@ function setup(options: {
     applyFooterSettings: () => {},
     acpAccess,
     config: settingsDirectPageConfig({
-      configReadiness: () => 'ready',
+      configReadiness: () => readiness,
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
       subagentModelSelection: { available: () => false },
@@ -206,6 +209,7 @@ function setup(options: {
     invoke,
     acp,
     pref,
+    setReadiness: next => { readiness = next },
     dispose: () => {
       startedApps.delete(app)
       if (!app.isDisposed()) app.dispose()
@@ -341,6 +345,41 @@ test('a dispatched toggle whose reply is lost stays indeterminate and is never r
     await settle(h, 'the indeterminate verdict', frame => frame.includes('Outcome unknown'))
     assert.deepEqual(h.acp.setEnabledCalls, [true], 'the write was dispatched exactly once and never replayed')
     assert.equal(h.acp.status.state, 'enabled', 'the reread shows the reached state while the outcome stays unprovable')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('the refresh key re-reads the ACP runtime state from the Host', async () => {
+  const h = setup({ status: { state: 'disabled' } })
+  try {
+    await openTools(h)
+    await highlightRow(h, 'ACP Server')
+    assert.match(h.view(), /> ACP Server\s+Off\b/u, 'the row starts on the Host\'s Off state')
+    // Another Client enables the listener on the Host while this page is open.
+    h.acp.status = { state: 'enabled' }
+    await key(h, 'r')
+    await settle(h, 'the ACP row to reflect a fresh read', frame => /> ACP Server\s+On\b/u.test(frame))
+    assert.equal(h.acp.setEnabledCalls.length, 0, 'r is read-only and never toggles the listener')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('a stale Host is never presented as the current ACP listener state', async () => {
+  const h = setup({ status: { state: 'enabled' } })
+  try {
+    await openTools(h)
+    await highlightRow(h, 'ACP Server')
+    assert.match(h.view(), /> ACP Server\s+On\b/u, 'the current Host state is shown')
+    // The Host disconnects; the configuration plane goes stale.
+    h.setReadiness('stale')
+    await key(h, 'r') // re-reads/re-paints through the one ACP read owner
+    await settle(h, 'the stale row to stop claiming On', frame => /Checking…/u.test(frame))
+    assert.doesNotMatch(h.view(), /> ACP Server\s+On\b/u, 'a stale Host must not present a cached On as the current fact')
+    await key(h, ENTER)
+    assert.doesNotMatch(h.view(), /Choose value/u, 'a stale Host offers no confirmable candidate')
+    assert.equal(h.acp.setEnabledCalls.length, 0)
   } finally {
     h.dispose()
   }

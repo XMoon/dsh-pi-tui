@@ -269,6 +269,71 @@ export async function runAcpPo1bOptInControl(context) {
     try { await tui.waitForExit(60_000) } catch { await tui.dispose() }
     trace('acp-po1b/default-off', { socketBound: false, tuiReady: true })
 
+    // ── b0) REAL TUI Settings → Tools → ACP Server Confirm (end-to-end) ──────
+    // The plan requires at least one runtime start/stop driven by the REAL Split
+    // TUI Settings keyboard Confirm (not only a Peer invoke): drive the live
+    // `/settings` workspace and prove the REAL socket follows.
+    const frameOf = async target => (await target.viewport()).join('\n')
+    const enterToolsRows = async (target, label) => {
+      target.send('/settings\r')
+      await target.waitForScreen('Settings ·', `${label}: /settings open`, 60_000)
+      for (let step = 0; step < 16; step += 1) {
+        if (/^\s*> Tools\b/mu.test(await frameOf(target))) break
+        target.send('\x1b[B')
+        await sleep(160)
+      }
+      assert(/^\s*> Tools\b/mu.test(await frameOf(target)), `${label}: the Tools category was never selected`)
+      target.send('\r')
+      await target.waitForScreen('ACP Server', `${label}: Tools rows`, 30_000)
+    }
+    const selectAcpServerRow = async (target, label) => {
+      target.send('\x1b[H')
+      await sleep(160)
+      for (let step = 0; step < 12; step += 1) {
+        if (/^> ACP Server(?:\s|$)/mu.test(await frameOf(target))) return
+        target.send('\x1b[B')
+        await sleep(160)
+      }
+      assert(/^> ACP Server(?:\s|$)/mu.test(await frameOf(target)), `${label}: the ACP Server row was never selected`)
+    }
+    await seatFree(`\0dsh-pi-tui-c-${String(scopeId).slice(0, 40)}`, 20_000)
+    const tuiSettings = new SurfaceEntryProcess(entries.client, { ...base, workDir })
+    clients.push(tuiSettings)
+    const tuiSettingsReady = await tuiSettings.waitFor(record => record.m4a0 === 'ready', 'acp-po1b settings TUI ready', 180_000)
+    assert(tuiSettingsReady.surfaceMounted === true && tuiSettingsReady.transport === 'connected',
+      'b0: the real Split TUI did not mount for the Settings confirm path')
+    await enterToolsRows(tuiSettings, 'b0 enable')
+    await selectAcpServerRow(tuiSettings, 'b0 enable')
+    tuiSettings.send('\r') // L2 choice (the Host is currently Off)
+    await tuiSettings.waitForScreen('Choose value', 'b0 enable: ACP choice', 30_000)
+    tuiSettings.send('\x1b[A') // Off -> On
+    await sleep(150)
+    tuiSettings.send('\r')
+    await tuiSettings.waitForScreen('Verified', 'b0 enable: Verified', 60_000)
+    const tuiSocket = socketPathFor(scopeId)
+    assert(exists(tuiSocket), 'b0: the REAL TUI Settings Confirm must bind acp.sock on the running Host')
+    const tuiSocketInfo = lstatSync(tuiSocket)
+    assert(tuiSocketInfo.isSocket() && (tuiSocketInfo.mode & 0o777) === 0o600,
+      'b0: the TUI-enabled socket must be a 0600 socket')
+    const tuiHostAfterEnable = await hostStatus(host1)
+    // Disable through the SAME real TUI: Esc back to the rows, reopen, pick Off.
+    tuiSettings.send('\x1b')
+    await tuiSettings.waitForScreen('Visual tools', 'b0 disable: back to rows', 30_000)
+    await selectAcpServerRow(tuiSettings, 'b0 disable')
+    tuiSettings.send('\r')
+    await tuiSettings.waitForScreen('Choose value', 'b0 disable: ACP choice', 30_000)
+    tuiSettings.send('\x1b[B') // On -> Off
+    await sleep(150)
+    tuiSettings.send('\r')
+    await tuiSettings.waitForScreen('Verified', 'b0 disable: Verified', 60_000)
+    await waitUntil(() => !exists(tuiSocket), 'b0: acp.sock to retire after the TUI Confirm disable')
+    const tuiHostAfterDisable = await hostStatus(host1)
+    assert(tuiHostAfterDisable.pid === tuiHostAfterEnable.pid,
+      'b0: the real TUI Settings Confirm toggle must not replace the Host')
+    tuiSettings.send('/exit\r')
+    try { await tuiSettings.waitForExit(60_000) } catch { await tuiSettings.dispose() }
+    trace('acp-po1b/tui-settings-confirm', { enabledViaTui: true, disabledViaTui: true, socket0600: true, sameHost: true })
+
     // ── b) RUNTIME TOGGLE through the private Peer control ───────────────────
     const peer = await startPeer('acp-po1b runtime peer')
     assertAccess(await acpAccess(peer, 'b getStatus', undefined), 'disabled', 'b getStatus')

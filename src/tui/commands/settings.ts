@@ -511,9 +511,22 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     }, { notify: false })
   }
 
+  /**
+   * The currentness of the ACP listener observation. The Direct process owns no
+   * Split-Host listener (`unavailable`); a Remote whose configuration plane is
+   * reconnecting (`stale`) or gone (`unavailable`) must NOT keep presenting a
+   * cached On/Off as the current Host fact.
+   */
+  const acpReadiness = (): 'ready' | 'stale' | 'unavailable' =>
+    runner.backendKind === 'direct' ? 'unavailable' : runner.config.configReadiness()
+
   /** The row's human summary for the CURRENT listener state. */
   const acpRuntimeSummaryOf = (): string => {
     if (runner.backendKind === 'direct') return 'Unavailable — Split Host only'
+    const readiness = acpReadiness()
+    // A non-current Host never presents a cached On/Off as the current fact.
+    if (readiness === 'stale') return 'Checking…'
+    if (readiness === 'unavailable') return 'Unavailable'
     if (acpRuntimeFailure !== undefined) return 'Unavailable'
     if (!acpRuntimeReadSettled) return 'Loading…'
     const status = acpRuntimeStatus
@@ -528,6 +541,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
 
   /** The live runtime fact painted as the Detail `Runtime` line. */
   const acpRuntimeFactOf = (): string => {
+    if (runner.backendKind === 'direct') return 'unavailable (Split Host only)'
+    const readiness = acpReadiness()
+    if (readiness === 'stale') return 'the Host is not current (reconnecting); the last ACP state is not shown as current'
+    if (readiness === 'unavailable') return 'the Host is unavailable'
     if (acpRuntimeFailure !== undefined) return 'status could not be read'
     if (!acpRuntimeReadSettled) return 'checking…'
     const status = acpRuntimeStatus
@@ -542,6 +559,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
 
   const acpRuntimeFreshnessOf = (): SettingsWorkspaceFreshness => {
     if (runner.backendKind === 'direct') return 'unavailable'
+    const readiness = acpReadiness()
+    if (readiness === 'stale') return 'last-known'
+    if (readiness === 'unavailable') return 'unavailable'
     if (acpRuntimeFailure !== undefined) return 'read-error'
     if (!acpRuntimeReadSettled) return 'runtime'
     const status = acpRuntimeStatus
@@ -550,11 +570,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return 'ready'
   }
 
-  /** A settled On/Off is the only confirmable state; `changing`/`unavailable`/
-   *  unread offer NO candidate so Confirm is impossible. */
+  /** A settled On/Off on a CURRENT Host is the only confirmable state; a stale/
+   *  unavailable Host, `changing`, or an unread authority offers NO candidate so
+   *  Confirm is impossible. */
   const acpRuntimeEditOf = (): SettingsWorkspaceEdit => {
     const status = acpRuntimeStatus
-    const confirmable = runner.backendKind !== 'direct'
+    const confirmable = acpReadiness() === 'ready'
       && acpRuntimeReadSettled
       && acpRuntimeFailure === undefined
       && (status?.state === 'enabled' || status?.state === 'disabled')
@@ -1272,7 +1293,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           const registry = runner.extensions?.settings.snapshot()
           return { revision: registry?.revision ?? 0, count: registry?.rows.length ?? 0 }
         },
-        onRefresh: () => { startWebSettingsRead(); startPolicyRead(true) },
+        onRefresh: () => { startWebSettingsRead(); startAcpRuntimeRead(); startPolicyRead(true) },
       },
       {
         onOpenPlugins: (onYieldNavigation) => runner.createPluginManagerPage(onYieldNavigation),
