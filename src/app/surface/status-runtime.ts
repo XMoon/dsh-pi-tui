@@ -139,6 +139,10 @@ export interface StatusRuntimeDeps {
     readonly selection: () => ModelSelectionValue | undefined
     readonly currentOf: (agent: StatusLiveAgent) => ModelSelectionValue | undefined
     readonly defaultSelection: () => ModelSelectionValue | undefined
+    /** TRUE when a confirmed sessionless default save's directory is not
+     *  readable yet — the footer shows UNKNOWN, never 'no model' and never a
+     *  fabricated value. */
+    readonly defaultUnavailable?: () => boolean
     readonly marker: () => { readonly selection: ModelSelectionValue; readonly status: 'pending' | 'unresolved' } | undefined
     readonly preset: () => string | undefined
   }
@@ -585,7 +589,11 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
         base = 'no model'
       } else {
         const fallback = deps.model.defaultSelection() as ModelSelectionValue | undefined
-        base = fallback === undefined ? 'no model' : labelOf(fallback)
+        // Distinguish an UNKNOWN current default (a confirmed save whose
+        // directory is not readable yet) from a genuinely absent one.
+        base = fallback !== undefined
+          ? labelOf(fallback)
+          : deps.model.defaultUnavailable?.() === true ? 'model unknown' : 'no model'
       }
     } else {
       const selection = agent === undefined

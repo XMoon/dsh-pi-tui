@@ -48,6 +48,10 @@ function childStats(): StatsFolder {
 
 function makeHarness(options: {
   remote?: boolean
+  /** A TRUE sessionless surface (no current Session id). */
+  sessionless?: boolean
+  /** The confirmed-save-with-unreadable-directory fact for the P2 status. */
+  defaultUnavailable?: boolean
   /** M6-1 F8: the ONE session-policy observation the access derivation reads. */
   policyObservation?: { readSnapshot(sessionId: string): import('../../src/app/command/policy-observation-state.ts').PolicyObservationState; subscribe(listener: () => void): () => void }
 } = {}): {
@@ -83,13 +87,14 @@ function makeHarness(options: {
     // subject's sections are asserted from the store, not from a live Agent.
     liveAgent: () => undefined,
     generation: () => 1,
-    currentSessionId: () => 'main',
+    currentSessionId: options.sessionless === true ? () => undefined : () => 'main',
     measureContext: () => 42,
     sessionStatus: (sessionId: string) => statuses.get(sessionId),
     model: {
       selection: () => undefined,
       currentOf: () => undefined,
       defaultSelection: () => undefined,
+      defaultUnavailable: () => options.defaultUnavailable === true,
       marker: () => undefined,
       preset: () => undefined,
     },
@@ -132,6 +137,17 @@ test('the main subject keeps the main view with the live session sections', () =
   assert.deepEqual(h.store.snapshot().view, { subject: { kind: 'main' } })
   assert.equal(h.store.snapshot().workspace.cwd, '/client')
   assert.equal(commit.presentation, undefined, 'no display-subject projection on the main subject')
+})
+
+test('a sessionless Remote surface shows UNKNOWN (not no model) for a confirmed save whose directory is unreadable', () => {
+  const unknown = makeHarness({ remote: true, sessionless: true, defaultUnavailable: true })
+  unknown.runtime.refresh()
+  assert.equal(unknown.commits.at(-1)!.legacy?.model, 'model unknown',
+    'a confirmed default whose Host directory cannot be read is UNKNOWN, never fabricated')
+  const absent = makeHarness({ remote: true, sessionless: true, defaultUnavailable: false })
+  absent.runtime.refresh()
+  assert.equal(absent.commits.at(-1)!.legacy?.model, 'no model',
+    'a genuinely absent default stays no model')
 })
 
 test('every child Session-owned section comes from SessionStatus(childId)', () => {

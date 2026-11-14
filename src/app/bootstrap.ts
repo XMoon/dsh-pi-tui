@@ -2836,6 +2836,7 @@ export function applyRunnerWithRuntime(
         selection: () => model.selected.current,
         currentOf: (agent) => model.currentOf(agent),
         defaultSelection: () => model.currentDefault(),
+        defaultUnavailable: () => model.defaultUnavailable(),
         marker: () => model.currentMarker(),
         preset: () => currentPreset(),
       },
