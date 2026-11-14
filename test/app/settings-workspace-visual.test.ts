@@ -864,6 +864,7 @@ function setup(options: HarnessOptions = {}): Harness {
             backendStartupState = { backend: value, revision: backendStartupState.revision + 1, userOverridden: true }
           }
         },
+      },
       // PO-1B: the profile-owned ACP startup preference. This suite does not
       // exercise ACP controls (they live in settings-acp-controls.test.ts); a
       // default-OFF stub keeps the Tools category complete without a write path.

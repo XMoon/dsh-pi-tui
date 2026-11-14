@@ -1910,12 +1910,6 @@ class RemoteAcpStartupPreferenceConfig implements AcpStartupPreferenceConfig {
   }
 }
 
-      expectedRevision,
-      'record',
-    )
-  }
-}
-
 const WEB_PROVIDER_NS = 'web'
 const WEB_SEARCH_API_NS = 'web-deepseek-api'
 const WEB_API_KEY_REF = 'DEEPSEEK_API_KEY'
