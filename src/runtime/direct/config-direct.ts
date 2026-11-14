@@ -2319,13 +2319,22 @@ export class DirectMcpServerConfigurationConfig implements McpServerConfiguratio
           : { kind: 'rejected', reason: message },
       }
     }
-    // Saved is a READ-BACK fact: re-read the descriptor and report the
-    // committed revision only when the namespace is still readable.
+    // Saved is a READ-BACK fact from the SAME Host authority: re-read the
+    // descriptor and report the committed revision only when it is still
+    // readable AND the generation the caller pinned is still current. A Host
+    // replacement during the write makes the outcome unobservable here, never
+    // a `saved` claim about another authority's namespace.
     const readBack = this.read()
     if (readBack.kind !== 'ready') {
       return {
         kind: 'failed',
         failure: { kind: 'outcome-unconfirmed', reason: readBack.reason },
+      }
+    }
+    if (!Object.is(this.generation(), pinnedGeneration)) {
+      return {
+        kind: 'failed',
+        failure: { kind: 'outcome-unconfirmed', reason: 'the Host authority changed while the write settled' },
       }
     }
     return { kind: 'saved', revision: readBack.revision }

@@ -156,6 +156,10 @@ export interface McpConfigConfirmSnapshot {
   readonly name: string
   /** For `toggle`: the enabled value that would be written. */
   readonly nextEnabled?: boolean
+  /** The config revision the question was asked at: the answer is refused when
+   *  the namespace moved in the meantime (a confirmation is a decision about a
+   *  SPECIFIC configuration, never about whatever is current when `y` lands). */
+  readonly capturedRevision: number
 }
 
 /** FR4: the ONE configuration-action status slot. */
@@ -335,6 +339,8 @@ export class McpServersController {
   private configStatus: McpConfigStatus | undefined
   /** FR4: identity of the ONE config write allowed to settle into the slot. */
   private configWriteToken = 0
+  /** FR4: identity of the LATEST configuration read (only it may commit). */
+  private configReadToken = 0
 
   constructor(deps: McpServersControllerDeps) {
     this.deps = deps
@@ -527,21 +533,23 @@ export class McpServersController {
     return this.configuration.entries.find(entry => entry.name === this.selected)
   }
 
-  /** Whether the page may offer ANY configuration edit right now. */
+  /** Whether the page may offer ANY configuration edit right now. A write
+   *  already in flight owns the namespace: opening a second confirmation (or a
+   *  second save) would dispatch a competing CAS and silently discard the
+   *  first settlement, so every CRUD intent is refused until it settles. */
   canEditConfiguration(): boolean {
     return this.phase === 'ready'
       && this.configIsCurrent()
       && this.editor === undefined
       && this.configConfirm === undefined
       && this.operation?.phase !== 'running'
+      && !this.configStatusIsInFlight()
   }
 
   /** Whether `a` (Add) may open right now: a current descriptor is required
    *  (its revision is the CAS token the add will carry). */
   canBeginAdd(): boolean {
-    return this.canEditConfiguration()
-      && this.configuration.kind === 'ready'
-      && !this.configStatusIsInFlight()
+    return this.canEditConfiguration() && this.configuration.kind === 'ready'
   }
 
   /** Whether the selected server may be Edited. */
@@ -568,11 +576,15 @@ export class McpServersController {
   }
 
   /** Re-read the configuration for the current generation (bounded; never a
-   *  background poll). */
+   *  background poll). Only the LATEST read may commit: two overlapping reads
+   *  (a roster-triggered one and a post-write one) must never let the older
+   *  result overwrite the newer revision, which would make the next edit pin a
+   *  stale CAS token. */
   refreshConfiguration(): void {
     if (this.disposed) return
     const token = this.openToken
     const epoch = this.rosterEpoch
+    const readToken = ++this.configReadToken
     this.deps.runOwned('MCP configuration read', async () => {
       try {
         await this.deps.configuration.refresh()
@@ -580,6 +592,7 @@ export class McpServersController {
         // The backend records its own readiness fact; the read below reports it.
       }
       if (this.disposed || token !== this.openToken || epoch !== this.rosterEpoch) return
+      if (readToken !== this.configReadToken) return
       this.configuration = this.deps.configuration.read()
       this.deps.requestRender()
     })
@@ -701,12 +714,10 @@ export class McpServersController {
     const dict = field === 'env' ? this.editor.draft.env : this.editor.draft.headers
     if (!dict.has(from) || from === to) return
     if (dict.has(to)) return
-    const value = dict.get(from) as string
     // Rebuild the map to keep the edited order stable.
     const entries = [...dict.entries()].map(([key, existing]) => key === from ? [to, existing] as const : [key, existing] as const)
     dict.clear()
     for (const [key, existing] of entries) dict.set(key, existing)
-    void value
     this.deps.requestRender()
   }
 
@@ -773,24 +784,33 @@ export class McpServersController {
     })
   }
 
-  /** A name already held by another configured entry (the draft's own name is
-   *  free in Edit mode; Add has no own name yet). */
+  /**
+   * Whether an Add may NOT use this name. The official manager refuses a
+   * configured entry whose key collides with a live plugin registration
+   * ("a plugin already registers this server name"), and a retained cleanup
+   * record still owns its name, so the collision check covers the EFFECTIVE
+   * configuration AND the whole current roster — refusing locally instead of
+   * dispatching a write the Host would reject.
+   */
   private nameTaken(name: string): boolean {
-    if (this.configuration.kind !== 'ready') return false
-    return this.configuration.entries.some(entry => entry.name === name)
+    if (this.configuration.kind === 'ready' && this.configuration.entries.some(entry => entry.name === name)) {
+      return true
+    }
+    return this.servers.has(name) || this.entryTokens.has(name)
   }
 
   /** Ask for the Enable/Disable confirmation of the selected server. */
   beginToggle(): void {
     if (!this.canEditConfiguration()) return
     const entry = this.selectedConfigEntry()
-    if (entry === undefined) return
+    if (entry === undefined || this.configuration.kind !== 'ready') return
     this.editor = undefined
     this.configStatus = undefined
     this.configConfirm = {
       kind: 'toggle',
       name: entry.name,
       nextEnabled: entry.effective.enabled === false,
+      capturedRevision: this.configuration.revision,
     }
     this.deps.requestRender()
   }
@@ -800,9 +820,10 @@ export class McpServersController {
     if (!this.canEditConfiguration()) return
     const entry = this.selectedConfigEntry()
     if (entry === undefined || entry.provenance !== 'user-added') return
+    if (this.configuration.kind !== 'ready') return
     this.editor = undefined
     this.configStatus = undefined
-    this.configConfirm = { kind: 'delete', name: entry.name }
+    this.configConfirm = { kind: 'delete', name: entry.name, capturedRevision: this.configuration.revision }
     this.deps.requestRender()
   }
 
@@ -811,9 +832,10 @@ export class McpServersController {
     if (!this.canEditConfiguration()) return
     const entry = this.selectedConfigEntry()
     if (entry === undefined || entry.provenance !== 'overridden') return
+    if (this.configuration.kind !== 'ready') return
     this.editor = undefined
     this.configStatus = undefined
-    this.configConfirm = { kind: 'reset', name: entry.name }
+    this.configConfirm = { kind: 'reset', name: entry.name, capturedRevision: this.configuration.revision }
     this.deps.requestRender()
   }
 
@@ -838,6 +860,16 @@ export class McpServersController {
     const entry = this.selectedConfigEntry()
     if (entry === undefined || this.configuration.kind !== 'ready') {
       this.configStatus = { kind: 'unavailable', text: MCP_CONFIG_TEXT.unavailable }
+      this.deps.requestRender()
+      return
+    }
+    // The confirmation is a decision about ONE configuration: when the
+    // namespace moved after the question was asked, the answer no longer
+    // describes it (another editor may have changed the same entry). Refuse,
+    // keep zero writes, and re-read so the user decides again on current facts.
+    if (this.configuration.revision !== confirmation.capturedRevision) {
+      this.configStatus = { kind: 'conflict', text: MCP_CONFIG_TEXT.conflict }
+      this.refreshConfiguration()
       this.deps.requestRender()
       return
     }

@@ -354,3 +354,45 @@ test('an inherited Reset through the wire restores the base value (never a delet
   assert.equal(entry?.effective.enabled, true)
   assert.equal(entry?.effective.command, '/base')
 })
+
+test('an unknown wire failure is outcome-unconfirmed, not a fake refusal', async () => {
+  // `gateway/internal` is raised AFTER the Host method returned, so the write
+  // may have committed: reporting `rejected` would claim the configuration did
+  // not change.
+  const fixture = makePort({
+    namespaces: [{ ns: 'mcp-manager', base: { servers: {} }, user: { servers: { mine: stdioEntry() } }, value: { servers: { mine: stdioEntry() } }, revision: 1 }],
+    mutateError: { code: 'gateway/internal', message: 'the carrier dropped the reply' },
+  })
+  await fixture.port.describe()
+  const read = fixture.port.mcpServerConfiguration.read()
+  assert.equal(read.kind, 'ready')
+  if (read.kind !== 'ready') return
+  const outcome = await fixture.port.mcpServerConfiguration.mutate(
+    [{ op: 'set', path: ['servers', 'mine', 'enabled'], value: false }],
+    read.revision,
+    read.generation,
+  )
+  assert.equal(outcome.kind, 'failed')
+  if (outcome.kind !== 'failed') return
+  assert.equal(outcome.failure.kind, 'outcome-unconfirmed')
+  assert.equal(fixture.mutateCalls.length, 1, 'never replayed')
+})
+
+test('a pre-invocation gateway refusal stays a rejection', async () => {
+  const fixture = makePort({
+    namespaces: [{ ns: 'mcp-manager', base: { servers: {} }, user: { servers: { mine: stdioEntry() } }, value: { servers: { mine: stdioEntry() } }, revision: 1 }],
+    mutateError: { code: 'gateway/bad-request', message: 'arguments do not match the endpoint' },
+  })
+  await fixture.port.describe()
+  const read = fixture.port.mcpServerConfiguration.read()
+  assert.equal(read.kind, 'ready')
+  if (read.kind !== 'ready') return
+  const outcome = await fixture.port.mcpServerConfiguration.mutate(
+    [{ op: 'set', path: ['servers', 'mine', 'enabled'], value: false }],
+    read.revision,
+    read.generation,
+  )
+  assert.equal(outcome.kind, 'failed')
+  if (outcome.kind !== 'failed') return
+  assert.equal(outcome.failure.kind, 'rejected')
+})

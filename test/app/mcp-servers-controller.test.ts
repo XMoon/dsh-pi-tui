@@ -668,3 +668,114 @@ test('a dispatched write settles into the page even after the roster stays curre
   assert.equal(h.controller.snapshot().configStatus?.kind, 'saved')
   assert.equal(h.controller.snapshot().rows[0]?.status.state, 'connected')
 })
+
+test('a configuration write in flight refuses every second CRUD intent', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  let release!: (outcome: McpConfigWriteOutcome) => void
+  h.configuration.outcome = () => new Promise<McpConfigWriteOutcome>(resolve => { release = resolve }) as never
+  h.controller.beginToggle()
+  h.controller.answerConfigConfirm(true)
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'saving')
+  // While the write is unsettled, no second intent may open a confirmation or
+  // a form: it would dispatch a competing CAS and drop the first settlement.
+  h.controller.beginToggle()
+  h.controller.beginDelete()
+  h.controller.beginReset()
+  h.controller.beginEdit()
+  h.controller.beginAdd()
+  assert.equal(h.controller.snapshot().configConfirm, undefined, 'no second confirmation may open')
+  assert.equal(h.controller.snapshot().editor, undefined, 'no second form may open')
+  assert.equal(h.controller.canEditConfiguration(), false)
+  assert.equal(h.controller.canBeginAdd(), false)
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 1, 'exactly ONE dispatch')
+  release({ kind: 'saved', revision: 4 })
+  await h.flush()
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'saved')
+  // Once settled, the page offers its actions again.
+  assert.equal(h.controller.canEditConfiguration(), true)
+})
+
+test('an older configuration read never overwrites the newer revision', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }], 2)
+  // Two overlapping reads. The NEWER one commits first; the older one settles
+  // afterwards and must be dropped, otherwise the next edit would pin a stale
+  // CAS token.
+  const gates: Array<() => void> = []
+  h.configuration.refresh = () => new Promise<void>(resolve => { gates.push(resolve) })
+  h.controller.refreshConfiguration()
+  h.controller.refreshConfiguration()
+  assert.equal(gates.length, 2, 'two reads are in flight')
+  // The second read carries the newer revision; it settles first.
+  h.configuration.read = () => ({ kind: 'ready', generation: GENERATION_1, revision: 9, entries: [] })
+  gates[1]!()
+  for (let tick = 0; tick < 16; tick += 1) await Promise.resolve()
+  assert.equal((h.controller.snapshot().config as { revision?: number }).revision, 9)
+  // The older read now settles with the OLDER revision and must not commit.
+  h.configuration.read = () => ({ kind: 'ready', generation: GENERATION_1, revision: 2, entries: [] })
+  gates[0]!()
+  for (let tick = 0; tick < 16; tick += 1) await Promise.resolve()
+  assert.equal((h.controller.snapshot().config as { revision?: number }).revision, 9,
+    'a late older read must not replace the committed revision')
+  await h.flush()
+})
+
+test('a confirmation answered after the namespace moved refuses with zero writes', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }], 3)
+  h.controller.beginDelete()
+  assert.equal(h.controller.snapshot().configConfirm?.capturedRevision, 3)
+  // Another editor moves the namespace while the question is on screen; the
+  // page re-reads it (the settings mirror invalidates on a document update).
+  h.configuration.value = configOf(GENERATION_1, 8, [
+    { name: 'mine', provenance: 'user-added', effective: stdioEffective() },
+  ])
+  h.controller.refreshConfiguration()
+  await h.flush()
+  assert.equal((h.controller.snapshot().config as { revision?: number }).revision, 8,
+    'the page sees the moved revision')
+  h.controller.answerConfigConfirm(true)
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 0, 'a moved revision refuses the answer')
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'conflict')
+  assert.match(h.controller.snapshot().configStatus?.text ?? '', /configuration changed/u)
+})
+
+test('a confirmation answered after the Host was replaced refuses with zero writes', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }], 3)
+  h.controller.beginToggle()
+  h.port.roster([view('mine')], GENERATION_2)
+  await h.flush()
+  assert.equal(h.controller.snapshot().configConfirm, undefined, 'the old question is retired')
+  h.controller.answerConfigConfirm(true)
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 0)
+})
+
+test('an Add refuses a name held by a plugin registration or a retained record', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  // A plugin-owned live entry and a retained cleanup record are NOT in the
+  // settings configuration, but the official manager still owns their names.
+  h.port.roster([
+    view('mine'),
+    view('plugin-owned'),
+    { name: 'retained', configured: false, status: { state: 'failed', reason: 'cleanup', result: { closeConfirmed: false } } },
+  ], GENERATION_1)
+  await h.flush()
+
+  for (const name of ['plugin-owned', 'retained']) {
+    h.controller.beginAdd()
+    h.controller.setEditorField('name', name)
+    h.controller.setEditorField('command', '/bin/true')
+    h.controller.saveEditor()
+    await h.flush()
+    assert.equal(h.controller.snapshot().configStatus?.kind, 'rejected', `${name} must be refused locally`)
+    assert.equal(h.controller.snapshot().editor?.name, name, 'the draft survives the refusal')
+  }
+  assert.equal(h.configuration.mutations.length, 0, 'a collision never dispatches a write')
+
+  // A genuinely free name still dispatches.
+  h.controller.setEditorField('name', 'free-name')
+  h.controller.saveEditor()
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 1)
+})
