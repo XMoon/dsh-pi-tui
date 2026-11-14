@@ -25,11 +25,12 @@
  * @module split-process/acp-po1b
  */
 
-import { closeSync, lstatSync, openSync, readdirSync } from 'node:fs'
-import { connect } from 'node:net'
+import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { connect, createServer } from 'node:net'
 import { join } from 'node:path'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
+import { createSplitSmokeProfile } from '../../lib/split-smoke-profile.mjs'
 import { hostStatus, seatFree } from '../../lib/split-smoke-processes.mjs'
 
 function assert(condition, message) {
@@ -493,6 +494,146 @@ export async function runAcpPo1bOptInControl(context) {
       autoStartFalseReadBack: true,
       coldBootOffBindsNothing: true,
     })
+
+    // ══ AC-10: runtime enable vs an unsafe / occupied socket path (real L6) ══
+    // A foreign regular file, then a LIVE foreign server, occupy the Host's own
+    // scope pathname. Runtime enable must be REJECTED (never enabled), the Host
+    // must stay Ready, the foreign entry must be preserved, and a later clean
+    // enable must work — proving dynamic enable honors the same safety rules.
+    const { host: host4, ready: ready4 } = await startReadyHost('acp-po1b ac10 host')
+    const scopeId4 = ready4.localHost.scopeId
+    const scopeDir4 = scopeDirOf(scopeId4)
+    const foreignPath = socketPathFor(scopeId4)
+    mkdirSync(scopeDir4, { recursive: true, mode: 0o700 })
+    const peer4 = await startPeer('acp-po1b ac10 peer')
+    assertAccess(await acpAccess(peer4, 'ac10 initial', undefined), 'disabled', 'ac10 initial')
+    writeFileSync(foreignPath, 'FOREIGN-REGULAR')
+    const rejectFile = await acpAccess(peer4, 'ac10 enable unsafe file', true)
+    assert(rejectFile.ok === false, `AC-10: enable over a foreign file must be rejected: ${JSON.stringify(rejectFile.status)}`)
+    assert(readFileSync(foreignPath, 'utf8') === 'FOREIGN-REGULAR', 'AC-10: the foreign file must be preserved, never deleted')
+    assertAccess(await acpAccess(peer4, 'ac10 after file reject', undefined), 'disabled', 'ac10 after file reject')
+    unlinkSync(foreignPath)
+    const fd4 = openSync(scopeDir4, 'r')
+    const foreignSrv = createServer(s => s.destroy())
+    await new Promise((resolveListen, rejectListen) => {
+      foreignSrv.once('error', rejectListen)
+      foreignSrv.listen(`/proc/self/fd/${String(fd4)}/acp.sock`, () => { foreignSrv.off('error', rejectListen); resolveListen() })
+    })
+    const rejectBusy = await acpAccess(peer4, 'ac10 enable occupied', true)
+    assert(rejectBusy.ok === false, 'AC-10: enable over a live foreign listener must be rejected (socket in use)')
+    assert(foreignSrv.listening === true, 'AC-10: the live foreign server must keep listening after the rejection')
+    await new Promise(resolveClose => foreignSrv.close(() => resolveClose()))
+    closeSync(fd4)
+    assertAccess(await acpAccess(peer4, 'ac10 clean enable', true), 'enabled', 'ac10 clean enable')
+    assert(lstatSync(foreignPath).isSocket(), 'AC-10: our socket must bind once the foreign entry is gone')
+    assertAccess(await acpAccess(peer4, 'ac10 disable again', false), 'disabled', 'ac10 disable again')
+    assert((await hostStatus(host4)).pid === ready4.pid, 'AC-10: rejections must never replace or kill the Host')
+    trace('acp-po1b/ac10-safety', { unsafeRejected: true, foreignFilePreserved: true, occupiedRejected: true, recovers: true, hostStayedReady: true })
+    assert((await peer4.shutdown()).code === 0, 'AC-10: the peer did not stop')
+    await stopHost(host4, 'ac10 host')
+
+    // ══ AC-11: autoStart=true + real bind failure → Host still Ready + diag ══
+    // Persist autoStart On, stop the Host, place an unsafe foreign file at its
+    // scope path, then COLD start: bind fails but the Host must publish Ready and
+    // emit one bounded `acp-autostart-unavailable` diagnostic (never crash).
+    const { host: host5, ready: ready5 } = await startReadyHost('acp-po1b ac11 seed host')
+    const scopeId5 = ready5.localHost.scopeId
+    const peer5 = await startPeer('acp-po1b ac11 seed peer')
+    const setOn = await acpPreference(peer5, 'ac11 set autostart On', true)
+    assert(setOn.ok === true && setOn.autoStart === true, 'AC-11: preference On write failed')
+    profileTouched = true
+    assert((await peer5.shutdown()).code === 0, 'AC-11: seed peer did not stop')
+    await stopHost(host5, 'ac11 seed host')
+    const foreignPath11 = socketPathFor(scopeId5)
+    mkdirSync(scopeDirOf(scopeId5), { recursive: true, mode: 0o700 })
+    writeFileSync(foreignPath11, 'FOREIGN-AUTOSTART')
+    const host6 = startHost('acp-po1b ac11 cold host')
+    const ready6 = await waitReady(host6, 'ac11 cold host ready')
+    host6.scopeId = ready6.localHost.scopeId
+    const autostartDiag = (host6.records ?? []).find(record => record.m4a0 === 'diagnostic' && record.code === 'acp-autostart-unavailable')
+    assert(autostartDiag !== undefined, 'AC-11: the Host must emit acp-autostart-unavailable when the autoStart bind fails')
+    assert(ready6.localHost?.instanceId !== undefined, 'AC-11: the Host still published a normal Ready identity')
+    assert(readFileSync(foreignPath11, 'utf8') === 'FOREIGN-AUTOSTART', 'AC-11: the foreign occupant must be preserved')
+    unlinkSync(foreignPath11)
+    const peer6 = await startPeer('acp-po1b ac11 reset peer')
+    const resetOff = await acpPreference(peer6, 'ac11 reset Off', false)
+    assert(resetOff.ok === true && resetOff.autoStart === false, 'AC-11: reset preference Off failed')
+    profileTouched = false
+    assert((await peer6.shutdown()).code === 0, 'AC-11: reset peer did not stop')
+    await stopHost(host6, 'ac11 cold host')
+    trace('acp-po1b/ac11-autostart-failsoft', { hostReadyDespiteBindFailure: true, diagnosticEmitted: true, foreignPreserved: true })
+
+    // ══ AC-12: a runtime toggle in flight + SIGTERM → one clean shutdown ══
+    const { host: host7, ready: ready7 } = await startReadyHost('acp-po1b ac12 host')
+    const scopeId7 = ready7.localHost.scopeId
+    const peer7 = await startPeer('acp-po1b ac12 peer')
+    assertAccess(await acpAccess(peer7, 'ac12 enable', true), 'enabled', 'ac12 enable')
+    assert(exists(socketPathFor(scopeId7)), 'AC-12: enabled socket expected before the race')
+    // Dispatch a disable WITHOUT awaiting it, then SIGTERM immediately so the
+    // toggle races the ONE official shutdown on the controller's serial chain.
+    peer7.send({ op: 'qualification-acp-access', requestId: `ac12-race-${String(process.pid)}`, acpEnabled: false })
+    host7.kill('SIGTERM')
+    host7.child.stdin.end()
+    const exit12 = await host7.waitForExit(90_000)
+    assert(exit12.code === 0 && exit12.signal === null, `AC-12: shutdown during toggle ended as ${JSON.stringify(exit12)}`)
+    await waitUntil(() => !exists(socketPathFor(scopeId7)), 'AC-12: acp.sock to retire after shutdown during toggle')
+    const cleanupFail12 = (host7.records ?? []).find(record => record.m4a0 === 'cleanup-failure')
+    assert(cleanupFail12 === undefined, `AC-12: shutdown during toggle reported a cleanup failure: ${JSON.stringify(cleanupFail12)}`)
+    trace('acp-po1b/ac12-shutdown-race', { cleanExit: true, socketRetired: true, noCleanupFailure: true })
+    try { await peer7.dispose() } catch { /* host is gone */ }
+
+    // ══ AC-20: different Profile/Home concurrent isolation (real L6) ══
+    // A SECOND independent installed profile/home runs concurrently with this
+    // one. Their scopes/sockets/autoStart are fully independent: enabling,
+    // disabling and stopping one never creates, retires or writes the other.
+    const secondWorkDir = join(workDir, 'ac20-second')
+    const instB = createSplitSmokeProfile({
+      tarball: context.tarball,
+      targetDshVersion: context.targetDshVersion,
+      workDir: secondWorkDir,
+    })
+    const startFrom = async (label, inst) => {
+      const host = new EntryProcess('host', inst.entries.host, { ...inst.base })
+      host.qualificationLabel = label
+      hosts.push(host)
+      const record = await host.waitFor(candidate => candidate.m4a0 === 'ready' || candidate.m4a0 === 'failure', label, 180_000)
+      assert(record.m4a0 === 'ready', `${label} did not reach Ready: ${JSON.stringify({ code: record.code, error: record.error })}`)
+      host.scopeId = record.localHost.scopeId
+      return { host, ready: record, dshHome: inst.dshHome }
+    }
+    const peerFrom = async (label, inst) => {
+      const peer = new EntryProcess('peer', inst.entries.client, {
+        ...inst.base,
+        env: { ...inst.base.env, SPLIT_PROCESS_CLIENT_MODE: 'peer' },
+      })
+      peer.qualificationLabel = label
+      peers.push(peer)
+      await peer.waitFor(record => record.m4a0 === 'ready', label, 180_000)
+      return peer
+    }
+    const sockOf = (home, scopeId) => join(home, 'run', 'dsh-pi-tui', scopeId, 'acp.sock')
+    const A = await startFrom('ac20 host A', context.installation)
+    const B = await startFrom('ac20 host B', instB)
+    const peerA = await peerFrom('ac20 peer A', context.installation)
+    const peerB = await peerFrom('ac20 peer B', instB)
+    const sockA = sockOf(A.dshHome, A.ready.localHost.scopeId)
+    const sockB = sockOf(B.dshHome, B.ready.localHost.scopeId)
+    assert(!exists(sockA) && !exists(sockB), 'AC-20: both independent profiles start default-off with no socket')
+    assertAccess(await acpAccess(peerA, 'ac20 A enable', true), 'enabled', 'ac20 A enable')
+    assert(exists(sockA) && !exists(sockB), 'AC-20: enabling profile A must not create a socket for profile B')
+    assertAccess(await acpAccess(peerB, 'ac20 B enable', true), 'enabled', 'ac20 B enable')
+    assert(exists(sockA) && exists(sockB), 'AC-20: each Host owns its own independent socket')
+    assert(lstatSync(sockA).ino !== lstatSync(sockB).ino, 'AC-20: the two profile sockets are distinct inodes')
+    assertAccess(await acpAccess(peerA, 'ac20 A disable', false), 'disabled', 'ac20 A disable')
+    assert(!exists(sockA) && exists(sockB), 'AC-20: disabling profile A must not retire profile B socket')
+    assert((await peerA.shutdown()).code === 0, 'AC-20: peer A did not stop')
+    await stopHost(A.host, 'ac20 host A')
+    assert(exists(sockB), 'AC-20: stopping profile A must not delete profile B socket')
+    assertAccess(await acpAccess(peerB, 'ac20 B still enabled', undefined), 'enabled', 'ac20 B still enabled')
+    assertAccess(await acpAccess(peerB, 'ac20 B disable', false), 'disabled', 'ac20 B disable')
+    assert((await peerB.shutdown()).code === 0, 'AC-20: peer B did not stop')
+    await stopHost(B.host, 'ac20 host B')
+    trace('acp-po1b/ac20-isolation', { independentSockets: true, noCrossDelete: true, hostAStopKeepsB: true, distinctProfiles: true })
 
     return {
       status: 'PASS',
