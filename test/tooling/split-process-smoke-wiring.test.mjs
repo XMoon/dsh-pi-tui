@@ -689,6 +689,14 @@ test('a custom XDG_CONFIG_HOME or SYSTEMD_UNIT_PATH makes the fixed unit path un
   assert.equal(managerUserUnitDir({ XDG_CONFIG_HOME: '/home/u/.config-alt' }, home), '/home/u/.config-alt/systemd/user')
   assert.equal(typeof userUnitPathUnsupportedReason({ XDG_CONFIG_HOME: '/home/u/.config-alt' }, home, fixed), 'string')
   assert.equal(typeof userUnitPathUnsupportedReason({ SYSTEMD_UNIT_PATH: '/custom' }, home, fixed), 'string')
+  // systemd `show-environment` C-quotes values with whitespace/specials as
+  // `$'...'`; the parser MUST decode them, not treat `$'...'` literally.
+  assert.deepEqual(parseManagerEnvironment("XDG_CONFIG_HOME=$'/home/user name/.config'\n"), { XDG_CONFIG_HOME: '/home/user name/.config' })
+  assert.deepEqual(parseManagerEnvironment("X=$'a\\\\b'\n"), { X: 'a\\b' })
+  assert.deepEqual(parseManagerEnvironment("Y=$'it\\'s'\n"), { Y: "it's" })
+  // A manager whose (decoded) XDG_CONFIG_HOME IS the fixed dir stays supported.
+  const spaced = join(home, '.config', 'systemd', 'user')
+  assert.equal(userUnitPathUnsupportedReason({ XDG_CONFIG_HOME: join(home, '.config') }, home, spaced), null)
 })
 
 test('the ACP UDS selected verdict accepts only the complete real-L6 proof', () => {
