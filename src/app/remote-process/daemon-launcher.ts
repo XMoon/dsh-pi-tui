@@ -51,6 +51,7 @@ export function encodeLaunchEnvelope(startup: TuiDaemonStartupValues): string {
     version: 1,
     ...(startup.sessionLaunch === undefined ? {} : { sessionLaunch: startup.sessionLaunch }),
     ...(startup.presetId === undefined ? {} : { presetId: startup.presetId }),
+    ...(startup.backendSource === undefined ? {} : { backendSource: startup.backendSource }),
   })
 }
 
@@ -115,9 +116,12 @@ export type SpawnImpl = typeof spawn
 
 /**
  * The ONE child lifecycle. Idempotent start/dispose; a single settle drives the
- * launcher `appExit` exactly once. Signal forwarding is bounded: a parent-only
- * SIGTERM is forwarded once to a live child, and a terminal SIGINT is NOT
- * re-forwarded because the kernel already delivered it to the same TTY group.
+ * launcher `appExit` exactly once. `dispose()` is the SINGLE stop owner: it is
+ * driven by the row's fiber disposal (the official `runProfile` SIGTERM → shutdown
+ * → fiber disposal path) and asks the live child to stop once. The Coordinator
+ * installs NO second SIGTERM/SIGINT handler — a terminal SIGINT already reaches
+ * the foreground child through the shared TTY group, and the parent's own SIGTERM
+ * is the official shutdown's, so there is exactly one stop request.
  */
 export class DaemonCoordinator {
   private readonly spawnImpl: SpawnImpl
@@ -129,7 +133,6 @@ export class DaemonCoordinator {
   private started = false
   private disposed = false
   private settled = false
-  private removeSigterm: (() => void) | undefined
   /** Test observation: how many children were actually spawned. */
   spawnCount = 0
 
@@ -167,38 +170,23 @@ export class DaemonCoordinator {
     this.spawnCount += 1
     child.once('error', (error: Error) => { this.settle(1, error) })
     child.once('exit', (code, signal) => { this.settle(exitCodeFor(code, signal), undefined) })
-    this.installSigtermForward()
-  }
-
-  private installSigtermForward(): void {
-    const onSigterm = (): void => {
-      const child = this.child
-      if (child === undefined || child.exitCode !== null || child.signalCode !== null) return
-      child.kill('SIGTERM')
-    }
-    process.on('SIGTERM', onSigterm)
-    this.removeSigterm = () => { process.removeListener('SIGTERM', onSigterm) }
   }
 
   private settle(code: number, error: Error | undefined): void {
     if (this.settled) return
     this.settled = true
-    this.removeSigterm?.()
-    this.removeSigterm = undefined
     if (error !== undefined) this.diag.warn('pi-tui daemon: client process failed', { error: error.message })
     this.appExit(code)
   }
 
   /**
-   * Release the child lifecycle. A spawn not yet started is cancelled; a live
-   * child is asked to stop once and the process is NOT re-exited by dispose (the
+   * The SINGLE stop owner. A spawn not yet started is cancelled; a live child is
+   * asked to stop once (SIGTERM) and the process is NOT re-exited by dispose (the
    * single settle owns the exit code). Idempotent.
    */
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
-    this.removeSigterm?.()
-    this.removeSigterm = undefined
     const child = this.child
     if (child !== undefined && child.exitCode === null && child.signalCode === null) {
       child.kill('SIGTERM')

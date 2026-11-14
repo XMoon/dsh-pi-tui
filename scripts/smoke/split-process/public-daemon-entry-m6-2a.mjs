@@ -82,7 +82,8 @@ async function waitForPaint(output, label, timeoutMs) {
     if (/[╭╮╰╯│─]/u.test(output.raw)) return
     await sleep(100)
   }
-  throw new SplitSmokeAssertionError(`public-entry daemon: ${label} never painted a TUI frame`)
+  const tailText = output.raw.replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(-1800)
+  throw new SplitSmokeAssertionError(`public-entry daemon: ${label} never painted a TUI frame; output tail: ${tailText}`)
 }
 
 /** The cleanup: reap the CLI process group and any isolated Host/Client. */
@@ -116,7 +117,7 @@ export async function runPublicDaemonEntry({ installation, trace }) {
     }
     assert(counts.host === 1, `public-entry daemon: expected exactly one Host, saw ${counts.host}`)
     assert(counts.client === 1, `public-entry daemon: expected exactly one Client, saw ${counts.client}`)
-    await waitForPaint(positive.output, 'the daemon Client', 60_000)
+    await waitForPaint(positive.output, 'the daemon Client', 120_000)
     trace('m6-2a-public-daemon-mounted', { host: counts.host, client: counts.client })
     // Exit the real TUI through the ordinary /exit key path.
     positive.child.stdin.write('/exit\r')

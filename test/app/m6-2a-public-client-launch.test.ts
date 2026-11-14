@@ -133,3 +133,18 @@ test('the replacement-Client environment drops the public launch envelope', () =
   assert.equal(env[SESSION_ENV], 'abc-123', 'the confirmed exact Session is restored instead')
   assert.equal(env[PRESET_ENV], undefined, 'a handoff never creates via preset')
 })
+
+// ── backend source fact (CR-03) ──────────────────────────────────────────
+
+test('decodes a read-only backendSource fact', () => {
+  const envelope = decodeClientLaunchEnvelope(JSON.stringify({
+    version: 1,
+    backendSource: { value: 'daemon', source: 'env' },
+  }))
+  assert.deepEqual(envelope.backendSource, { value: 'daemon', source: 'env' })
+})
+
+test('rejects an illegal backendSource value or source', () => {
+  assert.throws(() => decodeClientLaunchEnvelope(JSON.stringify({ version: 1, backendSource: { value: 'wire-local', source: 'env' } })), /backendSource/u)
+  assert.throws(() => decodeClientLaunchEnvelope(JSON.stringify({ version: 1, backendSource: { value: 'daemon', source: 'bogus' } })), /backendSource/u)
+})

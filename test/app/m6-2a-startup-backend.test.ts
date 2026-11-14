@@ -69,18 +69,27 @@ function withEnv<T>(value: string | undefined, fn: () => T): T {
   }
 }
 
-/** Force `process.platform` and `process.stdin.isTTY` for the duration of `fn`. */
+/** Force `process.platform` and BOTH stdin/stdout `isTTY` for the duration of `fn`. */
 function withDaemonPlatform<T>(platform: NodeJS.Platform, tty: boolean, fn: () => T): T {
+  return withTty(platform, tty, tty, fn)
+}
+
+/** Force `process.platform` and independent stdin/stdout TTY capabilities. */
+function withTty<T>(platform: NodeJS.Platform, stdinTty: boolean, stdoutTty: boolean, fn: () => T): T {
   const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
-  const stdinTty = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY')
+  const stdinDescriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY')
+  const stdoutDescriptor = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY')
   Object.defineProperty(process, 'platform', { value: platform, configurable: true })
-  Object.defineProperty(process.stdin, 'isTTY', { value: tty, configurable: true })
+  Object.defineProperty(process.stdin, 'isTTY', { value: stdinTty, configurable: true })
+  Object.defineProperty(process.stdout, 'isTTY', { value: stdoutTty, configurable: true })
   try {
     return fn()
   } finally {
     Object.defineProperty(process, 'platform', platformDescriptor)
-    if (stdinTty !== undefined) Object.defineProperty(process.stdin, 'isTTY', stdinTty)
+    if (stdinDescriptor !== undefined) Object.defineProperty(process.stdin, 'isTTY', stdinDescriptor)
     else delete (process.stdin as { isTTY?: boolean }).isTTY
+    if (stdoutDescriptor !== undefined) Object.defineProperty(process.stdout, 'isTTY', stdoutDescriptor)
+    else delete (process.stdout as { isTTY?: boolean }).isTTY
   }
 }
 
@@ -187,6 +196,26 @@ test('daemon on a non-Linux platform fails closed with the platform reason', (t)
 test('daemon without an interactive TTY fails closed', (t) => {
   withEnv('daemon', () => {
     withDaemonPlatform('linux', false, () => {
+      const { ctx, exitCodes } = mount(t, [])
+      assert.equal(ctx.get(TUI_DAEMON_STARTUP_SERVICE), undefined)
+      assert.deepEqual(exitCodes, [1])
+    })
+  })
+})
+
+test('daemon with a TTY stdin but a redirected stdout fails closed (output capability checked)', (t) => {
+  withEnv('daemon', () => {
+    withTty('linux', true, false, () => {
+      const { ctx, exitCodes } = mount(t, [])
+      assert.equal(ctx.get(TUI_DAEMON_STARTUP_SERVICE), undefined)
+      assert.deepEqual(exitCodes, [1])
+    })
+  })
+})
+
+test('daemon with a redirected stdin but a TTY stdout fails closed (input capability checked)', (t) => {
+  withEnv('daemon', () => {
+    withTty('linux', false, true, () => {
       const { ctx, exitCodes } = mount(t, [])
       assert.equal(ctx.get(TUI_DAEMON_STARTUP_SERVICE), undefined)
       assert.deepEqual(exitCodes, [1])

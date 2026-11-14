@@ -209,6 +209,8 @@ const MAX_CLIENT_LAUNCH_ENVELOPE_BYTES = 16 * 1024
 export interface ClientLaunchEnvelope {
   readonly sessionLaunch?: CliSessionLaunchIntent
   readonly presetId?: string
+  /** The read-only launch backend source (value + env/profile provenance). */
+  readonly backendSource?: { readonly value: 'direct' | 'daemon'; readonly source: 'env' | 'profile' }
 }
 
 /** Decode ONE public launch intent, strictly: exactly the known keys, a browse
@@ -250,13 +252,20 @@ export function decodeClientLaunchEnvelope(raw: string): ClientLaunchEnvelope {
   }
   if (!isRecord(parsed)) throw new Error('local client entry: the launch envelope must be a JSON object')
   for (const key of Object.keys(parsed)) {
-    if (key !== 'version' && key !== 'sessionLaunch' && key !== 'presetId') {
+    if (key !== 'version' && key !== 'sessionLaunch' && key !== 'presetId' && key !== 'backendSource') {
       throw new Error(`local client entry: unexpected launch envelope key ${JSON.stringify(key)}`)
     }
   }
   if (parsed.version !== 1) throw new Error('local client entry: the launch envelope version must be 1')
-  const envelope: { sessionLaunch?: CliSessionLaunchIntent; presetId?: string } = {}
+  const envelope: { sessionLaunch?: CliSessionLaunchIntent; presetId?: string; backendSource?: { value: 'direct' | 'daemon'; source: 'env' | 'profile' } } = {}
   if ('sessionLaunch' in parsed) envelope.sessionLaunch = decodeLaunchIntent(parsed.sessionLaunch)
+  if ('backendSource' in parsed) {
+    const bs = parsed.backendSource
+    if (!isRecord(bs) || (bs.value !== 'direct' && bs.value !== 'daemon') || (bs.source !== 'env' && bs.source !== 'profile')) {
+      throw new Error('local client entry: the launch envelope backendSource must be { value: "direct"|"daemon", source: "env"|"profile" }')
+    }
+    envelope.backendSource = { value: bs.value, source: bs.source }
+  }
   if ('presetId' in parsed) {
     if (typeof parsed.presetId !== 'string' || parsed.presetId.trim() === '') {
       throw new Error('local client entry: the launch envelope presetId must be a non-empty string')
@@ -1127,6 +1136,18 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   // malformed, oversized or contradictory envelope fails closed with no Host
   // interaction. Surface mode only; the qualification/peer channels never read it.
   const launchEnvelope = options.mode === 'surface' ? readClientLaunchEnvelope() : undefined
+  // Mutually-exclusive channels are checked HERE, before ensureHost / seat /
+  // Context: a contradictory public envelope + internal exact Session input must
+  // have ZERO Host side effects. The later surfaceStartupFacts check stays as a
+  // second fence but this is the zero-side-effect gate.
+  if (launchEnvelope !== undefined && process.env.SPLIT_PROCESS_CLIENT_SESSION !== undefined) {
+    throw new Error('local client entry: the public launch envelope is mutually exclusive with the internal exact Session channel')
+  }
+  if (launchEnvelope?.backendSource !== undefined) {
+    // A read-only launch fact for the Settings row. It is NOT DSH_PI_TUI_BACKEND
+    // (so it can never recurse into backend selection) and is never persisted.
+    process.env.SPLIT_PROCESS_CLIENT_LAUNCH_BACKEND = JSON.stringify(launchEnvelope.backendSource)
+  }
   const hostModules = await loadOfficialClientHost(options.dshAnchor)
   const dshHome = hostModules.resolveDshHome()
   const packageRoot = installedPackageRootFromEntry(import.meta.url)
@@ -1187,7 +1208,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     revisionTask = run.then(() => {}, () => {})
     return run
   }
-  const diag = createEntryDiag('client', recordSink?.emit)
+  const diag = createEntryDiag('client', recordSink?.emit ?? (options.mode === 'surface' ? () => {} : undefined))
   const CLIENT_DISPOSE_DEADLINE_MS = 10_000
   const disposeWithinDeadline = async (dispose: () => Promise<void>, errors: unknown[]): Promise<boolean> => {
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -1320,6 +1341,12 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       // Pause the qualification control channel so its resumed stdin pipe no
       // longer keeps the process alive after disposal. The dispatcher's own
       // stop hook does the same for a control-channel shutdown.
+      // Surface mode owns the tty: an async terminal/channel failure that
+      // drives this stop path also gets ONE sanitized human line (a clean
+      // /exit or signal carries no failure and prints nothing).
+      if (options.mode === 'surface' && failure !== undefined) {
+        process.stderr.write(`${surfaceStartupFailureLine(failure)}\n`)
+      }
       process.stdin.pause()
       resolveStopped?.()
       if (timedOut || transportCleanupFailed) forceExitAfterCleanupFailure()
@@ -2189,13 +2216,15 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       ...(primary.stack === undefined ? {} : { stack: primary.stack }),
       ...(primary.cause === undefined ? {} : { cause: primary.cause instanceof Error ? primary.cause.message : String(primary.cause) }),
     })
-    // Surface mode owns the tty. A handoff Client reports ONE concise line for
-    // any restore failure (expected Host/Session/preflight); the live-Host
-    // protocol refusal keeps its existing actionable line.
-    if (options.mode === 'surface' && expectedHostInstanceId !== undefined) {
-      process.stderr.write(`${handoffStartupFailureLine(failure)}\n`)
-    } else if (options.mode === 'surface' && failure instanceof LocalScopeError && failure.code === 'HOST_PROTOCOL_INCOMPATIBLE') {
-      process.stderr.write(`${surfaceStartupFailureLine(failure)}\n`)
+    // Surface mode owns the tty: EVERY startup failure gets ONE concise,
+    // actionable human line on stderr (a handoff Client gets its own restore
+    // line; every other failure, including ordinary Host init / Loader /
+    // assembly failures, gets the sanitized surface line). Never a bare exit 1.
+    if (options.mode === 'surface') {
+      const line = expectedHostInstanceId !== undefined
+        ? handoffStartupFailureLine(failure)
+        : surfaceStartupFailureLine(failure)
+      process.stderr.write(`${line}\n`)
     }
     process.stdin.pause()
     if (cleanupErrors.length === 0 && !timedOut && !transportCleanupFailed) {
