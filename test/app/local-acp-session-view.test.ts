@@ -326,8 +326,58 @@ test('a close while a connection is still attaching cancels the pending attach',
   assert.equal(registry.phaseOf(conn), 'idle')
 })
 
-test('a cwd mismatch on resume is attached without changing the Host Session', async () => {
+test('a late result from a superseded attach NEVER clobbers the newer operation state', async () => {
   const access = new FakeAccess()
+  const agentS1 = makeAgent('S1', '/w')
+  const agentS2 = makeAgent('S2', '/w')
+  access.seed(agentS1)
+  access.seed(agentS2)
+  const pendingS1 = deferred<{ agent: LiveAgentViewIdentity }>()
+  const pendingS2 = deferred<{ agent: LiveAgentViewIdentity }>()
+  access.resolveAgentImpl = sessionId => (sessionId === 'S1' ? pendingS1.promise : pendingS2.promise)
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+
+  const first = registry.resumeSession(conn, access, { sessionId: 'S1', cwd: '/w' })
+  assert.equal(registry.phaseOf(conn), 'attaching')
+  // close(S1) then immediately a NEW resume(S2) starts while S1's resolve is
+  // still in flight: a second attach operation now owns the connection state.
+  assert.deepEqual(registry.closeSession(conn, 'S1'), {})
+  const second = registry.resumeSession(conn, access, { sessionId: 'S2', cwd: '/w' })
+  assert.equal(registry.phaseOf(conn), 'attaching', 'the newer resume owns attaching')
+
+  // The STALE S1 result resolves late: it must be inert and must NOT reset the
+  // connection to idle (which would let a third request attach concurrently).
+  pendingS1.resolve({ agent: agentS1 })
+  await assert.rejects(first, isViewError('LOCAL_ACP_VIEW_CLOSED'))
+  assert.equal(registry.phaseOf(conn), 'attaching', 'the stale S1 result must not clobber S2 attaching')
+  assert.equal(registry.hasClaim('S1'), false)
+  assert.equal(registry.hasClaim('S2'), true, 'S2 reservation survives the stale S1 result')
+
+  // S2 still commits cleanly.
+  pendingS2.resolve({ agent: agentS2 })
+  await second
+  assert.equal(registry.phaseOf(conn), 'attached')
+  assert.equal(registry.hasClaim('S2'), true)
+})
+
+test('a rejecting resolve after a physical disconnect keeps the connection closed (never resurrected)', async () => {
+  const access = new FakeAccess()
+  const pending = deferred<{ agent: LiveAgentViewIdentity }>()
+  access.resolveAgentImpl = () => pending.promise
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+
+  const attempt = registry.resumeSession(conn, access, { sessionId: 'S13', cwd: '/w' })
+  registry.releaseConnection(conn)
+  assert.equal(registry.phaseOf(conn), 'closed')
+  pending.reject(new Error('host failed after disconnect'))
+  await assert.rejects(attempt)
+  assert.equal(registry.phaseOf(conn), 'closed', 'a late rejection must not turn a closed connection back to idle')
+  assert.equal(registry.hasClaim('S13'), false)
+})
+
+test('a cwd mismatch on resume is attached without changing the Host Session', async () => {  const access = new FakeAccess()
   access.seed(makeAgent('S11', '/host/dir'))
   const warnings: string[] = []
   const diag: Diag = {
