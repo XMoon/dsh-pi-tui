@@ -26,12 +26,14 @@ import type {
   TaskBrowserPresentationHandle,
   TaskBrowserPresentationOpen,
   TaskCenterPresentationPort,
+  TeamBrowserPresentation,
 } from '../../src/app/surface/task-presentation-port.ts'
 import type { TaskPanelItem } from '../../src/app/surface/task-presentation.ts'
 import type { TaskBrowserSummary } from '../../src/app/surface/task-browser-runtime.ts'
 import type { QuestionAttentionRow } from '../../src/app/surface/question-controller.ts'
 import type { TaskBrowserJobInput } from '../../src/domain/task/browser.ts'
 import type { TaskSubagentEntry } from '../../src/runtime/task-read-port.ts'
+import type { TeamBoardSnapshot } from '../../src/runtime/team-board-read-port.ts'
 import type { SessionSubject } from '../../src/app/session/subject.ts'
 import type { JobObservationPort, JobStopOutcome } from '../../src/runtime/job-observation-port.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
@@ -188,6 +190,7 @@ interface RuntimeHarness {
     items: readonly TaskPanelItem[]
     preferredValues: Array<string | undefined>
     refreshStates: Array<{ state: 'loading' | 'ready' | 'stale'; error?: string }>
+    teamPages: TeamBrowserPresentation[]
   }>
   readonly sinks: {
     quick: number
@@ -216,7 +219,7 @@ function startRuntime(options: {
     openBrowser: (items, onSelect, onClose, open) => {
       const entry = { items, onSelect, onClose, options: open }
       opens.push(entry)
-      const handleState: RuntimeHarness['handles'][number] = { closed: false, items, preferredValues: [], refreshStates: [] }
+      const handleState: RuntimeHarness['handles'][number] = { closed: false, items, preferredValues: [], refreshStates: [], teamPages: [] }
       handles.push(handleState)
       const handle: TaskBrowserPresentationHandle = {
         close: () => {
@@ -229,6 +232,9 @@ function startRuntime(options: {
         },
         setRefreshState: (state, error) => {
           handleState.refreshStates.push({ state, ...(error === undefined ? {} : { error }) })
+        },
+        setTeamPage: (value) => {
+          handleState.teamPages.push(value)
         },
       }
       return handle
@@ -769,4 +775,76 @@ test('the Task Runtime has no remaining PiTui-only presentation calls', () => {
     'every presentation sink must go through the port/display seam')
   assert.match(source, /options\.mounted\(\)\.openJobInspector\(/u,
     'the PiTui-only Job Inspector mount remains the ONE documented exception')
+})
+
+// ── FR2: the READ-ONLY Team page DTO reaches the PiTui presentation ─────────
+
+function teamSource(options: { snapshot: TeamBoardSnapshot; descendants?: TaskSubagentEntry[] }) {
+  let current = options.snapshot
+  const box: { listener: (() => void) | undefined; disposed: number } = { listener: undefined, disposed: 0 }
+  const board = {
+    read: () => current,
+    subscribe: (_id: string, listener: () => void) => {
+      box.listener = listener
+      return () => { box.disposed += 1; if (box.listener === listener) box.listener = undefined }
+    },
+  }
+  const source: TaskSurfaceSource = { ...makeSource({ descendants: options.descendants ?? [], roster: [] }), teamBoard: board }
+  return { source, box, setSnapshot: (next: TeamBoardSnapshot) => { current = next } }
+}
+
+test('a Root Team board is delivered to the PiTui presentation with catalog members (path names)', async () => {
+  const child = { ...taskChild('child-1', 'review', 'continuable', 'running'), path: 'reviewer' }
+  const { source, box } = teamSource({
+    snapshot: { kind: 'ready', enabled: true, tasks: [] },
+    descendants: [child],
+  })
+  const h = startRuntime({ source })
+  await flush()
+  h.tasks.openTasksBrowser('full')
+  const opts = h.opens[0]!.options
+  assert.ok(opts.team !== undefined, 'the Team DTO is passed to the PiTui options')
+  assert.equal(opts.team!.snapshot.kind, 'ready')
+  const names = opts.team!.members.map(entry => entry.name)
+  assert.ok(names.includes('lead'), `the Root member is lead: ${names.join(',')}`)
+  assert.ok(names.includes('reviewer'), `the catalog member name is the official path: ${names.join(',')}`)
+  assert.equal(typeof opts.interactionCurrent, 'function', 'the pointer admission fence is supplied')
+  assert.ok(box.listener !== undefined, 'the browser registered ONE Team board subscription')
+  h.tasks.resetTasks()
+})
+
+test('a confirmed Child gets a Work-only browser (no Team DTO, no subscription)', async () => {
+  const { source, box } = teamSource({ snapshot: { kind: 'unavailable', cause: 'not-root', reason: 'child' } })
+  const h = startRuntime({ source })
+  await flush()
+  h.tasks.openTasksBrowser('full')
+  assert.equal(h.opens[0]!.options.team, undefined, 'a child is Work-only')
+  assert.equal(box.listener, undefined, 'a child browser never subscribes to the board')
+  h.tasks.resetTasks()
+})
+
+test('a transient session-missing board is a recoverable Team error page, not permanent Work-only', async () => {
+  const { source, box, setSnapshot } = teamSource({ snapshot: { kind: 'unavailable', cause: 'session-missing', reason: 'not yet bound' } })
+  const h = startRuntime({ source })
+  await flush()
+  h.tasks.openTasksBrowser('full')
+  assert.ok(h.opens[0]!.options.team !== undefined, 'session-missing still presents the Team page (error)')
+  assert.ok(box.listener !== undefined, 'it keeps a subscription to recover')
+  // The binding arrives: the board becomes ready and the SAME handle repaints.
+  setSnapshot({ kind: 'ready', enabled: true, tasks: [{ id: 't1', revision: 1, subject: 'Ship', description: '', status: 'pending', ready: true, blockedBy: [], writeScopes: [], writeScopeWarnings: [] }] })
+  box.listener!()
+  const calls = h.handles[0]!.teamPages
+  assert.equal(calls.length, 1, 'the subscription repaints the live Team page')
+  assert.equal(calls[0]!.snapshot.kind, 'ready')
+  h.tasks.resetTasks()
+})
+
+test('resetTasks releases the Team board subscription exactly once', async () => {
+  const { source, box } = teamSource({ snapshot: { kind: 'ready', enabled: true, tasks: [] } })
+  const h = startRuntime({ source })
+  await flush()
+  h.tasks.openTasksBrowser('full')
+  assert.equal(box.disposed, 0)
+  h.tasks.resetTasks()
+  assert.ok(box.disposed >= 1, 'reset releases the subscription')
 })

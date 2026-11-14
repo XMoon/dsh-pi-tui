@@ -16,6 +16,7 @@ import { RemoteConfigPort, type RemoteConfigRuntimeSource } from '../../runtime/
 import { RemoteConfigWriteLifetime } from '../../runtime/remote/config-write-lifetime.ts'
 import { RemoteSessionPolicyPort } from '../../runtime/remote/session-policy-remote.ts'
 import { RemoteTeamModePort } from '../../runtime/remote/team-mode-remote.ts'
+import { RemoteTeamBoardReadPort } from '../../runtime/remote/team-board-read-remote.ts'
 import { RemoteSessionArchive } from '../../runtime/remote/session-archive-remote.ts'
 import { RemoteSessionMarkdown } from '../../runtime/remote/session-markdown-remote.ts'
 import { createRemoteBackend } from '../../runtime/remote/backend-remote.ts'
@@ -226,6 +227,13 @@ export async function createRemoteBackendRuntime(
         teamMode: new RemoteTeamModePort({
           sessions: options.runtime.sessions,
           remote: { agentTeams: options.runtime.remote.agentTeams },
+          connection: { generation: options.runtime.connection.generation },
+        }),
+        // FR2: the official `agentTeam` projection READ-ONLY board over the SAME
+        // Client sessions + Connection generation source. No generated write
+        // namespace is required (the board is a projection, not an RPC).
+        teamBoard: new RemoteTeamBoardReadPort({
+          sessions: options.runtime.sessions,
           connection: { generation: options.runtime.connection.generation },
         }),
       }),

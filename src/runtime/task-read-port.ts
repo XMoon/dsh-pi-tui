@@ -33,6 +33,14 @@ export type TaskSubagentEntry =
     readonly hasChildren: boolean
     readonly parentId: string
     readonly depth: number
+    /**
+     * Official Root-relative slash-separated agent path (`lead` is the root);
+     * absent when this child or an ancestor below the root has no name. It is
+     * the DURABLE member identity the Team board shows (`row.path ?? childId`),
+     * carried verbatim from the official `listDescendants()` — never inferred
+     * from a label, parent id or task owner.
+     */
+    readonly path?: string
   }
   | {
     readonly kind: 'diagnostic'

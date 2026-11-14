@@ -200,7 +200,7 @@ test('search mode renders its own hint — query actions, never the task actions
   const view = panel.render(100).map(stripTerminalSequences).join('\n')
   // D8 keeps the real Escape outcome last and highest-priority; low-priority
   // query help drops before it when the one-line hint is constrained.
-  const searchHint = 'Enter open · ↑↓ select · ←→ edit · Shift+Tab type · type to filter · Esc back'
+  const searchHint = 'Enter open · ↑↓ select · ←→ edit · type to filter · Esc back'
   assert.ok(view.includes(searchHint), `search-mode hint must advertise the query actions:\n${view}`)
   for (const stale of ['A scope', 'N next running', 'S stop', 'R refresh', '←→ tree']) {
     assert.ok(!view.includes(stale), `search-mode hint must not advertise '${stale}':\n${view}`)
@@ -217,8 +217,8 @@ test('search-mode hint keeps Esc back visible at 80 columns', () => {
   const hintRow = view.split('\n').find(line => line.includes('type to filter'))
   assert.ok(hintRow !== undefined, `search hint missing at 80 cols:\n${view}`)
   assert.ok(hintRow.includes('Esc back'), `Esc back must survive the 80-column hint:\n${view}`)
-  // Reverse type cycling uses the component keymap's canonical label.
-  assert.ok(hintRow.includes('Shift+Tab'), `reverse type cycling must be discoverable:\n${view}`)
+  // The retired reverse type cycle must never reappear in the hint.
+  assert.ok(!hintRow.includes('Shift+Tab'), `the retired reverse type cycle must not reappear:\n${view}`)
   // The ordinary task actions stay out of search mode here too.
   assert.ok(!view.includes('A scope') && !view.includes('S stop'), `no task actions in search mode:\n${view}`)
   panel.dispose()
@@ -268,12 +268,12 @@ test('Quick Tasks whitelist still navigates, filters types and opens rows', () =
   assert.equal(panel.getViewState().selectedId, 'job:b', '↓ moves the selection')
   panel.handleInput('\x1b[A')
   assert.equal(panel.getViewState().selectedId, 'job:a', '↑ moves the selection')
-  panel.handleInput('\t')
-  assert.equal(panel.getViewState().typeFilter, 'bash', 'Tab cycles the type filter forward')
-  panel.handleInput('\t')
-  assert.equal(panel.getViewState().typeFilter, 'subagent')
-  panel.handleInput('\t')
-  assert.equal(panel.getViewState().typeFilter, null)
+  panel.handleInput('f'); panel.handleInput('\x1b[B'); panel.handleInput('\r')
+  assert.equal(panel.getViewState().typeFilter, 'bash', 'the f list applies the bash type')
+  panel.handleInput('f'); panel.handleInput('\x1b[B'); panel.handleInput('\r')
+  assert.equal(panel.getViewState().typeFilter, 'subagent', 'the f list applies the subagent type')
+  panel.handleInput('f'); panel.handleInput('\x1b[A'); panel.handleInput('\x1b[A'); panel.handleInput('\r')
+  assert.equal(panel.getViewState().typeFilter, null, 'the f list can return to All')
   panel.handleInput('\x1b')
   assert.equal(cancelled, 1, 'Esc closes Quick')
   panel.dispose()
@@ -305,37 +305,38 @@ test('Full Task Center: N / Shift+N / T have no effect (removed actions)', () =>
   panel.dispose()
 })
 
-test('Full Task Center: Tab and Shift+Tab cycle the type filter in both directions', () => {
+test('Full Task Center: the f list applies types and Tab no longer cycles them', () => {
   const panel = new TaskBrowserPanel([job('job:a'), agentRow('agent:c')], 10,
     { mode: 'full', enableSearch: true, header: 'Tasks' }, () => {}, () => {}, () => {})
   assert.equal(panel.getViewState().typeFilter, null)
+  // Tab without a Team page is inert: it must not touch the type filter.
   panel.handleInput('\t')
+  assert.equal(panel.getViewState().typeFilter, null, 'Tab must not cycle the type filter')
+  panel.handleInput('\x1b[Z')
+  assert.equal(panel.getViewState().typeFilter, null, 'Shift+Tab must not cycle the type filter')
+  // The explicit f list applies a type (candidates: All, bash, subagent).
+  panel.handleInput('f'); panel.handleInput('\x1b[B'); panel.handleInput('\r')
   assert.equal(panel.getViewState().typeFilter, 'bash')
-  panel.handleInput('\t')
+  panel.handleInput('f'); panel.handleInput('\x1b[B'); panel.handleInput('\r')
   assert.equal(panel.getViewState().typeFilter, 'subagent')
-  panel.handleInput('\t')
-  assert.equal(panel.getViewState().typeFilter, null, 'forward past the last type returns to All')
-  // Reverse from All enters at the LAST type and wraps back to All.
-  panel.handleInput('\x1b[Z')
-  assert.equal(panel.getViewState().typeFilter, 'subagent')
-  panel.handleInput('\x1b[Z')
-  assert.equal(panel.getViewState().typeFilter, 'bash')
-  panel.handleInput('\x1b[Z')
-  assert.equal(panel.getViewState().typeFilter, null, 'reverse past the first type returns to All')
+  panel.handleInput('f'); panel.handleInput('\x1b[A'); panel.handleInput('\x1b[A'); panel.handleInput('\r')
+  assert.equal(panel.getViewState().typeFilter, null, 'the f list can return to All')
   panel.dispose()
 })
 
-test('Full search mode: Shift+Tab cycles the type filter backward without becoming query text', () => {
+test('Full search mode: Tab does not append to the query and never becomes query text', () => {
   const panel = new TaskBrowserPanel([job('build-1'), agentRow('agent:c')], 10,
     { mode: 'full', enableSearch: true, header: 'Tasks' }, () => {}, () => {}, () => {})
   panel.handleInput('/')
   panel.handleInput('b')
   panel.handleInput('u')
   assert.equal(panel.getFilter(), 'bu')
+  // Without a Team page, Tab/Shift+Tab switch nothing and MUST NOT become query
+  // text or leave search mode.
   panel.handleInput('\x1b[Z')
-  assert.equal(panel.getViewState().typeFilter, 'subagent', 'Shift+Tab uses the reverse type action')
   assert.equal(panel.getFilter(), 'bu', 'the query must be preserved')
   assert.equal(panel.getViewState().searchMode, true, 'Shift+Tab must not leave search mode')
+  assert.equal(panel.getViewState().typeFilter, null, 'Shift+Tab must not cycle the type filter')
   panel.dispose()
 })
 

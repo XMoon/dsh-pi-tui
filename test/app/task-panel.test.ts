@@ -14,6 +14,8 @@ import { TaskBrowserPanel, formatElapsed } from '../../src/tui/panels/task-panel
 import { componentKeymap } from '../../src/tui/keybindings/component-keymap.ts'
 import { formatKeyId } from '../../src/tui/keybindings/hints.ts'
 import type { TaskPanelItem } from '../../src/app/surface/task-presentation.ts'
+import type { TeamBrowserPresentation, TeamMemberPresentation } from '../../src/app/surface/task-presentation-port.ts'
+import type { TeamBoardSnapshot, TeamBoardTask } from '../../src/runtime/team-board-read-port.ts'
 import { MARQUEE_STEP_MS } from '../../src/tui/components/marquee.ts'
 import { color, setTheme } from '../../src/tui/theme/runtime.ts'
 
@@ -49,7 +51,7 @@ const subagent = (overrides: Partial<TaskPanelItem> = {}): TaskPanelItem => ({
 
 function makePanel(
   items: TaskPanelItem[],
-  options: { maxVisible?: number; enableSearch?: boolean; header?: string } = {},
+  options: { maxVisible?: number; enableSearch?: boolean; header?: string; team?: TeamBrowserPresentation; interactionCurrent?: () => boolean } = {},
 ): { panel: TaskBrowserPanel; rendered: () => string[] } {
   const panel = new TaskBrowserPanel(
     items,
@@ -60,6 +62,8 @@ function makePanel(
       enableSearch: options.enableSearch,
       mouseActionsEnabled: () => true,
       noMatchText: 'no active tasks',
+      ...(options.team === undefined ? {} : { team: options.team }),
+      ...(options.interactionCurrent === undefined ? {} : { interactionCurrent: options.interactionCurrent }),
     },
     () => {},
     () => {},
@@ -300,6 +304,11 @@ test('search matches the GROUP name too (the merged /tasks surface)', () => {
 // ── the async-merge focus race (plan item 2) ──────────────────────────────
 
 const typed = (item: TaskPanelItem, type: string): TaskPanelItem => ({ ...item, type })
+const DOWN = '\x1b[B'
+const UP = '\x1b[A'
+/** Apply one type through the explicit `f` filter list (FR2). Opens at the
+ *  current type; the caller navigates with DOWN/UP counts from there. */
+const openTypeList = (panel: TaskBrowserPanel): void => panel.handleInput('f')
 
 test('an UNTOUCHED selection follows the enriched list head (the /tasks race)', () => {
   // The browser opens on the jobs half only…
@@ -383,9 +392,9 @@ test('a user-touched selection whose row vanished resets to the head (not a stal
   assert.ok(after.includes('→ bash · pnpm build'), `a vanished row must fall back to the head:\n${after}`)
 })
 
-// ── the Tab type filter (initial item 2) ──────────────────────────────────
+// ── the explicit `f` type filter list (FR2: Tab is no longer a type cycle) ──
 
-test('Tab cycles All → subagent → bash → All and filters rows by type', () => {
+test('the f type list applies All → subagent → bash → All and filters rows by type', () => {
   const { panel, rendered } = makePanel(
     [typed(subagent(), 'subagent'), typed(runningJob(), 'bash'), typed(doneJob(), 'bash')],
     { enableSearch: true, header: 'tasks · subagents' },
@@ -393,21 +402,21 @@ test('Tab cycles All → subagent → bash → All and filters rows by type', ()
   const all = rendered().map(strip).join('\n')
   assert.ok(all.includes('subagent · research') && all.includes('pnpm build'), `precondition — All shows everything:\n${all}`)
 
-  panel.handleInput('\t')
+  openTypeList(panel); panel.handleInput(DOWN); panel.handleInput('\r') // All → subagent
   const agents = rendered().map(strip).join('\n')
   assert.ok(agents.includes('subagent · research'), `subagent filter keeps the agent row:\n${agents}`)
   assert.ok(!agents.includes('pnpm build'), `subagent filter drops job rows:\n${agents}`)
   assert.ok(agents.includes('[subagent]'), `the header must show the active type chip:\n${agents}`)
 
-  panel.handleInput('\t')
+  openTypeList(panel); panel.handleInput(DOWN); panel.handleInput('\r') // subagent → bash
   const bash = rendered().map(strip).join('\n')
   assert.ok(bash.includes('pnpm build'), `bash filter keeps job rows:\n${bash}`)
   assert.ok(!bash.includes('subagent · research'), `bash filter drops the agent row:\n${bash}`)
-  assert.ok(bash.includes('[bash]'), `the chip follows the cycle:\n${bash}`)
+  assert.ok(bash.includes('[bash]'), `the chip follows the selection:\n${bash}`)
 
-  panel.handleInput('\t') // bash → All (the cycle wraps)
+  openTypeList(panel); panel.handleInput(UP); panel.handleInput(UP); panel.handleInput('\r') // bash → All
   const allAgain = rendered().map(strip).join('\n')
-  assert.ok(allAgain.includes('subagent · research') && allAgain.includes('pnpm build'), `cycle wraps to All:\n${allAgain}`)
+  assert.ok(allAgain.includes('subagent · research') && allAgain.includes('pnpm build'), `All shows everything again:\n${allAgain}`)
   assert.ok(!allAgain.includes('[bash]'), `All shows no chip:\n${allAgain}`)
 })
 
@@ -416,7 +425,7 @@ test('type filter composes with the search query', () => {
     [typed(subagent(), 'subagent'), typed(runningJob(), 'bash'), typed(doneJob(), 'bash')],
     { enableSearch: true },
   )
-  panel.handleInput('\t') // subagent
+  openTypeList(panel); panel.handleInput(DOWN); panel.handleInput('\r') // subagent
   panel.handleInput('/') // explicit search mode
   panel.handleInput('r') // query 'r'
   const both = rendered().map(strip).join('\n')
@@ -429,19 +438,24 @@ test('rows without a type never match a type filter (they only appear under All)
     [runningJob(), typed(doneJob(), 'bash')],
     { enableSearch: true },
   )
-  panel.handleInput('\t') // bash
+  openTypeList(panel); panel.handleInput(DOWN); panel.handleInput('\r') // bash
   const filtered = rendered().map(strip).join('\n')
   assert.ok(filtered.includes('bash · lint'), `typed row stays:\n${filtered}`)
   assert.ok(!filtered.includes('bash · pnpm build'), `typeless row hides under a type filter:\n${filtered}`)
 })
 
-test('the Full hint always advertises the Tab type cycle', () => {
-  const single = makePanel([typed(runningJob(), 'bash')], { enableSearch: true })
-  assert.ok(single.rendered().map(strip).join('\n').includes('Shift+Tab type'),
-    `a single-kind list still toggles All↔type:\n${single.rendered().map(strip).join('\n')}`)
-  const multi = makePanel([typed(runningJob(), 'bash'), typed(subagent(), 'subagent')], { enableSearch: true })
-  assert.ok(multi.rendered().map(strip).join('\n').includes('Shift+Tab type'),
-    `mixed list advertises the Tab cycle:\n${multi.rendered().map(strip).join('\n')}`)
+test('the Work hint advertises the explicit f type list and the Tab Team switch (never Shift+Tab type)', () => {
+  const typeHint = `${componentKeymap.keyHint('tasks.type.filter')} type`
+  const tabHint = `${componentKeymap.keyHint('tasks.tab.next')} Team`
+  const single = makePanel([typed(runningJob(), 'bash')], { enableSearch: true, team: readyTeam([teamTask()]) })
+  const singleFrame = single.rendered().map(strip).join('\n')
+  assert.ok(singleFrame.includes(typeHint), `a single-kind list still advertises the f type list:\n${singleFrame}`)
+  assert.ok(singleFrame.includes(tabHint), `the Work hint advertises the Tab Team switch:\n${singleFrame}`)
+  assert.ok(!singleFrame.includes('Shift+Tab type'), `Shift+Tab type must be retired:\n${singleFrame}`)
+  const multi = makePanel([typed(runningJob(), 'bash'), typed(subagent(), 'subagent')], { enableSearch: true, team: readyTeam([teamTask()]) })
+  const multiFrame = multi.rendered().map(strip).join('\n')
+  assert.ok(multiFrame.includes(typeHint), `mixed list advertises the f type list:\n${multiFrame}`)
+  assert.ok(multiFrame.includes(tabHint), `mixed list advertises Tab Team:\n${multiFrame}`)
 })
 
 test('the Full action bar keeps the real Esc outcome last and visible at 44/80/120 columns', () => {
@@ -462,9 +476,11 @@ test('the Full action bar keeps the real Esc outcome last and visible at 44/80/1
     const segments = hint.trim().split(' · ')
     const stopKey = componentKeymap.keysFor('tasks.stop')[0]
     const stopLabel = stopKey === undefined ? 'Stop' : `Stop [${formatKeyId(stopKey)}]`
+    const tabHint = `${componentKeymap.keyHint('tasks.tab.next')} Team`
+    const typeHint = `${componentKeymap.keyHint('tasks.type.filter')} type`
     const allowed = outcome === 'close'
-      ? new Set(['Enter open', '↑↓ select', '←→ tree', stopLabel, 'Stop', '/ search', 'a scope', 'Shift+Tab type', 'Esc close'])
-      : new Set(['Enter open', '↑↓ select', '←→ edit', 'Shift+Tab type', 'type to filter', 'Esc back'])
+      ? new Set(['Enter open', '↑↓ select', '←→ tree', stopLabel, 'Stop', '/ search', 'a scope', tabHint, typeHint, 'Esc close'])
+      : new Set(['Enter open', '↑↓ select', '←→ edit', tabHint, 'type to filter', 'Esc back'])
     assert.ok(segments.every(segment => allowed.has(segment)),
       `width ${width}: only complete advertised segments remain: ${JSON.stringify(segments)}`)
     assert.equal(segments.at(-1), `Esc ${outcome}`,
@@ -495,7 +511,7 @@ test('a vanished active type snaps the filter back to All on setItems', () => {
     [typed(subagent(), 'subagent'), typed(runningJob(), 'bash')],
     { enableSearch: true },
   )
-  panel.handleInput('\t') // subagent
+  openTypeList(panel); panel.handleInput(DOWN); panel.handleInput('\r') // subagent
   assert.ok(rendered().map(strip).join('\n').includes('[subagent]'), `precondition — subagent filter active:\n${rendered().map(strip).join('\n')}`)
   // The subagent settles and disappears from the refresh.
   panel.setItems([typed(runningJob(), 'bash')])
@@ -504,8 +520,8 @@ test('a vanished active type snaps the filter back to All on setItems', () => {
   assert.ok(!after.includes('[subagent]'), `the vanished type must not stay active:\n${after}`)
 })
 
-test('a Tab type filter counts as a user interaction (no head-stealing on refresh)', () => {
-  // Round-1 review finding: Tab cycles the type filter, so a later async
+test('an f type filter counts as a user interaction (no head-stealing on refresh)', () => {
+  // The explicit `f` filter marks the selection touched, so a later async
   // setItems enrichment must preserve the selection within the user's
   // chosen scope — never re-focus the unfiltered head.
   const { panel, rendered } = makePanel(
@@ -513,9 +529,8 @@ test('a Tab type filter counts as a user interaction (no head-stealing on refres
     { enableSearch: true },
   )
   // The user picks the bash scope and moves onto the lint row.
-  panel.handleInput('\t') // subagent
-  panel.handleInput('\t') // bash (marks the selection touched)
-  panel.handleInput('\x1b[B') // onto the lint row
+  openTypeList(panel); panel.handleInput(DOWN); panel.handleInput(DOWN); panel.handleInput('\r') // bash
+  panel.handleInput(DOWN) // onto the lint row
   const before = rendered().map(strip).join('\n')
   assert.ok(before.includes('→ bash · lint'), `precondition — a row selected within the type scope:\n${before}`)
   // An enrichment arrives with a NEW bash job at the head of the filtered
@@ -1633,4 +1648,137 @@ test('Question rows never expose a stop affordance', () => {
   const row = questionRow()
   assert.equal(row.canStop, false)
   assert.equal(row.source, 'question')
+})
+
+// ── FR2: Work/Team dual page + explicit type filter state machine ──────────
+
+const teamTask = (overrides: Partial<TeamBoardTask> = {}): TeamBoardTask => ({
+  id: 'task-1', revision: 1, subject: 'Implement adapter', description: 'a read-only board',
+  status: 'in_progress', ready: false, blockedBy: [], writeScopes: [], writeScopeWarnings: [],
+  ...overrides,
+})
+const member = (id: string, name: string, activity: TeamMemberPresentation['activity'] = 'running', kind: TeamMemberPresentation['kind'] = 'subagent', depth = 1): TeamMemberPresentation =>
+  ({ value: `member:${id}`, id, name, activity, kind, depth })
+const readyTeam = (tasks: TeamBoardTask[], enabled = true): TeamBrowserPresentation =>
+  ({ snapshot: { kind: 'ready', enabled, tasks }, members: [member('s-root', 'lead', 'running', 'root', 0)] })
+const teamDto = (snapshot: TeamBoardSnapshot, members: TeamMemberPresentation[]): TeamBrowserPresentation => ({ snapshot, members })
+
+test('FR2: Tab switches Work↔Team and each page keeps its own state', () => {
+  const { panel, rendered } = makePanel(
+    [subagent(), runningJob()],
+    { enableSearch: true, team: readyTeam([teamTask()]) },
+  )
+  const work = rendered().map(strip).join('\n')
+  assert.ok(work.includes('[Work]') && work.includes('subagent · research'), `Work page header + rows:\n${work}`)
+  panel.handleInput('\t')
+  const team = rendered().map(strip).join('\n')
+  assert.ok(team.includes('[Team]'), `Team page tab:\n${team}`)
+  assert.ok(team.includes('Members') && team.includes('lead') && team.includes('Implement adapter'), `Team page members + tasks:\n${team}`)
+  panel.handleInput('\x1b[Z') // Shift+Tab back
+  assert.ok(rendered().map(strip).join('\n').includes('subagent · research'), 'Work page state survives the round trip')
+  panel.dispose()
+})
+
+test('FR2: Tab does nothing without a Team page (Work-only), and s/a/f are inert on the Team page', () => {
+  const workOnly = makePanel([subagent()], { enableSearch: true })
+  workOnly.panel.handleInput('\t')
+  assert.ok(!workOnly.rendered().map(strip).join('\n').includes('[Team]'), 'no Team tab without a Team DTO')
+  workOnly.panel.dispose()
+
+  const { panel, rendered } = makePanel([subagent()], { enableSearch: true, team: readyTeam([teamTask()]) })
+  panel.handleInput('\t') // Team
+  const before = rendered().map(strip).join('\n')
+  for (const key of ['f', 'a', 's']) panel.handleInput(key)
+  const after = rendered().map(strip).join('\n')
+  assert.ok(!after.includes('Type filter'), 'f must not open the Work type filter on the Team page')
+  assert.equal(after, before, 's/a/f must have no effect on the Team page')
+  panel.dispose()
+})
+
+test('FR2: a pending Work Stop forbids the Tab page switch', () => {
+  const { panel, rendered } = makePanel([subagent()], { enableSearch: true, team: readyTeam([teamTask()]) })
+  panel.handleInput('s') // request Stop on the stoppable subagent
+  assert.ok(rendered().map(strip).join('\n').includes('Confirm stop'), 'precondition — Stop is pending')
+  panel.handleInput('\t')
+  const stillWork = rendered().map(strip).join('\n')
+  assert.ok(stillWork.includes('Confirm stop'), 'a pending Stop keeps the Work page')
+  assert.ok(!stillWork.includes('Members'), 'Tab must not switch pages while a Stop is pending')
+  panel.dispose()
+})
+
+test('FR2: Enter on a Team task toggles its single disclosure; a member row has no write', () => {
+  const { panel, rendered } = makePanel([], {
+    enableSearch: true,
+    team: teamDto({ kind: 'ready', enabled: true, tasks: [teamTask({ subject: 'Ship it', status: 'completed' })] }, []),
+  })
+  panel.handleInput('\t') // Team page; the only selectable row is the task
+  const before = rendered().map(strip).join('\n')
+  assert.ok(before.includes('Ship it') && !before.includes('status    completed'), `not expanded yet:\n${before}`)
+  panel.handleInput('\r')
+  const after = rendered().map(strip).join('\n')
+  assert.ok(after.includes('status    completed'), `Enter expands the task detail:\n${after}`)
+  panel.handleInput('\r')
+  assert.ok(!rendered().map(strip).join('\n').includes('status    completed'), 'Enter again collapses it')
+  panel.dispose()
+})
+
+test('FR2: Team OFF shows the enable hint with retained tasks; stale/unavailable are explicit; empty ready is honest', () => {
+  const off = makePanel([], { enableSearch: true, team: readyTeam([teamTask({ subject: 'Retained task', status: 'pending', ready: true })], false) })
+  off.panel.handleInput('\t')
+  const offView = off.rendered().map(strip).join('\n')
+  assert.ok(offView.includes('Team is Off'), `OFF hint:\n${offView}`)
+  assert.ok(offView.includes('Retained task'), `retained tasks still show:\n${offView}`)
+  assert.ok(!offView.includes('No shared tasks'), `OFF is not an empty board:\n${offView}`)
+  off.panel.dispose()
+
+  const stale = makePanel([], { enableSearch: true, team: teamDto({ kind: 'stale', reason: 'the Host connection is not ready' }, []) })
+  stale.panel.handleInput('\t')
+  const staleView = stale.rendered().map(strip).join('\n')
+  assert.ok(staleView.includes('stale: the Host connection is not ready'), `stale reason:\n${staleView}`)
+  assert.ok(!staleView.includes('No shared tasks'), `stale is never fabricated empty:\n${staleView}`)
+  stale.panel.dispose()
+
+  const empty = makePanel([], { enableSearch: true, team: teamDto({ kind: 'ready', enabled: true, tasks: [] }, []) })
+  empty.panel.handleInput('\t')
+  assert.ok(empty.rendered().map(strip).join('\n').includes('No shared tasks'), 'a ready empty board is honest')
+  empty.panel.dispose()
+})
+
+test('FR2: each page keeps its own search draft across a Tab round trip', () => {
+  const { panel, rendered } = makePanel(
+    [subagent(), runningJob()],
+    { enableSearch: true, team: readyTeam([teamTask({ subject: 'review contract' })]) },
+  )
+  // Work query 'bu' (matches the build job only).
+  panel.handleInput('/'); panel.handleInput('b'); panel.handleInput('u')
+  assert.equal(panel.getFilter(), 'bu')
+  panel.handleInput('\t') // Team, Work query preserved
+  // Team query 'review'.
+  panel.handleInput('/'); panel.handleInput('r'); panel.handleInput('e'); panel.handleInput('v')
+  assert.ok(rendered().map(strip).join('\n').includes('rev'), 'the Team search row shows its draft')
+  panel.handleInput('\x1b[Z') // back to Work
+  assert.equal(panel.getFilter(), 'bu', 'the Work query is preserved, never appended with Team text')
+  panel.handleInput('\t') // back to Team
+  assert.ok(rendered().map(strip).join('\n').includes('rev'), 'the Team draft is preserved across the round trip')
+  panel.dispose()
+})
+
+test('FR2: a Team task row is never a Work Open/Stop route; a member Enter is inert', () => {
+  let opens = 0
+  const panel = new TaskBrowserPanel(
+    [],
+    10,
+    { mode: 'full', enableSearch: true, header: 'Tasks', team: readyTeam([teamTask({ id: 't1', subject: 'Only task' })]) },
+    () => { opens += 1 },
+    () => {},
+    () => {},
+  )
+  panel.handleInput('\t') // Team
+  panel.handleInput('\x1b[B') // onto the task (after the lead member)
+  panel.handleInput('\r') // toggle disclosure, NOT onSelect
+  assert.equal(opens, 0, 'Enter on a Team task never opens a Work row')
+  panel.handleInput('\x1b[A') // back onto the lead member
+  panel.handleInput('\r') // member Enter is inert
+  assert.equal(opens, 0, 'Enter on a Team member never opens anything')
+  panel.dispose()
 })

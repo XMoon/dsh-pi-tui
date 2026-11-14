@@ -26,6 +26,8 @@ import {
   type TaskScope,
 } from '../../app/surface/task-presentation.ts'
 import type { TaskBrowserViewState } from '../../app/surface/task-runtime.ts'
+import type { TeamBrowserPresentation, TeamMemberPresentation } from '../../app/surface/task-presentation-port.ts'
+import type { TeamBoardSnapshot, TeamBoardTask } from '../../runtime/team-board-read-port.ts'
 
 export type { TaskPanelItem, TaskScope } from '../../app/surface/task-presentation.ts'
 
@@ -53,7 +55,14 @@ type TaskMouseHit =
   | { kind: 'search' }
   | { kind: 'item'; value: string; index: number; listWidth?: number }
   | { kind: 'actions'; actions: readonly TaskMouseActionHit[] }
+  | { kind: 'tab'; target: 'work' | 'team' }
   | { kind: 'inert' }
+
+/** One selectable Team page row (Root/member or shared task). Section headers
+ *  are derived from kind transitions during render and are never selectable. */
+type TeamViewRow =
+  | { readonly kind: 'member'; readonly value: string; readonly member: TeamMemberPresentation }
+  | { readonly kind: 'task'; readonly value: string; readonly task: TeamBoardTask }
 
 /** Options for {@link TaskBrowserPanel}. */
 export interface TaskPanelOptions {
@@ -94,6 +103,11 @@ export interface TaskPanelOptions {
   groupLabels?: boolean
   /** Test hook: the selected-row marquee's clock. */
   marqueeNow?: () => number
+  /** FR2: the READ-ONLY Team page DTO. Absent = Work-only (no Team tab). */
+  team?: TeamBrowserPresentation
+  /** FR2: physical pointer final admission (captured subject / browser token /
+   *  non-cleanup), read by the tab/filter/Team hit paths. */
+  interactionCurrent?: () => boolean
 }
 
 /** Render elapsed seconds as `2s`, `1m5s`, or `1h2m`. */
@@ -167,6 +181,8 @@ export class TaskBrowserPanel implements Component, Focusable {
   private mousePressedValue: string | undefined
   private mousePressedSelectionOnly = false
   private mousePressedAction: TaskMouseActionGesture | undefined
+  /** FR2: the pressed Team/filter row identity (last-painted geometry). */
+  private teamMousePressedValue: string | undefined
   private readonly onSelect: (value: string) => void
   private readonly onCancel: () => void
   private readonly onStop: ((value: string) => void) | undefined
@@ -183,6 +199,25 @@ export class TaskBrowserPanel implements Component, Focusable {
   private loading: boolean
   private refreshError: string | undefined
   private preferredValue: string | undefined
+
+  // ── FR2: Work/Team pages + Work type-filter list ──────────────────────────
+  /** The active page. Both pages share the ONE physical panel/overlay. */
+  private pageView: 'work' | 'team' = 'work'
+  /** The READ-ONLY Team page DTO (undefined = Work-only, no Team tab). */
+  private team: TeamBrowserPresentation | undefined
+  /** Team view-only local state: selection identity, scroll, search, disclosure. */
+  private teamSelectedValue: string | undefined
+  private teamScroll = 0
+  /** The ACTUAL Team viewport rows the last render painted (page-step size). */
+  private teamLastRenderedCount = 1
+  private teamSearchMode = false
+  private readonly teamSearchInput = new Input()
+  /** At most ONE expanded Team task id (stable, never a row index). */
+  private teamExpandedTaskId: string | undefined
+  /** The Work explicit type-filter list (a transient focus state, not an overlay). */
+  private filterOpen = false
+  private filterSelected = 0
+  private readonly interactionCurrent: (() => boolean) | undefined
 
   constructor(
     items: readonly TaskPanelItem[],
@@ -230,6 +265,13 @@ export class TaskBrowserPanel implements Component, Focusable {
       }
     }
     this.searchInput.onSubmit = () => this.openSelected()
+    this.team = options.team
+    this.interactionCurrent = options.interactionCurrent
+    this.teamSearchInput.onEscape = () => {
+      if (this.teamSearchMode) this.exitTeamSearchMode()
+      else this.onCancel()
+    }
+    this.teamSearchInput.onSubmit = () => this.toggleTeamSelected()
     this.rebuildTypeCycle()
     // A restored type filter that no row satisfies produces a dead view;
     // validate it against the initial row set exactly like setItems does.
@@ -324,6 +366,38 @@ export class TaskBrowserPanel implements Component, Focusable {
     // paging/ack do not keep the pre-banner window until the next projection.
     this.recomputeVisibleBudget()
     this.requestRender()
+  }
+
+  /**
+   * FR2: replace the READ-ONLY Team page DTO (forwarded from the runtime's
+   * one subscription). Team state only: Work rows, its type order, Stop state
+   * and selection are never touched here.
+   */
+  setTeamPage(value: TeamBrowserPresentation): void {
+    this.team = value
+    // Drop an expanded task that no longer exists in the new snapshot (identity,
+    // not index — a revision reuse must not carry disclosure).
+    if (this.teamExpandedTaskId !== undefined) {
+      const snapshot = value.snapshot
+      const stillExists = snapshot.kind === 'ready'
+        && snapshot.tasks.some(task => task.id === this.teamExpandedTaskId)
+      if (!stillExists) this.teamExpandedTaskId = undefined
+    }
+    // Keep the Team selection valid against the new selectable set.
+    const selectable = this.teamSelectableValues()
+    if (this.teamSelectedValue === undefined || !selectable.includes(this.teamSelectedValue)) {
+      this.teamSelectedValue = selectable[0]
+    }
+    if (this.pageView === 'team') {
+      this.ensureTeamVisible()
+      this.requestRender()
+    }
+  }
+
+  /** Re-apply input focus against the current page + search-mode state. */
+  private updateInputFocus(): void {
+    this.searchInput.focused = this._focused && this.pageView === 'work' && this.searchMode
+    this.teamSearchInput.focused = this._focused && this.pageView === 'team' && this.teamSearchMode
   }
 
   /** Current rows after scope/type/search/disclosure projection. */
@@ -423,23 +497,6 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.ensureVisible()
   }
 
-  private cycleType(direction: 1 | -1): void {
-    if (this.typeOrder.length === 0) return
-    const index = this.activeType === null ? -1 : this.typeOrder.indexOf(this.activeType)
-    if (index === -1) {
-      // All (null): forward enters the first type, backward the last, so
-      // the cycle is symmetric without a second code path.
-      this.activeType = direction > 0
-        ? this.typeOrder[0]!
-        : this.typeOrder[this.typeOrder.length - 1]!
-    } else {
-      const next = index + direction
-      this.activeType = next < 0 || next >= this.typeOrder.length ? null : this.typeOrder[next]!
-    }
-    this.selectionTouched = true
-    this.reproject(true)
-  }
-
   private toggleScope(): void {
     this.scope = this.scope === 'active' ? 'all' : 'active'
     this.selectionTouched = true
@@ -449,7 +506,7 @@ export class TaskBrowserPanel implements Component, Focusable {
   private enterSearchMode(): void {
     if (!this.searchEnabled || this.searchMode) return
     this.searchMode = true
-    this.searchInput.focused = this._focused
+    this.updateInputFocus()
     this.selectionTouched = true
     // The search chrome (2 rows) enters the budget estimate immediately.
     this.recomputeVisibleBudget()
@@ -459,10 +516,364 @@ export class TaskBrowserPanel implements Component, Focusable {
   private exitSearchMode(): void {
     if (!this.searchMode) return
     this.searchMode = false
-    this.searchInput.focused = false
+    this.updateInputFocus()
     // The search chrome (2 rows) leaves the budget estimate immediately.
     this.recomputeVisibleBudget()
     this.requestRender()
+  }
+
+  private enterTeamSearchMode(): void {
+    if (this.teamSearchMode) return
+    this.teamSearchMode = true
+    this.updateInputFocus()
+    this.requestRender()
+  }
+
+  private exitTeamSearchMode(): void {
+    if (!this.teamSearchMode) return
+    this.teamSearchMode = false
+    this.updateInputFocus()
+    this.requestRender()
+  }
+
+  // ── FR2 Team page: read-only data / selection helpers ─────────────────────
+
+  private teamQuery(): string {
+    return (this.teamSearchInput.getValue() ?? '').trim().toLowerCase()
+  }
+
+  /** The filtered, ordered Team rows: members first, then shared tasks. */
+  private teamViewRows(): TeamViewRow[] {
+    const team = this.team
+    if (team === undefined) return []
+    const query = this.teamQuery()
+    const rows: TeamViewRow[] = []
+    for (const member of team.members) {
+      if (query !== '' && !`${member.name} ${member.id} ${member.kind}`.toLowerCase().includes(query)) continue
+      rows.push({ kind: 'member', value: member.value, member })
+    }
+    const snapshot = team.snapshot
+    if (snapshot.kind === 'ready') {
+      for (const task of snapshot.tasks) {
+        const haystack = `${task.subject} ${task.description} ${task.ownerName ?? ''} ${task.ownerId ?? ''} ${task.id}`.toLowerCase()
+        if (query !== '' && !haystack.includes(query)) continue
+        rows.push({ kind: 'task', value: `task:${task.id}`, task })
+      }
+    }
+    return rows
+  }
+
+  private teamSelectableValues(): string[] {
+    return this.teamViewRows().map(row => row.value)
+  }
+
+  private resetTeamSelectionToFirst(): void {
+    const values = this.teamSelectableValues()
+    if (this.teamSelectedValue === undefined || !values.includes(this.teamSelectedValue)) {
+      this.teamSelectedValue = values[0]
+    }
+  }
+
+  private moveTeam(delta: number): void {
+    const values = this.teamSelectableValues()
+    if (values.length === 0) return
+    const index = this.teamSelectedValue === undefined ? -1 : values.indexOf(this.teamSelectedValue)
+    const next = index < 0 ? 0 : Math.max(0, Math.min(values.length - 1, index + delta))
+    this.teamSelectedValue = values[next]
+    this.ensureTeamVisible()
+    this.requestRender()
+  }
+
+  private pageTeam(direction: -1 | 1): void {
+    const values = this.teamSelectableValues()
+    if (values.length === 0) return
+    const index = this.teamSelectedValue === undefined ? -1 : values.indexOf(this.teamSelectedValue)
+    const step = Math.max(1, this.teamLastRenderedCount)
+    const next = index < 0 ? 0 : Math.max(0, Math.min(values.length - 1, index + direction * step))
+    this.teamSelectedValue = values[next]
+    this.ensureTeamVisible()
+    this.requestRender()
+  }
+
+  /** Enter on a Team TASK row toggles its (single) disclosure; a member row
+   *  has NO write and NO navigation. */
+  private toggleTeamSelected(): void {
+    const selected = this.teamViewRows().find(row => row.value === this.teamSelectedValue)
+    if (selected === undefined || selected.kind !== 'task') return
+    this.teamExpandedTaskId = this.teamExpandedTaskId === selected.task.id ? undefined : selected.task.id
+    this.requestRender()
+  }
+
+  /** The Team page row budget from the live grant + current chrome. */
+  private teamBudget(): number {
+    if (!Number.isFinite(this.maxRows)) return Math.max(1, this.configuredMaxVisible)
+    // Header (1) + blank (1) + team status (1) + optional failure/stale line +
+    // footer blank (1) + hint (1).
+    const chrome = 1 + 1 + 1 + 1 + 1
+    return Math.max(1, this.maxRows - chrome)
+  }
+
+  private ensureTeamVisible(): void {
+    const total = this.teamSelectableValues().length
+    const budget = this.teamBudget()
+    const values = this.teamSelectableValues()
+    const index = this.teamSelectedValue === undefined ? -1 : values.indexOf(this.teamSelectedValue)
+    if (index < 0) return
+    if (index < this.teamScroll) this.teamScroll = index
+    else if (index >= this.teamScroll + budget) this.teamScroll = index - budget + 1
+    this.teamScroll = Math.max(0, Math.min(this.teamScroll, Math.max(0, total - budget)))
+  }
+
+  // ── FR2 Team page: rendering ──────────────────────────────────────────────
+
+  /** The `Tasks · [Work]  Team` / `Tasks · Work  [Team]` tab prefix. */
+  private tabsPrefix(active: 'work' | 'team'): string {
+    const title = this.options.header ?? 'Tasks'
+    const work = active === 'work' ? '[Work]' : 'Work'
+    const team = active === 'team' ? '[Team]' : 'Team'
+    return `${title} · ${work}  ${team}`
+  }
+
+  private teamStatusShort(): string {
+    const snapshot = this.team!.snapshot
+    if (snapshot.kind === 'ready') return snapshot.enabled ? 'Agent Team: On (read-only)' : 'Agent Team: Off'
+    if (snapshot.kind === 'stale') return 'Agent Team: stale'
+    return 'Agent Team: unavailable'
+  }
+
+  /** The one optional status/error line under the Team header (never fabricated
+   *  empty data — a stale/unavailable board says so explicitly). */
+  private teamErrorLine(): string | undefined {
+    const snapshot = this.team!.snapshot
+    if (snapshot.kind === 'stale') return `stale: ${snapshot.reason}`
+    if (snapshot.kind === 'unavailable') return `unavailable: ${snapshot.reason}`
+    if (snapshot.failure !== undefined) return `warning: ${snapshot.failure}`
+    if (!snapshot.enabled) return 'Team is Off · Enable it from /model'
+    return undefined
+  }
+
+  private teamHeaderLine(): string {
+    return `${this.tabsPrefix('team')}   ${this.teamStatusShort()}`
+  }
+
+  private emptyTeamText(): string {
+    return this.team?.snapshot.kind === 'ready' ? 'No shared tasks' : 'Team board unavailable'
+  }
+
+  private teamTaskStatusWord(task: TeamBoardTask): string {
+    if (task.status === 'completed') return 'completed'
+    if (task.status === 'in_progress') return 'in_progress'
+    return task.ready ? 'ready' : 'blocked'
+  }
+
+  private teamTaskStatusColor(task: TeamBoardTask): (text: string) => string {
+    if (task.status === 'completed') return color.textDim
+    if (task.status === 'in_progress') return color.primary
+    return task.ready ? color.success : color.warning
+  }
+
+  private teamRowMain(row: TeamViewRow, selected: boolean, width: number): string {
+    const pointer = selected ? color.primary(POINTER) : ' '
+    if (row.kind === 'member') {
+      const indent = '  '.repeat(Math.max(0, row.member.depth))
+      const plain = `${pointer} ${indent}${sanitizedPhysicalLine(row.member.name)} · ${row.member.activity}`
+      if (selected) return truncateToWidth(color.textStrong(plain), width, '…')
+      const tone = row.member.activity === 'running' ? color.primary
+        : row.member.activity === 'idle' ? color.textDim : color.textMuted
+      return truncateToWidth(tone(plain), width, '…')
+    }
+    const owner = row.task.ownerName ?? row.task.ownerId ?? ''
+    const statusWord = this.teamTaskStatusWord(row.task)
+    const body = `${statusWord.padEnd(11)} ${sanitizedPhysicalLine(row.task.subject)}${owner === '' ? '' : ` · ${sanitizedPhysicalLine(owner)}`}`
+    const plain = `${pointer} ${body}`
+    if (selected) return truncateToWidth(color.textStrong(plain), width, '…')
+    return truncateToWidth(this.teamTaskStatusColor(row.task)(plain), width, '…')
+  }
+
+  private memberDetailLines(member: TeamMemberPresentation): string[] {
+    return ['Selected', member.name, `kind      ${member.kind}`, `activity  ${member.activity}`, `session   ${member.id}`]
+      .map(sanitizedPhysicalLine)
+  }
+
+  private tabHitFor(target: 'work' | 'team'): TaskMouseHit {
+    return this.team !== undefined ? { kind: 'tab', target } : { kind: 'inert' }
+  }
+
+  private teamDetailLines(task: TeamBoardTask): string[] {
+    const lines = ['Selected', task.subject, `status    ${this.teamTaskStatusWord(task)}`, `owner     ${task.ownerName ?? task.ownerId ?? '—'}`]
+    if (task.blockedBy.length > 0) lines.push(`blocked by ${task.blockedBy.join(', ')}`)
+    if (task.writeScopes.length > 0) lines.push(`scopes    ${task.writeScopes.join(', ')}`)
+    for (const warning of task.writeScopeWarnings) lines.push(`warning   ${warning}`)
+    lines.push(`desc      ${task.description}`)
+    return lines.map(sanitizedPhysicalLine)
+  }
+
+  private teamSearchLine(width: number): string {
+    const value = this.teamSearchInput.getValue() ?? ''
+    const rendered = this.teamSearchInput.render(Math.max(1, width - 2))[0] ?? ''
+    const stripped = rendered.startsWith('> ') ? rendered.slice(2) : rendered
+    return value === '' ? ' / search…' : ` ${stripped}`
+  }
+
+  private teamHint(): string {
+    const tab = componentKeymap.keyHint('tasks.tab.next')
+    return `↑↓ select · Enter details · ${tab} Work · Esc close`
+  }
+
+  private renderTeam(safeWidth: number): string[] {
+    const team = this.team
+    if (team === undefined) {
+      // A Team page must never be reachable without a DTO; fail closed to Work.
+      this.pageView = 'work'
+      return this.renderWork(safeWidth)
+    }
+    const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY
+    const rows = this.teamViewRows()
+    if (this.teamSelectedValue === undefined || !rows.some(row => row.value === this.teamSelectedValue)) {
+      this.teamSelectedValue = rows[0]?.value
+    }
+    const headerText = truncateToWidth(sanitizedPhysicalLine(this.teamHeaderLine()), safeWidth, '…')
+    const errorRaw = this.teamErrorLine()
+    const errorText = errorRaw === undefined ? undefined : truncateToWidth(sanitizedPhysicalLine(errorRaw), safeWidth, '…')
+    const searchLine = this.teamSearchMode ? this.teamSearchLine(safeWidth) : undefined
+    const hintLine = color.textMuted(truncateToWidth(`  ${this.teamHint()}`, safeWidth, '…'))
+    const selectedIndex = rows.findIndex(row => row.value === this.teamSelectedValue)
+
+    const build = (count: number, start: number): { lines: string[]; hits: TaskMouseHit[] } => {
+      const out: string[] = []
+      const outHits: TaskMouseHit[] = []
+      out.push(color.textStrong(headerText)); outHits.push(this.tabHitFor('work'))
+      if (searchLine !== undefined) {
+        out.push(this.teamSearchMode && this.teamQuery() === '' ? color.textDim(searchLine) : searchLine)
+        outHits.push({ kind: 'search' })
+      }
+      if (errorText !== undefined) { out.push(color.warning(errorText)); outHits.push({ kind: 'inert' }) }
+      out.push(''); outHits.push({ kind: 'inert' })
+      const listLines: string[] = []
+      const listHits: TaskMouseHit[] = []
+      const end = Math.min(rows.length, start + count)
+      let lastKind: TeamViewRow['kind'] | undefined
+      for (let index = start; index < end; index += 1) {
+        const row = rows[index]!
+        if (row.kind !== lastKind) {
+          listLines.push(color.textMuted(row.kind === 'member' ? 'Members' : 'Shared Tasks'))
+          listHits.push({ kind: 'inert' })
+          lastKind = row.kind
+        }
+        const selected = index === selectedIndex
+        listLines.push(this.teamRowMain(row, selected, safeWidth))
+        listHits.push({ kind: 'item', value: row.value, index })
+        if (safeWidth < 110 && selected && row.kind === 'task' && this.teamExpandedTaskId === row.task.id) {
+          for (const detail of this.teamDetailLines(row.task).slice(1, 3)) {
+            listLines.push(color.textDim(truncateToWidth(`    ${detail}`, safeWidth, '…')))
+            listHits.push({ kind: 'inert' })
+          }
+        }
+      }
+      if (rows.length === 0) {
+        listLines.push(color.textDim(truncateToWidth(this.emptyTeamText(), safeWidth, '…')))
+        listHits.push({ kind: 'inert' })
+      }
+      if (safeWidth >= 110) {
+        const selected = rows[selectedIndex]
+        const details = selected === undefined ? ['Selected', '—']
+          : selected.kind === 'task' ? this.teamDetailLines(selected.task) : this.memberDetailLines(selected.member)
+        const listWidth = Math.max(40, Math.floor((safeWidth - 3) * 0.58))
+        const detailWidth = Math.max(24, safeWidth - listWidth - 3)
+        const max = Math.max(listLines.length, details.length)
+        for (let index = 0; index < max; index += 1) {
+          const left = truncateToWidth(listLines[index] ?? '', listWidth, '…')
+          const leftPad = ' '.repeat(Math.max(0, listWidth - visibleWidth(left)))
+          const right = truncateToWidth(details[index] ?? '', detailWidth, '…')
+          out.push(`${left}${leftPad} ${color.border('│')} ${right}`)
+          outHits.push(listHits[index] ?? { kind: 'inert' })
+        }
+      } else {
+        out.push(...listLines)
+        outHits.push(...listHits)
+      }
+      if (rows.length > count) {
+        out.push(color.textMuted(`  ${selectedIndex + 1}/${rows.length}`)); outHits.push({ kind: 'inert' })
+      }
+      out.push(''); outHits.push({ kind: 'inert' })
+      out.push(hintLine); outHits.push({ kind: 'inert' })
+      return { lines: out, hits: outHits }
+    }
+
+    let count = Math.min(Math.max(rows.length, 1), this.teamBudget())
+    let start = this.teamScroll
+    if (start + count > rows.length) start = Math.max(0, rows.length - count)
+    let candidate = build(count, start)
+    while (candidate.lines.length > limit && count > 1) {
+      count -= 1
+      start = Math.max(0, Math.min(start, Math.max(0, rows.length - count)))
+      candidate = build(count, start)
+    }
+    if (candidate.lines.length > limit) {
+      // Very short grant: keep header, search (if any), the selected main row
+      // and the hint — never a decorative blank over the selected row/Esc.
+      const slim: string[] = [color.textStrong(headerText)]
+      const slimHits: TaskMouseHit[] = [{ kind: 'inert' }]
+      if (searchLine !== undefined) { slim.push(searchLine); slimHits.push({ kind: 'search' }) }
+      const selected = rows[selectedIndex]
+      if (selected !== undefined) {
+        slim.push(this.teamRowMain(selected, true, safeWidth))
+        slimHits.push({ kind: 'item', value: selected.value, index: selectedIndex })
+      } else if (rows.length === 0) {
+        slim.push(color.textDim(truncateToWidth(this.emptyTeamText(), safeWidth, '…')))
+        slimHits.push({ kind: 'inert' })
+      }
+      if (slim.length + 1 <= limit) { slim.push(hintLine); slimHits.push({ kind: 'inert' }) }
+      candidate = { lines: slim.slice(0, limit), hits: slimHits.slice(0, limit) }
+      count = selected === undefined ? 0 : 1
+    }
+    this.teamLastRenderedCount = Math.max(1, count)
+    this.teamScroll = start
+    this.hitMap = candidate.hits
+    return candidate.lines
+  }
+
+  private renderFilter(safeWidth: number): string[] {
+    const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY
+    const candidates = this.filterCandidates()
+    this.filterSelected = Math.max(0, Math.min(candidates.length - 1, this.filterSelected))
+    const lines: string[] = []
+    const hits: TaskMouseHit[] = []
+    lines.push(color.textStrong(truncateToWidth('Type filter', safeWidth, '…'))); hits.push({ kind: 'inert' })
+    lines.push(''); hits.push({ kind: 'inert' })
+    const budget = Number.isFinite(limit) ? Math.max(1, limit - 4) : candidates.length
+    let start = 0
+    if (candidates.length > budget) start = Math.max(0, Math.min(this.filterSelected, candidates.length - budget))
+    const end = Math.min(candidates.length, start + budget)
+    for (let index = start; index < end; index += 1) {
+      const chosen = candidates[index]
+      const label = chosen === null ? 'All' : chosen
+      const selected = index === this.filterSelected
+      const pointer = selected ? color.primary('> ') : '  '
+      lines.push(`${pointer}${selected ? color.textStrong(label) : color.text(label)}`)
+      hits.push({ kind: 'item', value: `filter:${chosen === null ? '__all__' : chosen}`, index })
+    }
+    if (candidates.length > budget) {
+      lines.push(color.textMuted(`  ${this.filterSelected + 1}/${candidates.length}`)); hits.push({ kind: 'inert' })
+    }
+    lines.push(''); hits.push({ kind: 'inert' })
+    lines.push(color.textMuted(truncateToWidth('  ↑↓ select · Enter apply · Esc cancel', safeWidth, '…')))
+    hits.push({ kind: 'inert' })
+    if (lines.length > limit) {
+      // Degrade to the title, the selected candidate and the hint.
+      const chosen = candidates[this.filterSelected]
+      const label = chosen === null ? 'All' : chosen ?? ''
+      const slim = [
+        color.textStrong(truncateToWidth('Type filter', safeWidth, '…')),
+        `${color.primary('> ')}${color.textStrong(label)}`,
+        color.textMuted(truncateToWidth('  ↑↓ · Enter · Esc', safeWidth, '…')),
+      ]
+      const slimHits: TaskMouseHit[] = [{ kind: 'inert' }, { kind: 'item', value: `filter:${chosen === null ? '__all__' : (chosen ?? '')}`, index: this.filterSelected }, { kind: 'inert' }]
+      this.hitMap = slimHits.slice(0, limit)
+      return slim.slice(0, limit)
+    }
+    this.hitMap = hits
+    return lines
   }
 
   private move(delta: number): void {
@@ -585,6 +996,22 @@ export class TaskBrowserPanel implements Component, Focusable {
     // accessory replaced it. This panel is the Full Task Center only, and
     // the Full state machine below is the only keyboard surface.
 
+    // FR2: the Work explicit type-filter list owns input while open. It is a
+    // bounded single-select state, not a second overlay: Tab/Shift+Tab are
+    // CONSUMED here (never a page switch) so a half-finished selection cannot
+    // lose focus.
+    if (this.filterOpen) {
+      this.handleFilterInput(data)
+      return
+    }
+
+    // FR2: the Team page owns input while active. A Team keystroke never reaches
+    // Work Stop/Scope/TypeFilter (no side effects).
+    if (this.pageView === 'team') {
+      this.handleTeamInput(data)
+      return
+    }
+
     if (this.pendingStopValue !== undefined) {
       if (matchesKey(data, 'escape')) {
         this.clearPendingStop()
@@ -594,6 +1021,9 @@ export class TaskBrowserPanel implements Component, Focusable {
         this.confirmStop()
         return
       }
+      // A Work Stop confirmation forbids a page switch: Tab/Shift+Tab are
+      // consumed with no effect while the destructive confirmation is pending.
+      if (componentKeymap.matches(data, 'tasks.tab.next') || componentKeymap.matches(data, 'tasks.tab.previous')) return
       // A navigation gesture changes selection and therefore invalidates the
       // destructive confirmation. Other keys are ignored, never dispatched.
       if (componentKeymap.matches(data, 'tasks.cursorUp')) this.move(-1)
@@ -604,6 +1034,11 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
 
     if (this.searchMode) {
+      // While search-mode editing, Tab/Shift+Tab switch pages but PRESERVE this
+      // page's query/cursor/searchMode; the keystroke is never appended to the
+      // other page's input.
+      if (componentKeymap.matches(data, 'tasks.tab.next')) { this.switchPage('next'); return }
+      if (componentKeymap.matches(data, 'tasks.tab.previous')) { this.switchPage('prev'); return }
       if (componentKeymap.matches(data, 'tasks.search.exit')) {
         this.exitSearchMode()
         return
@@ -613,10 +1048,8 @@ export class TaskBrowserPanel implements Component, Focusable {
       if (componentKeymap.matches(data, 'tasks.pageUp')) { this.page(-1); return }
       if (componentKeymap.matches(data, 'tasks.pageDown')) { this.page(1); return }
       if (componentKeymap.matches(data, 'tasks.open')) { this.openSelected(); return }
-      if (componentKeymap.matches(data, 'tasks.type.next')) { this.cycleType(1); return }
-      if (componentKeymap.matches(data, 'tasks.type.previous')) { this.cycleType(-1); return }
       // In search mode arrows/editing remain with Input. In particular S, A,
-      // R, N and every other printable character are query text, never an
+      // R, F, N and every other printable character are query text, never an
       // action with side effects.
       this.selectionTouched = true
       this.searchInput.handleInput(data)
@@ -628,6 +1061,9 @@ export class TaskBrowserPanel implements Component, Focusable {
       this.enterSearchMode()
       return
     }
+    if (componentKeymap.matches(data, 'tasks.tab.next')) { this.switchPage('next'); return }
+    if (componentKeymap.matches(data, 'tasks.tab.previous')) { this.switchPage('prev'); return }
+    if (componentKeymap.matches(data, 'tasks.type.filter')) { this.openFilterList(); return }
     if (componentKeymap.matches(data, 'tasks.scope.toggle')) {
       this.toggleScope()
       return
@@ -648,14 +1084,6 @@ export class TaskBrowserPanel implements Component, Focusable {
       this.onRefresh?.()
       return
     }
-    if (componentKeymap.matches(data, 'tasks.type.next')) {
-      this.cycleType(1)
-      return
-    }
-    if (componentKeymap.matches(data, 'tasks.type.previous')) {
-      this.cycleType(-1)
-      return
-    }
     if (componentKeymap.matches(data, 'tasks.cursorUp')) { this.move(-1); return }
     if (componentKeymap.matches(data, 'tasks.cursorDown')) { this.move(1); return }
     if (componentKeymap.matches(data, 'tasks.pageUp')) { this.page(-1); return }
@@ -663,6 +1091,107 @@ export class TaskBrowserPanel implements Component, Focusable {
     if (componentKeymap.matches(data, 'tasks.open')) { this.openSelected(); return }
     if (componentKeymap.matches(data, 'tasks.search.exit')) this.onCancel()
   }
+
+  /** Switch between the Work and Team pages, preserving each page's own state
+   *  (query / cursor / searchMode / disclosure). A no-op when there is no Team
+   *  page (Work-only: a Child, a Workflow-scoped browser, or no Team source). */
+  private switchPage(direction: 'next' | 'prev'): void {
+    void direction
+    if (this.team === undefined) return
+    this.setPage(this.pageView === 'work' ? 'team' : 'work')
+  }
+
+  private setPage(target: 'work' | 'team'): void {
+    if (this.team === undefined || this.pageView === target) return
+    this.pageView = target
+    if (target === 'team') this.ensureTeamVisible()
+    else this.ensureVisible()
+    this.updateInputFocus()
+    this.requestRender()
+  }
+
+  private openFilterList(): void {
+    // The candidate list is derived from the CURRENT Work rows (this.typeOrder).
+    const candidates = this.filterCandidates()
+    if (candidates.length === 0) return
+    const current = this.activeType
+    const index = candidates.findIndex(candidate => candidate === current)
+    this.filterSelected = index < 0 ? 0 : index
+    this.filterOpen = true
+    this.requestRender()
+  }
+
+  /** `All` (null) followed by every current Work row type, in row order. */
+  private filterCandidates(): Array<string | null> {
+    return [null, ...this.typeOrder]
+  }
+
+  private handleFilterInput(data: string): void {
+    if (componentKeymap.matches(data, 'tasks.search.exit')) {
+      // Esc cancels the selection without changing the active filter.
+      this.filterOpen = false
+      this.requestRender()
+      return
+    }
+    if (componentKeymap.matches(data, 'tasks.tab.next') || componentKeymap.matches(data, 'tasks.tab.previous')) {
+      // Consumed by the selection state: never a page switch.
+      return
+    }
+    const candidates = this.filterCandidates()
+    if (componentKeymap.matches(data, 'tasks.cursorUp')) {
+      this.filterSelected = Math.max(0, this.filterSelected - 1)
+      this.requestRender()
+      return
+    }
+    if (componentKeymap.matches(data, 'tasks.cursorDown')) {
+      this.filterSelected = Math.min(candidates.length - 1, this.filterSelected + 1)
+      this.requestRender()
+      return
+    }
+    if (componentKeymap.matches(data, 'tasks.open')) {
+      const chosen = candidates[this.filterSelected]
+      if (chosen === undefined) {
+        // A selected candidate removed by a refresh before commit: cancel.
+        this.filterOpen = false
+        this.requestRender()
+        return
+      }
+      this.activeType = chosen
+      this.filterOpen = false
+      this.selectionTouched = true
+      this.reproject(true)
+      this.requestRender()
+    }
+  }
+
+  private handleTeamInput(data: string): void {
+    if (this.teamSearchMode) {
+      if (componentKeymap.matches(data, 'tasks.search.exit')) { this.exitTeamSearchMode(); return }
+      if (componentKeymap.matches(data, 'tasks.cursorUp')) { this.moveTeam(-1); return }
+      if (componentKeymap.matches(data, 'tasks.cursorDown')) { this.moveTeam(1); return }
+      if (componentKeymap.matches(data, 'tasks.pageUp')) { this.pageTeam(-1); return }
+      if (componentKeymap.matches(data, 'tasks.pageDown')) { this.pageTeam(1); return }
+      if (componentKeymap.matches(data, 'tasks.open')) { this.toggleTeamSelected(); return }
+      if (componentKeymap.matches(data, 'tasks.tab.next')) { this.switchPage('next'); return }
+      if (componentKeymap.matches(data, 'tasks.tab.previous')) { this.switchPage('prev'); return }
+      this.teamSearchInput.handleInput(data)
+      this.resetTeamSelectionToFirst()
+      this.requestRender()
+      return
+    }
+    if (componentKeymap.matches(data, 'tasks.search.enter')) { this.enterTeamSearchMode(); return }
+    if (componentKeymap.matches(data, 'tasks.tab.next')) { this.switchPage('next'); return }
+    if (componentKeymap.matches(data, 'tasks.tab.previous')) { this.switchPage('prev'); return }
+    if (componentKeymap.matches(data, 'tasks.cursorUp')) { this.moveTeam(-1); return }
+    if (componentKeymap.matches(data, 'tasks.cursorDown')) { this.moveTeam(1); return }
+    if (componentKeymap.matches(data, 'tasks.pageUp')) { this.pageTeam(-1); return }
+    if (componentKeymap.matches(data, 'tasks.pageDown')) { this.pageTeam(1); return }
+    if (componentKeymap.matches(data, 'tasks.open')) { this.toggleTeamSelected(); return }
+    if (componentKeymap.matches(data, 'tasks.search.exit')) { this.onCancel(); return }
+    // Everything else (s, a, f, r, Y, …) is inert on the Team page: no Work
+    // Stop/Scope/TypeFilter route exists here.
+  }
+
 
   /**
    * Mouse parity: the hit map from the LAST render decides what a pointer
@@ -692,6 +1221,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       this.mousePressedValue = undefined
       this.mousePressedSelectionOnly = false
       this.mousePressedAction = undefined
+      this.teamMousePressedValue = undefined
     }
     if (event.type === 'click' && pressedSelectionOnly) return { handled: true }
     if (this.disposed) return undefined
@@ -701,6 +1231,18 @@ export class TaskBrowserPanel implements Component, Focusable {
     if (event.width !== this.lastRenderWidth) return undefined
     const hit = this.hitMap[event.y]
     if (!hit) return undefined
+
+    // FR2: the Work type-filter list owns the pointer while open. Tab/Filter/
+    // Team pointer actions all require the runtime's physical admission fence.
+    if (this.filterOpen) return this.handleFilterMouse(event, hit)
+    // FR2: the Team page owns the pointer while active.
+    if (this.pageView === 'team') return this.handleTeamMouse(event, hit)
+    if (hit.kind === 'tab') {
+      if (event.button !== 'left' || event.type !== 'click') return { handled: true }
+      if (this.interactionCurrent?.() !== true) return undefined
+      this.setPage(hit.target)
+      return { handled: true }
+    }
 
     if (hit.kind === 'actions') {
       if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
@@ -797,6 +1339,70 @@ export class TaskBrowserPanel implements Component, Focusable {
     return undefined
   }
 
+  private handleFilterMouse(event: TuiMouseEvent, hit: TaskMouseHit): TuiMouseEventResult | undefined {
+    if (hit.kind !== 'item' || !hit.value.startsWith('filter:')) return undefined
+    if (event.button !== 'left') return undefined
+    if (event.type === 'wheel' && event.wheelDelta) {
+      const candidates = this.filterCandidates()
+      const delta = event.wheelDelta < 0 ? -1 : 1
+      this.filterSelected = Math.max(0, Math.min(candidates.length - 1, this.filterSelected + delta))
+      return { handled: true, render: true }
+    }
+    if (event.type === 'press') {
+      this.filterSelected = hit.index
+      return { handled: true, focus: true }
+    }
+    if (event.type !== 'click') return undefined
+    if (this.interactionCurrent?.() !== true) return undefined
+    const candidates = this.filterCandidates()
+    const chosen = candidates[hit.index]
+    if (chosen === undefined) {
+      this.filterOpen = false
+      this.requestRender()
+      return { handled: true }
+    }
+    this.filterSelected = hit.index
+    this.activeType = chosen
+    this.filterOpen = false
+    this.selectionTouched = true
+    this.reproject(true)
+    this.requestRender()
+    return { handled: true }
+  }
+
+  private handleTeamMouse(event: TuiMouseEvent, hit: TaskMouseHit): TuiMouseEventResult | undefined {
+    if (hit.kind === 'tab') {
+      if (event.button !== 'left' || event.type !== 'click') return { handled: true }
+      if (this.interactionCurrent?.() !== true) return undefined
+      this.setPage(hit.target)
+      return { handled: true }
+    }
+    if (hit.kind !== 'item') return undefined
+    if (event.button !== 'left') return undefined
+    if (event.type === 'wheel' && event.wheelDelta) {
+      this.moveTeam(event.wheelDelta < 0 ? -1 : 1)
+      return { handled: true, render: true }
+    }
+    if (event.type === 'press') {
+      if (this.interactionCurrent?.() !== true) return undefined
+      this.teamMousePressedValue = hit.value
+      this.teamSelectedValue = hit.value
+      this.ensureTeamVisible()
+      return { handled: true, focus: true }
+    }
+    if (event.type !== 'click') return undefined
+    if (this.interactionCurrent?.() !== true) return undefined
+    if (this.teamMousePressedValue !== hit.value) return undefined
+    this.teamMousePressedValue = undefined
+    this.teamSelectedValue = hit.value
+    // A member row is SELECTION ONLY: no viewer, no write. A task row toggles
+    // its single disclosure. Text inside the detail pane is inert (never a
+    // Work Open/Stop route).
+    const row = this.teamViewRows().find(candidate => candidate.value === hit.value)
+    if (row?.kind === 'task') this.toggleTeamSelected()
+    return { handled: true }
+  }
+
   private ensureVisible(): void {
     if (this.selected < this.scroll) this.scroll = this.selected
     else if (this.selected >= this.scroll + this.maxVisible) this.scroll = this.selected - this.maxVisible + 1
@@ -830,17 +1436,24 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   set focused(value: boolean) {
     this._focused = value
-    this.searchInput.focused = value && this.searchMode
+    this.updateInputFocus()
   }
 
   invalidate(): void {
     this.searchInput.invalidate()
+    this.teamSearchInput.invalidate()
   }
 
   render(width: number): string[] {
     this.now = Date.now()
     const safeWidth = Math.max(1, width)
     this.lastRenderWidth = safeWidth
+    if (this.filterOpen) return this.renderFilter(safeWidth)
+    if (this.pageView === 'team') return this.renderTeam(safeWidth)
+    return this.renderWork(safeWidth)
+  }
+
+  private renderWork(safeWidth: number): string[] {
     const lines: string[] = []
     const hits: TaskMouseHit[] = []
     const push = (line: string, hit: TaskMouseHit): void => {
@@ -878,7 +1491,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     })()
 
     if (headerText !== undefined) {
-      push(color.textStrong(headerText), { kind: 'inert' })
+      push(color.textStrong(headerText), this.tabHitFor('team'))
       push('', { kind: 'inert' })
     }
 
@@ -1224,7 +1837,10 @@ export class TaskBrowserPanel implements Component, Focusable {
     if (done > 0) stats.push(`${done} done`)
     if (failed > 0) stats.push(`${failed} failed`)
     stats.push(`${visible}/${real.length} shown`)
-    return `${this.options.header ?? 'Tasks'} ${chips.join(' ')}  ${stats.join(' · ')}`
+    // The `Tasks · [Work]  Team` tabs appear ONLY when a Team page exists
+    // (a proved Root); a Work-only browser keeps the original title-only header.
+    const prefix = this.team === undefined ? (this.options.header ?? 'Tasks') : this.tabsPrefix('work')
+    return `${prefix} ${chips.join(' ')}  ${stats.join(' · ')}`
   }
 
   private renderRow(item: TaskPanelItem, selected: boolean, width: number): string[] {
@@ -1333,7 +1949,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       add({ text: 'Enter open', priority: 90 })
       add({ text: '↑↓ select', priority: 80 })
       add({ text: '←→ edit', priority: 70 })
-      add({ text: `${componentKeymap.keyHint('tasks.type.previous')} type`, priority: 60 })
+      if (this.team !== undefined) add({ text: `${componentKeymap.keyHint('tasks.tab.next')} Team`, priority: 15 })
       add({ text: 'type to filter', priority: 10 })
       add({ text: 'Esc back', priority: 1000 })
     } else {
@@ -1354,7 +1970,8 @@ export class TaskBrowserPanel implements Component, Focusable {
       }
       if (this.searchEnabled) add({ text: '/ search', priority: 30 })
       add({ text: 'a scope', priority: 20 })
-      add({ text: `${componentKeymap.keyHint('tasks.type.previous')} type`, priority: 10 })
+      if (this.team !== undefined) add({ text: `${componentKeymap.keyHint('tasks.tab.next')} Team`, priority: 15 })
+      add({ text: `${componentKeymap.keyHint('tasks.type.filter')} type`, priority: 10 })
       add({ text: 'Esc close', priority: 1000 })
     }
 

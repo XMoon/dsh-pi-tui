@@ -1660,8 +1660,28 @@ adapter re-resolves that Session's live Root on every call.
   dispatched write whose settlement cannot be proven is indeterminate and is
   never replayed.
 
+### Agent Team board (read-only)
+
+`TeamBoardReadPort` is the ONE semantic seam for the Root Session's READ-ONLY
+shared Team board — a SEPARATE contract from `TeamModePort`. It reads the
+official `agentTeam` projection's `{enabled, tasks, failure}` and reaches no
+Team write (no create/update/claim/complete). A read is `ready` / `stale` /
+`unavailable` (`not-root` | `session-missing` | `authority-missing`); an
+`enabled:false` board is still a readable `ready` with its retained tasks, and
+a `failure` is returned ALONGSIDE the last valid tasks. It does not reuse the
+`TeamModePort` availability rule (which also requires the write namespace and
+`modelSelection`), so a legal read-only board stays readable. Direct proves
+`subagents.rootOf(agent) === agent` and reads
+`sessionProjections.snapshot(session, ['agentTeam'])`; Split Client reads the
+exact `sessions.binding(sessionId)` `faceOf('agentTeam')`, re-armed on the
+Connection generation / binding, and needs no `agentTeams` write namespace.
+Team members are the Root (`lead`) plus the already-read official Subagent
+catalog rows (`path ?? childId`) — never a second catalog crawl.
+
 Proof: `test/runtime/direct/team-mode-direct.test.ts`,
-`test/runtime/remote/team-mode-remote.test.ts`.
+`test/runtime/remote/team-mode-remote.test.ts`,
+`test/runtime/direct/team-board-read-direct.test.ts`,
+`test/runtime/remote/team-board-read-remote.test.ts`.
 
 ## Workflow terminal-state authority
 

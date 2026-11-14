@@ -468,18 +468,26 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     scope: 'tasks',
     configurable: false,
   },
-  'tasks.type.next': {
-    id: 'tasks.type.next',
+  'tasks.tab.next': {
+    id: 'tasks.tab.next',
     defaultKeys: ['tab'],
-    description: 'Cycle the task type filter forward',
+    description: 'Switch to the Team page of the Task Center',
     category: 'Tasks',
     scope: 'tasks',
     configurable: false,
   },
-  'tasks.type.previous': {
-    id: 'tasks.type.previous',
+  'tasks.tab.previous': {
+    id: 'tasks.tab.previous',
     defaultKeys: ['shift+tab'],
-    description: 'Cycle the task type filter backward',
+    description: 'Switch back to the Work page of the Task Center',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
+  'tasks.type.filter': {
+    id: 'tasks.type.filter',
+    defaultKeys: ['f'],
+    description: 'Open the Work type filter list',
     category: 'Tasks',
     scope: 'tasks',
     configurable: false,

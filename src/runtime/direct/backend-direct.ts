@@ -48,6 +48,7 @@ import { DirectSchedulePort } from './schedule-direct.ts'
 import { DirectHostDirectoryBrowsePort } from './host-directory-browse-direct.ts'
 import { DirectSessionPolicyPort } from './session-policy-direct.ts'
 import { DirectTeamModePort } from './team-mode-direct.ts'
+import { DirectTeamBoardReadPort } from './team-board-read-direct.ts'
 import type { WebAccessPort, WebAccessStatus, WebAccessUrl } from '../web-access-port.ts'
 import type { AcpAccessPort, AcpAccessStatus } from '../acp-access-port.ts'
 
@@ -223,5 +224,8 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     // FR1: the official Root-only Team authority behind the ONE Team port.
     // Every call re-resolves the exact live Agent and its tree root.
     new DirectTeamModePort(deps.ctx, sessionId => deps.agentFor(sessionId)),
+    // FR2: the official Root-only READ-ONLY Team board behind the ONE board
+    // port. Same exact-live-Agent Root proof; no write is reachable here.
+    new DirectTeamBoardReadPort(deps.ctx, sessionId => deps.agentFor(sessionId)),
   )
 }

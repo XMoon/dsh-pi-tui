@@ -164,6 +164,18 @@ Full:
 - This pointer path is Fullscreen-only. Regular/Main retains terminal-native
   selection and scrolling behavior and has no application Task pointer routing.
 - Reading Job output belongs to the Job Workspace, not the Task Browser.
+- The Full Task Center is ONE physical overlay with two pages: `Work`
+  (default) and `Team`. Only a proved Root `agentTeam` projection shows the
+  `[Work] Team` tabs; `Tab`/`Shift+Tab` switch pages and each page keeps its OWN
+  query, selection, scroll and disclosure (never a shared draft). A Child
+  Session, and any Workflow-scoped browser, is Work-only. The Team page is
+  READ-ONLY: it presents the official `agentTeam` projection's shared tasks plus
+  the Root (`lead`) and the already-read Subagent catalog members; there is NO
+  Team write, claim, stop, member navigation or `/team` command. An
+  `Agent Team: Off` board, a `stale` read or an official `failure` is shown
+  explicitly and still lists the retained tasks; a failed read is never
+  rendered as an empty board. The `f` key opens the explicit Work type list
+  (`All` + the types the current Work rows own); `Tab` no longer cycles types.
 
 Authority: `src/app/surface/task-browser-runtime.ts`, `task-runtime.ts`
 (`openTasksBrowser`, `quickTaskProjection`), `task-presentation.ts`,
