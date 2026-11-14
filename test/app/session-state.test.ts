@@ -1984,8 +1984,18 @@ test('a HELD Host write that completes after an old-value read is reconciled by 
   await flushMicrotasks()
   await vt.waitForRender()
   assert.equal(proxy.defaultIntentOutcome, 'unresolved', 'the held write is not declared failed by an old read')
-  // Host completes the write; the user reopens /model -> a fresh authoritative
-  // read now reports the saved value and reconciles.
+  // The user reopens /model while the Host write is still pending: the panel's
+  // OWN authoritative load also reads the OLD default, and the SAME shared
+  // reconciliation rule must keep the unconfirmed intent.
+  await modelDef.handler!()
+  await vt.waitForRender()
+  stub.releaseRead({ provider: 'p', model: 'old-model' })
+  await flushMicrotasks()
+  await vt.waitForRender()
+  assert.equal(proxy.defaultIntentOutcome, 'unresolved',
+    'reopening /model with an older snapshot must not clear the unconfirmed write')
+  // Host completes the write; the next authoritative read reports the saved
+  // value and reconciles.
   await modelDef.handler!()
   await vt.waitForRender()
   stub.releaseRead({ provider: 'p', model: 'm1' })
