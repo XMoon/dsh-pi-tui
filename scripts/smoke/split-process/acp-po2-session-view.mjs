@@ -587,13 +587,15 @@ export async function runAcpPo2SessionView(context) {
     connL.close()
     await connL.closed
 
-    // M) still-unsupported session/prompt and session/list.
+    // M) PO-3A admits prompts only on an ATTACHED View: a prompt from a
+    //    connection that holds no View for that Session stays fail-closed.
+    //    session/list stays unsupported.
     const { client: connM } = await openInitialized(scopeDir, 'M unsupported methods')
-    const promptReject = await sendRequest(connM, 2, 'session/prompt', { sessionId: sessionA, prompt: [] })
-    assert(promptReject?.error?.code === -32042,
-      `M: session/prompt must be -32042 (got ${JSON.stringify(promptReject?.error ?? promptReject?.result)})`)
-    assert(promptReject?.error?.data?.code === 'LOCAL_ACP_SESSION_NOT_READY',
-      `M: session/prompt must name LOCAL_ACP_SESSION_NOT_READY (got ${JSON.stringify(promptReject?.error?.data)})`)
+    const promptReject = await sendRequest(connM, 2, 'session/prompt', { sessionId: sessionA, prompt: [{ type: 'text', text: 'hi' }] })
+    assert(promptReject?.error?.code === -32602,
+      `M: an unattached session/prompt must be -32602 (got ${JSON.stringify(promptReject?.error ?? promptReject?.result)})`)
+    assert(promptReject?.error?.data?.code === 'LOCAL_ACP_VIEW_NOT_OWNED',
+      `M: an unattached session/prompt must name LOCAL_ACP_VIEW_NOT_OWNED (got ${JSON.stringify(promptReject?.error?.data)})`)
     const listReject = await sendRequest(connM, 3, 'session/list', {})
     assert(listReject?.error?.code === -32042,
       `M: session/list must be -32042 (got ${JSON.stringify(listReject?.error ?? listReject?.result)})`)

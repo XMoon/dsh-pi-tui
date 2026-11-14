@@ -206,6 +206,21 @@ class C1Model extends LlmAdapter {
       return
     }
 
+    // PO-3A qualification only: the ACP prompt marker asks for ONE committed
+    // assistant message with more standard text blocks than the bounded ACP
+    // output queue, so the real projection reaches its fixed cap. No other
+    // case sends the marker, so no other lane's model behaviour changes.
+    if (userText.includes('po3a-large-output') && !this.largeOutputIssued?.has(sessionId)) {
+      this.largeOutputIssued ??= new Set()
+      this.largeOutputIssued.add(sessionId)
+      for (let index = 0; index < 200; index += 1) {
+        yield { type: 'block-start', index, blockType: 'text' }
+        yield { type: 'block-end', index, block: { type: 'text', text: `po3a-large-block-${String(index)}-${token}` } }
+      }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
     if (this.scenario === 'long-turn') {
       if (afterTool) {
         yield { type: 'block-start', index: 0, blockType: 'text' }

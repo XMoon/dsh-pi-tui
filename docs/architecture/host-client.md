@@ -512,10 +512,29 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     the connection's View with the same detach-only semantics; the Session,
     Agent and writer keep their Host authority, and a pending create/resume whose
     connection closed never publishes an attached View.
-  - `session/prompt`, `session/list`, `session/set_config_option`, approval and
-    turn semantics are NOT provided by this View; they fail closed with the
-    stable `LOCAL_ACP_SESSION_NOT_READY` code, and a `session/cancel`
-    notification has no Host side effect.
+  - `session/list`, `session/set_config_option`, approval, image/MCP prompts and
+    client-driven turn cancellation are NOT provided by this View and fail closed
+    with their stable `LOCAL_ACP_*` code; a `session/cancel` notification has no
+    Host side effect.
+  - **One prompt flight per View.** `session/prompt` is admitted only on
+    an attached View that already holds the exact Session claim. The View mints
+    ONE stable `requestId`, submits exactly ONE official
+    `SessionController.prompt` in queue mode, and correlates the real Host facts
+    — `source.rpcId` at `agent/inbox/inserted`, the claimed turn of that exact
+    message id (`agent/inbox/claimed`), the committed `data.turn` events and
+    `turn/end` — before answering a real ACP StopReason (`end_turn` /
+    `max_tokens`). Only the committed output of that claimed turn is projected as
+    standard `session/update` notifications, and the answer is sent after the
+    turn's `turn/end` and the ordered notification drain. A turn that also claims
+    another user's message (e.g. a TUI steer) is a MIXED turn: no further output
+    is projected and the request fails closed with
+    `LOCAL_ACP_PROMPT_MIXED_TURN`, never a fabricated success. A completed turn
+    without real non-empty assistant text fails
+    `LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT`. `session/close` with an unsettled prompt
+    returns `LOCAL_ACP_PROMPT_IN_FLIGHT` and never cancels the shared turn; a
+    physical disconnect releases only the View and never cancels the Host turn.
+    Message ordering, the bounded per-connection output cap and the
+    one-View-per-Session rule are unchanged.
 - **Bounded per Host and per connection.** The Host start-time
   `DSH_PI_TUI_ACP_MAX_CONNECTIONS` integer (default 4, valid 1..16, an invalid
   value is a startup failure) caps live connections; an over-limit connection
