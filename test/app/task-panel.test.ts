@@ -2038,3 +2038,58 @@ test('FR2-ext4b: a stale panel (interactionCurrent=false) ignores Team and filte
   assert.ok(allRow.includes('>'), 'a stale wheel must not move the filter cursor')
   filter.panel.dispose()
 })
+
+test('FR2-ext-r3-F1: a Work-only panel applies the type filter by mouse (fence supplied)', () => {
+  const W = 100
+  const { panel } = makePanel([typed(runningJob(), 'bash'), typed(subagent(), 'subagent')], { enableSearch: true, header: 'Tasks', interactionCurrent: () => true })
+  panel.handleInput('f')
+  const y = panel.render(W).map(strip).findIndex(line => line.includes('bash'))
+  assert.ok(y >= 0)
+  panel.handleMouse(mouse('press', 1, y, W))
+  panel.handleMouse(mouse('click', 1, y, W))
+  assert.equal(panel.getViewState().typeFilter, 'bash', 'the Work-only filter applies the pressed type by mouse')
+  panel.dispose()
+})
+
+test('FR2-ext-r3-F2: at 120 columns the Team right detail pane is inert', () => {
+  const W = 120
+  const tasks = [teamTask({ id: 't-a', subject: 'Alpha task' }), teamTask({ id: 't-b', subject: 'Beta task' })]
+  const { panel } = makePanel([], { enableSearch: true, header: 'Tasks', team: teamDto({ kind: 'ready', enabled: true, tasks }, []), interactionCurrent: () => true })
+  panel.handleInput('\t') // Team
+  const frame = panel.render(W).map(strip)
+  const yBeta = frame.findIndex(line => line.includes('Beta task'))
+  assert.ok(yBeta >= 0)
+  // The right detail pane (x well past listWidth) must NOT select/activate the row.
+  panel.handleMouse(mouse('press', W - 2, yBeta, W))
+  panel.handleMouse(mouse('click', W - 2, yBeta, W))
+  const afterDetail = panel.render(W).map(strip)
+  assert.ok(afterDetail.some(line => line.includes('→') && line.includes('Alpha task')), 'the detail-pane click must not move the selection')
+  // The left list cell of the same row does select it.
+  panel.handleMouse(mouse('press', 2, yBeta, W))
+  panel.handleMouse(mouse('click', 2, yBeta, W))
+  assert.ok(panel.render(W).map(strip).some(line => line.includes('→') && line.includes('Beta task')), 'the left list cell selects the row')
+  panel.dispose()
+})
+
+test('FR2-ext-r3-F3: setTeamPage(undefined) revokes the Team page back to Work-only', () => {
+  const { panel } = makePanel([subagent()], { enableSearch: true, header: 'Tasks', team: readyTeam([teamTask()]), interactionCurrent: () => true })
+  panel.handleInput('\t') // Team
+  assert.ok(panel.render(100).map(strip).join('\n').includes('Members'), 'precondition — Team page shown')
+  panel.setTeamPage(undefined)
+  const frame = panel.render(100).map(strip).join('\n')
+  assert.ok(!frame.includes('[Team]') && !frame.includes('Members'), 'the Team page is revoked')
+  assert.ok(frame.includes('subagent · research'), 'the Work page is shown')
+  panel.dispose()
+})
+
+test('FR2-ext-r3-F4: a real Job type named __all__ is selectable by mouse (no All collision)', () => {
+  const W = 100
+  const { panel } = makePanel([typed(runningJob(), '__all__')], { enableSearch: true, header: 'Tasks', interactionCurrent: () => true })
+  panel.handleInput('f')
+  const y = panel.render(W).map(strip).findIndex(line => line.includes('__all__'))
+  assert.ok(y >= 0)
+  panel.handleMouse(mouse('press', 1, y, W))
+  panel.handleMouse(mouse('click', 1, y, W))
+  assert.equal(panel.getViewState().typeFilter, '__all__', 'the __all__ type must apply as the type, not as All')
+  panel.dispose()
+})

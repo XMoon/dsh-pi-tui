@@ -395,7 +395,20 @@ export class TaskBrowserPanel implements Component, Focusable {
    * one subscription). Team state only: Work rows, its type order, Stop state
    * and selection are never touched here.
    */
-  setTeamPage(value: TeamBrowserPresentation): void {
+  setTeamPage(value: TeamBrowserPresentation | undefined): void {
+    if (value === undefined) {
+      // Root eligibility went unknown → not-root: REVOKE the Team page and fall
+      // back to Work-only. Work state is untouched.
+      this.team = undefined
+      this.teamSelectedValue = undefined
+      this.teamScroll = 0
+      this.teamExpandedTaskId = undefined
+      this.teamSearchMode = false
+      if (this.pageView === 'team') this.pageView = 'work'
+      this.updateInputFocus()
+      this.requestRender()
+      return
+    }
     this.team = value
     // Drop an expanded task that no longer exists in the new snapshot (identity,
     // not index — a revision reuse must not carry disclosure).
@@ -848,7 +861,10 @@ export class TaskBrowserPanel implements Component, Focusable {
           const leftPad = ' '.repeat(Math.max(0, listWidth - visibleWidth(left)))
           const right = truncateToWidth(details[index] ?? '', detailWidth, '…')
           out.push(`${left}${leftPad} ${color.border('│')} ${right}`)
-          outHits.push(listHits[index] ?? { kind: 'inert' })
+          const windowHit = listHits[index]
+          // The left list cell is the only pointer target; the right detail
+          // pane is inert (carry listWidth so handleTeamMouse can reject it).
+          outHits.push(windowHit !== undefined && windowHit.kind === 'item' ? { ...windowHit, listWidth } : (windowHit ?? { kind: 'inert' }))
         }
       } else {
         out.push(...listLines)
@@ -923,7 +939,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       const selected = index === this.filterSelected
       const pointer = selected ? color.primary('> ') : '  '
       lines.push(`${pointer}${selected ? color.textStrong(safeLabel) : color.text(safeLabel)}`)
-      hits.push({ kind: 'item', value: `filter:${chosen === null ? '__all__' : chosen}`, index })
+      hits.push({ kind: 'item', value: chosen === null ? 'filter:__ALL__' : `filter:type:${chosen}`, index })
     }
     if (candidates.length > budget) {
       lines.push(color.textMuted(`  ${this.filterSelected + 1}/${candidates.length}`)); hits.push({ kind: 'inert' })
@@ -941,7 +957,7 @@ export class TaskBrowserPanel implements Component, Focusable {
         `${color.primary('> ')}${color.textStrong(safeLabel)}`,
         color.textMuted(truncateToWidth('  ↑↓ · Enter · Esc', safeWidth, '…')),
       ]
-      const slimHits: TaskMouseHit[] = [{ kind: 'inert' }, { kind: 'item', value: `filter:${chosen === null ? '__all__' : (chosen ?? '')}`, index: this.filterSelected }, { kind: 'inert' }]
+      const slimHits: TaskMouseHit[] = [{ kind: 'inert' }, { kind: 'item', value: chosen === null ? 'filter:__ALL__' : `filter:type:${chosen ?? ''}`, index: this.filterSelected }, { kind: 'inert' }]
       this.hitMap = slimHits.slice(0, limit)
       return slim.slice(0, limit)
     }
@@ -1416,7 +1432,9 @@ export class TaskBrowserPanel implements Component, Focusable {
   }
 
   private decodeFilterToken(token: string): string | null {
-    return token === 'filter:__all__' ? null : token.slice('filter:'.length)
+    // `All` and a real type get disjoint identities, so a legal Job kind of
+    // `__all__` can never alias the All option.
+    return token === 'filter:__ALL__' ? null : token.slice('filter:type:'.length)
   }
 
   /** Whether a click resolves the SAME last-painted identity as the captured
@@ -1476,6 +1494,8 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   private handleTeamMouse(event: TuiMouseEvent, hit: TaskMouseHit, pressed: Fr2Gesture | undefined): TuiMouseEventResult | undefined {
     if (hit.kind !== 'item') return undefined
+    // Wide-layout right detail pane is inert: reject press/click/wheel there.
+    if (hit.listWidth !== undefined && event.x >= hit.listWidth) return undefined
     // Wheel events use `button: 'none'`: handle them BEFORE the left-button gate.
     // They still require the pointer final-admission fence (no stale mutation).
     if (event.type === 'wheel' && event.wheelDelta) {

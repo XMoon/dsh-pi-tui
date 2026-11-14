@@ -2201,8 +2201,8 @@ export interface TaskBrowserHandle {
   setItems(items: readonly TaskPanelItem[], preferredValue?: string): void
   /** Update loading/ready/stale state without replacing cached rows. */
   setRefreshState?(state: 'loading' | 'ready' | 'stale', error?: string): void
-  /** FR2: replace the READ-ONLY Team page DTO (PiTui only). */
-  setTeamPage?(value: TeamBrowserPresentation): void
+  /** FR2: replace (or, with `undefined`, REVOKE) the READ-ONLY Team page DTO. */
+  setTeamPage?(value: TeamBrowserPresentation | undefined): void
   /** Read the presentation state for tests/embedders (the full projection
    *  snapshot; the Quick→Full restore consumer retired with the modal
    *  Quick, B4-B). */
@@ -26264,7 +26264,7 @@ export class TuiApp {
         panel.setRefreshState(state, error)
         this.requestRender()
       },
-      setTeamPage: (value: TeamBrowserPresentation) => {
+      setTeamPage: (value: TeamBrowserPresentation | undefined) => {
         panel.setTeamPage(value)
         this.requestRender()
       },
