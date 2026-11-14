@@ -15,13 +15,13 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { readFileSync, existsSync, realpathSync, statSync, unlinkSync } from 'node:fs'
+import { readFileSync, existsSync, lstatSync, realpathSync, statSync, unlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { userInfo } from 'node:os'
 
 import xterm from '@xterm/headless'
-import { findIsolatedProcesses, killIsolatedProcesses } from '../../lib/split-smoke-processes.mjs'
+import { findIsolatedProcesses, killIsolatedProcesses, productionBuildId } from '../../lib/split-smoke-processes.mjs'
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 
 const ISOLATED_HOME_ENV = 'SPLIT_PROCESS_MANAGED_HOST_ISOLATED_HOME'
@@ -85,8 +85,28 @@ function systemctl(args, runtimeDir) {
   })
 }
 
-function showUnit(unit, runtimeDir) {
-  const result = systemctl(['--user', '--no-pager', '--no-ask-password', 'show', '-p', 'LoadState', '-p', 'ActiveState', '-p', 'FragmentPath', '-p', 'MainPID', '-p', 'UnitFileState', '-p', 'DropInPaths', unit], runtimeDir)
+/**
+ * Mirror the production ExecStart argument encoding (encodeUnitValue with
+ * commandLine=true): backslash, double-quote, `%` specifier and `$` variable
+ * escapes, wrapped in double quotes. Cleanup must match the ENCODED form the
+ * unit file actually contains, not the raw path (`%`/`$`/`\`/`"`).
+ */
+export function encodeExecArg(value) {
+  let out = ''
+  for (const character of value) {
+    switch (character) {
+      case '\\': out += '\\\\'; break
+      case '"': out += '\\"'; break
+      case '%': out += '%%'; break
+      case '$': out += '$$'; break
+      default: out += character
+    }
+  }
+  return `"${out}"`
+}
+
+function showUnit(unit, runtimeDir, run = systemctl) {
+  const result = run(['--user', '--no-pager', '--no-ask-password', 'show', '-p', 'LoadState', '-p', 'ActiveState', '-p', 'FragmentPath', '-p', 'MainPID', '-p', 'UnitFileState', '-p', 'DropInPaths', unit], runtimeDir)
   if (result.status !== 0) throw new SplitSmokeAssertionError(`managed-host: systemctl show failed for ${unit}`)
   const props = {}
   for (const line of (result.stdout ?? '').split('\n')) {
@@ -97,20 +117,40 @@ function showUnit(unit, runtimeDir) {
 }
 
 /**
+ * The production build fingerprint of THIS installation's package, computed from
+ * the verified install artifact (no Host identity required). Cached per package.
+ * This lets cleanup recognize a unit the Host created before it published any
+ * `instance.json` identity.
+ */
+const artifactBuildCache = new Map()
+function installedArtifactBuildId(installation) {
+  try {
+    const root = realpathSync(installation.profilePackage)
+    if (artifactBuildCache.has(root)) return artifactBuildCache.get(root)
+    const dshVersion = JSON.parse(readFileSync(installation.anchor, 'utf8')).version
+    const value = productionBuildId(root, dshVersion)
+    artifactBuildCache.set(root, value)
+    return value
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Decide whether a unit FILE belongs to THIS run — the exact scope, this
- * installation's Host entry path (unique per install) and the Host's published
+ * installation's Host-entry path (unique per install) and the Host's/artifact's
  * install build. Returns a stable reason string when it is NOT ours, else null.
- * This is what keeps cleanup from ever stopping/removing a foreign or
- * other-build unit that happens to share the same uid + canonical profile scope.
+ * The ExecStart match uses the SAME encoding the production unit applies.
  */
 export function unitBelongsToRun(content, { scopeId, hostEntry, publishedBuildId }) {
   const lines = content.split('\n')
   if (!lines.includes('X-DshPiTuiOwner=local-host-manager-v1')) return 'foreign-owner'
   if (!lines.includes(`X-DshPiTuiScopeId=${scopeId}`)) return 'foreign-scope'
-  // A missing/empty published build cannot bind the unit to this run: NOT ours.
+  // A missing/empty install build cannot bind the unit to this run: NOT ours.
   if (typeof publishedBuildId !== 'string' || publishedBuildId === '') return 'no-published-build'
   if (!lines.includes(`X-DshPiTuiInstallBuild=${publishedBuildId}`)) return 'other-build'
-  if (!lines.some(line => line.startsWith('ExecStart=') && line.includes(`"${hostEntry}"`))) return 'other-install'
+  const encodedHostEntry = encodeExecArg(hostEntry)
+  if (!lines.some(line => line.startsWith('ExecStart=') && line.includes(encodedHostEntry))) return 'other-install'
   return null
 }
 
@@ -125,18 +165,26 @@ export function unitFileSafetyError(info, uid) {
 
 /**
  * Stop and remove THIS run's managed unit, and only when it is provably ours:
- * a same-uid 0600 non-symlink unit file, matching owner/scope Host-entry/install
- * build, and (if loaded) a manager FragmentPath that names this exact file with
- * no drop-in. A failed stop never silently unlinks. No-op when absent.
+ * a same-uid 0600 non-symlink unit file, matching owner/scope/encoded Host-entry/
+ * install build, and (if loaded) a manager FragmentPath that names this exact
+ * file with no drop-in. The install build comes from the live Host identity when
+ * available, else from the verified installation artifact (pre-publish case), so
+ * a unit created before the Host published identity is still cleaned up. A
+ * failed stop never silently unlinks. `deps` is a test seam; production omits it.
  */
-export function stopAndRemoveManagedUnit(installation, trace = () => {}, expectedBuildId) {
-  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+export function stopAndRemoveManagedUnit(installation, trace = () => {}, expectedBuildId, deps = {}) {
+  const uid = typeof deps.uid === 'number'
+    ? deps.uid
+    : (typeof process.getuid === 'function' ? process.getuid() : undefined)
   if (typeof uid !== 'number') return { removed: false, reason: 'no-uid' }
+  const run = deps.systemctl ?? systemctl
   let scopeId
   try { scopeId = profileScopeId(uid, installation.profileDir) } catch { return { removed: false, reason: 'no-scope' } }
   const unit = unitName('pi-tui', scopeId)
-  let unitPath
-  try { unitPath = join(realpathSync(userInfo().homedir), '.config', 'systemd', 'user', unit) } catch { return { removed: false, reason: 'no-home' } }
+  let home = deps.homeDir
+  if (home === undefined) { try { home = realpathSync(userInfo().homedir) } catch { home = undefined } }
+  if (home === undefined) return { removed: false, reason: 'no-home' }
+  const unitPath = join(home, '.config', 'systemd', 'user', unit)
   if (!existsSync(unitPath)) return { removed: false, reason: 'absent' }
   let info
   try { info = lstatSync(unitPath) } catch { return { removed: false, reason: 'unreadable' } }
@@ -146,24 +194,28 @@ export function stopAndRemoveManagedUnit(installation, trace = () => {}, expecte
   try { content = readFileSync(unitPath, 'utf8') } catch { return { removed: false, reason: 'unreadable' } }
   let hostEntry
   try { hostEntry = realpathSync(join(installation.profilePackage, 'dist', 'local-host.mjs')) } catch { return { removed: false, reason: 'no-entry' } }
+  const instanceBuild = deps.instanceBuild ?? (() => readInstance(installation.dshHome, scopeId)?.buildId)
+  const artifactBuild = deps.artifactBuild ?? (() => installedArtifactBuildId(installation))
   const publishedBuildId = (typeof expectedBuildId === 'string' && expectedBuildId !== '')
     ? expectedBuildId
-    : readInstance(installation.dshHome, scopeId)?.buildId
+    : (instanceBuild() ?? artifactBuild())
   const foreign = unitBelongsToRun(content, { scopeId, hostEntry, publishedBuildId })
   if (foreign !== null) return { removed: false, reason: foreign }
-  const runtimeDir = existsSync(`/run/user/${String(uid)}`) ? `/run/user/${String(uid)}` : undefined
+  const runtimeDir = deps.runtimeDir !== undefined
+    ? deps.runtimeDir
+    : (existsSync(`/run/user/${String(uid)}`) ? `/run/user/${String(uid)}` : undefined)
   let props
-  try { props = showUnit(unit, runtimeDir) } catch { return { removed: false, reason: 'manager-unqueryable' } }
+  try { props = showUnit(unit, runtimeDir, run) } catch { return { removed: false, reason: 'manager-unqueryable' } }
   if (props.LoadState !== 'not-found') {
     let realFragment
     try { realFragment = realpathSync(props.FragmentPath) } catch { return { removed: false, reason: 'fragment-unreadable' } }
     if (realFragment !== realpathSync(unitPath)) return { removed: false, reason: 'fragment-mismatch' }
     if ((props.DropInPaths ?? '').trim() !== '') return { removed: false, reason: 'dropin' }
-    const stop = systemctl(['--user', '--no-pager', '--no-ask-password', 'stop', unit], runtimeDir)
+    const stop = run(['--user', '--no-pager', '--no-ask-password', 'stop', unit], runtimeDir)
     if (stop.status !== 0) return { removed: false, reason: 'stop-failed' }
   }
   try { unlinkSync(unitPath) } catch (error) { if (error?.code !== 'ENOENT') return { removed: false, reason: 'unlink-failed' } }
-  systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload'], runtimeDir)
+  run(['--user', '--no-pager', '--no-ask-password', 'daemon-reload'], runtimeDir)
   trace('managed-host-unit-removed', { unit })
   return { removed: true }
 }
