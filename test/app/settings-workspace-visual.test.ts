@@ -6752,7 +6752,7 @@ test('a live registration appends Extensions and its row commits through the reg
   await h.vt.waitForRender()
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'the rail owns the keyboard again')
   assert.match(h.view(), /^> Plugins/mu, 'the emptied Extensions category fell back to Plugins')
-  assert.match(h.view(), /Categories \(10\)/u, 'the empty directory paints the nine fixed categories')
+  assert.match(h.view(), /Categories \(10\)/u, 'the empty directory paints the ten fixed categories')
   await key(h, '\u001b')
   assert.ok(h.view().includes('❯'), 'Esc still closes the workspace legally')
   h.dispose()
