@@ -561,4 +561,3 @@ export async function runDaemonControlConcurrentControls({ installation, trace, 
   if (failure !== undefined) throw failure
   return result
 }
-

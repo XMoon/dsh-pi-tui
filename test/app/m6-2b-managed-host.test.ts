@@ -13,7 +13,7 @@
 
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import test, { type TestContext } from 'node:test'
@@ -788,6 +788,54 @@ test('replaceStoppedOwnedProfileUnit refuses a unit file that changed after insp
     error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
   )
   assert.match(readFileSync(fx.unitPath, 'utf8'), /X-DshPiTuiOwner=other/u, 'the foreign file must be untouched')
+})
+
+/** Replace the unit path with an already-allocated, byte-identical file so the
+ *  inode actually differs (an unlink+create can reuse the freed inode). */
+function swapInNewInode(fx: ControlUnitFixture): void {
+  const staged = join(fx.unitDir, 'staged-replacement.service')
+  writeFileSync(staged, fx.content, { mode: 0o600 })
+  renameSync(staged, fx.unitPath)
+}
+
+test('stopOwnedProfileUnit refuses a same-content replacement file with a different inode', async t => {
+  const uid = process.getuid?.() ?? 1000
+  const fx = controlledUnitFixture(t)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir)
+  if (unit.kind !== 'owned') return assert.fail('expected an owned unit')
+  swapInNewInode(fx)
+  const fake = managerState(fx.unitPath, 'active', 4242)
+  await assert.rejects(
+    () => stopOwnedProfileUnit(unit, undefined, fake.run),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
+  )
+  assert.equal(fake.calls.some(args => args.includes('stop')), false, 'a swapped file must never be stopped')
+})
+
+test('replaceStoppedOwnedProfileUnit refuses a same-content replacement file with a different inode', t => {
+  const uid = process.getuid?.() ?? 1000
+  const fx = controlledUnitFixture(t)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir)
+  if (unit.kind !== 'owned') return assert.fail('expected an owned unit')
+  swapInNewInode(fx)
+  assert.throws(
+    () => replaceStoppedOwnedProfileUnit(unit, fx.scope, 'pi-tui', uid, fx.content.replace(/Restart=on-failure/u, 'Restart=always')),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
+  )
+  assert.equal(readFileSync(fx.unitPath, 'utf8'), fx.content, 'the swapped file must be untouched')
+})
+
+test('uninstallOwnedProfileUnit refuses a same-content replacement file with a different inode', t => {
+  const uid = process.getuid?.() ?? 1000
+  const fx = controlledUnitFixture(t)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir)
+  if (unit.kind !== 'owned') return assert.fail('expected an owned unit')
+  swapInNewInode(fx)
+  assert.throws(
+    () => uninstallOwnedProfileUnit(unit, fx.scope, 'pi-tui', uid),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
+  )
+  assert.equal(existsSync(fx.unitPath), true, 'a swapped file must never be removed')
 })
 
 test('uninstallOwnedProfileUnit removes only the verified profile unit file', t => {

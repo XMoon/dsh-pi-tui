@@ -864,8 +864,12 @@ export function sanitizeLogText(text: string): string {
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '')
     .split('\n')
     .map(line => line
-      .replace(/\b(token|access_token|refresh_token|api[_-]?key|secret|password|authorization|cookie|set-cookie)\s*[:=]\s*[^\s]+/giu, '$1=[redacted]')
-      .replace(/([?&](?:token|key|secret|password)=)[^&\s]+/giu, '$1[redacted]')
+      // Header-style credentials carry a scheme and a token separated by a
+      // space, so the WHOLE remaining value must be removed (not just the
+      // scheme). This also covers multi-word secret assignments.
+      .replace(/\b((?:proxy-)?authorization|x-api-key|x-auth-token|cookie|set-cookie|secret|password)\s*[:=]\s*.*$/gimu, '$1=[redacted]')
+      .replace(/\b(token|access_token|refresh_token|api[_-]?key)\s*[:=]\s*[^\s&]+/gimu, '$1=[redacted]')
+      .replace(/([?&](?:token|key|secret|password)=)[^&\s]+/gimu, '$1[redacted]')
       .replace(/https?:\/\/[^\s"']*(?:token=|key=|secret=|password=)[^\s"']*/giu, '[redacted-url]')
       .replace(/\bconnectUrl\b[^\s]*/giu, 'connectUrl=[redacted]')
       .slice(0, MAX_LOG_LINE_LENGTH))

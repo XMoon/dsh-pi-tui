@@ -818,6 +818,9 @@ export interface OwnedProfileUnit {
   readonly content: string
   /** The install build the unit file declares; may differ from the current build. */
   readonly installBuild: string
+  /** The filesystem identity captured when this exact file was validated. */
+  readonly device: number
+  readonly inode: number
 }
 
 /** The read-only file ownership answer: this Profile's unit, or none at all. */
@@ -935,6 +938,30 @@ function assertOwnedUnitContent(content: string, scope: LocalScope, profile: str
   }
 }
 
+/**
+ * Prove the file AT THE PATH is still the exact inode/content this unit
+ * inspection validated. The check is repeated immediately before every write or
+ * signal so a swapped/named-replaced file is refused instead of overwritten or
+ * stopped. A same-uid process can still mutate the path after the final `lstat`;
+ * that residual window is inherent to path-based units and is reported, never
+ * silently accepted.
+ */
+function assertUnitFileIdentity(unit: OwnedProfileUnit, uid: number): void {
+  let info
+  try {
+    info = lstatSync(unit.filePath)
+  } catch (error) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file is no longer present', error)
+  }
+  if (info.isSymbolicLink() || !info.isFile() || info.uid !== uid || (info.mode & 0o777) !== 0o600
+    || info.dev !== unit.device || info.ino !== unit.inode) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file changed during the transition')
+  }
+  if (readFileSync(unit.filePath, 'utf8') !== unit.content) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit content changed during the transition')
+  }
+}
+
 /** Read ONE existing profile unit file without creating or mutating anything.
  *  `unitDir` is an explicit test seam; production always derives it from the
  *  account home. */
@@ -962,6 +989,8 @@ export function inspectOwnedProfileUnit(scope: LocalScope, profile: string, uid:
     filePath,
     content,
     installBuild: readUnitMetadata(content.split('\n'), 'X-DshPiTuiInstallBuild'),
+    device: info.dev,
+    inode: info.ino,
   }
 }
 
@@ -1007,6 +1036,9 @@ export async function stopOwnedProfileUnit(
   if (!active || (before.mainPid === 0 && before.activeState !== 'active')) {
     return { stopped: false, alreadyInactive: true, mainPid: before.mainPid }
   }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  if (uid === undefined) throw new LocalScopeError('B1_PLATFORM_UNSUPPORTED', 'managed Host: the user id is unavailable')
+  assertUnitFileIdentity(unit, uid)
   const stop = await systemctl(['--user', '--no-pager', '--no-ask-password', 'stop', unit.unitName], runtimeDir)
   if (stop.kind !== 'exited' || stop.code !== 0) {
     throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: systemctl could not stop the unit')
@@ -1044,6 +1076,9 @@ export function replaceStoppedOwnedProfileUnit(
   if (current.kind === 'none' || current.filePath !== unit.filePath) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file changed during the transition')
   }
+  if (current.kind !== 'owned' || current.device !== unit.device || current.inode !== unit.inode) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file changed during the transition')
+  }
   if (current.content === content) return { replaced: false }
   const tempPath = join(dirname(unit.filePath), `.${unit.unitName}.${String(process.pid)}.${randomUUID()}.tmp`)
   let fd: number | undefined
@@ -1056,6 +1091,9 @@ export function replaceStoppedOwnedProfileUnit(
     fsyncSync(fd)
     closeSync(fd)
     fd = undefined
+    // The last observable check before the atomic overwrite: the path must still
+    // be the inode/content this explicit restart validated.
+    assertUnitFileIdentity(unit, uid)
     renameSync(tempPath, unit.filePath)
     return { replaced: true }
   } catch (error) {
@@ -1072,9 +1110,11 @@ export function replaceStoppedOwnedProfileUnit(
  */
 export function uninstallOwnedProfileUnit(unit: OwnedProfileUnit, scope: LocalScope, profile: string, uid: number): void {
   const current = inspectOwnedProfileUnit(scope, profile, uid, unit.unitDir)
-  if (current.kind === 'none' || current.filePath !== unit.filePath) {
+  if (current.kind !== 'owned' || current.filePath !== unit.filePath
+    || current.device !== unit.device || current.inode !== unit.inode) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file changed during the transition')
   }
+  assertUnitFileIdentity(unit, uid)
   try {
     unlinkSync(unit.filePath)
   } catch (error) {
