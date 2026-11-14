@@ -2610,10 +2610,13 @@ test('a Job View opened from Full returns to the exact Full state (type filter, 
     { mode: 'full', header: 'Tasks', enableSearch: true, maxVisible: 18 },
   )
   await vt.waitForRender()
-  // Establish a non-default TYPE FILTER (first cycle: the first item type).
-  vt.sendInput('\t')
+  // Establish a non-default TYPE FILTER through the explicit f list
+  // (`All` → the first row type; Tab no longer cycles types, FR2).
+  vt.sendInput('f')
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\r')
   await vt.waitForRender()
-  assert.equal(handle.getViewState!().typeFilter, 'subagent', 'Tab must set the type filter')
+  assert.equal(handle.getViewState!().typeFilter, 'subagent', 'the f list must set the type filter')
   // Establish non-default TREE DISCLOSURE on the selected parent row.
   vt.sendInput('\x1b[C') // right arrow: expand
   await vt.waitForRender()
