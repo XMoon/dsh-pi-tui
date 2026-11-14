@@ -80,6 +80,26 @@
       inject: [tools, agents, sessionQuery, sessionProjections]
       disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
+    # The ONE Host MCP manager: the official `@deepseek-ai/dsh-mcp-manager`
+    # service (`ctx.mcpManager`) that owns the profile's `mcp-manager.servers`
+    # fleet plus every plugin `register()`ed server, and exposes `list`/`watch`/
+    # `probe`/`restart` to the Host and the authenticated Remote. It is declared
+    # ONCE here as a SHARED Host row — deliberately NOT a Web row — so Direct
+    # owns it with the Web frontend off and a Split Host keeps the SAME instance
+    # across `/web` on/off. No `config.servers` is declared: the user's profile
+    # configuration is inherited through the same row id, and the loader commits
+    # live `servers` updates without remounting the row.
+    #
+    # `credentials` is the official provider the manager resolves
+    # `${credential:…}` entry templates through; the class's own static
+    # `inject: ['tools']` still supplies the tool registry. The daemon
+    # supervisor PID owns no Host business state, so the row is absent there
+    # exactly like the other Host-owned rows below.
+    - id: mcp-manager
+      name: '@deepseek-ai/dsh-mcp-manager'
+      inject: [credentials]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
     # The profile-owned Web startup preference (M5-W PR-C): ONE durable boolean,
     # `autoStart`, that a NEW Split Host reads BEFORE it becomes Ready. The row
     # performs no work; it exists so the official Settings service projects the

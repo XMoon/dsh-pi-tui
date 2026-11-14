@@ -857,10 +857,13 @@ Review page from exactly those answers. Consequences of this contract:
   is the authority for whether a preset consumes that guidance.
 - The Office conversion provider is Web-only: enabling the official Browser
   graph publishes `officeKit` (rc.2 renamed it from `officeToPdf`) for the
-  document-preview sidebar, alongside the shared `mcpManager` server fleet;
-  disabling Web disposes those providers together with the Web graph while
-  retaining protected Host owners. `office-kit` writes its output under the
-  Host's own DSH home, never a Client cwd.
+  document-preview sidebar; disabling Web disposes that provider together with
+  the Web graph while retaining protected Host owners. `office-kit` writes its
+  output under the Host's own DSH home, never a Client cwd. The shared
+  `mcpManager` is deliberately NOT a Web row: the bundle's Host composition
+  mounts it once (Direct and Host-only), so the Web toggle never mounts,
+  remounts or unloads it and the same Host instance survives `/web`
+  off → on → off.
 - `harness-dev-context` remains deliberately uncomposed. Its developer
   instructions assume that the Agent is editing the DSH GUI that serves the
   page, and expose the DSH implementation path, GUI URL and HMR/build workflow;

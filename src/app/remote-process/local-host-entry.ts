@@ -219,7 +219,9 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
 # every row whose authority ALREADY exists in this Host: the second
 # 'connection', 'api-remotes', 'file-upload', 'workspace'/'workspace-controller',
 # 'session-controller', 'settings-controller', 'webserver', 'frontend-static'
-# fallback and 'web-startup' parser are NOT declared here. The mandatory
+# fallback, 'web-startup' parser and the shared Host 'mcp-manager' row are NOT
+# declared here (the manager belongs to the Host composition, so the toggle
+# must never mount or unload it). The mandatory
 # client-dependency closure of the official UIs ('ui-context-menu',
 # 'ui-file-drag'), the official Client file-actions / message-quotes features
 # and the 'workspace-changes' Host recorder that 'ui-deliverables' injects are

@@ -44,7 +44,18 @@ const FIBER_ACTIVE = 2
 const FIBER_DISPOSED = 4
 
 /** The official Web services whose presence the status vocabulary claims. */
-const WEB_SERVICES = ['webApp', 'clientModules', 'terminalController', 'officeKit', 'mcpManager'] as const
+const WEB_SERVICES = ['webApp', 'clientModules', 'terminalController', 'officeKit'] as const
+
+/**
+ * The SHARED Host rows this Host owns OUTSIDE the Web roster. They are never
+ * toggled: the Web frontend consumes them, and an `enabled` claim requires the
+ * MCP manager to be live. The real row lives in the bundle's
+ * `cordis.patch.yml`, so the fixture declares it as an already-mounted Host
+ * row — exactly the composition the toggle must leave untouched.
+ */
+const SHARED_HOST_ROWS: ReadonlyArray<{ readonly id: string; readonly name: string; readonly provide: string }> = [
+  { id: 'mcp-manager', name: '@deepseek-ai/dsh-mcp-manager', provide: 'mcpManager' },
+]
 
 /** The Host owners that must keep their fiber identity across every toggle. */
 const PROTECTED_ROWS: ReadonlyArray<{ readonly id: string; readonly name: string }> = [
@@ -144,10 +155,12 @@ interface WebAccessFixture {
 }
 
 interface FixtureOptions {
-  /** Per-row overrides keyed by roster id. */
+  /** Per-row overrides keyed by roster id (a SHARED Host row id is accepted). */
   readonly overrides?: ReadonlyMap<string, RowOverride>
   /** Roster ids the Host deliberately does NOT declare (negative control). */
   readonly skipRows?: readonly string[]
+  /** Shared Host row ids the composition deliberately does NOT declare. */
+  readonly skipSharedRows?: readonly string[]
 }
 
 /**
@@ -164,10 +177,10 @@ async function createFixture(options: FixtureOptions = {}): Promise<WebAccessFix
     ['modules', { provide: 'clientModules' }],
     ['client-hmr', { inject: ['clientModules', 'webServer'] }],
     ['terminal-controller', { provide: 'terminalController' }],
-    // rc.2 renamed the Office conversion service and added the shared MCP
-    // server fleet; both are required Host services for an `enabled` claim.
+    // rc.2 renamed the Office conversion service; it is a required Host
+    // service for an `enabled` claim. The shared MCP manager is NOT a Web row:
+    // it is mounted by the Host composition (see SHARED_HOST_ROWS).
     ['office-kit', { provide: 'officeKit' }],
-    ['mcp-manager', { provide: 'mcpManager' }],
     // The changed-files Host recorder `ui-deliverables` injects. The fixture
     // provides the SERVICE (topology only); the real Git recorder is qualified
     // by the split-process Host lane, never here.
@@ -175,11 +188,16 @@ async function createFixture(options: FixtureOptions = {}): Promise<WebAccessFix
     ['ui-deliverables', { inject: ['workspaceChanges'] }],
   ])
   for (const [id, behaviour] of defaults) if (!behaviours.has(id)) behaviours.set(id, behaviour)
+  const sharedById = new Map(SHARED_HOST_ROWS.map(row => [row.id, row]))
   const behaviourForPackage = new Map<string, RowOverride>()
   for (const [id, behaviour] of behaviours) {
-    const row = PI_TUI_WEB_ACCESS_ROWS.find(candidate => candidate.id === id)
+    const row = PI_TUI_WEB_ACCESS_ROWS.find(candidate => candidate.id === id) ?? sharedById.get(id)
     if (row === undefined) throw new Error(`the fixture override names an unknown row: ${id}`)
     behaviourForPackage.set(row.name, behaviour)
+  }
+  // The shared Host rows provide their service with the real composition shape.
+  for (const row of SHARED_HOST_ROWS) {
+    if (!behaviourForPackage.has(row.name)) behaviourForPackage.set(row.name, { provide: row.provide })
   }
 
   const webServer = createWebServerFixture()
@@ -187,6 +205,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<WebAccessFix
   const facts = new Map<string, RowFacts>()
   for (const row of PI_TUI_WEB_ACCESS_ROWS) facts.set(row.name, { applies: 0, disposes: 0 })
   for (const row of PROTECTED_ROWS) facts.set(row.name, { applies: 0, disposes: 0 })
+  for (const row of SHARED_HOST_ROWS) facts.set(row.name, { applies: 0, disposes: 0 })
 
   const modules = new Map<string, ControlledPlugin>()
   /** The controlled module of one official package. */
@@ -265,6 +284,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<WebAccessFix
   }
 
   const skipped = new Set(options.skipRows ?? [])
+  const skippedShared = new Set(options.skipSharedRows ?? [])
   // `ensureId` honours a supplied id; the published TYPE omits it because a
   // caller normally lets the tree name a row.
   const createRow = async (spec: { readonly id: string; readonly name: string; readonly disabled?: boolean }): Promise<void> => {
@@ -273,6 +293,12 @@ async function createFixture(options: FixtureOptions = {}): Promise<WebAccessFix
   for (const row of PI_TUI_WEB_ACCESS_ROWS) {
     if (skipped.has(row.id)) continue
     await createRow({ id: row.id, name: row.name, disabled: true })
+  }
+  // The shared Host rows are part of the Host composition, NOT the Web roster:
+  // they are enabled from boot and no toggle ever touches them.
+  for (const row of SHARED_HOST_ROWS) {
+    if (skippedShared.has(row.id)) continue
+    await createRow({ id: row.id, name: row.name })
   }
   for (const row of PROTECTED_ROWS) await createRow({ id: row.id, name: row.name })
   await loader.await()
@@ -287,8 +313,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<WebAccessFix
   })
   await serviceFiber
   const service = ctx.reflect.get('piTuiWebAccess') as PiTuiWebAccessHostService
-  const rows = new Map<string, LiveRow>([...PI_TUI_WEB_ACCESS_ROWS, ...PROTECTED_ROWS]
-    .filter(row => !skipped.has(row.id))
+  const rows = new Map<string, LiveRow>([...PI_TUI_WEB_ACCESS_ROWS, ...SHARED_HOST_ROWS, ...PROTECTED_ROWS]
+    .filter(row => !skipped.has(row.id) && !skippedShared.has(row.id))
     .map(row => [row.id, loader.resolve(row.id) as unknown as LiveRow]))
   return {
     ctx,
@@ -308,7 +334,7 @@ function fiberState(fixture: WebAccessFixture, id: string): number | undefined {
   return fixture.rows.get(id)?.fiber?.state
 }
 
-/** Assert every declared row is effectively disabled with no active fiber. */
+/** Assert every declared Web row is effectively disabled with no active fiber. */
 function assertAllRowsDisabled(fixture: WebAccessFixture): void {
   for (const row of PI_TUI_WEB_ACCESS_ROWS) {
     const entry = fixture.rows.get(row.id)
@@ -323,6 +349,23 @@ function assertAllRowsDisabled(fixture: WebAccessFixture): void {
   }
 }
 
+/** The shared Host witnesses a fixture's composition mounted. */
+interface SharedHostWitness {
+  readonly uid: number | undefined
+  readonly service: unknown
+  readonly applies: number
+}
+
+/** Capture the SHARED Host rows (manager identity + apply count). */
+function sharedHostWitness(fixture: WebAccessFixture): SharedHostWitness {
+  const row = SHARED_HOST_ROWS[0]
+  return {
+    uid: fixture.rows.get(row.id)?.fiber?.uid,
+    service: fixture.ctx.reflect.get(row.provide),
+    applies: fixture.facts.get(row.name)?.applies ?? 0,
+  }
+}
+
 /** Total applies over the Web roster (one per mounted row). */
 function webApplies(fixture: WebAccessFixture): number {
   return PI_TUI_WEB_ACCESS_ROWS.reduce((total, row) => total + (fixture.facts.get(row.name)?.applies ?? 0), 0)
@@ -334,6 +377,10 @@ test('the toggle drives off -> on -> off -> on through the real Entry.update', a
 
   assert.deepEqual(await fixture.service.getStatus(), { state: 'disabled' })
   assert.equal(fixture.webServer.facts().registered, false, 'no fallback may exist before enable')
+  // BEFORE the toggle: the SHARED Host manager the Web frontend reads exists
+  // while the Web frontend is off — it is not a Web row.
+  const shared = sharedHostWitness(fixture)
+  assert.notEqual(shared.service, undefined, 'the shared MCP manager must exist with the Web frontend off')
   const protectedUids = new Map(PROTECTED_ROWS.map(row => [row.id, fixture.rows.get(row.id)?.fiber?.uid]))
   const protectedApplies = new Map(PROTECTED_ROWS.map(row => [row.id, fixture.facts.get(row.name)?.applies]))
 
@@ -349,6 +396,12 @@ test('the toggle drives off -> on -> off -> on through the real Entry.update', a
   for (const service of WEB_SERVICES) {
     assert.notEqual(fixture.ctx.reflect.get(service), undefined, `the official "${service}" service must be live`)
   }
+  // The shared Host manager is the SAME instance: the enable mounted Browser
+  // rows around it and never remounted or duplicated it.
+  const enabledShared = sharedHostWitness(fixture)
+  assert.equal(enabledShared.uid, shared.uid, 'the shared MCP manager keeps its fiber across Web enable')
+  assert.equal(enabledShared.service, shared.service, 'the shared MCP manager keeps its service identity')
+  assert.equal(enabledShared.applies, shared.applies, 'the shared MCP manager is never re-applied by a Web toggle')
   for (const row of PROTECTED_ROWS) {
     assert.equal(fixture.rows.get(row.id)?.fiber?.uid, protectedUids.get(row.id),
       `the protected "${row.id}" owner must keep its fiber`)
@@ -359,14 +412,22 @@ test('the toggle drives off -> on -> off -> on through the real Entry.update', a
   // ── disable ──────────────────────────────────────────────────────────────
   assert.deepEqual(await fixture.service.setEnabled(false), { state: 'disabled' })
   assertAllRowsDisabled(fixture)
+  const disabledShared = sharedHostWitness(fixture)
+  assert.equal(disabledShared.uid, shared.uid, 'the shared MCP manager survives Web disable with the SAME fiber')
+  assert.equal(disabledShared.service, shared.service, 'the shared MCP manager service identity survives Web disable')
+  // A Web-off Host truthfully reports `disabled` even though the shared manager
+  // is still published: Manager presence is not a Web service.
+  assert.deepEqual(await fixture.service.getStatus(), { state: 'disabled' })
   // The SPA fallback disposer ran EXACTLY once: the seat is gone and no second
   // registration ever happened.
   assert.deepEqual(fixture.webServer.facts(), { registered: false, registrations: 1, disposals: 1 })
-  assert.deepEqual(await fixture.service.getStatus(), { state: 'disabled' })
 
   // ── enable again on the SAME Loader ──────────────────────────────────────
   assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
   assert.deepEqual(fixture.webServer.facts(), { registered: true, registrations: 2, disposals: 1 })
+  const reenabledShared = sharedHostWitness(fixture)
+  assert.equal(reenabledShared.uid, shared.uid, 'the shared MCP manager keeps ONE lifetime across off -> on -> off -> on')
+  assert.equal(reenabledShared.service, shared.service, 'the shared MCP manager service identity never changes')
   for (const row of PROTECTED_ROWS) {
     assert.equal(fixture.rows.get(row.id)?.fiber?.uid, protectedUids.get(row.id),
       `the protected "${row.id}" owner must survive the second enable`)
@@ -412,8 +473,8 @@ test('the rc.2 Web rows carry their official non-desktop inject/config facts', (
   const byId = new Map(PI_TUI_WEB_ACCESS_ROWS.map(row => [row.id, row]))
   // Official rc.2 row facts copied from the installed web-app patch, not
   // derived from the production table under test.
-  assert.deepEqual(byId.get('mcp-manager')?.inject, ['credentials'],
-    'the shared MCP server fleet resolves credential templates through the mounted provider')
+  assert.equal(byId.has('mcp-manager'), false,
+    'the shared MCP manager belongs to the Host composition, never to the Web toggle roster')
   assert.deepEqual(byId.get('skill-office')?.config, { pythonEnvironment: 'user' },
     'a non-desktop Host-only profile selects the user Python, never a workspace runtime')
   assert.match(byId.get('office-kit')?.yaml?.join('\n') ?? '',
@@ -427,8 +488,6 @@ test('the rc.2 Web rows carry their official non-desktop inject/config facts', (
     'the Office conversion service must mount before its document-preview UI')
   assert.ok(index('skill-office') >= 0 && index('skill-office') < index('ui-sidebar-documentpreview'),
     'the Office skills must mount before the document-preview UI')
-  assert.ok(index('mcp-manager') >= 0 && index('mcp-manager') < index('ui-settings'),
-    'the MCP manager must mount before its Browser settings consumer')
   assert.ok(index('ui-settings-account') >= 0 && index('ui-settings-account') < index('ui-account-notifications'),
     'the notification UI comes after the settings-account module it injects')
   assert.ok(index('ui-agent-team') >= 0 && index('ui-agent-team') > index('ui-skill'),
@@ -647,6 +706,33 @@ test('a missing required Web service keeps the composition unavailable', async t
   assert.match((status as { reason: string }).reason, /clientModules|client-hmr/u)
   // Recovery keeps closing: no SPA row stays mounted behind an unavailable graph.
   assert.equal(fixture.webServer.facts().registered, false)
+  assertAllRowsDisabled(fixture)
+})
+
+test('a missing shared MCP manager keeps the Web composition unavailable', async t => {
+  // The manager is NOT a Web row: the Host composition owns it. A Host whose
+  // composition failed to mount it must not advertise a working Web settings
+  // surface (whose MCP page would have no Host authority), and the failed
+  // enable must withdraw everything it mounted.
+  const fixture = await createFixture({ skipSharedRows: ['mcp-manager'] })
+  t.after(() => fixture.dispose())
+  const status = await fixture.service.setEnabled(true)
+  assert.equal(status.state, 'unavailable')
+  assert.match((status as { reason: string }).reason, /shared Host services are missing: mcpManager/u)
+  assert.equal(fixture.webServer.facts().registered, false, 'a missing shared authority must not leave the SPA served')
+  assertAllRowsDisabled(fixture)
+})
+
+test('a PENDING shared MCP manager row is a missing shared service, never enabled', async t => {
+  // The row exists but its fiber never activates (a real install/dependency
+  // regression): the mounted fiber is not a working Host authority.
+  const fixture = await createFixture({
+    overrides: new Map<string, RowOverride>([['mcp-manager', { inject: ['neverProvidedSharedService'] }]]),
+  })
+  t.after(() => fixture.dispose())
+  const status = await fixture.service.setEnabled(true)
+  assert.equal(status.state, 'unavailable')
+  assert.match((status as { reason: string }).reason, /shared Host services are missing: mcpManager/u)
   assertAllRowsDisabled(fixture)
 })
 

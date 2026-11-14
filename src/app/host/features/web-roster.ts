@@ -26,8 +26,7 @@
  * `inject` / `config` / `yaml` are the NARROW, row-local facts the official
  * rc.2 Web patch states for a row that cannot keep its own manifest defaults in
  * this Host-only profile:
- * - `inject` mirrors the official row's explicit dependency override
- *   (`mcp-manager` needs the already-mounted `credentials` provider);
+ * - `inject` mirrors the official row's explicit dependency override;
  * - `config` carries a fixed official non-desktop value (`skill-office`
  *   `pythonEnvironment: user`: the Host-only profile mounts no
  *   `workspace-dependencies` runtime, so the user's Python stays the target);
@@ -51,9 +50,10 @@ export const PI_TUI_WEB_ACCESS_ROWS: ReadonlyArray<{
   { id: 'modules', name: '@deepseek-ai/dsh-client-modules' },
   { id: 'client-hmr', name: '@deepseek-ai/dsh-client-hmr' },
   { id: 'cordis-client-runner', name: '@deepseek-ai/dsh-cordis-client-runner' },
-  // One shared MCP server fleet behind the official Host service; the
-  // credential provider it resolves templates through is already mounted.
-  { id: 'mcp-manager', name: '@deepseek-ai/dsh-mcp-manager', inject: ['credentials'] },
+  // The shared Host MCP manager is deliberately ABSENT: it is a Host-owned row
+  // in the bundle's `cordis.patch.yml` (Direct and Host-only both mount it,
+  // the daemon supervisor does not), so the Web toggle neither owns it nor
+  // unloads it. The Browser settings surface reads the SAME `mcpManager`.
   // Browser file actions (download / clipboard) for the Session's own files.
   { id: 'ui-file-actions', name: '@deepseek-ai/dsh-client-ui-file-actions' },
   { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },

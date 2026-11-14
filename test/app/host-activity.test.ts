@@ -608,7 +608,7 @@ test('agent-team bound to a different package is an unqualified source', async (
 })
 
 test('an active rc.2 Web-only row never lets activity claim quiescence', async () => {
-  for (const name of ['@deepseek-ai/dsh-office-kit', '@deepseek-ai/dsh-mcp-manager', '@deepseek-ai/dsh-client-ui-account-notifications']) {
+  for (const name of ['@deepseek-ai/dsh-office-kit', '@deepseek-ai/dsh-client-ui-account-notifications', '@deepseek-ai/dsh-client-ui-sidebar-terminal']) {
     const context = new Context()
     provideAgents(context, [])
     provideJobs(context, {})
@@ -625,6 +625,28 @@ test('an active rc.2 Web-only row never lets activity claim quiescence', async (
       observer.close()
       await disposeContext(context)
     }
+  }
+})
+
+test('the shared Host MCP manager row is an unqualified Host source while live', async () => {
+  // The manager owns MCP server subprocesses/connections, so a live row is
+  // semantic work the observer cannot prove passive. It is a HOST row (not a
+  // Web row); this fails closed regardless of the Web frontend state.
+  const context = new Context()
+  provideAgents(context, [])
+  provideJobs(context, {})
+  provideGoals(context, {})
+  provideLoader(context, [
+    { options: { id: 'mcp-manager', name: '@deepseek-ai/dsh-mcp-manager' }, fiber: { state: 2 } },
+  ])
+  const observer = new HostActivityObserver(context)
+  try {
+    const snapshot = await observer.snapshot()
+    assert.equal(snapshot.verdict, 'UNKNOWN')
+    assert.ok(snapshot.reasons.includes('unqualified-host-source'))
+  } finally {
+    observer.close()
+    await disposeContext(context)
   }
 })
 
