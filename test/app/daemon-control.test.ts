@@ -18,6 +18,7 @@ import {
   inspectInstalledProfileScope,
   LOCAL_PROTOCOL,
   LocalScopeError,
+  readLinuxStarttime,
   type LocalScope,
 } from '../../src/app/remote-process/local-scope.ts'
 import {
@@ -358,6 +359,30 @@ test('stop refuses a live Host with no verifiable supervision attribution', { sk
   assert.equal(signals, 0, 'an unverifiable Host is never signalled')
 })
 
+test('the fallback process identity check reads a real procfs cmdline despite st_size=0', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  // The production default reads THIS process's real /proc/<pid>/cmdline, which
+  // reports st_size = 0: a size-based read returns an empty string and would
+  // refuse every real fallback Host. Node's own argv must come back intact.
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    probe: async (): Promise<UserManagerProbe> => ({ kind: 'absent' }),
+    readRecord: () => {
+      const withOwnPid = { ...record, hostPid: process.pid, hostStarttime: readLinuxStarttime(process.pid) }
+      return withOwnPid
+    },
+    inspectProcess: r => (r.hostPid === process.pid ? 'alive' : 'dead'),
+    authenticate: async r => ({ record: r, cookie: 'c', identity: r }),
+    readStarttime: () => readLinuxStarttime(process.pid),
+    kill: () => {},
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  // The identity check passed (node is not the Host entry, so the command must
+  // refuse on ownership — NOT on an empty command line).
+  assertCode(result, 3, /is not the product Host entry/u)
+})
+
 test('stop sends one SIGTERM to the authenticated strict-absence Host PID', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
   const record = recordOf(fx.scope)
@@ -429,6 +454,39 @@ test('a stop that cannot confirm the Host exit is TRANSITION_UNCERTAIN, not stop
     now: () => now,
   }))
   assertCode(result, 5, /TRANSITION_UNCERTAIN/u)
+})
+
+test('an aborted start holds the admin seat until the underlying ensure settles', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const controller = new AbortController()
+  let ensureSettled = false
+  let releaseEnsure: (() => void) | undefined
+  const ensureStarted = new Promise<void>(resolve => { releaseEnsure = resolve })
+  void releaseEnsure
+  const resultPromise = runDaemonControl({ verb: 'start' }, fx.profile, depsOf(fx, {
+    signal: controller.signal,
+    seatHoldBudgetMs: 60_000,
+    ensureHost: () => {
+      releaseEnsure?.()
+      return new Promise<never>((_resolve, reject) => {
+        // The underlying OS start stays pending so the second command must
+        // observe BUSY; the suite aborts the caller long before it fires.
+        // reason: this bounded window keeps the fake ensure chain pending.
+        setTimeout(() => { ensureSettled = true; reject(new Error('ensure failed')) }, 120)
+      })
+    },
+  }))
+  await ensureStarted
+  controller.abort()
+  // The caller observes the abort immediately...
+  const result = await resultPromise
+  assertCode(result, 5, /TRANSITION_UNCERTAIN/u)
+  assert.equal(ensureSettled, false, 'the underlying ensure must still be running')
+  // ...but the seat is still held by the detached continuation: a second
+  // management command must be BUSY while the first ensure chain is still
+  // mutating Host/unit state.
+  const second = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, { seatHoldBudgetMs: 60_000 }))
+  assertCode(second, 5, /DAEMON_CONTROL_BUSY/u)
 })
 
 test('a second concurrent management operation is DAEMON_CONTROL_BUSY', { skip: process.platform !== 'linux' }, async t => {
@@ -532,8 +590,9 @@ test('restart starts a fresh authenticated instance after the old Host stopped',
 
 test('logs reads the verified unit journal and strips ANSI plus token material', async t => {
   const fx = fixture(t)
-  writeOwnedUnit(fx)
+  const unit = writeOwnedUnit(fx)
   const result = await runDaemonControl({ verb: 'logs', lines: 50 }, fx.profile, depsOf(fx, {
+    systemctl: unitSystemctl(unit.path).run,
     journal: async () => ({ code: 0, stdout: '\u001b[31mtoken=SECRET\u001b[0m host started\n', stderr: '' }),
   }))
   assertCode(result, 0)
@@ -553,6 +612,18 @@ test('logs refuses an unavailable unit journal and never falls back to raw files
   }))
   assertCode(result, 4, /LOG_SOURCE_UNAVAILABLE/u)
   assert.equal(fellBack, 0)
+})
+
+test('logs refuses a unit the manager has not loaded as this profile unit', async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  let journalReads = 0
+  const result = await runDaemonControl({ verb: 'logs' }, fx.profile, depsOf(fx, {
+    systemctl: unitSystemctl(unit.path, { loadState: 'not-found' }).run,
+    journal: async () => { journalReads += 1; return { code: 0, stdout: 'entries\n', stderr: '' } },
+  }))
+  assertCode(result, 4, /LOG_SOURCE_UNAVAILABLE/u)
+  assert.equal(journalReads, 0, 'an unloaded foreign unit journal must never be read')
 })
 
 test('logs reads the strict-absence private host.log only without a manager', async t => {
