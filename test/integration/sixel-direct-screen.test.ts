@@ -26,11 +26,16 @@
  * - real TuiApp creates its OWN DirectSixelGraphics and mounts its Screen/Workspace
  * - capability DA1, CSI 16t cell size, OSC11 background observations via terminal input
  * - real ImageLoader + same scoped JPEG/WebP derivative
- * - real admitSvg + SvgRasterLoader(rasterizeSvg) (on Linux)
+ * - real admitSvg + SvgRasterLoader over controlled PNG raster derivatives (the
+ *   native resvg child itself is qualified separately by test/client/svg-raster.test.ts)
  * - same Owner -> Screen trust/materialization -> Terminal.write -> independent oracle
  * - real TuiApp published visual/tool and workspace navigation handlers
  * TEST STAND-INS / SUBSTITUTIONS
  * - SixelAppTerminal/VirtualTerminal records physical bytes; synthetic authorized source fixtures
+ * - the SVG rasterizer input is a controlled PNG derivative of the registered admitted source,
+ *   not a resvg child: every journey still flows through the real admission, the real
+ *   `SvgRasterLoader` variant cache and the real Direct SIXEL encoder/Screen (see the
+ *   `controlledSvgRaster` helper below)
  * - user key/pointer injection (not OS mouse)
  * DELIBERATELY ABSENT
  * - physical Windows Terminal font/DPI/window composite
@@ -47,7 +52,7 @@ import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import type { TuiAppEvents } from '../../src/tui-app.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
 import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
-import { rasterizeSvg } from '../../src/client/media/svg/rasterize.ts'
+import type { SvgRasterize } from '../../src/client/media/svg/rasterize.ts'
 import { clearAssistantVisualPresentation, setAssistantVisualPresentation, type VisualPresentationKey } from '../../src/domain/visual/presentation.ts'
 import { SVG_TOOL_NAME } from '../../src/domain/visual/tools.ts'
 import { authorizeSvg, svgContentBlocks, svgDetailRows, svgFactFromArgs, svgHumanText, type SvgAuthorization } from '../../src/domain/visual/svg.ts'
@@ -167,6 +172,57 @@ function pngFromRgba(rgba: Uint8Array, width: number, height: number): Promise<U
     const buffer = await sharp(Buffer.from(rgba), { raw: { width, height, channels: 4 } }).png().toBuffer()
     return new Uint8Array(buffer)
   })
+}
+
+/** The admitted-source fill palette the SVG fixtures encode (non-premultiplied RGBA). */
+const SVG_BLUE: [number, number, number, number] = [59, 130, 246, 255] // #3b82f6
+const SVG_GREEN: [number, number, number, number] = [34, 197, 94, 255] // #22c55e
+const SVG_RED: [number, number, number, number] = [220, 38, 38, 255] // #dc2626
+const SVG_YELLOW: [number, number, number, number] = [234, 179, 8, 255] // #eab308
+/** #22c55e at fill-opacity 0.5: the encoder composites it over the REAL OSC11 background. */
+const SVG_TRANSLUCENT_GREEN: [number, number, number, number] = [34, 197, 94, 128]
+
+/** The fixed derivative spec of ONE registered admitted source. */
+interface ControlledRasterSpec {
+  /** The declared CSS viewport of the source; the derivative keeps its aspect. */
+  readonly width0: number
+  readonly height0: number
+  /** The deterministic RGBA pixel of the derivative at its real output size. */
+  readonly pixel: (x: number, y: number, widthPx: number, heightPx: number) => [number, number, number, number]
+}
+
+/**
+ * The file's ONE narrow deterministic rasterizer: each registered admitted
+ * source maps to a fixed `width0:height0` spec, and the returned `SvgRasterize`
+ * keeps the production contract — the EXACT `options.targetWidth` sizes the
+ * derivative (`heightPx = ceil(widthPx * height0 / width0)`, the same rounding
+ * the native child applies to the declared viewport), the caller's abort signal
+ * fences both sides of the construction, and the PNG/base64/width/height all
+ * describe the bytes built here.
+ *
+ * The real `SvgRasterLoader` still owns the variant cache, the single worker
+ * lane and the settle fences; only the native resvg child is substituted. Its
+ * own qualification (constructor, memory budget, SIGKILL→close→settle and the
+ * safety rejections) lives in `test/client/svg-raster.test.ts` and is untouched.
+ *
+ * An unregistered source fails loudly: a journey must declare which sources it
+ * admits before it can rasterize them.
+ */
+function controlledSvgRaster(
+  specs: readonly (readonly [source: string, spec: ControlledRasterSpec])[],
+): SvgRasterize {
+  const bySource = new Map(specs)
+  return async (source, options) => {
+    const spec = bySource.get(source)
+    assert.ok(spec !== undefined,
+      `the controlled rasterizer received an unregistered source: ${JSON.stringify(source.slice(0, 120))}`)
+    if (options.signal.aborted) throw new Error('the SVG raster request was cancelled before it started')
+    const widthPx = Math.max(1, Math.floor(options.targetWidth))
+    const heightPx = Math.max(1, Math.ceil((widthPx * spec.height0) / spec.width0))
+    const png = await pngFromRgba(fill(widthPx, heightPx, (x, y) => spec.pixel(x, y, widthPx, heightPx)), widthPx, heightPx)
+    if (options.signal.aborted) throw new Error('the SVG raster request was cancelled before its result could commit')
+    return { png, base64: Buffer.from(png).toString('base64'), widthPx, heightPx }
+  }
 }
 
 /** Every complete DCS the app's terminal received, in write order. */
@@ -1064,10 +1120,24 @@ test('the Viewer grant survives the frozen resize matrix and a Main↔Alt round 
 })
 
 test('a real SVG tool card paints admitted pixels, and malformed SVG paints text only', async (t) => {
+  // The five admitted sources this card owns, each with its fixed derivative
+  // spec; the production admission still decides what the loader is asked for.
+  const normalSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/><text x="4" y="20" font-size="12" fill="#ffffff">Gateway</text></svg>'
+  const wideSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 64"><rect width="640" height="64" fill="#dc2626"/></svg>'
+  const transparentSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#22c55e" fill-opacity="0.5"/></svg>'
+  const tallSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 128"><rect width="32" height="128" fill="#eab308"/></svg>'
+  const shortSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 16"><rect width="640" height="16" fill="#dc2626"/></svg>'
   const rasterWidths: number[] = []
+  const rasterize = controlledSvgRaster([
+    [normalSvg, { width0: 64, height0: 32, pixel: () => SVG_BLUE }],
+    [wideSvg, { width0: 640, height0: 64, pixel: () => SVG_RED }],
+    [transparentSvg, { width0: 64, height0: 32, pixel: () => SVG_TRANSLUCENT_GREEN }],
+    [tallSvg, { width0: 32, height0: 128, pixel: () => SVG_YELLOW }],
+    [shortSvg, { width0: 640, height0: 16, pixel: () => SVG_RED }],
+  ])
   const svgLoader = new SvgRasterLoader(async (source, options) => {
     rasterWidths.push(options.targetWidth)
-    return rasterizeSvg(source, options)
+    return rasterize(source, options)
   })
   const { terminal, app } = await startSixelApp(t, {
     svgLoader,
@@ -1111,7 +1181,7 @@ test('a real SVG tool card paints admitted pixels, and malformed SVG paints text
 
   // A normal admitted drawing: real pixels and the readable description.
   const normal = await mountToolSvg(
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/><text x="4" y="20" font-size="12" fill="#ffffff">Gateway</text></svg>',
+    normalSvg,
     'Service topology',
     'Gateway -> App',
   )
@@ -1125,7 +1195,7 @@ test('a real SVG tool card paints admitted pixels, and malformed SVG paints text
 
   // Over-wide drawing: the real footprint stays inside the thumbnail width cap.
   const wide = await mountToolSvg(
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 64"><rect width="640" height="64" fill="#dc2626"/></svg>',
+    wideSvg,
     'Wide topology',
     'A wide drawing',
   )
@@ -1137,7 +1207,7 @@ test('a real SVG tool card paints admitted pixels, and malformed SVG paints text
   // OSC 11 background #282c34, so the decoded pixel is a real blend, not a
   // guessed white/black or a transparent hole.
   const transparent = await mountToolSvg(
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#22c55e" fill-opacity="0.5"/></svg>',
+    transparentSvg,
     'Transparent drawing',
     'A transparent drawing',
   )
@@ -1148,7 +1218,7 @@ test('a real SVG tool card paints admitted pixels, and malformed SVG paints text
 
   // Tall and short aspects stay inside the same cell/row budget.
   const tall = await mountToolSvg(
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 128"><rect width="32" height="128" fill="#eab308"/></svg>',
+    tallSvg,
     'Tall drawing',
     'A tall drawing',
   )
@@ -1157,7 +1227,7 @@ test('a real SVG tool card paints admitted pixels, and malformed SVG paints text
   assert.ok(tallDecoded.height <= 12 * 20, `tall drawing height ${tallDecoded.height} fits`)
   assert.ok(tallDecoded.height > tallDecoded.width, 'the tall aspect is preserved')
   const short = await mountToolSvg(
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 16"><rect width="640" height="16" fill="#dc2626"/></svg>',
+    shortSvg,
     'Short drawing',
     'A short drawing',
   )
@@ -1183,11 +1253,13 @@ test('a real SVG tool card paints admitted pixels, and malformed SVG paints text
     status: 'ok',
   } as never
   const beforeBad = paintedRasters(terminal).length
+  const rasterWidthsBeforeBad = rasterWidths.length
   internals.setTranscript([badMessage])
   internals.toggleMessageExpanded(internals.messages[0])
   const badView = await waitViewport(terminal, 'Broken drawing', 'the malformed card description')
   assert.ok(badView.includes('Broken drawing'))
   assert.equal(paintedRasters(terminal).length, beforeBad, 'malformed SVG emits no trusted DCS')
+  assert.equal(rasterWidths.length, rasterWidthsBeforeBad, 'malformed SVG never requests a raster')
 })
 
 test('negative: a failed SVG raster reports its own reason before the DCS wait', async (t) => {
@@ -1241,7 +1313,33 @@ test('negative: a failed SVG raster reports its own reason before the DCS wait',
 
 test('a published Assistant SIXEL figure exposes the committed hit and its exact boundaries', async (t) => {
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/></svg>'
-  const svgLoader = new SvgRasterLoader(async (source, options) => rasterizeSvg(source, options))
+  // The designated initial figure request stays pending until the pre-commit
+  // assertions below have run, then this local resolver releases it (an abort
+  // — dispose/clear — cancels it). Later re-requests pass through immediately,
+  // so the loader's single worker lane never stays blocked on the gate.
+  let releaseInitialFigure: (() => void) | undefined
+  let figureGateArmed = true
+  const rasterize = controlledSvgRaster([
+    [svg, { width0: 64, height0: 32, pixel: () => SVG_BLUE }],
+  ])
+  const svgLoader = new SvgRasterLoader(async (source, options) => {
+    if (figureGateArmed) {
+      figureGateArmed = false
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = (): void => reject(new Error('the pending figure raster gate was cancelled'))
+        if (options.signal.aborted) {
+          onAbort()
+          return
+        }
+        options.signal.addEventListener('abort', onAbort, { once: true })
+        releaseInitialFigure = () => {
+          options.signal.removeEventListener('abort', onAbort)
+          resolve()
+        }
+      })
+    }
+    return rasterize(source, options)
+  })
   const { terminal, app } = await startSixelApp(t, {
     svgLoader,
     imageTheme: { fallbackColor: (text: string) => text },
@@ -1273,6 +1371,8 @@ test('a published Assistant SIXEL figure exposes the committed hit and its exact
   const beforeHits = bodyRecord.body.paintedVisualHits(innerWidth)
   assert.equal(beforeHits.length, 1)
   assert.equal(beforeHits[0]!.thumbnailBody, undefined, 'the render-time candidate declares no pixel body')
+  // The pre-commit facts are observed; only now does the initial raster settle.
+  releaseInitialFigure!()
   await until(() => paintedRasters(terminal).length > 0, 'the figure thumbnail raster')
   // AFTER the commit, without any new component render or layout call: the
   // same body answers the real footprint.
@@ -1368,9 +1468,12 @@ test('the SIXEL SVG Viewer Preview/Source/Copy/resize/release path', async (t) =
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/><text x="4" y="20" font-size="12" fill="#ffffff">Gateway</text></svg>'
   const rasterWidths: number[] = []
   const copies: string[] = []
+  const rasterize = controlledSvgRaster([
+    [svg, { width0: 64, height0: 32, pixel: () => SVG_BLUE }],
+  ])
   const svgLoader = new SvgRasterLoader(async (source, options) => {
     rasterWidths.push(options.targetWidth)
-    return rasterizeSvg(source, options)
+    return rasterize(source, options)
   })
   let viewerSubscriptions = 0
   let viewerUnsubscriptions = 0
@@ -1447,7 +1550,21 @@ test('the SIXEL SVG Viewer Preview/Source/Copy/resize/release path', async (t) =
 test('source safety: the Viewer sanitizes Source while Copy keeps the raw bytes', async (t) => {
   const hostile = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><!-- \u001b]52;c;SGVsbG8=\u0007 --><rect width="64" height="32" fill="#3b82f6"/></svg>'
   const copies: string[] = []
-  const svgLoader = new SvgRasterLoader(async (source, options) => rasterizeSvg(source, options))
+  // Production reality (measured on the native seam): the published-figure path
+  // hands the credential straight to the loader and the rasterizer is the
+  // depth-of-defense that refuses the terminal-active bytes (the resvg XML gate
+  // rejects them with `disallowed character`, so the fallback — never a raster —
+  // is what the product really does). This fixture reproduces that rejection
+  // without an OS child; the case's closing assertion pins the exact ONE
+  // request, and any other source reaching this seam fails loudly.
+  let rasterRequests = 0
+  const svgLoader = new SvgRasterLoader(async (source) => {
+    rasterRequests += 1
+    if (source === hostile) {
+      throw new Error('the SVG rasterizer rejected the document: disallowed character')
+    }
+    return assert.fail(`the source-safety case received an unexpected raster request: ${JSON.stringify(source.slice(0, 80))}`)
+  })
   const { terminal, app } = await startSixelApp(t, {
     svgLoader,
     imageTheme: { fallbackColor: (text: string) => text },
@@ -1475,14 +1592,18 @@ test('source safety: the Viewer sanitizes Source while Copy keeps the raw bytes'
   assert.deepEqual(copies, [hostile], 'Copy sends the RAW source unchanged')
   terminal.sendInput('\x1b')
   await waitViewport(terminal, 'hostile', 'the transcript after the Source-only Viewer')
+  assert.equal(rasterRequests, 1, 'the unsafe source reaches the rasterizer seam exactly once and is refused there')
 })
 
 test('SVG Viewer width variants, page switching, close/reopen and crop stay bounded', async (t) => {
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/></svg>'
   const rasterWidths: number[] = []
+  const rasterize = controlledSvgRaster([
+    [svg, { width0: 64, height0: 32, pixel: () => SVG_BLUE }],
+  ])
   const svgLoader = new SvgRasterLoader(async (source, options) => {
     rasterWidths.push(options.targetWidth)
-    return rasterizeSvg(source, options)
+    return rasterize(source, options)
   })
   let viewerUnsubscriptions = 0
   const originalSubscribe = svgLoader.subscribe.bind(svgLoader)
@@ -1575,7 +1696,10 @@ test('a long 24-image transcript fills the registry, then re-encodes old images 
     pngs.push(await pngFromRgba(fill(80, 40, (x, y) => (y < 20 ? [255, (index * 7) % 255, x % 2 === 0 ? 0 : 8, 255] : [0, 0, 255, 255])), 80, 40))
   }
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#22c55e"/></svg>'
-  const svgLoader = new SvgRasterLoader(async (source, options) => rasterizeSvg(source, options))
+  const rasterize = controlledSvgRaster([
+    [svg, { width0: 64, height0: 32, pixel: () => SVG_GREEN }],
+  ])
+  const svgLoader = new SvgRasterLoader(rasterize)
   const { terminal, app } = await startSixelApp(t, {
     imageLoader: new ImageLoader(async (ref) => {
       const index = Number(ref.attachmentId.split('-').at(-1))
@@ -2183,7 +2307,41 @@ test('a real top-cropped Assistant SVG maps the visible pixel rows and keeps the
   const bands = Array.from({ length: 12 }, (_, band) =>
     `<rect x="0" y="${band * 25}" width="500" height="25" fill="rgb(${band * 20},${255 - band * 20},${(band * 37) % 255})"/>`).join('')
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 300">${bands}</svg>`
-  const svgLoader = new SvgRasterLoader(async (source, options) => rasterizeSvg(source, options))
+  // The designated initial thumbnail request stays pending until the pending
+  // crop click has really been observed (the pending-state assertions and the
+  // workspaceOpen probe below), then the local resolver releases it. The
+  // Viewer's later, differently sized requests pass straight through: the gate
+  // arms exactly once, for the initial thumbnail only, and an abort cancels it.
+  let releaseInitialThumbnail: (() => void) | undefined
+  let thumbnailGateArmed = true
+  const rasterize = controlledSvgRaster([
+    [svg, {
+      width0: 500,
+      height0: 300,
+      pixel: (_x, y, _widthPx, heightPx) => {
+        const [r, g, b] = bandColour(Math.min(11, Math.floor((y * 12) / heightPx)))
+        return [r, g, b, 255]
+      },
+    }],
+  ])
+  const svgLoader = new SvgRasterLoader(async (source, options) => {
+    if (thumbnailGateArmed) {
+      thumbnailGateArmed = false
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = (): void => reject(new Error('the pending thumbnail raster gate was cancelled'))
+        if (options.signal.aborted) {
+          onAbort()
+          return
+        }
+        options.signal.addEventListener('abort', onAbort, { once: true })
+        releaseInitialThumbnail = () => {
+          options.signal.removeEventListener('abort', onAbort)
+          resolve()
+        }
+      })
+    }
+    return rasterize(source, options)
+  })
   const { terminal, app } = await startSixelApp(t, {
     svgLoader,
     imageTheme: { fallbackColor: (text: string) => text },
@@ -2265,6 +2423,10 @@ test('a real top-cropped Assistant SVG maps the visible pixel rows and keeps the
   terminal.sendInput(`\x1b[<0;1;${topRow}M`)
   terminal.sendInput(`\x1b[<0;1;${topRow}m`)
   assert.equal(workspaceOpen(), false, 'a pending SVG crop row opens no Viewer')
+  // The pending-state facts and the pending crop click are recorded; only now
+  // does the initial thumbnail PNG settle, and the encode pending that the
+  // observer watches happens AFTER the real raster, in the real SIXEL chain.
+  releaseInitialThumbnail!()
 
   // The real pending observation is the authority; the transient scrollbar may
   // remain visible while the committed SVG crop paints (X074 fix).
