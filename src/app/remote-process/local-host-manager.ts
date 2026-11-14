@@ -37,7 +37,7 @@ import {
   writeSync,
 } from 'node:fs'
 import { userInfo } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { LocalScopeError, type LocalScope } from './local-scope.ts'
 
 /** The fixed OS executable this module controls the user manager through. */
@@ -588,6 +588,47 @@ export function resolveUserUnitDir(uid: number): string {
   return ensureOwnedUnitDir(home, uid)
 }
 
+function canonicalPath(path: string): string {
+  try { return realpathSync(path) } catch { return resolve(path) }
+}
+
+/** Parse a `systemctl --user show-environment` body into a KEY->value map. */
+export function parseManagerEnvironment(stdout: string): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const line of stdout.split('\n')) {
+    const at = line.indexOf('=')
+    if (at > 0) env[line.slice(0, at)] = line.slice(at + 1)
+  }
+  return env
+}
+
+/**
+ * The user-unit directory the manager actually searches, from the MANAGER's own
+ * environment: `$XDG_CONFIG_HOME/systemd/user` when XDG_CONFIG_HOME is set to a
+ * non-default value, else `<accountHome>/.config/systemd/user`.
+ */
+export function managerUserUnitDir(managerEnv: Record<string, string>, accountHome: string): string {
+  const configHome = managerEnv.XDG_CONFIG_HOME !== undefined && managerEnv.XDG_CONFIG_HOME !== ''
+    ? managerEnv.XDG_CONFIG_HOME
+    : join(accountHome, '.config')
+  return join(configHome, 'systemd', 'user')
+}
+
+/**
+ * Why the fixed plan install directory is NOT the manager's real user-unit
+ * search directory (stable reason string), or `null` when it matches. A custom
+ * `SYSTEMD_UNIT_PATH` overrides the whole search path and is unsupported by the
+ * fixed plan contract. When this returns a reason the caller MUST fail closed
+ * BEFORE writing a unit that the manager would never load.
+ */
+export function userUnitPathUnsupportedReason(managerEnv: Record<string, string>, accountHome: string, targetDir: string): string | null {
+  const unitPath = managerEnv.SYSTEMD_UNIT_PATH
+  if (unitPath !== undefined && unitPath.trim() !== '') return 'the user manager sets a custom SYSTEMD_UNIT_PATH'
+  const expected = managerUserUnitDir(managerEnv, accountHome)
+  if (canonicalPath(expected) !== canonicalPath(targetDir)) return 'the user manager searches $XDG_CONFIG_HOME/systemd/user, not the fixed home path'
+  return null
+}
+
 /** The result of one atomic unit installation. */
 export interface UnitInstallResult {
   /** True when THIS call created the unit file; false when an identical one existed. */
@@ -759,6 +800,24 @@ export async function startManagedHostCandidate(
   const runtimeDir = selectRuntimeDir(uid)
   const facts = collectUnitFacts(options, uid)
   const unitDir = (deps.unitDir ?? resolveUserUnitDir)(uid)
+  // The fixed plan path (<account-home>/.config/systemd/user) must be exactly the
+  // directory this manager searches. A custom XDG_CONFIG_HOME or SYSTEMD_UNIT_PATH
+  // would make the written unit unloadable, so fail closed BEFORE writing. Test
+  // seams (deps) bypass this real-manager query.
+  if (deps.probe === undefined && deps.unitDir === undefined) {
+    const environment = await systemctl(['--user', '--no-pager', '--no-ask-password', 'show-environment'], runtimeDir)
+    if (environment.kind !== 'exited' || environment.code !== 0) {
+      throw new LocalScopeError('HOST_MANAGER_ERROR', 'managed Host: the user manager environment could not be queried')
+    }
+    const unsupported = userUnitPathUnsupportedReason(
+      parseManagerEnvironment(environment.stdout),
+      canonicalPath(userInfo().homedir),
+      unitDir,
+    )
+    if (unsupported !== null) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the plan-supported user unit path is not the manager's search path (${unsupported})`)
+    }
+  }
   const unitName = buildUnitName(options.profile, options.scope.scopeId)
   const content = renderUnitContent(facts)
   const finalPath = join(unitDir, unitName)
