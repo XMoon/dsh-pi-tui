@@ -862,23 +862,20 @@ export class TaskBrowserPanel implements Component, Focusable {
       return { lines: out, hits: outHits }
     }
 
-    // The window start always keeps the SELECTED row inside the visible rows,
-    // and is re-derived on EVERY fit shrink so a short grant can never paint
-    // past the selected main row.
-    const windowStart = (windowCount: number, from: number): number => {
-      let start = from
-      if (selectedIndex >= 0) {
-        if (selectedIndex < start) start = selectedIndex
-        else if (selectedIndex >= start + windowCount) start = selectedIndex - windowCount + 1
-      }
-      return Math.max(0, Math.min(start, Math.max(0, rows.length - windowCount)))
+    // The window is SELECTED-CENTERED (like Work's fit loop): every shrink
+    // re-derives start around selectedIndex, so the selected main row is always
+    // inside the painted window no matter how far the grant shrinks.
+    const windowStart = (windowCount: number): number => {
+      if (selectedIndex < 0) return 0
+      const desired = Math.max(0, selectedIndex - Math.floor(windowCount / 2))
+      return Math.min(desired, Math.max(0, rows.length - windowCount))
     }
     let count = Math.min(Math.max(rows.length, 1), this.teamBudget())
-    let start = windowStart(count, this.teamScroll)
+    let start = windowStart(count)
     let candidate = build(count, start)
     while (candidate.lines.length > limit && count > 1) {
       count -= 1
-      start = windowStart(count, start)
+      start = windowStart(count)
       candidate = build(count, start)
     }
     if (candidate.lines.length > limit) {
@@ -1438,7 +1435,10 @@ export class TaskBrowserPanel implements Component, Focusable {
   private handleFilterMouse(event: TuiMouseEvent, hit: TaskMouseHit, pressed: Fr2Gesture | undefined): TuiMouseEventResult | undefined {
     if (hit.kind !== 'item' || !hit.value.startsWith('filter:')) return undefined
     // Wheel events use `button: 'none'`: handle them BEFORE the left-button gate.
+    // They still require the pointer final-admission fence (a stale/retired
+    // panel must not mutate even local selection state).
     if (event.type === 'wheel' && event.wheelDelta) {
+      if (this.interactionCurrent?.() !== true) return undefined
       const candidates = this.filterCandidates()
       const delta = event.wheelDelta < 0 ? -1 : 1
       this.filterSelected = Math.max(0, Math.min(candidates.length - 1, this.filterSelected + delta))
@@ -1477,7 +1477,9 @@ export class TaskBrowserPanel implements Component, Focusable {
   private handleTeamMouse(event: TuiMouseEvent, hit: TaskMouseHit, pressed: Fr2Gesture | undefined): TuiMouseEventResult | undefined {
     if (hit.kind !== 'item') return undefined
     // Wheel events use `button: 'none'`: handle them BEFORE the left-button gate.
+    // They still require the pointer final-admission fence (no stale mutation).
     if (event.type === 'wheel' && event.wheelDelta) {
+      if (this.interactionCurrent?.() !== true) return undefined
       this.moveTeam(event.wheelDelta < 0 ? -1 : 1)
       return { handled: true, render: true }
     }
