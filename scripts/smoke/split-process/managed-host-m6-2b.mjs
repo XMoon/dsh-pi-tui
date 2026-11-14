@@ -22,6 +22,7 @@ import { userInfo } from 'node:os'
 
 import xterm from '@xterm/headless'
 import { findIsolatedProcesses, killIsolatedProcesses, productionBuildId } from '../../lib/split-smoke-processes.mjs'
+import { createSplitSmokeProfile } from '../../lib/split-smoke-profile.mjs'
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 
 const ISOLATED_HOME_ENV = 'SPLIT_PROCESS_MANAGED_HOST_ISOLATED_HOME'
@@ -630,6 +631,69 @@ export async function runManagedHostCrashRestart({ installation, trace, dshHome 
     const outcomeError = cleanupOutcomeError(cleanup)
     if (outcomeError !== undefined && failure === undefined) failure = new SplitSmokeAssertionError(outcomeError)
     if (cleanup.removed === true || cleanup.reason === 'absent') killIsolatedProcesses(dshHome)
+  }
+  if (failure !== undefined) throw failure
+  return result
+}
+
+/**
+ * B11: TWO real Profile installations under the same isolated account stay
+ * isolated — distinct scopes, Host instances and units; stopping one profile's
+ * Host never affects the other.
+ */
+export async function runManagedHostTwoProfileIsolation({ installation, trace, dshHome, tarball, targetDshVersion, workDir }) {
+  const gate = isolatedGate()
+  if (!gate.qualified) return { status: 'NOT_VERIFIED', reason: gate.reason }
+  const uid = process.getuid()
+  const runtimeDir = existsSync(`/run/user/${String(uid)}`) ? `/run/user/${String(uid)}` : undefined
+  const probe = systemctl(['--user', '--no-pager', '--no-ask-password', 'show-environment'], runtimeDir)
+  if (probe.status !== 0) return { status: 'NOT_VERIFIED', reason: `NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: systemctl --user show-environment exited ${String(probe.status)}` }
+  assert(typeof tarball === 'string' && typeof targetDshVersion === 'string' && typeof workDir === 'string', 'the two-profile case needs the lane tarball/workDir facts')
+  // Provision a SECOND real Profile installation (its own DSH home/profile path).
+  const second = createSplitSmokeProfile({ tarball, targetDshVersion, workDir: join(workDir, 'profile-b') })
+  const scopeA = profileScopeId(uid, installation.profileDir)
+  const scopeB = profileScopeId(uid, second.profileDir)
+  const unitA = unitName('pi-tui', scopeA)
+  const unitB = unitName('pi-tui', scopeB)
+  assert(scopeA !== scopeB, 'the two profiles resolved to the same scope')
+  assert(unitA !== unitB, 'the two profiles resolved to the same unit name')
+  const a = new PublicDshScreen(installation, 'daemon')
+  const b = new PublicDshScreen(second, 'daemon')
+  let result
+  let failure
+  try {
+    await waitForCounts(installation.dshHome, counts => counts.host >= 1 && counts.client >= 1, 'profile A Host/Client', 120_000)
+    await waitForCounts(second.dshHome, counts => counts.host >= 1 && counts.client >= 1, 'profile B Host/Client', 120_000)
+    await a.waitForAny(['type a message', '╭'], 'profile A Client', 120_000)
+    await b.waitForAny(['type a message', '╭'], 'profile B Client', 120_000)
+    const identityA = readInstance(installation.dshHome, scopeA)
+    const identityB = readInstance(second.dshHome, scopeB)
+    assert(identityA !== undefined && identityB !== undefined, 'both Hosts must publish an identity')
+    assert(identityA.instanceId !== identityB.instanceId, 'the two profiles shared one Host instance')
+    assert(identityA.hostPid !== identityB.hostPid, 'the two profiles shared one Host PID')
+    assert(showUnit(unitA, runtimeDir).ActiveState === 'active' && showUnit(unitB, runtimeDir).ActiveState === 'active', 'both profile units must be active')
+    // Stopping profile A's Host/unit must never touch profile B.
+    assert(systemctl(['--user', '--no-pager', '--no-ask-password', 'stop', unitA], runtimeDir).status === 0, 'stopping profile A unit failed')
+    await waitNoHost(installation.dshHome, 30_000)
+    assert(hostPids(second.dshHome).length === 1, 'stopping profile A killed the profile B Host')
+    assert(showUnit(unitB, runtimeDir).ActiveState === 'active', 'profile B unit stopped together with profile A')
+    trace('managed-host-two-profile-isolation', { unitA, unitB })
+    result = { status: 'PASS', scope: 'REAL_SYSTEMD_USER_L6', twoProfiles: true, distinctInstances: true, crossProfileUnaffected: true }
+  } catch (error) {
+    failure = error
+  } finally {
+    try { a.send('/exit\r') } catch { /* gone */ }
+    try { b.send('/exit\r') } catch { /* gone */ }
+    await a.exitWithin(60_000)
+    await b.exitWithin(60_000)
+    await a.dispose()
+    await b.dispose()
+    const cleanupA = stopAndRemoveManagedUnit(installation, trace)
+    const cleanupB = stopAndRemoveManagedUnit(second, trace)
+    const outcomeError = cleanupOutcomeError(cleanupA) ?? cleanupOutcomeError(cleanupB)
+    if (outcomeError !== undefined && failure === undefined) failure = new SplitSmokeAssertionError(outcomeError)
+    if (cleanupA.removed === true || cleanupA.reason === 'absent') killIsolatedProcesses(installation.dshHome)
+    if (cleanupB.removed === true || cleanupB.reason === 'absent') killIsolatedProcesses(second.dshHome)
   }
   if (failure !== undefined) throw failure
   return result
