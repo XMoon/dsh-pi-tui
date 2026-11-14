@@ -202,6 +202,11 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),
       refresh: async () => {},
     },
+    mcpServerConfiguration: {
+      read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),
+      refresh: async () => {},
+      mutate: async () => ({ kind: 'failed' as const, failure: { kind: 'rejected' as const, reason: 'no Host settings in this fixture' } }),
+    },
   }
   const hostFile = {
     listReferences: async () => ({ kind: 'ok' as const, items: [] }),

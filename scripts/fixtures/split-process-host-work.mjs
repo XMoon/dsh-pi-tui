@@ -82,6 +82,9 @@ const SCENARIOS = new Set([
   // FR3: the MCP scene only needs the real Host composition; this row keeps the
   // scripted model inert and the work root prepared (no Session is created).
   'mcp-servers-fr3',
+  // FR4: the same real Host composition plus ONE plugin-registered server, so
+  // the configuration surface must classify it Plugin-owned and offer no CRUD.
+  'mcp-servers-fr4',
 ])
 
 /** Quote one token for the Host shell used by the harmless fixture commands. */
@@ -496,7 +499,7 @@ export async function apply(ctx) {
 
   ctx.effect(() => ctx.llm.registerAdapter(['c1-qualification'], model))
 
-  if (scenario === 'mcp-servers-fr3') {
+  if (scenario === 'mcp-servers-fr3' || scenario === 'mcp-servers-fr4') {
     // FR3: one PLUGIN-OWNED server contributed for this Host row's lifetime.
     // It has no settings entry, so the management surface must classify it
     // Plugin-owned (never Configured) while it is registered.
@@ -512,11 +515,12 @@ export async function apply(ctx) {
       "  else send({ jsonrpc: '2.0', id: m.id, error: { code: -32601, message: 'method not found' } })",
       "})",
     ].join('\n')
-    const releaseRegistration = ctx.effect(() => ctx.mcpManager.register('fr3-plugin', {
+    const pluginName = scenario === 'mcp-servers-fr4' ? 'fr4-plugin' : 'fr3-plugin'
+    const releaseRegistration = ctx.effect(() => ctx.mcpManager.register(pluginName, {
       transport: 'stdio',
       command: process.execPath,
       args: ['-e', inline],
-    }), 'fr3 plugin-owned MCP server')
+    }), `${pluginName} plugin-owned MCP server`)
     // The scene triggers a clean revocation through a file, proving the
     // unregister path removes the entry (no retained cleanup record).
     ctx.effect(() => {

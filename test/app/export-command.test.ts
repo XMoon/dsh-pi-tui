@@ -230,6 +230,11 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),
         refresh: async () => {},
       },
+      mcpServerConfiguration: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'failed' as const, failure: { kind: 'rejected' as const, reason: 'no Host settings in this fixture' } }),
+      },
     },
     hostFile: new DirectHostFilePort(() => undefined, null),
     hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },

@@ -1098,6 +1098,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  settings authority: a fact settlement repaints the root, whose frame
    *  re-renders the page from the LATEST command-owned read. */
   let activeWebPage: WebSettingsPage | undefined
+  /** FR4: the ONE open MCP page's controller (a Settings refresh re-reads it). */
+  let activeMcpController: McpServersController | undefined
 
   interface WorkspaceOpenSpec {
     readonly initialRowId?: SettingsWorkspaceRowId
@@ -1352,7 +1354,14 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           const registry = runner.extensions?.settings.snapshot()
           return { revision: registry?.revision ?? 0, count: registry?.rows.length ?? 0 }
         },
-        onRefresh: () => { startWebSettingsRead(); startAcpRuntimeRead(); startPolicyRead(true) },
+        onRefresh: () => {
+          startWebSettingsRead()
+          startAcpRuntimeRead()
+          startPolicyRead(true)
+          // FR4: the open MCP page re-reads its roster + configuration on an
+          // explicit refresh (never a background poll).
+          activeMcpController?.refresh()
+        },
       },
       {
         onOpenPlugins: (onYieldNavigation) => runner.createPluginManagerPage(onYieldNavigation),
@@ -1448,6 +1457,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           const controller = new McpServersController({
             port,
             sources: runner.config.mcpServerSources,
+            configuration: runner.config.mcpServerConfiguration,
             requestRender: () => { if (!app.isDisposed()) app.requestRender() },
             runOwned: (label, task, options) => runOwned(label, task, {
               diag: runner.diag,
@@ -1458,8 +1468,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           const page = new McpServersPage({
             controller,
             requestRender: () => { if (!app.isDisposed()) app.requestRender() },
-            done: () => { done() },
+            done: () => {
+              if (activeMcpController === controller) activeMcpController = undefined
+              done()
+            },
           })
+          activeMcpController = controller
           controller.start()
           return page
         },
@@ -3907,7 +3921,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       freshness: 'runtime',
       description: 'Inspect the ONE Host MCP manager fleet, including plugin-registered servers and retained cleanup records. '
         + 'Probe connects to one server and lists its tools without touching the live instance; Restart rebuilds one server from its current configuration. '
-        + 'Both act on the running Host only: this page writes no configuration and shows no secret. Configuration source is shown as Unknown when the Host settings read is not current.',
+        + 'Add, Edit, Enable/Disable, Delete and Reset-to-inherited write the official mcp-manager profile configuration through the Host settings compare-and-swap; '
+        + 'a saved configuration is not a connected server — the manager reconciles it afterwards. '
+        + 'Both act on the running Host only: this page shows no secret. Configuration source is shown as Unknown when the Host settings read is not current.',
       specialist: 'mcp-servers',
     }
     return {

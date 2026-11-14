@@ -24,6 +24,7 @@
 import { Input, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
 import type { McpManagedServerStatus } from '@deepseek-ai/dsh-mcp-manager/types'
 import type {
+  McpConfigStatus,
   McpServerSourceLabel,
   McpServersController,
   McpServersRow,
@@ -34,6 +35,12 @@ import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from 
 import { paintActionSpan } from '../presentation/action-ink.ts'
 import { color } from '../theme/runtime.ts'
 import type { EmbeddedSpecialistPage } from './settings-workspace-panel.ts'
+import {
+  mcpFormRows,
+  mcpFormStatusText,
+  renderMcpConfigForm,
+  type McpFormRow,
+} from './mcp-server-config-form.ts'
 
 /** The page's own name (also the Settings row label and the breadcrumb tail). */
 export const MCP_SERVERS_PAGE_TITLE = 'MCP servers'
@@ -43,7 +50,7 @@ type McpPageLayout = 'wide' | 'medium' | 'narrow'
 
 /** The page's own view state: a wide frame paints both regions; the others
  *  paint one region at a time. */
-type McpPageView = 'list' | 'detail'
+type McpPageView = 'list' | 'detail' | 'editor'
 
 /** The wide frame's ONE focused region. */
 type McpPageFocus = 'list' | 'detail'
@@ -160,6 +167,7 @@ function paintBar(segments: readonly ActionBarSegment[], width: number, lastIsEs
 const LIST_HINTS: readonly ActionBarSegment[] = [
   { text: '↑/↓ move', short: '↑/↓', priority: 30 },
   { text: 'Enter details', short: 'Enter', priority: 20 },
+  { text: 'a Add', priority: 18 },
   { text: '/ search', priority: 15 },
   { text: 'r refresh', priority: 10 },
   // The Esc affordance is the ONE required segment at every width: it is never
@@ -170,6 +178,10 @@ const LIST_HINTS: readonly ActionBarSegment[] = [
 const DETAIL_ACTION_HINTS: readonly ActionBarSegment[] = [
   { text: 'p probe', priority: 30 },
   { text: 'x restart', priority: 25 },
+  { text: 'e edit', priority: 24 },
+  { text: 't enable/disable', short: 't toggle', priority: 23 },
+  { text: 'd delete', priority: 22 },
+  { text: 'u reset', priority: 21 },
   { text: 'r refresh', priority: 10 },
   { text: 'Back [Esc]', priority: 1000 },
 ]
@@ -178,9 +190,29 @@ const DETAIL_READONLY_HINTS: readonly ActionBarSegment[] = [
   { text: 'r refresh', priority: 10 },
   { text: 'Back [Esc]', priority: 1000 },
 ]
-const CONFIRM_HINTS: readonly ActionBarSegment[] = [
-  { text: 'Y confirm', priority: 100 },
+const EDITOR_HINTS: readonly ActionBarSegment[] = [
+  { text: '↑/↓ field', short: '↑/↓', priority: 30 },
+  { text: 'Enter edit', short: 'Enter', priority: 25 },
+  { text: 'Tab next', short: 'Tab', priority: 20 },
+  { text: 's Save', priority: 40 },
+  { text: 'Back [Esc]', priority: 1000 },
+]
+const EDITOR_INPUT_HINTS: readonly ActionBarSegment[] = [
+  { text: 'Enter apply', short: 'Enter', priority: 30 },
   { text: 'Esc cancel', short: 'Esc', priority: 1000 },
+]
+const DISCARD_HINTS: readonly ActionBarSegment[] = [
+  { text: 'Keep editing', short: 'Keep', priority: 900 },
+  { text: 'Esc', priority: 999 },
+]
+/** The confirmation ANSWER segments. `Esc` is the required affordance and `y`
+ *  is the only affirmative key, so both are compacted (never dropped) before
+ *  the target sentence — the target sentence itself carries the HIGHEST
+ *  priority, because a confirmation whose subject vanished would let the user
+ *  answer a question they cannot read (§7.2 "safety facts kept"). */
+const CONFIRM_HINTS: readonly ActionBarSegment[] = [
+  { text: 'Y confirm', short: 'y', priority: 900 },
+  { text: 'Esc cancel', short: 'Esc', priority: 999 },
 ]
 const SEARCH_HINTS: readonly ActionBarSegment[] = [
   { text: 'type to filter', priority: 20 },
@@ -203,6 +235,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private searching = false
   private listOffset = 0
   private detailOffset = 0
+  /** FR4: the focused form row index and its scroll offset. */
+  private formFocus = 0
+  private formOffset = 0
+  /** FR4: the ACTIVE text input of the form (its row + the value being typed). */
+  private formInput: { readonly row: McpFormRow; readonly input: Input; readonly initial: string } | undefined
+  /** FR4: the pending `Discard changes?` confirmation of a dirty form. */
+  private discardConfirm = false
   private disposed = false
   private revision = 0
   private paint: McpPagePaint | undefined
@@ -274,12 +313,45 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       snapshot.phase,
       snapshot.operation?.phase ?? '',
       String(snapshot.rows.length),
+      snapshot.editor === undefined ? '' : `editor:${snapshot.editor.mode}:${String(this.formFocus)}:${snapshot.editor.dirty ? 'dirty' : 'clean'}`,
+      snapshot.configConfirm === undefined ? '' : `confirm:${snapshot.configConfirm.kind}:${snapshot.configConfirm.name}`,
+      this.discardConfirm ? 'discard' : '',
     ].join(':')
   }
 
   handleInput(data: string): void {
     if (this.disposed) return
     const snapshot = this.controller.snapshot()
+    // A CRUD confirmation owns the keyboard: only the explicit answer and Esc
+    // are accepted, and neither is ever inferred from another key.
+    if (snapshot.configConfirm !== undefined) {
+      if (matchesKey(data, 'escape')) {
+        this.controller.answerConfigConfirm(false)
+        return
+      }
+      if (data === 'y' || data === 'Y') this.controller.answerConfigConfirm(true)
+      // No other key may dispatch a Host write.
+      return
+    }
+    // The dirty-discard confirmation: Keep editing is the default; only an
+    // explicit `d` drops the draft (zero official writes).
+    if (this.discardConfirm) {
+      if (data === 'd' || data === 'D') {
+        this.discardConfirm = false
+        this.formInput = undefined
+        this.controller.discardEditor()
+        this.formFocus = 0
+        this.formOffset = 0
+        this.bumpRevision()
+        return
+      }
+      // Enter/Esc/anything else keeps editing.
+      if (matchesKey(data, 'enter') || matchesKey(data, 'escape') || matchesKey(data, 'tab')) {
+        this.discardConfirm = false
+        this.bumpRevision()
+      }
+      return
+    }
     // A restart confirmation owns the keyboard: only the explicit answer and
     // Esc are accepted, and neither is ever inferred from another key.
     if (snapshot.confirmingName !== undefined) {
@@ -289,6 +361,22 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       }
       if (data === 'y' || data === 'Y') this.controller.answerRestart(true)
       // No other key may dispatch a Host operation.
+      return
+    }
+    // The ACTIVE form input consumes every key: a/e/t/d/u/s are input
+    // characters here, never page actions.
+    if (this.formInput !== undefined) {
+      if (matchesKey(data, 'escape')) {
+        this.formInput = undefined
+        this.bumpRevision()
+        return
+      }
+      if (matchesKey(data, 'enter')) {
+        this.commitFormInput()
+        return
+      }
+      this.formInput.input.handleInput(data)
+      this.requestRender()
       return
     }
     if (this.searching) {
@@ -313,6 +401,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       this.searchInput.handleInput(data)
       this.reconcileSelection(snapshot)
       this.requestRender()
+      return
+    }
+    if (this.view === 'editor') {
+      this.handleEditorInput(data, snapshot)
       return
     }
     if (matchesKey(data, 'escape')) {
@@ -340,6 +432,14 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       this.controller.refresh()
       return
     }
+    if (data === 'a' || data === 'A') {
+      // Add is a list action; a search query keeps every letter as text.
+      if (!this.inDetail() && this.controller.canBeginAdd()) {
+        this.controller.beginAdd()
+        this.enterEditor()
+      }
+      return
+    }
     if (this.inDetail()) {
       if (matchesKey(data, 'up')) return this.scrollDetail(-1)
       if (matchesKey(data, 'down')) return this.scrollDetail(1)
@@ -351,6 +451,25 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       }
       if (data === 'x' || data === 'X') {
         if (this.controller.canOperateSelected()) this.controller.beginRestart()
+        return
+      }
+      if (data === 'e' || data === 'E') {
+        if (this.controller.canBeginEdit()) {
+          this.controller.beginEdit()
+          this.enterEditor()
+        }
+        return
+      }
+      if (data === 't' || data === 'T') {
+        if (this.controller.canEditConfiguration()) this.controller.beginToggle()
+        return
+      }
+      if (data === 'd' || data === 'D') {
+        if (this.controller.canEditConfiguration()) this.controller.beginDelete()
+        return
+      }
+      if (data === 'u' || data === 'U') {
+        if (this.controller.canEditConfiguration()) this.controller.beginReset()
         return
       }
       return
@@ -372,6 +491,176 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         this.detailOffset = 0
         this.bumpRevision()
       }
+      return
+    }
+  }
+
+  // ── FR4: the configuration form ───────────────────────────────────────────
+
+  private enterEditor(): void {
+    this.view = 'editor'
+    this.formFocus = 0
+    this.formOffset = 0
+    this.formInput = undefined
+    this.discardConfirm = false
+    this.bumpRevision()
+  }
+
+  /** Activate the focused form row (Enter). */
+  private activateFormRow(row: McpFormRow, snapshot: McpServersSnapshot): void {
+    const editor = snapshot.editor
+    if (editor === undefined) return
+    switch (row.action.kind) {
+      case 'cycle-transport':
+        this.controller.setEditorTransport(editor.transport === 'stdio' ? 'streamable-http' : 'stdio')
+        this.bumpRevision()
+        return
+      case 'toggle-enabled':
+        this.controller.setEditorEnabled(!editor.enabled)
+        this.bumpRevision()
+        return
+      case 'add-arg':
+        this.controller.addEditorArg()
+        this.formFocus = Math.min(this.formFocus + 1, mcpFormRows(snapshot.editor as NonNullable<McpServersSnapshot['editor']>).length - 1)
+        this.bumpRevision()
+        return
+      case 'add-dict-row':
+        this.controller.addEditorDictKey(row.action.field)
+        this.bumpRevision()
+        return
+      case 'edit-name':
+        if (!editor.nameEditable) return
+        this.openFormInput(row, editor.name)
+        return
+      case 'edit-text':
+        this.openFormInput(row, row.action.field === 'command'
+          ? editor.command
+          : row.action.field === 'cwd' ? editor.cwd : editor.url)
+        return
+      case 'edit-arg': {
+        const current = editor.args[row.action.index] ?? ''
+        this.openFormInput(row, current)
+        return
+      }
+      case 'edit-dict-key': {
+        const { field, key } = row.action
+        const entries = field === 'env' ? editor.env : editor.headers
+        this.openFormInput(row, entries.find(entry => entry.key === key)?.key ?? '')
+        return
+      }
+      case 'edit-dict-value':
+        // A stored value is NEVER re-displayed: the input starts empty and an
+        // empty commit keeps the current value.
+        this.openFormInput(row, '')
+        return
+    }
+  }
+
+  private openFormInput(row: McpFormRow, initial: string): void {
+    const input = new Input({
+      prompt: '> ',
+      placeholder: row.action.kind === 'edit-dict-value' ? 'new value (blank keeps current)' : '',
+      placeholderStyle: color.textDim,
+    })
+    input.setValue(initial)
+    input.focused = this.focused
+    this.formInput = { row, input, initial }
+    this.requestRender()
+  }
+
+  /** Commit the active input through the controller (never a direct write). */
+  private commitFormInput(): void {
+    const active = this.formInput
+    if (active === undefined) return
+    this.formInput = undefined
+    const value = active.input.getValue() ?? ''
+    switch (active.row.action.kind) {
+      case 'edit-name':
+        this.controller.setEditorField('name', value.trim())
+        break
+      case 'edit-text':
+        this.controller.setEditorField(active.row.action.field, value)
+        break
+      case 'edit-arg':
+        this.controller.setEditorArg(active.row.action.index, value)
+        break
+      case 'edit-dict-key': {
+        const { field, key } = active.row.action
+        const trimmed = value.trim()
+        if (trimmed !== '' && trimmed !== key) this.controller.renameEditorDictKey(field, key, trimmed)
+        break
+      }
+      case 'edit-dict-value': {
+        const { field, key } = active.row.action
+        // An empty commit keeps the stored value (the form never rewrites a
+        // hidden value it did not just type).
+        if (value !== '') this.controller.setEditorDictValue(field, key, value)
+        break
+      }
+      default:
+        break
+    }
+    this.bumpRevision()
+  }
+
+  private handleEditorInput(data: string, snapshot: McpServersSnapshot): void {
+    const editor = snapshot.editor
+    if (editor === undefined) {
+      // The editor closed underneath (a saved draft): return to the detail.
+      this.view = this.layoutClass() === 'wide' ? 'list' : 'detail'
+      this.bumpRevision()
+      return
+    }
+    const rows = mcpFormRows(editor)
+    if (matchesKey(data, 'escape')) {
+      if (editor.dirty) {
+        this.discardConfirm = true
+        this.bumpRevision()
+        return
+      }
+      this.controller.discardEditor()
+      this.formFocus = 0
+      this.formOffset = 0
+      this.view = this.layoutClass() === 'wide' ? 'list' : 'detail'
+      this.bumpRevision()
+      return
+    }
+    if (data === 's' || data === 'S') {
+      // Save runs ONLY while the form is the current, painted view.
+      if (this.view === 'editor') this.controller.saveEditor()
+      return
+    }
+    if (matchesKey(data, 'up')) {
+      this.formFocus = Math.max(0, this.formFocus - 1)
+      this.bumpRevision()
+      return
+    }
+    if (matchesKey(data, 'down')) {
+      this.formFocus = Math.min(rows.length - 1, this.formFocus + 1)
+      this.bumpRevision()
+      return
+    }
+    if (matchesKey(data, 'tab')) {
+      this.formFocus = (this.formFocus + 1) % Math.max(1, rows.length)
+      this.bumpRevision()
+      return
+    }
+    if (matchesKey(data, 'backspace') || matchesKey(data, 'delete')) {
+      const row = rows[this.formFocus]
+      if (row?.removable === true) {
+        switch (row.action.kind) {
+          case 'edit-arg': this.controller.removeEditorArg(row.action.index); break
+          case 'edit-dict-key': this.controller.removeEditorDictKey(row.action.field, row.action.key); break
+          default: break
+        }
+        this.formFocus = Math.max(0, Math.min(this.formFocus, mcpFormRows(snapshot.editor as NonNullable<McpServersSnapshot['editor']>).length - 1))
+        this.bumpRevision()
+      }
+      return
+    }
+    if (matchesKey(data, 'enter')) {
+      const row = rows[this.formFocus]
+      if (row !== undefined) this.activateFormRow(row, snapshot)
       return
     }
   }
@@ -440,6 +729,8 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     this.paint = undefined
     this.pressed = undefined
     this.paintedEscapeSpanValue = undefined
+    this.formInput = undefined
+    this.discardConfirm = false
     this.controller.dispose()
   }
 
@@ -581,11 +872,24 @@ export class McpServersPage implements EmbeddedSpecialistPage {
 
   private renderForGrant(width: number, bodyRows: number): string[] {
     const snapshot = this.controller.snapshot()
+    // FR4: a SAVED (or authority-retired) editor closes itself. Step back to
+    // the view the form was opened from so the ONE config-status line of the
+    // list/detail is visible; no input is needed to leave a closed form.
+    if (this.view === 'editor' && snapshot.editor === undefined) {
+      this.view = this.layoutClass() === 'wide' ? 'list' : 'detail'
+      this.formInput = undefined
+      this.discardConfirm = false
+      this.formFocus = 0
+      this.formOffset = 0
+      this.bumpRevision()
+    }
     if (!this.searching) this.reconcileSelection(snapshot)
     const targets: McpPaintedTarget[] = []
     const lines: string[] = []
     const layout = mcpServersLayoutFor(width, bodyRows)
-    if (layout === 'wide') {
+    if (this.view === 'editor') {
+      lines.push(...this.renderEditor(snapshot, width, bodyRows))
+    } else if (layout === 'wide') {
       const listWidth = this.wideListWidth()
       const detailWidth = Math.max(1, width - listWidth - 2)
       const left = this.renderList(snapshot, listWidth, bodyRows, targets)
@@ -611,6 +915,36 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     return lines.slice(0, this.rowGrant)
   }
 
+  /** FR4: the whole-page configuration form (never a third column). */
+  private renderEditor(snapshot: McpServersSnapshot, width: number, rows: number): string[] {
+    const editor = snapshot.editor
+    if (editor === undefined) {
+      return [fit(color.textDim('The configuration form was closed'), width)]
+    }
+    const statusRows = 1
+    const inputRows = this.formInput === undefined ? 0 : 1
+    const bodyRows = Math.max(1, rows - statusRows - inputRows)
+    // Keep the focused row inside the painted window before painting.
+    const formRowCount = mcpFormRows(editor).length
+    if (this.formFocus >= formRowCount) this.formFocus = Math.max(0, formRowCount - 1)
+    if (this.formFocus < this.formOffset) this.formOffset = this.formFocus
+    if (this.formFocus >= this.formOffset + bodyRows) this.formOffset = this.formFocus - bodyRows + 1
+    const rendered = renderMcpConfigForm(editor, width, bodyRows, this.formFocus, this.formOffset)
+    const lines = [...rendered.lines]
+    if (this.formInput !== undefined) {
+      const [inputLine] = this.formInput.input.render(width)
+      lines.push(fit(color.textMuted('edit: ') + (inputLine ?? ''), width))
+    }
+    const statusText = this.discardConfirm
+      ? 'Discard changes? [Keep editing] [Discard d]'
+      : mcpFormStatusText(editor, snapshot.configStatus?.text)
+    const painted = truncateToWidth(sanitizedPhysicalLine(statusText), width, '…', false)
+    lines.push(fit(this.discardConfirm || snapshot.configStatus === undefined
+      ? color.textDim(painted)
+      : this.configStatusInk({ ...snapshot.configStatus, text: painted }), width))
+    return lines.slice(0, rows)
+  }
+
   /** The list column of the wide/compact projections. */
   private renderList(
     snapshot: McpServersSnapshot,
@@ -627,9 +961,11 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       lines.push(this.listHeader(width))
     }
     const noticeRows = snapshot.notice === undefined ? 0 : 1
+    // FR4: the ONE configuration-action status line (saving/saved/conflict).
+    const configRows = snapshot.configStatus === undefined ? 0 : 1
     const phaseRows = snapshot.phase === 'ready' ? 0 : 1
     const summaryRows = this.layoutClass() === 'wide' ? 0 : 1
-    const reserved = lines.length + noticeRows + phaseRows + summaryRows
+    const reserved = lines.length + noticeRows + configRows + phaseRows + summaryRows
     const viewport = Math.max(1, rows - reserved)
     const visible = this.visibleRows(snapshot)
     // Keep the selected row inside the painted list window.
@@ -680,7 +1016,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         })
       }
     }
-    while (lines.length < rows - noticeRows - phaseRows - summaryRows) lines.push(fit('', width))
+    while (lines.length < rows - noticeRows - configRows - phaseRows - summaryRows) lines.push(fit('', width))
     if (summaryRows === 1) {
       const selected = snapshot.rows.find(row => row.name === snapshot.selectedName)
       const text = selected === undefined
@@ -689,6 +1025,9 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       lines.push(fit(color.textDim(truncateToWidth(sanitizedPhysicalLine(text), width, '…', false)), width))
     }
     if (phaseRows === 1) lines.push(fit(this.phaseLine(snapshot, width), width))
+    if (configRows === 1 && snapshot.configStatus !== undefined) {
+      lines.push(fit(this.configStatusLine(snapshot.configStatus, width), width))
+    }
     if (noticeRows === 1 && snapshot.notice !== undefined) lines.push(fit(this.noticeLine(snapshot.notice, width), width))
     return lines.slice(0, rows)
   }
@@ -732,6 +1071,28 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     return notice.kind === 'error' ? color.error(text) : color.textDim(text)
   }
 
+  /** FR4: the configuration-action status ink — the design-language §3.2
+   *  status-word contract (`Verified`/saved → success, `Not saved` → error,
+   *  `Outcome unknown` → warning, `Saving…` → textDim, `Unavailable` → error).
+   *  A saved configuration is never painted as a connection claim. */
+  private configStatusInk(status: McpConfigStatus): string {
+    switch (status.kind) {
+      case 'saved': return color.success(status.text)
+      case 'saving': return color.textDim(status.text)
+      case 'unconfirmed': return color.warning(status.text)
+      case 'conflict':
+      case 'rejected':
+      case 'unavailable': return color.error(status.text)
+    }
+  }
+
+  /** FR4: the ONE configuration-action status line (a saved config is never a
+   *  connection claim). */
+  private configStatusLine(status: McpConfigStatus, width: number): string {
+    return truncateToWidth(sanitizedPhysicalLine(status.text), width, '…', false)
+      .replace(/^.*$/u, (text) => this.configStatusInk({ ...status, text }))
+  }
+
   /** The detail lines of the selected server (fixed field order). */
   private detailLines(snapshot: McpServersSnapshot): string[] {
     const row = snapshot.rows.find(candidate => candidate.name === snapshot.selectedName)
@@ -746,6 +1107,17 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     }
     add('Server', row.name)
     add('Source', row.source, () => sourceInk(row.source))
+    // FR4: the configuration provenance from the SAME descriptor (a plugin
+    // registration has no config entry and therefore no provenance line).
+    const config = snapshot.selectedConfig
+    if (config !== undefined) {
+      add('Configuration', config.provenance === 'user-added'
+        ? 'User-added'
+        : config.provenance === 'inherited' ? 'Inherited' : 'Overridden (user)')
+      if (config.enabled !== undefined) add('Saved enabled', config.enabled ? 'yes' : 'no')
+      const transport = this.selectedConfigTransport(snapshot)
+      if (transport !== undefined) add('Saved transport', transport)
+    }
     // The official list publishes no transport: a "Not exposed" fact beats an
     // invented stdio/http claim.
     add('Transport', 'Not exposed', color.textDim)
@@ -778,7 +1150,21 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     if (snapshot.operation !== undefined && snapshot.operation.name === row.name) {
       add('Operation', snapshot.operation.text ?? snapshot.operation.kind, (text) => snapshot.operation?.phase === 'failed' ? color.error(text) : color.textDim(text))
     }
+    // FR4: the ONE configuration-action status slot (a saved config is never a
+    // connected claim; the state above stays the manager's own fact).
+    if (snapshot.configStatus !== undefined && snapshot.configStatus.kind !== 'saving') {
+      const status = snapshot.configStatus
+      add('Configuration', status.text, (text) => this.configStatusInk({ ...status, text }))
+    }
     return lines
+  }
+
+  /** The saved transport of the selected entry (from the same descriptor). */
+  private selectedConfigTransport(snapshot: McpServersSnapshot): string | undefined {
+    const entry = snapshot.config?.kind === 'ready'
+      ? snapshot.config.entries.find(candidate => candidate.name === snapshot.selectedName)
+      : undefined
+    return entry?.effective.transport
   }
 
   private renderDetail(snapshot: McpServersSnapshot, width: number, rows: number): string[] {
@@ -800,9 +1186,43 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   }
 
   private renderBar(width: number, snapshot: McpServersSnapshot): ReturnType<typeof paintBar> {
+    if (snapshot.configConfirm !== undefined) {
+      const confirm = snapshot.configConfirm
+      const name = sanitizedPhysicalLine(confirm.name)
+      if (confirm.kind === 'delete') {
+        return paintBar(
+          [{ text: `Delete ${name}? This removes your added configuration permanently`, short: `Delete ${name}?`, priority: 1000 }, ...CONFIRM_HINTS],
+          width,
+          true,
+        )
+      }
+      if (confirm.kind === 'reset') {
+        return paintBar(
+          [{ text: `Remove your override and restore the inherited configuration for ${name}?`, short: `Reset ${name}?`, priority: 1000 }, ...CONFIRM_HINTS],
+          width,
+          true,
+        )
+      }
+      return paintBar(
+        [{ text: 'Change saved configuration? The MCP process may stop or start', short: 'Change config?', priority: 1000 }, ...CONFIRM_HINTS],
+        width,
+        true,
+      )
+    }
+    if (this.discardConfirm) {
+      return paintBar([{ text: 'Discard changes?', short: 'Discard?', priority: 1000 }, ...DISCARD_HINTS], width, true)
+    }
+    if (this.view === 'editor') {
+      if (this.formInput !== undefined) return paintBar(EDITOR_INPUT_HINTS, width, true)
+      return paintBar(EDITOR_HINTS, width, true)
+    }
     if (snapshot.confirmingName !== undefined) {
       return paintBar(
-        [{ text: `Restart ${sanitizedPhysicalLine(snapshot.confirmingName)}? Live tools may be interrupted`, short: 'Restart?', priority: 50 }, ...CONFIRM_HINTS],
+        [{
+          text: `Restart ${sanitizedPhysicalLine(snapshot.confirmingName)}? Live tools may be interrupted`,
+          short: `Restart ${sanitizedPhysicalLine(snapshot.confirmingName)}?`,
+          priority: 1000,
+        }, ...CONFIRM_HINTS],
         width,
         true,
       )
@@ -816,8 +1236,12 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         // A retained cleanup record (`configured:false`) is diagnostic only:
         // no Probe/Restart affordance may be painted or dispatched.
         && selectedRow?.configured === true
-      return paintBar(actionable ? DETAIL_ACTION_HINTS : DETAIL_READONLY_HINTS, width, true)
+      // A CRUD affordance is painted ONLY for a config-owned entry proven by
+      // the same-generation descriptor (the key set alone is not enough).
+      const crud = snapshot.selectedConfig !== undefined
+      return paintBar(actionable && crud ? DETAIL_ACTION_HINTS : DETAIL_READONLY_HINTS, width, true)
     }
-    return paintBar(LIST_HINTS, width, true)
+    const addable = snapshot.phase === 'ready' && snapshot.config?.kind === 'ready'
+    return paintBar(addable ? LIST_HINTS : LIST_HINTS.filter(segment => !segment.text.includes('Add')), width, true)
   }
 }

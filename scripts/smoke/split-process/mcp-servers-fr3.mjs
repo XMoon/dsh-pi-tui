@@ -41,7 +41,7 @@ function assert(condition, message) {
 const SERVER_NAME = 'fr3-fixture'
 
 /** A minimal MCP stdio server: initialize, tools/list, tools/call. */
-const FIXTURE_SERVER_SOURCE = `#!/usr/bin/env node
+export const FIXTURE_SERVER_SOURCE = `#!/usr/bin/env node
 import { createInterface } from 'node:readline'
 const send = payload => process.stdout.write(JSON.stringify(payload) + '\\n')
 const rl = createInterface({ input: process.stdin })
@@ -74,7 +74,7 @@ rl.on('line', line => {
 })
 `
 
-async function waitForScreenText(client, text, label, timeoutMs = 90_000) {
+export async function waitForScreenText(client, text, label, timeoutMs = 90_000) {
   try {
     await waitForCondition(async () => (await client.viewport()).join('\n').includes(text), label, timeoutMs)
   } catch (error) {
@@ -85,7 +85,7 @@ async function waitForScreenText(client, text, label, timeoutMs = 90_000) {
 }
 
 /** Type one line into a proven-empty main editor seat. */
-async function submitLine(client, line, label) {
+export async function submitLine(client, line, label) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const marker = `fr3-ready-${String(attempt + 1)}`
     client.send(marker)
@@ -112,7 +112,7 @@ async function submitLine(client, line, label) {
 }
 
 /** Leave the Settings workspace and prove the main editor regains the seat. */
-async function exitSettingsWorkspace(client, label) {
+export async function exitSettingsWorkspace(client, label) {
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const probe = `fr3-exit-${String(attempt)}`
     client.send(probe)
@@ -130,7 +130,7 @@ async function exitSettingsWorkspace(client, label) {
 }
 
 /** Open Settings and walk to the MCP servers page. */
-async function openMcpPage(client, label) {
+export async function openMcpPage(client, label) {
   await submitLine(client, '/settings', `${label} /settings`)
   await waitForScreenText(client, 'Settings', `${label} settings workspace`)
   for (let step = 0; step < 14; step += 1) {
@@ -154,7 +154,7 @@ async function openMcpPage(client, label) {
 }
 
 /** The live `mcp-manager` Host row identity (one row, one fiber). */
-async function mcpManagerRow(host, label) {
+export async function mcpManagerRow(host, label) {
   const status = await hostStatus(host)
   const rows = (status.entries ?? []).filter(entry => entry.id === 'mcp-manager')
   assert(rows.length === 1, `${label}: exactly ONE mcp-manager Host row is expected, found ${String(rows.length)}`)
@@ -219,7 +219,7 @@ setInterval(() => {}, 1000)
 `
 
 /** A minimal raw Streamable HTTP MCP fixture (initialize/tools/list/tools/call). */
-async function startHttpMcpFixture() {
+export async function startHttpMcpFixture() {
   const reply = message => {
     if (message.id === undefined) return undefined
     switch (message.method) {
@@ -266,7 +266,7 @@ async function startHttpMcpFixture() {
 }
 
 /** Wait for one regex in the client frame. */
-async function waitForScreenPattern(client, pattern, label, timeoutMs = 90_000) {
+export async function waitForScreenPattern(client, pattern, label, timeoutMs = 90_000) {
   try {
     await waitForCondition(async () => pattern.test((await client.viewport()).join('\n')), label, timeoutMs)
   } catch (error) {
@@ -277,7 +277,7 @@ async function waitForScreenPattern(client, pattern, label, timeoutMs = 90_000) 
 }
 
 /** Go back to the list and select the Nth (0-based) row, then open its detail. */
-async function selectRow(client, index) {
+export async function selectRow(client, index) {
   // Back to the list (a Detail Esc returns there; an already-list frame is a
   // no-op for the list's own Esc ladder only when the page is at its root, so
   // the caller always invokes this from a Detail frame).

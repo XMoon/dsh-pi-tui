@@ -987,8 +987,22 @@ with a roster. Classification is
 record with no live entry, `Plugin-owned` only for a live entry the CURRENT key
 set does not hold, and `Unknown` whenever the key set is not current/unreadable
 or still settling (a non-atomic watch/Settings window may not be resolved into
-`Plugin-owned`). This surface is READ-ONLY: server CRUD, credential entry and
-configuration writes are a later milestone.
+`Plugin-owned`).
+
+`ConfigPort.mcpServerConfiguration` is the narrow SPLIT read/write sub-domain for
+the SAME namespace: Direct uses the in-process Settings descriptor, Remote uses
+the ONE settings mirror (never a second mirror). One `ready` read carries the
+Host generation, the official namespace revision and the effective/base layers
+of ONE descriptor; provenance is derived from the effective entry versus the
+base entry (the ConfigEditor materializes inherited entries into the USER patch
+on writes, so USER key presence is not an override verdict). Every CRUD write is
+ONE official `SettingsForms.mutate('mcp-manager', ops, expectedRevision)`;
+Remote additionally fences the Connection generation and uses the accepted-write
+lifetime. A resolved write is re-read before it is reported saved; a lost
+post-write read is `outcome-unconfirmed`, never replayed. This sub-domain owns
+configuration facts only: the manager watch remains the sole live
+connection/status authority, and no resolved secret, namespace or profile path
+crosses the port.
 
 ### Client composition, Session references and the real surface
 

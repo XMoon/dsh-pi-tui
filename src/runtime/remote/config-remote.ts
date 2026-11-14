@@ -104,7 +104,15 @@ import type {
   AcpStartupPreferenceState,
   McpServerSources,
   McpServerSourcesConfig,
+  McpServerConfiguration,
+  McpServerConfigurationConfig,
+  McpConfigWriteOutcome,
 } from '../config-port.ts'
+import {
+  classifyMcpServerProvenance,
+  projectMcpServerEntry,
+  type McpClassifiedServerEntry,
+} from '../../domain/mcp/server-config.ts'
 import { SupersededReadError } from '../read-error.ts'
 import { RemoteConfigWriteLifetime } from './config-write-lifetime.ts'
 import { RemoteAuthorizationConfig } from './authorization-remote.ts'
@@ -657,6 +665,7 @@ class RemoteConfigMirror {
           committed.set(view.ns, {
             ns: view.ns,
             ...view.value === undefined ? {} : { value: detachedValue(view.value) },
+            ...view.base === undefined ? {} : { base: detachedValue(view.base) },
             ...view.user === undefined ? {} : { user: detachedValue(view.user) },
             ...view.revision === undefined ? {} : { revision: view.revision },
           })
@@ -791,7 +800,13 @@ class RemoteConfigMirror {
           } catch (error) {
             this.recordFailure(error)
           }
-          throw new Error(`settings.mutate(${ns}) failed: ${remoteFailureMessage(result.error)}`)
+          // The official failure's stable `code` is preserved on the thrown
+          // error: a CAS conflict (`settings/conflict`) is a different outcome
+          // from a business refusal for the caller.
+          throw Object.assign(
+            new Error(`settings.mutate(${ns}) failed: ${remoteFailureMessage(result.error)}`),
+            { code: remoteFailureCode(result.error) },
+          )
         }
         // Authoritative refresh AFTER the official settlement. The write is already
         // committed; a FAILED refresh is a currentness uncertainty, not a refusal —
@@ -1963,6 +1978,7 @@ export class RemoteConfigPort implements ConfigPort {
   readonly backendStartupPreference: BackendStartupPreferenceConfig
   readonly acpStartupPreference: AcpStartupPreferenceConfig
   readonly mcpServerSources: McpServerSourcesConfig
+  readonly mcpServerConfiguration: McpServerConfigurationConfig
 
   /** `undefined` while the `tui-app` namespace is absent from the mirror
    *  (the port's documented absence contract). */
@@ -2021,6 +2037,7 @@ export class RemoteConfigPort implements ConfigPort {
     // describe(), so a just-opened page reads a current key set instead of
     // waiting for an unrelated invalidation.
     this.mcpServerSources = new RemoteMcpServerSourcesConfig(this.mirror, () => this.describe())
+    this.mcpServerConfiguration = new RemoteMcpServerConfigurationConfig(this.mirror, () => this.describe())
     this.web = new RemoteWebProviderConfig(this.mirror, this.credentialConfig)
   }
 
@@ -2708,5 +2725,117 @@ class RemoteMcpServerSourcesConfig implements McpServerSourcesConfig {
 
   async refresh(): Promise<void> {
     await this.refreshRead()
+  }
+}
+
+/**
+ * The Remote FR4 MCP server configuration read/write over the SAME committed
+ * settings mirror (never a second mirror). `read()` requires a CURRENT
+ * committed snapshot; a last-known one is `stale`, an absent namespace
+ * `unavailable`. `mutate` is ONE official wire mutation at the caller's
+ * pinned revision, fenced on the mirror's current Host generation; a lost
+ * post-write refresh is `outcome-unconfirmed` (never replayed).
+ */
+class RemoteMcpServerConfigurationConfig implements McpServerConfigurationConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly refreshRead: () => Promise<void>
+
+  constructor(mirror: RemoteConfigMirror, refreshRead: () => Promise<void>) {
+    this.mirror = mirror
+    this.refreshRead = refreshRead
+  }
+
+  read(): McpServerConfiguration {
+    const readiness = this.mirror.readiness()
+    if (readiness === 'unavailable') {
+      return { kind: 'unavailable', reason: 'no current Host settings snapshot is available' }
+    }
+    if (readiness !== 'ready') {
+      return { kind: 'stale', reason: 'the Host settings snapshot is not current' }
+    }
+    const generation = this.mirror.readyGeneration()
+    if (generation === undefined) {
+      return { kind: 'stale', reason: 'the Host settings snapshot is not current' }
+    }
+    const descriptor = this.mirror.namespace(MCP_SERVER_SOURCES_NS)
+    if (descriptor === undefined) {
+      return {
+        kind: 'unavailable',
+        reason: 'the "mcp-manager" Host settings section is not mounted',
+      }
+    }
+    const section = plainRecord(descriptor.value)
+    const servers = section === undefined ? undefined : plainRecord(section.servers)
+    if (servers === undefined) {
+      return { kind: 'unavailable', reason: 'the "mcp-manager.servers" configuration is not readable' }
+    }
+    if (typeof descriptor.revision !== 'number') {
+      return { kind: 'unavailable', reason: 'the "mcp-manager" settings revision is not readable' }
+    }
+    const entries: McpClassifiedServerEntry[] = []
+    for (const name of Object.keys(servers)) {
+      const provenance = classifyMcpServerProvenance(descriptor.base, { servers }, name)
+      if (provenance === undefined) continue
+      const effective = projectMcpServerEntry(servers[name])
+      if (effective === undefined) continue
+      entries.push({ name, provenance, effective })
+    }
+    return {
+      kind: 'ready',
+      generation,
+      revision: descriptor.revision,
+      entries: Object.freeze(entries),
+    }
+  }
+
+  async refresh(): Promise<void> {
+    await this.refreshRead()
+  }
+
+  async mutate(
+    ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[],
+    expectedRevision: number,
+    pinnedGeneration: object,
+  ): Promise<McpConfigWriteOutcome> {
+    // The generation fence: refuse BEFORE dispatch when the pinned Host
+    // authority is no longer the live one.
+    if (!Object.is(this.mirror.readyGeneration(), pinnedGeneration)) {
+      return {
+        kind: 'failed',
+        failure: { kind: 'rejected', reason: 'the Host authority changed; re-read the configuration before saving' },
+      }
+    }
+    const wireOps: RemoteSettingsPathOp[] = ops.map(op => op.op === 'set'
+      ? { op: 'set', path: [...op.path], value: op.value }
+      : { op: 'unset', path: [...op.path] })
+    try {
+      // `record`: a write whose post-settlement refresh cannot complete is a
+      // committed-but-unverified fact (`outcome-unconfirmed`), never a fake
+      // refusal — exactly the FR4 unconfirmed contract.
+      await this.mirror.mutate(MCP_SERVER_SOURCES_NS, wireOps, expectedRevision, 'record')
+    } catch (error) {
+      const message = remoteFailureMessage(error)
+      const code = remoteFailureCode(error)
+      const failure = code === 'settings/conflict' || /changed since it was read|SETTINGS_CONFLICT/u.test(message)
+        ? { kind: 'conflict' as const, reason: message }
+        : { kind: 'rejected' as const, reason: message }
+      return { kind: 'failed', failure }
+    }
+    // Saved is a READ-BACK fact: only a current committed snapshot that still
+    // speaks for the same generation verifies the write.
+    const readBack = this.read()
+    if (readBack.kind !== 'ready') {
+      return {
+        kind: 'failed',
+        failure: { kind: 'outcome-unconfirmed', reason: readBack.reason },
+      }
+    }
+    if (!Object.is(readBack.generation, pinnedGeneration)) {
+      return {
+        kind: 'failed',
+        failure: { kind: 'outcome-unconfirmed', reason: 'the Host authority changed while the write settled' },
+      }
+    }
+    return { kind: 'saved', revision: readBack.revision }
   }
 }

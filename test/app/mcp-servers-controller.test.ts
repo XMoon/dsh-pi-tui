@@ -25,7 +25,14 @@ import type {
   McpServerView,
   McpServerWatchEvent,
 } from '../../src/runtime/mcp-server-port.ts'
-import type { McpServerSources, McpServerSourcesConfig } from '../../src/runtime/config-port.ts'
+import { projectMcpServerEntry } from '../../src/domain/mcp/server-config.ts'
+import type {
+  McpConfigWriteOutcome,
+  McpServerConfiguration,
+  McpServerConfigurationConfig,
+  McpServerSources,
+  McpServerSourcesConfig,
+} from '../../src/runtime/config-port.ts'
 
 const GENERATION_1 = Object.freeze({ id: 'g1' })
 const GENERATION_2 = Object.freeze({ id: 'g2' })
@@ -116,25 +123,41 @@ function view(name: string, configured = true, state: 'connected' | 'disabled' =
   })
 }
 
+/** A controllable FR4 configuration read/write. */
+class FakeConfiguration implements McpServerConfigurationConfig {
+  value: McpServerConfiguration = { kind: 'unavailable', reason: 'not read' }
+  readonly mutations: Array<{ ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[]; revision: number; generation: object }> = []
+  outcome: (ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[], revision: number, generation: object) => McpConfigWriteOutcome = () => ({ kind: 'saved', revision: 2 })
+  async refresh(): Promise<void> {}
+  read(): McpServerConfiguration { return this.value }
+  async mutate(ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[], revision: number, generation: object): Promise<McpConfigWriteOutcome> {
+    this.mutations.push({ ops, revision, generation })
+    return this.outcome(ops, revision, generation)
+  }
+}
+
 interface Harness {
   readonly controller: McpServersController
   readonly port: FakePort
   readonly sources: FakeSources
+  readonly configuration: FakeConfiguration
   flush(): Promise<void>
 }
 
 function harness(): Harness {
   const port = new FakePort()
   const sources = new FakeSources()
+  const configuration = new FakeConfiguration()
   const tasks: Array<Promise<void>> = []
   const controller = new McpServersController({
     port,
     sources,
+    configuration,
     requestRender: () => {},
     runOwned: (label, task) => {
       // Long-lived operations (the watch and a held Probe/Restart) run
       // detached; only the finite source reads are awaited by `flush`.
-      if (label.includes('watch') || label.includes('probe') || label.includes('restart')) {
+      if (label.includes('watch') || label.includes('probe') || label.includes('restart') || label.includes('write')) {
         void task().catch(() => {})
         return
       }
@@ -149,7 +172,7 @@ function harness(): Harness {
     }
   }
   controller.start()
-  return { controller, port, sources, flush }
+  return { controller, port, sources, configuration, flush }
 }
 
 function probeOutcome(generation: object): McpServerProbeOutcome {
@@ -377,4 +400,271 @@ test('a settled probe result is published as the page probe report', async () =>
   await h.flush()
   assert.equal(h.controller.snapshot().operation?.phase, 'settled')
   assert.equal(h.controller.snapshot().lastProbe?.kind, 'passed')
+})
+
+/* ------------------------------------------------------------------------- *
+ * FR4: configuration CRUD.
+ * ------------------------------------------------------------------------- */
+
+/** A configuration read for the given generation with the given entries. The
+ *  raw entry value is projected EXACTLY like the adapters do. */
+function configOf(
+  generation: object,
+  revision: number,
+  entries: readonly { name: string; provenance: 'user-added' | 'inherited' | 'overridden'; effective: Record<string, unknown> }[],
+): McpServerConfiguration {
+  return {
+    kind: 'ready',
+    generation,
+    revision,
+    entries: entries.map(entry => {
+      const effective = projectMcpServerEntry(entry.effective)
+      assert.ok(effective !== undefined, `the test entry ${entry.name} must project`)
+      return { name: entry.name, provenance: entry.provenance, effective }
+    }),
+  }
+}
+
+function stdioEffective(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { transport: 'stdio', command: '/bin/echo', args: [], cwd: '', enabled: true, ...overrides }
+}
+
+/** Ready roster + configuration of the same generation. */
+async function readyHarness(configEntries: Parameters<typeof configOf>[2], revision = 3): Promise<Harness> {
+  const h = harness()
+  h.sources.value = { kind: 'ready', configuredNames: configEntries.map(entry => entry.name), generation: GENERATION_1 }
+  h.port.roster(configEntries.map(entry => view(entry.name)), GENERATION_1)
+  h.configuration.value = configOf(GENERATION_1, revision, configEntries)
+  await h.flush()
+  return h
+}
+
+test('a configured roster entry without a config descriptor entry offers NO edit intent', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  // The roster also lists a plugin-registered server that the settings
+  // descriptor never holds: `configured: true` is NOT config ownership.
+  h.port.roster([view('mine'), view('plugin')], GENERATION_1)
+  await h.flush()
+  h.controller.select('plugin', ['mine', 'plugin'])
+  assert.equal(h.controller.snapshot().selectedConfig, undefined)
+  assert.equal(h.controller.canBeginEdit(), false, 'a non-config-owned row has no Edit')
+  h.controller.beginDelete()
+  h.controller.beginToggle()
+  h.controller.beginReset()
+  await h.flush()
+  assert.equal(h.controller.snapshot().configConfirm, undefined, 'no CRUD confirmation may open')
+})
+
+test('a retained cleanup record offers no configuration action', async () => {
+  const h = await readyHarness([])
+  h.port.roster([{ name: 'gone', configured: false, status: { state: 'failed', reason: 'cleanup', result: { closeConfirmed: false } } }], GENERATION_1)
+  await h.flush()
+  assert.equal(h.controller.snapshot().selectedConfig, undefined)
+  assert.equal(h.controller.canBeginEdit(), false)
+})
+
+test('Add requires a CURRENT descriptor and refuses a taken name', async () => {
+  const h = harness()
+  h.port.roster([view('mine')], GENERATION_1)
+  await h.flush()
+  // The configuration read never landed: no revision to pin, no Add.
+  assert.equal(h.controller.canBeginAdd(), false)
+
+  const ready = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  assert.equal(ready.controller.canBeginAdd(), true)
+  ready.controller.beginAdd()
+  const editor = ready.controller.snapshot().editor
+  assert.equal(editor?.mode, 'add')
+  assert.equal(editor?.nameEditable, true)
+  ready.controller.setEditorField('name', 'mine')
+  ready.controller.setEditorField('command', '/bin/true')
+  ready.controller.saveEditor()
+  await ready.flush()
+  assert.equal(ready.configuration.mutations.length, 0, 'a taken name never dispatches a write')
+  assert.equal(ready.controller.snapshot().configStatus?.kind, 'rejected')
+  assert.equal(ready.controller.snapshot().editor?.name, 'mine', 'the draft survives a refusal')
+})
+
+test('an Add dispatches ONE pinned mutation, closes the draft and claims Saved (never Connected)', async () => {
+  const h = await readyHarness([], 5)
+  h.controller.beginAdd()
+  h.controller.setEditorField('name', 'added')
+  h.controller.setEditorField('command', '/bin/true')
+  h.controller.addEditorArg()
+  h.controller.setEditorArg(0, '--flag')
+  h.controller.setEditorEnabled(false)
+  assert.equal(h.controller.editorDirty(), true)
+  h.controller.saveEditor()
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 1)
+  const mutation = h.configuration.mutations[0]
+  assert.equal(mutation?.revision, 5, 'the revision captured when the form opened')
+  assert.equal(mutation?.generation, GENERATION_1)
+  assert.deepEqual(mutation?.ops, [{
+    op: 'set',
+    path: ['servers', 'added'],
+    value: { transport: 'stdio', enabled: false, command: '/bin/true', args: ['--flag'], cwd: '' },
+  }])
+  assert.equal(h.controller.snapshot().editor, undefined, 'a saved draft closes its form')
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'saved')
+  assert.match(h.controller.snapshot().configStatus?.text ?? '', /waiting for Host reconcile/u)
+  assert.doesNotMatch(h.controller.snapshot().configStatus?.text ?? '', /Connected/u)
+})
+
+test('an Edit patches only dirty fields and keeps a conflicted draft open', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective({ env: { KEEP: 'same', DROP: 'x' } }) }])
+  h.configuration.outcome = () => ({ kind: 'failed', failure: { kind: 'conflict', reason: 'changed' } })
+  h.controller.beginEdit()
+  assert.equal(h.controller.snapshot().editor?.nameEditable, false, 'Edit keeps the name fixed')
+  h.controller.setEditorDictValue('env', 'KEEP', 'same')
+  h.controller.addEditorDictKey('env')
+  // The inserted row starts with a unique placeholder key the user renames.
+  const placeholder = h.controller.snapshot().editor?.env.find(entry => entry.key.startsWith('KEY_'))?.key
+  assert.ok(placeholder !== undefined, 'the inserted row is painted')
+  h.controller.renameEditorDictKey('env', placeholder, 'NEW')
+  h.controller.setEditorDictValue('env', 'NEW', 'v')
+  h.controller.removeEditorDictKey('env', 'DROP')
+  h.controller.saveEditor()
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 1)
+  assert.deepEqual(h.configuration.mutations[0]?.ops, [
+    { op: 'set', path: ['servers', 'mine', 'env', 'NEW'], value: 'v' },
+    { op: 'unset', path: ['servers', 'mine', 'env', 'DROP'] },
+  ])
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'conflict')
+  assert.equal(h.controller.snapshot().editor?.name, 'mine', 'the draft is preserved on a conflict')
+})
+
+test('Delete is user-added only; Reset is overridden only; both are ONE unset', async () => {
+  const h = await readyHarness([
+    { name: 'mine', provenance: 'user-added', effective: stdioEffective() },
+    { name: 'inherited', provenance: 'inherited', effective: stdioEffective() },
+    { name: 'both', provenance: 'overridden', effective: stdioEffective({ enabled: false }) },
+  ])
+  h.controller.select('inherited', ['mine', 'inherited', 'both'])
+  h.controller.beginDelete()
+  assert.equal(h.controller.snapshot().configConfirm, undefined, 'an inherited entry has no Delete')
+  h.controller.beginReset()
+  assert.equal(h.controller.snapshot().configConfirm, undefined, 'an unmodified inherited entry has no Reset')
+
+  h.controller.select('mine', ['mine', 'inherited', 'both'])
+  h.controller.beginDelete()
+  assert.equal(h.controller.snapshot().configConfirm?.kind, 'delete')
+  h.controller.answerConfigConfirm(false)
+  assert.equal(h.configuration.mutations.length, 0, 'Esc cancels with zero writes')
+  h.controller.beginDelete()
+  h.controller.answerConfigConfirm(true)
+  await h.flush()
+  assert.deepEqual(h.configuration.mutations[0]?.ops, [{ op: 'unset', path: ['servers', 'mine'] }])
+
+  h.controller.select('both', ['mine', 'inherited', 'both'])
+  h.controller.beginReset()
+  assert.equal(h.controller.snapshot().configConfirm?.kind, 'reset')
+  h.controller.answerConfigConfirm(true)
+  await h.flush()
+  assert.deepEqual(h.configuration.mutations[1]?.ops, [{ op: 'unset', path: ['servers', 'both'] }])
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'saved')
+})
+
+test('a confirmation bound to Host A never writes against Host B', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  h.controller.beginDelete()
+  assert.equal(h.controller.snapshot().configConfirm?.kind, 'delete')
+  // The Host is replaced (a new roster + a new configuration read).
+  h.port.roster([view('mine')], GENERATION_2)
+  await h.flush()
+  assert.equal(h.controller.snapshot().configConfirm, undefined, 'the old confirmation is retired')
+  h.controller.answerConfigConfirm(true)
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 0)
+})
+
+test('an open draft is retired by a Host replacement and cannot dispatch', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  h.controller.beginEdit()
+  h.controller.setEditorField('command', '/bin/true')
+  h.port.roster([view('mine')], GENERATION_2)
+  await h.flush()
+  assert.equal(h.controller.snapshot().editor, undefined, 'a draft bound to Host A dies with it')
+  h.controller.saveEditor()
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 0)
+})
+
+test('a Save whose captured revision moved is refused by the official CAS', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }], 2)
+  h.controller.beginEdit()
+  h.controller.setEditorField('command', '/bin/true')
+  // A concurrent editor moved the namespace before Save; the adapter reports
+  // the official conflict at the pinned revision.
+  h.configuration.outcome = (ops, revision) => revision === 2
+    ? { kind: 'failed', failure: { kind: 'conflict', reason: 'changed since it was read' } }
+    : { kind: 'saved', revision: 4 }
+  h.controller.saveEditor()
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 1)
+  assert.equal(h.configuration.mutations[0]?.revision, 2, 'the pinned revision is submitted verbatim')
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'conflict')
+})
+
+test('a second Save while a write is in flight dispatches nothing', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  let release!: (outcome: McpConfigWriteOutcome) => void
+  h.configuration.outcome = () => new Promise<McpConfigWriteOutcome>(resolve => { release = resolve }) as never
+  h.controller.beginEdit()
+  h.controller.setEditorField('command', '/bin/true')
+  h.controller.saveEditor()
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'saving')
+  h.controller.saveEditor()
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 1, 'one write at a time')
+  release({ kind: 'saved', revision: 4 })
+  await h.flush()
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'saved')
+})
+
+test('an unconfirmed write is never replayed and never reported as saved', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  h.configuration.outcome = () => ({ kind: 'failed', failure: { kind: 'outcome-unconfirmed', reason: 'ack lost' } })
+  h.controller.beginToggle()
+  assert.equal(h.controller.snapshot().configConfirm?.nextEnabled, false, 'enabled true -> the toggle writes false')
+  h.controller.answerConfigConfirm(true)
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 1)
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'unconfirmed')
+  assert.match(h.controller.snapshot().configStatus?.text ?? '', /Outcome unconfirmed/u)
+  assert.doesNotMatch(h.controller.snapshot().configStatus?.text ?? '', /Saved/u)
+})
+
+test('an invalid draft is refused before any dispatch', async () => {
+  const h = await readyHarness([], 1)
+  h.controller.beginAdd()
+  h.controller.setEditorField('name', 'bad name')
+  h.controller.setEditorField('command', '')
+  h.controller.saveEditor()
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 0)
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'rejected')
+  assert.equal(h.controller.snapshot().editor?.issues.length, 2, 'name + command issues are both reported')
+})
+
+test('a discarded draft performs zero writes and leaves no editor', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  h.controller.beginEdit()
+  h.controller.setEditorField('command', '/bin/true')
+  assert.equal(h.controller.editorDirty(), true)
+  h.controller.discardEditor()
+  assert.equal(h.controller.snapshot().editor, undefined)
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 0)
+})
+
+test('a dispatched write settles into the page even after the roster stays current', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  h.controller.beginToggle()
+  h.controller.answerConfigConfirm(true)
+  await h.flush()
+  // Saved is a CONFIG fact; the FR3 status of the roster is untouched.
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'saved')
+  assert.equal(h.controller.snapshot().rows[0]?.status.state, 'connected')
 })

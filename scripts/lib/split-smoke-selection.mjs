@@ -50,6 +50,7 @@ import { runUnknownWriteHostDeath } from '../smoke/split-process/unknown-write-h
 import { runWebProductQualification } from '../smoke/split-process/web-product.mjs'
 import { runWebRuntimeToggle } from '../smoke/split-process/web-runtime-toggle.mjs'
 import { runMcpServersFr3 } from '../smoke/split-process/mcp-servers-fr3.mjs'
+import { runMcpServersFr4 } from '../smoke/split-process/mcp-servers-fr4.mjs'
 import { runWebStartupPreference } from '../smoke/split-process/web-startup-preference.mjs'
 import { runF2AccountComposition } from '../smoke/split-process/account-composition.mjs'
 import { runF7AProviderAuthorization } from '../smoke/split-process/provider-authorization-f7a.mjs'
@@ -277,6 +278,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'mcp.servers-fr3',
     title: 'ONE real Split Host and Client mount the single official MCP manager, classify the configured source, probe and restart the real test server once, and keep the same manager fiber across /web off->on->off',
     run: runMcpServersFr3,
+  }),
+  Object.freeze({
+    suite: 'mcp',
+    id: 'mcp.servers-fr4',
+    title: 'real Split Host and Clients edit the official mcp-manager configuration through the Settings CAS: inherited classification, Add/Edit/Disable/Enable/Delete/Reset, a dirty-discard with zero writes, a plugin-owned refusal and a two-client revision conflict',
+    run: runMcpServersFr4,
   }),
   Object.freeze({
     suite: 'web',
