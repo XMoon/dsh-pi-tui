@@ -181,6 +181,20 @@ function sleep(ms) {
   return new Promise(resolveSleep => setTimeout(resolveSleep, ms))
 }
 
+/**
+ * The managed-host lane summary, derived from the ONE case registry (never a
+ * second hand-written list). Returns the registered ids, the non-PASS ones and
+ * the honest verdict string.
+ */
+export function summarizeManagedHostStatuses(entries, statusOf) {
+  const ids = entries.filter(entry => entry.suite === 'managed-host').map(entry => entry.id)
+  const unverified = ids.filter(id => statusOf(id) !== 'PASS')
+  const verdict = unverified.length === 0
+    ? 'PASS'
+    : `NOT_VERIFIED(${String(unverified.length)}/${String(ids.length)})`
+  return { ids, unverified, verdict }
+}
+
 function failpoint(name) {
   if (FAILPOINT === name) throw new Error(`qualification failpoint: ${name}`)
 }
@@ -331,11 +345,11 @@ async function main(explicitPath) {
     // unqualified host reports NOT_VERIFIED instead of a fabricated PASS. The
     // full verdict stays honest about that — it never prints "passed" while a
     // managed slice is NOT_VERIFIED.
-    const managedHostIds = ['managed-host.m6-2b-systemd', 'managed-host.m6-2b-fallback', 'managed-host.m6-2b-manager-error']
-    const managedHostUnverified = managedHostIds.filter(id => statusOf(id) !== 'PASS')
-    const managedHostVerdict = managedHostUnverified.length === 0
-      ? 'PASS'
-      : `NOT_VERIFIED(${String(managedHostUnverified.length)}/${String(managedHostIds.length)})`
+    const {
+      ids: managedHostIds,
+      unverified: managedHostUnverified,
+      verdict: managedHostVerdict,
+    } = summarizeManagedHostStatuses(listSelectableCases(), statusOf)
     trace('t60', {
       candidate: basename(tarball),
       sha256: candidateSha256,

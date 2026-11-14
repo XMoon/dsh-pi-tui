@@ -25,7 +25,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse as parseYaml } from 'yaml'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { assertSelectedVerdict, runSelectedCase, waitForCondition } from '../../scripts/split-process-smoke.mjs'
+import { assertSelectedVerdict, runSelectedCase, summarizeManagedHostStatuses, waitForCondition } from '../../scripts/split-process-smoke.mjs'
 import { PR_A_WEB_ROWS, raceWithAbortableDeadline, redactWebQualificationText } from '../../scripts/smoke/split-process/web-helpers.mjs'
 import { createSmokeDiagnostics, redactErrorForStep } from '../../scripts/lib/split-smoke-diagnostics.mjs'
 import { statusMatches } from '../../scripts/lib/split-smoke-processes.mjs'
@@ -656,6 +656,17 @@ test('cleanup actually stops and removes this run\u2019s unit and refuses foreig
   assert.equal(reloadFail.result.reason, 'reload-failed')
   assert.equal(reloadFail.result.fileRemoved, true)
   assert.equal(existsSync(reloadFail.unitPath), false)
+})
+
+test('the managed-host smoke summary covers the whole registry (B10 concurrent case included)', () => {
+  const entries = listSelectableCases()
+  const ids = entries.filter(entry => entry.suite === 'managed-host').map(entry => entry.id)
+  assert.ok(ids.includes('managed-host.m6-2b-concurrent-cold-start'), 'B10 concurrent case must be in the managed-host summary scope')
+  const statusOf = id => (id === 'managed-host.m6-2b-systemd' ? 'PASS' : 'NOT_VERIFIED')
+  const summary = summarizeManagedHostStatuses(entries, statusOf)
+  assert.deepEqual(summary.ids, ids, 'the summary ids must be derived from the registry')
+  assert.equal(summary.unverified.length, ids.length - 1)
+  assert.equal(summary.verdict, `NOT_VERIFIED(${ids.length - 1}/${ids.length})`)
 })
 
 test('a cleanup that did not remove this run\u2019s unit fails the scenario verdict', () => {
