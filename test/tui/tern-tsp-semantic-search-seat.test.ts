@@ -53,9 +53,11 @@ function scriptedBinding(matches: readonly TranscriptSearchMatch[], options: {
   readonly calls: { query: string; refinement: unknown }[]
   readonly setMatches: (next: readonly TranscriptSearchMatch[]) => void
   readonly revoke: () => void
+  readonly bumpRevision: () => void
 } {
   let current = options.current ?? true
   let live = matches
+  let revision = 1
   const calls: { query: string; refinement: unknown }[] = []
   const binding: TspTranscriptSemanticSearchBinding = {
     snapshot(query, refinement) {
@@ -65,7 +67,7 @@ function scriptedBinding(matches: readonly TranscriptSearchMatch[], options: {
         source: SOURCE,
         subjectKind: 'main',
         subjectId: 'session-1',
-        revision: calls.length,
+        revision,
         matches: live,
         coverage: options.coverage ?? 'entire-session',
       }
@@ -75,12 +77,14 @@ function scriptedBinding(matches: readonly TranscriptSearchMatch[], options: {
       return { kind: 'tool', id: candidate.id } as unknown as TranscriptMessage
     },
     current: (source) => current && source === SOURCE,
+    revision: (source) => (current && source === SOURCE ? revision : undefined),
   }
   return {
     binding,
     calls,
     setMatches: (next) => { live = next },
     revoke: () => { current = false },
+    bumpRevision: () => { revision += 1 },
   }
 }
 
@@ -302,14 +306,17 @@ test('a revoked source retires the card instead of painting a stale result', () 
   assert.equal(seat.renderState(), undefined)
 })
 
-test('Ctrl+C is NOT the seat\'s cancel: the key falls through to the cancel owner', () => {
+test('Ctrl+C retires the card and still falls through to the cancel owner exactly once', () => {
   const { binding } = scriptedBinding([match(1, { kind: 'message' })])
-  const { ports: seatPorts } = ports()
+  const { ports: seatPorts, focuses } = ports()
   const seat = createTspTranscriptSearch(seatPorts, binding, () => true)
   seat.open()
+  const before = focuses()
   assert.equal(seat.handleKey(key('c', { ctrl: true })), false,
     'Ctrl+C must reach the original interrupt/cancel owner exactly once')
-  assert.equal(seat.isOpen(), true, 'the card itself is not closed by Ctrl+C')
+  assert.equal(seat.isOpen(), false, 'the card retires BEFORE the cancel is forwarded')
+  assert.equal(seat.renderState(), undefined, 'no stale query survives the interrupt')
+  assert.equal(focuses(), before + 1, 'the ONE focus owner is re-evaluated after the retire')
 })
 
 test('Escape closes the card and returns the caret to the Composer', () => {
@@ -364,6 +371,7 @@ test('refresh keeps the same representative card when it still exists', () => {
   // An official revision adds a card BEFORE the current one: the identity, not
   // the position, is what the refresh restores.
   scripted.setMatches([match(0, { kind: 'message' }), match(1, { kind: 'message' }), match(2, { kind: 'message' })])
+  scripted.bumpRevision()
   seat.refresh()
   assert.equal(seat.currentTarget()?.representativeId, 2, 'the same card stays current')
   assert.equal(seat.renderState()?.countLabel, '3/3 targets')
@@ -378,6 +386,7 @@ test('refresh falls back to the first card when the current one vanished', () =>
   seat.handleKey(key('enter'))
   assert.equal(seat.currentTarget()?.representativeId, 2)
   scripted.setMatches([match(5, { kind: 'message' })])
+  scripted.bumpRevision()
   seat.refresh()
   assert.equal(seat.currentTarget()?.representativeId, 5, 'a vanished card falls back, never invents one')
 })
@@ -395,18 +404,58 @@ test('the render projection refuses to paint a card the mount no longer admits',
   assert.equal(seat.isOpen(), false)
 })
 
+test('Tab / Shift+Tab cycle the seat\'s own focus ring (Query → Prev → Next → Close)', () => {
+  const { binding } = scriptedBinding([match(1, { kind: 'message' }), match(2, { kind: 'message' })])
+  const seen: (string | undefined)[] = []
+  const { ports: seatPorts } = ports({ setFocus: (control) => { seen.push(control) } })
+  const seat = createTspTranscriptSearch(seatPorts, binding, () => true)
+  seat.open()
+  seen.length = 0
+  seat.handleKey(key('tab'))
+  seat.handleKey(key('tab'))
+  seat.handleKey(key('tab'))
+  seat.handleKey(key('tab'))
+  assert.deepEqual(seen, ['prev', 'next', 'close', 'query'],
+    'Tab walks the ring and wraps, and never reaches the hidden Composer')
+  seen.length = 0
+  seat.handleKey(key('tab', { shift: true }))
+  assert.deepEqual(seen, ['close'], 'Shift+Tab walks the ring backwards')
+})
+
+test('refresh is a NO-OP while the Folder revision is unchanged, and re-queries on a real change', () => {
+  const scripted = scriptedBinding([match(1, { kind: 'message' })])
+  const { ports: seatPorts } = ports()
+  const seat = createTspTranscriptSearch(seatPorts, scripted.binding, () => true)
+  seat.open()
+  seat.handleKey(key('x', { text: 'x' }))
+  const before = scripted.calls.length
+  // An unchanged revision must never re-scan history.
+  seat.refresh()
+  assert.equal(scripted.calls.length, before, 'an unchanged revision is a no-op')
+  // A real revision change re-queries the same query.
+  scripted.bumpRevision()
+  seat.refresh()
+  assert.equal(scripted.calls.length, before + 1, 'a real revision change re-queries')
+  assert.equal(scripted.calls.at(-1)?.query, 'x', 'the current query is preserved')
+})
+
 test('the seat diagnostics count the real work it did', () => {
-  const { binding } = scriptedBinding([match(1, { kind: 'message' })])
+  const scriptedRevision = scriptedBinding([match(1, { kind: 'message' })])
+  const { binding } = scriptedRevision
   const { ports: seatPorts } = ports()
   const seat = createTspTranscriptSearch(seatPorts, binding, () => true)
   seat.open()
   seat.handleKey(key('a', { text: 'a' }))
   seat.handleKey(key('enter'))
   seat.refresh()
+  assert.equal(seat.diagnosticsForTest().refreshes, 0,
+    'an unchanged Folder revision never re-queries')
+  scriptedRevision.bumpRevision()
+  seat.refresh()
   seat.retire()
   const diagnostics = seat.diagnosticsForTest()
   assert.equal(diagnostics.opens, 1)
   assert.equal(diagnostics.queries, 1, 'one query round from the typed key')
-  assert.equal(diagnostics.refreshes, 1)
+  assert.equal(diagnostics.refreshes, 1, 'the real revision change refreshed once')
   assert.equal(diagnostics.retired, 1)
 })

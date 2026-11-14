@@ -545,6 +545,12 @@ export interface TspTranscriptSemanticSearchBinding {
   resolve(source: object, match: TranscriptSearchMatch): TranscriptMessage | undefined
   /** Whether this token still names the selected, committed subject. */
   current(source: object): boolean
+  /**
+   * The Folder's own `searchRevision()` for this token's CURRENT subject, or
+   * `undefined` when the source moved on. A CHEAP read (one counter): the seat's
+   * refresh probes it so an unchanged revision never re-scans history.
+   */
+  revision(source: object): number | undefined
 }
 
 /** One immutable semantic-search snapshot: matches plus the coverage fact. */
@@ -2084,6 +2090,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     && left.subjectId === right.subjectId
 
   /**
+   * T3-B1: the subject identity each issued source token was minted under, so
+   * `current()`/`resolve()` compare the SUBJECT (kind + id), never the folder
+   * token alone. Deliberately NOT the window controller: scrolling the window is
+   * not a subject change and must never retire a live card.
+   */
+  const searchTokenSubjects = new WeakMap<object, { readonly subjectKind: 'main' | 'viewed-child'; readonly subjectId: string | undefined }>()
+
+  /**
    * T3-B1: the officially committed search coverage, SCOPED to the source token
    * it was committed for.
    *
@@ -2141,6 +2155,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // rather than relabelled with the new subject's identity.
       const current = captureProjectionTarget(activeFolder(), activeWindow())
       if (!sameProjectionTarget(target, current)) return undefined
+      searchTokenSubjects.set(source, { subjectKind: target.subjectKind, subjectId: target.subjectId })
       return {
         source,
         subjectKind: target.subjectKind,
@@ -2154,12 +2169,30 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       if (disposed || isCleanedUp() || routingSource === undefined) return undefined
       const target = captureProjectionTarget(activeFolder(), activeWindow())
       if (projectionTokenFor(target.folder) !== source) return undefined
+      // The token must still name the subject it was minted under (kind + id);
+      // the window controller is deliberately NOT part of this comparison.
+      const minted = searchTokenSubjects.get(source)
+      if (minted !== undefined
+        && (minted.subjectKind !== target.subjectKind || minted.subjectId !== target.subjectId)) return undefined
       return target.folder.resolveSearchMatch(match)
     },
     current(source) {
       if (disposed || isCleanedUp() || routingSource === undefined) return false
       const target = captureProjectionTarget(activeFolder(), activeWindow())
-      return projectionTokenFor(target.folder) === source
+      if (projectionTokenFor(target.folder) !== source) return false
+      const minted = searchTokenSubjects.get(source)
+      if (minted !== undefined
+        && (minted.subjectKind !== target.subjectKind || minted.subjectId !== target.subjectId)) return false
+      return true
+    },
+    revision(source) {
+      if (disposed || isCleanedUp() || routingSource === undefined) return undefined
+      const target = captureProjectionTarget(activeFolder(), activeWindow())
+      if (projectionTokenFor(target.folder) !== source) return undefined
+      const minted = searchTokenSubjects.get(source)
+      if (minted !== undefined
+        && (minted.subjectKind !== target.subjectKind || minted.subjectId !== target.subjectId)) return undefined
+      return target.folder.searchRevision()
     },
   }
 

@@ -100,9 +100,11 @@ Two rules belong to this ladder and not to the PiTui keymap:
   PiTui surface. A higher seat that is active takes the key first, so the chord
   cannot open a search behind a Modal or a picker.
 - While the Session Search card is open it consumes every key it does not
-  delegate; the ONE deliberate exception is `Ctrl+C`, which retires the card and
-  then reaches the original interrupt/cancel owner exactly once. `Ctrl+F` and
-  `Ctrl+Shift+F` stay the client's own Find actions in every state.
+  delegate. `Enter`/`Shift+Enter` step the card targets and `Tab`/`Shift+Tab`
+  cycle the seat's own focus ring (query → Prev → Next → Close); the ONE
+  deliberate exception is `Ctrl+C`, which retires the card and then reaches the
+  original interrupt/cancel owner exactly once. `Ctrl+F` and `Ctrl+Shift+F` stay
+  the client's own Find actions in every state.
 
 ### The conditional task affordance vs the actual route
 

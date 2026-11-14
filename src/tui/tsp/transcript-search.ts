@@ -39,6 +39,9 @@ import { TSP_SEARCH_CHORD, matchesKeyId } from '../keybindings/hints.ts'
 /** The seat's own lifecycle: ONE card per open, retired by a higher seat. */
 export type TspTranscriptSearchPhase = 'closed' | 'open'
 
+/** One control of the seat's own focus ring. */
+export type SearchFocusControl = 'query' | 'prev' | 'next' | 'close'
+
 /** The ONE user-visible statement of a pane without the semantic-search plane. */
 export const TSP_TRANSCRIPT_SEARCH_UNAVAILABLE = 'Session Search unavailable in this Tern pane.'
 
@@ -94,8 +97,13 @@ export interface TspTranscriptSearchPorts {
   admitted(): boolean
   /** Commit one frame for a seat-only change. */
   requestRender(): void
-  /** Re-evaluate the ONE focus owner after a committed frame. */
-  setFocus(): void
+  /**
+   * Re-evaluate the ONE focus owner after a committed frame. With `control` the
+   * call is the seat's own Tab cycle: the mount focuses THAT control's real wire
+   * id directly (the query takes the hardware caret; a button focus is the
+   * client's to grant or decline — the ring position is tracked either way).
+   */
+  setFocus(control?: SearchFocusControl): void
   /**
    * Request the native card reveal for the CURRENT target. The mount owns the
    * canonical owner derivation and the attached-id check; it must re-check the
@@ -134,6 +142,8 @@ export interface TspTranscriptSearchSeat {
   currentMessage(): TranscriptMessage | undefined
   /** The wire id of the field that owns the hardware caret, if indexed. */
   desiredFocusId(): string | undefined
+  /** The wire id of ONE control of the ring, or `undefined` when unindexed. */
+  controlFocusId(control: SearchFocusControl): string | undefined
   /** Index the committed frame: map this card's node keys to real wire ids. */
   indexFrame(dockRoot: import('@stencil-hq/tern').Node): void
   /** Re-run the current query after an official revision change. */
@@ -269,6 +279,8 @@ interface SearchSeatState {
   queryCursor: number
   /** Bumped by every query round: the frame/intent fence's half. */
   queryRevision: number
+  /** The Folder revision the CURRENT matches were computed on. */
+  lastRevision: number
   matches: readonly TranscriptSearchMatch[]
   targets: readonly TspTranscriptSearchTarget[]
   current: number
@@ -279,6 +291,8 @@ interface SearchSeatState {
   revealAttempted: boolean
   /** Whether that attempt actually requested a reveal (the card is reachable). */
   reachable: boolean
+  /** The control of the seat's own focus ring the caret is on. */
+  focusControl: SearchFocusControl
   retired: boolean
 }
 
@@ -324,6 +338,29 @@ export function createTspTranscriptSearch(
     ports.navigationChanged()
   }
 
+  /**
+   * T3-B1 refresh: the official setTranscript commit of the SAME source calls
+   * this. An unchanged Folder revision is a NO-OP (never a re-scan of history);
+   * a real revision change re-queries the current query and keeps the current
+   * representative card when it still exists.
+   */
+  const refreshFromRevision = (): void => {
+    const owner = state
+    if (owner === undefined || owner.retired || owner.phase !== 'open') return
+    if (binding === undefined) return
+    if (binding.current(owner.source) !== true) {
+      retireDiscovered()
+      return
+    }
+    const revision = binding.revision(owner.source)
+    if (revision === undefined || revision === owner.lastRevision) return
+    diagnostics.refreshes += 1
+    const previousRevision = owner.queryRevision
+    owner.queryRevision += 1
+    query(owner, previousRevision)
+    change(owner)
+  }
+
   /** The retire that DISCOVERED the death (a refused snapshot, a dead source)
    *  rather than the one an outer lifecycle commit performed. */
   const retireDiscovered = (): void => {
@@ -346,6 +383,7 @@ export function createTspTranscriptSearch(
     owner.matches = matches
     owner.targets = groupTranscriptSearchTargets(matches)
     owner.coverage = snapshot.coverage
+    owner.lastRevision = snapshot.revision
     // The same representative card keeps the selection while it still exists;
     // a vanished card falls back to the FIRST navigable target, never an
     // invented one, and an empty result leaves no current target at all.
@@ -453,9 +491,15 @@ export function createTspTranscriptSearch(
     const revision = owner.queryRevision
     if (key.name === 'escape') { act({ kind: 'close', serial, revision }); return true }
     // `Ctrl+C` is NOT this seat's cancel: it must reach the original upper-level
-    // interrupt/cancel owner exactly once. The card retires first so no stale
-    // query survives the interrupt.
-    if (key.ctrl === true && key.name === 'c' && key.alt !== true && key.meta !== true) return false
+    // interrupt/cancel owner exactly once. The card retires FIRST — the query,
+    // the target and the temporary grants die with it — and the SAME key then
+    // falls through the ladder unchanged.
+    if (key.ctrl === true && key.name === 'c' && key.alt !== true && key.meta !== true) {
+      retire()
+      ports.requestRender()
+      ports.setFocus()
+      return false
+    }
     // A second entry chord focuses the query and keeps the current card.
     if (matchesKeyId(key, TSP_SEARCH_CHORD)) {
       act({ kind: 'focus-query', serial, revision })
@@ -471,10 +515,13 @@ export function createTspTranscriptSearch(
       act(key.shift === true ? { kind: 'previous', serial, revision } : { kind: 'next', serial, revision })
       return true
     }
-    // `Tab`/`Shift+Tab` cycle the seat's own focus ring and never reach the
-    // hidden Composer.
+    // `Tab`/`Shift+Tab` cycle the seat's OWN focus ring (Query → Prev → Next →
+    // Close) and never reach the hidden Composer (the frozen contract).
     if (key.name === 'tab') {
-      act(key.shift === true ? { kind: 'previous', serial, revision } : { kind: 'next', serial, revision })
+      const ring: SearchFocusControl[] = ['query', 'prev', 'next', 'close']
+      const at = ring.indexOf(owner.focusControl)
+      owner.focusControl = ring[(at + (key.shift === true ? ring.length - 1 : 1)) % ring.length]!
+      ports.setFocus(owner.focusControl)
       return true
     }
     const edited = editQuery(owner.query, owner.queryCursor, key)
@@ -588,6 +635,7 @@ export function createTspTranscriptSearch(
         query: '',
         queried: '',
         queryCursor: 0,
+        lastRevision: snapshot.revision,
         queryRevision: 0,
         matches: [],
         targets: [],
@@ -596,6 +644,7 @@ export function createTspTranscriptSearch(
         pendingReveal: false,
         revealAttempted: false,
         reachable: false,
+        focusControl: 'query',
         retired: false,
       }
       state = owner
@@ -635,17 +684,14 @@ export function createTspTranscriptSearch(
       if (owner === undefined || owner.retired || owner.phase !== 'open') return undefined
       return frameIds.get(queryKeyOf(owner.openSerial))
     },
-    refresh: () => {
+    controlFocusId: (control) => {
       const owner = state
-      if (owner === undefined || owner.retired || owner.phase !== 'open') return
-      if (binding?.current(owner.source) !== true) {
-        retireDiscovered()
-        return
-      }
-      diagnostics.refreshes += 1
-      query(owner)
-      change(owner)
+      if (owner === undefined || owner.retired || owner.phase !== 'open') return undefined
+      return frameIds.get(control === 'query'
+        ? queryKeyOf(owner.openSerial)
+        : actionKeyOf(owner, control))
     },
+    refresh: refreshFromRevision,
     diagnosticsForTest: () => ({ ...diagnostics }),
   }
 }

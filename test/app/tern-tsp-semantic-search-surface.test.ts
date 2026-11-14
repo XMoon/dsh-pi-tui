@@ -386,6 +386,36 @@ test('Remote never claims Entire, whatever the match count says', async (t) => {
     'a match count never widens the coverage claim')
 })
 
+test('the cheap revision probe answers the CURRENT Folder revision and refuses a stale token', async (t) => {
+  const h = await mountSurface(t)
+  const binding = h.binding()
+  const snapshot = binding.snapshot(MAIN_MARKER.toLowerCase())
+  assert.ok(snapshot !== undefined)
+  assert.equal(binding.revision(snapshot.source), h.mainFolder().searchRevision(),
+    'the probe reads the SAME Folder revision the snapshot was computed on')
+  // A same-id cold replacement is a NEW token: the old probe answers nothing.
+  h.replaceMain('B1_SURFACE_REVISION_TWO')
+  assert.equal(binding.revision(snapshot.source), undefined,
+    'a replaced subject never answers a revision for the old token')
+})
+
+test('current()/resolve() compare the SUBJECT, not only the folder token', async (t) => {
+  const h = await mountSurface(t)
+  const binding = h.binding()
+  const mainSnapshot = binding.snapshot(MAIN_MARKER.toLowerCase())
+  assert.ok(mainSnapshot !== undefined)
+  // Mount a viewed child: same surface, DIFFERENT subject, different folder.
+  h.mountChild('B1_SURFACE_SUBJECT_CHILD')
+  assert.equal(binding.current(mainSnapshot.source), false,
+    'the main token is no longer current once the viewed child is the subject')
+  assert.equal(binding.resolve(mainSnapshot.source, mainSnapshot.matches[0]!), undefined,
+    'an old token never resolves against the successor subject')
+  // Back to main: the ORIGINAL main folder is still its own live subject.
+  h.unmountChild()
+  assert.equal(binding.current(mainSnapshot.source), true,
+    'the same folder under the same main subject is current again')
+})
+
 test('a disposed surface answers nothing: no stale snapshot, no resolution, no currentness', async (t) => {
   const h = await mountSurface(t)
   const binding = h.binding()
