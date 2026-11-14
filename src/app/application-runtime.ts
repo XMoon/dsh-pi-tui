@@ -69,6 +69,13 @@ export interface SelectedApplicationRuntime {
 export interface ClientUiStartupFacts {
   readonly sessionId?: string
   readonly presetId?: string
+  /**
+   * The public CLI Session launch intent (M6-2A). Mutually exclusive with the
+   * exact `sessionId` above; the Client-local `tuiStartup` forwards it to the
+   * existing `bootstrap.ts` Session resolver. Type-only import: this module
+   * stays transport-neutral and never pulls the startup row's runtime deps.
+   */
+  readonly sessionLaunch?: import('../startup.ts').CliSessionLaunchIntent
 }
 
 /**

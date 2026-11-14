@@ -12,6 +12,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { parseCmdline } from '@deepseek-ai/dsh-cmdline'
+import z from '@deepseek-ai/schemastery'
 import compatMatrix from './dsh-compat-matrix.json' with { type: 'json' }
 
 // ── Inline version helpers (startup must stay a ZERO-DEPENDENCY island) ────
@@ -314,6 +315,147 @@ export interface TuiStartupValues {
 }
 
 /**
+ * Service provided when the invocation selects the local daemon backend
+ * (M6-2A). The daemon-launcher row injects it, launches exactly one foreground
+ * Client OS process, and waits for its real exit.
+ */
+export const TUI_DAEMON_STARTUP_SERVICE = 'tuiDaemonStartup'
+
+/**
+ * The ONE public backend selector (M6-2A). `direct` keeps the in-process TUI
+ * of earlier releases; `daemon` launches one foreground Client against a local
+ * Host. The value is chosen per cold launch from the environment override or
+ * the persisted Profile Config — never a CLI flag and never a hot switch.
+ */
+export type PublicBackend = 'direct' | 'daemon'
+
+/** The environment variable that overrides the persisted Profile backend for
+ *  one cold launch. It is never written back to the Profile. */
+const BACKEND_ENV = 'DSH_PI_TUI_BACKEND'
+
+/** What the daemon-launcher row reads from {@link TUI_DAEMON_STARTUP_SERVICE}. */
+export interface TuiDaemonStartupValues {
+  /** The public CLI Session launch intent, resolved Client-locally against the
+   *  official Host roster (never an exact-id field). */
+  readonly sessionLaunch?: CliSessionLaunchIntent
+  /** `--preset`, the agent preset a fresh session starts on. */
+  readonly presetId?: string
+  /**
+   * Mark the daemon Coordinator (the launcher row) as mounted. The readiness
+   * handshake the daemon branch registers exits nonzero when readiness commits
+   * without it — i.e. the launcher row is missing, failed or pending on
+   * `tuiDaemonStartup`. Optional so structural test providers may omit it.
+   */
+  markCoordinatorMounted?(): void
+}
+
+/**
+ * The row's Profile Config: the persisted backend selector. `.volatile()`
+ * projects the field into the official Settings form and keeps it live-editable
+ * (M6-2A writes it through the official revision-checked settings mutation); the
+ * selector reads it back via `config.backend.get()` at cold launch. The value is
+ * a plain string on purpose: an out-of-band illegal value then fails closed in
+ * THIS row with an explicit reason, instead of a Loader schema rejection that
+ * would also block an explicit environment override.
+ */
+export interface Config {
+  readonly backend: { readonly get: () => string }
+}
+export const Config: z<Config> = z.object({
+  backend: z.string().default('direct').volatile(),
+}) as unknown as z<Config>
+
+/** A fail-closed backend-decision error: a stable code plus an actionable line.
+ *  It is delivered on stderr and exits nonzero before any startup side effect. */
+interface BackendDecisionError {
+  readonly kind: 'error'
+  readonly code: string
+  readonly message: string
+}
+
+/** Resolve the daemon platform/tty prerequisite, or undefined when satisfiable.
+ *  Daemon is a local-Linux foreground process that owns a real interactive TTY;
+ *  an unsupported OS or a non-interactive launch must fail closed with a reason. */
+function daemonPrerequisiteError(): BackendDecisionError | undefined {
+  if (process.platform !== 'linux') {
+    return {
+      kind: 'error',
+      code: 'unsupported-platform',
+      message: `the daemon backend is only supported on Linux (this is ${process.platform}); use DSH_PI_TUI_BACKEND=direct or unset it`,
+    }
+  }
+  if (process.stdin.isTTY !== true && process.stdout.isTTY !== true) {
+    return {
+      kind: 'error',
+      code: 'no-interactive-tty',
+      message: 'the daemon backend requires an interactive terminal (no TTY was detected)',
+    }
+  }
+  return undefined
+}
+
+/** Read the persisted Profile backend. An absent config (a structural test
+ *  provider mounting the row without the Loader schema) resolves to the schema
+ *  default, so a bare `apply(ctx)` keeps the historical Direct behavior. */
+function profileBackendOf(config: Config | undefined): string {
+  const ref = config?.backend
+  if (ref === undefined || typeof ref.get !== 'function') return 'direct'
+  return ref.get()
+}
+
+/**
+ * The ONE frozen public-backend decision for a cold launch.
+ *
+ * Precedence is fixed (plan §5): `DSH_PI_TUI_BACKEND` > Profile backend >
+ * `direct`. An empty or unknown environment value is an illegal input, never
+ * "unset" and never a Direct fallback. An illegal Profile value fails closed
+ * unless an explicit valid environment value overrides it for this launch.
+ */
+function resolveBackendDecision(config: Config | undefined): { kind: 'ok'; backend: PublicBackend; source: 'env' | 'profile' } | BackendDecisionError {
+  const envRaw = process.env[BACKEND_ENV]
+  if (envRaw !== undefined) {
+    if (envRaw === 'direct' || envRaw === 'daemon') {
+      if (envRaw === 'daemon') {
+        const error = daemonPrerequisiteError()
+        if (error !== undefined) return error
+      }
+      return { kind: 'ok', backend: envRaw, source: 'env' }
+    }
+    // Empty string or any other value is an illegal input, not "unset".
+    return {
+      kind: 'error',
+      code: 'invalid-backend',
+      message: `${BACKEND_ENV} must be "direct" or "daemon" (got ${JSON.stringify(envRaw)})`,
+    }
+  }
+  const profileRaw = profileBackendOf(config)
+  if (profileRaw === 'direct' || profileRaw === 'daemon') {
+    if (profileRaw === 'daemon') {
+      const error = daemonPrerequisiteError()
+      if (error !== undefined) return error
+    }
+    return { kind: 'ok', backend: profileRaw, source: 'profile' }
+  }
+  return {
+    kind: 'error',
+    code: 'invalid-backend',
+    message: `the tui-startup Profile backend must be "direct" or "daemon" (got ${JSON.stringify(profileRaw)})`,
+  }
+}
+
+/** The actionable error for a committed daemon startup whose Coordinator never
+ *  mounted. The launcher row is missing, failed or still pending on
+ *  `tuiDaemonStartup`; DSH treats that as an optional plugin failure, so the
+ *  explicitly requested launch owns the verdict. */
+function coordinatorNotMountedMessage(): string {
+  return [
+    `dsh-pi-tui ${bundleVersionLabel(CURRENT_DSH_REQUIREMENT.since)} was invoked for the daemon backend, but the daemon launcher row did not mount.`,
+    'The pi-tui-daemon-launcher row failed to import/apply or stayed pending on tuiDaemonStartup (see the loader warnings above); DSH app-boot treats that as an optional plugin failure.',
+    'This installation cannot start the daemon TUI; reinstall the profile or fix its composition, then re-run: DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui',
+  ].join('\n')
+}
+
+/**
  * The actionable error for a committed startup whose TUI surface never
  * mounted. The launcher proved the tree booted, but `--profile pi-tui` asked
  * for this surface, so the outcome is an error rather than an optional plugin
@@ -504,7 +646,7 @@ function installModelListingLogInterceptor(): () => void {
  * nothing is provided, so no TUI row mounts.
  * @param ctx - plugin context carrying the command line.
  */
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config?: Config): void {
   const program = tuiCommand()
   program.action(() => {
     // The CLI grammar is read and validated FIRST: a conflicting Session
@@ -527,6 +669,24 @@ export function apply(ctx: Context): void {
         : typeof options.session === 'string' && options.session.trim() !== ''
           ? { kind: 'lookup', query: options.session.trim() }
           : { kind: 'browse', query: '' }
+    // The real M4-A0 Host-only process keeps the historical `tuiStartup` Host
+    // overlay path unchanged: it never consumes the public backend selector.
+    if (!isHostOnlyRole()) {
+      // Resolve the ONE frozen public-backend decision BEFORE any side effect
+      // (no model-listing interception, no readiness handshake, no service
+      // publication, no Host Session/Workspace action). A fail-closed decision
+      // writes only a stable code plus an actionable line and exits nonzero.
+      const decision = resolveBackendDecision(config)
+      if (decision.kind === 'error') {
+        process.stderr.write(`\ndsh-pi-tui: cannot start (${decision.code}): ${decision.message}\n\n`)
+        ctx.get('appExit')?.(1)
+        return
+      }
+      if (decision.backend === 'daemon') {
+        publishDaemonStartup(ctx, sessionLaunch, options.preset)
+        return
+      }
+    }
     // The model-listing interception is installed as early as the action
     // allows: the provider's listing diagnostics arrive while the session
     // connects, so the interception must be in place before this row
@@ -617,4 +777,47 @@ export function apply(ctx: Context): void {
     } satisfies TuiStartupValues)
   })
   parseCmdline(ctx, program)
+}
+
+/**
+ * Publish the daemon startup service. The daemon-launcher row injects it,
+ * spawns exactly ONE foreground Client OS process and waits for its real exit.
+ *
+ * The daemon supervisor paints no TUI, so it installs no console interception
+ * and never arms the Direct surface handshake. It owns the compatibility notice
+ * and one `coordinatorMounted` cold-ready handshake: readiness that commits
+ * without the launcher row having mounted (missing/failed/pending) is an error,
+ * not a silent optional failure.
+ */
+function publishDaemonStartup(
+  ctx: Context,
+  sessionLaunch: CliSessionLaunchIntent | undefined,
+  presetId: string | undefined,
+): void {
+  const installed = installedDshVersion()
+  if (installed !== undefined) {
+    const entry = harnessCompatEntryFor(installed)
+    if (entry !== undefined) process.stderr.write(`\n${incompatibleHarnessMessage(installed, entry)}\n\n`)
+  }
+  let coordinatorMounted = false
+  const ready = ctx.get('appReady')
+  if (ready !== undefined) {
+    let registrationReturned = false
+    const cancel = ready.onReady(() => {
+      // A callback that ran INSIDE `onReady` means readiness was committed
+      // before this row existed (an HMR re-apply); this row witnessed no
+      // startup and delivers no verdict.
+      if (!registrationReturned) return
+      if (coordinatorMounted) return
+      process.stderr.write(`\n${coordinatorNotMountedMessage()}\n\n`)
+      ctx.get('appExit')?.(1)
+    })
+    registrationReturned = true
+    ctx.effect(() => () => { cancel() }, 'tui-daemon-startup readiness handshake')
+  }
+  ctx.provide(TUI_DAEMON_STARTUP_SERVICE, {
+    ...(sessionLaunch !== undefined ? { sessionLaunch } : {}),
+    ...(presetId !== undefined ? { presetId } : {}),
+    markCoordinatorMounted: () => { coordinatorMounted = true },
+  } satisfies TuiDaemonStartupValues)
 }

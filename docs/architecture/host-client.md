@@ -147,12 +147,52 @@ Must-not:
   contract).
 - Spread a generated Remote namespace or detach a receiver-sensitive method
   (`const on = source.remote.$on; on(...)`).
-- Add a public `--backend`/env/config Remote selector before the migration
-  milestone authorizes it.
+- Add a public backend or Remote selector beyond the authorized
+  `DSH_PI_TUI_BACKEND` / `tui-startup.backend` (`direct | daemon`) contract in
+  "Public backend selection" below, and never a `--backend` CLI flag.
 
 Generated Client/Remote objects must keep their identity and prototype
 accessors; a fixture must reproduce production prerequisites without adding a
 second Host service or runtime graph.
+
+## Public backend selection (`direct | daemon`)
+
+`dsh --profile pi-tui` selects ONE backend per cold launch. The single
+configuration authority is the official Profile Config `tui-startup.backend`
+(rendered by the startup row's `.volatile()` schema), overridable for one launch
+by the `DSH_PI_TUI_BACKEND` environment variable. The fixed precedence is
+`DSH_PI_TUI_BACKEND` > Profile backend > `direct`, and `direct` is the default.
+There is no `--backend` CLI flag and no `wire-local` alias: an empty or unknown
+environment value (including case variants) is an illegal input that fails
+closed with a stable reason, never a silent Direct fallback; an illegal Profile
+value fails closed unless a valid environment value overrides it for that launch.
+
+The startup row publishes exactly one service. `direct` publishes the existing
+`tuiStartup` (the in-process Direct TUI). `daemon` publishes
+`tuiDaemonStartup`, and the `pi-tui-daemon-launcher` row spawns exactly ONE
+foreground Client (`dist/local-client.mjs`) that authenticates the local Host and
+mounts the real surface, then the CLI process waits for that Client's real exit.
+The daemon supervisor owns no Host: the Client entry authenticates/ensures the
+one Profile Host itself, and the launcher never calls `ensureLocalHost`, binds a
+Host seat or creates a Session/Agent/Writer. Under the daemon supervisor the
+Host-business Loader rows that do not gate on `tuiStartup` (visual tools, job
+controller, workspace history bootstrap, file references) and the `webserver`
+required entry are conditionally disabled, so the short-lived supervisor PID owns
+no second Host authority and never trips a required-entry startup failure.
+
+The `--session` / `-c` / `--preset` launch intent reaches the Client as ONE
+public `sessionLaunch` value resolved Client-locally by the existing
+`app/bootstrap.ts` Session runner (Host roster, Workspace membership, exact
+resume) — never an exact-id bypass. It is dropped on Client reexec so the
+confirmed exact Session is restored instead of re-running the public intent.
+
+The daemon backend is the LOCAL Linux split process: it requires a real
+interactive TTY, and an unsupported OS or a non-interactive launch fails closed.
+Selection is cold-launch only: writing the Profile value shows "applies on next
+launch" and never hot-switches the running process or restarts the Host, and an
+environment override never writes back to the Profile. The `.volatile()` Config
+value lets a Direct and a Remote TUI Client read and write the same Host Profile
+node through the official revision-checked Settings mutation.
 
 ## Split-process local Host transport
 

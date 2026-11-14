@@ -38,6 +38,10 @@ const bundleConfig = defineConfig({
     // M5-W PR-C: the profile-owned Web startup preference row. Same precedent:
     // the canonical nested Host module is exposed under a flat package subpath.
     { 'web-preferences': './src/app/host/web-preferences.ts' },
+    // M6-2A: the daemon Coordinator Loader row. Canonical nested module
+    // (app/remote-process), flat dist subpath for the Loader. It is a plugin
+    // entry, never a `bin` and never a public executable export.
+    { 'daemon-launcher': './src/app/remote-process/daemon-launcher.ts' },
   ],
   format: ['esm'],
   outDir: 'dist',

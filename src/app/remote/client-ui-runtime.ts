@@ -80,6 +80,7 @@ export async function createRemoteClientUiRuntime(
   const startupFacts = Object.freeze({
     ...(options.startup.sessionId === undefined ? {} : { sessionId: options.startup.sessionId }),
     ...(options.startup.presetId === undefined ? {} : { presetId: options.startup.presetId }),
+    ...(options.startup.sessionLaunch === undefined ? {} : { sessionLaunch: options.startup.sessionLaunch }),
   })
 
   // Each fiber is assigned BEFORE it is awaited (the client-runtime.ts

@@ -19,11 +19,11 @@ export interface SettingsRailTerminal {
   getViewport(): readonly string[]
 }
 
-/** The painted category order of the Settings rail (the nine fixed categories;
+/** The painted category order of the Settings rail (the ten fixed categories;
  *  `Extensions` exists only while the extension settings registry has live
  *  rows, so a walk to it selects it by label after the registration). */
 export const SETTINGS_CATEGORY_ORDER = [
-  'About', 'Models', 'Account', 'Agent', 'Appearance',
+  'About', 'General', 'Models', 'Account', 'Agent', 'Appearance',
   'Conversation', 'Input & Terminal', 'Tools', 'Plugins',
 ] as const
 
@@ -32,7 +32,7 @@ export const SETTINGS_CATEGORY_ORDER = [
  *  the rail's own labels are the witness. */
 export function settingsRailVisible(vt: SettingsRailTerminal): boolean {
   return vt.getViewport().map(stripTerminalSequences)
-    .some(line => /^(?:> | {2})(?:About|Models|Account|Agent|Appearance|Conversation|Input & Terminal|Tools|Plugins|Extensions)(?: {2,}|\s*$)/u.test(line))
+    .some(line => /^(?:> | {2})(?:About|General|Models|Account|Agent|Appearance|Conversation|Input & Terminal|Tools|Plugins|Extensions)(?: {2,}|\s*$)/u.test(line))
 }
 
 /**

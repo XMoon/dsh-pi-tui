@@ -216,6 +216,10 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         read: () => undefined,
         setAutoStart: async (_value: boolean, _revision: number) => {},
       },
+      backendStartupPreference: {
+        read: () => undefined,
+        setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
+      },
     },
     hostFile: new DirectHostFilePort(() => undefined, null),
     hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },

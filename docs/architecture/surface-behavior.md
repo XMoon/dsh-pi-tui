@@ -626,10 +626,10 @@ preference.
 `/settings` and its real alias `/status` open ONE fullscreen lease with ONE
 navigation focus state. The category rail is the selection owner; the right
 column is the content. Width only projects panes (≥108 three, 76–107 two, <76
-one). The category order is the fixed `About, Models, Account, Agent, Appearance,
-Conversation, Input & Terminal, Tools, Plugins`, and ONE conditional
+one). The category order is the fixed `About, General, Models, Account, Agent,
+Appearance, Conversation, Input & Terminal, Tools, Plugins`, and ONE conditional
 `Extensions` is appended while the extension settings registry reports live
-rows (nine vs ten painted categories; no hardcoded count anywhere). Both
+rows (ten vs eleven painted categories; no hardcoded count anywhere). Both
 `/settings` and `/status` run the same handler and land on `About` with
 identical initial focus and entry-refresh behavior. `/footer` and its
 `/statusline` alias take this SAME lease and mount the Footer layout page;
@@ -805,17 +805,20 @@ specialist-page contract below).
   A transient choice, a pending write and the in-place Plugin Manager keep their
   own keys; every region jump lands on the destination's first candidate and
   bumps the pointer-press revision, so a straddling click cannot activate it.
-- The configuration categories (`Agent`, `Appearance`, `Conversation`, `Input &
-  Terminal`, `Tools`, and the conditional `Extensions`) keep their three-level
-  browse (L0 categories, L1 rows, L2 detail). `About`, `Models`, `Account` and
-  `Plugins` remain direct content pages.
-- Twenty configuration rows are writable, in writer kinds that are never
+- The configuration categories (`General`, `Agent`, `Appearance`, `Conversation`,
+  `Input & Terminal`, `Tools`, and the conditional `Extensions`) keep their
+  three-level browse (L0 categories, L1 rows, L2 detail). `About`, `Models`,
+  `Account` and `Plugins` remain direct content pages. `General` holds the ONE
+  startup backend row.
+- Twenty-one configuration rows are writable, in writer kinds that are never
   conflated: the configured theme, the transcript display preset, the icon style,
   the mid-turn progress-updates cadence, the response style, Git attribution,
   Home/End keys, Mouse wheel lines, Notifications, Notification method,
   Terminal progress and the `Agent` user-shell sandbox policy are persisted
   through the ONE serialized TUI settings document; the profile-wide
-  `Visual tools` switch is the Host profile's revision-checked form section;
+  `Visual tools` switch and the `General` startup backend (`Direct`/`Daemon`)
+  selector are the Host profile's revision-checked form sections
+  (`pi-tui-visual-tools` and `tui-startup.backend`);
   the `Agent` `Approval policy` is the official per-Session durable policy
   event (write-through, no document field), `Default permission` is the Host
   permission default, and
@@ -1171,6 +1174,26 @@ specialist-page contract below).
   Workspace contract above).
 - The screen lease/currentness mechanics are owned by
   [overlay-focus.md](./overlay-focus.md).
+
+### Startup backend (General)
+
+`/settings → General → Backend` is the ONE writable row in the `General`
+category. Its candidates are `Direct` and `Daemon`, persisted to the official
+Profile Config `tui-startup.backend` (`direct`/`daemon`) through the same
+revision-checked Settings mutation the other Host form rows use; an explicit
+`Direct` or `Daemon` choice is the sole persisted authority and the current
+process's backend is never read from this row.
+
+The value is a NEXT cold-launch fact. The `Runtime` half always states
+`Applies on next launch; current TUI/Host remains unchanged`: a verified write
+never hot-switches the running process, never spawns or stops a Host, and never
+changes the current backend. The summary marks `(default)` only while the USER
+layer does not declare the value; a Profile section that is unreadable or
+carries an illegal value is `Unavailable` and cannot be edited, never silently
+shown as the shipped `direct` default. When `DSH_PI_TUI_BACKEND` is set for the
+current launch, the Detail adds ONE read-only `Current launch: … (environment
+override)` fact (an illegal override value is reported too); that fact is a
+launch input only and is never written back into the persisted preference.
 
 ### Models page
 

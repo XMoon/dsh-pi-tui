@@ -92,8 +92,8 @@ test('every breakpoint projects the frozen plugin columns in all three stages', 
       assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 0, `${width}: the list starts at x=0`)
     } else {
       // >=120: `Categories | List | Details`; the rail stays visible.
-      const header = rowOf(harness, 'Categories (9)')
-      assert.equal(columnOf(harness, header, 'Categories (9)'), 0, `${width}: the rail owns the leading column`)
+      const header = rowOf(harness, 'Categories (10)')
+      assert.equal(columnOf(harness, header, 'Categories (10)'), 0, `${width}: the rail owns the leading column`)
       assert.equal(columnOf(harness, header, '[Plugins]'), 24, `${width}: the list starts after the rail + gutter`)
       assert.match(listRows[header]!, /Details/u, `${width}: the third column is painted`)
       assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 24, `${width}: the list body starts at x=24`)
@@ -128,8 +128,8 @@ test('every breakpoint projects the frozen plugin columns in all three stages', 
       assert.doesNotMatch(harness.view(), /Search: \//u, `${width}: a narrow rail paints no plugin content`)
       assert.match(harness.view(), /> Plugins/u, `${width}: Plugins stays selected`)
     } else {
-      const header = rowOf(harness, 'Categories (9)')
-      assert.equal(columnOf(harness, header, '[Categories (9)]'), 0, `${width}: the rail is the ONE active device`)
+      const header = rowOf(harness, 'Categories (10)')
+      assert.equal(columnOf(harness, header, '[Categories (10)]'), 0, `${width}: the rail is the ONE active device`)
       assert.equal(columnOf(harness, header, 'Plugins'), 24, `${width}: the preview starts after the rail`)
       if (width >= 120) {
         assert.match(railRows[header]!, /Details/u, `${width}: >=120 previews the Details column`)
@@ -477,7 +477,7 @@ test('a same-category rail click never steals a plugin sub-view Esc gradient', a
 
   const fullWidth = await open({ columns: 120, rows: 24 })
   await openRemoveConfirm(fullWidth)
-  assert.doesNotMatch(fullWidth.view(), /Categories \(9\)/u, 'the confirmation paints no Categories rail to click')
+  assert.doesNotMatch(fullWidth.view(), /Categories \(10\)/u, 'the confirmation paints no Categories rail to click')
   assert.equal(fullWidth.panel.focused, true)
   fullWidth.vt.sendInput('\x1b')
   await fullWidth.waitForFrame()
@@ -486,7 +486,7 @@ test('a same-category rail click never steals a plugin sub-view Esc gradient', a
 
   const install = await open({ columns: 120, rows: 24 })
   await openInstall(install)
-  assert.doesNotMatch(install.view(), /Categories \(9\)/u, 'the install view paints no Categories rail to click')
+  assert.doesNotMatch(install.view(), /Categories \(10\)/u, 'the install view paints no Categories rail to click')
   assert.equal(install.panel.focused, true)
   // The page's own Esc gradient (edit -> hide) runs first and never closes the
   // Settings lease: the same sub-view safety the rail click must not bypass.
@@ -621,7 +621,7 @@ test('an App notice between press and release refuses the Host mutation', async 
   await yieldToRail(railWheel)
   railWheel.vt.sendInput('\u001b[H') // Home -> the rail window starts at About
   await railWheel.waitForFrame()
-  const railLabels = ['About', 'Models', 'Account', 'Agent', 'Appearance', 'Conversation', 'Input & Terminal', 'Tools', 'Plugins', 'Extensions']
+  const railLabels = ['About', 'General', 'Models', 'Account', 'Agent', 'Appearance', 'Conversation', 'Input & Terminal', 'Tools', 'Plugins', 'Extensions']
   const visibleRail = (): string[] => frameRows(railWheel)
     .map(line => line.slice(0, 22).trim())
     .map(cell => cell.replace(/^> /u, ''))
@@ -863,7 +863,7 @@ test('the 119<->120 and 75<->76 width boundaries refuse a straddling gesture', a
   await selectCard(toWide, 'bundle:@vendor/foo')
   // 76..119 with the content focused is the adjacent pair WITHOUT the rail, so
   // the same screen cell changes meaning across the boundary.
-  assert.doesNotMatch(toWide.view(), /Categories \(9\)/u, '119 content focus paints no Categories rail')
+  assert.doesNotMatch(toWide.view(), /Categories \(10\)/u, '119 content focus paints no Categories rail')
   assert.match(toWide.view(), /\[Plugins\]/u, '119 paints the shared pane header')
   const wideRow = rowOf(toWide, '> @vendor/foo')
   press(toWide, wideRow, 6)
@@ -1240,7 +1240,7 @@ test('the 76..119 Categories+List preview reprojects the mouse after the focus s
   // the content at x=0 — so the same screen cell changes meaning.
   const harness = await open({ columns: 100, rows: 24 })
   await yieldToRail(harness)
-  assert.match(harness.view(), /Categories \(9\)/u, 'the rail-focused medium frame paints the Categories column')
+  assert.match(harness.view(), /Categories \(10\)/u, 'the rail-focused medium frame paints the Categories column')
   assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 24, 'the preview starts after the rail')
   const previewCard = rowOf(harness, '@vendor/foo')
   assert.ok(previewCard >= 0, `the preview paints the third-party card:
@@ -1260,7 +1260,7 @@ ${harness.view()}`)
 
   // The focus switch changed the projection: the content column is now x=0.
   assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 0, 'the content took the leading column')
-  assert.doesNotMatch(harness.view(), /Categories \(9\)/u, 'the rail is gone while the content owns the keys')
+  assert.doesNotMatch(harness.view(), /Categories \(10\)/u, 'the rail is gone while the content owns the keys')
 
   // A click at the NEW coordinate on the SELECTED card opens Details.
   const reprojected = rowOf(harness, '> @vendor/foo')
@@ -2017,7 +2017,7 @@ test('the plugin Host notice and the ONE root App notice never overwrite each ot
   const appNoticeRow = rowOf(harness, 'context measurement failed')
   const hostNoticeRow = rowOf(harness, 'plugin inventory is stale')
   const headerRow = rowOf(harness, 'Settings · Plugins')
-  const paneHeaderRow = rowOf(harness, 'Categories (9)')
+  const paneHeaderRow = rowOf(harness, 'Categories (10)')
   assert.ok(appNoticeRow > headerRow && appNoticeRow < paneHeaderRow, 'the App notice is ONE root row above the pane header')
   assert.ok(hostNoticeRow > paneHeaderRow, 'the plugin Host notice stays inside the business body')
   assert.equal(frame.filter(line => line.includes('context measurement failed')).length, 1, 'the App notice is painted exactly once')
