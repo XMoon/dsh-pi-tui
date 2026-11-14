@@ -1035,10 +1035,11 @@ test('same session id with a NEW Agent object never lets the old Agent facts rea
   await view.registry.resumeSession(view.conn, view.access, { sessionId: 'P1', cwd: '/w' })
   const attempt = view.start()
   const request = view.access.promptCalls[0]!
-  // The OLD Agent object's facts are inert.
-  view.insert(request.requestId, 'm-1')
-  view.registry.onInboxInserted(view.agent, view.message('m-old', request.requestId))
-  view.registry.onInboxClaimed(view.agent, view.message('m-old', request.requestId), 1)
+  // The OLD Agent object's facts are inert. Its own request ids never match
+  // this attached generation, and it must not be mistaken for a foreign
+  // acceptance of the CURRENT request id.
+  view.registry.onInboxInserted(view.agent, view.message('m-old-other', 'old-generation-request'))
+  view.registry.onInboxClaimed(view.agent, view.message('m-old', 'old-generation-request'), 1)
   view.commit('assistant/message', assistantData(1, 'm-old', [{ type: 'text', text: 'old agent answer' }]))
   assert.equal(view.notifications.length, 0, 'the old Agent generation is never projected')
   // The CURRENT Agent object's exact facts settle the prompt.
@@ -1110,4 +1111,62 @@ test('the production Host access subscribes the prompt fact sink and disposes ex
   ], 'each official event reaches the sink with its real identity payload')
   dispose()
   assert.equal([...listeners.values()].every(set => set.size === 0), true, 'the disposer removes exactly its own listeners')
+})
+
+test('a prompt is refused before dispatch when the borrowed Agent/Session is stale', async () => {
+  const view = promptView()
+  await view.attach()
+  // The Host retires its live Agent while the View is still attached; the
+  // official Controller would cold-resume a NEW Agent for the same Session.
+  view.access.remove('P1')
+  await assert.rejects(view.start(), isPromptError('LOCAL_ACP_PROMPT_STALE_AGENT'))
+  assert.equal(view.access.promptCalls.length, 0, 'a stale borrowed identity must never reach the Host prompt')
+  assert.equal(view.registry.phaseOf(view.conn), 'attached', 'the View stays attached for a real re-attach')
+})
+
+test('an accepted request on a DIFFERENT Agent generation fails bounded and is never re-dispatched', async () => {
+  const view = promptView()
+  await view.attach()
+  // Same session id, but a DISTINCT Agent object: what the official Controller
+  // cold-resumes while the async resolve runs. It accepts OUR requestId.
+  const foreignAgent = makeAgent('P1', '/w')
+  view.access.promptImpl = async request => {
+    view.registry.onInboxInserted(foreignAgent, { id: 'm-foreign-gen', source: { kind: 'user', rpcId: request.requestId } })
+    return { accepted: true as const }
+  }
+  await assert.rejects(view.start(), isPromptError('LOCAL_ACP_PROMPT_STALE_AGENT'))
+  assert.equal(view.access.promptCalls.length, 1, 'the accepted request is never re-dispatched')
+  // The foreign generation's later facts stay inert for this View.
+  view.registry.onInboxClaimed(foreignAgent, {
+    id: 'm-foreign-gen',
+    source: { kind: 'user', rpcId: view.access.promptCalls[0]!.requestId },
+  }, 1)
+  assert.equal(view.notifications.length, 0)
+})
+
+test('an acceptance whose exact identity changed during resolve fails bounded', async () => {
+  const view = promptView()
+  await view.attach()
+  view.access.promptImpl = async () => {
+    view.access.remove('P1')
+    return { accepted: true as const }
+  }
+  await assert.rejects(view.start(), isPromptError('LOCAL_ACP_PROMPT_STALE_AGENT'))
+  assert.equal(view.access.promptCalls.length, 1, 'the request is never retried')
+})
+
+test('a failed turn without assistant text keeps its REAL terminal classification', async () => {
+  for (const kind of ['blocked', 'error', 'aborted', 'interrupted'] as const) {
+    const view = promptView()
+    await view.attach()
+    const attempt = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-1')
+    view.claim('m-1', 1, request.requestId)
+    // No assistant message at all before the failed terminal.
+    view.commit('turn/end', { turn: 1, reason: { kind } })
+    await assert.rejects(attempt, (error: unknown) => error instanceof LocalAcpViewError
+      && error.code === 'LOCAL_ACP_PROMPT_TURN_FAILED'
+      && error.data.reason === kind)
+  }
 })
