@@ -2,17 +2,15 @@
  * The test LANE RUNNER's cross-platform command-line contract.
  *
  * The runner passes the lane's file list to Node's test runner as command
- * line arguments. The ABSOLUTE form of that list exceeds the Windows
- * command-line limit: the product lane is ~491 files, and absolute paths in a
- * typical Windows checkout total ~60,000 characters against
- * `CreateProcessW`'s 32,767 — so `pnpm test:product` would fail to start
- * on a common Windows development directory, and only the Linux CI would
- * miss it.
+ * line arguments. A Windows process is created with `CreateProcessW`, whose
+ * command line is capped at 32,767 characters, so the runner passes the
+ * discovered list RELATIVE to the repository root and runs the child with
+ * that root as its working directory.
  *
- * The runner therefore passes the list RELATIVE to the repository root and
- * runs the child with that root as its working directory. These cases prove
- * the CONTRACT, not one platform's spelling: the length bound, the relative
- * form, and the working directory the tests depend on.
+ * These cases prove the CONTRACT, not one platform's spelling: one dynamic
+ * budget case measures a representative CI shard+reporter argv against the
+ * Windows limit, and separate cases protect the relative file list, the
+ * child's working directory and the runner's SIGNAL responsibility.
  *
  * The last case owns the runner's SIGNAL contract on POSIX: the child leads
  * its own process group, so the signal reaches the `node --test` worker tree
@@ -24,7 +22,7 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join, relative, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve, win32 } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
@@ -158,61 +156,14 @@ function deferWrapperCleanup(life, { child, closed, marker, descendantFixture = 
  */
 const WINDOWS_COMMAND_LINE_LIMIT = 32_767
 
-/**
- * The command line the runner builds for a lane, in the WINDOWS spelling:
- * a checkout under `C:\Users\<name>\projects\<repo>\`.
- */
-function windowsCommandLineLength(lane) {
-  const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-  const checkout = 'C:\\\\Users\\\\owner\\\\projects\\\\dsh-pi-tui\\\\'
-  const commandArguments = files.map(rel => `${checkout}test\\\\${rel.replaceAll('/', '\\\\')}`)
-  return {
-    // The executable and the fixed flags take a little room too.
-    length: 'C:\\\\Program Files\\\\nodejs\\\\node.exe --test '.length
-      + commandArguments.join(' ').length,
-    fileCount: files.length,
-  }
-}
-
-test('the product lane command line fits the Windows limit in the RELATIVE form', () => {
+test('the product lane CI shard and reporter argv fits the Windows command-line budget', () => {
   const lane = LANES.product
   const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-  const checkout = 'C:\\\\Users\\\\owner\\\\projects\\\\dsh-pi-tui\\\\'
-  // The RELATIVE form the runner uses: the path under the repository root.
-  const relativeArguments = files.map(rel => `test\\\\${rel.replaceAll('/', '\\\\')}`)
-  const length = 'C:\\\\Program Files\\\\nodejs\\\\node.exe --test '.length
-    + relativeArguments.join(' ').length
-  assert.ok(
-    length < WINDOWS_COMMAND_LINE_LIMIT,
-    `the relative command line must fit the Windows limit: ${length} > ${WINDOWS_COMMAND_LINE_LIMIT}`,
-  )
-})
-
-test('the ABSOLUTE form would NOT fit the Windows limit, so the relative form is required', () => {
-  // The regression this protects: if the runner ever goes back to the
-  // absolute form, this case shows the breakage is real.
-  const lane = LANES.product
-  const { length, fileCount } = windowsCommandLineLength(lane)
-  assert.ok(fileCount > 400, `the product lane is the large one: ${fileCount} files`)
-  assert.ok(
-    length > WINDOWS_COMMAND_LINE_LIMIT,
-    `the absolute form must exceed the Windows limit for this case to be meaningful: ${length} <= ${WINDOWS_COMMAND_LINE_LIMIT}`,
-  )
-})
-
-test('the SHARDED command line still fits the Windows limit', () => {
-  // The shard argument and the reporter flag ADD to the command line, and
-  // the shard path is exactly what the CI measurement uses. If the
-  // measurement's own command line did not fit, the sharded lane would
-  // fail to START on a Windows runner — and the failure would look like a
-  // test failure rather than a command-line failure.
-  const lane = LANES.product
-  const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-  const relativeArguments = files.map(rel => `test\\${rel.replaceAll('/', '\\')}`)
-  // The fixed part: the executable, `--test`, the shard argument and the
-  // reporter flag the measurement adds.
-  const fixed = 'C:\\Program Files\\nodejs\\node.exe --test --test-shard=1/4 --test-reporter=C:\\Users\\owner\\projects\\dsh-pi-tui\\scripts\\test-case-reporter.mjs '.length
-  const length = fixed + relativeArguments.join(' ').length
+  const relativeArguments = files.map(rel => win32.join('test', rel))
+  // One representative Windows Node executable and CI reporter path.
+  // Node receives the WHOLE list even when --test-shard is present.
+  const fixed = '"C:\\Program Files\\nodejs\\node.exe" --test --test-shard=1/4 --test-reporter=C:\\Users\\owner\\projects\\dsh-pi-tui\\scripts\\test-case-reporter.mjs '
+  const length = fixed.length + relativeArguments.join(' ').length
   assert.ok(
     length < WINDOWS_COMMAND_LINE_LIMIT,
     `the sharded command line must fit the Windows limit: ${length} >= ${WINDOWS_COMMAND_LINE_LIMIT}`,
