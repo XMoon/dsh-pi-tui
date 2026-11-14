@@ -2565,6 +2565,8 @@ export function applyRunnerWithRuntime(
         webAccess: backend.webAccess,
         // PO-1B: the Split-Client local ACP listener control (Settings row).
         acpAccess: backend.acpAccess,
+        // FR3: the ONE official Host MCP manager port for the Settings page.
+        mcpServers: backend.mcpServers,
         // The selected backend's live semantic completion authority. Direct
         // compgen stays on the in-process compatibility path; Remote calls Host.
         hostShellCompletion: backend.hostShellCompletion,

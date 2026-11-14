@@ -748,7 +748,7 @@ test('the page deeplink is reachable and Esc cancels without a write', async t =
   await key(h, ESC) // list -> Tools rows
   // The root keeps the row's Detail focus, exactly like the allowlist picker
   // return: the Tools rows are painted again with the Web row selected.
-  assert.match(h.view(), /Rows \(5\)/u, 'Esc from the list returns to the Tools rows')
+  assert.match(h.view(), /Rows \(6\)/u, 'Esc from the list returns to the Tools rows')
   assert.match(h.view(), /Configure Web…/u, 'the Web row owns the frame again')
   assert.deepEqual(h.writes, [], 'the whole cancel path wrote nothing')
 })

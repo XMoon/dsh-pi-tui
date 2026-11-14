@@ -41,3 +41,23 @@ export function unavailableAcpAccess(): AcpAccessPort {
     subscribeGeneration: () => () => {},
   }
 }
+
+/** The truthful "no Host MCP manager port" runner seam: a fixture composition
+ *  that owns no MCP server management capability. */
+export function unavailableMcpServers(): import('../../src/runtime/mcp-server-port.ts').McpServerPort {
+  return {
+    watch: async function* () {
+      yield { kind: 'invalidated' as const, reason: 'unavailable' as const }
+    },
+    probe: async (_name: string, _signal: AbortSignal) => ({
+      kind: 'failed' as const,
+      generation: {},
+      failure: { kind: 'unavailable' as const, reason: 'test: no Host MCP manager' },
+    }),
+    restart: async (_name: string, _signal: AbortSignal) => ({
+      kind: 'failed' as const,
+      generation: {},
+      failure: { kind: 'unavailable' as const, reason: 'test: no Host MCP manager' },
+    }),
+  }
+}

@@ -7,7 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { unavailableAcpAccess, unavailableWebAccess } from '../support/web-access-fake.ts'
+import { unavailableAcpAccess, unavailableWebAccess, unavailableMcpServers } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -293,6 +293,7 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
     acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -470,6 +471,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
     acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -644,6 +646,7 @@ test('/footer Esc cancels without writing', async () => {
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
     acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx, app, diag: {} as never,
@@ -733,6 +736,7 @@ test('/footer starts from the persisted custom layout when active', async () => 
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
     acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx, app, diag: {} as never,
@@ -821,6 +825,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
     acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx, app, diag: {} as never,
@@ -948,6 +953,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
     acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx, app, diag: {} as never,
@@ -1067,6 +1073,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
     acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -1196,6 +1203,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
     acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx, app, diag: {} as never,
@@ -1311,6 +1319,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
     acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -1438,6 +1447,7 @@ test('an unsaved custom command draft NEVER executes (preview, resize, Keep Edit
     const runner: TuiCommandRunner = {
       webAccess: unavailableWebAccess(),
       acpAccess: unavailableAcpAccess(),
+      mcpServers: unavailableMcpServers(),
       beginClientWrite: () => () => {},
       deliveredFilesSnapshot: () => undefined,
       ctx, app, diag: {} as never,
@@ -1591,6 +1601,7 @@ test('a FAILED save never executes the new command (draft preserved, marker abse
     const runner: TuiCommandRunner = {
       webAccess: unavailableWebAccess(),
       acpAccess: unavailableAcpAccess(),
+      mcpServers: unavailableMcpServers(),
       beginClientWrite: () => () => {},
       deliveredFilesSnapshot: () => undefined,
       ctx, app, diag: {} as never,
@@ -1710,6 +1721,7 @@ test('a SUCCESSFUL save is the ONLY event that arms the runtime (marker appears 
     const runner: TuiCommandRunner = {
       webAccess: unavailableWebAccess(),
       acpAccess: unavailableAcpAccess(),
+      mcpServers: unavailableMcpServers(),
       beginClientWrite: () => () => {},
       deliveredFilesSnapshot: () => undefined,
       ctx, app, diag: {} as never,

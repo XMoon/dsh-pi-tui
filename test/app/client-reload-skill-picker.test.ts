@@ -23,7 +23,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { unavailableAcpAccess, unavailableWebAccess } from '../support/web-access-fake.ts'
+import { unavailableAcpAccess, unavailableWebAccess, unavailableMcpServers } from '../support/web-access-fake.ts'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -117,6 +117,8 @@ function setup(mode: Mode): Harness {
     webAccess: unavailableWebAccess(),
 
     acpAccess: unavailableAcpAccess(),
+
+    mcpServers: unavailableMcpServers(),
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,

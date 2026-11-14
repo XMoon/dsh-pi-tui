@@ -70,6 +70,7 @@ import type { SessionReader } from './runtime/session-reader-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { SessionWorkspaceFactsPort } from './runtime/session-workspace-facts-port.ts'
 import type { HostDirectoryBrowsePort } from './runtime/host-directory-browse-port.ts'
+import type { McpServerPort } from './runtime/mcp-server-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
 import type {
   CreateSessionRequest,
@@ -507,6 +508,12 @@ export interface TuiCommandRunner {  ctx: Context
    *  `piTuiAcpAccess` service through this ONE semantic surface and never
    *  reaches a Host service, Connection or Gateway directly. */
   readonly acpAccess: AcpAccessPort
+  /** The ONE official Host MCP manager's management port (FR3): the Settings
+   *  `Tools → MCP servers` page reads/probes/restarts through it and never a
+   *  Host service, Connection or Gateway directly. Absent in a composition with
+   *  no Host MCP manager (e.g. a native renderer surface), where the row is
+   *  omitted rather than shown as an inert control. */
+  readonly mcpServers: McpServerPort
   /** Host-owned/direct/remote shell completion capability, never a Client PATH guess. */
   readonly hostShellCompletion: HostShellCompletionPort
   /** The minimal commands registry for the TUI's OWN registrations
