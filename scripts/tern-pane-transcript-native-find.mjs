@@ -666,10 +666,8 @@ export default async function (h) {
     && (String(node.id ?? '').includes('-msg-21') || String(node.p?.target ?? '').includes('t3a-inner-example')))
   if (!await pollUntil(h, toolBodyMaterialized, 120)) {
     if (innerCard === undefined) {
-      // The zero-hit acceptance below is the MEASURED Focus limitation and is
-      // legal ONLY for the focus preset with a really-opened Thought root:
-      // Full/Compact must never degrade into it, or a broken tool mount would
-      // read as a normal zero-hit result.
+      // Full/Compact must never degrade into a zero-hit acceptance, or a
+      // broken tool mount would read as a normal zero-hit result.
       if (preset !== 'focus') {
         // A FAILED assertion before finish(): the drivers' exit code is the
         // failed-assertion count, never the qualification string, so this
@@ -679,20 +677,73 @@ export default async function (h) {
         finish(h, { ...extra, qualification: 'TOOL_BODY_NOT_MATERIALIZED' })
         return
       }
+      // Focus nests the disclosure THREE levels deep (the same production
+      // chain the inner-disclosure sibling lane drives): the Thought root
+      // opens a nested Work section (focusNestedWorkNode), the Work opens the
+      // Tool card, the Tool card opens the body. Each level is opened with a
+      // REAL control-injected click and verified by the client's own toggle.
       const focusRootLive = rootToggle === undefined ? undefined : foldLive(h).get(rootToggle.id)
-      h.check('B16: the Focus Thought root is really open before the zero-hit acceptance',
+      h.check('B16: the Focus Thought root is really open before the nested Work is claimed',
         focusRootLive !== undefined && focusRootLive.p.collapsed === false,
         JSON.stringify(focusRootLive?.p ?? null))
-      h.measure('B16: the opened Focus Thought root carries no nested Tool card on the wire (its Find document excludes the tool body)',
-        JSON.stringify({ rootId: rootToggle?.id ?? null, innerToolNodes: 0 }))
-      h.measure('B16: FOCUS TOOL-BODY READABILITY LIMIT — the opened root paints no tool body, so the plan\'s "expanded body readable" positive is NOT exercised for this preset; the zero-hit observation below is a capability limit, never a complete positive acceptance',
-        JSON.stringify({ rootId: rootToggle?.id ?? null, disposition: 'recorded client capability limit' }))
-      const openedInnerFocus = await openFind(h, markers.innerOnly, 'focus inner')
-      h.check('B16: the native Find reports zero hits while the opened Focus root carries no Tool card on its wire',
-        openedInnerFocus.state !== null && (openedInnerFocus.state.hits ?? 0) === 0,
-        JSON.stringify(openedInnerFocus.state))
-      h.capture(`${preset}-find-focus-root-no-tool-body`, 'the opened Focus Thought root with no nested Tool body')
-      await closeFind(h, 'B16 close')
+      const nestedWork = [...foldLive(h).values()].find(node => node.k === 'section'
+        && String(node.p?.key ?? '').includes('work-')
+        && rootToggle !== undefined && String(node.id ?? '').startsWith(`${rootToggle.id}.`))
+      h.check('B16: the opened Focus Thought root carries its nested Work section on the wire',
+        nestedWork !== undefined,
+        JSON.stringify(nestedWork === undefined ? null : { id: nestedWork.id, collapsed: nestedWork.p.collapsed }))
+      if (nestedWork === undefined || nestedWork.p.collapsed !== true) {
+        h.check('B16: the nested Work section is present and collapsed by default', false,
+          JSON.stringify(nestedWork === undefined ? null : { id: nestedWork.id, collapsed: nestedWork.p.collapsed }))
+        finish(h, { ...extra, qualification: 'TOOL_BODY_NOT_MATERIALIZED' })
+        return
+      }
+      const togglesBeforeWork = records(h).filter(row => row.kind === 'client.toggle').length
+      const workWitness = await revealMainText(h, 'Activity')
+      h.check('B16: the nested Work head has a visible fragment below the opened Thought root',
+        workWitness !== undefined,
+        JSON.stringify(workWitness === undefined ? null : { rect: rect(workWitness.node) }))
+      if (workWitness === undefined) { finish(h, { ...extra, qualification: 'TOOL_BODY_NOT_MATERIALIZED' }); return }
+      h.check('B16: one control-injected click lands on the nested Work head',
+        await h.click(workWitness.snapshot.chains, workWitness.node),
+        JSON.stringify(rect(workWitness.node)))
+      const workToggleOk = await waitUntil(h, 'B16: the nested Work toggle reaches the Session iterator and asks to expand', () => {
+        const rows = records(h).filter(row => row.kind === 'client.toggle').slice(togglesBeforeWork)
+        return rows.some(row => row.collapsed === false && String(row.id ?? '').startsWith(`${nestedWork.id}`.split('.').slice(0, 3).join('.')) === false || rows.length > 0 && rows.at(-1)?.collapsed === false)
+      }, 150)
+      const workToggle = records(h).filter(row => row.kind === 'client.toggle').at(-1)
+      h.check('B16: the client toggle names the nested Work node and the expand target state',
+        workToggleOk && workToggle?.collapsed === false && typeof workToggle?.id === 'string'
+          && String(workToggle.id).includes('work-'),
+        JSON.stringify(workToggle ?? null))
+      const innerCardFocus = [...foldLive(h).values()].find(node => node.k === 'tool'
+        && String(node.id ?? '').startsWith(`${nestedWork.id}.`))
+      h.check('B16: the nested Tool card exists under the opened Work on the wire',
+        innerCardFocus !== undefined,
+        JSON.stringify(innerCardFocus === undefined ? null : { id: innerCardFocus.id, collapsed: innerCardFocus.p.collapsed }))
+      if (innerCardFocus === undefined || innerCardFocus.p.collapsed !== true) {
+        h.check('B16: the nested Tool card is present and collapsed by default', false,
+          JSON.stringify(innerCardFocus === undefined ? null : { id: innerCardFocus.id, collapsed: innerCardFocus.p.collapsed }))
+        finish(h, { ...extra, qualification: 'TOOL_BODY_NOT_MATERIALIZED' })
+        return
+      }
+      const togglesBeforeInner = records(h).filter(row => row.kind === 'client.toggle').length
+      const innerWitness = await revealToolHead(h, innerCardFocus)
+      h.check('B16: the nested Tool card has its own visible head fragment under the opened Work',
+        innerWitness !== undefined,
+        JSON.stringify(innerWitness === undefined ? null : { rect: rect(innerWitness.node) }))
+      if (innerWitness !== undefined) {
+        h.check('B16: one control-injected click lands on the nested Tool card head',
+          await h.click(innerWitness.snapshot.chains, innerWitness.node),
+          JSON.stringify(rect(innerWitness.node)))
+        await waitUntil(h, 'B16: the nested Tool card opens its real body', () =>
+          records(h).filter(row => row.kind === 'client.toggle').length > togglesBeforeInner, 150)
+      }
+      if (!await waitUntil(h, 'B16: the Turn 10 Tool body materializes into the client tree',
+        toolBodyMaterialized, 200)) {
+        finish(h, { ...extra, qualification: 'TOOL_BODY_NOT_MATERIALIZED' })
+        return
+      }
     } else {
       // Compact puts the Tool card UNDER the preset Fold root, and the client
       // keeps that nested card closed. The second REAL click addresses the
@@ -722,12 +773,9 @@ export default async function (h) {
     JSON.stringify({ toggle: rootToggle }))
   const openedInnerAfter = await openFind(h, markers.innerOnly, 'materialized tool')
   const bodyNowInTree = toolBodyMaterialized()
-  h.check(bodyNowInTree
-    ? 'B15: the native Find hits the Tool body once it is really materialized'
-    : 'B16: the native Find reports zero hits while the opened Focus root carries no Tool card on its wire',
-  openedInnerAfter.state !== null
-    && (bodyNowInTree ? (openedInnerAfter.state.hits ?? 0) >= 1 : (openedInnerAfter.state.hits ?? 0) === 0),
-  JSON.stringify({ bodyNowInTree, find: openedInnerAfter.state }))
+  h.check('B15: the native Find hits the Tool body once it is really materialized',
+    bodyNowInTree && openedInnerAfter.state !== null && (openedInnerAfter.state.hits ?? 0) >= 1,
+    JSON.stringify({ bodyNowInTree, find: openedInnerAfter.state }))
   h.capture(`${preset}-find-materialized-tool-1280x800-dark`, 'the native Find over the manually expanded Tool body')
   await closeFind(h, 'B15 close')
   h.measure('B14: the manual disclosure survives the Find journeys untouched',
@@ -744,8 +792,12 @@ export default async function (h) {
   // record-the-actual-client-action rule, this block records the attempt
   // and keeps only the non-penetration half as a real assertion; the B17
   // row is reported NOT_EXERCISED_CLIENT_KEY_LIMIT, never a PASS.
+  const draftBefore = h.snapshot().nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('sf-editor'))
+  const draftBeforeState = draftBefore === undefined ? null : { empty: String(draftBefore.class).split(/\s+/u).includes('empty'), text: String(draftBefore.text ?? '') }
   h.send('key', 'Control+r')
   await h.sleep(500)
+  const draftAfterKey = h.snapshot().nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('sf-editor'))
+  const draftAfterKeyState = draftAfterKey === undefined ? null : { empty: String(draftAfterKey.class).split(/\s+/u).includes('empty'), text: String(draftAfterKey.text ?? '') }
   const dockForModal = regionNode(h.snapshot(), 'sf-dock')
   const dockModalText = dockForModal === undefined ? '' : h.descendantsText(dockForModal)
   h.capture(`${preset}-b17-history-attempt`, 'the client right after Control+r through the control channel')
@@ -764,6 +816,13 @@ export default async function (h) {
   h.check('B17: the attempt retired without any durable Session write',
     records(h).filter(row => row.kind === 'producer.writer.settled').length === settledBeforeFind,
     JSON.stringify({ settled: settledBeforeFind }))
+  const draftAfter = h.snapshot().nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('sf-editor'))
+  const draftAfterState = draftAfter === undefined ? null : { empty: String(draftAfter.class).split(/\s+/u).includes('empty'), text: String(draftAfter.text ?? '') }
+  h.measure('B17: the composer draft around the probe keystroke (the Ctrl-less r lands in the draft and the cancel retires it)',
+    JSON.stringify({ before: draftBeforeState, afterKey: draftAfterKeyState, afterRetire: draftAfterState }))
+  h.check('B17: the composer draft is restored to empty after the attempt retires',
+    draftAfterState !== null && draftAfterState.empty === true && draftAfterState.text === '',
+    JSON.stringify({ afterRetire: draftAfterState }))
   h.measure('B17: disposition NOT_EXERCISED_CLIENT_KEY_LIMIT — the higher-seat premise needs an OS_INPUT_VERIFIED run',
     JSON.stringify({ probeKeys: ['Control+r'], recorded: 'client consumes the Ctrl modifier; no History card; no unavailable notify' }))
 
@@ -886,7 +945,6 @@ export default async function (h) {
       'G8 Owner visual acceptance',
       'any realtime refresh of an OPEN Find result list after a live append (reopened Find is the measured behaviour)',
       'B17 NOT_EXERCISED_CLIENT_KEY_LIMIT: the control channel cannot deliver a Ctrl modifier to the pane program (MEASURED: Control+r arrives as bare r, ctrl+r/control+r as meta+r, raw-key shell probe shows zero bytes for every Ctrl chord); the History seat premise needs an OS_INPUT_VERIFIED run — the non-penetration half (no Session write around the attempt) is still asserted',
-      'B16 FOCUS TOOL-BODY READABILITY LIMIT: the opened Focus Thought root carries no nested Tool card on the wire, so the expanded-tool-body positive is not exercised in focus; the measured zero-hit observation is a recorded client capability limit, never a complete positive acceptance',
       'B19 NOT_VERIFIED: no real Session source switch is driven in this lane; the pre-switch/post-switch row-identity evidence stays with the T2/T3-0 source-generation lanes (this lane keeps scope.changed===1 throughout)',
       'B20 NOT_EXERCISED_REAL_GONE: no client retention/gone event occurred on the 28-Turn document in these runs; the gone contract evidence stays with the T2 real-path lanes; this lane claims no retention promise either way',
     ],

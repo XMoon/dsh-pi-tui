@@ -649,9 +649,23 @@ const appendNativeFindSeed = (): NativeFindStats => {
           source: { kind: 'tool', callId: ToolCallId('call-t3a-inner') },
         },
       }, { surfaceOp: 'append' })
+      // The canonical tool turn ends with its final assistant answer, so every
+      // reading preset projects Turn 10 through the SAME Work-span segmentation
+      // (Focus nests the Work under the Thought root exactly like Compact).
+      session.append('assistant/message', {
+        turn,
+        step: 0,
+        message: {
+          id: MessageId(`t3a-find-a-${turn}`),
+          role: 'assistant',
+          content: [{ type: 'text', text: assistantText }],
+          source: { kind: 'model', provider: 'scripted', model: 'scripted' },
+        },
+        stream: [],
+      }, { surfaceOp: 'append' })
       session.append('step/end', { turn, step: 0 })
       session.append('turn/end', { turn, reason: { kind: 'completed' } })
-      written += 3
+      written += 4
     } else {
       appendNativeFindTurn(session, turn, userText, assistantText)
       written += 2
