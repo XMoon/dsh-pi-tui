@@ -13,11 +13,13 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs'
+import { join } from 'node:path'
 
 import xterm from '@xterm/headless'
 import { findIsolatedProcesses, killIsolatedProcesses } from '../../lib/split-smoke-processes.mjs'
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
+import { hostSessionHeader, hostSessionEvents, hostAssistantHasText } from '../../lib/split-smoke-sessions.mjs'
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
@@ -211,7 +213,7 @@ export async function runPublicDaemonEntry({ installation, trace }) {
   }
 
   // Real PUBLIC session-launch + signal acceptance (A08 reject, A12 signal).
-  const session = await runSessionAcceptance(installation, trace)
+  const session = await runSceneAcceptance(installation, trace)
   Object.assign(result, session)
 
   return result
@@ -228,7 +230,7 @@ class RealDshScreen {
     const command = `${shellQuote(dshInvocation[0])} ${shellQuote(dshInvocation[1])} --profile pi-tui${args.map(a => ' ' + shellQuote(a)).join('')}`
     this.child = spawn('script', ['-qefc', command, '/dev/null'], {
       cwd: profileDir,
-      env: { ...env, DSH_PI_TUI_BACKEND: backend, COLUMNS: '100', LINES: '30' },
+      env: { ...env, ...(backend === undefined ? {} : { DSH_PI_TUI_BACKEND: backend }), COLUMNS: '100', LINES: '30' },
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: true,
     })
@@ -266,12 +268,119 @@ class RealDshScreen {
   }
 }
 
-async function runSessionAcceptance(installation, trace) {
+/** Seed the offline stub LLM into the installed PROFILE patch so the Host that
+ *  actually runs the turn loads it (per-turn Host deletes SPLIT_PROCESS_EXTRA_PATCH). */
+function ensureProfileStubLlm(installation) {
+  const patchPath = join(installation.profileDir, 'cordis.patch.yml')
+  let stock = ''
+  try { stock = readFileSync(patchPath, 'utf8') } catch { /* absent */ }
+  if (stock.includes('m4b2s-stub-llm')) return
+  const rows = [
+    '- insert:',
+    '    - id: m4b2s-stub-llm',
+    `      name: 'file://${installation.surfaceLlm.stubPath}'`,
+    '      inject: [llm]',
+    '- id: agent-default-model',
+    '  config:',
+    '    provider: stub',
+    '    model: stub',
+    '',
+  ].join('\n')
+  // An empty profile patch ends with the `[]` flow document; a following block
+  // sequence after it is a YAML error, so REPLACE the empty document.
+  const noEmpty = stock.split('\n').filter(line => line.trim() !== '[]').join('\n')
+  writeFileSync(patchPath, `${noEmpty.replace(/\s*$/u, '')}\n${rows}`, { mode: 0o600 })
+}
+
+/** Create ONE real Session with a completed offline-stub turn; return its id + header. */
+async function seedSession(installation, extraArgs) {
+  const s = new RealDshScreen(installation, 'daemon', extraArgs)
+  try {
+    await s.waitForAny(['type a message', '╭'], 'seed paint', 90_000)
+    s.send('hello stub scene\r')
+    await s.waitForAny(['stub answer'], 'seed turn', 120_000)
+    let sessionId
+    const match = /session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/u.exec(s.records.raw)
+    if (match !== null) sessionId = match[0]
+    else sessionId = newestSessionId(installation.dshHome)
+    assert(typeof sessionId === 'string' && sessionId.startsWith('session-'), 'seed: session id was not observed')
+    s.send('/exit\r')
+    const exit = await Promise.race([s.exit, sleep(30_000).then(() => ({ code: 'timeout' }))])
+    assert(exit.code === 0, `seed: /exit exited ${JSON.stringify(exit)}`)
+    return { sessionId, shortId: sessionId.slice('session-'.length, 'session-'.length + 8), header: hostSessionHeader(installation.dshHome, sessionId) }
+  } finally { await s.dispose() }
+}
+
+/** Newest persisted session id under the isolated DSH home (fallback locator). */
+function newestSessionId(dshHome) {
+  const root = join(dshHome, 'sessions')
+  if (!existsSync(root)) return undefined
+  let best
+  for (const scope of readdirSync(root, { withFileTypes: true })) {
+    if (!scope.isDirectory()) continue
+    const scopeDir = join(root, scope.name)
+    for (const sess of readdirSync(scopeDir, { withFileTypes: true })) {
+      if (sess.isDirectory() && sess.name.startsWith('session-')) best = sess.name
+    }
+  }
+  return best
+}
+
+async function runSceneAcceptance(installation, trace) {
   const out = {}
-  // A05/A06/A07 (browse/lookup/continue, POSITIVE and the no-resume NEGATIVE)
-  // and A08b preset-effect need a PRE-SEEDED Host Workspace+Session scene the
-  // isolated packed profile does not provide; they stay NOT_VERIFIED with that
-  // blocker (not asserted here to avoid a false positive).
+  ensureProfileStubLlm(installation)
+
+  // Seed ONE real Session with an offline-stub turn (no credentials).
+  const seeded = await seedSession(installation, [])
+  out.seedSession = 'PASS'
+
+  // A05 Browse positive: --session opens the real Session Browser, which must
+  // list the seeded Session under the confirmed workspace (non-zero count).
+  {
+    const s = new RealDshScreen(installation, 'daemon', ['--session'])
+    try {
+      await s.waitForAny(['Sessions ·', 'Up/Down move'], 'A05 browse', 90_000)
+      let listed = false
+      const deadline = Date.now() + 30_000
+      while (Date.now() < deadline) {
+        if (/pi-tui · [1-9]\d*/u.test(await s.viewport())) { listed = true; break }
+        await sleep(150)
+      }
+      assert(listed, 'A05: the Session Browser did not list the seeded session')
+      out.a05Browse = 'PASS'
+    } finally { await s.dispose() }
+  }
+
+  // A06 Lookup positive: the FULL id and a unique SHORT prefix both resume it.
+  for (const [label, query, key] of [
+    ['full', seeded.sessionId, 'a06LookupFull'],
+    ['prefix', seeded.shortId, 'a06LookupPrefix'],
+  ]) {
+    const s = new RealDshScreen(installation, 'daemon', ['--session', query])
+    try {
+      await s.waitForAny(['hello stub scene', 'stub answer'], `A06 lookup ${label}`, 90_000)
+      out[key] = 'PASS'
+    } finally { await s.dispose() }
+  }
+
+  // A07 Continue positive: auto-confirmed workspace (Client/Host same cwd) → -c
+  // resumes the latest Session and never reports "Cannot continue".
+  {
+    const s = new RealDshScreen(installation, 'daemon', ['-c'])
+    try {
+      await s.waitForAny(['stub answer', 'hello stub scene'], 'A07 continue', 90_000)
+      assert(!(await s.viewport()).includes('Cannot continue'), 'A07: -c reported Cannot continue')
+      out.a07Continue = 'PASS'
+    } finally { await s.dispose() }
+  }
+
+  // A08b Preset effect: the persisted Session HEADER records the requested preset;
+  // a minimal control proves the assertion discriminates (default seed = standard).
+  const preseted = await seedSession(installation, ['--preset', 'minimal'])
+  assert(seeded.header?.agentPreset === 'standard', `A08b: default seed preset was ${JSON.stringify(seeded.header?.agentPreset)}`)
+  assert(preseted.header?.agentPreset === 'minimal', `A08b: --preset minimal header was ${JSON.stringify(preseted.header?.agentPreset)}`)
+  out.a08bPreset = 'PASS'
+
   // A08a --session + -c is early-rejected (nonzero, no TUI).
   {
     const s = new RealDshScreen(installation, 'daemon', ['--session', '-c'])
@@ -282,8 +391,9 @@ async function runSessionAcceptance(installation, trace) {
       out.a08Reject = 'PASS'
     } finally { await s.dispose() }
   }
-  // A12 Signal: SIGTERM to the SUPERVISOR PID ALONE (not the process group) must
-  // stop the ONE Client through the Coordinator while the detached Host survives.
+
+  // A12 Signal: SIGTERM to the SUPERVISOR PID ALONE stops the one Client while the
+  // detached Host survives (and, with the awaitable dispose, the parent waits).
   {
     const s = new RealDshScreen(installation, 'daemon', [])
     try {
@@ -299,6 +409,34 @@ async function runSessionAcceptance(installation, trace) {
       out.a12Signal = 'PASS'
     } finally { await s.dispose() }
   }
-  trace('m6-2a-session-acceptance', out)
+
+  // A14 real-terminal Settings reachability + A03 persisted backend.
+  {
+    const s = new RealDshScreen(installation, 'daemon', [])
+    try {
+      await s.waitForAny(['type a message', '╭'], 'A14 paint', 90_000)
+      s.send('/settings\r')
+      await s.waitForAny(['Settings'], 'A14 settings open', 30_000)
+      s.send('\x1b[B'); await sleep(250); s.send('\r'); await sleep(500); s.send('\r'); await sleep(500)
+      await s.waitForAny(['Backend', 'Daemon'], 'A14 backend detail', 30_000)
+      s.send('\x1b[B'); await sleep(250); s.send('\r')
+      await s.waitForAny(['Applies on next launch', 'Verified'], 'A14 next-launch', 30_000)
+      out.a14Settings = 'PASS'
+      s.send('\x1b'); await sleep(300); s.send('/exit\r')
+      await Promise.race([s.exit, sleep(15_000)])
+    } finally { await s.dispose() }
+    // A03: the committed Profile backend is persisted, and a NEW process launched
+    // WITHOUT DSH_PI_TUI_BACKEND selects Daemon from the Profile alone.
+    const profilePatch = readFileSync(join(installation.profileDir, 'cordis.patch.yml'), 'utf8')
+    assert(/backend:\s*daemon/u.test(profilePatch), 'A03: the committed Profile backend was not persisted as daemon')
+    const s2 = new RealDshScreen(installation, undefined, [])
+    try {
+      const counts = await waitForProcesses(installation.dshHome, c => c.host >= 1 && c.client >= 1, 'A03 no-env daemon', 90_000)
+      assert(counts.host >= 1 && counts.client >= 1, 'A03: a no-ENV launch did not select the daemon path')
+      out.a03Persisted = 'PASS'
+    } finally { await s2.dispose() }
+  }
+
+  trace('m6-2a-scene-acceptance', out)
   return out
 }
