@@ -27,10 +27,24 @@
  * it can create a second Host business resource. A late async result only
  * commits when its own connection state is still the same live one.
  *
+ * PO-3A adds ONE prompt flight per attached View. The View mints the official
+ * `requestId`, submits the official Session Controller prompt exactly once in
+ * queue mode, and correlates the real Host facts back to that exact request:
+ * `source.rpcId === requestId` at `agent/inbox/inserted`, the claimed
+ * `agent/inbox/claimed` turn for that exact message id, and the committed
+ * Session events carrying that same `data.turn`. It projects only that turn's
+ * committed output as standard ACP `session/update` notifications, drains them,
+ * and only then answers a real ACP StopReason. A turn that also claims another
+ * user's message is a MIXED turn: no further output is projected and the
+ * request fails closed instead of returning a fabricated success.
+ *
  * @module app/remote-process/local-acp-session-view
  */
 
+import { randomUUID } from 'node:crypto'
+import type { SessionUpdate, StopReason } from '@agentclientprotocol/sdk'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
+import { runDetached } from '../../runtime/process/tasks.ts'
 
 /** The exact live identity a borrowed Session View is allowed to believe. */
 export interface LiveAgentViewIdentity {
@@ -85,6 +99,14 @@ export interface HostAcpSessionAccess {
   currentAgent(sessionId: string): LiveAgentViewIdentity | undefined
   /** The CURRENT live Session object for a Session id, or `undefined`. */
   currentSession(sessionId: string): object | undefined
+  /** Submit ONE prompt through the official Session Controller (queue mode only). */
+  prompt(request: AcpSessionPromptRequest, signal: AbortSignal): Promise<{ readonly accepted: true }>
+  /**
+   * Register the exact Agent/Session facts a prompt flight is correlated
+   * against. The subscription belongs to the listener lifetime; the returned
+   * disposer removes exactly these listeners.
+   */
+  observePromptFacts(listener: AcpPromptFactListener): () => void
 }
 
 /**
@@ -108,6 +130,37 @@ export type LocalAcpViewErrorCode =
   | 'LOCAL_ACP_VIEW_CLOSED'
 
 /**
+ * The stable prompt-flight failure codes. Each one names ONE Host fact the
+ * settlement could prove; none of them is a fabricated ACP StopReason.
+ */
+export type LocalAcpPromptErrorCode =
+  /** This View already owns an unsettled prompt flight. */
+  | 'LOCAL_ACP_PROMPT_IN_FLIGHT'
+  /** The prompt content was empty, whitespace-only or not a standard text block. */
+  | 'LOCAL_ACP_PROMPT_INVALID_CONTENT'
+  /** The ACP request/transport aborted before a real Host settlement. */
+  | 'LOCAL_ACP_PROMPT_ABORTED'
+  /** The Host refused the prompt before accepting it into the Agent inbox. */
+  | 'LOCAL_ACP_PROMPT_HOST_REJECTED'
+  /** The Host call failed after the message was already inserted: never retried. */
+  | 'LOCAL_ACP_PROMPT_DISPATCH_INDETERMINATE'
+  /** A committed event could not be projected and delivery kept its real failure. */
+  | 'LOCAL_ACP_PROMPT_OUTPUT_FAILED'
+  /** The bounded View output queue could not keep up with committed events. */
+  | 'LOCAL_ACP_PROMPT_OUTPUT_BACKPRESSURE'
+  /** A committed block has no PO-3A standard ACP projection (never truncated). */
+  | 'LOCAL_ACP_PROMPT_UNSUPPORTED_CONTENT'
+  /** The owned turn also claimed another user's message (D23 fail-closed). */
+  | 'LOCAL_ACP_PROMPT_MIXED_TURN'
+  /** The owned turn ended without a real non-empty assistant text chunk. */
+  | 'LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT'
+  /** The owned turn ended blocked/error/aborted/interrupted or the Agent died. */
+  | 'LOCAL_ACP_PROMPT_TURN_FAILED'
+
+/** Every stable local ACP classification the View owner can raise. */
+export type LocalAcpSessionErrorCode = LocalAcpViewErrorCode | LocalAcpPromptErrorCode
+
+/**
  * One classified View rejection. `rpcCode` is the JSON-RPC error code the
  * listener maps onto an ACP `RequestError`; `code` is the stable data code.
  * `data` carries non-sensitive structured facts the caller may act on — most
@@ -115,12 +168,12 @@ export type LocalAcpViewErrorCode =
  * created before a later step failed.
  */
 export class LocalAcpViewError extends Error {
-  readonly code: LocalAcpViewErrorCode
+  readonly code: LocalAcpSessionErrorCode
   readonly rpcCode: number
   readonly data: Readonly<Record<string, unknown>>
 
   constructor(
-    code: LocalAcpViewErrorCode,
+    code: LocalAcpSessionErrorCode,
     message: string,
     rpcCode: number,
     data: Readonly<Record<string, unknown>> = {},
@@ -148,6 +201,65 @@ export interface AcpResumeSessionParams {
   readonly mcpServers?: readonly unknown[]
 }
 
+/** One standard text prompt part in the client's original order. */
+export interface AcpTextPromptPart {
+  readonly type: 'text'
+  readonly text: string
+}
+
+/**
+ * The ONE official Session Controller prompt this View submits per ACP request.
+ * `mode: 'queue'` is the only delivery this phase supports and `requestId` is
+ * the View-minted identity the official wrapper records as `source.rpcId`.
+ */
+export interface AcpSessionPromptRequest {
+  readonly requestId: string
+  readonly sessionId: string
+  readonly mode: 'queue'
+  readonly content: readonly AcpTextPromptPart[]
+}
+
+/** The minimal `session/prompt` request facts this module validates. */
+export interface AcpPromptSessionParams {
+  readonly sessionId: string
+  readonly prompt: readonly unknown[]
+}
+
+/**
+ * The exact Host facts a prompt flight is correlated against. They are read
+ * from the official Agent/Session event sources after the settled Host Context
+ * registered them; nothing here is inferred from status, text or time.
+ */
+export interface AcpPromptFactListener {
+  /** One message entered the live inbox (synchronous with admission). */
+  onInboxInserted(agent: LiveAgentViewIdentity, message: AcpUserMessageLike): void
+  /** One message was claimed into an open turn. */
+  onInboxClaimed(agent: LiveAgentViewIdentity, message: AcpUserMessageLike, turn: number): void
+  /** One committed durable Session event. */
+  onSessionEvent(session: object, event: AcpSessionEventLike): void
+  /** One Agent interval failure carrying the owning turn. */
+  onAgentError(agent: LiveAgentViewIdentity, turn: number): void
+  /** The exact live Agent was disposed. */
+  onAgentDisposed(agent: LiveAgentViewIdentity): void
+}
+
+/** The inbox message facts the View reads (`UserMessage` is structurally wider). */
+export interface AcpUserMessageLike {
+  readonly id: string
+  readonly source?: { readonly kind?: string; readonly rpcId?: string }
+}
+
+/** The committed Session event facts the View reads (`SessionEvent` is structurally wider). */
+export interface AcpSessionEventLike {
+  readonly type: string
+  readonly data: unknown
+}
+
+/** One ACP prompt result: only a real legal stop reason is ever returned. */
+export interface AcpPromptResult {
+  readonly stopReason: StopReason
+}
+
 /** One connection's transient protocol view state. */
 export interface ConnectionViewState {
   phase: 'idle' | 'attaching' | 'attached' | 'closed'
@@ -166,17 +278,79 @@ export interface ConnectionViewState {
 interface ViewClaim {
   readonly connectionIdentity: ConnectionViewState
   readonly sessionId: string
+  /** The exact live Agent object verified at `commitAttached`; `undefined` until attached. */
+  exactAgent?: LiveAgentViewIdentity
+  /** The exact live Session object verified at `commitAttached`; `undefined` until attached. */
+  exactSession?: object
+  /** At most ONE unsettled ACP prompt flight, correlated by real Host facts only. */
+  inflight?: InflightPrompt
+}
+
+/** The maximum number of not-yet-written notifications ONE prompt flight may queue. */
+const MAX_PENDING_OUTPUT_UPDATES = 64
+
+/**
+ * One unsettled prompt flight. Each field is a DIFFERENT authoritative fact:
+ * `requestId` is View-minted, `messageId` comes from the official
+ * `agent/inbox/inserted`, `turn` from the official `agent/inbox/claimed`, and
+ * `assistantText` only from a committed, non-empty assistant text block.
+ */
+interface InflightPrompt {
+  readonly requestId: string
+  phase: 'admitting' | 'queued' | 'claimed' | 'settling'
+  messageId?: string
+  turn?: number
+  /**
+   * The most recent turn claimed by a FOREIGN message while this flight had no
+   * own turn yet. Claims are monotonic and a same-batch claim emits the
+   * foreign message before the queued one, so one marker answers "did the turn
+   * that claims me already carry another user's message?".
+   */
+  foreignTurn?: number
+  mixed: boolean
+  assistantText: boolean
+  pendingUpdates: number
+  outputTail: Promise<void>
+  readonly sendUpdate: (update: SessionUpdate) => Promise<void>
+  readonly settled: PromiseWithResolvers<AcpPromptResult>
+  settledDone: boolean
+  detachAbort?: () => void
 }
 
 const JSONRPC_INVALID_PARAMS = -32602
 const JSONRPC_INTERNAL_ERROR = -32603
+
+/** One standard classified prompt failure. */
+function promptError(
+  code: LocalAcpPromptErrorCode,
+  message: string,
+  rpcCode: number,
+  data: Readonly<Record<string, unknown>> = {},
+): LocalAcpViewError {
+  return new LocalAcpViewError(code, message, rpcCode, data)
+}
+
+/** A stable code from a rejecting Host call, never its message or stack. */
+function hostErrorCode(error: unknown): string | undefined {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const code = (error as { readonly code?: unknown }).code
+    if (typeof code === 'string' && code.length > 0) return code
+  }
+  return undefined
+}
+
+/** The committed turn reason facts the View reads (`TurnEndReason` is wider). */
+function turnEndReasonKind(data: unknown): string | undefined {
+  const reason = (data as { readonly reason?: { readonly kind?: unknown } } | undefined)?.reason
+  return typeof reason?.kind === 'string' ? reason.kind : undefined
+}
 
 /**
  * The pure View/claim lifecycle for ONE listener lifetime. A fresh registry is
  * created on every `setEnabled(true)` bind; a rebind never shares a previous
  * connection's claims.
  */
-export class AcpSessionViewRegistry {
+export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private readonly claims = new Map<string, ViewClaim>()
   private readonly diag: Diag
 
@@ -327,6 +501,15 @@ export class AcpSessionViewRegistry {
   closeSession(state: ConnectionViewState, sessionId: string): Record<string, never> {
     const claim = this.claims.get(sessionId)
     if (claim !== undefined && claim.connectionIdentity === state) {
+      if (claim.inflight !== undefined) {
+        // PO-3A cannot cancel a shared Host turn; pretending the View detached
+        // would leave an unanswerable request behind. PO-3B owns that policy.
+        throw promptError(
+          'LOCAL_ACP_PROMPT_IN_FLIGHT',
+          'a prompt is still in flight for this session view',
+          JSONRPC_INVALID_PARAMS,
+        )
+      }
       this.claims.delete(sessionId)
       // This close also cancels any in-flight attach for this connection: the
       // op generation is unchanged, but the claim is gone and the phase is idle,
@@ -341,6 +524,208 @@ export class AcpSessionViewRegistry {
   }
 
   /**
+   * Admit ONE text prompt on this connection's attached View and settle it on
+   * the exact Host facts. The slot and the View-minted `requestId` are committed
+   * BEFORE the official prompt call, so a synchronous inbox notice or a second
+   * pipelined request can never be attributed to a later flight.
+   *
+   * The returned promise settles only from real Host facts: the claimed turn of
+   * THIS message id, that turn's committed events, its `turn/end`, and the
+   * ordered notification drain. No status, text, timestamp or ACK is treated as
+   * a completed turn.
+   */
+  async promptSession(
+    state: ConnectionViewState,
+    access: HostAcpSessionAccess,
+    request: AcpPromptSessionParams,
+    requestSignal: AbortSignal,
+    sendUpdate: (update: SessionUpdate) => Promise<void>,
+  ): Promise<AcpPromptResult> {
+    if (typeof request.sessionId !== 'string' || request.sessionId.length === 0) {
+      throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'a non-empty sessionId is required', JSONRPC_INVALID_PARAMS)
+    }
+    const claim = this.claims.get(request.sessionId)
+    if (
+      state.phase !== 'attached'
+      || claim === undefined
+      || claim.connectionIdentity !== state
+      || claim.exactAgent === undefined
+      || claim.exactSession === undefined
+    ) {
+      throw new LocalAcpViewError('LOCAL_ACP_VIEW_NOT_OWNED', 'this ACP connection holds no view for that session', JSONRPC_INVALID_PARAMS)
+    }
+    if (claim.inflight !== undefined) {
+      throw promptError('LOCAL_ACP_PROMPT_IN_FLIGHT', 'a prompt is already in flight for this session view', JSONRPC_INVALID_PARAMS)
+    }
+    const content = validatePromptContent(request.prompt)
+    if (requestSignal.aborted) {
+      throw promptError('LOCAL_ACP_PROMPT_ABORTED', 'the ACP prompt request was aborted before admission', JSONRPC_INVALID_PARAMS)
+    }
+
+    const flight: InflightPrompt = {
+      requestId: randomUUID(),
+      phase: 'admitting',
+      mixed: false,
+      assistantText: false,
+      pendingUpdates: 0,
+      outputTail: Promise.resolve(),
+      sendUpdate,
+      settled: Promise.withResolvers<AcpPromptResult>(),
+      settledDone: false,
+    }
+    const onAbort = (): void => {
+      this.failPrompt(claim, flight, promptError(
+        'LOCAL_ACP_PROMPT_ABORTED',
+        'the ACP prompt request was aborted before a real Host settlement',
+        JSONRPC_INTERNAL_ERROR,
+      ))
+    }
+    requestSignal.addEventListener('abort', onAbort, { once: true })
+    flight.detachAbort = () => requestSignal.removeEventListener('abort', onAbort)
+    claim.inflight = flight
+
+    try {
+      await access.prompt({
+        requestId: flight.requestId,
+        sessionId: request.sessionId,
+        mode: 'queue',
+        content,
+      }, requestSignal)
+      if (!flight.settledDone) flight.phase = 'queued'
+    } catch (error) {
+      if (!flight.settledDone) {
+        if (flight.messageId !== undefined) {
+          // The official call rejected AFTER the message entered the live
+          // inbox: the prompt may already be queued forever. Never retry and
+          // never report a definite "not accepted".
+          this.failPrompt(claim, flight, promptError(
+            'LOCAL_ACP_PROMPT_DISPATCH_INDETERMINATE',
+            'the Host prompt outcome could not be confirmed after dispatch; it was not retried',
+            JSONRPC_INTERNAL_ERROR,
+          ))
+        } else {
+          const hostCode = hostErrorCode(error)
+          this.failPrompt(claim, flight, promptError(
+            'LOCAL_ACP_PROMPT_HOST_REJECTED',
+            'the Host did not accept the prompt',
+            JSONRPC_INTERNAL_ERROR,
+            hostCode === undefined ? {} : { hostCode },
+          ))
+        }
+      }
+    }
+    return await flight.settled.promise
+  }
+
+  /** One message entered the live inbox: correlate the View-minted request id. */
+  onInboxInserted(agent: LiveAgentViewIdentity, message: AcpUserMessageLike): void {
+    for (const claim of this.claims.values()) {
+      if (claim.exactAgent !== agent) continue
+      const flight = claim.inflight
+      if (flight === undefined || flight.settledDone || flight.messageId !== undefined) continue
+      if (message.source?.kind === 'user' && message.source.rpcId === flight.requestId) {
+        flight.messageId = message.id
+      }
+    }
+  }
+
+  /**
+   * One message was claimed. The exact message id (never text or timing) links
+   * the prompt to its turn; any other user message claimed into that same turn
+   * proves the turn is MIXED.
+   */
+  onInboxClaimed(agent: LiveAgentViewIdentity, message: AcpUserMessageLike, turn: number): void {
+    for (const claim of this.claims.values()) {
+      if (claim.exactAgent !== agent) continue
+      const flight = claim.inflight
+      if (flight === undefined || flight.settledDone) continue
+      if (flight.messageId !== undefined && message.id === flight.messageId) {
+        if (flight.turn === undefined) {
+          flight.turn = turn
+          if (flight.phase === 'admitting' || flight.phase === 'queued') flight.phase = 'claimed'
+          if (flight.foreignTurn === turn) flight.mixed = true
+          flight.foreignTurn = undefined
+        }
+        continue
+      }
+      if (flight.turn !== undefined) {
+        if (flight.turn === turn) flight.mixed = true
+        continue
+      }
+      flight.foreignTurn = turn
+    }
+  }
+
+  /**
+   * One committed Session event. Only the exact Session object and the owned
+   * turn are projected; every other event is inert for this View.
+   */
+  onSessionEvent(session: object, event: AcpSessionEventLike): void {
+    for (const claim of this.claims.values()) {
+      if (claim.exactSession !== session) continue
+      const flight = claim.inflight
+      if (flight === undefined || flight.settledDone) return
+      const data = event.data as { readonly turn?: unknown } | undefined
+      if (typeof data?.turn !== 'number' || flight.turn === undefined || data.turn !== flight.turn) return
+      if (flight.mixed) {
+        // A mixed turn projects NOTHING further; it can only settle as a
+        // failure once the turn reaches its own terminal record.
+        if (event.type === 'turn/end') this.settleTurnEnd(claim, flight, data)
+        return
+      }
+      switch (event.type) {
+        case 'assistant/message':
+          this.projectAssistantMessage(claim, flight, data)
+          break
+        case 'tool/call':
+          this.projectToolCall(claim, flight, data)
+          break
+        case 'tool/result':
+          this.projectToolResult(claim, flight, data)
+          break
+        case 'turn/end':
+          this.settleTurnEnd(claim, flight, data)
+          break
+        default:
+          break
+      }
+      return
+    }
+  }
+
+  /** One Agent interval failure: only the owned turn of the exact Agent is attributed. */
+  onAgentError(agent: LiveAgentViewIdentity, turn: number): void {
+    for (const claim of this.claims.values()) {
+      if (claim.exactAgent !== agent) continue
+      const flight = claim.inflight
+      if (flight === undefined || flight.settledDone) continue
+      if (flight.turn !== undefined && flight.turn === turn) {
+        this.failPrompt(claim, flight, promptError(
+          'LOCAL_ACP_PROMPT_TURN_FAILED',
+          'the owned turn reported an Agent failure',
+          JSONRPC_INTERNAL_ERROR,
+          { reason: 'agent-error' },
+        ))
+      }
+    }
+  }
+
+  /** The exact live Agent was disposed: its in-flight prompt can never settle. */
+  onAgentDisposed(agent: LiveAgentViewIdentity): void {
+    for (const claim of this.claims.values()) {
+      if (claim.exactAgent !== agent) continue
+      const flight = claim.inflight
+      if (flight === undefined || flight.settledDone) continue
+      this.failPrompt(claim, flight, promptError(
+        'LOCAL_ACP_PROMPT_TURN_FAILED',
+        'the owned Agent was disposed before the prompt settled',
+        JSONRPC_INTERNAL_ERROR,
+        { reason: 'agent-disposed' },
+      ))
+    }
+  }
+
+  /**
    * Release every claim owned by one connection and mark it closed. Used by
    * BOTH an explicit `session/close` teardown path and a physical `socket`
    * end/error/destroy or Host Off; it is idempotent and never touches another
@@ -352,7 +737,19 @@ export class AcpSessionViewRegistry {
     // can never mutate this (closed) connection's state.
     state.op += 1
     for (const [sessionId, claim] of this.claims) {
-      if (claim.connectionIdentity === state) this.claims.delete(sessionId)
+      if (claim.connectionIdentity !== state) continue
+      const flight = claim.inflight
+      if (flight !== undefined) {
+        // A physical connection end cannot answer the ACP request any more and
+        // must not cancel the shared Host turn; the flight settles as failed
+        // and this View stops projecting. The Host Agent keeps running.
+        this.failPrompt(claim, flight, new LocalAcpViewError(
+          'LOCAL_ACP_VIEW_CLOSED',
+          'the ACP connection closed before the prompt settled',
+          JSONRPC_INTERNAL_ERROR,
+        ))
+      }
+      this.claims.delete(sessionId)
     }
   }
 
@@ -468,6 +865,10 @@ export class AcpSessionViewRegistry {
       )
     }
     state.phase = 'attached'
+    // The verified exact objects are the identity fence every prompt claim and
+    // committed event is checked against; never a sessionId lookup.
+    claim.exactAgent = agent
+    claim.exactSession = agent.session
   }
 
   /**
@@ -480,6 +881,197 @@ export class AcpSessionViewRegistry {
     if (this.claims.get(claim.sessionId) === claim && claim.connectionIdentity === state) {
       this.claims.delete(claim.sessionId)
     }
+  }
+
+  /** Project one committed assistant message of the owned turn in block order. */
+  private projectAssistantMessage(claim: ViewClaim, flight: InflightPrompt, data: unknown): void {
+    const message = (data as { readonly message?: { readonly id?: unknown; readonly content?: unknown } }).message
+    if (message === undefined || typeof message.id !== 'string' || !Array.isArray(message.content)) {
+      this.failPrompt(claim, flight, unsupportedContent())
+      return
+    }
+    const updates: SessionUpdate[] = []
+    for (const block of message.content as readonly unknown[]) {
+      const type = (block as { readonly type?: unknown } | null)?.type
+      const text = (block as { readonly text?: unknown } | null)?.text
+      if (type === 'reasoning') {
+        if (typeof text !== 'string') {
+          this.failPrompt(claim, flight, unsupportedContent())
+          return
+        }
+        if (text.length > 0) updates.push({ sessionUpdate: 'agent_thought_chunk', messageId: message.id, content: { type: 'text', text } })
+        continue
+      }
+      if (type === 'text') {
+        if (typeof text !== 'string') {
+          this.failPrompt(claim, flight, unsupportedContent())
+          return
+        }
+        if (text.length === 0) continue
+        updates.push({ sessionUpdate: 'agent_message_chunk', messageId: message.id, content: { type: 'text', text } })
+        flight.assistantText = true
+        continue
+      }
+      // Images/audio/unknown blocks belong to PO-4: never truncate or fake one.
+      this.failPrompt(claim, flight, unsupportedContent())
+      return
+    }
+    this.enqueueUpdates(claim, flight, updates)
+  }
+
+  /** Project one committed tool call of the owned turn as a standard start update. */
+  private projectToolCall(claim: ViewClaim, flight: InflightPrompt, data: unknown): void {
+    const call = data as { readonly callId?: unknown; readonly name?: unknown; readonly arguments?: unknown }
+    if (typeof call.callId !== 'string' || typeof call.name !== 'string') {
+      this.failPrompt(claim, flight, unsupportedContent())
+      return
+    }
+    const rawInput = typeof call.arguments === 'string' ? parseToolArguments(call.arguments) : undefined
+    this.enqueueUpdates(claim, flight, [{
+      sessionUpdate: 'tool_call',
+      toolCallId: call.callId,
+      title: call.name,
+      kind: 'other',
+      status: 'in_progress',
+      ...(rawInput === undefined ? {} : { rawInput }),
+    }])
+  }
+
+  /** Project one committed tool result of the owned turn, text content only. */
+  private projectToolResult(claim: ViewClaim, flight: InflightPrompt, data: unknown): void {
+    const message = (data as {
+      readonly message?: {
+        readonly toolCallId?: unknown
+        readonly isError?: unknown
+        readonly content?: unknown
+      }
+    }).message
+    if (message === undefined || typeof message.toolCallId !== 'string' || !Array.isArray(message.content)) {
+      this.failPrompt(claim, flight, unsupportedContent())
+      return
+    }
+    const content: Array<{ readonly type: 'content'; readonly content: { readonly type: 'text'; readonly text: string } }> = []
+    for (const block of message.content as readonly unknown[]) {
+      const type = (block as { readonly type?: unknown } | null)?.type
+      const text = (block as { readonly text?: unknown } | null)?.text
+      if (type !== 'text' || typeof text !== 'string') {
+        this.failPrompt(claim, flight, unsupportedContent())
+        return
+      }
+      if (text.length > 0) content.push({ type: 'content', content: { type: 'text', text } })
+    }
+    this.enqueueUpdates(claim, flight, [{
+      sessionUpdate: 'tool_call_update',
+      toolCallId: message.toolCallId,
+      status: message.isError === true ? 'failed' : 'completed',
+      content,
+    }])
+  }
+
+  /**
+   * Append one committed event's updates to this flight's single ordered output
+   * tail. The bounded pending count is the ONLY additional queue: exceeding it
+   * fails this View's request instead of growing without limit.
+   */
+  private enqueueUpdates(claim: ViewClaim, flight: InflightPrompt, updates: readonly SessionUpdate[]): void {
+    if (updates.length === 0 || flight.settledDone) return
+    flight.pendingUpdates += updates.length
+    if (flight.pendingUpdates > MAX_PENDING_OUTPUT_UPDATES) {
+      this.failPrompt(claim, flight, promptError(
+        'LOCAL_ACP_PROMPT_OUTPUT_BACKPRESSURE',
+        'the ACP output queue exceeded its bounded capacity',
+        JSONRPC_INTERNAL_ERROR,
+      ))
+      return
+    }
+    flight.outputTail = flight.outputTail.then(async () => {
+      for (const update of updates) {
+        if (flight.settledDone) {
+          flight.pendingUpdates -= 1
+          continue
+        }
+        try {
+          await flight.sendUpdate(update)
+        } catch {
+          // The transport failure keeps its real classification; it never turns
+          // into a StopReason and never touches the Host Agent.
+          this.failPrompt(claim, flight, promptError(
+            'LOCAL_ACP_PROMPT_OUTPUT_FAILED',
+            'an ACP session/update notification could not be delivered',
+            JSONRPC_INTERNAL_ERROR,
+          ))
+        } finally {
+          flight.pendingUpdates -= 1
+        }
+      }
+    })
+  }
+
+  /**
+   * Settle the owned turn after `turn/end`: first drain every notification this
+   * flight queued, then answer one real legal StopReason or a stable failure.
+   */
+  private settleTurnEnd(claim: ViewClaim, flight: InflightPrompt, data: unknown): void {
+    flight.phase = 'settling'
+    runDetached('local acp: prompt settlement', async () => {
+      await flight.outputTail
+      if (flight.settledDone) return
+      if (flight.mixed) {
+        this.failPrompt(claim, flight, promptError(
+          'LOCAL_ACP_PROMPT_MIXED_TURN',
+          'the owned turn also carried another user message, so its output cannot be reported as this prompt',
+          JSONRPC_INTERNAL_ERROR,
+        ))
+        return
+      }
+      if (!flight.assistantText) {
+        this.failPrompt(claim, flight, promptError(
+          'LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT',
+          'the owned turn ended without a non-empty assistant text chunk',
+          JSONRPC_INTERNAL_ERROR,
+        ))
+        return
+      }
+      const kind = turnEndReasonKind(data)
+      if (kind === 'completed') {
+        this.completePrompt(claim, flight, { stopReason: 'end_turn' })
+        return
+      }
+      if (kind === 'max-tokens') {
+        this.completePrompt(claim, flight, { stopReason: 'max_tokens' })
+        return
+      }
+      this.failPrompt(claim, flight, promptError(
+        'LOCAL_ACP_PROMPT_TURN_FAILED',
+        'the owned turn did not reach a successful completion',
+        JSONRPC_INTERNAL_ERROR,
+        kind === undefined ? { reason: 'unknown' } : { reason: kind },
+      ))
+    }, { diag: this.diag })
+  }
+
+  /** Fail one flight exactly once and release its slot and correlation state. */
+  private failPrompt(claim: ViewClaim, flight: InflightPrompt, error: LocalAcpViewError): void {
+    if (flight.settledDone) return
+    flight.settledDone = true
+    flight.phase = 'settling'
+    flight.detachAbort?.()
+    flight.detachAbort = undefined
+    flight.foreignTurn = undefined
+    if (claim.inflight === flight) claim.inflight = undefined
+    flight.settled.reject(error)
+  }
+
+  /** Complete one flight with its real ACP StopReason and release its slot. */
+  private completePrompt(claim: ViewClaim, flight: InflightPrompt, result: AcpPromptResult): void {
+    if (flight.settledDone) return
+    flight.settledDone = true
+    flight.phase = 'settling'
+    flight.detachAbort?.()
+    flight.detachAbort = undefined
+    flight.foreignTurn = undefined
+    if (claim.inflight === flight) claim.inflight = undefined
+    flight.settled.resolve(result)
   }
 
   private validateNew(request: AcpNewSessionParams): void {
@@ -510,6 +1102,48 @@ export class AcpSessionViewRegistry {
 function validateCwd(cwd: string): void {
   if (typeof cwd !== 'string' || cwd.length === 0 || !cwd.startsWith('/') || cwd.includes('\u0000')) {
     throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'cwd must be a non-empty absolute path', JSONRPC_INVALID_PARAMS)
+  }
+}
+
+/**
+ * Admit one ACP prompt as ordered standard text parts. PO-3A is a TEXT-ONLY
+ * phase: an empty/whitespace-only prompt, a missing block or any non-text
+ * block is refused before any Host dispatch, and order is preserved verbatim.
+ */
+function validatePromptContent(prompt: readonly unknown[]): readonly AcpTextPromptPart[] {
+  if (!Array.isArray(prompt) || prompt.length === 0) {
+    throw promptError('LOCAL_ACP_PROMPT_INVALID_CONTENT', 'a prompt must contain at least one non-empty text block', JSONRPC_INVALID_PARAMS)
+  }
+  const content: AcpTextPromptPart[] = []
+  for (const block of prompt) {
+    const type = (block as { readonly type?: unknown } | null)?.type
+    const text = (block as { readonly text?: unknown } | null)?.text
+    if (type !== 'text' || typeof text !== 'string') {
+      throw promptError('LOCAL_ACP_PROMPT_INVALID_CONTENT', 'this Host accepts standard ACP text prompt blocks only', JSONRPC_INVALID_PARAMS)
+    }
+    content.push({ type: 'text', text })
+  }
+  if (!content.some(part => part.text.trim().length > 0)) {
+    throw promptError('LOCAL_ACP_PROMPT_INVALID_CONTENT', 'a prompt must include non-whitespace text', JSONRPC_INVALID_PARAMS)
+  }
+  return content
+}
+
+/** One stable "this committed block has no PO-3A projection" failure. */
+function unsupportedContent(): LocalAcpViewError {
+  return promptError(
+    'LOCAL_ACP_PROMPT_UNSUPPORTED_CONTENT',
+    'a committed content block has no standard ACP projection in this phase',
+    JSONRPC_INTERNAL_ERROR,
+  )
+}
+
+/** Preserve malformed model tool arguments as opaque input instead of dropping them. */
+function parseToolArguments(value: string): unknown {
+  try {
+    return JSON.parse(value) as unknown
+  } catch {
+    return value
   }
 }
 

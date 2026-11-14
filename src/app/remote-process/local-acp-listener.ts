@@ -470,22 +470,39 @@ function buildAgentApp(
         state.pendingRequests -= 1
       }
     })
+    // PO-3A: ONE text prompt per attached View. The request's own SDK context
+    // supplies the abort lifecycle and the ONLY notification sink — this
+    // connection's client. Nothing here captures a mutable connection or
+    // invents a second sender.
+    app.onRequest(methods.agent.session.prompt, async ({ params, signal, client }) => {
+      beginRequest()
+      try {
+        requireInitialized()
+        return await views.promptSession(view, access, params, signal, async update => {
+          await client.notify(methods.client.session.update, { sessionId: params.sessionId, update })
+        })
+      } catch (error) {
+        throw asRequestError(error)
+      } finally {
+        state.pendingRequests -= 1
+      }
+    })
   } else {
     // No real Host Session View installed (raw socket contracts): the lifecycle
     // methods stay fail-closed exactly like PO-1.
     app.onRequest(methods.agent.session.new, acceptAnyParams, rejectSessionOperation)
     app.onRequest(methods.agent.session.resume, acceptAnyParams, rejectSessionOperation)
     app.onRequest(methods.agent.session.close, acceptAnyParams, rejectSessionOperation)
+    app.onRequest(methods.agent.session.prompt, acceptAnyParams, rejectSessionOperation)
   }
-  // These methods remain genuinely unimplemented in PO-2 regardless of View:
-  // no prompt admission, no session listing, no config mutation.
+  // These methods remain genuinely unimplemented in PO-3A regardless of View:
+  // no session listing and no config mutation.
   app.onRequest(methods.agent.session.list, acceptAnyParams, rejectSessionOperation)
   app.onRequest(methods.agent.session.setConfigOption, acceptAnyParams, rejectSessionOperation)
-  app.onRequest(methods.agent.session.prompt, acceptAnyParams, rejectSessionOperation)
 
-  // A `session/cancel` notification carries no response. PO-2 owns no Host
-  // business turn, so the handler stays an explicit no-op: it must never touch
-  // a Host Agent. Real turn cancellation belongs to PO-3B.
+  // A `session/cancel` notification carries no response. PO-3A owns no Host
+  // cancellation business, so the handler stays an explicit no-op: it must
+  // never touch a Host Agent or fabricate a `cancelled` StopReason.
   app.onNotification(methods.agent.session.cancel, () => {})
 
   return app
@@ -656,6 +673,18 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
       : { sessionAccess, views: new AcpSessionViewRegistry(diag) }),
   }
 
+  // The prompt-flight fact subscription belongs to THIS listener lifetime: it
+  // is installed BEFORE the socket can accept a request and removed exactly
+  // once when the listener retires (or fails to bind).
+  let disposePromptFacts = sessionAccess === undefined || context.views === undefined
+    ? undefined
+    : sessionAccess.observePromptFacts(context.views)
+  const releasePromptFacts = (): void => {
+    const dispose = disposePromptFacts
+    disposePromptFacts = undefined
+    dispose?.()
+  }
+
   const closeScopeDirFd = (): void => {
     if (scopeDirFdClosed) return
     scopeDirFdClosed = true
@@ -712,6 +741,10 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
     stopping = true
     closed = (async () => {
       for (const socket of context.connections) socket.destroy()
+      // Stop observing Host facts only after new connections stopped being
+      // accepted; every pending connection View was released by the teardown
+      // above, so no flight can still be waiting for a fact.
+      releasePromptFacts()
       if (server !== undefined) {
         // Keep privFd OPEN across close so the stored private bind path always
         // resolves to OUR (now-empty) private dir → ENOENT; it can never be
@@ -878,6 +911,7 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
     // never delete a foreign inode. Keep privFd open across close (private bind
     // path → ENOENT), remove only our contract-path inode, then release fds.
     for (const socket of context.connections) socket.destroy()
+    releasePromptFacts()
     if (server !== undefined) {
       try {
         await new Promise<void>(resolveClose => {

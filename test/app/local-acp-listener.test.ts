@@ -27,7 +27,12 @@ import {
   startLocalAcpListener,
   type LocalAcpListener,
 } from '../../src/app/remote-process/local-acp-listener.ts'
-import type { HostAcpSessionAccess, LiveAgentViewIdentity } from '../../src/app/remote-process/local-acp-session-view.ts'
+import type {
+  AcpPromptFactListener,
+  AcpSessionPromptRequest,
+  HostAcpSessionAccess,
+  LiveAgentViewIdentity,
+} from '../../src/app/remote-process/local-acp-session-view.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const QUIET_DIAG: Diag = {
@@ -737,8 +742,13 @@ test('a stale PRIVATE bind socket left by SIGKILL is recovered on the next start
 function makeFakeAccess(): {
   access: HostAcpSessionAccess
   seed: (id: string, cwd: string) => LiveAgentViewIdentity
+  agentOf: (id: string) => LiveAgentViewIdentity | undefined
+  prompts: AcpSessionPromptRequest[]
+  facts: () => AcpPromptFactListener | undefined
 } {
   const agents = new Map<string, { id: string; session: { id: string; header: { cwd: string } } }>()
+  const prompts: AcpSessionPromptRequest[] = []
+  let facts: AcpPromptFactListener | undefined
   let counter = 0
   return {
     access: {
@@ -763,7 +773,18 @@ function makeFakeAccess(): {
       currentSession(sessionId: string) {
         return agents.get(sessionId)?.session
       },
+      async prompt(request: AcpSessionPromptRequest) {
+        prompts.push(request)
+        return { accepted: true as const }
+      },
+      observePromptFacts(listener: AcpPromptFactListener) {
+        facts = listener
+        return () => { facts = undefined }
+      },
     },
+    prompts,
+    facts: () => facts,
+    agentOf: (id: string) => agents.get(id),
     seed: (id: string, cwd: string) => {
       const agent = { id, session: { id, header: { cwd } } }
       agents.set(id, agent)
@@ -810,11 +831,13 @@ test('a Host Session View advertises resume/close and serves new/close over the 
     const again = (await client.next()) as { result?: unknown }
     assert.deepEqual(again.result, {}, 'a repeated close on the same connection is idempotent')
 
-    // A still-unsupported method keeps the misleading-free fail-closed code.
+    // A prompt on a connection that holds NO View for that Session is refused
+    // with the View's own stable code and never reaches the Host.
     client.send({ jsonrpc: '2.0', id: 7, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'hi' }] } })
     const prompt = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
-    assert.equal(prompt.error?.code, -32042)
-    assert.equal(prompt.error?.data?.code, 'LOCAL_ACP_SESSION_NOT_READY')
+    assert.equal(prompt.error?.code, -32602)
+    assert.equal(prompt.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_OWNED')
+    assert.equal(fake.prompts.length, 0, 'an unattached prompt never reaches the Host')
   } finally {
     client.close()
   }
@@ -882,6 +905,12 @@ test('session/new carries the authoritative created session id in JSON-RPC error
     currentSession() {
       return undefined
     },
+    async prompt() {
+      return { accepted: true as const }
+    },
+    observePromptFacts() {
+      return () => {}
+    },
   }
   const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: access })
   t.after(() => listener.close())
@@ -899,5 +928,176 @@ test('session/new carries the authoritative created session id in JSON-RPC error
       'the JSON-RPC error data must preserve the created Session id')
   } finally {
     client.close()
+  }
+})
+
+/** Wait until a recorded fact exists (real async delivery, never a fixed sleep). */
+async function waitForFact<T>(read: () => T | undefined, label: string, timeoutMs = 5_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const value = read()
+    if (value !== undefined) return value
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`)
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+}
+
+test('session/prompt admits one attached text prompt and answers the real stop reason after the updates', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host/proj', mcpServers: [] } })
+    const created = (await client.next()) as { result?: { sessionId?: string } }
+    const sessionId = created.result?.sessionId as string
+    assert.equal(typeof sessionId, 'string')
+
+    client.send({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/prompt',
+      params: { sessionId, prompt: [{ type: 'text', text: 'first' }, { type: 'text', text: 'second' }] },
+    })
+    const request = await waitForFact(() => fake.prompts[0], 'the Host prompt request')
+    assert.equal(request.mode, 'queue')
+    assert.deepEqual(request.content, [{ type: 'text', text: 'first' }, { type: 'text', text: 'second' }])
+    assert.equal(fake.prompts.length, 1)
+    const facts = fake.facts()
+    assert.ok(facts !== undefined, 'the listener registered its prompt fact subscription')
+    const agent = fake.agentOf(sessionId)
+    assert.ok(agent !== undefined, 'session/new attached the exact live Agent')
+    const message = { id: 'm-uds', source: { kind: 'user', rpcId: request.requestId } }
+    facts.onInboxInserted(agent, message)
+    facts.onInboxClaimed(agent, message, 1)
+    facts.onSessionEvent(agent.session, {
+      type: 'assistant/message',
+      data: { turn: 1, message: { id: 'm-uds', content: [{ type: 'text', text: 'wire answer' }] } },
+    })
+    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+
+    const update = (await client.next()) as {
+      method?: string
+      params?: { sessionId?: string; update?: { sessionUpdate?: string; content?: unknown } }
+    }
+    assert.equal(update.method, 'session/update')
+    assert.equal(update.params?.sessionId, sessionId)
+    assert.equal(update.params?.update?.sessionUpdate, 'agent_message_chunk')
+    assert.deepEqual(update.params?.update?.content, { type: 'text', text: 'wire answer' })
+    const response = (await client.next()) as { id?: number; result?: { stopReason?: string }; error?: unknown }
+    assert.equal(response.id, 3)
+    assert.equal(response.error, undefined)
+    assert.equal(response.result?.stopReason, 'end_turn')
+  } finally {
+    client.close()
+  }
+})
+
+test('session/prompt keeps uninitialized, unattached, invalid and in-flight requests fail-closed before dispatch', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-resume', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    client.send({ jsonrpc: '2.0', id: 1, method: 'session/prompt', params: { sessionId: 'session-resume', prompt: [{ type: 'text', text: 'x' }] } })
+    const uninitialized = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(uninitialized.error?.code, -32042)
+    assert.equal(uninitialized.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_INITIALIZED')
+
+    initialize(client, 2)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'session-resume', prompt: [{ type: 'text', text: 'x' }] } })
+    const unattached = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(unattached.error?.code, -32602)
+    assert.equal(unattached.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_OWNED')
+
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/resume', params: { sessionId: 'session-resume', cwd: '/host/proj' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+
+    for (const [id, prompt] of [
+      [5, [{ type: 'text', text: '   ' }]],
+      [6, []],
+      [7, [{ type: 'image', mimeType: 'image/png', data: 'AAAA' }]],
+    ] as const) {
+      client.send({ jsonrpc: '2.0', id, method: 'session/prompt', params: { sessionId: 'session-resume', prompt } })
+      const refused = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+      assert.equal(refused.error?.code, -32602)
+      assert.equal(refused.error?.data?.code, 'LOCAL_ACP_PROMPT_INVALID_CONTENT')
+    }
+    client.send({ jsonrpc: '2.0', id: 8, method: 'session/prompt', params: { sessionId: 'other-session', prompt: [{ type: 'text', text: 'x' }] } })
+    const wrongSession = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(wrongSession.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_OWNED')
+    assert.equal(fake.prompts.length, 0, 'no refused request reached the Host')
+
+    // ONE in-flight prompt; a second request on the same View is refused while
+    // session/close reports the real in-flight state instead of faking a cancel.
+    client.send({ jsonrpc: '2.0', id: 9, method: 'session/prompt', params: { sessionId: 'session-resume', prompt: [{ type: 'text', text: 'first' }] } })
+    await waitForFact(() => fake.prompts[0], 'the first Host prompt')
+    client.send({ jsonrpc: '2.0', id: 10, method: 'session/prompt', params: { sessionId: 'session-resume', prompt: [{ type: 'text', text: 'second' }] } })
+    const inFlight = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(inFlight.error?.code, -32602)
+    assert.equal(inFlight.error?.data?.code, 'LOCAL_ACP_PROMPT_IN_FLIGHT')
+    client.send({ jsonrpc: '2.0', id: 11, method: 'session/close', params: { sessionId: 'session-resume' } })
+    const closeRefused = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(closeRefused.error?.code, -32602)
+    assert.equal(closeRefused.error?.data?.code, 'LOCAL_ACP_PROMPT_IN_FLIGHT')
+    assert.equal(fake.prompts.length, 1, 'only the admitted prompt reached the Host')
+  } finally {
+    client.close()
+  }
+})
+
+test('a physical connection end with an in-flight prompt never affects an independent connection', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-a', '/host/a')
+  fake.seed('session-b', '/host/b')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const a = await RawClient.open(listener.socketPath)
+  const b = await RawClient.open(listener.socketPath)
+  try {
+    initialize(a, 1)
+    await a.next()
+    initialize(b, 1)
+    await b.next()
+    a.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-a', cwd: '/host/a' } })
+    assert.deepEqual(((await a.next()) as { result?: unknown }).result, {})
+    b.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-b', cwd: '/host/b' } })
+    assert.deepEqual(((await b.next()) as { result?: unknown }).result, {})
+
+    a.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'session-a', prompt: [{ type: 'text', text: 'a' }] } })
+    await waitForFact(() => fake.prompts[0], 'connection A prompt')
+    a.close()
+    await a.closed
+
+    // Connection B is independent: its own prompt still settles normally.
+    b.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'session-b', prompt: [{ type: 'text', text: 'b' }] } })
+    const request = await waitForFact(() => fake.prompts[1], 'connection B prompt')
+    const facts = fake.facts()
+    assert.ok(facts !== undefined)
+    const agent = fake.agentOf('session-b')
+    assert.ok(agent !== undefined)
+    const message = { id: 'm-b', source: { kind: 'user', rpcId: request.requestId } }
+    facts.onInboxInserted(agent, message)
+    facts.onInboxClaimed(agent, message, 1)
+    facts.onSessionEvent(agent.session, {
+      type: 'assistant/message',
+      data: { turn: 1, message: { id: 'm-b', content: [{ type: 'text', text: 'b answer' }] } },
+    })
+    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    const update = (await b.next()) as { method?: string; params?: { update?: { sessionUpdate?: string } } }
+    assert.equal(update.method, 'session/update')
+    assert.equal(update.params?.update?.sessionUpdate, 'agent_message_chunk')
+    const response = (await b.next()) as { result?: { stopReason?: string } }
+    assert.equal(response.result?.stopReason, 'end_turn')
+  } finally {
+    a.close()
+    b.close()
   }
 })
