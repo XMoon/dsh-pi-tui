@@ -53,6 +53,7 @@ import {
   type McpDraftIssue,
   type McpServerEntryDraft,
   type McpServerTransport,
+  type McpSettingsPathOp,
 } from '../../domain/mcp/server-config.ts'
 
 /** The configuration-source verdict a row may display. */
@@ -152,10 +153,12 @@ export interface McpEditorSnapshot {
 
 /** FR4: one pending CRUD confirmation. */
 export interface McpConfigConfirmSnapshot {
-  readonly kind: 'delete' | 'reset' | 'toggle'
+  readonly kind: 'delete' | 'reset' | 'toggle' | 'save'
   readonly name: string
   /** For `toggle`: the enabled value that would be written. */
   readonly nextEnabled?: boolean
+  /** For `save`: the external-capability sentence the user acknowledges. */
+  readonly warning?: string
   /** The config revision the question was asked at: the answer is refused when
    *  the namespace moved in the meantime (a confirmation is a decision about a
    *  SPECIFIC configuration, never about whatever is current when `y` lands). */
@@ -185,6 +188,9 @@ export const MCP_CONFIG_TEXT = {
   reset: 'Inherited configuration restored',
   toggleOn: 'Configuration saved · the server will start',
   toggleOff: 'Configuration saved · the server will stop',
+  /** The external-capability disclosure an Add/Edit Save must acknowledge. */
+  externalCommand: 'Enabling this server can execute an external command.',
+  externalService: 'Enabling this server can send data to an external service.',
 } as const
 
 /** The mutable draft the editor holds while open. */
@@ -273,6 +279,31 @@ function draftFromEntry(entry: McpClassifiedServerEntry): McpEditorDraftState {
     url: effective.url ?? '',
     headers: new Map(effective.headers ?? []),
     enabled: effective.enabled !== false,
+  }
+}
+
+/**
+ * The external-capability sentence for one draft, or `undefined` when the
+ * entry cannot reach anything outside the Host (an unconfigured draft still
+ * names its transport, so the disclosure is derived from the TRANSPORT, never
+ * from a heuristic about the command's danger).
+ */
+function externalCapabilityWarning(draft: McpServerEntryDraft): string | undefined {
+  if (draft.transport === 'stdio') {
+    return draft.command.trim() === '' ? undefined : MCP_CONFIG_TEXT.externalCommand
+  }
+  if (draft.url.trim() === '') return undefined
+  return `${MCP_CONFIG_TEXT.externalService} Target: ${safeHostOf(draft.url)}`
+}
+
+/** The host of one URL (no path, no query, no credential); the raw value when
+ *  it cannot be parsed as a URL. */
+function safeHostOf(url: string): string {
+  try {
+    const parsed = new URL(url.replaceAll('${credential:', ''))
+    return parsed.host === '' ? url : parsed.host
+  } catch {
+    return url
   }
 }
 
@@ -738,47 +769,92 @@ export class McpServersController {
     this.deps.requestRender()
   }
 
-  /** Save the open editor through ONE official CAS mutation. */
+  /**
+   * Save the open editor. Every local precondition (draft validity, name
+   * collision, the form's authority binding) is decided BEFORE any question is
+   * asked; a draft that can start an external command or reach an external
+   * service then requires ONE explicit acknowledgement, and only the
+   * acknowledged answer dispatches the write.
+   */
   saveEditor(): void {
     if (this.disposed || this.editor === undefined) return
     if (this.configStatusIsInFlight()) return
+    const prepared = this.prepareEditorSave()
+    if (prepared.kind === 'refused') {
+      this.configStatus = prepared.status
+      this.deps.requestRender()
+      return
+    }
+    if (prepared.ops.length === 0) {
+      // A zero-diff Edit already IS the saved state: no CAS write at all.
+      this.editor = undefined
+      this.configStatus = { kind: 'saved', text: MCP_CONFIG_TEXT.saved }
+      this.deps.requestRender()
+      return
+    }
+    const warning = externalCapabilityWarning(entryDraftOf(this.editor.draft))
+    if (warning !== undefined && this.configConfirm === undefined) {
+      this.configConfirm = {
+        kind: 'save',
+        name: this.editor.draft.name,
+        warning,
+        capturedRevision: this.editor.revision,
+      }
+      this.deps.requestRender()
+      return
+    }
+    this.commitEditorSave()
+  }
+
+  /**
+   * The local preconditions of the open draft: either the ONE op batch to
+   * dispatch, or the truthful refusal status. Nothing here writes.
+   */
+  private prepareEditorSave():
+    | { readonly kind: 'ready'; readonly ops: readonly McpSettingsPathOp[]; readonly revision: number; readonly generation: McpServerGeneration }
+    | { readonly kind: 'refused'; readonly status: McpConfigStatus } {
     const editor = this.editor
+    if (editor === undefined) return { kind: 'refused', status: { kind: 'unavailable', text: MCP_CONFIG_TEXT.unavailable } }
     const name = editor.draft.name
     const draft = entryDraftOf(editor.draft)
     const issues = validateMcpServerDraft(name, draft)
     if (issues.length > 0) {
-      this.configStatus = { kind: 'rejected', text: `Not saved · ${issues[0]?.message ?? 'invalid draft'}` }
-      this.deps.requestRender()
-      return
+      return { kind: 'refused', status: { kind: 'rejected', text: `Not saved · ${issues[0]?.message ?? 'invalid draft'}` } }
     }
     // The form's authority binding must still be current BEFORE dispatch: a
-    // replaced Host generation or a moved revision never dispatches.
+    // replaced Host generation never dispatches.
     if (!Object.is(this.generation, editor.generation)) {
-      this.configStatus = { kind: 'unavailable', text: MCP_CONFIG_TEXT.unavailable }
+      return { kind: 'refused', status: { kind: 'unavailable', text: MCP_CONFIG_TEXT.unavailable } }
+    }
+    if (editor.mode === 'add') {
+      if (editor.entry !== undefined) return { kind: 'refused', status: { kind: 'unavailable', text: MCP_CONFIG_TEXT.unavailable } }
+      if (this.nameTaken(name)) {
+        return { kind: 'refused', status: { kind: 'rejected', text: 'Not saved · that server name is already in use' } }
+      }
+      return { kind: 'ready', ops: mcpAddOps(name, draft), revision: editor.revision, generation: editor.generation }
+    }
+    if (editor.entry === undefined) return { kind: 'refused', status: { kind: 'unavailable', text: MCP_CONFIG_TEXT.unavailable } }
+    const ops = mcpEditOps(name, editor.entry.effective, draft, diffMcpServerDraft(editor.entry.effective, draft))
+    return { kind: 'ready', ops, revision: editor.revision, generation: editor.generation }
+  }
+
+  /** Perform the acknowledged Save (also the no-warning path of {@link saveEditor}). */
+  private commitEditorSave(): void {
+    if (this.disposed || this.editor === undefined) return
+    const editor = this.editor
+    const prepared = this.prepareEditorSave()
+    if (prepared.kind === 'refused') {
+      this.configStatus = prepared.status
       this.deps.requestRender()
       return
     }
-    let ops: ReturnType<typeof mcpAddOps>
-    if (editor.mode === 'add') {
-      if (editor.entry !== undefined) return
-      if (this.nameTaken(name)) {
-        this.configStatus = { kind: 'rejected', text: 'Not saved · that server name is already in use' }
-        this.deps.requestRender()
-        return
-      }
-      ops = mcpAddOps(name, draft)
-    } else {
-      if (editor.entry === undefined) return
-      const patch = diffMcpServerDraft(editor.entry.effective, draft)
-      ops = mcpEditOps(name, editor.entry.effective, draft, patch)
-      if (ops.length === 0) {
-        this.editor = undefined
-        this.configStatus = { kind: 'saved', text: MCP_CONFIG_TEXT.saved }
-        this.deps.requestRender()
-        return
-      }
+    if (prepared.ops.length === 0) {
+      this.editor = undefined
+      this.configStatus = { kind: 'saved', text: MCP_CONFIG_TEXT.saved }
+      this.deps.requestRender()
+      return
     }
-    this.dispatchConfigWrite(ops, editor.revision, editor.generation, MCP_CONFIG_TEXT.saved, () => {
+    this.dispatchConfigWrite(prepared.ops, prepared.revision, prepared.generation, MCP_CONFIG_TEXT.saved, () => {
       // A saved draft closes its editor (a failed/conflicted one keeps it).
       if (this.editor === editor) this.editor = undefined
     })
@@ -851,6 +927,24 @@ export class McpServersController {
     this.configConfirm = undefined
     if (!confirmed) {
       this.deps.requestRender()
+      return
+    }
+    // A Save answers a question about the FORM's draft (which for an Add has
+    // no entry yet and no list selection), so it is dispatched through the
+    // editor's own fences instead of the selected-entry ones.
+    if (confirmation.kind === 'save') {
+      if (this.configuration.kind !== 'ready') {
+        this.configStatus = { kind: 'unavailable', text: MCP_CONFIG_TEXT.unavailable }
+        this.deps.requestRender()
+        return
+      }
+      if (this.configuration.revision !== confirmation.capturedRevision) {
+        this.configStatus = { kind: 'conflict', text: MCP_CONFIG_TEXT.conflict }
+        this.refreshConfiguration()
+        this.deps.requestRender()
+        return
+      }
+      this.commitEditorSave()
       return
     }
     if (this.selected !== confirmation.name) {

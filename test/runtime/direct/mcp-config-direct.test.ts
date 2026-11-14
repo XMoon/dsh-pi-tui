@@ -308,3 +308,42 @@ test('a Host replacement during the write is outcome-unconfirmed, never saved', 
   if (outcome.kind !== 'failed') return
   assert.equal(outcome.failure.kind, 'outcome-unconfirmed')
 })
+
+test('a mutate that throws AFTER persisting is saved when the read-back proves the op is in force', async () => {
+  const settings = new FakeSettingsForms({ servers: {} }, { servers: { mine: stdioEntry() } })
+  const config = makeConfig(settings)
+  const read = config.read()
+  assert.equal(read.kind, 'ready')
+  if (read.kind !== 'ready') return
+  // The official ConfigEditor persists the patch and THEN reconciles; a throw
+  // from the Loader must not be reported as "the configuration did not change".
+  const originalMutate = settings.mutate.bind(settings)
+  settings.mutate = async (ns, ops, revision) => {
+    await originalMutate(ns, ops, revision)
+    throw new Error('loader reconcile failed after the patch was written')
+  }
+  const outcome = await config.mutate(
+    [{ op: 'set', path: ['servers', 'mine', 'enabled'], value: false }],
+    read.revision,
+    GENERATION,
+  )
+  assert.equal(outcome.kind, 'saved', 'the read-back proves the write committed')
+})
+
+test('a mutate that throws without persisting is a rejection when the revision did not move', async () => {
+  const settings = new FakeSettingsForms({ servers: {} }, { servers: { mine: stdioEntry() } })
+  const config = makeConfig(settings)
+  const read = config.read()
+  assert.equal(read.kind, 'ready')
+  if (read.kind !== 'ready') return
+  settings.mutate = async () => { throw new Error('servers.mine: a stdio server requires "command"') }
+  const outcome = await config.mutate(
+    [{ op: 'set', path: ['servers', 'mine', 'command'], value: '' }],
+    read.revision,
+    GENERATION,
+  )
+  assert.equal(outcome.kind, 'failed')
+  if (outcome.kind !== 'failed') return
+  assert.equal(outcome.failure.kind, 'rejected')
+  assert.match(outcome.failure.reason, /requires "command"/u)
+})

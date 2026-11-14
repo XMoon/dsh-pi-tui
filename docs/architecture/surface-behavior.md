@@ -1483,7 +1483,12 @@ plain value is shown only as `Set (hidden)` in a non-editing row, while a
 `${credential:REF}` reference stays verbatim. The form's draft, validation,
 focus, discard confirmation and one configuration status are Client-local and
 die with the page. A dirty `Esc` asks `Discard changes?` with Keep editing as the
-default; only an explicit discard drops the draft with zero writes.
+default; only an explicit discard drops the draft with zero writes. A Save whose
+draft can reach outside the Host asks ONE explicit question before writing —
+`Enabling this server can execute an external command.` for a stdio entry, and
+`Enabling this server can send data to an external service. Target: <host>` for
+an HTTP entry (the host only, never a credential) — and only an affirmative
+answer dispatches the write.
 
 Keys: list `↑/↓` move, `Enter` opens the detail, `a` begins Add when the Host
 settings are current, `/` filters by name, `r` re-observes, `Esc` cancels search /
@@ -1493,9 +1498,10 @@ cancels), `e` edits, `t` asks
 `Change saved configuration? The MCP process may stop or start`, `d` asks the
 exact-name Delete confirmation, `u` asks the Reset-to-inherited confirmation,
 `r` refreshes, `Esc` returns to the list. In a form, `↑/↓`/`Tab` move focus,
-`Enter` activates a field or row, `s` saves, `Esc` leaves an input or asks the
-discard confirmation; while an input is active `a/e/t/d/u/s` are text.
-Delete/Reset/toggle confirmations respond only to `y` or `Esc`. While searching,
+`Enter` activates a field or row, `s` asks to save (an external-capability acknowledgement first when the draft
+can reach outside the Host), `Esc` leaves an input or asks the discard
+confirmation; while an input is active `a/e/t/d/u/s` are text.
+Delete/Reset/toggle/Save confirmations respond only to `y` or `Esc`. While searching,
 `p/x/r/y` and every CRUD key are query text only. Every action requires a
 current observation, a same-generation current settings descriptor, an exact
 listed entry and no in-flight operation; `loading`/`stale`/`unavailable` states

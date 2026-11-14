@@ -560,3 +560,36 @@ test('a dirty-discard prompt keeps its question at every narrow width', () => {
     assert.match(bar, /Discard(\?| changes\?)/u, `width ${String(width)}: the discard question must survive`)
   }
 })
+
+test('a Save confirmation paints the external-capability subject at every width', () => {
+  for (const width of [200, 100, 80, 44]) {
+    const { page } = makePage(snapshot({
+      selectedConfig: CONFIG_FACET,
+      editor: editorSnapshot({ dirty: true }),
+      configConfirm: {
+        kind: 'save',
+        name: 'alpha',
+        warning: 'Enabling this server can execute an external command.',
+        capturedRevision: 1,
+      },
+    }))
+    const bar = render(page, width, 16).at(-1) ?? ''
+    assert.match(bar, /external command|Save configuration\?/u,
+      `width ${String(width)}: the disclosure must be readable`)
+    assert.match(bar, /Y confirm|y/u, `width ${String(width)}: the affirmative key is advertised`)
+    assert.match(bar, /Esc/u, `width ${String(width)}: the cancel key is advertised`)
+  }
+})
+
+test('a Save confirmation only dispatches on `y`, never on another key', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ dirty: true }),
+    configConfirm: { kind: 'save', name: 'alpha', warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
+  }))
+  render(page, 100, 16)
+  for (const key of ['s', 'e', 'd', 'u', '\r']) page.handleInput(key)
+  assert.deepEqual(controller.calls, [], 'no other key may answer the disclosure')
+  page.handleInput('y')
+  assert.deepEqual(controller.calls, ['answerConfigConfirm:true'])
+})

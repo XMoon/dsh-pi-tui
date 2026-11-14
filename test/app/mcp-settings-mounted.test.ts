@@ -468,6 +468,13 @@ test('the mounted Add -> Save -> descriptor journey writes the official namespac
   assert.match(h.view(), /Unsaved changes/u)
   await press(h.vt, 's')
   await frames(h.vt)
+  // The Save first asks for the external-capability acknowledgement (a stdio
+  // entry runs a command); only `y` writes.
+  assert.match(h.view(), /Enabling this server can execute an external command/u,
+    'a stdio Save must disclose the external command it enables')
+  assert.deepEqual(h.settingsMutateCalls, [], 'the question itself writes nothing')
+  await press(h.vt, 'y')
+  await frames(h.vt)
   await flushOwnedTurns()
   await frames(h.vt)
   assert.deepEqual(h.settingsMutateCalls, ['mcp-manager'], 'exactly ONE official settings mutation')
