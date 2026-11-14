@@ -49,6 +49,7 @@ import {
   waitForHostSessionEventAfter,
   waitForHostSessionHeader,
 } from '../../lib/split-smoke-sessions.mjs'
+import { waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
 function assert(condition, message) {
@@ -318,6 +319,7 @@ export async function runAcpPo3bCancelApproval(context) {
       C1_HOLD_LONG_TURN: barrier,
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '16',
     })
+    const mainWorkRoot = started.workRoot
     host = started.host
     const ready = started.ready
     const scopeId = ready.localHost.scopeId
@@ -658,8 +660,17 @@ export async function runAcpPo3bCancelApproval(context) {
     const closeNeverClaimed = (hostSessionEvents(dshHome, sessionA) ?? []).every(event =>
       !(event.type === 'user/message' && userMessageText(event) === closePrompt))
     const closeTuiTurn = userMessageTurnOf(hostSessionEvents(dshHome, sessionA) ?? [], 'po3b-tui-a4', tuiA4Start)
+    // The OFFICIAL `agent/inbox/discarded` notice names the removed message:
+    // it must be exactly the close prompt's own durable id.
+    const closeDiscarded = await waitForC1WorkEvent(mainWorkRoot,
+      event => event.kind === 'po3b-inbox-discarded' && event.messageId === closeQueuedMessage.id,
+      'C08: the official discarded notice for the exact queued close prompt', 60_000)
+    assert(closeDiscarded.messageId === closeQueuedMessage.id,
+      'C08: the durable removal must name the exact queued close message')
     const closeDrainedAndDetached = closeRemoval.data?.outcome === 'canceled'
       && closeCanceledSplices.length === 1
+      && closeDiscarded.messageId === closeQueuedMessage.id
+      && closeDiscarded.text === closePrompt
       && closeNeverClaimed
       && closeResponse?.result !== undefined
       && closeResponse?.error === undefined

@@ -633,6 +633,22 @@ export async function apply(ctx) {
     }, 'fr3 plugin revocation trigger')
   }
 
+  // PO-3B qualification only: the OFFICIAL `agent/inbox/discarded` notice is
+  // the documented way to learn WHICH message an ordinary inbox removal
+  // dropped (the durable splice carries only coordinates/counts). Recording it
+  // lets the L6 case bind the scoped cancellation to its exact message id.
+  if (scenario === 'acp-po3b') {
+    ctx.effect(() => ctx.on('agent/inbox/discarded', ({ message }) => {
+      record('po3b-inbox-discarded', {
+        messageId: message?.id === undefined ? undefined : String(message.id),
+        text: (message?.content ?? [])
+          .map(part => (typeof part?.text === 'string' ? part.text : ''))
+          .join('')
+          .slice(0, 200),
+      })
+    }), 'po3b-discarded-observer')
+  }
+
   // M6-1 F6 qualification fault: an EMPTY official provider that reports an
   // INCOMPLETE observation while the control file exists. The real filesystem
   // provider keeps contributing its candidates, so the catalog can prove
