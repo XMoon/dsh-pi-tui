@@ -14,10 +14,11 @@
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { lstatSync, mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { closeSync, openSync } from 'node:fs'
 import { connect, createServer } from 'node:net'
 import { join } from 'node:path'
+import { Worker } from 'node:worker_threads'
 import test, { type TestContext } from 'node:test'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import { type LocalScope } from '../../src/app/remote-process/local-scope.ts'
@@ -616,4 +617,39 @@ test('retiring an old listener never deletes a newer live server\'s socket path'
   assert.ok(pathExists(logical), 'the newer server pathname must survive the old listener retirement')
   await new Promise<void>(resolveClose => newer.close(() => resolveClose()))
   closeSync(newerDirFd)
+})
+
+/** A worker that continuously opens/closes a directory fd to compete for fd
+ *  numbers on the SHARED worker_threads fd table — the exact condition under
+ *  which a "close dirfd then server.close()" retirement could redirect Node's
+ *  automatic unlink to another directory. */
+const FD_CHURN_WORKER = `
+const fs = require('node:fs')
+const dir = process.env.ACPFDC_DIR
+for (;;) { try { const fd = fs.openSync(dir, 'r'); fs.closeSync(fd) } catch {} }
+`
+
+test('retiring never deletes a foreign socket under concurrent fd-number churn', async t => {
+  const { scope } = newScope(t)
+  const churnDir = testLifecycle(t).tempDir('acp-churn-')
+  const churnSocket = join(churnDir, 'acp.sock')
+  writeFileSync(churnSocket, 'CHURN-FOREIGN')
+  const worker = new Worker(FD_CHURN_WORKER, { eval: true, env: { ...process.env, ACPFDC_DIR: churnDir } })
+  try {
+    await new Promise<void>(resolve => setTimeout(resolve, 50))
+    for (let iteration = 0; iteration < 80; iteration += 1) {
+      const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+      const path = listener.socketPath
+      // Replace OUR contract inode with a foreign file, then retire under churn.
+      unlinkSync(path)
+      writeFileSync(path, `REPL-${String(iteration)}`)
+      await listener.close()
+      assert.ok(pathExists(churnSocket), `the concurrent churn foreign socket must survive retire (iter ${String(iteration)})`)
+      assert.equal(readFileSync(churnSocket, 'utf8'), 'CHURN-FOREIGN', 'the churn foreign socket content is intact')
+      assert.ok(pathExists(path) && lstatSync(path).isFile(), 'the local replacement must also survive retire')
+      unlinkSync(path)
+    }
+  } finally {
+    await worker.terminate()
+  }
 })

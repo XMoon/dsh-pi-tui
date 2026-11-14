@@ -465,6 +465,14 @@ export function createAcpController(options: AcpControlControllerOptions): AcpCo
     if (quiescing) return { state: 'unavailable', reason: 'the Host is shutting down' }
     inFlight += 1
     try {
+      // Qualification-only barrier: hold the controller INSIDE an accepted
+      // mutation so a launcher can prove SIGTERM is admitted while a transition
+      // is genuinely in flight (never inferred from send-time proximity).
+      const mutationBarrier = process.env.SPLIT_PROCESS_HOST_ACP_MUTATION_BARRIER
+      if (mutationBarrier !== undefined && mutationBarrier !== '') {
+        writeEntryRecord({ m4a0: 'qualification', processRole: 'host', op: 'acp-mutation-start', pid: process.pid })
+        await waitForQualificationBarrier(mutationBarrier)
+      }
       if (enabled) {
         // Idempotent enable: an already-listening listener touches nothing.
         if (listener !== undefined && listener.isListening()) return { state: 'enabled' }
