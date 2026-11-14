@@ -456,64 +456,67 @@ test('a stop that cannot confirm the Host exit is TRANSITION_UNCERTAIN, not stop
   assertCode(result, 5, /TRANSITION_UNCERTAIN/u)
 })
 
-test('an aborted start holds the admin seat until the underlying ensure settles', { skip: process.platform !== 'linux' }, async t => {
+/** Wait until a held fake entered its awaited phase (real event, no fixed sleep). */
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  for (;;) {
+    if (predicate()) return
+    await new Promise(resolve => setImmediate(resolve))
+  }
+}
+
+test('an abort during the pre-flight snapshot starts no Host and creates no scope', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
   const controller = new AbortController()
-  let ensureSettled = false
-  let releaseEnsure: (() => void) | undefined
-  const ensureStarted = new Promise<void>(resolve => { releaseEnsure = resolve })
-  void releaseEnsure
+  let releaseProbe: (() => void) | undefined
+  const probeGate = new Promise<void>(resolve => { releaseProbe = resolve })
+  let probeEntered = false
+  let ensured = 0
   const resultPromise = runDaemonControl({ verb: 'start' }, fx.profile, depsOf(fx, {
     signal: controller.signal,
-    seatHoldBudgetMs: 60_000,
-    ensureHost: () => {
-      releaseEnsure?.()
-      return new Promise<never>((_resolve, reject) => {
-        // The underlying OS start stays pending so the second command must
-        // observe BUSY; the suite aborts the caller long before it fires.
-        // reason: this bounded window keeps the fake ensure chain pending.
-        setTimeout(() => { ensureSettled = true; reject(new Error('ensure failed')) }, 120)
-      })
+    probe: async (): Promise<UserManagerProbe> => {
+      probeEntered = true
+      await probeGate
+      return { kind: 'available' }
     },
+    ensureHost: async () => { ensured += 1; throw new Error('must not start after abort') },
   }))
-  await ensureStarted
+  await waitUntil(() => probeEntered)
   controller.abort()
-  // The caller observes the abort immediately...
+  releaseProbe?.()
   const result = await resultPromise
   assertCode(result, 5, /TRANSITION_UNCERTAIN/u)
-  assert.equal(ensureSettled, false, 'the underlying ensure must still be running')
-  // ...but the seat is still held by the detached continuation: a second
-  // management command must be BUSY while the first ensure chain is still
-  // mutating Host/unit state.
-  const second = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, { seatHoldBudgetMs: 60_000 }))
-  assertCode(second, 5, /DAEMON_CONTROL_BUSY/u)
+  assert.equal(ensured, 0, 'an aborted pre-flight must never commit a Host start')
+  assert.equal(existsSync(fx.scope.dir), false, 'an aborted pre-flight must not create the run directory')
 })
 
-test('a forgotten stuck operation no longer delays later commands of its profile', { skip: process.platform !== 'linux' }, async t => {
+test('an abort during the restart pre-flight commits no stop, reload or start', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'inactive', mainPid: 0 })
   const controller = new AbortController()
-  let releaseEnsure: (() => void) | undefined
-  const ensureStarted = new Promise<void>(resolve => { releaseEnsure = resolve })
-  void releaseEnsure
-  // A start whose underlying ensure NEVER settles, with a short forget budget.
-  const first = runDaemonControl({ verb: 'start' }, fx.profile, depsOf(fx, {
+  let releaseProbe: (() => void) | undefined
+  const probeGate = new Promise<void>(resolve => { releaseProbe = resolve })
+  let probeEntered = false
+  let ensured = 0
+  const resultPromise = runDaemonControl({ verb: 'restart' }, fx.profile, depsOf(fx, {
     signal: controller.signal,
-    seatHoldBudgetMs: 120,
-    ensureHost: () => {
-      releaseEnsure?.()
-      return new Promise(() => {})
+    systemctl: systemctl.run,
+    probe: async (): Promise<UserManagerProbe> => {
+      probeEntered = true
+      await probeGate
+      return { kind: 'available' }
     },
+    ensureHost: async () => { ensured += 1; throw new Error('must not start after abort') },
   }))
-  await ensureStarted
+  await waitUntil(() => probeEntered)
   controller.abort()
-  assertCode(await first, 5, /TRANSITION_UNCERTAIN/u)
-  // After the forget budget the registry entry is gone even though the ensure
-  // never settled: a later command of THIS profile must not wait for it.
-  // The registry entry must be provably forgotten before the later command.
-  // reason: this window outlives the 120ms forget budget.
-  await new Promise(resolve => setTimeout(resolve, 200))
-  const later = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, { seatHoldBudgetMs: 120 }))
-  assertCode(later, 0)
+  releaseProbe?.()
+  const result = await resultPromise
+  assertCode(result, 5, /TRANSITION_UNCERTAIN/u)
+  assert.equal(ensured, 0)
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), false, 'no stop may be committed after abort')
+  assert.equal(systemctl.calls.some(args => args.includes('daemon-reload')), false, 'no reload may be committed after abort')
+  assert.equal(existsSync(unit.path), true, 'the owned unit file must be untouched')
 })
 
 test('a second concurrent management operation is DAEMON_CONTROL_BUSY', { skip: process.platform !== 'linux' }, async t => {
@@ -665,6 +668,34 @@ test('logs reads the strict-absence private host.log only without a manager', as
   }))
   assertCode(result, 0)
   assert.match(result.stdout, /fallback line/u)
+})
+
+test('logs reads the strict-absence host.log even when an owned unit file remains on disk', async t => {
+  const fx = fixture(t)
+  writeOwnedUnit(fx)
+  let journalReads = 0
+  const result = await runDaemonControl({ verb: 'logs', lines: 5 }, fx.profile, depsOf(fx, {
+    probe: async (): Promise<UserManagerProbe> => ({ kind: 'absent' }),
+    journal: async () => { journalReads += 1; return { code: 0, stdout: 'stale journal\n', stderr: '' } },
+    hostLogTail: async () => 'real fallback line\n',
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /real fallback line/u)
+  assert.equal(journalReads, 0, 'a strictly absent manager cannot serve the stale unit journal')
+})
+
+test('logs refuses a journal whose manager FragmentPath is not the owned file', async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const other = join(fx.unitDir, 'other.service')
+  let journalReads = 0
+  const result = await runDaemonControl({ verb: 'logs' }, fx.profile, depsOf(fx, {
+    systemctl: unitSystemctl(other).run,
+    journal: async () => { journalReads += 1; return { code: 0, stdout: 'foreign entries\n', stderr: '' } },
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(journalReads, 0, 'a journal from a different loaded unit must never be read')
+  assert.equal(existsSync(unit.path), true)
 })
 
 test('logs refuses a private file when a user manager exists without an owned unit', async t => {

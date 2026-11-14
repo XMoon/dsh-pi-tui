@@ -451,13 +451,17 @@ an unavailable log source, `5` busy/timeout/transition-uncertain. Errors print
 argv, absolute private paths, Cookies, tokens and Host URLs never reach
 stdout/stderr.
 
-- **Status is a pure read.** `status` performs no filesystem mutation: it does
-  not create the profile run directory or a unit, does not reload/start/stop the
-  manager, starts no Host, Session, Agent or TUI, and writes no credential,
-  setting or job. It may read the private scope files, query the manager and run
-  the official authenticated `/connect` handshake. Its stable `key=value` block
-  carries `profile`, `manager`, `user-manager`, `host`, `unit`, `unit-state` and
-  `compatibility` (plus a bounded `pid`/`instance` while one is live). `manager`
+- **Status is a pure read.** The management command performs no Host
+  control-plane mutation: it does not create the profile run directory or a
+  unit, does not reload/start/stop the manager, starts no Host, Session, Agent
+  or TUI, and writes no credential, setting or job. The surrounding official
+  DSH Profile Boot keeps its existing behavior; this contract is about the
+  management control plane, not a claim that the whole CLI process is
+  write-free. `status` may read the private scope files, query the manager and
+  run the official authenticated `/connect` handshake. Its stable `key=value`
+  block carries `profile`, `manager`, `user-manager`, `host`, `unit`,
+  `unit-state` and `compatibility` (plus a bounded `pid`/`instance` while one
+  is live). `manager`
   names the VERIFIED supervision attribution (`systemd` for a verified loaded
   profile unit, `process` for an authenticated strict-absence Host, otherwise
   `unmanaged`); it never means "systemctl exists". `ActiveState=active` or a

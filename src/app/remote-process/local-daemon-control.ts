@@ -184,10 +184,8 @@ export interface DaemonControlDeps {
   readonly sleep?: (ms: number) => Promise<void>
   readonly now?: () => number
   readonly stopTimeoutMs?: number
-  /** Supervisor shutdown signal: abort an in-flight management wait. */
+  /** Supervisor shutdown signal: refuse to COMMIT a new OS transition once set. */
   readonly signal?: AbortSignal
-  /** Test seam: how long an interrupted operation's admin seat is held. */
-  readonly seatHoldBudgetMs?: number
 }
 
 /** One internal snapshot shared by the read-only status and the pre-flight checks. */
@@ -250,26 +248,6 @@ function assertNotAborted(signal: AbortSignal | undefined): void {
   if (signal !== undefined && signal.aborted) {
     throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the management operation was cancelled by supervisor shutdown')
   }
-}
-
-/**
- * Race the underlying OS operation against the supervisor shutdown signal.
- * The RACE is caller-visible only: the losing promise is never cancelled (there
- * is no cancellation channel into systemctl/ensure), and `withAdminSeat` keeps
- * observing the real settlement for the seat's lifetime.
- */
-function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  if (signal === undefined) return promise
-  const aborted = new Promise<never>((_, reject) => {
-    if (signal.aborted) {
-      reject(new DaemonControlError('TRANSITION_UNCERTAIN', 'the management operation was cancelled by supervisor shutdown'))
-      return
-    }
-    signal.addEventListener('abort', () => {
-      reject(new DaemonControlError('TRANSITION_UNCERTAIN', 'the management operation was cancelled by supervisor shutdown'))
-    }, { once: true })
-  })
-  return Promise.race([promise, aborted])
 }
 
 /** The effective platform/uid inputs. */
@@ -487,123 +465,24 @@ export function formatDaemonStatus(status: DaemonControlStatus): string {
 
 /**
  * Acquire the ONE profile-scoped admin seat for a mutating verb. The seat is
- * released only after the operation settles OR the supervisor shutdown budget
- * expires; on an abort-driven early return the caller keeps observing the
- * abort, but the seat is held until the underlying OS work finishes so a
- * second command cannot race a still-running start/stop. When the underlying
- * work outlives the bounded shutdown budget, the seat is released with a
- * sanitized warning instead of blocking the supervisor forever.
+ * held for exactly the lifetime of THIS command's operation: two concurrently
+ * running management commands of the same Profile cannot interleave, and the
+ * kernel releases the abstract name when the process exits. There is no
+ * persistent lock file and no in-memory shadow of OS operations — a command
+ * that dies with the process releases the seat, and the next command re-reads
+ * the real systemd/Host state.
  */
-
-/** The supervisor shutdown budget for holding an interrupted operation's seat. */
-const SEAT_HOLD_BUDGET_MS = 4_000
-
-function withAdminSeat<T>(scope: LocalScope, deps: DaemonControlDeps, operation: () => Promise<T>): Promise<T> {
-  return withAdminSeatScoped(scope, deps.signal, deps.seatHoldBudgetMs ?? SEAT_HOLD_BUDGET_MS, operation)
-}
-
-async function withAdminSeatScoped<T>(
-  scope: LocalScope,
-  signal: AbortSignal | undefined,
-  budgetMs: number,
-  operation: () => Promise<T>,
-): Promise<T> {
+async function withAdminSeat<T>(scope: LocalScope, operation: () => Promise<T>): Promise<T> {
   let seat
   try {
     seat = await bindProcessSeat(`${ADMIN_SEAT_PREFIX}${scope.scopeId.slice(0, 40)}`, 'DAEMON_CONTROL_BUSY')
   } catch (error) {
     throw toDaemonControlError(error)
   }
-  const settled = operation()
-  const holder = (async (): Promise<void> => {
-    try {
-      await settled
-    } catch {
-      // The operation's own failure mapping is the caller's outcome; the seat
-      // holder only observes settlement.
-    }
-  })()
   try {
-    const value = await awaitWithAbort(settled, signal)
-    // The operation itself settled: the seat can close synchronously after the
-    // underlying work of THIS scope drains.
-    await drainUnderlying(scope.scopeId, budgetMs)
+    return await operation()
+  } finally {
     await seat.close()
-    return value
-  } catch (error) {
-    if (signal?.aborted === true) {
-      // ABORT path: return to the caller immediately, but the seat stays held
-      // by a detached continuation until this scope's real OS work settles
-      // (bounded by the shutdown budget) — a second command gets BUSY meanwhile.
-      holdSeatUntilDrained(scope.scopeId, seat, budgetMs).catch(() => {})
-    } else {
-      await drainUnderlying(scope.scopeId, budgetMs)
-      await seat.close()
-    }
-    throw error
-  }
-}
-
-/** Wait (bounded) for every tracked underlying operation of this scope. */
-async function drainUnderlying(scopeId: string, budgetMs: number): Promise<boolean> {
-  return await Promise.race([
-    waitForUnderlyingOperations(scopeId).then(() => true),
-    new Promise<boolean>(resolve => { setTimeout(() => resolve(false), budgetMs).unref?.() }),
-  ])
-}
-
-/** Hold an interrupted operation's seat open until its OS work settles. */
-async function holdSeatUntilDrained(scopeId: string, seat: { close(): Promise<void> }, budgetMs: number): Promise<void> {
-  const drained = await drainUnderlying(scopeId, budgetMs)
-  if (!drained) {
-    try { process.stderr.write('dsh-pi-tui daemon: note: the interrupted management operation had not settled; releasing the profile admin seat\n') } catch { /* best effort */ }
-  }
-  await seat.close()
-}
-
-/**
- * The underlying OS work a management operation started but no longer awaits
- * (an aborted caller), keyed BY SCOPE: one Profile's interrupted start must
- * never hold another Profile's seat. The admin seat stays held while THIS
- * scope's work is still live, so a second command of the same Profile cannot
- * race a still-running ensure/systemctl chain; settlement is also observed so
- * it never becomes an unhandled rejection. The registry is process-local and
- * drains itself on settlement.
- */
-const liveUnderlyingOperations = new Map<string, Set<Promise<unknown>>>()
-
-function trackDetachedSettlement(scopeId: string, promise: Promise<unknown>, forgetAfterMs?: number): void {
-  let set = liveUnderlyingOperations.get(scopeId)
-  if (set === undefined) {
-    set = new Set()
-    liveUnderlyingOperations.set(scopeId, set)
-  }
-  set.add(promise)
-  let released = false
-  const release = (): void => {
-    if (released) return
-    released = true
-    const current = liveUnderlyingOperations.get(scopeId)
-    if (current === undefined) return
-    current.delete(promise)
-    if (current.size === 0) liveUnderlyingOperations.delete(scopeId)
-  }
-  promise.then(release, release)
-  if (forgetAfterMs !== undefined) {
-    // An operation that outlives the seat-hold budget is forgotten: it can no
-    // longer extend ANY later command's drain, so one stuck start cannot
-    // impose a permanent per-command delay on its Profile.
-    const timer = setTimeout(() => release(), forgetAfterMs)
-    timer.unref?.()
-  }
-}
-
-/** Wait until every tracked underlying operation of THIS scope settled. */
-async function waitForUnderlyingOperations(scopeId: string): Promise<void> {
-  for (;;) {
-    const set = liveUnderlyingOperations.get(scopeId)
-    if (set === undefined || set.size === 0) return
-    await Promise.race([...set].map(promise => promise.then(() => {}, () => {})))
   }
 }
 
@@ -631,7 +510,8 @@ async function waitForHostStopped(
   })
   const deadline = now() + (deps.stopTimeoutMs ?? 20_000)
   for (;;) {
-    assertNotAborted(deps.signal)
+    // The stop request is already committed: await its real bounded settlement
+    // instead of turning a shutdown signal into a premature "unknown".
     const targetPid = record?.hostPid ?? mainPid
     const observed = targetPid === 0 ? undefined : readStarttime(targetPid)
     const starttimeGone = targetPid === 0 || observed === undefined
@@ -720,6 +600,7 @@ async function stopFromSnapshot(
       if (probe.kind !== 'available') {
         throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'the user manager cannot verify the profile unit')
       }
+      assertNotAborted(deps.signal)
       await stopOwnedProfileUnit(unit, runtimeDirOf(deps), systemctl)
       await waitForHostStopped(record, unitMainPid, deps)
       return
@@ -738,6 +619,7 @@ async function stopFromSnapshot(
       if (readStarttime(record.hostPid) !== record.hostStarttime) {
         throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the Host process start identity changed before the signal')
       }
+      assertNotAborted(deps.signal)
       const kill = deps.kill ?? process.kill
       try {
         kill(record.hostPid, 'SIGTERM')
@@ -750,6 +632,7 @@ async function stopFromSnapshot(
     throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'a live Host has no verifiable supervision attribution')
   }
   if (unit !== undefined && unitState !== 'not-found' && probe.kind === 'available') {
+    assertNotAborted(deps.signal)
     await stopOwnedProfileUnit(unit, runtimeDirOf(deps), systemctl)
     await waitForHostStopped(undefined, unitMainPid, deps)
   }
@@ -768,33 +651,33 @@ async function runStatus(profile: DaemonControlProfile, deps: DaemonControlDeps)
 /** The `start` handler. */
 async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
   const inspected = inspectScope(profile, deps)
-  return await withAdminSeat(inspected, deps, async () => {
+  return await withAdminSeat(inspected, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
     if (pre.failure !== undefined) throw pre.failure
     if (pre.status.host === 'ready') return { code: 0, stdout: formatDaemonStatus(pre.status), stderr: '' }
     if (pre.status.host !== 'stopped' && pre.status.host !== 'starting') throw refuseHostState(pre.status)
+    // The long read-only snapshot above may have taken seconds. Shutdown that
+    // arrived during it must be observed BEFORE creating the run directory or
+    // committing any Host start.
+    assertNotAborted(deps.signal)
     const scope = scopeFromInstalledProfile({
       dshHome: profile.home,
       profileDir: profile.dir,
       packageRoot: profile.packageRoot,
       dshVersion: profile.dshVersion,
     })
+    assertNotAborted(deps.signal)
     const ensureHost = deps.ensureHost ?? ensureLocalHost
-    const underlying = ensureHost({
-      scope,
-      hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
-      dshAnchor: profile.installAnchor,
-      profile: profile.name,
-      hostStartPolicy: 'public-managed',
-    })
-    // Keep the underlying start observed (never unhandled) while the caller
-    // races the shutdown signal; the seat stays held until `underlying` itself
-    // settles, not until the caller's race rejects. The tracker forgets the
-    // operation after the same budget so a permanently stuck start cannot
-    // delay later commands of this Profile.
-    trackDetachedSettlement(scope.scopeId, underlying, deps.seatHoldBudgetMs ?? SEAT_HOLD_BUDGET_MS)
     try {
-      await awaitWithAbort(underlying, deps.signal)
+      // One committed OS transition: once the request is issued its real result
+      // is awaited as-is; a later abort does not invent a rollback.
+      await ensureHost({
+        scope,
+        hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
+        dshAnchor: profile.installAnchor,
+        profile: profile.name,
+        hostStartPolicy: 'public-managed',
+      })
     } catch (error) {
       throw toDaemonControlError(error)
     }
@@ -807,9 +690,10 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
 /** The `stop` handler. */
 async function runStop(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
   const inspected = inspectScope(profile, deps)
-  return await withAdminSeat(inspected, deps, async () => {
+  return await withAdminSeat(inspected, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
     if (pre.failure !== undefined) throw pre.failure
+    assertNotAborted(deps.signal)
     await stopFromSnapshot(profile, pre, deps)
     const post = await readSnapshot(profile, deps, inspected)
     if (post.status.host !== 'stopped') throw refuseHostState(post.status)
@@ -820,44 +704,47 @@ async function runStop(profile: DaemonControlProfile, deps: DaemonControlDeps): 
 /** The `restart` handler: stop -> confirmed exit -> controlled unit refresh -> start. */
 async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
   const inspected = inspectScope(profile, deps)
-  return await withAdminSeat(inspected, deps, async () => {
+  return await withAdminSeat(inspected, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
     if (pre.failure !== undefined) throw pre.failure
     if (pre.status.host !== 'ready' && pre.status.host !== 'stopped') throw refuseHostState(pre.status)
     const oldInstance = pre.record?.instanceId
-    await stopFromSnapshot(profile, pre, deps)
     assertNotAborted(deps.signal)
+    await stopFromSnapshot(profile, pre, deps)
     const systemctl = deps.systemctl ?? runSystemctl
     if (pre.unit !== undefined && pre.unit.installBuild !== pre.scope.buildId) {
+      assertNotAborted(deps.signal)
       const rendered = renderCurrentProfileUnit({
         scope: pre.scope,
         hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
         dshAnchor: profile.installAnchor,
         profile: profile.name,
       })
+      assertNotAborted(deps.signal)
       replaceStoppedOwnedProfileUnit(pre.unit, pre.scope, profile.name, uidOf(deps), rendered.content)
+      assertNotAborted(deps.signal)
       const reload = await systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload'], runtimeDirOf(deps))
       if (reload.kind !== 'exited' || reload.code !== 0) {
         throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'daemon-reload failed after the controlled unit replacement')
       }
     }
+    assertNotAborted(deps.signal)
     const scope = scopeFromInstalledProfile({
       dshHome: profile.home,
       profileDir: profile.dir,
       packageRoot: profile.packageRoot,
       dshVersion: profile.dshVersion,
     })
+    assertNotAborted(deps.signal)
     const ensureHost = deps.ensureHost ?? ensureLocalHost
-    const underlying = ensureHost({
-      scope,
-      hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
-      dshAnchor: profile.installAnchor,
-      profile: profile.name,
-      hostStartPolicy: 'public-managed',
-    })
-    trackDetachedSettlement(scope.scopeId, underlying, deps.seatHoldBudgetMs ?? SEAT_HOLD_BUDGET_MS)
     try {
-      await awaitWithAbort(underlying, deps.signal)
+      await ensureHost({
+        scope,
+        hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
+        dshAnchor: profile.installAnchor,
+        profile: profile.name,
+        hostStartPolicy: 'public-managed',
+      })
     } catch (error) {
       throw toDaemonControlError(error)
     }
@@ -877,7 +764,7 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
 /** The `uninstall` handler. */
 async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
   const inspected = inspectScope(profile, deps)
-  return await withAdminSeat(inspected, deps, async () => {
+  return await withAdminSeat(inspected, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
     if (pre.failure !== undefined) throw pre.failure
     if (pre.unit === undefined) {
@@ -888,6 +775,7 @@ async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDe
       throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'the user manager cannot verify the profile unit')
     }
     const systemctl = deps.systemctl ?? runSystemctl
+    assertNotAborted(deps.signal)
     if (pre.unitState === 'active' || pre.unitState === 'unknown') {
       await stopOwnedProfileUnit(pre.unit, runtimeDirOf(deps), systemctl)
       // Only the unit's own Host is waited for; an unrelated strict-absence
@@ -1025,10 +913,17 @@ async function runLogs(profile: DaemonControlProfile, intent: DaemonControlInten
   }
   const lines = intent.lines ?? 100
   let text: string
-  if (unit !== undefined) {
-    if (probe.kind !== 'available') {
-      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the user manager cannot provide the unit journal')
+  // A strictly absent manager cannot be running any unit, so a leftover owned
+  // unit FILE on disk must not hide the real process-supervised Host log.
+  if (probe.kind === 'absent') {
+    const path = join(scope.dir, 'host.log')
+    const tail = deps.hostLogTail ?? tailHostLog
+    const value = await tail(path, lines)
+    if (value === undefined || value.trim() === '') {
+      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'no private fallback Host log is available')
     }
+    text = value
+  } else if (unit !== undefined) {
     // The journal belongs to the unit the manager actually loads. A disk file
     // with valid owner metadata is not enough: verify FragmentPath names THIS
     // file and no drop-in overrides it, exactly like stop/uninstall do.
@@ -1049,14 +944,6 @@ async function runLogs(profile: DaemonControlProfile, intent: DaemonControlInten
       throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'no journal entries are available for the owned profile unit')
     }
     text = result.stdout
-  } else if (probe.kind === 'absent') {
-    const path = join(scope.dir, 'host.log')
-    const tail = deps.hostLogTail ?? tailHostLog
-    const value = await tail(path, lines)
-    if (value === undefined || value.trim() === '') {
-      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'no private fallback Host log is available')
-    }
-    text = value
   } else {
     throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'no owned unit or strict-absence Host log exists for this profile')
   }
