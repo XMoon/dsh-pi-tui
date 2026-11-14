@@ -554,6 +554,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         // empty commit keeps the current value.
         this.openFormInput(row, '')
         return
+      case 'cycle-dict-form':
+        // The EXPLICIT storage-form choice: reference ⇄ literal. Switching
+        // never guesses from the typed text.
+        this.controller.setEditorDictForm(row.action.field, row.action.key,
+          this.controller.dictValueForm(row.action.field, row.action.key) === 'reference' ? 'literal' : 'reference')
+        this.bumpRevision()
+        return
     }
   }
 
@@ -594,8 +601,11 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       case 'edit-dict-value': {
         const { field, key } = active.row.action
         // An empty commit keeps the stored value (the form never rewrites a
-        // hidden value it did not just type).
-        if (value !== '') this.controller.setEditorDictValue(field, key, value)
+        // hidden value it did not just type). A non-empty commit uses the FORM
+        // the user explicitly chose for this key.
+        if (value !== '') {
+          this.controller.setEditorDictValue(field, key, value, this.controller.dictValueForm(field, key))
+        }
         break
       }
       default:
@@ -926,11 +936,12 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     const inputRows = this.formInput === undefined ? 0 : 1
     const bodyRows = Math.max(1, rows - statusRows - inputRows)
     // Keep the focused row inside the painted window before painting.
-    const formRowCount = mcpFormRows(editor).length
+    const formRowCount = mcpFormRows(editor, (field, key) => this.controller.dictValueForm(field, key)).length
     if (this.formFocus >= formRowCount) this.formFocus = Math.max(0, formRowCount - 1)
     if (this.formFocus < this.formOffset) this.formOffset = this.formFocus
     if (this.formFocus >= this.formOffset + bodyRows) this.formOffset = this.formFocus - bodyRows + 1
-    const rendered = renderMcpConfigForm(editor, width, bodyRows, this.formFocus, this.formOffset)
+    const rendered = renderMcpConfigForm(editor, width, bodyRows, this.formFocus, this.formOffset,
+      (field, key) => this.controller.dictValueForm(field, key))
     const lines = [...rendered.lines]
     if (this.formInput !== undefined) {
       const [inputLine] = this.formInput.input.render(width)

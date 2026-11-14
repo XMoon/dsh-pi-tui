@@ -347,3 +347,53 @@ test('a mutate that throws without persisting is a rejection when the revision d
   assert.equal(outcome.failure.kind, 'rejected')
   assert.match(outcome.failure.reason, /requires "command"/u)
 })
+
+test('a commit-then-throw Delete is only saved when the entry is really gone', async () => {
+  const settings = new FakeSettingsForms({ servers: {} }, { servers: { mine: stdioEntry() } })
+  const config = makeConfig(settings)
+  const read = config.read()
+  assert.equal(read.kind, 'ready')
+  if (read.kind !== 'ready') return
+  const originalMutate = settings.mutate.bind(settings)
+  settings.mutate = async (ns, ops, revision) => {
+    await originalMutate(ns, ops, revision)
+    throw new Error('loader reconcile failed after the patch was written')
+  }
+  const outcome = await config.mutate([{ op: 'unset', path: ['servers', 'mine'] }], read.revision, GENERATION)
+  assert.equal(outcome.kind, 'saved', 'the entry is gone, so the unset committed')
+})
+
+test('a commit-then-throw Reset is NOT claimed saved when the inherited entry survives', async () => {
+  // A Reset keeps the server (the base provides it), so the unset cannot be
+  // proven by the entry's absence: the truthful settlement is unconfirmed.
+  const settings = new FakeSettingsForms(
+    { servers: { inherited: stdioEntry('/base') } },
+    { servers: { inherited: { enabled: false } } },
+  )
+  const config = makeConfig(settings)
+  const read = config.read()
+  assert.equal(read.kind, 'ready')
+  if (read.kind !== 'ready') return
+  const originalMutate = settings.mutate.bind(settings)
+  settings.mutate = async (ns, ops, revision) => {
+    await originalMutate(ns, ops, revision)
+    throw new Error('loader reconcile failed after the patch was written')
+  }
+  const outcome = await config.mutate([{ op: 'unset', path: ['servers', 'inherited'] }], read.revision, GENERATION)
+  assert.equal(outcome.kind, 'failed')
+  if (outcome.kind !== 'failed') return
+  assert.equal(outcome.failure.kind, 'outcome-unconfirmed')
+})
+
+test('an unset that provably did not take effect stays a rejection', async () => {
+  const settings = new FakeSettingsForms({ servers: {} }, { servers: { mine: stdioEntry() } })
+  const config = makeConfig(settings)
+  const read = config.read()
+  assert.equal(read.kind, 'ready')
+  if (read.kind !== 'ready') return
+  settings.mutate = async () => { throw new Error('the Host refused the write') }
+  const outcome = await config.mutate([{ op: 'unset', path: ['servers', 'mine'] }], read.revision, GENERATION)
+  assert.equal(outcome.kind, 'failed')
+  if (outcome.kind !== 'failed') return
+  assert.equal(outcome.failure.kind, 'rejected')
+})

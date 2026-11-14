@@ -30,6 +30,8 @@ export type McpFormAction =
   | { readonly kind: 'edit-arg'; readonly index: number }
   | { readonly kind: 'edit-dict-key'; readonly field: 'env' | 'headers'; readonly key: string }
   | { readonly kind: 'edit-dict-value'; readonly field: 'env' | 'headers'; readonly key: string }
+  /** Flip the stored FORM of one value (reference ⇄ literal). */
+  | { readonly kind: 'cycle-dict-form'; readonly field: 'env' | 'headers'; readonly key: string }
   | { readonly kind: 'add-arg' }
   | { readonly kind: 'add-dict-row'; readonly field: 'env' | 'headers' }
 
@@ -58,8 +60,15 @@ function dictValueText(value: string): string {
   return isCredentialReference(value) ? value : 'Set (hidden)'
 }
 
-/** Build the form's field list from one editor snapshot (deterministic). */
-export function mcpFormRows(editor: McpEditorSnapshot): readonly McpFormRow[] {
+/**
+ * Build the form's field list from one editor snapshot (deterministic).
+ * `formOf` supplies the EXPLICIT storage form the user chose for one value (the
+ * controller owns it); the row states it and a separate row toggles it.
+ */
+export function mcpFormRows(
+  editor: McpEditorSnapshot,
+  formOf: (field: 'env' | 'headers', key: string) => 'reference' | 'literal' = (_field, _key) => 'reference',
+): readonly McpFormRow[] {
   const rows: McpFormRow[] = []
   if (editor.nameEditable) {
     rows.push({ id: 'name', group: 'Identity', label: 'Name', value: editor.name === '' ? '(required)' : editor.name, action: { kind: 'edit-name' } })
@@ -120,8 +129,16 @@ export function mcpFormRows(editor: McpEditorSnapshot): readonly McpFormRow[] {
         id: `env-value:${entry.key}`,
         group: 'Parameters',
         label: `Env ${entry.key}`,
+        // A reference stays verbatim; a literal is only `Set (hidden)`.
         value: dictValueText(entry.value),
         action: { kind: 'edit-dict-value', field: 'env', key: entry.key },
+      })
+      rows.push({
+        id: `env-form:${entry.key}`,
+        group: 'Parameters',
+        label: `Env ${entry.key} stored as`,
+        value: `${formOf('env', entry.key) === 'reference' ? 'Credential reference' : 'Literal (stored in profile)'} (Enter to switch)`,
+        action: { kind: 'cycle-dict-form', field: 'env', key: entry.key },
       })
     }
   } else {
@@ -149,6 +166,13 @@ export function mcpFormRows(editor: McpEditorSnapshot): readonly McpFormRow[] {
         value: dictValueText(entry.value),
         action: { kind: 'edit-dict-value', field: 'headers', key: entry.key },
       })
+      rows.push({
+        id: `header-form:${entry.key}`,
+        group: 'Parameters',
+        label: `Header ${entry.key} stored as`,
+        value: `${formOf('headers', entry.key) === 'reference' ? 'Credential reference' : 'Literal (stored in profile)'} (Enter to switch)`,
+        action: { kind: 'cycle-dict-form', field: 'headers', key: entry.key },
+      })
     }
   }
   return rows
@@ -175,8 +199,9 @@ export function renderMcpConfigForm(
   rows: number,
   focusIndex: number,
   offset: number,
+  formOf: (field: 'env' | 'headers', key: string) => 'reference' | 'literal' = (_field, _key) => 'reference',
 ): { readonly lines: string[]; readonly painted: readonly McpFormPaintedRow[]; readonly maxOffset: number } {
-  const formRows = mcpFormRows(editor)
+  const formRows = mcpFormRows(editor, formOf)
   const content: { readonly text: string; readonly row?: McpFormRow; readonly group?: McpFormGroup }[] = []
   let lastGroup: McpFormGroup | undefined
   for (const row of formRows) {

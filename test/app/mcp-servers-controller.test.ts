@@ -523,13 +523,15 @@ test('an Edit patches only dirty fields and keeps a conflicted draft open', asyn
   h.configuration.outcome = () => ({ kind: 'failed', failure: { kind: 'conflict', reason: 'changed' } })
   h.controller.beginEdit()
   assert.equal(h.controller.snapshot().editor?.nameEditable, false, 'Edit keeps the name fixed')
-  h.controller.setEditorDictValue('env', 'KEEP', 'same')
+  // The stored value is re-stored in its OWN form (a literal here), so an
+  // untouched literal is never silently converted into a credential token.
+  h.controller.setEditorDictValue('env', 'KEEP', 'same', 'literal')
   h.controller.addEditorDictKey('env')
   // The inserted row starts with a unique placeholder key the user renames.
   const placeholder = h.controller.snapshot().editor?.env.find(entry => entry.key.startsWith('KEY_'))?.key
   assert.ok(placeholder !== undefined, 'the inserted row is painted')
   h.controller.renameEditorDictKey('env', placeholder, 'NEW')
-  h.controller.setEditorDictValue('env', 'NEW', 'v')
+  h.controller.setEditorDictValue('env', 'NEW', 'v', 'literal')
   h.controller.removeEditorDictKey('env', 'DROP')
   await saveAcknowledging(h)
   assert.equal(h.configuration.mutations.length, 1)
@@ -818,4 +820,47 @@ test('a Save on a stdio or HTTP draft discloses the external capability first', 
   await h.flush()
   assert.equal(h.configuration.mutations.length, 1)
   assert.equal(h.controller.snapshot().configStatus?.kind, 'saved')
+})
+
+test('an env/header value is stored as an explicit reference or literal, never silently', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  h.controller.beginEdit()
+  h.controller.addEditorDictKey('env')
+  const placeholder = h.controller.snapshot().editor?.env.find(entry => entry.key.startsWith('KEY_'))?.key
+  assert.ok(placeholder !== undefined)
+  h.controller.renameEditorDictKey('env', placeholder, 'TOKEN')
+
+  // The DEFAULT form is a reference: the bare REF name becomes the official
+  // `${credential:REF}` token, never a plain literal.
+  h.controller.setEditorDictValue('env', 'TOKEN', 'MY_TOKEN')
+  assert.equal(h.controller.snapshot().editor?.env.find(entry => entry.key === 'TOKEN')?.value, '${credential:MY_TOKEN}')
+
+  // A malformed REF is refused with a truthful status and the value unchanged.
+  h.controller.setEditorDictValue('env', 'TOKEN', 'not a ref')
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'rejected')
+  assert.equal(h.controller.snapshot().editor?.env.find(entry => entry.key === 'TOKEN')?.value, '${credential:MY_TOKEN}')
+
+  // An explicit LITERAL choice stores the typed value as-is.
+  h.controller.setEditorDictValue('env', 'TOKEN', 'plain-value', 'literal')
+  assert.equal(h.controller.snapshot().editor?.env.find(entry => entry.key === 'TOKEN')?.value, 'plain-value')
+
+  // A full `${credential:REF}` typed into the reference form is normalized once.
+  h.controller.setEditorDictValue('env', 'TOKEN', '${credential:OTHER}', 'reference')
+  assert.equal(h.controller.snapshot().editor?.env.find(entry => entry.key === 'TOKEN')?.value, '${credential:OTHER}')
+})
+
+test('the HTTP disclosure never echoes a path, query or credential of an unparseable URL', async () => {
+  const h = await readyHarness([], 1)
+  h.controller.beginAdd()
+  h.controller.setEditorField('name', 'svc')
+  h.controller.setEditorTransport('streamable-http')
+  // A malformed URL that embeds a credential template and a token in its query:
+  // the disclosure must show NEITHER, and must not echo the raw string.
+  h.controller.setEditorField('url', '${credential:MY_SECRET}https://user:pw@host.test:9/rpc?token=abc')
+  h.controller.saveEditor()
+  const warning = h.controller.snapshot().configConfirm?.warning ?? ''
+  assert.match(warning, /external service/u)
+  assert.doesNotMatch(warning, /MY_SECRET|user|pw|token=abc|credential/u,
+    `the disclosure must never echo the raw URL: ${warning}`)
+  assert.match(warning, /Unknown target/u, 'an unparseable URL fails closed')
 })

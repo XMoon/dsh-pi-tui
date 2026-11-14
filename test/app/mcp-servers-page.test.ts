@@ -85,7 +85,15 @@ class StubController {
   removeEditorArg(index: number): void { this.calls.push(`removeArg:${String(index)}`) }
   addEditorDictKey(field: string): void { this.calls.push(`addDict:${field}`) }
   renameEditorDictKey(field: string, from: string, to: string): void { this.calls.push(`renameDict:${field}:${from}=${to}`) }
-  setEditorDictValue(field: string, key: string, value: string): void { this.calls.push(`setDictValue:${field}:${key}=${value}`) }
+  setEditorDictValue(field: string, key: string, value: string, form = 'reference'): void {
+    this.calls.push(`setDictValue:${field}:${key}=${value}:${form}`)
+  }
+  dictValueForm(_field: string, _key: string): 'reference' | 'literal' { return this.formValue }
+  setEditorDictForm(field: string, key: string, form: 'reference' | 'literal'): void {
+    this.calls.push(`setDictForm:${field}:${key}=${form}`)
+    this.formValue = form
+  }
+  formValue: 'reference' | 'literal' = 'reference'
   removeEditorDictKey(field: string, key: string): void { this.calls.push(`removeDict:${field}:${key}`) }
   addable = true
   editable = true
@@ -607,4 +615,28 @@ test('a compacted HTTP disclosure still names its target host', () => {
       `width ${String(width)}: the target host must survive compaction`)
     assert.match(bar, /[Ee]xternal (service|data)/u, `width ${String(width)}: the capability fact must survive`)
   }
+})
+
+test('the form exposes an explicit storage-form row that the user can switch', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({
+      env: [{ key: 'TOKEN', value: '${credential:TOKEN}' }],
+      dirty: true,
+    }),
+  }))
+  openEditor(page, 'e')
+  const frame = render(page, 100, 20).join('\n')
+  // The stored FORM is visible, and it is its own focusable row.
+  assert.match(frame, /stored as: Credential reference/u)
+  // Walk to that row and switch it.
+  for (let step = 0; step < 14; step += 1) {
+    const current = /▸ ([^:\n]+):/u.exec(render(page, 100, 20).join('\n'))
+    if (current !== null && (current[1] ?? '').trim().startsWith('Env TOKEN stored as')) break
+    page.handleInput('\x1b[B')
+  }
+  page.handleInput('\r')
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('setDictForm')), ['setDictForm:env:TOKEN=literal'])
+  const after = render(page, 100, 20).join('\n')
+  assert.match(after, /stored as: Literal \(stored in profile\)/u, 'the switch is painted')
 })
