@@ -274,6 +274,46 @@ anything else (a started turn, an unknown read, a
   whether the action is operable at all. A pane missing one of them keeps the
   rest and is never sent a node it cannot paint.
 
+## Native reading and the client's own Find
+
+The Tern client owns reading: its Main scrollback, its Follow state and its
+pane-level **Find** are client behaviours, not TSP surfaces.
+
+- The client Find searches the **committed text of the focused pane's own
+  document** — the rows the preset mapper materialized and the client has
+  painted into its scrollback. It is not a semantic full-text search over the
+  Session, and TSP adds no Find UI, no Find key binding, no second index, no
+  match list and no scroll mirror for it. `Ctrl+F` / `Ctrl+Shift+F` stay the
+  client's own actions; TSP neither binds nor intercepts them.
+- What is **not** in that document is not searchable there: a body the current
+  preset keeps folded (a collapsed Tool/Activity/Thought body, a Command or
+  Compaction detail) is not claimed to be Find-reachable until the user really
+  opens it, and the client may also bound or evict long documents
+  (`gone`-retired rows are not re-fetched). A host-unloaded page, a Remote
+  page the authorized Reader never loaded, and a settled row the client
+  evicted are all outside the claim.
+- The client owns the Find query, the match cursor, the highlight and the
+  close action; the program receives no match data and keeps no Find state.
+  The SDK pin in use exposes `reveal`/`scroll` and no find/openFind entry
+  point, so no application code may call one or drive the client's Find
+  programmatically in production.
+- A client-side disclosure the user causes stays the existing
+  source-scoped disclosure owner's decision. The SDK exposes no Find-origin
+  field, so a client `toggle` that happens while Find is open is not
+  reclassified as "temporary" or as a second manual state.
+- **Semantic search is the application's authority, not the client's**:
+  `TranscriptFolder.search()` owns the corpus of the loaded messages
+  (including text inside a folded card) and `TranscriptSearchMatch.source`
+  locates a hit inside its semantic source. That corpus and the client's
+  document are different scopes and neither contains the other. PiTui's
+  search overlay consumes the Folder authority and stays PiTui-only; a TSP
+  semantic search entry, source occurrence resolution and temporary
+  search-only expansion are separate work, and this renderer adds none of
+  them here.
+- Locality: the whole path is Client-local presentation. Nothing here reads
+  Host cwd/filesystem or Session writer authority, and a Find gesture writes
+  no Session event and mutates no composer draft.
+
 ## Surface, frame and lifecycle invariants
 
 - One persistent inline Tern surface per TSP renderer, with ONE bounded
