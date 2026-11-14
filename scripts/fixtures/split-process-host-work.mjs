@@ -79,6 +79,9 @@ const SCENARIOS = new Set([
   // M6-1 F3 closure: seed the official Web settings baseline + a non-functional
   // credential sentinel through the official Services (never a hand edit).
   'web-settings-f3',
+  // FR3: the MCP scene only needs the real Host composition; this row keeps the
+  // scripted model inert and the work root prepared (no Session is created).
+  'mcp-servers-fr3',
 ])
 
 /** Quote one token for the Host shell used by the harmless fixture commands. */
@@ -492,6 +495,29 @@ export async function apply(ctx) {
   })
 
   ctx.effect(() => ctx.llm.registerAdapter(['c1-qualification'], model))
+
+  if (scenario === 'mcp-servers-fr3') {
+    // FR3: one PLUGIN-OWNED server contributed for this Host row's lifetime.
+    // It has no settings entry, so the management surface must classify it
+    // Plugin-owned (never Configured) while it is registered.
+    const inline = [
+      "import { createInterface } from 'node:readline'",
+      "const send = payload => process.stdout.write(JSON.stringify(payload) + '\\n')",
+      "createInterface({ input: process.stdin }).on('line', line => {",
+      "  let m; try { m = JSON.parse(line) } catch { return }",
+      "  if (m.id === undefined) return",
+      "  if (m.method === 'initialize') send({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: m.params?.protocolVersion ?? '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'fr3-plugin', version: '1.0.0' } } })",
+      "  else if (m.method === 'tools/list') send({ jsonrpc: '2.0', id: m.id, result: { tools: [] } })",
+      "  else if (m.method === 'ping') send({ jsonrpc: '2.0', id: m.id, result: {} })",
+      "  else send({ jsonrpc: '2.0', id: m.id, error: { code: -32601, message: 'method not found' } })",
+      "})",
+    ].join('\n')
+    ctx.effect(() => ctx.mcpManager.register('fr3-plugin', {
+      transport: 'stdio',
+      command: process.execPath,
+      args: ['-e', inline],
+    }), 'fr3 plugin-owned MCP server')
+  }
 
   // M6-1 F6 qualification fault: an EMPTY official provider that reports an
   // INCOMPLETE observation while the control file exists. The real filesystem
