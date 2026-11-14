@@ -165,10 +165,13 @@ Full:
   selection and scrolling behavior and has no application Task pointer routing.
 - Reading Job output belongs to the Job Workspace, not the Task Browser.
 - The Full Task Center is ONE physical overlay with two pages: `Work`
-  (default) and `Team`. Only a proved Root `agentTeam` projection shows the
-  `[Work] Team` tabs; `Tab`/`Shift+Tab` switch pages and each page keeps its OWN
-  query, selection, scroll and disclosure (never a shared draft). A Child
-  Session, and any Workflow-scoped browser, is Work-only. The Team page is
+  (default) and `Team`. A proved Root `agentTeam` projection shows the
+  `[Work] Team` tabs. A browser whose Root eligibility is still UNPROVEN — for
+  example a Remote browser whose exact binding has not materialized yet — may
+  show a recoverable Team error page while it keeps a subscription, until the
+  identity is proven; a proven Child Session, and any Workflow-scoped browser,
+  is Work-only. `Tab`/`Shift+Tab` switch pages and each page keeps its OWN
+  query, selection, scroll and disclosure (never a shared draft). The Team page is
   READ-ONLY: it presents the official `agentTeam` projection's shared tasks plus
   the Root (`lead`) and the already-read Subagent catalog members; there is NO
   Team write, claim, stop, member navigation or `/team` command. An

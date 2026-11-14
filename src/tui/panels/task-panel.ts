@@ -804,13 +804,16 @@ export class TaskBrowserPanel implements Component, Focusable {
     const errorText = errorRaw === undefined ? undefined : truncateToWidth(sanitizedPhysicalLine(errorRaw), safeWidth, '…')
     const searchLine = this.teamSearchMode ? this.teamSearchLine(safeWidth) : undefined
     // The Team hint is action-bar budgeted so `Esc close` (highest retention)
-    // survives very narrow grants instead of being cut mid-word.
-    const teamHintLayout = layoutActionBarRow([
-      { text: '↑↓ select', priority: 80 },
-      { text: 'Enter details', priority: 90 },
+    // survives very narrow grants instead of being cut mid-word. At >=110 the
+    // right pane ALWAYS shows the selected task's details, so `Enter` no longer
+    // toggles anything visible there — do not advertise it at that width.
+    const teamHintSegments: ActionBarSegment[] = [{ text: '↑↓ select', priority: 80 }]
+    if (safeWidth < 110) teamHintSegments.push({ text: 'Enter details', priority: 90 })
+    teamHintSegments.push(
       { text: `${componentKeymap.keyHint('tasks.tab.next')} Work`, priority: 15 },
       { text: 'Esc close', priority: 1000 },
-    ], Math.max(0, safeWidth - 2))
+    )
+    const teamHintLayout = layoutActionBarRow(teamHintSegments, Math.max(0, safeWidth - 2))
     const hintLine = color.textMuted(`  ${teamHintLayout.text}`)
     const selectedIndex = rows.findIndex(row => row.value === this.teamSelectedValue)
 
