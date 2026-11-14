@@ -73,6 +73,7 @@ import {
   runManagedHostTwoProfileIsolation,
 } from '../smoke/split-process/managed-host-m6-2b.mjs'
 import { runAcpPo3aTurnEvents } from '../smoke/split-process/acp-po3a-turn-events.mjs'
+import { runAcpPo3bCancelApproval } from '../smoke/split-process/acp-po3b-cancel-approval.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -417,6 +418,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'acp.po3a-turn-events',
     title: 'one shared-host ACP prompt is admitted once, projects only the committed output of its exact claimed turn, answers a real stopReason and fails mixed turns closed',
     run: runAcpPo3aTurnEvents,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    id: 'acp.po3b-cancel-approval',
+    title: 'session/cancel and session/close scope to the exact shared-host turn (queued removal, exact running user-abort, mixed fail-closed) and the approval waterfall routes ACP-owned turns to the same connection only',
+    run: runAcpPo3bCancelApproval,
   }),
 ])
 

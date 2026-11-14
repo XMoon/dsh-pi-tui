@@ -41,6 +41,9 @@ const SCENARIOS = new Set([
   'question',
   'approval-allow',
   'approval-reject',
+  // PO-3B: held long turns + ONE official approval tool call + the never
+  // policy negative, staged against the scoped ACP cancel/approval owner.
+  'acp-po3b',
   // Host-liveness qualification scenarios. They only reach official Host
   // services (`goals`, `schedule`, `Agent.runMaintenance`) and record facts.
   'goal-armed',
@@ -159,12 +162,13 @@ function recordPromptFacts(options) {
 }
 
 class C1Model extends LlmAdapter {
-  constructor(scenario, proof, root, agentStatusOf) {
+  constructor(scenario, proof, root, agentStatusOf, neverSetup) {
     super()
     this.scenario = scenario
     this.proof = proof
     this.root = root
     this.agentStatusOf = agentStatusOf
+    this.neverSetup = neverSetup
     this.toolIssued = new Set()
     this.longTurnCount = new Map()
     this.childHeld = false
@@ -475,6 +479,88 @@ class C1Model extends LlmAdapter {
       return
     }
 
+    if (this.scenario === 'acp-po3b') {
+      // A one-time official approval-policy switch for the never negative:
+      // the marker prompt itself is answered as a plain turn, and every LATER
+      // approval ask in this Session is decided by the OFFICIAL `never`
+      // policy before the waterfall (no ACP question may appear).
+      if (userText.includes('po3b-never-setup') && !this.toolIssued.has(`never:${sessionId}`)) {
+        this.toolIssued.add(`never:${sessionId}`)
+        if (this.neverSetup !== undefined) await this.neverSetup(sessionId)
+        this.record('po3b-never-set', { sessionId })
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: `po3b never armed ${token}` }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `po3b never armed ${token}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      // PO-3B qualification only. Prompts carrying the approval marker ask
+      // for ONE official `bash` tool call (an approval waterfall question)
+      // before answering; a `never`-policy Session never even asks because
+      // the official service decides before the waterfall. Every other turn
+      // is a held long turn (the C1_HOLD_LONG_TURN barrier), so the smoke can
+      // stage queued-vs-running cancels against real Host facts.
+      if (userText.includes('po3b-approval') && !afterTool) {
+        const suffix = userText.includes('reject') ? 'reject' : 'allow'
+        // ONE tool call per distinct ask marker: the follow-up model request
+        // of the SAME turn is excluded by `afterTool`, and different asks use
+        // different `po3b-*` marker words. The LAST match wins because the
+        // assembled history repeats every earlier marker.
+        const matches = userText.match(/po3b-(?:acp|tui|never)-[a-z-]+/g) ?? ['po3b-ask']
+        const markerKey = `${sessionId}:${matches.at(-1)}`
+        if (!this.toolIssued.has(markerKey)) {
+          this.toolIssued.add(markerKey)
+          const marker = join(this.root, `po3b-${suffix}-${sessionId}.marker`)
+          const command = `printf 'po3b-${suffix}' > ${shellQuote(marker)}`
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield {
+            type: 'block-end',
+            index: 0,
+            block: {
+              type: 'tool-call',
+              id: `c1-po3b-${suffix}-${sessionId}`,
+              name: 'bash',
+              arguments: JSON.stringify({
+                command,
+                description: 'Create the harmless PO-3B approval marker',
+                sandbox_permissions: 'danger-full-access',
+                justification: 'Qualification verifies the ACP approval ownership on an isolated harmless command.',
+              }),
+            },
+          }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }
+          return
+        }
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: `po3b settled ${suffix} ${token}` }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `po3b settled ${suffix} ${token}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      if (afterTool) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: `po3b answer ${token}` }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `po3b answer ${token}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      const attempt = (this.longTurnCount.get(sessionId) ?? 0) + 1
+      this.longTurnCount.set(sessionId, attempt)
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: `po3b started ${token}` }
+      this.record('long-turn-held', {
+        sessionId,
+        attempt,
+        userText: userText.slice(0, 400),
+        agentStatus: this.agentStatusOf(sessionId),
+      })
+      await waitForBarrier(process.env.C1_HOLD_LONG_TURN, signal)
+      this.record('long-turn-released', { sessionId, attempt })
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: `po3b answer ${String(attempt)} ${token}` } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
     throw new Error(`m4-c1-host-work: unsupported scenario ${JSON.stringify(this.scenario)}`)
   }
 }
@@ -492,10 +578,22 @@ export async function apply(ctx) {
   const record = (kind, fields = {}) => {
     appendFileSync(proof, `${JSON.stringify({ kind, scenario, time: Date.now(), pid: process.pid, ...fields })}\n`, { mode: 0o600 })
   }
+  // PO-3B never negative: set the OFFICIAL durable approval policy of one
+  // Session through the official service (the same seam the F8 case proves).
+  const neverSetup = scenario === 'acp-po3b'
+    ? async sessionId => {
+        const agent = ctx.agents.get(sessionId)
+        if (agent === undefined) throw new Error('m4-c1-host-work: po3b-never-setup requires the live Agent')
+        const approval = ctx.reflect.get('approval')
+        if (approval === undefined) throw new Error('m4-c1-host-work: po3b-never-setup requires the official ctx.approval service')
+        const official = await import('@deepseek-ai/dsh-user-approval')
+        official.setApprovalPolicy(agent.session, 'never')
+      }
+    : undefined
   const model = new C1Model(scenario, proof, root, sessionId => {
     const agent = ctx.agents.get(sessionId)
     return agent === undefined ? undefined : agent.status
-  })
+  }, neverSetup)
 
   ctx.effect(() => ctx.llm.registerAdapter(['c1-qualification'], model))
 

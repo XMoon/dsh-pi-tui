@@ -568,6 +568,27 @@ export function assertSelectedVerdict(caseId, result) {
     `selected ${caseId}: the ACP prompt-turn verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
     return
   }
+  if (caseId === 'acp.po3b-cancel-approval') {
+    assert(result?.status === 'PASS'
+      && result?.scope === 'REAL_SPLIT_PROCESS_L6'
+      && result?.acpVersionFromInstalledDsh === true
+      && result?.queuedCancelRemoved === true
+      && result?.runningCancelExactTurn === true
+      && result?.idleCancelNoOp === true
+      && result?.claimRaceSafe === true
+      && result?.cancelDrainBeforeStop === true
+      && result?.closeDrainedAndDetached === true
+      && result?.acpApprovalOnly === true
+      && result?.tuiApprovalOnly === true
+      && result?.policyNeverUnbypassed === true
+      && result?.lateApprovalNoLeak === true
+      && result?.twoViewsIsolated === true
+      && result?.tuiAndAcpShareSession === true
+      && result?.hostIdentityKept === true
+      && result?.l6EvidenceRecorded === true,
+    `selected ${caseId}: the ACP scoped-cancel/approval verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
+    return
+  }
   if (caseId === 'account.official-composition') {
     assert(result?.status === 'PASS'
       && result?.browser === 'PASS'

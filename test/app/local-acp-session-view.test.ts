@@ -63,6 +63,13 @@ class FakeAccess implements HostAcpSessionAccess {
   readonly createSessionCalls: string[] = []
   readonly resolveCalls: string[] = []
   readonly promptCalls: AcpSessionPromptRequest[] = []
+  readonly removedMessageIds: string[] = []
+  readonly cancelledTurns: Array<{ readonly turn: number; readonly keepInbox: boolean }> = []
+  /** The fake inbox: messageIds still pending on the exact agent. */
+  pendingInbox = new Set<string>()
+  /** The fake official current-turn fence of the exact agent. */
+  turnFence: { openTurnStartSeq: number | null; lastTurn: number } | 'stale' = { openTurnStartSeq: null, lastTurn: 0 }
+  agentStatus: 'idle' | 'running' = 'idle'
   createWorkspaceImpl: (path: string) => Promise<AcpCreateWorkspaceOutcome> =
     async path => ({ kind: 'created', workspaceId: `ws:${path}`, path })
   createSessionImpl: (workspaceId: string) => Promise<AcpCreateSessionOutcome> =
@@ -78,6 +85,26 @@ class FakeAccess implements HostAcpSessionAccess {
 
   promptImpl: (request: AcpSessionPromptRequest, signal: AbortSignal) => Promise<{ readonly accepted: true }> =
     async () => ({ accepted: true })
+
+  cancelPendingImpl: (messageId: string) => 'removed' | 'not-pending' | 'stale' =
+    messageId => {
+      if (this.turnFence === 'stale') return 'stale'
+      if (!this.pendingInbox.has(messageId)) return 'not-pending'
+      this.pendingInbox.delete(messageId)
+      this.removedMessageIds.push(messageId)
+      return 'removed'
+    }
+
+  cancelCurrentTurnImpl: (turn: number) => 'addressed' | 'not-current' | 'stale' =
+    turn => {
+      if (this.turnFence === 'stale') return 'stale'
+      if (this.turnFence.openTurnStartSeq === null || this.turnFence.lastTurn !== turn) return 'not-current'
+      if (this.agentStatus !== 'running') return 'not-current'
+      this.cancelledTurns.push({ turn, keepInbox: true })
+      this.agentStatus = 'idle'
+      this.turnFence = { openTurnStartSeq: null, lastTurn: this.turnFence.lastTurn }
+      return 'addressed'
+    }
 
   private readonly agents = new Map<string, AgentLike>()
 
@@ -112,6 +139,25 @@ class FakeAccess implements HostAcpSessionAccess {
   async prompt(request: AcpSessionPromptRequest, signal: AbortSignal): Promise<{ readonly accepted: true }> {
     this.promptCalls.push(request)
     return await this.promptImpl(request, signal)
+  }
+
+  cancelPending(sessionId: string, agent: LiveAgentViewIdentity, session: object, messageId: string):
+    'removed' | 'not-pending' | 'stale' {
+    if (this.agents.get(sessionId) !== agent || this.agents.get(sessionId)?.session !== session) return 'stale'
+    return this.cancelPendingImpl(messageId)
+  }
+
+  cancelCurrentTurn(sessionId: string, agent: LiveAgentViewIdentity, session: object, turn: number):
+    'addressed' | 'not-current' | 'stale' {
+    if (this.agents.get(sessionId) !== agent || this.agents.get(sessionId)?.session !== session) return 'stale'
+    return this.cancelCurrentTurnImpl(turn)
+  }
+
+  currentTurn(sessionId: string, agent: LiveAgentViewIdentity, session: object):
+    { readonly kind: 'current'; readonly openTurn: number | null } | { readonly kind: 'stale' } {
+    if (this.agents.get(sessionId) !== agent || this.agents.get(sessionId)?.session !== session) return { kind: 'stale' }
+    if (this.turnFence === 'stale') return { kind: 'stale' }
+    return { kind: 'current', openTurn: this.turnFence.openTurnStartSeq === null ? null : this.turnFence.lastTurn }
   }
 
   observePromptFacts(_listener: AcpPromptFactListener): () => void {
@@ -231,7 +277,7 @@ test('a second connection cannot attach a Session another connection already hol
   assert.equal(registry.phaseOf(b), 'idle', 'the refused connection stays idle')
   assert.equal(registry.claimCount(), 1, 'the first connection keeps its claim')
   // The first connection is unaffected and can still close its View.
-  assert.deepEqual(registry.closeSession(a, 'S3'), {})
+  assert.deepEqual(await registry.closeSession(a, access, 'S3'), {})
   assert.equal(registry.claimCount(), 0)
 })
 
@@ -246,13 +292,13 @@ test('session/close is idempotent on one connection and never clears another con
   await registry.resumeSession(a, access, { sessionId: 'S4', cwd: '/w' })
   await registry.resumeSession(b, access, { sessionId: 'S5', cwd: '/w' })
 
-  assert.deepEqual(registry.closeSession(a, 'S4'), {})
-  assert.deepEqual(registry.closeSession(a, 'S4'), {}, 'a repeated close on the same connection is idempotent')
+  assert.deepEqual(await registry.closeSession(a, access, 'S4'), {})
+  assert.deepEqual(await registry.closeSession(a, access, 'S4'), {}, 'a repeated close on the same connection is idempotent')
   assert.equal(registry.phaseOf(a), 'idle')
   assert.equal(registry.hasClaim('S5'), true, 'another connection claim is untouched')
   assert.equal(registry.claimCount(), 1)
   // A connection closing a Session it never held is refused.
-  assert.throws(() => registry.closeSession(a, 'S5'), isViewError('LOCAL_ACP_VIEW_NOT_OWNED'))
+  await assert.rejects(registry.closeSession(a, access, 'S5'), isViewError('LOCAL_ACP_VIEW_NOT_OWNED'))
 })
 
 test('releasing a connection frees only its claims and marks it closed', async () => {
@@ -338,7 +384,7 @@ test('a close while a connection is still attaching cancels the pending attach',
   const attempt = registry.resumeSession(conn, access, { sessionId: 'S12', cwd: '/w' })
   assert.equal(registry.hasClaim('S12'), true)
   // The client closes the same session id while resume is still in flight.
-  assert.deepEqual(registry.closeSession(conn, 'S12'), {})
+  assert.deepEqual(await registry.closeSession(conn, access, 'S12'), {})
   assert.equal(registry.hasClaim('S12'), false)
   pending.resolve({ agent })
   // The late result must NOT resurrect an attached view.
@@ -363,7 +409,7 @@ test('a late result from a superseded attach NEVER clobbers the newer operation 
   assert.equal(registry.phaseOf(conn), 'attaching')
   // close(S1) then immediately a NEW resume(S2) starts while S1's resolve is
   // still in flight: a second attach operation now owns the connection state.
-  assert.deepEqual(registry.closeSession(conn, 'S1'), {})
+  assert.deepEqual(await registry.closeSession(conn, access, 'S1'), {})
   const second = registry.resumeSession(conn, access, { sessionId: 'S2', cwd: '/w' })
   assert.equal(registry.phaseOf(conn), 'attaching', 'the newer resume owns attaching')
 
@@ -414,7 +460,7 @@ test('resume then close then resume of the SAME session never lets a stale resul
     const conn = registry.createConnection()
     const staleAttempt = registry.resumeSession(conn, access, { sessionId: 'S', cwd: '/w' })
     assert.equal(registry.hasClaim('S'), true)
-    assert.deepEqual(registry.closeSession(conn, 'S'), {})
+    assert.deepEqual(await registry.closeSession(conn, access, 'S'), {})
     assert.equal(registry.hasClaim('S'), false)
     const newAttempt = registry.resumeSession(conn, access, { sessionId: 'S', cwd: '/w' })
     assert.equal(registry.hasClaim('S'), true, `${mode}: the new claim exists`)
@@ -425,7 +471,7 @@ test('resume then close then resume of the SAME session never lets a stale resul
     assert.equal(registry.hasClaim('S'), true, `${mode}: the stale result must NOT delete the new claim`)
     await newAttempt
     assert.equal(registry.phaseOf(conn), 'attached')
-    assert.deepEqual(registry.closeSession(conn, 'S'), {})
+    assert.deepEqual(await registry.closeSession(conn, access, 'S'), {})
     assert.equal(registry.hasClaim('S'), false)
   }
 })
@@ -567,6 +613,7 @@ function promptView(sessionId = 'P1'): {
   registry: AcpSessionViewRegistry
   conn: ReturnType<AcpSessionViewRegistry['createConnection']>
   notifications: SessionUpdate[]
+  permissionRequests: Array<{ params: import('../../src/app/remote-process/local-acp-session-view.ts').AcpRequestPermissionParams; signal?: AbortSignal; respond: (response: import('../../src/app/remote-process/local-acp-session-view.ts').AcpRequestPermissionResponse) => void; fail: (error: unknown) => void }>
   attach: () => Promise<void>
   start: (text?: string, signal?: AbortSignal) => Promise<{ stopReason: string }>
   insert: (rpcId: string, messageId: string, text?: string) => void
@@ -579,8 +626,10 @@ function promptView(sessionId = 'P1'): {
   const agent = makeAgent(sessionId, '/w')
   access.seed(agent)
   const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
   const conn = registry.createConnection()
   const notifications: SessionUpdate[] = []
+  const permissionRequests: Array<{ params: import('../../src/app/remote-process/local-acp-session-view.ts').AcpRequestPermissionParams; signal?: AbortSignal; respond: (response: import('../../src/app/remote-process/local-acp-session-view.ts').AcpRequestPermissionResponse) => void; fail: (error: unknown) => void }> = []
   const pending: Array<{ promise: Promise<void>; release: () => void }> = []
   const sendUpdate = async (update: SessionUpdate): Promise<void> => {
     const gate = pending.shift()
@@ -594,11 +643,21 @@ function promptView(sessionId = 'P1'): {
     registry,
     conn,
     notifications,
+    permissionRequests,
     message,
     attach: async () => { await registry.resumeSession(conn, access, { sessionId, cwd: '/w' }) },
     start: (text = 'hello', signal = new AbortController().signal) =>
-      registry.promptSession(conn, access, { sessionId, prompt: [{ type: 'text', text }] }, signal, sendUpdate),
+      registry.promptSession(conn, access, { sessionId, prompt: [{ type: 'text', text }] }, signal, sendUpdate, (params, options) =>
+        new Promise((resolveAsk, rejectAsk) => {
+          permissionRequests.push({
+            params,
+            signal: options?.signal,
+            respond: resolveAsk,
+            fail: rejectAsk,
+          })
+        })),
     insert: (rpcId: string, messageId: string, text = 'hello') => {
+      access.pendingInbox.add(messageId)
       registry.onInboxInserted(agent, message(messageId, rpcId))
     },
     claim: (messageId: string, turn: number, rpcId = 'unknown') => {
@@ -877,32 +936,65 @@ test('a Host rejection before insertion is definite; a rejection after insertion
   }
 })
 
-test('close and physical release never fake a cancelled shared turn; late facts cannot reach a new claim', async () => {
-  {
-    const view = promptView()
-    await view.attach()
-    const attempt = view.start()
-    const request = view.access.promptCalls[0]!
-    view.insert(request.requestId, 'm-1')
-    view.claim('m-1', 2, request.requestId)
-    assert.throws(() => view.registry.closeSession(view.conn, 'P1'), isPromptError('LOCAL_ACP_PROMPT_IN_FLIGHT'))
-    assert.equal(view.registry.phaseOf(view.conn), 'attached', 'an in-flight close leaves the View attached')
-    // The Host turn keeps running; only the View release ends the request.
-    view.registry.releaseConnection(view.conn)
-    await assert.rejects(attempt, isPromptError('LOCAL_ACP_VIEW_CLOSED'))
-    // Late facts of the old View are inert.
-    view.commit('assistant/message', assistantData(2, 'm-1', [{ type: 'text', text: 'late answer' }]))
-    view.commit('turn/end', { turn: 2, reason: { kind: 'completed' } })
-    await flushOutput()
-    assert.equal(view.notifications.length, 0)
+test('a close with a RUNNING owned flight cancels the exact turn, drains, detaches and stays idempotent', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-1')
+  view.claim('m-1', 2, request.requestId)
+  view.access.pendingInbox.delete('m-1')
+  view.access.turnFence = { openTurnStartSeq: 100, lastTurn: 2 }
+  view.access.agentStatus = 'running'
+  const closing = view.registry.closeSession(view.conn, view.access, 'P1')
+  // The repeated close awaits the SAME settlement (never a second cancel).
+  const closingAgain = view.registry.closeSession(view.conn, view.access, 'P1')
+  assert.deepEqual(view.access.cancelledTurns, [{ turn: 2, keepInbox: true }], 'exactly one official user cancel of the exact turn')
+  // The prompt answers `cancelled` only after the real user-aborted turn/end.
+  view.commit('turn/end', { turn: 2, reason: { kind: 'aborted', reason: { kind: 'user' } } })
+  assert.deepEqual(await attempt, { stopReason: 'cancelled' })
+  assert.deepEqual(await closing, {})
+  assert.deepEqual(await closingAgain, {}, 'a repeated close awaits the same settlement')
+  assert.equal(view.registry.hasClaim('P1'), false)
+  assert.equal(view.registry.phaseOf(view.conn), 'idle')
+})
 
-    // A NEW connection attaching the SAME session receives none of the old turn.
-    const next = promptView()
-    await next.attach()
-    next.commit('assistant/message', assistantData(2, 'm-1', [{ type: 'text', text: 'late answer' }]))
-    next.commit('turn/end', { turn: 2, reason: { kind: 'completed' } })
-    assert.equal(next.notifications.length, 0, 'an old generation turn is never replayed to a new claim')
+test('a physical disconnect with a QUEUED flight removes the exact pending message before releasing the claim', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-1')
+  view.access.pendingInbox.add('m-1')
+  view.registry.releaseConnection(view.conn, view.access)
+  // The scoped cancellation removes the exact queued message; the claim is
+  // released only after that proven settlement. The disconnected request
+  // settles cancelled (a proven removal) — never a fabricated success.
+  assert.deepEqual(await attempt, { stopReason: 'cancelled' })
+  assert.deepEqual(view.access.removedMessageIds, ['m-1'], 'the disconnect removed the exact queued message')
+  for (let guard = 0; guard < 100 && view.registry.hasClaim('P1'); guard += 1) {
+    await new Promise(resolveTick => setImmediate(resolveTick))
   }
+  assert.equal(view.registry.hasClaim('P1'), false, 'the disconnect releases the claim after the settlement')
+})
+
+test('late facts of a settled old View never reach a new claim', async () => {
+  const view = promptView()
+  await view.attach()
+  view.insert('old-request', 'm-old')
+  view.claim('m-old', 2, 'old-request')
+  await view.registry.closeSession(view.conn, view.access, 'P1')
+  view.commit('assistant/message', assistantData(2, 'm-old', [{ type: 'text', text: 'late answer' }]))
+  view.commit('turn/end', { turn: 2, reason: { kind: 'completed' } })
+  await flushOutput()
+  assert.equal(view.notifications.length, 0)
+
+  // A NEW connection attaching the SAME session receives none of the old turn.
+  const next = promptView()
+  await next.attach()
+  next.commit('assistant/message', assistantData(2, 'm-old', [{ type: 'text', text: 'late answer' }]))
+  next.commit('turn/end', { turn: 2, reason: { kind: 'completed' } })
+  assert.equal(next.notifications.length, 0, 'an old generation turn is never replayed to a new claim')
 })
 
 test('an aborted ACP request releases only the View flight and leaves the Host turn alone', async () => {
@@ -1028,7 +1120,7 @@ test('a failed notification or an over-capacity output queue fails only this Vie
 test('same session id with a NEW Agent object never lets the old Agent facts reach the new claim', async () => {
   const view = promptView()
   await view.attach()
-  view.registry.closeSession(view.conn, 'P1')
+  await view.registry.closeSession(view.conn, view.access, 'P1')
   // A new live Agent object for the SAME session id (a new generation).
   const replacement = makeAgent('P1', '/w')
   view.access.seed(replacement)
@@ -1092,6 +1184,10 @@ test('the production Host access subscribes the prompt fact sink and disposes ex
     onSessionEvent: (session, event) => { seen.push(`event:${String((session as { id: string }).id)}:${event.type}`) },
     onAgentError: (agent, turn) => { seen.push(`error:${agent.id}:${String(turn)}`) },
     onAgentDisposed: agent => { seen.push(`disposed:${agent.id}`) },
+    onApprovalRequest: (request, next) => {
+      seen.push(`approval:${request.agent.id}:${String(request.toolName)}:${String(request.callId)}`)
+      return next()
+    },
   })
   const agent = { id: 'S', session: { id: 'S', header: {} } }
   const fire = (name: string, ...args: unknown[]): void => {
@@ -1102,12 +1198,14 @@ test('the production Host access subscribes the prompt fact sink and disposes ex
   fire('session/event', agent.session, { type: 'turn/end', data: { turn: 3, reason: { kind: 'completed' } } })
   fire('agent/error', { agent, turn: 3, step: 1, error: new Error('x') })
   fire('agent/disposed', { agent })
+  fire('approval/request', { agent, toolName: 'bash', callId: 'c9' }, async () => 'rejected')
   assert.deepEqual(seen, [
     'inserted:S:m1:r1',
     'claimed:S:m1:3',
     'event:S:turn/end',
     'error:S:3',
     'disposed:S',
+    'approval:S:bash:c9',
   ], 'each official event reaches the sink with its real identity payload')
   dispose()
   assert.equal([...listeners.values()].every(set => set.size === 0), true, 'the disposer removes exactly its own listeners')
@@ -1248,4 +1346,333 @@ test('a mixed turn drops notifications that were queued but not yet handed to th
   view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
   await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_MIXED_TURN'))
   assert.ok(!JSON.stringify(view.notifications).includes('still queued'))
+})
+
+// ── PO-3B: scoped cancellation + approval ownership contracts ──
+
+test('C01: session/cancel on an idle attached View is a no-op that never touches the Host Agent', async () => {
+  const view = promptView()
+  await view.attach()
+  view.registry.cancelSession(view.conn, view.access, 'P1')
+  assert.deepEqual(view.access.removedMessageIds, [], 'no inbox removal')
+  assert.deepEqual(view.access.cancelledTurns, [], 'no Agent cancel')
+  assert.equal(view.registry.hasClaim('P1'), true, 'the View stays attached')
+  assert.equal(view.registry.phaseOf(view.conn), 'attached')
+  // A cancel of a Session this connection does not hold is equally inert.
+  view.registry.cancelSession(view.conn, view.access, 'OTHER')
+  assert.deepEqual(view.access.cancelledTurns, [])
+})
+
+test('C02: a cancel of a QUEUED own message removes exactly it and answers cancelled after the admission classification', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-b')
+  view.registry.cancelSession(view.conn, view.access, 'P1')
+  assert.deepEqual(view.access.removedMessageIds, ['m-b'], 'exactly the queued own message is durably removed')
+  assert.deepEqual(view.access.cancelledTurns, [], 'no Agent cancel is issued for a queued message')
+  assert.deepEqual(await attempt, { stopReason: 'cancelled' })
+})
+
+test('C03: a cancel arriving BEFORE the durable insertion still removes the late-inserted message exactly once', async () => {
+  const view = promptView()
+  await view.attach()
+  let finishAdmission!: (value: { readonly accepted: true }) => void
+  view.access.promptImpl = () => new Promise(resolveAdmission => { finishAdmission = resolveAdmission })
+  const attempt = view.start('late insert')
+  const request = view.access.promptCalls[0]!
+  // The cancellation arrives while the official admission is still pending.
+  view.registry.cancelSession(view.conn, view.access, 'P1')
+  assert.deepEqual(view.access.removedMessageIds, [], 'nothing is removable before the durable id exists')
+  // The late insertion callback observes the pending intent and removes it.
+  view.insert(request.requestId, 'm-late')
+  assert.deepEqual(view.access.removedMessageIds, ['m-late'], 'the late-inserted message is removed exactly once')
+  finishAdmission({ accepted: true })
+  assert.deepEqual(await attempt, { stopReason: 'cancelled' })
+})
+
+test('C04: the remove/claim race never cancels a foreign turn (claim wins -> exact running cancel; remove wins -> settled)', async () => {
+  {
+    // Claim wins: between the cancel intent and the pending read, the official
+    // inbox already claimed the message into its own turn, so the removal
+    // misses and the SAME callback stack addresses the exact running turn.
+    const view = promptView()
+    await view.attach()
+    const attempt = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-b')
+    // The official claim takes the message out of the pending lists first.
+    view.access.pendingInbox.delete('m-b')
+    view.access.turnFence = { openTurnStartSeq: 500, lastTurn: 3 }
+    view.access.agentStatus = 'running'
+    view.claim('m-b', 3, request.requestId)
+    // The cancel intent arrives AFTER the claim: the claim callback already
+    // saved the authoritative turn, so this addresses the exact CURRENT turn.
+    view.registry.cancelSession(view.conn, view.access, 'P1')
+    assert.deepEqual(view.access.cancelledTurns, [{ turn: 3, keepInbox: true }], 'the exact claimed current turn is cancelled')
+    assert.deepEqual(view.access.removedMessageIds, [], 'no removal is attempted once the turn owns the message')
+    view.commit('turn/end', { turn: 3, reason: { kind: 'aborted', reason: { kind: 'user' } } })
+    assert.deepEqual(await attempt, { stopReason: 'cancelled' })
+  }
+  {
+    // Remove wins: the durable removal happened before any claim; the next
+    // foreign turn (a TUI C) is NEVER cancelled by this View.
+    const view = promptView()
+    await view.attach()
+    const attempt = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-b')
+    view.registry.cancelSession(view.conn, view.access, 'P1')
+    assert.deepEqual(view.access.removedMessageIds, ['m-b'])
+    // A foreign TUI turn runs and completes naturally.
+    view.access.turnFence = { openTurnStartSeq: 700, lastTurn: 9 }
+    view.access.agentStatus = 'running'
+    view.claim('m-foreign', 9, 'tui-request')
+    view.commit('assistant/message', assistantData(9, 'm-foreign', [{ type: 'text', text: 'tui answer' }]))
+    view.commit('turn/end', { turn: 9, reason: { kind: 'completed' } })
+    assert.deepEqual(view.access.cancelledTurns, [], 'the foreign TUI turn is never cancelled')
+    assert.deepEqual(await attempt, { stopReason: 'cancelled' })
+  }
+})
+
+test('C05: a cancel of a RUNNING own turn answers cancelled only after the real user-aborted turn/end and drain', async () => {
+  const view = promptView()
+  await view.attach()
+  const gate = view.deferredSend()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-b')
+  view.access.pendingInbox.delete('m-b')
+  view.access.turnFence = { openTurnStartSeq: 100, lastTurn: 4 }
+  view.access.agentStatus = 'running'
+  view.claim('m-b', 4, request.requestId)
+  view.registry.cancelSession(view.conn, view.access, 'P1')
+  assert.deepEqual(view.access.cancelledTurns, [{ turn: 4, keepInbox: true }])
+  view.commit('assistant/message', assistantData(4, 'm-b', [{ type: 'text', text: 'partial' }]))
+  view.commit('turn/end', { turn: 4, reason: { kind: 'aborted', reason: { kind: 'user' } } })
+  let settled = false
+  void attempt.then(() => { settled = true })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(settled, false, 'the cancelled answer must wait for the notification drain')
+  gate.release()
+  assert.deepEqual(await attempt, { stopReason: 'cancelled' })
+})
+
+test('C06: a turn that already completed naturally keeps its REAL result (the cancel loses the race)', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-b')
+  view.access.pendingInbox.delete('m-b')
+  view.access.turnFence = { openTurnStartSeq: 100, lastTurn: 5 }
+  view.access.agentStatus = 'running'
+  view.claim('m-b', 5, request.requestId)
+  view.commit('assistant/message', assistantData(5, 'm-b', [{ type: 'text', text: 'real answer' }]))
+  // The turn completes BEFORE the cancel intent arrives.
+  view.access.turnFence = { openTurnStartSeq: null, lastTurn: 5 }
+  view.access.agentStatus = 'idle'
+  view.commit('turn/end', { turn: 5, reason: { kind: 'completed' } })
+  view.registry.cancelSession(view.conn, view.access, 'P1')
+  assert.deepEqual(view.access.cancelledTurns, [], 'a settled turn is never cancelled')
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
+
+test('C07: a cancel of a MIXED owned turn never cancels the Agent and keeps the D23 failure', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-b')
+  view.access.pendingInbox.delete('m-b')
+  view.claim('m-steer', 6, 'tui-steer')
+  view.claim('m-b', 6, request.requestId)
+  view.access.turnFence = { openTurnStartSeq: 100, lastTurn: 6 }
+  view.access.agentStatus = 'running'
+  view.registry.cancelSession(view.conn, view.access, 'P1')
+  assert.deepEqual(view.access.cancelledTurns, [], 'a mixed turn is never Agent-cancelled')
+  view.commit('turn/end', { turn: 6, reason: { kind: 'completed' } })
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_MIXED_TURN'))
+})
+
+test('A01/A03: an approval of the OWN running turn goes ONLY to this connection and maps the selected options', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-b')
+  view.access.pendingInbox.delete('m-b')
+  view.claim('m-b', 7, request.requestId)
+  let delegated = false
+  const outcomePromise = view.registry.onApprovalRequest(
+    { agent: view.agent, toolName: 'bash', callId: 'call-1' },
+    async () => { delegated = true; return 'rejected' },
+  )
+  // Let the reverse request reach its channel (a real microtask hop).
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(view.permissionRequests.length, 1, 'exactly one reverse request was issued on this connection')
+  const asked = view.permissionRequests[0]!
+  assert.equal(asked.params.sessionId, 'P1')
+  assert.deepEqual(asked.params.toolCall, { toolCallId: 'call-1' })
+  assert.deepEqual(asked.params.options.map(option => option.kind), ['allow_once', 'reject_once'])
+  asked.respond({ outcome: { outcome: 'selected', optionId: 'reject-once' } })
+  const outcome = await outcomePromise
+  assert.equal(delegated, false, 'an ACP-owned approval is never delegated to the TUI channel')
+  assert.equal(outcome, 'rejected')
+  view.commit('turn/end', { turn: 7, reason: { kind: 'completed' } })
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT'))
+})
+
+test('A02: an approval of a TUI-owned turn is delegated exactly once', async () => {
+  const view = promptView()
+  await view.attach()
+  // The View is idle: no flight, no retired fence; the official fence has an
+  // open turn owned by the TUI.
+  view.access.turnFence = { openTurnStartSeq: 100, lastTurn: 12 }
+  let delegated = 0
+  const outcome = await view.registry.onApprovalRequest(
+    { agent: view.agent, toolName: 'bash', callId: 'call-2' },
+    async () => { delegated += 1; return 'allowed-once' },
+  )
+  assert.equal(delegated, 1, 'a TUI-owned approval is delegated exactly once')
+  assert.equal(outcome, 'allowed-once')
+  assert.equal(view.permissionRequests.length, 0, 'no reverse request was issued')
+})
+
+test('A04: a stale identity, an unknown optionId and a missing callId all fail closed without a grant', async () => {
+  {
+    // A missing callId on an OWNED turn is fail-closed, never delegated.
+    const view = promptView()
+    await view.attach()
+    const attempt = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-b')
+    view.access.pendingInbox.delete('m-b')
+    view.claim('m-b', 3, request.requestId)
+    let delegated = false
+    const outcome = await view.registry.onApprovalRequest(
+      { agent: view.agent, toolName: 'bash' },
+      async () => { delegated = true; return 'unavailable' },
+    )
+    assert.equal(outcome, 'unavailable')
+    assert.equal(delegated, false, 'an owned approval without a callId never reaches the TUI')
+    view.commit('turn/end', { turn: 3, reason: { kind: 'completed' } })
+    await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT'))
+  }
+  {
+    // An unknown optionId never grants.
+    const view = promptView()
+    await view.attach()
+    const attempt = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-b')
+    view.access.pendingInbox.delete('m-b')
+    view.claim('m-b', 4, request.requestId)
+    const outcome = view.registry.onApprovalRequest(
+      { agent: view.agent, toolName: 'bash', callId: 'call-3' },
+      async () => 'rejected',
+    )
+    await new Promise(resolve => setImmediate(resolve))
+    view.permissionRequests[0]!.respond({ outcome: { outcome: 'selected', optionId: 'allow-forever' } })
+    assert.equal(await outcome, 'unavailable', 'an unknown optionId fails closed')
+    view.commit('turn/end', { turn: 4, reason: { kind: 'completed' } })
+    await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT'))
+  }
+  {
+    // A stale exact identity is fail-closed without delegation.
+    const view = promptView()
+    await view.attach()
+    view.access.turnFence = 'stale'
+    let delegated = false
+    const outcome = await view.registry.onApprovalRequest(
+      { agent: view.agent, toolName: 'bash', callId: 'call-4' },
+      async () => { delegated = true; return 'unavailable' },
+    )
+    assert.equal(outcome, 'unavailable')
+    assert.equal(delegated, false, 'a stale fence never delegates')
+  }
+})
+
+test('A05: an upstream signal abort settles the reverse request as cancelled (never a grant, never TUI fallback)', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-b')
+  view.access.pendingInbox.delete('m-b')
+  view.claim('m-b', 8, request.requestId)
+  const upstream = new AbortController()
+  const outcome = view.registry.onApprovalRequest(
+    { agent: view.agent, toolName: 'bash', callId: 'call-5', signal: upstream.signal },
+    async () => 'allowed-once',
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(view.permissionRequests.length, 1)
+  upstream.abort()
+  view.permissionRequests[0]!.respond({ outcome: { outcome: 'selected', optionId: 'allow-once' } })
+  assert.equal(await outcome, 'cancelled', 'the upstream abort wins over a late allow')
+  view.commit('turn/end', { turn: 8, reason: { kind: 'completed' } })
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT'))
+})
+
+test('A06: an approval arriving AFTER the flight failed (retired turn) never leaks to the TUI', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-b')
+  view.access.pendingInbox.delete('m-b')
+  view.claim('m-b', 9, request.requestId)
+  // The flight fails (e.g. an output delivery failure) BEFORE its turn ended.
+  view.access.promptImpl = async () => ({ accepted: true })
+  view.registry.onAgentError(view.agent, 9)
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_TURN_FAILED'))
+  // The old turn is STILL running on the Host; its late approval request
+  // must be answered fail-closed by the retired-turn fence, never delegated.
+  let delegated = false
+  const outcome = await view.registry.onApprovalRequest(
+    { agent: view.agent, toolName: 'bash', callId: 'call-late' },
+    async () => { delegated = true; return 'allowed-once' },
+  )
+  assert.equal(delegated, false, 'a retired ACP turn approval never reaches the TUI')
+  assert.equal(outcome, 'unavailable')
+  // The fence dies on the real turn/end; a LATER TUI turn delegates again.
+  view.commit('turn/end', { turn: 9, reason: { kind: 'error', error: { message: 'x', code: 'UNKNOWN' } } })
+  view.access.turnFence = { openTurnStartSeq: 900, lastTurn: 10 }
+  let delegatedAfter = 0
+  const outcomeAfter = await view.registry.onApprovalRequest(
+    { agent: view.agent, toolName: 'bash', callId: 'call-next' },
+    async () => { delegatedAfter += 1; return 'rejected' },
+  )
+  assert.equal(delegatedAfter, 1, 'after the retired fence died, a TUI turn delegates again')
+  assert.equal(outcomeAfter, 'rejected')
+})
+
+test('a committed assistant message carrying a tool-call block projects the text and skips the block (the durable tool/call event owns it)', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-1')
+  view.claim('m-1', 11, request.requestId)
+  view.commit('tool/call', { turn: 11, step: 1, callId: 'call-9', name: 'bash', arguments: '{"command":"true"}' })
+  // The SAME turn's assistant/message carries its tool-call block plus text.
+  view.commit('assistant/message', assistantData(11, 'm-1', [
+    { type: 'tool-call', id: 'call-9', name: 'bash', arguments: '{"command":"true"}' },
+    { type: 'text', text: 'after the tool' },
+  ]))
+  view.commit('tool/result', {
+    turn: 11,
+    step: 1,
+    message: { toolCallId: 'call-9', isError: false, content: [{ type: 'text', text: 'ok' }] },
+  })
+  view.commit('turn/end', { turn: 11, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+  await flushOutput()
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), [
+    'tool_call',
+    'agent_message_chunk',
+    'tool_call_update',
+  ], 'the tool-call block in the assistant message is not duplicated or rejected')
 })
