@@ -23,6 +23,7 @@
 
 import { Input, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
 import type { McpManagedServerStatus } from '@deepseek-ai/dsh-mcp-manager/types'
+import { MCP_HTTP_TARGET_MARKER } from '../../app/command/mcp-servers.ts'
 import type {
   McpConfigStatus,
   McpServerSourceLabel,
@@ -1205,12 +1206,20 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       }
       if (confirm.kind === 'save') {
         // The external-capability disclosure is the question: it must survive
-        // whole-segment drops, so it outranks the answer hints.
-        return paintBar(
-          [{ text: confirm.warning ?? 'Save this configuration?', short: 'Save configuration?', priority: 1000 }, ...CONFIRM_HINTS],
-          width,
-          true,
-        )
+        // whole-segment drops AND its compaction must keep the SAFETY FACT —
+        // for an HTTP entry the compaction still names the target host (a
+        // bare `Save configuration?` would hide what the user is enabling).
+        const warning = confirm.warning ?? 'Save this configuration?'
+        const markerAt = warning.indexOf(MCP_HTTP_TARGET_MARKER)
+        // The compaction keeps the TARGET HOST itself (the shortest form that
+        // still answers "which external service?"); the full sentence is used
+        // whenever the row has room for it.
+        const short = markerAt === -1
+          ? 'External command?'
+          : `External service: ${warning.slice(markerAt + MCP_HTTP_TARGET_MARKER.length)}`
+        // The compaction must still answer BOTH "which capability?" and
+        // "which target?", so the tests assert `external service` + the host.
+        return paintBar([{ text: warning, short, priority: 1000 }, ...CONFIRM_HINTS], width, true)
       }
       return paintBar(
         [{ text: 'Change saved configuration? The MCP process may stop or start', short: 'Change config?', priority: 1000 }, ...CONFIRM_HINTS],

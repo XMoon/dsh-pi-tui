@@ -574,7 +574,7 @@ test('a Save confirmation paints the external-capability subject at every width'
       },
     }))
     const bar = render(page, width, 16).at(-1) ?? ''
-    assert.match(bar, /external command|Save configuration\?/u,
+    assert.match(bar, /[Ee]xternal command|Save configuration\?/u,
       `width ${String(width)}: the disclosure must be readable`)
     assert.match(bar, /Y confirm|y/u, `width ${String(width)}: the affirmative key is advertised`)
     assert.match(bar, /Esc/u, `width ${String(width)}: the cancel key is advertised`)
@@ -592,4 +592,19 @@ test('a Save confirmation only dispatches on `y`, never on another key', () => {
   assert.deepEqual(controller.calls, [], 'no other key may answer the disclosure')
   page.handleInput('y')
   assert.deepEqual(controller.calls, ['answerConfigConfirm:true'])
+})
+
+test('a compacted HTTP disclosure still names its target host', () => {
+  const warning = 'Enabling this server can send data to an external service. Target: mcp.example.test'
+  for (const width of [200, 100, 80, 44]) {
+    const { page } = makePage(snapshot({
+      selectedConfig: CONFIG_FACET,
+      editor: editorSnapshot({ transport: 'streamable-http', dirty: true }),
+      configConfirm: { kind: 'save', name: 'alpha', warning, capturedRevision: 1 },
+    }))
+    const bar = render(page, width, 16).at(-1) ?? ''
+    assert.match(bar, /mcp\.example\.test/u,
+      `width ${String(width)}: the target host must survive compaction`)
+    assert.match(bar, /[Ee]xternal (service|data)/u, `width ${String(width)}: the capability fact must survive`)
+  }
 })

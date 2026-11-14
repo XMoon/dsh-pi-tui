@@ -174,6 +174,10 @@ export type McpConfigStatus =
   | { readonly kind: 'unconfirmed'; readonly text: string }
   | { readonly kind: 'unavailable'; readonly text: string }
 
+/** The marker the HTTP external-service disclosure carries, so a compacted
+ *  Action Bar can keep the target host instead of dropping the whole fact. */
+export const MCP_HTTP_TARGET_MARKER = 'Target: '
+
 /** The fixed FR4 user-facing wording (one source for page + tests). */
 export const MCP_CONFIG_TEXT = {
   saving: 'Saving configuration…',
@@ -293,7 +297,7 @@ function externalCapabilityWarning(draft: McpServerEntryDraft): string | undefin
     return draft.command.trim() === '' ? undefined : MCP_CONFIG_TEXT.externalCommand
   }
   if (draft.url.trim() === '') return undefined
-  return `${MCP_CONFIG_TEXT.externalService} Target: ${safeHostOf(draft.url)}`
+  return `${MCP_CONFIG_TEXT.externalService} ${MCP_HTTP_TARGET_MARKER}${safeHostOf(draft.url)}`
 }
 
 /** The host of one URL (no path, no query, no credential); the raw value when
