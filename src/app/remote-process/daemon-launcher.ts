@@ -22,10 +22,10 @@ import { constants as osConstants } from 'node:os'
 import { constants, closeSync, existsSync, fchmodSync, fstatSync, lstatSync, openSync, realpathSync, statSync, writeSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { installedPackageRootFromEntry } from './local-scope.ts'
+import { installedPackageRootFromEntry, readInstalledDshVersion } from './local-scope.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { createEntryDiag } from './entry-control.ts'
-import type { TuiDaemonStartupValues } from '../../startup.ts'
+import type { TuiDaemonClientStartup, TuiDaemonControlStartup, TuiDaemonStartupValues } from '../../startup.ts'
 
 /** Stable Loader row id / Cordis plugin name. */
 export const name = 'pi-tui-daemon-launcher'
@@ -46,7 +46,7 @@ interface ProfileContextLike {
 }
 
 /** The one-shot public launch envelope encoded for the Client child. */
-export function encodeLaunchEnvelope(startup: TuiDaemonStartupValues): string {
+export function encodeLaunchEnvelope(startup: TuiDaemonClientStartup): string {
   return JSON.stringify({
     version: 1,
     ...(startup.sessionLaunch === undefined ? {} : { sessionLaunch: startup.sessionLaunch }),
@@ -249,6 +249,105 @@ export class DaemonCoordinator {
   }
 }
 
+/** The result of one management operation, as written to the real TTY. */
+export interface DaemonManagementResult {
+  readonly code: number
+  readonly stdout: string
+  readonly stderr: string
+}
+
+/** One management executor: the production one dynamically imports the control
+ *  module; a structural test supplies its own. */
+export type DaemonManagementExecutor = () => Promise<DaemonManagementResult>
+
+/**
+ * The ONE management operation lifecycle. It runs at most once, writes its
+ * output and requests `appExit` exactly once, and a fiber disposal before the
+ * result settles suppresses both the output and the exit so a late result can
+ * never surface after the supervisor has gone away. The operation itself is
+ * bounded so a shutdown never waits indefinitely on a management action.
+ */
+export class DaemonControlRunner {
+  private readonly run: DaemonManagementExecutor
+  private readonly appExit: (code: number) => void
+  private readonly writeStdout: (text: string) => void
+  private readonly writeStderr: (text: string) => void
+  private readonly reportFatal: (line: string) => void
+  private readonly shutdownBudgetMs: number
+  private started = false
+  private disposed = false
+  private settled = false
+  private operation: Promise<void> | undefined
+  /** Test observation: how many management operations actually started. */
+  runCount = 0
+
+  constructor(options: {
+    run: DaemonManagementExecutor
+    appExit: (code: number) => void
+    writeStdout?: (text: string) => void
+    writeStderr?: (text: string) => void
+    reportFatal?: (line: string) => void
+    shutdownBudgetMs?: number
+  }) {
+    this.run = options.run
+    this.appExit = options.appExit
+    this.writeStdout = options.writeStdout ?? (text => { process.stdout.write(text) })
+    this.writeStderr = options.writeStderr ?? (text => { process.stderr.write(text) })
+    this.reportFatal = options.reportFatal ?? (() => {})
+    this.shutdownBudgetMs = options.shutdownBudgetMs ?? 4000
+  }
+
+  /** Start exactly one management operation. A no-op after a prior start/dispose. */
+  start(): void {
+    if (this.started || this.disposed) return
+    this.started = true
+    this.runCount += 1
+    this.operation = (async (): Promise<void> => {
+      let result: DaemonManagementResult
+      try {
+        result = await this.run()
+      } catch {
+        // The control module maps every known failure itself; this arm exists
+        // only so a hostile unexpected throw cannot escape as an unhandled
+        // rejection or look successful.
+        result = {
+          code: 4,
+          stdout: '',
+          stderr: 'dsh-pi-tui daemon: MANAGER_OR_OS_FAILURE: an unexpected local management failure occurred\n',
+        }
+      }
+      if (this.disposed || this.settled) return
+      this.settled = true
+      try {
+        if (result.stdout !== '') this.writeStdout(result.stdout)
+        if (result.stderr !== '') this.writeStderr(result.stderr)
+      } catch {
+        // A closed output stream must not abort the ONE exit request; the
+        // command already settled its OS state.
+        this.reportFatal('dsh-pi-tui: the daemon management output could not be written')
+      }
+      try {
+        this.appExit(result.code)
+      } catch {
+        // The launcher's exit owner is authoritative; nothing else to do.
+      }
+    })()
+  }
+
+  /** Stop accepting a late result and bound the wait for an in-flight one. */
+  async dispose(): Promise<boolean> {
+    this.disposed = true
+    if (this.operation === undefined) return true
+    const settled = await Promise.race([
+      this.operation.then(() => true, () => true),
+      sleep(this.shutdownBudgetMs).then(() => false),
+    ])
+    if (!settled) this.reportFatal('dsh-pi-tui: the daemon management operation did not settle within the shutdown budget')
+    return settled
+  }
+}
+
+
 /**
  * Write a qualification dump to a SAFE, PRIVATE target: absolute path, a real
  * parent directory owned by this process user, NEVER overwriting an existing
@@ -302,8 +401,9 @@ export function createLoaderDumpScheduler(produce: () => string, write: (text: s
   }
 }
 
-/** The production Coordinator row: resolve the installed Client, spawn it once
- *  on the real cold-start readiness settlement, and own its single lifecycle. */
+/** The production Coordinator row. A `client` launch spawns the ONE foreground
+ *  Client; a `control` launch runs ONE management operation. Both settle on the
+ *  real cold-ready commit and are owned by this row's Fiber. */
 export function apply(ctx: Context): void {
   const startup = ctx.get('tuiDaemonStartup') as TuiDaemonStartupValues | undefined
   if (startup === undefined) return
@@ -311,6 +411,10 @@ export function apply(ctx: Context): void {
   if (appExit === undefined) throw new Error('pi-tui daemon launcher: ctx.appExit is required')
   const profileContext = ctx.get('profileContext') as ProfileContextLike | undefined
   if (profileContext === undefined) throw new Error('pi-tui daemon launcher: ctx.profileContext is required')
+  if (startup.kind === 'control') {
+    applyManagement(ctx, startup, profileContext, appExit)
+    return
+  }
 
   const packageRoot = installedPackageRootFromEntry(import.meta.url)
   const entry = resolveClientEntry(packageRoot)
@@ -366,4 +470,49 @@ export function apply(ctx: Context): void {
   // Client's real exit during shutdown (never exits the parent underneath a
   // still-cleaning child). Still the ONE stop owner — no second signal manager.
   ctx.effect(() => () => coordinator.dispose(), 'pi-tui-daemon-launcher child lifecycle')
+}
+
+/** Assemble ONE management operation for this official Profile. No Client
+ *  artifact is resolved, no Client is spawned and no TUI/Direct row is opened. */
+function applyManagement(
+  ctx: Context,
+  startup: TuiDaemonControlStartup,
+  profileContext: ProfileContextLike,
+  appExit: (code: number) => void,
+): void {
+  const packageRoot = installedPackageRootFromEntry(import.meta.url)
+  const profile = {
+    name: profileContext.name,
+    dir: profileContext.dir,
+    home: profileContext.home,
+    installAnchor: profileContext.installAnchor,
+    packageRoot,
+    dshVersion: readInstalledDshVersion(profileContext.installAnchor),
+  }
+  const controller = new AbortController()
+  const runner = new DaemonControlRunner({
+    run: async () => {
+      const { runDaemonControl } = await import('./local-daemon-control.ts')
+      return await runDaemonControl(startup.control, profile, { signal: controller.signal })
+    },
+    appExit,
+  })
+  // The row mounted: the startup handshake must not report a missing launcher.
+  startup.markCoordinatorMounted?.()
+  const ready = ctx.get('appReady') as { onReady(listener: () => void): () => void } | undefined
+  if (ready === undefined) {
+    runner.start()
+  } else {
+    let registrationReturned = false
+    const cancel = ready.onReady(() => {
+      if (!registrationReturned) return
+      runner.start()
+    })
+    registrationReturned = true
+    ctx.effect(() => () => { cancel() }, 'pi-tui-daemon-control readiness')
+  }
+  ctx.effect(() => () => {
+    controller.abort()
+    return runner.dispose()
+  }, 'pi-tui-daemon-control lifecycle')
 }

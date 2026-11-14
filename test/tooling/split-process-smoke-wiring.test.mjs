@@ -555,6 +555,15 @@ test('a managed-host selected case may report an honest NOT_VERIFIED, never SELE
     /selected managed-host\.m6-2b-manager-error/u)
 })
 
+test('a daemon-control selected case may report an honest NOT_VERIFIED, never SELECTED_PASS', () => {
+  assert.equal(assertSelectedVerdict('daemon-control.m6-2c-systemd-lifecycle', { status: 'PASS', scope: 'REAL_SYSTEMD_USER_L6' }), undefined)
+  assert.equal(assertSelectedVerdict('daemon-control.m6-2c-process-fallback', { status: 'NOT_VERIFIED', reason: 'NOT_AN_ABSENT_MANAGER_ENV' }), undefined)
+  assert.throws(() => assertSelectedVerdict('daemon-control.m6-2c-manager-error', { status: 'FAIL' }),
+    /selected daemon-control\.m6-2c-manager-error/u)
+  assert.throws(() => assertSelectedVerdict('daemon-control.m6-2c-owner-and-multi-profile', { status: 'BLOCKED' }),
+    /selected daemon-control\.m6-2c-owner-and-multi-profile/u)
+})
+
 test('managed unit cleanup only matches this run\u2019s exact owner metadata and safe file', () => {
   const scopeId = 'a'.repeat(64)
   const buildId = 'b'.repeat(64)
@@ -694,6 +703,22 @@ test('environment-gated native cases are selectable-only, never in the default f
   ]) {
     assert.ok(all.some(entry => entry.id === id), `${id} must remain selectable`)
   }
+})
+
+test('the daemon-control native cases are selectable-only and registered in order', () => {
+  const all = listSelectableCases()
+  const controls = all.filter(entry => entry.suite === 'daemon-control')
+  assert.equal(controls.length, 6, 'the six daemon-control native cases stay registered')
+  assert.deepEqual(controls.map(entry => entry.id), [
+    'daemon-control.m6-2c-status-safety',
+    'daemon-control.m6-2c-systemd-lifecycle',
+    'daemon-control.m6-2c-process-fallback',
+    'daemon-control.m6-2c-manager-error',
+    'daemon-control.m6-2c-owner-and-multi-profile',
+    'daemon-control.m6-2c-concurrent-controls',
+  ])
+  assert.deepEqual(listDefaultLaneCases().filter(entry => entry.suite === 'daemon-control'), [])
+  assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'daemon-control' }).cases, controls)
 })
 
 test('a cleanup that did not remove this run\u2019s unit fails the scenario verdict', () => {

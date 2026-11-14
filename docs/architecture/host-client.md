@@ -430,6 +430,94 @@ authenticated carrier, the Session/Writer authority or readiness.
   the Host's own `runProfile` shutdown owner; the manager only sends the OS
   signal, and a Client exit/crash never stops the Host.
 
+### Daemon management commands
+
+`dsh --profile pi-tui daemon status|start|stop|restart|logs|uninstall` is the ONE
+public management grammar. It is nested under the existing command, needs no
+interactive TTY, and operates on the official `profileContext` Profile alone: the
+`DSH_PI_TUI_BACKEND` environment value, the persisted `tui-startup.backend` value
+and the current terminal state never select, block or redirect a management
+command. A management command publishes one typed intent to the same
+`tuiDaemonStartup` service and the same launcher row; it resolves no Client
+artifact, opens no Direct/Remote TUI, creates no Session/Agent/Writer and starts
+no Host unless `start`/`restart` asks for one. Every other platform fails closed.
+`--help` provides neither startup service.
+
+The exit and error taxonomy is fixed: `0` success (including a confirmed
+`stopped`, an idempotent stop and an uninstall with no owned unit), `2` CLI usage,
+`3` unsupported platform or identity/ownership refusal, `4` manager/OS failure or
+an unavailable log source, `5` busy/timeout/transition-uncertain. Errors print
+`dsh-pi-tui daemon: <STABLE_CODE>: <sanitized reason>`; raw Error text, command
+argv, absolute private paths, Cookies, tokens and Host URLs never reach
+stdout/stderr.
+
+- **Status is a pure read.** `status` performs no filesystem mutation: it does
+  not create the profile run directory or a unit, does not reload/start/stop the
+  manager, starts no Host, Session, Agent or TUI, and writes no credential,
+  setting or job. It may read the private scope files, query the manager and run
+  the official authenticated `/connect` handshake. Its stable `key=value` block
+  carries `profile`, `manager`, `user-manager`, `host`, `unit`, `unit-state` and
+  `compatibility` (plus a bounded `pid`/`instance` while one is live). `manager`
+  names the VERIFIED supervision attribution (`systemd` for a verified loaded
+  profile unit, `process` for an authenticated strict-absence Host, otherwise
+  `unmanaged`); it never means "systemctl exists". `ActiveState=active` or a
+  registry PID is not readiness: a supervised but unauthenticated Host is
+  `starting`/`unresponsive`, and an unreadable/contradictory state is `unknown`.
+  A missing Host with no unit conflict is `stopped` and exit 0; manager error,
+  unsafe/foreign unit, incompatible protocol/DSH and unverifiable liveness are
+  nonzero and are never reported as `stopped`.
+- **start reuses before it creates.** `start` first authenticates and reuses a
+  live compatible Host, so a warm start is idempotent on the same
+  `instanceId`. Otherwise it creates only the needed 0700 scope run directory and
+  asks the existing `ensureLocalHost({hostStartPolicy:'public-managed'})` to
+  bring one up, then waits for authenticated readiness. A manager error never
+  degrades to the process fallback; a different installed build or unknown unit
+  is a conflict; a live unauthenticated/incompatible Host is never replaced or
+  killed.
+- **stop needs proven supervision.** A verified owned profile unit is stopped
+  only through `systemctl --user stop <verified-name>`, followed by a bounded
+  wait for the original MainPID to exit. With a strictly absent user manager, an
+  authenticated live fallback Host is stopped only by one SIGTERM to the
+  verified original PID after re-checking the kernel starttime and the product
+  Host entry command identity; no process group and no `pkill`. A live Host with
+  no provable ownership, a foreign/symlinked/drop-in/wrong-scope unit, a stale
+  PID or an identity mismatch is refused instead of being signalled. A timeout
+  is exit 5 and never escalates to SIGKILL or claims `stopped`.
+- **restart and uninstall are ONE explicit transition.** `restart` stops, awaits
+  a confirmed old-instance exit, and only then starts a new instance; a stop
+  that is unknown, failed or still running forbids the start. When the verified
+  owned unit belongs to an older compatible build, the explicit `restart` may
+  replace that STOPPED unit atomically (same scope, profile identity and owner
+  metadata; no drop-in) and reload it before the new start. `uninstall` stops and
+  removes ONLY the verified owned profile unit and reloads; it never removes the
+  Profile, `DSH_HOME`, Sessions, credentials, `launch.json` or another Profile's
+  unit, and it never kills a strict-absence fallback Host. A reload failure is
+  reported as a failure, never as a completed uninstall. A cold `start` never
+  silently upgrades a different build.
+- **logs use one proven source.** An owned profile unit reads the fixed
+  `/usr/bin/journalctl --user --unit <verified-name> --no-pager -o cat` with a
+  bounded line count; only a strictly absent user manager may tail the private
+  0600 `host.log` in this profile scope. There is no arbitrary path/command
+  input, no journal fallback to an unrelated file and no business side effect;
+  missing/unreadable output is exit 4. Output is bounded and best-effort
+  sanitized (ANSI/control sequences, token/cookie/Authorization and
+  connect/launch URL material); the user-facing notice states that the
+  sanitization cannot promise every secret shape in free-form user text.
+- **Mutating verbs serialize per Profile, not globally.** `start`, `stop`,
+  `restart` and `uninstall` hold one short-lived profile-scoped Linux abstract
+  admin seat (`\0dsh-pi-tui-admin-<scope prefix>`); the kernel releases it when
+  the command exits, so there is no lock file or persistent state. A second
+  concurrent mutating command for the same Profile gets `DAEMON_CONTROL_BUSY`
+  and exit 5 before any Host/unit mutation; another Profile is unaffected. A
+  normal Client cold start keeps its existing Host kernel-singleton semantics and
+  takes no admin seat.
+- **Running-work boundary.** `stop`/`restart`/`uninstall` are explicit user Host
+  control. They can interrupt a running Session, accepted Turn, tool or pending
+  Interaction; the official Host `runProfile` shutdown remains the only shutdown
+  owner and the management command never answers, cancels, replays or rolls back
+  a pending business result. The CLI prints a stable line that current work may
+  be interrupted and that unsettled writes are not replayed automatically.
+
 
 ### Host-owned local ACP v1 front door (Unix socket)
 

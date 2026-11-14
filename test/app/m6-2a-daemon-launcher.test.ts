@@ -14,6 +14,7 @@ import { EventEmitter } from 'node:events'
 import { mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  DaemonControlRunner,
   DaemonCoordinator,
   encodeLaunchEnvelope,
   buildChildEnvironment,
@@ -35,9 +36,9 @@ const PROFILE = { name: 'pi-tui', dir: '/home/.dsh/profiles/pi-tui', home: '/hom
 // ── pure helpers ─────────────────────────────────────────────────────────
 
 test('encodes only the present public launch fields', () => {
-  assert.deepEqual(JSON.parse(encodeLaunchEnvelope({})), { version: 1 })
+  assert.deepEqual(JSON.parse(encodeLaunchEnvelope({ kind: 'client' })), { version: 1 })
   assert.deepEqual(
-    JSON.parse(encodeLaunchEnvelope({ sessionLaunch: { kind: 'continue' }, presetId: 'std' })),
+    JSON.parse(encodeLaunchEnvelope({ kind: 'client', sessionLaunch: { kind: 'continue' }, presetId: 'std' })),
     { version: 1, sessionLaunch: { kind: 'continue' }, presetId: 'std' },
   )
 })
@@ -293,4 +294,64 @@ test('a live LoaderDumpScheduler writes exactly once', async () => {
   await sleep(60)
   scheduler.flush()
   assert.deepEqual(writes, ['PAYLOAD'], 'only ONE dump is written')
+})
+
+// ── the management operation lifecycle ───────────────────────────────────
+
+test('a management operation writes its output and requests appExit exactly once', async () => {
+  const exitCodes: number[] = []
+  const stdout: string[] = []
+  const stderr: string[] = []
+  let exited: (() => void) | undefined
+  const settled = new Promise<void>(resolve => { exited = resolve })
+  const runner = new DaemonControlRunner({
+    run: async () => ({ code: 0, stdout: 'profile=pi-tui\n', stderr: 'note\n' }),
+    appExit: code => { exitCodes.push(code); exited?.() },
+    writeStdout: text => { stdout.push(text) },
+    writeStderr: text => { stderr.push(text) },
+  })
+  runner.start()
+  runner.start()
+  await settled
+  assert.equal(runner.runCount, 1, 'a second start never runs another operation')
+  assert.deepEqual(stdout, ['profile=pi-tui\n'])
+  assert.deepEqual(stderr, ['note\n'])
+  assert.deepEqual(exitCodes, [0])
+  assert.equal(await runner.dispose(), true)
+})
+
+test('a disposed management runner suppresses a late result and never exits', async () => {
+  const exitCodes: number[] = []
+  let release: ((value: { code: number; stdout: string; stderr: string }) => void) | undefined
+  const runner = new DaemonControlRunner({
+    run: () => new Promise(resolve => { release = resolve }),
+    appExit: code => { exitCodes.push(code) },
+    writeStdout: () => {},
+    writeStderr: () => {},
+    shutdownBudgetMs: 10,
+  })
+  runner.start()
+  const disposed = await runner.dispose()
+  release?.({ code: 0, stdout: 'late\n', stderr: '' })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(disposed, false, 'an unsettled operation is reported as an abnormal shutdown wait')
+  assert.deepEqual(exitCodes, [], 'a late result must not request an exit after disposal')
+})
+
+test('an unexpected management throw is a sanitized non-zero failure', async () => {
+  const exitCodes: number[] = []
+  const stderr: string[] = []
+  let exited: (() => void) | undefined
+  const settled = new Promise<void>(resolve => { exited = resolve })
+  const runner = new DaemonControlRunner({
+    run: async () => { throw new Error('raw secret at /home/u/.dsh') },
+    appExit: code => { exitCodes.push(code); exited?.() },
+    writeStdout: () => {},
+    writeStderr: text => { stderr.push(text) },
+  })
+  runner.start()
+  await settled
+  assert.deepEqual(exitCodes, [4])
+  assert.match(stderr.join(''), /MANAGER_OR_OS_FAILURE/u)
+  assert.doesNotMatch(stderr.join(''), /raw secret|\/home\/u/u)
 })

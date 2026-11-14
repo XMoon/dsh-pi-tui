@@ -333,8 +333,19 @@ export type PublicBackend = 'direct' | 'daemon'
  *  one cold launch. It is never written back to the Profile. */
 const BACKEND_ENV = 'DSH_PI_TUI_BACKEND'
 
-/** What the daemon-launcher row reads from {@link TUI_DAEMON_STARTUP_SERVICE}. */
-export interface TuiDaemonStartupValues {
+/** The public daemon management verbs (M6-2C). */
+export type DaemonControlVerb = 'status' | 'start' | 'stop' | 'restart' | 'logs' | 'uninstall'
+
+/** One immutable daemon management intent parsed by the nested CLI grammar. */
+export interface DaemonControlIntent {
+  readonly verb: DaemonControlVerb
+  /** `logs` only: a validated integer in 1..1000. */
+  readonly lines?: number
+}
+
+/** The client-launch arm of {@link TuiDaemonStartupValues}. */
+export interface TuiDaemonClientStartup {
+  readonly kind: 'client'
   /** The public CLI Session launch intent, resolved Client-locally against the
    *  official Host roster (never an exact-id field). */
   readonly sessionLaunch?: CliSessionLaunchIntent
@@ -355,6 +366,17 @@ export interface TuiDaemonStartupValues {
    */
   markCoordinatorMounted?(): void
 }
+
+/** The management arm: no TUI, no Client, exactly one operation. */
+export interface TuiDaemonControlStartup {
+  readonly kind: 'control'
+  readonly control: DaemonControlIntent
+  /** Same one-shot cold-ready handshake as the client arm. */
+  markCoordinatorMounted?(): void
+}
+
+/** What the daemon-launcher row reads from {@link TUI_DAEMON_STARTUP_SERVICE}. */
+export type TuiDaemonStartupValues = TuiDaemonClientStartup | TuiDaemonControlStartup
 
 /**
  * The row's Profile Config: the persisted backend selector. `.volatile()`
@@ -476,16 +498,87 @@ function surfaceNotMountedMessage(): string {
   ].join('\n')
 }
 
+/** Force every Commander usage rejection below `command` onto the fixed
+ *  `CLI_USAGE` exit code (2) without changing its printed text. `parseCmdline`
+ *  maps a thrown `CommanderError` to `ctx.appExit(error.exitCode)`. */
+function withUsageExitCode(command: Command): Command {
+  const original = command.error.bind(command)
+  command.error = ((message: string, options?: { readonly exitCode?: number; readonly code?: string }) =>
+    original(message, { ...options, exitCode: 2 })) as Command['error']
+  return command
+}
+
+/** Reject the public Session launch flags on a daemon management invocation.
+ *  Commander parses root options before the subcommand, so a flag placed before
+ *  the verb reaches this action instead of being an unknown subcommand option. */
+function rejectSessionFlags(program: Command, command: Command): void {
+  const options = program.opts<{ session?: string | boolean; continue?: boolean; preset?: string }>()
+  if (options.continue === true || options.session !== undefined || options.preset !== undefined) {
+    command.error('error: --session, --continue and --preset are only valid for a normal TUI launch, not with daemon commands')
+  }
+}
+
 /** This app's command: its flags, its description, and its help text. */
-function tuiCommand(): Command {
-  return new Command()
+function tuiCommand(ctx: Context): Command {
+  const program = new Command()
     .name('dsh --profile pi-tui')
     .description('Run the DeepSeek Harness terminal UI.')
     .helpOption('-h, --help', 'show this help')
     .option('--session [id-or-query]', 'open the session browser; a full session id or a listed unique prefix resumes it')
     .option('-c, --continue', 'continue the most recent session in the confirmed workspace')
     .option('--preset <id>', 'agent preset for a fresh session (falls back to $DSH_PI_TUI_PRESET, then the saved default)')
-    .addHelpText('after', `
+
+  // The daemon management grammar is nested under the ONE existing command; it
+  // never changes backend selection and never opens the TUI/Client.
+  const daemon = withUsageExitCode(program.command('daemon').description('Manage the local daemon Host for this profile.'))
+  daemon.action(() => {
+    daemon.error('error: a daemon command is required (status, start, stop, restart, logs or uninstall)')
+  })
+  const addControlVerb = (
+    name: DaemonControlVerb,
+    description: string,
+    configure?: (command: Command) => void,
+  ): Command => {
+    const command = withUsageExitCode(daemon.command(name).description(description))
+    configure?.(command)
+    command.action((options: { readonly lines?: string } = {}) => {
+      rejectSessionFlags(program, command)
+      // A Host-only process must never acquire the public management route: it
+      // already owns the Host business and would recurse into a second
+      // supervisor. Reject before publishing any service.
+      if (isHostOnlyRole()) command.error('error: daemon management commands are not available in a Host-only process')
+      let lines: number | undefined
+      if (options.lines !== undefined) {
+        if (!/^[0-9]+$/u.test(options.lines)) command.error('error: --lines must be an integer between 1 and 1000')
+        const parsed = Number(options.lines)
+        if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 1000) {
+          command.error('error: --lines must be an integer between 1 and 1000')
+        }
+        lines = parsed
+      }
+      publishDaemonControl(ctx, { verb: name, ...(lines === undefined ? {} : { lines }) })
+    })
+    return command
+  }
+  addControlVerb('status', 'show the manager, unit, Host readiness and compatibility of this profile')
+  addControlVerb('start', 'start the profile Host and wait until it is authenticated')
+  addControlVerb('stop', 'stop this profile Host through its verified supervision owner')
+  addControlVerb('restart', 'stop the profile Host, confirm its exit, then start a new instance')
+  addControlVerb('logs', 'show the managed unit journal or the strict-absence Host log', command => {
+    command.option('--lines <count>', 'number of log lines to show (1-1000, default 100)')
+  })
+  addControlVerb('uninstall', 'stop and remove only this profile managed unit')
+  daemon.addHelpText('after', `
+Examples:
+  dsh --profile pi-tui daemon status
+  dsh --profile pi-tui daemon start
+  dsh --profile pi-tui daemon stop
+  dsh --profile pi-tui daemon restart
+  dsh --profile pi-tui daemon logs --lines 200
+  dsh --profile pi-tui daemon uninstall
+`)
+
+  program.addHelpText('after', `
 Examples:
   dsh --profile pi-tui                       start the terminal UI
   dsh --profile pi-tui --session             browse all sessions
@@ -493,7 +586,9 @@ Examples:
   dsh --profile pi-tui --session <id>        resume a listed or full session id
   dsh --profile pi-tui --continue            continue the last session in this workspace
   dsh --profile pi-tui --session <id> --preset minimal
+  dsh --profile pi-tui daemon status         inspect the local daemon Host
 `)
+  return program
 }
 
 // ── TEMPORARY: official DSH model-listing console output ────────────────
@@ -654,7 +749,7 @@ function installModelListingLogInterceptor(): () => void {
  * @param ctx - plugin context carrying the command line.
  */
 export function apply(ctx: Context, config?: Config): void {
-  const program = tuiCommand()
+  const program = tuiCommand(ctx)
   program.action(() => {
     // The CLI grammar is read and validated FIRST: a conflicting Session
     // launch must fail before the model-listing interception, the
@@ -786,6 +881,17 @@ export function apply(ctx: Context, config?: Config): void {
   parseCmdline(ctx, program)
 }
 
+/** The actionable error for a committed management startup whose launcher row
+ *  never mounted. A missing/failed supervisor row must not look like a
+ *  successful management command. */
+function controlNotMountedMessage(): string {
+  return [
+    `dsh-pi-tui ${bundleVersionLabel(CURRENT_DSH_REQUIREMENT.since)} was invoked for a daemon management command, but the daemon launcher row did not mount.`,
+    'The pi-tui-daemon-launcher row failed to import/apply or stayed pending on tuiDaemonStartup (see the loader warnings above); DSH app-boot treats that as an optional plugin failure.',
+    'This installation cannot run daemon management commands; reinstall the profile or fix its composition, then re-run the command.',
+  ].join('\n')
+}
+
 /**
  * Publish the daemon startup service. The daemon-launcher row injects it,
  * spawns exactly ONE foreground Client OS process and waits for its real exit.
@@ -796,12 +902,7 @@ export function apply(ctx: Context, config?: Config): void {
  * without the launcher row having mounted (missing/failed/pending) is an error,
  * not a silent optional failure.
  */
-function publishDaemonStartup(
-  ctx: Context,
-  sessionLaunch: CliSessionLaunchIntent | undefined,
-  presetId: string | undefined,
-  backendSource: { value: PublicBackend; source: 'env' | 'profile' } | undefined,
-): void {
+function publishDaemonService(ctx: Context, values: TuiDaemonStartupValues): void {
   const installed = installedDshVersion()
   if (installed !== undefined) {
     const entry = harnessCompatEntryFor(installed)
@@ -817,16 +918,34 @@ function publishDaemonStartup(
       // startup and delivers no verdict.
       if (!registrationReturned) return
       if (coordinatorMounted) return
-      process.stderr.write(`\n${coordinatorNotMountedMessage()}\n\n`)
+      process.stderr.write(`\n${values.kind === 'control' ? controlNotMountedMessage() : coordinatorNotMountedMessage()}\n\n`)
       ctx.get('appExit')?.(1)
     })
     registrationReturned = true
     ctx.effect(() => () => { cancel() }, 'tui-daemon-startup readiness handshake')
   }
   ctx.provide(TUI_DAEMON_STARTUP_SERVICE, {
+    ...values,
+    markCoordinatorMounted: () => { coordinatorMounted = true },
+  } satisfies TuiDaemonStartupValues)
+}
+
+function publishDaemonStartup(
+  ctx: Context,
+  sessionLaunch: CliSessionLaunchIntent | undefined,
+  presetId: string | undefined,
+  backendSource: { value: PublicBackend; source: 'env' | 'profile' } | undefined,
+): void {
+  publishDaemonService(ctx, {
+    kind: 'client',
     ...(sessionLaunch !== undefined ? { sessionLaunch } : {}),
     ...(presetId !== undefined ? { presetId } : {}),
     ...(backendSource !== undefined ? { backendSource } : {}),
-    markCoordinatorMounted: () => { coordinatorMounted = true },
-  } satisfies TuiDaemonStartupValues)
+  })
+}
+
+/** Publish the ONE management intent; the launcher row runs it once after the
+ *  real cold-ready commit and never opens the TUI/Client. */
+function publishDaemonControl(ctx: Context, control: DaemonControlIntent): void {
+  publishDaemonService(ctx, { kind: 'control', control })
 }

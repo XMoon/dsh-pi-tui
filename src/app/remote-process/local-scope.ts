@@ -59,6 +59,8 @@ export type LocalScopeErrorCode =
   | 'HOST_MANAGER_ERROR'
   | 'HOST_MANAGER_UNIT_CONFLICT'
   | 'HOST_MANAGER_START_FAILED'
+  | 'HOST_STOP_TIMEOUT'
+  | 'DAEMON_CONTROL_BUSY'
   | 'PROCESS_STARTTIME_UNAVAILABLE'
 
 /** A failure that carries one stable B1 classification code. */
@@ -404,13 +406,14 @@ export function readLinuxStarttime(pid: number = process.pid): string {
 /**
  * Claim one kernel abstract-socket seat. `EADDRINUSE` means another process
  * of this scope already holds the seat and is the sole winner; any other
- * listen error is a real failure. The Host Singleton and the frozen
- * `qualification` Client are the two live users; a real `surface` Client holds
- * no seat. The returned close is idempotent.
+ * listen error is a real failure. The Host Singleton, the frozen
+ * `qualification` Client and the short-lived daemon-control seat are the live
+ * users; a real `surface` Client holds no seat. The returned close is
+ * idempotent.
  */
 export function bindProcessSeat(
   name: string,
-  conflictCode: 'HOST_ALREADY_OWNED' | 'CLIENT_ALREADY_ACTIVE',
+  conflictCode: 'HOST_ALREADY_OWNED' | 'CLIENT_ALREADY_ACTIVE' | 'DAEMON_CONTROL_BUSY',
 ): Promise<ProcessSeat> {
   assertLinux()
   if (!name.startsWith('\0')) {
