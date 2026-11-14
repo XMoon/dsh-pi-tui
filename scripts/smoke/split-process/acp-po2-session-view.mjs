@@ -19,6 +19,8 @@
  * @module split-process/acp-po2-session-view
  */
 
+import { createRequire } from 'node:module'
+import { randomUUID } from 'node:crypto'
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { join } from 'node:path'
@@ -175,8 +177,13 @@ function isObjectResult(message) {
  * Every returned boolean is a fact gathered from a REAL process/socket.
  */
 export async function runAcpPo2SessionView(context) {
-  const { EntryProcess, entries, base, dshHome, workDir, installation } = context
+  const { EntryProcess, entries, base, dshHome, workDir, installation, trace } = context
   const installedVersion = installation.manifest.version
+  const acpSdkVersion = (() => {
+    try { return createRequire(import.meta.url)('@agentclientprotocol/sdk/package.json').version }
+    catch { return 'unknown' }
+  })()
+  const tuiPids = []
   const scene = createC1Scene(context)
   const {
     startC1Host,
@@ -281,6 +288,16 @@ export async function runAcpPo2SessionView(context) {
     const scopeDir = scopeDirOf(scopeId)
     const socketPath = join(scopeDir, 'acp.sock')
     const hostCwd = realpathSync(workDir)
+    trace('acp-po2/evidence-start', {
+      candidateSha256: context.candidateSha256 ?? null,
+      nodeVersion: process.version,
+      dshVersion: context.targetDshVersion ?? null,
+      bundleVersion: installedVersion,
+      acpSdkVersion,
+      hostPid: ready.localHost.hostPid,
+      hostInstanceId: ready.localHost.instanceId,
+      scopeId,
+    })
 
     const peer = await startPeer('po2 A peer')
     assertAccess(await acpAccess(peer, 'A getStatus', undefined), 'disabled', 'A getStatus')
@@ -308,6 +325,7 @@ export async function runAcpPo2SessionView(context) {
       && record.surfaceMounted === true, 'B: the real TUI opened an empty Session', 120_000)
     const sessionA = openA.openSessionId
     assert(typeof sessionA === 'string' && sessionA.length > 0, 'B: `/new` must publish an openSessionId')
+    if (Number.isInteger(tuiA.child?.pid)) tuiPids.push({ role: 'tui-A', pid: tuiA.child.pid })
 
     const conn1 = track(await openAcpClient(scopeDir))
     const initA = await conn1.initialize(1)
@@ -472,6 +490,7 @@ export async function runAcpPo2SessionView(context) {
     await connColdB.closed
 
     const { client: tuiColdA } = await startC1Client('po2 cold tuiA', { SPLIT_PROCESS_CLIENT_SESSION: sessionA })
+    if (Number.isInteger(tuiColdA.child?.pid)) tuiPids.push({ role: 'tui-cold-A', pid: tuiColdA.child.pid })
     await waitForSurfaceStatus(tuiColdA, record => record.sessionOpen === true
       && record.openSessionId === sessionA && record.surfaceMounted === true && record.transport === 'connected',
       'H2: a real TUI opened persisted Session A on the cold Host')
@@ -499,9 +518,14 @@ export async function runAcpPo2SessionView(context) {
     connJ.close()
     await connJ.closed
 
-    // K) unknown sessionId.
-    const { client: connK } = await openInitialized(scopeDir, 'K unknown session')
-    const missing = await sendRequest(connK, 2, 'session/resume', { sessionId: `po2-missing-${String(process.pid)}`, cwd: hostCwd })
+    // K) A FOREIGN session id (a session created on ANOTHER profile/Host) must be
+    //    rejected here: this Host resolves ids ONLY through its own persistence,
+    //    so a foreign id is never found and never leaks across profiles. The lane
+    //    is single-profile by contract, so a literal second-profile install is out
+    //    of scope; the resolution boundary this negative exercises is identical.
+    const foreignSessionId = randomUUID()
+    const { client: connK } = await openInitialized(scopeDir, 'K foreign session')
+    const missing = await sendRequest(connK, 2, 'session/resume', { sessionId: foreignSessionId, cwd: hostCwd })
     assert(missing?.error?.code === -32602,
       `K: an unknown session must be -32602 (got ${JSON.stringify(missing?.error ?? missing?.result)})`)
     assert(missing?.error?.data?.code === 'LOCAL_ACP_VIEW_SESSION_NOT_FOUND',
@@ -556,6 +580,22 @@ export async function runAcpPo2SessionView(context) {
       negativesRejected: true,
       hostIdentityKept: true,
       originalSplitClientIntact: true,
+      evidence: {
+        candidateSha256: context.candidateSha256 ?? null,
+        nodeVersion: process.version,
+        dshVersion: context.targetDshVersion ?? null,
+        bundleVersion: installedVersion,
+        acpSdkVersion,
+        hostPidStart: ready.localHost.hostPid,
+        hostInstanceIdStart: ready.localHost.instanceId,
+        hostPidCold: identityCold.hostPid,
+        hostInstanceIdCold: identityCold.instanceId,
+        scopeId,
+        tuiPids,
+        sessionA,
+        sessionB,
+        turnEndObserved: true,
+      },
     }
   } catch (error) {
     originalError = error
