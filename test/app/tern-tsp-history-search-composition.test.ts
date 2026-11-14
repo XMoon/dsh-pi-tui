@@ -422,13 +422,27 @@ test('the scope bridge is captured exactly ONCE per open and reused by every lat
     await waitUntil('the typed round read', () => h.requests.at(-1)?.query === 'prom')
     h.key(TAB)
     await waitUntil('the scope round read', () => h.requests.at(-1)?.scope === 'current')
+    assert.equal(h.requests.at(-1)?.query, 'prom',
+      'the scope switch kept the typed filter')
     assert.equal(h.requests.at(-1)?.sessionId, sessionId,
       'the later rounds still name the open-time session identity')
     // The decisive witness: the Directory scope ignores the identity, and the
     // All scope reads the same one source object the mount received.
     assert.equal(h.requests.at(-1)?.cwd, process.env.DSH_HOME, 'and the open-time cwd')
+    // The request-start witness above is not a completion barrier: between the
+    // debounced dispatch and the settled page the seat is `searching` and a
+    // real Enter is correctly refused (and never replayed), which is exactly
+    // the CI flake this case shipped. Wait for the CURRENT Directory round to
+    // settle and paint its rows before operating on it.
+    await waitUntil('the Directory round painted its settled page', () => {
+      const texts = h.texts()
+      return texts.includes('Scope: Directory ⌄')
+        && texts.includes('Results · 3 shown')
+        && texts.includes('›gamma three prompt')
+    })
     h.key(ENTER)
-    await waitUntil('the restore wrote the composer', () => h.draft().text !== '')
+    await waitUntil('the restore wrote the exact selected row', () =>
+      h.draft().text === 'gamma three prompt')
     assert.equal(h.submits.length, 0, 'the restore stayed a draft write')
   } finally {
     await h.dispose()
