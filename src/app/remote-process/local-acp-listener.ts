@@ -435,7 +435,7 @@ function buildAgentApp(
     }
     const asRequestError = (error: unknown): unknown =>
       error instanceof LocalAcpViewError
-        ? new RequestError(error.rpcCode, error.message, { code: error.code })
+        ? new RequestError(error.rpcCode, error.message, { ...error.data, code: error.code })
         : error
     app.onRequest(methods.agent.session.new, async ({ params }) => {
       beginRequest()

@@ -742,13 +742,13 @@ function makeFakeAccess(): {
   return {
     access: {
       async createWorkspace(path: string) {
-        return { workspaceId: `ws-${path}`, path }
+        return { kind: 'created' as const, workspaceId: `ws-${path}`, path }
       },
       async createSession(workspaceId: string) {
         counter += 1
         const id = `session-${String(counter)}`
         agents.set(id, { id, session: { id, header: { cwd: `/host/${workspaceId}` } } })
-        return { sessionId: id }
+        return { kind: 'created' as const, sessionId: id }
       },
       async resolveAgent(sessionId: string) {
         const agent = agents.get(sessionId)
@@ -860,5 +860,43 @@ test('a second ACP connection cannot attach an already-held Session; invalid req
   } finally {
     a.close()
     b.close()
+  }
+})
+
+test('session/new carries the authoritative created session id in JSON-RPC error data on published-with-error', async t => {
+  const { scope } = newScope(t)
+  const access: HostAcpSessionAccess = {
+    async createWorkspace() {
+      return { kind: 'created', workspaceId: 'ws-po2', path: '/host' }
+    },
+    async createSession() {
+      return { kind: 'published-with-error', sessionId: 'session-created-po2', code: 'session/workspace-attach-failed' }
+    },
+    async resolveAgent() {
+      return { error: { code: 'session/not-found', message: 'not found' } }
+    },
+    currentAgent() {
+      return undefined
+    },
+    currentSession() {
+      return undefined
+    },
+  }
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host', mcpServers: [] } })
+    const response = (await client.next()) as {
+      error?: { code: number; data?: { code?: string; sessionId?: string } }
+    }
+    assert.equal(response.error?.code, -32603)
+    assert.equal(response.error?.data?.code, 'LOCAL_ACP_VIEW_CREATE_ATTACH_FAILED')
+    assert.equal(response.error?.data?.sessionId, 'session-created-po2',
+      'the JSON-RPC error data must preserve the created Session id')
+  } finally {
+    client.close()
   }
 })

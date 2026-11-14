@@ -19,6 +19,8 @@ import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import {
   AcpSessionViewRegistry,
   LocalAcpViewError,
+  type AcpCreateSessionOutcome,
+  type AcpCreateWorkspaceOutcome,
   type HostAcpSessionAccess,
   type LiveAgentViewIdentity,
 } from '../../src/app/remote-process/local-acp-session-view.ts'
@@ -56,10 +58,10 @@ class FakeAccess implements HostAcpSessionAccess {
   readonly createWorkspaceCalls: string[] = []
   readonly createSessionCalls: string[] = []
   readonly resolveCalls: string[] = []
-  createWorkspaceImpl: (path: string) => Promise<{ workspaceId: string; path: string }> =
-    async path => ({ workspaceId: `ws:${path}`, path })
-  createSessionImpl: (workspaceId: string) => Promise<{ sessionId: string }> =
-    async () => { throw new Error('createSession unconfigured') }
+  createWorkspaceImpl: (path: string) => Promise<AcpCreateWorkspaceOutcome> =
+    async path => ({ kind: 'created', workspaceId: `ws:${path}`, path })
+  createSessionImpl: (workspaceId: string) => Promise<AcpCreateSessionOutcome> =
+    async () => ({ kind: 'indeterminate', code: 'createSession unconfigured' })
   resolveAgentImpl: (sessionId: string) => Promise<
     { agent: LiveAgentViewIdentity } | { error: { code: string; message: string } }
   > = async sessionId => {
@@ -74,12 +76,12 @@ class FakeAccess implements HostAcpSessionAccess {
   seed(agent: AgentLike): void { this.agents.set(agent.id, agent) }
   remove(id: string): void { this.agents.delete(id) }
 
-  async createWorkspace(path: string): Promise<{ workspaceId: string; path: string }> {
+  async createWorkspace(path: string): Promise<AcpCreateWorkspaceOutcome> {
     this.createWorkspaceCalls.push(path)
     return this.createWorkspaceImpl(path)
   }
 
-  async createSession(workspaceId: string): Promise<{ sessionId: string }> {
+  async createSession(workspaceId: string): Promise<AcpCreateSessionOutcome> {
     this.createSessionCalls.push(workspaceId)
     return this.createSessionImpl(workspaceId)
   }
@@ -109,7 +111,7 @@ const NEW = { cwd: '/work/a', mcpServers: [] as unknown[] }
 test('session/new creates one workspace then one session and attaches the exact live identity', async () => {
   const access = new FakeAccess()
   const agent = makeAgent('S1', '/work/a')
-  access.createSessionImpl = async () => { access.seed(agent); return { sessionId: 'S1' } }
+  access.createSessionImpl = async () => { access.seed(agent); return { kind: 'created', sessionId: 'S1' } }
   const registry = new AcpSessionViewRegistry(QUIET_DIAG)
   const conn = registry.createConnection()
 
@@ -124,9 +126,9 @@ test('session/new creates one workspace then one session and attaches the exact 
   assert.equal(registry.phaseOf(conn), 'attached')
 })
 
-test('session/new runs the create exactly once even when the post-dispatch reply is lost', async () => {
+test('session/new runs the create exactly once even when the post-dispatch result is unconfirmed', async () => {
   const access = new FakeAccess()
-  access.createSessionImpl = async () => { throw new Error('host vanished after commit') }
+  access.createSessionImpl = async () => ({ kind: 'indeterminate', code: 'session/internal' })
   const registry = new AcpSessionViewRegistry(QUIET_DIAG)
   const conn = registry.createConnection()
 
@@ -155,7 +157,7 @@ test('session/new rejects an invalid cwd and an unsupported MCP server before an
 
 test('session/new rejects when the Host refuses the workspace directory', async () => {
   const access = new FakeAccess()
-  access.createWorkspaceImpl = async () => { throw new Error('workspace/invalid-path') }
+  access.createWorkspaceImpl = async () => ({ kind: 'rejected', code: 'workspace/invalid-path' })
   const registry = new AcpSessionViewRegistry(QUIET_DIAG)
   const conn = registry.createConnection()
 
@@ -375,6 +377,97 @@ test('a rejecting resolve after a physical disconnect keeps the connection close
   await assert.rejects(attempt)
   assert.equal(registry.phaseOf(conn), 'closed', 'a late rejection must not turn a closed connection back to idle')
   assert.equal(registry.hasClaim('S13'), false)
+})
+
+test('resume then close then resume of the SAME session never lets a stale result delete the new claim', async () => {
+  for (const mode of ['success', 'error', 'throw'] as const) {
+    const access = new FakeAccess()
+    const agent = makeAgent('S', '/w')
+    access.seed(agent)
+    let call = 0
+    let stale!: Deferred<{ agent: LiveAgentViewIdentity } | { error: { code: string; message: string } }>
+    access.resolveAgentImpl = () => {
+      call += 1
+      if (call === 1) { stale = deferred(); return stale.promise }
+      return Promise.resolve({ agent })
+    }
+    const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+    const conn = registry.createConnection()
+    const staleAttempt = registry.resumeSession(conn, access, { sessionId: 'S', cwd: '/w' })
+    assert.equal(registry.hasClaim('S'), true)
+    assert.deepEqual(registry.closeSession(conn, 'S'), {})
+    assert.equal(registry.hasClaim('S'), false)
+    const newAttempt = registry.resumeSession(conn, access, { sessionId: 'S', cwd: '/w' })
+    assert.equal(registry.hasClaim('S'), true, `${mode}: the new claim exists`)
+    if (mode === 'success') stale.resolve({ agent })
+    else if (mode === 'error') stale.resolve({ error: { code: 'session/not-found', message: 'x' } })
+    else stale.reject(new Error('boom'))
+    await assert.rejects(staleAttempt, (error: unknown) => error instanceof LocalAcpViewError)
+    assert.equal(registry.hasClaim('S'), true, `${mode}: the stale result must NOT delete the new claim`)
+    await newAttempt
+    assert.equal(registry.phaseOf(conn), 'attached')
+    assert.deepEqual(registry.closeSession(conn, 'S'), {})
+    assert.equal(registry.hasClaim('S'), false)
+  }
+})
+
+test('session/new classifies the HOST result instead of whichever await threw', async () => {
+  {
+    const access = new FakeAccess()
+    access.createWorkspaceImpl = async () => ({ kind: 'rejected', code: 'workspace/invalid-path' })
+    const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+    const conn = registry.createConnection()
+    await assert.rejects(registry.newSession(conn, access, NEW), isViewError('LOCAL_ACP_VIEW_WORKSPACE_REJECTED'))
+    assert.equal(access.createSessionCalls.length, 0)
+    assert.equal(registry.phaseOf(conn), 'idle')
+  }
+  {
+    const access = new FakeAccess()
+    access.createWorkspaceImpl = async () => ({ kind: 'indeterminate', code: 'workspace/internal' })
+    const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+    const conn = registry.createConnection()
+    await assert.rejects(registry.newSession(conn, access, NEW), isViewError('LOCAL_ACP_VIEW_WORKSPACE_UNAVAILABLE'))
+    assert.equal(access.createSessionCalls.length, 0)
+  }
+  {
+    const access = new FakeAccess()
+    access.createSessionImpl = async () => ({ kind: 'rejected', code: 'gateway/bad-request' })
+    const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+    const conn = registry.createConnection()
+    await assert.rejects(registry.newSession(conn, access, NEW), isViewError('LOCAL_ACP_VIEW_INVALID_REQUEST'))
+    assert.equal(registry.claimCount(), 0)
+  }
+  {
+    const access = new FakeAccess()
+    access.createSessionImpl = async () => ({ kind: 'published-with-error', sessionId: 'S30', code: 'session/workspace-attach-failed' })
+    const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+    const conn = registry.createConnection()
+    await assert.rejects(
+      registry.newSession(conn, access, NEW),
+      (error: unknown) => error instanceof LocalAcpViewError
+        && error.code === 'LOCAL_ACP_VIEW_CREATE_ATTACH_FAILED'
+        && error.data.sessionId === 'S30',
+    )
+    assert.equal(access.createSessionCalls.length, 1, 'never retried')
+    assert.equal(registry.claimCount(), 0)
+    assert.equal(registry.phaseOf(conn), 'idle')
+  }
+})
+
+test('session/new keeps the created session id when the agent borrow fails after a confirmed create', async () => {
+  const access = new FakeAccess()
+  access.createSessionImpl = async () => ({ kind: 'created', sessionId: 'S20' })
+  access.resolveAgentImpl = async () => ({ error: { code: 'gateway/internal', message: 'x' } })
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  await assert.rejects(
+    registry.newSession(conn, access, NEW),
+    (error: unknown) => error instanceof LocalAcpViewError
+      && error.code === 'LOCAL_ACP_VIEW_HOST_ERROR'
+      && error.data.sessionId === 'S20',
+  )
+  assert.equal(registry.claimCount(), 0)
+  assert.equal(registry.phaseOf(conn), 'idle')
 })
 
 test('a cwd mismatch on resume is attached without changing the Host Session', async () => {  const access = new FakeAccess()
