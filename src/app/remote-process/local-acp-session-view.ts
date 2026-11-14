@@ -152,6 +152,8 @@ export type LocalAcpPromptErrorCode =
   | 'LOCAL_ACP_PROMPT_UNSUPPORTED_CONTENT'
   /** The owned turn also claimed another user's message (D23 fail-closed). */
   | 'LOCAL_ACP_PROMPT_MIXED_TURN'
+  /** The exact live Agent/Session changed since this View attached. */
+  | 'LOCAL_ACP_PROMPT_STALE_AGENT'
   /** The owned turn ended without a real non-empty assistant text chunk. */
   | 'LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT'
   /** The owned turn ended blocked/error/aborted/interrupted or the Agent died. */
@@ -561,6 +563,21 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (requestSignal.aborted) {
       throw promptError('LOCAL_ACP_PROMPT_ABORTED', 'the ACP prompt request was aborted before admission', JSONRPC_INVALID_PARAMS)
     }
+    // A View is only a BORROWER: it keeps no claim on the Agent's lifetime, so
+    // the exact identity verified at attach time must STILL be current before a
+    // prompt is dispatched. Otherwise the official Controller would cold-resume
+    // a NEW Agent under the same Session and accept a message this View can
+    // never observe (its facts require the exact attached Agent/Session).
+    if (
+      !Object.is(access.currentAgent(request.sessionId), claim.exactAgent)
+      || !Object.is(access.currentSession(request.sessionId), claim.exactSession)
+    ) {
+      throw promptError(
+        'LOCAL_ACP_PROMPT_STALE_AGENT',
+        'the borrowed Session Agent changed since this View attached; the prompt was not dispatched',
+        JSONRPC_INVALID_PARAMS,
+      )
+    }
 
     const flight: InflightPrompt = {
       requestId: randomUUID(),
@@ -591,7 +608,24 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         mode: 'queue',
         content,
       }, requestSignal)
-      if (!flight.settledDone) flight.phase = 'queued'
+      if (!flight.settledDone) {
+        // The official call resolved. If this View never observed its own
+        // message AND the exact identity is no longer current, the async
+        // resolve cold-resumed a DIFFERENT Agent that accepted the request; it
+        // can never settle here, so fail bounded instead of waiting for events
+        // that cannot match (never re-dispatch, never rebind).
+        const stillExact = Object.is(access.currentAgent(request.sessionId), claim.exactAgent)
+          && Object.is(access.currentSession(request.sessionId), claim.exactSession)
+        if (flight.messageId === undefined && !stillExact) {
+          this.failPrompt(claim, flight, promptError(
+            'LOCAL_ACP_PROMPT_STALE_AGENT',
+            'the accepted prompt was not observed on the Agent generation this View attached; it was not re-dispatched',
+            JSONRPC_INTERNAL_ERROR,
+          ))
+        } else {
+          flight.phase = 'queued'
+        }
+      }
     } catch (error) {
       if (!flight.settledDone) {
         if (flight.messageId !== undefined) {
@@ -619,13 +653,26 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
 
   /** One message entered the live inbox: correlate the View-minted request id. */
   onInboxInserted(agent: LiveAgentViewIdentity, message: AcpUserMessageLike): void {
+    const rpcId = message.source?.kind === 'user' ? message.source.rpcId : undefined
     for (const claim of this.claims.values()) {
-      if (claim.exactAgent !== agent) continue
       const flight = claim.inflight
-      if (flight === undefined || flight.settledDone || flight.messageId !== undefined) continue
-      if (message.source?.kind === 'user' && message.source.rpcId === flight.requestId) {
-        flight.messageId = message.id
+      if (flight === undefined || flight.settledDone) continue
+      if (claim.exactAgent !== agent) {
+        // This View's own requestId was accepted by a DIFFERENT Agent
+        // generation (the official Controller cold-resumed a new Agent during
+        // admission). It can never settle against this View's exact identity:
+        // fail bounded, never re-dispatch and never rebind to the new Agent.
+        if (rpcId !== undefined && rpcId === flight.requestId && flight.messageId === undefined) {
+          this.failPrompt(claim, flight, promptError(
+            'LOCAL_ACP_PROMPT_STALE_AGENT',
+            'the prompt was accepted by a different Agent generation than this View attached',
+            JSONRPC_INTERNAL_ERROR,
+          ))
+        }
+        continue
       }
+      if (flight.messageId !== undefined) continue
+      if (rpcId !== undefined && rpcId === flight.requestId) flight.messageId = message.id
     }
   }
 
@@ -1024,6 +1071,19 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         ))
         return
       }
+      // The REAL terminal reason decides first: a blocked/error/aborted/
+      // interrupted turn keeps its actual classification even when it produced
+      // no assistant text. Only a successful candidate needs the text check.
+      const kind = turnEndReasonKind(data)
+      if (kind !== 'completed' && kind !== 'max-tokens') {
+        this.failPrompt(claim, flight, promptError(
+          'LOCAL_ACP_PROMPT_TURN_FAILED',
+          'the owned turn did not reach a successful completion',
+          JSONRPC_INTERNAL_ERROR,
+          kind === undefined ? { reason: 'unknown' } : { reason: kind },
+        ))
+        return
+      }
       if (!flight.assistantText) {
         this.failPrompt(claim, flight, promptError(
           'LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT',
@@ -1032,21 +1092,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         ))
         return
       }
-      const kind = turnEndReasonKind(data)
-      if (kind === 'completed') {
-        this.completePrompt(claim, flight, { stopReason: 'end_turn' })
-        return
-      }
-      if (kind === 'max-tokens') {
-        this.completePrompt(claim, flight, { stopReason: 'max_tokens' })
-        return
-      }
-      this.failPrompt(claim, flight, promptError(
-        'LOCAL_ACP_PROMPT_TURN_FAILED',
-        'the owned turn did not reach a successful completion',
-        JSONRPC_INTERNAL_ERROR,
-        kind === undefined ? { reason: 'unknown' } : { reason: kind },
-      ))
+      this.completePrompt(claim, flight, { stopReason: kind === 'completed' ? 'end_turn' : 'max_tokens' })
     }, { diag: this.diag })
   }
 
