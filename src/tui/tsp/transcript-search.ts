@@ -126,6 +126,14 @@ export interface TspTranscriptSearchPorts {
 export interface TspTranscriptSearchSeat {
   /** Whether the card currently owns the keyboard. */
   isOpen(): boolean
+  /**
+   * Whether the seat still HOLDS state (query/targets/source/grants) even though
+   * it may be temporarily un-admitted. `isOpen()` deliberately folds admission in
+   * (a card the mount would not let act paints nothing), so the mount's
+   * higher-seat retirement needs this SEPARATE fact: `isOpen() === false` must
+   * never be mistaken for "already retired".
+   */
+  holdsState(): boolean
   /** Open ONE card: capture the current snapshot (empty query = zero targets). */
   open(): void
   /** `false` when this pane cannot present the card at all. */
@@ -140,6 +148,13 @@ export interface TspTranscriptSearchSeat {
   renderState(): TspTranscriptSearchRenderState | undefined
   /** The current target's canonical representative message, or `undefined`. */
   currentMessage(): TranscriptMessage | undefined
+  /**
+   * Invalidate the CURRENT target's proven reachability (a `gone` root, a
+   * re-materialized Main). The next frame paints the honest `Unavailable in
+   * current pane` state; the seat NEVER re-adds an evicted root and never sends a
+   * stale-id reveal.
+   */
+  invalidateReachability(): void
   /** The wire id of the field that owns the hardware caret, if indexed. */
   desiredFocusId(): string | undefined
   /** The wire id of ONE control of the ring, or `undefined` when unindexed. */
@@ -610,6 +625,10 @@ export function createTspTranscriptSearch(
       if (binding?.current(owner.source) !== true) return false
       return ports.admitted()
     },
+    holdsState: () => {
+      const owner = state
+      return owner !== undefined && !owner.retired && owner.phase === 'open'
+    },
     supported: () => binding !== undefined && nativeSupported(),
     handleKey,
     handleIntent: (intent) => { act(intent) },
@@ -665,6 +684,13 @@ export function createTspTranscriptSearch(
     retire,
     renderState,
     indexFrame,
+    invalidateReachability: () => {
+      const owner = state
+      if (owner === undefined || owner.retired) return
+      owner.revealAttempted = true
+      owner.reachable = false
+      owner.pendingReveal = false
+    },
     currentMessage: () => {
       const owner = state
       if (owner === undefined || owner.retired) return undefined

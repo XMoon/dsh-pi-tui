@@ -945,7 +945,7 @@ let handling: Promise<void> | undefined
 let polling = false
 const handleOneBatch = async (): Promise<void> => {
   if (!existsSync(casePath)) return
-  let command: { seq?: number; kind?: string }
+  let command: { seq?: number; kind?: string; id?: string }
   try {
     command = JSON.parse(readFileSync(casePath, 'utf8'))
   } catch {
@@ -1115,19 +1115,20 @@ const handleOneBatch = async (): Promise<void> => {
       return
     }
     if (kind === 'semantic-search-wrong-node') {
-      // Reveal a REAL but WRONG Main card: the FIRST id the renderer ever
-      // revealed is remembered by the hook, and this case re-reveals the FIRST
-      // Main root the renderer's own committed frame addressed instead. Both ids
-      // are real wire ids the client holds, so the client accepts the op and
-      // scrolls to the wrong card — the false positive the qualification catches.
+      // Reveal the id the FLOW chose: a REAL Main root the client currently holds
+      // that ALSO carries the shared word but is NOT the current target. Both ids
+      // are real wire identities, so the client accepts the op and scrolls to the
+      // WRONG same-word card — the false positive the qualification must catch.
       const surface = (globalThis as unknown as GlobalProbe).__transcriptModesSurface
-      const firstRoot = (globalThis as unknown as GlobalProbe).__transcriptModesFirstMainRoot
-      if (surface === undefined || firstRoot === undefined) {
-        throw new Error('no production Main root has been observed yet')
-      }
       const intended = (globalThis as unknown as GlobalProbe).__transcriptModesLastReveal
-      ;(surface as unknown as { reveal(id: string, at: string): void }).reveal(firstRoot, 'nearest')
-      note({ kind: 'fault.wrong-node', revealedId: firstRoot, intendedId: intended })
+      if (surface === undefined) throw new Error('no production inline Surface is open')
+      const chosen = command.id
+      if (typeof chosen !== 'string' || chosen === '') {
+        throw new Error('the flow must carry the wrong-but-real Main root id')
+      }
+      if (chosen === intended) throw new Error('the fault id must differ from the current target id')
+      ;(surface as unknown as { reveal(id: string, at: string): void }).reveal(chosen, 'nearest')
+      note({ kind: 'fault.wrong-node', revealedId: chosen, intendedId: intended })
       const payload = { seq, command: kind, status: 'ok' }
       writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
       renameSync(`${caseResultPath}.tmp`, caseResultPath)

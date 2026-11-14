@@ -39,7 +39,7 @@ import { emptyStatusSnapshot } from '../../src/domain/status/types.ts'
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 import { settle, waitUntil } from '../support/tsp-runner-harness.ts'
-import { clickNodeById, surfaceFocusOps, surfaceTexts, wireNodes } from '../support/tsp-picker-wire.ts'
+import { clickNodeById, foldWireNodes, surfaceFocusOps, surfaceTexts, wireNodes } from '../support/tsp-picker-wire.ts'
 
 const T0 = 1_700_000_000_000
 const OLD_ONLY = 'T3B1_OLD_ARCHIVE_ONLY'
@@ -213,12 +213,21 @@ const ALT_SHIFT_S = '\u001b[115;4u'
 
 async function mountSearchPane(
   t: { after(fn: () => unknown): void },
-  options: { readonly transcriptSearch?: boolean; readonly folder?: TranscriptFolder; readonly cols?: number } = {},
+  options: {
+    readonly transcriptSearch?: boolean
+    readonly folder?: TranscriptFolder
+    readonly cols?: number
+    readonly nativeInteraction?: boolean
+    /** The display preset this mount presents (the Focus cases need the real
+     *  Focus projection, which is a display-state fact, never a renderer flag). */
+    readonly preset?: 'full' | 'compact' | 'focus'
+  } = {},
 ): Promise<RevealPane> {
   const pane = installTspPane({
     composerActions: true,
     ...(options.cols === undefined ? {} : { cols: options.cols }),
     ...(options.transcriptSearch === false ? {} : { transcriptSearch: true }),
+    ...(options.nativeInteraction === true ? { nativeInteraction: true } : {}),
   })
   t.after(() => pane.restore())
   const session = await connect({ timeout: 500, exitHooks: false })
@@ -230,7 +239,7 @@ async function mountSearchPane(
     copyVisual: async () => true,
     requestExit: () => { calls.exits += 1 },
     onFatal: (error) => { throw error },
-    displayState: { preset: 'full' },
+    displayState: { preset: options.preset ?? 'full' },
   })
   t.after(() => renderer.dispose())
   if (options.transcriptSearch !== false) renderer.bindTranscriptSemanticSearch(scripted.binding)
@@ -274,7 +283,9 @@ async function mountSearchPane(
     folder,
     bindingState: scripted.state,
     calls,
-    cardPainted: () => wireNodes(pane).some(node => node.id.includes('search-card')),
+    // The LIVE folded frame, not the additive wire list: an `add` stays in the
+  // history after its card left the frame.
+  cardPainted: () => foldWireNodes(pane.frames()).some(node => String(node.id).includes('search-card')),
     queryField: () => {
       const node = wireNodes(pane).find(candidate => /-query$/.test(candidate.id) && candidate.id.includes('ss'))
       if (node === undefined) return undefined
@@ -630,6 +641,104 @@ test('the Tasks footer action is NOT advertised while the Search card owns the D
   await waitUntil('the card painted', () => wireNodes(pane).some(node => node.id.includes('search-card')))
   assert.equal(actionsOf().some(act => act.includes('tasks')), false,
     'the search-open frame paints NO Tasks click affordance')
+})
+
+test('a higher seat RETIRES the card: closing it does not bring the old search back', async (t) => {
+  const h = await mountSearchPane(t, { nativeInteraction: true })
+  h.key(char('q'))
+  await h.painted(() => h.composerNode()?.text === 'q', 'the draft installed')
+  h.key(ALT_SHIFT_S)
+  await h.painted(() => h.cardPainted(), 'the card painted')
+  // The REAL higher-seat acquisition: the production interaction presenter
+  // presents an official Question form, which IS the modal seat.
+  // A REPRESENTABLE question (the presenter refuses a payload it cannot paint).
+  const asked = h.renderer.interaction.askQuestions(
+    [{ id: 'q-1', question: 'Proceed?', options: [{ label: 'Yes' }] }] as never,
+    undefined,
+    undefined,
+    false,
+  )
+  // The prompt is a modal: the seat retires instead of parking behind it.
+  asked.catch(() => {})
+  await h.absent()
+  h.renderer.display.commitDisplaySubject({}, {}, undefined)
+  await h.absent()
+  assert.equal(h.cardPainted(), false, 'the card is not painted while the modal owns the input')
+  // A repaint after the higher seat settles must NOT resurrect the old search:
+  // the seat was RETIRED, not parked.
+  h.renderer.display.commitDisplaySubject({}, {}, undefined)
+  await h.absent()
+  assert.equal(h.cardPainted(), false, 'the retired card never comes back')
+  assert.equal(h.queryField(), undefined, 'the old query field is gone')
+  assert.equal(h.composerNode()?.text, 'q', 'the draft was never touched')
+})
+
+test('closing the search retracts the grant: the body folds again and no manual state was written', async (t) => {
+  const h = await mountSearchPane(t)
+  h.key(ALT_SHIFT_S)
+  await h.painted(() => h.cardPainted(), 'the card painted')
+  for (const ch of INNER_ONLY.toLowerCase()) h.key(char(ch))
+  await h.painted(() => (h.queryField()?.text ?? '') === INNER_ONLY.toLowerCase(), 'the query installed')
+  await h.painted(() => h.texts().some(text => text.includes('/1 targets')), 'one target')
+  h.key(ENTER)
+  await h.painted(() => h.texts().some(text => text.includes(INNER_ONLY)),
+    'the grant opened the owning tool card')
+  // Escape closes the card; the SAME frame must retract the grant.
+  h.key(ESCAPE)
+  await h.painted(() => h.composerNode() !== undefined, 'the Composer restored')
+  assert.equal(h.texts().some(text => text.includes(INNER_ONLY)), false,
+    `the grant is retracted with the card :: ${JSON.stringify(h.texts().slice(-4))}`)
+  // Re-opening starts a NEW navigation epoch whose grant opens it again: the
+  // manual state was never written, so nothing was "remembered" as collapsed.
+  h.key(ALT_SHIFT_S)
+  await h.painted(() => h.cardPainted(), 'the card painted again')
+  for (const ch of INNER_ONLY.toLowerCase()) h.key(char(ch))
+  await h.painted(() => h.texts().some(text => text.includes('/1 targets')), 'the target again')
+  h.key(ENTER)
+  await h.painted(() => h.texts().some(text => text.includes(INNER_ONLY)),
+    'a fresh navigation grants again (the manual set was never polluted)')
+})
+
+test('a gone root invalidates the target reachability: the card says Unavailable, never a stale claim', async (t) => {
+  const h = await mountSearchPane(t)
+  h.key(ALT_SHIFT_S)
+  await h.painted(() => h.cardPainted(), 'the card painted')
+  for (const ch of INNER_ONLY.toLowerCase()) h.key(char(ch))
+  await h.painted(() => (h.queryField()?.text ?? '') === INNER_ONLY.toLowerCase(), 'the query installed')
+  await h.painted(() => h.texts().some(text => text.includes('/1 targets')), 'one target')
+  h.key(ENTER)
+  await h.painted(() => h.revealOps().length > 0, 'the reveal op for the current target')
+  await h.painted(() => h.texts().some(text => text.includes('Source-only · position unverified')),
+    'the reachable target states the card-level claim')
+  // The REAL client `gone` for the revealed root.
+  const sf = h.pane.frames().at(-1)!.sf
+  const revealedId = h.revealOps().at(-1)?.id
+  assert.ok(revealedId !== undefined)
+  h.pane.event({ ev: 'gone', sf, ids: [revealedId], raw: {} })
+  await h.painted(() => h.texts().some(text => text.includes('Unavailable in current pane')),
+    `the evicted root is reported honestly :: ${JSON.stringify(h.texts().slice(-5))}`)
+  // No stale-id reveal follows the eviction.
+  const revealsAfterGone = h.revealOps().length
+  h.renderer.display.commitDisplaySubject({}, {}, undefined)
+  await h.absent()
+  assert.equal(h.revealOps().length, revealsAfterGone,
+    'a passive repaint after gone never sends a stale-id reveal')
+})
+
+test('a VISIBLE prompt row hit opens NO Thought (the row never lived inside it)', async (t) => {
+  const h = await mountSearchPane(t, { preset: 'focus' })
+  // The prompt row is visible in Focus OUTSIDE the Thought: its own turn's
+  // Thought is folded and must stay folded when the prompt is the target.
+  const promptMarker = 'read the example file'
+  h.key(ALT_SHIFT_S)
+  await h.painted(() => h.cardPainted(), 'the card painted')
+  for (const ch of promptMarker) h.key(char(ch))
+  await h.painted(() => (h.queryField()?.text ?? '') === promptMarker, 'the query installed')
+  await h.painted(() => h.texts().some(text => text.includes('/1 targets')), 'one target')
+  // The visible prompt row is already readable; no Thought grant may add the
+  // hidden process (the tool body) on top of it.
+  assert.equal(h.texts().some(text => text.includes(INNER_ONLY)), false,
+    `a visible-row hit never opens unrelated Process :: ${JSON.stringify(h.texts().slice(-5))}`)
 })
 
 // ── E. Currentness: a dead source retires the card ───────────────────────────
