@@ -110,7 +110,7 @@ export interface TspTranscriptSearchPorts {
    * source, the serial and the revision before sending any op, and it answers
    * whether a reveal was actually requested.
    */
-  requestReveal(): boolean
+  requestReveal(): { readonly requested: boolean; readonly rootId: string | undefined }
   /**
    * The seat's navigation identity moved: the card opened, its query changed or
    * the user stepped to another target. The mount re-derives its TEMPORARY
@@ -149,12 +149,15 @@ export interface TspTranscriptSearchSeat {
   /** The current target's canonical representative message, or `undefined`. */
   currentMessage(): TranscriptMessage | undefined
   /**
-   * Invalidate the CURRENT target's proven reachability (a `gone` root, a
-   * re-materialized Main). The next frame paints the honest `Unavailable in
-   * current pane` state; the seat NEVER re-adds an evicted root and never sends a
-   * stale-id reveal.
+   * Invalidate the CURRENT target's proven reachability when the CLIENT evicted
+   * the root it was revealed into.
+   *
+   * `evictedRootIds` are the wire ids the client reported `gone`: the seat
+   * invalidates ONLY when the CURRENT target's own root is among them, so an
+   * unrelated eviction never poisons a still-attached target. The seat NEVER
+   * re-adds an evicted root and never sends a stale-id reveal.
    */
-  invalidateReachability(): void
+  invalidateReachability(evictedRootIds: readonly string[]): void
   /** The wire id of the field that owns the hardware caret, if indexed. */
   desiredFocusId(): string | undefined
   /** The wire id of ONE control of the ring, or `undefined` when unindexed. */
@@ -304,6 +307,9 @@ interface SearchSeatState {
   pendingReveal: boolean
   /** Whether a reveal was attempted for the CURRENT target at all. */
   revealAttempted: boolean
+  /** The Main root wire id the CURRENT target's reveal named (its reachability
+   *  proof). `undefined` until a reveal actually requested one. */
+  revealRootId: string | undefined
   /** Whether that attempt actually requested a reveal (the card is reachable). */
   reachable: boolean
   /** The control of the seat's own focus ring the caret is on. */
@@ -432,6 +438,7 @@ export function createTspTranscriptSearch(
     // re-uses them.
     owner.pendingReveal = false
     owner.revealAttempted = false
+    owner.revealRootId = undefined
     owner.reachable = false
     // A new result set is a new navigation identity: the previous target's
     // temporary grants must not linger on a card the user is no longer on.
@@ -460,6 +467,7 @@ export function createTspTranscriptSearch(
     }
     owner.pendingReveal = true
     owner.revealAttempted = false
+    owner.revealRootId = undefined
     owner.reachable = false
     // ONE explicit navigation: the new target's grants are derived before the
     // frame that reveals it.
@@ -609,10 +617,11 @@ export function createTspTranscriptSearch(
     // after the frame that paints it was committed.
     if (owner.pendingReveal) {
       owner.pendingReveal = false
-      const requested = ports.requestReveal()
+      const reveal = ports.requestReveal()
       owner.revealAttempted = true
-      owner.reachable = requested
-      if (requested) diagnostics.reveals += 1
+      owner.reachable = reveal.requested
+      owner.revealRootId = reveal.rootId
+      if (reveal.requested) diagnostics.reveals += 1
       // The label the card paints depends on the reveal result.
       ports.requestRender()
     }
@@ -666,6 +675,7 @@ export function createTspTranscriptSearch(
         coverage: snapshot.coverage,
         pendingReveal: false,
         revealAttempted: false,
+        revealRootId: undefined,
         reachable: false,
         focusControl: 'query',
         retired: false,
@@ -684,9 +694,13 @@ export function createTspTranscriptSearch(
     retire,
     renderState,
     indexFrame,
-    invalidateReachability: () => {
+    invalidateReachability: (evictedRootIds) => {
       const owner = state
       if (owner === undefined || owner.retired) return
+      // ONLY the target's OWN root matters: an eviction elsewhere in the Main
+      // document must never make a still-attached target read `Unavailable`.
+      const targetRoot = owner.revealRootId
+      if (targetRoot === undefined || !evictedRootIds.includes(targetRoot)) return
       owner.revealAttempted = true
       owner.reachable = false
       owner.pendingReveal = false

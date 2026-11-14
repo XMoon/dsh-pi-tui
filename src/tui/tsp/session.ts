@@ -3175,26 +3175,28 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * source) is reported as unreachable, and the card says
    * `Unavailable in current pane` instead of sending an op that cannot land.
    */
-  const revealCurrentSearchTarget = (): boolean => {
-    if (disposed || hydrating || !inputBound) return false
+  const revealCurrentSearchTarget = (): { readonly requested: boolean; readonly rootId: string | undefined } => {
+    if (disposed || hydrating || !inputBound) return { requested: false, rootId: undefined }
     const seat = transcriptSearch
-    if (seat === undefined || seat.isOpen() !== true) return false
+    if (seat === undefined || seat.isOpen() !== true) return { requested: false, rootId: undefined }
     const target = seat.currentTarget()
-    if (target === undefined) return false
+    if (target === undefined) return { requested: false, rootId: undefined }
     const message = seat.currentMessage()
-    if (message === undefined) return false
+    if (message === undefined) return { requested: false, rootId: undefined }
     // The canonical owner: the FIRST committed descriptor whose `owners`
     // contains this exact representative object. Object identity is the mapper's
     // own membership fact, never a re-derived guess.
     const block = lastMainBlocks.find(candidate => candidate.owners.includes(message))
-    if (block === undefined) return false
+    if (block === undefined) return { requested: false, rootId: undefined }
     // The CURRENT attached fact: a root the client evicted is not re-added by a
     // projection, so an unattached root can never receive a reveal op.
-    if (!mainJournal.isAttached(block.key)) return false
+    if (!mainJournal.isAttached(block.key)) return { requested: false, rootId: undefined }
     const nodeId = mainJournal.idOf(block.key)
-    if (nodeId === undefined) return false
+    if (nodeId === undefined) return { requested: false, rootId: undefined }
     surface.reveal(nodeId, 'nearest')
-    return true
+    // The id this reveal named IS the target's reachability proof: a later
+    // `gone` for THIS id is the only eviction that invalidates the target.
+    return { requested: true, rootId: nodeId }
   }
 
   /**
@@ -5547,7 +5549,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
             // current pane` instead of keeping a `Source-only` claim about a node
             // the client no longer holds. Nothing is re-added and no stale-id
             // reveal is ever sent.
-            transcriptSearch?.invalidateReachability()
+            transcriptSearch?.invalidateReachability(input.event.ids)
             render()
           }
         }

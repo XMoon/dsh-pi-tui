@@ -104,7 +104,10 @@ function ports(overrides: Partial<TspTranscriptSearchPorts> = {}): {
     admitted: () => true,
     requestRender: () => { renders += 1 },
     setFocus: () => { focuses += 1 },
-    requestReveal: () => { reveals += 1; return true },
+    requestReveal: () => {
+      reveals += 1
+      return { requested: true, rootId: 'main.probe-root' }
+    },
     navigationChanged: () => { navigations += 1 },
     reportFatal: () => {},
     ...overrides,
