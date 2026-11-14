@@ -177,19 +177,32 @@ test('dispose after start asks the live child to stop once and resolves after it
   const c = coordinator(children, exitCodes, spawnImpl)
   c.start()
   children[0].autoExitSignal = 'SIGTERM'
-  await c.dispose()
-  await c.dispose()
+  assert.equal(await c.dispose(), true)
+  assert.equal(await c.dispose(), true)
   assert.deepEqual(children[0].kills, ['SIGTERM'], 'the live child is asked to stop exactly once')
 })
 
-test('dispose escalates to SIGKILL when the child does not exit within the grace window', async () => {
+test('dispose escalates to SIGKILL within the SAME budget when SIGTERM does not stop the child', async () => {
   const { spawnImpl, children } = fakeSpawn()
   const exitCodes: number[] = []
-  const c = coordinator(children, exitCodes, spawnImpl, { graceMs: 40, killGraceMs: 40 })
+  const c = coordinator(children, exitCodes, spawnImpl, { shutdownBudgetMs: 80 })
   c.start()
   children[0].autoExitSignal = 'SIGKILL' // only SIGKILL triggers the exit
-  await c.dispose()
-  assert.deepEqual(children[0].kills, ['SIGTERM', 'SIGKILL'], 'escalates to SIGKILL after the grace window')
+  assert.equal(await c.dispose(), true)
+  assert.deepEqual(children[0].kills, ['SIGTERM', 'SIGKILL'], 'escalates to SIGKILL inside the budget')
+})
+
+test('an unresponsive child is an ABNORMAL cleanup result, never success', async () => {
+  const { spawnImpl, children } = fakeSpawn()
+  const exitCodes: number[] = []
+  const fatalLines: string[] = []
+  const c = coordinator(children, exitCodes, spawnImpl, { shutdownBudgetMs: 60, reportFatal: (line: string) => { fatalLines.push(line) } })
+  c.start()
+  children[0].autoExitSignal = undefined // ignores SIGTERM and SIGKILL forever
+  assert.equal(await c.dispose(), false, 'an unconfirmed exit must NOT resolve as success')
+  assert.deepEqual(children[0].kills, ['SIGTERM', 'SIGKILL'], 'the whole budget is used, then SIGKILL')
+  assert.equal(fatalLines.length, 1)
+  assert.match(fatalLines[0], /did not exit after SIGKILL/u)
 })
 
 test('the Coordinator installs no second SIGTERM/SIGINT handler (single stop owner)', () => {

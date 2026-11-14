@@ -46,6 +46,31 @@ function classify(pid) {
   return undefined
 }
 
+/** Whether a PID is still alive (Linux /proc). */
+function isAlive(pid) {
+  if (pid === undefined) return false
+  try { process.kill(pid, 0); return true } catch (error) { return error.code === 'EPERM' }
+}
+
+/** The first child PID of `pid` (used to find a `script` wrapper's dsh supervisor). */
+function firstChildPid(pid) {
+  try {
+    const text = readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim()
+    return text === '' ? undefined : Number(text.split(/\s+/u)[0])
+  } catch { return undefined }
+}
+
+/** The current Host/Client process counts for this isolated DSH home. */
+function processCounts(dshHome) {
+  const roles = findIsolatedProcesses(dshHome).map(classify)
+  return { host: roles.filter(r => r === 'host').length, client: roles.filter(r => r === 'client').length }
+}
+
+/** The live detached Host PIDs for this isolated DSH home. */
+function hostPids(dshHome) {
+  return findIsolatedProcesses(dshHome).filter(pid => classify(pid) === 'host')
+}
+
 /** The real `dsh` supervisor PID (the CLI process, not the Host/Client). */
 function findSupervisorPid(dshHome) {
   const marker = `DSH_HOME=${dshHome}`
@@ -402,12 +427,65 @@ async function runSceneAcceptance(installation, trace) {
       const supervisorPid = findSupervisorPid(installation.dshHome)
       assert(supervisorPid !== undefined, 'A12: the real dsh supervisor PID was not found')
       process.kill(supervisorPid, 'SIGTERM')
-      const after = await waitForProcesses(installation.dshHome, c => c.client === 0, 'A12 client exit', 40_000)
-      assert(after.client === 0, 'A12: the Client did not exit after a supervisor-only SIGTERM')
+      // Record WHEN the Client cleanup completes vs WHEN the supervisor exits: the
+      // parent must wait for the child (R4-03 / R4-01).
+      let clientGoneAt
+      let supervisorGoneAt
+      const start = Date.now()
+      while (Date.now() - start < 45_000) {
+        const counts = processCounts(installation.dshHome)
+        if (clientGoneAt === undefined && counts.client === 0) clientGoneAt = Date.now()
+        if (supervisorGoneAt === undefined && !isAlive(supervisorPid)) supervisorGoneAt = Date.now()
+        if (clientGoneAt !== undefined && supervisorGoneAt !== undefined) break
+        await sleep(80)
+      }
+      assert(clientGoneAt !== undefined, 'A12: the Client never exited after a supervisor-only SIGTERM')
+      assert(supervisorGoneAt !== undefined, 'A12: the supervisor did not exit')
+      assert(clientGoneAt <= supervisorGoneAt, `A12: the supervisor exited (${supervisorGoneAt}) BEFORE the Client cleanup finished (${clientGoneAt})`)
       const still = findIsolatedProcesses(installation.dshHome).map(classify).filter(r => r === 'host').length
       assert(still >= 1, 'A12: the detached Host was not preserved after the Client stopped')
       out.a12Signal = 'PASS'
     } finally { await s.dispose() }
+  }
+
+  // A09 Host reuse: a SECOND public daemon Client reuses the SAME Host (one Host
+  // instance, two Client PIDs), and the first Client's exit never stops the Host
+  // or the second Client.
+  {
+    const a = new RealDshScreen(installation, 'daemon', [])
+    let b
+    try {
+      await waitForProcesses(installation.dshHome, c => c.host >= 1 && c.client >= 1, 'A09 first Client', 90_000)
+      const hostsA = hostPids(installation.dshHome)
+      assert(hostsA.length === 1, `A09: expected one Host after the first Client, saw ${hostsA.length}`)
+      const hostPidA = hostsA[0]
+      b = new RealDshScreen(installation, 'daemon', [])
+      await waitForProcesses(installation.dshHome, c => c.host === 1 && c.client >= 2, 'A09 second Client', 90_000)
+      const hostsAB = hostPids(installation.dshHome)
+      assert(hostsAB.length === 1 && hostsAB[0] === hostPidA, 'A09: the second Client did not reuse the same Host')
+      // Stop the FIRST client's supervisor only; the Host and the second Client
+      // must survive (A09: one Host reused, Client A exit does not kill it).
+      const aSupervisor = firstChildPid(a.child.pid)
+      assert(aSupervisor !== undefined, 'A09: A supervisor PID not found')
+      process.kill(aSupervisor, 'SIGTERM')
+      await Promise.race([a.exit, sleep(30_000)])
+      let last
+      let oneLeft = false
+      const exitDeadline = Date.now() + 60_000
+      while (Date.now() < exitDeadline) {
+        last = processCounts(installation.dshHome)
+        if (last.client === 1) { oneLeft = true; break }
+        await sleep(150)
+      }
+      assert(oneLeft, `A09: the first Client's exit did not settle (last counts=${JSON.stringify(last)})`)
+      const hostsAfter = hostPids(installation.dshHome)
+      assert(hostsAfter.length === 1 && hostsAfter[0] === hostPidA, `A09: the Host was stopped/replaced when the first Client exited (hosts=${hostsAfter.join(',')})`)
+      out.a09HostReuse = 'PASS'
+    } finally {
+      // Soft-stop A is already exited; B.dispose kills the shared isolated set.
+      if (b !== undefined) await b.dispose()
+      else { try { process.kill(-a.child.pid, 'SIGTERM') } catch { /* gone */ } killIsolatedProcesses(installation.dshHome) }
+    }
   }
 
   // A14 real-terminal Settings reachability + A03 persisted backend.
