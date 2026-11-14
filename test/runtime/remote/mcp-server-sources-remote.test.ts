@@ -60,6 +60,7 @@ function makePort(options: FixtureOptions = {}) {
   return {
     port,
     get describeCalls() { return describeCalls },
+    get generationIdentity() { return snapshot },
     setNamespaces(next: readonly { ns: string; value?: unknown; revision?: number }[]) { namespaces = next },
     advanceGeneration() {
       snapshot = { id: (snapshot?.id as number ?? 0) + 1 }
@@ -88,6 +89,7 @@ test('a current mcp-manager namespace yields its effective configured keys and r
   assert.deepEqual(fixture.port.mcpServerSources.read(), {
     kind: 'ready',
     configuredNames: ['alpha', 'beta'],
+    generation: fixture.generationIdentity,
     revision: 7,
   })
 })
@@ -95,7 +97,9 @@ test('a current mcp-manager namespace yields its effective configured keys and r
 test('an empty configured server map is a real ready empty list, not unavailable', async () => {
   const fixture = makePort({ namespaces: [{ ns: 'mcp-manager', value: { servers: {} }, revision: 1 }] })
   await fixture.port.describe()
-  assert.deepEqual(fixture.port.mcpServerSources.read(), { kind: 'ready', configuredNames: [], revision: 1 })
+  assert.deepEqual(fixture.port.mcpServerSources.read(), {
+    kind: 'ready', configuredNames: [], generation: fixture.generationIdentity, revision: 1,
+  })
 })
 
 test('a missing namespace or an unreadable servers field is unavailable, never plugin-owned', async () => {

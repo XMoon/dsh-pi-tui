@@ -559,6 +559,16 @@ class RemoteConfigMirror {
     return this.readiness() === 'ready'
   }
 
+  /**
+   * The opaque Host generation of the CURRENT committed settings read, or
+   * undefined when the snapshot is not current. Exposed so a semantic consumer
+   * (the MCP configuration-source read) can prove its key set belongs to the
+   * same Host generation as the roster it classifies.
+   */
+  readyGeneration(): object | undefined {
+    return this.readiness() === 'ready' ? this.snapshot?.generation : undefined
+  }
+
   /** Refresh when the snapshot is not current (a write's pre-flight fence). */
   async ensureCurrent(): Promise<void> {
     if (!this.isCurrent()) await this.describe()
@@ -2672,6 +2682,10 @@ class RemoteMcpServerSourcesConfig implements McpServerSourcesConfig {
     if (readiness !== 'ready') {
       return { kind: 'stale', reason: 'the Host settings snapshot is not current' }
     }
+    const generation = this.mirror.readyGeneration()
+    if (generation === undefined) {
+      return { kind: 'stale', reason: 'the Host settings snapshot is not current' }
+    }
     const descriptor = this.mirror.namespace(MCP_SERVER_SOURCES_NS)
     if (descriptor === undefined) {
       return {
@@ -2687,6 +2701,7 @@ class RemoteMcpServerSourcesConfig implements McpServerSourcesConfig {
     return {
       kind: 'ready',
       configuredNames: Object.freeze(Object.keys(servers)),
+      generation,
       ...descriptor.revision === undefined ? {} : { revision: descriptor.revision },
     }
   }

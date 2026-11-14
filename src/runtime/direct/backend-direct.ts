@@ -157,6 +157,10 @@ export const DIRECT_ACP_ACCESS_REASON = 'The local ACP listener is available onl
 
 /** Assemble the complete Direct `Backend` from the runner's resolvers. */
 export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
+  // FR3: the ONE manager adapter owns the Host generation identity; the
+  // configuration-source read is bound to the SAME identity so a source
+  // verdict can never be mixed with another generation's roster.
+  const mcpServers = new DirectMcpServerPort(deps.ctx)
   return createDirectBackend(
     new DirectSubagentPort(deps.ctx),
     new DirectSessionReader(deps.ctx, deps.liveResolvers, deps.modelSelections),
@@ -165,7 +169,7 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     new DirectSessionLifecycle(deps.ctx, deps.compose, deps.ownerPool),
     new DirectInteractionPort(deps.ctx, deps.agentFor),
     new DirectCatalogPort(deps.ctx, deps.agentFor, deps.modelSelections, deps.diag),
-    new DirectConfigPort(deps.ctx, deps.tuiSettings, deps.agentFor),
+    new DirectConfigPort(deps.ctx, deps.tuiSettings, deps.agentFor, () => mcpServers.currentGeneration()),
     new DirectHostFilePort(deps.agentFor, deps.ctx),
     new DirectSessionArchive(deps.ctx),
     // S5-PR3: the official Markdown read is a separate semantic capability
@@ -231,6 +235,6 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     // FR3: the ONE official in-process MCP manager behind the semantic port.
     // The adapter owns no fleet: watch/probe/restart forward to `ctx.mcpManager`
     // and every settlement is generation-bound.
-    new DirectMcpServerPort(deps.ctx),
+    mcpServers,
   )
 }

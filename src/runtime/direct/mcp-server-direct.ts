@@ -70,8 +70,12 @@ export class DirectMcpServerPort implements McpServerPort {
     return this.ctx.get('mcpManager') as McpManagerServiceLike | undefined
   }
 
-  /** The generation a caller's operation is dispatched under. */
-  private currentGeneration(): McpServerGeneration {
+  /**
+   * The opaque generation identity of the CURRENT manager authority. The
+   * config-source read shares it, so a source verdict and a roster can be
+   * proven to belong to the same Host generation.
+   */
+  currentGeneration(): McpServerGeneration {
     return this.generation
   }
 

@@ -127,6 +127,10 @@ export class McpServersController {
   private phaseReason: string | undefined
   private generation: McpServerGeneration | undefined
   private readonly servers = new Map<string, McpServerView>()
+  /** Continuity token per listed name: a removed-and-relisted name is a NEW
+   *  entry even within one Host generation, so a late operation result for the
+   *  previous entry can never be attributed to the replacement. */
+  private readonly entryTokens = new Map<string, object>()
   private readonly order: string[] = []
   private selected: string | undefined
   private confirming: string | undefined
@@ -285,8 +289,17 @@ export class McpServersController {
     return this.generation
   }
 
+  /** Whether the committed source read belongs to the CURRENT roster generation. */
+  private sourceMatchesGeneration(): boolean {
+    return this.sources.kind === 'ready'
+      && this.generation !== undefined
+      && Object.is(this.sources.generation, this.generation)
+  }
+
   private sourceOf(view: McpServerView): McpServerSourceLabel {
-    if (this.sources.kind !== 'ready') return 'Unknown'
+    // A key set from another Host generation is never combined with this
+    // roster: the source is Unknown until a same-generation read is proven.
+    if (!this.sourceMatchesGeneration()) return 'Unknown'
     const configured = view.configured
     if (configured && this.confirmedKeySet?.has(view.name) === true) return 'Configured'
     if (!configured) return 'Retained/removed'
@@ -331,12 +344,18 @@ export class McpServersController {
       this.generation = undefined
       this.confirmedKeySet = undefined
       this.sources = { kind: 'unavailable', reason: event.reason }
+      this.entryTokens.clear()
       // A late probe/restart result of the replaced observation must not become
-      // a fact of the stale page.
+      // a fact of the stale page. A dispatched restart is never claimed
+      // cancelled: its settlement is simply no longer observable here.
       this.operationController?.abort()
       this.operationController = undefined
       if (this.operation?.phase === 'running') {
-        this.operation = { ...this.operation, phase: 'failed', text: 'Observation lost; the result was discarded' }
+        const text = this.operation.kind === 'restart'
+          ? RESTART_LOST_NOTE
+          : 'Observation lost; the result was discarded'
+        this.operation = { ...this.operation, phase: 'failed', text }
+        this.notice = { text, kind: 'error' }
       }
       this.deps.requestRender()
       return
@@ -349,9 +368,16 @@ export class McpServersController {
     const previousOrder = [...this.order]
     this.servers.clear()
     this.order.length = 0
+    const liveNames = new Set(event.roster.servers.map(view => view.name))
+    for (const name of [...this.entryTokens.keys()]) {
+      if (!liveNames.has(name)) this.entryTokens.delete(name)
+    }
     for (const view of event.roster.servers) {
       this.servers.set(view.name, view)
       this.order.push(view.name)
+      // A continuously listed name keeps its token; a removal + re-add gets a
+      // fresh one.
+      if (!this.entryTokens.has(view.name)) this.entryTokens.set(view.name, {})
     }
     // Keep the selection by NAME; when that member is gone, fall back to the
     // nearest member by the Host's own stable order (never re-sort).
@@ -381,14 +407,24 @@ export class McpServersController {
         }
         if (this.disposed || epoch !== this.rosterEpoch) return
         const verdict = this.deps.sources.read()
-        const previous = this.sources
         if (verdict.kind !== 'ready') {
           this.sources = verdict
           this.confirmedKeySet = undefined
           this.deps.requestRender()
           return
         }
-        const agreed = previous.kind === 'ready' && sameKeys(previous.configuredNames, verdict.configuredNames)
+        // The source read must belong to THIS roster generation; a key set
+        // from another Host authority is never combined with this roster.
+        if (this.generation === undefined || !Object.is(verdict.generation, this.generation)) {
+          this.sources = { kind: 'stale', reason: 'the settings source is not from the current Host generation' }
+          this.confirmedKeySet = undefined
+          this.deps.requestRender()
+          return
+        }
+        const previous = this.sources
+        const agreed = previous.kind === 'ready'
+          && Object.is(previous.generation, verdict.generation)
+          && sameKeys(previous.configuredNames, verdict.configuredNames)
         this.sources = verdict
         this.confirmedKeySet = agreed ? new Set(verdict.configuredNames) : undefined
         this.deps.requestRender()
@@ -403,6 +439,8 @@ export class McpServersController {
     if (!this.canOperateSelected() || this.selected !== name) return
     const generation = this.currentGeneration()
     if (generation === undefined) return
+    const entryToken = this.entryTokens.get(name)
+    if (entryToken === undefined) return
     const token = this.openToken
     const controller = new AbortController()
     this.operationController = controller
@@ -411,9 +449,22 @@ export class McpServersController {
     this.deps.requestRender()
     this.deps.runOwned('MCP server probe', async () => {
       const outcome = await this.deps.port.probe(name, controller.signal)
-      // The result belongs to ITS page token and Host generation only.
+      // The result belongs to ITS page token, Host generation AND roster entry
+      // only. A discarded result still ENDS this page's operation: a permanent
+      // "running" latch would disable every later Probe/Restart.
       if (this.disposed || token !== this.openToken) return
-      if (outcome.generation !== generation || this.generation !== generation) return
+      const generationCurrent = outcome.generation === generation && this.generation === generation
+      const entryCurrent = this.entryTokens.get(name) === entryToken && this.servers.has(name)
+      if (!generationCurrent || !entryCurrent) {
+        if (this.operation?.kind === 'probe' && this.operation.name === name) {
+          const text = 'Probe result discarded (the Host or server changed)'
+          this.operation = { kind: 'probe', name, phase: 'failed', text }
+          this.notice = { text, kind: 'error' }
+        }
+        this.operationController = undefined
+        this.deps.requestRender()
+        return
+      }
       if (outcome.kind === 'settled') {
         this.lastProbe = { name, ...classifyProbe(outcome.value) }
         this.operation = { kind: 'probe', name, phase: 'settled', text: probeResultText(this.lastProbe) }
@@ -430,6 +481,8 @@ export class McpServersController {
   private runRestart(name: string): void {
     const generation = this.currentGeneration()
     if (generation === undefined) return
+    const entryToken = this.entryTokens.get(name)
+    if (entryToken === undefined) return
     const token = this.openToken
     const controller = new AbortController()
     this.operationController = controller
@@ -440,9 +493,12 @@ export class McpServersController {
       // EXACTLY ONE dispatch: no retry, no second confirmation.
       const outcome = await this.deps.port.restart(name, controller.signal)
       if (this.disposed || token !== this.openToken) return
-      if (outcome.generation !== generation || this.generation !== generation) {
-        // The page now speaks for a different Host generation: the dispatched
-        // request's settlement is not this page's fact.
+      const generationCurrent = outcome.generation === generation && this.generation === generation
+      const entryCurrent = this.entryTokens.get(name) === entryToken && this.servers.has(name)
+      if (!generationCurrent || !entryCurrent) {
+        // The page now speaks for a different Host generation or the target is
+        // no longer the listed entry: a dispatched request's settlement is not
+        // this page's fact, and it is never claimed cancelled.
         this.operation = { kind: 'restart', name, phase: 'failed', text: RESTART_LOST_NOTE }
         this.notice = { text: RESTART_LOST_NOTE, kind: 'error' }
         this.operationController = undefined
@@ -454,7 +510,10 @@ export class McpServersController {
         // new status.
         this.operation = { kind: 'restart', name, phase: 'settled', text: RESTART_WAITING_NOTE }
         this.notice = { text: RESTART_WAITING_NOTE, kind: 'info' }
-      } else if (outcome.failure.kind === 'outcome-unconfirmed') {
+      } else if (outcome.failure.kind === 'outcome-unconfirmed' || outcome.failure.kind === 'superseded') {
+        // A dispatched restart that lost its confirmation is NEVER reported as
+        // "could not be dispatched" (Direct's manager-replacement settlement
+        // arrives as `superseded` after the call was issued).
         this.operation = { kind: 'restart', name, phase: 'failed', text: RESTART_LOST_NOTE }
         this.notice = { text: RESTART_LOST_NOTE, kind: 'error' }
       } else if (outcome.failure.kind === 'rejected') {

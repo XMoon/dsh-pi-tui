@@ -171,7 +171,9 @@ function setup(options: { readonly columns?: number; readonly rows?: number; rea
     on: ((_event: string, _listener: (name: string) => void) => () => {}) as unknown as DirectMcpHostContextLike['on'],
   }
   const mcpServers = new DirectMcpServerPort(hostCtx)
-  const mcpServerSources = new DirectMcpServerSourcesConfig(settingsCtx)
+  // The source read shares the manager's OWN generation, so the page can prove
+  // the key set and the roster belong to the same Host authority.
+  const mcpServerSources = new DirectMcpServerSourcesConfig(settingsCtx, () => mcpServers.currentGeneration())
 
   const fixture = createDirectSettingsFixture({ footer: 'default' })
   const settings = fixture.settings
