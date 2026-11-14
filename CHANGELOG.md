@@ -24,7 +24,7 @@
 
 - **PiTui `/model` 可以启停当前 Root Session 的 Agent Team。** `/model` 现在以 88×28 宽版打开：模型列表保留搜索与分组，列表下方独立显示当前模型的 Reasoning Effort 条带和 Agent Team 行。Tab 在模型列表与 Team 行之间切换，Team 行按 Enter/Space 启停，Effort 仍在模型上按 Enter 进入、←/→ 调整、再 Enter 提交。Team 与模型选择是两次独立写入，选模型不会顺带改 Team；只有在官方投影已记录过模型请求后才关闭 Team 时，才会先弹出独立确认页，确认页取消或 Esc 不写 Host。无 Session、子会话或投影不可读时 Team 行如实显示不可用，不会伪造 On/Off。
 
-- **PiTui `/tasks` 新增只读的 Work / Team 双页任务板。** `/tasks`（及 `/subagents` 别名）现在用 `Tab` / `Shift+Tab` 在原有的 `Work` 页与新增的 `Team` 页之间切换：`Work` 页保留原有子代理 / 任务 / 问题、打开、Stop 确认、刷新、Active/Tracked 与搜索；`Team` 页只读展示当前 Root Session 官方 Agent Team 投影的共享任务以及 Root 与子代理成员，可展开查看任务详情，但不提供任何建/改/认领/完成/停止或成员跳转，也没有新的 `/team` 命令。仅当当前 Session 确为 Root 时显示 Team 页（子会话与 Workflow 限定视图保持 Work-only）；Team 关闭（Off）页、投影暂不可读或有失败时如实显示并保留已列出的任务，不会把读失败当成空板。`Work` 页的 `f` 打开显式类型筛选列表（`All` 加当前任务真实拥有的类型），`Tab` 不再循环类型；两页各自保留独立的搜索草稿与选中。
+- **PiTui `/tasks` 新增只读的 Work / Team 双页任务板。** `/tasks`（及 `/subagents` 别名）现在用 `Tab` / `Shift+Tab` 在原有的 `Work` 页与新增的 `Team` 页之间切换：`Work` 页保留原有子代理 / 任务 / 问题、打开、Stop 确认、刷新、Active/Tracked 与搜索；`Team` 页只读展示当前 Root Session 官方 Agent Team 投影的共享任务以及 Root 与子代理成员，可展开查看任务详情，但不提供任何建/改/认领/完成/停止或成员跳转，也没有新的 `/team` 命令。仅当当前 Session 确为 Root 时显示 Team 页（子会话与 Workflow 限定视图保持 Work-only）；Team 关闭（Off）页仍显示已列出的任务，官方 failure 与仍列出的有效任务并列显示；投影暂不可读（stale）时显示明确错误页，既不伪造空板也不缓存旧任务板。`Work` 页的 `f` 打开显式类型筛选列表（`All` 加当前任务真实拥有的类型），`Tab` 不再循环类型；两页各自保留独立的搜索草稿与选中。
 
 ### 变更
 

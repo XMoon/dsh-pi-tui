@@ -870,10 +870,11 @@ function mouse(
   width = 100,
   height = 24,
   wheelDelta?: number,
+  button: 'left' | 'none' = 'left',
 ): import('@xmoon76/pi-tui').TuiMouseEvent {
   return {
     type,
-    button: 'left',
+    button,
     x,
     y,
     screenX: x,
@@ -1801,5 +1802,195 @@ test('FR2: at 88 columns Enter reveals description/blockedBy/scopes/warnings inl
   panel.setMaxRows(8)
   const tiny = panel.render(44).map(strip).join('\n')
   assert.ok(tiny.includes('Ship') || tiny.includes('Esc close'), `44x8 keeps the selected row or Esc:\n${tiny}`)
+  panel.dispose()
+})
+
+// ── External review: Team mouse, pending-Stop tab, short-screen selection ──
+
+function headerColOf(frame: string[], label: string): number {
+  const header = strip(frame[0] ?? '')
+  const col = header.indexOf(label)
+  assert.ok(col >= 0, `header must contain ${label}: ${header}`)
+  return col + 1 // inside the label (not its first cell edge)
+}
+
+test('FR2-ext1: a real press→release on a Team task expands it (mouse parity)', () => {
+  const task = teamTask({ subject: 'Ship it', description: 'detail-line-x', status: 'pending', ready: true })
+  const { panel } = makePanel([], {
+    enableSearch: true,
+    header: 'Tasks',
+    team: teamDto({ kind: 'ready', enabled: true, tasks: [task] }, []),
+    interactionCurrent: () => true,
+  })
+  const W = 100
+  panel.handleInput('\t') // Team
+  const y = panel.render(W).map(strip).findIndex(line => line.includes('Ship it'))
+  assert.ok(y >= 0)
+  panel.handleMouse(mouse('press', 1, y, W))
+  panel.handleMouse(mouse('click', 1, y, W))
+  assert.ok(panel.render(W).map(strip).join('\n').includes('desc: detail-line-x'),
+    'press→release on the task row must expand its details')
+  panel.dispose()
+})
+
+test('FR2-ext1: a release on a DIFFERENT row (or after the row moved) never expands', () => {
+  const a = teamTask({ id: 't-a', subject: 'Alpha task', description: 'alpha-desc' })
+  const b = teamTask({ id: 't-b', subject: 'Beta task', description: 'beta-desc' })
+  const { panel } = makePanel([], {
+    enableSearch: true, header: 'Tasks',
+    team: teamDto({ kind: 'ready', enabled: true, tasks: [a, b] }, []),
+    interactionCurrent: () => true,
+  })
+  const W = 100
+  panel.handleInput('\t') // Team
+  const frame = panel.render(W).map(strip)
+  const ya = frame.findIndex(line => line.includes('Alpha task'))
+  const yb = frame.findIndex(line => line.includes('Beta task'))
+  assert.ok(ya >= 0 && yb >= 0 && ya !== yb)
+  panel.handleMouse(mouse('press', 1, ya, W))
+  panel.handleMouse(mouse('click', 1, yb, W)) // cross-row release
+  assert.ok(!panel.render(W).map(strip).join('\n').includes('desc:'),
+    'a cross-row release must not expand any task')
+  panel.dispose()
+})
+
+test('FR2-ext2: a pending Work Stop forbids the MOUSE Tab switch (not just keyboard)', () => {
+  const { panel } = makePanel([subagent()], { enableSearch: true, header: 'Tasks', team: readyTeam([teamTask()]), interactionCurrent: () => true })
+  const W = 100
+  panel.render(W)
+  panel.handleInput('s') // arm Stop on the stoppable subagent
+  assert.ok(panel.render(W).map(strip).join('\n').includes('Confirm stop'), 'precondition — Stop pending')
+  const before = panel.render(W)
+  const x = headerColOf(before, 'Team')
+  panel.handleMouse(mouse('press', x, 0, W))
+  panel.handleMouse(mouse('click', x, 0, W))
+  const after = panel.render(W).map(strip).join('\n')
+  assert.ok(after.includes('Confirm stop'), 'the pending Stop survives the mouse Tab attempt')
+  assert.ok(!after.includes('Members'), 'a mouse Tab must not switch pages while a Stop is pending')
+  // Once cancelled, the same mouse Tab does switch.
+  panel.handleInput('\x1b') // cancel pending stop
+  panel.render(W)
+  panel.handleMouse(mouse('press', x, 0, W))
+  panel.handleMouse(mouse('click', x, 0, W))
+  assert.ok(panel.render(W).map(strip).join('\n').includes('Members'), 'after cancel, mouse Tab switches to Team')
+  panel.dispose()
+})
+
+test('FR2-ext2: the mouse Tab only hits the painted label, not the whole header row', () => {
+  const { panel } = makePanel([], { enableSearch: true, header: 'Tasks', team: readyTeam([teamTask()]), interactionCurrent: () => true })
+  const W = 100
+  const frame = panel.render(W)
+  const x = headerColOf(frame, 'Team')
+  // A press far to the RIGHT of the Team label (in the stats area) is NOT a tab.
+  panel.handleMouse(mouse('press', W - 2, 0, W))
+  panel.handleMouse(mouse('click', W - 2, 0, W))
+  assert.ok(!panel.render(W).map(strip).join('\n').includes('Members'), 'the stats area is inert')
+  // The real label column does switch.
+  panel.handleMouse(mouse('press', x, 0, W))
+  panel.handleMouse(mouse('click', x, 0, W))
+  assert.ok(panel.render(W).map(strip).join('\n').includes('Members'), 'the painted Team label switches')
+  panel.dispose()
+})
+
+test('FR2-ext3: on a short grant the SELECTED Team row stays visible (search + many members)', () => {
+  const members = [
+    member('s-root', 'lead', 'running', 'root', 0),
+    member('m-1', 'alpha', 'inactive'),
+    member('m-2', 'beta', 'inactive'),
+    member('m-3', 'gamma', 'inactive'),
+  ]
+  const { panel } = makePanel([], { enableSearch: true, header: 'Tasks', team: teamDto({ kind: 'ready', enabled: true, tasks: [] }, members), interactionCurrent: () => true })
+  panel.handleInput('\t') // Team
+  panel.setMaxRows(8)
+  panel.handleInput('/') // team search mode, empty query
+  for (let i = 0; i < 3; i += 1) panel.handleInput(DOWN) // select the 4th member (gamma)
+  const frame = panel.render(44).map(strip)
+  const selected = frame.find(line => line.includes('gamma'))
+  assert.ok(selected !== undefined, `the selected member must be painted:\n${frame.join('\n')}`)
+  assert.ok(selected!.includes('→'), `the selected marker must be on gamma:\n${selected}`)
+  assert.ok(frame.join('\n').includes('Esc close'), 'the exit hint stays')
+  panel.dispose()
+})
+
+test('FR2-ext3: on a short grant a selected TASK across the group boundary stays visible', () => {
+  const members = [member('s-root', 'lead', 'running', 'root', 0), member('m-1', 'alpha', 'inactive')]
+  const tasks = [teamTask({ id: 't-a', subject: 'Alpha task' }), teamTask({ id: 't-b', subject: 'Beta task' })]
+  const { panel } = makePanel([], { enableSearch: true, header: 'Tasks', team: teamDto({ kind: 'ready', enabled: true, tasks }, members), interactionCurrent: () => true })
+  panel.handleInput('\t') // Team
+  panel.setMaxRows(8)
+  for (let i = 0; i < 3; i += 1) panel.handleInput(DOWN) // lead,alpha,Alpha→Beta item index 3
+  const frame = panel.render(44).map(strip)
+  const selected = frame.find(line => line.includes('Beta task'))
+  assert.ok(selected !== undefined, `the selected task must be painted:\n${frame.join('\n')}`)
+  assert.ok(selected!.includes('→'), `the selected marker must be on the Beta task:\n${selected}`)
+  panel.dispose()
+})
+
+test('FR2-ext4: wheel (button none) moves the Team selection and the filter cursor', () => {
+  const members = [member('s-root', 'lead', 'running', 'root', 0), member('m-1', 'alpha', 'inactive'), member('m-2', 'beta', 'inactive')]
+  const W = 100
+  const team = makePanel([], { enableSearch: true, header: 'Tasks', team: teamDto({ kind: 'ready', enabled: true, tasks: [] }, members), interactionCurrent: () => true })
+  team.panel.handleInput('\t') // Team
+  const ty = team.panel.render(W).map(strip).findIndex(line => line.includes('alpha'))
+  assert.ok(ty >= 0)
+  team.panel.handleMouse(mouse('wheel', 1, ty, W, 24, 1, 'none'))
+  const afterTeam = team.panel.render(W).map(strip)
+  const alphaLine = afterTeam.find(line => line.includes('alpha'))!
+  assert.ok(alphaLine.includes('→'), `wheel must move the Team selection to alpha:\n${afterTeam.join('\n')}`)
+  team.panel.dispose()
+
+  const filter = makePanel([typed(runningJob(), 'bash'), typed(subagent(), 'subagent')], { enableSearch: true, header: 'Tasks', interactionCurrent: () => true })
+  filter.panel.handleInput('f')
+  const fy = filter.panel.render(W).map(strip).findIndex(line => line.includes('All'))
+  assert.ok(fy >= 0)
+  filter.panel.handleMouse(mouse('wheel', 1, fy, W, 24, 1, 'none'))
+  const afterFilter = filter.panel.render(W).map(strip)
+  const bashRow = afterFilter.find(line => line.includes('bash'))!
+  assert.ok(bashRow.includes('>'), `wheel must move the filter cursor:\n${afterFilter.join('\n')}`)
+  filter.panel.dispose()
+})
+
+test('FR2-ext5: a hostile Job.kind type name stays one safe, truncated physical row at 44 columns', () => {
+  const longType = `super-long-custom-kind-${'x'.repeat(80)}\u001b[31mRED\u001b[0m\r\nINJECT中文类型`
+  const { panel } = makePanel([typed(runningJob(), longType)], { enableSearch: true, header: 'Tasks' })
+  panel.handleInput('f')
+  const lines = panel.render(44)
+  for (const line of lines) {
+    assert.ok(visibleWidth(line) <= 44, `no filter row may exceed 44 cells: ${JSON.stringify(line)} (${visibleWidth(line)})`)
+    assert.ok(!line.includes('\r') && !line.includes('\n'), 'no control newline may enter a painted row')
+  }
+  // The candidate row is a single truncated physical line.
+  assert.ok(lines.some(line => strip(line).includes('…')), `the long type must truncate:\n${lines.map(strip).join('\n')}`)
+  panel.dispose()
+})
+
+test('FR2-ext6: applying the Work type filter by mouse uses the PRESSED identity, never a re-indexed row', () => {
+  const W = 100
+  const { panel } = makePanel([typed(runningJob(), 'bash'), typed(subagent(), 'subagent')], { enableSearch: true, header: 'Tasks', interactionCurrent: () => true })
+  panel.handleInput('f')
+  const yBash = panel.render(W).map(strip).findIndex(line => line.includes('bash'))
+  assert.ok(yBash >= 0)
+  panel.handleMouse(mouse('press', 1, yBash, W))
+  // The candidate set/order changes between press and release.
+  panel.setItems([typed(subagent(), 'subagent'), typed(runningJob(), 'bash')])
+  panel.render(W)
+  panel.handleMouse(mouse('click', 1, yBash, W)) // same physical row now means a DIFFERENT type
+  assert.equal(panel.getViewState().typeFilter, null, 'a re-indexed release must not submit a wrong type')
+  assert.ok(panel.render(W).map(strip).join('\n').includes('Type filter'), 'the list stays open (no wrong commit)')
+  panel.dispose()
+})
+
+test('FR2-ext6: a click with no preceding press never applies a filter; a matching press→release does', () => {
+  const W = 100
+  const { panel } = makePanel([typed(runningJob(), 'bash'), typed(subagent(), 'subagent')], { enableSearch: true, header: 'Tasks', interactionCurrent: () => true })
+  panel.handleInput('f')
+  panel.render(W)
+  const yBash = panel.render(W).map(strip).findIndex(line => line.includes('bash'))
+  panel.handleMouse(mouse('click', 1, yBash, W)) // no press
+  assert.equal(panel.getViewState().typeFilter, null, 'a bare click must not apply a filter')
+  // A real press→release on the same painted row applies it.
+  panel.handleMouse(mouse('press', 1, yBash, W))
+  panel.handleMouse(mouse('click', 1, yBash, W))
+  assert.equal(panel.getViewState().typeFilter, 'bash', 'a matching press→release applies the pressed type')
   panel.dispose()
 })

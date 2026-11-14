@@ -172,9 +172,10 @@ Full:
   READ-ONLY: it presents the official `agentTeam` projection's shared tasks plus
   the Root (`lead`) and the already-read Subagent catalog members; there is NO
   Team write, claim, stop, member navigation or `/team` command. An
-  `Agent Team: Off` board, a `stale` read or an official `failure` is shown
-  explicitly and still lists the retained tasks; a failed read is never
-  rendered as an empty board. The `f` key opens the explicit Work type list
+  `Agent Team: Off` board still shows its retained tasks, and an official
+  `failure` is shown beside the still-listed valid tasks; a `stale` read is an
+  explicit error page (never a fabricated empty board and never a cached old
+  board). The `f` key opens the explicit Work type list
   (`All` + the types the current Work rows own); `Tab` no longer cycles types.
 
 Authority: `src/app/surface/task-browser-runtime.ts`, `task-runtime.ts`
