@@ -536,7 +536,8 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.runtimeToggleDisconnects === true
       && result?.negativesRejected === true
       && result?.hostIdentityKept === true
-      && result?.originalSplitClientIntact === true,
+      && result?.originalSplitClientIntact === true
+      && result?.l6EvidenceRecorded === true,
     `selected ${caseId}: the ACP shared Session View verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
     return
   }

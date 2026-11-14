@@ -20,13 +20,12 @@
  */
 
 import { createRequire } from 'node:module'
-import { randomUUID } from 'node:crypto'
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
-import { waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
+import { seatFree, waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
 import {
   hostAssistantHasText,
   hostSessionEvents,
@@ -35,6 +34,7 @@ import {
   waitForHostSessionHeader,
 } from '../../lib/split-smoke-sessions.mjs'
 import { createC1Scene } from './c1-scene.mjs'
+import { createSplitSmokeProfile } from '../../lib/split-smoke-profile.mjs'
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
@@ -180,8 +180,19 @@ export async function runAcpPo2SessionView(context) {
   const { EntryProcess, entries, base, dshHome, workDir, installation, trace } = context
   const installedVersion = installation.manifest.version
   const acpSdkVersion = (() => {
-    try { return createRequire(import.meta.url)('@agentclientprotocol/sdk/package.json').version }
-    catch { return 'unknown' }
+    try {
+      const require = createRequire(import.meta.url)
+      let dir = dirname(require.resolve('@agentclientprotocol/sdk'))
+      for (let depth = 0; depth < 6; depth += 1) {
+        const manifest = join(dir, 'package.json')
+        if (existsSync(manifest)) {
+          const parsed = JSON.parse(readFileSync(manifest, 'utf8'))
+          if (parsed.name === '@agentclientprotocol/sdk' && typeof parsed.version === 'string') return parsed.version
+        }
+        dir = dirname(dir)
+      }
+      return 'unknown'
+    } catch { return 'unknown' }
   })()
   const tuiPids = []
   const scene = createC1Scene(context)
@@ -198,6 +209,7 @@ export async function runAcpPo2SessionView(context) {
 
   const peers = []
   const acpClients = []
+  const extraHosts = []
   let sequence = 0
   let originalError
   let host
@@ -518,12 +530,41 @@ export async function runAcpPo2SessionView(context) {
     connJ.close()
     await connJ.closed
 
-    // K) A FOREIGN session id (a session created on ANOTHER profile/Host) must be
-    //    rejected here: this Host resolves ids ONLY through its own persistence,
-    //    so a foreign id is never found and never leaks across profiles. The lane
-    //    is single-profile by contract, so a literal second-profile install is out
-    //    of scope; the resolution boundary this negative exercises is identical.
-    const foreignSessionId = randomUUID()
+    // K) A REAL Session id created on ANOTHER profile/Host must be rejected here:
+    //    this Host resolves ids ONLY through its own persistence, so a session
+    //    that genuinely exists in a DIFFERENT profile is never found and never
+    //    leaks across profiles. A second, fully independent isolated profile is
+    //    installed under this case's work root; one Session is created on ITS
+    //    Host; the id is then presented to the MAIN Host.
+    const foreignWorkDir = join(workDir, 'po2-foreign-profile')
+    mkdirSync(foreignWorkDir, { recursive: true, mode: 0o700 })
+    const foreign = createSplitSmokeProfile({ tarball: context.tarball, targetDshVersion: context.targetDshVersion, workDir: foreignWorkDir })
+    const foreignHost = new EntryProcess('host', foreign.entries.host, { ...foreign.base })
+    extraHosts.push(foreignHost)
+    const foreignReady = await foreignHost.waitFor(r => r.m4a0 === 'ready' || r.m4a0 === 'failure', 'K foreign Host ready', 180_000)
+    assert(foreignReady.m4a0 === 'ready', `K: the foreign Host did not become Ready: ${JSON.stringify({ code: foreignReady.code, phase: foreignReady.phase })}`)
+    const foreignPeer = new EntryProcess('peer', foreign.entries.client, { ...foreign.base, env: { ...foreign.base.env, SPLIT_PROCESS_CLIENT_MODE: 'peer' } })
+    peers.push(foreignPeer)
+    await foreignPeer.waitFor(r => r.m4a0 === 'ready', 'K foreign peer ready', 180_000)
+    assertAccess(await acpAccess(foreignPeer, 'K foreign enable', true), 'enabled', 'K foreign enable')
+    const foreignScopeDir = findScopeDirBySocket(foreign.dshHome)
+    assert(foreignScopeDir !== undefined, 'K: the foreign Host bound no acp.sock')
+    const foreignConn = await openAcpClient(foreignScopeDir)
+    const foreignInit = await foreignConn.initialize(1)
+    assert(foreignInit?.result?.protocolVersion === 1, 'K: the foreign socket must answer initialize')
+    const foreignCreated = await sendRequest(foreignConn, 2, 'session/new', { cwd: realpathSync(foreignWorkDir), mcpServers: [] })
+    assert(typeof foreignCreated?.result?.sessionId === 'string' && foreignCreated.result.sessionId !== '',
+      `K: the foreign Host must create a real Session id (got ${JSON.stringify(foreignCreated?.error ?? foreignCreated?.result)})`)
+    const foreignSessionId = foreignCreated.result.sessionId
+    foreignConn.close()
+    await foreignConn.closed
+    await foreignHost.shutdown()
+    await foreignPeer.shutdown()
+    await seatFree(seatName(foreignReady.localHost.scopeId), 20_000)
+    trace('acp-po2/foreign-profile', { foreignSessionId, foreignScopeId: foreignReady.localHost.scopeId })
+    assert(foreignSessionId !== sessionA && foreignSessionId !== sessionB,
+      'K: the foreign Session id must differ from this Host sessions')
+
     const { client: connK } = await openInitialized(scopeDir, 'K foreign session')
     const missing = await sendRequest(connK, 2, 'session/resume', { sessionId: foreignSessionId, cwd: hostCwd })
     assert(missing?.error?.code === -32602,
@@ -563,6 +604,43 @@ export async function runAcpPo2SessionView(context) {
 
     await assertSameHost(identityCold, 'final Host after all negatives')
 
+    // The L6 evidence is MANDATORY, not decorative: a missing/unresolvable value
+    // fails the PASS rather than reporting a hollow result.
+    const evidence = {
+      candidateSha256: context.candidateSha256,
+      nodeVersion: process.version,
+      dshVersion: context.targetDshVersion,
+      bundleVersion: installedVersion,
+      acpSdkVersion,
+      hostPidStart: ready.localHost.hostPid,
+      hostInstanceIdStart: ready.localHost.instanceId,
+      hostPidCold: identityCold.hostPid,
+      hostInstanceIdCold: identityCold.instanceId,
+      scopeId,
+      tuiPids,
+      acpClientProcessPid: process.pid,
+      sessionA,
+      sessionB,
+      foreignSessionId,
+      turnEndObserved: true,
+    }
+    assert(typeof evidence.candidateSha256 === 'string' && /^[0-9a-f]{64}$/u.test(evidence.candidateSha256),
+      'evidence: candidate SHA256 must be a real 64-hex digest')
+    assert(typeof evidence.dshVersion === 'string' && evidence.dshVersion.length > 0,
+      'evidence: target DSH version must be recorded')
+    assert(evidence.acpSdkVersion !== 'unknown' && evidence.acpSdkVersion.length > 0,
+      'evidence: ACP SDK version must be resolvable')
+    assert(Number.isInteger(evidence.hostPidStart) && Number.isInteger(evidence.hostPidCold)
+      && evidence.hostPidStart !== evidence.hostPidCold,
+      'evidence: start/cold Host pids must be real and distinct')
+    assert(tuiPids.length >= 2 && tuiPids.every(entry => Number.isInteger(entry.pid)),
+      'evidence: at least two real TUI OS process pids must be recorded')
+    assert(Number.isInteger(evidence.acpClientProcessPid),
+      'evidence: the ACP client OS process pid must be recorded')
+    assert(typeof evidence.sessionA === 'string' && typeof evidence.sessionB === 'string'
+      && typeof evidence.foreignSessionId === 'string' && evidence.foreignSessionId.length > 0,
+      'evidence: session ids must be recorded')
+
     return {
       status: 'PASS',
       scope: 'REAL_SPLIT_PROCESS_L6',
@@ -580,22 +658,8 @@ export async function runAcpPo2SessionView(context) {
       negativesRejected: true,
       hostIdentityKept: true,
       originalSplitClientIntact: true,
-      evidence: {
-        candidateSha256: context.candidateSha256 ?? null,
-        nodeVersion: process.version,
-        dshVersion: context.targetDshVersion ?? null,
-        bundleVersion: installedVersion,
-        acpSdkVersion,
-        hostPidStart: ready.localHost.hostPid,
-        hostInstanceIdStart: ready.localHost.instanceId,
-        hostPidCold: identityCold.hostPid,
-        hostInstanceIdCold: identityCold.instanceId,
-        scopeId,
-        tuiPids,
-        sessionA,
-        sessionB,
-        turnEndObserved: true,
-      },
+      l6EvidenceRecorded: true,
+      evidence,
     }
   } catch (error) {
     originalError = error
@@ -607,6 +671,11 @@ export async function runAcpPo2SessionView(context) {
     for (const peerProcess of peers) {
       if (peerProcess.exited) continue
       try { await peerProcess.shutdown() } catch { /* the global backstop owns leftovers */ }
+    }
+    for (const extraHost of extraHosts) {
+      if (extraHost.exited) continue
+      try { await extraHost.kill('SIGKILL') } catch { /* already gone */ }
+      try { await extraHost.waitForExit(30_000) } catch { /* the runner backstop owns leftovers */ }
     }
     try { await scene.dispose() } catch { /* the global backstop owns leftovers */ }
     try { await awaitSceneSeatFree().catch(() => {}) } catch { /* seat proof is best effort on failure */ }

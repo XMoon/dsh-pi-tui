@@ -613,6 +613,7 @@ test('the ACP shared Session View selected verdict accepts only the complete rea
     negativesRejected: true,
     hostIdentityKept: true,
     originalSplitClientIntact: true,
+    l6EvidenceRecorded: true,
   }
   assert.equal(assertSelectedVerdict('acp.po2-session-view', complete), undefined)
   // A missing proof field is a rejected verdict.
