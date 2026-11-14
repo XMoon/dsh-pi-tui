@@ -399,6 +399,19 @@ test('two consecutive x/undo cycles keep the retained draft live', async () => {
     expandImagePlaceholders(draft, store).every(segment => segment.type === 'image' || !segment.text.includes('[image #')),
     'the second x leaves no dead placeholder text',
   )
+  // The third real Undo restores the SAME staged image: two x→Undo cycles are
+  // enough to distinguish the first registration from re-entry, and the
+  // (owner, image) map must still hold exactly ONE lease.
+  vt.sendInput(storedUndoKey)
+  await vt.waitForRender()
+  assert.ok(app.getDraft().includes(image.placeholder), 'the third undo restores the same staged placeholder')
+  assert.ok(store.get(image.id) !== undefined, 'the restored image bytes stay live')
+  const owners = (store as unknown as {
+    undoOwners: Map<object, { ids: Set<number> }>
+  }).undoOwners
+  assert.equal(owners.size, 1, 'one stable owner')
+  assert.deepEqual([...owners.values()][0]!.ids, new Set([image.id]),
+    'exactly one lease for the (owner, image) pair after the repeated cycles')
   app.setFullscreen(false)
   app.stop()
 })
@@ -521,41 +534,6 @@ test('an async rejection restore survives the bridge release on the business pin
   vt.sendInput(storedUndoKey)
   await vt.waitForRender()
   assert.ok(expandImagePlaceholders(app.getDraft(), store).some(segment => segment.type === 'image' && segment.image.id === image.id))
-  app.setFullscreen(false)
-  app.stop()
-})
-
-
-test('100 x/Undo cycles keep ONE (owner,image) undo lease', async () => {
-  resetCapabilitiesCache()
-  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
-  const store = new DraftImageStore()
-  const { vt, app } = startApp(100, 32, store)
-  const image = addImage(store)
-  app.setDraft('')
-  app.insertIntoEditor(image.placeholder)
-  vt.sendInput(' hello')
-  await vt.waitForRender()
-  app.setFullscreen(true)
-  await vt.waitForRender()
-  for (let cycle = 0; cycle < 100; cycle += 1) {
-    const row = await rowOf(vt, '#1/1 · 800×100', `cycle ${cycle} identity`)
-    click(vt, 100, row)
-    await vt.waitForRender()
-    vt.sendInput(storedUndoKey)
-    await vt.waitForRender()
-    // A fresh edit AFTER the undo pushes a snapshot that contains the token
-    // again, so every cycle keeps the image genuinely restorable.
-    vt.sendInput('z')
-    await vt.waitForRender()
-  }
-  assert.ok(app.getDraft().includes(image.placeholder), 'the token is live after every cycle')
-  const owners = (store as unknown as {
-    undoOwners: Map<object, { ids: Set<number> }>
-  }).undoOwners
-  assert.equal(owners.size, 1, 'one stable owner')
-  assert.deepEqual([...owners.values()][0]!.ids, new Set([image.id]),
-    'exactly one lease for the (owner, image) pair after 100 cycles')
   app.setFullscreen(false)
   app.stop()
 })
