@@ -134,14 +134,14 @@ export class DaemonCoordinator {
   /** A sanitized human line for the supervisor TTY when the Client cannot be
    *  spawned at all (never a JSON record, never a raw error/message/path). */
   private readonly reportFatal: (line: string) => void
-  private readonly graceMs: number
-  private readonly killGraceMs: number
+  private readonly shutdownBudgetMs: number
+  private readonly markAbnormalExit: boolean
   private child: ChildProcess | undefined
   private childExit: Promise<void> | undefined
   private started = false
   private disposed = false
   private settled = false
-  private disposePromise: Promise<void> | undefined
+  private disposePromise: Promise<boolean> | undefined
   /** Test observation: how many children were actually spawned. */
   spawnCount = 0
 
@@ -152,8 +152,8 @@ export class DaemonCoordinator {
     appExit: (code: number) => void
     diag: Diag
     reportFatal?: (line: string) => void
-    graceMs?: number
-    killGraceMs?: number
+    shutdownBudgetMs?: number
+    markAbnormalExit?: boolean
   }) {
     this.spawnImpl = options.spawnImpl
     this.entry = options.entry
@@ -161,8 +161,11 @@ export class DaemonCoordinator {
     this.appExit = options.appExit
     this.diag = options.diag
     this.reportFatal = options.reportFatal ?? (() => {})
-    this.graceMs = options.graceMs ?? 4000
-    this.killGraceMs = options.killGraceMs ?? 1500
+    // A SINGLE budget strictly below the official ~5s parent shutdown deadline
+    // (leaving margin for the other fibers): the whole SIGTERM→SIGKILL sequence
+    // must fit inside it, never 4s + 1.5s = 5.5s.
+    this.shutdownBudgetMs = options.shutdownBudgetMs ?? 4000
+    this.markAbnormalExit = options.markAbnormalExit ?? false
   }
 
   /** Spawn the ONE foreground Client. No-op after a prior start or dispose. */
@@ -214,19 +217,33 @@ export class DaemonCoordinator {
    * bounded to fit the official ~5s shutdown deadline; a child that does not exit
    * within it is escalated to SIGKILL and awaited briefly. Idempotent.
    */
-  dispose(): Promise<void> {
+  dispose(): Promise<boolean> {
     if (this.disposePromise !== undefined) return this.disposePromise
     this.disposed = true
-    this.disposePromise = (async (): Promise<void> => {
+    this.disposePromise = (async (): Promise<boolean> => {
       const child = this.child
       const exited = this.childExit
-      if (child === undefined || child.exitCode !== null || child.signalCode !== null || exited === undefined) return
+      if (child === undefined || child.exitCode !== null || child.signalCode !== null || exited === undefined) return true
+      const start = Date.now()
+      const budgetEnd = start + this.shutdownBudgetMs
+      // Reserve part of the ONE budget for the SIGKILL phase so a SIGTERM phase
+      // that never stops the child cannot consume the whole budget.
+      const killReserve = Math.min(1000, Math.max(50, Math.floor(this.shutdownBudgetMs * 0.25)))
+      const killAt = budgetEnd - killReserve
+      const waitExitUntil = (absoluteDeadline: number): Promise<boolean> => Promise.race([
+        exited.then(() => true),
+        sleep(Math.max(0, absoluteDeadline - Date.now())).then(() => false),
+      ])
       try { child.kill('SIGTERM') } catch { /* already gone */ }
-      const graceful = await Promise.race([exited.then(() => 'exited' as const), sleep(this.graceMs).then(() => 'timeout' as const)])
-      if (graceful === 'timeout') {
-        try { child.kill('SIGKILL') } catch { /* already gone */ }
-        await Promise.race([exited, sleep(this.killGraceMs)])
-      }
+      if (await waitExitUntil(killAt)) return true
+      // Escalate within the SAME budget; the total never exceeds shutdownBudgetMs.
+      try { child.kill('SIGKILL') } catch { /* already gone */ }
+      if (await waitExitUntil(budgetEnd)) return true
+      // A child that never exits inside the unified budget is an ABNORMAL cleanup
+      // result, never reported as success. Make it observable.
+      this.reportFatal('dsh-pi-tui: the daemon Client did not exit after SIGKILL within the shutdown budget; it may be left running')
+      if (this.markAbnormalExit) process.exitCode = 1
+      return false
     })()
     return this.disposePromise
   }
@@ -248,7 +265,7 @@ export function apply(ctx: Context): void {
   // The daemon supervisor paints nothing: keep its diagnostics off the terminal.
   const diag = createEntryDiag('host', () => {})
   const reportFatal = (line: string): void => { try { process.stderr.write(`${line}\n`) } catch { /* best effort */ } }
-  const coordinator = new DaemonCoordinator({ spawnImpl: spawn, entry, env, appExit, diag, reportFatal })
+  const coordinator = new DaemonCoordinator({ spawnImpl: spawn, entry, env, appExit, diag, reportFatal, markAbnormalExit: true })
 
   // The launcher row is successfully assembled: report it to the startup row's
   // cold-ready handshake. Setting this synchronously (during mount, before the
