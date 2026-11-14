@@ -33,6 +33,7 @@ import type { SessionWorkspaceFactsPort } from './session-workspace-facts-port.t
 import type { SchedulePort } from './schedule-port.ts'
 import type { HostDirectoryBrowsePort } from './host-directory-browse-port.ts'
 import type { SessionPolicyPort } from './session-policy-port.ts'
+import type { TeamModePort } from './team-mode-port.ts'
 
 /** The transport backends the TUI can run on. `direct` remains the
  * production/default; `remote` is the experimental M3-3B assembly that can be
@@ -110,6 +111,10 @@ export interface Backend {
    *  approval/sandbox facts of one live Session and the single official
    *  approval-policy write. Both backends serve the SAME contract. */
   readonly sessionPolicy: SessionPolicyPort
+  /** The exact-Root Agent Team mode port (FR1): the official saved selection,
+   *  its model-request history and the single official Team mode write. Both
+   *  backends serve the SAME contract; no client-side Team truth exists. */
+  readonly teamMode: TeamModePort
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -138,6 +143,7 @@ export function createDirectBackend(
   schedule: SchedulePort,
   hostDirectoryBrowse: HostDirectoryBrowsePort,
   sessionPolicy: SessionPolicyPort,
+  teamMode: TeamModePort,
 ): Backend {
   return {
     kind: 'direct',
@@ -164,5 +170,6 @@ export function createDirectBackend(
     schedule,
     hostDirectoryBrowse,
     sessionPolicy,
+    teamMode,
   }
 }

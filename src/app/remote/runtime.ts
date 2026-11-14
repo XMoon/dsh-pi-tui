@@ -15,6 +15,7 @@ import type { RemotePromptSerializer } from '../../runtime/remote/session-writer
 import { RemoteConfigPort, type RemoteConfigRuntimeSource } from '../../runtime/remote/config-remote.ts'
 import { RemoteConfigWriteLifetime } from '../../runtime/remote/config-write-lifetime.ts'
 import { RemoteSessionPolicyPort } from '../../runtime/remote/session-policy-remote.ts'
+import { RemoteTeamModePort } from '../../runtime/remote/team-mode-remote.ts'
 import { RemoteSessionArchive } from '../../runtime/remote/session-archive-remote.ts'
 import { RemoteSessionMarkdown } from '../../runtime/remote/session-markdown-remote.ts'
 import { createRemoteBackend } from '../../runtime/remote/backend-remote.ts'
@@ -211,6 +212,14 @@ export async function createRemoteBackendRuntime(
           options.runtime.connection.generation,
           writeLifetime,
         ),
+        // FR1: the official generated `agentTeams` namespace over the SAME
+        // Client sessions service and the SAME Connection generation source.
+        // A missing mounted namespace is a truthful unavailable, never Direct.
+        teamMode: new RemoteTeamModePort({
+          sessions: options.runtime.sessions,
+          remote: { agentTeams: options.runtime.remote.agentTeams },
+          connection: { generation: options.runtime.connection.generation },
+        }),
       }),
       semantics,
       dispose,

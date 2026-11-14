@@ -199,6 +199,13 @@ export interface SearchablePickerOptions {
    */
   showHint?: boolean
   /**
+   * The caller renders the footer hint ITSELF (a composed surface that owns
+   * extra strips below the list, e.g. `/model`). The picker then reserves and
+   * paints no hint rows at all, even though search is enabled; every other
+   * consumer keeps the historical "search implies hint" behavior.
+   */
+  externalHint?: boolean
+  /**
    * Override the footer hint text. Defaults to the generic picker hint;
    * existing consumers omit it and keep the default wording.
    */
@@ -337,7 +344,7 @@ export class SearchablePicker implements Component, Focusable {
   /** Reserve the list chrome before deriving the item count. */
   private recomputeVisibleBudget(): void {
     const prefix = (this.options.header === undefined ? 0 : 2) + (this.searchEnabled ? 2 : 0)
-    const hint = this.options.showHint === true || this.searchEnabled ? 2 : 0
+    const hint = this.options.showHint === true || (this.searchEnabled && this.options.externalHint !== true) ? 2 : 0
     const indicator = this.filteredItems.length > 1 ? 1 : 0
     const group = this.filteredItems.some(item => this.groupKeyOf(item) !== '') ? 1 : 0
     // selected-below: the selected row's detail is a real physical row, so
@@ -477,7 +484,7 @@ export class SearchablePicker implements Component, Focusable {
       // — or wrapped into extra rows — by its own status text.
       const noMatch = truncateToWidth(singlePhysicalLine(this.options.noMatchText ?? '  No matching commands'), width, '')
       push(this.theme.noMatch(noMatch), { kind: 'inert' }, ROW_PRIORITY.noMatch)
-      if (this.options.showHint === true || this.searchEnabled) this.addHintLine(lines, hits, priorities, width)
+      if (this.options.showHint === true || (this.searchEnabled && this.options.externalHint !== true)) this.addHintLine(lines, hits, priorities, width)
       const result = this.finalizeEmpty(lines, hits)
       this.hitMap = result.hits
       this.lastRenderWidth = width
@@ -485,7 +492,7 @@ export class SearchablePicker implements Component, Focusable {
     }
 
     const primaryColumnWidth = this.getPrimaryColumnWidth()
-    const showHint = this.options.showHint === true || this.searchEnabled
+    const showHint = this.options.showHint === true || (this.searchEnabled && this.options.externalHint !== true)
     const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY
     const hintRows = showHint ? 2 : 0
 

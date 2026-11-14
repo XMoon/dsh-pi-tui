@@ -150,6 +150,10 @@
   "runtime/direct/surface-catalog.ts": [
     "commands"
   ],
+  "runtime/direct/team-mode-direct.ts": [
+    "sessionProjections",
+    "subagents"
+  ],
   "runtime/direct/turn-outline-compat.ts": [
     "import:dsh-session"
   ]

@@ -49,6 +49,7 @@ import fileUploadsRemote from '@deepseek-ai/dsh-client-file-upload/remote'
 import workspaceFilesRemote from '@deepseek-ai/dsh-api-workspace-files/remote'
 import workspaceRemote from '@deepseek-ai/dsh-api-workspace-controller/remote'
 import scheduleRemote from '@deepseek-ai/dsh-schedule/remote'
+import agentTeamsRemote from '@deepseek-ai/dsh-agent-team/remote'
 import { PI_TUI_CLIENT_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 import { mergeCause } from './dispose-cause.ts'
 
@@ -361,6 +362,10 @@ export const REMOTE_CONTRIBUTIONS = [
   // contribution only publishes its Remote face to the authenticated Client,
   // and `schedule/changed` is already in the forwarded-event allowlist.
   scheduleRemote,
+  // The official generated `agentTeams` namespace (FR1). The base Host already
+  // mounts the ONE Team service; this contribution only publishes its
+  // Root-only `agentTeams/setEnabled` Remote face to the authenticated Client.
+  agentTeamsRemote,
 ] as const
 
 /**
@@ -386,6 +391,7 @@ export const REMOTE_CONTRIBUTION_SPECIFIERS = [
   '@deepseek-ai/dsh-api-workspace-files/remote',
   '@deepseek-ai/dsh-api-workspace-controller/remote',
   '@deepseek-ai/dsh-schedule/remote',
+  '@deepseek-ai/dsh-agent-team/remote',
 ] as const
 
 /** The official Client-side modules and generated `/remote` contributions one

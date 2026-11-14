@@ -65,6 +65,8 @@ import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import WebSocket, { type RawData } from 'ws'
 import { z } from 'zod'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
+import AgentTeamService from '@deepseek-ai/dsh-agent-team'
+import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
@@ -89,6 +91,7 @@ import type { ExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.
 import { createRemoteM3ASemantics, type RemoteM3ASemantics } from '../../src/app/remote/m3a-semantics.ts'
 import { createRemoteBackendRuntime } from '../../src/app/remote/runtime.ts'
 import { RemoteConfigPort } from '../../src/runtime/remote/config-remote.ts'
+import { RemoteTeamModePort } from '../../src/runtime/remote/team-mode-remote.ts'
 import { acquireMainSurfaceReference, type MainSurfaceReference } from '../../src/runtime/remote/session-reference.ts'
 import { contextPressureOccupancy } from '../../src/runtime/session-reader-port.ts'
 import { DirectConfigPort, DirectWebProviderConfig } from '../../src/runtime/direct/config-direct.ts'
@@ -198,6 +201,8 @@ async function createHostFixture(
     /** Replace the inert stub model only for a suite that needs a real scripted
      *  turn (the durable timed-question probe). */
     readonly llmAdapter?: LlmAdapter
+    /** Mount the official base Agent Team service (FR1 wire proof). */
+    readonly teamPlane?: boolean
   } = {},
 ): Promise<HostFixture> {
   const workRoot = life.tempDir('dsh-m3a-')
@@ -256,6 +261,13 @@ async function createHostFixture(
     // so the fixture mounts the official service itself — the composition must
     // REUSE it, never mount a second one.
     await ctx.plugin(UserQuestionService)
+    if (options.teamPlane === true) {
+      // The base Team service requires the official subagent tree owner; both
+      // are mounted through their real Host services (the same rows dsh-base
+      // composes), never a test double.
+      await ctx.plugin(SubagentRuntime)
+      await ctx.plugin(AgentTeamService)
+    }
     await ctx.plugin(Loader)
     if (options.webProviderPlane !== undefined) {
       await ctx.plugin(LocalCredentials, { path: join(workRoot, '.credentials.yaml'), watch: false })
@@ -2598,4 +2610,38 @@ test('the production Gateway negotiates permessage-deflate and delivers a 1KiB+ 
     'websocketCompression: none disables the extension on the same carrier')
   plainSocket.close()
   await once(plainSocket, 'close')
+})
+
+test('FR1 P0-E: the generated agentTeams namespace writes the real Root Team mode over one Host wire', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life, { teamPlane: true })
+  const { runtime } = await compose(host)
+  try {
+    const agent = await host.harness.create(SessionId(MAIN), undefined, { cwd: host.anchorDir })
+    acquireMainSurfaceReference(runtime.client.sessions, SessionId(MAIN))
+    await waitFor('the MAIN window to open', () =>
+      runtime.client.sessions.binding(SessionId(MAIN))?.session.getSnapshot().openState === 'open')
+
+    // The official generated namespace the split Client mounts is the ONE write
+    // face; the port never falls back to Direct.
+    assert.equal(typeof runtime.client.remote.agentTeams.setEnabled, 'function',
+      'the mounted generated agentTeams namespace exposes setEnabled')
+    const port = new RemoteTeamModePort(runtime.client)
+    assert.deepEqual(port.read(MAIN), { kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+
+    const signal = new AbortController().signal
+    assert.deepEqual(await port.setEnabled(MAIN, true, signal), { kind: 'committed' })
+    const team = host.ctx.get('agentTeams') as { isEnabled(candidate: unknown): boolean }
+    assert.equal(team.isEnabled(agent), true, 'the real Host Team service observes the Client write')
+    assert.deepEqual(port.read(MAIN), { kind: 'ready', enabled: true, modelRequestHistory: 'none' })
+    const modeEvents = host.ctx.sessions.get(SessionId(MAIN))!.snapshotEvents()
+      .filter(event => event.type === 'team/mode')
+    assert.equal(modeEvents.length, 1, 'exactly one durable team/mode crossed the wire')
+
+    assert.deepEqual(await port.setEnabled(MAIN, false, signal), { kind: 'committed' })
+    assert.equal(team.isEnabled(agent), false)
+    assert.deepEqual(port.read(MAIN), { kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  } finally {
+    await runtime.dispose().catch(() => {})
+  }
 })

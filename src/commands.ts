@@ -457,6 +457,15 @@ export interface TuiCommandRunner {  ctx: Context
    */
   readonly sessionPolicy: import('./runtime/session-policy-port.ts').SessionPolicyPort
   /**
+   * FR1: the exact-Root Agent Team mode port — the official saved selection,
+   * the recorded model-request history and the single official Team mode
+   * write. The `/model` picker is its only consumer; it never mirrors an
+   * enabled value and never appends a Session event itself. Absent means the
+   * mounted composition serves no Team seam (the picker then reports the
+   * truthful unavailable row instead of inventing one).
+   */
+  readonly teamMode?: import('./runtime/team-mode-port.ts').TeamModePort
+  /**
    * Split-Client only (G567's Client-root read view, consumed by M5-U-D): the
    * official forwarded Question/Approval invocations THIS Client still holds
    * for an answer. It carries identity only — never a question payload, option,

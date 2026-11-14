@@ -73,6 +73,7 @@ import type { DeliveredFileReadPort } from '../../runtime/deliverables-port.ts'
 import type { SchedulePort } from '../../runtime/schedule-port.ts'
 import type { HostDirectoryBrowsePort } from '../../runtime/host-directory-browse-port.ts'
 import { RemoteHostDirectoryBrowsePort } from '../../runtime/remote/host-directory-browse-remote.ts'
+import type { RemoteTeamModeNamespace } from '../../runtime/remote/team-mode-remote.ts'
 import type { ClientRemote } from '@deepseek-ai/dsh-api-gateway/client'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import { RemoteSessionReader } from '../../runtime/remote/session-reader-remote.ts'
@@ -223,6 +224,10 @@ export interface RemoteM3ARuntimeSource {
      *  domain's management face. Absent until the installed contribution is
      *  mounted, so the port answers the ONE truthful unavailable error. */
     readonly schedule: RemoteScheduleNamespace | undefined
+    /** The official generated `agentTeams` namespace (FR1): the Root-only Team
+     *  mode write. Absent until the installed contribution is mounted, so the
+     *  Team port fails closed instead of fabricating a Direct path. */
+    readonly agentTeams: RemoteTeamModeNamespace | undefined
     /** The official generated config-plane namespaces (the SAME Client
      *  Remote service): settings, credentials and permission presets. The
      *  M3-3A adapters ignore them; the Remote Backend's ConfigPort reads them

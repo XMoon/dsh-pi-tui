@@ -47,6 +47,7 @@ import { DirectSessionWorkspaceFacts } from './session-workspace-facts-direct.ts
 import { DirectSchedulePort } from './schedule-direct.ts'
 import { DirectHostDirectoryBrowsePort } from './host-directory-browse-direct.ts'
 import { DirectSessionPolicyPort } from './session-policy-direct.ts'
+import { DirectTeamModePort } from './team-mode-direct.ts'
 import type { WebAccessPort, WebAccessStatus, WebAccessUrl } from '../web-access-port.ts'
 
 /** The minimal Host context surface the Direct adapters need (structural;
@@ -182,5 +183,8 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     // resolved per call from the SAME Host Context (the exact live
     // Session/Agent identity is resolved inside the adapter).
     new DirectSessionPolicyPort(deps.ctx, sessionId => deps.agentFor(sessionId)),
+    // FR1: the official Root-only Team authority behind the ONE Team port.
+    // Every call re-resolves the exact live Agent and its tree root.
+    new DirectTeamModePort(deps.ctx, sessionId => deps.agentFor(sessionId)),
   )
 }

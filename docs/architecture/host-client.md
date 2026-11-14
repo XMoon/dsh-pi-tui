@@ -1567,6 +1567,39 @@ Proof: `test/runtime/schedule-port.test.ts`,
 `test/app/schedule-workspace-controller.test.ts`,
 `test/app/schedule-host-profile.test.ts`.
 
+## Agent Team mode
+
+`TeamModePort` is the ONE semantic seam for the Root Session's Agent Team
+selection. The saved selection and the "a model request has already run" fact
+are owned by the official Host projections — `agentTeam` and
+`modelSelection.lastUsed` — and the only write is the official Root-only
+`agentTeams.setEnabled`, which appends the single durable `team/mode` record and
+flushes the Session itself. The port never mirrors an enabled value, never
+appends a Session event, and never grants a child Session write authority.
+
+Method surface: `read(sessionId)` (a synchronous `ready` / `stale` /
+`unavailable` snapshot), `subscribe(sessionId, listener)` (a same-Session
+projection change feed) and `setEnabled(sessionId, enabled, signal)` (the
+semantic write settlement `committed` / `rejected` / `cancelled` /
+`indeterminate`). Calls pass the exact Session id the caller captured; the
+adapter re-resolves that Session's live Root on every call.
+
+- **Direct** reads `sessionProjections.snapshot(session, ['agentTeam',
+  'modelSelection'])`, proves `subagents.rootOf(agent) === agent`, observes
+  `sessionProjections.onChanged` for the two keys, and forwards
+  `ctx.agentTeams.setEnabled`. A rejected Root check is a proven refusal; a
+  flush/observation failure after the Root admission is indeterminate.
+- **Split Client** reads the exact `sessions.binding(sessionId)` faces and
+  re-arms them on a Connection generation replacement, proving Root identity
+  from the Session snapshot (falling back to the Session-list subagent origin
+  when a binding cannot expose it), and writes through the official generated
+  `@deepseek-ai/dsh-agent-team/remote` `agentTeams/setEnabled` namespace. A
+  dispatched write whose settlement cannot be proven is indeterminate and is
+  never replayed.
+
+Proof: `test/runtime/direct/team-mode-direct.test.ts`,
+`test/runtime/remote/team-mode-remote.test.ts`.
+
 ## Workflow terminal-state authority
 
 A Workflow run/member status is settled ONLY by its own terminal event:

@@ -58,6 +58,7 @@ import type { ClientRemote } from '@deepseek-ai/dsh-api-gateway/client'
 // `./remote` face; this public assembly entry references them all, so the
 // `ClientRemote[...]` indexed accesses below resolve to the published contract.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
+import type {} from '@deepseek-ai/dsh-agent-team/remote'
 import type { RemoteClientRuntime } from '../../support/m3-inprocess/client-runtime.ts'
 import { RemoteConfigPort } from '../../../src/runtime/remote/config-remote.ts'
 import { RemoteSessionReader } from '../../../src/runtime/remote/session-reader-remote.ts'
@@ -83,6 +84,7 @@ import {
   RemoteHostDirectoryBrowsePort,
   type RemoteDirectoryPickerNamespace,
 } from '../../../src/runtime/remote/host-directory-browse-remote.ts'
+import { RemoteTeamModePort } from '../../../src/runtime/remote/team-mode-remote.ts'
 import type { ContextPressureProjection, ContextBreakdownProjection, TokenUsageProjection } from '@deepseek-ai/dsh-token-meter'
 import type { TurnOutlineEntry } from '@deepseek-ai/dsh-session-turn-outline/types'
 import type { SessionSeq } from '@deepseek-ai/dsh-session/types'
@@ -208,6 +210,20 @@ function officialHostDirectoryBrowsePort(
   generation: ConnectionGenerationState,
 ): RemoteHostDirectoryBrowsePort {
   return new RemoteHostDirectoryBrowsePort(directoryPicker, generation)
+}
+
+/** FR1: the official generated `agentTeams` namespace and the published
+ *  `ISessions` binding/list face satisfy the Team port's source with NO cast. */
+function officialTeamModePort(
+  sessions: ISessions,
+  remote: ClientRemote,
+  generation: ConnectionGenerationState,
+): RemoteTeamModePort {
+  return new RemoteTeamModePort({
+    sessions,
+    remote: { agentTeams: remote.agentTeams },
+    connection: { generation },
+  })
 }
 
 function officialSkillCatalog(
@@ -367,6 +383,7 @@ test('every Remote adapter accepts the published DSH public Client/Remote face (
     officialQuestionProjectionPayload,
     officialHostDirectoryBrowseNamespace,
     officialHostDirectoryBrowsePort,
+    officialTeamModePort,
   ]) {
     assert.equal(typeof proof, 'function')
   }
@@ -381,6 +398,7 @@ test('the M3-3B additions consume the published 0.2.0-rc.2 contract', () => {
   assert.equal(typeof officialSettingsRemoteFace, 'function')
   assert.equal(typeof officialCredentialsRemoteFace, 'function')
   assert.equal(typeof officialArchiveFetchFace, 'function')
+  assert.equal(typeof officialTeamModePort, 'function')
 })
 
 test('the M3-3A semantic additions consume the published 0.2.0-rc.1 contract', () => {

@@ -43,6 +43,7 @@ import type { SessionWorkspaceFactsPort } from '../session-workspace-facts-port.
 import type { SchedulePort } from '../schedule-port.ts'
 import type { HostDirectoryBrowsePort } from '../host-directory-browse-port.ts'
 import type { SessionPolicyPort } from '../session-policy-port.ts'
+import type { TeamModePort } from '../team-mode-port.ts'
 
 /** Every semantic port the Remote backend serves (one adapter each). */
 export interface RemoteBackendParts {
@@ -78,6 +79,8 @@ export interface RemoteBackendParts {
    *  approval/sandbox facts and the single approval write, generation-fenced
    *  and bracketed by the SHARED accepted-write lifetime. */
   readonly sessionPolicy: SessionPolicyPort
+  /** The official generated `agentTeams` namespace adapter (FR1). */
+  readonly teamMode: TeamModePort
 }
 
 /** Assemble the experimental Remote `Backend` from its proven adapters. */
