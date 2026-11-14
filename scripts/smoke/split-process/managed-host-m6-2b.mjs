@@ -172,6 +172,19 @@ export function unitFileSafetyError(info, uid) {
  * a unit created before the Host published identity is still cleaned up. A
  * failed stop never silently unlinks. `deps` is a test seam; production omits it.
  */
+/**
+ * A cleanup result is a scenario FAILURE unless it removed this run's unit or
+ * there was nothing to remove ('absent'); a foreign/other-build refusal or a
+ * stop/unlink failure must be surfaced to the scenario verdict, never silently
+ * dropped.
+ */
+export function cleanupOutcomeError(cleanup) {
+  if (cleanup === undefined || cleanup === null) return 'managed-host: cleanup produced no result'
+  if (cleanup.removed === true) return undefined
+  if (cleanup.reason === 'absent') return undefined
+  return `managed-host: this run's managed unit was not cleaned up (${cleanup.reason})`
+}
+
 export function stopAndRemoveManagedUnit(installation, trace = () => {}, expectedBuildId, deps = {}) {
   const uid = typeof deps.uid === 'number'
     ? deps.uid
@@ -196,9 +209,18 @@ export function stopAndRemoveManagedUnit(installation, trace = () => {}, expecte
   try { hostEntry = realpathSync(join(installation.profilePackage, 'dist', 'local-host.mjs')) } catch { return { removed: false, reason: 'no-entry' } }
   const instanceBuild = deps.instanceBuild ?? (() => readInstance(installation.dshHome, scopeId)?.buildId)
   const artifactBuild = deps.artifactBuild ?? (() => installedArtifactBuildId(installation))
-  const publishedBuildId = (typeof expectedBuildId === 'string' && expectedBuildId !== '')
-    ? expectedBuildId
-    : (instanceBuild() ?? artifactBuild())
+  // The CANDIDATE artifact fingerprint is the necessary ownership condition: a
+  // running Host's identity may belong to an OLDER compatible build that the
+  // public Client legitimately reused, so it can only CROSS-CHECK, never grant
+  // "this run's install" ownership. Without a candidate build we cannot bind the
+  // unit to this run and must not touch it.
+  const candidateBuild = artifactBuild()
+  if (typeof candidateBuild !== 'string' || candidateBuild === '') return { removed: false, reason: 'no-artifact-build' }
+  const observedBuild = (typeof expectedBuildId === 'string' && expectedBuildId !== '') ? expectedBuildId : instanceBuild()
+  if (typeof observedBuild === 'string' && observedBuild !== '' && observedBuild !== candidateBuild) {
+    return { removed: false, reason: 'not-this-install' }
+  }
+  const publishedBuildId = candidateBuild
   const foreign = unitBelongsToRun(content, { scopeId, hostEntry, publishedBuildId })
   if (foreign !== null) return { removed: false, reason: foreign }
   const runtimeDir = deps.runtimeDir !== undefined
@@ -333,6 +355,8 @@ export async function runManagedHostSystemd({ installation, trace, dshHome }) {
   // Captured while the Host is alive: its registry is gone once stopped, but the
   // cleanup still needs the published install build to prove unit ownership.
   let unitBuildId
+  let result
+  let failure
   try {
     await waitForCounts(dshHome, counts => counts.host >= 1 && counts.client >= 1, 'one Host + one Client', 90_000)
     await screen.waitForAny(['type a message', '╭'], 'the managed Client', 120_000)
@@ -345,6 +369,24 @@ export async function runManagedHostSystemd({ installation, trace, dshHome }) {
     assert(typeof identity.instanceId === 'string' && /^[0-9a-f-]{36}$/u.test(identity.instanceId), 'the Host identity has no instance id')
     unitBuildId = identity.buildId
     trace('managed-host-systemd-unit', { unit, loadState: props.LoadState, activeState: props.ActiveState })
+    // B10: a SECOND concurrent cold public Client attaches to the SAME single
+    // Host and the SAME single unit (never a second Host, never a unit rewrite).
+    const second = new PublicDshScreen(installation, 'daemon')
+    try {
+      await waitForCounts(dshHome, counts => counts.host === 1 && counts.client >= 2, 'a second concurrent Client on the same Host', 90_000)
+      await second.waitForAny(['type a message', '╭'], 'the second managed Client', 120_000)
+      assert(hostPids(dshHome).length === 1, 'a second cold Client created or replaced the Host')
+      const props2 = showUnit(unit, runtimeDir)
+      assert(props2.FragmentPath !== undefined && realpathSync(props2.FragmentPath) === realpathSync(expectedFragment), 'the second Client changed the unit FragmentPath')
+      assert(props2.ActiveState === 'active', 'the unit is not active with two Clients')
+      trace('managed-host-concurrency', { clients: 2, hosts: 1 })
+      second.send('/exit\r')
+      await second.exitWithin(60_000)
+      await waitForCounts(dshHome, counts => counts.client === 1, 'the second Client exit', 30_000)
+      assert(hostPids(dshHome).length === 1, 'the Host died when the second Client exited')
+    } finally {
+      await second.dispose()
+    }
     screen.send('/exit\r')
     const exit = await screen.exitWithin(60_000)
     assert(exit.code === 0, `the managed Client /exit did not exit 0: ${JSON.stringify(exit)}`)
@@ -354,7 +396,7 @@ export async function runManagedHostSystemd({ installation, trace, dshHome }) {
     assert(stop.status === 0, 'systemctl --user stop failed')
     await waitNoHost(dshHome, 30_000)
     assert(props.UnitFileState !== 'enabled', 'the profile unit must not be login auto-enabled')
-    return {
+    result = {
       status: 'PASS',
       scope: 'REAL_SYSTEMD_USER_L6',
       unitOwned: true,
@@ -363,13 +405,23 @@ export async function runManagedHostSystemd({ installation, trace, dshHome }) {
       stoppedOnSigterm: true,
       noEnableOrWantedBy: props.UnitFileState !== 'enabled',
     }
+  } catch (error) {
+    failure = error
   } finally {
     await screen.dispose()
-    // Stop through the manager + remove the owned unit BEFORE the kill backstop,
-    // so `Restart=on-failure` cannot resurrect the Host and no unit file leaks.
-    stopAndRemoveManagedUnit(installation, trace, unitBuildId)
-    killIsolatedProcesses(dshHome)
+    // Stop through the manager + remove the owned unit BEFORE the kill backstop.
+    // The cleanup result feeds the scenario verdict: a this-run unit that could
+    // not be stopped/removed is a real failure, not a PASS.
+    const cleanup = stopAndRemoveManagedUnit(installation, trace, unitBuildId)
+    const outcomeError = cleanupOutcomeError(cleanup)
+    if (outcomeError !== undefined && failure === undefined) failure = new SplitSmokeAssertionError(outcomeError)
+    // Only SIGKILL the isolated set when no supervised unit remains; if our unit
+    // could not be stopped/removed, killing a still-supervised Host would trip
+    // Restart=on-failure, so we leave it and surface the failure above.
+    if (cleanup.removed === true || cleanup.reason === 'absent') killIsolatedProcesses(dshHome)
   }
+  if (failure !== undefined) throw failure
+  return result
 }
 
 /** The strict-absence fallback: no user manager, a real detached Host, a private 0600 log, Host survives Client exit. */

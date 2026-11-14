@@ -402,9 +402,12 @@ authenticated carrier, the Session/Writer authority or readiness.
   directory, which must be real-directory owned by the uid on every component and
   never group/other-writable (a writable parent could swap the validated file).
   The Node interpreter in `ExecStart` is trusted by being an absolute, canonical,
-  executable regular file — a normal user may run a root-owned `/usr/bin/node` —
-  while the product-private Host entry and installed DSH anchor must be
-  uid-owned. Full `scopeId`, profile identity and install build are carried in
+  executable regular file — a normal user may run a root-owned `/usr/bin/node`.
+  The product-private Host entry must be uid-owned, while the official DSH install
+  anchor is trusted by its declared `@deepseek-ai/dsh` identity, its exact pinned
+  runtime version and a safe (non-group/other-writable) regular file — not by uid
+  ownership, so a normal user may run against a root-owned system-wide DSH. Full
+  `scopeId`, profile identity and install build are carried in
   the unit owner metadata, and the manager's actual
   `FragmentPath`/`LoadState`/`DropInPaths` must name the installed file with no
   drop-in override. A different build, a foreign owner, a drop-in or a symlink is

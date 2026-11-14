@@ -37,7 +37,7 @@ import {
 } from '../../scripts/lib/split-smoke-selection.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 import { encodeUnitValue } from '../../src/app/remote-process/local-host-manager.ts'
-import { encodeExecArg, stopAndRemoveManagedUnit, unitBelongsToRun, unitFileSafetyError } from '../../scripts/smoke/split-process/managed-host-m6-2b.mjs'
+import { cleanupOutcomeError, encodeExecArg, stopAndRemoveManagedUnit, unitBelongsToRun, unitFileSafetyError } from '../../scripts/smoke/split-process/managed-host-m6-2b.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'split-process-smoke.mjs')
@@ -588,7 +588,7 @@ test('managed unit cleanup only matches this run\u2019s exact owner metadata and
 
 test('cleanup actually stops and removes this run\u2019s unit and refuses foreign, unsafe and failed-stop cases', t => {
   const uid = process.getuid?.()
-  const mkRun = ({ artifactBuild, contentBuild = artifactBuild, stopStatus = 0, symlink = false }) => {
+  const mkRun = ({ artifactBuild, contentBuild = artifactBuild, stopStatus = 0, symlink = false, instanceBuild = () => undefined }) => {
     const root = testLifecycle(t).tempDir('m62b-cleanup-')
     const home = join(root, 'home'); mkdirSync(home, { mode: 0o700 })
     const unitDir = join(home, '.config', 'systemd', 'user'); mkdirSync(unitDir, { recursive: true, mode: 0o700 })
@@ -618,7 +618,7 @@ test('cleanup actually stops and removes this run\u2019s unit and refuses foreig
     }
     const installation = { profileDir, profilePackage, dshHome: join(root, 'dsh-home'), anchor }
     const result = stopAndRemoveManagedUnit(installation, () => {}, undefined, {
-      uid, homeDir: home, systemctl: fakeRun, instanceBuild: () => undefined, artifactBuild: () => artifactBuild,
+      uid, homeDir: home, systemctl: fakeRun, instanceBuild, artifactBuild: () => artifactBuild,
     })
     return { result, unitPath, calls }
   }
@@ -644,6 +644,20 @@ test('cleanup actually stops and removes this run\u2019s unit and refuses foreig
   const nobuild = mkRun({ artifactBuild: undefined, contentBuild: 'b'.repeat(64) })
   assert.equal(nobuild.result.removed, false)
   assert.equal(existsSync(nobuild.unitPath), true)
+  // An OLD compatible Host's unit (build A) is NOT this candidate's (artifact B):
+  // the live identity must never grant ownership; it only cross-checks.
+  const stale = mkRun({ artifactBuild: 'b'.repeat(64), contentBuild: 'a'.repeat(64), instanceBuild: () => 'a'.repeat(64) })
+  assert.equal(stale.result.removed, false)
+  assert.equal(existsSync(stale.unitPath), true)
+})
+
+test('a cleanup that did not remove this run\u2019s unit fails the scenario verdict', () => {
+  assert.equal(cleanupOutcomeError({ removed: true }), undefined)
+  assert.equal(cleanupOutcomeError({ removed: false, reason: 'absent' }), undefined)
+  for (const reason of ['stop-failed', 'other-build', 'foreign-owner', 'no-artifact-build', 'not-this-install', 'unsafe-file', 'dropin']) {
+    assert.equal(typeof cleanupOutcomeError({ removed: false, reason }), 'string', `cleanup ${reason} must be a scenario failure`)
+  }
+  assert.equal(typeof cleanupOutcomeError(undefined), 'string')
 })
 
 test('the ACP UDS selected verdict accepts only the complete real-L6 proof', () => {
