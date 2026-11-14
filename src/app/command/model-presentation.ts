@@ -3,6 +3,7 @@
  * @module app/command/model-presentation
  */
 import type { ModelDirectoryDto, ModelSelectionDto } from '../../runtime/catalog-port.ts'
+import type { TeamModeSnapshot, TeamModeWriteOutcome } from '../../runtime/team-mode-port.ts'
 import type { OwnedTaskOptions } from '../../runtime/process/tasks.ts'
 
 export type ModelApplyOutcome =
@@ -12,6 +13,40 @@ export type ModelApplyOutcome =
   | 'indeterminate'
   | 'unsupported'
   | 'superseded'
+
+/** One admitted Team toggle gesture, bound to the exact captured owner scope. */
+export interface ModelPickerTeamAttempt {
+  /** The exact Host state this gesture writes. */
+  readonly enabled: boolean
+  /** An OFF write over a recorded model request needs the independent seat. */
+  readonly confirmRequired: boolean
+  /** Run the admitted write; the command re-verifies the captured scope. */
+  run(): Promise<TeamModeWriteOutcome>
+  /**
+   * Release an admitted-but-never-run gesture (the user cancelled the
+   * confirmation or the gesture became stale). Idempotent; a no-op after
+   * {@link run} started. The command's single Team-write latch stays held
+   * until this or the run settlement.
+   */
+  abandon?(): void
+}
+
+/** One Team gesture admission result. */
+export type ModelPickerTeamAdmission =
+  | { readonly kind: 'admitted'; readonly attempt: ModelPickerTeamAttempt }
+  | { readonly kind: 'refused'; readonly reason: string }
+
+/**
+ * The narrow Team seam the `/model` picker presents. It owns no truth: `read`
+ * returns the official projection, `subscribe` notifies on its changes and
+ * `begin` admits one gesture against the exact Session scope the command
+ * captured at open.
+ */
+export interface ModelPickerTeamControl {
+  read(): TeamModeSnapshot
+  subscribe(listener: () => void): () => void
+  begin(): ModelPickerTeamAdmission
+}
 
 /**
  * The write subject, captured by the command at `open()`: whether the user was
@@ -49,6 +84,12 @@ export interface ModelPickerRequest {
    */
   readonly entry: ModelPickerEntry
   apply(selection: ModelSelectionDto): Promise<ModelApplyOutcome> | ModelApplyOutcome
+  /**
+   * The optional PiTui Team seam. Its absence leaves the picker on the old
+   * model-only contract (the TSP presenter ignores it); presence never lets a
+   * model selection write Team mode.
+   */
+  readonly team?: ModelPickerTeamControl
   /**
    * Re-read the SAME directory authority after a failed or partial read. The
    * command's single read owner re-enters loading itself; a presenter only asks.

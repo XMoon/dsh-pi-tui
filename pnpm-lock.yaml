@@ -242,6 +242,9 @@ importers:
       '@deepseek-ai/dsh-agent-preset-registry':
         specifier: 0.2.2-rc.3
         version: 0.2.2-rc.3(dee4d4b0c7ff79257ff68d37b32735e9)
+      '@deepseek-ai/dsh-agent-team':
+        specifier: 0.2.2-rc.3
+        version: 0.2.2-rc.3(734ab0e0d44259bb257d3f7eb8b1e234)
       '@deepseek-ai/dsh-agent-tool-presentation':
         specifier: 0.2.2-rc.3
         version: 0.2.2-rc.3(397c32d6008e0aa734d210a95e61b52e)

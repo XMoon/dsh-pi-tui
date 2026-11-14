@@ -136,6 +136,7 @@ import {
   type OutputViewerBar,
   OutputViewerPanel,
 } from './tui/panels/output-viewer-panel.ts'
+import { TeamDisableConfirmation, type TeamDisableConfirmationRequest } from './tui/pickers/team-disable-confirmation.ts'
 import { ImageThumbnail } from './tui/components/media/image-thumbnail.ts'
 import { ImageWorkspacePanel } from './tui/components/media/image-workspace.ts'
 import type { SvgViewerSource } from './tui/components/media/svg-viewer.ts'
@@ -4165,6 +4166,13 @@ export class TuiApp {
   private modelPickerOverlay: OverlayHandle | undefined
   /** The live responsive frame of the /model picker. */
   private modelPickerFrame: ResponsiveOverlayFrame | undefined
+  /** The independent Team-disable confirmation seat (a logical Root seat of
+   *  its own: it outlives the /model overlay and owns its write admission). */
+  private teamConfirmationOverlay: {
+    readonly handle: OverlayHandle
+    readonly component: TeamDisableConfirmation
+    close(): void
+  } | undefined
   /** The injected Ctrl+R search source (the runner wires the file-backed
    * implementation; the host never touches the filesystem). */
   private readonly historySearchSource: HistorySearchSource | undefined
@@ -26707,6 +26715,9 @@ export class TuiApp {
    * reappear.
    */
   openModelPicker(component: Component & RowBudgetAware): () => void {
+    // A new `/model` interaction retires any previous Team-disable confirmation
+    // seat: that seat belongs to the previous interaction's exact capture.
+    this.closeTeamDisableConfirmation()
     if (this.modelPickerComponent !== undefined) this.closeModelPicker()
     this.modelPickerComponent = component
     this.mountModelPickerOverlay(component)
@@ -26714,6 +26725,52 @@ export class TuiApp {
     // remounts the SAME component behind a fresh handle, and the user's
     // close must still reach it.
     return () => this.closeModelPicker()
+  }
+
+  /**
+   * Mount the independent `TeamDisableConfirmation` seat. It is a sibling
+   * overlay, NOT part of the `/model` picker: closing `/model` leaves it alive
+   * with its captured Session scope, and its Confirm performs the one Host
+   * write. Returns the closer; the seat never changes the Host on Cancel/Esc.
+   */
+  openTeamDisableConfirmation(request: TeamDisableConfirmationRequest): () => void {
+    this.closeTeamDisableConfirmation()
+    let handle: OverlayHandle | undefined
+    // The hide latch is INDEPENDENT of the component's teardown notification:
+    // the component commits `closed` before it asks the owner to hide, and the
+    // owner must still perform the ONE hide.
+    let hidden = false
+    let closeHandle: () => void = () => {}
+    const component = new TeamDisableConfirmation({
+      ...request,
+      requestRender: () => { this.requestRender() },
+      close: () => { closeHandle() },
+      onClosed: () => {
+        if (this.teamConfirmationOverlay?.handle === handle) this.teamConfirmationOverlay = undefined
+        request.onClosed?.()
+      },
+    })
+    const frame = new FocusForwardingFrame(component, true)
+    handle = this.showOverlayOnHost(frame, { width: 64, maxHeight: 14 })
+    closeHandle = (): void => {
+      if (hidden) return
+      hidden = true
+      if (this.teamConfirmationOverlay?.handle === handle) this.teamConfirmationOverlay = undefined
+      handle?.hide()
+    }
+    this.teamConfirmationOverlay = { handle, component, close: closeHandle }
+    return closeHandle
+  }
+
+  /** Close the Team-disable confirmation seat, if one is open and not
+   *  mid-write. An in-flight write owns the seat until settlement; a new
+   *  `/model` must not tear it down (the command's shared Team latch also
+   *  refuses a second write while it is unsettled). */
+  private closeTeamDisableConfirmation(): void {
+    const seat = this.teamConfirmationOverlay
+    if (seat === undefined) return
+    if (!seat.component.requestClose()) return
+    seat.close()
   }
 
   /** Mount the `/model` picker frame around its (retained) component. The
@@ -26725,14 +26782,14 @@ export class TuiApp {
     this.modelPickerFrame = frame
     const handle = this.showOverlayOnHost(
       frame,
-      { width: 72, maxHeight: 28 },
+      { width: 88, maxHeight: 28 },
       {
         remountable: true,
         remount: (logical) => {
           if (this.modelPickerComponent !== component) return
           const next = this.createModelPickerFrame(component)
           this.modelPickerFrame = next
-          this.rebindOverlayRaw(logical, next, { width: 72, maxHeight: 28 })
+          this.rebindOverlayRaw(logical, next, { width: 88, maxHeight: 28 })
         },
       },
     )
@@ -26740,7 +26797,7 @@ export class TuiApp {
   }
 
   private createModelPickerFrame(component: Component & RowBudgetAware): ResponsiveOverlayFrame {
-    const configuredWidth = 72
+    const configuredWidth = 88
     const configuredMaxHeight = 28
     const geometryOf = (): ResponsiveOverlayGeometry => {
       const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))

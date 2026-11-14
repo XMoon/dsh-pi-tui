@@ -15,11 +15,13 @@ import { CommandDefinitionId, type CommandResult } from '@deepseek-ai/dsh-comman
 import type { TuiApp } from '../../tui-app.ts'
 import type { SessionScope } from '../../app/session/scope.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
+import { SessionScopeSupersededError } from '../../app/session/scope.ts'
 import { isCancellation, runOwned, type OwnedTaskOptions } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type {
   ModelApplyOutcome,
   ModelPickerRequest,
+  ModelPickerTeamControl,
   ModelPresentation,
 } from '../../app/command/model-presentation.ts'
 import type {
@@ -58,6 +60,7 @@ type ModelCommandRunner = Pick<
   | 'setModelSelectionPending'
   | 'settleIntent'
   | 'signal'
+  | 'teamMode'
   | 'trackDefaultWrite'
   | 'updateWelcomeCard'
   | 'withSessionTransition'
@@ -124,6 +127,10 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
   // newer selection supersedes an older one's pending-marker clear and error
   // notice even on the SAME Session generation (v2 §0.2.5).
   let modelOperationToken = 0
+  // ONE shared Team-write latch across every `/model` invocation in this TUI:
+  // while a Team gesture is admitted (confirmation pending) or writing, no
+  // second invocation may dispatch another Team write for the same surface.
+  let teamWriteInFlight = false
   // PRESENTATION ownership for `/model`: a newer invocation supersedes the
   // previous (loading or loaded) panel. It is DISTINCT from
   // modelOperationToken (which owns the WRITE): the surface token decides
@@ -371,12 +378,124 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
         // flight is refused (RETRY LOADING admits no second read), and a
         // settled response can only belong to the latest token+scope read.
         let reading = false
+        // The ONE Team gesture admission for this `/model` surface. Every
+        // read/write re-verifies the scope captured at OPEN, so a moved Session
+        // can never read or write another owner; the Team write is admitted
+        // through the SAME Session writer barrier as the model write and never
+        // rides on a model `apply()`.
+        const teamModePort = runner.teamMode
+        const teamControl: ModelPickerTeamControl | undefined = teamModePort === undefined ? undefined : {
+          read: () => {
+            if (!runner.isSessionScopeCurrent(scope)) {
+              return { kind: 'stale', reason: 'the Session changed since /model opened' }
+            }
+            const sessionId = scope.sessionId
+            if (sessionId === undefined) {
+              return { kind: 'unavailable', reason: 'open a Session to change Agent Team mode' }
+            }
+            return teamModePort.read(sessionId)
+          },
+          subscribe: (listener) => {
+            const sessionId = scope.sessionId
+            if (sessionId === undefined) return () => {}
+            return teamModePort.subscribe(sessionId, listener)
+          },
+          begin: () => {
+            if (!runner.isSessionScopeCurrent(scope)) {
+              return { kind: 'refused', reason: 'the Session changed since /model opened' }
+            }
+            const sessionId = scope.sessionId
+            if (sessionId === undefined || liveScope === undefined) {
+              return { kind: 'refused', reason: 'open a Session to change Agent Team mode' }
+            }
+            const snapshot = teamModePort.read(sessionId)
+            if (snapshot.kind !== 'ready') return { kind: 'refused', reason: snapshot.reason }
+            // A Team write already owns the surface: never admit a second one
+            // while a confirmation is pending or a write is unsettled.
+            if (teamWriteInFlight) {
+              return { kind: 'refused', reason: 'a Team write is already in progress' }
+            }
+            const enabled = !snapshot.enabled
+            // The latch is owned for the WHOLE admitted gesture, not one run:
+            // a confirmation Retry reuses this same attempt and must stay
+            // inside the same single-writer admission. It is released only by
+            // an explicit `abandon()` once no run is executing.
+            let released = false
+            let state: 'admitted' | 'running' | 'settled' = 'admitted'
+            let abandonRequested = false
+            const release = (): void => {
+              if (released) return
+              released = true
+              teamWriteInFlight = false
+            }
+            const abandon = (): void => {
+              if (released) return
+              // Never relinquish the latch while a Host request is executing;
+              // defer the release until the in-flight run settles.
+              if (state === 'running') {
+                abandonRequested = true
+                return
+              }
+              release()
+            }
+            teamWriteInFlight = true
+            return {
+              kind: 'admitted',
+              attempt: {
+                enabled,
+                // OFF may touch a Session whose model request history is
+                // recorded; that fact comes ONLY from the official projection.
+                confirmRequired: enabled === false && snapshot.modelRequestHistory === 'recorded',
+                abandon,
+                run: async () => {
+                  if (released) {
+                    return { kind: 'cancelled', reason: 'the Team gesture was already released; start a new one' }
+                  }
+                  state = 'running'
+                  try {
+                    if (!runner.isSessionScopeCurrent(scope)) {
+                      return { kind: 'cancelled', reason: 'the Session changed; no Team write was sent' }
+                    }
+                    const fresh = teamModePort.read(sessionId)
+                    if (fresh.kind !== 'ready') return { kind: 'rejected', reason: fresh.reason }
+                    // A fresh official read already proving the target is the
+                    // settlement: never append a duplicate `team/mode` event.
+                    if (fresh.enabled === enabled) return { kind: 'committed' }
+                    try {
+                      // The SAME Session writer barrier the model write uses.
+                      return await runner.withWriter(
+                        liveScope,
+                        () => teamModePort.setEnabled(sessionId, enabled, runner.signal),
+                      )
+                    } catch (error) {
+                      // Both refusals are proven pre-dispatch: nothing was sent.
+                      if (error instanceof TransitionInProgressError) {
+                        return { kind: 'cancelled', reason: 'another Session operation is in progress; try again' }
+                      }
+                      if (error instanceof SessionScopeSupersededError) {
+                        return { kind: 'cancelled', reason: 'the Session changed before the Team write' }
+                      }
+                      return {
+                        kind: 'indeterminate',
+                        reason: `the Team write could not be dispatched: ${safeErrorMessage(error)}`,
+                      }
+                    }
+                  } finally {
+                    state = 'settled'
+                    if (abandonRequested) release()
+                  }
+                },
+              },
+            }
+          },
+        }
         // ONE request object for BOTH presentations: the quick menu and the full
         // catalogue share the same subject, entry hint, read owner, writer and
         // currentness fence, so no quick path can grow a second authority.
         const request: ModelPickerRequest = {
           subject,
           entry,
+          ...(teamControl === undefined ? {} : { team: teamControl }),
           isCurrent: () => surfaceToken === modelSurfaceToken && ownerCurrent(),
           retry: () => loadOnce(),
           // The picker owns presentation only: brand the effort id here so the

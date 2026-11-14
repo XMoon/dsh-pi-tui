@@ -22,6 +22,12 @@ import {
   type ModelPickerCurrent,
 } from '../../src/tui/pickers/model-picker.ts'
 import type { ModelDirectoryDto, ModelDirectoryModelDto, ModelSelectionDto } from '../../src/runtime/catalog-port.ts'
+import type { TeamModeSnapshot, TeamModeWriteOutcome } from '../../src/runtime/team-mode-port.ts'
+import type {
+  ModelPickerTeamAdmission,
+  ModelPickerTeamAttempt,
+  ModelPickerTeamControl,
+} from '../../src/app/command/model-presentation.ts'
 import { currentPalette } from '../../src/tui/theme/runtime.ts'
 import { runOwned, type OwnedTaskOptions } from '../../src/runtime/process/tasks.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
@@ -66,6 +72,18 @@ const cellIndexOf = (vt: VirtualTerminal, row: number, needle: string): number =
 }
 const rowLine = (vt: VirtualTerminal, label: string): string | undefined =>
   contentLinesOf(vt).find(line => line.includes(label))
+/** The Reasoning Effort strip line: wide `Reasoning Effort …` or compact
+ *  `Effort: …`. Effort lives here, NEVER on a model row, in the new contract. */
+const effortStripLine = (vt: VirtualTerminal): string | undefined =>
+  contentLinesOf(vt).find(line => line.includes('Reasoning Effort') || line.includes('Effort:'))
+/** The bracketed draft token of the wide effort strip, e.g. `[High]`. */
+const effortDraft = (vt: VirtualTerminal): string | undefined => {
+  const match = effortStripLine(vt)?.match(/\[[^\]]+\]/u)
+  return match?.[0]
+}
+/** The effort strip line inside a bare `picker.render(width)` array. */
+const effortLineOf = (lines: readonly string[]): string | undefined =>
+  lines.find(line => line.includes('Reasoning Effort') || line.includes('Effort:'))
 
 interface EffortShape {
   readonly id: string
@@ -191,6 +209,123 @@ test('projection maps provider failures to inert failure rows', () => {
   assert.equal(projection.failures[0]!.message, 'connection refused')
 })
 
+// ── fake Agent Team seam ─────────────────────────────────────────────────
+
+interface Deferred<T> {
+  readonly promise: Promise<T>
+  resolve(value: T): void
+  reject(error?: unknown): void
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void
+  let reject!: (error?: unknown) => void
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+
+/** One admitted team attempt whose `run()` records the write target and settles
+ *  with either the queued manual/outcome value or a plain commit. */
+class FakeTeamAttempt implements ModelPickerTeamAttempt {
+  readonly enabled: boolean
+  readonly confirmRequired: boolean
+  private readonly team: FakeTeam
+  runCalls = 0
+  abandonCalls = 0
+
+  constructor(team: FakeTeam, enabled: boolean, confirmRequired: boolean) {
+    this.team = team
+    this.enabled = enabled
+    this.confirmRequired = confirmRequired
+  }
+
+  run(): Promise<TeamModeWriteOutcome> {
+    this.runCalls += 1
+    this.team.setEnabledCalls.push(this.enabled)
+    return this.team.consumeRun(this.enabled)
+  }
+
+  abandon(): void {
+    this.abandonCalls += 1
+  }
+}
+
+/** A tiny in-memory {@link ModelPickerTeamControl}: holds a snapshot, records
+ *  `begin()` admissions and `run()` write targets, fans listeners out on every
+ *  snapshot change, and returns chosen admissions. A committed run reflects the
+ *  new value in the snapshot (so a fresh read proves it). */
+class FakeTeam implements ModelPickerTeamControl {
+  snapshot: TeamModeSnapshot
+  beginCalls = 0
+  readonly setEnabledCalls: boolean[] = []
+  readonly attempts: FakeTeamAttempt[] = []
+  nextConfirmRequired = false
+  nextRefusal: string | undefined
+  private readonly listeners = new Set<() => void>()
+  private readonly runQueue: Array<{ deferred?: Deferred<TeamModeWriteOutcome>; outcome?: TeamModeWriteOutcome }> = []
+
+  constructor(snapshot: TeamModeSnapshot) {
+    this.snapshot = snapshot
+  }
+
+  read(): TeamModeSnapshot {
+    return this.snapshot
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+
+  emit(): void {
+    for (const listener of [...this.listeners]) listener()
+  }
+
+  setSnapshot(next: TeamModeSnapshot): void {
+    this.snapshot = next
+    this.emit()
+  }
+
+  /** Queue a manually-resolved run: the attempt's `run()` awaits the returned
+   *  deferred, so a test can settle WHEN it wants. */
+  queueManualRun(): Deferred<TeamModeWriteOutcome> {
+    const handle = deferred<TeamModeWriteOutcome>()
+    this.runQueue.push({ deferred: handle })
+    return handle
+  }
+
+  queueOutcome(outcome: TeamModeWriteOutcome): void {
+    this.runQueue.push({ outcome })
+  }
+
+  begin(): ModelPickerTeamAdmission {
+    this.beginCalls += 1
+    if (this.nextRefusal !== undefined) {
+      const reason = this.nextRefusal
+      this.nextRefusal = undefined
+      return { kind: 'refused', reason }
+    }
+    const enabled = this.snapshot.kind === 'ready' ? !this.snapshot.enabled : true
+    const attempt = new FakeTeamAttempt(this, enabled, this.nextConfirmRequired)
+    this.nextConfirmRequired = false
+    this.attempts.push(attempt)
+    return { kind: 'admitted', attempt }
+  }
+
+  async consumeRun(enabled: boolean): Promise<TeamModeWriteOutcome> {
+    const entry = this.runQueue.shift()
+    const outcome = entry?.deferred !== undefined
+      ? await entry.deferred.promise
+      : entry?.outcome ?? { kind: 'committed' as const }
+    if (outcome.kind === 'committed') {
+      const history = this.snapshot.kind === 'ready' ? this.snapshot.modelRequestHistory : 'none'
+      this.snapshot = { kind: 'ready', enabled, modelRequestHistory: history }
+      this.emit()
+    }
+    return outcome
+  }
+}
+
 // ── component harness ────────────────────────────────────────────────────
 
 interface HarnessOptions {
@@ -204,12 +339,19 @@ interface HarnessOptions {
   fullscreen?: boolean
   apply?: (selection: ModelSelectionDto) => Promise<ModelApplyOutcome> | ModelApplyOutcome
   outcome?: ModelApplyOutcome
+  /** The fake Team control; `false` mounts WITHOUT a Team seam (the row then
+   *  reports a truthful unavailable). Defaults to a ready, saved-OFF control. */
+  team?: FakeTeam | false
+  /** Terminal size (defaults to 80×24). */
+  columns?: number
+  rows?: number
 }
 
 interface Harness {
   vt: VirtualTerminal
   app: TuiApp
   picker: ModelPicker
+  team: FakeTeam | undefined
   applied: ModelSelectionDto[]
   closeCount: () => number
   close: () => void
@@ -217,13 +359,16 @@ interface Harness {
 }
 
 async function openPicker(options: HarnessOptions): Promise<Harness> {
-  const vt = new VirtualTerminal(80, 24)
+  const vt = new VirtualTerminal(options.columns ?? 80, options.rows ?? 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   startedApps.add(app)
   if (options.fullscreen === true) app.setFullscreen(true)
   const applied: ModelSelectionDto[] = []
   const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
+  const team = options.team === false
+    ? undefined
+    : options.team ?? new FakeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
   let closeCount = 0
   const picker = new ModelPicker({
     subject: { sessionless: options.sessionless ?? false },
@@ -236,6 +381,10 @@ async function openPicker(options: HarnessOptions): Promise<Harness> {
     runOwned: <T>(label: string, task: () => T | Promise<T>, ownedOptions: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
       runOwned(label, task, { ...ownedOptions, diag })
     },
+    ...(team === undefined ? {} : { team }),
+    // Wire the independent OFF confirmation seat through the real TuiApp seam:
+    // its write/read stay the fake Team's, so the seat can outlive the picker.
+    openTeamDisableConfirmation: (request) => app.openTeamDisableConfirmation(request),
   })
   let closer: () => void = () => {}
   closer = app.openModelPicker(picker)
@@ -250,6 +399,7 @@ async function openPicker(options: HarnessOptions): Promise<Harness> {
     vt,
     app,
     picker,
+    team,
     applied,
     closeCount: () => closeCount,
     close: () => closer(),
@@ -483,16 +633,17 @@ test('multiple provider failures collapse into one Unavailable section', async (
 
 // ── inline effort ────────────────────────────────────────────────────────
 
-test('the inline effort seeds from the configured/current explicit effort', async () => {
+test('the effort strip seeds from the configured/current explicit effort', async () => {
   const h = await openPicker({
     directory: EFFORT_DIRECTORY,
     current: { provider: 'p1', model: 'sol', reasoningEffort: 'high' },
   })
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort ‹High›'), `Sol must show the configured effort:\n${viewOf(h.vt)}`)
+  assert.equal(effortDraft(h.vt), '[High]', `the strip must seed the configured effort:\n${viewOf(h.vt)}`)
+  assert.match(effortStripLine(h.vt)!, /Low\s+Medium\s+\[High\]\s+XHigh/u)
   h.app.stop()
 })
 
-test('a sessionless inline effort seeds from the global default, with no current badge', async () => {
+test('a sessionless effort strip seeds from the global default, with no current badge', async () => {
   const directory = makeDirectory({
     groups: [{ id: 'p1', name: 'P1', models: [model('sol', { name: 'Sol', efforts: [
       { id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' },
@@ -506,7 +657,7 @@ test('a sessionless inline effort seeds from the global default, with no current
   })
   const sol = rowLine(h.vt, 'Sol')!
   assert.ok(!sol.includes('[current]'), `sessionless must not show a current chip: ${sol}`)
-  assert.ok(sol.includes('effort ‹High›'), `the global default effort must seed the inline value: ${sol}`)
+  assert.equal(effortDraft(h.vt), '[High]', `the global default effort must seed the strip: ${effortStripLine(h.vt)}`)
   h.app.stop()
 })
 
@@ -515,11 +666,13 @@ test('a non-current model seeds its own default effort, never the Session effort
     directory: EFFORT_DIRECTORY,
     current: { provider: 'p1', model: 'plain' },
   })
-  const sol = rowLine(h.vt, 'Sol')!
-  assert.ok(sol.includes('effort ‹Medium›'), `Sol must use its own default (medium): ${sol}`)
-  assert.ok(!sol.includes('[current]'), `a non-current model must not be current: ${sol}`)
-  const plain = rowLine(h.vt, 'Plain')!
-  assert.ok(!plain.includes('effort ‹'), `a no-effort model must not show an effort token: ${plain}`)
+  h.vt.sendInput(UP) // select Sol (the effort model; current is Plain)
+  await h.vt.waitForRender()
+  assert.equal(effortDraft(h.vt), '[Medium]', `Sol must use its own default (medium): ${effortStripLine(h.vt)}`)
+  assert.ok(!rowLine(h.vt, 'Sol')?.includes('[current]'), 'a non-current model must not be current')
+  h.vt.sendInput(DOWN) // select Plain (no reasoning metadata)
+  await h.vt.waitForRender()
+  assert.ok(effortStripLine(h.vt)?.includes('No reasoning effort'), `a no-effort model has no candidates: ${effortStripLine(h.vt)}`)
   h.app.stop()
 })
 
@@ -529,39 +682,36 @@ test('a model without a concrete default shows provider default', async () => {
     default: { provider: 'p1', model: 'nodefault' },
   })
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'nodefault' } })
-  assert.ok(rowLine(h.vt, 'No Default')?.includes('effort ‹Default›'), viewOf(h.vt))
+  assert.equal(effortDraft(h.vt), '[Default]', viewOf(h.vt))
   h.vt.sendInput(ENTER) // focus: provider default is a real candidate
   await h.vt.waitForRender()
   assert.deepEqual(h.applied, [], 'focusing must not write')
-  assert.ok(rowLine(h.vt, 'No Default')?.includes('effort [ Default ]'), viewOf(h.vt))
+  assert.ok(viewOf(h.vt).includes('←→ effort'), 'the effort zone owns the keys')
   h.vt.sendInput(ENTER) // commit
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'nodefault' }], 'provider default must omit reasoningEffort')
   h.app.stop()
 })
 
-test('Enter focuses the inline effort; ←/→ cycles it and wraps', async () => {
+test('Enter focuses the effort strip; ←/→ cycles it and wraps', async () => {
   const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort ‹Medium›'), viewOf(h.vt))
+  assert.equal(effortDraft(h.vt), '[Medium]', viewOf(h.vt))
   h.vt.sendInput(ENTER) // first Enter: focus the effort, NO write
   await h.vt.waitForRender()
   assert.deepEqual(h.applied, [], 'the first Enter must not write')
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ Medium ]'), `focused token: ${viewOf(h.vt)}`)
+  assert.ok(viewOf(h.vt).includes('←→ effort'), `the effort zone must own the keys: ${viewOf(h.vt)}`)
+  assert.equal(effortDraft(h.vt), '[Medium]')
   h.vt.sendInput(RIGHT)
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ High ]'), `→ High:
-${viewOf(h.vt)}`)
+  assert.equal(effortDraft(h.vt), '[High]', `→ High:\n${viewOf(h.vt)}`)
   h.vt.sendInput(RIGHT)
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ XHigh ]'), `→ XHigh:
-${viewOf(h.vt)}`)
+  assert.equal(effortDraft(h.vt), '[XHigh]', `→ XHigh:\n${viewOf(h.vt)}`)
   h.vt.sendInput(RIGHT)
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ Low ]'), `→ wraps to Low:
-${viewOf(h.vt)}`)
+  assert.equal(effortDraft(h.vt), '[Low]', `→ wraps to Low:\n${viewOf(h.vt)}`)
   h.vt.sendInput(LEFT)
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ XHigh ]'), `← wraps back to XHigh:
-${viewOf(h.vt)}`)
+  assert.equal(effortDraft(h.vt), '[XHigh]', `← wraps back to XHigh:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
@@ -574,18 +724,20 @@ test('the effort focus is the SAME single view; Esc backs out, a second Esc clos
 ${view}`)
   assert.ok(view.includes('Models'), view)
   assert.equal(h.closeCount(), 0, 'no write, no close on focus')
+  assert.ok(view.includes('←→ effort'), 'the effort zone owns the keys')
   h.vt.sendInput('\x1b') // Esc: back to model mode
   await h.vt.waitForRender()
   assert.equal(h.closeCount(), 0, 'Esc from effort focus must not close')
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort ‹Medium›'), `back to the inactive token:
+  assert.ok(!viewOf(h.vt).includes('←→ effort'), `back to the model-mode hint:
 ${viewOf(h.vt)}`)
+  assert.equal(effortDraft(h.vt), '[Medium]', 'the draft is kept')
   h.vt.sendInput('\x1b') // Esc: close
   await h.vt.waitForRender()
   assert.equal(h.closeCount(), 1, 'the second Esc closes')
   h.app.stop()
 })
 
-test('per-model inline effort state is retained across model moves', async () => {
+test('per-model effort draft is retained across model moves', async () => {
   const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
   h.vt.sendInput(ENTER) // focus Sol
   h.vt.sendInput(RIGHT) // medium -> high
@@ -594,15 +746,14 @@ test('per-model inline effort state is retained across model moves', async () =>
   await h.vt.waitForRender()
   h.vt.sendInput(DOWN) // move to Plain
   await h.vt.waitForRender()
+  assert.ok(effortStripLine(h.vt)?.includes('No reasoning effort'), `Plain has no effort: ${effortStripLine(h.vt)}`)
   h.vt.sendInput(UP) // back to Sol
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort ‹High›'), `Sol's picker-local effort must persist:\n${viewOf(h.vt)}`)
-  const plain = rowLine(h.vt, 'Plain')!
-  assert.ok(!plain.includes('effort ‹'), plain)
+  assert.equal(effortDraft(h.vt), '[High]', `Sol's picker-local effort must persist:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
-test('inline effort state uses the full (provider, model) identity', async () => {
+test('effort draft uses the full (provider, model) identity', async () => {
   const directory = makeDirectory({
     groups: [
       { id: 'p1', name: 'One', models: [model('m', { name: 'P1 Model', efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'low' })] },
@@ -614,8 +765,12 @@ test('inline effort state uses the full (provider, model) identity', async () =>
   h.vt.sendInput(ENTER) // focus p1
   h.vt.sendInput(RIGHT) // p1 -> high
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'P1 Model')?.includes('effort [ High ]'), viewOf(h.vt))
-  assert.ok(rowLine(h.vt, 'P2 Model')?.includes('effort ‹Low›'), `the same-id other provider keeps its own value:\n${viewOf(h.vt)}`)
+  assert.equal(effortDraft(h.vt), '[High]', viewOf(h.vt))
+  h.vt.sendInput('\x1b') // leave effort mode
+  await h.vt.waitForRender()
+  h.vt.sendInput(DOWN) // move to P2 Model
+  await h.vt.waitForRender()
+  assert.equal(effortDraft(h.vt), '[Low]', `the same-id other provider keeps its own value:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
@@ -800,7 +955,7 @@ test('a Save Location prompt suspends the picker and restores it on settle', asy
   h.app.stop()
 })
 
-test('a fullscreen swap remounts the SAME picker with its query and inline effort intact', async () => {
+test('a fullscreen swap remounts the SAME picker with its query and effort draft intact', async () => {
   const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, fullscreen: true })
   h.vt.sendInput('sol') // filter the list to Sol
   await h.vt.waitForRender()
@@ -814,7 +969,7 @@ test('a fullscreen swap remounts the SAME picker with its query and inline effor
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
   assert.ok(view.includes('Models'), `the picker must survive the swap:\n${view}`)
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort ‹High›'), `the inline effort must survive:\n${view}`)
+  assert.equal(effortDraft(h.vt), '[High]', `the effort draft must survive:\n${view}`)
   assert.ok(!view.includes('Plain'), `the query must survive the swap:\n${view}`)
   assert.notEqual(h.app.focusedComponentForTest(), h.app.seatEditorForTest().component,
     'the remounted picker must hold PHYSICAL focus')
@@ -918,11 +1073,11 @@ test('plain Left/Right move the search cursor (loaded)', async () => {
 
 test('plain Left/Right never change the effort', async () => {
   const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort ‹Medium›'), viewOf(h.vt))
+  assert.equal(effortDraft(h.vt), '[Medium]', viewOf(h.vt))
   h.vt.sendInput(RIGHT)
   h.vt.sendInput(LEFT)
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort ‹Medium›'), `Left/Right must not change the effort:\n${viewOf(h.vt)}`)
+  assert.equal(effortDraft(h.vt), '[Medium]', `Left/Right must not change the effort:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
@@ -958,13 +1113,15 @@ test('a delayed thrown write repaints the list after Selecting…', async () => 
 
 // ── preserved mouse stale-geometry + tiny-grant contracts (round-1 → round-2)
 
-test('an 80x6 terminal still shows the selected model primary row and its arrow', async () => {
+test('a tiny 80x6 terminal keeps the Team row and footer inside the frame (no half-cut strip)', async () => {
   const h = await openPicker({ directory: EIGHT_MODELS, current: { provider: 'p1', model: 'm0' } })
   h.vt.resize(80, 6)
   await h.vt.waitForRender()
   assert.ok(linesOf(h.vt).length <= 6, `frame must fit the terminal:\n${viewOf(h.vt)}`)
-  assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('> ') && line.includes('Model 0')),
-    `the selected primary row/arrow must survive the tiny grant:\n${viewOf(h.vt)}`)
+  // The composed strips are whole rows: at a grant below FIXED_ROWS+2 the
+  // overlay keeps the actionable Team row + the footer, never a cut chip.
+  assert.ok(rowLine(h.vt, 'Agent Team') !== undefined, `the Team row must stay inside:\n${viewOf(h.vt)}`)
+  assert.ok(rowLine(h.vt, 'Tab Team') !== undefined, `the footer hint must stay inside:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
@@ -1049,7 +1206,7 @@ test('search matches a provider display name and a provider id independently', a
   h.app.stop()
 })
 
-test('a current model that is also the default composes [current] [default] · effort', async () => {
+test('a current model that is also the default shows [current] [default] and its effort in the strip', async () => {
   const directory = makeDirectory({
     groups: [{ id: 'p1', name: 'P1', models: [model('sol', { name: 'Sol', efforts: [
       { id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' },
@@ -1057,8 +1214,10 @@ test('a current model that is also the default composes [current] [default] · e
     default: { provider: 'p1', model: 'sol' },
   })
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol', reasoningEffort: 'medium' } })
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('[current] [default] · effort ‹Medium›'),
-    `the state chips and the inline effort must compose:\n${viewOf(h.vt)}`)
+  assert.ok(rowLine(h.vt, 'Sol')?.includes('[current] [default]'),
+    `the row keeps only the state chips:\n${viewOf(h.vt)}`)
+  assert.ok(!rowLine(h.vt, 'Sol')?.includes('effort'), `the row must not carry effort:\n${viewOf(h.vt)}`)
+  assert.equal(effortDraft(h.vt), '[Medium]', `the strip carries the effort:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
@@ -1165,12 +1324,13 @@ test('a no-effort model has no effort focus and commits in one Enter', async () 
   const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
   h.vt.sendInput(DOWN) // move to Plain (no reasoning metadata)
   await h.vt.waitForRender()
-  assert.ok(!rowLine(h.vt, 'Plain')?.includes('effort ‹'), `Plain starts effort-free:\n${viewOf(h.vt)}`)
+  assert.ok(effortStripLine(h.vt)?.includes('No reasoning effort'), `Plain has no effort candidates:\n${viewOf(h.vt)}`)
+  assert.ok(!viewOf(h.vt).includes('←→ effort'), `a no-effort model has no effort focus:\n${viewOf(h.vt)}`)
   h.vt.sendInput(RIGHT)
   h.vt.sendInput(LEFT)
   await h.vt.waitForRender()
-  assert.ok(!rowLine(h.vt, 'Plain')?.includes('effort ‹'),
-    `←/→ must not invent an effort token on a no-effort model:\n${viewOf(h.vt)}`)
+  assert.ok(effortStripLine(h.vt)?.includes('No reasoning effort'),
+    `←/→ must not invent an effort on a no-effort model:\n${viewOf(h.vt)}`)
   h.vt.sendInput(ENTER)
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'plain' }], 'one Enter commits, omitting reasoningEffort')
   h.app.stop()
@@ -1192,49 +1352,43 @@ const LAYOUT_DIRECTORY = makeDirectory({
 
 const renderAt = (h: Harness, width: number): string[] => h.picker.render(width).map(stripAnsi)
 
-test('the /model selected row is role 8 textStrong and the effort token keeps its own role-4 textDim ink', async () => {
-  // Two effort models: Sol is the selected current+default row, Other is an
-  // UNSELECTED row that also carries an effort token.
+test('the /model selected row is role 8 textStrong and the effort strip keeps its own inks', async () => {
   const directory = makeDirectory({
     groups: [{ id: 'p1', name: 'P1', models: [
-      model('sol', { name: 'Sol', efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' }),
-      model('other', { name: 'Other', efforts: [{ id: 'low', name: 'Low' }], defaultEffort: 'low' }),
+      model('sol', { name: 'Sol', efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'high' }),
     ] }],
     default: { provider: 'p1', model: 'sol' },
   })
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol' } })
   const selectedSol = rowOf(h.vt, 'Sol')
   // Role 8: the selected row's LABEL is bold `textStrong` (only the cursor
-  // glyph is `primary`). It used to be the terminal default (chalk.bold only).
+  // glyph is `primary`).
   assert.equal(h.vt.getCellFgRgb(selectedSol, cellIndexOf(h.vt, selectedSol, 'Sol')), hexToRgb(currentPalette.textStrong),
     `the selected row label is role 8 textStrong:\n${viewOf(h.vt)}`)
-  // Role 4: the effort token carries its OWN `textDim` span, so a nested chip's
-  // reset can never drop it to the terminal default — on either selection state.
-  assert.equal(h.vt.getCellFgRgb(selectedSol, cellIndexOf(h.vt, selectedSol, 'effort ‹')), hexToRgb(currentPalette.textDim),
-    `the effort token keeps its own textDim ink on the SELECTED row:\n${viewOf(h.vt)}`)
-  const unselectedOther = rowOf(h.vt, 'Other')
-  assert.equal(h.vt.getCellFgRgb(unselectedOther, cellIndexOf(h.vt, unselectedOther, 'effort ‹')), hexToRgb(currentPalette.textDim),
-    `the effort token keeps its own textDim ink on the UNSELECTED row:\n${viewOf(h.vt)}`)
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('[current] [default] · effort ‹High›'),
-    `the chips come first and the effort token last:\n${viewOf(h.vt)}`)
+  // The effort strip paints the DRAFT token textStrong and every NON-draft
+  // candidate label the quieter textDim ink.
+  const stripRow = rowOf(h.vt, 'Reasoning Effort')
+  assert.equal(h.vt.getCellFgRgb(stripRow, cellIndexOf(h.vt, stripRow, 'Low')), hexToRgb(currentPalette.textDim),
+    `a non-draft effort candidate keeps textDim:\n${viewOf(h.vt)}`)
+  assert.equal(h.vt.getCellFgRgb(stripRow, cellIndexOf(h.vt, stripRow, '[High]')), hexToRgb(currentPalette.textStrong),
+    `the draft effort token is textStrong when unfocused:\n${viewOf(h.vt)}`)
+  assert.ok(rowLine(h.vt, 'Sol')?.includes('[current] [default]'),
+    `the row keeps only the state chips:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
 test('a normal-width badge row stays on one line', async () => {
   const h = await openPicker({ directory: LAYOUT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
   const lines = renderAt(h, 72)
-  assert.ok(lines.some(line => line.includes('GPT-5.6 Sol') && line.includes('[current] [default] · effort ‹High›')),
+  assert.ok(lines.some(line => line.includes('GPT-5.6 Sol') && line.includes('[current] [default]')),
     `must stay single-line at 72:\n${lines.join('\n')}`)
   h.app.stop()
 })
 
 test('the badge wraps exactly when label + badge no longer fit (no width threshold)', async () => {
   const h = await openPicker({ directory: LAYOUT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
-  const badge = '[current] [default] · effort ‹High›'
-  // The wrap is measured from the WIDEST form (the active `[ High ]`), so the
-  // single/two-line boundary is that width, not the inactive rendering.
-  const measure = '[current] [default] · effort [ High ]'
-  const exact = 2 + visibleWidth('GPT-5.6 Sol') + 2 + visibleWidth(measure)
+  const badge = '[current] [default]'
+  const exact = 2 + visibleWidth('GPT-5.6 Sol') + 2 + visibleWidth(badge)
   const fits = renderAt(h, exact)
   assert.ok(fits.some(line => line.includes('GPT-5.6 Sol') && line.includes(badge)),
     `width ${exact} must be single-line:\n${fits.join('\n')}`)
@@ -1250,11 +1404,13 @@ test('an ultra-narrow row keeps the model identity before the badge', async () =
   const h = await openPicker({ directory: LAYOUT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
   const lines = renderAt(h, 26)
   assert.ok(lines.some(line => line.includes('GPT-5.6 Sol')), `identity must never disappear:\n${lines.join('\n')}`)
-  // §15: at ultra-narrow width the factual prefixes may be dropped, but the
-  // effort token (the value being chosen) must survive.
-  assert.ok(lines.some(line => line.includes('‹High›')), `the effort token must survive:\n${lines.join('\n')}`)
-  assert.ok(!lines.some(line => line.includes('GPT-5.6 Sol') && line.includes('‹High›')),
+  // The chosen effort lives on the strip, not the row; the state chips wrap to
+  // an inert second row and never share the truncated identity row.
+  assert.ok(lines.some(line => line.includes('[current]') || line.includes('[default]')),
+    `the state chips must survive:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.includes('GPT-5.6 Sol') && line.includes('[current]')),
     `identity and badge must not share the truncated row:\n${lines.join('\n')}`)
+  assert.ok(effortLineOf(lines)?.includes('Effort: High'), `the effort lives on the strip:\n${lines.join('\n')}`)
   h.app.stop()
 })
 
@@ -1276,18 +1432,15 @@ test('effort cycling never toggles a row between one and two lines', async () =>
     default: { provider: 'p1', model: 'sol' },
   })
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol', reasoningEffort: 'a' } })
-  // The SHORT badge would fit here, but the LONGEST candidate does not, so the
-  // stable measurement must wrap from the start.
-  const short = '[current] [default] · effort ‹A›'
-  const width = 2 + visibleWidth('Sol') + 2 + visibleWidth(short)
-  const before = renderAt(h, width)
-  assert.ok(!before.some(line => line.includes('Sol') && line.includes('effort ‹A›')),
-    `the wrap must be decided by the widest candidate:\n${before.join('\n')}`)
+  // The chips-only row has a fixed height regardless of the effort strip, so
+  // cycling the strip's draft can never change the physical row count.
+  const before = renderAt(h, 20)
   const heightBefore = before.length
+  assert.ok(before.some(line => line.includes('Sol')), before.join('\n'))
   h.vt.sendInput(ENTER) // focus the effort, then cycle to the long label
   h.vt.sendInput(RIGHT)
   await h.vt.waitForRender()
-  const after = renderAt(h, width)
+  const after = renderAt(h, 20)
   assert.equal(after.length, heightBefore, `cycling must not change the frame height:\n${after.join('\n')}`)
   assert.ok(after.some(line => line.includes('Sol')), after.join('\n'))
   h.app.stop()
@@ -1310,12 +1463,13 @@ test('Enter focuses the effort even with an active query, and the query survives
   h.vt.sendInput(ENTER)
   h.vt.sendInput(RIGHT)
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ High ]'), viewOf(h.vt))
+  assert.ok(viewOf(h.vt).includes('←→ effort'), `the effort zone must own the keys:\n${viewOf(h.vt)}`)
+  assert.equal(effortDraft(h.vt), '[High]', viewOf(h.vt))
   assert.ok(viewOf(h.vt).includes('> sol'), `the query must not change:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
-test('the effort row shows the human name while the payload carries the protocol id', async () => {
+test('the effort strip shows the human name while the payload carries the protocol id', async () => {
   const directory = makeDirectory({
     groups: [{ id: 'p1', name: 'P1', models: [model('m', { name: 'Zed', efforts: [
       { id: 'xhigh', name: 'Extra High' },
@@ -1323,11 +1477,12 @@ test('the effort row shows the human name while the payload carries the protocol
     default: { provider: 'p1', model: 'm' },
   })
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'm' } })
-  assert.ok(rowLine(h.vt, 'Zed')?.includes('effort ‹Extra High›'), viewOf(h.vt))
-  assert.ok(!rowLine(h.vt, 'Zed')?.includes('effort ‹xhigh›'), `the protocol id must not render:\n${viewOf(h.vt)}`)
+  assert.ok(effortStripLine(h.vt)?.includes('[Extra High]'), viewOf(h.vt))
+  assert.ok(!effortStripLine(h.vt)?.includes('xhigh'), `the protocol id must not render:\n${viewOf(h.vt)}`)
   h.vt.sendInput(ENTER) // focus
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Zed')?.includes('effort [ Extra High ]'), `active token:\n${viewOf(h.vt)}`)
+  assert.ok(viewOf(h.vt).includes('←→ effort'), `the effort zone must own the keys:\n${viewOf(h.vt)}`)
+  assert.ok(effortStripLine(h.vt)?.includes('[Extra High]'), `draft:\n${viewOf(h.vt)}`)
   assert.deepEqual(h.applied, [], 'focusing must not write')
   h.vt.sendInput(ENTER) // commit
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'm', reasoningEffort: 'xhigh' }])
@@ -1343,19 +1498,19 @@ test('provider default cycles to the first and last advertised effort', async ()
     default: { provider: 'p1', model: 'm' },
   })
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'm' } })
-  assert.ok(rowLine(h.vt, 'Zed')?.includes('effort ‹Default›'), viewOf(h.vt))
+  assert.equal(effortDraft(h.vt), '[Default]', viewOf(h.vt))
   h.vt.sendInput(ENTER) // focus
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Zed')?.includes('effort [ Default ]'), viewOf(h.vt))
+  assert.equal(effortDraft(h.vt), '[Default]', viewOf(h.vt))
   h.vt.sendInput(RIGHT)
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Zed')?.includes('effort [ Low ]'), `→ first effort:\n${viewOf(h.vt)}`)
+  assert.equal(effortDraft(h.vt), '[Low]', `→ first effort:\n${viewOf(h.vt)}`)
   h.vt.sendInput(LEFT)
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Zed')?.includes('effort [ Default ]'), `← provider default:\n${viewOf(h.vt)}`)
+  assert.equal(effortDraft(h.vt), '[Default]', `← provider default:\n${viewOf(h.vt)}`)
   h.vt.sendInput(LEFT)
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Zed')?.includes('effort [ High ]'), `← wraps to the last effort:\n${viewOf(h.vt)}`)
+  assert.equal(effortDraft(h.vt), '[High]', `← wraps to the last effort:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
@@ -1394,7 +1549,7 @@ test('a wrapped badge row is mouse-inert while the model row focuses the effort'
   const h = await openPicker({ directory: LAYOUT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
   const lines = renderAt(h, 26)
   const modelRow = lines.findIndex(line => line.includes('GPT-5.6 Sol'))
-  const badgeRow = lines.findIndex(line => line.includes('‹High›') && !line.includes('GPT-5.6 Sol'))
+  const badgeRow = lines.findIndex(line => line.includes('[current]') && !line.includes('GPT-5.6 Sol'))
   assert.ok(modelRow >= 0 && badgeRow >= 0, lines.join('\n'))
   assert.equal(h.picker.handleMouse(mouse('press', 3, badgeRow, 26, 24)), undefined,
     'a press on the inert wrapped badge row must be rejected')
@@ -1402,7 +1557,7 @@ test('a wrapped badge row is mouse-inert while the model row focuses the effort'
   h.picker.handleMouse(mouse('press', 3, modelRow, 26, 24))
   h.picker.handleMouse(mouse('click', 3, modelRow, 26, 24))
   assert.deepEqual(h.applied, [], 'a reasoning-model click focuses the effort, it does not commit')
-  assert.ok(renderAt(h, 60).some(line => line.includes('effort [ High ]')), 'the click must focus the effort')
+  assert.ok(renderAt(h, 72).some(line => line.includes('←→ effort')), 'the click must focus the effort')
   h.vt.sendInput(ENTER)
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol', reasoningEffort: 'high' }])
   h.app.stop()
@@ -1451,24 +1606,17 @@ test('the badge is right-aligned against the row edge', async () => {
   const wide = renderAt(h, 72)
     .find(line => line.includes('GPT-5.6 Sol'))!
   assert.equal(visibleWidth(wide), 72, `a single-line badge row must sit flush right:\n${wide}`)
-  assert.ok(wide.trimEnd().endsWith('›'), `the badge must be the last thing on the row:\n${wide}`)
-  const narrow = renderAt(h, 34)
-    .find(line => line.includes('‹High›'))!
-  assert.equal(visibleWidth(narrow), 34, `the wrapped badge line must sit flush right:\n${narrow}`)
+  assert.ok(wide.trimEnd().endsWith(']'), `the badge must be the last thing on the row:\n${wide}`)
+  const narrow = renderAt(h, 20)
+    .find(line => line.includes('[current]') && !line.includes('GPT-5.6 Sol'))!
+  assert.equal(visibleWidth(narrow), 20, `the wrapped badge line must sit flush right:\n${narrow}`)
   h.app.stop()
 })
 
-test('a multi-line effort choice never truncates the model label', async () => {
-  // WITNESS for the projected-width comparison in `widestBadgeOf` (mutation-proven:
-  // reverting it to raw labels fails this test). The widest CANDIDATE badge is 30
-  // cells once projected — `[current] · effort [ A B C D ]` — but 29 measured on the
-  // RAW label, because `A\nB\nC\nD` is 4 cells raw and 7 projected. The wrap
-  // threshold is therefore exactly `2 + 20 + 2 + 29 = 53` cells, and this test
-  // renders AT it: the projected comparison sees 54 > 53 and WRAPS, painting the
-  // 20-cell model label in full, while the raw comparison sees 53 > 53 false and
-  // keeps the 32-cell badge inline — leaving the label `53 - 2 - 32 = 19` cells and
-  // cutting its last character. (Widths below 53 wrap either way, which is why the
-  // earlier 36..44 sweep could not discriminate.)
+test('a multi-line effort choice projects onto one strip line and never truncates the model label', async () => {
+  // The strip projects the multi-line effort name onto ONE physical line
+  // (`A B C D`), and the model row is decided only by its chips — so the full
+  // model label can never be truncated by an effort label's line breaks.
   const label = 'Model name 123456789' // exactly 20 cells
   const directory = makeDirectory({
     groups: [{ id: 'p1', name: 'P1', models: [model('sol', { name: label, efforts: [
@@ -1477,27 +1625,30 @@ test('a multi-line effort choice never truncates the model label', async () => {
     default: { provider: 'p2', model: 'ghost' },
   })
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol', reasoningEffort: 'medium' } })
-  h.vt.sendInput('\r') // focus this model's inline effort
+  h.vt.sendInput('\r') // focus this model's effort
   await h.vt.waitForRender()
   h.vt.sendInput('\x1b[C') // cycle Medium -> the multi-line choice
   await h.vt.waitForRender()
   const rows = h.picker.render(53).map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
-  assert.ok(rows.some(line => line.includes('[ A B C D ]')),
-    `the effort must really be on the multi-line choice:\n${rows.join('\n')}`)
+  assert.ok(rows.some(line => line.includes('A B C D')),
+    `the multi-line effort name must project onto ONE strip line:\n${rows.join('\n')}`)
   assert.ok(rows.some(line => line.includes(label)),
-    `the complete model label must survive — the projection must WRAP, not truncate it:\n${rows.join('\n')}`)
+    `the complete model label must survive:\n${rows.join('\n')}`)
+  for (const row of rows) {
+    assert.ok(!/[\r\n]/.test(row), `a row break leaked: ${JSON.stringify(row)}`)
+    assert.ok(visibleWidth(row) <= 53, `over-wide row: ${JSON.stringify(row)}`)
+  }
   h.app.stop()
 })
 
 test('a narrow wrapped badge drops whole chips instead of slicing one', async () => {
   const h = await openPicker({ directory: LAYOUT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, fullscreen: true })
-  // `[current] [default] · effort ‹High›` is 35 cells (two state chips a single
-  // space apart): at 34 the pre-painted `[current]` chip must drop WHOLE — the
-  // pre-paint makes a char-wise left trim produce both a `…rent]` fragment and,
-  // potentially, a broken SGR sequence.
-  for (const width of [34, 20]) {
+  // `[current] [default]` (19 cells, two state chips a single space apart): below
+  // 19 the pre-painted `[current]` chip must drop WHOLE — a char-wise left trim
+  // would produce both a `…rent]` fragment and a broken SGR sequence.
+  for (const width of [18, 16]) {
     const rows = h.picker.render(width)
-    const raw = rows.find(line => line.includes('‹High›') && !line.includes('GPT-5.6 Sol'))
+    const raw = rows.find(line => line.includes('…') && !line.includes('GPT-5.6 Sol'))
     assert.ok(raw !== undefined, `width ${width}: the wrapped badge row must render:\n${rows.join('\n')}`)
     // The escape-aware trim only lands BETWEEN tokens: no broken SGR survives.
     assert.ok(!raw.replace(/\x1b\[[0-9;]*m/g, '').includes('\x1b'),
@@ -1508,20 +1659,17 @@ test('a narrow wrapped badge drops whole chips instead of slicing one', async ()
     const wholeChips = badge.match(/\[[^\]]*\]/g) ?? []
     assert.equal((badge.match(/\]/g) ?? []).length, wholeChips.length,
       `width ${width}: a chip survived in fragments:\n${badge}`)
-    // The ellipsis may only prefix a WHOLE surviving unit (`…[default]` /
-    // `…effort ‹High›`), never a chip fragment (`…rent]`).
-    assert.match(badge, /…(?:\[(?:current|default)\]|effort ‹High›)/,
+    // The ellipsis may only prefix a WHOLE surviving chip.
+    assert.match(badge, /…\[(?:current|default)\]/,
       `width ${width}: the ellipsis landed inside a chip:\n${badge}`)
-    assert.ok(badge.includes('effort ‹High›'), `width ${width}: the effort token must survive whole:\n${badge}`)
+    assert.ok(badge.includes('[default]'), `width ${width}: the surviving chip must be whole:\n${badge}`)
     for (const line of rows) {
       assert.ok(visibleWidth(line) <= width, `width ${width}: over-wide row ${JSON.stringify(line)}`)
     }
   }
   // A real narrow frame: the dropped `[current]` leaves a WHOLE `[default]`, and
-  // the surviving chip keeps its own `textMuted` ink. The width is 38, not 40:
-  // the badge lost the two cells the ` · ` join used to spend, so it first
-  // overflows (and wraps) two columns earlier.
-  h.vt.resize(38, 24)
+  // the surviving chip keeps its own `textMuted` ink.
+  h.vt.resize(22, 24)
   await h.vt.waitForRender()
   const chipRow = rowOf(h.vt, '…')
   const frame = linesOf(h.vt)
@@ -1560,7 +1708,7 @@ test('a lone state chip is dropped whole, never sliced', async () => {
   h.app.stop()
 })
 
-test('a provider effort name containing ` · ` is never split into badge parts', async () => {
+test('a provider effort name containing ` · ` is never split into strip parts', async () => {
   const directory = makeDirectory({
     groups: [{ id: 'p1', name: 'P1', models: [
       model('sol', { name: 'Sol', efforts: [{ id: 'high', name: 'High · Adaptive' }], defaultEffort: 'high' }),
@@ -1568,24 +1716,17 @@ test('a provider effort name containing ` · ` is never split into badge parts',
     default: { provider: 'p1', model: 'sol' },
   })
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol' } })
-  const token = 'effort ‹High · Adaptive›'
-  // Badge parts: `[current]` + `[default]` chips then ONE effort `text` part.
-  // The buggy joined-text ` · `-split tears the name, drops the `effort ‹High`
-  // head and paints `…Adaptive›` at 25 and 24 columns.
-  for (const width of [26, 25, 24]) {
-    const rows = h.picker.render(width)
-    const raw = rows.find(line => line.includes('Adaptive'))
-    assert.ok(raw !== undefined, `width ${width}: the wrapped badge row must render:\n${rows.join('\n')}`)
-    // The trim still only lands BETWEEN whole SGR sequences.
-    assert.ok(!raw.replace(/\x1b\[[0-9;]*m/g, '').includes('\x1b'),
-      `width ${width}: a broken escape survived:\n${JSON.stringify(raw)}`)
-    const badge = stripAnsi(raw)
-    assert.ok(!badge.includes('…Adaptive›'),
-      `width ${width}: the name separator was treated as a part boundary:\n${badge}`)
-    assert.ok(badge.includes('‹High · Adaptive›'), `width ${width}: the effort name head must survive:\n${badge}`)
-    if (width >= 25) {
-      assert.ok(badge.includes(token), `width ${width}: the whole effort token must survive:\n${badge}`)
-    }
+  // The effort lives on the strip as ONE human label; its own ` · ` is never a
+  // badge-part boundary (it used to be torn when the row carried the effort).
+  const wide = h.picker.render(72).map(stripAnsi)
+  assert.ok(effortLineOf(wide)?.includes('[High · Adaptive]'),
+    `wide: the whole effort label must survive:\n${wide.join('\n')}`)
+  assert.ok(!effortLineOf(wide)?.includes('…Adaptive'),
+    `wide: the name separator must not be treated as a part boundary:\n${wide.join('\n')}`)
+  for (const width of [40, 34, 30]) {
+    const rows = h.picker.render(width).map(stripAnsi)
+    assert.ok(effortLineOf(rows)?.includes('Effort: High · Adaptive'),
+      `width ${width}: the compact strip must keep the whole label:\n${rows.join('\n')}`)
     for (const line of rows) {
       assert.ok(visibleWidth(line) <= width, `width ${width}: over-wide row ${JSON.stringify(line)}`)
     }
@@ -1594,9 +1735,9 @@ test('a provider effort name containing ` · ` is never split into badge parts',
 })
 
 test('a provider effort name carrying CR/LF never breaks the single-row contract', async () => {
-  // Two break forms in one frame: the current+default row (`[current]` +
-  // `[default]`, so the badge is long enough to trim) carries `\n`; the second
-  // row carries `\r\n`. Both names come verbatim from the model directory.
+  // Two break forms in one frame: Sol's effort name carries `\n`, Luna's `\r\n`.
+  // Both names come verbatim from the model directory and must be folded onto
+  // ONE physical strip row.
   const directory = makeDirectory({
     groups: [{ id: 'p1', name: 'P1', models: [
       model('sol', { name: 'Sol', efforts: [{ id: 'high', name: 'High\nAdaptive' }], defaultEffort: 'high' }),
@@ -1605,42 +1746,32 @@ test('a provider effort name carrying CR/LF never breaks the single-row contract
     default: { provider: 'p1', model: 'sol' },
   })
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol' } })
-  const cases = [
-    { rowNeedle: 'High', name: 'High Adaptive', whole: 'effort ‹High Adaptive›' },
-    { rowNeedle: 'Low', name: 'Low Adaptive', whole: 'effort ‹Low Adaptive›' },
-  ]
-  // Every width here takes the wrapped-badge path (the widest-form measurement
-  // is longer than the grant) and trims the effort PART.
-  for (const width of [26, 23, 20]) {
+  const assertStrip = (width: number, needle: string): void => {
     const rows = h.picker.render(width)
     for (const row of rows) {
       assert.equal(/[\r\n]/.test(row), false, `width ${width}: a row break leaked: ${JSON.stringify(row)}`)
       assert.ok(visibleWidth(row) <= width, `width ${width}: over-wide row ${JSON.stringify(row)}`)
     }
-    for (const { rowNeedle, name, whole } of cases) {
-      const raw = rows.find(line => line.includes(rowNeedle) && line.includes('‹'))
-      assert.ok(raw !== undefined, `width ${width}: ${rowNeedle}'s effort token must survive:\n${rows.join('\n')}`)
-      const badge = stripAnsi(raw)
-      assert.ok(badge.includes(`‹${name}›`),
-        `width ${width}: ${rowNeedle}'s name head must survive with the break projected to a space:\n${badge}`)
-      if (width >= 23) {
-        assert.ok(badge.includes(whole), `width ${width}: the whole effort token must survive:\n${badge}`)
-      }
-    }
+    assert.ok(effortLineOf(rows.map(stripAnsi))?.includes(needle),
+      `width ${width}: the folded effort name must survive on one strip line:\n${rows.map(stripAnsi).join('\n')}`)
   }
+  for (const width of [30, 26, 23]) assertStrip(width, 'High Adaptive')
+  h.vt.sendInput(DOWN) // select Luna
+  await h.vt.waitForRender()
+  for (const width of [30, 26, 23]) assertStrip(width, 'Low Adaptive')
   h.app.stop()
 })
 
 test('a narrow-to-wide unwrap transition fences the stale two-line hit map', async () => {
   const directory = makeDirectory({
     groups: [{ id: 'p1', name: 'P1', models: [
-      model('sol', { name: 'GPT-5.6 Sol Long Name', efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' }),
+      model('sol', { name: 'GPT-5.6 Sol Long Name Extra Wrapping', efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' }),
       model('m2', { name: 'Second' }),
     ] }],
     default: { provider: 'p1', model: 'sol' },
   })
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol' }, fullscreen: true })
-  // Narrow first: the long-named model wraps onto two lines.
+  // Narrow first: the long-named model (label + chips) wraps onto two lines.
   h.vt.resize(50, 24)
   await h.vt.waitForRender()
   assert.ok(linesOf(h.vt).some(line => line.includes('Second')), viewOf(h.vt))
@@ -1655,9 +1786,9 @@ test('a narrow-to-wide unwrap transition fences the stale two-line hit map', asy
   await h.vt.waitForRender()
   // The widened row renders on one line again...
   const wide = renderAt(h, 72)
-  const modelLine = wide.findIndex(line => line.includes('GPT-5.6 Sol Long Name'))
+  const modelLine = wide.findIndex(line => line.includes('GPT-5.6 Sol Long Name Extra Wrapping'))
   assert.ok(modelLine >= 0, wide.join('\n'))
-  assert.ok(wide[modelLine]!.includes('effort ‹High›'), `single line restored:\n${wide.join('\n')}`)
+  assert.ok(wide[modelLine]!.includes('[current] [default]'), `single line restored:\n${wide.join('\n')}`)
   // ...and the FRESH geometry (not the stale two-line one) resolves the click.
   const second = wide.findIndex(line => line.includes('Second'))
   assert.ok(second >= 0, wide.join('\n'))
@@ -1722,9 +1853,10 @@ test('a wrapped badge under a tight row grant stays in budget and keeps the sele
 test('effort edit mode consumes ↑/↓ and printable keys (no model move, no query/effort change)', async () => {
   const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
   assert.ok(rowLine(h.vt, 'Plain') !== undefined, `Plain must be a neighbour model:\n${viewOf(h.vt)}`)
-  h.vt.sendInput(ENTER) // focus the inline effort
+  h.vt.sendInput(ENTER) // focus the effort
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ Medium ]'), viewOf(h.vt))
+  assert.ok(viewOf(h.vt).includes('←→ effort'), viewOf(h.vt))
+  assert.equal(effortDraft(h.vt), '[Medium]')
   const searchBefore = contentLinesOf(h.vt).find(line => line.trimStart().startsWith('>'))!
   h.vt.sendInput(DOWN) // would move Sol -> Plain in model mode
   h.vt.sendInput(UP)
@@ -1732,7 +1864,7 @@ test('effort edit mode consumes ↑/↓ and printable keys (no model move, no qu
   h.vt.sendInput('9')
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ Medium ]'), `the effort must not change:\n${view}`)
+  assert.equal(effortDraft(h.vt), '[Medium]', `the effort must not change:\n${view}`)
   assert.ok(!contentLinesOf(h.vt).some(line => line.startsWith('> ') && line.includes('Plain')),
     `↑/↓ must not move the selected model:\n${view}`)
   const searchAfter = contentLinesOf(h.vt).find(line => line.trimStart().startsWith('>'))!
@@ -1749,11 +1881,13 @@ test('entering and leaving effort edit preserves the query and the selected mode
   h.vt.sendInput(ENTER) // focus the effort
   h.vt.sendInput(RIGHT) // medium -> high
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ High ]'), viewOf(h.vt))
+  assert.ok(viewOf(h.vt).includes('←→ effort'), viewOf(h.vt))
+  assert.equal(effortDraft(h.vt), '[High]', viewOf(h.vt))
   h.vt.sendInput('\x1b') // back to model mode
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort ‹High›'), `the effort must persist:\n${view}`)
+  assert.equal(effortDraft(h.vt), '[High]', `the effort must persist:\n${view}`)
+  assert.ok(!view.includes('←→ effort'), `the effort focus must be released:\n${view}`)
   assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('> ') && line.includes('Sol')),
     `the selected model must persist:\n${view}`)
   const searchAfter = contentLinesOf(h.vt).find(line => line.trimStart().startsWith('>'))!
@@ -1761,16 +1895,16 @@ test('entering and leaving effort edit preserves the query and the selected mode
   h.app.stop()
 })
 
-test('an ultra-narrow wrapped badge keeps the effort token (inactive and active)', async () => {
+test('an ultra-narrow layout keeps the effort on its compact strip (inactive and active)', async () => {
   const h = await openPicker({ directory: LAYOUT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
   const inactive = renderAt(h, 26)
-  assert.ok(inactive.some(line => line.includes('‹High›')),
-    `the inactive effort token must survive the truncation:\n${inactive.join('\n')}`)
-  h.vt.sendInput(ENTER) // focus the inline effort
+  assert.ok(effortLineOf(inactive)?.includes('Effort: High'),
+    `the compact effort strip must survive:\n${inactive.join('\n')}`)
+  h.vt.sendInput(ENTER) // focus the effort
   await h.vt.waitForRender()
   const active = renderAt(h, 26)
-  assert.ok(active.some(line => line.includes('[ High ]')),
-    `the active effort token must survive the truncation:\n${active.join('\n')}`)
+  assert.ok(effortLineOf(active)?.includes('Effort: High · ←→'),
+    `the focused compact strip must show the keys:\n${active.join('\n')}`)
   h.app.stop()
 })
 
@@ -1784,19 +1918,20 @@ for (const outcome of ['rejected', 'cancelled', 'unsupported'] as const) {
     h.vt.sendInput(ENTER) // focus the effort
     h.vt.sendInput(RIGHT) // medium -> high
     await h.vt.waitForRender()
-    assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ High ]'), viewOf(h.vt))
+    assert.ok(viewOf(h.vt).includes('←→ effort'), viewOf(h.vt))
+    assert.equal(effortDraft(h.vt), '[High]', viewOf(h.vt))
     h.vt.sendInput(ENTER) // commit -> refused
     await h.vt.waitForRender()
     const view = viewOf(h.vt)
     assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol', reasoningEffort: 'high' }])
     assert.equal(h.closeCount(), 0, `a ${outcome} commit must not dismiss the overlay`)
     assert.ok(!view.includes('Selecting'), `the selecting state must clear:\n${view}`)
-    assert.ok(rowLine(h.vt, 'Sol')?.includes('effort ‹High›'), `must return to Model mode:\n${view}`)
-    assert.ok(!view.includes('[ High ]'), `the effort focus must be released:\n${view}`)
+    assert.equal(effortDraft(h.vt), '[High]', `must return to Model mode:\n${view}`)
+    assert.ok(!view.includes('←→ effort'), `the effort focus must be released:\n${view}`)
     assert.ok(view.includes('> sol'), `the query must be preserved:\n${view}`)
     h.vt.sendInput(ENTER) // re-entry
     await h.vt.waitForRender()
-    assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ High ]'), `re-entry must work:\n${viewOf(h.vt)}`)
+    assert.ok(viewOf(h.vt).includes('←→ effort'), `re-entry must work:\n${viewOf(h.vt)}`)
     h.app.stop()
   })
 }
@@ -1819,7 +1954,8 @@ test('a delayed effort-mode refusal repaints back to Model mode after Selecting�
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
   assert.ok(!view.includes('Selecting'), `the refusal must clear Selecting…:\n${view}`)
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort ‹High›'), `must return to Model mode:\n${view}`)
+  assert.equal(effortDraft(h.vt), '[High]', `must return to Model mode:\n${view}`)
+  assert.ok(!view.includes('←→ effort'), `the effort focus must be released:\n${view}`)
   assert.equal(h.closeCount(), 0)
   h.app.stop()
 })
@@ -1868,7 +2004,8 @@ test('an active effort-mode thrown write returns to Model mode', async () => {
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
   assert.ok(!view.includes('Selecting'), `the error must clear Selecting…:\n${view}`)
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort ‹High›'), `must return to Model mode:\n${view}`)
+  assert.equal(effortDraft(h.vt), '[High]', `must return to Model mode:\n${view}`)
+  assert.ok(!view.includes('←→ effort'), `the effort focus must be released:\n${view}`)
   assert.equal(h.closeCount(), 0)
   h.app.stop()
 })
@@ -1878,12 +2015,13 @@ test('a directory refresh preserves the picker-local effort for a surviving mode
   h.vt.sendInput(ENTER) // focus
   h.vt.sendInput(RIGHT) // medium -> high
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ High ]'), viewOf(h.vt))
+  assert.ok(viewOf(h.vt).includes('←→ effort'), viewOf(h.vt))
+  assert.equal(effortDraft(h.vt), '[High]', viewOf(h.vt))
   h.hydrate(EFFORT_DIRECTORY, { provider: 'p1', model: 'sol' }) // refresh, same catalog
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ High ]'), `the local effort must survive the refresh:\n${view}`)
-  assert.ok(view.includes('[ High ]'), `the effort focus must survive the refresh:\n${view}`)
+  assert.equal(effortDraft(h.vt), '[High]', `the local effort must survive the refresh:\n${view}`)
+  assert.ok(view.includes('←→ effort'), `the effort focus must survive the refresh:\n${view}`)
   h.app.stop()
 })
 
@@ -1898,11 +2036,12 @@ test('a refresh that drops the local effort re-anchors to the model default', as
   h.vt.sendInput(ENTER)
   h.vt.sendInput(RIGHT) // medium -> high
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ High ]'), viewOf(h.vt))
+  assert.ok(viewOf(h.vt).includes('←→ effort'), viewOf(h.vt))
+  assert.equal(effortDraft(h.vt), '[High]', viewOf(h.vt))
   h.hydrate(narrower, { provider: 'p1', model: 'sol' }) // 'high' is no longer advertised
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ Medium ]'), `must re-anchor to the model default:\n${view}`)
+  assert.equal(effortDraft(h.vt), '[Medium]', `must re-anchor to the model default:\n${view}`)
   assert.ok(!view.includes('High'), `the dropped effort must not linger:\n${view}`)
   h.app.stop()
 })
@@ -1918,13 +2057,13 @@ test('a refresh that removes the bound model exits Effort mode without retargeti
   const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
   h.vt.sendInput(ENTER) // focus Sol
   await h.vt.waitForRender()
-  assert.ok(viewOf(h.vt).includes('[ '), viewOf(h.vt))
+  assert.ok(viewOf(h.vt).includes('←→ effort'), viewOf(h.vt))
   h.hydrate(other, { provider: 'p1', model: 'plain' }) // Sol disappears
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
-  assert.ok(!view.includes('[ '), `the effort focus must be released when its model vanishes:\n${view}`)
+  assert.ok(!view.includes('←→ effort'), `the effort focus must be released when its model vanishes:\n${view}`)
   assert.ok(view.includes('Other'), view)
-  assert.ok(view.includes('effort ‹Low›'), `a neighbour must stay INACTIVE (never retargeted):\n${view}`)
+  assert.ok(effortStripLine(h.vt)?.includes('No reasoning effort'), `a neighbour must stay INACTIVE (never retargeted):\n${view}`)
   h.app.stop()
 })
 
@@ -1939,20 +2078,20 @@ test('a refresh that removes the bound model consumes the next key (no retarget)
   const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
   h.vt.sendInput(ENTER) // focus Sol
   await h.vt.waitForRender()
-  assert.ok(viewOf(h.vt).includes('[ '), viewOf(h.vt))
+  assert.ok(viewOf(h.vt).includes('←→ effort'), viewOf(h.vt))
   // The refresh removes Sol and selects the reasoning replacement.
   h.hydrate(other, { provider: 'p1', model: 'other' })
   await h.vt.waitForRender()
-  assert.ok(!viewOf(h.vt).includes('[ '), `the refresh must release the effort focus:\n${viewOf(h.vt)}`)
+  assert.ok(!viewOf(h.vt).includes('←→ effort'), `the refresh must release the effort focus:\n${viewOf(h.vt)}`)
   // The key that would otherwise retarget the replacement is CONSUMED.
   h.vt.sendInput(ENTER)
   await h.vt.waitForRender()
-  assert.ok(!viewOf(h.vt).includes('[ '), `the triggering key must not re-focus the replacement:\n${viewOf(h.vt)}`)
+  assert.ok(!viewOf(h.vt).includes('←→ effort'), `the triggering key must not re-focus the replacement:\n${viewOf(h.vt)}`)
   assert.deepEqual(h.applied, [], 'the consumed key must not write')
   // The following key behaves normally again (focuses the reasoning row).
   h.vt.sendInput(ENTER)
   await h.vt.waitForRender()
-  assert.ok(viewOf(h.vt).includes('effort [ Low ]'), `the next key must behave normally:\n${viewOf(h.vt)}`)
+  assert.ok(viewOf(h.vt).includes('←→ effort'), `the next key must behave normally:\n${viewOf(h.vt)}`)
   assert.deepEqual(h.applied, [], 'focusing must not write')
   h.app.stop()
 })
@@ -1965,12 +2104,11 @@ test('a refresh that drops the reasoning metadata exits Effort mode to the no-ef
   const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
   h.vt.sendInput(ENTER) // focus the effort
   await h.vt.waitForRender()
-  assert.ok(viewOf(h.vt).includes('[ '), viewOf(h.vt))
+  assert.ok(viewOf(h.vt).includes('←→ effort'), viewOf(h.vt))
   h.hydrate(noReasoning, { provider: 'p1', model: 'sol' }) // same model, no reasoning metadata
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
-  assert.ok(!view.includes('[ '), `the focus must be released:\n${view}`)
-  assert.ok(!view.includes('Esc back'), `the effort-mode hint must be dropped:\n${view}`)
+  assert.ok(!view.includes('←→ effort'), `the focus must be released:\n${view}`)
   assert.ok(view.includes('Enter effort/select'), `the model-mode hint must return:\n${view}`)
   h.vt.sendInput(ENTER) // the no-effort fast path commits directly
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol' }])
@@ -1985,14 +2123,14 @@ test('removing then re-adding the bound model does not leave a stale swallow lat
   const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
   h.vt.sendInput(ENTER) // focus Sol
   await h.vt.waitForRender()
-  assert.ok(viewOf(h.vt).includes('[ '), viewOf(h.vt))
+  assert.ok(viewOf(h.vt).includes('←→ effort'), viewOf(h.vt))
   h.hydrate(without, { provider: 'p1', model: 'plain' }) // remove Sol -> latch set
   await h.vt.waitForRender()
   h.hydrate(EFFORT_DIRECTORY, { provider: 'p1', model: 'sol' }) // Sol returns BEFORE any input
   await h.vt.waitForRender()
   h.vt.sendInput(ENTER)
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ Medium ]'),
+  assert.ok(viewOf(h.vt).includes('←→ effort'),
     `the re-hydration must clear the latch so Enter is not swallowed:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
@@ -2026,16 +2164,17 @@ test('a refresh that moves the configured selection keeps the Effort-bound row s
   h.vt.sendInput(ENTER) // focus Sol
   h.vt.sendInput(RIGHT) // low -> high
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ High ]'), viewOf(h.vt))
+  assert.ok(viewOf(h.vt).includes('←→ effort'), viewOf(h.vt))
+  assert.equal(effortDraft(h.vt), '[High]', viewOf(h.vt))
   h.hydrate(two, { provider: 'p1', model: 'other' }) // the configured selection moves
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
   assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('> ') && line.includes('Sol')),
     `the effort-bound row must stay selected:\n${view}`)
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ High ]'), `the active token must sit on the selected row:\n${view}`)
+  assert.equal(effortDraft(h.vt), '[High]', `the active draft must sit on the selected row:\n${view}`)
   h.vt.sendInput(LEFT) // still acts on Sol
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ Low ]'), `← must still act on the bound row:\n${viewOf(h.vt)}`)
+  assert.equal(effortDraft(h.vt), '[Low]', `← must still act on the bound row:\n${viewOf(h.vt)}`)
   h.vt.sendInput(ENTER)
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol', reasoningEffort: 'low' }])
   h.app.stop()
@@ -2130,6 +2269,343 @@ test('a hostile single-row model label keeps its painted click map', async () =>
   h.picker.handleMouse(mouse('click', 5, row, 72, 24))
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'm1' }],
     `the click map must address the collapsed row itself:\n${rendered.join('\n')}`)
+  h.app.stop()
+})
+
+// ── Agent Team row, focus transitions, disable seat, token mouse, budgets ──
+
+test('the Agent Team row shows the saved state and Tab moves focus models ⇄ team', async () => {
+  const team = new FakeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, team })
+  const offRow = contentLinesOf(h.vt).find(line => line.includes('Agent Team'))!
+  assert.ok(offRow.includes('On') && offRow.includes('[Off]'), `bracket marks the saved OFF state:\n${offRow}`)
+  assert.ok(!offRow.startsWith('> '), 'the team row is not focused yet')
+  assert.ok(viewOf(h.vt).includes('Tab Team'), `the models-zone hint advertises Tab Team:\n${viewOf(h.vt)}`)
+  h.vt.sendInput('\t') // Tab -> team
+  await h.vt.waitForRender()
+  const focusedTeam = contentLinesOf(h.vt).find(line => line.includes('Agent Team'))!
+  assert.ok(focusedTeam.startsWith('> Agent Team'), `the focused team row uses the > prefix:\n${focusedTeam}`)
+  assert.ok(viewOf(h.vt).includes('Tab model'), `the team-zone hint:\n${viewOf(h.vt)}`)
+  assert.ok(viewOf(h.vt).includes('Enter/Space toggle'), `the team-zone hint:\n${viewOf(h.vt)}`)
+  h.vt.sendInput('\t') // Tab -> models
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Tab Team'), `back to the models-zone hint:\n${viewOf(h.vt)}`)
+  h.app.stop()
+})
+
+test('team Esc returns to models without closing the picker', async () => {
+  const team = new FakeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, team })
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('> Agent Team')), viewOf(h.vt))
+  h.vt.sendInput('\x1b') // Esc -> models, not close
+  await h.vt.waitForRender()
+  assert.equal(h.closeCount(), 0, 'team Esc must not close the picker')
+  assert.ok(viewOf(h.vt).includes('Tab Team'), `Esc backs out to models:\n${viewOf(h.vt)}`)
+  assert.ok(!contentLinesOf(h.vt).some(line => line.startsWith('> Agent Team')), 'team focus released')
+  h.app.stop()
+})
+
+test('Enter on the team row performs one Host write and the saved bracket follows', async () => {
+  const team = new FakeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, team })
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r') // toggle OFF -> ON
+  await h.vt.waitForRender()
+  assert.equal(team.beginCalls, 1, 'one admitted gesture')
+  assert.deepEqual(team.setEnabledCalls, [true], 'one separate On write')
+  assert.equal(team.attempts[0]?.runCalls, 1)
+  const onRow = contentLinesOf(h.vt).find(line => line.includes('Agent Team'))!
+  assert.ok(onRow.includes('[On]') && onRow.includes('Off'), `the saved bracket moves to On:\n${onRow}`)
+  h.app.stop()
+})
+
+test('a refused Team gesture shows a notice and performs no write', async () => {
+  const team = new FakeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  team.nextRefusal = 'another operation is in progress'
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, team })
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.equal(team.beginCalls, 1)
+  assert.deepEqual(team.setEnabledCalls, [], 'a refused gesture writes nothing')
+  const row = contentLinesOf(h.vt).find(line => line.includes('Agent Team'))!
+  assert.ok(row.includes('On') && row.includes('[Off]'), `state tokens stay painted:\n${row}`)
+  assert.ok(row.includes('another operation is in progress'), `the notice appends after the tokens:\n${row}`)
+  h.app.stop()
+})
+
+test('an unknown Team write offers only a read-only R recheck', async () => {
+  const team = new FakeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  const manual = team.queueManualRun()
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, team })
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r') // toggle OFF -> ON; run() awaits the manual deferred
+  await h.vt.waitForRender()
+  assert.ok(contentLinesOf(h.vt).some(line => line.includes('Saving')), viewOf(h.vt))
+  manual.resolve({ kind: 'indeterminate', reason: 'network lost' })
+  await h.vt.waitForRender()
+  const unknownRow = contentLinesOf(h.vt).find(line => line.includes('Agent Team'))!
+  assert.ok(unknownRow.includes('Outcome unknown — R recheck'), `unknown row:\n${unknownRow}`)
+  assert.ok(viewOf(h.vt).includes('R recheck'), `the team hint offers only a recheck:\n${viewOf(h.vt)}`)
+  const writesBefore = team.setEnabledCalls.length
+  // A fresh official read that the target did not land: R is READ-ONLY.
+  team.setSnapshot({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  h.vt.sendInput('R')
+  await h.vt.waitForRender()
+  assert.equal(team.beginCalls, 1, 'R does not admit another gesture')
+  assert.equal(team.setEnabledCalls.length, writesBefore, 'R performs no write')
+  // A still-not-target readback cannot prove the dispatched write failed; the
+  // row must stay `unknown` and offer no Retry.
+  assert.ok(contentLinesOf(h.vt).some(line => line.includes('Outcome unknown')), `unknown must persist:\n${viewOf(h.vt)}`)
+  assert.ok(!contentLinesOf(h.vt).some(line => line.includes('Save failed')), `unknown must not become failed:\n${viewOf(h.vt)}`)
+  h.app.stop()
+})
+
+test('an OFF write over a recorded Session opens the disable seat; Esc cancels with zero writes', async () => {
+  const team = new FakeTeam({ kind: 'ready', enabled: true, modelRequestHistory: 'recorded' })
+  team.nextConfirmRequired = true
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, team })
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r') // OFF target needs the independent seat
+  await h.vt.waitForRender()
+  assert.equal(team.beginCalls, 1)
+  assert.deepEqual(team.setEnabledCalls, [], 'opening the seat performs no write')
+  assert.ok(viewOf(h.vt).includes('Disable Agent Team'), `the seat must mount:\n${viewOf(h.vt)}`)
+  h.vt.sendInput('\x1b') // Esc cancels the seat
+  await h.vt.waitForRender()
+  await h.vt.waitForRender()
+  assert.deepEqual(team.setEnabledCalls, [], 'Cancel/Esc perform zero writes')
+  assert.ok(!viewOf(h.vt).includes('Disable Agent Team'), `the seat closes:\n${viewOf(h.vt)}`)
+  h.app.stop()
+})
+
+test('Confirm in the disable seat runs the OFF write once and closes on a proven readback', async () => {
+  const team = new FakeTeam({ kind: 'ready', enabled: true, modelRequestHistory: 'recorded' })
+  team.nextConfirmRequired = true
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, team })
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Disable Agent Team'))
+  h.vt.sendInput('\x1b[C') // Right -> focus Confirm
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r') // act
+  await h.vt.waitForRender()
+  await h.vt.waitForRender()
+  assert.deepEqual(team.setEnabledCalls, [false], 'exactly one OFF write')
+  assert.equal(team.attempts[0]?.runCalls, 1)
+  assert.ok(!viewOf(h.vt).includes('Disable Agent Team'), `the seat closes after a proven readback:\n${viewOf(h.vt)}`)
+  h.app.stop()
+})
+
+test('an 88x28 overlay shows more than eight model rows for a tall directory', async () => {
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: Array.from({ length: 20 }, (_, i) => model(`m${i}`, { name: `Model ${String(i).padStart(2, '0')}` })) }],
+    default: { provider: 'p1', model: 'm0' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'm0' }, columns: 88, rows: 28 })
+  // The overlay must actually request the 88-wide step, not merely be mounted
+  // on an 88-column terminal.
+  const topBorder = linesOf(h.vt).find(line => line.includes('╭'))
+  assert.ok(topBorder !== undefined, `the frame must paint a top border:
+${viewOf(h.vt)}`)
+  assert.equal(visibleWidth(topBorder!), 88, `the /model frame must be 88 wide, got ${visibleWidth(topBorder!)}:
+${viewOf(h.vt)}`)
+  const modelRows = contentLinesOf(h.vt).filter(line => /(?:^|\s)Model \d\d/u.test(line))
+  assert.ok(modelRows.length > 8, `the 88x28 layout must show >8 model rows, got ${modelRows.length}:\n${viewOf(h.vt)}`)
+  assert.ok(rowLine(h.vt, 'Agent Team') !== undefined, `the Team row stays inside:\n${viewOf(h.vt)}`)
+  assert.ok(rowLine(h.vt, 'Tab Team') !== undefined, `the footer hint stays inside:\n${viewOf(h.vt)}`)
+  h.app.stop()
+})
+
+test('the small-size matrix keeps the Team row and footer inside the frame', async () => {
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: '供应商', models: [
+      model('wide', { name: '模型名称非常长需要裁剪', efforts: [{ id: 'high', name: '非常高的推理强度' }, { id: 'low', name: 'Low' }], defaultEffort: 'high' }),
+      model('plain', { name: 'Plain' }),
+    ] }],
+    default: { provider: 'p1', model: 'wide' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'wide' }, columns: 72, rows: 24 })
+  for (const [columns, rows] of [[72, 24], [64, 20], [44, 20], [44, 10], [44, 8]] as const) {
+    h.vt.resize(columns, rows)
+    await h.vt.waitForRender()
+    const lines = linesOf(h.vt)
+    assert.ok(lines.some(line => line.includes('╭')) && lines.some(line => line.includes('╰')),
+      `${columns}x${rows}: the overlay's top AND bottom border must stay inside the frame:\n${viewOf(h.vt)}`)
+    for (const line of lines) {
+      assert.ok(visibleWidth(line) <= columns, `${columns}x${rows}: over-wide line ${JSON.stringify(line)} (${visibleWidth(line)})`)
+      assert.equal((line.match(/\[/g) ?? []).length, (line.match(/\]/g) ?? []).length,
+        `${columns}x${rows}: a half-cut chip: ${JSON.stringify(line)}`)
+    }
+    assert.ok(rowLine(h.vt, 'Agent Team') !== undefined, `${columns}x${rows}: the Team row must stay inside:\n${viewOf(h.vt)}`)
+    assert.ok(rowLine(h.vt, 'Esc') !== undefined, `${columns}x${rows}: the footer hint must stay inside:\n${viewOf(h.vt)}`)
+  }
+  h.app.stop()
+})
+
+test('an effort candidate token press+click changes the draft only (never submits)', async () => {
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
+  const width = 72
+  const lines = h.picker.render(width).map(stripAnsi)
+  const row = lines.findIndex(line => line.includes('Reasoning Effort'))
+  assert.ok(row >= 0, lines.join('\n'))
+  const col = visibleWidth(lines[row]!.slice(0, lines[row]!.indexOf('Low')))
+  assert.equal(h.picker.handleMouse(mouse('press', col, row, width, 24))?.handled, true, 'the press hits the Low token')
+  assert.equal(h.picker.handleMouse(mouse('click', col, row, width, 24))?.handled, true, 'the click hits the Low token')
+  assert.deepEqual(h.applied, [], 'an effort token never submits the model')
+  const after = h.picker.render(width).map(stripAnsi)
+  assert.ok(effortLineOf(after)?.includes('[Low]'), `the draft moved to Low:\n${after.join('\n')}`)
+  assert.ok(after.some(line => line.includes('←→ effort')), 'the effort zone owns the keys after the click')
+  h.app.stop()
+})
+
+test('an effort token press survives an ordinary focus repaint but not a resize', async () => {
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
+  const lines = h.picker.render(72).map(stripAnsi)
+  const row = lines.findIndex(line => line.includes('Reasoning Effort'))
+  const col = visibleWidth(lines[row]!.slice(0, lines[row]!.indexOf('Low')))
+  h.picker.handleMouse(mouse('press', col, row, 72, 24))
+  h.picker.render(72) // the press's own focus repaint must NOT drop the click
+  h.picker.handleMouse(mouse('click', col, row, 72, 24))
+  const after = h.picker.render(72).map(stripAnsi)
+  assert.ok(effortLineOf(after)?.includes('[Low]'), `a normal press→repaint→release must act:\n${after.join('\n')}`)
+
+  // A genuine WIDTH change invalidates the last-painted geometry: press at 72,
+  // repaint at 60, then release at 60 must not act on a re-derived token.
+  const wide = h.picker.render(72).map(stripAnsi)
+  const wideRow = wide.findIndex(line => line.includes('Reasoning Effort'))
+  const wideCol = visibleWidth(wide[wideRow]!.slice(0, wide[wideRow]!.indexOf('Medium')))
+  h.picker.handleMouse(mouse('press', wideCol, wideRow, 72, 24))
+  h.picker.render(60) // the resize repaint at a different width
+  h.picker.handleMouse(mouse('click', wideCol, wideRow, 60, 24))
+  const resizedAfter = h.picker.render(60).map(stripAnsi)
+  assert.ok(resizedAfter.some(line => line.includes('Effort: Low')),
+    `a resize between press and release must not change the draft:\n${resizedAfter.join('\n')}`)
+  h.app.stop()
+})
+
+test('an effort token release after the selection moved never retargets another model', async () => {
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [
+      model('a', { name: 'Alpha', efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'low' }),
+      model('b', { name: 'Beta', efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'low' }),
+    ] }],
+    default: { provider: 'p1', model: 'a' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'a' } })
+  const lines = h.picker.render(72).map(stripAnsi)
+  const row = lines.findIndex(line => line.includes('Reasoning Effort'))
+  const col = visibleWidth(lines[row]!.slice(0, lines[row]!.indexOf('High')))
+  h.picker.handleMouse(mouse('press', col, row, 72, 24))
+  h.vt.sendInput(DOWN) // the selection moves to Beta (same candidate names)
+  await h.vt.waitForRender()
+  h.picker.handleMouse(mouse('click', col, row, 72, 24))
+  const after = h.picker.render(72).map(stripAnsi)
+  assert.ok(effortLineOf(after)?.includes('[Low]'),
+    `the stale press must never change Beta's draft:\n${after.join('\n')}`)
+  h.app.stop()
+})
+
+test('an indeterminate Team write stays unknown on recheck and never re-sends', async () => {
+  const team = new FakeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  team.queueOutcome({ kind: 'indeterminate', reason: 'connection lost' })
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, team })
+  // Enter the Team zone and toggle On (a non-confirmed write).
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.equal(team.beginCalls, 1)
+  assert.equal(team.setEnabledCalls.length, 1)
+  assert.ok(viewOf(h.vt).includes('Outcome unknown'), viewOf(h.vt))
+  // A second Enter is a READ-ONLY recheck: it must not dispatch another write.
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.equal(team.beginCalls, 1, 'recheck never begins a new gesture')
+  assert.equal(team.setEnabledCalls.length, 1, 'recheck never re-sends')
+  assert.ok(viewOf(h.vt).includes('Outcome unknown'), 'the old readback cannot downgrade unknown to failed')
+  assert.ok(!viewOf(h.vt).includes('Save failed'), 'unknown must never become a Retryable failure')
+  h.app.stop()
+})
+
+test('disposing the picker mid-write still releases the command-owned Team latch', async () => {
+  const team = new FakeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  const manual = team.queueManualRun()
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, team })
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r') // non-confirmed ON write starts and awaits the Host
+  await h.vt.waitForRender()
+  assert.equal(team.attempts.length, 1)
+  const attempt = team.attempts[0]!
+  assert.equal(attempt.abandonCalls, 0, 'the latch is held while the write is in flight')
+  h.picker.dispose() // the UI goes away before the Host settles
+  manual.resolve({ kind: 'committed' })
+  await h.vt.waitForRender()
+  assert.equal(attempt.abandonCalls, 1, 'settlement releases the latch even after UI disposal')
+  h.app.stop()
+})
+
+test('disposing the picker before a rejected settlement also releases the latch', async () => {
+  const team = new FakeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  const manual = team.queueManualRun()
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, team })
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  const attempt = team.attempts[0]!
+  h.picker.dispose()
+  manual.resolve({ kind: 'rejected', reason: 'permission denied' })
+  await h.vt.waitForRender()
+  assert.equal(attempt.abandonCalls, 1, 'a rejected settlement after disposal still releases the latch')
+  h.app.stop()
+})
+
+test('an effort press is rejected when the internal selection moved before the repaint', async () => {
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [
+      model('a', { name: 'Alpha', efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'low' }),
+      model('b', { name: 'Beta', efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'low' }),
+    ] }],
+    default: { provider: 'p1', model: 'a' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'a' } })
+  const lines = h.picker.render(72).map(stripAnsi) // paints A
+  const row = lines.findIndex(line => line.includes('Reasoning Effort'))
+  const col = visibleWidth(lines[row]!.slice(0, lines[row]!.indexOf('High')))
+  h.picker.handleInput(DOWN) // internal selection -> B WITHOUT a repaint
+  h.picker.handleMouse(mouse('press', col, row, 72, 24))
+  h.picker.handleMouse(mouse('click', col, row, 72, 24))
+  const after = h.picker.render(72).map(stripAnsi) // now paints B
+  assert.ok(effortLineOf(after)?.includes('[Low]'),
+    `a pre-repaint selection move must reject the press rather than retarget B:\n${after.join('\n')}`)
+  h.app.stop()
+})
+
+test('a Team token press+click toggles via the admitted write', async () => {
+  const team = new FakeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, team })
+  const width = 72
+  const lines = h.picker.render(width).map(stripAnsi)
+  const row = lines.findIndex(line => line.includes('Agent Team'))
+  assert.ok(row >= 0, lines.join('\n'))
+  const col = visibleWidth(lines[row]!.slice(0, lines[row]!.indexOf('On')))
+  assert.equal(h.picker.handleMouse(mouse('press', col, row, width, 24))?.handled, true, 'the press hits the On token')
+  // A normal focus repaint between press and release must still commit.
+  h.picker.render(width)
+  assert.equal(h.picker.handleMouse(mouse('click', col, row, width, 24))?.handled, true, 'the click hits the On token')
+  await h.vt.waitForRender()
+  assert.equal(team.beginCalls, 1)
+  assert.deepEqual(team.setEnabledCalls, [true], 'the team click toggles ON')
   h.app.stop()
 })
 

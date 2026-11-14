@@ -1426,6 +1426,61 @@ settlement repaint the current page, drive the visual-tools switch from a TUI
 preference, or claim its Host registry registration took effect when the
 backend has no registry evidence.
 
+## Model picker (`/model`)
+
+The PiTui `/model` overlay is ONE capturing surface: one provider-grouped,
+searchable model list plus three composed strips below it (a full-width
+separator, the Reasoning Effort strip, the Agent Team row) and a footer hint.
+The overlay requests the `88×28` wide step and subtracts those four fixed rows
+from the list's row grant, so the list keeps more rows than the old narrow step
+and no control row is clipped at `min(terminal, 88×28)`.
+
+Keyboard is a three-zone state machine over the SAME component:
+
+- **Models** (initial): `↑/↓/PageUp/PageDown` and typing stay the list's;
+  `Enter` enters the selected reasoning model's Effort strip (no Host write) or
+  commits a model with no reasoning metadata in one press; `Tab` moves to Agent
+  Team when the composition serves it; `Esc` closes.
+- **Effort**: `←/→` cycle only the official catalogue candidates of the bound
+  `(provider, model)` identity, `Enter` commits that model with the visible
+  effort, `Esc` returns to the list keeping the draft, and every other key is
+  consumed. The draft is picker-local and per identity; it never becomes a
+  second Host truth.
+- **Agent Team**: `Enter`/`Space` toggles, `Tab`/`Shift+Tab` return to the list,
+  `Esc` returns without a write, and every other key is consumed. The bracket
+  marks the SAVED state (`On [Off]` / `[On] Off`); focus is the `> ` prefix and
+  `primary` ink, so color is never the only signal.
+
+Model selection and Team mode are TWO INDEPENDENT Host writes. A model `apply`
+never writes Team mode, and a Team gesture never rides on a model selection.
+The Team row reflects the exact Root Session's official `agentTeam` projection
+and the official `modelSelection.lastUsed` fact: it paints `Checking…`,
+`Unavailable: <reason>`, `Saving…`, `Checking saved state…`, `Save failed: …` or
+`Outcome unknown — R recheck` rather than a guessed On/Off. `R` in the Team zone
+is a read-only recheck, never an automatic retry.
+
+Disabling a Root Session that already recorded a model request opens a SEPARATE
+single-purpose confirmation seat (`src/tui/pickers/team-disable-confirmation.ts`)
+mounted next to the picker. It is a logical Root seat of its own: closing
+`/model` does not cancel it, `Cancel`/`Esc` perform zero Host writes, the
+default focus is Cancel, and an indeterminate write offers only a read-only
+Recheck/Close. A committed write stays on `Checking saved state…`; a fresh
+projection read that equals the target proves it and closes the seat once. Only
+an in-flight Host **request** (`Saving…`) is uncloseable. `Checking saved
+state…` is not an in-flight request, so `Esc` (or the owning surface) may close
+the seat safely without claiming the write landed, and a `stale` authority
+(superseded Session / lost Connection) retires it automatically; a transiently
+`unavailable` readback stays `Checking…` but remains exitable.
+
+The pointer contract follows the same last-painted-frame rule: only a complete
+visible Team `On`/`Off` token or an Effort candidate is hittable; a press
+followed by a resize, re-hydration or a different frame never commits. An
+Effort hit is bound to the `(provider, model)` identity that PAINTED it, so a
+selection move before the repaint cannot retarget another model; an Effort click
+changes the draft only and never submits the model. Below `64`
+content columns the strip compacts to `Effort: <value>`; the Team row and the
+footer hint remain visible down to `44×8`.
+
 ## Task Quick
 
 Current behavior:

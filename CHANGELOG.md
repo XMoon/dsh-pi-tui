@@ -22,6 +22,8 @@
 
 - **声明接受附件的 Host 斜杠命令可以携带普通 FILE。** Host 声明 `input.attachments` 的斜杠命令（Direct 与 Split 两种后端）现在会把已暂存的普通文件按官方 upload receipt 投递给命令 handler；只有命令执行成功才消费草稿，上传或预检失败会保留可编辑的草稿与附件，结果不确定时不会自动重试。
 
+- **PiTui `/model` 可以启停当前 Root Session 的 Agent Team。** `/model` 现在以 88×28 宽版打开：模型列表保留搜索与分组，列表下方独立显示当前模型的 Reasoning Effort 条带和 Agent Team 行。Tab 在模型列表与 Team 行之间切换，Team 行按 Enter/Space 启停，Effort 仍在模型上按 Enter 进入、←/→ 调整、再 Enter 提交。Team 与模型选择是两次独立写入，选模型不会顺带改 Team；只有在官方投影已记录过模型请求后才关闭 Team 时，才会先弹出独立确认页，确认页取消或 Esc 不写 Host。无 Session、子会话或投影不可读时 Team 行如实显示不可用，不会伪造 On/Off。
+
 ### 变更
 
 - **CLI 启动支持 `--session [id-or-query]` 与 `-c, --continue`。** 裸 `--session` 打开 Session Browser 的 Browse All；只有规范完整 ID 保留挂载前的直接恢复，其他非空值立即打开同一个 Browser，等官方列表到位后精确/唯一前缀匹配并走现有受保护 Resume，关键词、歧义或未命中只进入全局搜索。列表加载中 Browser 始终可输入、可 `Esc`；加载期间修改查询会取消原自动匹配。`-c, --continue` 只在 Host 已确认的 Workspace 内按官方成员关系与主 Session 列表的交集选择最近一条，且 baseline 与列表必须来自同一 Host/Connection generation；未确认 Workspace 或无历史时保持 sessionless 并提示一次，不猜测其他 Workspace，也不创建 Session。两个参数互斥。

@@ -2541,6 +2541,10 @@ export function applyRunnerWithRuntime(
         // M6-1 F8: the SAME exact-Session policy port both the observation
         // owner and the scope-bound approval write consume.
         sessionPolicy: backend.sessionPolicy,
+        // FR1: the SAME selected backend's exact-Root Team mode port. The
+        // `/model` command owns the Team gesture admission and the independent
+        // confirmation seat; no picker reaches the Host directly.
+        teamMode: backend.teamMode,
         // Split-Client only: the Client-root forwarded-answer eligibility read
         // view. The Session Workspace uses it ONLY as the positive
         // answerability gate for `Needs attention`; a Direct/TSP composition

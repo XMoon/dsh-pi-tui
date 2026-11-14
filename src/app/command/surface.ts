@@ -307,6 +307,9 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
      *  facts + the single approval write), forwarded unchanged to the
      *  runner's scope-bound write and the policy observation owner. */
     readonly sessionPolicy: TuiCommandRunner['sessionPolicy']
+    /** FR1: the exact-Root Agent Team mode port, forwarded unchanged to the
+     *  `/model` picker's one Team write. Absent = no Team seam here. */
+    readonly teamMode?: TuiCommandRunner['teamMode']
     /** Split-Client only (G567 capability): the Client-root forwarded-answer
      *  eligibility read view, forwarded unchanged. Direct/TSP supply nothing. */
     readonly forwardedAnswerEligibility?: TuiCommandRunner['forwardedAnswerEligibility']
@@ -1515,6 +1518,9 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // M6-1 F8: the exact-Session policy port (read + write), forwarded
       // unchanged — the observation owner above is its read consumer.
       sessionPolicy: deps.backend.sessionPolicy,
+      // FR1: the exact-Root Team mode port, forwarded unchanged. The `/model`
+      // command owns its scope admission and writer; the picker only presents.
+      ...(deps.backend.teamMode === undefined ? {} : { teamMode: deps.backend.teamMode }),
       // The opaque Host-generation identity the write chain binds its ACK and
       // readback to (undefined on Direct).
       sessionPolicyGeneration: () => deps.policyGeneration?.(),
