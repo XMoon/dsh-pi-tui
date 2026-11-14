@@ -679,6 +679,7 @@ const LANE_SOURCE_LIST = Object.freeze([
   'web-runtime-toggle.mjs',
   'web-startup-preference.mjs',
   'web-product.mjs',
+  'acp-po2-session-view.mjs',
   'split-smoke-processes.mjs',
   'split-smoke-fixtures.mjs',
   'split-smoke-profile.mjs',

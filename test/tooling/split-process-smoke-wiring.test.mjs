@@ -552,7 +552,7 @@ test('the ACP UDS selected verdict accepts only the complete real-L6 proof', () 
     hostReadyAfterAcp: true,
     independentConnections: true,
     capacityAndBackpressure: true,
-    noBusinessSessionBeforePo2: true,
+    unsupportedSessionMethodsFailClosed: true,
     stoppedAndUnlinked: true,
     staleReclaimedSafely: true,
     noTcpOrStdoutPollution: true,
@@ -594,6 +594,37 @@ test('the ACP opt-in control selected verdict accepts only the complete real-L6 
   // A NOT_VERIFIED status never becomes a selected PASS.
   assert.throws(() => assertSelectedVerdict('acp.po1b-opt-in-control', { ...complete, status: 'NOT_VERIFIED' }),
     /selected acp\.po1b-opt-in-control/u)
+})
+test('the ACP shared Session View selected verdict accepts only the complete real-L6 proof', () => {
+  const complete = {
+    status: 'PASS',
+    scope: 'REAL_SPLIT_PROCESS_L6',
+    acpVersionFromInstalledDsh: true,
+    socketPermissions0700And0600: true,
+    tuiAndAcpShareSession: true,
+    secondConnectionConflict: true,
+    closeReleasesOnlyView: true,
+    tuiTurnAfterClose: true,
+    newSessionViaHostWorkspace: true,
+    closeKeepsSessionResumable: true,
+    coldRestartResume: true,
+    disconnectReleasesView: true,
+    runtimeToggleDisconnects: true,
+    negativesRejected: true,
+    hostIdentityKept: true,
+    originalSplitClientIntact: true,
+  }
+  assert.equal(assertSelectedVerdict('acp.po2-session-view', complete), undefined)
+  // A missing proof field is a rejected verdict.
+  const missing = { ...complete }
+  delete missing.tuiTurnAfterClose
+  assert.throws(() => assertSelectedVerdict('acp.po2-session-view', missing), /selected acp\.po2-session-view/u)
+  // A proof field that is present but false is a rejected verdict.
+  assert.throws(() => assertSelectedVerdict('acp.po2-session-view', { ...complete, secondConnectionConflict: false }),
+    /selected acp\.po2-session-view/u)
+  // A NOT_VERIFIED status never becomes a selected PASS.
+  assert.throws(() => assertSelectedVerdict('acp.po2-session-view', { ...complete, status: 'NOT_VERIFIED' }),
+    /selected acp\.po2-session-view/u)
 })
 test('a selected result names only the selectable scope', () => {
   const first = listSelectableCases()[0]

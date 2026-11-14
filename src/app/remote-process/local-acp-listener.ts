@@ -36,6 +36,12 @@ import {
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { type LocalScope } from './local-scope.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
+import {
+  AcpSessionViewRegistry,
+  LocalAcpViewError,
+  type ConnectionViewState,
+  type HostAcpSessionAccess,
+} from './local-acp-session-view.ts'
 
 /** The ACP agent identity this front door advertises (never a copied brand). */
 const AGENT_NAME = 'dsh-pi-tui'
@@ -124,6 +130,12 @@ export interface StartLocalAcpListenerOptions {
   readonly scope: LocalScope
   readonly maxConnections: number
   readonly diag: Diag
+  /**
+   * The narrow, already-bound Host Session access. Present ONLY when a real Host
+   * installs the connection-scoped shared Session View (PO-2); absent keeps the
+   * PO-1 fail-closed Session behaviour (used by the raw socket contracts).
+   */
+  readonly sessionAccess?: HostAcpSessionAccess
 }
 
 /**
@@ -149,6 +161,8 @@ interface ConnectionState {
   initialized: boolean
   pendingRequests: number
   closed: boolean
+  /** The connection-scoped Session View state; present only when Session View is installed. */
+  view?: ConnectionViewState
 }
 
 /** The listener's accept-time facts shared by the connection factories. */
@@ -157,6 +171,10 @@ interface ListenerContext {
   readonly bundleVersion: string
   readonly connections: Set<Socket>
   readonly connectionStates: Map<Socket, ConnectionState>
+  /** The settled Host Session access, present only when a real Host installs Session View. */
+  readonly sessionAccess?: HostAcpSessionAccess
+  /** The per-listener View/claim registry; a fresh one per bind. */
+  readonly views?: AcpSessionViewRegistry
 }
 
 /** The ACP Session methods PO-1 must fail closed (business capability does not exist yet). */
@@ -326,7 +344,12 @@ function createBoundedOutput(
 }
 
 /** Build the per-connection ACP agent app whose handlers own only connection-local state. */
-function buildAgentApp(state: ConnectionState, context: ListenerContext, fail: (code: string) => void) {
+function buildAgentApp(
+  state: ConnectionState,
+  view: ConnectionViewState | undefined,
+  context: ListenerContext,
+  fail: (code: string) => void,
+) {
   const app = agent({ name: AGENT_NAME })
 
   const beginRequest = (): void => {
@@ -369,7 +392,10 @@ function buildAgentApp(state: ConnectionState, context: ListenerContext, fail: (
           loadSession: false,
           promptCapabilities: { image: false, audio: false, embeddedContext: false },
           mcpCapabilities: { http: false, sse: false },
-          sessionCapabilities: {},
+          // Advertise the shared-Session capability ONLY when this Host really
+          // installed the connection-scoped View. Never claim prompt, image or
+          // MCP capability; `session/list`/`loadSession` stay unavailable.
+          sessionCapabilities: context.sessionAccess !== undefined ? { resume: {}, close: {} } : {},
         },
         authMethods: [],
       }
@@ -386,20 +412,80 @@ function buildAgentApp(state: ConnectionState, context: ListenerContext, fail: (
       state.pendingRequests -= 1
     }
   }
-  // Register with a permissive params parser: these methods are unsupported in
-  // PO-1 regardless of whether a client's params happen to be schema-valid, so
-  // the deterministic fail-closed code must reach EVERY such request (a schema
-  // rejection would otherwise answer -32602 for malformed params).
+  // Register with a permissive params parser for the STILL-UNSUPPORTED methods:
+  // a schema rejection would otherwise answer -32602 instead of the
+  // deterministic fail-closed business code, and a client's params are
+  // irrelevant because the capability simply does not exist yet.
   const acceptAnyParams = (params: unknown): unknown => params
-  app.onRequest(methods.agent.session.new, acceptAnyParams, rejectSessionOperation)
+
+  const access = context.sessionAccess
+  const views = context.views
+  if (access !== undefined && views !== undefined && view !== undefined) {
+    // PO-2 shared Session View: the three lifecycle methods are decoded with the
+    // SDK's STANDARD schema (typed params), and any View rejection is mapped
+    // onto a JSON-RPC RequestError that keeps the stable data code.
+    const requireInitialized = (): void => {
+      if (!state.initialized) {
+        throw new RequestError(
+          -32042,
+          'ACP Session operations require a completed initialize',
+          { code: 'LOCAL_ACP_VIEW_NOT_INITIALIZED' },
+        )
+      }
+    }
+    const asRequestError = (error: unknown): unknown =>
+      error instanceof LocalAcpViewError
+        ? new RequestError(error.rpcCode, error.message, { code: error.code })
+        : error
+    app.onRequest(methods.agent.session.new, async ({ params }) => {
+      beginRequest()
+      try {
+        requireInitialized()
+        return await views.newSession(view, access, params)
+      } catch (error) {
+        throw asRequestError(error)
+      } finally {
+        state.pendingRequests -= 1
+      }
+    })
+    app.onRequest(methods.agent.session.resume, async ({ params }) => {
+      beginRequest()
+      try {
+        requireInitialized()
+        return await views.resumeSession(view, access, params)
+      } catch (error) {
+        throw asRequestError(error)
+      } finally {
+        state.pendingRequests -= 1
+      }
+    })
+    app.onRequest(methods.agent.session.close, async ({ params }) => {
+      beginRequest()
+      try {
+        requireInitialized()
+        return views.closeSession(view, params.sessionId)
+      } catch (error) {
+        throw asRequestError(error)
+      } finally {
+        state.pendingRequests -= 1
+      }
+    })
+  } else {
+    // No real Host Session View installed (raw socket contracts): the lifecycle
+    // methods stay fail-closed exactly like PO-1.
+    app.onRequest(methods.agent.session.new, acceptAnyParams, rejectSessionOperation)
+    app.onRequest(methods.agent.session.resume, acceptAnyParams, rejectSessionOperation)
+    app.onRequest(methods.agent.session.close, acceptAnyParams, rejectSessionOperation)
+  }
+  // These methods remain genuinely unimplemented in PO-2 regardless of View:
+  // no prompt admission, no session listing, no config mutation.
   app.onRequest(methods.agent.session.list, acceptAnyParams, rejectSessionOperation)
-  app.onRequest(methods.agent.session.resume, acceptAnyParams, rejectSessionOperation)
   app.onRequest(methods.agent.session.setConfigOption, acceptAnyParams, rejectSessionOperation)
   app.onRequest(methods.agent.session.prompt, acceptAnyParams, rejectSessionOperation)
-  app.onRequest(methods.agent.session.close, acceptAnyParams, rejectSessionOperation)
 
-  // A `session/cancel` notification carries no response. PO-1 has no View, so
-  // the handler is an explicit no-op: it must never touch a Host Agent.
+  // A `session/cancel` notification carries no response. PO-2 owns no Host
+  // business turn, so the handler stays an explicit no-op: it must never touch
+  // a Host Agent. Real turn cancellation belongs to PO-3B.
   app.onNotification(methods.agent.session.cancel, () => {})
 
   return app
@@ -407,7 +493,13 @@ function buildAgentApp(state: ConnectionState, context: ListenerContext, fail: (
 
 /** Wire one accepted socket to its own SDK connection; only this connection is affected by a fault. */
 function serveConnection(socket: Socket, context: ListenerContext): void {
-  const state: ConnectionState = { initialized: false, pendingRequests: 0, closed: false }
+  const view = context.views?.createConnection()
+  const state: ConnectionState = {
+    initialized: false,
+    pendingRequests: 0,
+    closed: false,
+    ...(view === undefined ? {} : { view }),
+  }
   context.connectionStates.set(socket, state)
 
   let tornDown = false
@@ -424,6 +516,10 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
     if (tornDown) return
     tornDown = true
     state.closed = true
+    // BOTH `session/close` and a physical socket end/error/destroy (or Host Off)
+    // release through the SAME idempotent View path: only this connection's
+    // claim is dropped; no Host Agent/Session is cancelled, disposed or flushed.
+    if (view !== undefined) context.views?.releaseConnection(view)
     try {
       connection?.close()
     } catch {
@@ -446,7 +542,7 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
 
   const input = createBoundedInput(socket, fail)
   const output = createBoundedOutput(socket, fail)
-  const app = buildAgentApp(state, context, fail)
+  const app = buildAgentApp(state, view, context, fail)
   const stream = ndJsonStream(output, input)
   connection = app.connect(stream)
   const connected = connection
@@ -520,7 +616,7 @@ function readSavedInode(path: string, uid: number): SavedInode {
  * responsible for committing Ready AFTER this resolves.
  */
 export async function startLocalAcpListener(options: StartLocalAcpListenerOptions): Promise<LocalAcpListener> {
-  const { scope, maxConnections, diag } = options
+  const { scope, maxConnections, diag, sessionAccess } = options
   const uid = process.getuid?.()
   if (typeof uid !== 'number') {
     throw new LocalAcpError('LOCAL_ACP_SOCKET_PATH_UNSUPPORTED', 'local acp: the current uid is unavailable')
@@ -555,6 +651,9 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
     bundleVersion: scope.bundleVersion,
     connections: new Set<Socket>(),
     connectionStates: new Map<Socket, ConnectionState>(),
+    ...(sessionAccess === undefined
+      ? {}
+      : { sessionAccess, views: new AcpSessionViewRegistry(diag) }),
   }
 
   const closeScopeDirFd = (): void => {

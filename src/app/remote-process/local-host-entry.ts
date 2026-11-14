@@ -60,6 +60,7 @@ import {
   startLocalAcpListener,
   type LocalAcpListener,
 } from './local-acp-listener.ts'
+import { type HostAcpSessionAccess, type LiveAgentViewIdentity } from './local-acp-session-view.ts'
 import type { AcpAccessStatus } from '../../runtime/acp-access-port.ts'
 
 /** The official Web-only rows of the Host overlay, rendered from the ONE
@@ -431,6 +432,72 @@ export interface AcpControlControllerOptions {
   readonly scope: LocalScope
   readonly maxConnections: number
   readonly diag: import('../../runtime/process/diagnostics.ts').Diag
+  /**
+   * The narrow, already-bound Host Session access the listener forwards to the
+   * connection-scoped Session View (PO-2). Absent keeps the PO-1 fail-closed
+   * Session behaviour. Never a Context, Agent or Session object.
+   */
+  readonly sessionAccess?: HostAcpSessionAccess
+}
+
+/** Structural views of the official Host services the ACP Session View borrows. */
+interface WorkspaceControllerLike {
+  create(request: { path: string }): Promise<{ workspace: { workspaceId: string; path: string }; created: boolean }>
+}
+interface SessionControllerLike {
+  create(request: { workspaceId: string }): Promise<{ sessionId: string }>
+  resolveAgent(sessionId: string): Promise<
+    { agent: LiveAgentViewIdentity } | { error: { code: string; message: string } }
+  >
+}
+interface AgentRegistryLike {
+  get(id: string): LiveAgentViewIdentity | undefined
+}
+interface SessionRegistryLike {
+  get(id: string): object | undefined
+}
+
+/**
+ * Bind the narrow {@link HostAcpSessionAccess} from the ONE already-settled Host
+ * Context. The official Workspace/Session/Agent/Session services stay the sole
+ * authority: this only forwards their callable methods, never their objects,
+ * Context or lifecycle. A missing service is a Host composition failure (the
+ * readiness audit already requires all four), never a silent fallback.
+ *
+ * `reflect.get` is used (not `ctx.<service>`) so this Host composition root does
+ * not add client-boundary coupling debt; the service identities remain the
+ * official ones the readiness audit asserts.
+ *
+ * @param context - the settled Host context.
+ * @returns the narrow Session access the listener borrows from.
+ */
+export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis').Context): HostAcpSessionAccess {
+  const workspaceController = context.reflect.get('workspaceController') as WorkspaceControllerLike | undefined
+  const sessionController = context.reflect.get('sessionController') as SessionControllerLike | undefined
+  const agents = context.reflect.get('agents') as AgentRegistryLike | undefined
+  const sessions = context.reflect.get('sessions') as SessionRegistryLike | undefined
+  if (
+    workspaceController === undefined
+    || sessionController === undefined
+    || agents === undefined
+    || sessions === undefined
+  ) {
+    throw new Error(
+      'local host entry: the Host ACP Session View requires the live workspaceController, sessionController, agents and sessions services',
+    )
+  }
+  return {
+    async createWorkspace(path: string): Promise<{ workspaceId: string; path: string }> {
+      const result = await workspaceController.create({ path })
+      return { workspaceId: result.workspace.workspaceId, path: result.workspace.path }
+    },
+    async createSession(workspaceId: string): Promise<{ sessionId: string }> {
+      return { sessionId: (await sessionController.create({ workspaceId })).sessionId }
+    },
+    resolveAgent: sessionId => sessionController.resolveAgent(sessionId),
+    currentAgent: sessionId => agents.get(sessionId),
+    currentSession: sessionId => sessions.get(sessionId),
+  }
 }
 
 /**
@@ -445,7 +512,7 @@ export interface AcpControlControllerOptions {
  * serialized promise chain so at most one transition runs at a time.
  */
 export function createAcpController(options: AcpControlControllerOptions): AcpControlController {
-  const { scope, maxConnections, diag } = options
+  const { scope, maxConnections, diag, sessionAccess } = options
   let listener: LocalAcpListener | undefined
   let tail: Promise<unknown> = Promise.resolve()
   let inFlight = 0
@@ -487,7 +554,12 @@ export function createAcpController(options: AcpControlControllerOptions): AcpCo
             diag.warn('local-acp.error', { code: 'LOCAL_ACP_CLOSE_FAILED', cause: String(error) })
           }
         }
-        listener = await startLocalAcpListener({ scope, maxConnections, diag })
+        listener = await startLocalAcpListener({
+          scope,
+          maxConnections,
+          diag,
+          ...(sessionAccess === undefined ? {} : { sessionAccess }),
+        })
         return listener.isListening()
           ? { state: 'enabled' }
           : { state: 'unavailable', reason: 'the local ACP listener failed to bind' }
@@ -1011,7 +1083,12 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       // the ONE official shutdown and the synchronous process-exit mirror
       // release it; there is no second Host owner, Context, Agent or Session.
       const maxConnections = parseAcpMaxConnections(process.env.DSH_PI_TUI_ACP_MAX_CONNECTIONS)
-      acpController = createAcpController({ scope, maxConnections, diag: createEntryDiag('host') })
+      // Bind the narrow shared-Session View access from THIS settled Context.
+      // The official Workspace/Session/Agent registries stay the sole authority;
+      // only their callable methods are forwarded. A failure to read them is a
+      // Host composition failure (the readiness audit already required them).
+      const sessionAccess = createHostAcpSessionAccess(handle.ctx)
+      acpController = createAcpController({ scope, maxConnections, diag: createEntryDiag('host'), sessionAccess })
       scratchOwner.acpController = acpController
       // Register the entry-owned controller as the root Host `piTuiAcpOwner`
       // service the private `piTuiAcpAccess` facade forwards to. It is a plain
