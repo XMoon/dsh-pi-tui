@@ -13,7 +13,7 @@
 
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import test, { type TestContext } from 'node:test'
@@ -24,7 +24,10 @@ import {
   classifyUserManagerProbe,
   encodeUnitPath,
   encodeUnitValue,
+  ensureOwnedUnitDir,
   installProfileUnit,
+  inspectTrustedExecutable,
+  probeUserManager,
   profileIdentityDigest,
   profileUnitSlug,
   renderUnitContent,
@@ -112,6 +115,36 @@ test('a probe error reason never leaks an absolute private path', () => {
   }))
   assert.equal(result.kind, 'error')
   assert.doesNotMatch((result as { reason: string }).reason, /\/home\/secret/u)
+})
+
+test('a missing systemctl binary with no live endpoint is an absent manager even without a system state', () => {
+  const enoent: SystemctlResult = { kind: 'spawn-error', error: Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) }
+  assert.deepEqual(classifyUserManagerProbe(probeFacts({ systemctl: enoent, systemdUserServiceState: 'unknown' })), { kind: 'absent' })
+  assert.equal(classifyUserManagerProbe(probeFacts({ systemctl: enoent, systemdUserServiceState: 'unknown', userBusPresent: true })).kind, 'error')
+})
+
+test('systemd not being the init system with no live endpoint is a definitive absence', () => {
+  const init = exited(1, '', 'System has not been booted with systemd as init system (PID 1). Can\'t operate.')
+  assert.deepEqual(classifyUserManagerProbe(probeFacts({ systemctl: init, systemdUserServiceState: 'unknown' })), { kind: 'absent' })
+})
+
+test('a user-scope-bus refusal or permission error is never treated as absence', () => {
+  assert.equal(classifyUserManagerProbe(probeFacts({ systemctl: exited(1, '', 'Failed to connect to user scope bus: Permission denied') })).kind, 'error')
+  assert.equal(classifyUserManagerProbe(probeFacts({ systemctl: exited(1, '', 'Failed to connect to user scope bus: Connection refused') })).kind, 'error')
+})
+
+test('the two-step probe classifies a genuinely absent (no systemctl) host as absent', async () => {
+  const enoent: SystemctlResult = { kind: 'spawn-error', error: Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) }
+  const result = await probeUserManager({ systemctl: async () => enoent, pathExists: () => false })
+  assert.deepEqual(result, { kind: 'absent' })
+})
+
+test('the two-step probe reports available on a successful show-environment', async () => {
+  const result = await probeUserManager({
+    systemctl: async args => (args.includes('show-environment') ? exited(0, 'HOME=/home/u\n') : exited(1)),
+    pathExists: () => true,
+  })
+  assert.deepEqual(result, { kind: 'available' })
 })
 
 // ── Unit naming ──────────────────────────────────────────────────────────────
@@ -229,6 +262,43 @@ test('the real systemd parser accepts the rendered unit with space, percent, dol
       `systemd-analyze rejected the ${label} path encoding`,
     )
   }
+})
+
+// ── Installed-fact trust and directory permission ────────────────────────────
+
+test('the node interpreter is trusted by executability, not by uid ownership', t => {
+  const uid = process.getuid?.()
+  // A root-owned system executable must be accepted for the node interpreter.
+  const candidate = ['/usr/bin/systemctl', '/bin/sh', '/usr/bin/env', '/bin/ls'].find(probe => {
+    try {
+      const real = realpathSync(probe)
+      const info = lstatSync(real)
+      return info.isFile() && (info.mode & 0o111) !== 0 && info.uid !== uid
+    } catch {
+      return false
+    }
+  })
+  if (candidate === undefined) {
+    t.skip('no root-owned system executable is available on this host')
+    return
+  }
+  assert.doesNotThrow(() => inspectTrustedExecutable(candidate, 'node executable'), 'a root-owned executable must be accepted')
+  const dir = testLifecycle(t).tempDir('m62b-trust-')
+  const nonExec = join(dir, 'plain-file')
+  writeFileSync(nonExec, 'x')
+  assert.equal(lstatSync(nonExec).mode & 0o111, 0, 'the probe file must not be executable')
+  assert.throws(() => inspectTrustedExecutable(nonExec, 'node executable'), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+  assert.throws(() => inspectTrustedExecutable(dir, 'node executable'), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+})
+
+test('a group/other-writable unit directory is refused while a 0700 chain is accepted', t => {
+  const uid = process.getuid?.() as number
+  const good = testLifecycle(t).tempDir('m62b-home-good-')
+  assert.doesNotThrow(() => ensureOwnedUnitDir(good, uid))
+  const bad = testLifecycle(t).tempDir('m62b-home-bad-')
+  mkdirSync(join(bad, '.config'), { mode: 0o700 })
+  chmodSync(join(bad, '.config'), 0o770)
+  assert.throws(() => ensureOwnedUnitDir(bad, uid), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
 })
 
 // ── Atomic owner-checked installation ───────────────────────────────────────

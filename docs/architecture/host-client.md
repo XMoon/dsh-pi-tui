@@ -384,10 +384,13 @@ authenticated carrier, the Session/Writer authority or readiness.
   `available`, `absent` or `error`. A non-zero reply, a timeout, a broken bus, a
   permission failure, or an endpoint that exists but cannot be used is a stable
   `HOST_MANAGER_ERROR`; it never degrades. Fallback is used only on a strictly
-  corroborated `absent`: an explicit no-user-bus failure, no live
-  `/run/user/<uid>/systemd/private` or user bus socket, and a system manager that
-  reports `user@<uid>.service` as `inactive`/`not-found`. An unconfirmable or
-  contradictory state is `error`, never `absent`.
+  corroborated `absent`, proven two independent ways with no live
+  `/run/user/<uid>/systemd/private` or user bus socket: (a) a definitive
+  no-systemd statement — the fixed `systemctl` binary is missing, or systemd is
+  not the init system — or (b) an explicit no-user-bus failure with a system
+  manager that reports `user@<uid>.service` as `inactive`/`not-found`. A
+  connect refusal, permission error, timeout or any unconfirmable/contradictory
+  state is `error`, never `absent`.
 - **Public vs. internal start boundary.** Only the real public surface launch —
   a strictly-decoded public Client launch envelope with no internal exact-id
   handoff — requests a managed start. Internal qualification/peer/manual surface
@@ -396,12 +399,18 @@ authenticated carrier, the Session/Writer authority or readiness.
 - **Owned unit, no silent upgrade.** One unit per `(uid, canonical profile)` scope
   is named `dsh-pi-tui@<slug>-<scope prefix>.service` and installed atomically
   (0600, hard link, never overwrite) under the account home's user unit
-  directory. Full `scopeId`, profile identity and install build are carried in
-  the unit owner metadata, and the manager's actual `FragmentPath`/`LoadState`
-  must name the installed file. A different build, a foreign owner, a drop-in or
-  a symlink is `HOST_MANAGER_UNIT_CONFLICT` and is never rewritten; automatic
-  cross-build upgrade is a separate explicit lifecycle capability, not a cold
-  start side effect. The unit carries only the minimal startup facts and official
+  directory, which must be real-directory owned by the uid on every component and
+  never group/other-writable (a writable parent could swap the validated file).
+  The Node interpreter in `ExecStart` is trusted by being an absolute, canonical,
+  executable regular file — a normal user may run a root-owned `/usr/bin/node` —
+  while the product-private Host entry and installed DSH anchor must be
+  uid-owned. Full `scopeId`, profile identity and install build are carried in
+  the unit owner metadata, and the manager's actual
+  `FragmentPath`/`LoadState`/`DropInPaths` must name the installed file with no
+  drop-in override. A different build, a foreign owner, a drop-in or a symlink is
+  `HOST_MANAGER_UNIT_CONFLICT` and is never rewritten; automatic cross-build
+  upgrade is a separate explicit lifecycle capability, not a cold start side
+  effect. The unit carries only the minimal startup facts and official
   environment anchors — never a token, Cookie or secret, never a one-shot backend
   selector or qualification injection — and has no `[Install]`/enable, no
   `Type=notify`, `Restart=on-failure` with limits and journal output.

@@ -18,6 +18,7 @@ import { join } from 'node:path'
 
 import xterm from '@xterm/headless'
 import { findIsolatedProcesses, killIsolatedProcesses } from '../../lib/split-smoke-processes.mjs'
+import { stopAndRemoveManagedUnit } from './managed-host-m6-2b.mjs'
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { hostSessionHeader, hostSessionEvents, hostAssistantHasText } from '../../lib/split-smoke-sessions.mjs'
 
@@ -172,11 +173,17 @@ async function waitForPaint(output, label, timeoutMs) {
   throw new SplitSmokeAssertionError(`public-entry daemon: ${label} never painted a TUI frame; output tail: ${tailText}`)
 }
 
-/** The cleanup: reap the CLI process group and any isolated Host/Client. */
-async function reap(child, dshHome) {
+/** The cleanup: stop any owned managed unit, reap the CLI group, kill any isolated Host/Client. */
+async function reap(child, installation) {
+  // A daemon Client cold start may have created a managed unit (systemd
+  // `Restart=on-failure`); stop it through the manager BEFORE killing the Host so
+  // it cannot be resurrected, and remove the owned unit so the next scene starts
+  // from a truly Host-free state. No-op when no owned unit exists (e.g. CI's
+  // no-user-manager fallback).
+  stopAndRemoveManagedUnit(installation)
   try { process.kill(-child.pid, 'SIGTERM') } catch { /* already gone */ }
   await sleep(200)
-  killIsolatedProcesses(dshHome)
+  killIsolatedProcesses(installation.dshHome)
 }
 
 export async function runPublicDaemonEntry({ installation, trace }) {
@@ -210,7 +217,7 @@ export async function runPublicDaemonEntry({ installation, trace }) {
     const exit = await Promise.race([positive.exit, sleep(60_000).then(() => ({ code: 'timeout', signal: null }))])
     assert(exit.code === 0, `public-entry daemon: /exit exited ${JSON.stringify(exit)}`)
   } finally {
-    await reap(positive.child, dshHome)
+    await reap(positive.child, installation)
   }
   // The Client must be gone; the detached Host may remain (it is Host authority).
   await waitForProcesses(dshHome, c => c.client === 0, 'the Client to exit', 30_000)
@@ -233,7 +240,7 @@ export async function runPublicDaemonEntry({ installation, trace }) {
     result.negativeFailsClosed = true
     trace('m6-2a-public-daemon-illegal-backend', { exitCode: exit.code })
   } finally {
-    await reap(negative.child, dshHome)
+    await reap(negative.child, installation)
   }
 
   // CR-01: the REAL dsh --dump-config composed Loader roster must show every
@@ -300,6 +307,9 @@ class RealDshScreen {
   }
   send(data) { this.child.stdin.write(data) }
   async dispose() {
+    // Stop an owned managed unit through the manager BEFORE the kill backstop so
+    // `Restart=on-failure` cannot resurrect the Host; no-op without a unit.
+    stopAndRemoveManagedUnit(this.installation)
     try { process.kill(-this.child.pid, 'SIGTERM') } catch { /* gone */ }
     await Promise.race([this.exit, sleep(4000)])
     killIsolatedProcesses(this.installation.dshHome)
