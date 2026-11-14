@@ -185,6 +185,10 @@ export class RemoteTeamBoardReadPort implements TeamBoardReadPort {
   }
 
   subscribe(sessionId: string, listener: () => void): () => void {
+    // Root-only: a binding already PROVEN to be a child gets no subscription at
+    // all (no face, generation or Session-list listener, no board callback).
+    const initial = this.sessions.binding(sessionId)
+    if (initial !== undefined && this.isProvenChild(sessionId, initial.session)) return () => {}
     let faceOffs: Array<() => void> = []
     let lastBinding: unknown
     let disposed = false
@@ -210,11 +214,11 @@ export class RemoteTeamBoardReadPort implements TeamBoardReadPort {
     rearm(false)
     // A reconnect keeps the retained binding identity stable, but a retired +
     // same-id rebuilt owner produces a NEW face; re-arm on every generation
-    // change so a retired binding's callback is never mistaken for current.
+    // change so a retired binding's callback is never mistaken for current. A
+    // proven child re-arm returns false, so it never notifies either.
     const generationOff = this.generation.subscribe(() => {
       if (disposed) return
-      rearm(true)
-      listener()
+      if (rearm(true)) listener()
     })
     const listOff = this.sessions.list.subscribe?.(() => {
       if (disposed) return

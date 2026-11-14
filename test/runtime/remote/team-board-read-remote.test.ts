@@ -206,14 +206,31 @@ test('Remote board subscription re-arms on binding arrival and generation change
   assert.equal(calls, callsAfter, 'a disposed subscription never fires again')
 })
 
-test('Remote board subscribe is Root-only: a confirmed child binding never attaches', () => {
+test('Remote board subscribe is Root-only: a confirmed child binding never attaches or notifies', () => {
   const child = makeSession({ face: new FakeFace(board([task()])), subagent: { parent: 'root' } })
   const s = makeSessions({ session: child.session })
-  const port = new RemoteTeamBoardReadPort({ sessions: s.sessions, connection: { generation: generation({ id: 'g' }) } })
+  const gen = generation({ id: 'g' })
+  const port = new RemoteTeamBoardReadPort({ sessions: s.sessions, connection: { generation: gen } })
   let calls = 0
   const dispose = port.subscribe('root', () => { calls += 1 })
   assert.equal(child.face.size(), 0, 'a child binding never gets a face listener')
-  assert.equal(calls, 0)
+  gen.set({ id: 'g2' })
+  assert.equal(calls, 0, 'a generation change never notifies a confirmed child')
+  dispose()
+})
+
+test('Remote board subscribe stays silent when an initially absent binding resolves to a child', () => {
+  const s = makeSessions(undefined)
+  const gen = generation({ id: 'g' })
+  const port = new RemoteTeamBoardReadPort({ sessions: s.sessions, connection: { generation: gen } })
+  let calls = 0
+  const dispose = port.subscribe('root', () => { calls += 1 })
+  const child = makeSession({ face: new FakeFace(board([task()])), subagent: { parent: 'root' } })
+  s.setBinding({ session: child.session })
+  s.emitList()
+  gen.set({ id: 'g2' })
+  assert.equal(child.face.size(), 0, 'a late child binding never gets a face listener')
+  assert.equal(calls, 0, 'a generation/list change never notifies once the binding proves a child')
   dispose()
 })
 
