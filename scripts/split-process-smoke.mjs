@@ -601,6 +601,15 @@ export function assertSelectedVerdict(caseId, result) {
       `selected ${caseId}: the Browser/Web verdict ended as ${String(result?.browser ?? 'missing')}/${String(result?.status ?? 'missing')}`)
     return
   }
+  if (caseId.startsWith('managed-host.')) {
+    // A managed-host case is environment-gated: a real PASS needs the isolated
+    // native systemd environment, and an honest NOT_VERIFIED is a valid selected
+    // outcome. Anything else (FAIL/BLOCKED/unknown) is a rejected verdict. The
+    // selected runner must never turn NOT_VERIFIED into SELECTED_PASS.
+    assert(result?.status === 'PASS' || result?.status === 'NOT_VERIFIED',
+      `selected ${caseId}: the managed-host verdict ended as ${String(result?.status ?? 'missing')} (only PASS or NOT_VERIFIED are valid)`)
+    return
+  }
   assert(result?.status === undefined || result?.status === 'PASS',
     `selected ${caseId}: the case returned ${String(result?.status)} instead of a successful verdict`)
 }
@@ -683,12 +692,26 @@ async function runSelectedCases(selection) {
     }
     const selected = []
     for (const selectedCase of selection.cases) {
-      await runSelectedCase(diagnostics, selectedCase, context)
-      selected.push(selectedCase.id)
+      const result = await runSelectedCase(diagnostics, selectedCase, context)
+      selected.push({
+        id: selectedCase.id,
+        status: typeof result?.status === 'string' ? result.status : 'PASS',
+        reason: typeof result?.reason === 'string' ? result.reason : undefined,
+      })
     }
     assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
       'the candidate artifact changed during the selected qualification')
-    for (const caseId of selected) process.stdout.write(`${selectedPassLine(caseId)}\n`)
+    for (const entry of selected) {
+      // Only a real PASS may print SELECTED_PASS. An environment-gated
+      // NOT_VERIFIED is reported as its own distinct line and is non-zero, so a
+      // caller can never mistake it for a qualified pass.
+      if (entry.status === 'PASS') {
+        process.stdout.write(`${selectedPassLine(entry.id)}\n`)
+      } else {
+        process.stdout.write(`SPLIT_PROCESS_SELECTED_NOT_VERIFIED id=${entry.id} scope=SELECTABLE_ONLY reason=${entry.reason ?? entry.status}\n`)
+        process.exitCode = 1
+      }
+    }
   } catch (error) {
     // Report BEFORE the cleanup below: the failure projection must read the
     // still-live process handles, and the work root must still exist while the

@@ -542,6 +542,15 @@ test('selected dispatch fails closed on non-PASS Web and Account verdicts', () =
     { status: 'NOT_VERIFIED', rhH3ClientCrash: 'REAL_SPLIT_PROCESS_L6', rhH3HostCrash: 'REAL_SPLIT_PROCESS_L6', hostReportedNothing: true }),
     /selected herdr\.h3-abrupt-lifecycle/u)
 })
+test('a managed-host selected case may report an honest NOT_VERIFIED, never SELECTED_PASS', () => {
+  assert.equal(assertSelectedVerdict('managed-host.m6-2b-systemd', { status: 'PASS', scope: 'REAL_SYSTEMD_USER_L6' }), undefined)
+  assert.equal(assertSelectedVerdict('managed-host.m6-2b-fallback', { status: 'NOT_VERIFIED', reason: 'NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE' }), undefined)
+  assert.throws(() => assertSelectedVerdict('managed-host.m6-2b-systemd', { status: 'FAIL' }),
+    /selected managed-host\.m6-2b-systemd/u)
+  assert.throws(() => assertSelectedVerdict('managed-host.m6-2b-manager-error', { status: 'BLOCKED' }),
+    /selected managed-host\.m6-2b-manager-error/u)
+})
+
 test('the ACP UDS selected verdict accepts only the complete real-L6 proof', () => {
   const complete = {
     status: 'PASS',

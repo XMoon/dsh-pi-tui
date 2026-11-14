@@ -124,6 +124,12 @@ test('the profile slug is ASCII-safe, bounded, and never empty or leading-unsafe
   assert.equal(profileUnitSlug('üñî'), 'p___')
   assert.equal(profileUnitSlug('a/b c'), 'a_b_c')
   assert.equal(profileUnitSlug('a'.repeat(40)).length, 32)
+  // Boundary: a 32-char unsafe-leading slug is normalized FIRST, then bounded,
+  // so it never grows past the fixed 32-character limit.
+  const unsafeLeading = profileUnitSlug('-'.repeat(32))
+  assert.equal(unsafeLeading.length, 32, 'the prefixed slug must still be bounded to 32 characters')
+  assert.equal(unsafeLeading[0], 'p', 'the leading character must be normalized before the bound')
+  assert.equal(profileUnitSlug('a'.repeat(32)), 'a'.repeat(32))
 })
 
 test('the unit name uses the slug plus a bounded scope prefix, not the whole scope id', () => {
@@ -362,8 +368,8 @@ function fakeSystemctl(finalPath: string) {
     }
     if (args.includes('show')) {
       const body = loaded
-        ? `LoadState=loaded\nActiveState=inactive\nFragmentPath=${finalPath}\n`
-        : 'LoadState=not-found\nActiveState=inactive\nFragmentPath=\n'
+        ? `LoadState=loaded\nActiveState=inactive\nFragmentPath=${finalPath}\nDropInPaths=\n`
+        : 'LoadState=not-found\nActiveState=inactive\nFragmentPath=\nDropInPaths=\n'
       return exited(0, body)
     }
     return exited(0)
@@ -440,13 +446,35 @@ test('a manager reporting a different FragmentPath is a unit conflict', async t 
   const otherFile = fx.anchor
   const systemctl = async (args: readonly string[]): Promise<SystemctlResult> => {
     if (args.includes('daemon-reload')) return exited(0)
-    if (args.includes('show')) return exited(0, `LoadState=loaded\nActiveState=inactive\nFragmentPath=${otherFile}\n`)
+    if (args.includes('show')) return exited(0, `LoadState=loaded\nActiveState=inactive\nFragmentPath=${otherFile}\nDropInPaths=\n`)
     return exited(0)
   }
   await assert.rejects(
     startManagedHostCandidate(
       { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: fx.anchor, profile: 'pi-tui' },
       { probe: async (): Promise<UserManagerProbe> => ({ kind: 'available' }), unitDir: () => unitDir, systemctl },
+    ),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
+  )
+})
+
+test('a loaded drop-in override is a unit conflict even when the FragmentPath is our file', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-dropin-')
+  const finalPath = join(unitDir, buildUnitName('pi-tui', fx.scope.scopeId))
+  const fake = fakeSystemctl(finalPath)
+  const withDropIn = async (args: readonly string[]): Promise<SystemctlResult> => {
+    if (args.includes('show')) {
+      // Our owned file is the FragmentPath, but a same-named drop-in would
+      // override ExecStart/Environment/Restart — this must fail closed.
+      return exited(0, `LoadState=loaded\nActiveState=inactive\nFragmentPath=${finalPath}\nDropInPaths=/etc/systemd/user/${buildUnitName('pi-tui', fx.scope.scopeId)}.d/override.conf\n`)
+    }
+    return fake.run(args)
+  }
+  await assert.rejects(
+    startManagedHostCandidate(
+      { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: fx.anchor, profile: 'pi-tui' },
+      { probe: async (): Promise<UserManagerProbe> => ({ kind: 'available' }), unitDir: () => unitDir, systemctl: withDropIn },
     ),
     error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
   )
