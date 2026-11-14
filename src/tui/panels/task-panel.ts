@@ -55,8 +55,27 @@ type TaskMouseHit =
   | { kind: 'search' }
   | { kind: 'item'; value: string; index: number; listWidth?: number }
   | { kind: 'actions'; actions: readonly TaskMouseActionHit[] }
-  | { kind: 'tab'; target: 'work' | 'team' }
+  | { kind: 'tab'; spans: readonly TabSpan[] }
   | { kind: 'inert' }
+
+/** One painted tab label's column range and the page it switches to. */
+interface TabSpan {
+  readonly target: 'work' | 'team'
+  readonly startCol: number
+  readonly endCol: number
+}
+
+/**
+ * ONE captured FR2 pointer gesture — the last-painted identity a press locked.
+ * A click is accepted only when it resolves the SAME identity on the SAME
+ * painted geometry (row + grant), so a repaint/refresh between press and
+ * release can never retarget the action. Wheel is NOT a gesture (it moves the
+ * selection with no commit) and never requires a press.
+ */
+type Fr2Gesture =
+  | { readonly kind: 'tab'; readonly target: 'work' | 'team'; readonly startCol: number; readonly endCol: number; readonly row: number; readonly width: number; readonly height: number }
+  | { readonly kind: 'team-row'; readonly value: string; readonly row: number; readonly width: number; readonly height: number }
+  | { readonly kind: 'filter'; readonly token: string; readonly chosen: string | null; readonly row: number; readonly width: number; readonly height: number }
 
 /** One selectable Team page row (Root/member or shared task). Section headers
  *  are derived from kind transitions during render and are never selectable. */
@@ -181,8 +200,8 @@ export class TaskBrowserPanel implements Component, Focusable {
   private mousePressedValue: string | undefined
   private mousePressedSelectionOnly = false
   private mousePressedAction: TaskMouseActionGesture | undefined
-  /** FR2: the pressed Team/filter row identity (last-painted geometry). */
-  private teamMousePressedValue: string | undefined
+  /** FR2: the ONE captured last-painted pointer gesture (tab / team row / filter). */
+  private fr2Pressed: Fr2Gesture | undefined
   private readonly onSelect: (value: string) => void
   private readonly onCancel: () => void
   private readonly onStop: ((value: string) => void) | undefined
@@ -631,10 +650,7 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   /** The `Tasks · [Work]  Team` / `Tasks · Work  [Team]` tab prefix. */
   private tabsPrefix(active: 'work' | 'team'): string {
-    const title = this.options.header ?? 'Tasks'
-    const work = active === 'work' ? '[Work]' : 'Work'
-    const team = active === 'team' ? '[Team]' : 'Team'
-    return `${title} · ${work}  ${team}`
+    return this.tabSpans(active).text
   }
 
   private teamStatusShort(): string {
@@ -698,8 +714,34 @@ export class TaskBrowserPanel implements Component, Focusable {
       .map(sanitizedPhysicalLine)
   }
 
-  private tabHitFor(target: 'work' | 'team'): TaskMouseHit {
-    return this.team !== undefined ? { kind: 'tab', target } : { kind: 'inert' }
+  /** The `Tasks · [Work]  Team` tab bar plus the PAINTED column ranges of each
+   *  tab label, so pointer hits target the real labels (not the whole row). */
+  private tabSpans(active: 'work' | 'team'): { text: string; spans: readonly TabSpan[] } {
+    const title = this.options.header ?? 'Tasks'
+    const workLabel = active === 'work' ? '[Work]' : 'Work'
+    const teamLabel = active === 'team' ? '[Team]' : 'Team'
+    const sep = ' · '
+    const gap = '  '
+    const text = `${title}${sep}${workLabel}${gap}${teamLabel}`
+    const workStart = visibleWidth(title) + visibleWidth(sep)
+    const workEnd = workStart + visibleWidth(workLabel)
+    const teamStart = workEnd + visibleWidth(gap)
+    const teamEnd = teamStart + visibleWidth(teamLabel)
+    return {
+      text,
+      spans: [
+        { target: 'work', startCol: workStart, endCol: workEnd },
+        { target: 'team', startCol: teamStart, endCol: teamEnd },
+      ],
+    }
+  }
+
+  private workTabHit(): TaskMouseHit {
+    return this.team !== undefined ? { kind: 'tab', spans: this.tabSpans('work').spans } : { kind: 'inert' }
+  }
+
+  private teamTabHit(): TaskMouseHit {
+    return { kind: 'tab', spans: this.tabSpans('team').spans }
   }
 
   private teamDetailLines(task: TeamBoardTask): string[] {
@@ -732,11 +774,6 @@ export class TaskBrowserPanel implements Component, Focusable {
     return value === '' ? ' / search…' : ` ${stripped}`
   }
 
-  private teamHint(): string {
-    const tab = componentKeymap.keyHint('tasks.tab.next')
-    return `↑↓ select · Enter details · ${tab} Work · Esc close`
-  }
-
   private renderTeam(safeWidth: number): string[] {
     const team = this.team
     if (team === undefined) {
@@ -753,13 +790,21 @@ export class TaskBrowserPanel implements Component, Focusable {
     const errorRaw = this.teamErrorLine()
     const errorText = errorRaw === undefined ? undefined : truncateToWidth(sanitizedPhysicalLine(errorRaw), safeWidth, '…')
     const searchLine = this.teamSearchMode ? this.teamSearchLine(safeWidth) : undefined
-    const hintLine = color.textMuted(truncateToWidth(`  ${this.teamHint()}`, safeWidth, '…'))
+    // The Team hint is action-bar budgeted so `Esc close` (highest retention)
+    // survives very narrow grants instead of being cut mid-word.
+    const teamHintLayout = layoutActionBarRow([
+      { text: '↑↓ select', priority: 80 },
+      { text: 'Enter details', priority: 90 },
+      { text: `${componentKeymap.keyHint('tasks.tab.next')} Work`, priority: 15 },
+      { text: 'Esc close', priority: 1000 },
+    ], Math.max(0, safeWidth - 2))
+    const hintLine = color.textMuted(`  ${teamHintLayout.text}`)
     const selectedIndex = rows.findIndex(row => row.value === this.teamSelectedValue)
 
     const build = (count: number, start: number): { lines: string[]; hits: TaskMouseHit[] } => {
       const out: string[] = []
       const outHits: TaskMouseHit[] = []
-      out.push(color.textStrong(headerText)); outHits.push(this.tabHitFor('work'))
+      out.push(color.textStrong(headerText)); outHits.push(this.teamTabHit())
       if (searchLine !== undefined) {
         out.push(this.teamSearchMode && this.teamQuery() === '' ? color.textDim(searchLine) : searchLine)
         outHits.push({ kind: 'search' })
@@ -817,13 +862,23 @@ export class TaskBrowserPanel implements Component, Focusable {
       return { lines: out, hits: outHits }
     }
 
+    // The window start always keeps the SELECTED row inside the visible rows,
+    // and is re-derived on EVERY fit shrink so a short grant can never paint
+    // past the selected main row.
+    const windowStart = (windowCount: number, from: number): number => {
+      let start = from
+      if (selectedIndex >= 0) {
+        if (selectedIndex < start) start = selectedIndex
+        else if (selectedIndex >= start + windowCount) start = selectedIndex - windowCount + 1
+      }
+      return Math.max(0, Math.min(start, Math.max(0, rows.length - windowCount)))
+    }
     let count = Math.min(Math.max(rows.length, 1), this.teamBudget())
-    let start = this.teamScroll
-    if (start + count > rows.length) start = Math.max(0, rows.length - count)
+    let start = windowStart(count, this.teamScroll)
     let candidate = build(count, start)
     while (candidate.lines.length > limit && count > 1) {
       count -= 1
-      start = Math.max(0, Math.min(start, Math.max(0, rows.length - count)))
+      start = windowStart(count, start)
       candidate = build(count, start)
     }
     if (candidate.lines.length > limit) {
@@ -865,9 +920,12 @@ export class TaskBrowserPanel implements Component, Focusable {
     for (let index = start; index < end; index += 1) {
       const chosen = candidates[index]
       const label = chosen === null ? 'All' : chosen
+      // A Job `kind` is open-extension text: project to ONE safe physical row and
+      // width-truncate before it enters the line budget / hit map.
+      const safeLabel = truncateToWidth(sanitizedPhysicalLine(label), Math.max(1, safeWidth - 2), '…')
       const selected = index === this.filterSelected
       const pointer = selected ? color.primary('> ') : '  '
-      lines.push(`${pointer}${selected ? color.textStrong(label) : color.text(label)}`)
+      lines.push(`${pointer}${selected ? color.textStrong(safeLabel) : color.text(safeLabel)}`)
       hits.push({ kind: 'item', value: `filter:${chosen === null ? '__all__' : chosen}`, index })
     }
     if (candidates.length > budget) {
@@ -880,9 +938,10 @@ export class TaskBrowserPanel implements Component, Focusable {
       // Degrade to the title, the selected candidate and the hint.
       const chosen = candidates[this.filterSelected]
       const label = chosen === null ? 'All' : chosen ?? ''
+      const safeLabel = truncateToWidth(sanitizedPhysicalLine(label), Math.max(1, safeWidth - 2), '…')
       const slim = [
         color.textStrong(truncateToWidth('Type filter', safeWidth, '…')),
-        `${color.primary('> ')}${color.textStrong(label)}`,
+        `${color.primary('> ')}${color.textStrong(safeLabel)}`,
         color.textMuted(truncateToWidth('  ↑↓ · Enter · Esc', safeWidth, '…')),
       ]
       const slimHits: TaskMouseHit[] = [{ kind: 'inert' }, { kind: 'item', value: `filter:${chosen === null ? '__all__' : (chosen ?? '')}`, index: this.filterSelected }, { kind: 'inert' }]
@@ -1120,6 +1179,10 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   private setPage(target: 'work' | 'team'): void {
     if (this.team === undefined || this.pageView === target) return
+    // The ONE page-switch admission: a pending Work Stop confirmation forbids a
+    // page switch from BOTH the keyboard and the pointer (never leave an
+    // unresolved destructive confirmation).
+    if (this.pendingStopValue !== undefined) return
     this.pageView = target
     if (target === 'team') this.ensureTeamVisible()
     else this.ensureVisible()
@@ -1234,11 +1297,12 @@ export class TaskBrowserPanel implements Component, Focusable {
     const pressedValue = this.mousePressedValue
     const pressedSelectionOnly = this.mousePressedSelectionOnly
     const pressedAction = this.mousePressedAction
+    const fr2Pressed = this.fr2Pressed
     if (event.type === 'click' || (event.type === 'press' && event.button === 'left') || event.type === 'wheel') {
       this.mousePressedValue = undefined
       this.mousePressedSelectionOnly = false
       this.mousePressedAction = undefined
-      this.teamMousePressedValue = undefined
+      this.fr2Pressed = undefined
     }
     if (event.type === 'click' && pressedSelectionOnly) return { handled: true }
     if (this.disposed) return undefined
@@ -1249,17 +1313,15 @@ export class TaskBrowserPanel implements Component, Focusable {
     const hit = this.hitMap[event.y]
     if (!hit) return undefined
 
-    // FR2: the Work type-filter list owns the pointer while open. Tab/Filter/
-    // Team pointer actions all require the runtime's physical admission fence.
-    if (this.filterOpen) return this.handleFilterMouse(event, hit)
-    // FR2: the Team page owns the pointer while active.
-    if (this.pageView === 'team') return this.handleTeamMouse(event, hit)
-    if (hit.kind === 'tab') {
-      if (event.button !== 'left' || event.type !== 'click') return { handled: true }
-      if (this.interactionCurrent?.() !== true) return undefined
-      this.setPage(hit.target)
-      return { handled: true }
-    }
+    // FR2: the Work type-filter list owns the pointer while open.
+    if (this.filterOpen) return this.handleFilterMouse(event, hit, fr2Pressed)
+    // FR2: the tab labels are shared by both pages — the SAME painted-span,
+    // press→release identity path governs either page's switch. setPage()
+    // refuses a pending Work Stop, so a mouse Tab can never bypass the
+    // confirmation.
+    if (hit.kind === 'tab') return this.handleTabMouse(event, hit, fr2Pressed)
+    // FR2: the Team page owns the pointer while active (item rows only).
+    if (this.pageView === 'team') return this.handleTeamMouse(event, hit, fr2Pressed)
 
     if (hit.kind === 'actions') {
       if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
@@ -1356,29 +1418,54 @@ export class TaskBrowserPanel implements Component, Focusable {
     return undefined
   }
 
-  private handleFilterMouse(event: TuiMouseEvent, hit: TaskMouseHit): TuiMouseEventResult | undefined {
+  private decodeFilterToken(token: string): string | null {
+    return token === 'filter:__all__' ? null : token.slice('filter:'.length)
+  }
+
+  /** Whether a click resolves the SAME last-painted identity as the captured
+   *  press (kind + row + grant + kind-specific identity). */
+  private sameFr2Gesture(pressed: Fr2Gesture | undefined, current: Fr2Gesture): boolean {
+    if (pressed === undefined || pressed.kind !== current.kind) return false
+    if (pressed.row !== current.row || pressed.width !== current.width || pressed.height !== current.height) return false
+    if (pressed.kind === 'tab' && current.kind === 'tab') {
+      return pressed.target === current.target && pressed.startCol === current.startCol && pressed.endCol === current.endCol
+    }
+    if (pressed.kind === 'team-row' && current.kind === 'team-row') return pressed.value === current.value
+    if (pressed.kind === 'filter' && current.kind === 'filter') return pressed.token === current.token
+    return false
+  }
+
+  private handleFilterMouse(event: TuiMouseEvent, hit: TaskMouseHit, pressed: Fr2Gesture | undefined): TuiMouseEventResult | undefined {
     if (hit.kind !== 'item' || !hit.value.startsWith('filter:')) return undefined
-    if (event.button !== 'left') return undefined
+    // Wheel events use `button: 'none'`: handle them BEFORE the left-button gate.
     if (event.type === 'wheel' && event.wheelDelta) {
       const candidates = this.filterCandidates()
       const delta = event.wheelDelta < 0 ? -1 : 1
       this.filterSelected = Math.max(0, Math.min(candidates.length - 1, this.filterSelected + delta))
       return { handled: true, render: true }
     }
+    if (event.button !== 'left') return undefined
+    const current: Fr2Gesture = { kind: 'filter', token: hit.value, chosen: this.decodeFilterToken(hit.value), row: event.y, width: event.width, height: event.height }
     if (event.type === 'press') {
+      if (this.interactionCurrent?.() !== true) return undefined
       this.filterSelected = hit.index
+      this.fr2Pressed = current
       return { handled: true, focus: true }
     }
     if (event.type !== 'click') return undefined
     if (this.interactionCurrent?.() !== true) return undefined
+    if (pressed === undefined || pressed.kind !== 'filter' || !this.sameFr2Gesture(pressed, current)) return undefined
+    // Apply the PRESSED type by identity — never the current row index (the
+    // candidate set may have changed between paint and release). If that pressed
+    // type vanished, cancel rather than submit a different one.
+    const chosen = pressed.chosen
     const candidates = this.filterCandidates()
-    const chosen = candidates[hit.index]
-    if (chosen === undefined) {
+    if (chosen !== null && !candidates.includes(chosen)) {
       this.filterOpen = false
       this.requestRender()
       return { handled: true }
     }
-    this.filterSelected = hit.index
+    this.filterSelected = chosen === null ? 0 : candidates.indexOf(chosen)
     this.activeType = chosen
     this.filterOpen = false
     this.selectionTouched = true
@@ -1387,36 +1474,50 @@ export class TaskBrowserPanel implements Component, Focusable {
     return { handled: true }
   }
 
-  private handleTeamMouse(event: TuiMouseEvent, hit: TaskMouseHit): TuiMouseEventResult | undefined {
-    if (hit.kind === 'tab') {
-      if (event.button !== 'left' || event.type !== 'click') return { handled: true }
-      if (this.interactionCurrent?.() !== true) return undefined
-      this.setPage(hit.target)
-      return { handled: true }
-    }
+  private handleTeamMouse(event: TuiMouseEvent, hit: TaskMouseHit, pressed: Fr2Gesture | undefined): TuiMouseEventResult | undefined {
     if (hit.kind !== 'item') return undefined
-    if (event.button !== 'left') return undefined
+    // Wheel events use `button: 'none'`: handle them BEFORE the left-button gate.
     if (event.type === 'wheel' && event.wheelDelta) {
       this.moveTeam(event.wheelDelta < 0 ? -1 : 1)
       return { handled: true, render: true }
     }
+    if (event.button !== 'left') return undefined
+    const current: Fr2Gesture = { kind: 'team-row', value: hit.value, row: event.y, width: event.width, height: event.height }
     if (event.type === 'press') {
       if (this.interactionCurrent?.() !== true) return undefined
-      this.teamMousePressedValue = hit.value
+      this.fr2Pressed = current
       this.teamSelectedValue = hit.value
       this.ensureTeamVisible()
       return { handled: true, focus: true }
     }
     if (event.type !== 'click') return undefined
     if (this.interactionCurrent?.() !== true) return undefined
-    if (this.teamMousePressedValue !== hit.value) return undefined
-    this.teamMousePressedValue = undefined
+    if (!this.sameFr2Gesture(pressed, current)) return undefined
     this.teamSelectedValue = hit.value
     // A member row is SELECTION ONLY: no viewer, no write. A task row toggles
-    // its single disclosure. Text inside the detail pane is inert (never a
-    // Work Open/Stop route).
+    // its single disclosure. Text inside the detail pane is inert.
     const row = this.teamViewRows().find(candidate => candidate.value === hit.value)
     if (row?.kind === 'task') this.toggleTeamSelected()
+    return { handled: true }
+  }
+
+  private handleTabMouse(event: TuiMouseEvent, hit: TaskMouseHit, pressed: Fr2Gesture | undefined): TuiMouseEventResult | undefined {
+    if (hit.kind !== 'tab') return undefined
+    if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return { handled: true }
+    const span = hit.spans.find(candidate => event.x >= candidate.startCol && event.x < candidate.endCol)
+    if (span === undefined) return undefined
+    const current: Fr2Gesture = { kind: 'tab', target: span.target, startCol: span.startCol, endCol: span.endCol, row: event.y, width: event.width, height: event.height }
+    if (event.type === 'press') {
+      // Refuse to arm a tab gesture while a Work Stop confirmation is pending:
+      // the mouse path honors the same ban as the keyboard Tab.
+      if (this.pendingStopValue !== undefined || this.interactionCurrent?.() !== true) return undefined
+      this.fr2Pressed = current
+      return { handled: true, focus: true }
+    }
+    if (this.pendingStopValue !== undefined) return undefined
+    if (this.interactionCurrent?.() !== true) return undefined
+    if (!this.sameFr2Gesture(pressed, current)) return undefined
+    this.setPage(span.target)
     return { handled: true }
   }
 
@@ -1508,7 +1609,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     })()
 
     if (headerText !== undefined) {
-      push(color.textStrong(headerText), this.tabHitFor('team'))
+      push(color.textStrong(headerText), this.workTabHit())
       push('', { kind: 'inert' })
     }
 
