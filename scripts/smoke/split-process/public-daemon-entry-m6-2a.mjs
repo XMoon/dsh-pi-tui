@@ -384,15 +384,26 @@ async function runRuntimeLoaderAudit(installation, trace) {
     }
     assert(Array.isArray(dump), `R6-02: runtime Loader dump was not produced${dump && dump.error ? ` (${String(dump.error)})` : ''}`)
     const pick = (id) => dump.find(row => row.id === id || row.id === `include:${id}` || row.id.endsWith(`:${id}`))
-    for (const id of ['session', 'session-persistence-jsonl', 'storage-json', 'jobs', 'typert-gateway', 'remote-access', 'deepseek-account', 'authorization', 'credentials']) {
+    // Every second-Host-business authority row (incl. the pi-tui conditional ones)
+    // must be RUNTIME-disabled with NO active fiber; stateless infra stays enabled
+    // WITH an active fiber.
+    const authorityIds = ['session', 'session-persistence-jsonl', 'storage-json', 'jobs', 'typert-gateway', 'remote-access', 'deepseek-account', 'authorization', 'credentials', 'workspace', 'job-controller', 'webserver']
+    for (const id of authorityIds) {
       const row = pick(id)
       assert(row !== undefined, `R6-02: the runtime supervisor Loader has no row for ${id} (ids sample: ${dump.map(r => r.id).slice(0, 8).join(',')})`)
+      // The runtime `entry.disabled` GETTER (which evaluates the !!js expression
+      // against the live loader context) must be true — real admission state, not
+      // a composed config string. NOTE: for entries created by cordis-plugin-include
+      // (`include:<id>`) the per-entry fiber is the include group's shared fiber, so
+      // fiber state is not a reliable per-row signal and is collected for reference
+      // only, not asserted.
       assert(row.disabled === true, `R6-02: runtime Loader row ${row.id} disabled=${String(row.disabled)} (expected the !!js expression to evaluate true)`)
     }
     for (const id of ['timer', 'llm', 'tools']) {
       const row = pick(id)
       if (row !== undefined) assert(row.disabled === false, `R6-02: control row ${row.id} must stay ENABLED in the supervisor`)
     }
+    trace('m6-2a-runtime-loader-audit', { rows: dump.length, authorityDisabled: authorityIds.length })
     trace('m6-2a-runtime-loader-audit', { rows: dump.length })
     return 'PASS'
   } finally { await s.dispose() }

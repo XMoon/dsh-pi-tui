@@ -19,8 +19,8 @@
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { constants as osConstants } from 'node:os'
-import { lstatSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { constants, closeSync, existsSync, fchmodSync, fstatSync, lstatSync, openSync, realpathSync, statSync, writeSync } from 'node:fs'
+import { dirname, isAbsolute, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { installedPackageRootFromEntry } from './local-scope.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
@@ -249,6 +249,59 @@ export class DaemonCoordinator {
   }
 }
 
+/**
+ * Write a qualification dump to a SAFE, PRIVATE target: absolute path, a real
+ * parent directory owned by this process user, NEVER overwriting an existing
+ * file and never following a symlink; created 0600. Throws on any unsafe target
+ * (mirrors the qualification record-sink contract in local-client-entry).
+ */
+export function writeQualificationDump(target: string, text: string): void {
+  if (!isAbsolute(target)) throw new Error('the qualification dump path must be absolute')
+  const directory = realpathSync(dirname(target))
+  const dirStats = statSync(directory)
+  if (!dirStats.isDirectory()) throw new Error('the qualification dump parent is not a directory')
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  if (uid !== undefined && dirStats.uid !== uid) throw new Error('the qualification dump parent is not owned by this process user')
+  if (existsSync(target)) throw new Error('the qualification dump target already exists (refusing to overwrite)')
+  const fd = openSync(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+  try {
+    if ((fstatSync(fd).mode & 0o777) !== 0o600) fchmodSync(fd, 0o600)
+    writeSync(fd, text)
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** A cancelable, Fiber-lifecycle-owned one-shot qualification dump scheduler. */
+export interface LoaderDumpScheduler {
+  schedule(delayMs: number): void
+  flush(): void
+  dispose(): void
+}
+export function createLoaderDumpScheduler(produce: () => string, write: (text: string) => void): LoaderDumpScheduler {
+  let disposed = false
+  let done = false
+  const timers = new Set<ReturnType<typeof setTimeout>>()
+  const emit = (): void => {
+    if (disposed || done) return
+    done = true
+    try { write(produce()) } catch { /* best effort once */ }
+  }
+  return {
+    schedule(delayMs: number): void {
+      if (disposed) return
+      const timer = setTimeout(() => { timers.delete(timer); emit() }, delayMs)
+      timers.add(timer)
+    },
+    flush(): void { emit() },
+    dispose(): void {
+      disposed = true
+      for (const timer of timers) clearTimeout(timer)
+      timers.clear()
+    },
+  }
+}
+
 /** The production Coordinator row: resolve the installed Client, spawn it once
  *  on the real cold-start readiness settlement, and own its single lifecycle. */
 export function apply(ctx: Context): void {
@@ -270,21 +323,22 @@ export function apply(ctx: Context): void {
   // isolation proof reads real admission state, not composed config strings.
   const loaderDumpPath = process.env.M62A_LOADER_DUMP
   if (loaderDumpPath !== undefined && loaderDumpPath !== '') {
-    const dumpLoader = (): void => {
-      try {
-        const loader = ctx.get('loader') as { entries?: () => Iterable<{ id: string; disabled?: boolean; fiber?: { state?: unknown } }> } | undefined
-        const rows: Array<{ id: string; disabled: boolean; state: unknown }> = []
-        if (loader !== undefined && typeof loader.entries === 'function') {
-          for (const entry of loader.entries()) rows.push({ id: entry.id, disabled: entry.disabled === true, state: entry.fiber !== undefined ? entry.fiber.state : null })
-        }
-        writeFileSync(loaderDumpPath, JSON.stringify(rows))
-      } catch (error) {
-        try { writeFileSync(loaderDumpPath, JSON.stringify({ error: String(error instanceof Error ? error.message : error) })) } catch { /* give up */ }
+    // Qualification-only, env-gated. Writes to a SAFE private target only (see
+    // writeQualificationDump) and its timers/subscription are owned by this row's
+    // Fiber via ctx.effect; after dispose no timer fires and nothing is written.
+    const produce = (): string => {
+      const loader = ctx.get('loader') as { entries?: () => Iterable<{ id: string; disabled?: boolean; fiber?: { state?: unknown } }> } | undefined
+      const rows: Array<{ id: string; disabled: boolean; state: unknown }> = []
+      if (loader !== undefined && typeof loader.entries === 'function') {
+        for (const entry of loader.entries()) rows.push({ id: entry.id, disabled: entry.disabled === true, state: entry.fiber !== undefined ? entry.fiber.state : null })
       }
+      return JSON.stringify(rows)
     }
+    const scheduler = createLoaderDumpScheduler(produce, text => writeQualificationDump(loaderDumpPath, text))
     const readyForDump = ctx.get('appReady') as { onReady?: (listener: () => void) => () => void } | undefined
-    if (readyForDump !== undefined && typeof readyForDump.onReady === 'function') readyForDump.onReady(() => setTimeout(dumpLoader, 800))
-    setTimeout(dumpLoader, 4000)
+    const cancelReady = readyForDump !== undefined && typeof readyForDump.onReady === 'function' ? readyForDump.onReady(() => { scheduler.schedule(800) }) : undefined
+    scheduler.schedule(4000)
+    ctx.effect(() => () => { cancelReady?.(); scheduler.dispose() }, 'm62a-loader-dump lifecycle')
   }
   const coordinator = new DaemonCoordinator({ spawnImpl: spawn, entry, env, appExit, diag, reportFatal })
 

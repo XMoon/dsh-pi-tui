@@ -11,13 +11,15 @@
 import assert from 'node:assert/strict'
 import test, { type TestContext } from 'node:test'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   DaemonCoordinator,
   encodeLaunchEnvelope,
   buildChildEnvironment,
   resolveClientEntry,
+  writeQualificationDump,
+  createLoaderDumpScheduler,
 } from '../../src/app/remote-process/daemon-launcher.ts'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -235,4 +237,60 @@ test('the Coordinator installs no second SIGTERM/SIGINT handler (single stop own
   assert.equal(process.listenerCount('SIGINT'), sigintBefore, 'no extra SIGINT handler')
   c.dispose()
   assert.deepEqual(children[0].kills, ['SIGTERM'], 'the single owner asks the live child to stop once')
+})
+
+// ── R7-01: qualification dump file safety + lifecycle ────────────────────
+
+test('writeQualificationDump refuses a relative path', () => {
+  assert.throws(() => writeQualificationDump('relative/dump.json', 'x'), /absolute/u)
+})
+
+test('writeQualificationDump writes a fresh 0600 file into an owned private dir', (t: TestContext) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('m62a-dump-')
+  const target = join(dir, 'dump.json')
+  writeQualificationDump(target, '[{"id":"session"}]')
+  assert.equal(readFileSync(target, 'utf8'), '[{"id":"session"}]')
+  assert.equal(statSync(target).mode & 0o777, 0o600)
+})
+
+test('writeQualificationDump NEVER overwrites an existing file', (t: TestContext) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('m62a-dump-existing-')
+  const target = join(dir, 'dump.json')
+  writeFileSync(target, 'ORIGINAL', { mode: 0o600 })
+  assert.throws(() => writeQualificationDump(target, 'OVERWRITE'), /already exists/u)
+  assert.equal(readFileSync(target, 'utf8'), 'ORIGINAL', 'the existing file must be untouched')
+})
+
+test('writeQualificationDump refuses a symlink target (no follow)', (t: TestContext) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('m62a-dump-symlink-')
+  const real = join(dir, 'real.json')
+  writeFileSync(real, 'REAL', { mode: 0o600 })
+  const link = join(dir, 'link.json')
+  symlinkSync(real, link)
+  assert.throws(() => writeQualificationDump(link, 'X'))
+  assert.equal(readFileSync(real, 'utf8'), 'REAL', 'the symlink target must be untouched')
+})
+
+test('a disposed LoaderDumpScheduler never writes (timers cancelled)', async () => {
+  const writes: string[] = []
+  const scheduler = createLoaderDumpScheduler(() => 'PAYLOAD', text => { writes.push(text) })
+  scheduler.schedule(20)
+  scheduler.dispose()
+  await sleep(60)
+  assert.deepEqual(writes, [], 'dispose must cancel the scheduled write')
+  scheduler.flush()
+  assert.deepEqual(writes, [], 'flush after dispose must not write')
+})
+
+test('a live LoaderDumpScheduler writes exactly once', async () => {
+  const writes: string[] = []
+  const scheduler = createLoaderDumpScheduler(() => 'PAYLOAD', text => { writes.push(text) })
+  scheduler.schedule(10)
+  scheduler.schedule(10)
+  await sleep(60)
+  scheduler.flush()
+  assert.deepEqual(writes, ['PAYLOAD'], 'only ONE dump is written')
 })
