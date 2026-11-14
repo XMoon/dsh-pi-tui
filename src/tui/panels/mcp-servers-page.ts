@@ -809,9 +809,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     }
     if (this.searching) return paintBar(SEARCH_HINTS, width, true)
     if (this.inDetail()) {
+      const selectedRow = snapshot.rows.find(row => row.name === snapshot.selectedName)
       const actionable = snapshot.phase === 'ready'
         && snapshot.operation?.phase !== 'running'
         && snapshot.selectedName !== undefined
+        // A retained cleanup record (`configured:false`) is diagnostic only:
+        // no Probe/Restart affordance may be painted or dispatched.
+        && selectedRow?.configured === true
       return paintBar(actionable ? DETAIL_ACTION_HINTS : DETAIL_READONLY_HINTS, width, true)
     }
     return paintBar(LIST_HINTS, width, true)

@@ -59,13 +59,13 @@ class StubController {
 }
 
 function connected(name: string, toolCount = 2): McpServersSnapshot['rows'][number] {
-  return { name, status: { state: 'connected', toolCount, connectedAt: 1 }, source: 'Configured' }
+  return { name, configured: true, status: { state: 'connected', toolCount, connectedAt: 1 }, source: 'Configured' }
 }
 
 function snapshot(overrides: Partial<McpServersSnapshot> = {}): McpServersSnapshot {
   return {
     phase: 'ready',
-    rows: [connected('alpha'), { name: 'beta', status: { state: 'disabled' }, source: 'Plugin-owned' }],
+    rows: [connected('alpha'), { name: 'beta', configured: true, status: { state: 'disabled' }, source: 'Plugin-owned' }],
     selectedName: 'alpha',
     ...overrides,
   }
@@ -208,6 +208,17 @@ test('detail keys probe/restart; the list only navigates; Esc steps back one lev
   assert.equal(done, 0)
   page.handleInput('\x1b')
   assert.equal(done, 1)
+})
+
+test('a retained cleanup record advertises no Probe/Restart affordance', () => {
+  const { page } = makePage(snapshot({
+    rows: [{ name: 'gone', configured: false, status: { state: 'failed', reason: 'cleanup', result: { closeConfirmed: false } }, source: 'Retained/removed' }],
+    selectedName: 'gone',
+  }))
+  const bar = render(page, 88, 12).at(-1) ?? ''
+  assert.match(bar, /Back \[Esc\]/u)
+  assert.doesNotMatch(bar, /p probe|probe/u)
+  assert.doesNotMatch(bar, /x restart|restart/u)
 })
 
 test('search filters by name only and p/x/r are query text while searching', () => {
