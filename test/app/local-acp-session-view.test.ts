@@ -1170,3 +1170,82 @@ test('a failed turn without assistant text keeps its REAL terminal classificatio
       && error.data.reason === kind)
   }
 })
+
+test('a failure while the Host admission is pending never becomes an unhandled rejection', async () => {
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    {
+      // Abort during a pending admission.
+      const view = promptView()
+      await view.attach()
+      let finishAdmission!: (value: { readonly accepted: true }) => void
+      view.access.promptImpl = async () => await new Promise(resolveAdmission => { finishAdmission = resolveAdmission })
+      const controller = new AbortController()
+      const attempt = view.start('abort while admitting', controller.signal)
+      controller.abort(new Error('client went away'))
+      await new Promise(resolveTick => setTimeout(resolveTick, 20))
+      assert.deepEqual(unhandled, [], 'the early rejection must be observed before admission settles')
+      finishAdmission({ accepted: true })
+      await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_ABORTED'))
+      assert.equal(view.access.promptCalls.length, 1, 'no retry after an aborted admission')
+    }
+    {
+      // Physical release during a pending admission.
+      const view = promptView()
+      await view.attach()
+      let finishAdmission!: (value: { readonly accepted: true }) => void
+      view.access.promptImpl = async () => await new Promise(resolveAdmission => { finishAdmission = resolveAdmission })
+      const attempt = view.start('release while admitting')
+      view.registry.releaseConnection(view.conn)
+      await new Promise(resolveTick => setTimeout(resolveTick, 20))
+      assert.deepEqual(unhandled, [], 'a released View must not leave the flight rejection unhandled')
+      finishAdmission({ accepted: true })
+      await assert.rejects(attempt, isPromptError('LOCAL_ACP_VIEW_CLOSED'))
+      assert.equal(view.access.promptCalls.length, 1)
+    }
+    {
+      // The exact Agent is disposed during a pending admission.
+      const view = promptView()
+      await view.attach()
+      let finishAdmission!: (value: { readonly accepted: true }) => void
+      view.access.promptImpl = async () => await new Promise(resolveAdmission => { finishAdmission = resolveAdmission })
+      const attempt = view.start('dispose while admitting')
+      view.registry.onAgentDisposed(view.agent)
+      await new Promise(resolveTick => setTimeout(resolveTick, 20))
+      assert.deepEqual(unhandled, [], 'an Agent disposal must not leave the flight rejection unhandled')
+      finishAdmission({ accepted: true })
+      await assert.rejects(attempt, (error: unknown) => error instanceof LocalAcpViewError
+        && error.code === 'LOCAL_ACP_PROMPT_TURN_FAILED' && error.data.reason === 'agent-disposed')
+      assert.equal(view.access.promptCalls.length, 1)
+    }
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+  }
+})
+
+test('a mixed turn drops notifications that were queued but not yet handed to the transport', async () => {
+  const view = promptView()
+  await view.attach()
+  const gate = view.deferredSend()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-1')
+  view.claim('m-1', 1, request.requestId)
+  // Batch 1 must actually reach the transport (and block there) BEFORE the mix
+  // is confirmed; batch 2 is queued behind it and still ours to drop.
+  view.commit('assistant/message', assistantData(1, 'm-1', [{ type: 'text', text: 'already sending' }]))
+  await flushOutput()
+  view.commit('assistant/message', assistantData(1, 'm-2', [{ type: 'text', text: 'still queued' }]))
+  // A TUI steer is claimed into the SAME turn AFTER both batches were queued.
+  view.claim('m-steer', 1, 'tui-steer')
+  gate.release()
+  await flushOutput()
+  assert.deepEqual(view.notifications, [
+    { sessionUpdate: 'agent_message_chunk', messageId: 'm-1', content: { type: 'text', text: 'already sending' } },
+  ], 'only the update already handed to the transport may be delivered')
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_MIXED_TURN'))
+  assert.ok(!JSON.stringify(view.notifications).includes('still queued'))
+})

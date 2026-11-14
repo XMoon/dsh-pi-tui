@@ -44,7 +44,7 @@
 import { randomUUID } from 'node:crypto'
 import type { SessionUpdate, StopReason } from '@agentclientprotocol/sdk'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
-import { runDetached } from '../../runtime/process/tasks.ts'
+import { observeSettled, runDetached } from '../../runtime/process/tasks.ts'
 
 /** The exact live identity a borrowed Session View is allowed to believe. */
 export interface LiveAgentViewIdentity {
@@ -590,6 +590,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       settled: Promise.withResolvers<AcpPromptResult>(),
       settledDone: false,
     }
+    // Observe the settlement promise BEFORE the first await: an abort, physical
+    // disconnect or Agent disposal can reject it while this method is still
+    // suspended inside the official admission, and a rejection with no handler
+    // would surface as an unhandled rejection in the Host process. This attaches
+    // only the observation — the SAME rejection is still returned to the ACP
+    // request below and is never swallowed.
+    observeSettled(flight.settled.promise, () => {})
     const onAbort = (): void => {
       this.failPrompt(claim, flight, promptError(
         'LOCAL_ACP_PROMPT_ABORTED',
@@ -1033,7 +1040,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
     flight.outputTail = flight.outputTail.then(async () => {
       for (const update of updates) {
-        if (flight.settledDone) {
+        // A mixed turn stops ALL output that has not yet been handed to the
+        // transport. Notifications already sent cannot be retracted, but a
+        // queued one is still ours to drop.
+        if (flight.settledDone || flight.mixed) {
           flight.pendingUpdates -= 1
           continue
         }
