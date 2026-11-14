@@ -94,7 +94,10 @@ async function submitLine(client, line, label) {
     }
     client.send('\x15')
     for (let poll = 0; poll < 60; poll += 1) {
-      if (await client.composerText().then(text => text === undefined).catch(() => true)) {
+      const composer = await client.composerText().catch(() => undefined)
+      const empty = composer === undefined
+        || composer.split('\n').every(text => text.replace(/[│┌┐└┘─]/gu, ' ').replace(/❯/gu, ' ').trim() === '')
+      if (empty) {
         client.send(`${line}\r`)
         return
       }
@@ -156,13 +159,14 @@ async function mcpManagerRow(host, label) {
   return rows[0]
 }
 
-/** Poll the Host Loader row state of one web row. */
-async function webRowActive(host, id, expected, label) {
-  await waitForCondition(async () => {
-    const status = await hostStatus(host)
-    const row = (status.entries ?? []).find(entry => entry.id === id)
-    return (row?.state === 'active') === expected
-  }, label, 60_000)
+/** One correlated private `piTuiWebAccess` round trip on a live Peer. */
+async function webAccess(peer, value, label, sequence) {
+  const requestId = `fr3-web-${String(sequence)}`
+  peer.send({ op: 'qualification-web-access', requestId, webAccessEnabled: value })
+  const record = await peer.waitFor(entry => entry.op === 'web-access' && entry.requestId === requestId,
+    label, 300_000)
+  assert(record.ok === true, `${label}: the private Web access call failed: ${JSON.stringify(record.errorCode ?? null)}`)
+  return record.status
 }
 
 /**
@@ -183,6 +187,7 @@ export async function runMcpServersFr3(context) {
 
   let host
   let client
+  let peerProcess
   try {
     const started = await scene.startC1Host('mcp-servers-fr3', 'FR3 MCP Host')
     host = started.host
@@ -214,18 +219,28 @@ export async function runMcpServersFr3(context) {
     await waitForScreenText(client, 'Restart settled · awaiting connected status', 'FR3 restart settled notice')
     trace('fr3.restart', { dispatched: true })
 
-    // /web on -> off keeps the SAME manager fiber (Web never owns it).
+    // Web on -> off keeps the SAME manager fiber (the Web toggle never owns
+    // it). The toggle is the Host's own private service, driven by a Peer so
+    // the assertion does not depend on the human Client's Settings state.
     await exitSettingsWorkspace(client, 'FR3')
-    const beforeWeb = await mcpManagerRow(host, 'FR3 before /web')
-    await submitLine(client, '/web', 'FR3 /web enable')
-    await webRowActive(host, 'web-runtime', true, 'FR3 web enabled')
-    const duringWeb = await mcpManagerRow(host, 'FR3 during /web')
+    const beforeWeb = await mcpManagerRow(host, 'FR3 before Web')
+    const peer = new context.EntryProcess('peer', context.entries.client, {
+      ...context.base,
+      env: { ...context.base.env, SPLIT_PROCESS_CLIENT_MODE: 'peer' },
+    })
+    peerProcess = peer
+    await peer.waitFor(record => record.m4a0 === 'ready', 'FR3 Web peer ready', 180_000)
+    const enabled = await webAccess(peer, true, 'FR3 Web enabled', 1)
+    assert(enabled?.state === 'enabled', `FR3: the Host did not reach Web enabled: ${JSON.stringify(enabled)}`)
+    const duringWeb = await mcpManagerRow(host, 'FR3 during Web')
     assert(duringWeb.fiberUid === beforeWeb.fiberUid, 'FR3: enabling Web re-mounted the shared mcp-manager row')
-    await submitLine(client, '/web', 'FR3 /web disable')
-    await webRowActive(host, 'web-runtime', false, 'FR3 web disabled')
-    const afterWeb = await mcpManagerRow(host, 'FR3 after /web')
-    assert(afterWeb.fiberUid === beforeWeb.fiberUid, 'FR3: /web off->on->off replaced the shared mcp-manager fiber')
+    const disabled = await webAccess(peer, false, 'FR3 Web disabled', 2)
+    assert(disabled?.state === 'disabled', `FR3: the Host did not reach Web disabled: ${JSON.stringify(disabled)}`)
+    const afterWeb = await mcpManagerRow(host, 'FR3 after Web')
+    assert(afterWeb.fiberUid === beforeWeb.fiberUid, 'FR3: Web off->on->off replaced the shared mcp-manager fiber')
     trace('fr3.web-identity', { fiberUid: beforeWeb.fiberUid, kept: true })
+    await peer.shutdown()
+    peerProcess = undefined
 
     client.send('/exit\r')
     await client.waitForExit(60_000)
@@ -235,6 +250,7 @@ export async function runMcpServersFr3(context) {
     host = undefined
     return { status: 'PASS' }
   } finally {
+    if (peerProcess !== undefined && !peerProcess.exited) await peerProcess.shutdown().catch(() => {})
     await scene.dispose()
   }
 }
