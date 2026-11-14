@@ -122,7 +122,7 @@ export class DirectTeamBoardReadPort implements TeamBoardReadPort {
     }
     const subagents = this.ctx.get('subagents') as DirectTeamBoardSubagentsLike | undefined
     const projections = this.ctx.get('sessionProjections') as DirectTeamBoardProjectionsLike | undefined
-    if (subagents === undefined || projections === undefined) {
+    if (subagents === undefined || typeof subagents.rootOf !== 'function' || projections === undefined) {
       return { kind: 'unavailable', cause: 'authority-missing', reason: 'Agent Team board authority is unavailable' }
     }
     const root = subagents.rootOf(agent)
@@ -153,7 +153,7 @@ export class DirectTeamBoardReadPort implements TeamBoardReadPort {
     const agent = this.agentFor(sessionId)
     if (agent === undefined) return () => {}
     const subagents = this.ctx.get('subagents') as DirectTeamBoardSubagentsLike | undefined
-    if (subagents === undefined) return () => {}
+    if (subagents === undefined || typeof subagents.rootOf !== 'function') return () => {}
     // Root-only: a confirmed child never receives the Root board feed.
     if (subagents.rootOf(agent) !== agent) return () => {}
     const projections = this.ctx.get('sessionProjections') as DirectTeamBoardProjectionsLike | undefined

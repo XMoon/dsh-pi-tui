@@ -544,10 +544,12 @@ test('the Full browser carries its presentation state across an overlay round-tr
   harness.tasks.openTasksBrowser('full', { kind: 'subagents', childIds: ['child-1', 'child-2'] })
   await vt.waitForRender()
   const first = harness.lastBrowser()!
-  // A type filter in the Full (Tab cycles: subagents → ... ).
-  vt.sendInput('\t')
+  // A type filter in the Full via the explicit f list (Tab no longer cycles).
+  vt.sendInput('f')
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\r')
   await vt.waitForRender()
-  assert.notEqual(first.getViewState!().typeFilter, null, 'Tab must set a type filter in the Full')
+  assert.notEqual(first.getViewState!().typeFilter, null, 'the f list must set a type filter in the Full')
   const filtered = first.getViewState!().typeFilter
 
   // Open + close a Job-detail overlay (the same round-trip shape): the
