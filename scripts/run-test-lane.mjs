@@ -169,15 +169,11 @@ function main() {
   }
   // The lane's patterns are relative to the test root.
   const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-  // The file list is passed RELATIVE to the repository root, and the child
-  // runs with that root as its working directory.
-  //
-  // The absolute form would exceed the Windows command-line limit: the
-  // product lane is 491 files, and absolute paths in a typical Windows
-  // checkout total ~60,000 characters against `CreateProcessW`'s 32,767.
-  // The relative form is ~9,000 characters on every platform, and the
-  // child's `cwd` keeps the repository root as the working directory —
-  // which the tests rely on (22 of them read `process.cwd()`).
+  // Pass discovered test paths relative to the repository root, and run
+  // the Node child from that root. Absolute paths unnecessarily consume
+  // the Windows CreateProcessW command-line budget; the tooling suite
+  // checks the representative CI shard/reporter argv length separately.
+  // Node's --test-shard partitions execution after receiving the full list.
   const relativeFiles = files.map(rel => join('test', rel))
 
   // The optional shard. It is a runner ARGUMENT, not a mode: the default
