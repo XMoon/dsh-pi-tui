@@ -12,8 +12,11 @@
  */
 
 import assert from 'node:assert/strict'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
   apply as applyStartup,
   TUI_STARTUP_SERVICE,
@@ -299,4 +302,128 @@ test('a fail-closed backend decision installs no interception and arms no handsh
     assert.deepEqual(mounted.exitCodes, [1])
     assert.match(text, /invalid-backend|wire-local/u)
   })
+})
+
+// ── daemon management grammar (M6-2C) ─────────────────────────────────────
+
+function daemonControl(ctx: Context): { kind: string; control?: { verb: string; lines?: number }; markCoordinatorMounted?: () => void } | undefined {
+  return ctx.get(TUI_DAEMON_STARTUP_SERVICE) as { kind: string; control?: { verb: string; lines?: number }; markCoordinatorMounted?: () => void } | undefined
+}
+
+test('daemon status publishes one control intent and opens no TUI', (t) => {
+  withEnv('direct', () => {
+    const { ctx } = mount(t, ['daemon', 'status'])
+    const startup = daemonControl(ctx)
+    assert.equal(startup?.kind, 'control')
+    assert.equal(startup?.control?.verb, 'status')
+    assert.equal(ctx.get(TUI_STARTUP_SERVICE), undefined, 'a management command never publishes the Direct TUI')
+  })
+})
+
+for (const backend of ['daemon', 'wire-local', '']) {
+  test(`daemon status ignores ENV ${JSON.stringify(backend)} and keeps the same control intent`, (t) => {
+    withEnv(backend, () => {
+      const { ctx, exitCodes } = mount(t, ['daemon', 'status'])
+      assert.equal(daemonControl(ctx)?.control?.verb, 'status')
+      assert.deepEqual(exitCodes, [], 'an invalid backend value must not block a management command')
+    })
+  })
+}
+
+test('daemon logs --lines carries the validated line budget', (t) => {
+  const { ctx } = mount(t, ['daemon', 'logs', '--lines', '250'])
+  assert.equal(daemonControl(ctx)?.control?.verb, 'logs')
+  assert.equal(daemonControl(ctx)?.control?.lines, 250)
+})
+
+test('daemon logs without --lines uses the default line budget', (t) => {
+  const { ctx } = mount(t, ['daemon', 'logs'])
+  assert.equal(daemonControl(ctx)?.control?.verb, 'logs')
+  assert.equal(daemonControl(ctx)?.control?.lines, undefined)
+})
+
+for (const bad of ['0', '1001', '-1', '1.5', 'abc', '']) {
+  test(`daemon logs --lines ${JSON.stringify(bad)} is a usage error with no service`, (t) => {
+    const { ctx, exitCodes } = mount(t, ['daemon', 'logs', '--lines', bad])
+    assert.equal(daemonControl(ctx), undefined)
+    assert.deepEqual(exitCodes, [2])
+  })
+}
+
+test('daemon without a verb exits 2 and publishes no service', (t) => {
+  const { ctx, exitCodes } = mount(t, ['daemon'])
+  assert.equal(daemonControl(ctx), undefined)
+  assert.deepEqual(exitCodes, [2])
+})
+
+test('an unknown daemon verb exits 2 and publishes no service', (t) => {
+  const { ctx, exitCodes } = mount(t, ['daemon', 'destroy'])
+  assert.equal(daemonControl(ctx), undefined)
+  assert.deepEqual(exitCodes, [2])
+})
+
+test('an extra positional on a daemon verb exits 2 and publishes no service', (t) => {
+  const { ctx, exitCodes } = mount(t, ['daemon', 'status', 'extra'])
+  assert.equal(daemonControl(ctx), undefined)
+  assert.deepEqual(exitCodes, [2])
+})
+
+test('a public session flag mixed with a daemon verb exits 2 and publishes no service', (t) => {
+  const { ctx, exitCodes } = mount(t, ['--session', 'mysql', 'daemon', 'status'])
+  assert.equal(daemonControl(ctx), undefined)
+  assert.deepEqual(exitCodes, [2])
+})
+
+test('daemon help and daemon status help exit 0 and publish no service', (t) => {
+  for (const args of [['daemon', '--help'], ['daemon', 'status', '--help']]) {
+    const { ctx, exitCodes } = mount(t, args)
+    assert.equal(daemonControl(ctx), undefined, `${args.join(' ')} must not publish a control intent`)
+    assert.deepEqual(exitCodes, [0])
+  }
+})
+
+test('a Host-only process rejects the management route without publishing a service', (t) => {
+  const hostEntry = join(testLifecycle(t).tempDir('m62c-host-only-'), 'local-host.mjs')
+  writeFileSync(hostEntry, '')
+  const previousArgv = process.argv[1]
+  const previousRole = process.env.DSH_PI_TUI_ROLE
+  const previousEntry = process.env.DSH_PI_TUI_HOST_ENTRY
+  process.argv[1] = hostEntry
+  process.env.DSH_PI_TUI_ROLE = 'host'
+  process.env.DSH_PI_TUI_HOST_ENTRY = hostEntry
+  try {
+    const { ctx, exitCodes } = mount(t, ['daemon', 'status'])
+    assert.equal(daemonControl(ctx), undefined, 'a Host-only process must not acquire a management intent')
+    assert.deepEqual(exitCodes, [2])
+  } finally {
+    process.argv[1] = previousArgv
+    if (previousRole === undefined) delete process.env.DSH_PI_TUI_ROLE
+    else process.env.DSH_PI_TUI_ROLE = previousRole
+    if (previousEntry === undefined) delete process.env.DSH_PI_TUI_HOST_ENTRY
+    else process.env.DSH_PI_TUI_HOST_ENTRY = previousEntry
+  }
+})
+
+test('a management command works without an interactive TTY', (t) => {
+  // The test process itself is not a TTY: the daemon backend would fail closed,
+  // but a management command must still publish its control intent.
+  const { ctx, exitCodes } = mount(t, ['daemon', 'start'])
+  assert.equal(daemonControl(ctx)?.control?.verb, 'start')
+  assert.deepEqual(exitCodes, [])
+})
+
+test('a management cold-ready commit without the launcher row exits nonzero', (t) => {
+  const { ctx, fireReady, exitCodes } = mount(t, ['daemon', 'status'])
+  assert.ok(daemonControl(ctx) !== undefined)
+  const { text } = captureStderr(() => { fireReady() })
+  assert.deepEqual(exitCodes, [1])
+  assert.match(text, /daemon launcher row did not mount/u)
+})
+
+test('a mounted management launcher suppresses the cold-ready error', (t) => {
+  const { ctx, fireReady, exitCodes } = mount(t, ['daemon', 'status'])
+  daemonControl(ctx)?.markCoordinatorMounted?.()
+  const { text } = captureStderr(() => { fireReady() })
+  assert.deepEqual(exitCodes, [])
+  assert.equal(text, '')
 })

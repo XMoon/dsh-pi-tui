@@ -76,6 +76,14 @@ import {
 import { runAcpPo3aTurnEvents } from '../smoke/split-process/acp-po3a-turn-events.mjs'
 import { runAcpPo3bCancelApproval } from '../smoke/split-process/acp-po3b-cancel-approval.mjs'
 import { runAcpPo4aContentInput } from '../smoke/split-process/acp-po4a-content-input.mjs'
+import {
+  runDaemonControlConcurrentControls,
+  runDaemonControlManagerError,
+  runDaemonControlOwnerAndMultiProfile,
+  runDaemonControlProcessFallback,
+  runDaemonControlStatusSafety,
+  runDaemonControlSystemdLifecycle,
+} from '../smoke/split-process/daemon-controls-m6-2c.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -441,6 +449,48 @@ const CASE_REGISTRY = Object.freeze([
     id: 'acp.po4a-content-input',
     title: 'one real Host and TUI admit standard ACP resource_link and image prompts, verify durable image refs, carry a fragmented frame above 1 MiB, reject invalid inputs and preserve the TUI turn on scoped cancellation',
     run: runAcpPo4aContentInput,
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-2c-status-safety',
+    title: 'a no-Host daemon status is a pure read, while an active-but-unauthenticated managed Host is reported nonzero and never as ready or stopped',
+    run: runDaemonControlStatusSafety,
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-2c-systemd-lifecycle',
+    title: 'the public daemon start/status/stop/restart/logs/uninstall commands drive ONE verified profile unit, reuse a warm Host, create a new instance on restart and preserve the Profile',
+    run: runDaemonControlSystemdLifecycle,
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-2c-process-fallback',
+    title: 'with a strictly absent user manager the public daemon commands manage only the authenticated detached Host, read its private 0600 log and never create a unit',
+    run: runDaemonControlProcessFallback,
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-2c-manager-error',
+    title: 'a reachable but unusable user manager makes daemon status/start/restart fail closed without a process fallback, Host or unit',
+    run: runDaemonControlManagerError,
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-2c-owner-and-multi-profile',
+    title: 'two real Profiles keep independent Hosts and units; management of one never affects the other, a foreign unit is refused, and an explicit restart migrates only a controlled old-build unit',
+    run: runDaemonControlOwnerAndMultiProfile,
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-2c-concurrent-controls',
+    title: 'the short-lived admin seat refuses a second profile-scoped management command with BUSY, leaves another Profile independent, and two concurrent starts converge on ONE Host',
+    run: runDaemonControlConcurrentControls
   }),
 ])
 

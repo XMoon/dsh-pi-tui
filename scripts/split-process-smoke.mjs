@@ -684,13 +684,14 @@ export function assertSelectedVerdict(caseId, result) {
       `selected ${caseId}: the Browser/Web verdict ended as ${String(result?.browser ?? 'missing')}/${String(result?.status ?? 'missing')}`)
     return
   }
-  if (caseId.startsWith('managed-host.')) {
-    // A managed-host case is environment-gated: a real PASS needs the isolated
-    // native systemd environment, and an honest NOT_VERIFIED is a valid selected
-    // outcome. Anything else (FAIL/BLOCKED/unknown) is a rejected verdict. The
-    // selected runner must never turn NOT_VERIFIED into SELECTED_PASS.
+  if (caseId.startsWith('managed-host.') || caseId.startsWith('daemon-control.')) {
+    // These native cases are environment-gated: a real PASS needs the isolated
+    // systemd/absent test environment, and an honest NOT_VERIFIED is a valid
+    // selected outcome. Anything else (FAIL/BLOCKED/unknown) is a rejected
+    // verdict. The selected runner must never turn NOT_VERIFIED into
+    // SELECTED_PASS.
     assert(result?.status === 'PASS' || result?.status === 'NOT_VERIFIED',
-      `selected ${caseId}: the managed-host verdict ended as ${String(result?.status ?? 'missing')} (only PASS or NOT_VERIFIED are valid)`)
+      `selected ${caseId}: the native verdict ended as ${String(result?.status ?? 'missing')} (only PASS or NOT_VERIFIED are valid)`)
     return
   }
   assert(result?.status === undefined || result?.status === 'PASS',

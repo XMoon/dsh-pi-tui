@@ -1,0 +1,678 @@
+/**
+ * M6-2C daemon management control plane: the read-only status classification,
+ * the fixed error/exit taxonomy, the explicit stop/restart/uninstall actions and
+ * the log source rules, exercised with injected OS/discovery seams.
+ *
+ * Evidence level: structural (L1-L3). These prove the control module's
+ * source -> decision -> sink contract; the real systemd/absent/manager-error OS
+ * evidence lives in the selectable split-process lane, never here.
+ * @module @xmoon76/dsh-pi-tui/daemon-control.test
+ */
+
+import assert from 'node:assert/strict'
+import { existsSync, mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import test, { type TestContext } from 'node:test'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
+import {
+  inspectInstalledProfileScope,
+  LOCAL_PROTOCOL,
+  LocalScopeError,
+  type LocalScope,
+} from '../../src/app/remote-process/local-scope.ts'
+import {
+  buildUnitName,
+  renderUnitContent,
+  type SystemctlResult,
+  type UserManagerProbe,
+} from '../../src/app/remote-process/local-host-manager.ts'
+import {
+  formatDaemonStatus,
+  runDaemonControl,
+  sanitizeLogText,
+  type DaemonControlDeps,
+  type DaemonControlProfile,
+} from '../../src/app/remote-process/local-daemon-control.ts'
+import type { LocalInstanceRecord } from '../../src/app/remote-process/local-discovery.ts'
+
+const DSH_VERSION = '0.2.2-rc.3'
+const UUID = '11111111-1111-4111-8111-111111111111'
+
+function exited(code: number, stdout = '', stderr = ''): SystemctlResult {
+  return { kind: 'exited', code, stdout, stderr }
+}
+
+interface Fixture {
+  readonly profile: DaemonControlProfile
+  readonly scope: LocalScope
+  readonly unitDir: string
+  readonly unitName: string
+}
+
+function fixture(t: TestContext): Fixture {
+  const root = testLifecycle(t).tempDir('m62c-control-')
+  const home = join(root, 'dsh-home')
+  const profileDir = join(root, 'profiles', 'pi-tui')
+  const packageRoot = join(root, 'package')
+  const anchor = join(root, 'dsh', 'package.json')
+  mkdirSync(home, { recursive: true, mode: 0o700 })
+  mkdirSync(profileDir, { recursive: true, mode: 0o700 })
+  mkdirSync(join(packageRoot, 'dist'), { recursive: true, mode: 0o700 })
+  mkdirSync(join(root, 'dsh'), { recursive: true, mode: 0o700 })
+  writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.7' })}\n`)
+  writeFileSync(join(packageRoot, 'dist', 'index.mjs'), 'export const value = 1\n')
+  writeFileSync(join(packageRoot, 'dist', 'local-host.mjs'), 'process.exit(0)\n')
+  writeFileSync(anchor, `${JSON.stringify({ name: '@deepseek-ai/dsh', version: DSH_VERSION })}\n`, { mode: 0o644 })
+  const profile: DaemonControlProfile = {
+    name: 'pi-tui',
+    dir: profileDir,
+    home,
+    installAnchor: anchor,
+    packageRoot,
+    dshVersion: DSH_VERSION,
+  }
+  const scope = inspectInstalledProfileScope({ dshHome: home, profileDir, packageRoot, dshVersion: DSH_VERSION })
+  const unitDir = join(root, 'user-units')
+  mkdirSync(unitDir, { recursive: true, mode: 0o700 })
+  return { profile, scope, unitDir, unitName: buildUnitName(profile.name, scope.scopeId) }
+}
+
+function recordOf(scope: LocalScope, overrides: Partial<LocalInstanceRecord> = {}): LocalInstanceRecord {
+  return {
+    schema: 1,
+    scopeId: scope.scopeId,
+    profileRealpath: scope.profileRealpath,
+    instanceId: UUID,
+    hostPid: 4242,
+    hostStarttime: '12345',
+    origin: 'http://127.0.0.1:4517',
+    protocol: LOCAL_PROTOCOL,
+    bundleVersion: scope.bundleVersion,
+    dshVersion: scope.dshVersion,
+    buildId: scope.buildId,
+    ...overrides,
+  }
+}
+
+function writeOwnedUnit(fx: Fixture): { readonly path: string; readonly content: string } {
+  const content = renderUnitContent({
+    dshHome: fx.scope.dshHome,
+    profileRealpath: fx.scope.profileRealpath,
+    profile: fx.profile.name,
+    scopeId: fx.scope.scopeId,
+    buildId: fx.scope.buildId,
+    nodePath: process.execPath,
+    hostEntryPath: join(fx.profile.packageRoot, 'dist', 'local-host.mjs'),
+    dshAnchor: fx.profile.installAnchor,
+  })
+  const path = join(fx.unitDir, fx.unitName)
+  writeFileSync(path, content, { mode: 0o600 })
+  return { path, content }
+}
+
+interface UnitState {
+  loadState?: string
+  activeState?: string
+  mainPid?: number
+  unitFileState?: string
+  stopResult?: SystemctlResult
+  reloadResult?: SystemctlResult
+}
+
+function unitSystemctl(path: string, initial: UnitState = {}) {
+  const state = {
+    loadState: initial.loadState ?? 'loaded',
+    activeState: initial.activeState ?? 'active',
+    mainPid: initial.mainPid ?? 4242,
+    unitFileState: initial.unitFileState ?? 'disabled',
+  }
+  const calls: string[][] = []
+  const run = async (args: readonly string[]): Promise<SystemctlResult> => {
+    calls.push([...args])
+    if (args.includes('daemon-reload')) return initial.reloadResult ?? exited(0)
+    if (args.includes('stop')) {
+      if (initial.stopResult !== undefined) return initial.stopResult
+      state.activeState = 'inactive'
+      state.mainPid = 0
+      return exited(0)
+    }
+    if (args.includes('show')) {
+      return exited(0, [
+        `LoadState=${state.loadState}`,
+        `ActiveState=${state.activeState}`,
+        `FragmentPath=${state.loadState === 'not-found' ? '' : path}`,
+        'DropInPaths=',
+        `MainPID=${String(state.mainPid)}`,
+        `UnitFileState=${state.unitFileState}`,
+        '',
+      ].join('\n'))
+    }
+    return exited(0)
+  }
+  return { run, calls }
+}
+
+function depsOf(fx: Fixture, overrides: Partial<DaemonControlDeps> = {}): DaemonControlDeps {
+  return {
+    platform: 'linux',
+    uid: process.getuid?.() ?? 1000,
+    unitDir: fx.unitDir,
+    probe: async (): Promise<UserManagerProbe> => ({ kind: 'available' }),
+    systemctl: unitSystemctl(join(fx.unitDir, fx.unitName)).run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+    ...overrides,
+  }
+}
+
+function assertCode(result: { code: number; stdout: string; stderr: string }, code: number, pattern?: RegExp): void {
+  assert.equal(result.code, code, `expected exit ${String(code)}, got ${String(result.code)}; stderr=${result.stderr}`)
+  if (pattern !== undefined) assert.match(`${result.stdout}${result.stderr}`, pattern)
+}
+
+// ── status: read-only classification ────────────────────────────────────────
+
+test('status with no Host reports stopped and creates no run directory', async t => {
+  const fx = fixture(t)
+  assert.equal(existsSync(fx.scope.dir), false, 'the fixture must start without a run directory')
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^profile=pi-tui$/mu)
+  assert.match(result.stdout, /^manager=unmanaged$/mu)
+  assert.match(result.stdout, /^user-manager=available$/mu)
+  assert.match(result.stdout, /^host=stopped$/mu)
+  assert.match(result.stdout, /^unit=none$/mu)
+  assert.match(result.stdout, /^unit-state=not-found$/mu)
+  assert.match(result.stdout, /^compatibility=none$/mu)
+  assert.equal(existsSync(fx.scope.dir), false, 'status must never create the scope run directory')
+})
+
+test('an active unit without an authenticated Host reports starting, never ready', async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: 9001 })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, { systemctl: systemctl.run }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=starting$/mu)
+  assert.match(result.stdout, /^manager=systemd$/mu)
+  assert.match(result.stdout, /^unit-state=active$/mu)
+  assert.doesNotMatch(result.stdout, /^host=ready$/mu)
+})
+
+test('a live Host that fails the authenticated handshake is unresponsive and nonzero', async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => { throw new LocalScopeError('HOST_AUTH_FAILED', 'no cookie') },
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.match(result.stdout, /^host=unresponsive$/mu)
+  assert.doesNotMatch(result.stdout, /^host=stopped$/mu)
+})
+
+test('a live Host with a different DSH runtime reports incompatible, not stopped', async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope, { dshVersion: '0.1.0' })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.match(result.stdout, /^host=incompatible$/mu)
+  assert.match(result.stdout, /^compatibility=incompatible$/mu)
+})
+
+test('an unreadable registry is nonzero with an unknown Host, never stopped', async t => {
+  const fx = fixture(t)
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    readRecord: () => { throw new LocalScopeError('LOCAL_FILE_UNSAFE', 'registry is unsafe') },
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.match(result.stdout, /^host=unknown$/mu)
+  assert.doesNotMatch(result.stdout, /^host=stopped$/mu)
+})
+
+test('a live fallback Host under a now-available manager is unmanaged, not the inactive unit owner', async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'inactive', mainPid: 0 })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.match(result.stdout, /^manager=unmanaged$/mu)
+})
+
+test('a user-manager error is nonzero and never reported as stopped', async t => {
+  const fx = fixture(t)
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    probe: async (): Promise<UserManagerProbe> => ({ kind: 'error', reason: 'connection refused' }),
+  }))
+  assertCode(result, 4, /MANAGER_OR_OS_FAILURE/u)
+  assert.match(result.stdout, /^user-manager=error$/mu)
+  assert.match(result.stdout, /^host=unknown$/mu)
+})
+
+test('a compatible live Host is attributed to the verified active unit and reports ready', async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: record.hostPid })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.match(result.stdout, /^manager=systemd$/mu)
+  assert.match(result.stdout, /^compatibility=compatible$/mu)
+  assert.match(result.stdout, /^pid=4242$/mu)
+  assert.match(result.stdout, /^instance=11111111$/mu)
+})
+
+test('an active unit whose MainPID is not the authenticated Host is refused', async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: 777 })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+})
+
+test('a different installed build is reported as other-build while a compatible Host stays ready', async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope, { buildId: 'f'.repeat(64) })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.match(result.stdout, /^compatibility=other-build$/mu)
+})
+
+test('a foreign or unsafe unit file is refused before any Host claim', async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  writeFileSync(unit.path, unit.content.replace('X-DshPiTuiOwner=local-host-manager-v1', 'X-DshPiTuiOwner=someone-else'), { mode: 0o600 })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.doesNotMatch(result.stdout, /^host=ready$/mu)
+})
+
+test('a symlinked unit file is refused, not followed', async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const real = join(fx.unitDir, 'real.service')
+  writeFileSync(real, unit.content, { mode: 0o600 })
+  const { unlinkSync } = await import('node:fs')
+  unlinkSync(unit.path)
+  symlinkSync(real, unit.path)
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+})
+
+test('an unsupported platform exits 3 before touching the filesystem', async t => {
+  const fx = fixture(t)
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, { platform: 'darwin' })
+  assertCode(result, 3, /UNSUPPORTED_PLATFORM/u)
+})
+
+// ── stop: explicit supervision only ─────────────────────────────────────────
+
+test('stop with no live Host and no owned unit is an idempotent no-op', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const systemctl = unitSystemctl(join(fx.unitDir, fx.unitName), { loadState: 'not-found' })
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, { systemctl: systemctl.run }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=stopped$/mu)
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), false, 'nothing may be stopped')
+})
+
+test('stop refuses a live Host with no verifiable supervision attribution', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  let signals = 0
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    kill: () => { signals += 1 },
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(signals, 0, 'an unverifiable Host is never signalled')
+})
+
+test('stop sends one SIGTERM to the authenticated strict-absence Host PID', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  let alive = true
+  const signals: Array<[number, NodeJS.Signals]> = []
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    probe: async (): Promise<UserManagerProbe> => ({ kind: 'absent' }),
+    readRecord: () => alive ? record : undefined,
+    inspectProcess: () => alive ? 'alive' : 'dead',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    readCmdline: () => `node\0${join(fx.profile.packageRoot, 'dist', 'local-host.mjs')}\0`,
+    readStarttime: () => alive ? record.hostStarttime : undefined,
+    kill: (pid, signal) => { signals.push([pid, signal]); alive = false },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.deepEqual(signals, [[record.hostPid, 'SIGTERM']])
+  assert.match(result.stdout, /^host=stopped$/mu)
+})
+
+test('stop refuses a non-Host command line and never signals it', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  let signals = 0
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    probe: async (): Promise<UserManagerProbe> => ({ kind: 'absent' }),
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    readCmdline: () => 'node\0/tmp/not-the-host.mjs\0',
+    kill: () => { signals += 1 },
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(signals, 0)
+})
+
+test('stop refuses when the kernel starttime changed before the signal', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  let signals = 0
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    probe: async (): Promise<UserManagerProbe> => ({ kind: 'absent' }),
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    readCmdline: () => `node\0${join(fx.profile.packageRoot, 'dist', 'local-host.mjs')}\0`,
+    readStarttime: () => '99999',
+    kill: () => { signals += 1 },
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(signals, 0)
+})
+
+test('a stop that cannot confirm the Host exit is TRANSITION_UNCERTAIN, not stopped', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  let now = 0
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    probe: async (): Promise<UserManagerProbe> => ({ kind: 'absent' }),
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    readCmdline: () => `node\0${join(fx.profile.packageRoot, 'dist', 'local-host.mjs')}\0`,
+    readStarttime: () => record.hostStarttime,
+    kill: () => {},
+    stopTimeoutMs: 100,
+    sleep: async () => { now += 50 },
+    now: () => now,
+  }))
+  assertCode(result, 5, /TRANSITION_UNCERTAIN/u)
+})
+
+test('a second concurrent management operation is DAEMON_CONTROL_BUSY', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const { bindProcessSeat } = await import('../../src/app/remote-process/local-scope.ts')
+  const seat = await bindProcessSeat(`\0dsh-pi-tui-admin-${fx.scope.scopeId.slice(0, 40)}`, 'DAEMON_CONTROL_BUSY')
+  t.after(async () => { await seat.close() })
+  const result = await runDaemonControl({ verb: 'start' }, fx.profile, depsOf(fx))
+  assertCode(result, 5, /DAEMON_CONTROL_BUSY/u)
+})
+
+// ── start / restart ─────────────────────────────────────────────────────────
+
+test('start reuses an already authenticated Host without calling ensure', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  let ensured = 0
+  const result = await runDaemonControl({ verb: 'start' }, fx.profile, depsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    ensureHost: async () => { ensured += 1; throw new Error('must not ensure') },
+  }))
+  assertCode(result, 0)
+  assert.equal(ensured, 0)
+  assert.match(result.stdout, /^instance=11111111$/mu)
+})
+
+test('start refuses an incompatible live Host without starting another one', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope, { protocol: 'dsh-pi-tui/local/0' as typeof LOCAL_PROTOCOL })
+  let ensured = 0
+  const result = await runDaemonControl({ verb: 'start' }, fx.profile, depsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    ensureHost: async () => { ensured += 1; throw new Error('must not ensure') },
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(ensured, 0)
+})
+
+test('start reports a manager error without falling back to a process Host', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  let ensured = 0
+  const result = await runDaemonControl({ verb: 'start' }, fx.profile, depsOf(fx, {
+    probe: async (): Promise<UserManagerProbe> => ({ kind: 'error', reason: 'bus is broken' }),
+    ensureHost: async () => { ensured += 1; throw new Error('must not ensure') },
+  }))
+  assertCode(result, 4, /MANAGER_OR_OS_FAILURE/u)
+  assert.equal(ensured, 0)
+})
+
+test('restart refuses to start when the old Host exit is unconfirmed', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  let ensured = 0
+  let now = 0
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, depsOf(fx, {
+    probe: async (): Promise<UserManagerProbe> => ({ kind: 'absent' }),
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    readCmdline: () => `node\0${join(fx.profile.packageRoot, 'dist', 'local-host.mjs')}\0`,
+    readStarttime: () => record.hostStarttime,
+    kill: () => {},
+    ensureHost: async () => { ensured += 1; throw new Error('must not ensure') },
+    stopTimeoutMs: 100,
+    sleep: async () => { now += 50 },
+    now: () => now,
+  }))
+  assertCode(result, 5, /TRANSITION_UNCERTAIN/u)
+  assert.equal(ensured, 0, 'a stop that did not settle must never be followed by a start')
+})
+
+test('restart starts a fresh authenticated instance after the old Host stopped', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const oldRecord = recordOf(fx.scope)
+  const newRecord = recordOf(fx.scope, { instanceId: '22222222-2222-4222-8222-222222222222', hostPid: 5252 })
+  let alive = true
+  let ensured = 0
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, depsOf(fx, {
+    probe: async (): Promise<UserManagerProbe> => ({ kind: 'absent' }),
+    // Before ensureHost runs the old registry is still the only candidate; after
+    // the start it must resolve to the NEW instance.
+    readRecord: () => alive ? oldRecord : (ensured > 0 ? newRecord : undefined),
+    inspectProcess: recordValue => recordValue === undefined ? 'dead' : 'alive',
+    authenticate: async recordValue => ({ record: recordValue, cookie: 'c', identity: recordValue }),
+    readCmdline: () => `node\0${join(fx.profile.packageRoot, 'dist', 'local-host.mjs')}\0`,
+    readStarttime: () => alive ? oldRecord.hostStarttime : undefined,
+    kill: () => { alive = false },
+    ensureHost: async () => { ensured += 1; return { record: newRecord, cookie: 'c', identity: newRecord } },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.equal(ensured, 1)
+  assert.match(result.stdout, /^instance=22222222$/mu)
+})
+
+// ── logs ────────────────────────────────────────────────────────────────────
+
+test('logs reads the verified unit journal and strips ANSI plus token material', async t => {
+  const fx = fixture(t)
+  writeOwnedUnit(fx)
+  const result = await runDaemonControl({ verb: 'logs', lines: 50 }, fx.profile, depsOf(fx, {
+    journal: async () => ({ code: 0, stdout: '\u001b[31mtoken=SECRET\u001b[0m host started\n', stderr: '' }),
+  }))
+  assertCode(result, 0)
+  assert.doesNotMatch(result.stdout, /\u001b/u)
+  assert.doesNotMatch(result.stdout, /SECRET/u)
+  assert.match(result.stdout, /host started/u)
+  assert.match(result.stderr, /best-effort sanitized/u)
+})
+
+test('logs refuses an unavailable unit journal and never falls back to raw files', async t => {
+  const fx = fixture(t)
+  writeOwnedUnit(fx)
+  let fellBack = 0
+  const result = await runDaemonControl({ verb: 'logs' }, fx.profile, depsOf(fx, {
+    journal: async () => ({ code: 1, stdout: '', stderr: 'no journal' }),
+    hostLogTail: async () => { fellBack += 1; return 'raw' },
+  }))
+  assertCode(result, 4, /LOG_SOURCE_UNAVAILABLE/u)
+  assert.equal(fellBack, 0)
+})
+
+test('logs reads the strict-absence private host.log only without a manager', async t => {
+  const fx = fixture(t)
+  const result = await runDaemonControl({ verb: 'logs', lines: 5 }, fx.profile, depsOf(fx, {
+    probe: async (): Promise<UserManagerProbe> => ({ kind: 'absent' }),
+    hostLogTail: async (path, lines) => {
+      assert.equal(path, join(fx.scope.dir, 'host.log'))
+      assert.equal(lines, 5)
+      return 'fallback line\n'
+    },
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /fallback line/u)
+})
+
+test('logs refuses a private file when a user manager exists without an owned unit', async t => {
+  const fx = fixture(t)
+  const result = await runDaemonControl({ verb: 'logs' }, fx.profile, depsOf(fx, {
+    hostLogTail: async () => { throw new Error('must not read') },
+  }))
+  assertCode(result, 4, /LOG_SOURCE_UNAVAILABLE/u)
+})
+
+test('sanitizeLogText redacts connect URLs, cookies and control characters', () => {
+  const text = 'GET http://127.0.0.1:4517/connect?token=abc\r\nAuthorization: Bearer xyz\nCookie: sid=1\nnormal line'
+  const out = sanitizeLogText(text)
+  assert.doesNotMatch(out, /token=abc/u)
+  assert.doesNotMatch(out, /Bearer xyz/u)
+  assert.doesNotMatch(out, /sid=1/u)
+  assert.match(out, /normal line/u)
+})
+
+// ── uninstall ───────────────────────────────────────────────────────────────
+
+test('uninstall with no owned unit leaves a strict-absence Host untouched', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  let signals = 0
+  const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, depsOf(fx, {
+    probe: async (): Promise<UserManagerProbe> => ({ kind: 'absent' }),
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    kill: () => { signals += 1 },
+  }))
+  assertCode(result, 0)
+  assert.equal(signals, 0, 'uninstall never kills a fallback Host')
+})
+
+test('uninstall removes an inactive owned unit without killing an unrelated fallback Host', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope, { hostPid: 7777 })
+  const systemctl = unitSystemctl(unit.path, { activeState: 'inactive', mainPid: 0 })
+  let signals = 0
+  const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    kill: () => { signals += 1 },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.equal(existsSync(unit.path), false, 'the inactive owned unit file must be removed')
+  assert.equal(signals, 0, 'an unrelated fallback Host must not be signalled')
+})
+
+test('uninstall stops and removes only the verified profile unit, then reloads', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: 4242 })
+  const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.equal(existsSync(unit.path), false, 'the owned unit file must be removed')
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), true)
+  assert.equal(systemctl.calls.some(args => args.includes('daemon-reload')), true)
+  assert.equal(existsSync(join(fx.scope.dir, 'instance.json')), false)
+})
+
+test('uninstall reports a failed daemon-reload instead of claiming completion', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'inactive', mainPid: 0, reloadResult: exited(1, '', 'reload failed') })
+  const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, depsOf(fx, { systemctl: systemctl.run }))
+  assertCode(result, 4, /MANAGER_OR_OS_FAILURE/u)
+  assert.equal(existsSync(unit.path), false, 'the file removal itself is recorded before the reload failure')
+})
+
+// ── output contract ─────────────────────────────────────────────────────────
+
+test('the status block is stable key=value text and never prints the DSH home path', async t => {
+  const fx = fixture(t)
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx))
+  assertCode(result, 0)
+  const lines = result.stdout.trimEnd().split('\n')
+  for (const line of lines) assert.match(line, /^[a-z-]+=/u)
+  assert.equal(result.stdout.includes(fx.profile.home), false)
+})
+
+test('formatDaemonStatus keeps an abbreviated instance identity only', () => {
+  const text = formatDaemonStatus({
+    profile: 'pi-tui',
+    manager: 'systemd',
+    userManager: 'available',
+    host: 'ready',
+    unit: 'dsh-pi-tui@pi-tui-abc.service',
+    unitState: 'active',
+    compatibility: 'compatible',
+    pid: 12,
+    instance: 'abcdef12',
+  })
+  assert.match(text, /^instance=abcdef12$/mu)
+  assert.equal(text.includes(UUID), false)
+})

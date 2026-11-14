@@ -33,11 +33,12 @@ import {
   openSync,
   readFileSync,
   realpathSync,
+  renameSync,
   unlinkSync,
   writeSync,
 } from 'node:fs'
 import { userInfo } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { LocalScopeError, type LocalScope } from './local-scope.ts'
 
 /** The fixed OS executable this module controls the user manager through. */
@@ -102,8 +103,24 @@ export interface UnitFacts {
   readonly dshAnchor: string
 }
 
-/** The stable observation returned by a Host start request (never readiness). */
+/** The readiness request returned by a managed start; it is never readiness itself. */
 export type HostStartObservation = () => Error | undefined
+
+/**
+ * Render the CURRENT installed definition of this Profile's managed unit. The
+ * explicit restart uses it only after the old instance stopped, so a cold start
+ * can never rewrite another build's unit.
+ */
+export function renderCurrentProfileUnit(options: HostStartOptions): { readonly unitName: string; readonly content: string; readonly installBuild: string } {
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  if (uid === undefined) throw new LocalScopeError('B1_PLATFORM_UNSUPPORTED', 'managed Host: the user id is unavailable')
+  const facts = collectUnitFacts(options, uid)
+  return {
+    unitName: buildUnitName(options.profile, options.scope.scopeId),
+    content: renderUnitContent(facts),
+    installBuild: facts.buildId,
+  }
+}
 
 /** Replace absolute paths so a probe reason never leaks a private path. */
 function sanitizeReason(text: string): string {
@@ -190,7 +207,7 @@ export function classifyUserManagerProbe(facts: UserManagerProbeFacts): UserMana
 }
 
 /** The user runtime directory to hand to a child `systemctl`. */
-function selectRuntimeDir(uid: number): string | undefined {
+export function selectRuntimeDir(uid: number): string | undefined {
   const standard = `/run/user/${String(uid)}`
   try {
     const info = lstatSync(standard)
@@ -698,6 +715,10 @@ export interface UnitLoadState {
   readonly fragmentPath: string
   /** The drop-in override paths the manager actually loaded (empty when none). */
   readonly dropInPaths: string
+  /** The unit's current main PID (`0` when inactive or not reported). */
+  readonly mainPid: string
+  /** The manager's install state (`UnitFileState`), e.g. `disabled`/`enabled`. */
+  readonly unitFileState: string
 }
 
 /** The injectable `systemctl` runner shape (production uses `runSystemctl`). */
@@ -713,7 +734,16 @@ export interface HostManagerDeps {
 /** Run `systemctl --user show -p ... <unit>` and parse the properties. */
 async function showUnit(unitName: string, runtimeDir: string | undefined, systemctl: SystemctlRunner): Promise<UnitLoadState> {
   const result = await systemctl(
-    ['--user', '--no-pager', '--no-ask-password', 'show', '-p', 'LoadState', '-p', 'ActiveState', '-p', 'FragmentPath', '-p', 'DropInPaths', unitName],
+    [
+      '--user', '--no-pager', '--no-ask-password', 'show',
+      '-p', 'LoadState',
+      '-p', 'ActiveState',
+      '-p', 'FragmentPath',
+      '-p', 'DropInPaths',
+      '-p', 'MainPID',
+      '-p', 'UnitFileState',
+      unitName,
+    ],
     runtimeDir,
   )
   if (result.kind !== 'exited' || result.code !== 0) {
@@ -728,6 +758,8 @@ async function showUnit(unitName: string, runtimeDir: string | undefined, system
     activeState: read('ActiveState'),
     fragmentPath: read('FragmentPath'),
     dropInPaths: read('DropInPaths'),
+    mainPid: read('MainPID'),
+    unitFileState: read('UnitFileState'),
   }
 }
 
@@ -767,6 +799,287 @@ async function waitForUnitLoaded(unitName: string, runtimeDir: string | undefine
     if (state.loadState !== 'not-found') return state
     if (Date.now() >= deadline) return state
     await new Promise(resolve => setTimeout(resolve, UNIT_LOAD_POLL_MS))
+  }
+}
+
+// ── Daemon control: read-only ownership facts and the explicit narrow actions ──
+//
+// These are the ONLY management writes of the Host supervision boundary. They
+// never create a Host, never run a Session/Agent and never replace the official
+// Host shutdown owner: stop sends the manager's SIGTERM, uninstall removes only
+// the verified profile unit file, and replacement happens only after an explicit
+// restart has already proven the old instance stopped.
+
+/** One controlled profile unit file proven from the filesystem alone. */
+export interface OwnedProfileUnit {
+  readonly unitName: string
+  readonly unitDir: string
+  readonly filePath: string
+  readonly content: string
+  /** The install build the unit file declares; may differ from the current build. */
+  readonly installBuild: string
+}
+
+/** The read-only file ownership answer: this Profile's unit, or none at all. */
+export type OwnedProfileUnitInspection =
+  | { readonly kind: 'none' }
+  | ({ readonly kind: 'owned' } & OwnedProfileUnit)
+
+/** The manager facts of one owned profile unit (never Host readiness). */
+export interface OwnedProfileUnitState {
+  readonly loadState: string
+  readonly activeState: string
+  readonly mainPid: number
+  readonly unitFileState: string
+}
+
+/** The outcome of one explicit stop attempt. */
+export interface StopOwnedProfileUnitResult {
+  /** True when a running unit was asked to stop and its main process exited. */
+  readonly stopped: boolean
+  /** True when the unit was already inactive; the caller reports an idempotent no-op. */
+  readonly alreadyInactive: boolean
+  /** The MainPID observed before the stop request (`0` when none). */
+  readonly mainPid: number
+}
+
+/** The stable stop-settlement window (systemd TimeoutStopSec is 15s). */
+const UNIT_STOP_TIMEOUT_MS = 20_000
+/** Poll interval for the post-stop MainPID/ActiveState observation. */
+const UNIT_STOP_POLL_MS = 100
+
+/**
+ * Resolve the fixed user unit directory WITHOUT creating it. The management
+ * queries must be side-effect free, so this mirrors `resolveUserUnitDir`'s
+ * account-home/owner/writability checks but returns `undefined` when any
+ * component of `<home>/.config/systemd/user` is missing.
+ */
+export function inspectExistingUserUnitDir(uid: number): string | undefined {
+  let home: string
+  try {
+    home = realpathSync(userInfo().homedir)
+  } catch (error) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the account home is not readable', error)
+  }
+  const homeInfo = lstatSync(home)
+  if (homeInfo.isSymbolicLink() || !homeInfo.isDirectory() || homeInfo.uid !== uid) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the account home must be a real directory owned by uid ${String(uid)}`)
+  }
+  if ((homeInfo.mode & 0o022) !== 0) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the account home must not be group/other writable')
+  }
+  let current = home
+  for (const component of USER_UNIT_SUBDIR) {
+    const next = join(current, component)
+    let info
+    try {
+      info = lstatSync(next)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the unit directory ${component} is not accessible`, error)
+    }
+    if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== uid) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the unit directory ${component} must be a real directory owned by uid ${String(uid)}`)
+    }
+    if ((info.mode & 0o022) !== 0) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the unit directory ${component} must not be group/other writable`)
+    }
+    current = next
+  }
+  return current
+}
+
+/** Read one exact `X-DshPiTui...` unit metadata value, rejecting duplicates. */
+function readUnitMetadata(lines: readonly string[], key: string): string {
+  const matches = lines.filter(line => line.startsWith(`${key}=`))
+  if (matches.length !== 1) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the unit has no single ${key} owner metadata line`)
+  }
+  return matches[0].slice(key.length + 1)
+}
+
+/**
+ * Prove that a unit file is the controlled definition for THIS (scope, profile)
+ * pair. The installed build may differ (an older compatible build): that is the
+ * explicit `restart` migration input, not a cold-start rewrite permission.
+ */
+function assertOwnedUnitContent(content: string, scope: LocalScope, profile: string): void {
+  const lines = content.split('\n')
+  if (readUnitMetadata(lines, 'X-DshPiTuiOwner') !== UNIT_OWNER_MARKER) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit is not owned by this product')
+  }
+  if (readUnitMetadata(lines, 'X-DshPiTuiScopeId') !== scope.scopeId) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit belongs to another profile scope')
+  }
+  if (readUnitMetadata(lines, 'X-DshPiTuiProfileIdentity') !== profileIdentityDigest(scope.profileRealpath)) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit belongs to another canonical profile')
+  }
+  if (!/^[0-9a-f]{64}$/u.test(readUnitMetadata(lines, 'X-DshPiTuiInstallBuild'))) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit has no valid install build identity')
+  }
+  const required = new Set([
+    'Type=exec',
+    `WorkingDirectory=${encodeUnitPath(scope.profileRealpath, 'WorkingDirectory')}`,
+    encodeEnvironment('DSH_HOME', scope.dshHome),
+    encodeEnvironment('SPLIT_PROCESS_PROFILE', profile),
+    'Restart=on-failure',
+  ])
+  for (const line of required) {
+    if (!lines.includes(line)) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit definition does not match this Profile')
+    }
+  }
+  const execLines = lines.filter(line => line.startsWith('ExecStart='))
+  if (execLines.length !== 1 || !execLines[0].includes('/dist/local-host.mjs"')) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit does not start the product Host entry')
+  }
+}
+
+/** Read ONE existing profile unit file without creating or mutating anything.
+ *  `unitDir` is an explicit test seam; production always derives it from the
+ *  account home. */
+export function inspectOwnedProfileUnit(scope: LocalScope, profile: string, uid: number, unitDir?: string): OwnedProfileUnitInspection {
+  const dir = unitDir ?? inspectExistingUserUnitDir(uid)
+  if (dir === undefined) return { kind: 'none' }
+  const unitName = buildUnitName(profile, scope.scopeId)
+  const filePath = join(dir, unitName)
+  let info
+  try {
+    info = lstatSync(filePath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'none' }
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file is not accessible', error)
+  }
+  if (info.isSymbolicLink() || !info.isFile() || info.uid !== uid || (info.mode & 0o777) !== 0o600) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit must be a 0600 regular file owned by this uid')
+  }
+  const content = readFileSync(filePath, 'utf8')
+  assertOwnedUnitContent(content, scope, profile)
+  return {
+    kind: 'owned',
+    unitName,
+    unitDir: dir,
+    filePath,
+    content,
+    installBuild: readUnitMetadata(content.split('\n'), 'X-DshPiTuiInstallBuild'),
+  }
+}
+
+/**
+ * Query the manager facts of ONE owned profile unit and cross-check that the
+ * manager really loads THIS file with no drop-in override. A `not-found`
+ * LoadState is returned as such (the file exists but is not loaded); every
+ * contradicting fact is an ownership refusal.
+ */
+export async function queryOwnedProfileUnit(
+  unit: OwnedProfileUnit,
+  runtimeDir: string | undefined,
+  systemctl: SystemctlRunner,
+): Promise<OwnedProfileUnitState> {
+  const state = await showUnit(unit.unitName, runtimeDir, systemctl)
+  if (state.loadState === 'not-found') {
+    return { loadState: state.loadState, activeState: state.activeState, mainPid: 0, unitFileState: state.unitFileState }
+  }
+  assertUnitOwned(state, unit.filePath)
+  return {
+    loadState: state.loadState,
+    activeState: state.activeState,
+    mainPid: Number(state.mainPid) === 0 ? 0 : Number(state.mainPid),
+    unitFileState: state.unitFileState,
+  }
+}
+
+/**
+ * Stop ONE verified owned profile unit through the user manager and wait for
+ * its original MainPID to actually disappear. This never falls back to a PID
+ * signal: the manager is the only supervision authority. A timeout is the
+ * stable `HOST_STOP_TIMEOUT`, never a claimed stop.
+ */
+export async function stopOwnedProfileUnit(
+  unit: OwnedProfileUnit,
+  runtimeDir: string | undefined,
+  systemctl: SystemctlRunner,
+  timeoutMs: number = UNIT_STOP_TIMEOUT_MS,
+): Promise<StopOwnedProfileUnitResult> {
+  const before = await queryOwnedProfileUnit(unit, runtimeDir, systemctl)
+  const active = before.activeState === 'active' || before.activeState === 'activating'
+    || before.activeState === 'deactivating' || before.activeState === 'reloading'
+  if (!active || (before.mainPid === 0 && before.activeState !== 'active')) {
+    return { stopped: false, alreadyInactive: true, mainPid: before.mainPid }
+  }
+  const stop = await systemctl(['--user', '--no-pager', '--no-ask-password', 'stop', unit.unitName], runtimeDir)
+  if (stop.kind !== 'exited' || stop.code !== 0) {
+    throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: systemctl could not stop the unit')
+  }
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const after = await queryOwnedProfileUnit(unit, runtimeDir, systemctl)
+    const settled = after.loadState === 'not-found'
+      || after.activeState === 'inactive'
+      || after.activeState === 'failed'
+    if (settled && (after.mainPid === 0 || after.mainPid !== before.mainPid)) {
+      return { stopped: true, alreadyInactive: false, mainPid: before.mainPid }
+    }
+    if (Date.now() >= deadline) {
+      throw new LocalScopeError('HOST_STOP_TIMEOUT', 'managed Host: the unit did not stop within the bounded window')
+    }
+    await new Promise(resolve => setTimeout(resolve, UNIT_STOP_POLL_MS))
+  }
+}
+
+/**
+ * Atomically replace one STOPPED owned profile unit with a freshly rendered
+ * definition. Only an explicit restart reaches this function, and only after
+ * the old instance was proven stopped. The current file is re-proven before the
+ * rename so a swapped/foreign file is never overwritten.
+ */
+export function replaceStoppedOwnedProfileUnit(
+  unit: OwnedProfileUnit,
+  scope: LocalScope,
+  profile: string,
+  uid: number,
+  content: string,
+): { readonly replaced: boolean } {
+  const current = inspectOwnedProfileUnit(scope, profile, uid, unit.unitDir)
+  if (current.kind === 'none' || current.filePath !== unit.filePath) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file changed during the transition')
+  }
+  if (current.content === content) return { replaced: false }
+  const tempPath = join(dirname(unit.filePath), `.${unit.unitName}.${String(process.pid)}.${randomUUID()}.tmp`)
+  let fd: number | undefined
+  try {
+    fd = openSync(tempPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+    fchmodSync(fd, 0o600)
+    const buffer = Buffer.from(content, 'utf8')
+    let offset = 0
+    while (offset < buffer.length) offset += writeSync(fd, buffer, offset, buffer.length - offset)
+    fsyncSync(fd)
+    closeSync(fd)
+    fd = undefined
+    renameSync(tempPath, unit.filePath)
+    return { replaced: true }
+  } catch (error) {
+    if (fd !== undefined) closeSync(fd)
+    try { unlinkSync(tempPath) } catch { /* temp may not exist */ }
+    if (error instanceof LocalScopeError) throw error
+    throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: the profile unit could not be replaced atomically', error)
+  }
+}
+
+/** Remove ONE verified owned profile unit file. There is no Host kill here: a
+ * strict-absence fallback Host is not unit-supervised and is never stopped by
+ * uninstall. The caller owns the `daemon-reload` that follows.
+ */
+export function uninstallOwnedProfileUnit(unit: OwnedProfileUnit, scope: LocalScope, profile: string, uid: number): void {
+  const current = inspectOwnedProfileUnit(scope, profile, uid, unit.unitDir)
+  if (current.kind === 'none' || current.filePath !== unit.filePath) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file changed during the transition')
+  }
+  try {
+    unlinkSync(unit.filePath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: the profile unit file could not be removed', error)
   }
 }
 
