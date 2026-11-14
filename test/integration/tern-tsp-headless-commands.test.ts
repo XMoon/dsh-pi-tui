@@ -1098,17 +1098,30 @@ test('a /copy success that outlives its Session is not announced on the replacem
     // the switch is still held.
     await submitInput(fixture, '/sessions')
     await waitFor('the Session Browser is ready', () => pickerNode(fixture.pane, 'session-browser-') !== undefined, 25_000)
-    const browserId = pickerNode(fixture.pane, 'session-browser-')!.id
-    // The persisted target Session can live in a non-current Workspace Folder,
-    // which starts collapsed: expand every collapsed official Folder instead of
-    // the retired cross-workspace scope switch.
-    const collapsedFolders = (): string[] => {
-      const items = (pickerProps(fixture.pane, 'session-browser-').items ?? []) as Array<Record<string, unknown>>
-      return items.filter(item => String(item.id).startsWith('workspace:') && item.open !== true).map(item => String(item.id))
-    }
-    for (const folderId of collapsedFolders()) sendActivate(fixture.pane, folderId, browserId)
+    // The Browser opens with its EMPTY listing snapshot (`listState` loading):
+    // the workspace folders and the session rows inside them only exist after
+    // the listing settles and the workspace baseline is proven, so reading the
+    // folded folders ONCE right after the picker node appears races the listing
+    // on a loaded runner — the expansion loop then ran while `items` was still
+    // empty and the persisted target stayed folded forever (the measured CI
+    // failure). The persisted target Session lives in a non-current Workspace
+    // Folder which starts collapsed, so expand every folded official folder AS
+    // THE WIRE REVEALS IT (never the retired cross-workspace scope switch), and
+    // let the SAME wait settle only when the target row is really listed.
+    // At most ONE expansion is in flight per turn, and the folder's `open`
+    // flip on the wire is the commit proof: `browse-workspace` bumps the
+    // panel revision and `handleEvent` refuses every event whose target was
+    // rendered under an older revision, so back-to-back activations without a
+    // committed frame in between are dropped — a re-read that still shows the
+    // folder folded therefore simply re-issues the SAME idempotent expansion
+    // intent (a refused event has no side effect), never a blind retry.
     await waitFor('the target row is listed', () => {
-      const items = (pickerProps(fixture.pane, 'session-browser-').items ?? []) as Array<{ id?: unknown }>
+      const items = (pickerProps(fixture.pane, 'session-browser-').items ?? []) as Array<Record<string, unknown>>
+      const folder = items.find(item => String(item.id).startsWith('workspace:') && item.open !== true)
+      if (folder !== undefined) {
+        sendActivate(fixture.pane, String(folder.id), pickerNode(fixture.pane, 'session-browser-')!.id)
+        return false
+      }
       return items.some(item => String(item.id).includes('f5-target-b'))
     }, 25_000)
     const targetItem = (pickerProps(fixture.pane, 'session-browser-').items as Array<{ id?: unknown }>)
