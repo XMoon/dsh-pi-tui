@@ -258,6 +258,23 @@ function switchReported(fixture: DirectTspFixture, toSessionId: string): boolean
   return text.split('\n').some(line => line.includes('switch ok') && line.includes(`to=${toSessionId}`))
 }
 
+/**
+ * The COUNT of terminal switch reports naming THIS target Session. The diag
+ * log is append-only, so a Session that already owns one report from an
+ * earlier switch (its `/new`) proves a LATER transition only by the count
+ * moving — `switchReported` alone would keep matching the old report.
+ */
+function switchReportCount(fixture: DirectTspFixture, toSessionId: string): number {
+  let text: string
+  try {
+    text = readFileSync(join(fixture.workRoot, 'diag.log'), 'utf8')
+  } catch {
+    return 0
+  }
+  return text.split('\n')
+    .filter(line => line.includes('switch ok') && line.includes(`to=${toSessionId}`)).length
+}
+
 function liveAgentIds(fixture: DirectTspFixture): string[] {
   const agents = fixture.ctx.get('agents') as unknown as {
     list(): readonly { session: { id: string } }[]
@@ -809,6 +826,13 @@ test('a session switch A → B → A offers the live Session’s own candidates,
     await submitCommand(fixture, '/new')
     const [sessionA] = await waitForSessionHeaders(fixture, 1, 'Session A')
     await waitFor('A to own a live Agent', () => liveAgentIds(fixture).includes(sessionA), 30_000)
+    // A durable header and a live Agent can appear while /new's single-flight
+    // marker is still held: the terminal `switch ok` report is the real
+    // completion boundary (surface rebuild + live-catalog refresh settled), the
+    // same gate the sibling submission lanes wait on. A queryUntil probe typed
+    // before it can land in the hydration window and paint no rows.
+    await waitFor('A transition and catalog refresh complete', () =>
+      switchReported(fixture, sessionA), 30_000)
 
     // A REAL agent-scoped Host command, through the official per-agent seam, so the
     // candidate set genuinely differs between the two Sessions.
@@ -843,6 +867,10 @@ test('a session switch A → B → A offers the live Session’s own candidates,
     assert.ok(sessionB, '/new published a different real Session')
     await waitFor('B to own the live Agent', () =>
       liveAgentIds(fixture).includes(sessionB) && !liveAgentIds(fixture).includes(sessionA), 30_000)
+    // The same terminal boundary for B: the stale-frame click and B's own
+    // catalog query below need B's surface rebuild and catalog refresh settled.
+    await waitFor('B transition and catalog refresh complete', () =>
+      switchReported(fixture, sessionB), 30_000)
 
     clickRow(fixture, aRowId)
     await observeNothing(fixture)
@@ -860,9 +888,15 @@ test('a session switch A → B → A offers the live Session’s own candidates,
       `the candidates follow the current Session, never the previous one (got ${JSON.stringify(rowNames(fixture))})`)
 
     await eraseDraft(fixture)
+    // The FIRST `switch ok` naming A is A's creation report, which
+    // `switchReported` would keep matching forever — count the reports BEFORE
+    // the /resume and wait for a NEW one, the same terminal boundary.
+    const aReportsBeforeResume = switchReportCount(fixture, sessionA)
     await submitCommand(fixture, `/resume ${sessionA}`)
     await waitFor('A to own the live Agent again', () =>
       liveAgentIds(fixture).includes(sessionA) && !liveAgentIds(fixture).includes(sessionB), 30_000)
+    await waitFor('the return transition and catalog refresh complete', () =>
+      switchReportCount(fixture, sessionA) > aReportsBeforeResume, 30_000)
 
     await prepareDraft(fixture, '/ic-s')
     await observeNothing(fixture)
