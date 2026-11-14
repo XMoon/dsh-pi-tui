@@ -16,10 +16,50 @@ import type { TeamModePort, TeamModeSnapshot, TeamModeWriteOutcome } from '../te
 import { SupersededReadError } from '../read-error.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
-import { classifyRemoteWriteFailure } from './write-failure.ts'
+import { copyFailureDetails, remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
+import { GATEWAY_PRE_INVOCATION_CODES } from '../write-outcome.ts'
+import type { RemoteWriteFailure } from './write-failure.ts'
 
 const AGENT_TEAM_KEY = 'agentTeam'
 const MODEL_SELECTION_KEY = 'modelSelection'
+
+/**
+ * Team's OWN post-dispatch classifier.
+ *
+ * The shared `classifyRemoteWriteFailure` treats any domain code as a proven
+ * refusal, which is wrong after dispatch: the official `setEnabled` appends the
+ * `team/mode` record BEFORE `sessions.flush()`, and flush can throw a listener
+ * error carrying a domain code after the append. The generated Client also
+ * re-checks the AbortSignal after the RPC returns, so a `gateway/cancelled`
+ * arriving here does NOT prove the Host write did not land. Only codes the Host
+ * provably raises BEFORE appending (the Root refusal) or the Gateway's
+ * pre-invocation admission codes are safe `rejected`; everything else is
+ * `indeterminate`.
+ */
+function classifyTeamWriteFailure(error: unknown): RemoteWriteFailure {
+  const code = remoteFailureCode(error)
+  const details = copyFailureDetails(error)
+  const proven = code !== undefined && (
+    code === 'gateway/bad-request'
+    || code === 'TEAM_LEAD_REQUIRED'
+    || GATEWAY_PRE_INVOCATION_CODES.has(code)
+  )
+  if (proven) {
+    return {
+      kind: 'rejected',
+      error: { code: code as string, message: remoteFailureMessage(error), ...details === undefined ? {} : { details } },
+    }
+  }
+  return {
+    kind: 'indeterminate',
+    error: {
+      code: code ?? 'agent-team/write-indeterminate',
+      message: remoteFailureMessage(error),
+      ...details === undefined ? {} : { details },
+    },
+  }
+}
+
 
 /** One official Client projection face (value deliberately `unknown`). */
 export interface RemoteTeamModeProjectionFace {
@@ -196,7 +236,7 @@ export class RemoteTeamModePort implements TeamModePort {
     const result = await this.namespace.setEnabled(sessionId, enabled, signal)
       .catch((error: unknown) => ({ ok: false as const, error }))
     if (result.ok) return { kind: 'committed' }
-    const failure = classifyRemoteWriteFailure(result.error)
+    const failure = classifyTeamWriteFailure(result.error)
     if (failure.kind === 'cancelled') {
       return { kind: 'cancelled', reason: 'the Team mode change was cancelled' }
     }

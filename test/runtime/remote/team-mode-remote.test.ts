@@ -239,6 +239,27 @@ test('Remote Team port: the generated write settle is classified, never guessed'
   assert.equal(refusedOutcome.kind, 'rejected')
   assert.match(refusedOutcome.kind === 'rejected' ? refusedOutcome.reason : '', /root Session/u)
 
+  // A post-dispatch `gateway/cancelled` is NOT proof that nothing was written:
+  // the generated Client can report cancellation after the Host appended.
+  const postCancel = makeNamespace(async () => ({
+    ok: false,
+    error: { code: 'gateway/cancelled', message: 'the call was cancelled' },
+  }))
+  const cancelOutcome = await portOf({ binding: makeBinding().binding, namespace: postCancel.namespace })
+    .port.setEnabled('s1', true, signal)
+  assert.equal(cancelOutcome.kind, 'indeterminate', 'a post-dispatch cancellation is indeterminate')
+
+  // A domain code after the append (e.g. a flush listener error) is also
+  // indeterminate — only the Root refusal / gateway pre-invocation codes are
+  // safe refusals.
+  const postAppend = makeNamespace(async () => ({
+    ok: false,
+    error: { code: 'session/flush-failed', message: 'a listener failed after append' },
+  }))
+  const appendOutcome = await portOf({ binding: makeBinding().binding, namespace: postAppend.namespace })
+    .port.setEnabled('s1', true, signal)
+  assert.equal(appendOutcome.kind, 'indeterminate', 'a post-append domain failure is indeterminate')
+
   // A thrown transport/envelope failure after dispatch is indeterminate.
   const thrown = makeNamespace(async () => { throw new Error('socket closed') })
   const thrownOutcome = await portOf({ binding: makeBinding().binding, namespace: thrown.namespace })
