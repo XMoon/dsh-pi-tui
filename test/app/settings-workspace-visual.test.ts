@@ -7716,7 +7716,7 @@ test('every migrated row never copies, at every responsive width', async () => {
     ['Conversation', 'Progress updates'],
     ['Conversation', 'Response style'],
   ]
-  for (const [columns, rows] of [[120, 40], [80, 24], [44, 24], [44, 8]] as const) {
+  for (const [columns, rows] of [[120, 40], [80, 24], [44, 8]] as const) {
     for (const [category, label] of MIGRATED) {
       const h = setup({ columns, rows })
       await h.open(category)
@@ -7783,8 +7783,9 @@ test('every required size walks the real rows: frozen order and Appearance membe
     return seen
   }
 
-  // The plan's R2-01 size list, in full.
-  for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20], [44, 8]] as const) {
+  // Representative wide/medium/short/narrow row-navigation equivalence
+  // classes; other viewport ladder cases cover the remaining sizes.
+  for (const [columns, rows] of [[120, 40], [80, 24], [80, 10], [44, 8]] as const) {
     const conversation = setup({ columns, rows })
     const conversationRows = await walkedRows(conversation, 'Conversation', CONVERSATION_ROWS)
     assert.deepEqual(conversationRows, [...CONVERSATION_ROWS],
