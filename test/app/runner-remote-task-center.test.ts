@@ -2174,7 +2174,8 @@ test('reincarnation: a read stamped with the OLD child lifetime fails closed and
       && lifetimeOf(committedScope.key) > lifetimeOf(scope1.key)
     if (committed) break
     if (Date.now() > lifetimeDeadline) {
-      throw new Error(`timed out waiting for the reopened viewer to commit its own lifetime (generation=${String(app.getViewerGeneration())} after ${String(generation1)}, scope=${committedScope.key} after ${scope1.key})`)
+      const retain = retainFacts(sessions, CHILD_A_ID)
+      throw new Error(`timed out waiting for the reopened viewer to commit its own lifetime (generation=${String(app.getViewerGeneration())} after ${String(generation1)}, scope=${committedScope.key} after ${scope1.key}, retain=${JSON.stringify(retain)})`)
     }
     await new Promise(resolve => setTimeout(resolve, 10))
   }
