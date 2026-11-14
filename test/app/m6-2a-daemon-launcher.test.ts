@@ -82,7 +82,15 @@ class FakeChild extends EventEmitter {
   exitCode: number | null = null
   signalCode: NodeJS.Signals | null = null
   readonly kills: NodeJS.Signals[] = []
-  kill(signal: NodeJS.Signals): boolean { this.kills.push(signal); return true }
+  autoExitSignal: NodeJS.Signals | undefined
+  kill(signal: NodeJS.Signals): boolean {
+    this.kills.push(signal)
+    if (this.autoExitSignal === signal && this.exitCode === null && this.signalCode === null) {
+      this.exitCode = signal === 'SIGKILL' ? 1 : 0
+      setImmediate(() => this.emit('exit', this.exitCode, null))
+    }
+    return true
+  }
   finish(code: number): void { this.exitCode = code; this.emit('exit', code, null) }
   finishSignal(signal: NodeJS.Signals): void { this.signalCode = signal; this.emit('exit', null, signal) }
 }
@@ -97,13 +105,14 @@ function fakeSpawn(): { spawnImpl: typeof import('node:child_process').spawn; ch
   return { spawnImpl, children }
 }
 
-function coordinator(children: FakeChild[], exitCodes: number[], spawnImpl?: typeof import('node:child_process').spawn): DaemonCoordinator {
+function coordinator(children: FakeChild[], exitCodes: number[], spawnImpl?: typeof import('node:child_process').spawn, extra: Record<string, unknown> = {}): DaemonCoordinator {
   return new DaemonCoordinator({
     spawnImpl: spawnImpl ?? fakeSpawn().spawnImpl,
     entry: '/x/pkg/dist/local-client.mjs',
     env: {},
     appExit: code => { exitCodes.push(code) },
     diag: silentDiag,
+    ...extra,
   })
 }
 
@@ -162,15 +171,25 @@ test('dispose before start cancels the spawn', () => {
   assert.deepEqual(exitCodes, [])
 })
 
-test('dispose after start asks the live child to stop once, without a second exit', () => {
+test('dispose after start asks the live child to stop once and resolves after its exit', async () => {
   const { spawnImpl, children } = fakeSpawn()
   const exitCodes: number[] = []
   const c = coordinator(children, exitCodes, spawnImpl)
   c.start()
-  c.dispose()
-  c.dispose()
+  children[0].autoExitSignal = 'SIGTERM'
+  await c.dispose()
+  await c.dispose()
   assert.deepEqual(children[0].kills, ['SIGTERM'], 'the live child is asked to stop exactly once')
-  assert.deepEqual(exitCodes, [], 'dispose does not itself re-exit')
+})
+
+test('dispose escalates to SIGKILL when the child does not exit within the grace window', async () => {
+  const { spawnImpl, children } = fakeSpawn()
+  const exitCodes: number[] = []
+  const c = coordinator(children, exitCodes, spawnImpl, { graceMs: 40, killGraceMs: 40 })
+  c.start()
+  children[0].autoExitSignal = 'SIGKILL' // only SIGKILL triggers the exit
+  await c.dispose()
+  assert.deepEqual(children[0].kills, ['SIGTERM', 'SIGKILL'], 'escalates to SIGKILL after the grace window')
 })
 
 test('the Coordinator installs no second SIGTERM/SIGINT handler (single stop owner)', () => {
