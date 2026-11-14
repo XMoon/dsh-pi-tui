@@ -734,7 +734,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       const sessionId = taskCenter().sessionId()
       if (sessionId !== undefined) {
         const next = buildTeamPresentation(sessionId)
-        if (next !== undefined) activeTaskBrowser?.setTeamPage?.(next)
+        activeTaskBrowser?.setTeamPage?.(next) // undefined REVOKES to Work-only
       }
     }
     activeTaskBrowser?.setItems(taskPanelItemsWithAttention(rows), preferred)
@@ -1326,15 +1326,14 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         maxVisible: 18,
         loading: runtime !== undefined && taskBrowserRows.length === 0,
         groupLabels: true,
-        ...(teamPresentation === undefined ? {} : {
-          team: teamPresentation,
-          // The physical pointer final admission: the captured subject is still
-          // current, the browser token still owns the slot, and cleanup has not
-          // started. Read lazily by the panel's tab/filter/Team hit paths.
-          interactionCurrent: () => !options.isCleanedUp()
-            && activeTaskBrowserToken === browserToken
-            && source.subjectMatches(browserSubject),
-        }),
+        ...(teamPresentation === undefined ? {} : { team: teamPresentation }),
+        // The physical pointer final admission for the Work type filter (and the
+        // Team page when present): injected for EVERY browser, including
+        // Work-only (Child / Workflow-scoped), because the `f` filter list is a
+        // Work-page pointer surface regardless of Team eligibility.
+        interactionCurrent: () => !options.isCleanedUp()
+          && activeTaskBrowserToken === browserToken
+          && source.subjectMatches(browserSubject),
         onRefresh: () => {
           if (options.isCleanedUp()) return
           if (runtime === undefined) {
@@ -1398,7 +1397,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
           if (activeTaskBrowserToken !== browserToken) return
           if (!source.subjectMatches(browserSubject)) return
           const next = buildTeamPresentation(browserSessionId)
-          if (next !== undefined) activeTaskBrowser?.setTeamPage?.(next)
+          activeTaskBrowser?.setTeamPage?.(next) // undefined REVOKES to Work-only
         })
       }
     }

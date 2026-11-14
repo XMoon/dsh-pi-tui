@@ -190,7 +190,7 @@ interface RuntimeHarness {
     items: readonly TaskPanelItem[]
     preferredValues: Array<string | undefined>
     refreshStates: Array<{ state: 'loading' | 'ready' | 'stale'; error?: string }>
-    teamPages: TeamBrowserPresentation[]
+    teamPages: Array<TeamBrowserPresentation | undefined>
   }>
   readonly sinks: {
     quick: number
@@ -847,4 +847,43 @@ test('resetTasks releases the Team board subscription exactly once', async () =>
   assert.equal(box.disposed, 0)
   h.tasks.resetTasks()
   assert.ok(box.disposed >= 1, 'reset releases the subscription')
+})
+
+// ── FR2 external round 3: pointer admission for Work-only, eligibility revoke ──
+
+test('a Work-only (Child) browser still injects interactionCurrent for the Work type filter', async () => {
+  const { source } = teamSource({ snapshot: { kind: 'unavailable', cause: 'not-root', reason: 'child' } })
+  const h = startRuntime({ source })
+  await flush()
+  h.tasks.openTasksBrowser('full')
+  assert.equal(h.opens[0]!.options.team, undefined, 'a child is Work-only')
+  assert.equal(typeof h.opens[0]!.options.interactionCurrent, 'function', 'the Work filter pointer fence must still be supplied')
+  h.tasks.resetTasks()
+})
+
+test('a Workflow-scoped browser still injects interactionCurrent and stays Work-only', async () => {
+  const { source } = teamSource({ snapshot: { kind: 'ready', enabled: true, tasks: [] }, descendants: [] })
+  const h = startRuntime({ source })
+  await flush()
+  h.tasks.handleWorkflowAction({ kind: 'open-run-agents', runId: 'r1', name: 'wf', childIds: ['child-1'] })
+  const opts = h.opens.at(-1)!.options
+  assert.equal(opts.team, undefined, 'a Workflow-scoped browser is Work-only')
+  assert.equal(typeof opts.interactionCurrent, 'function', 'the scoped Work filter pointer fence is supplied')
+  h.tasks.resetTasks()
+})
+
+test('an unknown→not-root transition REVOKES the Team page on the mounted browser', async () => {
+  const { source, box, setSnapshot } = teamSource({ snapshot: { kind: 'unavailable', cause: 'session-missing', reason: 'not yet bound' } })
+  const h = startRuntime({ source })
+  await flush()
+  h.tasks.openTasksBrowser('full')
+  assert.ok(h.opens[0]!.options.team !== undefined, 'an unknown binding shows the recoverable Team error page')
+  assert.ok(box.listener !== undefined, 'and keeps a subscription to recover / revoke')
+  // The binding arrives and proves a CHILD: the runtime must revoke the Team page.
+  setSnapshot({ kind: 'unavailable', cause: 'not-root', reason: 'child' })
+  box.listener!()
+  const pages = h.handles[0]!.teamPages
+  assert.ok(pages.length >= 1, 'the eligibility change reaches the live handle')
+  assert.equal(pages.at(-1), undefined, 'the Team page is REVOKED (undefined), not left showing a stale error')
+  h.tasks.resetTasks()
 })

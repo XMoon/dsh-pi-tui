@@ -194,17 +194,32 @@ export class RemoteTeamBoardReadPort implements TeamBoardReadPort {
     }
     let faceOffs: Array<() => void> = []
     let lastBinding: unknown
+    let lastChildState: boolean | undefined
     let disposed = false
-    /** (Re)arm the `agentTeam` face against the CURRENT binding. A proven child
-     *  (binding snapshot OR Session-list origin) never receives the board feed. */
+    /** (Re)arm the `agentTeam` face. Returns whether the listener should be
+     *  notified: a ROOT face attach/replace, OR a classification change to a
+     *  proven child (so the runtime can REVOKE a previously shown Team page).
+     *  A proven child never receives the board face itself. */
     const rearm = (force: boolean): boolean => {
       const binding = this.sessions.binding(sessionId)
-      if (!force && Object.is(binding, lastBinding)) return false
-      for (const off of faceOffs.splice(0)) off()
-      lastBinding = binding
-      if (binding === undefined ? this.isListProvenChild(sessionId) : this.isProvenChild(sessionId, binding.session)) {
+      const childNow = binding === undefined
+        ? this.isListProvenChild(sessionId)
+        : this.isProvenChild(sessionId, binding.session)
+      const bindingChanged = !Object.is(binding, lastBinding)
+      if (!force && !bindingChanged) {
+        // Binding stable, but the list-origin classification may have flipped
+        // (a Session-list row arrives proving a child) — surface that transition.
+        if (childNow !== lastChildState) {
+          lastChildState = childNow
+          if (childNow) for (const off of faceOffs.splice(0)) off()
+          return true
+        }
         return false
       }
+      for (const off of faceOffs.splice(0)) off()
+      lastBinding = binding
+      lastChildState = childNow
+      if (childNow) return true // notify so the runtime revokes; attach NO face
       if (binding === undefined) return true
       try {
         faceOffs.push(binding.session.projections.faceOf(AGENT_TEAM_KEY).subscribe(listener))
@@ -219,8 +234,7 @@ export class RemoteTeamBoardReadPort implements TeamBoardReadPort {
     rearm(false)
     // A reconnect keeps the retained binding identity stable, but a retired +
     // same-id rebuilt owner produces a NEW face; re-arm on every generation
-    // change so a retired binding's callback is never mistaken for current. A
-    // proven child re-arm returns false, so it never notifies either.
+    // change so a retired binding's callback is never mistaken for current.
     const generationOff = this.generation.subscribe(() => {
       if (disposed) return
       if (rearm(true)) listener()

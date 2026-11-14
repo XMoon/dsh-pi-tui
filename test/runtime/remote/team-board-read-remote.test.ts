@@ -219,7 +219,7 @@ test('Remote board subscribe is Root-only: a confirmed child binding never attac
   dispose()
 })
 
-test('Remote board subscribe stays silent when an initially absent binding resolves to a child', () => {
+test('Remote board subscribe notifies ONCE when an unknown binding resolves to a child (eligibility revocation), but attaches no face', () => {
   const s = makeSessions(undefined)
   const gen = generation({ id: 'g' })
   const port = new RemoteTeamBoardReadPort({ sessions: s.sessions, connection: { generation: gen } })
@@ -227,10 +227,9 @@ test('Remote board subscribe stays silent when an initially absent binding resol
   const dispose = port.subscribe('root', () => { calls += 1 })
   const child = makeSession({ face: new FakeFace(board([task()])), subagent: { parent: 'root' } })
   s.setBinding({ session: child.session })
-  s.emitList()
-  gen.set({ id: 'g2' })
+  s.emitList() // unknown → proven child: the ONE eligibility-revocation notification
   assert.equal(child.face.size(), 0, 'a late child binding never gets a face listener')
-  assert.equal(calls, 0, 'a generation/list change never notifies once the binding proves a child')
+  assert.equal(calls, 1, 'the unknown→child transition must notify once so the runtime revokes the Team page')
   dispose()
 })
 

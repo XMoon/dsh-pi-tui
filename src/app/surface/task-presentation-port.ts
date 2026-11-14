@@ -50,9 +50,10 @@ export interface TaskBrowserPresentationHandle {
   close(): void
   setItems(items: readonly TaskPanelItem[], preferredValue?: string): void
   setRefreshState(state: 'loading' | 'ready' | 'stale', error?: string): void
-  /** Replace the Team page DTO (PiTui only). Optional so the TSP Work Hub
-   *  handle (which never shows a Team tab) need not implement it. */
-  setTeamPage?(value: TeamBrowserPresentation): void
+  /** Replace the Team page DTO (PiTui only). `undefined` REVOKES the Team page
+   *  (Root eligibility went unknown → not-root), returning the browser to
+   *  Work-only. Optional so the TSP Work Hub handle need not implement it. */
+  setTeamPage?(value: TeamBrowserPresentation | undefined): void
 }
 
 /** The already-decided opening facts of one Task Browser presentation. */
