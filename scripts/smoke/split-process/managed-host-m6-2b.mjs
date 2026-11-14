@@ -15,7 +15,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { readFileSync, existsSync, lstatSync, realpathSync, statSync, unlinkSync } from 'node:fs'
+import { readFileSync, existsSync, lstatSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { userInfo } from 'node:os'
@@ -501,6 +501,131 @@ export async function runManagedHostConcurrentColdStart({ installation, trace, d
     await b.exitWithin(60_000)
     await a.dispose()
     await b.dispose()
+    const cleanup = stopAndRemoveManagedUnit(installation, trace)
+    const outcomeError = cleanupOutcomeError(cleanup)
+    if (outcomeError !== undefined && failure === undefined) failure = new SplitSmokeAssertionError(outcomeError)
+    if (cleanup.removed === true || cleanup.reason === 'absent') killIsolatedProcesses(dshHome)
+  }
+  if (failure !== undefined) throw failure
+  return result
+}
+
+async function waitForCondition(predicate, label, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await sleep(150)
+  }
+  throw new SplitSmokeAssertionError(`managed-host: ${label} did not settle before the deadline`)
+}
+
+/**
+ * B07 negative: the managed unit is ACTIVE, yet a NEW cold Client must not treat
+ * that manager state as readiness. With tampered launch material it fails closed
+ * on the authenticated identity, and the live Host/unit are neither killed nor
+ * replaced.
+ */
+export async function runManagedHostAuthFailureNegative({ installation, trace, dshHome }) {
+  const gate = isolatedGate()
+  if (!gate.qualified) return { status: 'NOT_VERIFIED', reason: gate.reason }
+  const uid = process.getuid()
+  const runtimeDir = existsSync(`/run/user/${String(uid)}`) ? `/run/user/${String(uid)}` : undefined
+  const probe = systemctl(['--user', '--no-pager', '--no-ask-password', 'show-environment'], runtimeDir)
+  if (probe.status !== 0) return { status: 'NOT_VERIFIED', reason: `NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: systemctl --user show-environment exited ${String(probe.status)}` }
+  const scopeId = profileScopeId(uid, installation.profileDir)
+  const unit = unitName('pi-tui', scopeId)
+  const expectedFragment = join(realpathSync(userInfo().homedir), '.config', 'systemd', 'user', unit)
+  const launchPath = join(dshHome, 'run', 'dsh-pi-tui', scopeId, 'launch.json')
+  const screen = new PublicDshScreen(installation, 'daemon')
+  let result
+  let failure
+  let launchBefore
+  try {
+    await waitForCounts(dshHome, counts => counts.host >= 1 && counts.client >= 1, 'one Host + one Client', 90_000)
+    await screen.waitForAny(['type a message', '╭'], 'the managed Client', 120_000)
+    const identity = readInstance(dshHome, scopeId)
+    assert(identity !== undefined && identity.scopeId === scopeId, 'the Host published no scope identity')
+    const hostBefore = hostPids(dshHome)
+    assert(hostBefore.length === 1, 'expected exactly one live Host')
+    const propsBefore = showUnit(unit, runtimeDir)
+    assert(propsBefore.ActiveState === 'active', 'the managed unit is not active')
+    // ACTIVE is not Ready: a new Client must still prove the authenticated identity.
+    launchBefore = readFileSync(launchPath, 'utf8')
+    writeFileSync(launchPath, `${JSON.stringify({ schema: 1, instanceId: '00000000-0000-4000-8000-000000000000', connectUrl: `${identity.origin}/connect?token=tampered` })}\n`, { mode: 0o600 })
+    const second = new PublicDshScreen(installation, 'daemon')
+    try {
+      const exit = await second.exitWithin(60_000)
+      assert(exit.code !== 0 && exit.code !== 'timeout', `a tampered Host identity must fail the new Client, saw ${JSON.stringify(exit)}`)
+      assert(/HOST_IDENTITY_MISMATCH|HOST_AUTH_FAILED|LOCAL_FILE_UNSAFE/u.test(second.records.raw), 'the authentication failure was not reported')
+    } finally {
+      await second.dispose()
+    }
+    writeFileSync(launchPath, launchBefore, { mode: 0o600 })
+    launchBefore = undefined
+    assert(hostPids(dshHome).length === 1 && hostPids(dshHome)[0] === hostBefore[0], 'a failed authentication killed or replaced the live Host')
+    const propsAfter = showUnit(unit, runtimeDir)
+    assert(propsAfter.ActiveState === 'active' && propsAfter.FragmentPath !== undefined && realpathSync(propsAfter.FragmentPath) === realpathSync(expectedFragment), 'the managed unit changed after a failed authentication')
+    trace('managed-host-auth-failure-negative', { hostPid: hostBefore[0] })
+    result = { status: 'PASS', scope: 'REAL_SYSTEMD_USER_L6', authFailureFailsClosed: true, liveHostUnchanged: true }
+  } catch (error) {
+    failure = error
+  } finally {
+    if (launchBefore !== undefined) { try { writeFileSync(launchPath, launchBefore, { mode: 0o600 }) } catch { /* best effort */ } }
+    try { screen.send('/exit\r') } catch { /* gone */ }
+    await screen.exitWithin(60_000)
+    await screen.dispose()
+    const cleanup = stopAndRemoveManagedUnit(installation, trace)
+    const outcomeError = cleanupOutcomeError(cleanup)
+    if (outcomeError !== undefined && failure === undefined) failure = new SplitSmokeAssertionError(outcomeError)
+    if (cleanup.removed === true || cleanup.reason === 'absent') killIsolatedProcesses(dshHome)
+  }
+  if (failure !== undefined) throw failure
+  return result
+}
+
+/**
+ * B13: a crashed managed Host is restarted by systemd `Restart=on-failure` as a
+ * NEW authenticated instance under the SAME owned unit.
+ */
+export async function runManagedHostCrashRestart({ installation, trace, dshHome }) {
+  const gate = isolatedGate()
+  if (!gate.qualified) return { status: 'NOT_VERIFIED', reason: gate.reason }
+  const uid = process.getuid()
+  const runtimeDir = existsSync(`/run/user/${String(uid)}`) ? `/run/user/${String(uid)}` : undefined
+  const probe = systemctl(['--user', '--no-pager', '--no-ask-password', 'show-environment'], runtimeDir)
+  if (probe.status !== 0) return { status: 'NOT_VERIFIED', reason: `NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: systemctl --user show-environment exited ${String(probe.status)}` }
+  const scopeId = profileScopeId(uid, installation.profileDir)
+  const unit = unitName('pi-tui', scopeId)
+  const expectedFragment = join(realpathSync(userInfo().homedir), '.config', 'systemd', 'user', unit)
+  const screen = new PublicDshScreen(installation, 'daemon')
+  let result
+  let failure
+  try {
+    await waitForCounts(dshHome, counts => counts.host >= 1 && counts.client >= 1, 'one Host + one Client', 90_000)
+    await screen.waitForAny(['type a message', '╭'], 'the managed Client', 120_000)
+    const before = readInstance(dshHome, scopeId)
+    assert(before !== undefined && before.scopeId === scopeId, 'the Host published no scope identity')
+    const oldPid = before.hostPid
+    const oldInstance = before.instanceId
+    process.kill(oldPid, 'SIGKILL')
+    await waitForCondition(() => {
+      const current = readInstance(dshHome, scopeId)
+      return current !== undefined && current.instanceId !== oldInstance && current.hostPid !== oldPid && hostPids(dshHome).includes(current.hostPid)
+    }, 'the systemd-restarted Host', 60_000)
+    const after = readInstance(dshHome, scopeId)
+    assert(after !== undefined && after.instanceId !== oldInstance && after.hostPid !== oldPid, 'the restarted Host is not a new instance')
+    const props = showUnit(unit, runtimeDir)
+    assert(props.ActiveState === 'active', 'the unit is not active after the Host crash')
+    assert(props.FragmentPath !== undefined && realpathSync(props.FragmentPath) === realpathSync(expectedFragment), 'the unit FragmentPath changed after the restart')
+    assert(Number(props.MainPID) === after.hostPid, 'the restarted unit MainPID is not the new Host PID')
+    trace('managed-host-crash-restart', { oldPid, newPid: after.hostPid })
+    result = { status: 'PASS', scope: 'REAL_SYSTEMD_USER_L6', crashRestartedByManager: true, newInstance: true }
+  } catch (error) {
+    failure = error
+  } finally {
+    try { screen.send('/exit\r') } catch { /* gone */ }
+    await screen.exitWithin(60_000)
+    await screen.dispose()
     const cleanup = stopAndRemoveManagedUnit(installation, trace)
     const outcomeError = cleanupOutcomeError(cleanup)
     if (outcomeError !== undefined && failure === undefined) failure = new SplitSmokeAssertionError(outcomeError)
