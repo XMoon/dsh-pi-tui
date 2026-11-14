@@ -133,6 +133,17 @@ function nativeFindFolder(): TranscriptFolder {
       source: { kind: 'tool', callId: ToolCallId('call-t3a-inner') },
     },
   }, seq++))
+  events.push(ev('assistant/message', {
+    turn: 3,
+    step: 0,
+    message: {
+      id: MessageId('t3a-a-3'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'a plain answer' }],
+      source: { kind: 'model', provider: 'scripted', model: 'scripted' },
+    },
+    stream: [],
+  }, seq++))
   events.push(ev('step/end', { turn: 3, step: 0 }, seq++))
   events.push(ev('turn/end', { turn: 3, reason: { kind: 'completed' } }, seq++))
   turn(4, 'a later request', `the shared answer again carries ${SHARED}`)
@@ -172,19 +183,37 @@ test('the Folder corpus owns the Tool body text that a client may not index', ()
   const compactDefault = flatten(folder.messages(), { preset: 'compact', scopePrefix: 's1-', window: LATEST_WINDOW })
   assert.ok(!compactDefault.map(textOf).join('\n').includes(INNER_ONLY),
     'compact: the collapsed Activity head keeps the Tool body out of the document')
-  // Full/Focus materialize the tool result node, but the client's own document
-  // is NOT the mapper output: the real-pane lane measured zero native Find
-  // hits for the same body while the card was still collapsed. After a real
-  // click opened the card the lane measured ONE hit in the full and compact
-  // presets; in focus the opened Thought root carries no nested Tool card on
-  // the wire at all, so the lane measured ZERO hits there (the projection
-  // never sends the body under that root). This unit test therefore asserts
-  // only the mapper/row difference, never a client hit count.
-  for (const preset of ['full', 'focus'] as const) {
-    const nodes = flatten(folder.messages(), { preset, scopePrefix: 's1-', window: LATEST_WINDOW })
-    const resultNode = nodes.find(node => node.kind === 'code' && textOf(node).includes(INNER_ONLY))
-    assert.ok(resultNode !== undefined,
-      `${preset}: the mapper emits the tool result node (the client decides what its own Find indexes)`)
+  // The real-pane lane (round 5) drives Focus through the REAL Thought →
+  // Work → Tool chain — three verified client toggles — and measured ONE
+  // native Find hit once the body materializes; full and compact measure the
+  // same after their own disclosure clicks. The mapper output differs per
+  // preset in HOW the body is reachable, and that difference is what this
+  // unit test owns: the client decides what its own Find document indexes;
+  // this test never asserts a client hit count.
+  // Per-preset DEFAULT materialization boundary in the real (assistant-completed)
+  // turn shape: full keeps the tool row flat (its result node is in the
+  // document), while compact wraps the turn in a collapsible Work root and
+  // focus wraps it in a collapsible Thought root whose folded default keeps
+  // the text OUT of the document until the user opens it.
+  const fullDefault = flatten(folder.messages(), { preset: 'full', scopePrefix: 's1-', window: LATEST_WINDOW })
+  assert.ok(fullDefault.some(node => node.kind === 'code' && textOf(node).includes(INNER_ONLY)),
+    'full: the tool result node is materialized in the document')
+  for (const preset of ['compact', 'focus'] as const) {
+    const nodes = flatten(folder.messages(), {
+      preset, scopePrefix: 's1-', window: LATEST_WINDOW, turnActivities: folder.turnActivities(),
+    })
+    assert.ok(!nodes.some(node => node.kind === 'code' && textOf(node).includes(INNER_ONLY)),
+      `${preset}: the folded default document excludes the Tool body`)
+    // The REAL disclosure chain the client toggles (the round-5 real-pane lane
+    // drove exactly this): the FOCUS layer expands through its turn, the WORK
+    // layer through its owner — the mapper must materialize the body once the
+    // matching layer is expanded, without any search-only side door.
+    const focusOpened = flatten(folder.messages(), {
+      preset, scopePrefix: 's1-', window: LATEST_WINDOW, turnActivities: folder.turnActivities(),
+      expandedFocusTurns: new Set([3]), expandedWorkOwners: new Set(folder.messages()),
+    })
+    assert.ok(focusOpened.map(textOf).join('\n').includes(INNER_ONLY),
+      `${preset}: expanding the Thought and Work owners materializes the body`)
   }
 })
 

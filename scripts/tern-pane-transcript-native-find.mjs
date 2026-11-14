@@ -709,12 +709,11 @@ export default async function (h) {
         JSON.stringify(rect(workWitness.node)))
       const workToggleOk = await waitUntil(h, 'B16: the nested Work toggle reaches the Session iterator and asks to expand', () => {
         const rows = records(h).filter(row => row.kind === 'client.toggle').slice(togglesBeforeWork)
-        return rows.some(row => row.collapsed === false && String(row.id ?? '').startsWith(`${nestedWork.id}`.split('.').slice(0, 3).join('.')) === false || rows.length > 0 && rows.at(-1)?.collapsed === false)
+        return rows.some(row => row.collapsed === false && row.id === nestedWork.id)
       }, 150)
       const workToggle = records(h).filter(row => row.kind === 'client.toggle').at(-1)
-      h.check('B16: the client toggle names the nested Work node and the expand target state',
-        workToggleOk && workToggle?.collapsed === false && typeof workToggle?.id === 'string'
-          && String(workToggle.id).includes('work-'),
+      h.check('B16: the client toggle names the EXACT nested Work node and the expand target state',
+        workToggleOk && workToggle?.collapsed === false && workToggle?.id === nestedWork.id,
         JSON.stringify(workToggle ?? null))
       const innerCardFocus = [...foldLive(h).values()].find(node => node.k === 'tool'
         && String(node.id ?? '').startsWith(`${nestedWork.id}.`))
