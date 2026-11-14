@@ -48,7 +48,7 @@ const scenario = modeConfig.scenario ?? 'modes'
 if (mode !== 'full' && mode !== 'compact' && mode !== 'focus') {
   throw new Error('the flow must select exactly full, compact or focus')
 }
-if (scenario !== 'modes' && scenario !== 'inner-disclosure' && scenario !== 'ptc-error-note' && scenario !== 'card-disclosure' && scenario !== 'workflow-disclosure' && scenario !== 'native-find') {
+if (scenario !== 'modes' && scenario !== 'inner-disclosure' && scenario !== 'ptc-error-note' && scenario !== 'card-disclosure' && scenario !== 'workflow-disclosure' && scenario !== 'native-find' && scenario !== 'semantic-search') {
   throw new Error(`unknown transcript Tern scenario ${scenario}`)
 }
 
@@ -67,6 +67,29 @@ const NATIVE_FIND_MARKERS = {
   otherPane: 'T3A_OTHER_PANE_F4C7',
   seedTurns: { first: 2, last: 29 },
   appendTurn: 30,
+} as const
+
+/**
+ * T3-B1: the Session semantic-search scenario's fixed marker tokens. Each token
+ * is owned by exactly ONE seeded source, so a visibility assertion can never be
+ * satisfied by a different row that happens to share the text:
+ *
+ * - `archive`    an OLD user row (Turn 3) — off-viewport at the tail;
+ * - `innerOnly`  inside ONE tool result body that is folded by default;
+ * - `shared`     carried by TWO different assistant cards (Turns 4 and 25), so
+ *                the card-count projection must report two targets;
+ * - `tail`       the newest assistant answer (Turn 29);
+ * - `nonExistent` is never written anywhere: the zero-match control.
+ */
+const SEMANTIC_SEARCH_MARKERS = {
+  archive: 'ARCHIVE_B1_ONLY',
+  innerOnly: 'INNER_B1_TOOL_ONLY',
+  shared: 'SHARED_B1',
+  wrong: 'SHARED_B1_WRONG',
+  right: 'SHARED_B1_RIGHT',
+  tail: 'TAIL_B1_ONLY',
+  nonExistent: 'SEMANTIC_SEARCH_ABSENT_B1',
+  seedTurns: { first: 2, last: 29 },
 } as const
 const workRoot = join(paneRoot, 'dsh-home')
 const wireRecordPath = join(paneRoot, 'sdk-wire.jsonl')
@@ -144,6 +167,8 @@ const ptcFailureRuntime = {
 const nativeFindModeTag = mode.toUpperCase()
 const PROMPT = scenario === 'native-find'
   ? `FIND-${nativeFindModeTag} Qualify the native client Find over the continuous Main transcript.`
+  : scenario === 'semantic-search'
+    ? `SEARCH-${nativeFindModeTag} Qualify the loaded-session semantic search over the continuous Main transcript.`
   : scenario === 'ptc-error-note'
   ? 'PTC-NOTE'
   : scenario === 'inner-disclosure'
@@ -158,17 +183,20 @@ writeFileSync(promptsPath, `${JSON.stringify({
   mode,
   scenario,
   assistantMarker: scenario === 'native-find' ? `FIND-${nativeFindModeTag}-ANSWER`
+    : scenario === 'semantic-search' ? `SEARCH-${nativeFindModeTag}-ANSWER`
     : scenario === 'ptc-error-note' ? `PTC-NOTE-${nativeFindModeTag}-ANSWER`
     : scenario === 'inner-disclosure' ? `INNER-${nativeFindModeTag}-ANSWER`
       : scenario === 'card-disclosure' ? `CARD-${nativeFindModeTag}-ANSWER`
         : scenario === 'workflow-disclosure' ? `WORKFLOW-${nativeFindModeTag}-ANSWER` : 'MODES-DIRECT-ANSWER',
   toolName: scenario === 'ptc-error-note' ? 'run_code' : 'job_list',
   prompts: [{ ordinal: 1, marker: scenario === 'native-find' ? `FIND-${nativeFindModeTag}`
+    : scenario === 'semantic-search' ? `SEARCH-${nativeFindModeTag}`
     : scenario === 'ptc-error-note' ? `PTC-NOTE-${nativeFindModeTag}`
     : scenario === 'inner-disclosure' ? `INNER-${nativeFindModeTag}`
       : scenario === 'card-disclosure' ? `CARD-${nativeFindModeTag}`
         : scenario === 'workflow-disclosure' ? `WORKFLOW-${nativeFindModeTag}` : 'MODES-01', text: PROMPT }],
   ...(scenario === 'native-find' ? { nativeFind: NATIVE_FIND_MARKERS } : {}),
+  ...(scenario === 'semantic-search' ? { semanticSearch: SEMANTIC_SEARCH_MARKERS } : {}),
 }, null, 1)}\n`)
 
 // ── ONE-TO-ONE recorder around the production mount (append-only) ──
@@ -232,6 +260,68 @@ mountTspRenderer = function (...args) {
   }
   __tmNote({ kind: 'sdk.caps', caps: sdkSession.caps })
   const renderer = __tmOriginalMount.apply(this, args)
+  // T3-B1 §6.4: the fault switch. It is read by the appended hook ONLY (the
+  // production source above stays byte-for-byte unchanged) and it is armed from
+  // the run directory by the flow, never by a global environment backdoor.
+  // ONE-TO-ONE reveal recorder on the REAL inline Surface the mount renders
+  // into (recorded by the open wrapper above): it observes every reveal id and
+  // forwards the call unchanged, EXCEPT when the suppression fault is armed.
+  // READ AT CALL TIME, never captured: the fault is armed by a case AFTER the
+  // mount, so a mount-time snapshot would always read undefined.
+  const __tmFaultNow = () => globalThis.__transcriptModesFault
+  const __tmInline = globalThis.__transcriptModesSurface
+  if (__tmInline !== undefined) {
+    const __tmOriginalReveal = __tmInline.reveal
+    // The no-materialization fault: filter the journal's MAIN-region ops for the
+    // armed navigation. The dock card still updates (its ops are untouched), so
+    // the run fails on the READABILITY assertion, not on a missing count.
+    const __tmOriginalSend = __tmInline.send
+    __tmInline.send = function (...sendArgs) {
+      // Record the FIRST top-level Main root the journal ever added: the fault
+      // uses it as a REAL but far-away card id.
+      const opsNow = Array.isArray(sendArgs[0]) ? sendArgs[0] : []
+      for (const op of opsNow) {
+        if (!Array.isArray(op) || op[0] !== 'add') continue
+        const id = String(op[1] ?? '')
+        if (!id.startsWith('main.')) continue
+        // The hydration placeholder is a real root but NOT a transcript card.
+        if (id === 'main.loading') continue
+        if (id.slice('main.'.length).includes('.')) continue
+        // Keep the FIRST root of the CURRENT scope: after a source replacement
+        // the older scope's ids are dead wire ids the client rejects, which
+        // would make the fault vacuous instead of a wrong-but-valid target.
+        const scope = id.slice('main.'.length, id.indexOf('-', 'main.'.length) + 1)
+        if (globalThis.__transcriptModesFirstRootScope !== scope) {
+          globalThis.__transcriptModesFirstRootScope = scope
+          globalThis.__transcriptModesFirstMainRoot = id
+        }
+        break
+      }
+      const faultNow = __tmFaultNow()
+      if (faultNow && faultNow.suppressMainOps === true) {
+        const ops = Array.isArray(sendArgs[0]) ? sendArgs[0] : []
+        const kept = ops.filter(op => !(Array.isArray(op) && typeof op[1] === 'string' && op[1].startsWith('main.')))
+        __tmNote({ kind: 'fault.main-ops-dropped', dropped: ops.length - kept.length })
+        if (kept.length === 0) return undefined
+        return __tmOriginalSend.call(__tmInline, kept)
+      }
+      return __tmOriginalSend.apply(__tmInline, sendArgs)
+    }
+    __tmInline.reveal = function (...revealArgs) {
+      const id = String(revealArgs[0] ?? '')
+      if (id.startsWith('main.') && globalThis.__transcriptModesFirstMainRoot === undefined) {
+        globalThis.__transcriptModesFirstMainRoot = id
+      }
+      globalThis.__transcriptModesLastReveal = id
+      __tmNote({ kind: 'renderer.reveal', id })
+      const faultNow = __tmFaultNow()
+      if (faultNow && faultNow.suppressReveal === true) {
+        __tmNote({ kind: 'fault.reveal-suppressed', id })
+        return undefined
+      }
+      return __tmOriginalReveal.apply(__tmInline, revealArgs)
+    }
+  }
   const originalCommit = renderer.display.setTranscript
   renderer.display.setTranscript = function (...commitArgs) {
     const result = originalCommit.apply(this, commitArgs)
@@ -248,10 +338,21 @@ mountTspRenderer = function (...args) {
 })
 
 type GlobalProbe = {
+  __transcriptModesFault?: { suppressReveal?: boolean; suppressMainOps?: boolean }
+  /** The FIRST Main root id the renderer ever revealed (a real wire id). */
+  __transcriptModesFirstMainRoot?: string
+  /** The scope prefix the recorded root belongs to. */
+  __transcriptModesFirstRootScope?: string
+  /** The LAST id the renderer revealed (the intended source). */
+  __transcriptModesLastReveal?: string
   __transcriptModesNote?: (event: Record<string, unknown>) => void
   __transcriptModesObserveCommit?: (args: readonly unknown[]) => void
   __transcriptModesRenderer?: { display: { setTranscript: (...args: unknown[]) => void }; composer: { getDraft(): string } }
-  __transcriptModesSurface?: { id: string }
+  __transcriptModesSurface?: {
+    id: string
+    reveal(id: string, at?: string): void
+    send(ops: readonly unknown[]): void
+  }
 }
 ;(globalThis as unknown as GlobalProbe).__transcriptModesNote = note
 
@@ -674,6 +775,129 @@ const appendNativeFindSeed = (): NativeFindStats => {
   return nativeFindStats(written)
 }
 
+/**
+ * T3-B1: append the semantic-search seed through the SAME live Direct Session
+ * writer (never a direct folder/mapper write). The shape the qualification needs:
+ *
+ * - Turn 3  user row carrying `ARCHIVE_B1_ONLY` (old, far above the tail);
+ * - Turn 10 ONE tool whose LONG result body carries `INNER_B1_TOOL_ONLY` inside a
+ *   body the default preset keeps folded, followed by the canonical final
+ *   assistant answer + `step/end` + `turn/end` so Focus segments it as Work;
+ * - Turn 14 an adjacent pair of assistant rows carrying `SHARED_B1_WRONG` and
+ *   `SHARED_B1_RIGHT` — the SAME word `SHARED_B1` in two DIFFERENT cards, so a
+ *   navigation that lands on the wrong one is observable;
+ * - Turn 25 a third `SHARED_B1` card, so the card count is really > 1;
+ * - Turn 29 `TAIL_B1_ONLY`.
+ */
+const appendSemanticSearchSeed = (): NativeFindStats => {
+  const session = nativeFindSession()
+  let written = 0
+  for (let turn = SEMANTIC_SEARCH_MARKERS.seedTurns.first; turn <= SEMANTIC_SEARCH_MARKERS.seedTurns.last; turn += 1) {
+    const userText = turn === 3
+      ? `Earlier archive request referencing ${SEMANTIC_SEARCH_MARKERS.archive} in the scrollback.`
+      : nativeFindFiller(turn)
+    const assistantText = turn === 14
+      ? `The adjacent card carries ${SEMANTIC_SEARCH_MARKERS.wrong} and the right marker is the next card.`
+      : turn === 25
+        ? `A later card repeats ${SEMANTIC_SEARCH_MARKERS.shared} for the card-count projection.`
+        : turn === 29
+          ? `The final tail answer carries ${SEMANTIC_SEARCH_MARKERS.tail}.`
+          : nativeFindFiller(turn)
+    if (turn === 10) {
+      session.append('turn/start', { turn })
+      session.append('user/message', {
+        id: MessageId(`t3b1-search-u-${turn}`),
+        role: 'user',
+        content: [{ type: 'text', text: userText }],
+        source: { kind: 'user' },
+      }, { surfaceOp: 'append' })
+      session.append('step/start', { turn, step: 0 })
+      session.append('tool/call', {
+        turn,
+        step: 0,
+        callId: ToolCallId('call-t3b1-inner'),
+        name: 'read',
+        arguments: JSON.stringify({ file_path: 'src/t3b1-inner-example.ts' }),
+      })
+      session.append('tool/result', {
+        turn,
+        step: 0,
+        message: {
+          id: MessageId('t3b1-search-tool-10'),
+          role: 'tool',
+          toolCallId: ToolCallId('call-t3b1-inner'),
+          content: [{ type: 'text', text: [
+            '<path>src/t3b1-inner-example.ts</path>',
+            '<type>file</type>',
+            '<content>',
+            ...Array.from({ length: 14 }, (_, line) => `${line + 1}: inner file line ${line + 1}`),
+            `9: ${SEMANTIC_SEARCH_MARKERS.innerOnly} lives inside this collapsed Tool result body`,
+            ...Array.from({ length: 6 }, (_, line) => `${line + 15}: inner file line ${line + 15}`),
+            '(End of file - total 20 lines)',
+            '</content>',
+          ].join('\n') }],
+          source: { kind: 'tool', callId: ToolCallId('call-t3b1-inner') },
+        },
+      }, { surfaceOp: 'append' })
+      session.append('assistant/message', {
+        turn,
+        step: 0,
+        message: {
+          id: MessageId(`t3b1-search-a-${turn}`),
+          role: 'assistant',
+          content: [{ type: 'text', text: assistantText }],
+          source: { kind: 'model', provider: 'scripted', model: 'scripted' },
+        },
+        stream: [],
+      }, { surfaceOp: 'append' })
+      session.append('step/end', { turn, step: 0 })
+      session.append('turn/end', { turn, reason: { kind: 'completed' } })
+      written += 4
+      continue
+    }
+    if (turn === 14) {
+      // TWO adjacent assistant cards in ONE turn: the same token, different cards.
+      session.append('turn/start', { turn })
+      session.append('user/message', {
+        id: MessageId(`t3b1-search-u-${turn}`),
+        role: 'user',
+        content: [{ type: 'text', text: userText }],
+        source: { kind: 'user' },
+      }, { surfaceOp: 'append' })
+      session.append('step/start', { turn, step: 0 })
+      session.append('assistant/message', {
+        turn,
+        step: 0,
+        message: {
+          id: MessageId(`t3b1-search-a-${turn}-first`),
+          role: 'assistant',
+          content: [{ type: 'text', text: `The first adjacent card carries ${SEMANTIC_SEARCH_MARKERS.wrong}.` }],
+          source: { kind: 'model', provider: 'scripted', model: 'scripted' },
+        },
+        stream: [],
+      }, { surfaceOp: 'append' })
+      session.append('assistant/message', {
+        turn,
+        step: 0,
+        message: {
+          id: MessageId(`t3b1-search-a-${turn}-second`),
+          role: 'assistant',
+          content: [{ type: 'text', text: `The second adjacent card carries ${SEMANTIC_SEARCH_MARKERS.right}.` }],
+          source: { kind: 'model', provider: 'scripted', model: 'scripted' },
+        },
+        stream: [],
+      }, { surfaceOp: 'append' })
+      session.append('step/end', { turn, step: 0 })
+      session.append('turn/end', { turn, reason: { kind: 'completed' } })
+      written += 4
+      continue
+    }
+    appendNativeFindTurn(session, turn, userText, assistantText)
+    written += 2
+  }
+  return nativeFindStats(written)
+}
+
 /** Append the Turn-30 live same-source update (new LIVE_APPEND token plus the
  *  previously shared token) with the full official turn envelope. */
 const appendNativeFindLiveAppend = (): NativeFindStats => {
@@ -866,6 +1090,76 @@ const handleOneBatch = async (): Promise<void> => {
       note({ kind: 'case.finished', ...payload })
       return
     }
+    // T3-B1 §6.4 fault injections. Each arms ONE observation condition and
+    // reports what it did; the FLOW owns the assertions, so a green fault run is
+    // the real failure.
+    if (kind === 'semantic-search-suppress-reveal') {
+      ;(globalThis as unknown as GlobalProbe).__transcriptModesFault = { suppressReveal: true }
+      const payload = { seq, command: kind, status: 'ok' }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
+    if (kind === 'semantic-search-suppress-materialization') {
+      // Suppress the MAIN-region materialization for the armed navigation: the
+      // Folder still finds the hit (the card counts it), but the painted Main
+      // never materializes the body the grant would have opened.
+      const surface = (globalThis as unknown as GlobalProbe).__transcriptModesSurface
+      if (surface === undefined) throw new Error('the production inline Surface is not open')
+      ;(globalThis as unknown as GlobalProbe).__transcriptModesFault = { suppressMainOps: true }
+      const payload = { seq, command: kind, status: 'ok' }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
+    if (kind === 'semantic-search-wrong-node') {
+      // Reveal a REAL but WRONG Main card: the FIRST id the renderer ever
+      // revealed is remembered by the hook, and this case re-reveals the FIRST
+      // Main root the renderer's own committed frame addressed instead. Both ids
+      // are real wire ids the client holds, so the client accepts the op and
+      // scrolls to the wrong card — the false positive the qualification catches.
+      const surface = (globalThis as unknown as GlobalProbe).__transcriptModesSurface
+      const firstRoot = (globalThis as unknown as GlobalProbe).__transcriptModesFirstMainRoot
+      if (surface === undefined || firstRoot === undefined) {
+        throw new Error('no production Main root has been observed yet')
+      }
+      const intended = (globalThis as unknown as GlobalProbe).__transcriptModesLastReveal
+      ;(surface as unknown as { reveal(id: string, at: string): void }).reveal(firstRoot, 'nearest')
+      note({ kind: 'fault.wrong-node', revealedId: firstRoot, intendedId: intended })
+      const payload = { seq, command: kind, status: 'ok' }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
+    if (kind === 'semantic-search-stale-source') {
+      // Replace the CURRENT source while the card is open: the renderer must
+      // refuse to act on the new source with the old query/target.
+      const renderer = (globalThis as unknown as GlobalProbe).__transcriptModesRenderer
+      if (renderer === undefined) throw new Error('the production renderer is not mounted')
+      if (lastProductionCommit === undefined) throw new Error('no production commit has been observed')
+      // A REAL new source object with the SAME messages: the renderer must treat
+      // it as a different subject (a same-id cold rehydration shape).
+      renderer.display.setTranscript(...[lastProductionCommit.messages, ...lastProductionCommit.rest.slice(0, 4), { token: 'replaced-source' }] as never)
+      note({ kind: 'source.replaced' })
+      const payload = { seq, command: kind, status: 'ok' }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
+    // T3-B1: the semantic-search seed, written through the SAME official
+    // producer/Session writer as every other case (never a folder/mapper write).
+    if (kind === 'semantic-search-seed') {
+      const stats = appendSemanticSearchSeed()
+      const payload = { seq, command: kind, status: 'ok', ...stats }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
     if (kind === 'late-command-error') {
       if (fixture === undefined || mainSessionId === undefined) {
         throw new Error('the production Direct writer has not selected the main Session')
@@ -956,6 +1250,7 @@ try {
         : scenario === 'card-disclosure' ? [`CARD-${nativeFindModeTag}-`, 'ANSWER']
           : scenario === 'workflow-disclosure' ? [`WORKFLOW-${nativeFindModeTag}-`, 'ANSWER']
             : scenario === 'native-find' ? [`FIND-${nativeFindModeTag}-`, 'ANSWER']
+              : scenario === 'semantic-search' ? [`SEARCH-${nativeFindModeTag}-`, 'ANSWER']
               : ['MODES-', 'DIRECT-', 'ANSWER'],
     ...(scenario === 'inner-disclosure' ? {
       scriptedToolCalls: [{ text: 'the production Agent is checking the jobs', toolCall: { callId: 'call-inner-jobs', name: 'job_list', arguments: '{}' } }],

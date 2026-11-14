@@ -51,6 +51,17 @@ const INERT_HISTORY_BINDING = {
   captureScope: () => ({ sessionId: undefined, isCurrent: () => false }),
 }
 
+/**
+ * T3-B1: the "no semantic-search plane" binding. These cases never open the
+ * Session Search card, so every answer fails closed — never an empty snapshot
+ * that would read as a zero-match success.
+ */
+const INERT_SEMANTIC_SEARCH_BINDING = {
+  snapshot: () => undefined,
+  resolve: () => undefined,
+  current: () => false,
+}
+
 const TASKS_ACTION = TSP_FOOTER_TASKS_ACTION
 const SESSION_ID = 'session-tsp7-pra'
 const T0 = 1_700_000_000_000
@@ -768,7 +779,7 @@ test('PR-A A-24: a REAL binder throw propagates and the production release close
 
     const reader = { snapshot: () => emptyStatusSnapshot() }
     // The REAL wrapper mount: it binds the reader, then the image binder throws.
-    assert.throws(() => mount.mount({} as never, reader, INERT_HISTORY_BINDING),
+    assert.throws(() => mount.mount({} as never, reader, INERT_HISTORY_BINDING, INERT_SEMANTIC_SEARCH_BINDING, undefined),
       /already installed/,
       'the production binder error propagates unchanged (never swallowed)')
     // No surface was opened by the failed mount, so the pane has seen no close

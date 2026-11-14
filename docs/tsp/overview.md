@@ -305,14 +305,68 @@ pane-level **Find** are client behaviours, not TSP surfaces.
   `TranscriptFolder.search()` owns the corpus of the loaded messages
   (including text inside a folded card) and `TranscriptSearchMatch.source`
   locates a hit inside its semantic source. That corpus and the client's
-  document are different scopes and neither contains the other. PiTui's
-  search overlay consumes the Folder authority and stays PiTui-only; a TSP
-  semantic search entry, source occurrence resolution and temporary
-  search-only expansion are separate work, and this renderer adds none of
-  them here.
+  document are different scopes and neither contains the other. The TSP
+  Session Search below consumes the same Folder authority; the two entries
+  never share a query, an index or a result set.
 - Locality: the whole path is Client-local presentation. Nothing here reads
   Host cwd/filesystem or Session writer authority, and a Find gesture writes
   no Session event and mutates no composer draft.
+
+## Session semantic search (TSP)
+
+The TSP renderer's own search is a DIFFERENT entry from the client's Find and
+from PiTui's overlay. It answers one question — "where in the loaded session
+does this text appear?" — over the semantic corpus, and it navigates the
+existing native Main to the card that owns the hit.
+
+- **ONE authority, read-only.** The application surface hands the mount a
+  read-only binding over the ALREADY SELECTED `TranscriptFolder` (the main
+  folder, or the viewed child's while its viewer is mounted). `snapshot()`,
+  `resolve()` and `current()` are the only questions the renderer can ask; the
+  binding builds no index, keeps no cache and reads no Host service. The
+  opaque source token it returns is a per-fold identity, so a same-id cold
+  rehydration is a NEW source and every older snapshot, resolution and
+  currentness check is refused.
+- **Coverage is the officially committed fact.** A Direct surface owns a
+  complete log and labels itself `Entire`. A Remote surface starts at the
+  loaded history its authorized Reader delivered, and only an acknowledged
+  official hydrate/refold may widen it to `Older not searched`; a match count
+  never widens it and another subject's `hasMore` is never lent to a new one.
+- **ONE representative card is ONE target.** Raw hits are occurrence-level, but
+  the navigation projection groups them by representative card, so `N/M
+  targets` counts cards and a single card with many hits is never navigated as
+  many positions.
+- **Temporary disclosure, never a manual edit.** A hit inside a folded
+  Thought/Work/Tool/Context/Command/Workflow card opens that card's canonical
+  ancestry for the CURRENT target only. The grants are frame-scoped unions of
+  the user's own disclosure sets; they write no manual set and emit no fake
+  `toggle` event. A user collapse of a search-opened card wins for that
+  navigation epoch, and closing the search retracts every grant, so the
+  user's disclosure preferences are exactly what they were.
+- **Reveal is card-level and identity-checked.** The revealed node is the SDK's
+  OWN id for the Main root whose descriptor `owners` contain the resolved
+  representative message, and only while the `ContinuousMainJournal` reports
+  that root attached. A `gone` root, an unmaterialized member or a replaced
+  source yields `Unavailable in current pane` instead of an op that cannot
+  land. Because `Surface.reveal()` returns `void`, the card states
+  `Source-only · position unverified · <static kind>`: it never claims a
+  character-exact position or a painted highlight.
+- **Search and Composer are mutually exclusive input owners of ONE Dock.** While
+  the search card is open the Dock builds no composer editor, no Quiet Composer
+  shell and no completion/permission/quick node at all; closing it
+  re-materializes the SAME `TspComposer` from its own state (draft, caret,
+  selection, undo and staged attachments untouched). The card's query is a
+  controlled field the renderer's key route edits — the pinned client delivers
+  no native `EditEvent` — and every key except `Ctrl+C` (which still reaches the
+  original interrupt/cancel owner exactly once) is consumed by the seat.
+- **Higher seats win.** A Modal, the temporary Reader, the Work Hub, the Session
+  Browser, a picker or the Queue sheet retires the search card before it takes
+  input; the card is never parked and never restored across a Modal.
+- **Entry points.** The renderer-local `Alt+Shift+S` chord and the Quiet
+  Composer's `Search session` button call the SAME seat entry. A pane without
+  the negotiated kinds paints no button and the chord states the truth; neither
+  entry binds, intercepts or reuses `Ctrl+F`/`Ctrl+Shift+F`, the cross-session
+  `/search` command or the `/transcript` export.
 
 ## Surface, frame and lifecycle invariants
 

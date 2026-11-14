@@ -178,6 +178,11 @@ export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; rea
   // definition the handler and the derived labels consume.
   { file: 'src/tui/keybindings/hints.ts', line: "select: 'alt+v'," },
   { file: 'src/tui/keybindings/hints.ts', line: "copy: 'alt+c'," },
+  // (8d) The TSP renderer's FIXED Session Search chord (T3-B1): the same
+  // category as (8b) — the TSP surface owns no keymap action, the chord is
+  // dispatched from the raw SDK key stream, and this ONE id feeds both the
+  // handler and the derived label the Quiet Composer paints.
+  { file: 'src/tui/keybindings/hints.ts', line: "export const TSP_SEARCH_CHORD: KeyId = 'alt+shift+s'" },
   // (8c) The TSP composer action row's FIXED keyboard-equivalent labels
   // (TSP-7 PR-C): Send/Stop reuse the composer's existing fixed keys (Enter,
   // Ctrl+C — raw SDK key stream, no keymap action, no remap), and the labels

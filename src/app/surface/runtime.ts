@@ -506,6 +506,64 @@ export interface SurfaceImageBinding {
   readonly draftImages: SurfaceDraftImageProjection
 }
 
+/**
+ * T3-B1: the ONE read-only semantic-search binding a mounted TSP renderer
+ * receives.
+ *
+ * It is a PRESENTATION-side projection of the application's already-selected
+ * transcript source: the surface picks the active main/viewed-child
+ * `TranscriptFolder` (the SAME fold the repaint uses), hands the renderer an
+ * OPAQUE source token (never the mutable fold), and answers three questions
+ * through that ONE token:
+ *
+ * - `snapshot(query)` — run the Folder's OWN `search()` for the current
+ *   source and return the current matches plus the officially committed
+ *   coverage label;
+ * - `resolve(source, match)` — the current representative message of one
+ *   match, read from the SAME live Folder;
+ * - `current(source)` — whether that token still names the selected, committed
+ *   subject.
+ *
+ * The binding owns NO corpus, NO index, NO cache and NO Host read: the Folder
+ * stays the single search authority (`TranscriptFolder.search()`), and the
+ * renderer keeps only transient navigation state. A `snapshot` taken against a
+ * released, hydrating or replaced surface answers `undefined` — never a stale
+ * result.
+ */
+export interface TspTranscriptSemanticSearchBinding {
+  /** Run the Folder's own search for the CURRENT source. `refinement` is the
+   *  previous round's identity; the Folder validates it internally and falls
+   *  back to a full scan when it no longer applies. */
+  snapshot(query: string, refinement?: {
+    readonly previousQuery: string
+    readonly previousMatches: readonly TranscriptSearchMatch[]
+    readonly revision: number
+    readonly source: object
+  }): TspTranscriptSemanticSearchSnapshot | undefined
+  /** The current representative message of one match, from the SAME live
+   *  Folder, or `undefined` when the source moved on. */
+  resolve(source: object, match: TranscriptSearchMatch): TranscriptMessage | undefined
+  /** Whether this token still names the selected, committed subject. */
+  current(source: object): boolean
+}
+
+/** One immutable semantic-search snapshot: matches plus the coverage fact. */
+export interface TspTranscriptSemanticSearchSnapshot {
+  /** The opaque source token this snapshot belongs to. */
+  readonly source: object
+  readonly subjectKind: 'main' | 'viewed-child'
+  readonly subjectId: string | undefined
+  /** The Folder's own projection revision the matches were computed on. */
+  readonly revision: number
+  readonly matches: readonly TranscriptSearchMatch[]
+  /**
+   * The officially committed coverage of this subject. Direct boots complete;
+   * Remote starts at loaded history and only an acknowledged official
+   * hydrate/refold may widen it. It is NEVER inferred from a match count.
+   */
+  readonly coverage: TranscriptSearchCoverage
+}
+
 /** One ordered staged-image occurrence of the LIVE composer draft. */
 export interface SurfaceDraftImageOccurrence {
   /** The staged draft entry (its own bytes, media type and identity). */
@@ -613,7 +671,19 @@ export interface SurfaceRendererMount {
      * closed — never an empty `search()` that pretends success.
      */
     historySearch: TspHistorySearchBinding,
-    queueManager?: QueueManagerController,
+    /**
+     * T3-B1: the ONE read-only semantic-search binding. REQUIRED for the same
+     * reason the History bundle is: a connected TSP renderer always carries the
+     * seat, and a scripted mount that wants to express "no semantic search"
+     * passes a binding whose every answer fails closed — never an empty
+     * `snapshot()` that pretends a zero-match result.
+     */
+    semanticSearch: TspTranscriptSemanticSearchBinding,
+    /** The application-level Queue manager controller, or `undefined` when this
+     *  mount has none. EXPLICIT `| undefined` (not optional): the semantic
+     *  binding above is required, and an optional parameter may not precede a
+     *  required one. */
+    queueManager: QueueManagerController | undefined,
   ): {
     /** The renderer-facing display seam implementation. */
     readonly display: SurfaceDisplaySeam
@@ -2012,6 +2082,86 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     && left.controller === right.controller
     && left.subjectKind === right.subjectKind
     && left.subjectId === right.subjectId
+
+  /**
+   * T3-B1: the officially committed search coverage, SCOPED to the source token
+   * it was committed for.
+   *
+   * It is a READ PROJECTION of facts this surface already receives — the boot
+   * `initialSearchCoverage`, the Remote generation reset and the acknowledged
+   * official hydrate/refold outcomes — kept ONLY so the TSP semantic-search
+   * binding can label its own snapshot. It is never inferred from a match
+   * count, never widened by a client repaint, and it is not a second coverage
+   * state machine: every write is the SAME commit the PiTui branch already
+   * forwards through `setTranscriptSearchCoverage`.
+   *
+   * The `source` half is what keeps a Remote `hasMore` fact from being lent to a
+   * DIFFERENT subject: a commit recorded against one token is only ever read
+   * back for that same token, and a source with no commit of its own answers the
+   * boot default.
+   */
+  let searchCoverage: { readonly source: object; readonly coverage: TranscriptSearchCoverage } | undefined
+
+  /** The coverage of ONE source token: its own commit, else the boot default. */
+  const coverageFor = (source: object): TranscriptSearchCoverage =>
+    searchCoverage !== undefined && searchCoverage.source === source
+      ? searchCoverage.coverage
+      : options.initialSearchCoverage ?? 'loaded-history'
+
+  /**
+   * T3-B1: the ONE read-only semantic-search binding of this surface. Every
+   * answer is derived at call time from the LIVE selected Folder and the
+   * current projection target, so a snapshot can never outlive its subject.
+   *
+   * The refinement is forwarded only when the caller's source token is STILL
+   * the current one; the Folder itself then validates the prefix/revision (the
+   * same contract the PiTui search uses). Nothing here builds a corpus, a
+   * token index or a second match cache.
+   */
+  const semanticSearchBinding: TspTranscriptSemanticSearchBinding = {
+    snapshot(query, refinement) {
+      // A released, hydrating or unmounted surface has no selected subject to
+      // search: `undefined` is the truthful answer, never a stale result.
+      if (disposed || isCleanedUp() || routingSource === undefined) return undefined
+      const target = captureProjectionTarget(activeFolder(), activeWindow())
+      const source = projectionTokenFor(target.folder)
+      // A refinement belongs to a PREVIOUS round: it may only be applied when
+      // it names this very source. A different token means the subject moved,
+      // so the full scan runs (the Folder would reject the refinement anyway).
+      const matches = refinement !== undefined && refinement.source === source
+        ? target.folder.search(query, {
+            previousQuery: refinement.previousQuery,
+            previousMatches: refinement.previousMatches,
+            revision: refinement.revision,
+          })
+        : target.folder.search(query)
+      const revision = target.folder.searchRevision()
+      // The Folder's own search can synchronously run plugin/transcript work; a
+      // target that moved under it makes this snapshot a lie, so it is dropped
+      // rather than relabelled with the new subject's identity.
+      const current = captureProjectionTarget(activeFolder(), activeWindow())
+      if (!sameProjectionTarget(target, current)) return undefined
+      return {
+        source,
+        subjectKind: target.subjectKind,
+        subjectId: target.subjectId,
+        revision,
+        matches,
+        coverage: coverageFor(source),
+      }
+    },
+    resolve(source, match) {
+      if (disposed || isCleanedUp() || routingSource === undefined) return undefined
+      const target = captureProjectionTarget(activeFolder(), activeWindow())
+      if (projectionTokenFor(target.folder) !== source) return undefined
+      return target.folder.resolveSearchMatch(match)
+    },
+    current(source) {
+      if (disposed || isCleanedUp() || routingSource === undefined) return false
+      const target = captureProjectionTarget(activeFolder(), activeWindow())
+      return projectionTokenFor(target.folder) === source
+    },
+  }
 
   /**
    * PR2: publish ONE already-computed projection to the optional read-only
@@ -3500,7 +3650,18 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       }
       resetSearchPresentation()
     },
-    setTranscriptSearchCoverage: coverage => app?.setTranscriptSearchCoverage(coverage),
+    setTranscriptSearchCoverage: coverage => {
+      // T3-B1: the SAME commit feeds the TSP semantic-search read projection,
+      // SCOPED to the subject it was committed for. The PiTui branch
+      // additionally forwards to its own app; the TSP branch has no app, so
+      // without this line the renderer would have no authoritative coverage fact
+      // at all.
+      if (routingSource !== undefined) {
+        const target = captureProjectionTarget(activeFolder(), activeWindow())
+        searchCoverage = { source: projectionTokenFor(target.folder), coverage }
+      }
+      app?.setTranscriptSearchCoverage(coverage)
+    },
 
     resetSubjectStatus,
     disposeJobEvents() {
@@ -3560,6 +3721,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
             cwd: () => deps.sessionCwd(),
             captureScope: deps.captureHistoryScope,
           },
+          semanticSearchBinding,
           queueManager,
         )
         // TSP-7 PR-B: the TSP branch's seam is the renderer's own, wrapped by a

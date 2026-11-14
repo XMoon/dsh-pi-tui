@@ -196,6 +196,19 @@ export const TSP_VISUAL_CHORDS = {
   copy: 'alt+c',
 } as const satisfies Record<'select' | 'copy', KeyId>
 
+/**
+ * The TSP renderer's FIXED Session Search chord (T3-B1): the ONE machine
+ * definition that serves BOTH the raw-key dispatch and the painted label.
+ *
+ * Like the visual chords above it is a renderer-local chord with no Host action
+ * and no remap, so it can never come from `keyHint`/`keysFor` and can never go
+ * stale. Keeping the id HERE means the handler and the label are one authority.
+ */
+export const TSP_SEARCH_CHORD: KeyId = 'alt+shift+s'
+
+/** The label DERIVED from that one chord id (never a hand-written string). */
+export const TSP_SEARCH_CHORD_LABEL = formatKeyId(TSP_SEARCH_CHORD)
+
 /** The dock/notice labels DERIVED from the one chord table. */
 export const TSP_VISUAL_SELECT_LABEL = formatKeyId(TSP_VISUAL_CHORDS.select)
 export const TSP_VISUAL_COPY_LABEL = formatKeyId(TSP_VISUAL_CHORDS.copy)
