@@ -36,8 +36,8 @@ class FakePort implements McpServerPort {
   private waiters: Array<() => void> = []
   readonly probes: string[] = []
   readonly restarts: string[] = []
-  private probeWaiter: ((outcome: McpServerProbeOutcome) => void) | undefined
-  private restartWaiter: ((outcome: McpServerRestartOutcome) => void) | undefined
+  private readonly probeWaiters: Array<(outcome: McpServerProbeOutcome) => void> = []
+  private readonly restartWaiters: Array<(outcome: McpServerRestartOutcome) => void> = []
 
   emit(event: McpServerWatchEvent): void {
     this.queue.push(event)
@@ -66,25 +66,23 @@ class FakePort implements McpServerPort {
 
   probe(name: string, _signal: AbortSignal): Promise<McpServerProbeOutcome> {
     this.probes.push(name)
-    return new Promise(resolve => { this.probeWaiter = resolve })
+    return new Promise(resolve => { this.probeWaiters.push(resolve) })
   }
 
   restart(name: string, _signal: AbortSignal): Promise<McpServerRestartOutcome> {
     this.restarts.push(name)
-    return new Promise(resolve => { this.restartWaiter = resolve })
+    return new Promise(resolve => { this.restartWaiters.push(resolve) })
   }
 
-  resolveProbe(outcome: McpServerProbeOutcome): void {
-    const resolve = this.probeWaiter
-    this.probeWaiter = undefined
-    assert.ok(resolve !== undefined, 'no probe was in flight')
+  resolveProbe(outcome: McpServerProbeOutcome, index = 0): void {
+    const resolve = this.probeWaiters[index]
+    assert.ok(resolve !== undefined, `no probe #${String(index)} was in flight`)
     resolve(outcome)
   }
 
-  resolveRestart(outcome: McpServerRestartOutcome): void {
-    const resolve = this.restartWaiter
-    this.restartWaiter = undefined
-    assert.ok(resolve !== undefined, 'no restart was in flight')
+  resolveRestart(outcome: McpServerRestartOutcome, index = 0): void {
+    const resolve = this.restartWaiters[index]
+    assert.ok(resolve !== undefined, `no restart #${String(index)} was in flight`)
     resolve(outcome)
   }
 }
@@ -92,7 +90,19 @@ class FakePort implements McpServerPort {
 /** A controllable configuration-source read. */
 class FakeSources implements McpServerSourcesConfig {
   value: McpServerSources = { kind: 'unavailable', reason: 'not read' }
-  async refresh(): Promise<void> {}
+  /** A settings commit that becomes visible on the NEXT refresh (models the
+   *  non-atomic settings/manifest window). */
+  nextValue: McpServerSources | undefined
+  /** When set, one refresh waits on it (models a settings read still in flight). */
+  gate: Promise<void> | undefined
+  async refresh(): Promise<void> {
+    if (this.gate !== undefined) await this.gate
+    await Promise.resolve()
+    if (this.nextValue !== undefined) {
+      this.value = this.nextValue
+      this.nextValue = undefined
+    }
+  }
   read(): McpServerSources { return this.value }
 }
 
@@ -168,8 +178,8 @@ test('a probe that settles after a generation change is discarded AND ends its o
   await h.flush()
   h.port.resolveProbe(probeOutcome(GENERATION_1))
   await h.flush()
-  assert.equal(snapshot(h).operation?.phase, 'failed', 'the discarded probe must NOT stay "running"')
-  assert.match(snapshot(h).notice?.text ?? '', /discarded/u)
+  // The previous Host's probe report/feedback is not a fact of this roster.
+  assert.equal(snapshot(h).operation, undefined, 'the previous Host probe feedback is cleared')
   assert.equal(snapshot(h).lastProbe, undefined, 'no fact from another generation is retained')
   assert.equal(h.controller.canOperateSelected(), true, 'the page can operate again')
 })
@@ -259,6 +269,102 @@ test('a settings source read from another generation is Unknown, never Configure
   await h.flush()
   const classified = h.controller.snapshot().rows
   assert.deepEqual(classified.map(row => [row.name, row.source]), [['alpha', 'Configured'], ['beta', 'Plugin-owned']])
+})
+
+test('a restart confirmation bound to Host A can never restart Host B', async () => {
+  const h = harness()
+  h.sources.value = { kind: 'ready', configuredNames: ['alpha'], generation: GENERATION_1 }
+  h.port.roster([view('alpha')], GENERATION_1)
+  await h.flush()
+  h.controller.beginRestart()
+  assert.equal(h.controller.snapshot().confirmingName, 'alpha')
+  // Host A is replaced (directly, without an invalidated frame this time).
+  h.port.roster([view('alpha')], GENERATION_2)
+  await h.flush()
+  assert.equal(h.controller.snapshot().confirmingName, undefined, 'the old confirmation is retired')
+  h.controller.answerRestart(true)
+  await h.flush()
+  assert.equal(h.port.restarts.length, 0, 'the Host A confirmation must not restart Host B')
+})
+
+test('a late Probe #1 cannot overwrite the newer Probe #2 operation slot', async () => {
+  const h = harness()
+  h.sources.value = { kind: 'ready', configuredNames: ['alpha'], generation: GENERATION_1 }
+  h.port.roster([view('alpha')], GENERATION_1)
+  await h.flush()
+  h.controller.probe()
+  assert.equal(h.port.probes.length, 1)
+  h.port.emit({ kind: 'invalidated', reason: 'connection-changed' })
+  await h.flush()
+  h.port.roster([view('alpha')], GENERATION_2)
+  await h.flush()
+  h.controller.probe()
+  assert.equal(h.port.probes.length, 2)
+  assert.equal(h.controller.snapshot().operation?.phase, 'running')
+  // Probe #1's late reply must not touch Probe #2's slot.
+  h.port.resolveProbe(probeOutcome(GENERATION_1), 0)
+  await h.flush()
+  assert.equal(h.controller.snapshot().operation?.phase, 'running', 'the stale reply must not touch the new operation')
+  h.port.resolveProbe(probeOutcome(GENERATION_2), 1)
+  await h.flush()
+  assert.equal(h.controller.snapshot().operation?.phase, 'settled')
+  assert.equal(h.controller.snapshot().lastProbe?.kind, 'passed')
+})
+
+test('a probe report from Host A is not shown for the same-named Host B server', async () => {
+  const h = harness()
+  h.sources.value = { kind: 'ready', configuredNames: ['alpha'], generation: GENERATION_1 }
+  h.port.roster([view('alpha')], GENERATION_1)
+  await h.flush()
+  h.controller.probe()
+  h.port.resolveProbe(probeOutcome(GENERATION_1))
+  await h.flush()
+  assert.equal(h.controller.snapshot().lastProbe?.name, 'alpha')
+  // Host B offers the same name: the Host A report must disappear.
+  h.port.roster([view('alpha')], GENERATION_2)
+  await h.flush()
+  assert.equal(h.controller.snapshot().lastProbe, undefined, 'a Host A probe report is not a Host B fact')
+  assert.equal(h.controller.snapshot().operation, undefined)
+})
+
+test('a retained cleanup record cannot be probed or restart-confirmed', async () => {
+  const h = harness()
+  h.sources.value = { kind: 'ready', configuredNames: [], generation: GENERATION_1 }
+  h.port.roster([{ name: 'gone', configured: false, status: { state: 'failed', reason: 'cleanup', result: { closeConfirmed: false } } }], GENERATION_1)
+  await h.flush()
+  assert.equal(h.controller.canOperateSelected(), false, 'a retained record offers no operation')
+  h.controller.probe()
+  h.controller.beginRestart()
+  await h.flush()
+  assert.equal(h.port.probes.length, 0)
+  assert.equal(h.controller.snapshot().confirmingName, undefined)
+  // A disabled LIVE entry stays operable.
+  h.port.roster([{ name: 'off', configured: true, status: { state: 'disabled' } }], GENERATION_1)
+  await h.flush()
+  h.controller.move(0, ['off'])
+  assert.equal(h.controller.canOperateSelected(), true)
+})
+
+test('a roster update marks the source evidence non-current until a fresh read lands', async () => {
+  const h = harness()
+  h.sources.value = { kind: 'ready', configuredNames: [], generation: GENERATION_1 }
+  h.port.roster([], GENERATION_1)
+  await h.flush()
+  // Settings commit + Manager reconcile arrive as a new roster frame while the
+  // settings read is still the OLD key set.
+  h.sources.nextValue = { kind: 'ready', configuredNames: ['alpha'], generation: GENERATION_1 }
+  let releaseRefresh!: () => void
+  h.sources.gate = new Promise<void>(resolve => { releaseRefresh = resolve })
+  h.port.roster([view('alpha', true, 'connected'), view('beta', true, 'disabled')], GENERATION_1)
+  // Let the watch frame be processed, but keep the settings read in flight.
+  for (let tick = 0; tick < 12 && h.controller.snapshot().rows.length !== 2; tick += 1) await Promise.resolve()
+  // BEFORE the fresh read lands, the source must be Unknown, never the old
+  // empty key set (which would wrongly say Plugin-owned).
+  assert.deepEqual(h.controller.snapshot().rows.map(row => row.source), ['Unknown', 'Unknown'])
+  releaseRefresh()
+  await h.flush()
+  assert.deepEqual(h.controller.snapshot().rows.map(row => [row.name, row.source]),
+    [['alpha', 'Configured'], ['beta', 'Plugin-owned']])
 })
 
 test('a settled probe result is published as the page probe report', async () => {

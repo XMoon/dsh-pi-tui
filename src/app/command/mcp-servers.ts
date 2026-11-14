@@ -43,6 +43,9 @@ export type McpServerSourceLabel = 'Configured' | 'Plugin-owned' | 'Retained/rem
 /** One row of the validated projection. */
 export interface McpServersRow {
   readonly name: string
+  /** Whether the official manager still holds a LIVE entry for this name. A
+   *  retained cleanup record (`false`) is diagnostic only and NOT operable. */
+  readonly configured: boolean
   readonly status: McpManagedServerStatus
   /** The config-source verdict; `Unknown` when the evidence is not current. */
   readonly source: McpServerSourceLabel
@@ -133,9 +136,19 @@ export class McpServersController {
   private readonly entryTokens = new Map<string, object>()
   private readonly order: string[] = []
   private selected: string | undefined
-  private confirming: string | undefined
+  /** The restart confirmation, bound to the Host generation and the exact
+   *  roster entry it was opened for: it can never authorize another Host's
+   *  same-named server. */
+  private confirming: {
+    readonly name: string
+    readonly generation: McpServerGeneration
+    readonly entryToken: object
+  } | undefined
   private operation: McpServersOperationState | undefined
   private operationController: AbortController | undefined
+  /** Identity of the ONE operation allowed to mutate this page's operation slot.
+   *  Every async settlement must still own it before touching state. */
+  private operationToken = 0
   private lastProbe: McpServersProbeReport | undefined
   private notice: { text: string; kind: 'info' | 'error' } | undefined
   /** The last READY key set that a second consecutive read confirmed. */
@@ -165,6 +178,7 @@ export class McpServersController {
     if (this.disposed) return
     this.disposed = true
     this.openToken += 1
+    this.operationToken += 1
     this.watchController?.abort()
     this.watchController = undefined
     this.operationController?.abort()
@@ -181,14 +195,14 @@ export class McpServersController {
   snapshot(): McpServersSnapshot {
     const rows: McpServersRow[] = this.order.map(name => {
       const view = this.servers.get(name) as McpServerView
-      return { name, status: view.status, source: this.sourceOf(view) }
+      return { name, configured: view.configured, status: view.status, source: this.sourceOf(view) }
     })
     return {
       phase: this.phase,
       ...this.phaseReason === undefined ? {} : { phaseReason: this.phaseReason },
       rows: Object.freeze(rows),
       ...this.selected === undefined ? {} : { selectedName: this.selected },
-      ...this.confirming === undefined ? {} : { confirmingName: this.confirming },
+      ...this.confirming === undefined ? {} : { confirmingName: this.confirming.name },
       ...this.operation === undefined ? {} : { operation: this.operation },
       ...this.lastProbe === undefined ? {} : { lastProbe: this.lastProbe },
       ...this.notice === undefined ? {} : { notice: this.notice },
@@ -207,7 +221,11 @@ export class McpServersController {
 
   /** Whether the selected server may be probed/restarted right now. */
   canOperateSelected(): boolean {
-    return this.canOperate() && this.selected !== undefined && this.servers.has(this.selected)
+    if (!this.canOperate() || this.selected === undefined) return false
+    // A retained cleanup record has no live manager entry: it is diagnostic
+    // only and must never offer Probe/Restart. A `disabled` LIVE entry is still
+    // configured:true and remains probeable.
+    return this.servers.get(this.selected)?.configured === true
   }
 
   /**
@@ -259,7 +277,11 @@ export class McpServersController {
   /** Enter the restart confirmation for the selected server. */
   beginRestart(): void {
     if (!this.canOperateSelected()) return
-    this.confirming = this.selected
+    const name = this.selected as string
+    const generation = this.currentGeneration()
+    const entryToken = this.entryTokens.get(name)
+    if (generation === undefined || entryToken === undefined) return
+    this.confirming = { name, generation, entryToken }
     this.notice = undefined
     this.deps.requestRender()
   }
@@ -267,15 +289,22 @@ export class McpServersController {
   /** Answer the restart confirmation. Only `y` executes; anything else cancels. */
   answerRestart(confirmed: boolean): void {
     if (this.disposed || this.confirming === undefined) return
-    const name = this.confirming
+    const confirmation = this.confirming
     this.confirming = undefined
     if (!confirmed) {
       this.notice = { text: 'Restart cancelled', kind: 'info' }
       this.deps.requestRender()
       return
     }
-    if (this.selected !== name || !this.servers.has(name) || this.operation?.phase === 'running') return
-    this.runRestart(name)
+    // The confirmation is authority-bound: the exact Host generation and the
+    // exact roster entry that were confirmed must still be current. A name
+    // match on another Host is NOT a valid target.
+    if (this.selected !== confirmation.name
+      || !Object.is(this.currentGeneration(), confirmation.generation)
+      || this.entryTokens.get(confirmation.name) !== confirmation.entryToken
+      || this.servers.get(confirmation.name)?.configured !== true
+      || this.operation?.phase === 'running') return
+    this.runRestart(confirmation.name)
   }
 
   /** Clear the ONE transient notice (the page's Esc at a settled state). */
@@ -335,8 +364,33 @@ export class McpServersController {
     }, { signal: controller.signal })
   }
 
+  /**
+   * Retire every fact bound to the REPLACED Host authority: any in-flight
+   * operation, the restart confirmation, the last probe report and a completed
+   * operation's feedback. A dispatched restart keeps its unconfirmed wording;
+   * a probe simply loses its stale result.
+   */
+  private retireGenerationBoundState(): void {
+    this.operationToken += 1
+    this.operationController?.abort()
+    this.operationController = undefined
+    this.confirming = undefined
+    this.lastProbe = undefined
+    if (this.operation?.phase === 'running') {
+      const text = this.operation.kind === 'restart'
+        ? RESTART_LOST_NOTE
+        : 'Observation lost; the result was discarded'
+      this.operation = { ...this.operation, phase: 'failed', text }
+      this.notice = { text, kind: 'error' }
+    } else {
+      this.operation = undefined
+      this.notice = undefined
+    }
+  }
+
   private acceptWatchEvent(event: McpServerWatchEvent): void {
     if (event.kind === 'invalidated') {
+      this.retireGenerationBoundState()
       this.phase = event.reason === 'unavailable' ? 'unavailable' : 'read-error'
       this.phaseReason = event.reason === 'unavailable'
         ? 'Host MCP Manager is not mounted'
@@ -345,32 +399,39 @@ export class McpServersController {
       this.confirmedKeySet = undefined
       this.sources = { kind: 'unavailable', reason: event.reason }
       this.entryTokens.clear()
-      // A late probe/restart result of the replaced observation must not become
-      // a fact of the stale page. A dispatched restart is never claimed
-      // cancelled: its settlement is simply no longer observable here.
-      this.operationController?.abort()
-      this.operationController = undefined
-      if (this.operation?.phase === 'running') {
-        const text = this.operation.kind === 'restart'
-          ? RESTART_LOST_NOTE
-          : 'Observation lost; the result was discarded'
-        this.operation = { ...this.operation, phase: 'failed', text }
-        this.notice = { text, kind: 'error' }
-      }
       this.deps.requestRender()
       return
+    }
+    // A new Host authority replaces every generation-bound display fact: the
+    // previous Host's probe report/feedback/confirmation never describes it.
+    if (this.generation !== undefined && !Object.is(this.generation, event.roster.generation)) {
+      this.retireGenerationBoundState()
+      if (this.operation?.kind === 'probe') {
+        this.operation = undefined
+        this.notice = undefined
+      }
     }
     this.generation = event.roster.generation
     this.phase = 'ready'
     this.phaseReason = undefined
     this.rosterEpoch += 1
+    // A roster frame is only one half of the non-atomic joint snapshot: the
+    // previous settings key set does NOT describe this roster until a fresh
+    // same-generation read confirms it. Everything is Unknown in between.
+    this.sources = { kind: 'stale', reason: 'the roster changed; the settings source read is pending' }
+    this.confirmedKeySet = undefined
     const epoch = this.rosterEpoch
     const previousOrder = [...this.order]
     this.servers.clear()
     this.order.length = 0
     const liveNames = new Set(event.roster.servers.map(view => view.name))
     for (const name of [...this.entryTokens.keys()]) {
-      if (!liveNames.has(name)) this.entryTokens.delete(name)
+      if (liveNames.has(name)) continue
+      this.entryTokens.delete(name)
+      // A removed (and possibly later re-added) name must not keep the previous
+      // entry's probe report or confirmation.
+      if (this.lastProbe?.name === name) this.lastProbe = undefined
+      if (this.confirming?.name === name) this.confirming = undefined
     }
     for (const view of event.roster.servers) {
       this.servers.set(view.name, view)
@@ -442,6 +503,7 @@ export class McpServersController {
     const entryToken = this.entryTokens.get(name)
     if (entryToken === undefined) return
     const token = this.openToken
+    const operationToken = ++this.operationToken
     const controller = new AbortController()
     this.operationController = controller
     this.operation = { kind: 'probe', name, phase: 'running' }
@@ -452,9 +514,10 @@ export class McpServersController {
       // The result belongs to ITS page token, Host generation AND roster entry
       // only. A discarded result still ENDS this page's operation: a permanent
       // "running" latch would disable every later Probe/Restart.
-      if (this.disposed || token !== this.openToken) return
+      if (this.disposed || token !== this.openToken || this.operationToken !== operationToken) return
       const generationCurrent = outcome.generation === generation && this.generation === generation
-      const entryCurrent = this.entryTokens.get(name) === entryToken && this.servers.has(name)
+      const entryCurrent = this.entryTokens.get(name) === entryToken
+        && this.servers.get(name)?.configured === true
       if (!generationCurrent || !entryCurrent) {
         if (this.operation?.kind === 'probe' && this.operation.name === name) {
           const text = 'Probe result discarded (the Host or server changed)'
@@ -484,6 +547,7 @@ export class McpServersController {
     const entryToken = this.entryTokens.get(name)
     if (entryToken === undefined) return
     const token = this.openToken
+    const operationToken = ++this.operationToken
     const controller = new AbortController()
     this.operationController = controller
     this.operation = { kind: 'restart', name, phase: 'running' }
@@ -492,9 +556,10 @@ export class McpServersController {
     this.deps.runOwned('MCP server restart', async () => {
       // EXACTLY ONE dispatch: no retry, no second confirmation.
       const outcome = await this.deps.port.restart(name, controller.signal)
-      if (this.disposed || token !== this.openToken) return
+      if (this.disposed || token !== this.openToken || this.operationToken !== operationToken) return
       const generationCurrent = outcome.generation === generation && this.generation === generation
-      const entryCurrent = this.entryTokens.get(name) === entryToken && this.servers.has(name)
+      const entryCurrent = this.entryTokens.get(name) === entryToken
+        && this.servers.get(name)?.configured === true
       if (!generationCurrent || !entryCurrent) {
         // The page now speaks for a different Host generation or the target is
         // no longer the listed entry: a dispatched request's settlement is not
