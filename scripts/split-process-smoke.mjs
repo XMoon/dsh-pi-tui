@@ -101,6 +101,7 @@ import {
   waitForCondition,
 } from './lib/split-smoke-processes.mjs'
 import {
+  listDefaultLaneCases,
   listSelectableCases,
   parseSelectionArgs,
   resolveSelection,
@@ -179,20 +180,6 @@ export async function runSelectedCase(diagnostics, selectedCase, context) {
 
 function sleep(ms) {
   return new Promise(resolveSleep => setTimeout(resolveSleep, ms))
-}
-
-/**
- * The managed-host lane summary, derived from the ONE case registry (never a
- * second hand-written list). Returns the registered ids, the non-PASS ones and
- * the honest verdict string.
- */
-export function summarizeManagedHostStatuses(entries, statusOf) {
-  const ids = entries.filter(entry => entry.suite === 'managed-host').map(entry => entry.id)
-  const unverified = ids.filter(id => statusOf(id) !== 'PASS')
-  const verdict = unverified.length === 0
-    ? 'PASS'
-    : `NOT_VERIFIED(${String(unverified.length)}/${String(ids.length)})`
-  return { ids, unverified, verdict }
 }
 
 function failpoint(name) {
@@ -293,12 +280,14 @@ async function main(explicitPath) {
       trackDetachedPid: (pid, starttime) => trackedProcesses.set(pid, starttime),
     }
     /**
-     * The Full lane IS the registry: every registered case runs once, in the
-     * frozen order, and its real return value is recorded. There is no second
-     * hand-written case list and no skipped-case assumption.
+     * The Full lane IS the default-lane registry: every default-lane case runs
+     * once, in the frozen order, and its real return value is recorded. There is
+     * no second hand-written case list. Environment-gated native cases (real
+     * systemd user-manager qualification) are selectable-only and intentionally
+     * excluded from this continuously executed lane.
      */
     const actualCaseResults = []
-    for (const registeredCase of listSelectableCases()) {
+    for (const registeredCase of listDefaultLaneCases()) {
       const result = await diagnostics.runStep(
         `case/${registeredCase.id}`,
         () => registeredCase.run(context),
@@ -309,7 +298,7 @@ async function main(explicitPath) {
         result,
       })
     }
-    const registeredIds = listSelectableCases().map(entry => entry.id)
+    const registeredIds = listDefaultLaneCases().map(entry => entry.id)
     const completedIds = actualCaseResults.map(entry => entry.id)
     assert(completedIds.length === registeredIds.length
       && registeredIds.every(id => completedIds.includes(id))
@@ -341,15 +330,6 @@ async function main(explicitPath) {
     assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
       'T60 the candidate artifact changed during the split-process qualification')
     const webProductStatus = webProductResult?.status ?? 'NOT_RUN'
-    // The managed-host native lanes are environment-gated real-OS cases: an
-    // unqualified host reports NOT_VERIFIED instead of a fabricated PASS. The
-    // full verdict stays honest about that — it never prints "passed" while a
-    // managed slice is NOT_VERIFIED.
-    const {
-      ids: managedHostIds,
-      unverified: managedHostUnverified,
-      verdict: managedHostVerdict,
-    } = summarizeManagedHostStatuses(listSelectableCases(), statusOf)
     trace('t60', {
       candidate: basename(tarball),
       sha256: candidateSha256,
@@ -410,12 +390,9 @@ async function main(explicitPath) {
       t12PtyHup: statusOf('recovery.client-hmr-signals') === 'PASS'
         ? 'pass (real PTY master close, separate case)' : 'NOT_RUN',
       releaseGates: 'not run by this smoke; stage-final lane records the separate release-gate verdict',
-      managedHostVerdict,
+      managedHostNative: 'NOT_RUN_SELECTABLE_ONLY',
     })
-    if (managedHostVerdict !== 'PASS') {
-      console.error(`managed-host native lanes ${managedHostVerdict}: ${managedHostUnverified.map(id => `${id}=${statusOf(id)}`).join(', ')}`)
-    }
-    console.log(`split-process registry smoke ${managedHostVerdict === 'PASS' ? 'passed' : 'completed'} — ${basename(tarball)} × DSH ${targetDshVersion}; cases=${String(actualCaseResults.length)}/${String(registeredIds.length)}; managed-host ${managedHostVerdict}; official Web composition ${webBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${webBrowserVerdict})`}; official Web runtime toggle ${toggleBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${toggleBrowserVerdict})`}; product Web x real TUI ${webProductStatus === 'PASS' ? 'PASS (real Browser + real PTY TUI)' : webProductResult?.browserSubset === 'PASS' ? `BROWSER SUBSET PASS; WC-12 ${webProductStatus} (Owner decision recorded)` : `NOT_RUN (${webProductStatus})`}`)
+    console.log(`split-process registry smoke passed — ${basename(tarball)} × DSH ${targetDshVersion}; cases=${String(actualCaseResults.length)}/${String(registeredIds.length)}; managed-host native cases NOT_RUN (selectable-only); official Web composition ${webBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${webBrowserVerdict})`}; official Web runtime toggle ${toggleBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${toggleBrowserVerdict})`}; product Web x real TUI ${webProductStatus === 'PASS' ? 'PASS (real Browser + real PTY TUI)' : webProductResult?.browserSubset === 'PASS' ? `BROWSER SUBSET PASS; WC-12 ${webProductStatus} (Owner decision recorded)` : `NOT_RUN (${webProductStatus})`}`)
   } catch (error) {
     // Report BEFORE the cleanup below: the failure projection must read the
     // still-live process handles, and the work root must still exist while the

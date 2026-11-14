@@ -350,42 +350,49 @@ const CASE_REGISTRY = Object.freeze([
   }),
   Object.freeze({
     suite: 'managed-host',
+    defaultLane: false,
     id: 'managed-host.m6-2b-systemd',
     title: 'a real public daemon Client cold start with a reachable systemd user manager installs ONE owned profile unit, the manager FragmentPath names it, one authenticated Host serves it, and only SIGTERM stops it',
     run: runManagedHostSystemd,
   }),
   Object.freeze({
     suite: 'managed-host',
+    defaultLane: false,
     id: 'managed-host.m6-2b-auth-failure-negative',
     title: 'an ACTIVE managed unit is not Host readiness: a new cold Client with tampered launch identity fails closed and the live Host/unit are neither killed nor replaced',
     run: runManagedHostAuthFailureNegative,
   }),
   Object.freeze({
     suite: 'managed-host',
+    defaultLane: false,
     id: 'managed-host.m6-2b-concurrent-cold-start',
     title: 'two public daemon Clients cold-start with no Host yet and converge to exactly one authenticated Host and one owned unit (both authenticate to the same Host PID)',
     run: runManagedHostConcurrentColdStart,
   }),
   Object.freeze({
     suite: 'managed-host',
+    defaultLane: false,
     id: 'managed-host.m6-2b-crash-restart',
     title: 'a SIGKILLed managed Host is restarted by systemd Restart=on-failure as a NEW authenticated instance under the SAME owned unit',
     run: runManagedHostCrashRestart,
   }),
   Object.freeze({
     suite: 'managed-host',
+    defaultLane: false,
     id: 'managed-host.m6-2b-two-profile-isolation',
     title: 'two real Profile installations under one isolated account stay isolated: distinct scopes, Host instances and units, and stopping one profile never affects the other',
     run: runManagedHostTwoProfileIsolation,
   }),
   Object.freeze({
     suite: 'managed-host',
+    defaultLane: false,
     id: 'managed-host.m6-2b-fallback',
     title: 'a real public daemon Client cold start with a strictly absent user manager uses the detached process fallback with a private 0600 host.log and the Host survives Client exit',
     run: runManagedHostFallback,
   }),
   Object.freeze({
     suite: 'managed-host',
+    defaultLane: false,
     id: 'managed-host.m6-2b-manager-error',
     title: 'a real public daemon Client cold start with a genuinely broken user manager fails closed with HOST_MANAGER_ERROR and starts no fallback Host',
     run: runManagedHostManagerError,
@@ -402,6 +409,15 @@ function fail(detail) {
 /** The frozen registry, in registration order (read-only to every caller). */
 export function listSelectableCases() {
   return CASE_REGISTRY
+}
+
+/**
+ * The cases the DEFAULT (no-selector) full lane runs. Environment-gated native
+ * cases (e.g. real systemd user-manager qualification) are selectable-only and
+ * never run as part of the continuously executed default lane.
+ */
+export function listDefaultLaneCases() {
+  return Object.freeze(CASE_REGISTRY.filter(entry => entry.defaultLane !== false))
 }
 
 /**

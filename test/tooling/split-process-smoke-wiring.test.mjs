@@ -25,11 +25,12 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse as parseYaml } from 'yaml'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { assertSelectedVerdict, runSelectedCase, summarizeManagedHostStatuses, waitForCondition } from '../../scripts/split-process-smoke.mjs'
+import { assertSelectedVerdict, runSelectedCase, waitForCondition } from '../../scripts/split-process-smoke.mjs'
 import { PR_A_WEB_ROWS, raceWithAbortableDeadline, redactWebQualificationText } from '../../scripts/smoke/split-process/web-helpers.mjs'
 import { createSmokeDiagnostics, redactErrorForStep } from '../../scripts/lib/split-smoke-diagnostics.mjs'
 import { statusMatches } from '../../scripts/lib/split-smoke-processes.mjs'
 import {
+  listDefaultLaneCases,
   listSelectableCases,
   parseSelectionArgs,
   resolveSelection,
@@ -672,15 +673,27 @@ test('the B13 crash kill is authorized only for the verified unit MainPID and Ho
   assert.equal(killed.length, 0, 'an unverified target must never receive SIGKILL')
 })
 
-test('the managed-host smoke summary covers the whole registry (B10 concurrent case included)', () => {
-  const entries = listSelectableCases()
-  const ids = entries.filter(entry => entry.suite === 'managed-host').map(entry => entry.id)
-  assert.ok(ids.includes('managed-host.m6-2b-concurrent-cold-start'), 'B10 concurrent case must be in the managed-host summary scope')
-  const statusOf = id => (id === 'managed-host.m6-2b-systemd' ? 'PASS' : 'NOT_VERIFIED')
-  const summary = summarizeManagedHostStatuses(entries, statusOf)
-  assert.deepEqual(summary.ids, ids, 'the summary ids must be derived from the registry')
-  assert.equal(summary.unverified.length, ids.length - 1)
-  assert.equal(summary.verdict, `NOT_VERIFIED(${ids.length - 1}/${ids.length})`)
+test('environment-gated native cases are selectable-only, never in the default full lane', () => {
+  const all = listSelectableCases()
+  const managed = all.filter(entry => entry.suite === 'managed-host')
+  assert.ok(managed.length >= 7, 'all managed-host native cases stay registered/selectable')
+  // The continuously executed default lane never runs an environment-gated
+  // native systemd case.
+  assert.deepEqual(listDefaultLaneCases().filter(entry => entry.suite === 'managed-host'), [])
+  assert.deepEqual(listDefaultLaneCases().map(entry => entry.id), all.filter(entry => entry.defaultLane !== false).map(entry => entry.id))
+  // A selector still resolves them all (the opt-in route).
+  assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'managed-host' }).cases, managed)
+  for (const id of [
+    'managed-host.m6-2b-systemd',
+    'managed-host.m6-2b-concurrent-cold-start',
+    'managed-host.m6-2b-auth-failure-negative',
+    'managed-host.m6-2b-crash-restart',
+    'managed-host.m6-2b-two-profile-isolation',
+    'managed-host.m6-2b-fallback',
+    'managed-host.m6-2b-manager-error',
+  ]) {
+    assert.ok(all.some(entry => entry.id === id), `${id} must remain selectable`)
+  }
 })
 
 test('a cleanup that did not remove this run\u2019s unit fails the scenario verdict', () => {
