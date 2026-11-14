@@ -2316,10 +2316,38 @@ async function waitForStartupHold(path: string, signal: AbortSignal): Promise<vo
  * Every other startup failure keeps the existing diagnostic.
  */
 export function surfaceStartupFailureLine(error: unknown): string {
-  if (error instanceof LocalScopeError && error.code === 'HOST_PROTOCOL_INCOMPATIBLE') {
-    return 'HOST_PROTOCOL_INCOMPATIBLE: Another live local Host for this profile uses a different local protocol or DSH runtime. The Host has not been stopped or replaced. Finish or save your work in that Host, then explicitly stop that Host through its normal operating-system shutdown signal and start a compatible Host. Automatic upgrade and migration of in-memory work are not supported.'
+  if (error instanceof LocalScopeError) {
+    if (error.code === 'HOST_PROTOCOL_INCOMPATIBLE') {
+      return 'HOST_PROTOCOL_INCOMPATIBLE: Another live local Host for this profile uses a different local protocol or DSH runtime. The Host has not been stopped or replaced. Finish or save your work in that Host, then explicitly stop that Host through its normal operating-system shutdown signal and start a compatible Host. Automatic upgrade and migration of in-memory work are not supported.'
+    }
+    // Every other typed scope failure is a controlled code; never echo the raw
+    // message (it can carry a private profile path / Host origin).
+    return `split client surface: cannot establish the local Host (${error.code}); the Host was not stopped. Resolve the Host state and re-run: dsh --profile pi-tui`
   }
-  return `split client surface: ${error instanceof Error ? error.message : String(error)}`
+  return `split client surface: ${controlledSurfaceReason(error)}`
+}
+
+/**
+ * The ONLY text a surface startup failure is allowed to print: a fixed concise
+ * reason for unknown errors, or our OWN authored entry message stripped of
+ * terminal control characters, absolute paths and URLs. Detailed diagnostics stay
+ * in the controlled Client/Host log; the TTY never receives a raw error, a path
+ * or a Host launch URL.
+ */
+function controlledSurfaceReason(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error)
+  const entryPrefix = 'local client entry: '
+  if (raw.startsWith(entryPrefix)) return sanitizeSurfaceText(raw.slice(entryPrefix.length))
+  return 'startup failed before the TUI mounted; see the Host log for detail and re-run dsh --profile pi-tui'
+}
+
+/** Strip control characters, URLs and absolute paths; bound the length. */
+export function sanitizeSurfaceText(text: string): string {
+  let out = text.replace(/[\u0000-\u001f\u007f]/gu, ' ')
+  out = out.replace(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s'"]+/gu, '<url>')
+  out = out.replace(/(?:\/[\w.@+-]+){2,}\/?/gu, '<path>')
+  out = out.replace(/\s+/gu, ' ').trim().slice(0, 200)
+  return out === '' ? 'startup failed' : out
 }
 
 /**
