@@ -1837,6 +1837,8 @@ async function flushMicrotasks(rounds = 25): Promise<void> {
 function sessionlessSaveCatalog(options: {
   readonly saveOutcome: { kind: 'committed' } | { kind: 'indeterminate'; error: { code: string; message: string } }
   readonly initialDefault: { provider: string; model: string }
+  /** Also gate the FIRST (picker initial) read — for surface-supersession tests. */
+  readonly gateFirstRead?: boolean
 }): {
   catalog: TuiCommandRunner['catalog']
   releaseRead: (hostDefault: { provider: string; model: string } | undefined, error?: unknown) => void
@@ -1846,6 +1848,9 @@ function sessionlessSaveCatalog(options: {
 } {
   let reads = 0
   let saves = 0
+  // Latest-only publication, like the production adapter's GenerationCache: a
+  // read superseded by a NEWER loadDirectory start never publishes its value.
+  let latestRead = 0
   let statusDefault: { provider: string; model: string } | undefined = options.initialDefault
   const waiters: Array<(arg: { value: { provider: string; model: string } | undefined; error?: unknown }) => void> = []
   const queued: Array<{ value: { provider: string; model: string } | undefined; error?: unknown }> = []
@@ -1864,13 +1869,14 @@ function sessionlessSaveCatalog(options: {
     models: {
       available: () => true,
       loadDirectory: async () => {
-        reads += 1
-        if (reads === 1) return directory(options.initialDefault)
+        const myRead = ++reads
+        latestRead = myRead
+        if (myRead === 1 && options.gateFirstRead !== true) return directory(options.initialDefault)
         const settled = queued.length > 0
           ? queued.shift()!
           : await new Promise<{ value: { provider: string; model: string } | undefined; error?: unknown }>(resolve => { waiters.push(resolve) })
         if (settled.error !== undefined) throw settled.error
-        statusDefault = settled.value
+        if (myRead === latestRead) statusDefault = settled.value
         return directory(settled.value)
       },
       defaultSelection: () => statusDefault,
@@ -1898,6 +1904,8 @@ function sessionlessHarness(stub: ReturnType<typeof sessionlessSaveCatalog>): {
   proxy: TuiCommandRunner
   modelDef: { handler?: () => Promise<unknown> }
   vt: VirtualTerminal
+  /** Every runner.refreshStatus() call the command surface made (spy). */
+  refreshStatusCalls: () => number
 } {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 30)
@@ -1907,9 +1915,13 @@ function sessionlessHarness(stub: ReturnType<typeof sessionlessSaveCatalog>): {
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const runner = stubRunner(ctx, app, { agent: undefined, generation: 1 })
+  let refreshCalls = 0
   const proxy = new Proxy(runner, {
     get(target, prop, receiver) {
       if (prop === 'catalog') return stub.catalog
+      if (prop === 'refreshStatus') {
+        return () => { refreshCalls += 1; (target as { refreshStatus(): void }).refreshStatus() }
+      }
       return Reflect.get(target, prop, receiver)
     },
   })
@@ -1917,7 +1929,7 @@ function sessionlessHarness(stub: ReturnType<typeof sessionlessSaveCatalog>): {
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   const handler = modelDef!.handler as () => Promise<unknown>
-  return { proxy: proxy as unknown as TuiCommandRunner, modelDef: { handler }, vt }
+  return { proxy: proxy as unknown as TuiCommandRunner, modelDef: { handler }, vt, refreshStatusCalls: () => refreshCalls }
 }
 
 test('an INDETERMINATE sessionless default write stays UNRESOLVED until a MATCHING authoritative read proves it landed', async () => {
@@ -2027,22 +2039,90 @@ test('a COMMITTED sessionless default save repopulates the status default throug
     'a committed save is never followed by a failure notice')
 })
 
-test('a FAILED automatic reconcile read never downgrades a confirmed sessionless default save', async () => {
+test('a successful /model load refreshes the status default WITHOUT any other UI event', async () => {
+  // A confirmed save whose automatic re-read FAILED leaves the status default
+  // UNKNOWN ('model unknown'); the picker paint alone never recomputes the
+  // footer, so the panel's successful load must refresh the status bar itself.
   const stub = sessionlessSaveCatalog({
     saveOutcome: { kind: 'committed' },
     initialDefault: { provider: 'p', model: 'old-model' },
   })
-  const { proxy, modelDef, vt } = sessionlessHarness(stub)
+  const { modelDef, vt, refreshStatusCalls } = sessionlessHarness(stub)
   await pickFirstModel(vt, modelDef.handler!)
   await flushMicrotasks()
   stub.releaseRead(undefined, new Error('catalog read exploded'))
   await flushMicrotasks()
+  const refreshesAfterFailure = refreshStatusCalls()
+  assert.equal(stub.statusDefault(), undefined, 'the status default is unknown after the failed reconcile read')
+  // Reopen /model: the panel load succeeds and — with no other UI event — the
+  // status default becomes the authoritative value again.
+  await modelDef.handler!()
   await vt.waitForRender()
-  assert.equal(proxy.defaultIntentOutcome, 'committed', 'a failed re-read never downgrades the confirmed save')
-  assert.equal(stub.statusDefault(), undefined, 'the display waits for the next authoritative read')
-  assert.ok(!vt.getViewport().join('\n').includes('model default save'),
-    'a failed reconcile must not repaint the confirmed save as a failure')
+  stub.releaseRead({ provider: 'p', model: 'm1' })
+  await flushMicrotasks()
+  await vt.waitForRender()
+  assert.deepEqual(stub.statusDefault(), { provider: 'p', model: 'm1' },
+    'the status default follows the successful panel load')
+  assert.ok(refreshStatusCalls() > refreshesAfterFailure,
+    'the panel load must refresh the status bar itself, not wait for another UI event')
 })
+
+test('a /model load that resolves a lingering unresolved intent refreshes the status marker away', async () => {
+  // An indeterminate write survived an older-value auto-read; reopening /model
+  // reads the MATCHING value: the tracker clears AND the status refresh must
+  // happen here (no other UI event paints the footer).
+  const stub = sessionlessSaveCatalog({
+    saveOutcome: { kind: 'indeterminate', error: { code: 'session/model-default-indeterminate', message: 'held then landed' } },
+    initialDefault: { provider: 'p', model: 'old-model' },
+  })
+  const { proxy, modelDef, vt, refreshStatusCalls } = sessionlessHarness(stub)
+  await pickFirstModel(vt, modelDef.handler!)
+  await flushMicrotasks()
+  stub.releaseRead({ provider: 'p', model: 'old-model' })
+  await flushMicrotasks()
+  const refreshesBefore = refreshStatusCalls()
+  assert.equal(proxy.defaultIntentOutcome, 'unresolved', 'the unconfirmed marker is still painted')
+  // Reopen /model: the load reads the MATCHING authoritative default.
+  await modelDef.handler!()
+  await vt.waitForRender()
+  stub.releaseRead({ provider: 'p', model: 'm1' })
+  await flushMicrotasks()
+  await vt.waitForRender()
+  assert.equal(proxy.defaultIntentOutcome, 'committed', 'the matching panel load resolves the unresolved intent')
+  assert.ok(refreshStatusCalls() > refreshesBefore,
+    'the panel load must refresh the status marker itself')
+})
+
+test('a STALE /model panel load never repopulates or refreshes the newer surface', async () => {
+  // Two panel loads where the FIRST one's read settles LATE: the retired panel
+  // (surface token superseded) must neither publish its value into the display
+  // nor refresh the status bar. Only the CURRENT panel's read does.
+  const stub = sessionlessSaveCatalog({
+    saveOutcome: { kind: 'committed' },
+    initialDefault: { provider: 'p', model: 'old-model' },
+    gateFirstRead: true,
+  })
+  const { modelDef, vt, refreshStatusCalls } = sessionlessHarness(stub)
+  await modelDef.handler!() // panel A load: read #1 gated
+  await vt.waitForRender()
+  const refreshesBefore = refreshStatusCalls()
+  await modelDef.handler!() // panel B load: read #2 gated (newer surface owns)
+  await vt.waitForRender()
+  // Panel A's stale read settles late.
+  stub.releaseRead({ provider: 'p', model: 'm1' })
+  await flushMicrotasks()
+  await vt.waitForRender()
+  assert.deepEqual(stub.statusDefault(), { provider: 'p', model: 'old-model' },
+    "the retired panel's late read must not repopulate the display")
+  assert.equal(refreshStatusCalls(), refreshesBefore, 'a retired panel must not refresh the status bar')
+  // The current panel's read lands: it publishes and refreshes.
+  stub.releaseRead({ provider: 'p', model: 'm1' })
+  await flushMicrotasks()
+  await vt.waitForRender()
+  assert.deepEqual(stub.statusDefault(), { provider: 'p', model: 'm1' })
+  assert.ok(refreshStatusCalls() > refreshesBefore, 'the current panel load refreshes the status bar')
+})
+
 test('a /model picker opened on S1 cannot apply to S2 after a session switch (subject fence)', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 30)
