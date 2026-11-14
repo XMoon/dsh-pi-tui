@@ -1994,3 +1994,47 @@ test('FR2-ext6: a click with no preceding press never applies a filter; a matchi
   assert.equal(panel.getViewState().typeFilter, 'bash', 'a matching press→release applies the pressed type')
   panel.dispose()
 })
+
+test('FR2-ext3b: an EXPANDED lower task stays selected on a very short narrow grant', () => {
+  const members = [member('s-root', 'lead', 'running', 'root', 0), member('m-1', 'alpha', 'inactive'), member('m-2', 'beta', 'inactive')]
+  const tasks = [teamTask({ id: 't-1', subject: 'Task One' }), teamTask({ id: 't-2', subject: 'Task Two', description: 'detail-two' })]
+  const { panel } = makePanel([], { enableSearch: true, header: 'Tasks', team: teamDto({ kind: 'ready', enabled: true, tasks }, members), interactionCurrent: () => true })
+  panel.handleInput('\t') // Team
+  panel.setMaxRows(9)
+  for (let i = 0; i < 4; i += 1) panel.handleInput(DOWN) // lead,alpha,beta,Task One,Task Two
+  panel.render(44)
+  panel.handleInput('\r') // expand Task Two (adds inline detail lines, forcing a fit shrink)
+  panel.setMaxRows(8)
+  const frame = panel.render(44).map(strip)
+  const selected = frame.find(line => line.includes('Task Two'))
+  assert.ok(selected !== undefined, `the expanded selected task must still be painted:\n${frame.join('\n')}`)
+  assert.ok(selected!.includes('→'), `the selected marker must stay on Task Two:\n${selected}`)
+  assert.ok(frame.join('\n').includes('Esc close'), 'the exit hint stays')
+  panel.dispose()
+})
+
+test('FR2-ext4b: a stale panel (interactionCurrent=false) ignores Team and filter wheel', () => {
+  const W = 100
+  let alive = true
+  const members = [member('s-root', 'lead', 'running', 'root', 0), member('m-1', 'alpha', 'inactive'), member('m-2', 'beta', 'inactive')]
+  const team = makePanel([], { enableSearch: true, header: 'Tasks', team: teamDto({ kind: 'ready', enabled: true, tasks: [] }, members), interactionCurrent: () => alive })
+  team.panel.handleInput('\t')
+  const ty = team.panel.render(W).map(strip).findIndex(line => line.includes('alpha'))
+  alive = false
+  team.panel.handleMouse(mouse('wheel', 1, ty, W, 24, 1, 'none'))
+  alive = true
+  const leadLine = team.panel.render(W).map(strip).find(line => line.includes('lead'))!
+  assert.ok(leadLine.includes('→'), 'a stale wheel must not move the Team selection')
+  team.panel.dispose()
+
+  let aliveF = true
+  const filter = makePanel([typed(runningJob(), 'bash'), typed(subagent(), 'subagent')], { enableSearch: true, header: 'Tasks', interactionCurrent: () => aliveF })
+  filter.panel.handleInput('f')
+  const fy = filter.panel.render(W).map(strip).findIndex(line => line.includes('All'))
+  aliveF = false
+  filter.panel.handleMouse(mouse('wheel', 1, fy, W, 24, 1, 'none'))
+  aliveF = true
+  const allRow = filter.panel.render(W).map(strip).find(line => line.includes('All'))!
+  assert.ok(allRow.includes('>'), 'a stale wheel must not move the filter cursor')
+  filter.panel.dispose()
+})
