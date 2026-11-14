@@ -195,6 +195,29 @@ createInterface({ input: process.stdin }).on('line', line => {
 })
 `
 
+/** A stdio server that never closes its transport (probe cleanup unconfirmed). */
+const STUBBORN_SERVER_SOURCE = `#!/usr/bin/env node
+import { createInterface } from 'node:readline'
+const send = payload => process.stdout.write(JSON.stringify(payload) + '\\n')
+createInterface({ input: process.stdin }).on('line', line => {
+  let message
+  try { message = JSON.parse(line) } catch { return }
+  if (message.id === undefined) return
+  if (message.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: message.params?.protocolVersion ?? '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'fr3-stubborn', version: '1.0.0' } } })
+    return
+  }
+  if (message.method === 'tools/list') {
+    send({ jsonrpc: '2.0', id: message.id, result: { tools: [{ name: 'echo', description: 'Echo', inputSchema: { type: 'object', properties: {} } }] } })
+    return
+  }
+  if (message.method === 'ping') send({ jsonrpc: '2.0', id: message.id, result: {} })
+})
+process.stdin.on('end', () => {})
+process.on('SIGTERM', () => {})
+setInterval(() => {}, 1000)
+`
+
 /** A minimal raw Streamable HTTP MCP fixture (initialize/tools/list/tools/call). */
 async function startHttpMcpFixture() {
   const reply = message => {
@@ -291,6 +314,8 @@ export async function runMcpServersFr3(context) {
   writeFileSync(failScript, '#!/usr/bin/env node\nprocess.exit(1)\n', { mode: 0o700 })
   const giveupScript = join(root, 'fr3-mcp-giveup-server.mjs')
   writeFileSync(giveupScript, GIVEUP_SERVER_SOURCE, { mode: 0o700 })
+  const stubbornScript = join(root, 'fr3-mcp-stubborn-server.mjs')
+  writeFileSync(stubbornScript, STUBBORN_SERVER_SOURCE, { mode: 0o700 })
   const httpFixture = await startHttpMcpFixture()
   httpServer = httpFixture
   // The profile's OWN `mcp-manager` row inherits this configuration by id; no
@@ -340,6 +365,13 @@ export async function runMcpServersFr3(context) {
     '          initialDelayMs: 1',
     '          maxDelayMs: 1',
     '          maxAttempts: 1',
+    '      fr3-stubborn:',
+    '        transport: stdio',
+    `        command: ${JSON.stringify(process.execPath)}`,
+    `        args: [${JSON.stringify(stubbornScript)}]`,
+    '        enabled: true',
+    '        startupTimeoutMs: 5000',
+    '        closeTimeoutMs: 120',
     '',
   ].join('\n'))
 
@@ -347,7 +379,7 @@ export async function runMcpServersFr3(context) {
   let client
   let peerProcess
   try {
-    const started = await scene.startC1Host('mcp-servers-fr3', 'FR3 MCP Host')
+    const started = await scene.startC1Host('mcp-servers-fr3', 'FR3 MCP Host', { C1_FR3_UNREGISTER: join(root, 'fr3-unregister') })
     host = started.host
     const row = await mcpManagerRow(host, 'FR3 initial')
     trace('fr3.manager-mounted', { id: row.id, fiberUid: row.fiberUid })
@@ -419,12 +451,30 @@ export async function runMcpServersFr3(context) {
     await waitForScreenPattern(client, /State: Failed \(gave up\)/u, 'FR3 give-up state')
     trace('fr3.give-up', { observed: true })
 
-    // ROW 6 — the plugin-registered server has NO settings key: it must be
-    // Plugin-owned, never Configured.
+    // ROW 6 — a server that never closes its transport: the official manager
+    // reports a cleanup failure, and the page surfaces it as a FAILURE (the
+    // diagnostic state and last error), never as a probe success.
     await selectRow(client, 6)
+    await waitForScreenText(client, 'Server: fr3-stubborn', 'FR3 stubborn detail')
+    client.send('p')
+    await waitForScreenPattern(client, /State: Failed \(unclosed generation\)|cleanup not confirmed|Probe outcome unconfirmed/u,
+      'FR3 cleanup-failure surfaced')
+    await waitForScreenPattern(client, /cleanup/iu, 'FR3 cleanup diagnostic')
+    trace('fr3.cleanup-failure', { surfaced: true })
+
+    // ROW 7 — the plugin-registered server has NO settings key: it must be
+    // Plugin-owned, never Configured.
+    await selectRow(client, 7)
     await waitForScreenText(client, 'Server: fr3-plugin', 'FR3 plugin-owned detail')
     await waitForScreenText(client, 'Source: Plugin-owned', 'FR3 plugin-owned source')
     trace('fr3.plugin-owned', { classified: true })
+
+    // Revoke the plugin registration: the row disappears cleanly (no retained
+    // cleanup record), proving the unregister path the plan's L4 asks for.
+    writeFileSync(join(root, 'fr3-unregister'), '1')
+    await waitForCondition(async () => !(await client.viewport()).join('\n').includes('fr3-plugin'),
+      'FR3 plugin unregister clean removal', 60_000)
+    trace('fr3.plugin-revoked', { removed: true })
 
     // Web on -> off keeps the SAME manager fiber (the Web toggle never owns
     // it). The toggle is the Host's own private service, driven by a Peer so
