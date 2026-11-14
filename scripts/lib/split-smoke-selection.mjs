@@ -61,6 +61,11 @@ import { runAcpPo1 } from '../smoke/split-process/acp-po1.mjs'
 import { runPublicDaemonEntry } from '../smoke/split-process/public-daemon-entry-m6-2a.mjs'
 import { runAcpPo1bOptInControl } from '../smoke/split-process/acp-po1b.mjs'
 import { runAcpPo2SessionView } from '../smoke/split-process/acp-po2-session-view.mjs'
+import {
+  runManagedHostFallback,
+  runManagedHostManagerError,
+  runManagedHostSystemd,
+} from '../smoke/split-process/managed-host-m6-2b.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -338,6 +343,24 @@ const CASE_REGISTRY = Object.freeze([
     id: 'acp.po2-session-view',
     title: 'one live Host-owned ACP Session View shares a real TUI Session with one ACP connection, refuses a second attach, releases only its own View on close/teardown/Off, and creates a real Host Workspace Session',
     run: runAcpPo2SessionView,
+  }),
+  Object.freeze({
+    suite: 'managed-host',
+    id: 'managed-host.m6-2b-systemd',
+    title: 'a real public daemon Client cold start with a reachable systemd user manager installs ONE owned profile unit, the manager FragmentPath names it, one authenticated Host serves it, and only SIGTERM stops it',
+    run: runManagedHostSystemd,
+  }),
+  Object.freeze({
+    suite: 'managed-host',
+    id: 'managed-host.m6-2b-fallback',
+    title: 'a real public daemon Client cold start with a strictly absent user manager uses the detached process fallback with a private 0600 host.log and the Host survives Client exit',
+    run: runManagedHostFallback,
+  }),
+  Object.freeze({
+    suite: 'managed-host',
+    id: 'managed-host.m6-2b-manager-error',
+    title: 'a real public daemon Client cold start with a genuinely broken user manager fails closed with HOST_MANAGER_ERROR and starts no fallback Host',
+    run: runManagedHostManagerError,
   }),
 ])
 

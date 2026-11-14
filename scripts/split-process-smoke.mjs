@@ -327,6 +327,15 @@ async function main(explicitPath) {
     assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
       'T60 the candidate artifact changed during the split-process qualification')
     const webProductStatus = webProductResult?.status ?? 'NOT_RUN'
+    // The managed-host native lanes are environment-gated real-OS cases: an
+    // unqualified host reports NOT_VERIFIED instead of a fabricated PASS. The
+    // full verdict stays honest about that — it never prints "passed" while a
+    // managed slice is NOT_VERIFIED.
+    const managedHostIds = ['managed-host.m6-2b-systemd', 'managed-host.m6-2b-fallback', 'managed-host.m6-2b-manager-error']
+    const managedHostUnverified = managedHostIds.filter(id => statusOf(id) !== 'PASS')
+    const managedHostVerdict = managedHostUnverified.length === 0
+      ? 'PASS'
+      : `NOT_VERIFIED(${String(managedHostUnverified.length)}/${String(managedHostIds.length)})`
     trace('t60', {
       candidate: basename(tarball),
       sha256: candidateSha256,
@@ -387,8 +396,12 @@ async function main(explicitPath) {
       t12PtyHup: statusOf('recovery.client-hmr-signals') === 'PASS'
         ? 'pass (real PTY master close, separate case)' : 'NOT_RUN',
       releaseGates: 'not run by this smoke; stage-final lane records the separate release-gate verdict',
+      managedHostVerdict,
     })
-    console.log(`split-process registry smoke passed — ${basename(tarball)} × DSH ${targetDshVersion}; cases=${String(actualCaseResults.length)}/${String(registeredIds.length)}; official Web composition ${webBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${webBrowserVerdict})`}; official Web runtime toggle ${toggleBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${toggleBrowserVerdict})`}; product Web x real TUI ${webProductStatus === 'PASS' ? 'PASS (real Browser + real PTY TUI)' : webProductResult?.browserSubset === 'PASS' ? `BROWSER SUBSET PASS; WC-12 ${webProductStatus} (Owner decision recorded)` : `NOT_RUN (${webProductStatus})`}`)
+    if (managedHostVerdict !== 'PASS') {
+      console.error(`managed-host native lanes ${managedHostVerdict}: ${managedHostUnverified.map(id => `${id}=${statusOf(id)}`).join(', ')}`)
+    }
+    console.log(`split-process registry smoke ${managedHostVerdict === 'PASS' ? 'passed' : 'completed'} — ${basename(tarball)} × DSH ${targetDshVersion}; cases=${String(actualCaseResults.length)}/${String(registeredIds.length)}; managed-host ${managedHostVerdict}; official Web composition ${webBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${webBrowserVerdict})`}; official Web runtime toggle ${toggleBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${toggleBrowserVerdict})`}; product Web x real TUI ${webProductStatus === 'PASS' ? 'PASS (real Browser + real PTY TUI)' : webProductResult?.browserSubset === 'PASS' ? `BROWSER SUBSET PASS; WC-12 ${webProductStatus} (Owner decision recorded)` : `NOT_RUN (${webProductStatus})`}`)
   } catch (error) {
     // Report BEFORE the cleanup below: the failure projection must read the
     // still-live process handles, and the work root must still exist while the

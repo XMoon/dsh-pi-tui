@@ -56,6 +56,9 @@ export type LocalScopeErrorCode =
   | 'HOST_AUTH_FAILED'
   | 'HOST_START_TIMEOUT'
   | 'HOST_START_FAILED'
+  | 'HOST_MANAGER_ERROR'
+  | 'HOST_MANAGER_UNIT_CONFLICT'
+  | 'HOST_MANAGER_START_FAILED'
   | 'PROCESS_STARTTIME_UNAVAILABLE'
 
 /** A failure that carries one stable B1 classification code. */
@@ -86,6 +89,13 @@ export interface InstalledProfileFacts {
 export interface LocalScope {
   /** sha256 over UID + canonical profile directory. */
   readonly scopeId: string
+  /**
+   * The canonical official DSH home (`resolveDshHome()` result) the private run
+   * directory lives under. It is the already-resolved official fact, never
+   * derived from `scope.dir` or a Client cwd; the managed Host unit needs it to
+   * set a truthful `DSH_HOME`.
+   */
+  readonly dshHome: string
   /** Canonical profile directory the scope belongs to. */
   readonly profileRealpath: string
   /** Private 0700 run directory. */
@@ -288,32 +298,51 @@ export function computeBuildId(packageRoot: string, dshVersion: string): string 
 }
 
 /**
- * Build the one scope for an installed profile. The caller supplies the
- * official DSH home/profile resolution results; this module never guesses a
- * path. The run directory is created here, before any process seat or Host
- * Context exists.
+ * Compute the READ-ONLY identity of one installed profile scope. The caller
+ * supplies the official DSH home/profile resolution results; this module never
+ * guesses a path. This function performs NO filesystem mutation: it does not
+ * `mkdir`, does not touch the registry or a unit, and returns the scope with
+ * `dir` as the EXPECTED private run directory path (which may not exist yet).
+ * It is the single scope-id authority; `scopeFromInstalledProfile()` composes
+ * the exact same computation with the one directory-creation step.
  */
-export function scopeFromInstalledProfile(facts: InstalledProfileFacts): LocalScope {
+export function inspectInstalledProfileScope(facts: InstalledProfileFacts): LocalScope {
   const uid = assertLinux()
   const dshHome = canonicalOwnedDirectory(facts.dshHome, uid, 'DSH home')
   const profileRealpath = canonicalOwnedDirectory(facts.profileDir, uid, 'profile directory')
   const bundleVersion = readBundleVersion(facts.packageRoot)
   // Fixed hash domain: the scope id names one canonical profile + uid pair for
-  // the local protocol family. It is not a package-build compatibility key.
+  // the local protocol family. It is not a package-build compatibility key. The
+  // read-only inspection uses exactly this domain; the mutation form below must
+  // never drift from it.
   const scopeId = createHash('sha256')
     .update(`dsh-pi-tui/local-scope/1\0${String(uid)}\0${profileRealpath}`)
     .digest('hex')
-  const dir = ensureScopeDirectory(dshHome, scopeId, uid)
   return Object.freeze({
     scopeId,
+    dshHome,
     profileRealpath,
-    dir,
+    dir: join(dshHome, RUN_ROOT_NAME, SCOPE_ROOT_NAME, scopeId),
     hostSocketName: `${HOST_SEAT_PREFIX}${scopeId.slice(0, 40)}`,
     clientSeatSocketName: `${CLIENT_SEAT_PREFIX}${scopeId.slice(0, 40)}`,
     buildId: computeBuildId(facts.packageRoot, facts.dshVersion),
     bundleVersion,
     dshVersion: facts.dshVersion,
   })
+}
+
+/**
+ * Build the one scope for an installed profile AND create/prove its private
+ * 0700 run directory, before any process seat or Host Context exists. The
+ * scope identity comes from the same read-only computation above; only the run
+ * directory creation is added here, so Host admission and stdout/qualification
+ * shapes stay unchanged.
+ */
+export function scopeFromInstalledProfile(facts: InstalledProfileFacts): LocalScope {
+  const inspected = inspectInstalledProfileScope(facts)
+  const uid = assertLinux()
+  const dir = ensureScopeDirectory(inspected.dshHome, inspected.scopeId, uid)
+  return Object.freeze({ ...inspected, dir })
 }
 
 /** Field 3 (state) and field 22 (`starttime`) from one `/proc/<pid>/stat`. */

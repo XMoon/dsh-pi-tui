@@ -364,6 +364,54 @@ the kernel seat where one is required.
   remain intact. The user may retry the cancelled operation after reload.
 
 
+### Profile-scoped Host process manager
+
+A public daemon cold start that finds no reusable authenticated Host asks the
+profile-scoped Host process manager to bring one up. The manager decides only the
+Host's OS supervision; it never changes the Host business services, the
+authenticated carrier, the Session/Writer authority or readiness.
+
+- **Manager vs. authentication authority.** The manager answers "how is the Host
+  OS process supervised", never "is a Host ready". When a live Host is already
+  reusable it is authenticated and reused before any manager work; the manager
+  never replaces, adopts, kills or migrates a live Host (including a legacy
+  detached one, a compatible different build, or one without a product unit).
+  Readiness remains the official `/connect` Cookie + authenticated identity echo
+  + `/proc` starttime handshake. A manager `ActiveState=active` or a
+  `systemctl start` returning 0 is only a submitted request, never `Ready`.
+- **Three-state availability, fail-closed.** Manager usability is a real request
+  to the user manager (`systemctl --user show-environment`), classified as
+  `available`, `absent` or `error`. A non-zero reply, a timeout, a broken bus, a
+  permission failure, or an endpoint that exists but cannot be used is a stable
+  `HOST_MANAGER_ERROR`; it never degrades. Fallback is used only on a strictly
+  corroborated `absent`: an explicit no-user-bus failure, no live
+  `/run/user/<uid>/systemd/private` or user bus socket, and a system manager that
+  reports `user@<uid>.service` as `inactive`/`not-found`. An unconfirmable or
+  contradictory state is `error`, never `absent`.
+- **Public vs. internal start boundary.** Only the real public surface launch —
+  a strictly-decoded public Client launch envelope with no internal exact-id
+  handoff — requests a managed start. Internal qualification/peer/manual surface
+  launches and the Client reexec handoff keep the exact historic detached
+  process path and install no user unit.
+- **Owned unit, no silent upgrade.** One unit per `(uid, canonical profile)` scope
+  is named `dsh-pi-tui@<slug>-<scope prefix>.service` and installed atomically
+  (0600, hard link, never overwrite) under the account home's user unit
+  directory. Full `scopeId`, profile identity and install build are carried in
+  the unit owner metadata, and the manager's actual `FragmentPath`/`LoadState`
+  must name the installed file. A different build, a foreign owner, a drop-in or
+  a symlink is `HOST_MANAGER_UNIT_CONFLICT` and is never rewritten; automatic
+  cross-build upgrade is a separate explicit lifecycle capability, not a cold
+  start side effect. The unit carries only the minimal startup facts and official
+  environment anchors — never a token, Cookie or secret, never a one-shot backend
+  selector or qualification injection — and has no `[Install]`/enable, no
+  `Type=notify`, `Restart=on-failure` with limits and journal output.
+- **Fallback and stop ownership.** The only fallback is the strict-absence
+  detached process spawn with its private 0600 `host.log`, no periodic
+  auto-restart (only the manager restarts a supervised Host). Host stop remains
+  the Host's own `runProfile` shutdown owner; the manager only sends the OS
+  signal, and a Client exit/crash never stops the Host.
+
+
 ### Host-owned local ACP v1 front door (Unix socket)
 
 Alongside the authenticated loopback carrier, the one Host process can open ONE
