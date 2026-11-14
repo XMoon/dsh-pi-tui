@@ -21,7 +21,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
-import { stripTerminalSequences } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import type { TuiCommandRunner } from '../../src/commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
@@ -30,9 +30,10 @@ import { createDirectSettingsFixture } from '../support/direct-settings-fixture.
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
+import { selectSettingsCategory } from '../support/settings-rail.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { DirectMcpServerPort, type DirectMcpHostContextLike } from '../../src/runtime/direct/mcp-server-direct.ts'
-import { DirectMcpServerSourcesConfig } from '../../src/runtime/direct/config-direct.ts'
+import { DirectMcpServerConfigurationConfig, DirectMcpServerSourcesConfig } from '../../src/runtime/direct/config-direct.ts'
 import type { McpServerWatchEvent } from '../../src/runtime/mcp-server-port.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -153,15 +154,23 @@ function setup(options: { readonly columns?: number; readonly rows?: number; rea
   const manager = new FixtureManager(managedList())
   const managerMounted = options.withManager !== false
   const settingsMutateCalls: string[] = []
+  let settingsRevision = 3
+  const alphaEntry = { transport: 'stdio', command: '/bin/echo', args: [], env: {}, cwd: '', enabled: true }
   const settingsCtx = {
     get: (name: string): unknown => name === 'settings'
       ? {
           describe: () => [{
             ns: 'mcp-manager',
-            value: { servers: { alpha: { transport: 'stdio' } } },
-            revision: 3,
+            value: { servers: { alpha: alphaEntry } },
+            base: { servers: {} },
+            user: { servers: { alpha: alphaEntry } },
+            revision: settingsRevision,
           }],
-          mutate: async (ns: string) => { settingsMutateCalls.push(ns) },
+          mutate: async (ns: string, ops: readonly unknown[]) => {
+            settingsMutateCalls.push(ns)
+            if (ops.length === 0) return
+            settingsRevision += 1
+          },
         }
       : undefined,
   }
@@ -174,6 +183,7 @@ function setup(options: { readonly columns?: number; readonly rows?: number; rea
   // The source read shares the manager's OWN generation, so the page can prove
   // the key set and the roster belong to the same Host authority.
   const mcpServerSources = new DirectMcpServerSourcesConfig(settingsCtx, () => mcpServers.currentGeneration())
+  const mcpServerConfiguration = new DirectMcpServerConfigurationConfig(settingsCtx, () => mcpServers.currentGeneration())
 
   const fixture = createDirectSettingsFixture({ footer: 'default' })
   const settings = fixture.settings
@@ -216,6 +226,7 @@ function setup(options: { readonly columns?: number; readonly rows?: number; rea
     config: settingsDirectPageConfig({
       configReadiness: () => 'ready' as const,
       mcpServerSources,
+      mcpServerConfiguration,
       footerCustomItems: { rawForPersistence: () => ({ kind: 'detached' as const, value: [] }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined },
       subagentModelSelection: { available: () => false },
@@ -301,16 +312,22 @@ async function flushOwnedTurns(): Promise<void> {
   }
 }
 
-/** Walk the rail from About to Tools (eight categories down). */
+/** Walk the rail from About to Tools, then to the MCP row. The category walk
+ *  uses the SHARED rail helper (it knows the narrow layout opens on the About
+ *  content and that Esc returns to the rail), and the Rows cursor is
+ *  LABEL-driven because the visible row count differs per frozen size. */
 async function openMcpPage(h: Harness): Promise<void> {
   h.invoke('settings')
   await frames(h.vt)
   await flushOwnedTurns()
-  for (let step = 0; step < 8; step += 1) await press(h.vt, '\x1b[B')
-  // Categories → Rows, then to the MCP row (Visual tools, Web auto, ACP x2,
-  // Web Search/Fetch, MCP servers).
+  await selectSettingsCategory(h.vt, 'Tools')
+  await frames(h.vt)
   await press(h.vt, '\r')
-  for (let step = 0; step < 5; step += 1) await press(h.vt, '\x1b[B')
+  // The Rows column paints its cursor mid-line (`… > MCP servers  <summary>`),
+  // so the row cursor is matched WITHOUT a line-start anchor.
+  const mcpRow = (): boolean => /\S\s+> MCP servers\b/u.test(h.view())
+  for (let step = 0; step < 10 && !mcpRow(); step += 1) await press(h.vt, '\x1b[B')
+  assert.ok(mcpRow(), `the MCP servers row must be selectable at this size:\n${h.view()}`)
   await press(h.vt, '\r')
   await frames(h.vt, 2)
   await flushOwnedTurns()
@@ -417,4 +434,163 @@ test('a Host without the MCP manager is a truthful unavailable, never an empty l
   await flushOwnedTurns()
   assert.deepEqual(h.manager.probes, [])
   assert.match(lastLine(h), /Back \[Esc\]/u)
+})
+
+/* ------------------------------------------------------------------------- *
+ * FR4 L6 — the mounted `Settings · Tools · MCP servers` configuration loop.
+ *
+ * Drives the REAL `/settings` command, the REAL SettingsWorkspacePanel, the
+ * REAL McpServersController, the REAL McpServersPage and the REAL Direct
+ * config adapter; only the Host `settings`/`mcpManager` service boundaries are
+ * controlled fakes (their official contract shapes), never a pre-computed DTO.
+ * ------------------------------------------------------------------------- */
+
+test('the mounted Add -> Save -> descriptor journey writes the official namespace once', async () => {
+  const h = setup()
+  await openMcpPage(h)
+  // The config-owned `alpha` is the first row; `a` opens the Add form on the
+  // list. Search is not active, so `a` is a real page action.
+  await press(h.vt, 'a')
+  await frames(h.vt)
+  assert.match(h.view(), /Identity/u, 'the same-lease configuration form is painted')
+  assert.match(h.view(), /Name/u)
+  // Fill the name, then the command (the first two focusable rows).
+  await press(h.vt, '\r') // activate Name
+  for (const char of 'fr4-added') await h.vt.sendInput(char)
+  await press(h.vt, '\r') // commit Name
+  // Transport is row 1; Enabled row 2; Command row 3.
+  await press(h.vt, '\x1b[B')
+  await press(h.vt, '\x1b[B')
+  await press(h.vt, '\x1b[B')
+  await press(h.vt, '\r') // activate Command
+  for (const char of '/bin/sleep') await h.vt.sendInput(char)
+  await press(h.vt, '\r') // commit Command
+  assert.match(h.view(), /Unsaved changes/u)
+  await press(h.vt, 's')
+  await frames(h.vt)
+  await flushOwnedTurns()
+  await frames(h.vt)
+  assert.deepEqual(h.settingsMutateCalls, ['mcp-manager'], 'exactly ONE official settings mutation')
+  assert.match(h.view(), /Saved · waiting for Host reconcile/u)
+  assert.doesNotMatch(h.view(), /Connected ·/u, 'a saved config is not a connection claim')
+})
+
+test('dirty Esc in the mounted form shows the discard confirmation and writes nothing', async () => {
+  const h = setup()
+  await openMcpPage(h)
+  await press(h.vt, 'a')
+  await frames(h.vt)
+  await press(h.vt, '\r')
+  await h.vt.sendInput('z')
+  await press(h.vt, '\r')
+  await press(h.vt, '\x1b')
+  await frames(h.vt)
+  assert.match(h.view(), /Discard changes\?/u)
+  assert.match(lastLine(h), /Keep editing · Esc/u)
+  // Keep editing (Enter), then a second Esc and an explicit `d` discard.
+  await press(h.vt, '\r')
+  await press(h.vt, '\x1b')
+  await press(h.vt, 'd')
+  await frames(h.vt)
+  await flushOwnedTurns()
+  assert.deepEqual(h.settingsMutateCalls, [], 'a discarded draft performs zero writes')
+  assert.match(lastLine(h), /Back \[Esc\]/u)
+})
+
+test('the mounted Detail keeps the FR3 p/x actions beside the new CRUD actions', async () => {
+  const h = setup()
+  await openMcpPage(h)
+  await press(h.vt, '\r') // open Detail at the compact 100-column layout
+  await frames(h.vt)
+  await flushOwnedTurns()
+  await press(h.vt, '\r') // focus the Detail region
+  await frames(h.vt)
+  const bar = lastLine(h)
+  assert.match(bar, /p probe/u)
+  assert.match(bar, /x restart/u)
+  assert.match(bar, /e edit/u)
+  assert.match(bar, /t (toggle|enable\/disable)/u)
+  assert.match(bar, /d delete/u)
+  // The saved transport now comes from the same configuration descriptor.
+  assert.match(h.view(), /Saved transport: stdio/u)
+})
+
+/* ------------------------------------------------------------------------- *
+ * FR4 G8 — the frozen visual matrix over the mounted page.
+ *
+ * The REAL `/settings` workspace, the REAL controller/page and the REAL Direct
+ * config adapter are painted at every frozen size (design-language §11.2/§8 plus
+ * the 44×8 floor). This proves the FORM's reachability and no-wrap contract in
+ * a headless VirtualTerminal; physical terminal / palette / CJK acceptance is
+ * recorded separately and is NOT claimed here.
+ * ------------------------------------------------------------------------- */
+
+const G8_SIZES = [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20], [44, 8]] as const
+
+test('the configuration form keeps its identity, current field and Save/Esc reachable at every frozen size', async () => {
+  for (const [columns, rows] of G8_SIZES) {
+    const h = setup({ columns, rows })
+    await openMcpPage(h)
+    // Reach the Add form through the list action (present only when current).
+    await press(h.vt, 'a')
+    await frames(h.vt, 2)
+    await flushOwnedTurns()
+    await frames(h.vt, 2)
+    const lines = h.vt.getViewport().map(stripTerminalSequences)
+    const frame = lines.join('\n')
+    assert.match(frame, /Identity/u, `${String(columns)}x${String(rows)}: the form identity group is painted`)
+    assert.match(frame, /Name/u, `${String(columns)}x${String(rows)}: the current field is painted`)
+    assert.match(frame, /s Save/u, `${String(columns)}x${String(rows)}: Save is reachable`)
+    assert.match(frame, /Back \[Esc\]/u, `${String(columns)}x${String(rows)}: the Esc affordance is complete`)
+    assert.match(lastLine(h), /(s Save|Back \[Esc\])/u,
+      `${String(columns)}x${String(rows)}: the physical last row is the Action Bar`)
+    for (const line of lines) {
+      assert.ok(visibleWidth(line) <= columns, `${String(columns)}x${String(rows)}: no line may exceed the frame: ${line}`)
+    }
+    assert.equal(lines.length, rows, `${String(columns)}x${String(rows)}: the page fills its exact grant`)
+    h.app.dispose()
+    startedApps.delete(h.app)
+  }
+})
+
+test('the list and detail states stay truthful at the frozen sizes with one active signal per region', async () => {
+  for (const [columns, rows] of G8_SIZES) {
+    const h = setup({ columns, rows })
+    await openMcpPage(h)
+    const listLines = h.vt.getViewport().map(stripTerminalSequences)
+    const listFrame = listLines.join('\n')
+    assert.match(listFrame, /alpha/u, `${String(columns)}x${String(rows)}: the list paints the selected server`)
+    assert.match(listFrame, /Back \[Esc\]/u, `${String(columns)}x${String(rows)}: the list keeps Esc`)
+    assert.equal(listLines.filter(line => line.includes('▸')).length <= 1, true,
+      `${String(columns)}x${String(rows)}: at most ONE selected marker`)
+    for (const line of listLines) assert.ok(visibleWidth(line) <= columns)
+    assert.equal(listLines.length, rows)
+    h.app.dispose()
+    startedApps.delete(h.app)
+  }
+})
+
+test('the form never paints a row twice and never loses the page chrome', async () => {
+  // Regression guard for a real-terminal torn frame: the physical frame must
+  // carry the page breadcrumb exactly once and each form row exactly once.
+  const h = setup({ columns: 80, rows: 24 })
+  await openMcpPage(h)
+  await press(h.vt, 'a')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  await press(h.vt, '\r')
+  for (const char of '/bin/sleep') await h.vt.sendInput(char)
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+  const lines = h.vt.getViewport().map(stripTerminalSequences)
+  const frame = lines.join('\n')
+  assert.equal(frame.split('Settings · Tools · MCP servers').length - 1, 1,
+    `exactly ONE breadcrumb:\n${frame}`)
+  for (const label of ['Name:', 'Transport:', 'Enabled:', 'Command:', 'Working dir:']) {
+    assert.equal(frame.split(label).length - 1, 1, `${label} must be painted exactly once:\n${frame}`)
+  }
+  assert.equal(lines.length, 24)
+  h.app.dispose()
+  startedApps.delete(h.app)
 })

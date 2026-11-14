@@ -101,7 +101,15 @@ import type {
   ConfigReadiness,
   McpServerSources,
   McpServerSourcesConfig,
+  McpServerConfiguration,
+  McpServerConfigurationConfig,
+  McpConfigWriteOutcome,
 } from '../config-port.ts'
+import {
+  classifyMcpServerProvenance,
+  projectMcpServerEntry,
+  type McpClassifiedServerEntry,
+} from '../../domain/mcp/server-config.ts'
 import {
   VISUAL_TOOLS_STATUS_SERVICE,
   type VisualToolsRuntimeStatus,
@@ -122,10 +130,15 @@ export interface SettingsServiceLike {
   describe(options?: { readonly redactSecrets?: boolean }): readonly SettingsDescriptorLike[] | undefined
   mutate(
     ns: string,
-    ops: readonly { op: 'set'; path: readonly string[]; value: unknown }[],
+    ops: readonly SettingsMutationOp[],
     expectedRevision?: number,
   ): Promise<unknown>
 }
+
+/** One official settings path op (set + unset), the FR4 wire shape. */
+export type SettingsMutationOp =
+  | { op: 'set'; path: readonly string[]; value: unknown }
+  | { op: 'unset'; path: readonly string[] }
 
 /** The structural credentials service surface. */
 export interface CredentialsServiceLike {
@@ -191,6 +204,7 @@ export class DirectConfigPort implements ConfigPort {
   readonly backendStartupPreference: BackendStartupPreferenceConfig
   readonly acpStartupPreference: AcpStartupPreferenceConfig
   readonly mcpServerSources: McpServerSourcesConfig
+  readonly mcpServerConfiguration: McpServerConfigurationConfig
   /** FR3: the live Host MCP generation the source read is bound to. */
   private readonly mcpGeneration: (() => object) | undefined
 
@@ -217,6 +231,7 @@ export class DirectConfigPort implements ConfigPort {
     this.backendStartupPreference = new DirectBackendStartupPreferenceConfig(ctx)
     this.acpStartupPreference = new DirectAcpStartupPreferenceConfig(ctx)
     this.mcpServerSources = new DirectMcpServerSourcesConfig(ctx, mcpGeneration)
+    this.mcpServerConfiguration = new DirectMcpServerConfigurationConfig(ctx, mcpGeneration)
   }
 }
 
@@ -225,6 +240,8 @@ interface SettingsDescriptorLike {
   readonly ns: string
   /** Form-projected effective value (volatile fields only). */
   readonly value?: unknown
+  /** The composition base layer (inherited config, defaults resolved). */
+  readonly base?: unknown
   readonly user?: unknown
   readonly revision?: number
 }
@@ -2202,4 +2219,115 @@ export class DirectMcpServerSourcesConfig implements McpServerSourcesConfig {
 
   /** Direct reads the in-process Host authority, so a read is already current. */
   async refresh(): Promise<void> {}
+}
+
+/**
+ * The Direct FR4 MCP server configuration read/write. It reads the official
+ * `mcp-manager` descriptor's value/base/user layers in ONE `describe()` and
+ * classifies every entry's provenance from that same descriptor; every write
+ * is ONE official `settings.mutate('mcp-manager', ops, expectedRevision)`
+ * call. The write never touches `TuiSettingsDoc` and never writes a file.
+ */
+export class DirectMcpServerConfigurationConfig implements McpServerConfigurationConfig {
+  private readonly ctx: HostContextLike
+  private readonly generation: () => object
+  private readonly unwiredGeneration = Object.freeze({})
+
+  constructor(ctx: HostContextLike, generation?: () => object) {
+    this.ctx = ctx
+    this.generation = generation ?? (() => this.unwiredGeneration)
+  }
+
+  read(): McpServerConfiguration {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    if (settings === undefined) {
+      return { kind: 'unavailable', reason: 'the Host settings service is unavailable' }
+    }
+    let descriptor: SettingsDescriptorLike | undefined
+    try {
+      descriptor = readSettingsDescriptor(settings, MCP_SERVER_SOURCES_NS)
+    } catch {
+      descriptor = undefined
+    }
+    if (descriptor === undefined) {
+      return { kind: 'unavailable', reason: 'the "mcp-manager" Host settings section is not mounted' }
+    }
+    const value = descriptor.value
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return { kind: 'unavailable', reason: 'the "mcp-manager" settings section is not readable' }
+    }
+    const servers = (value as Record<string, unknown>).servers
+    if (typeof servers !== 'object' || servers === null || Array.isArray(servers)) {
+      return { kind: 'unavailable', reason: 'the "mcp-manager.servers" configuration is not readable' }
+    }
+    if (typeof descriptor.revision !== 'number') {
+      return { kind: 'unavailable', reason: 'the "mcp-manager" settings revision is not readable' }
+    }
+    // ONE descriptor, projected detached: base/user/effective all belong to
+    // the same read; a name that appears in neither layer of THIS descriptor
+    // is not config-owned and is simply absent from the entries.
+    const entries: McpClassifiedServerEntry[] = []
+    for (const name of Object.keys(servers as Record<string, unknown>)) {
+      const provenance = classifyMcpServerProvenance(descriptor.base, { servers }, name)
+      if (provenance === undefined) continue
+      const effective = projectMcpServerEntry(detachedSection((servers as Record<string, unknown>)[name]))
+      if (effective === undefined) continue
+      entries.push({ name, provenance, effective })
+    }
+    return {
+      kind: 'ready',
+      generation: this.generation(),
+      revision: descriptor.revision,
+      entries: Object.freeze(entries),
+    }
+  }
+
+  /** Direct reads the in-process Host authority, so a read is already current. */
+  async refresh(): Promise<void> {}
+
+  async mutate(
+    ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[],
+    expectedRevision: number,
+    pinnedGeneration: object,
+  ): Promise<McpConfigWriteOutcome> {
+    // The Host-generation fence: a decision taken against another generation
+    // is never dispatched against the current one.
+    if (!Object.is(this.generation(), pinnedGeneration)) {
+      return {
+        kind: 'failed',
+        failure: { kind: 'rejected', reason: 'the Host authority changed; re-read the configuration before saving' },
+      }
+    }
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    if (settings === undefined) {
+      return { kind: 'failed', failure: { kind: 'rejected', reason: 'the Host settings service is unavailable' } }
+    }
+    const wireOps: readonly SettingsMutationOp[] = ops.map(op => op.op === 'set'
+      ? { op: 'set' as const, path: [...op.path], value: op.value }
+      : { op: 'unset' as const, path: [...op.path] })
+    try {
+      await settings.mutate(MCP_SERVER_SOURCES_NS, wireOps, expectedRevision)
+    } catch (error) {
+      // The official CAS refusal is its own outcome: the draft survives and
+      // the user re-reads instead of the write being reported as a rejection.
+      const code = (error as { code?: unknown } | null)?.code
+      const message = safeErrorMessage(error)
+      return {
+        kind: 'failed',
+        failure: code === 'SETTINGS_CONFLICT'
+          ? { kind: 'conflict', reason: message }
+          : { kind: 'rejected', reason: message },
+      }
+    }
+    // Saved is a READ-BACK fact: re-read the descriptor and report the
+    // committed revision only when the namespace is still readable.
+    const readBack = this.read()
+    if (readBack.kind !== 'ready') {
+      return {
+        kind: 'failed',
+        failure: { kind: 'outcome-unconfirmed', reason: readBack.reason },
+      }
+    }
+    return { kind: 'saved', revision: readBack.revision }
+  }
 }

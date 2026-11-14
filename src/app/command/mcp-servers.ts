@@ -28,7 +28,13 @@
  */
 
 import type { McpManagedServerStatus } from '@deepseek-ai/dsh-mcp-manager/types'
-import type { McpServerSources, McpServerSourcesConfig } from '../../runtime/config-port.ts'
+import type {
+  McpConfigWriteOutcome,
+  McpServerConfiguration,
+  McpServerConfigurationConfig,
+  McpServerSources,
+  McpServerSourcesConfig,
+} from '../../runtime/config-port.ts'
 import type {
   McpServerGeneration,
   McpServerPort,
@@ -36,6 +42,18 @@ import type {
   McpServerView,
   McpServerWatchEvent,
 } from '../../runtime/mcp-server-port.ts'
+import {
+  diffMcpServerDraft,
+  mcpAddOps,
+  mcpEditOps,
+  mcpRemoveOps,
+  mcpSetEnabledOps,
+  validateMcpServerDraft,
+  type McpClassifiedServerEntry,
+  type McpDraftIssue,
+  type McpServerEntryDraft,
+  type McpServerTransport,
+} from '../../domain/mcp/server-config.ts'
 
 /** The configuration-source verdict a row may display. */
 export type McpServerSourceLabel = 'Configured' | 'Plugin-owned' | 'Retained/removed' | 'Unknown'
@@ -83,6 +101,109 @@ export interface McpServersSnapshot {
   readonly lastProbe?: McpServersProbeReport
   /** The ONE transient notice of this open. */
   readonly notice?: { readonly text: string; readonly kind: 'info' | 'error' }
+  /** FR4: the actionable CRUD facets of the selected server (undefined = none). */
+  readonly selectedConfig?: McpSelectedConfigFacet
+  /** FR4: the open configuration editor, when one is open. */
+  readonly editor?: McpEditorSnapshot
+  /** FR4: the pending CRUD confirmation (delete/reset/toggle), when open. */
+  readonly configConfirm?: McpConfigConfirmSnapshot
+  /** FR4: the ONE configuration-action status slot. */
+  readonly configStatus?: McpConfigStatus
+  /** FR4: the current configuration snapshot (for source/provenance display). */
+  readonly config?: McpServerConfiguration
+}
+
+/** FR4: what may be done with the currently selected server. */
+export interface McpSelectedConfigFacet {
+  readonly name: string
+  readonly provenance: McpClassifiedServerEntry['provenance']
+  /** Enable/Disable is always possible for a config-owned entry. */
+  readonly canToggle: boolean
+  /** Only a User-added entry can be deleted permanently. */
+  readonly canDelete: boolean
+  /** Only an entry whose EFFECTIVE configuration differs from the base can be
+   *  reset to inherited (a USER patch key alone is not an override). */
+  readonly canReset: boolean
+  /** The current saved `enabled` value (undefined when unreadable). */
+  readonly enabled?: boolean
+}
+
+/** FR4: the page-facing projection of the open editor. */
+export interface McpEditorSnapshot {
+  readonly mode: 'add' | 'edit'
+  readonly name: string
+  /** Edit keeps the name read-only (rename = Add then Delete). */
+  readonly nameEditable: boolean
+  readonly transport: McpServerTransport
+  readonly command: string
+  readonly args: readonly string[]
+  readonly env: readonly { readonly key: string; readonly value: string }[]
+  readonly cwd: string
+  readonly url: string
+  readonly headers: readonly { readonly key: string; readonly value: string }[]
+  readonly enabled: boolean
+  /** Whether the draft differs from the entry it was opened from. */
+  readonly dirty: boolean
+  /** The validation issues of the CURRENT draft (empty = dispatchable). */
+  readonly issues: readonly McpDraftIssue[]
+  /** The config revision this form was opened at (the CAS token). */
+  readonly capturedRevision: number
+}
+
+/** FR4: one pending CRUD confirmation. */
+export interface McpConfigConfirmSnapshot {
+  readonly kind: 'delete' | 'reset' | 'toggle'
+  readonly name: string
+  /** For `toggle`: the enabled value that would be written. */
+  readonly nextEnabled?: boolean
+}
+
+/** FR4: the ONE configuration-action status slot. */
+export type McpConfigStatus =
+  | { readonly kind: 'saving'; readonly text: string }
+  | { readonly kind: 'saved'; readonly text: string }
+  | { readonly kind: 'conflict'; readonly text: string }
+  | { readonly kind: 'rejected'; readonly text: string }
+  | { readonly kind: 'unconfirmed'; readonly text: string }
+  | { readonly kind: 'unavailable'; readonly text: string }
+
+/** The fixed FR4 user-facing wording (one source for page + tests). */
+export const MCP_CONFIG_TEXT = {
+  saving: 'Saving configuration…',
+  saved: 'Saved · waiting for Host reconcile',
+  conflict: 'Not saved · configuration changed; refresh to review',
+  unconfirmed: 'Outcome unconfirmed; inspect the Host configuration before retrying',
+  unavailable: 'Unavailable · Host settings not current',
+  deleted: 'Config removed · waiting for Host reconcile',
+  // The official `unset` restores the INHERITED VALUE into the user layer (it
+  // cannot remove the user entry itself), so the wording claims only what the
+  // Host really did: the inherited configuration is back in force.
+  reset: 'Inherited configuration restored',
+  toggleOn: 'Configuration saved · the server will start',
+  toggleOff: 'Configuration saved · the server will stop',
+} as const
+
+/** The mutable draft the editor holds while open. */
+interface McpEditorDraftState {
+  name: string
+  transport: McpServerTransport
+  command: string
+  args: string[]
+  env: Map<string, string>
+  cwd: string
+  url: string
+  headers: Map<string, string>
+  enabled: boolean
+}
+
+/** The open editor's authority binding. */
+interface McpEditorState {
+  readonly mode: 'add' | 'edit'
+  /** The exact entry an Edit was opened on (absent for Add). */
+  readonly entry: McpClassifiedServerEntry | undefined
+  readonly generation: McpServerGeneration
+  readonly revision: number
+  draft: McpEditorDraftState
 }
 
 /** One owned async task entry (the command layer supplies `runOwned`). */
@@ -96,6 +217,8 @@ export type McpServersRunOwned = (
 export interface McpServersControllerDeps {
   readonly port: McpServerPort
   readonly sources: McpServerSourcesConfig
+  /** FR4: the configuration read/write sub-domain (the ONLY CRUD path). */
+  readonly configuration: McpServerConfigurationConfig
   readonly requestRender: () => void
   readonly runOwned: McpServersRunOwned
 }
@@ -118,7 +241,52 @@ function singleLine(text: string): string {
   return collapsed.length > 160 ? `${collapsed.slice(0, 157)}...` : collapsed
 }
 
-/** The controller of one open page. */
+/** An empty Add draft (stdio is the first transport offered). */
+function emptyDraft(): McpEditorDraftState {
+  return {
+    name: '',
+    transport: 'stdio',
+    command: '',
+    args: [],
+    env: new Map(),
+    cwd: '',
+    url: '',
+    headers: new Map(),
+    enabled: true,
+  }
+}
+
+/** The mutable draft of one existing entry (its effective transport facts). */
+function draftFromEntry(entry: McpClassifiedServerEntry): McpEditorDraftState {
+  const effective = entry.effective
+  return {
+    name: entry.name,
+    transport: effective.transport,
+    command: effective.command ?? '',
+    args: [...effective.args ?? []],
+    env: new Map(effective.env ?? []),
+    cwd: effective.cwd ?? '',
+    url: effective.url ?? '',
+    headers: new Map(effective.headers ?? []),
+    enabled: effective.enabled !== false,
+  }
+}
+
+/** Project the mutable draft onto the immutably-typed domain draft. */
+function entryDraftOf(draft: McpEditorDraftState): McpServerEntryDraft {
+  return {
+    transport: draft.transport,
+    command: draft.command,
+    args: [...draft.args],
+    env: new Map(draft.env),
+    cwd: draft.cwd,
+    url: draft.url,
+    headers: new Map(draft.headers),
+    enabled: draft.enabled,
+  }
+}
+
+/** One controller of one open page. */
 export class McpServersController {
   private readonly deps: McpServersControllerDeps
   /** This open's identity: every late callback is fenced on it. */
@@ -157,6 +325,16 @@ export class McpServersController {
   private sources: McpServerSources = { kind: 'unavailable', reason: 'not read' }
   /** Bumped on every roster frame so a stale source read cannot land. */
   private rosterEpoch = 0
+  /** FR4: the last committed configuration read (same-generation evidence). */
+  private configuration: McpServerConfiguration = { kind: 'unavailable', reason: 'not read' }
+  /** FR4: the open editor (draft + its authority binding), when open. */
+  private editor: McpEditorState | undefined
+  /** FR4: the pending CRUD confirmation. */
+  private configConfirm: McpConfigConfirmSnapshot | undefined
+  /** FR4: the ONE config-action status slot. */
+  private configStatus: McpConfigStatus | undefined
+  /** FR4: identity of the ONE config write allowed to settle into the slot. */
+  private configWriteToken = 0
 
   constructor(deps: McpServersControllerDeps) {
     this.deps = deps
@@ -179,6 +357,7 @@ export class McpServersController {
     this.disposed = true
     this.openToken += 1
     this.operationToken += 1
+    this.configWriteToken += 1
     this.watchController?.abort()
     this.watchController = undefined
     this.operationController?.abort()
@@ -187,6 +366,12 @@ export class McpServersController {
     this.confirming = undefined
     this.notice = undefined
     this.lastProbe = undefined
+    // FR4: an open draft and a settled status die with the page; a DISPATCHED
+    // write is never claimed cancelled (the config write token simply stops
+    // this page presenting its result).
+    this.editor = undefined
+    this.configConfirm = undefined
+    this.configStatus = undefined
     this.servers.clear()
     this.order.length = 0
   }
@@ -197,6 +382,7 @@ export class McpServersController {
       const view = this.servers.get(name) as McpServerView
       return { name, configured: view.configured, status: view.status, source: this.sourceOf(view) }
     })
+    const selectedFacet = this.selectedConfigFacet()
     return {
       phase: this.phase,
       ...this.phaseReason === undefined ? {} : { phaseReason: this.phaseReason },
@@ -206,6 +392,11 @@ export class McpServersController {
       ...this.operation === undefined ? {} : { operation: this.operation },
       ...this.lastProbe === undefined ? {} : { lastProbe: this.lastProbe },
       ...this.notice === undefined ? {} : { notice: this.notice },
+      ...selectedFacet === undefined ? {} : { selectedConfig: selectedFacet },
+      ...this.editor === undefined ? {} : { editor: this.editorSnapshot(this.editor) },
+      ...this.configConfirm === undefined ? {} : { configConfirm: this.configConfirm },
+      ...this.configStatus === undefined ? {} : { configStatus: this.configStatus },
+      config: this.configuration,
     }
   }
 
@@ -314,6 +505,447 @@ export class McpServersController {
     this.deps.requestRender()
   }
 
+  // ── FR4: configuration CRUD ───────────────────────────────────────────────
+
+  /** The configuration read currently in force for THIS page. */
+  configurationState(): McpServerConfiguration {
+    return this.configuration
+  }
+
+  /** Whether the configuration snapshot is current for this roster generation. */
+  private configIsCurrent(): boolean {
+    return this.configuration.kind === 'ready'
+      && this.generation !== undefined
+      && Object.is(this.configuration.generation, this.generation)
+  }
+
+  /** The classified config entry of the selected name, when the SAME
+   *  generation proves it config-owned. */
+  private selectedConfigEntry(): McpClassifiedServerEntry | undefined {
+    if (!this.configIsCurrent() || this.configuration.kind !== 'ready') return undefined
+    if (this.selected === undefined) return undefined
+    return this.configuration.entries.find(entry => entry.name === this.selected)
+  }
+
+  /** Whether the page may offer ANY configuration edit right now. */
+  canEditConfiguration(): boolean {
+    return this.phase === 'ready'
+      && this.configIsCurrent()
+      && this.editor === undefined
+      && this.configConfirm === undefined
+      && this.operation?.phase !== 'running'
+  }
+
+  /** Whether `a` (Add) may open right now: a current descriptor is required
+   *  (its revision is the CAS token the add will carry). */
+  canBeginAdd(): boolean {
+    return this.canEditConfiguration()
+      && this.configuration.kind === 'ready'
+      && !this.configStatusIsInFlight()
+  }
+
+  /** Whether the selected server may be Edited. */
+  canBeginEdit(): boolean {
+    return this.canEditConfiguration() && this.selectedConfigEntry() !== undefined
+  }
+
+  /** The CRUD facet the Detail action bar paints. */
+  private selectedConfigFacet(): McpSelectedConfigFacet | undefined {
+    const entry = this.selectedConfigEntry()
+    if (entry === undefined) return undefined
+    return {
+      name: entry.name,
+      provenance: entry.provenance,
+      canToggle: this.canEditConfiguration(),
+      canDelete: entry.provenance === 'user-added' && this.canEditConfiguration(),
+      canReset: entry.provenance === 'overridden' && this.canEditConfiguration(),
+      ...entry.effective.enabled === undefined ? {} : { enabled: entry.effective.enabled },
+    }
+  }
+
+  private configStatusIsInFlight(): boolean {
+    return this.configStatus?.kind === 'saving'
+  }
+
+  /** Re-read the configuration for the current generation (bounded; never a
+   *  background poll). */
+  refreshConfiguration(): void {
+    if (this.disposed) return
+    const token = this.openToken
+    const epoch = this.rosterEpoch
+    this.deps.runOwned('MCP configuration read', async () => {
+      try {
+        await this.deps.configuration.refresh()
+      } catch {
+        // The backend records its own readiness fact; the read below reports it.
+      }
+      if (this.disposed || token !== this.openToken || epoch !== this.rosterEpoch) return
+      this.configuration = this.deps.configuration.read()
+      this.deps.requestRender()
+    })
+  }
+
+  /** Open the Add editor (the name is the first editable field). */
+  beginAdd(): void {
+    if (!this.canBeginAdd()) return
+    if (this.configuration.kind !== 'ready') return
+    if (this.generation === undefined) return
+    this.configConfirm = undefined
+    this.configStatus = undefined
+    this.editor = {
+      mode: 'add',
+      entry: undefined,
+      generation: this.generation,
+      revision: this.configuration.revision,
+      draft: emptyDraft(),
+    }
+    this.deps.requestRender()
+  }
+
+  /** Open the Edit editor for the selected server (name read-only). */
+  beginEdit(): void {
+    if (!this.canBeginEdit()) return
+    const entry = this.selectedConfigEntry()
+    if (entry === undefined || this.generation === undefined) return
+    if (this.configuration.kind !== 'ready') return
+    this.configConfirm = undefined
+    this.configStatus = undefined
+    this.editor = {
+      mode: 'edit',
+      entry,
+      generation: this.generation,
+      revision: this.configuration.revision,
+      draft: draftFromEntry(entry),
+    }
+    this.deps.requestRender()
+  }
+
+  /** Close the editor. A dirty draft requires the page's discard confirmation
+   *  (the page owns that prompt); this is the CONFIRMED close. */
+  discardEditor(): void {
+    if (this.disposed || this.editor === undefined) return
+    this.editor = undefined
+    this.deps.requestRender()
+  }
+
+  /** Whether the open editor has unsaved changes. */
+  editorDirty(): boolean {
+    if (this.editor === undefined) return false
+    return this.editorSnapshot(this.editor).dirty
+  }
+
+  /** Replace one scalar field of the open draft. A synchronous reentrancy
+   *  guard: nothing else may have closed the editor in between. */
+  setEditorField(field: 'name' | 'command' | 'cwd' | 'url', value: string): void {
+    if (this.disposed || this.editor === undefined) return
+    if (field === 'name' && this.editor.mode === 'edit') return
+    this.editor.draft[field] = value
+    this.deps.requestRender()
+  }
+
+  /** Switch the draft transport (an explicit user choice). */
+  setEditorTransport(transport: McpServerTransport): void {
+    if (this.disposed || this.editor === undefined) return
+    if (this.editor.draft.transport === transport) return
+    this.editor.draft.transport = transport
+    this.deps.requestRender()
+  }
+
+  /** Toggle the draft's `enabled`. */
+  setEditorEnabled(enabled: boolean): void {
+    if (this.disposed || this.editor === undefined) return
+    this.editor.draft.enabled = enabled
+    this.deps.requestRender()
+  }
+
+  /** Insert one empty argument row (each argument is its own row). */
+  addEditorArg(): void {
+    if (this.disposed || this.editor === undefined) return
+    this.editor.draft.args.push('')
+    this.deps.requestRender()
+  }
+
+  /** Edit one argument VALUE. */
+  setEditorArg(index: number, value: string): void {
+    if (this.disposed || this.editor === undefined) return
+    if (index < 0 || index >= this.editor.draft.args.length) return
+    this.editor.draft.args[index] = value
+    this.deps.requestRender()
+  }
+
+  /** Remove one argument row. */
+  removeEditorArg(index: number): void {
+    if (this.disposed || this.editor === undefined) return
+    if (index < 0 || index >= this.editor.draft.args.length) return
+    this.editor.draft.args.splice(index, 1)
+    this.deps.requestRender()
+  }
+
+  /** Insert one empty env/header row. */
+  addEditorDictKey(field: 'env' | 'headers'): void {
+    if (this.disposed || this.editor === undefined) return
+    const dict = field === 'env' ? this.editor.draft.env : this.editor.draft.headers
+    // A unique placeholder key: the user renames it; a duplicate real key is
+    // refused by `validateMcpServerDraft`'s map-key rules / the official
+    // schema, never silently merged.
+    let index = dict.size + 1
+    while (dict.has(`KEY_${String(index)}`)) index += 1
+    dict.set(`KEY_${String(index)}`, '')
+    this.deps.requestRender()
+  }
+
+  /** Rename one env/header key (a duplicate key is refused by the draft
+   *  validation, not merged). */
+  renameEditorDictKey(field: 'env' | 'headers', from: string, to: string): void {
+    if (this.disposed || this.editor === undefined) return
+    const dict = field === 'env' ? this.editor.draft.env : this.editor.draft.headers
+    if (!dict.has(from) || from === to) return
+    if (dict.has(to)) return
+    const value = dict.get(from) as string
+    // Rebuild the map to keep the edited order stable.
+    const entries = [...dict.entries()].map(([key, existing]) => key === from ? [to, existing] as const : [key, existing] as const)
+    dict.clear()
+    for (const [key, existing] of entries) dict.set(key, existing)
+    void value
+    this.deps.requestRender()
+  }
+
+  /** Set one env/header value (replace the whole value, never a hidden dict). */
+  setEditorDictValue(field: 'env' | 'headers', key: string, value: string): void {
+    if (this.disposed || this.editor === undefined) return
+    const dict = field === 'env' ? this.editor.draft.env : this.editor.draft.headers
+    if (!dict.has(key)) return
+    dict.set(key, value)
+    this.deps.requestRender()
+  }
+
+  /** Remove one env/header row. */
+  removeEditorDictKey(field: 'env' | 'headers', key: string): void {
+    if (this.disposed || this.editor === undefined) return
+    const dict = field === 'env' ? this.editor.draft.env : this.editor.draft.headers
+    dict.delete(key)
+    this.deps.requestRender()
+  }
+
+  /** Save the open editor through ONE official CAS mutation. */
+  saveEditor(): void {
+    if (this.disposed || this.editor === undefined) return
+    if (this.configStatusIsInFlight()) return
+    const editor = this.editor
+    const name = editor.draft.name
+    const draft = entryDraftOf(editor.draft)
+    const issues = validateMcpServerDraft(name, draft)
+    if (issues.length > 0) {
+      this.configStatus = { kind: 'rejected', text: `Not saved · ${issues[0]?.message ?? 'invalid draft'}` }
+      this.deps.requestRender()
+      return
+    }
+    // The form's authority binding must still be current BEFORE dispatch: a
+    // replaced Host generation or a moved revision never dispatches.
+    if (!Object.is(this.generation, editor.generation)) {
+      this.configStatus = { kind: 'unavailable', text: MCP_CONFIG_TEXT.unavailable }
+      this.deps.requestRender()
+      return
+    }
+    let ops: ReturnType<typeof mcpAddOps>
+    if (editor.mode === 'add') {
+      if (editor.entry !== undefined) return
+      if (this.nameTaken(name)) {
+        this.configStatus = { kind: 'rejected', text: 'Not saved · that server name is already in use' }
+        this.deps.requestRender()
+        return
+      }
+      ops = mcpAddOps(name, draft)
+    } else {
+      if (editor.entry === undefined) return
+      const patch = diffMcpServerDraft(editor.entry.effective, draft)
+      ops = mcpEditOps(name, editor.entry.effective, draft, patch)
+      if (ops.length === 0) {
+        this.editor = undefined
+        this.configStatus = { kind: 'saved', text: MCP_CONFIG_TEXT.saved }
+        this.deps.requestRender()
+        return
+      }
+    }
+    this.dispatchConfigWrite(ops, editor.revision, editor.generation, MCP_CONFIG_TEXT.saved, () => {
+      // A saved draft closes its editor (a failed/conflicted one keeps it).
+      if (this.editor === editor) this.editor = undefined
+    })
+  }
+
+  /** A name already held by another configured entry (the draft's own name is
+   *  free in Edit mode; Add has no own name yet). */
+  private nameTaken(name: string): boolean {
+    if (this.configuration.kind !== 'ready') return false
+    return this.configuration.entries.some(entry => entry.name === name)
+  }
+
+  /** Ask for the Enable/Disable confirmation of the selected server. */
+  beginToggle(): void {
+    if (!this.canEditConfiguration()) return
+    const entry = this.selectedConfigEntry()
+    if (entry === undefined) return
+    this.editor = undefined
+    this.configStatus = undefined
+    this.configConfirm = {
+      kind: 'toggle',
+      name: entry.name,
+      nextEnabled: entry.effective.enabled === false,
+    }
+    this.deps.requestRender()
+  }
+
+  /** Ask for the permanent-delete confirmation (User-added entries only). */
+  beginDelete(): void {
+    if (!this.canEditConfiguration()) return
+    const entry = this.selectedConfigEntry()
+    if (entry === undefined || entry.provenance !== 'user-added') return
+    this.editor = undefined
+    this.configStatus = undefined
+    this.configConfirm = { kind: 'delete', name: entry.name }
+    this.deps.requestRender()
+  }
+
+  /** Ask for the reset-to-inherited confirmation (overridden entries only). */
+  beginReset(): void {
+    if (!this.canEditConfiguration()) return
+    const entry = this.selectedConfigEntry()
+    if (entry === undefined || entry.provenance !== 'overridden') return
+    this.editor = undefined
+    this.configStatus = undefined
+    this.configConfirm = { kind: 'reset', name: entry.name }
+    this.deps.requestRender()
+  }
+
+  /**
+   * Answer the pending CRUD confirmation. Only an affirmative answer for the
+   * EXACT confirmed target (still selected, still the same generation, still
+   * the same revision and provenance) dispatches; anything else cancels with
+   * zero writes.
+   */
+  answerConfigConfirm(confirmed: boolean): void {
+    if (this.disposed || this.configConfirm === undefined) return
+    const confirmation = this.configConfirm
+    this.configConfirm = undefined
+    if (!confirmed) {
+      this.deps.requestRender()
+      return
+    }
+    if (this.selected !== confirmation.name) {
+      this.deps.requestRender()
+      return
+    }
+    const entry = this.selectedConfigEntry()
+    if (entry === undefined || this.configuration.kind !== 'ready') {
+      this.configStatus = { kind: 'unavailable', text: MCP_CONFIG_TEXT.unavailable }
+      this.deps.requestRender()
+      return
+    }
+    const generation = this.configuration.generation
+    const revision = this.configuration.revision
+    switch (confirmation.kind) {
+      case 'delete':
+        if (entry.provenance !== 'user-added') return
+        this.dispatchConfigWrite(mcpRemoveOps(entry.name), revision, generation, MCP_CONFIG_TEXT.deleted)
+        return
+      case 'reset':
+        if (entry.provenance !== 'overridden') return
+        this.dispatchConfigWrite(mcpRemoveOps(entry.name), revision, generation, MCP_CONFIG_TEXT.reset)
+        return
+      case 'toggle': {
+        const nextEnabled = confirmation.nextEnabled === true
+        this.dispatchConfigWrite(
+          mcpSetEnabledOps(entry.name, nextEnabled),
+          revision,
+          generation,
+          nextEnabled ? MCP_CONFIG_TEXT.toggleOn : MCP_CONFIG_TEXT.toggleOff,
+        )
+      }
+    }
+  }
+
+  /** Clear the ONE config status slot (a settled result acknowledged). */
+  clearConfigStatus(): void {
+    if (this.disposed || this.configStatus === undefined || this.configStatus.kind === 'saving') return
+    this.configStatus = undefined
+    this.deps.requestRender()
+  }
+
+  /**
+   * Dispatch EXACTLY ONE official configuration mutation. A dispatched write is
+   * never claimed cancelled: closing the page only stops its result being
+   * presented here.
+   */
+  private dispatchConfigWrite(
+    ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[],
+    revision: number,
+    generation: McpServerGeneration,
+    successText: string,
+    onSaved?: () => void,
+  ): void {
+    const token = this.openToken
+    const writeToken = ++this.configWriteToken
+    this.configStatus = { kind: 'saving', text: MCP_CONFIG_TEXT.saving }
+    this.notice = undefined
+    this.deps.requestRender()
+    this.deps.runOwned('MCP configuration write', async () => {
+      let outcome: McpConfigWriteOutcome
+      try {
+        outcome = await this.deps.configuration.mutate(ops, revision, generation)
+      } catch (error) {
+        outcome = {
+          kind: 'failed',
+          failure: { kind: 'outcome-unconfirmed', reason: error instanceof Error ? error.message : 'the write result is unknown' },
+        }
+      }
+      if (this.disposed || token !== this.openToken || writeToken !== this.configWriteToken) return
+      if (outcome.kind === 'saved') {
+        onSaved?.()
+        this.configStatus = { kind: 'saved', text: successText }
+        // The saved entry's own revision moved: re-read so the next edit pins
+        // the CURRENT revision instead of the one this write consumed.
+        this.refreshConfiguration()
+      } else {
+        switch (outcome.failure.kind) {
+          case 'conflict':
+            this.configStatus = { kind: 'conflict', text: MCP_CONFIG_TEXT.conflict }
+            this.refreshConfiguration()
+            break
+          case 'outcome-unconfirmed':
+            this.configStatus = { kind: 'unconfirmed', text: MCP_CONFIG_TEXT.unconfirmed }
+            break
+          case 'rejected':
+            this.configStatus = { kind: 'rejected', text: `Not saved · ${outcome.failure.reason}` }
+            break
+        }
+      }
+      this.deps.requestRender()
+    })
+  }
+
+  private editorSnapshot(editor: McpEditorState): McpEditorSnapshot {
+    const draft = entryDraftOf(editor.draft)
+    const dirty = editor.entry === undefined
+      ? true
+      : mcpEditOps(editor.draft.name, editor.entry.effective, draft, diffMcpServerDraft(editor.entry.effective, draft)).length > 0
+    return {
+      mode: editor.mode,
+      name: editor.draft.name,
+      nameEditable: editor.mode === 'add',
+      transport: editor.draft.transport,
+      command: editor.draft.command,
+      args: Object.freeze([...editor.draft.args]),
+      env: Object.freeze([...editor.draft.env.entries()].map(([key, value]) => ({ key, value }))),
+      cwd: editor.draft.cwd,
+      url: editor.draft.url,
+      headers: Object.freeze([...editor.draft.headers.entries()].map(([key, value]) => ({ key, value }))),
+      enabled: editor.draft.enabled,
+      dirty,
+      issues: validateMcpServerDraft(editor.draft.name, draft),
+      capturedRevision: editor.revision,
+    }
+  }
+
   private currentGeneration(): McpServerGeneration | undefined {
     return this.generation
   }
@@ -398,6 +1030,12 @@ export class McpServersController {
       this.generation = undefined
       this.confirmedKeySet = undefined
       this.sources = { kind: 'unavailable', reason: event.reason }
+      // FR4: a non-current observation can never authorize an edit — the
+      // configuration verdict degrades to unavailable and every open draft or
+      // confirmation is retired (zero writes).
+      this.configuration = { kind: 'unavailable', reason: event.reason }
+      this.editor = undefined
+      this.configConfirm = undefined
       this.entryTokens.clear()
       this.deps.requestRender()
       return
@@ -406,6 +1044,10 @@ export class McpServersController {
     // previous Host's probe report/feedback/confirmation never describes it.
     if (this.generation !== undefined && !Object.is(this.generation, event.roster.generation)) {
       this.retireGenerationBoundState()
+      // FR4: an open draft bound to the replaced Host is retired with it.
+      this.configuration = { kind: 'unavailable', reason: 'the Host authority changed' }
+      this.editor = undefined
+      this.configConfirm = undefined
       if (this.operation?.kind === 'probe') {
         this.operation = undefined
         this.notice = undefined
@@ -451,6 +1093,9 @@ export class McpServersController {
     if (this.selected === undefined && this.order.length > 0) this.selected = this.order[0]
     this.deps.requestRender()
     this.refreshSources(epoch)
+    // FR4: the configuration read is bound to the SAME roster generation, so
+    // it is re-read with it (never a separate poll).
+    this.refreshConfiguration()
   }
 
   /**

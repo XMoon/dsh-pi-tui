@@ -29,6 +29,7 @@
 
 import type { FooterCommandConfig } from '../domain/footer/command-config.ts'
 import type { FooterCustomItemsParseResult } from '../domain/footer/custom-items.ts'
+import type { McpClassifiedServerEntry } from '../domain/mcp/server-config.ts'
 
 /** The TUI settings document (theme/iconStyle/footer/footerLayout/
  * footerCustomItems/fullscreen/busyEnter/localShellSandbox/homeEndKeys/
@@ -1014,6 +1015,90 @@ export interface McpServerSourcesConfig {
   refresh(): Promise<void>
 }
 
+/**
+ * FR4 — the complete configured-server CONFIGURATION read of the official
+ * `mcp-manager` settings namespace, from ONE descriptor.
+ *
+ * `ready` carries the effective/base/user `servers` facts AND every entry's
+ * provenance classification (`user-added` / `inherited` / `overridden`),
+ * derived from the SAME descriptor read (never mixed with a manager roster or
+ * another generation's key set). `stale` is a last-known read that is not
+ * current; `unavailable` means no authority could be read at all. A consumer
+ * must turn both non-`ready` states into "no edit permission" — never into an
+ * empty configured list.
+ *
+ * The DTO carries NO resolved secret: sensitive values ride the official
+ * descriptor's redacted shape (or the stored `${credential:REF}` reference
+ * strings), and no namespace/path/loader fact crosses the port.
+ */
+export type McpServerConfiguration =
+  | {
+      readonly kind: 'ready'
+      /** Opaque identity of the Host generation this descriptor was read from
+       *  (the SAME identity the manager roster carries). */
+      readonly generation: object
+      /** The descriptor's revision — the CAS token every write must pin. */
+      readonly revision: number
+      /** The classified effective entries, in the descriptor's own key order. */
+      readonly entries: readonly McpClassifiedServerEntry[]
+    }
+  | { readonly kind: 'stale'; readonly reason: string }
+  | { readonly kind: 'unavailable'; readonly reason: string }
+
+/** Why one configuration write did not produce a saved, verified result. */
+export type McpConfigWriteFailure =
+  /** The official revision CAS refused the write (another editor changed the
+   *  namespace); the draft is NOT lost — the caller re-reads and re-confirms. */
+  | { readonly kind: 'conflict'; readonly reason: string }
+  /** A PROVEN refusal before or at the Host (not mounted, validation, no
+   *  permission): the write did not take effect. */
+  | { readonly kind: 'rejected'; readonly reason: string }
+  /** The write was DISPATCHED but its settlement can no longer be observed
+   *  (transport lost after dispatch). Never retried, never reported as saved
+   *  or refused. */
+  | { readonly kind: 'outcome-unconfirmed'; readonly reason: string }
+
+/** The settlement of ONE official `mcp-manager` settings mutation. */
+export type McpConfigWriteOutcome =
+  /** The write settled AND a fresh read-back confirmed the current authority. */
+  | { readonly kind: 'saved'; readonly revision: number }
+  | { readonly kind: 'failed'; readonly failure: McpConfigWriteFailure }
+
+/**
+ * FR4 — the configuration WRITE surface of the official `mcp-manager` settings
+ * namespace. This is the ONLY server CRUD path: every mutation is ONE official
+ * `SettingsForms.mutate('mcp-manager', ops, expectedRevision)` call carrying
+ * the revision the caller's decision was read at. There is no manager
+ * add/remove/update RPC, no Client-side spawn and no second persistence.
+ *
+ * A saved configuration is NOT a connected server: the manager's own watch
+ * reconciles instances afterwards, and status facts stay with the FR3 roster
+ * surface — this port reports only the config write settlement.
+ */
+export interface McpServerConfigurationConfig {
+  /** The current complete configuration verdict for THIS Host generation. */
+  read(): McpServerConfiguration
+  /**
+   * Ask the backend for a fresh authoritative read before the next
+   * {@link read} (the same refresh contract as `McpServerSourcesConfig`).
+   */
+  refresh(): Promise<void>
+  /**
+   * Dispatch EXACTLY ONE official revision-checked mutation. The ops are the
+   * domain's `SettingsPathOp[]` projection (path-scoped edits — never a
+   * whole-section rewrite); `expectedRevision` MUST be the revision the
+   * caller's decision was read at (a stale revision is the official
+   * `conflict`, never a silent overwrite); `pinnedGeneration` fences a Host
+   * replacement: a write whose captured generation is no longer current is
+   * refused before dispatch.
+   */
+  mutate(
+    ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[],
+    expectedRevision: number,
+    pinnedGeneration: object,
+  ): Promise<McpConfigWriteOutcome>
+}
+
 /** The config assembly — one narrow sub-interface per config domain.
  * Consumers depend on the sub-interface they use, never on the whole
  * assembly (no generic settings god API). */
@@ -1066,4 +1151,6 @@ export interface ConfigPort {
   readonly acpStartupPreference: AcpStartupPreferenceConfig
   /** The READ-ONLY MCP configuration-source keys (FR3). */
   readonly mcpServerSources: McpServerSourcesConfig
+  /** The MCP server configuration read/write sub-domain (FR4). */
+  readonly mcpServerConfiguration: McpServerConfigurationConfig
 }

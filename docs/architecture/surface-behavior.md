@@ -1471,34 +1471,67 @@ are the official ones; there is no invented `connected-ish`/`installed` flag.
 `Source` is `Configured`, `Plugin-owned`, `Retained/removed` or `Unknown`, and a
 non-current settings read never becomes `Plugin-owned`.
 
-Keys: list `↑/↓` move, `Enter` opens the detail, `/` filters by name, `r`
-re-observes, `Esc` cancels search / returns to Tools; detail `p` probes, `x`
-asks `Restart <name>? Live tools may be interrupted` (only `y` dispatches, `Esc`
-cancels), `r` refreshes, `Esc` returns to the list. While searching, `p/x/r/y`
-are query text only. Actions are offered only on a current observation with the
-server still listed and no in-flight operation; `loading`/`stale`/`unavailable`
-states explain themselves and expose no executable action. Probe reports a
-positive result only when the official result is `ok` AND cleanup is confirmed;
-a connected-but-unclean probe is its own `cleanup not confirmed` fact. A settled
-restart says `Restart settled · awaiting connected status` and waits for the
-watch; a lost settlement says `Outcome unconfirmed; refresh Host status before
+For a server the SAME current Host settings descriptor proves configuration-owned,
+the Detail also offers `Add`, `Edit`, Enable/Disable, permanent `Delete`
+(User-added entries only) and `Reset to inherited` (entries whose effective
+configuration differs from the base only). Add and Edit open a whole-page
+scrollable form inside the same specialist: `Identity` (name/transport/enabled),
+`Connection` (stdio command/working dir or HTTP URL), `Parameters` (one row per
+argument or key/value pair) and a `Status` line with the fixed `Save`/`Esc` bar.
+An Edit keeps the name read-only; a rename is two explicit actions. A stored
+plain value is shown only as `Set (hidden)` in a non-editing row, while a
+`${credential:REF}` reference stays verbatim. The form's draft, validation,
+focus, discard confirmation and one configuration status are Client-local and
+die with the page. A dirty `Esc` asks `Discard changes?` with Keep editing as the
+default; only an explicit discard drops the draft with zero writes.
+
+Keys: list `↑/↓` move, `Enter` opens the detail, `a` begins Add when the Host
+settings are current, `/` filters by name, `r` re-observes, `Esc` cancels search /
+returns to Tools; detail `p` probes, `x` asks
+`Restart <name>? Live tools may be interrupted` (only `y` dispatches, `Esc`
+cancels), `e` edits, `t` asks
+`Change saved configuration? The MCP process may stop or start`, `d` asks the
+exact-name Delete confirmation, `u` asks the Reset-to-inherited confirmation,
+`r` refreshes, `Esc` returns to the list. In a form, `↑/↓`/`Tab` move focus,
+`Enter` activates a field or row, `s` saves, `Esc` leaves an input or asks the
+discard confirmation; while an input is active `a/e/t/d/u/s` are text.
+Delete/Reset/toggle confirmations respond only to `y` or `Esc`. While searching,
+`p/x/r/y` and every CRUD key are query text only. Every action requires a
+current observation, a same-generation current settings descriptor, an exact
+listed entry and no in-flight operation; `loading`/`stale`/`unavailable` states
+explain themselves and expose no executable action. A write uses ONE official
+revision-checked settings mutation; the result is `Saving configuration…`,
+`Saved · waiting for Host reconcile`, a revision conflict, an unavailable Host,
+a proven refusal, or `Outcome unconfirmed …` after a lost settlement. A saved
+configuration is NEVER reported as Connected; the manager's watch remains the
+only status authority, and Probe/Restart results never overwrite the saved
+configuration fact. Probe reports a positive result only when the official
+result is `ok` AND cleanup is confirmed; a connected-but-unclean probe is its
+own `cleanup not confirmed` fact. A settled restart says
+`Restart settled · awaiting connected status` and waits for the watch; a lost
+settlement says `Outcome unconfirmed; refresh Host status before
 retrying` and is never retried.
 
 Layouts: `≥108` columns paint the list and the selected server side by side with
 one focus (`Enter` switches to the detail actions, `Esc` back to the list);
 `76–107` paint one compact column with a selected-row summary and an in-page
 detail state; `≤75` paint the list only. `44×8` keeps the selected row, its
-status and the complete `Back [Esc]`. Mouse targets are the last painted cells
+status and the complete `Back [Esc]`; the form keeps the current field, its
+status and `Save`/`Esc` reachable. Mouse targets are the last painted cells
 (a press whose frame repaints never completes), and the wheel scrolls only the
 one current region.
 
 Authority: `src/app/command/mcp-servers.ts` (`McpServersController`),
-`src/tui/panels/mcp-servers-page.ts`, the `McpServerPort` and
-`ConfigPort.mcpServerSources`, and the shared Settings panel.
-Must-not: write the profile or any configuration, spawn or speak MCP itself,
-own a second fleet/status cache, infer a source from `configured`, optimistically
-paint Connected after a restart, retry a restart, show a secret/URL/command
-credential, or let a late result from a replaced Host generation reach the page.
+`src/tui/panels/mcp-servers-page.ts`, the `McpServerPort`,
+`ConfigPort.mcpServerSources` / `ConfigPort.mcpServerConfiguration`, and the
+shared Settings panel.
+Must-not: spawn or speak MCP itself, write a second profile file or bypass the
+official settings mutation, treat `configured` or a materialized USER key as a
+source/override verdict, rewrite a whole existing entry (dirty paths only),
+offer permanent Delete for an inherited/overridden server, show a resolved
+secret, own a second fleet/status cache, optimistically paint Connected after a
+configuration write or restart, retry a dispatched write, or let a late result
+from a replaced Host generation reach the page.
 
 ## Model picker (`/model`)
 
