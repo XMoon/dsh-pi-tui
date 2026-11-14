@@ -48,9 +48,26 @@ const scenario = modeConfig.scenario ?? 'modes'
 if (mode !== 'full' && mode !== 'compact' && mode !== 'focus') {
   throw new Error('the flow must select exactly full, compact or focus')
 }
-if (scenario !== 'modes' && scenario !== 'inner-disclosure' && scenario !== 'ptc-error-note' && scenario !== 'card-disclosure' && scenario !== 'workflow-disclosure') {
+if (scenario !== 'modes' && scenario !== 'inner-disclosure' && scenario !== 'ptc-error-note' && scenario !== 'card-disclosure' && scenario !== 'workflow-disclosure' && scenario !== 'native-find') {
   throw new Error(`unknown transcript Tern scenario ${scenario}`)
 }
+
+// The T3-A native-find scenario's fixed marker tokens. The plan pins these
+// exact constants so the qualification flow reads them from the scenario
+// metadata (prompts.json) instead of re-typing them; no marker is ever placed
+// in the composer draft, tool debug output, status text or fixture plumbing —
+// only in real Main message bodies appended through the Session writer.
+const NATIVE_FIND_MARKERS = {
+  archive: 'T3A_MAIN_ARCHIVE_7C19',
+  shared: 'T3A_MAIN_SHARED_3A4D',
+  tail: 'T3A_MAIN_TAIL_8E02',
+  liveAppend: 'T3A_LIVE_APPEND_5F11',
+  nonExistent: 'T3A_NON_EXISTENT_6B90',
+  innerOnly: 'T3A_INNER_ONLY_2D73',
+  otherPane: 'T3A_OTHER_PANE_F4C7',
+  seedTurns: { first: 2, last: 29 },
+  appendTurn: 30,
+} as const
 const workRoot = join(paneRoot, 'dsh-home')
 const wireRecordPath = join(paneRoot, 'sdk-wire.jsonl')
 const eventsPath = join(paneRoot, 'events.jsonl')
@@ -124,28 +141,34 @@ const ptcFailureRuntime = {
   },
 }
 
-const PROMPT = scenario === 'ptc-error-note'
+const nativeFindModeTag = mode.toUpperCase()
+const PROMPT = scenario === 'native-find'
+  ? `FIND-${nativeFindModeTag} Qualify the native client Find over the continuous Main transcript.`
+  : scenario === 'ptc-error-note'
   ? 'PTC-NOTE'
   : scenario === 'inner-disclosure'
-    ? `INNER-${mode.toUpperCase()} Inspect the live reasoning, tool details and context disclosures.`
+    ? `INNER-${nativeFindModeTag} Inspect the live reasoning, tool details and context disclosures.`
     : scenario === 'card-disclosure'
-      ? `CARD-${mode.toUpperCase()} Inspect the native command, compaction, tool and context cards.`
+      ? `CARD-${nativeFindModeTag} Inspect the native command, compaction, tool and context cards.`
       : scenario === 'workflow-disclosure'
-        ? `WORKFLOW-${mode.toUpperCase()} Inspect the native Workflow run and phase disclosure.`
+        ? `WORKFLOW-${nativeFindModeTag} Inspect the native Workflow run and phase disclosure.`
         : 'MODES-01 Please list the background jobs and then answer with one short plain note '
           + 'about the canonical transcript reading flow, mixing English with 中文混排 so the real client wraps it.'
 writeFileSync(promptsPath, `${JSON.stringify({
   mode,
   scenario,
-  assistantMarker: scenario === 'ptc-error-note' ? `PTC-NOTE-${mode.toUpperCase()}-ANSWER`
-    : scenario === 'inner-disclosure' ? `INNER-${mode.toUpperCase()}-ANSWER`
-      : scenario === 'card-disclosure' ? `CARD-${mode.toUpperCase()}-ANSWER`
-        : scenario === 'workflow-disclosure' ? `WORKFLOW-${mode.toUpperCase()}-ANSWER` : 'MODES-DIRECT-ANSWER',
+  assistantMarker: scenario === 'native-find' ? `FIND-${nativeFindModeTag}-ANSWER`
+    : scenario === 'ptc-error-note' ? `PTC-NOTE-${nativeFindModeTag}-ANSWER`
+    : scenario === 'inner-disclosure' ? `INNER-${nativeFindModeTag}-ANSWER`
+      : scenario === 'card-disclosure' ? `CARD-${nativeFindModeTag}-ANSWER`
+        : scenario === 'workflow-disclosure' ? `WORKFLOW-${nativeFindModeTag}-ANSWER` : 'MODES-DIRECT-ANSWER',
   toolName: scenario === 'ptc-error-note' ? 'run_code' : 'job_list',
-  prompts: [{ ordinal: 1, marker: scenario === 'ptc-error-note' ? `PTC-NOTE-${mode.toUpperCase()}`
-    : scenario === 'inner-disclosure' ? `INNER-${mode.toUpperCase()}`
-      : scenario === 'card-disclosure' ? `CARD-${mode.toUpperCase()}`
-        : scenario === 'workflow-disclosure' ? `WORKFLOW-${mode.toUpperCase()}` : 'MODES-01', text: PROMPT }],
+  prompts: [{ ordinal: 1, marker: scenario === 'native-find' ? `FIND-${nativeFindModeTag}`
+    : scenario === 'ptc-error-note' ? `PTC-NOTE-${nativeFindModeTag}`
+    : scenario === 'inner-disclosure' ? `INNER-${nativeFindModeTag}`
+      : scenario === 'card-disclosure' ? `CARD-${nativeFindModeTag}`
+        : scenario === 'workflow-disclosure' ? `WORKFLOW-${nativeFindModeTag}` : 'MODES-01', text: PROMPT }],
+  ...(scenario === 'native-find' ? { nativeFind: NATIVE_FIND_MARKERS } : {}),
 }, null, 1)}\n`)
 
 // ── ONE-TO-ONE recorder around the production mount (append-only) ──
@@ -508,6 +531,149 @@ const appendWorkflowDisclosure = (): void => {
   session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
 }
 
+/** The T3-A native-find scenario's fixed SessionEvent appender helpers. Every
+ *  marker lives ONLY in real Main message bodies written by the SAME selected
+ *  Direct Session writer; nothing is injected at the Mapper or the surface. */
+interface NativeFindStats {
+  readonly written: number
+  readonly totalMessages: number
+  readonly lastTurn: number
+  readonly sessionId: string
+}
+
+const nativeFindSession = (): CardEventSession => {
+  if (fixture === undefined || mainSessionId === undefined) {
+    throw new Error('the production Direct writer has not selected the main Session')
+  }
+  const agent = fixture.ctx.agents.get(mainSessionId as never) as { session: CardEventSession } | undefined
+  if (agent === undefined) throw new Error('the Direct Session agent is not available')
+  return agent.session as CardEventSession
+}
+
+const nativeFindStats = (written: number): NativeFindStats => {
+  const session = nativeFindSession()
+  const events = session.snapshotEvents() as Array<{ type: string; data?: { turn?: number } }>
+  const messageTypes = new Set(['user/message', 'assistant/message', 'tool/result'])
+  const turns = events
+    .filter(event => event.type === 'turn/end' && typeof event.data?.turn === 'number')
+    .map(event => event.data!.turn!)
+  return {
+    written,
+    totalMessages: events.filter(event => messageTypes.has(event.type)).length,
+    lastTurn: turns.length === 0 ? 0 : Math.max(...turns),
+    sessionId: mainSessionId!,
+  }
+}
+
+const appendNativeFindTurn = (
+  session: CardEventSession,
+  turn: number,
+  userText: string,
+  assistantText: string,
+): void => {
+  session.append('turn/start', { turn })
+  session.append('user/message', {
+    id: MessageId(`t3a-find-u-${turn}`),
+    role: 'user',
+    content: [{ type: 'text', text: userText }],
+    source: { kind: 'user' },
+  }, { surfaceOp: 'append' })
+  session.append('step/start', { turn, step: 0 })
+  session.append('assistant/message', {
+    turn,
+    step: 0,
+    message: {
+      id: MessageId(`t3a-find-a-${turn}`),
+      role: 'assistant',
+      content: [{ type: 'text', text: assistantText }],
+      source: { kind: 'model', provider: 'scripted', model: 'scripted' },
+    },
+    stream: [],
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn, step: 0 })
+  session.append('turn/end', { turn, reason: { kind: 'completed' } })
+}
+
+const nativeFindFiller = (turn: number): string =>
+  `Turn ${turn}: ordinary continuous-Main filler line kept short and distinct for the native Find qualification.`
+
+/** Append the deterministic 28-Turn seed (Turn 2–29) through the SAME live
+ *  Direct Session writer: Turn 3 user ARCHIVE, Turns 4/25 assistant SHARED,
+ *  Turn 29 assistant TAIL and a Turn 10 native Tool whose LONG result carries
+ *  INNER_ONLY (default-collapsed; never force-materialized). */
+const appendNativeFindSeed = (): NativeFindStats => {
+  const session = nativeFindSession()
+  let written = 0
+  for (let turn = NATIVE_FIND_MARKERS.seedTurns.first; turn <= NATIVE_FIND_MARKERS.seedTurns.last; turn += 1) {
+    const userText = turn === 3
+      ? `Earlier archive request referencing ${NATIVE_FIND_MARKERS.archive} in the scrollback.`
+      : nativeFindFiller(turn)
+    const assistantText = turn === 4 || turn === 25
+      ? `The shared archive answer carries ${NATIVE_FIND_MARKERS.shared} for the native Find qualification.`
+      : turn === 29
+        ? `The final tail answer carries ${NATIVE_FIND_MARKERS.tail}.`
+        : nativeFindFiller(turn)
+    if (turn === 10) {
+      session.append('turn/start', { turn })
+      session.append('user/message', {
+        id: MessageId(`t3a-find-u-${turn}`),
+        role: 'user',
+        content: [{ type: 'text', text: userText }],
+        source: { kind: 'user' },
+      }, { surfaceOp: 'append' })
+      session.append('step/start', { turn, step: 0 })
+      session.append('tool/call', {
+        turn,
+        step: 0,
+        callId: ToolCallId('call-t3a-inner'),
+        name: 'read',
+        arguments: JSON.stringify({ file_path: 'src/t3a-inner-example.ts' }),
+      })
+      session.append('tool/result', {
+        turn,
+        step: 0,
+        message: {
+          id: MessageId('t3a-find-tool-10'),
+          role: 'tool',
+          toolCallId: ToolCallId('call-t3a-inner'),
+          content: [{ type: 'text', text: [
+            '<path>src/t3a-inner-example.ts</path>',
+            '<type>file</type>',
+            '<content>',
+            ...Array.from({ length: 14 }, (_, line) => `${line + 1}: inner file line ${line + 1}`),
+            `9: ${NATIVE_FIND_MARKERS.innerOnly} lives inside this collapsed Tool result body`,
+            ...Array.from({ length: 6 }, (_, line) => `${line + 15}: inner file line ${line + 15}`),
+            '(End of file - total 20 lines)',
+            '</content>',
+          ].join('\n') }],
+          source: { kind: 'tool', callId: ToolCallId('call-t3a-inner') },
+        },
+      }, { surfaceOp: 'append' })
+      session.append('step/end', { turn, step: 0 })
+      session.append('turn/end', { turn, reason: { kind: 'completed' } })
+      written += 3
+    } else {
+      appendNativeFindTurn(session, turn, userText, assistantText)
+      written += 2
+    }
+  }
+  return nativeFindStats(written)
+}
+
+/** Append the Turn-30 live same-source update (new LIVE_APPEND token plus the
+ *  previously shared token) with the full official turn envelope. */
+const appendNativeFindLiveAppend = (): NativeFindStats => {
+  const session = nativeFindSession()
+  const turn = NATIVE_FIND_MARKERS.appendTurn
+  appendNativeFindTurn(
+    session,
+    turn,
+    `A live same-source append carrying ${NATIVE_FIND_MARKERS.liveAppend}.`,
+    `The live append repeats ${NATIVE_FIND_MARKERS.shared} and adds ${NATIVE_FIND_MARKERS.liveAppend}.`,
+  )
+  return nativeFindStats(2)
+}
+
 /** Same-source late official update: grow Prepare from 5 to 6 members so the
  *  real client must switch that Phase to summary mode. */
 const growWorkflowPhase = (): void => {
@@ -670,6 +836,22 @@ const handleOneBatch = async (): Promise<void> => {
       note({ kind: 'case.finished', ...payload })
       return
     }
+    if (kind === 'native-find-seed') {
+      const stats = appendNativeFindSeed()
+      const payload = { seq, command: kind, status: 'ok', ...stats }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
+    if (kind === 'native-find-append') {
+      const stats = appendNativeFindLiveAppend()
+      const payload = { seq, command: kind, status: 'ok', ...stats }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
     if (kind === 'late-command-error') {
       if (fixture === undefined || mainSessionId === undefined) {
         throw new Error('the production Direct writer has not selected the main Session')
@@ -756,10 +938,11 @@ try {
     // `resolveDisplayPreset` reads. No renderer-local preset is set anywhere.
     tuiConfig: { displayPreset: mode },
     deltas: scenario === 'ptc-error-note' ? []
-      : scenario === 'inner-disclosure' ? [`INNER-${mode.toUpperCase()}-`, 'ANSWER']
-        : scenario === 'card-disclosure' ? [`CARD-${mode.toUpperCase()}-`, 'ANSWER']
-          : scenario === 'workflow-disclosure' ? [`WORKFLOW-${mode.toUpperCase()}-`, 'ANSWER']
-            : ['MODES-', 'DIRECT-', 'ANSWER'],
+      : scenario === 'inner-disclosure' ? [`INNER-${nativeFindModeTag}-`, 'ANSWER']
+        : scenario === 'card-disclosure' ? [`CARD-${nativeFindModeTag}-`, 'ANSWER']
+          : scenario === 'workflow-disclosure' ? [`WORKFLOW-${nativeFindModeTag}-`, 'ANSWER']
+            : scenario === 'native-find' ? [`FIND-${nativeFindModeTag}-`, 'ANSWER']
+              : ['MODES-', 'DIRECT-', 'ANSWER'],
     ...(scenario === 'inner-disclosure' ? {
       scriptedToolCalls: [{ text: 'the production Agent is checking the jobs', toolCall: { callId: 'call-inner-jobs', name: 'job_list', arguments: '{}' } }],
       scriptedReasoningDeltas: ['checking the first row\n', 'latest reasoning line'],
