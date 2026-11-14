@@ -432,8 +432,12 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
               }
               if (picker.isDisposed()) return
               // An authoritative Host read reconciles a lingering UNRESOLVED
-              // sessionless default intent (v2 §0.3.2) — the read is the truth.
+              // sessionless default intent (v2 §0.3.2) through the ONE shared
+              // confirm-only rule; a matching snapshot may have just cleared a
+              // stale marker, so the status bar is refreshed here too — the
+              // picker paint alone never recomputes the footer.
               runner.reconcileDefaultIntent(directory.default)
+              runner.refreshStatus()
               const sessionId = runner.currentSessionId
               picker.setDirectory({
                 directory,
