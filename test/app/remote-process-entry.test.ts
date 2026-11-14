@@ -433,15 +433,13 @@ test('a surface startup protocol refusal states the code, preserved Host and exp
   // The refusal must not turn an unauthenticated registry candidate into a
   // displayed PID/kill target or leak the private launch material.
   assert.doesNotMatch(line, /\bpid\b|connectUrl|token|cookie|\/home\/|\/users\//iu)
-  // Other startup failures keep the existing surface diagnostic.
-  assert.equal(
-    surfaceStartupFailureLine(new LocalScopeError('HOST_UNRESPONSIVE', 'local discovery: identity route answered HTTP 503')),
-    'split client surface: local discovery: identity route answered HTTP 503',
-  )
-  assert.equal(
-    surfaceStartupFailureLine(new LocalScopeError('HOST_BUILD_INCOMPATIBLE', 'local discovery: the Host cannot publish identity for another installed build')),
-    'split client surface: local discovery: the Host cannot publish identity for another installed build',
-  )
+  // Other typed scope failures are reported by CODE with a fixed recovery line;
+  // the raw message (which can carry an endpoint / detail) is never echoed.
+  for (const code of ['HOST_UNRESPONSIVE', 'HOST_BUILD_INCOMPATIBLE']) {
+    const other = surfaceStartupFailureLine(new LocalScopeError(code, 'local discovery: identity route answered HTTP 503 at http://10.0.0.1/x'))
+    assert.equal(other, `split client surface: cannot establish the local Host (${code}); the Host was not stopped. Resolve the Host state and re-run: dsh --profile pi-tui`)
+    assert.doesNotMatch(other, /503|10\.0\.0\.1|identity route/iu)
+  }
 })
 
 const REEXEC_HOST_INSTANCE = '00000000-0000-4000-8000-000000000000'
