@@ -21,6 +21,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { DirectTeamModePort, type DirectTeamModeContextLike } from '../../../src/runtime/direct/team-mode-direct.ts'
+import { cancellationError } from '../../../src/runtime/process/tasks.ts'
 import { skippedInstallationReason, startOptionalBundleHost } from '../../support/optional-bundle-fixture.ts'
 
 const skip = skippedInstallationReason([])
@@ -180,6 +181,39 @@ test('FR1 Direct Team port: real Host projection, Root write and modeled history
     setEnabled(agent: Agent, enabled: boolean): Promise<void>
   }).setEnabled(lead, false)
   assert.equal(notifications, 1, 'the disposer stops notifications and is idempotent')
+})
+
+test('FR1 Direct Team port: a post-append flush AbortError is indeterminate, not cancelled', { skip }, async t => {
+  const host = await startOptionalBundleHost(t, { bundles: [], presets: true })
+  host.ctx.llm.registerAdapter(['scripted'], new ScriptedAdapter())
+  const presets = host.ctx.get('agentPresets') as { select(agent: unknown, preset: string): Promise<unknown> }
+  const lead = await host.createAgent(SessionId('fr1-direct-flush-abort'), {
+    provider: 'scripted',
+    model: 'review-model',
+    cwd: join(host.root, 'work'),
+  })
+  await presets.select(lead, 'standard')
+  const port = new DirectTeamModePort(host.ctx as DirectTeamModeContextLike, (sessionId) => {
+    const agent = host.ctx.agents.get(SessionId(sessionId))
+    return agent === undefined ? undefined : agent
+  })
+  // A REAL session/flush listener that fails with a cancellation-shaped value
+  // AFTER the official service appended team/mode.
+  const unsubscribe = host.ctx.on('session/flush', (() => { throw cancellationError('flush listener aborted') }) as never)
+  let outcome
+  try {
+    outcome = await port.setEnabled('fr1-direct-flush-abort', true, signal)
+  } finally {
+    unsubscribe()
+  }
+  assert.equal(outcome.kind, 'indeterminate',
+    'an AbortError-shaped flush failure after the append must NOT be reported as a pre-dispatch cancellation')
+  // The write really was appended and the in-memory projection is ON; only the
+  // durability result is unconfirmed.
+  const modeEvents = host.events(lead).filter((event) => (event as { type?: string }).type === 'team/mode')
+  assert.equal(modeEvents.length, 1, 'the official service appended exactly one team/mode before the flush failed')
+  assert.equal((host.ctx.get('agentTeams') as { isEnabled(agent: Agent): boolean }).isEnabled(lead), true,
+    'the in-memory Team mode changed even though the flush failed')
 })
 
 test('FR1 Direct Team port: durable OFF survives restart and resume', { skip }, async t => {

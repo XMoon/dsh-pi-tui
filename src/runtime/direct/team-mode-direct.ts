@@ -14,7 +14,6 @@
 
 import type { TeamModePort, TeamModeSnapshot, TeamModeWriteOutcome } from '../team-mode-port.ts'
 import { safeErrorMessage } from '../process/errors.ts'
-import { isCancellation } from '../process/tasks.ts'
 
 /** The minimal structural Agent face this adapter forwards to the official services. */
 export interface DirectTeamModeAgentLike {
@@ -162,14 +161,16 @@ export class DirectTeamModePort implements TeamModePort {
       await service.setEnabled(agent, enabled, signal)
       return { kind: 'committed' }
     } catch (error) {
-      if (isCancellation(error)) {
-        return { kind: 'cancelled', reason: 'the Team mode change was cancelled' }
-      }
+      // The ONLY pre-dispatch cancellation is the caller's abort, checked
+      // before this call. Once the official `setEnabled` was entered it may
+      // already have appended `team/mode` before `sessions.flush()` failed —
+      // and a flush listener can throw an AbortError-shaped value. An error
+      // name here can never prove non-commit, so a cancellation-shaped error is
+      // `indeterminate`, not `cancelled`. The Root refusal is the one exception:
+      // the official service raises it BEFORE any append.
       if (isTeamLeadRequired(error)) {
         return { kind: 'rejected', reason: 'Agent Team mode can only be changed from the root Session' }
       }
-      // Past the pre-dispatch root/eligibility checks the Host may already have
-      // appended the selection before its flush failed; never claim a refusal.
       return {
         kind: 'indeterminate',
         reason: `the Host did not confirm the Team mode write: ${safeErrorMessage(error)}`,
