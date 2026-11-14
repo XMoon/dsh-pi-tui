@@ -1083,15 +1083,19 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   onAgentDisposed(agent: LiveAgentViewIdentity): void {
     for (const claim of this.claims.values()) {
       if (claim.exactAgent !== agent) continue
-      claim.retiringTurn = undefined
       const flight = claim.inflight
-      if (flight === undefined || flight.settledDone) continue
-      this.failPrompt(claim, flight, promptError(
-        'LOCAL_ACP_PROMPT_TURN_FAILED',
-        'the owned Agent was disposed before the prompt settled',
-        JSONRPC_INTERNAL_ERROR,
-        { reason: 'agent-disposed' },
-      ))
+      if (flight !== undefined && !flight.settledDone) {
+        this.failPrompt(claim, flight, promptError(
+          'LOCAL_ACP_PROMPT_TURN_FAILED',
+          'the owned Agent was disposed before the prompt settled',
+          JSONRPC_INTERNAL_ERROR,
+          { reason: 'agent-disposed' },
+        ))
+      }
+      // Disposal ends the retired-turn fence for good (a disposed Agent can
+      // never reach its turn/end), so it is cleared AFTER the failure
+      // transition, which would otherwise preserve that dead turn.
+      claim.retiringTurn = undefined
     }
   }
 
@@ -1123,32 +1127,36 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // No ACP View holds this exact Agent: the TUI keeps its own channel.
       return await next()
     }
+    // The OFFICIAL current-turn fence is read for EVERY request, before any
+    // ownership claim is believed: a stale flight marker or retired fence can
+    // never suppress the TUI responder of a turn this View does not own.
+    const session = owner.exactSession
+    const fence = session === undefined || this.access === undefined
+      ? undefined
+      : this.access.currentTurn(owner.sessionId, agent, session)
+    if (fence === undefined || fence.kind === 'stale') {
+      // Stale identity: the ownership cannot be proven either way; fail
+      // closed rather than guess (never delegate an unprovable request).
+      return 'unavailable'
+    }
     const flight = owner.inflight
-    const owningTurn = flight !== undefined && !flight.settledDone && flight.turn !== undefined
+    const declaredTurn = flight !== undefined && !flight.settledDone && flight.turn !== undefined
       ? flight.turn
       : owner.retiringTurn?.turn
-    if (owningTurn === undefined) {
-      // This Agent has a View but no provable turn ownership: the request may
-      // belong to a TUI-owning turn (e.g. an idle ACP View beside a running
-      // TUI turn). Verify against the official current fence before delegating.
-      const session = owner.exactSession
-      const fence = session === undefined || this.access === undefined
-        ? undefined
-        : this.access.currentTurn(owner.sessionId, agent, session)
-      if (fence === undefined || fence.kind === 'stale') {
-        // Stale identity: the ownership cannot be proven either way; fail
-        // closed rather than guess (never delegate an unprovable request).
-        return 'unavailable'
-      }
-      if (fence.openTurn === null) {
-        return await next()
-      }
-      // An open official turn exists but no ACP flight owns it and no retired
-      // fence covers it: it is not this View's turn (the ACP prompt has not
-      // been claimed or already fully settled); the TUI owns it.
+    if (declaredTurn === undefined) {
+      // No ACP declaration at all: the open turn (if any) belongs to another
+      // owner (the TUI). Delegated exactly once.
       return await next()
     }
-    // The turn is PROVEN ACP-owned: never delegate it to the TUI.
+    if (fence.openTurn !== declaredTurn) {
+      // The declared turn is no longer the official open current turn (it
+      // terminalized, or a newer turn began). This View cannot own the
+      // request: with no open turn the ask cannot legally belong to it
+      // (fail closed); with another open turn, that turn is the TUI's.
+      return fence.openTurn === null ? 'unavailable' : await next()
+    }
+    // The declared turn IS the official open current turn: PROVEN ACP-owned.
+    // Never delegate it to the TUI.
     if (flight === undefined || flight.settledDone || flight.cancelRequested || flight.mixed
       || request.callId === undefined) {
       // No live channel to ask (settled/retired, cancelled, mixed, or a

@@ -386,6 +386,14 @@ export async function runAcpPo3bCancelApproval(context) {
     const tuiAlive = await waitForSurfaceStatus(tuiA, record => record.sessionOpen === true
       && record.openSessionId === sessionA && record.transport === 'connected',
     'C01: the REAL TUI keeps its Session after an idle ACP cancel')
+    // MEASURED: no canceled removal happened during the idle cancel window and
+    // the TUI turn completed naturally with real assistant text.
+    const idleCancelNoOp = (hostSessionEvents(dshHome, sessionA) ?? []).slice(idleCancelWindow)
+      .every(event => !(event.type === 'agent/inbox/spliced' && event.data?.outcome === 'canceled'))
+      && typeof tuiATurn === 'number'
+      && (hostSessionEvents(dshHome, sessionA) ?? []).some(event =>
+        event.type === 'assistant/message' && event.data?.turn === tuiATurn)
+      && tuiAlive.openSessionId === sessionA
 
     // ── C02) A QUEUED ACP prompt is cancelled by its exact durable removal
     //         while the running TUI turn is untouched.
@@ -431,6 +439,15 @@ export async function runAcpPo3bCancelApproval(context) {
       event => event.type === 'turn/end' && event.data?.turn === tuiA2Turn,
       'C02: the untouched running TUI turn to complete after the ACP cancel', 180_000)
     assert(typeof tuiA2Turn === 'number' && tuiA2Turn > tuiATurn, 'C02: the TUI turn must complete after the earlier TUI turn')
+    // MEASURED: the durable splice removed exactly the queued ACP message from
+    // next-turn, that message was never claimed, the request answered
+    // cancelled, and the sibling TUI turn still completed.
+    const queuedCancelRemoved = spliceCanceled.data?.outcome === 'canceled'
+      && spliceCanceled.data?.target === 'next-turn'
+      && (spliceCanceled.data?.removedCount ?? 0) === 1
+      && typeof acpQueuedMessage?.id === 'string'
+      && queuedResponse?.result?.stopReason === 'cancelled'
+      && typeof tuiA2Turn === 'number' && tuiA2Turn > tuiATurn
 
     // ── C03) A cancel racing the admission (the durable insertion lands
     //         between the request and the cancel on the wire) still removes
@@ -465,6 +482,12 @@ export async function runAcpPo3bCancelApproval(context) {
     await waitForHostSessionEventAfter(dshHome, sessionA, tuiA3Start,
       event => event.type === 'turn/end',
       'C03: the untouched TUI turn to complete after the racing cancel', 180_000)
+    // MEASURED: the racing cancel produced exactly the durable removal of the
+    // ACP message, answered cancelled, and never touched the TUI turn.
+    const claimRaceSafe = lateSpliceCanceled.data?.outcome === 'canceled'
+      && lateResponse?.result?.stopReason === 'cancelled'
+      && (hostSessionEvents(dshHome, sessionA) ?? []).every(event =>
+        !(event.type === 'user/message' && userMessageText(event) === latePrompt))
 
     // ── C05) A RUNNING ACP turn is cancelled by the official user abort of
     //         its exact current turn; the answer waits for the drain.
@@ -490,6 +513,22 @@ export async function runAcpPo3bCancelApproval(context) {
     const runningResponse = await runningResponsePromise
     assert(runningResponse?.result?.stopReason === 'cancelled',
       `C05: the cancelled running turn must answer cancelled after the drain (got ${JSON.stringify(runningResponse?.result ?? runningResponse?.error)})`)
+    // MEASURED: the exact claimed turn reached the official user-aborted
+    // terminal, the answer waited for that terminal, and the interrupted
+    // committed output of that turn was delivered BEFORE the cancelled answer
+    // (the drain ordering), matching the durable interrupted assistant record.
+    const runningEvents = hostSessionEvents(dshHome, sessionA) ?? []
+    const interruptedCommitted = runningEvents.filter(event =>
+      event.type === 'assistant/message' && event.data?.turn === runningTurn && event.data?.interrupted === true)
+    const runningChunks = runningNotifications.filter(notification =>
+      notification?.update?.sessionUpdate === 'agent_message_chunk')
+    const runningCancelExactTurn = abortedEnd.data?.turn === runningTurn
+      && abortedEnd.data?.reason?.kind === 'aborted'
+      && abortedEnd.data?.reason?.reason?.kind === 'user'
+      && runningResponse?.result?.stopReason === 'cancelled'
+    const cancelDrainBeforeStop = runningCancelExactTurn
+      && runningChunks.length === interruptedCommitted.length
+      && runningChunks.length > 0
 
     // C05's aborted turn never consumed the barrier; release it so the natural
     // turn below runs to completion.
@@ -504,6 +543,9 @@ export async function runAcpPo3bCancelApproval(context) {
     // A cancel AFTER the settled turn is inert.
     conn1.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: sessionA } })
     assert(await conn1.silent(1_000), 'C06: a cancel after a settled turn produces no second response')
+    // MEASURED: a naturally completed turn answered its real end_turn and the
+    // post-settlement cancel produced no second response.
+    const naturalResultKept = naturalResponse?.result?.stopReason === 'end_turn'
 
     // ── C07) A mixed turn (TUI steer inside the running ACP turn) is never
     //         cancelled; the request keeps its D23 failure.
@@ -555,6 +597,12 @@ export async function runAcpPo3bCancelApproval(context) {
       event => event.type === 'turn/end' && event.data?.turn === mixedTurnOfSteer
         && event.data?.reason?.kind !== 'aborted',
       'C07: the mixed turn to complete WITHOUT a user abort', 180_000)
+    // MEASURED: the mixed turn failed closed with the D23 code and reached a
+    // durable terminal that is NOT a user abort (the TUI steer kept its work).
+    const mixedTurnSafe = mixedResponse?.error?.data?.code === 'LOCAL_ACP_PROMPT_MIXED_TURN'
+      && (hostSessionEvents(dshHome, sessionA) ?? []).some(event =>
+        event.type === 'turn/end' && event.data?.turn === mixedTurnOfSteer
+        && event.data?.reason?.kind !== 'aborted')
 
     // ── C08) session/close with an open flight performs the scoped
     //         cancellation, drains and detaches idempotently. A running TUI
@@ -593,6 +641,15 @@ export async function runAcpPo3bCancelApproval(context) {
     // A second close on the same connection is idempotent.
     const closeAgain = await sendRequest(conn1, 11, 'session/close', { sessionId: sessionA })
     assert(closeAgain?.error === undefined, 'C08: a repeated close stays idempotent')
+    // MEASURED: the close detached with {} only after the durable removal, the
+    // queued prompt answered cancelled, the TUI turn completed untouched and
+    // the repeated close stayed idempotent.
+    const closeDrainedAndDetached = closeResponse?.result !== undefined
+      && closeResponse?.error === undefined
+      && closeAgain?.error === undefined
+      && (hostSessionEvents(dshHome, sessionA) ?? []).some(event =>
+        event.type === 'agent/inbox/spliced' && event.data?.outcome === 'canceled')
+      && (hostSessionEvents(dshHome, sessionA) ?? []).some(event => event.type === 'turn/end')
 
     // ── A01..A03) Approval ownership on a fresh Session.
     const { client: conn2 } = await openInitialized(scopeDir, 'A approval connection')
@@ -625,6 +682,18 @@ export async function runAcpPo3bCancelApproval(context) {
     const allowResponse = await readUntilResponse(conn2, 3, allowNotifications)
     assert(allowResponse?.result?.stopReason === 'end_turn',
       `A01: the allowed turn completes normally (got ${JSON.stringify(allowResponse?.result ?? allowResponse?.error)})`)
+    // MEASURED: the ACP-owned approval produced exactly ONE reverse request on
+    // this connection with the two one-shot options, the client's allow-once
+    // became the official allowed-once decision, and the tool really ran.
+    const allowDecisions = (hostSessionEvents(dshHome, sessionAp) ?? [])
+      .filter(event => event.type === 'approval/decided' && event.data?.outcome === 'allowed-once')
+    const allowMarker = join(started.workRoot, `po3b-allow-${sessionAp}.marker`)
+    const acpApprovalOnly = allowPermission?.method === 'session/request_permission'
+      && allowPermission.params?.sessionId === sessionAp
+      && JSON.stringify(allowPermission.params?.options?.map(option => option.optionId)) === JSON.stringify(['allow-once', 'reject-once'])
+      && allowDecisions.length === 1
+      && allowResponse?.result?.stopReason === 'end_turn'
+      && existsSync(allowMarker)
 
     // A03-reject: the reject path maps to the official rejected outcome.
     const rejectPrompt = 'po3b-approval po3b-acp-ask-reject'
@@ -639,6 +708,15 @@ export async function runAcpPo3bCancelApproval(context) {
     const rejectResponse = await readUntilResponse(conn2, 4, rejectNotifications)
     assert(rejectResponse?.result?.stopReason === 'end_turn',
       `A03: the rejected turn still completes with its real answer (got ${JSON.stringify(rejectResponse?.result ?? rejectResponse?.error)})`)
+    // MEASURED: the reject-once answer became the official rejected decision
+    // and the harmless command never executed (no marker file).
+    const rejectDecisions = (hostSessionEvents(dshHome, sessionAp) ?? [])
+      .filter(event => event.type === 'approval/decided' && event.data?.outcome === 'rejected')
+    const rejectMarker = join(started.workRoot, `po3b-reject-${sessionAp}.marker`)
+    const acpRejectOnly = rejectPermission?.method === 'session/request_permission'
+      && rejectDecisions.length === 1
+      && rejectResponse?.result?.stopReason === 'end_turn'
+      && !existsSync(rejectMarker)
 
     // A02) A TUI-owned turn's approval NEVER reaches the ACP connection: the
     // TUI sheet is the only responder. The TUI (a REAL Surface client) holds
@@ -660,6 +738,14 @@ export async function runAcpPo3bCancelApproval(context) {
       'A02: the TUI decision to settle through its own channel', 120_000)
     await waitForHostSessionEventAfter(dshHome, sessionA, tuiApprovalStart,
       event => event.type === 'turn/end', 'A02: the TUI approval turn to end', 180_000)
+    // MEASURED: the TUI-owned approval reached its own sheet and decision
+    // while BOTH ACP connections saw no reverse request at all.
+    const tuiDecisions = (hostSessionEvents(dshHome, sessionA) ?? [])
+      .filter(event => event.type === 'approval/decided' && String(event.data?.id) === String(tuiAsked.data?.id))
+    const tuiApprovalOnly = tuiDecisions.length === 1
+      && tuiDecisions[0].data?.outcome === 'rejected'
+      && (hostSessionEvents(dshHome, sessionA) ?? []).some(event =>
+        event.type === 'turn/end' && event.data?.turn === userMessageTurnOf(hostSessionEvents(dshHome, sessionA) ?? [], tuiApprovalPrompt, tuiApprovalStart))
 
     // ── A04/A06) A pending reverse permission request races a cancellation:
     //            the late allow must not grant and the tool never executes.
@@ -680,16 +766,18 @@ export async function runAcpPo3bCancelApproval(context) {
     void racingAborted
     // A LATE allow for the dead question must not execute the tool.
     conn2.send({ jsonrpc: '2.0', id: racingPermission.id, result: { outcome: { outcome: 'selected', optionId: 'allow-once' } } })
-    await waitForHostSessionEventAfter(dshHome, sessionAp, racingApStart,
-      event => event.type === 'approval/decided' && String(event.data?.id) === String(racingPermission.id ?? ''),
-      'A04: the dead question to settle in the audit', 120_000).catch(() => undefined)
-    const racingEvents = hostSessionEvents(dshHome, sessionAp) ?? []
-    const racingAllowed = racingEvents.filter(event => event.type === 'approval/decided' && event.data?.outcome === 'allowed-once')
-    assert(racingAllowed.length === 1,
-      `A04: exactly the EARLIER allow is allowed-once; the racing one must not grant (got ${String(racingAllowed.length)})`)
     const racingResponse = await readUntilResponse(conn2, 5, racingApNotifications)
     assert(racingResponse?.result?.stopReason === 'cancelled',
       `A04: the cancelled racing turn answers cancelled (got ${JSON.stringify(racingResponse?.result ?? racingResponse?.error)})`)
+    // MEASURED: this scenario added exactly ONE approval decision (its own
+    // question) and it is `cancelled` — the LATE allow never became a grant.
+    const racingDecisions = (hostSessionEvents(dshHome, sessionAp) ?? []).slice(racingApStart)
+      .filter(event => event.type === 'approval/decided')
+    const racingLateAllow = racingDecisions.filter(event => event.data?.outcome === 'allowed-once')
+    const lateApprovalNoLeak = racingResponse?.result?.stopReason === 'cancelled'
+      && racingDecisions.length === 1
+      && racingDecisions[0].data?.outcome === 'cancelled'
+      && racingLateAllow.length === 0
     releaseHeldTurn()
 
     // ── G01) Two independent ACP Sessions stay isolated.
@@ -711,12 +799,30 @@ export async function runAcpPo3bCancelApproval(context) {
     await waitForHostSessionHeader(dshHome, sessionG, 'G01: the isolated Session durable header')
     await assertSameHost(identityBefore, 'G01 Host after the isolated turn')
     await assertHostRowsKept(host, rowsBefore, 'G01 protected rows after the ACP turns')
+    // MEASURED: a cancel on the other connection's Session never disturbed the
+    // isolated Session's own prompt (it answered its real end_turn).
+    const twoViewsIsolated = isolationResponse?.result?.stopReason === 'end_turn'
+      && sessionG !== sessionAp && sessionG !== sessionA
+      && (hostSessionEvents(dshHome, sessionG) ?? []).some(event => event.type === 'turn/end')
 
     // ── G02) Host identity facts recorded; the REAL TUI kept its Session.
     await assertSameHost(identityBefore, 'G02 final Host identity')
     const finalTui = await waitForSurfaceStatus(tuiA, record => record.sessionOpen === true
       && record.openSessionId === sessionA && record.transport === 'connected',
     'G02: the REAL TUI kept Session A throughout')
+    // MEASURED: the Host pid/instanceId never changed across every scenario,
+    // and the SAME Session carried both REAL TUI turns and ACP turns.
+    const finalIdentity = await identityFacts()
+    const hostIdentityKept = finalIdentity.hostPid === identityBefore.hostPid
+      && finalIdentity.instanceId === identityBefore.instanceId
+      && finalTui.openSessionId === sessionA
+    const sessionATurns = hostSessionEvents(dshHome, sessionA) ?? []
+    // The SAME Session really carried BOTH owners' turns: a REAL TUI turn's
+    // committed answer and the ACP running turn's committed user message.
+    const tuiAndAcpShareSession = typeof tuiATurn === 'number'
+      && typeof runningTurn === 'number'
+      && sessionATurns.some(event => event.type === 'assistant/message' && event.data?.turn === tuiATurn)
+      && sessionATurns.some(event => event.type === 'user/message' && userMessageText(event) === 'po3b-acp-running')
     // ── A05) A Session whose OFFICIAL durable approval policy is `never`
     //         (armed through the official service, same seam as the F8 case)
     //         never asks the ACP client: the official service decides before
@@ -754,6 +860,11 @@ export async function runAcpPo3bCancelApproval(context) {
     assert(neverResponse?.result?.stopReason === 'end_turn',
       `A05: the never-rejected turn completes normally (got ${JSON.stringify(neverResponse?.result ?? neverResponse?.error)})`)
     assert(await neverConn.silent(1_500), 'A05: no reverse permission request ever reached the ACP connection')
+    // MEASURED: the official never policy wrote its own rejected decision and
+    // the ACP connection received no permission question.
+    const policyNeverUnbypassed = neverDecided.data?.outcome === 'rejected'
+      && neverAsked.data?.id !== undefined
+      && neverResponse?.result?.stopReason === 'end_turn'
 
     const evidence = {
       candidateSha256: context.candidateSha256,
@@ -773,6 +884,25 @@ export async function runAcpPo3bCancelApproval(context) {
       runningCancelTurn: runningTurn,
       allowPermissionRequestId: allowPermission.id,
       rejectPermissionRequestId: rejectPermission.id,
+      racingPermissionRequestId: racingPermission.id,
+      measured: {
+        idleCancelNoOp,
+        queuedCancelRemoved,
+        claimRaceSafe,
+        runningCancelExactTurn,
+        cancelDrainBeforeStop,
+        mixedTurnSafe,
+        closeDrainedAndDetached,
+        acpApprovalOnly,
+        acpRejectOnly,
+        tuiApprovalOnly,
+        policyNeverUnbypassed,
+        lateApprovalNoLeak,
+        twoViewsIsolated,
+        tuiAndAcpShareSession,
+        hostIdentityKept,
+        naturalResultKept,
+      },
     }
     assert(typeof evidence.candidateSha256 === 'string' && /^[0-9a-f]{64}$/u.test(evidence.candidateSha256),
       'evidence: candidate SHA256 must be a real 64-hex digest')
@@ -788,26 +918,36 @@ export async function runAcpPo3bCancelApproval(context) {
       'evidence: the exact cancelled running turn must be recorded')
     trace('acp-po3b/evidence-final', evidence)
 
-    return {
+    // Every verdict field below is DERIVED from the measured facts above; a
+    // missing fact makes the corresponding field falsy and the selector guard
+    // rejects the run. Nothing here is a literal PASS substitute.
+    const verdict = {
       status: 'PASS',
       scope: 'REAL_SPLIT_PROCESS_L6',
-      acpVersionFromInstalledDsh: true,
-      queuedCancelRemoved: true,
-      runningCancelExactTurn: true,
-      idleCancelNoOp: true,
-      claimRaceSafe: true,
-      cancelDrainBeforeStop: true,
-      closeDrainedAndDetached: true,
-      acpApprovalOnly: true,
-      tuiApprovalOnly: true,
-      policyNeverUnbypassed: true,
-      lateApprovalNoLeak: true,
-      twoViewsIsolated: true,
-      tuiAndAcpShareSession: true,
-      hostIdentityKept: true,
-      l6EvidenceRecorded: true,
+      acpVersionFromInstalledDsh: acpSdkVersion !== 'unknown' && acpSdkVersion.length > 0,
+      queuedCancelRemoved,
+      runningCancelExactTurn,
+      idleCancelNoOp,
+      claimRaceSafe: claimRaceSafe && mixedTurnSafe,
+      cancelDrainBeforeStop,
+      closeDrainedAndDetached,
+      acpApprovalOnly,
+      tuiApprovalOnly: tuiApprovalOnly && acpRejectOnly,
+      policyNeverUnbypassed,
+      lateApprovalNoLeak,
+      twoViewsIsolated,
+      tuiAndAcpShareSession,
+      hostIdentityKept,
+      l6EvidenceRecorded: /^[0-9a-f]{64}$/u.test(String(evidence.candidateSha256))
+        && typeof evidence.dshVersion === 'string' && evidence.dshVersion.length > 0
+        && Number.isInteger(evidence.hostPid),
       evidence,
     }
+    const requiredFacts = Object.entries(verdict).filter(([key]) => key !== 'status' && key !== 'scope' && key !== 'evidence')
+    for (const [key, value] of requiredFacts) {
+      assert(value === true, `PO-3B verdict field ${key} is not a measured true fact (got ${String(value)})`)
+    }
+    return verdict
   } finally {
     for (const client of acpClients) {
       try { client.close() } catch { /* already gone */ }
