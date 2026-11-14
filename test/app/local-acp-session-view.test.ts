@@ -511,12 +511,22 @@ test('the production Host access classifier maps official errors to the right cr
   }
   assert.deepEqual(await access.createWorkspace('/w'), { kind: 'indeterminate', code: 'workspace/invalid-path' })
 
-  // Default Agent-preset composition rejects BEFORE the Session is minted.
-  for (const code of ['agent-preset/not-found', 'agent-preset/invalid']) {
+  // Definite PRE-mint rejections keep their definite classification.
+  for (const code of ['gateway/bad-request', 'workspace/not-found']) {
     sessionImpl = async () => {
       throw { isDSHRemoteError: true, code, details: {} }
     }
     assert.deepEqual(await access.createSession('ws'), { kind: 'rejected', code })
+  }
+
+  // `agent-preset/not-found|invalid` can ALSO be raised AFTER the Session handle
+  // was persisted (`composition.setup` → `presets.mount` → `retain`), so they
+  // cannot prove "not created" and must stay unconfirmed.
+  for (const code of ['agent-preset/not-found', 'agent-preset/invalid']) {
+    sessionImpl = async () => {
+      throw { isDSHRemoteError: true, code, details: {} }
+    }
+    assert.deepEqual(await access.createSession('ws'), { kind: 'indeterminate', code })
   }
 
   // The official published-with-error keeps the authoritative created id.
