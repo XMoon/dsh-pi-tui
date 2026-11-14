@@ -489,6 +489,23 @@ function printSelectableCases() {
  * installing a profile.
  */
 export function assertSelectedVerdict(caseId, result) {
+  if (caseId === 'acp.po1-uds-ready') {
+    assert(result?.status === 'PASS'
+      && result?.scope === 'REAL_SPLIT_PROCESS_L6'
+      && result?.acpVersionFromInstalledDsh === true
+      && result?.listenBeforeRegistry === true
+      && result?.permissions0700And0600 === true
+      && result?.hostReadyAfterAcp === true
+      && result?.independentConnections === true
+      && result?.capacityAndBackpressure === true
+      && result?.noBusinessSessionBeforePo2 === true
+      && result?.stoppedAndUnlinked === true
+      && result?.staleReclaimedSafely === true
+      && result?.noTcpOrStdoutPollution === true
+      && result?.originalSplitClientIntact === true,
+    `selected ${caseId}: the ACP UDS verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
+    return
+  }
   if (caseId === 'account.official-composition') {
     assert(result?.status === 'PASS'
       && result?.browser === 'PASS'

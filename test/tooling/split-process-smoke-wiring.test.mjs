@@ -542,6 +542,34 @@ test('selected dispatch fails closed on non-PASS Web and Account verdicts', () =
     { status: 'NOT_VERIFIED', rhH3ClientCrash: 'REAL_SPLIT_PROCESS_L6', rhH3HostCrash: 'REAL_SPLIT_PROCESS_L6', hostReportedNothing: true }),
     /selected herdr\.h3-abrupt-lifecycle/u)
 })
+test('the ACP UDS selected verdict accepts only the complete real-L6 proof', () => {
+  const complete = {
+    status: 'PASS',
+    scope: 'REAL_SPLIT_PROCESS_L6',
+    acpVersionFromInstalledDsh: true,
+    listenBeforeRegistry: true,
+    permissions0700And0600: true,
+    hostReadyAfterAcp: true,
+    independentConnections: true,
+    capacityAndBackpressure: true,
+    noBusinessSessionBeforePo2: true,
+    stoppedAndUnlinked: true,
+    staleReclaimedSafely: true,
+    noTcpOrStdoutPollution: true,
+    originalSplitClientIntact: true,
+  }
+  assert.equal(assertSelectedVerdict('acp.po1-uds-ready', complete), undefined)
+  // A missing proof field is a rejected verdict.
+  const missing = { ...complete }
+  delete missing.staleReclaimedSafely
+  assert.throws(() => assertSelectedVerdict('acp.po1-uds-ready', missing), /selected acp\.po1-uds-ready/u)
+  // A proof field that is present but false is a rejected verdict.
+  assert.throws(() => assertSelectedVerdict('acp.po1-uds-ready', { ...complete, listenBeforeRegistry: false }),
+    /selected acp\.po1-uds-ready/u)
+  // A NOT_VERIFIED status never becomes a selected PASS.
+  assert.throws(() => assertSelectedVerdict('acp.po1-uds-ready', { ...complete, status: 'NOT_VERIFIED' }),
+    /selected acp\.po1-uds-ready/u)
+})
 test('a selected result names only the selectable scope', () => {
   const first = listSelectableCases()[0]
   assert.ok(first, 'the registry must expose a case')

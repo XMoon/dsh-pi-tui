@@ -57,6 +57,7 @@ import { runF8SessionPolicy } from '../smoke/split-process/session-policy-f8.mjs
 import { runHerdrH1 } from '../smoke/split-process/herdr-h1.mjs'
 import { runWebProviderSettingsF3 } from '../smoke/split-process/web-provider-settings-f3.mjs'
 import { runHerdrH2, runHerdrH3 } from '../smoke/split-process/herdr-h2.mjs'
+import { runAcpPo1 } from '../smoke/split-process/acp-po1.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -310,6 +311,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'herdr.h3-abrupt-lifecycle',
     title: 'real Client and Host OS process abrupt exits prove Pane authority withdrawal, the untouched sibling Pane, and re-confirmation on a new authenticated generation',
     run: runHerdrH3,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    id: 'acp.po1-uds-ready',
+    title: 'a real Host-owned bounded ACP v1 Unix socket initializes before Ready, fails Session methods closed, retires on stop and reclaims a stale inode',
+    run: runAcpPo1,
   }),
 ])
 

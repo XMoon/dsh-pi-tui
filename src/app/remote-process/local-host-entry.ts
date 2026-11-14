@@ -54,6 +54,12 @@ import {
   type PiTuiWebAccessStatus,
 } from '../../runtime/remote/pi-tui-web-access-contract.ts'
 import { cleanupOwnedFiles, type LocalInstanceRecord } from './local-discovery.ts'
+import {
+  LocalAcpError,
+  parseAcpMaxConnections,
+  startLocalAcpListener,
+  type LocalAcpListener,
+} from './local-acp-listener.ts'
 
 /** The official Web-only rows of the Host overlay, rendered from the ONE
  * production roster (`host/features/web-roster.ts`). Pure template data: no
@@ -265,6 +271,8 @@ export interface LocalHostEntryOptions {
 interface HostScratchOwner {
   scopeDir?: string
   scratchDir?: string
+  /** The one Host-owned local ACP listener; its synchronous exit mirror retires the socket inode. */
+  acpListener?: LocalAcpListener
 }
 
 /** Node's `RequestInit` omits the cache mode; B1 requires `no-store` explicitly. */
@@ -523,6 +531,11 @@ async function publishLocalHost(
 export async function runLocalHostEntry(options: LocalHostEntryOptions): Promise<void> {
   const owned: HostScratchOwner = {}
   process.once('exit', () => {
+    // A forced `process.exit()` from the launcher's native signal handler
+    // bypasses the async finally; this synchronous mirror retires the exact
+    // socket inode this process bound (a SIGKILL has no JS callback and is left
+    // to the next seat winner's safe reclaim).
+    owned.acpListener?.cleanupSync()
     if (owned.scopeDir !== undefined && owned.scratchDir !== undefined) {
       removeOwnedScratch(owned.scopeDir, owned.scratchDir)
     }
@@ -574,6 +587,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
   let handle: Awaited<ReturnType<OfficialDshModules['runProfile']>> | undefined
   let registration: PublishedLocalHost | undefined
   let liveness: HostActivityObserver | undefined
+  let localAcp: LocalAcpListener | undefined
   try {
     const scratchDir = mkdtempSync(join(scope.dir, 'host-scratch-'))
     scratchOwner.scratchDir = scratchDir
@@ -634,11 +648,19 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       let shuttingDown = false
       let resolveStopped: (() => void) | undefined
       const stopped = new Promise<void>(resolve => { resolveStopped = resolve })
-      const stop = (code: number, owner: PublishedLocalHost): Promise<void> => {
+      const stop = (code: number, owner: PublishedLocalHost | undefined): Promise<void> => {
         if (stopping !== undefined) return stopping
         shuttingDown = true
         stopping = (async () => {
           const errors: Array<{ step: string; error: unknown }> = []
+          // PO-1: stop accepting and retire the local ACP socket before the
+          // official shutdown runs. One collected step; a close failure never
+          // skips the official `shutdownOwner`.
+          try {
+            await localAcp?.close()
+          } catch (error) {
+            errors.push({ step: 'local-acp-close', error })
+          }
           try {
             liveness?.close()
           } catch (error) {
@@ -655,17 +677,22 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
           } catch (error) {
             errors.push({ step: 'scratch-remove', error })
           }
-          try {
-            await owner.unregisterIdentity()
-          } catch (error) {
-            errors.push({ step: 'identity-unregister', error })
+          // With no published owner there is no identity route or registry yet
+          // (a stop admitted while the listener was binding, before Ready), so
+          // there is nothing to unregister and no owned registry file to delete.
+          if (owner !== undefined) {
+            try {
+              await owner.unregisterIdentity()
+            } catch (error) {
+              errors.push({ step: 'identity-unregister', error })
+            }
           }
           try {
             await shutdownOwner.shutdown(code)
           } catch (error) {
             errors.push({ step: 'shutdown', error })
           }
-          cleanupOwnedFiles(scope, owner.identity.instanceId)
+          if (owner !== undefined) cleanupOwnedFiles(scope, owner.identity.instanceId)
           if (errors.length > 0) {
             const first = errors[0]
             const primary = first.error instanceof Error ? first.error : new Error(String(first.error))
@@ -754,6 +781,34 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         process.removeListener('SIGINT', onSigint)
       }
 
+      // PO-1: bind the ONE Host-owned local ACP v1 front door BEFORE the Ready
+      // commit. `startLocalAcpListener` returns only once the socket is bound,
+      // forced to 0600 and serving `initialize`, so a published registry never
+      // points at a socket that is not yet accepting. The listener handle lives
+      // on the existing scratch owner so both the ordinary shutdown and the
+      // synchronous process-exit mirror release it; there is no second Host
+      // owner, Context, Agent or Session.
+      const maxConnections = parseAcpMaxConnections(process.env.DSH_PI_TUI_ACP_MAX_CONNECTIONS)
+      localAcp = await startLocalAcpListener({ scope, maxConnections, diag: createEntryDiag('host') })
+      scratchOwner.acpListener = localAcp
+      // Qualification-only barrier: hold the process after the socket is bound
+      // and serving but BEFORE the registry is committed, so a launcher can
+      // prove listen-before-Ready and deliver a signal in that exact window.
+      const acpBoundBarrier = process.env.SPLIT_PROCESS_HOST_ACP_BOUND_BARRIER
+      if (acpBoundBarrier !== undefined && acpBoundBarrier !== '') {
+        writeEntryRecord({ m4a0: 'qualification', processRole: 'host', op: 'acp-bound-barrier', pid: process.pid })
+        await waitForQualificationBarrier(acpBoundBarrier)
+      }
+      if (pendingStop !== undefined) {
+        // A signal was admitted while the listener was binding but before the
+        // registry committed. Never publish Ready for a stop-requested Host; the
+        // listener is already on the scratch owner, so the ordinary shutdown
+        // closes it and retires the socket inode.
+        await stop(pendingStop, undefined)
+        releaseSignalAdmission()
+        return
+      }
+
       const publishedHost = await publishLocalHost(handle.ctx, scope, processStartIdentity)
       published = publishedHost
       registration = publishedHost
@@ -812,7 +867,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         processRole: 'host',
         phase: 'after-boot',
         pid: process.pid,
-        ...(error instanceof LocalScopeError ? { code: error.code } : {}),
+        ...(error instanceof LocalScopeError || error instanceof LocalAcpError ? { code: error.code } : {}),
         error: error instanceof Error ? error.message : String(error),
         ...(error instanceof Error && error.stack !== undefined ? { stack: error.stack } : {}),
       })
@@ -840,6 +895,19 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
           pid: process.pid,
           step: 'settle-before-shutdown',
           error: priorCleanupFailure,
+        })
+      }
+      try {
+        await localAcp?.close()
+      } catch (cleanupError) {
+        priorCleanupFailure ??= cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+        writeEntryRecord({
+          m4a0: 'cleanup-failure',
+          processRole: 'host',
+          phase: 'after-boot',
+          pid: process.pid,
+          step: 'local-acp-close',
+          error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
         })
       }
       try {
@@ -1018,7 +1086,7 @@ if (import.meta.main) {
       processRole: 'host',
       phase: 'startup',
       pid: process.pid,
-      ...(error instanceof LocalScopeError ? { code: error.code } : {}),
+      ...(error instanceof LocalScopeError || error instanceof LocalAcpError ? { code: error.code } : {}),
       error: error instanceof Error ? error.message : String(error),
       ...(error instanceof Error && error.stack !== undefined ? { stack: error.stack } : {}),
     })

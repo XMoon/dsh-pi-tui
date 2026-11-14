@@ -169,6 +169,9 @@ importers:
 
   .:
     dependencies:
+      '@agentclientprotocol/sdk':
+        specifier: 1.4.0
+        version: 1.4.0(zod@4.6.7)
       '@resvg/resvg-js':
         specifier: 2.6.2
         version: 2.6.2
@@ -683,6 +686,11 @@ importers:
         version: 5.9.3
 
 packages:
+
+  '@agentclientprotocol/sdk@1.4.0':
+    resolution: {integrity: sha512-/eufudw+aFY1LKLolT6yFE6UMmYRl7fMJ/DEONSIyR6wI3slHWITBsANRGqXEY8FRzqUxwh7QEaGiZHcJPVThg==}
+    peerDependencies:
+      zod: 4.6.7
 
   '@anthropic-ai/sdk@0.129.0':
     resolution: {integrity: sha512-MH7LB20kNpGLUpPTe2OG5XvL/KhX8HUO9XyBaFjgFk6TLS4Xjt0VPIuMKywe7POKKPslX+QxSlVok9e+8kG5Nw==}
@@ -4967,6 +4975,10 @@ packages:
         optional: true
 
 snapshots:
+
+  '@agentclientprotocol/sdk@1.4.0(zod@4.6.7)':
+    dependencies:
+      zod: 4.6.7
 
   '@anthropic-ai/sdk@0.129.0(zod@4.6.7)':
     dependencies:
