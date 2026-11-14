@@ -577,12 +577,32 @@ test('logs refuses a private file when a user manager exists without an owned un
   assertCode(result, 4, /LOG_SOURCE_UNAVAILABLE/u)
 })
 
-test('sanitizeLogText redacts connect URLs, cookies and control characters', () => {
-  const text = 'GET http://127.0.0.1:4517/connect?token=abc\r\nAuthorization: Bearer xyz\nCookie: sid=1\nnormal line'
+test('sanitizeLogText redacts the whole credential value behind common header schemes', () => {
+  const text = [
+    'GET http://127.0.0.1:4517/connect?token=QUERYSECRET',
+    'Authorization: Bearer HEADERSECRET',
+    'Proxy-Authorization: Basic UHJveHlTZWNyZXQ=',
+    'X-Api-Key: APISECRET',
+    'Cookie: sid=COOKIESECRET; token=COOKIETOKEN',
+    'Set-Cookie: session=SETCOOKIESECRET',
+    'password: MULTI WORD SECRET',
+    'api_key=GENERICSECRET',
+    'normal line',
+  ].join('\r\n')
   const out = sanitizeLogText(text)
-  assert.doesNotMatch(out, /token=abc/u)
-  assert.doesNotMatch(out, /Bearer xyz/u)
-  assert.doesNotMatch(out, /sid=1/u)
+  for (const secret of [
+    'QUERYSECRET',
+    'HEADERSECRET',
+    'UHJveHlTZWNyZXQ=',
+    'APISECRET',
+    'COOKIESECRET',
+    'COOKIETOKEN',
+    'SETCOOKIESECRET',
+    'MULTI WORD SECRET',
+    'GENERICSECRET',
+  ]) {
+    assert.equal(out.includes(secret), false, `the sanitized output must not contain ${secret}`)
+  }
   assert.match(out, /normal line/u)
 })
 
