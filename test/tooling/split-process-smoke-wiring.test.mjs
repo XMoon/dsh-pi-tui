@@ -820,6 +820,40 @@ test('the ACP shared Session View selected verdict accepts only the complete rea
   assert.throws(() => assertSelectedVerdict('acp.po2-session-view', { ...complete, status: 'NOT_VERIFIED' }),
     /selected acp\.po2-session-view/u)
 })
+test('the ACP prompt/turn/event selected verdict accepts only the complete real-L6 proof', () => {
+  const complete = {
+    status: 'PASS',
+    scope: 'REAL_SPLIT_PROCESS_L6',
+    acpVersionFromInstalledDsh: true,
+    tuiAndAcpShareSession: true,
+    promptAcceptedWhileRunning: true,
+    ackIsNotCompletion: true,
+    acpOnlyOutput: true,
+    exactTurnCorrelation: true,
+    updatesBeforeStopReason: true,
+    tuiAfterPromptHistory: true,
+    mixedTurnFailClosed: true,
+    twoViewIsolation: true,
+    disconnectKeepsHostTurn: true,
+    staleGenerationNotReplayed: true,
+    outputBackpressureIsolated: true,
+    sameConnectionAfterFailure: true,
+    hostIdentityKept: true,
+    originalSplitClientIntact: true,
+    l6EvidenceRecorded: true,
+  }
+  assert.equal(assertSelectedVerdict('acp.po3a-turn-events', complete), undefined)
+  // A missing proof field is a rejected verdict.
+  const missing = { ...complete }
+  delete missing.mixedTurnFailClosed
+  assert.throws(() => assertSelectedVerdict('acp.po3a-turn-events', missing), /selected acp\.po3a-turn-events/u)
+  // A proof field that is present but false is a rejected verdict.
+  assert.throws(() => assertSelectedVerdict('acp.po3a-turn-events', { ...complete, acpOnlyOutput: false }),
+    /selected acp\.po3a-turn-events/u)
+  // A NOT_VERIFIED status never becomes a selected PASS.
+  assert.throws(() => assertSelectedVerdict('acp.po3a-turn-events', { ...complete, status: 'NOT_VERIFIED' }),
+    /selected acp\.po3a-turn-events/u)
+})
 test('a selected result names only the selectable scope', () => {
   const first = listSelectableCases()[0]
   assert.ok(first, 'the registry must expose a case')
