@@ -406,6 +406,14 @@ test('a settled probe result is published as the page probe report', async () =>
  * FR4: configuration CRUD.
  * ------------------------------------------------------------------------- */
 
+/** Save the open draft, acknowledging the external-capability question when the
+ *  draft can reach outside the Host (the contract: that disclosure is explicit). */
+async function saveAcknowledging(h: Harness): Promise<void> {
+  h.controller.saveEditor()
+  if (h.controller.snapshot().configConfirm?.kind === 'save') h.controller.answerConfigConfirm(true)
+  await h.flush()
+}
+
 /** A configuration read for the given generation with the given entries. The
  *  raw entry value is projected EXACTLY like the adapters do. */
 function configOf(
@@ -494,8 +502,7 @@ test('an Add dispatches ONE pinned mutation, closes the draft and claims Saved (
   h.controller.setEditorArg(0, '--flag')
   h.controller.setEditorEnabled(false)
   assert.equal(h.controller.editorDirty(), true)
-  h.controller.saveEditor()
-  await h.flush()
+  await saveAcknowledging(h)
   assert.equal(h.configuration.mutations.length, 1)
   const mutation = h.configuration.mutations[0]
   assert.equal(mutation?.revision, 5, 'the revision captured when the form opened')
@@ -524,8 +531,7 @@ test('an Edit patches only dirty fields and keeps a conflicted draft open', asyn
   h.controller.renameEditorDictKey('env', placeholder, 'NEW')
   h.controller.setEditorDictValue('env', 'NEW', 'v')
   h.controller.removeEditorDictKey('env', 'DROP')
-  h.controller.saveEditor()
-  await h.flush()
+  await saveAcknowledging(h)
   assert.equal(h.configuration.mutations.length, 1)
   assert.deepEqual(h.configuration.mutations[0]?.ops, [
     { op: 'set', path: ['servers', 'mine', 'env', 'NEW'], value: 'v' },
@@ -600,8 +606,7 @@ test('a Save whose captured revision moved is refused by the official CAS', asyn
   h.configuration.outcome = (ops, revision) => revision === 2
     ? { kind: 'failed', failure: { kind: 'conflict', reason: 'changed since it was read' } }
     : { kind: 'saved', revision: 4 }
-  h.controller.saveEditor()
-  await h.flush()
+  await saveAcknowledging(h)
   assert.equal(h.configuration.mutations.length, 1)
   assert.equal(h.configuration.mutations[0]?.revision, 2, 'the pinned revision is submitted verbatim')
   assert.equal(h.controller.snapshot().configStatus?.kind, 'conflict')
@@ -614,6 +619,11 @@ test('a second Save while a write is in flight dispatches nothing', async () => 
   h.controller.beginEdit()
   h.controller.setEditorField('command', '/bin/true')
   h.controller.saveEditor()
+  // The first Save opened the external-capability question; answering it
+  // dispatches the ONE write, and a second Save while it is in flight is a
+  // no-op.
+  assert.equal(h.controller.snapshot().configConfirm?.kind, 'save')
+  h.controller.answerConfigConfirm(true)
   assert.equal(h.controller.snapshot().configStatus?.kind, 'saving')
   h.controller.saveEditor()
   await h.flush()
@@ -766,8 +776,7 @@ test('an Add refuses a name held by a plugin registration or a retained record',
     h.controller.beginAdd()
     h.controller.setEditorField('name', name)
     h.controller.setEditorField('command', '/bin/true')
-    h.controller.saveEditor()
-    await h.flush()
+    await saveAcknowledging(h)
     assert.equal(h.controller.snapshot().configStatus?.kind, 'rejected', `${name} must be refused locally`)
     assert.equal(h.controller.snapshot().editor?.name, name, 'the draft survives the refusal')
   }
@@ -775,7 +784,38 @@ test('an Add refuses a name held by a plugin registration or a retained record',
 
   // A genuinely free name still dispatches.
   h.controller.setEditorField('name', 'free-name')
+  await saveAcknowledging(h)
+  assert.equal(h.configuration.mutations.length, 1)
+})
+
+test('a Save on a stdio or HTTP draft discloses the external capability first', async () => {
+  const h = await readyHarness([], 1)
+  // stdio: the external COMMAND fact, answered before any write.
+  h.controller.beginAdd()
+  h.controller.setEditorField('name', 'cmd')
+  h.controller.setEditorField('command', '/bin/sleep')
   h.controller.saveEditor()
+  assert.equal(h.controller.snapshot().configConfirm?.kind, 'save')
+  assert.match(h.controller.snapshot().configConfirm?.warning ?? '', /execute an external command/u)
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 0, 'the disclosure itself never writes')
+  h.controller.answerConfigConfirm(false)
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 0, 'declining writes nothing')
+  assert.equal(h.controller.snapshot().editor?.name, 'cmd', 'the draft survives a decline')
+
+  // HTTP: the external SERVICE fact names the target host (never a credential).
+  h.controller.setEditorTransport('streamable-http')
+  h.controller.setEditorField('name', 'svc')
+  h.controller.setEditorField('url', 'https://mcp.example.test/rpc')
+  h.controller.saveEditor()
+  assert.equal(h.controller.snapshot().configConfirm?.kind, 'save')
+  const warning = h.controller.snapshot().configConfirm?.warning ?? ''
+  assert.match(warning, /send data to an external service/u)
+  assert.match(warning, /mcp\.example\.test/u)
+  assert.doesNotMatch(warning, /credential/u)
+  h.controller.answerConfigConfirm(true)
   await h.flush()
   assert.equal(h.configuration.mutations.length, 1)
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'saved')
 })

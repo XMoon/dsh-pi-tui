@@ -2169,6 +2169,60 @@ class DirectAcpStartupPreferenceConfig implements AcpStartupPreferenceConfig {
 /** The official settings namespace the shared Host MCP manager owns. */
 const MCP_SERVER_SOURCES_NS = 'mcp-manager'
 
+/** Whether one detached value equals the `set` value of the same path (the
+ *  read-back proof that an op really is in force). */
+function sameJson(left: unknown, right: unknown): boolean {
+  if (left === right) return true
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right)
+      && left.length === right.length
+      && left.every((item, index) => sameJson(item, right[index]))
+  }
+  if (typeof left === 'object' && left !== null && typeof right === 'object' && right !== null) {
+    const leftKeys = Object.keys(left)
+    return leftKeys.length === Object.keys(right).length
+      && leftKeys.every(key => Object.hasOwn(right, key)
+        && sameJson((left as Record<string, unknown>)[key], (right as Record<string, unknown>)[key]))
+  }
+  return false
+}
+
+/** Read one path off a detached value (own keys only). */
+function valueAt(root: unknown, path: readonly string[]): unknown {
+  let node: unknown = root
+  for (const key of path) {
+    if (typeof node !== 'object' || node === null || !Object.hasOwn(node, key)) return undefined
+    node = (node as Record<string, unknown>)[key]
+  }
+  return node
+}
+
+/** Whether every `set` op of a committed batch is in force in the read-back. */
+function opsHold(read: McpServerConfiguration, ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[]): boolean {
+  if (read.kind !== 'ready') return false
+  const entries = new Map(read.entries.map(entry => [entry.name, entry]))
+  for (const op of ops) {
+    if (op.op !== 'set') continue
+    const name = op.path[1]
+    if (name === undefined) return false
+    const entry = entries.get(name)
+    if (entry === undefined) return false
+    const relative = op.path.slice(2)
+    if (relative.length === 0) continue
+    const actual = valueAt(entry.effective, relative)
+    if (!sameJson(actual, op.value)) return false
+  }
+  return true
+}
+
+/** Whether the read-back proves the batch did NOT take effect (the revision
+ *  never moved AND no `set` value is in force). */
+function opsRejected(read: McpServerConfiguration, expectedRevision: number, ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[]): boolean {
+  if (read.kind !== 'ready') return false
+  if (read.revision !== expectedRevision) return false
+  return !opsHold(read, ops)
+}
+
 /**
  * The Direct MCP configuration-source read. It projects the EFFECTIVE
  * `mcp-manager.servers` key set from the official Host settings descriptor —
@@ -2308,16 +2362,27 @@ export class DirectMcpServerConfigurationConfig implements McpServerConfiguratio
     try {
       await settings.mutate(MCP_SERVER_SOURCES_NS, wireOps, expectedRevision)
     } catch (error) {
-      // The official CAS refusal is its own outcome: the draft survives and
-      // the user re-reads instead of the write being reported as a rejection.
       const code = (error as { code?: unknown } | null)?.code
       const message = safeErrorMessage(error)
-      return {
-        kind: 'failed',
-        failure: code === 'SETTINGS_CONFLICT'
-          ? { kind: 'conflict', reason: message }
-          : { kind: 'rejected', reason: message },
+      if (code === 'SETTINGS_CONFLICT') {
+        // The official CAS refusal is its own outcome: the draft survives and
+        // the user re-reads instead of the write being reported as a rejection.
+        return { kind: 'failed', failure: { kind: 'conflict', reason: message } }
       }
+      // The official `ConfigEditor.edit` PERSISTS the profile patch and only
+      // then reconciles the Loader, so a throw from `settings.mutate` does NOT
+      // prove the write was refused — the entry may already be on disk. The
+      // read-back is the only honest classifier: if the caller's op is now in
+      // force the write COMMITTED (report `saved`), if it is provably absent
+      // the Host refused it, and anything else is unobservable.
+      const observed = this.read()
+      if (observed.kind === 'ready' && Object.is(this.generation(), pinnedGeneration)) {
+        if (opsHold(observed, ops)) return { kind: 'saved', revision: observed.revision }
+        if (opsRejected(observed, expectedRevision, ops)) {
+          return { kind: 'failed', failure: { kind: 'rejected', reason: message } }
+        }
+      }
+      return { kind: 'failed', failure: { kind: 'outcome-unconfirmed', reason: message } }
     }
     // Saved is a READ-BACK fact from the SAME Host authority: re-read the
     // descriptor and report the committed revision only when it is still

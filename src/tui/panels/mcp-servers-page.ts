@@ -1203,6 +1203,15 @@ export class McpServersPage implements EmbeddedSpecialistPage {
           true,
         )
       }
+      if (confirm.kind === 'save') {
+        // The external-capability disclosure is the question: it must survive
+        // whole-segment drops, so it outranks the answer hints.
+        return paintBar(
+          [{ text: confirm.warning ?? 'Save this configuration?', short: 'Save configuration?', priority: 1000 }, ...CONFIRM_HINTS],
+          width,
+          true,
+        )
+      }
       return paintBar(
         [{ text: 'Change saved configuration? The MCP process may stop or start', short: 'Change config?', priority: 1000 }, ...CONFIRM_HINTS],
         width,
