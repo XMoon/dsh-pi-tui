@@ -132,6 +132,19 @@ function liveAgentIds(fixture: DirectTspFixture): string[] {
   return agents.list().map(agent => agent.session.id)
 }
 
+/**
+ * The projection scope the renderer is currently showing (`s3`), or `undefined`
+ * while it sits BETWEEN scopes (the Loading state). Read-only: it folds the
+ * same wire the assertions below read.
+ */
+function projectionScopeId(pane: DirectTspFixture['pane']): string | undefined {
+  for (const node of wireNodes(pane)) {
+    const match = /main\.(s\d+)-/u.exec(node.id)
+    if (match !== null) return match[1]
+  }
+  return undefined
+}
+
 /** The REAL persisted session headers, as the sibling A/B/A lane reads them. */
 async function waitForSessionHeaders(fixture: DirectTspFixture, expected: number, label: string): Promise<string[]> {
   const persistence = fixture.ctx.get('sessionPersistence') as unknown as {
@@ -335,7 +348,7 @@ test('Alt+C hands the Client-local copy policy the exact stored bytes including 
 
 // ── D. A real publication retires the open card ─────────────────────────────
 
-test('a real /new publication while the card is open retires it and cannot restore the outgoing Session row', async (t) => {
+test('a real /new after closing History scopes the next card to the new Session', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['ok'], composerActions: true, historySearch: true, sessionBrowser: true })
   const prompts: string[] = []
@@ -355,15 +368,34 @@ test('a real /new publication while the card is open retires it and cannot resto
     // closing the card first, exactly as a user does.
     await keyWithFrame(fixture, '\u001b', 'Esc closes the card')
     assert.equal(cardPainted(fixture), false, 'the card is gone')
+    // The Ctrl+R below must read B's Session scope, so this wait chain is the
+    // FULL publication commit — Session store, live Agent, the new TSP Main
+    // projection's Loading→Welcome frames and a settled composer — the same
+    // barrier the sibling A/B/A history lane pins. Waiting only for "B exists"
+    // let the chord open inside A's scope on slow CI runs and search A's rows.
+    const scopeBeforeNew = projectionScopeId(fixture.pane)
+    const framesBeforeNew = fixture.pane.frameCount()
     await submitLine(fixture, '/new')
     const afterNew = await waitForSessionHeaders(fixture, 2, 'the /new Session in the real store')
     const sessionB = afterNew.find(id => id !== sessionA)
     assert.ok(sessionB !== undefined, 'a DIFFERENT real Session was published')
     await waitFor('B owns a live Agent', () => liveAgentIds(fixture).includes(sessionB!), 30_000)
+    await waitFor('the new Session projection commit', () => {
+      const nodes = wireNodes(fixture.pane)
+      if (nodes.some(node => node.id === 'main.loading')) return false
+      if (fixture.pane.frameCount() <= framesBeforeNew) return false
+      const scope = projectionScopeId(fixture.pane)
+      if (scope !== undefined && scope !== scopeBeforeNew) return true
+      return nodes.some(node => node.id.startsWith('main.welcome-'))
+        && fixture.pane.frames().slice(framesBeforeNew).some(frame =>
+          frame.ops.some(op => op[0] === 'add' && op[1] === 'main.loading'))
+    }, 30_000)
 
     await composerReady(fixture)
     await keyWithFrame(fixture, CTRL_R, 'Ctrl+R in the new Session')
-    await waitFor('the new scope settled', () => dockTexts(fixture).some(text => text.startsWith('Results ·')), 30_000)
+    // B is brand-new: its empty scope settles at EXACTLY zero rows. A loose
+    // prefix would also pass while the card still shows A's old result page.
+    await waitFor('the new scope settled', () => dockTexts(fixture).some(text => text === 'Results · 0 shown'), 30_000)
     assert.equal(dockTexts(fixture).some(text => text.includes('row owned by the outgoing session')), false,
       'the incoming Session never browses the outgoing Session\'s rows')
     const restore = wireNodes(fixture.pane).find(node => /-restore$/.test(node.id))
