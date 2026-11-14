@@ -17,7 +17,6 @@ import type { SessionScope } from '../../app/session/scope.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
 import { isCancellation, runOwned, type OwnedTaskOptions } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
-import { sameModelSelection } from '../../domain/session/model-selection.ts'
 import type {
   ModelApplyOutcome,
   ModelPickerRequest,
@@ -221,21 +220,10 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
                 onResult: (directory) => {
                   if (token !== modelOperationToken) return
                   if (!runner.isSessionScopeCurrent(scope)) return
-                  // An OLD or elsewhere-owned default is NOT evidence that an
-                  // in-flight write did NOT land: the official save is async and
-                  // may still commit after this read. For an UNRESOLVED intent,
-                  // ONLY a MATCHING authoritative read may reconcile it to
-                  // committed; a non-matching read refreshes the display (the
-                  // read is the best-known current value) but NEVER fails or
-                  // clears the unresolved marker. A committed save already
-                  // cleared the intent, so this branch only applies to the
-                  // indeterminate case.
-                  const pending = runner.defaultIntentRecord?.selection
-                  if (pending !== undefined && !sameModelSelection(pending, directory.default)) {
-                    runner.refreshStatus()
-                    runner.updateWelcomeCard()
-                    return
-                  }
+                  // The ONE reconciliation entry point owns the rule: only a
+                  // MATCHING authoritative read confirms the unresolved intent;
+                  // an older snapshot must never fail an in-flight write. This
+                  // caller, the /model panel load and every Retry share it.
                   runner.reconcileDefaultIntent(directory.default)
                   runner.refreshStatus()
                   runner.updateWelcomeCard()
