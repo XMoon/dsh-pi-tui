@@ -35,6 +35,7 @@ import {
   selectedPassLine,
 } from '../../scripts/lib/split-smoke-selection.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
+import { unitBelongsToRun, unitFileSafetyError } from '../../scripts/smoke/split-process/managed-host-m6-2b.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'split-process-smoke.mjs')
@@ -549,6 +550,32 @@ test('a managed-host selected case may report an honest NOT_VERIFIED, never SELE
     /selected managed-host\.m6-2b-systemd/u)
   assert.throws(() => assertSelectedVerdict('managed-host.m6-2b-manager-error', { status: 'BLOCKED' }),
     /selected managed-host\.m6-2b-manager-error/u)
+})
+
+test('managed unit cleanup only matches this run\u2019s exact owner metadata and safe file', () => {
+  const scopeId = 'a'.repeat(64)
+  const buildId = 'b'.repeat(64)
+  const hostEntry = '/opt/inst/dist/local-host.mjs'
+  const content = [
+    'X-DshPiTuiOwner=local-host-manager-v1',
+    `X-DshPiTuiScopeId=${scopeId}`,
+    `X-DshPiTuiInstallBuild=${buildId}`,
+    `ExecStart="/usr/bin/node" "${hostEntry}"`,
+  ].join('\n')
+  const base = { scopeId, hostEntry, publishedBuildId: buildId }
+  assert.equal(unitBelongsToRun(content, base), null)
+  assert.equal(unitBelongsToRun(content, { ...base, scopeId: 'c'.repeat(64) }), 'foreign-scope')
+  assert.equal(unitBelongsToRun(content, { ...base, hostEntry: '/other/inst/dist/local-host.mjs' }), 'other-install')
+  assert.equal(unitBelongsToRun(content, { ...base, publishedBuildId: 'd'.repeat(64) }), 'other-build')
+  assert.equal(unitBelongsToRun(content.replace('local-host-manager-v1', 'someone-else'), base), 'foreign-owner')
+  // An unsafe cleanup target (symlink / wrong owner / wrong mode / non-file) is refused.
+  const uid = 1000
+  const safe = { isSymbolicLink: () => false, isFile: () => true, uid, mode: 0o100600 }
+  assert.equal(unitFileSafetyError(safe, uid), null)
+  assert.equal(unitFileSafetyError({ ...safe, isSymbolicLink: () => true }, uid), 'unsafe-file')
+  assert.equal(unitFileSafetyError({ ...safe, uid: 2000 }, uid), 'unsafe-file')
+  assert.equal(unitFileSafetyError({ ...safe, mode: 0o100644 }, uid), 'unsafe-file')
+  assert.equal(unitFileSafetyError({ ...safe, isFile: () => false }, uid), 'unsafe-file')
 })
 
 test('the ACP UDS selected verdict accepts only the complete real-L6 proof', () => {

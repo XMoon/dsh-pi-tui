@@ -85,8 +85,8 @@ function systemctl(args, runtimeDir) {
   })
 }
 
-function showUnit(unit) {
-  const result = systemctl(['--user', '--no-pager', '--no-ask-password', 'show', '-p', 'LoadState', '-p', 'ActiveState', '-p', 'FragmentPath', '-p', 'MainPID', '-p', 'UnitFileState', unit], undefined)
+function showUnit(unit, runtimeDir) {
+  const result = systemctl(['--user', '--no-pager', '--no-ask-password', 'show', '-p', 'LoadState', '-p', 'ActiveState', '-p', 'FragmentPath', '-p', 'MainPID', '-p', 'UnitFileState', '-p', 'DropInPaths', unit], runtimeDir)
   if (result.status !== 0) throw new SplitSmokeAssertionError(`managed-host: systemctl show failed for ${unit}`)
   const props = {}
   for (const line of (result.stdout ?? '').split('\n')) {
@@ -97,30 +97,68 @@ function showUnit(unit) {
 }
 
 /**
- * Stop and remove THIS installation's managed unit when (and only when) its
- * ownership metadata names this exact scope. A test that created a managed Host
- * must stop it through the manager (so `Restart=on-failure` does not resurrect
- * it) and remove the owned unit file before the next scene, so no persistent
- * unit or restarted Host leaks. Safe and a no-op when no owned unit exists.
+ * Decide whether a unit FILE belongs to THIS run — the exact scope, this
+ * installation's Host entry path (unique per install) and the Host's published
+ * install build. Returns a stable reason string when it is NOT ours, else null.
+ * This is what keeps cleanup from ever stopping/removing a foreign or
+ * other-build unit that happens to share the same uid + canonical profile scope.
+ */
+export function unitBelongsToRun(content, { scopeId, hostEntry, publishedBuildId }) {
+  if (!content.includes('X-DshPiTuiOwner=local-host-manager-v1')) return 'foreign-owner'
+  if (!content.includes(`X-DshPiTuiScopeId=${scopeId}`)) return 'foreign-scope'
+  if (!content.includes(`"${hostEntry}"`)) return 'other-install'
+  if (typeof publishedBuildId === 'string' && publishedBuildId !== ''
+    && !content.includes(`X-DshPiTuiInstallBuild=${publishedBuildId}`)) return 'other-build'
+  return null
+}
+
+/**
+ * A cleanup target must be OUR private unit file: a same-uid, 0600, regular
+ * (non-symlink) file. Returns a stable reason when unsafe, else null.
+ */
+export function unitFileSafetyError(info, uid) {
+  if (info.isSymbolicLink() || !info.isFile() || info.uid !== uid || (info.mode & 0o777) !== 0o600) return 'unsafe-file'
+  return null
+}
+
+/**
+ * Stop and remove THIS run's managed unit, and only when it is provably ours:
+ * a same-uid 0600 non-symlink unit file, matching owner/scope Host-entry/install
+ * build, and (if loaded) a manager FragmentPath that names this exact file with
+ * no drop-in. A failed stop never silently unlinks. No-op when absent.
  */
 export function stopAndRemoveManagedUnit(installation, trace = () => {}) {
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
-  if (typeof uid !== 'number') return { removed: false }
+  if (typeof uid !== 'number') return { removed: false, reason: 'no-uid' }
   let scopeId
-  try { scopeId = profileScopeId(uid, installation.profileDir) } catch { return { removed: false } }
+  try { scopeId = profileScopeId(uid, installation.profileDir) } catch { return { removed: false, reason: 'no-scope' } }
   const unit = unitName('pi-tui', scopeId)
   let unitPath
-  try { unitPath = join(realpathSync(userInfo().homedir), '.config', 'systemd', 'user', unit) } catch { return { removed: false } }
-  if (!existsSync(unitPath)) return { removed: false }
+  try { unitPath = join(realpathSync(userInfo().homedir), '.config', 'systemd', 'user', unit) } catch { return { removed: false, reason: 'no-home' } }
+  if (!existsSync(unitPath)) return { removed: false, reason: 'absent' }
+  let info
+  try { info = lstatSync(unitPath) } catch { return { removed: false, reason: 'unreadable' } }
+  const fileError = unitFileSafetyError(info, uid)
+  if (fileError !== null) return { removed: false, reason: fileError }
   let content
-  try { content = readFileSync(unitPath, 'utf8') } catch { return { removed: false } }
-  // Only touch OUR unit for THIS scope; never another profile's or another build's.
-  if (!content.includes('X-DshPiTuiOwner=local-host-manager-v1') || !content.includes(`X-DshPiTuiScopeId=${scopeId}`)) {
-    return { removed: false }
-  }
+  try { content = readFileSync(unitPath, 'utf8') } catch { return { removed: false, reason: 'unreadable' } }
+  let hostEntry
+  try { hostEntry = realpathSync(join(installation.profilePackage, 'dist', 'local-host.mjs')) } catch { return { removed: false, reason: 'no-entry' } }
+  const publishedBuildId = readInstance(installation.dshHome, scopeId)?.buildId
+  const foreign = unitBelongsToRun(content, { scopeId, hostEntry, publishedBuildId })
+  if (foreign !== null) return { removed: false, reason: foreign }
   const runtimeDir = existsSync(`/run/user/${String(uid)}`) ? `/run/user/${String(uid)}` : undefined
-  systemctl(['--user', '--no-pager', '--no-ask-password', 'stop', unit], runtimeDir)
-  try { unlinkSync(unitPath) } catch { /* already gone */ }
+  let props
+  try { props = showUnit(unit, runtimeDir) } catch { return { removed: false, reason: 'manager-unqueryable' } }
+  if (props.LoadState !== 'not-found') {
+    let realFragment
+    try { realFragment = realpathSync(props.FragmentPath) } catch { return { removed: false, reason: 'fragment-unreadable' } }
+    if (realFragment !== realpathSync(unitPath)) return { removed: false, reason: 'fragment-mismatch' }
+    if ((props.DropInPaths ?? '').trim() !== '') return { removed: false, reason: 'dropin' }
+    const stop = systemctl(['--user', '--no-pager', '--no-ask-password', 'stop', unit], runtimeDir)
+    if (stop.status !== 0) return { removed: false, reason: 'stop-failed' }
+  }
+  try { unlinkSync(unitPath) } catch (error) { if (error?.code !== 'ENOENT') return { removed: false, reason: 'unlink-failed' } }
   systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload'], runtimeDir)
   trace('managed-host-unit-removed', { unit })
   return { removed: true }
@@ -239,7 +277,7 @@ export async function runManagedHostSystemd({ installation, trace, dshHome }) {
   try {
     await waitForCounts(dshHome, counts => counts.host >= 1 && counts.client >= 1, 'one Host + one Client', 90_000)
     await screen.waitForAny(['type a message', '╭'], 'the managed Client', 120_000)
-    const props = showUnit(unit)
+    const props = showUnit(unit, runtimeDir)
     assert(props.LoadState !== undefined && props.LoadState !== 'not-found', 'the profile unit was not loaded by the manager')
     assert(props.FragmentPath !== undefined && realpathSync(props.FragmentPath) === realpathSync(expectedFragment), 'the manager FragmentPath does not name the installed profile unit')
     assert(props.ActiveState === 'active', 'the unit is not active after a cold public Client')
