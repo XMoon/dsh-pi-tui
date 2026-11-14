@@ -1057,6 +1057,68 @@ test('folded Tools expose only trusted, bounded human summaries from the shared 
   assert.ok(nodeText(openedRead!).includes('src/a.ts'), 'the opened body is the real Tool content')
 })
 
+// The TSP-native Tool Card path for the rc.3 Team task / wait tools (plan §3.2):
+// the folded Note, the full expanded body and the durable `isError` status all
+// come from the SAME shared presenter the PiTui card uses, proved here through
+// the real native transcript node build (not a PiTui TuiApp, not a real GUI).
+test('native folded Team task and wait cards expose bounded notes, full expansion and durable error', () => {
+  const taskJson = JSON.stringify({
+    id: 'task-1', revision: 1, subject: 'Scout the config',
+    description: 'Read the config and report the timeout.', status: 'pending',
+    blockedBy: [], writeScopes: [], ready: true, writeScopeWarnings: [],
+  })
+  const events: SessionEvent[] = [
+    ev('turn/start', { turn: 1 }, 0),
+    user(1, 'exercise the rc.3 team task tool cards'),
+    toolCall(2, 'call-create', 'team_task_create', '{"subject":"Scout the config","description":"Read the config and report the timeout."}', 0),
+    toolResult(3, 'call-create', taskJson, 0),
+    toolCall(4, 'call-list', 'team_task_list', '{}', 1),
+    toolResult(5, 'call-list', JSON.stringify({ tasks: [JSON.parse(taskJson)], nextCursor: 2 }), 1),
+    toolCall(6, 'call-wait', 'wait_agent', '{}', 2),
+    toolResult(7, 'call-wait', '{"timedOut":false}', 2),
+    toolCall(8, 'call-update', 'team_task_update', '{"task_id":"task-1","expected_revision":1,"action":"claim"}', 3),
+    toolResult(9, 'call-update', '{"code":"APPROVAL_REJECTED","message":"the approval was rejected"}', 3, true),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 10),
+  ]
+  const messages = folder(events).messages()
+  const keys = new TranscriptNodeKeys()
+  const closed = flatten(messages, 'full', keys)
+  const toolNodeOf = (name: string): Tree | undefined =>
+    closed.find(node => node.kind === 'tool' && node.props['name'] === name)
+  const noteOf = (name: string): string | undefined => {
+    const note = toolNodeOf(name)?.props['note']
+    return note === undefined ? undefined : String(note)
+  }
+
+  // Folded Note: fixed title, bounded summary, no raw JSON; description never
+  // becomes the header; wait never claims an agent/task outcome.
+  assert.equal(toolNodeOf('team_task_create')?.props['title'], 'Create team task')
+  assert.equal(noteOf('team_task_create'), 'pending · ready · unowned · rev 1')
+  assert.ok(!(noteOf('team_task_create') ?? '').includes('"id"'), 'no raw JSON in the folded native Note')
+  assert.equal(toolNodeOf('team_task_list')?.props['title'], 'List team tasks')
+  assert.equal(noteOf('team_task_list'), '1 team task · more')
+  assert.equal(toolNodeOf('wait_agent')?.props['title'], 'Wait for input')
+  assert.equal(noteOf('wait_agent'), 'input pending')
+
+  // Durable failure: the native card keeps status=error and never a success Note.
+  const failed = toolNodeOf('team_task_update')
+  assert.ok(failed !== undefined)
+  assert.equal(failed.props['status'], 'error')
+  const failedNote = failed.props['note'] === undefined ? '' : String(failed.props['note'])
+  assert.ok(!/in_progress|completed|owner |rev \d/u.test(failedNote), `a success summary leaked into the failed native card: ${failedNote}`)
+
+  // Full expansion on the SAME native path: the exact row opens, drops the
+  // folded Note and reveals the complete official JSON body.
+  const createRow = messages.find((row): row is TranscriptToolMessage => row.kind === 'tool' && row.name === 'team_task_create')
+  assert.ok(createRow !== undefined)
+  const opened = flatten(messages, 'full', keys, { expandedToolKeys: new Set([keys.keyFor(createRow)]) })
+  const openedCreate = opened.find(node => node.kind === 'tool' && node.props['name'] === 'team_task_create' && node.props['collapsed'] === false)
+  assert.ok(openedCreate !== undefined, 'the created task card is expandable on the native path')
+  assert.equal(openedCreate.props['note'], undefined, 'an opened Team task card drops the folded Note')
+  assert.ok(nodeText(openedCreate).includes('Read the config and report the timeout.'), 'the opened body carries the full task JSON')
+  assert.ok(nodeText(openedCreate).includes('task-1'), 'the opened body carries the official task id')
+})
+
 test('standalone Notice, Recall and Relay forms keep their own readable identity and bounded disclosure', () => {
   const longNoticeSummary = `Agent completed\n第二行摘要 ${'很长'.repeat(60)}`
   const relayLines = Array.from({ length: 12 }, (_, index) => `relay line ${index + 1}`)
