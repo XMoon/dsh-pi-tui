@@ -197,6 +197,35 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             // ancestry back to the nearest still-pending operation. The save is
             // AWAITED so the picker reports a truthful settlement (a failed or
             // unsupported default write keeps the picker usable).
+            // ONE authoritative directory re-read owned by THIS operation:
+            // after a committed/indeterminate sessionless save the cached Host
+            // directory is invalidated, so the sessionless footer would read an
+            // empty cache as `no model` right after a CONFIRMED save. The
+            // re-read goes through the official `session.modelCatalog()` port
+            // (never the requested value), lets the tracker reconcile an
+            // UNRESOLVED indeterminate intent against the Host truth, and
+            // repaints only while this operation still owns the surface. A
+            // failed re-read is recorded in the diagnostics and never
+            // downgrades the settled write (the next authoritative read —
+            // reopening /model — repairs the display).
+            const reconcileDefaultDirectory = (): void => {
+              runOwned('model default reconcile', () => models.loadDirectory(runner.signal), {
+                diag: runner.diag,
+                sessionId: () => runner.currentSessionId,
+                isCancellation: (error) => token !== modelOperationToken
+                  || !runner.isSessionScopeCurrent(scope)
+                  || runner.signal.aborted
+                  || error instanceof SupersededReadError,
+                onCancel: () => {},
+                onResult: (directory) => {
+                  if (token !== modelOperationToken) return
+                  if (!runner.isSessionScopeCurrent(scope)) return
+                  runner.reconcileDefaultIntent(directory.default)
+                  runner.refreshStatus()
+                  runner.updateWelcomeCard()
+                },
+              })
+            }
             runner.setDefaultIntent(next)
             const intentId = runner.defaultIntentRecord?.id
             // The sessionless footer marker is DERIVED from the tracker (see the
@@ -228,17 +257,28 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
               const detail = outcome.kind === 'rejected'
                 ? outcome.error.message
                 : outcome.kind === 'indeterminate'
-                  ? `${outcome.error.message} — the default may still land; reopen /model to reconcile`
+                  ? `${outcome.error.message} — the default may still land; the display reconciles from the Host`
                   : outcome.kind === 'unsupported'
                     ? outcome.reason
                     : 'the default model save was cancelled'
               presentation.notify(`model default save: ${detail}`, 'error')
+              // An indeterminate write may still have committed: the SAME
+              // authoritative re-read below reconciles the unresolved intent
+              // (a rejected/cancelled/unsupported outcome invalidated nothing,
+              // so there is nothing to reconcile).
+              if (outcome.kind === 'indeterminate') reconcileDefaultDirectory()
               // An unsupported backend and a proven refusal keep the picker
               // usable; an indeterminate settle dismisses with the notice.
               return outcome.kind
             }
             runner.refreshStatus()
             runner.updateWelcomeCard()
+            // The committed write invalidated the cached model directory: the
+            // sessionless footer would read the EMPTY cache as `no model` even
+            // though the Host just confirmed the save. ONE owned authoritative
+            // re-read repopulates it from the official `session.modelCatalog()`
+            // and repaints; a failed re-read never downgrades the settled save.
+            reconcileDefaultDirectory()
             return 'committed'
           }
           // A live Session model write is NOT a sessionless global-default intent:
