@@ -104,11 +104,13 @@ function showUnit(unit, runtimeDir) {
  * other-build unit that happens to share the same uid + canonical profile scope.
  */
 export function unitBelongsToRun(content, { scopeId, hostEntry, publishedBuildId }) {
-  if (!content.includes('X-DshPiTuiOwner=local-host-manager-v1')) return 'foreign-owner'
-  if (!content.includes(`X-DshPiTuiScopeId=${scopeId}`)) return 'foreign-scope'
-  if (!content.includes(`"${hostEntry}"`)) return 'other-install'
-  if (typeof publishedBuildId === 'string' && publishedBuildId !== ''
-    && !content.includes(`X-DshPiTuiInstallBuild=${publishedBuildId}`)) return 'other-build'
+  const lines = content.split('\n')
+  if (!lines.includes('X-DshPiTuiOwner=local-host-manager-v1')) return 'foreign-owner'
+  if (!lines.includes(`X-DshPiTuiScopeId=${scopeId}`)) return 'foreign-scope'
+  // A missing/empty published build cannot bind the unit to this run: NOT ours.
+  if (typeof publishedBuildId !== 'string' || publishedBuildId === '') return 'no-published-build'
+  if (!lines.includes(`X-DshPiTuiInstallBuild=${publishedBuildId}`)) return 'other-build'
+  if (!lines.some(line => line.startsWith('ExecStart=') && line.includes(`"${hostEntry}"`))) return 'other-install'
   return null
 }
 
@@ -127,7 +129,7 @@ export function unitFileSafetyError(info, uid) {
  * build, and (if loaded) a manager FragmentPath that names this exact file with
  * no drop-in. A failed stop never silently unlinks. No-op when absent.
  */
-export function stopAndRemoveManagedUnit(installation, trace = () => {}) {
+export function stopAndRemoveManagedUnit(installation, trace = () => {}, expectedBuildId) {
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
   if (typeof uid !== 'number') return { removed: false, reason: 'no-uid' }
   let scopeId
@@ -144,7 +146,9 @@ export function stopAndRemoveManagedUnit(installation, trace = () => {}) {
   try { content = readFileSync(unitPath, 'utf8') } catch { return { removed: false, reason: 'unreadable' } }
   let hostEntry
   try { hostEntry = realpathSync(join(installation.profilePackage, 'dist', 'local-host.mjs')) } catch { return { removed: false, reason: 'no-entry' } }
-  const publishedBuildId = readInstance(installation.dshHome, scopeId)?.buildId
+  const publishedBuildId = (typeof expectedBuildId === 'string' && expectedBuildId !== '')
+    ? expectedBuildId
+    : readInstance(installation.dshHome, scopeId)?.buildId
   const foreign = unitBelongsToRun(content, { scopeId, hostEntry, publishedBuildId })
   if (foreign !== null) return { removed: false, reason: foreign }
   const runtimeDir = existsSync(`/run/user/${String(uid)}`) ? `/run/user/${String(uid)}` : undefined
@@ -274,6 +278,9 @@ export async function runManagedHostSystemd({ installation, trace, dshHome }) {
   const unit = unitName('pi-tui', scopeId)
   const expectedFragment = join(realpathSync(userInfo().homedir), '.config', 'systemd', 'user', unit)
   const screen = new PublicDshScreen(installation, 'daemon')
+  // Captured while the Host is alive: its registry is gone once stopped, but the
+  // cleanup still needs the published install build to prove unit ownership.
+  let unitBuildId
   try {
     await waitForCounts(dshHome, counts => counts.host >= 1 && counts.client >= 1, 'one Host + one Client', 90_000)
     await screen.waitForAny(['type a message', '╭'], 'the managed Client', 120_000)
@@ -284,6 +291,7 @@ export async function runManagedHostSystemd({ installation, trace, dshHome }) {
     const identity = readInstance(dshHome, scopeId)
     assert(identity !== undefined && identity.scopeId === scopeId, 'the Host published no authenticated scope identity')
     assert(typeof identity.instanceId === 'string' && /^[0-9a-f-]{36}$/u.test(identity.instanceId), 'the Host identity has no instance id')
+    unitBuildId = identity.buildId
     trace('managed-host-systemd-unit', { unit, loadState: props.LoadState, activeState: props.ActiveState })
     screen.send('/exit\r')
     const exit = await screen.exitWithin(60_000)
@@ -307,7 +315,7 @@ export async function runManagedHostSystemd({ installation, trace, dshHome }) {
     await screen.dispose()
     // Stop through the manager + remove the owned unit BEFORE the kill backstop,
     // so `Restart=on-failure` cannot resurrect the Host and no unit file leaks.
-    stopAndRemoveManagedUnit(installation, trace)
+    stopAndRemoveManagedUnit(installation, trace, unitBuildId)
     killIsolatedProcesses(dshHome)
   }
 }

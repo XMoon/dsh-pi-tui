@@ -567,6 +567,8 @@ test('managed unit cleanup only matches this run\u2019s exact owner metadata and
   assert.equal(unitBelongsToRun(content, { ...base, scopeId: 'c'.repeat(64) }), 'foreign-scope')
   assert.equal(unitBelongsToRun(content, { ...base, hostEntry: '/other/inst/dist/local-host.mjs' }), 'other-install')
   assert.equal(unitBelongsToRun(content, { ...base, publishedBuildId: 'd'.repeat(64) }), 'other-build')
+  assert.equal(unitBelongsToRun(content, { ...base, publishedBuildId: undefined }), 'no-published-build')
+  assert.equal(unitBelongsToRun(content, { ...base, publishedBuildId: '' }), 'no-published-build')
   assert.equal(unitBelongsToRun(content.replace('local-host-manager-v1', 'someone-else'), base), 'foreign-owner')
   // An unsafe cleanup target (symlink / wrong owner / wrong mode / non-file) is refused.
   const uid = 1000
