@@ -431,14 +431,20 @@ async function runSceneAcceptance(installation, trace) {
       // parent must wait for the child (R4-03 / R4-01).
       let clientGoneAt
       let supervisorGoneAt
+      let violation
       const start = Date.now()
       while (Date.now() - start < 45_000) {
         const counts = processCounts(installation.dshHome)
+        const backendAlive = isAlive(supervisorPid)
+        // Strict invariant: the supervisor must NEVER be gone while a Client is
+        // still alive (it waits for the child's cleanup).
+        if (!backendAlive && counts.client > 0) violation = `supervisor gone while ${counts.client} Client(s) alive`
         if (clientGoneAt === undefined && counts.client === 0) clientGoneAt = Date.now()
-        if (supervisorGoneAt === undefined && !isAlive(supervisorPid)) supervisorGoneAt = Date.now()
+        if (supervisorGoneAt === undefined && !backendAlive) supervisorGoneAt = Date.now()
         if (clientGoneAt !== undefined && supervisorGoneAt !== undefined) break
-        await sleep(80)
+        await sleep(10)
       }
+      assert(violation === undefined, `A12: ${String(violation)}`)
       assert(clientGoneAt !== undefined, 'A12: the Client never exited after a supervisor-only SIGTERM')
       assert(supervisorGoneAt !== undefined, 'A12: the supervisor did not exit')
       assert(clientGoneAt <= supervisorGoneAt, `A12: the supervisor exited (${supervisorGoneAt}) BEFORE the Client cleanup finished (${clientGoneAt})`)
@@ -452,15 +458,19 @@ async function runSceneAcceptance(installation, trace) {
   // instance, two Client PIDs), and the first Client's exit never stops the Host
   // or the second Client.
   {
-    const a = new RealDshScreen(installation, 'daemon', [])
+    const a = new RealDshScreen(installation, 'daemon', ['--session', seeded.sessionId])
     let b
     try {
       await waitForProcesses(installation.dshHome, c => c.host >= 1 && c.client >= 1, 'A09 first Client', 90_000)
+      // A reads the persisted Session through the shared Host.
+      await a.waitForAny(['hello stub scene', 'stub answer', seeded.shortId], 'A09 A reads session', 60_000)
       const hostsA = hostPids(installation.dshHome)
       assert(hostsA.length === 1, `A09: expected one Host after the first Client, saw ${hostsA.length}`)
       const hostPidA = hostsA[0]
-      b = new RealDshScreen(installation, 'daemon', [])
+      b = new RealDshScreen(installation, 'daemon', ['--session', seeded.sessionId])
       await waitForProcesses(installation.dshHome, c => c.host === 1 && c.client >= 2, 'A09 second Client', 90_000)
+      // B reads the SAME Session on the SAME Host (real Session read, not just PIDs).
+      await b.waitForAny(['hello stub scene', 'stub answer', seeded.shortId], 'A09 B reads same session', 60_000)
       const hostsAB = hostPids(installation.dshHome)
       assert(hostsAB.length === 1 && hostsAB[0] === hostPidA, 'A09: the second Client did not reuse the same Host')
       // Stop the FIRST client's supervisor only; the Host and the second Client
@@ -480,6 +490,8 @@ async function runSceneAcceptance(installation, trace) {
       assert(oneLeft, `A09: the first Client's exit did not settle (last counts=${JSON.stringify(last)})`)
       const hostsAfter = hostPids(installation.dshHome)
       assert(hostsAfter.length === 1 && hostsAfter[0] === hostPidA, `A09: the Host was stopped/replaced when the first Client exited (hosts=${hostsAfter.join(',')})`)
+      // B still reads the same Session after A exited.
+      await b.waitForAny(['hello stub scene', 'stub answer', seeded.shortId], 'A09 B still reads session after A exit', 60_000)
       out.a09HostReuse = 'PASS'
     } finally {
       // Soft-stop A is already exited; B.dispose kills the shared isolated set.

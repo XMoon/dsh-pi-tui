@@ -135,7 +135,6 @@ export class DaemonCoordinator {
    *  spawned at all (never a JSON record, never a raw error/message/path). */
   private readonly reportFatal: (line: string) => void
   private readonly shutdownBudgetMs: number
-  private readonly markAbnormalExit: boolean
   private child: ChildProcess | undefined
   private childExit: Promise<void> | undefined
   private started = false
@@ -153,7 +152,6 @@ export class DaemonCoordinator {
     diag: Diag
     reportFatal?: (line: string) => void
     shutdownBudgetMs?: number
-    markAbnormalExit?: boolean
   }) {
     this.spawnImpl = options.spawnImpl
     this.entry = options.entry
@@ -165,7 +163,6 @@ export class DaemonCoordinator {
     // (leaving margin for the other fibers): the whole SIGTERM→SIGKILL sequence
     // must fit inside it, never 4s + 1.5s = 5.5s.
     this.shutdownBudgetMs = options.shutdownBudgetMs ?? 4000
-    this.markAbnormalExit = options.markAbnormalExit ?? false
   }
 
   /** Spawn the ONE foreground Client. No-op after a prior start or dispose. */
@@ -240,9 +237,12 @@ export class DaemonCoordinator {
       try { child.kill('SIGKILL') } catch { /* already gone */ }
       if (await waitExitUntil(budgetEnd)) return true
       // A child that never exits inside the unified budget is an ABNORMAL cleanup
-      // result, never reported as success. Make it observable.
+      // result, never reported as success: return false and surface a sanitized
+      // line. NOTE: the official DSH SIGTERM shutdown calls shutdown.interrupt(0)
+      // and exits 0 after fiber disposal, so we do NOT (and cannot truthfully)
+      // force a nonzero supervisor exit here — the observable signal is the
+      // stderr line plus the false return, not a claimed exit code.
       this.reportFatal('dsh-pi-tui: the daemon Client did not exit after SIGKILL within the shutdown budget; it may be left running')
-      if (this.markAbnormalExit) process.exitCode = 1
       return false
     })()
     return this.disposePromise
@@ -265,7 +265,7 @@ export function apply(ctx: Context): void {
   // The daemon supervisor paints nothing: keep its diagnostics off the terminal.
   const diag = createEntryDiag('host', () => {})
   const reportFatal = (line: string): void => { try { process.stderr.write(`${line}\n`) } catch { /* best effort */ } }
-  const coordinator = new DaemonCoordinator({ spawnImpl: spawn, entry, env, appExit, diag, reportFatal, markAbnormalExit: true })
+  const coordinator = new DaemonCoordinator({ spawnImpl: spawn, entry, env, appExit, diag, reportFatal })
 
   // The launcher row is successfully assembled: report it to the startup row's
   // cold-ready handshake. Setting this synchronously (during mount, before the
