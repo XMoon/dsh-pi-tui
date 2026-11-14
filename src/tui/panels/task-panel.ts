@@ -926,7 +926,12 @@ export class TaskBrowserPanel implements Component, Focusable {
     const hits: TaskMouseHit[] = []
     lines.push(color.textStrong(truncateToWidth('Type filter', safeWidth, '…'))); hits.push({ kind: 'inert' })
     lines.push(''); hits.push({ kind: 'inert' })
-    const budget = Number.isFinite(limit) ? Math.max(1, limit - 4) : candidates.length
+    // Chrome = title + blank + blank + hint. The scroll indicator is budgeted in
+    // TOO when the list overflows, so a scrolling list never degrades just
+    // because the indicator pushed it one row past the grant.
+    const available = Number.isFinite(limit) ? Math.max(1, limit - 4) : candidates.length
+    const scrolling = candidates.length > available
+    const budget = scrolling && Number.isFinite(limit) ? Math.max(1, available - 1) : available
     let start = 0
     if (candidates.length > budget) start = Math.max(0, Math.min(this.filterSelected, candidates.length - budget))
     const end = Math.min(candidates.length, start + budget)
@@ -1466,7 +1471,9 @@ export class TaskBrowserPanel implements Component, Focusable {
     const current: Fr2Gesture = { kind: 'filter', token: hit.value, chosen: this.decodeFilterToken(hit.value), row: event.y, width: event.width, height: event.height }
     if (event.type === 'press') {
       if (this.interactionCurrent?.() !== true) return undefined
-      this.filterSelected = hit.index
+      // Record the gesture ONLY: mutating `filterSelected` here would let the
+      // press-triggered repaint re-window the list, moving the row under the
+      // pointer before the release. The click commits selection + filter.
       this.fr2Pressed = current
       return { handled: true, focus: true }
     }
@@ -1507,9 +1514,10 @@ export class TaskBrowserPanel implements Component, Focusable {
     const current: Fr2Gesture = { kind: 'team-row', value: hit.value, row: event.y, width: event.width, height: event.height }
     if (event.type === 'press') {
       if (this.interactionCurrent?.() !== true) return undefined
+      // Record the gesture ONLY: moving `teamSelectedValue` here would let the
+      // press-triggered selected-centered repaint move the row under the
+      // pointer before the release. The click commits selection + action.
       this.fr2Pressed = current
-      this.teamSelectedValue = hit.value
-      this.ensureTeamVisible()
       return { handled: true, focus: true }
     }
     if (event.type !== 'click') return undefined

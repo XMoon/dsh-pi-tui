@@ -2093,3 +2093,39 @@ test('FR2-ext-r3-F4: a real Job type named __all__ is selectable by mouse (no Al
   assert.equal(panel.getViewState().typeFilter, '__all__', 'the __all__ type must apply as the type, not as All')
   panel.dispose()
 })
+
+test('FR2-ext-r4: press → REAL render → release still selects/expands a long Team list row', () => {
+  const members = [member('s-root', 'lead', 'running', 'root', 0)]
+  for (let i = 1; i <= 9; i += 1) members.push(member(`m-${i}`, `agent-${i}`, 'inactive'))
+  const W = 60
+  const { panel } = makePanel([], { enableSearch: true, header: 'Tasks', team: teamDto({ kind: 'ready', enabled: true, tasks: [] }, members), interactionCurrent: () => true })
+  panel.handleInput('\t') // Team
+  panel.setMaxRows(12) // budget 7 → a press-driven recenter would move the clicked row
+  const frame = panel.render(W).map(strip)
+  const y = frame.findIndex(line => line.includes('agent-5'))
+  assert.ok(y >= 0, `agent-5 must be visible:\n${frame.join('\n')}`)
+  panel.handleMouse(mouse('press', 1, y, W, 12))
+  panel.render(W) // the real press-triggered repaint
+  panel.handleMouse(mouse('click', 1, y, W, 12))
+  const after = panel.render(W).map(strip)
+  assert.ok(after.some(line => line.includes('→') && line.includes('agent-5')),
+    `press→render→release must select the pressed row, not a repositioned one:\n${after.join('\n')}`)
+  panel.dispose()
+})
+
+test('FR2-ext-r4: press → REAL render → release applies a short-screen filter type', () => {
+  const items: TaskPanelItem[] = []
+  for (let i = 0; i < 8; i += 1) items.push(typed(runningJob({ value: `job:${i}`, label: `job ${i}` }), `t${i}`))
+  const W = 60
+  const { panel } = makePanel(items, { enableSearch: true, header: 'Tasks', interactionCurrent: () => true })
+  panel.setMaxRows(9) // budget 4 → All,t0,t1,t2 visible while the list still scrolls
+  panel.handleInput('f')
+  const frame = panel.render(W).map(strip)
+  const y = frame.findIndex(line => line.includes('t2'))
+  assert.ok(y >= 0, `t2 must be visible before press:\n${frame.join('\n')}`)
+  panel.handleMouse(mouse('press', 1, y, W, 9))
+  panel.render(W) // the real press-triggered repaint
+  panel.handleMouse(mouse('click', 1, y, W, 9))
+  assert.equal(panel.getViewState().typeFilter, 't2', 'press→render→release must apply the pressed type')
+  panel.dispose()
+})
