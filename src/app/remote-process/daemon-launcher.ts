@@ -103,6 +103,8 @@ export function buildChildEnvironment(
   return env
 }
 
+function sleep(ms: number): Promise<void> { return new Promise(resolve => setTimeout(resolve, ms)) }
+
 /** The child-exit mapping: a real code, or 128+signal when the child was signalled. */
 function exitCodeFor(code: number | null, signal: NodeJS.Signals | null): number {
   if (code !== null) return code
@@ -132,10 +134,14 @@ export class DaemonCoordinator {
   /** A sanitized human line for the supervisor TTY when the Client cannot be
    *  spawned at all (never a JSON record, never a raw error/message/path). */
   private readonly reportFatal: (line: string) => void
+  private readonly graceMs: number
+  private readonly killGraceMs: number
   private child: ChildProcess | undefined
+  private childExit: Promise<void> | undefined
   private started = false
   private disposed = false
   private settled = false
+  private disposePromise: Promise<void> | undefined
   /** Test observation: how many children were actually spawned. */
   spawnCount = 0
 
@@ -146,6 +152,8 @@ export class DaemonCoordinator {
     appExit: (code: number) => void
     diag: Diag
     reportFatal?: (line: string) => void
+    graceMs?: number
+    killGraceMs?: number
   }) {
     this.spawnImpl = options.spawnImpl
     this.entry = options.entry
@@ -153,6 +161,8 @@ export class DaemonCoordinator {
     this.appExit = options.appExit
     this.diag = options.diag
     this.reportFatal = options.reportFatal ?? (() => {})
+    this.graceMs = options.graceMs ?? 4000
+    this.killGraceMs = options.killGraceMs ?? 1500
   }
 
   /** Spawn the ONE foreground Client. No-op after a prior start or dispose. */
@@ -173,6 +183,10 @@ export class DaemonCoordinator {
     }
     this.child = child
     this.spawnCount += 1
+    this.childExit = new Promise<void>(resolve => {
+      child.once('exit', () => resolve())
+      child.once('error', () => resolve())
+    })
     child.once('error', (error: Error) => { this.settle(1, error) })
     child.once('exit', (code, signal) => { this.settle(exitCodeFor(code, signal), undefined) })
   }
@@ -193,17 +207,28 @@ export class DaemonCoordinator {
   }
 
   /**
-   * The SINGLE stop owner. A spawn not yet started is cancelled; a live child is
-   * asked to stop once (SIGTERM) and the process is NOT re-exited by dispose (the
-   * single settle owns the exit code). Idempotent.
+   * The SINGLE stop owner, AWAITABLE. A spawn not yet started is cancelled; a
+   * live child is asked to stop once (SIGTERM) and dispose() resolves only after
+   * the child actually exited, so the parent Fiber disposer holds the child's
+   * cleanup rather than the parent process exiting underneath it. The wait is
+   * bounded to fit the official ~5s shutdown deadline; a child that does not exit
+   * within it is escalated to SIGKILL and awaited briefly. Idempotent.
    */
-  dispose(): void {
-    if (this.disposed) return
+  dispose(): Promise<void> {
+    if (this.disposePromise !== undefined) return this.disposePromise
     this.disposed = true
-    const child = this.child
-    if (child !== undefined && child.exitCode === null && child.signalCode === null) {
-      child.kill('SIGTERM')
-    }
+    this.disposePromise = (async (): Promise<void> => {
+      const child = this.child
+      const exited = this.childExit
+      if (child === undefined || child.exitCode !== null || child.signalCode !== null || exited === undefined) return
+      try { child.kill('SIGTERM') } catch { /* already gone */ }
+      const graceful = await Promise.race([exited.then(() => 'exited' as const), sleep(this.graceMs).then(() => 'timeout' as const)])
+      if (graceful === 'timeout') {
+        try { child.kill('SIGKILL') } catch { /* already gone */ }
+        await Promise.race([exited, sleep(this.killGraceMs)])
+      }
+    })()
+    return this.disposePromise
   }
 }
 
@@ -245,5 +270,8 @@ export function apply(ctx: Context): void {
     registrationReturned = true
     ctx.effect(() => () => { cancel() }, 'pi-tui-daemon-launcher readiness')
   }
-  ctx.effect(() => () => { coordinator.dispose() }, 'pi-tui-daemon-launcher child lifecycle')
+  // The fiber disposer RETURNS the awaitable dispose so Cordis waits for the
+  // Client's real exit during shutdown (never exits the parent underneath a
+  // still-cleaning child). Still the ONE stop owner — no second signal manager.
+  ctx.effect(() => () => coordinator.dispose(), 'pi-tui-daemon-launcher child lifecycle')
 }
