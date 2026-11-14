@@ -511,14 +511,12 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
       } catch (error) {
         const code = remoteErrorCode(error) ?? 'session/internal'
         // These codes are thrown BEFORE the official Session is minted: the
-        // workspace lookup, the request shape and default Agent-preset
-        // composition all run first, so "no Session was created" is proven.
-        if (
-          code === 'gateway/bad-request'
-          || code === 'workspace/not-found'
-          || code === 'agent-preset/not-found'
-          || code === 'agent-preset/invalid'
-        ) {
+        // request shape and the pre-create Workspace lookup both run first, so
+        // "no Session was created" is proven.
+        // `agent-preset/not-found|invalid` are NOT in this set: rc.3 can also
+        // raise them from `composition.setup()` AFTER the Session handle was
+        // persisted, so they cannot prove "not created" and stay unconfirmed.
+        if (code === 'gateway/bad-request' || code === 'workspace/not-found') {
           return { kind: 'rejected', code }
         }
         // Official `SessionController.create` can publish a Session then fail a
