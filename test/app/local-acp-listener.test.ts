@@ -135,6 +135,7 @@ class RawClient {
 function makeScope(dir: string): LocalScope {
   return {
     scopeId: 'a'.repeat(64),
+    dshHome: dir,
     profileRealpath: dir,
     dir,
     hostSocketName: `\0dsh-pi-tui-h-${'h'.repeat(40)}`,

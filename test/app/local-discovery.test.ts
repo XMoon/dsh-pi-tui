@@ -24,6 +24,7 @@ import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
   bindProcessSeat,
   computeBuildId,
+  inspectInstalledProfileScope,
   LocalScopeError,
   LOCAL_PROTOCOL,
   parseProcessStat,
@@ -166,6 +167,37 @@ test('one canonical profile yields one scope across DSH homes, symlinked spellin
   } finally {
     cleanup(first.root)
     cleanup(second.root)
+  }
+})
+
+test('read-only scope inspection creates no run directory and preserves the official DSH home', t => {
+  const value = fixture(t)
+  try {
+    const inspected = inspectInstalledProfileScope({
+      dshHome: value.home,
+      profileDir: value.profile,
+      packageRoot: value.packageRoot,
+      dshVersion: '0.2.1-rc.4',
+    })
+    assert.equal(existsSync(join(value.home, 'run')), false, 'the read-only inspection must not create the run directory')
+    const realHome = realpathSync(value.home)
+    assert.equal(inspected.dshHome, realHome)
+    assert.equal(inspected.dir, join(realHome, 'run', 'dsh-pi-tui', inspected.scopeId))
+    assert.equal(existsSync(inspected.dir), false, 'the inspected .dir is only the expected path, not a created one')
+    // The mutating form composes the SAME identity and creates the 0700 directory.
+    const scope = scopeFromInstalledProfile({
+      dshHome: value.home,
+      profileDir: value.profile,
+      packageRoot: value.packageRoot,
+      dshVersion: '0.2.1-rc.4',
+    })
+    assert.equal(scope.scopeId, inspected.scopeId)
+    assert.equal(scope.dshHome, inspected.dshHome)
+    assert.equal(scope.dir, inspected.dir)
+    assert.equal(lstatSync(scope.dir).mode & 0o777, 0o700)
+    assert.equal(existsSync(scope.dir), true)
+  } finally {
+    cleanup(value.root)
   }
 })
 

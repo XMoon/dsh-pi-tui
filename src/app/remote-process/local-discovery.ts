@@ -10,7 +10,6 @@
  * @module app/remote-process/local-discovery
  */
 
-import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import {
   closeSync,
@@ -18,7 +17,6 @@ import {
   fchmodSync,
   fstatSync,
   fsyncSync,
-  lstatSync,
   openSync,
   readFileSync,
   renameSync,
@@ -33,6 +31,7 @@ import {
   readProcessStarttime,
   type LocalScope,
 } from './local-scope.ts'
+import { spawnHostCandidate, startManagedHostCandidate } from './local-host-manager.ts'
 
 /** Registry file name inside the private scope directory. */
 const REGISTRY_FILE = 'instance.json'
@@ -96,6 +95,15 @@ export interface EnsureLocalHostOptions {
    * stays byte-for-byte unchanged when it is absent.
    */
   readonly expectedInstanceId?: string
+  /**
+   * How a cold Client with no reusable Host asks for the Host to be started.
+   * `undefined` is the historical detached process spawn (internal
+   * qualification/peer/manual paths). `public-managed` is the M6-2B public
+   * daemon path: the profile-scoped systemd user manager when safely available,
+   * the strict-absence process fallback otherwise. It never changes the wire,
+   * business or readiness semantics.
+   */
+  readonly hostStartPolicy?: 'public-managed'
 }
 
 /** Exact registry keys; unknown fields are rejected, not ignored. */
@@ -512,48 +520,6 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-/** Start one Host candidate; the Host's own OS seat decides the winner. */
-function spawnHostCandidate(options: EnsureLocalHostOptions): () => Error | undefined {
-  let info
-  try {
-    info = lstatSync(options.hostEntryPath)
-  } catch (error) {
-    throw new LocalScopeError('HOST_START_FAILED', 'local discovery: the installed Host entry is not readable', error)
-  }
-  if (info.isSymbolicLink() || !info.isFile() || info.uid !== process.getuid?.()) {
-    throw new LocalScopeError('HOST_START_FAILED', 'local discovery: the installed Host entry must be a regular file owned by this uid')
-  }
-  const logPath = join(options.scope.dir, 'host.log')
-  let fd: number | undefined
-  try {
-    fd = openSync(logPath, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW, 0o600)
-    fchmodSync(fd, 0o600)
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      SPLIT_PROCESS_DSH_ANCHOR: options.dshAnchor,
-      SPLIT_PROCESS_PROFILE: options.profile,
-    }
-    delete env.SPLIT_PROCESS_EXTRA_PATCH
-    delete env.DSH_PI_TUI_ROLE
-    delete env.DSH_PI_TUI_HOST_ENTRY
-    const child = spawn(process.execPath, [options.hostEntryPath], {
-      cwd: options.scope.profileRealpath,
-      detached: true,
-      stdio: ['ignore', fd, fd],
-      env,
-    })
-    let spawnFailure: Error | undefined
-    child.once('error', error => { spawnFailure = error })
-    child.unref()
-    return () => spawnFailure
-  } catch (error) {
-    if (error instanceof LocalScopeError) throw error
-    throw new LocalScopeError('HOST_START_FAILED', 'local discovery: the Host candidate could not be spawned', error)
-  } finally {
-    if (fd !== undefined) closeSync(fd)
-  }
-}
-
 /**
  * Ensure one authenticated Host for this scope. A live registry candidate is
  * never killed and never replaced; a dead one may be replaced by a new Host
@@ -587,7 +553,9 @@ export async function ensureLocalHost(options: EnsureLocalHostOptions): Promise<
     return await authenticateLocalHost(existing, scope)
   }
 
-  const spawnFailure = spawnHostCandidate(options)
+  const spawnFailure = options.hostStartPolicy === 'public-managed'
+    ? await startManagedHostCandidate(options)
+    : spawnHostCandidate(options)
   const deadline = Date.now() + REGISTRY_WAIT_TIMEOUT_MS
   while (Date.now() < deadline) {
     const failure = spawnFailure()

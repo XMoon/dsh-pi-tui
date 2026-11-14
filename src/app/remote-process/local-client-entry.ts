@@ -1403,6 +1403,13 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       dshAnchor: options.dshAnchor,
       profile: options.profile,
       ...(expectedHostInstanceId === undefined ? {} : { expectedInstanceId: expectedHostInstanceId }),
+      // ONLY the real public surface launch (a strictly-decoded M6-2A envelope,
+      // no internal exact-id handoff) asks for a managed Host start. Legacy
+      // qualification/peer/manual surface and the reexec expectation keep the
+      // historical process path and never install a user unit.
+      ...(options.mode === 'surface' && launchEnvelope !== undefined && expectedHostInstanceId === undefined
+        ? { hostStartPolicy: 'public-managed' as const }
+        : {}),
     })
     startupAbort.signal.throwIfAborted()
     emit({
