@@ -735,8 +735,13 @@ export default async function (h) {
         h.check('B16: one control-injected click lands on the nested Tool card head',
           await h.click(innerWitness.snapshot.chains, innerWitness.node),
           JSON.stringify(rect(innerWitness.node)))
-        await waitUntil(h, 'B16: the nested Tool card opens its real body', () =>
-          records(h).filter(row => row.kind === 'client.toggle').length > togglesBeforeInner, 150)
+        const innerToggleOk = await waitUntil(h, 'B16: the nested Tool toggle reaches the Session iterator with the EXACT card identity', () => {
+          const rows = records(h).filter(row => row.kind === 'client.toggle').slice(togglesBeforeInner)
+          return rows.some(row => row.collapsed === false && row.id === innerCardFocus.id)
+        }, 150)
+        h.check('B16: the client toggle names the EXACT nested Tool card and the expand target state',
+          innerToggleOk && foldLive(h).get(innerCardFocus.id)?.p.collapsed === false,
+          JSON.stringify({ expected: { id: innerCardFocus.id, collapsed: false }, now: foldLive(h).get(innerCardFocus.id)?.p ?? null }))
       }
       if (!await waitUntil(h, 'B16: the Turn 10 Tool body materializes into the client tree',
         toolBodyMaterialized, 200)) {
