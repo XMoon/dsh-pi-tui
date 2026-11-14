@@ -1286,8 +1286,20 @@ test('the mounted child viewer routes the durable child image through the CHILD 
   await waitFor('the child transcript rendered the durable image row', () =>
     viewport().includes('🖼️ child-a-shot.png'), 20_000)
   const imageKey = `${CHILD_A_ID}\u0000${image.attachmentId}`
-  await waitFor('the child Session served the durable image bytes', () =>
-    served.has(imageKey), 20_000)
+  // "Never served" has several distinct causes; name the observed reads on
+  // timeout instead of failing as one bare wait. A read that settled FAILED
+  // (a lifetime fence, a rejected read, a stale generation) is a different
+  // defect from a read that was never initiated.
+  const servedDeadline = Date.now() + 20_000
+  while (!served.has(imageKey)) {
+    if (Date.now() > servedDeadline) {
+      const settledReads = routed
+        .filter(call => call.attachmentId === image.attachmentId && call.outcome !== undefined)
+        .map(call => `${call.sessionId}:${call.outcome}${call.outcome === 'failed' ? ` (${String(call.error)})` : ''}`)
+      throw new Error(`timed out waiting for the child Session to serve the durable image bytes (routed: ${JSON.stringify(readerSpy.addresses(image.attachmentId))}; settled: ${settledReads.length > 0 ? settledReads.join('; ') : 'none'})`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
 
   // The loader caches per captured CONTEXT (the `src/client/media/image/loader.ts` scope
   // model), so one ref may legitimately be read once per scope; what must hold
@@ -2120,6 +2132,7 @@ test('reincarnation: a read stamped with the OLD child lifetime fails closed and
   const scope1 = currentImageScope(app)
   assert.match(scope1.key, /^child:1:/u, 'the first child viewer owns the child:1 lifetime key')
   assert.equal(scope1.sessionId, CHILD_A_ID)
+  const lifetimeOf = (key: string): number => Number(/^child:(\d+):/u.exec(key)?.[1])
   const binding1 = sessions.binding(SessionId(CHILD_A_ID))
   assert.ok(binding1 !== undefined, 'lifetime 1 owns its exact binding')
 
@@ -2150,6 +2163,21 @@ test('reincarnation: a read stamped with the OLD child lifetime fails closed and
   await waitFor('the Task Center rendered the child row again', () => viewport().includes(LABEL_A), 20_000)
   fixture.vt.sendInput('\r')
   await waitFor('the child viewer A re-hydrated', () => viewport().includes('childa answer 30'), 20_000)
+  // The re-rendered transcript row alone does not prove the REOPENED lifetime
+  // committed: gate the binding/scope reads on the new viewer generation AND a
+  // LATER child-lifetime scope key, and name the observed facts on timeout.
+  const lifetimeDeadline = Date.now() + 20_000
+  for (;;) {
+    const committedScope = currentImageScope(app)
+    const committed = app.getViewerGeneration() > generation1
+      && /^child:(\d+):/u.test(committedScope.key)
+      && lifetimeOf(committedScope.key) > lifetimeOf(scope1.key)
+    if (committed) break
+    if (Date.now() > lifetimeDeadline) {
+      throw new Error(`timed out waiting for the reopened viewer to commit its own lifetime (generation=${String(app.getViewerGeneration())} after ${String(generation1)}, scope=${committedScope.key} after ${scope1.key})`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
   const scope2 = currentImageScope(app)
   const binding2 = sessions.binding(SessionId(CHILD_A_ID)) as unknown as ReadAttachmentFace | undefined
   assert.ok(binding2 !== undefined, 'the reincarnated viewer retains its own binding')
@@ -2157,7 +2185,6 @@ test('reincarnation: a read stamped with the OLD child lifetime fails closed and
   assert.notEqual(app.getViewerGeneration(), generation1, 'the reopened viewer is a new generation')
   assert.match(scope2.key, /^child:\d+:/u, 'the reopened viewer keys a child lifetime')
   assert.notEqual(scope2.key, scope1.key, 'the reincarnated scope key differs from the retired one')
-  const lifetimeOf = (key: string): number => Number(/^child:(\d+):/u.exec(key)?.[1])
   assert.ok(lifetimeOf(scope2.key) > lifetimeOf(scope1.key),
     `the reopened viewer must be a LATER lifetime (${scope1.key} -> ${scope2.key})`)
   assert.notEqual(scope2, scope1, 'the reincarnated scope token is a distinct object')
@@ -2256,10 +2283,14 @@ test('a durable image read under the STILL-OWNED presentation survives a same-bi
   assert.ok(bindingBefore !== undefined, 'the presentation owns its exact binding before the reconnect')
 
   // ── A REAL durable image in the CHILD Session (referenced by a durable
-  // child message, so the Session read can genuinely serve it).
+  // child message, so the Session read can genuinely serve it). The REF is
+  // created before the reconnect, but the turn is appended only AFTER the new
+  // generation is confirmed: a turn appended before the reconnect could start
+  // its read under the OLD generation, and the generation fence would reject
+  // that result into this presentation's cached error (no automatic retry) —
+  // an interleaving this lane does not intend to prove.
   const png = await realPng('#0f0f0f', 3)
   const image = (await attachments.saveImages([{ data: png, mediaType: 'image/png', name: 'pr2-reconnect.png' }]))[0]!
-  seedImageTurn(appenderOf(host.ctx, CHILD_A_ID), 50, 'reconnect image prompt', image)
 
   // ── The OFFICIAL reconnect (A -> B) with the SAME retained binding.
   const connection = fixture.aggregate.wire.client.connection as unknown as {
@@ -2275,16 +2306,26 @@ test('a durable image read under the STILL-OWNED presentation survives a same-bi
   assert.equal(sessions.binding(SessionId(CHILD_A_ID)), bindingBefore,
     'the retained child binding object survived the reconnect (the adoption)')
 
+  seedImageTurn(appenderOf(host.ctx, CHILD_A_ID), 50, 'reconnect image prompt', image)
+
   // ── The post-reconnect read under the still-owned presentation: ALLOWED.
   // The read captures generation B for its own async fence and the bytes
   // commit because B + the same binding remain current through the settle.
-  // (No `routed` clearing: the reconnect-triggered rehydrate may fire the
-  // loader before this point; the attachmentId filter selects this image.)
   await waitFor('the reconnect image turn hydrated', () =>
     viewport().includes('reconnect image prompt'), 20_000)
   const imageKey = `${CHILD_A_ID}\u0000${image.attachmentId}`
-  await waitFor('the still-owned presentation served the new image', () =>
-    readerSpy.served.has(imageKey), 20_000)
+  // The same distinguishable timeout as the sibling served-wait: a failed
+  // read names its error and the routed reads instead of one bare wait.
+  const servedDeadline = Date.now() + 20_000
+  while (!readerSpy.served.has(imageKey)) {
+    if (Date.now() > servedDeadline) {
+      const settledReads = readerSpy.routed
+        .filter(call => call.attachmentId === image.attachmentId && call.outcome !== undefined)
+        .map(call => `${call.sessionId}:${call.outcome}${call.outcome === 'failed' ? ` (${String(call.error)})` : ''}`)
+      throw new Error(`timed out waiting for the still-owned presentation to serve the new image (routed: ${JSON.stringify(readerSpy.addresses(image.attachmentId))}; settled: ${settledReads.length > 0 ? settledReads.join('; ') : 'none'})`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
   assert.deepEqual(readerSpy.served.get(imageKey), png,
     'the bytes committed under generation B + the SAME binding')
   const adoptedRead = readerSpy.routed.find(call => call.attachmentId === image.attachmentId)
