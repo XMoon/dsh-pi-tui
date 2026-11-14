@@ -512,11 +512,23 @@ export async function apply(ctx) {
       "  else send({ jsonrpc: '2.0', id: m.id, error: { code: -32601, message: 'method not found' } })",
       "})",
     ].join('\n')
-    ctx.effect(() => ctx.mcpManager.register('fr3-plugin', {
+    const releaseRegistration = ctx.effect(() => ctx.mcpManager.register('fr3-plugin', {
       transport: 'stdio',
       command: process.execPath,
       args: ['-e', inline],
     }), 'fr3 plugin-owned MCP server')
+    // The scene triggers a clean revocation through a file, proving the
+    // unregister path removes the entry (no retained cleanup record).
+    ctx.effect(() => {
+      const trigger = process.env.C1_FR3_UNREGISTER
+      if (trigger === undefined || trigger === '') return
+      const timer = setInterval(() => {
+        if (!existsSync(trigger)) return
+        clearInterval(timer)
+        releaseRegistration()
+      }, 50)
+      return () => clearInterval(timer)
+    }, 'fr3 plugin revocation trigger')
   }
 
   // M6-1 F6 qualification fault: an EMPTY official provider that reports an
