@@ -103,6 +103,19 @@ export interface RendererSelectionDeps {
     readonly bindHistorySearch?: (
       binding: import('../surface/runtime.ts').TspHistorySearchBinding,
     ) => void
+    /**
+     * T3-B1: install the ONE read-only semantic-search binding on the connected
+     * renderer. Forwarded verbatim like the History bundle: this projection
+     * holds no Folder, no match, no seat and no coverage fact — the surface's
+     * binding is the only reader of the selected Folder.
+     *
+     * Optional on the CONNECTOR INPUT so a scripted test connector can express
+     * "no semantic-search plane"; the production connector below declares it
+     * REQUIRED, because a connected TSP renderer always carries the seat.
+     */
+    readonly bindTranscriptSemanticSearch?: (
+      binding: import('../surface/runtime.ts').TspTranscriptSemanticSearchBinding,
+    ) => void
     /** PR-Q: install the application-level Queue manager controller ONCE. */
     readonly bindQueueManager?: (controller: import('../queue/manager.ts').QueueManagerController) => void
     readonly dispose: () => Promise<void>
@@ -144,7 +157,7 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
     // TSP-7 PR-D: the footer config binds exactly once at the mount, BEFORE
     // the first status commit can paint a row (a resolver throw propagates —
     // the mount-failure release path owns the session).
-    mount: (binding, statusReader, historySearch, queueManager) => {
+    mount: (binding, statusReader, historySearch, semanticSearch, queueManager) => {
       tsp.bindStatusReader(statusReader)
       tsp.bindNativeFooterConfig(deps.resolveFooterConfig())
       tsp.bindImages(binding)
@@ -155,6 +168,13 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
       // unbound, so `Ctrl+R` states the truth instead of opening a fake card) —
       // never a second lifecycle and never a silent fallback.
       tsp.bindHistorySearch?.(historySearch)
+      // T3-B1: the semantic-search binding is installed at the SAME one-time
+      // mount, strictly AFTER the History bundle and BEFORE the queue, and all
+      // of it happens before any input can reach the renderer. A scripted
+      // connector without the member mounts a renderer with NO semantic-search
+      // plane (its seat stays unbound, so the entry states the truth instead of
+      // opening a fake card).
+      tsp.bindTranscriptSemanticSearch?.(semanticSearch)
       // PR-Q: the application-level Queue manager is installed at the SAME
       // one-time mount, before any input can reach the renderer. A scripted
       // connector without the member mounts a renderer with no queue sheet; the
@@ -259,6 +279,12 @@ export function productionTspConnector(
      carries the seat, and a test connector is that contract's fake. */
   readonly bindHistorySearch: (
     binding: import('../surface/runtime.ts').TspHistorySearchBinding,
+  ) => void
+  /** T3-B1: the ONE semantic-search install on the renderer's own mount (see
+   *  the connector input above). Required: a connected TSP renderer always
+   *  carries the seat, and a test connector is that contract's fake. */
+  readonly bindTranscriptSemanticSearch: (
+    binding: import('../surface/runtime.ts').TspTranscriptSemanticSearchBinding,
   ) => void
   /** PR-Q: install the application-level Queue manager controller ONCE. */
   readonly bindQueueManager?: (controller: import('../queue/manager.ts').QueueManagerController) => void

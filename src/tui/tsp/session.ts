@@ -66,14 +66,20 @@ import type { SettledQuestionAnswersLookup, SurfaceInteractionPresenter } from '
 import type { SurfaceDraftImageOccurrence, SurfaceImageBinding } from '../../app/surface/runtime.ts'
 import type { DraftImage } from '../../client/media/image/types.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
-import { TSP_CONTINUED_INSPECTION_LABEL, TSP_VISUAL_CHORDS, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL, formatKeyId, matchesKeyId } from '../keybindings/hints.ts'
+import { TSP_CONTINUED_INSPECTION_LABEL, TSP_SEARCH_CHORD, TSP_VISUAL_CHORDS, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL, formatKeyId, matchesKeyId } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit, type TspComposerState } from './editor.ts'
 import { createTspInputCompletion, type TspInputCompletion } from './input-completion.ts'
 import { createTspHistorySearch, TSP_HISTORY_SEARCH_UNAVAILABLE, type TspHistorySearchSeat } from './history-search.ts'
 import { historySearchView, HISTORY_SEARCH_SHEET, HISTORY_SEARCH_STYLES } from './history-search-view.ts'
+import { createTspTranscriptSearch, TSP_TRANSCRIPT_SEARCH_UNAVAILABLE, type TspTranscriptSearchSeat } from './transcript-search.ts'
+import { transcriptSearchView, TRANSCRIPT_SEARCH_SHEET, TRANSCRIPT_SEARCH_STYLES } from './transcript-search-view.ts'
 import type { InlineAttachmentAcceptance, InlineAttachmentStager } from '../interaction/autocomplete/inline-attachment.ts'
 import { createInstalledAutocompleteProvider } from '../interaction/autocomplete/installed-provider.ts'
-import type { TspCommandCompletionInstallation, TspHistorySearchBinding } from '../../app/surface/runtime.ts'
+import type {
+  TspCommandCompletionInstallation,
+  TspHistorySearchBinding,
+  TspTranscriptSemanticSearchBinding,
+} from '../../app/surface/runtime.ts'
 import { pastedBodySpan } from '../interaction/pasted-path-range.ts'
 import type { PastedPathReceipt } from '../../app/surface/pasted-image-intake.ts'
 import { imageProtocolPreference } from '../graphics/image-protocol-preference.ts'
@@ -579,6 +585,17 @@ export interface TspRenderer extends TspInputBinding {
    */
   readonly bindHistorySearch: (binding: TspHistorySearchBinding) => void
   /**
+   * T3-B1: install the ONE read-only semantic-search capability on this mount.
+   * SYNCHRONOUS and ONE-TIME, exactly like the History bundle: the mount owns ONE
+   * Search seat, the seat is created here and never a second time, and a binding
+   * after disposal is an explicit error.
+   *
+   * The capability carries READ-ONLY projection only — the selected Folder's
+   * own `search()`, one match resolution and a source-currentness check. It
+   * grants no corpus, no Session ownership, no Host read and no Composer write.
+   */
+  readonly bindTranscriptSemanticSearch: (binding: TspTranscriptSemanticSearchBinding) => void
+  /**
    * Stop the input loop, close the surface + session ONCE. The promise
    * settles only after the SDK restored the tty (input drain included), so
    * callers awaiting it can safely touch the terminal afterwards.
@@ -941,6 +958,20 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let historySearch: TspHistorySearchSeat | undefined
   /** TSP I-E: the one-time History bind latch (a lifecycle fact, not a cache). */
   let historySearchInstalled = false
+  /**
+   * T3-B1: the ONE Session semantic-search seat of this mount, created exactly
+   * once by {@link bindTranscriptSemanticSearch}. Like the History seat it is a
+   * short-lived Dock seat — not a Presenter, not a second composer, not a second
+   * SDK surface — and it holds no corpus, no Session and no Composer authority:
+   * the surface's read-only binding answers every query from the live Folder.
+   */
+  let transcriptSearch: TspTranscriptSearchSeat | undefined
+  /** T3-B1: the one-time semantic-search bind latch. */
+  let transcriptSearchInstalled = false
+  /** T3-B1: the bound read-only semantic-search capability (the surface's ONE
+   *  projection of the selected Folder). Absent on a scripted mount that
+   *  declares no semantic-search plane. */
+  let transcriptSearchBinding: TspTranscriptSemanticSearchBinding | undefined
   /**
    * TSP I-E: the History card's SEAT LIFECYCLE fact, including a Modal park.
    * This is deliberately NOT `historySearch.isOpen()`: while a Modal owns the
@@ -1657,7 +1688,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
                 // it returns the caret to the ONE composer through this function.
                 : historySearch?.isOpen() === true
                   ? historySearch.desiredFocusId() ?? null
-                  : modelQuick?.isOpen() === true
+                  // T3-B1: an open Session Search card owns the hardware caret on
+                  // its own query field (the real wire id of the field this frame
+                  // built). It outranks the Quick menu, the Permission menu and
+                  // the Composer, and closing it returns the caret to the ONE
+                  // composer through this function.
+                  : transcriptSearch?.isOpen() === true
+                    ? transcriptSearch.desiredFocusId() ?? null
+                    : modelQuick?.isOpen() === true
                     ? modelQuick.desiredFocusId() ?? null
                     : composerFocusId
     if (!force && desired === lastAppliedFocusId) return
@@ -2138,6 +2176,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // of the frame the SDK just committed — never a guessed path. A closed or
     // parked card indexes nothing.
     if (dockNode !== undefined && historySearch?.isOpen() === true) historySearch.indexFrame(dockNode)
+    // T3-B1: the Search card's focus/reveal targets are the wire ids of the frame
+    // the SDK just committed — never a guessed path. A closed card indexes
+    // nothing, and a navigation's reveal is requested exactly here (after the
+    // Main tree this frame committed).
+    if (dockNode !== undefined && transcriptSearch?.isOpen() === true) transcriptSearch.indexFrame(dockNode)
     applyFocus(false)
     // B3-A2 §5.3: the base frame is the ONE point that reconciles the Reader
     // with the CURRENT row (the Hub already renders after `setItems`), so a
@@ -2827,6 +2870,254 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   }
 
   /**
+   * T3-B1: the SEARCH-ONLY disclosure grants of the CURRENT target.
+   *
+   * These are PURELY TEMPORARY, frame-scoped facts: they exist only while the
+   * Search seat is open and only for the target the user is on, and they are
+   * recomputed on every navigation. They NEVER write the manual disclosure sets
+   * above (`expandedWorkOwners`, `expandedToolKeys`, `expandedFocusTurns`, the
+   * inner owner sets, `workflowDisclosureStates`) and they never produce a fake
+   * `toggle` event: the Owner-frozen contract is "temporary effective
+   * disclosure", so closing the search leaves every manual preference exactly as
+   * the user set it.
+   *
+   * The grants are DERIVED from the canonical ancestry of the matched
+   * representative message, not from a text scan: the target's own message is
+   * the leaf, and each enclosing canonical owner (its Turn's Focus root, its Work
+   * span, its Thinking/Context/Command owner, its Workflow run/phase) is opened
+   * only because it really CONTAINS that message in the current projection.
+   */
+  interface SearchDisclosureGrants {
+    /** The target identity the grants were derived for (never a raw position). */
+    readonly targetKey: string
+    readonly focusTurns: ReadonlySet<number>
+    readonly workOwners: ReadonlySet<TranscriptMessage>
+    readonly thinkingOwners: ReadonlySet<TranscriptMessage>
+    readonly contextRowOwners: ReadonlySet<TranscriptMessage>
+    readonly clusterOwners: ReadonlySet<TranscriptMessage>
+    readonly commandCompactionOwners: ReadonlySet<TranscriptMessage>
+    readonly toolKeys: ReadonlySet<string>
+    /** Workflow run/phase keys the CURRENT target's own run must present open. */
+    readonly workflowRuns: ReadonlySet<WorkflowRunId>
+  }
+
+  /** The CURRENT frame's search grants (`undefined` = no search disclosure). */
+  let searchGrants: SearchDisclosureGrants | undefined
+  /**
+   * The navigation epoch whose grants the user has explicitly collapsed. A
+   * manual collapse suppresses the automatic re-open until the NEXT explicit
+   * navigation (a new epoch), and a passive repaint never overrides it.
+   */
+  let searchGrantSuppressedEpoch = -1
+  /** Strictly increasing per explicit navigation (Next/Prev/query change). */
+  let searchNavigationEpoch = 0
+  /** The epoch the CURRENT grants were derived in. */
+  let searchGrantsEpoch = -1
+
+  /** The empty grant set: a frame with no search disclosure at all. */
+  const EMPTY_SEARCH_GRANTS: SearchDisclosureGrants = {
+    targetKey: '',
+    focusTurns: new Set(),
+    workOwners: new Set(),
+    thinkingOwners: new Set(),
+    contextRowOwners: new Set(),
+    clusterOwners: new Set(),
+    commandCompactionOwners: new Set(),
+    toolKeys: new Set(),
+    workflowRuns: new Set(),
+  }
+
+  /**
+   * Derive the temporary grants for the CURRENT Search target.
+   *
+   * The chain is the canonical one: the binding resolves the target to the
+   * CURRENT representative message, and the enclosing owners are read from the
+   * SAME projection helpers the mapper uses (`projectTranscriptStructure` for
+   * Work spans and clusters, `projectFocus` for Focus turns, the message kinds
+   * for the inner owners, and the tool rows' own disclosure keys). Nothing here
+   * re-derives a structure from text.
+   */
+  const deriveSearchGrants = (): SearchDisclosureGrants => {
+    const seat = transcriptSearch
+    if (seat === undefined || seat.isOpen() !== true) return EMPTY_SEARCH_GRANTS
+    const target = seat.currentTarget()
+    const message = seat.currentMessage()
+    if (target === undefined || message === undefined) return EMPTY_SEARCH_GRANTS
+    // A user collapse of THIS navigation epoch wins over the automatic open.
+    if (searchGrantSuppressedEpoch === searchNavigationEpoch) return EMPTY_SEARCH_GRANTS
+    const focusTurns = new Set<number>()
+    const workOwners = new Set<TranscriptMessage>()
+    const thinkingOwners = new Set<TranscriptMessage>()
+    const contextRowOwners = new Set<TranscriptMessage>()
+    const clusterOwners = new Set<TranscriptMessage>()
+    const commandCompactionOwners = new Set<TranscriptMessage>()
+    const toolKeys = new Set<string>()
+    const workflowRuns = new Set<WorkflowRunId>()
+    // The message's own Turn is the Focus root that must open to reveal it. A
+    // Command card carries no `turn` at all (its identity is the command run), so
+    // only a message kind that really has one grants a Focus root.
+    if ('turn' in message) focusTurns.add(message.turn)
+    // Work spans / clusters that really CONTAIN the message in this projection.
+    for (const block of projectTranscriptStructure(lastMessages)) {
+      if (block.kind === 'work') {
+        const owns = block.span.parts.some(part => part.kind === 'message' && part.message === message)
+        if (owns) workOwners.add(block.span.owner)
+        continue
+      }
+      if (block.kind === 'context-cluster') {
+        if (block.cluster.members.includes(message as never)) {
+          clusterOwners.add(block.cluster.owner as TranscriptMessage)
+        }
+      }
+    }
+    if (message.kind === 'thinking') thinkingOwners.add(message)
+    else if (message.kind === 'system' && message.context === true) contextRowOwners.add(message)
+    else if (message.kind === 'command' || message.kind === 'compaction') commandCompactionOwners.add(message)
+    else if (message.kind === 'tool') {
+      // The tool card's OWN disclosure key (the SAME key the toggle route
+      // admits): a body that is folded behind the card opens for this target.
+      toolKeys.add(scopeKeys.keyFor(message))
+    } else if (message.kind === 'workflow') {
+      workflowRuns.add(message.runId)
+    }
+    return {
+      targetKey: `${target.representativeId}`,
+      focusTurns,
+      workOwners,
+      thinkingOwners,
+      contextRowOwners,
+      clusterOwners,
+      commandCompactionOwners,
+      toolKeys,
+      workflowRuns,
+    }
+  }
+
+  /**
+   * The effective disclosure inputs of THIS frame: the manual sets PLUS the
+   * current search grants. The manual sets are never mutated — every consumer
+   * below reads a fresh union, so closing the search restores the user's own
+   * state with no undo step.
+   */
+  const effectiveDisclosure = (): {
+    readonly focusTurns: ReadonlySet<number>
+    readonly workOwners: ReadonlySet<TranscriptMessage>
+    readonly thinkingOwners: ReadonlySet<TranscriptMessage>
+    readonly contextRowOwners: ReadonlySet<TranscriptMessage>
+    readonly clusterOwners: ReadonlySet<TranscriptMessage>
+    readonly commandCompactionOwners: ReadonlySet<TranscriptMessage>
+    readonly toolKeys: ReadonlySet<string>
+  } => {
+    const grants = searchGrants
+    if (grants === undefined) {
+      return {
+        focusTurns: expandedFocusTurns,
+        workOwners: expandedWorkOwners,
+        thinkingOwners: expandedThinkingOwners,
+        contextRowOwners: expandedContextRowOwners,
+        clusterOwners: expandedClusterOwners,
+        commandCompactionOwners: expandedCommandCompactionOwners,
+        toolKeys: expandedToolKeys,
+      }
+    }
+    const union = <T>(manual: ReadonlySet<T>, extra: ReadonlySet<T>): ReadonlySet<T> =>
+      extra.size === 0 ? manual : new Set([...manual, ...extra])
+    return {
+      focusTurns: union(expandedFocusTurns, grants.focusTurns),
+      workOwners: union(expandedWorkOwners, grants.workOwners),
+      thinkingOwners: union(expandedThinkingOwners, grants.thinkingOwners),
+      contextRowOwners: union(expandedContextRowOwners, grants.contextRowOwners),
+      clusterOwners: union(expandedClusterOwners, grants.clusterOwners),
+      commandCompactionOwners: union(expandedCommandCompactionOwners, grants.commandCompactionOwners),
+      toolKeys: union(expandedToolKeys, grants.toolKeys),
+    }
+  }
+
+  /**
+   * T3-B1: start ONE new navigation epoch and derive its grants. Called only by
+   * an EXPLICIT navigation (open, query change, Next/Prev) — a passive repaint
+   * never resets the suppression, so a card the user collapsed stays collapsed.
+   */
+  const refreshSearchGrants = (): void => {
+    searchNavigationEpoch += 1
+    searchGrantSuppressedEpoch = -1
+    searchGrants = deriveSearchGrants()
+    searchGrantsEpoch = searchNavigationEpoch
+  }
+
+  /**
+   * T3-B1: drop the search grants without touching any manual set. Used when the
+   * seat closes, retires or loses its source.
+   */
+  const clearSearchGrants = (): void => {
+    searchGrants = undefined
+    searchGrantsEpoch = -1
+  }
+
+  /**
+   * T3-B1: the ONE lifecycle retirement of the Session Search seat. Every path
+   * that can invalidate the current source — a new presentation scope, a
+   * hydration begin, a viewer switch, a `gone` root or a disposal — goes through
+   * here, so no older query, target, grant or reveal identity can survive it.
+   * It never touches the Composer: the Dock simply stops painting the card.
+   */
+  const retireSearchSeat = (): void => {
+    searchGrantSuppressedEpoch = -1
+    clearSearchGrants()
+    transcriptSearch?.retire()
+  }
+
+  /**
+   * T3-B1: the USER collapsed a card the search had opened. This is the ONE
+   * suppression point: the current navigation epoch stops re-opening, and the
+   * user's own manual choice is recorded by the SAME toggle route as always.
+   * A new explicit navigation starts a new epoch and may open again.
+   */
+  const suppressSearchGrantsForEpoch = (): void => {
+    searchGrantSuppressedEpoch = searchNavigationEpoch
+    clearSearchGrants()
+  }
+
+  /**
+   * T3-B1: request the native reveal of the CURRENT Session Search target.
+   *
+   * The identity chain is the canonical one and nothing else: the surface's
+   * read-only binding resolves the target's match to the CURRENT representative
+   * `TranscriptMessage` of the live Folder; the renderer's own committed
+   * `lastMainBlocks` descriptors report which top-level Main root OWNS that
+   * message object (their `owners` are the mapper's canonical membership); the
+   * `ContinuousMainJournal` then answers whether that root is really attached to
+   * the client and with which derived wire id.
+   *
+   * There is deliberately NO text scan, no `msg-<id>` synthesis and no
+   * turn/query guess here. A target whose root is not currently attached (a
+   * `gone` root, a folded member the mapper never materialized, a replaced
+   * source) is reported as unreachable, and the card says
+   * `Unavailable in current pane` instead of sending an op that cannot land.
+   */
+  const revealCurrentSearchTarget = (): boolean => {
+    if (disposed || hydrating || !inputBound) return false
+    const seat = transcriptSearch
+    if (seat === undefined || seat.isOpen() !== true) return false
+    const target = seat.currentTarget()
+    if (target === undefined) return false
+    const message = seat.currentMessage()
+    if (message === undefined) return false
+    // The canonical owner: the FIRST committed descriptor whose `owners`
+    // contains this exact representative object. Object identity is the mapper's
+    // own membership fact, never a re-derived guess.
+    const block = lastMainBlocks.find(candidate => candidate.owners.includes(message))
+    if (block === undefined) return false
+    // The CURRENT attached fact: a root the client evicted is not re-added by a
+    // projection, so an unattached root can never receive a reveal op.
+    if (!mainJournal.isAttached(block.key)) return false
+    const nodeId = mainJournal.idOf(block.key)
+    if (nodeId === undefined) return false
+    surface.reveal(nodeId, 'nearest')
+    return true
+  }
+
+  /**
    * The ONE Main-frame commit point: after the SDK view is rendered, commit the
    * current descriptors (materializing only new/changed roots), merge the
    * per-root frame indexes in real Main order, and reconcile the selected
@@ -3009,8 +3300,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
     }
     const turnActivities = lastTurnActivities ?? new Map<number, TurnActivity>()
+    // T3-B1: THIS frame's effective disclosure inputs = the user's manual sets
+    // PLUS the current search target's temporary grants. The manual sets are
+    // never mutated, so closing the search restores them with no undo step.
+    const effective = effectiveDisclosure()
     const focusBlocks = displayState?.preset === 'focus'
-      ? projectFocus(lastMessages, turnActivities, expandedFocusTurns, true)
+      ? projectFocus(lastMessages, turnActivities, effective.focusTurns, true)
       : []
     for (const block of focusBlocks) {
       if (block.kind === 'activity') {
@@ -3085,13 +3380,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       transcriptCopyPayloads,
       chartKindsSupported: session.caps.kinds.includes('chart'),
       ...(svgStates === undefined ? {} : { toolSvgStates: svgStates }),
-      expandedToolKeys,
+      expandedToolKeys: effective.toolKeys,
       ...(displayState === undefined ? {} : {
         innerDisclosure: {
-          expandedThinkingOwners,
-          expandedContextRowOwners,
-          expandedClusterOwners,
-          expandedCommandCompactionOwners,
+          expandedThinkingOwners: effective.thinkingOwners,
+          expandedContextRowOwners: effective.contextRowOwners,
+          expandedClusterOwners: effective.clusterOwners,
+          expandedCommandCompactionOwners: effective.commandCompactionOwners,
         },
       }),
       imageStates,
@@ -3114,8 +3409,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       : describeTranscriptMainBlocksForPreset(lastMessages, scopeKeys, {
           ...viewOptions,
           preset: displayState.preset,
-          expandedWorkOwners,
-          expandedFocusTurns,
+          expandedWorkOwners: effective.workOwners,
+          expandedFocusTurns: effective.focusTurns,
           turnActivities: lastTurnActivities,
           window: lastWindowState,
           ...(focusPhase === undefined ? {} : { focusPhase }),
@@ -3368,6 +3663,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // Dock — never a `mode:'screen'`, never an overlay, never a second editor.
     const historyNode = historyDockNode()
     if (historyNode !== undefined) lines.push(historyNode)
+    // T3-B1: the Search card and the Composer are MUTUALLY EXCLUSIVE input
+    // owners of this ONE Dock. While the card is open the Dock builds NO
+    // composer editor, NO Quiet Composer shell and NO completion/permission/
+    // quick node at all — the Composer is withdrawn, not hidden behind CSS, so
+    // there is never a second editable field and never a second Send. Closing
+    // the card re-materializes the SAME controller from its OWN state.
+    const searchNode = transcriptSearchDockNode()
+    if (searchNode !== undefined) {
+      lines.push(searchNode)
+      return ui.col({ key: 'dock' }, ...lines)
+    }
     const editorNode = composerEditorNode()
     const quietShell = composerActionsSupported() ? quietComposerNode(editorNode) : undefined
     if (quietShell === undefined) {
@@ -3488,6 +3794,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // open again for the incoming subject, and no older row can be restored
       // or copied into it.
       historySearch?.retire()
+      // T3-B1: and the same rule for the Session Search card. A new presentation
+      // scope is a DIFFERENT subject even under the same session id (a cold
+      // rehydration), so the outgoing subject's query, targets, index and
+      // temporary disclosure grants are withdrawn here; the card is never
+      // restored onto the incoming source.
+      retireSearchSeat()
       scopePrefix = `s${scopeEpoch}-`
       scopeKeys = new TranscriptNodeKeys()
       // PR-C: the retired subject's image subscriptions go with it, and the
@@ -4354,6 +4666,61 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const historySeatAdmitted = (): boolean => visualActionsAdmitted() && nativeHistoryCapable()
 
   /**
+   * T3-B1: the ONE capability gate of the Session Search card. It reads the
+   * EXACT kinds the card's own projection constructs (`col`/`row`/`text`/
+   * `input`/`el`) plus `styles` for its scoped sheet — never a version label or
+   * a window size. A pane that cannot paint the card states the truth instead of
+   * painting a reduced second-tier UI.
+   */
+  const nativeTranscriptSearchCapable = (): boolean =>
+    ['col', 'row', 'text', 'input', 'el'].every(kind => session.caps.kinds.includes(kind))
+    && session.caps.features.includes('styles')
+
+  /**
+   * T3-B1: the mount-side admission the Search seat consults. It REUSES the
+   * same live fences every composer-adjacent seat uses (no Modal/Reader/higher
+   * Presenter, no hydration window, no disposal, the input is bound) and adds
+   * the pane's own negotiated capability plus the History card, which outranks
+   * this seat.
+   *
+   * The three LOW composer popovers (Permission menu, Model quick menu,
+   * completion list) are deliberately NOT part of this predicate: the explicit
+   * Search entry retires them synchronously first, so a retirable local popover
+   * can never make the entry permanently unavailable.
+   */
+  const transcriptSearchSeatAdmitted = (): boolean =>
+    visualActionsAdmitted() && nativeTranscriptSearchCapable() && historySearch?.isOpen() !== true
+
+  /**
+   * T3-B1: the ONE Session Search entry. A pane without the negotiated
+   * capability or without the surface's semantic-search binding states the
+   * truth and leaves the draft untouched — it never opens a fake card.
+   */
+  const openTranscriptSearch = (): void => {
+    if (disposed || hydrating || !inputBound) return
+    if (visualActionsAdmitted() === false) return
+    if (historySearch?.isOpen() === true) return
+    if (transcriptSearch === undefined || !transcriptSearch.supported()) {
+      display.notify(TSP_TRANSCRIPT_SEARCH_UNAVAILABLE, 'info')
+      return
+    }
+    // The three low popovers retire FIRST (none of them reopens itself), then the
+    // same admission predicate decides whether the seat may really open.
+    if (closePermissionMenu()) render()
+    retireQuickMenu()
+    if (completion.retire()) render()
+    if (!transcriptSearchSeatAdmitted()) return
+    transcriptSearch.open()
+  }
+
+  /**
+   * T3-B1: whether the Session Search card currently owns the Dock's input seat.
+   * While it is open the Dock paints NO Composer node at all, so this predicate
+   * is the ONE fact every composer-side admission reads.
+   */
+  const transcriptSearchOwnsDock = (): boolean => transcriptSearch?.isOpen() === true
+
+  /**
    * TSP I-E: the ONE Dock producer of the History card. `undefined` = paint
    * nothing: the seat's own projection already refuses a parked, retired,
    * un-admitted or capability-poor card, so a frame can never show a card the
@@ -4369,6 +4736,23 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // produces; the SDK dispatches by the id of the view it last rendered, and
       // the seat re-checks serial/revision/currentness before anything mutates.
       onIntent: (intent) => { historySearch?.handleIntent(intent) },
+    })
+  }
+
+  /**
+   * T3-B1: the ONE Dock producer of the Session Search card. `undefined` = paint
+   * nothing: the seat's own projection already refuses a retired or un-admitted
+   * card, so a frame can never show a card the mount would not let act.
+   */
+  const transcriptSearchDockNode = (): Node | undefined => {
+    const seatState = transcriptSearch?.renderState()
+    if (seatState === undefined) return undefined
+    return transcriptSearchView({
+      state: seatState,
+      // Every pointer route lands in the SAME admitted intent the keyboard
+      // produces; the SDK dispatches by the id of the view it last rendered and
+      // the seat re-checks serial/revision/currentness before anything mutates.
+      onIntent: (intent) => { transcriptSearch?.handleIntent(intent) },
     })
   }
 
@@ -4621,6 +5005,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         retireQuickMenu()
         composerStopClicked()
       },
+      // T3-B1: the ONE `Search session` entry. `enabled` is the SAME admission
+      // predicate the click re-checks (plus the real seat capability), so the
+      // painted affordance and the accepted gesture can never disagree. A pane
+      // without the semantic-search plane paints the entry disabled rather than
+      // a fake control; the chord still states the truth.
+      searchSession: {
+        available: transcriptSearch?.supported() === true,
+        enabled: transcriptSearch?.supported() === true && transcriptSearchSeatAdmitted(),
+        narrow: session.caps.cols < QUIET_COMPOSER_NARROW_COLS,
+        onOpen: () => { openTranscriptSearch() },
+      },
     })
   }
 
@@ -4806,6 +5201,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       historySearch.handleKey(key)
       return false
     }
+    // T3-B1: an open Session Search card owns every key EXCEPT `Ctrl+C`, which
+    // must reach the original interrupt/cancel owner exactly once. The card
+    // retires itself first so no stale query survives the interrupt, and the
+    // key then falls through the ladder unchanged.
+    if (transcriptSearch?.isOpen() === true) {
+      if (transcriptSearch.handleKey(key)) return false
+    }
     // 4. `Alt+Q` (PR3-B B3 §3.8): the inspection entry for parked continued
     //    Questions — only with no modal and outside the hydration window (the
     //    list belongs to the subject that is currently owned, so the SAME
@@ -4862,6 +5264,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // never-two-operable-seats rule the Quick menu and Permission menu follow.
     if (key.ctrl === true && key.name === 'r' && !key.alt && !key.meta && !key.shift) {
       openHistorySearch()
+      return false
+    }
+    // T3-B1: `Alt+Shift+S` opens the ONE Session Search seat — the SAME entry the
+    // Quiet Composer's `Search session` button calls. It runs AFTER every higher
+    // Presenter has declined the key (so a Modal/Reader/Hub/picker/Queue keeps
+    // its own rights) and BEFORE the low composer popovers. A second press while
+    // the card is open only re-focuses its query.
+    if (matchesKeyId(key, TSP_SEARCH_CHORD)) {
+      openTranscriptSearch()
       return false
     }
     // TSP-7 PR-G: the composer quick menu owns its keys after every higher seat
@@ -5075,18 +5486,28 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         && webPicker?.isOpen() !== true && presetPicker?.isOpen() !== true
         && modelPicker?.isOpen() !== true && modelQuick?.isOpen() !== true
         && queueManagerPresenter?.isOpen() !== true
-        && historySearch?.isOpen() !== true) {
+        && historySearch?.isOpen() !== true
+        // T3-B1: a `toggle` stays admitted while the Search card is open — the
+        // Owner-frozen contract lets the user collapse a card the search
+        // temporarily expanded. Every OTHER base event stays fenced below.
+        ) {
         const preset = options.displayState?.preset
         if (preset === 'focus') {
           const path = input.event.id.startsWith('main.') ? input.event.id.slice('main.'.length) : input.event.id
           const turn = focusDisclosureByPath.get(input.event.id) ?? focusDisclosureByPath.get(path)
           if (turn !== undefined) {
-            const wasExpanded = expandedFocusTurns.has(turn)
+            // T3-B1: the comparison reads the EFFECTIVE state (manual + the
+            // current search grant), so collapsing a card the search opened is a
+            // real change instead of a no-op that the next frame re-opens.
+            const wasExpanded = expandedFocusTurns.has(turn) || searchGrants?.focusTurns.has(turn) === true
             const targetExpanded = input.event.collapsed !== true
             if (wasExpanded !== targetExpanded) {
               if (targetExpanded) {
                 expandedFocusTurns.add(turn)
               } else {
+                // The user's own collapse wins over the search's temporary
+                // grant for THIS navigation epoch.
+                if (searchGrants?.focusTurns.has(turn) === true) suppressSearchGrantsForEpoch()
                 expandedFocusTurns.delete(turn)
                 // Reset ONLY the process detail this exact Thought root owns:
                 // Work and Thinking manual owners, plus the top-level ordinary
@@ -5110,11 +5531,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           const turn = owner === undefined ? undefined : focusWorkTurnByOwner.get(owner)
           const admitted = preset === 'compact' || (turn !== undefined && expandedFocusTurns.has(turn))
           if (owner !== undefined && admitted) {
-            const wasExpanded = expandedWorkOwners.has(owner)
+            const wasExpanded = expandedWorkOwners.has(owner) || searchGrants?.workOwners.has(owner) === true
             const targetExpanded = input.event.collapsed !== true
             if (wasExpanded !== targetExpanded) {
               if (targetExpanded) expandedWorkOwners.add(owner)
-              else expandedWorkOwners.delete(owner)
+              else {
+                if (searchGrants?.workOwners.has(owner) === true) suppressSearchGrantsForEpoch()
+                expandedWorkOwners.delete(owner)
+              }
               if (rebuildLastMain()) render()
             }
             return false
@@ -5154,11 +5578,22 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
             : innerTarget.kind === 'context-row'
               ? expandedContextRowOwners
               : innerTarget.kind === 'context-cluster' ? expandedClusterOwners : expandedCommandCompactionOwners
-          const wasExpanded = set.has(innerTarget.owner)
+          const granted = innerTarget.kind === 'thinking'
+            ? searchGrants?.thinkingOwners
+            : innerTarget.kind === 'context-row'
+              ? searchGrants?.contextRowOwners
+              : innerTarget.kind === 'context-cluster'
+                ? searchGrants?.clusterOwners
+                : searchGrants?.commandCompactionOwners
+          // The comparison reads the EFFECTIVE state (manual + search grant).
+          const wasExpanded = set.has(innerTarget.owner) || granted?.has(innerTarget.owner) === true
           const targetExpanded = input.event.collapsed !== true
           if (wasExpanded !== targetExpanded) {
             if (targetExpanded) set.add(innerTarget.owner)
-            else set.delete(innerTarget.owner)
+            else {
+              if (granted?.has(innerTarget.owner) === true) suppressSearchGrantsForEpoch()
+              set.delete(innerTarget.owner)
+            }
             if (rebuildLastMain()) render()
           }
           return false
@@ -5169,11 +5604,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         // parent path claim a dotted PTC child identity.
         const disclosure = toolDisclosureByPath.get(input.event.id) ?? toolDisclosureByPath.get(framePath)
         if (disclosure !== undefined) {
+          // T3-B1: the effective state includes the current search grant, so the
+          // user's collapse of a search-opened tool body is a real change.
           const wasExpanded = expandedToolKeys.has(disclosure)
+            || searchGrants?.toolKeys.has(disclosure) === true
           const targetExpanded = input.event.collapsed !== true
           if (wasExpanded !== targetExpanded) {
             if (targetExpanded) expandedToolKeys.add(disclosure)
-            else expandedToolKeys.delete(disclosure)
+            else {
+              if (searchGrants?.toolKeys.has(disclosure) === true) suppressSearchGrantsForEpoch()
+              expandedToolKeys.delete(disclosure)
+            }
             if (rebuildLastMain()) render()
           }
         }
@@ -5194,6 +5635,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         return false
       }
       if (seat.hasModalSeat()) { if (seat.handleEvent(input.event)) applyFocus(true); return false }
+      // T3-B1: while the Session Search card owns the Dock, a base event that is
+      // not the admitted `toggle` above must not reach a composer-side or
+      // transcript business action behind the card the user is looking at.
+      if (transcriptSearch?.isOpen() === true) return false
       if (!hydrating && inputBound && 'sf' in input.event && input.event.sf === surface.id) {
         // B3-A1/A2: the Work Hub is the highest non-modal native presenter. Its
         // local SELECT/ACTIVATE/ACTION admission never reaches a business
@@ -5544,6 +5989,46 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         },
       }, binding, nativeHistoryCapable)
     },
+    // T3-B1: the ONE semantic-search bind. Synchronous, exactly once, before
+    // `bindInput` can deliver any key, and it installs nothing but capability
+    // plus the seat's own scoped sheet: no snapshot is sampled, no query runs and
+    // no frame is painted here, so a mount that fails afterwards has nothing to
+    // unwind.
+    bindTranscriptSemanticSearch: (binding) => {
+      if (disposed) throw new Error('cannot bind semantic search after TSP renderer disposal')
+      if (transcriptSearchInstalled) throw new Error('the TSP renderer semantic search is already bound')
+      transcriptSearchInstalled = true
+      transcriptSearchBinding = binding
+      // The sheet is installed ONCE, and only on a pane that can really paint
+      // the card: a pane without `el`+`styles` never receives a rule it cannot
+      // draw, and the capability gate above refuses the card there anyway.
+      if (nativeTranscriptSearchCapable()) {
+        surface.stylesheet(TRANSCRIPT_SEARCH_SHEET, TRANSCRIPT_SEARCH_STYLES)
+      }
+      transcriptSearch = createTspTranscriptSearch({
+        admitted: transcriptSearchSeatAdmitted,
+        requestRender: () => render(),
+        setFocus: () => applyFocus(true),
+        requestReveal: () => revealCurrentSearchTarget(),
+        // T3-B1: the ONE point a search disclosure grant is ever granted. The
+        // mount derives the CURRENT target's temporary grants and rebuilds the
+        // Main frame, so the frame that will be revealed already carries the
+        // opened ancestry. A passive repaint never reaches here.
+        navigationChanged: () => {
+          // The seat is closed or retiring: the grants go with it, and the frame
+          // that re-materializes the Composer carries the user's own disclosure
+          // state again.
+          if (transcriptSearch?.isOpen() !== true) {
+            clearSearchGrants()
+            rebuildLastMain()
+            return
+          }
+          refreshSearchGrants()
+          rebuildLastMain()
+        },
+        reportFatal: (error) => { routeFatal(error) },
+      }, binding, nativeTranscriptSearchCapable)
+    },
     bindQueueManager: (controller: QueueManagerController) => {
       if (disposed) throw new Error('cannot bind the queue manager after TSP renderer disposal')
       if (queueManagerPresenter !== undefined) throw new Error('the TSP renderer queue manager is already bound')
@@ -5679,6 +6164,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           // debounce timer and its painted click identities are all released
           // here, and a late search or copy settlement owns no frame.
           () => { historySearch?.retire() },
+          // T3-B1: the Search seat dies with the renderer — its captured source
+          // token, current target and pending reveal are all released here, so a
+          // late frame or intent owns nothing.
+          () => { transcriptSearch?.retire() },
           () => { completion.retire(); inlineAttachmentStager = undefined },
         ])
       } catch (error) {

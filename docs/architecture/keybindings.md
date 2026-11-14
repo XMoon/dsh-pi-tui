@@ -71,6 +71,39 @@ ECLIPSED inside the overlay (the binding still works outside it). The config
 parser warns on such a collision (`FIXED_OVERLAY_KEYS`); the overlay never
 resolves the configurable action first (§3.3).
 
+### The TSP renderer's own ladder (a separate input owner)
+
+The experimental TSP renderer does not consume this keymap: it reads the raw SDK
+`Key` stream and runs its own ladder inside `src/tui/tsp/session.ts`. The
+relative order is the durable contract, because a seat inserted in the wrong
+place silently steals another owner's key:
+
+```text
+temporary Screen (Reader) / modal seat
+  ↓
+History card (`Ctrl+R`, open)
+  ↓
+Session Search card (`Alt+Shift+S`, open)
+  ↓
+`Alt+Q` continued questions → `Ctrl+C` interrupt/cancel → the presenters
+  (Work Hub, Session Browser, Web/Preset/Model pickers, Queue sheet)
+  ↓
+the low composer popovers (quick Model menu, Permission menu, completion list)
+  ↓
+visual chords / paste-media / the composer reducer
+```
+
+Two rules belong to this ladder and not to the PiTui keymap:
+
+- `Alt+Shift+S` is a TSP-renderer-local chord, not a `TuiAction`: it is not
+  configurable, it is not in the Host effective keymap and it never reaches the
+  PiTui surface. A higher seat that is active takes the key first, so the chord
+  cannot open a search behind a Modal or a picker.
+- While the Session Search card is open it consumes every key it does not
+  delegate; the ONE deliberate exception is `Ctrl+C`, which retires the card and
+  then reaches the original interrupt/cancel owner exactly once. `Ctrl+F` and
+  `Ctrl+Shift+F` stay the client's own Find actions in every state.
+
 ### The conditional task affordance vs the actual route
 
 The `↓` task admission is a composition rule over `app.tasks.open`

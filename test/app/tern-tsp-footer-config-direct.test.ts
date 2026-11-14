@@ -44,6 +44,17 @@ const INERT_HISTORY_BINDING = {
   captureScope: () => ({ sessionId: undefined, isCurrent: () => false }),
 }
 
+/**
+ * T3-B1: the "no semantic-search plane" binding. These cases never open the
+ * Session Search card, so every answer fails closed — never an empty snapshot
+ * that would read as a zero-match success.
+ */
+const INERT_SEMANTIC_SEARCH_BINDING = {
+  snapshot: () => undefined,
+  resolve: () => undefined,
+  current: () => false,
+}
+
 /** One projection node's own props. */
 function props(node: Node): Record<string, unknown> {
   return node.props as Record<string, unknown>
@@ -453,7 +464,7 @@ test('the mount wiring binds the footer config exactly once through the producti
     assert.ok(mount !== undefined)
     // The FIRST production mount binds the reader + footer config together;
     // run it so the resolver evaluation is the mount's own (never a test's).
-    mount.mount({} as never, { snapshot: () => richSnapshot() }, INERT_HISTORY_BINDING)
+    mount.mount({} as never, { snapshot: () => richSnapshot() }, INERT_HISTORY_BINDING, INERT_SEMANTIC_SEARCH_BINDING, undefined)
     assert.equal(resolves, 1, 'the resolver ran exactly once, at the mount')
     // The footer bind is one-shot on the renderer: the mount's SECOND bind
     // attempt (driven through a fresh production connector over the same

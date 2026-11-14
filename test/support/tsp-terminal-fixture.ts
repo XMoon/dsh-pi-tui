@@ -197,6 +197,13 @@ export function installTspPane(options: {
    */
   readonly historySearch?: boolean
   /**
+   * T3-B1: advertise the EXACT kinds and features the Session Search card paints
+   * — a `ui.input` query, `el` buttons and the `styles` sheet. A pane without any
+   * one of them must be refused the card, so the negative case passes `kinds` or
+   * `features` verbatim instead (the fail-closed default, not an accident).
+   */
+  readonly transcriptSearch?: boolean
+  /**
    * PR-Q: advertise the native kinds the TSP Queue manager sheet paints — its
    * `picker` (Browse), the modal `overlay` + controlled `editor` (Edit) and
    * `overlay` + `button` (Delete confirmation) plus the `row`/`text`/`col`
@@ -244,6 +251,7 @@ export function installTspPane(options: {
     ...(options.nativeChart === true ? ['chart'] : []),
     ...(options.nativeInteraction === true ? ['questions', 'overlay', 'row', 'text', 'input', 'button', 'scroll'] : []),
     ...(options.historySearch === true ? ['input', 'el', 'scroll', 'row', 'text'] : []),
+    ...(options.transcriptSearch === true ? ['input', 'el', 'row', 'text'] : []),
     ...(options.queueManager === true ? ['picker', 'overlay', 'editor', 'button', 'row', 'text', 'el'] : []),
   ]))
   const nativeFeatures = [

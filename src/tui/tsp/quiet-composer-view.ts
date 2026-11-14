@@ -21,6 +21,7 @@ import type {
   QuickMenuRow,
 } from './model-quick-menu.ts'
 import type { TspInputCompletionPopup } from './input-completion.ts'
+import { TSP_SEARCH_CHORD_LABEL } from '../keybindings/hints.ts'
 
 /** The ONE surface-scoped stylesheet name the renderer installs. */
 export const QUIET_COMPOSER_SHEET = 'dsh-quiet-composer'
@@ -52,6 +53,10 @@ export const QUIET_COMPOSER_ROLES = {
   quickFailure: 'dsh.composer.quick-failure',
   send: 'dsh.composer.send',
   stop: 'dsh.composer.stop',
+  /** T3-B1: the ONE `Search session` entry, beside the existing controls. It
+   *  carries no search state and no query: it calls the SAME seat entry the
+   *  `Alt+Shift+S` chord calls. */
+  search: 'dsh.composer.search',
   footerGroup: 'dsh.footer.group',
   // TSP I-C/I-D: the ONE anchored candidate list. It is ONE child of the Composer
   // shell and positioned absolutely against it, so it floats above the Composer
@@ -130,6 +135,26 @@ export interface QuietComposerViewInput {
   readonly onCompletionChoose: (id: string, revision: number) => void
   readonly onSend: () => void
   readonly onStop: () => void
+  /**
+   * T3-B1: the ONE `Search session` entry of this shell.
+   *
+   * `enabled` is the mount's admission predicate result (the SAME one that
+   * gates the click), so the painted affordance and the accepted gesture can
+   * never disagree. `narrow` re-arranges the EXISTING controls for a narrow
+   * pane: the editor keeps a full row, Permission/Model keep their real
+   * controls and popover anchors, and the action row carries `Search session`,
+   * the optional Stop and the ORIGINAL single Send — never a second Send.
+   */
+  readonly searchSession: {
+    /** Whether this pane has the semantic-search plane at all. `false` paints
+     *  no entry: a permanently disabled button is not an honest affordance. */
+    readonly available: boolean
+    /** Whether the entry is operable right now (a higher seat may hold input or
+     *  a Modal may be up). Painted disabled, and re-checked by the click. */
+    readonly enabled: boolean
+    readonly narrow: boolean
+    readonly onOpen: () => void
+  }
 }
 
 /** One selectable menu row, bound to the intent its own frame minted. */
@@ -312,6 +337,41 @@ export function quietComposerView(input: QuietComposerViewInput): Node {
         }),
       )
 
+  // T3-B1: the ONE `Search session` entry. `available` is the pane's REAL
+  // semantic-search capability: a pane without it paints NO button at all
+  // (a permanently disabled control is worse than none — the chord still states
+  // the truth), and the click is re-admitted by the SAME mount predicate the
+  // mount evaluated to `available`.
+  const searchButton = (): Node | undefined => input.searchSession.available
+    ? html.button({
+        key: `composer-search-${scope}`,
+        role: QUIET_COMPOSER_ROLES.search,
+        title: `Search this session (${TSP_SEARCH_CHORD_LABEL})`,
+        aria: 'Search this session',
+        ...(input.searchSession.enabled
+          ? {}
+          : { attrs: { 'aria-disabled': 'true' } as Readonly<Record<string, string>> }),
+        onClick: () => input.searchSession.onOpen(),
+      }, 'Search session')
+    : undefined
+
+  const sendButton = (): Node => html.button({
+    key: `composer-send-${scope}`,
+    role: QUIET_COMPOSER_ROLES.send,
+    title: input.sendable ? 'Send message' : 'Type a message to send',
+    aria: 'Send message',
+    ...(input.sendable ? {} : { attrs: { 'aria-disabled': 'true', disabled: 'disabled' } as Readonly<Record<string, string>> }),
+    onClick: () => input.onSend(),
+  }, '↑')
+
+  const stopButton = (): Node => html.button({
+    key: `composer-stop-${scope}r${input.busyEpoch}`,
+    role: QUIET_COMPOSER_ROLES.stop,
+    title: 'Stop the running turn',
+    aria: 'Stop the running turn',
+    onClick: () => input.onStop(),
+  }, 'Stop')
+
   return ui.col(
     { key: 'quiet-composer', role: QUIET_COMPOSER_ROLES.shell, gap: 'none' },
     // TSP I-C/I-D: the candidate list is ONE child of the shell it anchors to, so
@@ -321,6 +381,18 @@ export function quietComposerView(input: QuietComposerViewInput): Node {
     // height it had before and the transcript never moves.
     ...(completionMenu === undefined ? [] : [completionMenu]),
     input.editor,
+    // A NARROW pane keeps the EXISTING Permission/Model controls on their own
+    // row and moves the actions (Search session · optional Stop · the ORIGINAL
+    // Send) to a third row, so nothing is clipped and there is still exactly ONE
+    // Send. A wide pane keeps the historical single control row.
+    ...(input.searchSession.narrow
+      ? [ui.row(
+          { key: 'composer-actions-narrow', role: QUIET_COMPOSER_ROLES.right, gap: 'sm', align: 'center' },
+          ...(searchButton() === undefined ? [] : [searchButton()]),
+          ...(input.busy ? [stopButton()] : []),
+          sendButton(),
+        )]
+      : []),
     ui.row(
       { key: 'composer-controls', role: QUIET_COMPOSER_ROLES.controls, gap: 'sm', align: 'center' },
       ui.col(
@@ -364,21 +436,9 @@ export function quietComposerView(input: QuietComposerViewInput): Node {
             ? [quickMenuNode(input.modelQuick.panel, (intent) => input.onModelQuickIntent(intent))]
             : []),
         ),
-        ...(input.busy ? [html.button({
-          key: `composer-stop-${scope}r${input.busyEpoch}`,
-          role: QUIET_COMPOSER_ROLES.stop,
-          title: 'Stop the running turn',
-          aria: 'Stop the running turn',
-          onClick: () => input.onStop(),
-        }, 'Stop')] : []),
-        html.button({
-          key: `composer-send-${scope}`,
-          role: QUIET_COMPOSER_ROLES.send,
-          title: input.sendable ? 'Send message' : 'Type a message to send',
-          aria: 'Send message',
-          ...(input.sendable ? {} : { attrs: { 'aria-disabled': 'true', disabled: 'disabled' } as Readonly<Record<string, string>> }),
-          onClick: () => input.onSend(),
-        }, '↑'),
+        ...(input.searchSession.narrow || searchButton() === undefined ? [] : [searchButton()]),
+        ...(input.busy ? [stopButton()] : []),
+        sendButton(),
       ),
     ),
   )
@@ -702,6 +762,41 @@ export const QUIET_COMPOSER_STYLES = `
     box-shadow: inset 0 0 0 1px var(--l3);
     cursor: not-allowed;
     filter: none;
+  }
+  /* T3-B1: the ONE Search-session entry. It shares the Permission/Model chip
+     family, so it reads as a control of THIS shell and never as a second primary
+     verb (Send stays the only filled control). */
+  [data-role='dsh.composer.search'] {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border: 1px solid var(--l2);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--t2);
+    font-family: var(--sans);
+    font-size: 12px;
+    line-height: 1.5;
+    cursor: pointer;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  [data-role='dsh.composer.search']:hover {
+    background: var(--l1);
+    color: var(--t1);
+  }
+  [data-role='dsh.composer.search'][aria-disabled='true'] {
+    color: var(--t4);
+    border-color: var(--l1);
+    cursor: not-allowed;
+  }
+  /* The narrow action row: the search entry and Stop keep their intrinsic width,
+     the single Send keeps its round 30px hit target, and the row never wraps
+     (a wrapped Send would be clipped by the shell's own overflow). */
+  [data-role='dsh.composer.right'][data-narrow='true'],
+  [data-role='dsh.composer.controls'] {
+    flex-wrap: nowrap;
   }
   [data-role='dsh.composer.stop'] {
     flex-shrink: 0;
