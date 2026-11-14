@@ -153,6 +153,8 @@ test('sessionless /model high effort reaches the first real Agent and request he
       'the effort was an explicit choice, never an adapter-materialized default')
     await waitFor('scripted adapter received the request', () => fixture.modelCalls() > 0)
   } finally {
+    // Teardown only: the fixture's own bounded settle releases the Host/runner;
+    // no test fact waits on this window.
     await fixture.settle()
   }
 })
