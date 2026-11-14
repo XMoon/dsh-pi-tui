@@ -186,6 +186,8 @@ export interface DaemonControlDeps {
   readonly stopTimeoutMs?: number
   /** Supervisor shutdown signal: abort an in-flight management wait. */
   readonly signal?: AbortSignal
+  /** Test seam: how long an interrupted operation's admin seat is held. */
+  readonly seatHoldBudgetMs?: number
 }
 
 /** One internal snapshot shared by the read-only status and the pre-flight checks. */
@@ -250,22 +252,24 @@ function assertNotAborted(signal: AbortSignal | undefined): void {
   }
 }
 
-/** Race a promise against the supervisor shutdown signal. */
+/**
+ * Race the underlying OS operation against the supervisor shutdown signal.
+ * The RACE is caller-visible only: the losing promise is never cancelled (there
+ * is no cancellation channel into systemctl/ensure), and `withAdminSeat` keeps
+ * observing the real settlement for the seat's lifetime.
+ */
 function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (signal === undefined) return promise
-  if (signal.aborted) {
-    return Promise.reject(new DaemonControlError('TRANSITION_UNCERTAIN', 'the management operation was cancelled by supervisor shutdown'))
-  }
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = (): void => {
+  const aborted = new Promise<never>((_, reject) => {
+    if (signal.aborted) {
       reject(new DaemonControlError('TRANSITION_UNCERTAIN', 'the management operation was cancelled by supervisor shutdown'))
+      return
     }
-    signal.addEventListener('abort', onAbort, { once: true })
-    promise.then(
-      value => { signal.removeEventListener('abort', onAbort); resolve(value) },
-      error => { signal.removeEventListener('abort', onAbort); reject(error) },
-    )
+    signal.addEventListener('abort', () => {
+      reject(new DaemonControlError('TRANSITION_UNCERTAIN', 'the management operation was cancelled by supervisor shutdown'))
+    }, { once: true })
   })
+  return Promise.race([promise, aborted])
 }
 
 /** The effective platform/uid inputs. */
@@ -296,6 +300,11 @@ function inspectScope(profile: DaemonControlProfile, deps: DaemonControlDeps): L
   }
 }
 
+/** The installed Host entry path of this Profile's package (never guessed). */
+function hostEntryOf(profile: DaemonControlProfile): string {
+  return join(profile.packageRoot, 'dist', 'local-host.mjs')
+}
+
 /** Resolve the fixed runtime dir for the current user. */
 function runtimeDirOf(deps: DaemonControlDeps): string | undefined {
   return selectRuntimeDir(uidOf(deps))
@@ -311,7 +320,7 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
   let unitState: DaemonUnitState = 'not-found'
   let unitMainPid = 0
   try {
-    const inspected = inspectOwnedProfileUnit(scope, profile.name, uid, deps.unitDir)
+    const inspected = inspectOwnedProfileUnit(scope, profile.name, uid, deps.unitDir, hostEntryOf(profile))
     if (inspected.kind === 'owned') {
       unit = inspected
       if (probe.kind === 'available') {
@@ -476,18 +485,101 @@ export function formatDaemonStatus(status: DaemonControlStatus): string {
   return `${lines.join('\n')}\n`
 }
 
-/** Acquire the ONE profile-scoped admin seat for a mutating verb. */
-async function withAdminSeat<T>(scope: LocalScope, operation: () => Promise<T>): Promise<T> {
+/**
+ * Acquire the ONE profile-scoped admin seat for a mutating verb. The seat is
+ * released only after the operation settles OR the supervisor shutdown budget
+ * expires; on an abort-driven early return the caller keeps observing the
+ * abort, but the seat is held until the underlying OS work finishes so a
+ * second command cannot race a still-running start/stop. When the underlying
+ * work outlives the bounded shutdown budget, the seat is released with a
+ * sanitized warning instead of blocking the supervisor forever.
+ */
+
+/** The supervisor shutdown budget for holding an interrupted operation's seat. */
+const SEAT_HOLD_BUDGET_MS = 4_000
+
+function withAdminSeat<T>(scope: LocalScope, deps: DaemonControlDeps, operation: () => Promise<T>): Promise<T> {
+  return withAdminSeatScoped(scope, deps.signal, deps.seatHoldBudgetMs ?? SEAT_HOLD_BUDGET_MS, operation)
+}
+
+async function withAdminSeatScoped<T>(
+  scope: LocalScope,
+  signal: AbortSignal | undefined,
+  budgetMs: number,
+  operation: () => Promise<T>,
+): Promise<T> {
   let seat
   try {
     seat = await bindProcessSeat(`${ADMIN_SEAT_PREFIX}${scope.scopeId.slice(0, 40)}`, 'DAEMON_CONTROL_BUSY')
   } catch (error) {
     throw toDaemonControlError(error)
   }
+  const settled = operation()
+  const holder = (async (): Promise<void> => {
+    try {
+      await settled
+    } catch {
+      // The operation's own failure mapping is the caller's outcome; the seat
+      // holder only observes settlement.
+    }
+  })()
   try {
-    return await operation()
-  } finally {
+    const value = await awaitWithAbort(settled, signal)
+    // The operation itself settled: the seat can close synchronously after the
+    // underlying work drains.
+    await drainUnderlying(budgetMs)
     await seat.close()
+    return value
+  } catch (error) {
+    if (signal?.aborted === true) {
+      // ABORT path: return to the caller immediately, but the seat stays held
+      // by a detached continuation until the real OS work settles (bounded by
+      // the shutdown budget) — a second command gets BUSY meanwhile.
+      holdSeatUntilDrained(seat, budgetMs).catch(() => {})
+    } else {
+      await drainUnderlying(budgetMs)
+      await seat.close()
+    }
+    throw error
+  }
+}
+
+/** Wait (bounded) for every tracked underlying operation to settle. */
+async function drainUnderlying(budgetMs: number): Promise<boolean> {
+  return await Promise.race([
+    waitForUnderlyingOperations().then(() => true),
+    new Promise<boolean>(resolve => { setTimeout(() => resolve(false), budgetMs).unref?.() }),
+  ])
+}
+
+/** Hold an interrupted operation's seat open until its OS work settles. */
+async function holdSeatUntilDrained(seat: { close(): Promise<void> }, budgetMs: number): Promise<void> {
+  const drained = await drainUnderlying(budgetMs)
+  if (!drained) {
+    try { process.stderr.write('dsh-pi-tui daemon: note: the interrupted management operation had not settled; releasing the profile admin seat\n') } catch { /* best effort */ }
+  }
+  await seat.close()
+}
+
+/**
+ * The underlying OS work a management operation started but no longer awaits
+ * (an aborted caller). The admin seat stays held while any such work is still
+ * live, so a second command cannot race a still-running ensure/systemctl
+ * chain; settlement is also observed so it never becomes an unhandled
+ * rejection. The registry is process-local and drains itself on settlement.
+ */
+const liveUnderlyingOperations = new Set<Promise<unknown>>()
+
+function trackDetachedSettlement(promise: Promise<unknown>): void {
+  liveUnderlyingOperations.add(promise)
+  const release = (): void => { liveUnderlyingOperations.delete(promise) }
+  promise.then(release, release)
+}
+
+/** Wait until every tracked underlying operation of this command settled. */
+async function waitForUnderlyingOperations(): Promise<void> {
+  while (liveUnderlyingOperations.size > 0) {
+    await Promise.race([...liveUnderlyingOperations].map(promise => promise.then(() => {}, () => {})))
   }
 }
 
@@ -564,16 +656,23 @@ function assertProcessHostOwnership(record: LocalInstanceRecord, deps: DaemonCon
   }
 }
 
-/** Best-effort raw file read used by the fallback process identity check. */
+/** Bounded read-to-EOF for procfs text files: `/proc` entries report
+ *  `st_size = 0` even when the content is readable, so the length must come
+ *  from reading until EOF under an explicit byte cap, never from `fstat.size`. */
 function readFileString(path: string): string {
   const fd = openSync(path, constants.O_RDONLY)
   try {
-    const info = fstatSync(fd)
-    if (!info.isFile() || info.size > 64 * 1024) throw new Error('unexpected process command line size')
-    const buffer = Buffer.alloc(info.size)
-    let offset = 0
-    while (offset < buffer.length) offset += readSync(fd, buffer, offset, buffer.length - offset, offset)
-    return buffer.toString('utf8')
+    const chunks: Buffer[] = []
+    let total = 0
+    for (;;) {
+      const chunk = Buffer.alloc(4096)
+      const read = readSync(fd, chunk, 0, chunk.length, null)
+      if (read <= 0) break
+      total += read
+      if (total > 64 * 1024) throw new Error('unexpected process command line size')
+      chunks.push(read === chunk.length ? chunk : chunk.subarray(0, read))
+    }
+    return Buffer.concat(chunks).toString('utf8')
   } finally {
     closeSync(fd)
   }
@@ -645,7 +744,7 @@ async function runStatus(profile: DaemonControlProfile, deps: DaemonControlDeps)
 /** The `start` handler. */
 async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
   const inspected = inspectScope(profile, deps)
-  return await withAdminSeat(inspected, async () => {
+  return await withAdminSeat(inspected, deps, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
     if (pre.failure !== undefined) throw pre.failure
     if (pre.status.host === 'ready') return { code: 0, stdout: formatDaemonStatus(pre.status), stderr: '' }
@@ -657,14 +756,19 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
       dshVersion: profile.dshVersion,
     })
     const ensureHost = deps.ensureHost ?? ensureLocalHost
+    const underlying = ensureHost({
+      scope,
+      hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
+      dshAnchor: profile.installAnchor,
+      profile: profile.name,
+      hostStartPolicy: 'public-managed',
+    })
+    // Keep the underlying start observed (never unhandled) while the caller
+    // races the shutdown signal; the seat stays held until `underlying` itself
+    // settles, not until the caller's race rejects.
+    trackDetachedSettlement(underlying)
     try {
-      await awaitWithAbort(ensureHost({
-        scope,
-        hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
-        dshAnchor: profile.installAnchor,
-        profile: profile.name,
-        hostStartPolicy: 'public-managed',
-      }), deps.signal)
+      await awaitWithAbort(underlying, deps.signal)
     } catch (error) {
       throw toDaemonControlError(error)
     }
@@ -677,7 +781,7 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
 /** The `stop` handler. */
 async function runStop(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
   const inspected = inspectScope(profile, deps)
-  return await withAdminSeat(inspected, async () => {
+  return await withAdminSeat(inspected, deps, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
     if (pre.failure !== undefined) throw pre.failure
     await stopFromSnapshot(profile, pre, deps)
@@ -690,7 +794,7 @@ async function runStop(profile: DaemonControlProfile, deps: DaemonControlDeps): 
 /** The `restart` handler: stop -> confirmed exit -> controlled unit refresh -> start. */
 async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
   const inspected = inspectScope(profile, deps)
-  return await withAdminSeat(inspected, async () => {
+  return await withAdminSeat(inspected, deps, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
     if (pre.failure !== undefined) throw pre.failure
     if (pre.status.host !== 'ready' && pre.status.host !== 'stopped') throw refuseHostState(pre.status)
@@ -718,14 +822,16 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
       dshVersion: profile.dshVersion,
     })
     const ensureHost = deps.ensureHost ?? ensureLocalHost
+    const underlying = ensureHost({
+      scope,
+      hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
+      dshAnchor: profile.installAnchor,
+      profile: profile.name,
+      hostStartPolicy: 'public-managed',
+    })
+    trackDetachedSettlement(underlying)
     try {
-      await awaitWithAbort(ensureHost({
-        scope,
-        hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
-        dshAnchor: profile.installAnchor,
-        profile: profile.name,
-        hostStartPolicy: 'public-managed',
-      }), deps.signal)
+      await awaitWithAbort(underlying, deps.signal)
     } catch (error) {
       throw toDaemonControlError(error)
     }
@@ -745,7 +851,7 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
 /** The `uninstall` handler. */
 async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
   const inspected = inspectScope(profile, deps)
-  return await withAdminSeat(inspected, async () => {
+  return await withAdminSeat(inspected, deps, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
     if (pre.failure !== undefined) throw pre.failure
     if (pre.unit === undefined) {
@@ -886,7 +992,7 @@ async function runLogs(profile: DaemonControlProfile, intent: DaemonControlInten
   const uid = uidOf(deps)
   let unit: OwnedProfileUnit | undefined
   try {
-    const inspected = inspectOwnedProfileUnit(scope, profile.name, uid, deps.unitDir)
+    const inspected = inspectOwnedProfileUnit(scope, profile.name, uid, deps.unitDir, hostEntryOf(profile))
     if (inspected.kind === 'owned') unit = inspected
   } catch (error) {
     throw toDaemonControlError(error)
@@ -896,6 +1002,20 @@ async function runLogs(profile: DaemonControlProfile, intent: DaemonControlInten
   if (unit !== undefined) {
     if (probe.kind !== 'available') {
       throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the user manager cannot provide the unit journal')
+    }
+    // The journal belongs to the unit the manager actually loads. A disk file
+    // with valid owner metadata is not enough: verify FragmentPath names THIS
+    // file and no drop-in overrides it, exactly like stop/uninstall do.
+    const systemctl = deps.systemctl ?? runSystemctl
+    let loaded = false
+    try {
+      const state = await queryOwnedProfileUnit(unit, runtimeDirOf(deps), systemctl)
+      loaded = state.loadState !== 'not-found'
+    } catch (error) {
+      throw toDaemonControlError(error)
+    }
+    if (!loaded) {
+      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the owned profile unit is not loaded by the manager')
     }
     const journal = deps.journal ?? runJournalctl
     const result = await journal(unit.unitName, lines)

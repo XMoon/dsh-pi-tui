@@ -815,6 +815,8 @@ export interface OwnedProfileUnit {
   readonly unitName: string
   readonly unitDir: string
   readonly filePath: string
+  /** The installed Host entry this unit was proven to start. */
+  readonly hostEntry: string
   readonly content: string
   /** The install build the unit file declares; may differ from the current build. */
   readonly installBuild: string
@@ -906,7 +908,21 @@ function readUnitMetadata(lines: readonly string[], key: string): string {
  * pair. The installed build may differ (an older compatible build): that is the
  * explicit `restart` migration input, not a cold-start rewrite permission.
  */
-function assertOwnedUnitContent(content: string, scope: LocalScope, profile: string): void {
+/** Decode one systemd double-quoted command argument back to its raw value. */
+function decodeUnitArg(encoded: string): string {
+  return encoded.replace(/^"|"$/gu, '').replace(/%%/gu, '%').replace(/\\\\/gu, '\\').replace(/\$\$/gu, '$').replace(/\\"/gu, '"')
+}
+
+/**
+ * Prove the content is the EXACT controlled execution template for this
+ * Profile: the owner/scope/profile/build metadata above plus ONE ExecStart
+ * whose only two arguments are a real executable interpreter and THIS
+ * installation's Host entry. "A line that mentions the entry" is not enough —
+ * an ExecStart that runs another program with the entry as an argument, or any
+ * extra Exec* directive anywhere in the file, could run arbitrary programs
+ * under this unit's name and is refused.
+ */
+function assertOwnedUnitContent(content: string, scope: LocalScope, profile: string, expectedHostEntry: string): void {
   const lines = content.split('\n')
   if (readUnitMetadata(lines, 'X-DshPiTuiOwner') !== UNIT_OWNER_MARKER) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit is not owned by this product')
@@ -932,9 +948,32 @@ function assertOwnedUnitContent(content: string, scope: LocalScope, profile: str
       throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit definition does not match this Profile')
     }
   }
-  const execLines = lines.filter(line => line.startsWith('ExecStart='))
-  if (execLines.length !== 1 || !execLines[0].includes('/dist/local-host.mjs"')) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit does not start the product Host entry')
+  // Exactly ONE process-spawning directive in the whole file, and it is the
+  // ExecStart. Any ExecStartPre/ExecStop/ExecReload/ExecStartPost or a second
+  // Exec* line is an uncontrolled execution surface.
+  const execDirectives = lines.filter(line => /^Exec[A-Za-z]+=/u.test(line))
+  if (execDirectives.length !== 1 || !execDirectives[0].startsWith('ExecStart=')) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit must define exactly one ExecStart and no other Exec directive')
+  }
+  const args = execDirectives[0].slice('ExecStart='.length).trim().split(/\s+/u)
+  if (args.length !== 2) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the ExecStart must take exactly the interpreter and the Host entry')
+  }
+  const interpreter = decodeUnitArg(args[0])
+  inspectTrustedExecutable(interpreter, 'unit interpreter')
+  const entry = decodeUnitArg(args[1])
+  let realEntry: string
+  try {
+    realEntry = realpathSync(entry)
+  } catch (error) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit Host entry is not readable', error)
+  }
+  if (realEntry !== realpathSync(expectedHostEntry)) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit does not start this installation Host entry')
+  }
+  const entryInfo = lstatSync(realEntry)
+  if (entryInfo.isSymbolicLink() || !entryInfo.isFile()) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit Host entry must be a regular file')
   }
 }
 
@@ -962,10 +1001,17 @@ function assertUnitFileIdentity(unit: OwnedProfileUnit, uid: number): void {
   }
 }
 
+/**
+ * The expected Host entry path is derived by the CALLER from the real installed
+ * package root (`join(packageRoot, 'dist', 'local-host.mjs')`); there is no
+ * fallback guess. Tests that omit it must pass it explicitly.
+ */
+const HOST_ENTRY_REQUIRED = 'managed Host: the expected Host entry path is required'
+
 /** Read ONE existing profile unit file without creating or mutating anything.
  *  `unitDir` is an explicit test seam; production always derives it from the
  *  account home. */
-export function inspectOwnedProfileUnit(scope: LocalScope, profile: string, uid: number, unitDir?: string): OwnedProfileUnitInspection {
+export function inspectOwnedProfileUnit(scope: LocalScope, profile: string, uid: number, unitDir?: string, expectedHostEntry?: string): OwnedProfileUnitInspection {
   const dir = unitDir ?? inspectExistingUserUnitDir(uid)
   if (dir === undefined) return { kind: 'none' }
   const unitName = buildUnitName(profile, scope.scopeId)
@@ -981,12 +1027,14 @@ export function inspectOwnedProfileUnit(scope: LocalScope, profile: string, uid:
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit must be a 0600 regular file owned by this uid')
   }
   const content = readFileSync(filePath, 'utf8')
-  assertOwnedUnitContent(content, scope, profile)
+  if (expectedHostEntry === undefined) throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', HOST_ENTRY_REQUIRED)
+  assertOwnedUnitContent(content, scope, profile, expectedHostEntry)
   return {
     kind: 'owned',
     unitName,
     unitDir: dir,
     filePath,
+    hostEntry: expectedHostEntry,
     content,
     installBuild: readUnitMetadata(content.split('\n'), 'X-DshPiTuiInstallBuild'),
     device: info.dev,
@@ -1072,7 +1120,7 @@ export function replaceStoppedOwnedProfileUnit(
   uid: number,
   content: string,
 ): { readonly replaced: boolean } {
-  const current = inspectOwnedProfileUnit(scope, profile, uid, unit.unitDir)
+  const current = inspectOwnedProfileUnit(scope, profile, uid, unit.unitDir, unit.hostEntry)
   if (current.kind === 'none' || current.filePath !== unit.filePath) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file changed during the transition')
   }
@@ -1109,7 +1157,7 @@ export function replaceStoppedOwnedProfileUnit(
  * uninstall. The caller owns the `daemon-reload` that follows.
  */
 export function uninstallOwnedProfileUnit(unit: OwnedProfileUnit, scope: LocalScope, profile: string, uid: number): void {
-  const current = inspectOwnedProfileUnit(scope, profile, uid, unit.unitDir)
+  const current = inspectOwnedProfileUnit(scope, profile, uid, unit.unitDir, unit.hostEntry)
   if (current.kind !== 'owned' || current.filePath !== unit.filePath
     || current.device !== unit.device || current.inode !== unit.inode) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file changed during the transition')
