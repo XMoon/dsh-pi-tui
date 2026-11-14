@@ -3719,7 +3719,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // Mouse PR4: the first-party Tasks segment carries its click action ONLY
     // while the live admission predicate allows the click; every other
     // segment stays status-only. Absent action => the frozen read-only frame.
-    const tasksAction = nativeTasksActionAdmitted() ? TSP_FOOTER_TASKS_ACTION : undefined
+    // While the Session Search card owns the Dock, its blanket event fence drops
+    // every non-toggle base event — so the Tasks segment must NOT advertise a
+    // click affordance it could not honor. The frozen read-only frame is the
+    // honest state (the SAME predicate paints and routes the action).
+    const tasksAction = nativeTasksActionAdmitted() && transcriptSearch?.isOpen() !== true
+      ? TSP_FOOTER_TASKS_ACTION
+      : undefined
     const footerRows = presentedStatus !== undefined && !hydrating
       ? nativeStatuslineRows(
           presentedStatus,
