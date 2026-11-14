@@ -324,6 +324,58 @@ the kernel seat where one is required.
   remain intact. The user may retry the cancelled operation after reload.
 
 
+### Host-owned local ACP v1 front door (Unix socket)
+
+Alongside the authenticated loopback carrier, the one Host process opens ONE
+bounded ACP v1 front door over a pathname Unix domain socket inside its own
+0700 profile scope: `<scope.dir>/acp.sock`. It is a Host-owned ingress owned by
+the same Host entry that already holds the kernel Host seat and the Ready
+commit; it is never a package export, a second Host, a second Agent/Session
+owner, a TCP/HTTP endpoint, or an ACP byte stream on the Host's stdout (the
+control records remain the only stdout format).
+
+- **One owner, one scope.** The listener is created by the Host entry before
+  the registry Ready commit and stored on that entry's existing resource owner,
+  so the ONE `runProfile` shutdown owner and the synchronous process-exit
+  mirror release it. Different canonical Host profiles keep their own scope and
+  socket; the socket path is never derived from the Client cwd, `$PWD` or a
+  guessed profile hash.
+- **Unix socket only, 0700/0600.** The scope directory stays 0700; the socket
+  inode is owned by the current UID and forced to 0600 before Ready. There is
+  no TCP/HTTP `/acp` port and no ACP JSON on the Host stdout. The bind uses a
+  Linux `/proc/self/fd/<dirfd>/acp.sock` short path so a long logical
+  `DSH_HOME`/scope pathname still works; the public/logical path stays
+  `<scope.dir>/acp.sock`, the inode stays in the scope, and the scope hash and
+  `instance.json` schema are unchanged.
+- **Listen before Ready.** The socket must be bound, chmod/proven 0600 and
+  answering `initialize` before the existing `publishLocalHost` /
+  `writeLocalRecord` Ready commit, so a published registry never points at a
+  not-yet-listening socket. The listener has no second readiness or stop state
+  machine; a stop admitted while it is binding never emits Ready.
+- **ACP v1 handshake, no Session capability yet.** The listener answers only
+  the ACP v1 `initialize` (protocol version 1, `agentInfo.name` `dsh-pi-tui`,
+  `agentInfo.version` the installed `@xmoon76/dsh-pi-tui` bundle version —
+  never the DSH engine version) with no business capability advertised. Every
+  `session/new|list|resume|set_config_option|prompt|close` request fails closed
+  with the stable `LOCAL_ACP_SESSION_NOT_READY` code, and a `session/cancel`
+  notification has no Host side effect. `initialize` is a protocol front door,
+  not a Session attach or a claim that an Agent run is possible.
+- **Bounded per Host and per connection.** The Host start-time
+  `DSH_PI_TUI_ACP_MAX_CONNECTIONS` integer (default 4, valid 1..16, an invalid
+  value is a startup failure) caps live connections; an over-limit connection
+  gets one bounded error and is closed. Each connection bounds its single
+  NDJSON frame, its unconsumed input, its outstanding requests and its buffered
+  output in bytes (not JS character length); a breach closes only that
+  connection and never the Host or a sibling connection. A capacity or
+  backpressure fault never affects the official Host/TUI.
+- **Safe stale reclaim.** After the abstract Host seat is held, an existing
+  socket inode is reclaimed only when a short connect probe proves it refused
+  (`ECONNREFUSED`) and its `(dev,ino,uid)` is unchanged; a live listener is
+  `LOCAL_ACP_SOCKET_IN_USE`, and a symlink, regular file or foreign-owner entry
+  is `LOCAL_ACP_UNSAFE_SOCKET` and never removed. Cleanup unlinks only this
+  process's own saved inode; a SIGKILL leaves the inode for the next seat
+  winner's safe reclaim.
+
 ### Local protocol and version evolution
 
 `dsh-pi-tui/local/1` is the required Host/Client wire contract. It is
