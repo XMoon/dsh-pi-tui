@@ -1632,8 +1632,10 @@ test('A06: an approval arriving AFTER the flight failed (retired turn) never lea
   view.access.promptImpl = async () => ({ accepted: true })
   view.registry.onAgentError(view.agent, 9)
   await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_TURN_FAILED'))
-  // The old turn is STILL running on the Host; its late approval request
-  // must be answered fail-closed by the retired-turn fence, never delegated.
+  // The old turn is STILL running on the Host (its official current-turn
+  // fence still points at the retired turn): the late approval request must be
+  // answered fail-closed by the retired-turn fence, never delegated.
+  view.access.turnFence = { openTurnStartSeq: 900, lastTurn: 9 }
   let delegated = false
   const outcome = await view.registry.onApprovalRequest(
     { agent: view.agent, toolName: 'bash', callId: 'call-late' },

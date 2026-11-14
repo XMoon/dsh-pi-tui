@@ -616,14 +616,20 @@ export async function runAcpPo3bCancelApproval(context) {
     const closePrompt = 'po3b-acp-close'
     const closeStart = (hostSessionEvents(dshHome, sessionA) ?? []).length
     conn1.send({ jsonrpc: '2.0', id: 9, method: 'session/prompt', params: { sessionId: sessionA, prompt: [{ type: 'text', text: closePrompt }] } })
-    await waitForHostSessionEventAfter(dshHome, sessionA, closeStart,
+    const closeQueued = await waitForHostSessionEventAfter(dshHome, sessionA, closeStart,
       event => event.type === 'agent/inbox/spliced'
         && event.data?.target === 'next-turn'
         && (event.data.inserted ?? []).some(message => (message.content ?? []).some(part => part?.text === closePrompt)),
       'C08: the close-cancel prompt to be queued', 120_000)
+    const closeQueuedMessage = (closeQueued.data.inserted ?? []).find(message =>
+      (message.content ?? []).some(part => part?.text === closePrompt))
+    assert(typeof closeQueuedMessage?.id === 'string', 'C08: the queued close prompt must carry its durable id')
     conn1.send({ jsonrpc: '2.0', id: 10, method: 'session/close', params: { sessionId: sessionA } })
-    await waitForHostSessionEventAfter(dshHome, sessionA, closeStart,
-      event => event.type === 'agent/inbox/spliced' && event.data?.outcome === 'canceled',
+    const closeRemoval = await waitForHostSessionEventAfter(dshHome, sessionA, closeStart,
+      event => event.type === 'agent/inbox/spliced'
+        && event.data?.outcome === 'canceled'
+        && event.data?.target === 'next-turn'
+        && (event.data.removedCount ?? 0) === 1,
       'C08: the close to remove the exact queued message', 120_000)
     const closeResponse = await (async () => {
       for (;;) {
@@ -641,15 +647,26 @@ export async function runAcpPo3bCancelApproval(context) {
     // A second close on the same connection is idempotent.
     const closeAgain = await sendRequest(conn1, 11, 'session/close', { sessionId: sessionA })
     assert(closeAgain?.error === undefined, 'C08: a repeated close stays idempotent')
-    // MEASURED: the close detached with {} only after the durable removal, the
-    // queued prompt answered cancelled, the TUI turn completed untouched and
-    // the repeated close stayed idempotent.
-    const closeDrainedAndDetached = closeResponse?.result !== undefined
+    // MEASURED and BOUND to this scenario's exact facts: the close's own
+    // durable removal was the single canceled next-turn splice, the queued
+    // close prompt never became a claimed user message, the close answered {}
+    // and stayed idempotent, and the SIBLING TUI turn's own turn/end arrived.
+    const closeWindow = (hostSessionEvents(dshHome, sessionA) ?? []).slice(closeStart)
+    const closeCanceledSplices = closeWindow.filter(event =>
+      event.type === 'agent/inbox/spliced' && event.data?.outcome === 'canceled'
+      && event.data?.target === 'next-turn' && (event.data?.removedCount ?? 0) === 1)
+    const closeNeverClaimed = (hostSessionEvents(dshHome, sessionA) ?? []).every(event =>
+      !(event.type === 'user/message' && userMessageText(event) === closePrompt))
+    const closeTuiTurn = userMessageTurnOf(hostSessionEvents(dshHome, sessionA) ?? [], 'po3b-tui-a4', tuiA4Start)
+    const closeDrainedAndDetached = closeRemoval.data?.outcome === 'canceled'
+      && closeCanceledSplices.length === 1
+      && closeNeverClaimed
+      && closeResponse?.result !== undefined
       && closeResponse?.error === undefined
       && closeAgain?.error === undefined
+      && typeof closeTuiTurn === 'number'
       && (hostSessionEvents(dshHome, sessionA) ?? []).some(event =>
-        event.type === 'agent/inbox/spliced' && event.data?.outcome === 'canceled')
-      && (hostSessionEvents(dshHome, sessionA) ?? []).some(event => event.type === 'turn/end')
+        event.type === 'turn/end' && event.data?.turn === closeTuiTurn)
 
     // ── A01..A03) Approval ownership on a fresh Session.
     const { client: conn2 } = await openInitialized(scopeDir, 'A approval connection')
@@ -752,6 +769,14 @@ export async function runAcpPo3bCancelApproval(context) {
     holdNextTurn()
     const racingPrompt = 'po3b-approval po3b-acp-late-allow'
     const racingApStart = (hostSessionEvents(dshHome, sessionAp) ?? []).length
+    // The durable audit ids that already exist BEFORE this scenario: the
+    // racing question's OWN pair is identified as the single NEW
+    // `approval/asked` id and its MATCHING `approval/decided` id.
+    const askedBeforeRacing = new Set(
+      (hostSessionEvents(dshHome, sessionAp) ?? [])
+        .filter(event => event.type === 'approval/asked')
+        .map(event => String(event.data?.id)),
+    )
     const racingApNotifications = []
     conn2.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: sessionAp, prompt: [{ type: 'text', text: racingPrompt }] } })
     const racingPermission = await waitForPermissionRequest(conn2, 'A04 the racing reverse request', 180_000)
@@ -769,15 +794,21 @@ export async function runAcpPo3bCancelApproval(context) {
     const racingResponse = await readUntilResponse(conn2, 5, racingApNotifications)
     assert(racingResponse?.result?.stopReason === 'cancelled',
       `A04: the cancelled racing turn answers cancelled (got ${JSON.stringify(racingResponse?.result ?? racingResponse?.error)})`)
-    // MEASURED: this scenario added exactly ONE approval decision (its own
-    // question) and it is `cancelled` — the LATE allow never became a grant.
-    const racingDecisions = (hostSessionEvents(dshHome, sessionAp) ?? []).slice(racingApStart)
-      .filter(event => event.type === 'approval/decided')
-    const racingLateAllow = racingDecisions.filter(event => event.data?.outcome === 'allowed-once')
+    // MEASURED from the official audit PAIR: the racing question is the one
+    // NEW `approval/asked` id, and the decision carrying that SAME id is
+    // exactly one `cancelled` — the LATE allow never became a grant.
+    const racingSessionEvents = hostSessionEvents(dshHome, sessionAp) ?? []
+    const newAsked = racingSessionEvents
+      .filter(event => event.type === 'approval/asked' && !askedBeforeRacing.has(String(event.data?.id)))
+    const askedId = newAsked.length === 1 ? String(newAsked[0].data?.id) : undefined
+    const pairedDecision = askedId === undefined
+      ? []
+      : racingSessionEvents.filter(event =>
+        event.type === 'approval/decided' && String(event.data?.id) === askedId)
     const lateApprovalNoLeak = racingResponse?.result?.stopReason === 'cancelled'
-      && racingDecisions.length === 1
-      && racingDecisions[0].data?.outcome === 'cancelled'
-      && racingLateAllow.length === 0
+      && newAsked.length === 1
+      && pairedDecision.length === 1
+      && pairedDecision[0].data?.outcome === 'cancelled'
     releaseHeldTurn()
 
     // ── G01) Two independent ACP Sessions stay isolated.
