@@ -312,7 +312,7 @@ test('browsing and Esc write nothing; a compact Confirm persists both modes and 
   const h = setup({ fixture })
   await h.invoke('settings')
   await frames(h.vt)
-  for (let step = 0; step < 4; step += 1) await press(h.vt, '\x1b[B')
+  for (let step = 0; step < 5; step += 1) await press(h.vt, '\x1b[B') // About -> General -> ... -> Appearance
   await press(h.vt, '\r')
   await press(h.vt, '\x1b[B')
   await press(h.vt, '\x1b[B')
@@ -339,7 +339,7 @@ test('an unreadable USER footer layer refuses the mode write with zero calls', a
   const h = setup({ fixture, rawUnavailable: true })
   await h.invoke('settings')
   await frames(h.vt)
-  for (let step = 0; step < 4; step += 1) await press(h.vt, '\x1b[B')
+  for (let step = 0; step < 5; step += 1) await press(h.vt, '\x1b[B') // About -> General -> ... -> Appearance
   await press(h.vt, '\r')
   await press(h.vt, '\x1b[B')
   await press(h.vt, '\x1b[B')
@@ -359,7 +359,7 @@ test('the Footer mode writer seeds a custom layout and persists the restart fall
   const h = setup({ fixture })
   await h.invoke('settings')
   await frames(h.vt)
-  for (let step = 0; step < 4; step += 1) await press(h.vt, '\x1b[B') // About -> Appearance
+  for (let step = 0; step < 5; step += 1) await press(h.vt, '\x1b[B') // About -> General -> ... -> Appearance
   await press(h.vt, '\r') // rows
   await press(h.vt, '\x1b[B') // Icon style
   await press(h.vt, '\x1b[B') // Status line mode
@@ -388,7 +388,7 @@ async function openEditorFromRows(
 ): Promise<void> {
   await h.invoke('settings')
   await frames(h.vt)
-  const categoryStep = target === 'footer' ? 4 : 6
+  const categoryStep = target === 'footer' ? 5 : 7
   for (let step = 0; step < categoryStep; step += 1) await press(h.vt, '\x1b[B')
   await press(h.vt, '\r') // the rail's Enter enters the Rows level
   assert.match(h.view(), target === 'footer'
@@ -864,7 +864,7 @@ test('a stored command-mode footer is reported as manual and never offered as a 
   await h.invoke('settings')
   await frames(h.vt)
   // Appearance -> Status line mode.
-  for (let step = 0; step < 4; step += 1) await press(h.vt, '\x1b[B')
+  for (let step = 0; step < 5; step += 1) await press(h.vt, '\x1b[B') // About -> General -> ... -> Appearance
   await press(h.vt, '\r')
   await press(h.vt, '\x1b[B')
   await press(h.vt, '\x1b[B')

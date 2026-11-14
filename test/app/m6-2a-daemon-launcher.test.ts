@@ -167,15 +167,17 @@ test('dispose after start asks the live child to stop once, without a second exi
   assert.deepEqual(exitCodes, [], 'dispose does not itself re-exit')
 })
 
-test('a parent-only SIGTERM is forwarded to a live child once and cleaned up', () => {
+test('the Coordinator installs no second SIGTERM/SIGINT handler (single stop owner)', () => {
   const { spawnImpl, children } = fakeSpawn()
   const exitCodes: number[] = []
   const c = coordinator(children, exitCodes, spawnImpl)
-  const before = process.listenerCount('SIGTERM')
+  const sigtermBefore = process.listenerCount('SIGTERM')
+  const sigintBefore = process.listenerCount('SIGINT')
   c.start()
-  assert.equal(process.listenerCount('SIGTERM'), before + 1)
-  process.emit('SIGTERM')
-  assert.deepEqual(children[0].kills, ['SIGTERM'])
+  // Disposal is the SINGLE stop owner (driven by the row's fiber disposal on the
+  // official shutdown path); the Coordinator adds no competing signal handler.
+  assert.equal(process.listenerCount('SIGTERM'), sigtermBefore, 'no extra SIGTERM handler')
+  assert.equal(process.listenerCount('SIGINT'), sigintBefore, 'no extra SIGINT handler')
   c.dispose()
-  assert.equal(process.listenerCount('SIGTERM'), before, 'the forwarded handler is removed on dispose')
+  assert.deepEqual(children[0].kills, ['SIGTERM'], 'the single owner asks the live child to stop once')
 })

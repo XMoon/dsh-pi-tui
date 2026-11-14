@@ -377,3 +377,78 @@
 
 - id: tool-web
   disabled: true
+
+# ── M6-2A daemon-supervisor Host-business isolation ────────────────────────
+# Under the daemon backend the `dsh --profile pi-tui` CLI is a short-lived
+# supervisor; the real Host is the detached local-host.mjs. These are the
+# official dsh-base rows that would be a SECOND Host Session/Storage/Jobs/
+# Gateway/Account authority if they mounted in the supervisor, so they are
+# disabled for the daemon backend only (condition evaluated per entry; Direct
+# and Host-only never publish tuiDaemonStartup and keep every row unchanged).
+
+- id: session
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: session-log-deepseek
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: session-persistence-jsonl
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: session-query-sqlite
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: storage
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: storage-json
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: storage-domain
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: session-projection
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: session-projection-cache
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: session-title
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: session-title-llm
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: jobs
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: typert-gateway
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: remote-access
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: plugin-manager
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: plugin-package-inventory-deepseek
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: credentials
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: deepseek-account
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: authorization
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: otel
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: session-telemetry-otel
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: attachment-local
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+

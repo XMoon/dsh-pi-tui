@@ -65,3 +65,14 @@ test('the Direct tui-app row still gates on tuiStartup', () => {
   const block = rowBlock('tui-app')
   assert.match(block, /inject: \[tuiStartup,/u)
 })
+
+test('the daemon supervisor disables every second-Host-business authority row', () => {
+  // These official dsh-base rows are the Session/Storage/Jobs/Gateway/Account/
+  // Attachment authorities. Under the daemon backend the CLI is a SHORT-LIVED
+  // supervisor; the real Host is the detached local-host.mjs. Leaving any of
+  // these enabled would be a SECOND Host business authority in the supervisor.
+  for (const id of ['session', 'session-persistence-jsonl', 'session-query-sqlite', 'storage', 'storage-json', 'storage-domain', 'session-projection', 'jobs', 'typert-gateway', 'remote-access', 'deepseek-account', 'credentials', 'authorization']) {
+    const block = rowBlock(id)
+    assert.ok(block.includes(DAEMON_DISABLED), `${id} must be daemon-disabled so the supervisor owns no second Host authority`)
+  }
+})

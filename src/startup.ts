@@ -341,6 +341,13 @@ export interface TuiDaemonStartupValues {
   /** `--preset`, the agent preset a fresh session starts on. */
   readonly presetId?: string
   /**
+   * The read-only public-backend choice for THIS launch: its value and whether
+   * the environment overrode the Profile. Carried to the Client so its Settings
+   * row can show the real "environment override" source WITHOUT depending on the
+   * deliberately-cleared `DSH_PI_TUI_BACKEND` (and never persisted).
+   */
+  readonly backendSource?: { readonly value: PublicBackend; readonly source: 'env' | 'profile' }
+  /**
    * Mark the daemon Coordinator (the launcher row) as mounted. The readiness
    * handshake the daemon branch registers exits nonzero when readiness commits
    * without it — i.e. the launcher row is missing, failed or pending on
@@ -384,11 +391,11 @@ function daemonPrerequisiteError(): BackendDecisionError | undefined {
       message: `the daemon backend is only supported on Linux (this is ${process.platform}); use DSH_PI_TUI_BACKEND=direct or unset it`,
     }
   }
-  if (process.stdin.isTTY !== true && process.stdout.isTTY !== true) {
+  if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
     return {
       kind: 'error',
       code: 'no-interactive-tty',
-      message: 'the daemon backend requires an interactive terminal (no TTY was detected)',
+      message: 'the daemon backend requires an interactive terminal: both stdin and stdout must be a TTY (input and output terminal capabilities are checked separately)',
     }
   }
   return undefined
@@ -683,7 +690,7 @@ export function apply(ctx: Context, config?: Config): void {
         return
       }
       if (decision.backend === 'daemon') {
-        publishDaemonStartup(ctx, sessionLaunch, options.preset)
+        publishDaemonStartup(ctx, sessionLaunch, options.preset, { value: decision.backend, source: decision.source })
         return
       }
     }
@@ -793,6 +800,7 @@ function publishDaemonStartup(
   ctx: Context,
   sessionLaunch: CliSessionLaunchIntent | undefined,
   presetId: string | undefined,
+  backendSource: { value: PublicBackend; source: 'env' | 'profile' } | undefined,
 ): void {
   const installed = installedDshVersion()
   if (installed !== undefined) {
@@ -818,6 +826,7 @@ function publishDaemonStartup(
   ctx.provide(TUI_DAEMON_STARTUP_SERVICE, {
     ...(sessionLaunch !== undefined ? { sessionLaunch } : {}),
     ...(presetId !== undefined ? { presetId } : {}),
+    ...(backendSource !== undefined ? { backendSource } : {}),
     markCoordinatorMounted: () => { coordinatorMounted = true },
   } satisfies TuiDaemonStartupValues)
 }

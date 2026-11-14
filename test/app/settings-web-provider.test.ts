@@ -574,7 +574,10 @@ test('the workspace row reports the configured providers and opens the Web page 
   assert.match(rowView, /Configure Web…/u, 'the row Detail paints the ONE page entry')
   assert.match(compactRow(), /billed separately/u)
   assert.match(compactRow(), /not an Optional.*?Bundle/u)
-  assert.match(compactRow(), /Share Original Question is on by default/u)
+  assert.match(compactRow(), /Share Original Question is on by/u,
+    'the launcher explains the default share behaviour')
+  assert.match(compactRow(), /default: it sends up to 128 characters/u,
+    'the default shares a bounded question excerpt')
   assert.match(compactRow(), /up to 128 characters/u)
   assert.match(compactRow(), /authoritative read-back agree/u)
   assert.match(compactRow(), /credential reference/u)

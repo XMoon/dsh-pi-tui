@@ -252,6 +252,10 @@ test('REAL DeepSeekAccount + official WebServer callback: state, PKCE, grant, pr
 
 test('the bundle patch mounts the official WebServer with a loopback OS-assigned port under tuiStartup', async () => {
   const patch = await readFile(new URL('../../cordis.patch.yml', import.meta.url), 'utf8')
-  assert.match(patch, /- id: webserver\n\s+name: '@deepseek-ai\/dsh-host-webserver'\n\s+inject: \[tuiStartup\]\n\s+config:\n\s+host: 127\.0\.0\.1\n\s+port: 0/u)
+  // The `disabled:` gate (and its explanatory comments) sits between `inject`
+  // and `config`; the row still proves its name/inject/config wiring.
+  assert.match(patch, /- id: webserver\n\s+name: '@deepseek-ai\/dsh-host-webserver'\n\s+inject: \[tuiStartup\]\n(?:[ \t]*#[^\n]*\n)*\s+disabled: !!js "ctx\.get\('tuiDaemonStartup'\) !== undefined"\n\s+config:\n\s+host: 127\.0\.0\.1\n\s+port: 0/u)
+  assert.match(patch, /- id: webserver\n\s+name: '@deepseek-ai\/dsh-host-webserver'[\s\S]*?\n\s+disabled: !!js "ctx\.get\('tuiDaemonStartup'\) !== undefined"/u,
+    'the webserver row stays disabled only in the daemon supervisor')
   assert.match(patch, /inject: \[[^\]]*deepseekAccount[^\]]*webServer[^\]]*\]/u)
 })

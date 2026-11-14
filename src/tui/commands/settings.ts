@@ -1810,9 +1810,27 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  real launch fact), so the row never hides an illegal environment override. */
   const backendLaunchOverrideOf = (): string | undefined => {
     const raw = process.env.DSH_PI_TUI_BACKEND
-    if (raw === undefined) return undefined
-    if (raw === 'direct' || raw === 'daemon') return `Current launch: ${raw} (environment override)`
-    return `Current launch: invalid value ${JSON.stringify(raw)} (environment override)`
+    if (raw !== undefined) {
+      if (raw === 'direct' || raw === 'daemon') return `Current launch: ${raw} (environment override)`
+      return `Current launch: invalid value ${JSON.stringify(raw)} (environment override)`
+    }
+    // A daemon Client is launched with DSH_PI_TUI_BACKEND cleared from its own
+    // environment (it must never recurse into backend selection); the read-only
+    // launch source rides SPLIT_PROCESS_CLIENT_LAUNCH_BACKEND instead. Only an
+    // `env`-sourced value is an environment override; a `profile`-sourced value
+    // is the persisted preference itself and shows no override.
+    const internal = process.env.SPLIT_PROCESS_CLIENT_LAUNCH_BACKEND
+    if (internal !== undefined) {
+      try {
+        const parsed = JSON.parse(internal) as { value?: unknown; source?: unknown }
+        if (parsed.source === 'env' && (parsed.value === 'direct' || parsed.value === 'daemon')) {
+          return `Current launch: ${parsed.value} (environment override)`
+        }
+      } catch {
+        // An unreadable internal fact is not a launch override.
+      }
+    }
+    return undefined
   }
 
   const backendStartupEditOf = (
