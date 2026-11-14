@@ -1057,7 +1057,7 @@ test('a sessionless /model pick awaits its default save and reports the committe
   }
 })
 
-test('an AMBIGUOUS sessionless default save keeps an explicit UNRESOLVED intent, never a failed choice', async () => {
+test('an AMBIGUOUS sessionless default save is reconciled by the automatic authoritative read (never fabricated as committed)', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
