@@ -2129,3 +2129,14 @@ test('FR2-ext-r4: press → REAL render → release applies a short-screen filte
   assert.equal(panel.getViewState().typeFilter, 't2', 'press→render→release must apply the pressed type')
   panel.dispose()
 })
+
+test('FR2-r5-P3: the Team hint advertises Enter details only where it has a visible effect', () => {
+  const { panel } = makePanel([], { enableSearch: true, header: 'Tasks', team: readyTeam([teamTask()]), interactionCurrent: () => true })
+  panel.handleInput('\t') // Team
+  const narrow = panel.render(100).map(strip).join('\n')
+  assert.ok(narrow.includes('Enter details'), `narrow layout expands inline details on Enter:\n${narrow}`)
+  const wide = panel.render(120).map(strip).join('\n')
+  assert.ok(!wide.includes('Enter details'), `wide layout always shows the detail pane, so Enter is not advertised:\n${wide}`)
+  assert.ok(wide.includes('Esc close'), 'the exit hint remains')
+  panel.dispose()
+})
