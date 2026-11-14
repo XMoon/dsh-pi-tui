@@ -59,7 +59,7 @@ const CONNECT_PROBE_TIMEOUT_MS = 500
 /** The logical socket file name inside the 0700 scope directory. */
 const SOCKET_FILE = 'acp.sock'
 /** Owner-only private subdirectory (inside the 0700 scope) where the server is
- *  actually BOUND before its inode is renamed onto the contract path. Node's
+ *  actually BOUND before its inode is hard-linked onto the contract path. Node's
  *  server.close() unlink always targets this private dir, so it can never delete
  *  a foreign inode at the contract path. */
 const PRIVATE_DIR = '.acp-priv'
@@ -533,11 +533,11 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
   const scopeDirFd = openScopeDirFd(scope)
   const scopeProbePath = fdSocketPath(scopeDirFd)
   // The server is BOUND inside a private, owner-only subdirectory (fd-shortened)
-  // and its inode is then renamed onto the contract path. Node's
-  // net.Server.close() unlinks the path it was told to listen on; because that
-  // path lives inside THIS private directory (and the inode was renamed out of
-  // it), the automatic unlink is always ENOENT and can never touch a foreign
-  // inode at the contract path. The private dirfd is kept OPEN across close, so
+  // and its inode is then hard-linked onto the contract path (then the private
+  // name is unlinked). Node's net.Server.close() unlinks the path it was told to
+  // listen on; because that private name is already gone, the automatic unlink is
+  // always ENOENT and can never touch a foreign inode at the contract path. The
+  // private dirfd is kept OPEN across close, so
   // its /proc/self/fd path can never be redirected to another directory by
   // fd-number reuse — the fix does NOT rely on a released fd staying unused.
   const privDir = join(scope.dir, PRIVATE_DIR)
@@ -661,10 +661,56 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
     }
 
     // 2. Prepare the private owner-only dir and BIND the fd-shortened private path.
-    mkdirSync(privDir, { recursive: true, mode: 0o700 })
+    //    Create it NON-recursively and VALIDATE an existing entry as a real dir we
+    //    own BEFORE any chmod (never chmod through a symlink / foreign dir).
+    let privCreated = true
+    try {
+      mkdirSync(privDir, { mode: 0o700 })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private bind directory could not be created', error)
+      }
+      privCreated = false
+    }
+    if (!privCreated) {
+      const dirInfo = lstatSync(privDir)
+      if (dirInfo.isSymbolicLink() || !dirInfo.isDirectory() || dirInfo.uid !== uid) {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private bind path is not a directory owned by this uid')
+      }
+    }
     chmodSync(privDir, 0o700)
     privFd = openSync(privDir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
     const privBindPath = fdSocketPath(privFd)
+    // Recover a stale PRIVATE bind name left by a crash BETWEEN the private bind
+    // and the private-name unlink (e.g. SIGKILL mid-startup). Only this one
+    // anchored private name is considered — never a scope-wide scan, never another
+    // .acp-* entry. A live/foreign/unsafe occupant is refused; a proven-stale own
+    // socket inode is unlinked so the next bind does not hit EADDRINUSE.
+    let privExisting: ReturnType<typeof lstatSync> | undefined
+    try {
+      privExisting = lstatSync(privBindPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private bind path is not accessible', error)
+      }
+    }
+    if (privExisting !== undefined) {
+      if (privExisting.isSymbolicLink() || !privExisting.isSocket() || privExisting.uid !== uid) {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private bind path is occupied by a non-socket, symlink or foreign-owned entry')
+      }
+      const privVerdict = await probeSocket(privBindPath)
+      if (privVerdict === 'open') {
+        throw new LocalAcpError('LOCAL_ACP_SOCKET_IN_USE', 'local acp: a live listener already occupies the private bind path')
+      }
+      if (privVerdict !== 'refused') {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private bind path could not be proven stale')
+      }
+      const privRecheck = readSavedInode(privBindPath, uid)
+      if (privRecheck.dev !== privExisting.dev || privRecheck.ino !== privExisting.ino) {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private socket inode changed during the stale recover')
+      }
+      unlinkSync(privBindPath)
+    }
     server = createServer(socket => {
       if (stopping) {
         socket.destroy()
@@ -697,7 +743,8 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
       diag.warn('local-acp.error', { code: (error as NodeJS.ErrnoException).code ?? 'LOCAL_ACP_SERVER_ERROR' })
     })
 
-    // 3. Force the private inode to 0600, then RENAME it onto the contract path.
+    // 3. Force the private inode to 0600, then publish it onto the contract path
+    //    with a no-replace hard link and drop the private name (see below).
     chmodSync(join(privDir, SOCKET_FILE), 0o600)
     // Publish the socket with a KERNEL-ATOMIC NO-REPLACE operation: hard-link the
     // private socket inode onto the contract path. If ANY foreign entry occupies

@@ -472,7 +472,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  reconnected Host B is the one that produced an earlier Host A state. */
   let acpRuntimeGeneration: unknown
   let acpRuntimeFailure: string | undefined
-  let acpRuntimeReadInFlight: { readonly serial: number; readonly promise: Promise<AcpAccessStatus | undefined> } | undefined
   let acpRuntimeReadSerial = 0
   let acpRuntimeReadSettled = false
 
@@ -483,7 +482,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // identity is what the settled fact is bound to.
     const generation = acpCurrentGeneration()
     const promise = (async (): Promise<AcpAccessStatus | undefined> => await runner.acpAccess.getStatus())()
-    acpRuntimeReadInFlight = { serial, promise }
     let status: AcpAccessStatus | undefined
     let failure: string | undefined
     try {
@@ -501,7 +499,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       acpRuntimeReadSettled = true
       activeSettingsWorkspace?.refreshAcpRuntimeRow()
     }
-    if (acpRuntimeReadInFlight?.serial === serial) acpRuntimeReadInFlight = undefined
     return { status: failure === undefined ? status : undefined, fresh }
   }
 

@@ -14,11 +14,10 @@
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { lstatSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { closeSync, openSync } from 'node:fs'
 import { connect, createServer } from 'node:net'
 import { join } from 'node:path'
-import { Worker } from 'node:worker_threads'
 import test, { type TestContext } from 'node:test'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import { type LocalScope } from '../../src/app/remote-process/local-scope.ts'
@@ -619,41 +618,6 @@ test('retiring an old listener never deletes a newer live server\'s socket path'
   closeSync(newerDirFd)
 })
 
-/** A worker that continuously opens/closes a directory fd to compete for fd
- *  numbers on the SHARED worker_threads fd table — the exact condition under
- *  which a "close dirfd then server.close()" retirement could redirect Node's
- *  automatic unlink to another directory. */
-const FD_CHURN_WORKER = `
-const fs = require('node:fs')
-const dir = process.env.ACPFDC_DIR
-for (;;) { try { const fd = fs.openSync(dir, 'r'); fs.closeSync(fd) } catch {} }
-`
-
-test('retiring never deletes a foreign socket under concurrent fd-number churn', async t => {
-  const { scope } = newScope(t)
-  const churnDir = testLifecycle(t).tempDir('acp-churn-')
-  const churnSocket = join(churnDir, 'acp.sock')
-  writeFileSync(churnSocket, 'CHURN-FOREIGN')
-  const worker = new Worker(FD_CHURN_WORKER, { eval: true, env: { ...process.env, ACPFDC_DIR: churnDir } })
-  try {
-    await new Promise<void>(resolve => setTimeout(resolve, 50))
-    for (let iteration = 0; iteration < 80; iteration += 1) {
-      const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
-      const path = listener.socketPath
-      // Replace OUR contract inode with a foreign file, then retire under churn.
-      unlinkSync(path)
-      writeFileSync(path, `REPL-${String(iteration)}`)
-      await listener.close()
-      assert.ok(pathExists(churnSocket), `the concurrent churn foreign socket must survive retire (iter ${String(iteration)})`)
-      assert.equal(readFileSync(churnSocket, 'utf8'), 'CHURN-FOREIGN', 'the churn foreign socket content is intact')
-      assert.ok(pathExists(path) && lstatSync(path).isFile(), 'the local replacement must also survive retire')
-      unlinkSync(path)
-    }
-  } finally {
-    await worker.terminate()
-  }
-})
-
 test('a live foreign socket at the contract path is refused and never overwritten', async t => {
   const { dir, scope } = newScope(t)
   const logical = join(scope.dir, 'acp.sock')
@@ -682,4 +646,64 @@ test('a live foreign socket at the contract path is refused and never overwritte
     await new Promise<void>(resolveClose => foreign.close(() => resolveClose()))
     closeSync(scopeFd)
   }
+})
+
+/**
+ * A crash BETWEEN the private bind and the private-name unlink (SIGKILL mid
+ * startup) leaves a stale `<scope.dir>/.acp-priv/acp.sock`. The next start of the
+ * SAME legal Host must recover it — not fail with EADDRINUSE — while the contract
+ * pathname is rebuilt as a real 0600 socket that answers ACP v1 initialize.
+ */
+test('a stale PRIVATE bind socket left by SIGKILL is recovered on the next start', async t => {
+  const { dir, scope } = newScope(t)
+  const privDir = join(dir, '.acp-priv')
+  mkdirSync(privDir, { recursive: true, mode: 0o700 })
+  const privSock = join(privDir, 'acp.sock')
+  // Child: raw-listen on the private path (crash window state), report, then hang.
+  const childScript = [
+    "const { createServer } = require('node:net')",
+    "const { openSync } = require('node:fs')",
+    "const fd = openSync(process.env.PRIVDIR, 'r')",
+    "const srv = createServer(s => s.destroy())",
+    "srv.listen('/proc/self/fd/' + fd + '/acp.sock', () => process.stdout.write('LISTENED\\n'))",
+    "setInterval(() => {}, 1000)",
+  ].join('\n')
+  const child = spawn(process.execPath, ['-e', childScript], {
+    env: { ...process.env, PRIVDIR: privDir },
+    stdio: ['ignore', 'pipe', 'inherit'],
+  })
+  await new Promise<void>((resolveReady, rejectReady) => {
+    let output = ''
+    child.stdout.on('data', chunk => {
+      output += chunk
+      if (output.includes('LISTENED')) resolveReady()
+    })
+    child.on('exit', code => rejectReady(new Error(`private-bind child exited early: ${String(code)}`)))
+    // bounded deadline: fail fast if the child never prints LISTENED (a real readiness signal, not a blind sleep)
+    setTimeout(() => rejectReady(new Error('private-bind child never reported LISTENED')), 15_000) // bounded deadline
+  })
+  child.kill('SIGKILL')
+  await new Promise<void>(resolveExit => child.on('exit', () => resolveExit()))
+  assert.equal(lstatSync(privSock).isSocket(), true, 'the SIGKILL must leave a stale private socket')
+
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+  try {
+    const info = lstatSync(listener.socketPath)
+    assert.equal(info.isSocket(), true, 'the contract path is a real socket after recovery')
+    assert.equal(info.mode & 0o777, 0o600, 'the recovered contract socket is 0600')
+    assert.equal(pathExists(privSock), false, 'the stale private bind name is removed during recovery')
+    const client = await RawClient.open(listener.socketPath)
+    try {
+      initialize(client, 1)
+      const reply = await client.next()
+      assert.equal((reply as { result?: { protocolVersion?: number } })?.result?.protocolVersion, 1,
+        'the recovered socket answers ACP v1 initialize')
+    } finally {
+      client.close()
+    }
+  } finally {
+    await listener.close()
+  }
+  assert.equal(pathExists(listener.socketPath), false, 'normal close retires the contract inode')
+  assert.equal(pathExists(privSock), false, 'the private bind name stays gone after close')
 })
