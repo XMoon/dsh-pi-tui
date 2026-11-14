@@ -113,9 +113,13 @@ export async function runSessionlessHostFileF5B(context) {
   writeFileSync(join(betaDir, betaMarker), 'beta\n', { mode: 0o600 })
   // An EXTERNAL directory OUTSIDE the alpha Host Workspace: an explicit
   // `@../<sibling>/` or absolute query must enumerate it, a bare query must not.
-  const sharedDir = join(workDir, `f5b-shared-${unique}`)
+  // The names stay SHORT so even the full ABSOLUTE candidate paints inside the
+  // completion panel without middle-ellipsis (a truncated row cannot witness a
+  // painted candidate).
+  const short = unique.slice(0, 8)
+  const sharedDir = join(workDir, `shr-${short}`)
   mkdirSync(sharedDir, { recursive: true, mode: 0o700 })
-  const sharedMarker = `shared-marker-${unique}.ts`
+  const sharedMarker = `sm-${short}.ts`
   writeFileSync(join(sharedDir, sharedMarker), 'shared\n', { mode: 0o600 })
   const canonicalAlpha = realpathSync(alphaDir)
   const canonicalBeta = realpathSync(betaDir)
@@ -150,29 +154,34 @@ export async function runSessionlessHostFileF5B(context) {
       `F5B explicit client is not a mounted sessionless surface: ${JSON.stringify(explReady)}`)
     await waitForConfirmedDirectory(expl, canonicalAlpha, 'F5B explicit client confirmed Host directory')
     const hardClear = async () => { expl.send('\x15'); await sleep(200) }
+    // EVENT-DRIVEN accept: type the DIRECTORY LISTING query (the composer then
+    // does NOT contain the file name), WAIT until the Host candidate is really
+    // PAINTED (waitForScreen polls the live frame — never a fixed sleep), Tab
+    // to accept, and require the EXACT Host-located draft. A mismatch retries
+    // from a clean editor instead of trusting timing.
     const acceptExplicit = async (query, draft, label) => {
-      for (let attempt = 0; attempt < 6; attempt += 1) {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
         await hardClear()
         expl.send(query)
-        await sleep(1_500)
+        await expl.waitForScreen(sharedMarker, `${label} candidate painted`, 60_000)
         expl.send('\t')
         try {
           await expl.waitForComposerDraft(draft, 10_000)
           await hardClear()
           return
         } catch {
-          // The candidate list had not settled yet; clear and retry.
+          // The accept raced the panel (or landed nothing); retry cleanly.
         }
       }
       throw new SplitSmokeAssertionError(`${label}: the explicit Host candidate was never accepted into the editor`)
     }
     const relativeDraft = `@../${basename(sharedDir)}/${sharedMarker}`
-    await acceptExplicit(`@../${basename(sharedDir)}/${sharedMarker.slice(0, 12)}`, relativeDraft, 'F5B explicit relative')
+    await acceptExplicit(`@../${basename(sharedDir)}/`, relativeDraft, 'F5B explicit relative')
     const absoluteDraft = `@${sharedDir}/${sharedMarker}`
-    await acceptExplicit(`@${sharedDir}/${sharedMarker.slice(0, 12)}`, absoluteDraft, 'F5B explicit absolute')
+    await acceptExplicit(`@${sharedDir}/`, absoluteDraft, 'F5B explicit absolute')
     // Negative control on the SAME sessionless Client: a BARE query stays inside
     // the registered Workspace and never reaches the external marker.
-    expl.send(`@${sharedMarker.slice(0, 12)}`)
+    expl.send(`@${sharedMarker.replace(/\.ts$/, '')}`)
     await sleep(ABSENCE_WINDOW_MS)
     const bareExternalView = (await expl.viewport()).join('\n')
     assert(!bareExternalView.includes(sharedMarker),
