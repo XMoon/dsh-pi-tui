@@ -44,15 +44,40 @@ export interface LiveAgentViewIdentity {
 }
 
 /**
+ * The result of registering the client's proposed directory as a Host
+ * Workspace. The classification is decided by the HOST fact, never by which
+ * `await` happened to throw: a definite client-directory rejection is
+ * `rejected`; a persistence/registry failure that cannot confirm the outcome is
+ * `indeterminate`; success is `created`.
+ */
+export type AcpCreateWorkspaceOutcome =
+  | { readonly kind: 'created'; readonly workspaceId: string; readonly path: string }
+  | { readonly kind: 'rejected'; readonly code: string }
+  | { readonly kind: 'indeterminate'; readonly code: string }
+
+/**
+ * The result of creating ONE Host Session. `published-with-error` is the
+ * official `SessionController.create()` "Session was authored, a later step
+ * failed" outcome (e.g. `session/workspace-attach-failed`): the Session EXISTS
+ * with the returned authoritative id even though the call failed, so its real
+ * identity is preserved instead of being reported as unconfirmed.
+ */
+export type AcpCreateSessionOutcome =
+  | { readonly kind: 'created'; readonly sessionId: string }
+  | { readonly kind: 'rejected'; readonly code: string }
+  | { readonly kind: 'published-with-error'; readonly sessionId: string; readonly code: string }
+  | { readonly kind: 'indeterminate'; readonly code: string }
+
+/**
  * The narrow Host access this module is allowed to call. `local-host-entry.ts`
  * binds each callable from the already-settled Host Context; this module never
  * receives the Context, an Agent, a Session or any registry directly.
  */
 export interface HostAcpSessionAccess {
   /** Register or resolve the client's proposed absolute directory as a Host Workspace. */
-  createWorkspace(path: string): Promise<{ workspaceId: string; path: string }>
-  /** Create ONE Host Session as a member of a Host Workspace. */
-  createSession(workspaceId: string): Promise<{ sessionId: string }>
+  createWorkspace(path: string): Promise<AcpCreateWorkspaceOutcome>
+  /** Create ONE Host Session as a member of a Host Workspace, classified by the Host result. */
+  createSession(workspaceId: string): Promise<AcpCreateSessionOutcome>
   /** Resolve (live-first, cold single resume) one Session to its live Agent. */
   resolveAgent(sessionId: string): Promise<
     { agent: LiveAgentViewIdentity } | { error: { code: string; message: string } }
@@ -77,7 +102,9 @@ export type LocalAcpViewErrorCode =
   | 'LOCAL_ACP_VIEW_SUBAGENT_OWNED'
   | 'LOCAL_ACP_VIEW_WRITER_HELD'
   | 'LOCAL_ACP_VIEW_WORKSPACE_REJECTED'
+  | 'LOCAL_ACP_VIEW_WORKSPACE_UNAVAILABLE'
   | 'LOCAL_ACP_VIEW_AGENT_UNAVAILABLE'
+  | 'LOCAL_ACP_VIEW_CREATE_ATTACH_FAILED'
   | 'LOCAL_ACP_VIEW_CREATE_INDETERMINATE'
   | 'LOCAL_ACP_VIEW_HOST_ERROR'
   | 'LOCAL_ACP_VIEW_CLOSED'
@@ -85,16 +112,26 @@ export type LocalAcpViewErrorCode =
 /**
  * One classified View rejection. `rpcCode` is the JSON-RPC error code the
  * listener maps onto an ACP `RequestError`; `code` is the stable data code.
+ * `data` carries non-sensitive structured facts the caller may act on — most
+ * importantly the authoritative `sessionId` of a Session the Host already
+ * created before a later step failed.
  */
 export class LocalAcpViewError extends Error {
   readonly code: LocalAcpViewErrorCode
   readonly rpcCode: number
+  readonly data: Readonly<Record<string, unknown>>
 
-  constructor(code: LocalAcpViewErrorCode, message: string, rpcCode: number) {
+  constructor(
+    code: LocalAcpViewErrorCode,
+    message: string,
+    rpcCode: number,
+    data: Readonly<Record<string, unknown>> = {},
+  ) {
     super(message)
     this.name = 'LocalAcpViewError'
     this.code = code
     this.rpcCode = rpcCode
+    this.data = data
   }
 }
 
@@ -116,7 +153,6 @@ export interface AcpResumeSessionParams {
 /** One connection's transient protocol view state. */
 export interface ConnectionViewState {
   phase: 'idle' | 'attaching' | 'attached' | 'closed'
-  sessionId?: string
   /** The last Session this connection closed, so a repeated close stays idempotent. */
   lastClosedSessionId?: string
   /**
@@ -128,12 +164,10 @@ export interface ConnectionViewState {
   op: number
 }
 
-/** One reservation/attachment held by exactly one connection. */
+/** One reservation held by exactly one connection. Its object identity IS the reservation identity. */
 interface ViewClaim {
   readonly connectionIdentity: ConnectionViewState
   readonly sessionId: string
-  phase: 'attaching' | 'attached'
-  agent?: LiveAgentViewIdentity
 }
 
 const JSONRPC_INVALID_PARAMS = -32602
@@ -175,8 +209,10 @@ export class AcpSessionViewRegistry {
   /**
    * Attach a freshly created Host Session to this connection's View. `session/new`
    * creates ONE Host Workspace, then ONE Host Session, then borrows the official
-   * live Agent. Any failure after the Host Session create is reported as an
-   * indeterminate post-dispatch result and is never retried.
+   * live Agent. The failure category is decided by the HOST result: a definite
+   * directory rejection, a peer-visible attachment failure that PRESERVES the
+   * real created Session id, an unconfirmed outcome, or success. It is never
+   * retried and never rolled back.
    */
   async newSession(
     state: ConnectionViewState,
@@ -191,40 +227,50 @@ export class AcpSessionViewRegistry {
       throw error
     }
 
-    let workspaceId: string
-    try {
-      workspaceId = (await access.createWorkspace(request.cwd)).workspaceId
-    } catch {
+    const workspace = await access.createWorkspace(request.cwd)
+    if (workspace.kind === 'rejected') {
       this.resetIdleIfCurrent(state, op)
-      throw new LocalAcpViewError(
-        'LOCAL_ACP_VIEW_WORKSPACE_REJECTED',
-        'the Host refused the proposed workspace directory',
-        JSONRPC_INVALID_PARAMS,
-      )
+      throw new LocalAcpViewError('LOCAL_ACP_VIEW_WORKSPACE_REJECTED', 'the Host refused the proposed workspace directory', JSONRPC_INVALID_PARAMS)
+    }
+    if (workspace.kind === 'indeterminate') {
+      this.resetIdleIfCurrent(state, op)
+      throw new LocalAcpViewError('LOCAL_ACP_VIEW_WORKSPACE_UNAVAILABLE', 'the Host could not register the workspace; the outcome is unconfirmed', JSONRPC_INTERNAL_ERROR)
     }
     if (!this.isCurrentOp(state, op)) {
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP connection closed before the session was created', JSONRPC_INVALID_PARAMS)
     }
 
     // ONE Host Session create per request: never a second attempt on failure.
-    let sessionId: string
-    try {
-      sessionId = (await access.createSession(workspaceId)).sessionId
-    } catch (error) {
+    const created = await access.createSession(workspace.workspaceId)
+    if (created.kind === 'rejected') {
       this.resetIdleIfCurrent(state, op)
-      if (errorCodeOf(error) === 'gateway/bad-request') {
-        throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'the Host rejected the session create request', JSONRPC_INVALID_PARAMS)
-      }
+      throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'the Host rejected the session create request', JSONRPC_INVALID_PARAMS)
+    }
+    if (created.kind === 'published-with-error') {
+      // The Session EXISTS with this authoritative id; a later Host step (e.g.
+      // `workspace.attachSession`) failed. Preserve the real identity so the
+      // client can recover the exact Session instead of being told "unknown".
+      this.resetIdleIfCurrent(state, op)
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_VIEW_CREATE_ATTACH_FAILED',
+        'the Host created the session but a later step failed',
+        JSONRPC_INTERNAL_ERROR,
+        { sessionId: created.sessionId },
+      )
+    }
+    if (created.kind === 'indeterminate') {
+      this.resetIdleIfCurrent(state, op)
       throw new LocalAcpViewError(
         'LOCAL_ACP_VIEW_CREATE_INDETERMINATE',
         'the Host did not confirm the new session; it may or may not exist',
         JSONRPC_INTERNAL_ERROR,
       )
     }
+    const sessionId = created.sessionId
     if (!this.isCurrentOp(state, op)) {
       // The Session exists on the Host but this connection is already gone (or a
       // newer operation owns it); do not hold a claim for a dead/superseded op.
-      throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP connection closed before the session view attached', JSONRPC_INVALID_PARAMS)
+      throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP connection closed before the session view attached', JSONRPC_INVALID_PARAMS, { sessionId })
     }
     if (this.claims.has(sessionId)) {
       this.resetIdleIfCurrent(state, op)
@@ -232,8 +278,10 @@ export class AcpSessionViewRegistry {
     }
 
     // Reserve the brand-new id synchronously BEFORE the identity await.
-    const claim: ViewClaim = { connectionIdentity: state, sessionId, phase: 'attaching' }
+    const claim: ViewClaim = { connectionIdentity: state, sessionId }
     this.claims.set(sessionId, claim)
+    // resolveForView carries the authoritative { sessionId } on failure, so a
+    // failed Agent borrow after a CONFIRMED create still preserves the identity.
     const agent = await this.resolveForView(access, state, op, claim)
     this.commitAttached(state, op, claim, access, agent)
     return { sessionId }
@@ -261,7 +309,7 @@ export class AcpSessionViewRegistry {
       this.resetIdleIfCurrent(state, op)
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_ALREADY_ATTACHED', 'the session is already attached to an ACP view', JSONRPC_INVALID_PARAMS)
     }
-    const claim: ViewClaim = { connectionIdentity: state, sessionId, phase: 'attaching' }
+    const claim: ViewClaim = { connectionIdentity: state, sessionId }
     this.claims.set(sessionId, claim)
     const agent = await this.resolveForView(access, state, op, claim)
     // cwd is a claim proposal only; a difference is a fixed non-sensitive note,
@@ -287,7 +335,6 @@ export class AcpSessionViewRegistry {
       // so the pending continuation sees `!isCurrentOp`/`claims.get !== claim`
       // and never commits.
       state.phase = 'idle'
-      state.sessionId = undefined
       state.lastClosedSessionId = sessionId
       return {}
     }
@@ -303,7 +350,6 @@ export class AcpSessionViewRegistry {
    */
   releaseConnection(state: ConnectionViewState): void {
     state.phase = 'closed'
-    state.sessionId = undefined
     // Bump the generation so any in-flight continuation is treated as stale and
     // can never mutate this (closed) connection's state.
     state.op += 1
@@ -326,7 +372,6 @@ export class AcpSessionViewRegistry {
     state.op += 1
     state.phase = 'attaching'
     state.lastClosedSessionId = undefined
-    state.sessionId = undefined
     return state.op
   }
 
@@ -356,32 +401,43 @@ export class AcpSessionViewRegistry {
     try {
       resolved = await access.resolveAgent(claim.sessionId)
     } catch {
-      this.onResolveFailure(state, op, claim.sessionId)
-      throw new LocalAcpViewError('LOCAL_ACP_VIEW_HOST_ERROR', 'the Host could not resolve the session', JSONRPC_INTERNAL_ERROR)
+      this.onResolveFailure(state, op, claim)
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_VIEW_HOST_ERROR',
+        'the Host could not resolve the session',
+        JSONRPC_INTERNAL_ERROR,
+        { sessionId: claim.sessionId },
+      )
     }
     if ('error' in resolved) {
-      this.onResolveFailure(state, op, claim.sessionId)
-      throw mapResolveError(resolved.error)
+      this.onResolveFailure(state, op, claim)
+      throw mapResolveError(resolved.error, claim.sessionId)
     }
     if (!this.isCurrentOp(state, op) || this.claims.get(claim.sessionId) !== claim) {
-      this.releaseReservation(state, claim.sessionId)
-      throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released before it attached', JSONRPC_INVALID_PARAMS)
+      // A superseded / released / closed operation: drop ONLY this exact claim.
+      this.releaseReservation(state, claim)
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_VIEW_CLOSED',
+        'the ACP view was released before it attached',
+        JSONRPC_INVALID_PARAMS,
+        { sessionId: claim.sessionId },
+      )
     }
     return resolved.agent
   }
 
-  /** Release a failed resolution's own reservation without clobbering a newer op. */
-  private onResolveFailure(state: ConnectionViewState, op: number, sessionId: string): void {
-    this.releaseReservation(state, sessionId)
+  /** Release a failed resolution's OWN exact reservation without touching a newer op's claim. */
+  private onResolveFailure(state: ConnectionViewState, op: number, claim: ViewClaim): void {
+    this.releaseReservation(state, claim)
     this.resetIdleIfCurrent(state, op)
   }
 
   /**
    * Commit an attached View only when `op` is still the connection's live
    * generation, the claim is still this connection's, AND the borrowed
-   * Agent/Session are the EXACT live Host objects. Any mismatch releases the
-   * claim instead of publishing a stale View, and never mutates a state now
-   * owned by a newer/closed operation.
+   * Agent/Session are the EXACT live Host objects. Any mismatch releases ONLY
+   * this exact claim instead of publishing a stale View, and never mutates a
+   * state now owned by a newer/closed operation.
    */
   private commitAttached(
     state: ConnectionViewState,
@@ -393,26 +449,39 @@ export class AcpSessionViewRegistry {
     if (state.op !== op || this.claims.get(claim.sessionId) !== claim || claim.connectionIdentity !== state) {
       // A newer op owns this connection or the claim was released; the late
       // result is inert and must not change the current transient state.
-      this.releaseReservation(state, claim.sessionId)
-      throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released before it attached', JSONRPC_INVALID_PARAMS)
+      this.releaseReservation(state, claim)
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_VIEW_CLOSED',
+        'the ACP view was released before it attached',
+        JSONRPC_INVALID_PARAMS,
+        { sessionId: claim.sessionId },
+      )
     }
     const exact = Object.is(access.currentAgent(claim.sessionId), agent)
       && Object.is(access.currentSession(claim.sessionId), agent.session)
     if (!exact) {
-      this.releaseReservation(state, claim.sessionId)
+      this.releaseReservation(state, claim)
       this.resetIdleIfCurrent(state, op)
-      throw new LocalAcpViewError('LOCAL_ACP_VIEW_AGENT_UNAVAILABLE', 'the resolved session agent is no longer the live Host agent', JSONRPC_INTERNAL_ERROR)
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_VIEW_AGENT_UNAVAILABLE',
+        'the resolved session agent is no longer the live Host agent',
+        JSONRPC_INTERNAL_ERROR,
+        { sessionId: claim.sessionId },
+      )
     }
-    claim.phase = 'attached'
-    claim.agent = agent
     state.phase = 'attached'
-    state.sessionId = claim.sessionId
   }
 
-  /** Remove a reservation only when it is still owned by this connection. */
-  private releaseReservation(state: ConnectionViewState, sessionId: string): void {
-    const claim = this.claims.get(sessionId)
-    if (claim !== undefined && claim.connectionIdentity === state) this.claims.delete(sessionId)
+  /**
+   * Remove ONE exact reservation. Identity is by the CLAIM OBJECT (and its
+   * owning connection), never by `sessionId` alone: a close-then-re-attach of
+   * the SAME Session produces a NEW claim for the same connection+sessionId, so
+   * a stale operation's late release must not delete the newer claim.
+   */
+  private releaseReservation(state: ConnectionViewState, claim: ViewClaim): void {
+    if (this.claims.get(claim.sessionId) === claim && claim.connectionIdentity === state) {
+      this.claims.delete(claim.sessionId)
+    }
   }
 
   private validateNew(request: AcpNewSessionParams): void {
@@ -439,11 +508,6 @@ export class AcpSessionViewRegistry {
   }
 }
 
-/** Whether one connection's view has been closed (a function boundary defeats TS narrowing across an await). */
-function isClosed(state: ConnectionViewState): boolean {
-  return state.phase === 'closed'
-}
-
 /** A `session/new|resume` cwd is a non-empty Linux absolute path with no NUL. */
 function validateCwd(cwd: string): void {
   if (typeof cwd !== 'string' || cwd.length === 0 || !cwd.startsWith('/') || cwd.includes('\u0000')) {
@@ -452,24 +516,16 @@ function validateCwd(cwd: string): void {
 }
 
 /** Map an official Session-domain failure onto a stable View rejection. */
-function mapResolveError(error: { code: string; message: string }): LocalAcpViewError {
+function mapResolveError(error: { code: string; message: string }, sessionId: string): LocalAcpViewError {
+  const data = { sessionId }
   switch (error.code) {
     case 'session/not-found':
-      return new LocalAcpViewError('LOCAL_ACP_VIEW_SESSION_NOT_FOUND', 'the session does not exist on this Host', JSONRPC_INVALID_PARAMS)
+      return new LocalAcpViewError('LOCAL_ACP_VIEW_SESSION_NOT_FOUND', 'the session does not exist on this Host', JSONRPC_INVALID_PARAMS, data)
     case 'session/agent-busy':
-      return new LocalAcpViewError('LOCAL_ACP_VIEW_SUBAGENT_OWNED', 'the session is owned by subagent routing', JSONRPC_INVALID_PARAMS)
+      return new LocalAcpViewError('LOCAL_ACP_VIEW_SUBAGENT_OWNED', 'the session is owned by subagent routing', JSONRPC_INVALID_PARAMS, data)
     case 'session/writer-held':
-      return new LocalAcpViewError('LOCAL_ACP_VIEW_WRITER_HELD', 'the session is written by another owner', JSONRPC_INVALID_PARAMS)
+      return new LocalAcpViewError('LOCAL_ACP_VIEW_WRITER_HELD', 'the session is written by another owner', JSONRPC_INVALID_PARAMS, data)
     default:
-      return new LocalAcpViewError('LOCAL_ACP_VIEW_HOST_ERROR', 'the Host could not resolve the session', JSONRPC_INTERNAL_ERROR)
+      return new LocalAcpViewError('LOCAL_ACP_VIEW_HOST_ERROR', 'the Host could not resolve the session', JSONRPC_INTERNAL_ERROR, data)
   }
-}
-
-/** Read a stable error code from an official RemoteError without importing it. */
-function errorCodeOf(error: unknown): string | undefined {
-  if (typeof error === 'object' && error !== null && 'code' in error) {
-    const code = (error as { readonly code?: unknown }).code
-    if (typeof code === 'string') return code
-  }
-  return undefined
 }

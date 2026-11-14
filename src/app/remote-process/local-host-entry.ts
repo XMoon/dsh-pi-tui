@@ -60,7 +60,12 @@ import {
   startLocalAcpListener,
   type LocalAcpListener,
 } from './local-acp-listener.ts'
-import { type HostAcpSessionAccess, type LiveAgentViewIdentity } from './local-acp-session-view.ts'
+import {
+  type AcpCreateSessionOutcome,
+  type AcpCreateWorkspaceOutcome,
+  type HostAcpSessionAccess,
+  type LiveAgentViewIdentity,
+} from './local-acp-session-view.ts'
 import type { AcpAccessStatus } from '../../runtime/acp-access-port.ts'
 
 /** The official Web-only rows of the Host overlay, rendered from the ONE
@@ -487,17 +492,62 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
     )
   }
   return {
-    async createWorkspace(path: string): Promise<{ workspaceId: string; path: string }> {
-      const result = await workspaceController.create({ path })
-      return { workspaceId: result.workspace.workspaceId, path: result.workspace.path }
+    async createWorkspace(path: string): Promise<AcpCreateWorkspaceOutcome> {
+      try {
+        const result = await workspaceController.create({ path })
+        return { kind: 'created', workspaceId: result.workspace.workspaceId, path: result.workspace.path }
+      } catch (error) {
+        const code = remoteErrorCode(error) ?? 'workspace/internal'
+        // Only the official directory-validation failures are a definite client
+        // rejection; a persistence/registry failure cannot confirm the outcome.
+        if (code === 'workspace/invalid-path' || code === 'workspace/name-conflict') {
+          return { kind: 'rejected', code }
+        }
+        return { kind: 'indeterminate', code }
+      }
     },
-    async createSession(workspaceId: string): Promise<{ sessionId: string }> {
-      return { sessionId: (await sessionController.create({ workspaceId })).sessionId }
+    async createSession(workspaceId: string): Promise<AcpCreateSessionOutcome> {
+      try {
+        return { kind: 'created', sessionId: (await sessionController.create({ workspaceId })).sessionId }
+      } catch (error) {
+        const code = remoteErrorCode(error) ?? 'session/internal'
+        if (code === 'gateway/bad-request' || code === 'workspace/not-found') {
+          return { kind: 'rejected', code }
+        }
+        // Official `SessionController.create` can publish a Session then fail a
+        // later step (e.g. `workspace.attachSession`). Its details carry the real
+        // created Session id, which the caller must preserve rather than treating
+        // the whole create as unconfirmed.
+        const sessionId = remoteErrorSessionId(error)
+        if (code === 'session/workspace-attach-failed' && sessionId !== undefined) {
+          return { kind: 'published-with-error', sessionId, code }
+        }
+        return { kind: 'indeterminate', code }
+      }
     },
     resolveAgent: sessionId => sessionController.resolveAgent(sessionId),
     currentAgent: sessionId => agents.get(sessionId),
     currentSession: sessionId => sessions.get(sessionId),
   }
+}
+
+/** A stable code from an official RemoteError without importing its class. */
+function remoteErrorCode(error: unknown): string | undefined {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const code = (error as { readonly code?: unknown }).code
+    if (typeof code === 'string') return code
+  }
+  return undefined
+}
+
+/** The authoritative created Session id an official `published-with-error` carries. */
+function remoteErrorSessionId(error: unknown): string | undefined {
+  if (typeof error === 'object' && error !== null && 'details' in error) {
+    const details = (error as { readonly details?: { readonly sessionId?: unknown } }).details
+    const sessionId = details?.sessionId
+    if (typeof sessionId === 'string' && sessionId !== '') return sessionId
+  }
+  return undefined
 }
 
 /**
