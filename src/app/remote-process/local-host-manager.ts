@@ -594,84 +594,34 @@ function canonicalPath(path: string): string {
 
 /** Parse a `systemctl --user show-environment` body into a KEY->value map. */
 /**
- * Decode one `systemctl --user show-environment` VALUE. systemd prints a plain
- * value when it needs no quoting, but wraps a value containing whitespace or
- * shell-special characters in `$'...'` with C-style (`\n`, `\t`, `\\`, `\'`,
- * `\xHH`, octal `\NNN`) escapes. This decodes that form WITHOUT eval/shell.
+ * Parse the RUNNING user manager's authoritative unit search path, as returned
+ * by `systemctl --user show -p UnitPath --value`. systemd joins the entries with
+ * single spaces, so a path containing spaces is additionally recognized by the
+ * caller's raw boundary match.
  */
-function decodeSystemdEnvValue(value: string): string {
-  if (!(value.length >= 3 && value.startsWith("$'") && value.endsWith("'"))) return value
-  const inner = value.slice(2, -1)
-  let out = ''
-  for (let i = 0; i < inner.length; i += 1) {
-    const character = inner[i]
-    if (character !== '\\') { out += character; continue }
-    const next = inner[i + 1]
-    if (next === undefined) { out += '\\'; break }
-    i += 1
-    switch (next) {
-      case '\\': out += '\\'; break
-      case "'": out += "'"; break
-      case '"': out += '"'; break
-      case 'n': out += '\n'; break
-      case 't': out += '\t'; break
-      case 'r': out += '\r'; break
-      case 'a': out += '\x07'; break
-      case 'b': out += '\b'; break
-      case 'f': out += '\f'; break
-      case 'v': out += '\v'; break
-      case 'x': {
-        const hex = inner.slice(i + 1, i + 3)
-        if (/^[0-9a-fA-F]{2}$/u.test(hex)) { out += String.fromCharCode(parseInt(hex, 16)); i += 2 } else { out += 'x' }
-        break
-      }
-      default:
-        if (/[0-7]/u.test(next)) {
-          let octal = next
-          while (octal.length < 3 && /[0-7]/u.test(inner[i + 1] ?? '')) { octal += inner[i + 1]; i += 1 }
-          out += String.fromCharCode(parseInt(octal, 8))
-        } else {
-          out += next
-        }
-    }
-  }
-  return out
-}
-
-export function parseManagerEnvironment(stdout: string): Record<string, string> {
-  const env: Record<string, string> = {}
-  for (const line of stdout.split('\n')) {
-    const at = line.indexOf('=')
-    if (at > 0) env[line.slice(0, at)] = decodeSystemdEnvValue(line.slice(at + 1))
-  }
-  return env
+export function parseManagerUnitPath(value: string): string[] {
+  return value.trim().split(/\s+/u).filter(entry => entry !== '')
 }
 
 /**
- * The user-unit directory the manager actually searches, from the MANAGER's own
- * environment: `$XDG_CONFIG_HOME/systemd/user` when XDG_CONFIG_HOME is set to a
- * non-default value, else `<accountHome>/.config/systemd/user`.
+ * Why the fixed plan install directory is NOT in the RUNNING manager's actual
+ * unit search path (stable reason), or `null` when it is. The authority is the
+ * manager's `UnitPath` property — never the environment block it exports to
+ * child processes, which can change (`set-environment`) without changing the
+ * real search path. The caller MUST fail closed BEFORE writing when this returns
+ * a reason or when UnitPath cannot be queried.
  */
-export function managerUserUnitDir(managerEnv: Record<string, string>, accountHome: string): string {
-  const configHome = managerEnv.XDG_CONFIG_HOME !== undefined && managerEnv.XDG_CONFIG_HOME !== ''
-    ? managerEnv.XDG_CONFIG_HOME
-    : join(accountHome, '.config')
-  return join(configHome, 'systemd', 'user')
-}
-
-/**
- * Why the fixed plan install directory is NOT the manager's real user-unit
- * search directory (stable reason string), or `null` when it matches. A custom
- * `SYSTEMD_UNIT_PATH` overrides the whole search path and is unsupported by the
- * fixed plan contract. When this returns a reason the caller MUST fail closed
- * BEFORE writing a unit that the manager would never load.
- */
-export function userUnitPathUnsupportedReason(managerEnv: Record<string, string>, accountHome: string, targetDir: string): string | null {
-  const unitPath = managerEnv.SYSTEMD_UNIT_PATH
-  if (unitPath !== undefined && unitPath.trim() !== '') return 'the user manager sets a custom SYSTEMD_UNIT_PATH'
-  const expected = managerUserUnitDir(managerEnv, accountHome)
-  if (canonicalPath(expected) !== canonicalPath(targetDir)) return 'the user manager searches $XDG_CONFIG_HOME/systemd/user, not the fixed home path'
-  return null
+export function userUnitPathUnsupportedReason(unitPathValue: string, targetDir: string): string | null {
+  const raw = unitPathValue.trim()
+  if (raw === '') return 'the manager reported an empty unit search path'
+  const target = canonicalPath(targetDir)
+  for (const entry of parseManagerUnitPath(raw)) {
+    if (canonicalPath(entry) === target) return null
+  }
+  // A target path that itself contains spaces is joined ambiguously by systemd;
+  // accept an exact boundary-delimited occurrence of the canonical target.
+  if (raw === target || raw.startsWith(`${target} `) || raw.endsWith(` ${target}`) || raw.includes(` ${target} `)) return null
+  return 'the fixed user unit directory is not in the manager UnitPath'
 }
 
 /** The result of one atomic unit installation. */
@@ -845,22 +795,20 @@ export async function startManagedHostCandidate(
   const runtimeDir = selectRuntimeDir(uid)
   const facts = collectUnitFacts(options, uid)
   const unitDir = (deps.unitDir ?? resolveUserUnitDir)(uid)
-  // The fixed plan path (<account-home>/.config/systemd/user) must be exactly the
-  // directory this manager searches. A custom XDG_CONFIG_HOME or SYSTEMD_UNIT_PATH
-  // would make the written unit unloadable, so fail closed BEFORE writing. Test
-  // seams (deps) bypass this real-manager query.
+  // The fixed plan path (<account-home>/.config/systemd/user) must be in the
+  // RUNNING manager's actual UnitPath. The manager's exported environment block
+  // is NOT that authority (set-environment can change it without changing the
+  // real search path), so query UnitPath and fail closed BEFORE writing when it
+  // cannot be read or does not contain the target. Test seams (deps) bypass this
+  // real-manager query.
   if (deps.probe === undefined && deps.unitDir === undefined) {
-    const environment = await systemctl(['--user', '--no-pager', '--no-ask-password', 'show-environment'], runtimeDir)
-    if (environment.kind !== 'exited' || environment.code !== 0) {
-      throw new LocalScopeError('HOST_MANAGER_ERROR', 'managed Host: the user manager environment could not be queried')
+    const unitPathResult = await systemctl(['--user', '--no-pager', '--no-ask-password', 'show', '-p', 'UnitPath', '--value'], runtimeDir)
+    if (unitPathResult.kind !== 'exited' || unitPathResult.code !== 0) {
+      throw new LocalScopeError('HOST_MANAGER_ERROR', 'managed Host: the user manager unit search path could not be queried')
     }
-    const unsupported = userUnitPathUnsupportedReason(
-      parseManagerEnvironment(environment.stdout),
-      canonicalPath(userInfo().homedir),
-      unitDir,
-    )
+    const unsupported = userUnitPathUnsupportedReason(unitPathResult.stdout, unitDir)
     if (unsupported !== null) {
-      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the plan-supported user unit path is not the manager's search path (${unsupported})`)
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the fixed user unit directory is not loadable by the manager (${unsupported})`)
     }
   }
   const unitName = buildUnitName(options.profile, options.scope.scopeId)

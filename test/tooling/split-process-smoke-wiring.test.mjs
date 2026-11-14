@@ -36,7 +36,7 @@ import {
   selectedPassLine,
 } from '../../scripts/lib/split-smoke-selection.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
-import { encodeUnitValue, managerUserUnitDir, parseManagerEnvironment, userUnitPathUnsupportedReason } from '../../src/app/remote-process/local-host-manager.ts'
+import { encodeUnitValue, parseManagerUnitPath, userUnitPathUnsupportedReason } from '../../src/app/remote-process/local-host-manager.ts'
 import { cleanupOutcomeError, encodeExecArg, managedHostGateReason, stopAndRemoveManagedUnit, unitBelongsToRun, unitFileSafetyError } from '../../scripts/smoke/split-process/managed-host-m6-2b.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -681,22 +681,20 @@ test('the managed-host native gate requires an attested non-root isolated accoun
   assert.equal(typeof managedHostGateReason({ ...base, isolatedHome: '' }), 'string')
 })
 
-test('a custom XDG_CONFIG_HOME or SYSTEMD_UNIT_PATH makes the fixed unit path unsupported', () => {
+test('the fixed unit path must be in the RUNNING manager UnitPath (authoritative)', () => {
   const home = '/home/u'
   const fixed = join(home, '.config', 'systemd', 'user')
-  assert.equal(userUnitPathUnsupportedReason({}, home, fixed), null)
-  assert.deepEqual(parseManagerEnvironment('HOME=/home/u\nXDG_CONFIG_HOME=/home/u/.config-alt\n'), { HOME: '/home/u', XDG_CONFIG_HOME: '/home/u/.config-alt' })
-  assert.equal(managerUserUnitDir({ XDG_CONFIG_HOME: '/home/u/.config-alt' }, home), '/home/u/.config-alt/systemd/user')
-  assert.equal(typeof userUnitPathUnsupportedReason({ XDG_CONFIG_HOME: '/home/u/.config-alt' }, home, fixed), 'string')
-  assert.equal(typeof userUnitPathUnsupportedReason({ SYSTEMD_UNIT_PATH: '/custom' }, home, fixed), 'string')
-  // systemd `show-environment` C-quotes values with whitespace/specials as
-  // `$'...'`; the parser MUST decode them, not treat `$'...'` literally.
-  assert.deepEqual(parseManagerEnvironment("XDG_CONFIG_HOME=$'/home/user name/.config'\n"), { XDG_CONFIG_HOME: '/home/user name/.config' })
-  assert.deepEqual(parseManagerEnvironment("X=$'a\\\\b'\n"), { X: 'a\\b' })
-  assert.deepEqual(parseManagerEnvironment("Y=$'it\\'s'\n"), { Y: "it's" })
-  // A manager whose (decoded) XDG_CONFIG_HOME IS the fixed dir stays supported.
-  const spaced = join(home, '.config', 'systemd', 'user')
-  assert.equal(userUnitPathUnsupportedReason({ XDG_CONFIG_HOME: join(home, '.config') }, home, spaced), null)
+  assert.deepEqual(parseManagerUnitPath(`/usr/lib/systemd/user ${fixed} /etc/systemd/user`), ['/usr/lib/systemd/user', fixed, '/etc/systemd/user'])
+  // Present in the real UnitPath -> supported, even if an env-block guess would differ.
+  assert.equal(userUnitPathUnsupportedReason(`/usr/lib/systemd/user ${fixed}`, fixed), null)
+  // Absent from the real UnitPath -> refused (the env block cannot grant support).
+  assert.equal(typeof userUnitPathUnsupportedReason('/usr/lib/systemd/user /etc/systemd/user', fixed), 'string')
+  // Unqueryable/empty -> refused, never a guessed default.
+  assert.equal(typeof userUnitPathUnsupportedReason('', fixed), 'string')
+  // A space-containing fixed path is still recognized by the raw boundary match.
+  const spaced = join('/home/user name', '.config', 'systemd', 'user')
+  assert.equal(userUnitPathUnsupportedReason(`${spaced} /usr/lib/systemd/user`, spaced), null)
+  assert.equal(typeof userUnitPathUnsupportedReason('/usr/lib/systemd/user', spaced), 'string')
 })
 
 test('the ACP UDS selected verdict accepts only the complete real-L6 proof', () => {
