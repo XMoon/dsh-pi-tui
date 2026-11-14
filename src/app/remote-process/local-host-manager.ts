@@ -908,6 +908,44 @@ function readUnitMetadata(lines: readonly string[], key: string): string {
  * pair. The installed build may differ (an older compatible build): that is the
  * explicit `restart` migration input, not a cold-start rewrite permission.
  */
+/**
+ * Split one ExecStart value into its argument tokens, honouring systemd's
+ * double-quoted form (a quoted argument may contain spaces). Quoting state is
+ * strict: an unterminated quote is a malformed line, never a token boundary.
+ */
+function tokenizeExecStart(line: string): string[] {
+  const tokens: string[] = []
+  let current = ''
+  let quoted = false
+  let started = false
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index]
+    if (quoted) {
+      if (character === '"') quoted = false
+      else current += character
+      continue
+    }
+    if (character === '"') {
+      quoted = true
+      started = true
+      continue
+    }
+    if (/\s/u.test(character)) {
+      if (started) {
+        tokens.push(current)
+        current = ''
+        started = false
+      }
+      continue
+    }
+    current += character
+    started = true
+  }
+  if (quoted) throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the ExecStart has an unterminated quote')
+  if (started) tokens.push(current)
+  return tokens
+}
+
 /** Decode one systemd double-quoted command argument back to its raw value. */
 function decodeUnitArg(encoded: string): string {
   return encoded.replace(/^"|"$/gu, '').replace(/%%/gu, '%').replace(/\\\\/gu, '\\').replace(/\$\$/gu, '$').replace(/\\"/gu, '"')
@@ -955,7 +993,11 @@ function assertOwnedUnitContent(content: string, scope: LocalScope, profile: str
   if (execDirectives.length !== 1 || !execDirectives[0].startsWith('ExecStart=')) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit must define exactly one ExecStart and no other Exec directive')
   }
-  const args = execDirectives[0].slice('ExecStart='.length).trim().split(/\s+/u)
+  // Tokenize the command line the way systemd does: double-quoted arguments may
+  // contain spaces, and the renderer quotes every path for exactly that
+  // reason. A whitespace split would reject every valid unit whose installed
+  // path contains a space.
+  const args = tokenizeExecStart(execDirectives[0].slice('ExecStart='.length))
   if (args.length !== 2) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the ExecStart must take exactly the interpreter and the Host entry')
   }

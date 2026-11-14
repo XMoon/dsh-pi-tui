@@ -489,6 +489,33 @@ test('an aborted start holds the admin seat until the underlying ensure settles'
   assertCode(second, 5, /DAEMON_CONTROL_BUSY/u)
 })
 
+test('a forgotten stuck operation no longer delays later commands of its profile', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const controller = new AbortController()
+  let releaseEnsure: (() => void) | undefined
+  const ensureStarted = new Promise<void>(resolve => { releaseEnsure = resolve })
+  void releaseEnsure
+  // A start whose underlying ensure NEVER settles, with a short forget budget.
+  const first = runDaemonControl({ verb: 'start' }, fx.profile, depsOf(fx, {
+    signal: controller.signal,
+    seatHoldBudgetMs: 120,
+    ensureHost: () => {
+      releaseEnsure?.()
+      return new Promise(() => {})
+    },
+  }))
+  await ensureStarted
+  controller.abort()
+  assertCode(await first, 5, /TRANSITION_UNCERTAIN/u)
+  // After the forget budget the registry entry is gone even though the ensure
+  // never settled: a later command of THIS profile must not wait for it.
+  // The registry entry must be provably forgotten before the later command.
+  // reason: this window outlives the 120ms forget budget.
+  await new Promise(resolve => setTimeout(resolve, 200))
+  const later = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, { seatHoldBudgetMs: 120 }))
+  assertCode(later, 0)
+})
+
 test('a second concurrent management operation is DAEMON_CONTROL_BUSY', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
   const { bindProcessSeat } = await import('../../src/app/remote-process/local-scope.ts')

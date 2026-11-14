@@ -526,35 +526,35 @@ async function withAdminSeatScoped<T>(
   try {
     const value = await awaitWithAbort(settled, signal)
     // The operation itself settled: the seat can close synchronously after the
-    // underlying work drains.
-    await drainUnderlying(budgetMs)
+    // underlying work of THIS scope drains.
+    await drainUnderlying(scope.scopeId, budgetMs)
     await seat.close()
     return value
   } catch (error) {
     if (signal?.aborted === true) {
       // ABORT path: return to the caller immediately, but the seat stays held
-      // by a detached continuation until the real OS work settles (bounded by
-      // the shutdown budget) — a second command gets BUSY meanwhile.
-      holdSeatUntilDrained(seat, budgetMs).catch(() => {})
+      // by a detached continuation until this scope's real OS work settles
+      // (bounded by the shutdown budget) — a second command gets BUSY meanwhile.
+      holdSeatUntilDrained(scope.scopeId, seat, budgetMs).catch(() => {})
     } else {
-      await drainUnderlying(budgetMs)
+      await drainUnderlying(scope.scopeId, budgetMs)
       await seat.close()
     }
     throw error
   }
 }
 
-/** Wait (bounded) for every tracked underlying operation to settle. */
-async function drainUnderlying(budgetMs: number): Promise<boolean> {
+/** Wait (bounded) for every tracked underlying operation of this scope. */
+async function drainUnderlying(scopeId: string, budgetMs: number): Promise<boolean> {
   return await Promise.race([
-    waitForUnderlyingOperations().then(() => true),
+    waitForUnderlyingOperations(scopeId).then(() => true),
     new Promise<boolean>(resolve => { setTimeout(() => resolve(false), budgetMs).unref?.() }),
   ])
 }
 
 /** Hold an interrupted operation's seat open until its OS work settles. */
-async function holdSeatUntilDrained(seat: { close(): Promise<void> }, budgetMs: number): Promise<void> {
-  const drained = await drainUnderlying(budgetMs)
+async function holdSeatUntilDrained(scopeId: string, seat: { close(): Promise<void> }, budgetMs: number): Promise<void> {
+  const drained = await drainUnderlying(scopeId, budgetMs)
   if (!drained) {
     try { process.stderr.write('dsh-pi-tui daemon: note: the interrupted management operation had not settled; releasing the profile admin seat\n') } catch { /* best effort */ }
   }
@@ -563,23 +563,47 @@ async function holdSeatUntilDrained(seat: { close(): Promise<void> }, budgetMs: 
 
 /**
  * The underlying OS work a management operation started but no longer awaits
- * (an aborted caller). The admin seat stays held while any such work is still
- * live, so a second command cannot race a still-running ensure/systemctl
- * chain; settlement is also observed so it never becomes an unhandled
- * rejection. The registry is process-local and drains itself on settlement.
+ * (an aborted caller), keyed BY SCOPE: one Profile's interrupted start must
+ * never hold another Profile's seat. The admin seat stays held while THIS
+ * scope's work is still live, so a second command of the same Profile cannot
+ * race a still-running ensure/systemctl chain; settlement is also observed so
+ * it never becomes an unhandled rejection. The registry is process-local and
+ * drains itself on settlement.
  */
-const liveUnderlyingOperations = new Set<Promise<unknown>>()
+const liveUnderlyingOperations = new Map<string, Set<Promise<unknown>>>()
 
-function trackDetachedSettlement(promise: Promise<unknown>): void {
-  liveUnderlyingOperations.add(promise)
-  const release = (): void => { liveUnderlyingOperations.delete(promise) }
+function trackDetachedSettlement(scopeId: string, promise: Promise<unknown>, forgetAfterMs?: number): void {
+  let set = liveUnderlyingOperations.get(scopeId)
+  if (set === undefined) {
+    set = new Set()
+    liveUnderlyingOperations.set(scopeId, set)
+  }
+  set.add(promise)
+  let released = false
+  const release = (): void => {
+    if (released) return
+    released = true
+    const current = liveUnderlyingOperations.get(scopeId)
+    if (current === undefined) return
+    current.delete(promise)
+    if (current.size === 0) liveUnderlyingOperations.delete(scopeId)
+  }
   promise.then(release, release)
+  if (forgetAfterMs !== undefined) {
+    // An operation that outlives the seat-hold budget is forgotten: it can no
+    // longer extend ANY later command's drain, so one stuck start cannot
+    // impose a permanent per-command delay on its Profile.
+    const timer = setTimeout(() => release(), forgetAfterMs)
+    timer.unref?.()
+  }
 }
 
-/** Wait until every tracked underlying operation of this command settled. */
-async function waitForUnderlyingOperations(): Promise<void> {
-  while (liveUnderlyingOperations.size > 0) {
-    await Promise.race([...liveUnderlyingOperations].map(promise => promise.then(() => {}, () => {})))
+/** Wait until every tracked underlying operation of THIS scope settled. */
+async function waitForUnderlyingOperations(scopeId: string): Promise<void> {
+  for (;;) {
+    const set = liveUnderlyingOperations.get(scopeId)
+    if (set === undefined || set.size === 0) return
+    await Promise.race([...set].map(promise => promise.then(() => {}, () => {})))
   }
 }
 
@@ -765,8 +789,10 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
     })
     // Keep the underlying start observed (never unhandled) while the caller
     // races the shutdown signal; the seat stays held until `underlying` itself
-    // settles, not until the caller's race rejects.
-    trackDetachedSettlement(underlying)
+    // settles, not until the caller's race rejects. The tracker forgets the
+    // operation after the same budget so a permanently stuck start cannot
+    // delay later commands of this Profile.
+    trackDetachedSettlement(scope.scopeId, underlying, deps.seatHoldBudgetMs ?? SEAT_HOLD_BUDGET_MS)
     try {
       await awaitWithAbort(underlying, deps.signal)
     } catch (error) {
@@ -829,7 +855,7 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
       profile: profile.name,
       hostStartPolicy: 'public-managed',
     })
-    trackDetachedSettlement(underlying)
+    trackDetachedSettlement(scope.scopeId, underlying, deps.seatHoldBudgetMs ?? SEAT_HOLD_BUDGET_MS)
     try {
       await awaitWithAbort(underlying, deps.signal)
     } catch (error) {
