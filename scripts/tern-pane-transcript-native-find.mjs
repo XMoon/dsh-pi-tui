@@ -781,49 +781,51 @@ export default async function (h) {
     JSON.stringify({ manualToggles: records(h).filter(row => row.kind === 'client.toggle').slice(togglesBeforeRoot) }))
 
   // ── B17: a higher app seat (History search) stays the owner ──
-  // MEASURED CLIENT LIMITATION: the control channel cannot deliver a CTRL
-  // modifier to the pane program. `Control+r` arrives as the bare `r`
-  // (client consumes the modifier), `ctrl+r` / `control+r` arrive as
-  // meta+r, and a raw-key shell probe shows ZERO bytes for every Ctrl
-  // chord while shift/alt pass through. The History card's own positive
-  // premise therefore CANNOT be established in either lane — a physical
-  // keyboard run (OS_INPUT_VERIFIED) would be needed. Per the plan's
-  // record-the-actual-client-action rule, this block records the attempt
-  // and keeps only the non-penetration half as a real assertion; the B17
-  // row is reported NOT_EXERCISED_CLIENT_KEY_LIMIT, never a PASS.
+  // The real client's control channel swaps Playwright's `Control` and `Meta`
+  // modifiers: `Control+r` arrives as meta/bare, and only `ControlOrMeta+r`
+  // arrives as `{name:'r', ctrl:true}` — the same MEASURED spelling the
+  // history-search sibling lanes use. Ctrl+R is therefore injectable and the
+  // higher-seat premise is established for real.
+  const dockBefore = regionNode(h.snapshot(), 'sf-dock')
+  const dockTextBefore = dockBefore === undefined ? '' : h.descendantsText(dockBefore)
   const draftBefore = h.snapshot().nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('sf-editor'))
   const draftBeforeState = draftBefore === undefined ? null : { empty: String(draftBefore.class).split(/\s+/u).includes('empty'), text: String(draftBefore.text ?? '') }
-  h.send('key', 'Control+r')
+  h.send('key', 'ControlOrMeta+r')
   await h.sleep(500)
-  const draftAfterKey = h.snapshot().nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('sf-editor'))
-  const draftAfterKeyState = draftAfterKey === undefined ? null : { empty: String(draftAfterKey.class).split(/\s+/u).includes('empty'), text: String(draftAfterKey.text ?? '') }
   const dockForModal = regionNode(h.snapshot(), 'sf-dock')
   const dockModalText = dockForModal === undefined ? '' : h.descendantsText(dockForModal)
-  h.capture(`${preset}-b17-history-attempt`, 'the client right after Control+r through the control channel')
-  h.measure('B17: the History seat stays closed after Control+r (client consumes the Ctrl modifier; recorded, never a PASS)',
-    JSON.stringify({ historyCardOpen: dockModalText.includes('Input History'), dockText: dockModalText.slice(0, 120) }))
+  const draftAfterKey = h.snapshot().nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('sf-editor'))
+  const draftAfterKeyState = draftAfterKey === undefined ? null : { empty: String(draftAfterKey.class).split(/\s+/u).includes('empty'), text: String(draftAfterKey.text ?? '') }
+  // POSITIVE PREMISE: the History seat must REALLY be open over the Main —
+  // a Ctrl+R that silently did nothing would make the whole B17 block vacuous.
+  h.check('B17: the app History-search seat is really open over the Main',
+    dockModalText.includes('Input History') && dockModalText.includes('Search input history'),
+    JSON.stringify({ dockText: dockModalText.slice(0, 160) }))
   const openedModalFind = await openFind(h, markers.shared, 'modal seat')
-  h.measure('B17: the client Find behaviour after the recorded History attempt (recorded, not assumed)',
+  h.measure('B17: the client Find behaviour under the higher seat (recorded, not assumed)',
     JSON.stringify(openedModalFind.state))
-  h.check('B17: the History attempt and Find probe produced no new Session write',
+  h.check('B17: the higher seat blocked any new Session write during the Find probe',
     records(h).filter(row => row.kind === 'producer.writer.settled').length === settledBeforeFind,
     JSON.stringify({ settled: settledBeforeFind }))
   h.send('key', 'Escape')
   await h.sleep(400)
   h.send('key', 'Escape')
   await h.sleep(400)
+  const dockAfter = regionNode(h.snapshot(), 'sf-dock')
+  const dockTextAfter = dockAfter === undefined ? '' : h.descendantsText(dockAfter)
+  h.check('B17: the History-search seat retired after Escape',
+    !dockTextAfter.includes('Input History'),
+    JSON.stringify({ dockText: dockTextAfter.slice(0, 120) }))
   h.check('B17: the attempt retired without any durable Session write',
     records(h).filter(row => row.kind === 'producer.writer.settled').length === settledBeforeFind,
     JSON.stringify({ settled: settledBeforeFind }))
   const draftAfter = h.snapshot().nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('sf-editor'))
   const draftAfterState = draftAfter === undefined ? null : { empty: String(draftAfter.class).split(/\s+/u).includes('empty'), text: String(draftAfter.text ?? '') }
-  h.measure('B17: the composer draft around the probe keystroke (the Ctrl-less r lands in the draft and the cancel retires it)',
+  h.measure('B17: the composer draft around the correctly-delivered chord',
     JSON.stringify({ before: draftBeforeState, afterKey: draftAfterKeyState, afterRetire: draftAfterState }))
-  h.check('B17: the composer draft is restored to empty after the attempt retires',
+  h.check('B17: the composer draft is restored to empty after the seat retires',
     draftAfterState !== null && draftAfterState.empty === true && draftAfterState.text === '',
     JSON.stringify({ afterRetire: draftAfterState }))
-  h.measure('B17: disposition NOT_EXERCISED_CLIENT_KEY_LIMIT — the higher-seat premise needs an OS_INPUT_VERIFIED run',
-    JSON.stringify({ probeKeys: ['Control+r'], recorded: 'client consumes the Ctrl modifier; no History card; no unavailable notify' }))
 
   // ── B21: the viewport × appearance matrix keeps Find readable ──
   const matrix = []
@@ -943,7 +945,6 @@ export default async function (h) {
       'OS physical keyboard/IME/wheel',
       'G8 Owner visual acceptance',
       'any realtime refresh of an OPEN Find result list after a live append (reopened Find is the measured behaviour)',
-      'B17 NOT_EXERCISED_CLIENT_KEY_LIMIT: the control channel cannot deliver a Ctrl modifier to the pane program (MEASURED: Control+r arrives as bare r, ctrl+r/control+r as meta+r, raw-key shell probe shows zero bytes for every Ctrl chord); the History seat premise needs an OS_INPUT_VERIFIED run — the non-penetration half (no Session write around the attempt) is still asserted',
       'B19 NOT_VERIFIED: no real Session source switch is driven in this lane; the pre-switch/post-switch row-identity evidence stays with the T2/T3-0 source-generation lanes (this lane keeps scope.changed===1 throughout)',
       'B20 NOT_EXERCISED_REAL_GONE: no client retention/gone event occurred on the 28-Turn document in these runs; the gone contract evidence stays with the T2 real-path lanes; this lane claims no retention promise either way',
     ],
