@@ -15,7 +15,7 @@ import type { ConfigEditor } from '@deepseek-ai/dsh-config-editor'
 import { DirectModelCatalog } from '../../../src/runtime/direct/catalog-direct.ts'
 import { createDirectTspFixture, waitFor } from '../../support/direct-tsp-fixture.ts'
 import { MODEL_PROFILE_ROW, mountModelProfile } from '../../support/model-profile-fixture.ts'
-import { pickerProps, waitForPicker } from '../../support/tsp-picker-wire.ts'
+import { pickerActionByBase, pickerNode, pickerProps, waitForPicker } from '../../support/tsp-picker-wire.ts'
 import { testLifecycle } from '../../support/temp-lifecycle.ts'
 
 test('official profile: native /model persists through ConfigEditor and survives fresh Loader composition', async t => {
@@ -83,4 +83,76 @@ test('official profile: native /model persists through ConfigEditor and survives
     assert.notEqual(reloaded, defaultOwner)
     assert.deepEqual(reloaded.currentSelection(), next, 'the new composition reads the persisted default')
   } finally { restore(); await fixture.settle() }
+})
+
+test('sessionless /model high effort reaches the first real Agent and request header', async t => {
+  const life = testLifecycle(t)
+  const initial = { provider: 'scripted', model: 'scripted-model', reasoningEffort: 'low' }
+  const fixture = await createDirectTspFixture(life, {
+    modelPicker: true,
+    // The ONLY stand-in this positive proof adds: the scripted exact model
+    // advertises low/high, so the official LLM accepts the real explicit effort.
+    reasoningFixtureModel: true,
+    profileDefault: initial,
+  })
+  const defaultOwner = fixture.ctx.get('agentDefaultModel') as AgentDefaultModelConfig
+  const liveAgents = () => [...fixture.ctx.agents.list()]
+  try {
+    await waitFor('native renderer', () => fixture.pane.output.text().includes('dock.composer'))
+    assert.equal(liveAgents().length, 0, 'the qualification starts sessionless')
+    assert.deepEqual(defaultOwner.currentSelection(), initial,
+      'the REAL Host default selection already carries the low effort')
+
+    fixture.pane.key('/model\r')
+    await waitForPicker('model directory', fixture.pane)
+    assert.equal(liveAgents().length, 0, '/model must not create a Session')
+    const draftedStrip = (): string | undefined => {
+      const strip = pickerProps(fixture.pane).strip as
+        | { readonly items?: ReadonlyArray<{ readonly label: string; readonly on?: boolean }> }
+        | undefined
+      return strip?.items?.find(item => item.on === true)?.label
+    }
+    assert.equal(draftedStrip(), 'Low', 'the picker drafts the persisted default effort')
+    // Tab owns the catalogue's effort strip; ArrowRight moves low -> high; the
+    // second Tab moves the keyboard to the explicit Save default action.
+    fixture.pane.key('\t')
+    await waitFor('effort strip focused', () => pickerProps(fixture.pane).focus === 'strip')
+    fixture.pane.key('\u001b[C')
+    await waitFor('high drafted', () => draftedStrip() === 'High')
+    fixture.pane.key('\t')
+    await waitFor('Save default focused', () => pickerActionByBase(fixture.pane, 'apply')?.label === 'Save default [Enter]')
+    assert.equal(liveAgents().length, 0, 'editing the draft is still sessionless and writes nothing')
+    fixture.pane.key('\r')
+    await waitFor('official default save settles', () => defaultOwner.currentSelection()?.reasoningEffort === 'high')
+    assert.deepEqual(defaultOwner.currentSelection(),
+      { provider: 'scripted', model: 'scripted-model', reasoningEffort: 'high' },
+      'the Loader-backed default service holds the complete saved selection')
+    await waitFor('picker dismissed after commit', () => pickerNode(fixture.pane) === undefined)
+    const patchPath = join(fixture.workRoot, 'profile', 'cordis.patch.yml')
+    const rows = parse(readFileSync(patchPath, 'utf8')) as Array<{ id: string; config: unknown }>
+    assert.deepEqual(rows.find(row => row.id === MODEL_PROFILE_ROW)?.config,
+      { provider: 'scripted', model: 'scripted-model', reasoningEffort: 'high' },
+      'the REAL profile patch holds the complete saved selection')
+    assert.equal(liveAgents().length, 0, 'the default save stays sessionless')
+    assert.equal(fixture.modelCalls(), 0, 'saving the default issues no model request')
+
+    // The first ordinary input creates the Session through the Direct admission.
+    fixture.pane.key('first effort proof\r')
+    await waitFor('first Session created', () => liveAgents().length === 1)
+    const agent = liveAgents()[0]!
+    assert.deepEqual(agent.model.current(),
+      { provider: 'scripted', model: 'scripted-model', reasoningEffort: 'high' },
+      'the official AgentModel resolves the COMPLETE saved default')
+    await waitFor('first real request header', () => agent.session.requestHeader() !== undefined)
+    const header = agent.session.requestHeader()!
+    assert.equal(header.config.provider, 'scripted')
+    assert.equal(header.config.model, 'scripted-model')
+    assert.equal(header.config.reasoningEffort, 'high',
+      'the FIRST real request header carries the explicit saved effort')
+    assert.equal(header.adapterDefaults?.reasoningEffort, undefined,
+      'the effort was an explicit choice, never an adapter-materialized default')
+    await waitFor('scripted adapter received the request', () => fixture.modelCalls() > 0)
+  } finally {
+    await fixture.settle()
+  }
 })

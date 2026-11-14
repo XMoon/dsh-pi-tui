@@ -127,7 +127,7 @@ export interface RunnerHarness {
   readonly sessions: unknown
   readonly defaultModel: unknown
   readonly llm: unknown
-  readonly createOptions: { provider?: string; model?: string }[]
+  readonly createOptions: { provider?: string; model?: string; reasoningEffort?: string }[]
   readonly createInheritedEventCounts: (number | undefined)[]
   readonly createSignals: (AbortSignal | undefined)[]
   readonly resumeSignals: (AbortSignal | undefined)[]
@@ -179,7 +179,7 @@ export function fakeAgent(
   delivered: DeliveredPrompt[] = [],
   /** The Agent options (the production loop seeds them from the persisted
    *  default at creation). */
-  agentOptions: { provider?: string; model?: string } = { provider: 'p', model: 'm' },
+  agentOptions: { provider?: string; model?: string; reasoningEffort?: string } = { provider: 'p', model: 'm' },
 ): Agent {
   // A small structural Agent context is sufficient for the Direct setup
   // callbacks.
@@ -294,7 +294,7 @@ export function makeHarness(
   /** PR3-B B2 round 3: the harness-level delivery log (`delivered`). */
   const deliveredLog: DeliveredPrompt[] = []
   const retirementEvents: string[] = []
-  const createOptions: { provider?: string; model?: string }[] = []
+  const createOptions: { provider?: string; model?: string; reasoningEffort?: string }[] = []
   const createInheritedEventCounts: (number | undefined)[] = []
   const createSignals: (AbortSignal | undefined)[] = []
   const resumeSignals: (AbortSignal | undefined)[] = []
@@ -305,7 +305,7 @@ export function makeHarness(
 
   const makeHandle = (
     session: FakeSession,
-    options: { provider?: string; model?: string } = initialDefault,
+    options: { provider?: string; model?: string; reasoningEffort?: string } = initialDefault,
   ): { agent: Agent; dispose: () => Promise<void> } => {
     const agent = fakeAgent(
       session,
@@ -369,7 +369,7 @@ export function makeHarness(
     create: async ({ sessionId, meta, agentOptions, setup, seed, inheritedEventCount, signal }: {
       sessionId: unknown
       meta?: { readonly cwd?: string }
-      agentOptions?: { provider?: string; model?: string }
+      agentOptions?: { provider?: string; model?: string; reasoningEffort?: string }
       setup?: (agentCtx: unknown, agent: Agent) => unknown
       seed?: readonly SessionEvent[]
       inheritedEventCount?: number

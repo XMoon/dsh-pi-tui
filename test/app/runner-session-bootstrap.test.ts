@@ -488,8 +488,17 @@ test('/new without an explicit default intent observes the persisted default, ne
   assert.ok(newHandler, 'the real runner must register the /new transition command')
   await newHandler()
   await settle()
-  assert.deepEqual(harness.createOptions[0], { provider: 'provider-b', model: 'model-b' },
-    '/new must create with the persisted global default, never the old Session selection')
+  assert.deepEqual(harness.createOptions[0], { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' },
+    '/new must create with the COMPLETE persisted global default, never the old Session selection')
+  // The create input is only half the chain: the live Agent the runner drives must
+  // resolve the SAME complete selection from its own AgentModel.
+  const live = harness.liveAgents() as unknown as ReadonlyArray<{
+    readonly status: string
+    readonly model: { current(): { provider: string; model: string; reasoningEffort?: string } }
+  }>
+  assert.equal(live.length, 1, 'the /new transition leaves exactly one live Agent')
+  assert.deepEqual(live[0]!.model.current(), { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' },
+    'the new Agent model resolves the complete persisted default')
   assert.equal(durableSelectionOf(harness.createdSessions[0]!), undefined,
     '/new without an explicit default intent must not freeze a durable choice into the fresh Session')
 })

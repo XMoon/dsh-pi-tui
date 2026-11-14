@@ -23,7 +23,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import { buildForkSeed } from '@deepseek-ai/dsh-session/fork'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { recordedSessionPreset } from './session-preset-direct.ts'
 import { safeErrorMessage } from '../process/errors.ts'
 import type {
@@ -46,7 +47,11 @@ export interface HostContextLike {
 
 /** The Host default-model service the Direct activation fallback reads. */
 export interface DefaultModelServiceLike {
-  currentSelection(): { readonly provider: string; readonly model: string } | undefined
+  currentSelection(): {
+    readonly provider: string
+    readonly model: string
+    readonly reasoningEffort?: string
+  } | undefined
 }
 
 /** The preset composition the adapter resolves internally (the runner's
@@ -61,7 +66,7 @@ export interface AgentsServiceLike {
   create(options: {
     sessionId: ReturnType<typeof SessionId>
     meta: Record<string, unknown>
-    agentOptions: { provider?: string; model?: string }
+    agentOptions: Pick<AgentOptions, 'provider' | 'model' | 'reasoningEffort'>
     setup: (agentCtx: Context, agent: Agent) => Promise<void> | void
     seed?: readonly SessionEvent[]
     /** Exact fork-inherited prefix length when `meta.isSeeded` is set. */
@@ -70,7 +75,7 @@ export interface AgentsServiceLike {
   }): Promise<AgentHandle>
   resume(options: {
     resumeSessionId: ReturnType<typeof SessionId>
-    agentOptions: { provider?: string; model?: string }
+    agentOptions: Pick<AgentOptions, 'provider' | 'model' | 'reasoningEffort'>
     setup: (agentCtx: Context, agent: Agent) => Promise<void> | void
     signal?: AbortSignal
   }): Promise<AgentHandle>
@@ -151,9 +156,10 @@ export interface DirectOwnerPoolLike {
 /** The Direct backend's session lifecycle: the `ctx.agents` service behind
  * the semantic `SessionLifecycle` interface. The preset composition (and
  * with it the agent-setup callback) is resolved here from the request's
- * preset id — it never crosses the port contract. The activation
- * provider/model fallback is the Host global default, exactly like the
- * official `ApiSessionAgentController.agentOptions()`. */
+ * preset id — it never crosses the port contract. The activation fallback is
+ * the COMPLETE Host global default (provider/model/optional reasoning effort),
+ * exactly like the official `ApiSessionAgentController.agentOptions()`; fork
+ * is the one sibling that stays provider/model-only (see `fork`). */
 export class DirectSessionLifecycle implements SessionLifecycle {
   private readonly ctx: HostContextLike
   private readonly compose: (presetId?: string) => Promise<CompositionLike>
@@ -169,11 +175,18 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     this.ownerPool = ownerPool
   }
 
-  /** The in-process activation fallback: the Host global default, never a
-   *  cross-backend request input. */
-  private agentOptions(): { provider?: string; model?: string } {
+  /** The in-process activation fallback: the COMPLETE Host global default,
+   *  never a cross-backend request input. An absent effort stays an omitted
+   *  property (the provider's own default), never a sentinel. */
+  private agentOptions(): Pick<AgentOptions, 'provider' | 'model' | 'reasoningEffort'> {
     const selection = (this.ctx.get('agentDefaultModel') as DefaultModelServiceLike | undefined)?.currentSelection()
-    return selection === undefined ? {} : { provider: selection.provider, model: selection.model }
+    return selection === undefined ? {} : {
+      provider: selection.provider,
+      model: selection.model,
+      ...selection.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: ReasoningEffortId(selection.reasoningEffort) },
+    }
   }
 
   /**
@@ -539,6 +552,16 @@ export class DirectSessionLifecycle implements SessionLifecycle {
         isSeeded: true,
         ...(composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }),
       }
+      // Fork is the official SIBLING with a different contract: the rc.3
+      // `SessionCommandController.fork` seeds a child from provider/model only
+      // and never takes the global default effort (the child's inherited
+      // pending/last-used model selection comes from the seed). Crop the
+      // complete activation fallback here, at the call, instead of redefining
+      // the fork semantics.
+      const fallback = this.agentOptions()
+      const forkAgentOptions = fallback.provider === undefined || fallback.model === undefined
+        ? {}
+        : { provider: fallback.provider, model: fallback.model }
       let handle: AgentHandle
       try {
         handle = await agents.create({
@@ -546,7 +569,7 @@ export class DirectSessionLifecycle implements SessionLifecycle {
           seed,
           inheritedEventCount,
           meta: childMeta,
-          agentOptions: this.agentOptions(),
+          agentOptions: forkAgentOptions,
           setup: composition.setup,
         })
       } catch (error) {
