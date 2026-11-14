@@ -1098,34 +1098,38 @@ test('a /copy success that outlives its Session is not announced on the replacem
     // the switch is still held.
     await submitInput(fixture, '/sessions')
     await waitFor('the Session Browser is ready', () => pickerNode(fixture.pane, 'session-browser-') !== undefined, 25_000)
-    // The Browser opens with its EMPTY listing snapshot (`listState` loading):
-    // the workspace folders and the session rows inside them only exist after
-    // the listing settles and the workspace baseline is proven, so reading the
-    // folded folders ONCE right after the picker node appears races the listing
-    // on a loaded runner — the expansion loop then ran while `items` was still
-    // empty and the persisted target stayed folded forever (the measured CI
-    // failure). The persisted target Session lives in a non-current Workspace
-    // Folder which starts collapsed, so expand every folded official folder AS
-    // THE WIRE REVEALS IT (never the retired cross-workspace scope switch), and
-    // let the SAME wait settle only when the target row is really listed.
-    // At most ONE expansion is in flight per turn, and the folder's `open`
-    // flip on the wire is the commit proof: `browse-workspace` bumps the
-    // panel revision and `handleEvent` refuses every event whose target was
-    // rendered under an older revision, so back-to-back activations without a
-    // committed frame in between are dropped — a re-read that still shows the
-    // folder folded therefore simply re-issues the SAME idempotent expansion
-    // intent (a refused event has no side effect), never a blind retry.
-    await waitFor('the target row is listed', () => {
-      const items = (pickerProps(fixture.pane, 'session-browser-').items ?? []) as Array<Record<string, unknown>>
-      const folder = items.find(item => String(item.id).startsWith('workspace:') && item.open !== true)
-      if (folder !== undefined) {
-        sendActivate(fixture.pane, String(folder.id), pickerNode(fixture.pane, 'session-browser-')!.id)
-        return false
-      }
-      return items.some(item => String(item.id).includes('f5-target-b'))
+    // The Browser opens with its EMPTY listing snapshot (`listState` loading,
+    // `items` empty): the workspace folders and the session rows inside them
+    // only exist after the listing settles and the workspace baseline is
+    // proven, so reading the folded folders ONCE right after the picker node
+    // appears races the listing on a loaded runner and the persisted target
+    // (which has no workspace membership, so it lives in the folded
+    // `workspace:unassigned` folder) stayed listed forever (the measured CI
+    // failure). The stages below keep every side effect OUT of the wait
+    // predicates, because a folder activation is a TOGGLE, not an idempotent
+    // "ensure expanded": while the committed frame is still in flight, the
+    // wire can keep showing `open: false` for a folder whose panel state is
+    // ALREADY expanded, so a predicate that re-issued the activation while it
+    // saw that stale frame would fold the folder back. Stage one waits for
+    // the listing itself, stage two issues EXACTLY ONE activation and then
+    // treats the folder's `open` flip on the wire as the commit barrier (the
+    // frame that proves the toggle was accepted and re-arms the revision the
+    // next event needs), and stage three operates on the listed target row.
+    const browserItems = (): Array<{ id?: unknown; open?: unknown }> =>
+      (pickerProps(fixture.pane, 'session-browser-').items ?? []) as Array<{ id?: unknown; open?: unknown }>
+    await waitFor('the folder holding the target to be listed', () => {
+      const items = browserItems()
+      return items.some(item => String(item.id) === 'workspace:unassigned')
+        || items.some(item => String(item.id) === 'session:f5-target-b')
     }, 25_000)
-    const targetItem = (pickerProps(fixture.pane, 'session-browser-').items as Array<{ id?: unknown }>)
-      .find(item => String(item.id).includes('f5-target-b'))!
+    if (!browserItems().some(item => String(item.id) === 'session:f5-target-b')) {
+      sendActivate(fixture.pane, 'workspace:unassigned', pickerNode(fixture.pane, 'session-browser-')!.id)
+      await waitFor('the unassigned folder to commit its expansion', () =>
+        browserItems().some(item => String(item.id) === 'workspace:unassigned' && item.open === true), 25_000)
+    }
+    await waitFor('the target row is listed', () =>
+      browserItems().some(item => String(item.id) === 'session:f5-target-b'), 25_000)
+    const targetItem = browserItems().find(item => String(item.id) === 'session:f5-target-b')!
     sendActivate(fixture.pane, String(targetItem.id), pickerNode(fixture.pane, 'session-browser-')!.id)
     await waitFor('the resume to be entered', () => resumeEntered, 25_000)
     fixture.pane.key('\x1b')
@@ -1173,6 +1177,65 @@ test('a /copy success that outlives its Session is not announced on the replacem
       'a current owner receives the copy success exactly once')
   } finally {
     writeFileSync(releasePath, '')
+    await fixture.settle()
+  }
+})
+
+test('a held frame credit cannot turn the folder expansion into a second, folding toggle', async (t) => {
+  // The F5 case above drives the SAME three-stage expansion with its side
+  // effects OUTSIDE the wait predicates. This companion pins the toggle
+  // safety at the SDK's own frame-credit boundary: with every ack held the
+  // committed expansion frame stays recorded-but-unflushed, so the wire keeps
+  // showing `open: false` while the panel state is ALREADY expanded — exactly
+  // the window in which a re-issued activation would arrive through the event
+  // channel against the CURRENT revision and fold the folder back. The
+  // exactly-one folder activation is the structure under test, not an
+  // incident of the fixture timing.
+  const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['probe'],
+    sessionBrowser: true,
+    persistedBlankSession: { id: 'f5-target-b' },
+  })
+  try {
+    await waitForInputDelivery(fixture.pane)
+    await submitInput(fixture, 'seed the folder probe turn')
+    await submitInput(fixture, '/sessions')
+    const browserItems = (): Array<{ id?: unknown; open?: unknown }> =>
+      (pickerProps(fixture.pane, 'session-browser-').items ?? []) as Array<{ id?: unknown; open?: unknown }>
+    await waitFor('the unassigned folder to be listed', () =>
+      browserItems().some(item => String(item.id) === 'workspace:unassigned'), 25_000)
+    // Stall the frame credits BEFORE the activation: every frame drawn after
+    // this point is recorded but not flushed, so the wire lags the panel.
+    fixture.pane.holdAcks()
+    let folderActivations = 0
+    const pane = fixture.pane as unknown as { event(value: unknown): void }
+    const originalEvent = pane.event
+    pane.event = (value: unknown): void => {
+      const candidate = value as { ev?: string; item?: unknown }
+      if (candidate?.ev === 'activate' && candidate.item === 'workspace:unassigned') folderActivations += 1
+      originalEvent.call(pane, value)
+    }
+    try {
+      sendActivate(fixture.pane, 'workspace:unassigned', pickerNode(fixture.pane, 'session-browser-')!.id)
+      // The committed-but-unflushed frame is the proof the toggle was ACCEPTED
+      // while the wire still lagged; this observation is what a re-issuing
+      // predicate would have raced against.
+      await waitFor('the expansion frame to be recorded behind the held acks', () =>
+        fixture.pane.unackedFrames().length > 0, 25_000)
+    } finally {
+      pane.event = originalEvent
+      fixture.pane.releaseAcks()
+    }
+    await waitFor('the unassigned folder to commit its expansion', () =>
+      browserItems().some(item => String(item.id) === 'workspace:unassigned' && item.open === true), 25_000)
+    await waitFor('the target row to be listed after the flush', () =>
+      browserItems().some(item => String(item.id) === 'session:f5-target-b'), 25_000)
+    assert.equal(folderActivations, 1,
+      'the expansion was issued exactly ONCE: a second activation behind the stale frame would have folded the folder back')
+    assert.equal(browserItems().some(item => String(item.id) === 'workspace:unassigned' && item.open === true), true,
+      'the folder stays expanded after the flush')
+  } finally {
     await fixture.settle()
   }
 })
