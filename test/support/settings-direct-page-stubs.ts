@@ -69,6 +69,12 @@ export const SETTINGS_DIRECT_PAGE_STUBS = {
     read: () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
     setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
   },
+  /** The profile-owned ACP startup preference: the schema default (OFF, no user
+   *  override) at revision 1. The `/settings` snapshot reads it on every open. */
+  acpStartupPreference: {
+    read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
+    setAutoStart: async (_value: boolean, _revision: number) => {},
+  },
 } as const
 
 /**
@@ -87,5 +93,6 @@ export function settingsDirectPageConfig(config: Record<string, unknown>): Recor
     visualTools: { ...SETTINGS_DIRECT_PAGE_STUBS.visualTools, ...(own.visualTools ?? {}) },
     webStartupPreference: { ...SETTINGS_DIRECT_PAGE_STUBS.webStartupPreference, ...(own.webStartupPreference ?? {}) },
     backendStartupPreference: { ...SETTINGS_DIRECT_PAGE_STUBS.backendStartupPreference, ...(own.backendStartupPreference ?? {}) },
+    acpStartupPreference: { ...SETTINGS_DIRECT_PAGE_STUBS.acpStartupPreference, ...(own.acpStartupPreference ?? {}) },
   }
 }

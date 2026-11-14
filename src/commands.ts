@@ -83,6 +83,7 @@ import type { SkillDefinitionResult } from './runtime/catalog-port.ts'
 import type { ConfigPort } from './runtime/config-port.ts'
 import type { HostFilePort, HostFileScope } from './runtime/host-file-port.ts'
 import type { WebAccessPort } from './runtime/web-access-port.ts'
+import type { AcpAccessPort } from './runtime/acp-access-port.ts'
 import type { HostShellCompletionPort } from './runtime/host-shell-completion-port.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshSource } from './app/command/catalog-refresh.ts'
 import type { ClientCommandRegistry } from './app/command/client-command-registry.ts'
@@ -501,6 +502,11 @@ export interface TuiCommandRunner {  ctx: Context
    * mutates the Host's official Web frontend through this ONE semantic surface
    * and never reaches a Host service, Connection or Gateway directly. */
   readonly webAccess: WebAccessPort
+  /** The Split-Client local ACP listener control port (PO-1B): the `/settings →
+   *  Tools → ACP Server` runtime row reads/mutates the Host's private
+   *  `piTuiAcpAccess` service through this ONE semantic surface and never
+   *  reaches a Host service, Connection or Gateway directly. */
+  readonly acpAccess: AcpAccessPort
   /** Host-owned/direct/remote shell completion capability, never a Client PATH guess. */
   readonly hostShellCompletion: HostShellCompletionPort
   /** The minimal commands registry for the TUI's OWN registrations

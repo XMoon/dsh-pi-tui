@@ -74,6 +74,20 @@ export interface EntryControlRequest {
    */
   readonly webAutoStart?: unknown
   /**
+   * Qualification-only target of the `qualification-acp-access` op (PO-1B):
+   * absent asks for the local ACP listener status, otherwise the value is passed
+   * to the Host's private `piTuiAcpAccess.setEnabled` UNVALIDATED so the v2
+   * Remote contract is the only authority on it. Internal control channel only.
+   */
+  readonly acpEnabled?: unknown
+  /**
+   * Qualification-only target of the `qualification-acp-autostart` op (PO-1B):
+   * absent asks for the profile's current ACP startup preference, otherwise the
+   * value is passed to the official generated `settings.mutate` as the
+   * next-launch `autoStart`. Internal control channel only.
+   */
+  readonly acpAutoStart?: unknown
+  /**
    * Qualification-only target of the `qualification-workspace-create` op: an
    * existing absolute directory the qualification Peer adopts as a Workspace
    * through the official generated `workspace.create` wire. Internal control

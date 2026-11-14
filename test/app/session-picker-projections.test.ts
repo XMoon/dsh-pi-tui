@@ -16,7 +16,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { unavailableWebAccess } from '../support/web-access-fake.ts'
+import { unavailableAcpAccess, unavailableWebAccess } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -122,6 +122,7 @@ test('the workspace projection loader covers EVERY main row beyond the legacy wi
   const state: { agent: Agent | undefined } = { agent: undefined }
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,

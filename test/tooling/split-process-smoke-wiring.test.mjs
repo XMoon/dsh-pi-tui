@@ -570,6 +570,31 @@ test('the ACP UDS selected verdict accepts only the complete real-L6 proof', () 
   assert.throws(() => assertSelectedVerdict('acp.po1-uds-ready', { ...complete, status: 'NOT_VERIFIED' }),
     /selected acp\.po1-uds-ready/u)
 })
+test('the ACP opt-in control selected verdict accepts only the complete real-L6 proof', () => {
+  const complete = {
+    status: 'PASS',
+    scope: 'REAL_SPLIT_PROCESS_L6',
+    defaultOffNoSocket: true,
+    runtimeToggle: true,
+    runtimeOffDisconnects: true,
+    preferenceDoesNotChangeRuntime: true,
+    autoStartBindsBeforeReady: true,
+    autoStartFalseNoSocket: true,
+    recomposeKeepsSameHost: true,
+    originalSplitClientIntact: true,
+  }
+  assert.equal(assertSelectedVerdict('acp.po1b-opt-in-control', complete), undefined)
+  // A missing proof field is a rejected verdict.
+  const missing = { ...complete }
+  delete missing.recomposeKeepsSameHost
+  assert.throws(() => assertSelectedVerdict('acp.po1b-opt-in-control', missing), /selected acp\.po1b-opt-in-control/u)
+  // A proof field that is present but false is a rejected verdict.
+  assert.throws(() => assertSelectedVerdict('acp.po1b-opt-in-control', { ...complete, runtimeToggle: false }),
+    /selected acp\.po1b-opt-in-control/u)
+  // A NOT_VERIFIED status never becomes a selected PASS.
+  assert.throws(() => assertSelectedVerdict('acp.po1b-opt-in-control', { ...complete, status: 'NOT_VERIFIED' }),
+    /selected acp\.po1b-opt-in-control/u)
+})
 test('a selected result names only the selectable scope', () => {
   const first = listSelectableCases()[0]
   assert.ok(first, 'the registry must expose a case')

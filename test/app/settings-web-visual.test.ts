@@ -293,10 +293,15 @@ for (const [columns, rows] of SIZES) {
     const h = setup({ columns, rows })
     t.after(h.dispose)
     await openOtherRows(h)
+    // PO-1B added two ACP rows to Tools, so at the shortest grant the Web
+    // launcher row is CROPPED from the first screen. It stays reachable by
+    // scrolling the rows cursor onto it (the label-driven helper), which is the
+    // real user path; assert it is painted once selected rather than assuming
+    // every Tools row fits at once.
+    await highlightWebRow(h)
     const launcherRows = h.plain()
     assert.ok(launcherRows.some(line => line.includes('Web Search / Fetch')),
       `the launcher row is painted at ${columns}x${rows}:\n${launcherRows.join('\n')}`)
-    await highlightWebRow(h)
     await key(h, ENTER)
     const frame = await waitForPainted(h, `the Web page at ${columns}x${rows}`, frame =>
       frame.includes('Web Search Provider') && !frame.includes('Loading…'))

@@ -12,7 +12,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { unavailableWebAccess } from '../support/web-access-fake.ts'
+import { unavailableAcpAccess, unavailableWebAccess } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -174,6 +174,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
   const settings = fakeTuiSettings(options.busyEnter ?? 'queue', options.localShellSandbox ?? 'bypass')
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,

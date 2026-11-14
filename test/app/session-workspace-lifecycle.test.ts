@@ -57,7 +57,7 @@ import { LifecycleError, WorkspaceSelectionError } from '../../src/runtime/sessi
 import type { HostDirectoryBrowseOutcome } from '../../src/runtime/host-directory-browse-port.ts'
 import type { DirectoryListing } from '@deepseek-ai/dsh-host-directory-picker/types'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
-import { unavailableWebAccess } from '../support/web-access-fake.ts'
+import { unavailableAcpAccess, unavailableWebAccess } from '../support/web-access-fake.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
@@ -382,6 +382,7 @@ function harness(options: {
   }
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,

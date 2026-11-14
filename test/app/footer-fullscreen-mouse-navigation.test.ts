@@ -31,7 +31,7 @@ import { createClientCommandRegistry } from '../../src/app/command/client-comman
 import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
-import { unavailableWebAccess } from '../support/web-access-fake.ts'
+import { unavailableAcpAccess, unavailableWebAccess } from '../support/web-access-fake.ts'
 import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -308,6 +308,7 @@ async function startHarness(options: {
   }
   const runnerBase: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx: liveCtx,
@@ -451,6 +452,7 @@ async function startHarness(options: {
       config: runnerBase.config,
       hostFile: runnerBase.hostFile,
       webAccess: runnerBase.webAccess,
+      acpAccess: runnerBase.acpAccess,
       hostShellCompletion: { pathAuthority: 'host' as const, complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
     },
     session: {

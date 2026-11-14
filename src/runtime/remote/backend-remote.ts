@@ -39,6 +39,7 @@ import type { HostUserShellPort } from '../host-user-shell-port.ts'
 import type { HostShellCompletionPort } from '../host-shell-completion-port.ts'
 import type { DeliveredFileReadPort } from '../deliverables-port.ts'
 import type { WebAccessPort } from '../web-access-port.ts'
+import type { AcpAccessPort } from '../acp-access-port.ts'
 import type { SessionWorkspaceFactsPort } from '../session-workspace-facts-port.ts'
 import type { SchedulePort } from '../schedule-port.ts'
 import type { HostDirectoryBrowsePort } from '../host-directory-browse-port.ts'
@@ -69,6 +70,8 @@ export interface RemoteBackendParts {
   readonly deliveredFileRead: DeliveredFileReadPort
   /** The private `piTuiWebAccess` control adapter (M5-W PR-C). */
   readonly webAccess: WebAccessPort
+  /** The private `piTuiAcpAccess` local ACP listener control adapter (PO-1B). */
+  readonly acpAccess: AcpAccessPort
   /** The Remote read-authority adapter (M5-U-A). */
   readonly sessionWorkspaceFacts: SessionWorkspaceFactsPort
   /** The official generated `schedule` namespace adapter (S5-PR4). */

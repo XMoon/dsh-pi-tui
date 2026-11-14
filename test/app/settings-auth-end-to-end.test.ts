@@ -189,6 +189,10 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
         read: () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
         setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
       },
+      acpStartupPreference: {
+        read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
+        setAutoStart: async (_value: boolean, _revision: number) => {},
+      },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined },
       subagentModelSelection: { available: () => false },

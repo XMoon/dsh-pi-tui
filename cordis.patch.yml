@@ -89,6 +89,16 @@
     - id: pi-tui-web-preferences
       name: '@xmoon76/dsh-pi-tui/web-preferences'
 
+    # The profile-owned ACP startup preference (PO-1B): ONE durable boolean,
+    # `autoStart`, that a NEW Split Host reads BEFORE it becomes Ready to decide
+    # whether to bind the local ACP v1 Unix socket listener. The row performs no
+    # work; it exists so the official Settings service projects the section and
+    # the Loader persists the user patch. It is deliberately NOT gated on
+    # `tuiStartup`: a Direct process also loads the profile and must be able to
+    # edit the preference for the Split Host it may start later.
+    - id: pi-tui-acp-preferences
+      name: '@xmoon76/dsh-pi-tui/acp-preferences'
+
     # The OFFICIAL Host browser-callback listener for DeepSeek Account sign-in.
     # The account provider registers `/oauth/callback` on this instance while an
     # attempt is waiting for the browser; it is mounted here because the dsh-base

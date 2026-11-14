@@ -98,6 +98,8 @@ export type SettingsWorkspaceRowId =
   | 'visual-tools'
   | 'web-autostart'
   | 'startup-backend'
+  | 'acp-runtime'
+  | 'acp-autostart'
   | 'web-settings'
   | 'approval'
   | 'default-permission'
@@ -131,6 +133,7 @@ export type SettingsWorkspaceFreshness = 'runtime' | 'ready' | 'last-known' | 'u
  */
 export type SettingsWorkspaceWritableField =
   | 'theme' | 'display-preset' | 'visual-tools' | 'web-autostart' | 'startup-backend'
+  | 'acp-runtime' | 'acp-autostart'
   | 'icon-style' | 'expand' | 'thinking'
   | 'progress-updates' | 'response-style'
   | 'busy-enter' | 'git-attribution'
@@ -1625,6 +1628,27 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   // ── rendering ────────────────────────────────────────────────────────────
+
+  /**
+   * Revoke the ENTIRE transient ACP edit intent for ONE writable field after
+   * that row's Host authority changed (a Connection generation change). This
+   * covers EVERY transient phase — `choosing`, `pending` and `settled`
+   * (including a stale `Retry save`) — so no old-Host selection, pending ack or
+   * retry can ever be confirmed into a write against another Host. It reuses the
+   * ONE existing lifecycle primitive (`discardTransientEdit`, which bumps the
+   * request identity so a late settlement/confirm is inert) instead of inventing
+   * a second state. A `pending` write is NOT cancelled: its app-owned writer
+   * keeps settling and reporting health/diagnostics; only its UI presentation is
+   * retired. The user re-enters the edit against the new authority.
+   */
+  invalidateChoice(field: SettingsWorkspaceWritableField): void {
+    if (this.disposed) return
+    const phase = this.editPhase
+    if (phase.kind === 'browsing' || phase.field !== field) return
+    this.discardTransientEdit()
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
 
   render(width: number): string[] {
     // The conditional `Extensions` directory is reconciled BEFORE the chrome is

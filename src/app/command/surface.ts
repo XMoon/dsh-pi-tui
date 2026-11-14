@@ -321,6 +321,8 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     readonly hostFile: TuiCommandRunner['hostFile']
     /** M5-W PR-C: the Split-Client Web frontend control (`/web`). */
     readonly webAccess: TuiCommandRunner['webAccess']
+    /** PO-1B: the Split-Client local ACP listener control (`/settings → Tools`). */
+    readonly acpAccess: TuiCommandRunner['acpAccess']
     /** Shell amendment (M3-4 PR3): whether Host-shell completion facts are
      * reachable on the selected backend. */
     readonly hostShellCompletion: import('../../runtime/host-shell-completion-port.ts').HostShellCompletionPort
@@ -1561,6 +1563,9 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // layer owns every read/write through this ONE port; the presenters never
       // reach the Host.
       webAccess: deps.backend.webAccess,
+      // PO-1B: the Split-Client local ACP listener control for the Settings
+      // `ACP Server` runtime row.
+      acpAccess: deps.backend.acpAccess,
       hostShellCompletion: deps.backend.hostShellCompletion,
       // The readable-transcript business capability is NOT a pre-read flag:
       // the command only acknowledges, and the post-success save owner reads

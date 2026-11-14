@@ -60,6 +60,7 @@ import {
   startLocalAcpListener,
   type LocalAcpListener,
 } from './local-acp-listener.ts'
+import type { AcpAccessStatus } from '../../runtime/acp-access-port.ts'
 
 /** The official Web-only rows of the Host overlay, rendered from the ONE
  * production roster (`host/features/web-roster.ts`). Pure template data: no
@@ -271,8 +272,8 @@ export interface LocalHostEntryOptions {
 interface HostScratchOwner {
   scopeDir?: string
   scratchDir?: string
-  /** The one Host-owned local ACP listener; its synchronous exit mirror retires the socket inode. */
-  acpListener?: LocalAcpListener
+  /** The one Host-entry-owned ACP runtime controller; its synchronous exit mirror retires the socket inode. */
+  acpController?: AcpControlController
 }
 
 /** Node's `RequestInit` omits the cache mode; B1 requires `no-store` explicitly. */
@@ -393,6 +394,222 @@ export async function applyWebStartupPreference(
   }
   emit({
     m4a0: 'web-autostart',
+    processRole: 'host',
+    pid: process.pid,
+    phase: 'pre-ready',
+    status: 'enabled',
+  })
+}
+
+/** The profile entry that owns the ACP startup preference. */
+const ACP_STARTUP_PREFERENCE_NAMESPACE = 'pi-tui-acp-preferences'
+
+/** The fixed failure categories the pre-Ready ACP autostart may report. */
+export type AcpAutostartFailure = 'controller-missing' | 'mutation-failed' | 'not-enabled'
+
+/**
+ * The single Host-entry-owned ACP runtime controller interface. ONE socket owner
+ * per Host profile: `getStatus` reads the LIVE listener fact; `setEnabled`
+ * serializes bind/close through one promise chain; `quiesce` is a SYNCHRONOUS
+ * latch set before the official shutdown begins so no new enable is admitted;
+ * `close` retires the listener inside the same serialized chain; `cleanupSync`
+ * is the synchronous process-exit mirror for the exact owned socket inode.
+ */
+export interface AcpControlController {
+  getStatus(): Promise<AcpAccessStatus>
+  setEnabled(enabled: boolean): Promise<AcpAccessStatus>
+  /** Mark the controller quiescing synchronously (no async work). */
+  quiesce(): void
+  /** Serialize a final close of the current listener (idempotent). */
+  close(): Promise<void>
+  /** Synchronously retire only this controller's current owned socket inode. */
+  cleanupSync(): void
+}
+
+/** Options for {@link createAcpController}; no Context, Agent or Session enters here. */
+export interface AcpControlControllerOptions {
+  readonly scope: LocalScope
+  readonly maxConnections: number
+  readonly diag: import('../../runtime/process/diagnostics.ts').Diag
+}
+
+/**
+ * Create the ONE Host-entry-owned ACP runtime controller.
+ *
+ * The controller owns no durable "enabled" flag: the ONLY authority is the live
+ * `LocalAcpListener` handle plus its own `isListening()` (a real `net.Server`
+ * listening with the exact saved socket inode). `getStatus` therefore reports
+ * `enabled` only when the socket really is serving and `disabled` only when no
+ * listener handle exists; a bind/close in flight is `changing`; a handle that is
+ * no longer listening is a truthful `unavailable`. Every bind/close joins ONE
+ * serialized promise chain so at most one transition runs at a time.
+ */
+export function createAcpController(options: AcpControlControllerOptions): AcpControlController {
+  const { scope, maxConnections, diag } = options
+  let listener: LocalAcpListener | undefined
+  let tail: Promise<unknown> = Promise.resolve()
+  let inFlight = 0
+  let quiescing = false
+
+  const describe = (): AcpAccessStatus => {
+    if (inFlight > 0) return { state: 'changing' }
+    if (listener === undefined) return { state: 'disabled' }
+    return listener.isListening()
+      ? { state: 'enabled' }
+      : { state: 'unavailable', reason: 'the local ACP listener is not accepting connections' }
+  }
+
+  const apply = async (enabled: boolean): Promise<AcpAccessStatus> => {
+    // A quiescing controller refuses every new transition; the caller sees the
+    // truthful shut-down state instead of a fabricated outcome.
+    if (quiescing) return { state: 'unavailable', reason: 'the Host is shutting down' }
+    inFlight += 1
+    try {
+      // Qualification-only barrier: hold the controller INSIDE an accepted
+      // mutation so a launcher can prove SIGTERM is admitted while a transition
+      // is genuinely in flight (never inferred from send-time proximity).
+      const mutationBarrier = process.env.SPLIT_PROCESS_HOST_ACP_MUTATION_BARRIER
+      if (mutationBarrier !== undefined && mutationBarrier !== '') {
+        writeEntryRecord({ m4a0: 'qualification', processRole: 'host', op: 'acp-mutation-start', pid: process.pid })
+        await waitForQualificationBarrier(mutationBarrier)
+      }
+      if (enabled) {
+        // Idempotent enable: an already-listening listener touches nothing.
+        if (listener !== undefined && listener.isListening()) return { state: 'enabled' }
+        // A handle that is no longer listening is retired before a fresh bind;
+        // the original safety checks in `startLocalAcpListener` still gate it.
+        if (listener !== undefined) {
+          const stale = listener
+          listener = undefined
+          try {
+            await stale.close()
+          } catch (error) {
+            diag.warn('local-acp.error', { code: 'LOCAL_ACP_CLOSE_FAILED', cause: String(error) })
+          }
+        }
+        listener = await startLocalAcpListener({ scope, maxConnections, diag })
+        return listener.isListening()
+          ? { state: 'enabled' }
+          : { state: 'unavailable', reason: 'the local ACP listener failed to bind' }
+      }
+      // Disable: drop the reference BEFORE the async close so a status read
+      // during the close cannot claim `enabled` for a listener being retired.
+      if (listener === undefined) return { state: 'disabled' }
+      const current = listener
+      listener = undefined
+      try {
+        await current.close()
+      } catch (error) {
+        diag.warn('local-acp.error', { code: 'LOCAL_ACP_CLOSE_FAILED', cause: String(error) })
+        return { state: 'unavailable', reason: 'the local ACP listener could not be closed' }
+      }
+      return { state: 'disabled' }
+    } finally {
+      inFlight -= 1
+    }
+  }
+
+  // ONE serialized chain: a failed transition never poisons the following entry.
+  const serialize = (operation: () => Promise<AcpAccessStatus>): Promise<AcpAccessStatus> => {
+    const run = tail.then(operation)
+    tail = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  return {
+    getStatus: async () => describe(),
+    setEnabled: (enabled: boolean) => serialize(() => apply(enabled)),
+    quiesce: () => {
+      quiescing = true
+    },
+    close: () =>
+      serialize(async () => {
+        quiescing = true
+        if (listener === undefined) return { state: 'disabled' }
+        const current = listener
+        listener = undefined
+        try {
+          await current.close()
+        } catch (error) {
+          diag.warn('local-acp.error', { code: 'LOCAL_ACP_CLOSE_FAILED', cause: String(error) })
+        }
+        return { state: 'disabled' }
+      }).then(() => undefined),
+    cleanupSync: () => {
+      listener?.cleanupSync()
+    },
+  }
+}
+
+/**
+ * Apply the profile-owned ACP startup preference BEFORE the Host becomes Ready.
+ *
+ * `autoStart` is read from the SAME `ctx` that already settled the profile: a
+ * missing settings service, a missing `pi-tui-acp-preferences` section or a
+ * non-boolean value is a corrupted composition and fails Host startup loudly
+ * (never "treated as Off"). A failing ACP enable is a bounded diagnostic: the
+ * ACP listener is an optional add-on, so the Host keeps its Session/Agent/
+ * Gateway graph and publishes Ready with the listener in whatever state the
+ * controller truthfully reports. The diagnostic is a FIXED record (a failure
+ * category plus the small state vocabulary), never an exception message or a
+ * socket path.
+ *
+ * @param context - the Host context that already settled the profile.
+ * @param controller - the entry-owned ACP runtime controller.
+ * @param emit - the structured record sink (the entry emits on its control channel).
+ */
+export async function applyAcpStartupPreference(
+  context: import('@deepseek-ai/cordis').Context,
+  controller: AcpControlController | undefined,
+  emit: (record: Record<string, unknown>) => void = writeEntryRecord,
+): Promise<void> {
+  const settings = context.get('settings') as HostSettingsServiceLike | undefined
+  if (settings === undefined || typeof settings.describe !== 'function') {
+    throw new Error('local host entry: the Host has no settings service, so the ACP startup preference cannot be read')
+  }
+  const descriptor = (settings.describe() ?? []).find(entry => entry.ns === ACP_STARTUP_PREFERENCE_NAMESPACE)
+  if (descriptor === undefined) {
+    throw new Error('local host entry: the profile projects no "pi-tui-acp-preferences" settings section')
+  }
+  const value = descriptor.value
+  const autoStart = typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as { readonly autoStart?: unknown }).autoStart
+    : undefined
+  // The schema owns the boolean strictly; anything else means the section was
+  // projected by a different composition, not a missing user choice.
+  if (typeof autoStart !== 'boolean') {
+    throw new Error('local host entry: "pi-tui-acp-preferences.autoStart" is not a boolean')
+  }
+  if (!autoStart) return
+  const unavailable = (failure: AcpAutostartFailure, state?: string): void => {
+    emit({
+      m4a0: 'diagnostic',
+      processRole: 'host',
+      pid: process.pid,
+      code: 'acp-autostart-unavailable',
+      failure,
+      ...(state === undefined ? {} : { state }),
+    })
+  }
+  if (controller === undefined) {
+    unavailable('controller-missing')
+    return
+  }
+  let status: AcpAccessStatus
+  try {
+    status = await controller.setEnabled(true)
+  } catch {
+    // The exception text is deliberately dropped: it can carry a socket path or
+    // a system error string. The controller's own state is the visible truth.
+    unavailable('mutation-failed')
+    return
+  }
+  if (status.state !== 'enabled') {
+    unavailable('not-enabled', status.state)
+    return
+  }
+  emit({
+    m4a0: 'acp-autostart',
     processRole: 'host',
     pid: process.pid,
     phase: 'pre-ready',
@@ -535,7 +752,7 @@ export async function runLocalHostEntry(options: LocalHostEntryOptions): Promise
     // bypasses the async finally; this synchronous mirror retires the exact
     // socket inode this process bound (a SIGKILL has no JS callback and is left
     // to the next seat winner's safe reclaim).
-    owned.acpListener?.cleanupSync()
+    owned.acpController?.cleanupSync()
     if (owned.scopeDir !== undefined && owned.scratchDir !== undefined) {
       removeOwnedScratch(owned.scopeDir, owned.scratchDir)
     }
@@ -587,7 +804,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
   let handle: Awaited<ReturnType<OfficialDshModules['runProfile']>> | undefined
   let registration: PublishedLocalHost | undefined
   let liveness: HostActivityObserver | undefined
-  let localAcp: LocalAcpListener | undefined
+  let acpController: AcpControlController | undefined
   try {
     const scratchDir = mkdtempSync(join(scope.dir, 'host-scratch-'))
     scratchOwner.scratchDir = scratchDir
@@ -651,13 +868,17 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       const stop = (code: number, owner: PublishedLocalHost | undefined): Promise<void> => {
         if (stopping !== undefined) return stopping
         shuttingDown = true
+        // Synchronously latch the ACP controller quiescing BEFORE any await, so
+        // a concurrent `setEnabled(true)` can no longer be admitted once the one
+        // official Host shutdown has begun. The actual close runs in the chain.
+        acpController?.quiesce()
         stopping = (async () => {
           const errors: Array<{ step: string; error: unknown }> = []
-          // PO-1: stop accepting and retire the local ACP socket before the
+          // PO-1B: stop accepting and retire the local ACP socket before the
           // official shutdown runs. One collected step; a close failure never
           // skips the official `shutdownOwner`.
           try {
-            await localAcp?.close()
+            await acpController?.close()
           } catch (error) {
             errors.push({ step: 'local-acp-close', error })
           }
@@ -781,19 +1002,30 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         process.removeListener('SIGINT', onSigint)
       }
 
-      // PO-1: bind the ONE Host-owned local ACP v1 front door BEFORE the Ready
-      // commit. `startLocalAcpListener` returns only once the socket is bound,
-      // forced to 0600 and serving `initialize`, so a published registry never
-      // points at a socket that is not yet accepting. The listener handle lives
-      // on the existing scratch owner so both the ordinary shutdown and the
-      // synchronous process-exit mirror release it; there is no second Host
-      // owner, Context, Agent or Session.
+      // PO-1B: the ONE Host-entry-owned ACP runtime controller. The socket is
+      // OFF by default and is bound ONLY when the profile's independent
+      // `pi-tui-acp-preferences.autoStart` preference is on (consumed below,
+      // before Ready). When enabled, the bind still happens BEFORE the Ready
+      // commit so a published registry never points at a not-yet-listening
+      // socket. The controller lives on the entry's existing scratch owner, so
+      // the ONE official shutdown and the synchronous process-exit mirror
+      // release it; there is no second Host owner, Context, Agent or Session.
       const maxConnections = parseAcpMaxConnections(process.env.DSH_PI_TUI_ACP_MAX_CONNECTIONS)
-      localAcp = await startLocalAcpListener({ scope, maxConnections, diag: createEntryDiag('host') })
-      scratchOwner.acpListener = localAcp
+      acpController = createAcpController({ scope, maxConnections, diag: createEntryDiag('host') })
+      scratchOwner.acpController = acpController
+      // Register the entry-owned controller as the root Host `piTuiAcpOwner`
+      // service the private `piTuiAcpAccess` facade forwards to. It is a plain
+      // root-Context value (not a Typert endpoint, not a business Fiber), so a
+      // profile settings recomposition cannot dispose a live socket.
+      handle.ctx.provide('piTuiAcpOwner', acpController)
+      // Consume the persisted next-launch preference from the SAME settled ctx.
+      // A failing enable keeps the Host Ready with a bounded diagnostic; a
+      // corrupted composition fails startup. autoStart=false binds nothing.
+      await applyAcpStartupPreference(handle.ctx, acpController)
       // Qualification-only barrier: hold the process after the socket is bound
       // and serving but BEFORE the registry is committed, so a launcher can
       // prove listen-before-Ready and deliver a signal in that exact window.
+      // (Reached only when autoStart bound the socket.)
       const acpBoundBarrier = process.env.SPLIT_PROCESS_HOST_ACP_BOUND_BARRIER
       if (acpBoundBarrier !== undefined && acpBoundBarrier !== '') {
         writeEntryRecord({ m4a0: 'qualification', processRole: 'host', op: 'acp-bound-barrier', pid: process.pid })
@@ -898,7 +1130,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         })
       }
       try {
-        await localAcp?.close()
+        await acpController?.close()
       } catch (cleanupError) {
         priorCleanupFailure ??= cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
         writeEntryRecord({

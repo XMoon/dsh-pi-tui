@@ -865,6 +865,13 @@ function setup(options: HarnessOptions = {}): Harness {
           }
         },
       },
+      // PO-1B: the profile-owned ACP startup preference. This suite does not
+      // exercise ACP controls (they live in settings-acp-controls.test.ts); a
+      // default-OFF stub keeps the Tools category complete without a write path.
+      acpStartupPreference: {
+        read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
+        setAutoStart: async (_value: boolean, _revision: number) => {},
+      },
       footerCustomItems: {
         rawForPersistence: () => ({ kind: 'available' as const, value: options.footerCustomItemsRaw }),
       },
@@ -5855,6 +5862,7 @@ test('a narrow Account deeplink → rail-browse About reads nothing; Enter reads
       visualTools: { read: () => undefined, setEnabled: async (_enabled: boolean, _revision: number) => {} },
       webStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
       backendStartupPreference: { read: () => undefined, setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {} },
+      acpStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined },
       subagentModelSelection: { available: () => false },
@@ -9358,6 +9366,8 @@ test('the real /settings route edits rows, choices and pages without ever callin
   await railToCategory(h, 'Tools')
   await key(h, '\r') // L0 -> L1
   await key(h, '\x1b[B') // Visual tools -> Auto-enable Web on Host startup
+  await key(h, '\x1b[B') // -> ACP Server (PO-1B)
+  await key(h, '\x1b[B') // -> Auto-enable ACP on Host startup (PO-1B)
   await key(h, '\x1b[B') // -> Web Search / Fetch
   await key(h, '\r') // the row's own page
   assert.match(h.rowsPlain()[0]!, /Settings · Tools · Web Search \/ Fetch/u,

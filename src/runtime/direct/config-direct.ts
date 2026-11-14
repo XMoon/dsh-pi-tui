@@ -96,6 +96,8 @@ import type {
   BackendStartupPreferenceConfig,
   BackendStartupPreferenceState,
   PublicBackendValue,
+  AcpStartupPreferenceConfig,
+  AcpStartupPreferenceState,
   ConfigReadiness,
 } from '../config-port.ts'
 import {
@@ -185,6 +187,7 @@ export class DirectConfigPort implements ConfigPort {
   readonly visualTools: VisualToolsConfig
   readonly webStartupPreference: WebStartupPreferenceConfig
   readonly backendStartupPreference: BackendStartupPreferenceConfig
+  readonly acpStartupPreference: AcpStartupPreferenceConfig
 
   constructor(
     ctx: HostContextLike,
@@ -205,6 +208,7 @@ export class DirectConfigPort implements ConfigPort {
     this.visualTools = new DirectVisualToolsConfig(ctx)
     this.webStartupPreference = new DirectWebStartupPreferenceConfig(ctx)
     this.backendStartupPreference = new DirectBackendStartupPreferenceConfig(ctx)
+    this.acpStartupPreference = new DirectAcpStartupPreferenceConfig(ctx)
   }
 }
 
@@ -2060,22 +2064,14 @@ class DirectBackendStartupPreferenceConfig implements BackendStartupPreferenceCo
     if (descriptor === undefined) return undefined
     const value = formValueOf(descriptor)
     const backend = value?.backend
-    // A value outside the closed public vocabulary is NOT a read: report the
-    // section unreadable instead of silently falling back to `direct`.
     if (!isPublicBackendValue(backend)) return undefined
     const revision = descriptor.revision
-    // Without the read revision the decision cannot be submitted conditionally;
-    // report the section unreadable rather than allowing a silent overwrite.
     if (typeof revision !== 'number') return undefined
     const user = descriptor.user
     const userSection = typeof user === 'object' && user !== null && !Array.isArray(user)
       ? user as Record<string, unknown>
       : undefined
-    return {
-      backend,
-      revision,
-      userOverridden: userSection?.backend !== undefined,
-    }
+    return { backend, revision, userOverridden: userSection?.backend !== undefined }
   }
 
   async setBackend(value: PublicBackendValue, expectedRevision: number): Promise<void> {
@@ -2084,17 +2080,63 @@ class DirectBackendStartupPreferenceConfig implements BackendStartupPreferenceCo
     if (readSettingsDescriptor(settings, TUI_STARTUP_NS) === undefined) {
       throw new Error('the "tui-startup" Host settings section is not mounted')
     }
-    // Submit the revision the USER's decision was read at — never a revision
-    // observed at write time, which would turn an external edit into a silent
-    // overwrite.
     await mutateSettings(settings, TUI_STARTUP_NS, [
       { op: 'set', path: ['backend'], value },
     ], expectedRevision)
   }
 }
 
-/** The typed guard for the closed public backend vocabulary. A value outside
- *  `direct|daemon` is never coerced into a default. */
+/** The typed guard for the closed public backend vocabulary. */
 function isPublicBackendValue(value: unknown): value is PublicBackendValue {
   return value === 'direct' || value === 'daemon'
 }
+
+/** The official profile entry id of the Host row that owns the ACP startup
+ *  preference (its Loader row id is also its Settings namespace). */
+const ACP_STARTUP_PREFERENCE_NS = 'pi-tui-acp-preferences'
+
+/**
+ * The Direct ACP startup preference: the `pi-tui-acp-preferences` form
+ * section's effective `autoStart` value. The write is a revision-checked path
+ * mutation of the exact `autoStart` field — never a whole-section replace, so an
+ * unrelated or unknown field is never pinned into the USER layer.
+ *
+ * It deliberately does NOT read or touch the private `piTuiAcpAccess` service:
+ * the preference is the NEXT Host launch's behavior, and the current Host's
+ * listener state stays that service's sole authority.
+ */
+class DirectAcpStartupPreferenceConfig implements AcpStartupPreferenceConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): AcpStartupPreferenceState | undefined {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    const descriptor = readSettingsDescriptor(settings, ACP_STARTUP_PREFERENCE_NS)
+    if (descriptor === undefined) return undefined
+    const value = formValueOf(descriptor)
+    const autoStart = value?.autoStart
+    if (typeof autoStart !== 'boolean') return undefined
+    const revision = descriptor.revision
+    if (typeof revision !== 'number') return undefined
+    const user = descriptor.user
+    const userSection = typeof user === 'object' && user !== null && !Array.isArray(user)
+      ? user as Record<string, unknown>
+      : undefined
+    return { autoStart, revision, userOverridden: userSection?.autoStart !== undefined }
+  }
+
+  async setAutoStart(value: boolean, expectedRevision: number): Promise<void> {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    if (settings === undefined) throw new Error('the Host settings service is unavailable')
+    if (readSettingsDescriptor(settings, ACP_STARTUP_PREFERENCE_NS) === undefined) {
+      throw new Error(`the "pi-tui-acp-preferences" Host settings section is not mounted`)
+    }
+    await mutateSettings(settings, ACP_STARTUP_PREFERENCE_NS, [
+      { op: 'set', path: ['autoStart'], value },
+    ], expectedRevision)
+  }
+}
+

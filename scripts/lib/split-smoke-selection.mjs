@@ -59,6 +59,7 @@ import { runWebProviderSettingsF3 } from '../smoke/split-process/web-provider-se
 import { runHerdrH2, runHerdrH3 } from '../smoke/split-process/herdr-h2.mjs'
 import { runAcpPo1 } from '../smoke/split-process/acp-po1.mjs'
 import { runPublicDaemonEntry } from '../smoke/split-process/public-daemon-entry-m6-2a.mjs'
+import { runAcpPo1bOptInControl } from '../smoke/split-process/acp-po1b.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -324,6 +325,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'public-entry.daemon-client-m6-2a',
     title: 'the real installed dsh --profile pi-tui CLI selects the daemon backend and launches one foreground Client against one local Host, and an illegal backend fails closed',
     run: runPublicDaemonEntry,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    id: 'acp.po1b-opt-in-control',
+    title: 'the opt-in default-off local ACP listener toggles at runtime, disconnects on disable and applies the persisted startup preference only on the next cold Host without recomposing the running one',
+    run: runAcpPo1bOptInControl,
   }),
 ])
 

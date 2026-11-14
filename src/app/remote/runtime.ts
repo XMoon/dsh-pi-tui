@@ -24,6 +24,7 @@ import { createRemoteFileReceiptUploader } from '../../runtime/remote/file-uploa
 import { RemoteHostUserShellPort } from '../../runtime/remote/host-user-shell-remote.ts'
 import { RemoteHostShellCompletionPort } from '../../runtime/remote/host-shell-completion-remote.ts'
 import { RemoteWebAccessPort } from '../../runtime/remote/web-access-remote.ts'
+import { RemoteAcpAccessPort } from '../../runtime/remote/acp-access-remote.ts'
 import { mergeCause } from './dispose-cause.ts'
 import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf, type RemoteM3ARuntimeSource, type RemoteM3ASemantics } from './m3a-semantics.ts'
 import type { SplitClientInteractionDelivery } from '../../runtime/remote/interaction-remote.ts'
@@ -202,6 +203,13 @@ export async function createRemoteBackendRuntime(
         // generation source every other adapter fences on.
         webAccess: new RemoteWebAccessPort(
           options.runtime.remote.piTuiWebAccess,
+          options.runtime.connection.generation,
+        ),
+        // PO-1B: the Split Client's local ACP listener control over the package's
+        // ONE private `piTuiAcpAccess` namespace and the SAME Connection
+        // generation source every other adapter fences on.
+        acpAccess: new RemoteAcpAccessPort(
+          options.runtime.remote.piTuiAcpAccess,
           options.runtime.connection.generation,
         ),
         // M6-1 F8: the exact-Session policy port over the SAME mounted

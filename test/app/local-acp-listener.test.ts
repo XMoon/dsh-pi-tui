@@ -14,9 +14,9 @@
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { lstatSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { closeSync, openSync } from 'node:fs'
-import { connect } from 'node:net'
+import { connect, createServer } from 'node:net'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
@@ -538,3 +538,172 @@ async function withTimeout<T>(value: Promise<T>, timeoutMs: number, label: strin
     if (timer !== undefined) clearTimeout(timer)
   }
 }
+
+/**
+ * PO-1B: the read-only `isListening()` fact the runtime controller relies on to
+ * report `enabled`. It proves the bound server and the exact owned socket inode,
+ * never a rebind, and turns false the moment the owned inode is gone.
+ */
+test('isListening() is true while bound, false after close, and close is idempotent', async t => {
+  const { scope } = newScope(t)
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+  assert.equal(listener.isListening(), true, 'a freshly bound, 0600-owned socket must report listening')
+  await listener.close()
+  assert.equal(listener.isListening(), false, 'a closed listener must never report listening')
+  // Repeated close is inert (never throws, never resurrects the socket).
+  await listener.close()
+  assert.equal(listener.isListening(), false, 'a repeated close stays not-listening')
+})
+
+test('isListening() is false when the owned socket inode is removed externally', async t => {
+  const { scope } = newScope(t)
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+  assert.equal(listener.isListening(), true)
+  unlinkSync(listener.socketPath)
+  assert.equal(listener.isListening(), false, 'the bound server must not claim a path it no longer owns')
+  await listener.close()
+})
+
+test('a second listener after close re-binds the same pathname and reports listening', async t => {
+  const { scope } = newScope(t)
+  const first = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+  const path = first.socketPath
+  await first.close()
+  assert.equal(pathExists(path), false, 'the first close retires its owned inode')
+  const second = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+  assert.equal(second.socketPath, path, 'a re-enable reuses the same logical socket pathname')
+  assert.equal(second.isListening(), true)
+  await second.close()
+})
+
+/**
+ * PO-1B / Finding 1 — retirement must never delete an inode this process does
+ * not own. Node's `net.Server.close()` unlinks the pathname it was told to
+ * listen on; after the owned inode is gone and the path is replaced (a regular
+ * file, or a newer live server's socket), that automatic unlink must NOT delete
+ * the foreign entry. Two real negative controls on the target runtime.
+ */
+test('retiring a listener never deletes a foreign replacement file at the path', async t => {
+  const { scope } = newScope(t)
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+  const path = listener.socketPath
+  // A foreign process removes our socket inode and drops a regular file in place.
+  unlinkSync(path)
+  writeFileSync(path, 'REPLACEMENT')
+  await listener.close()
+  assert.ok(pathExists(path), 'the foreign replacement file must survive retirement')
+  assert.equal(lstatSync(path).isFile(), true, 'the replacement is still the foreign file')
+})
+
+test('retiring an old listener never deletes a newer live server\'s socket path', async t => {
+  const { dir, scope } = newScope(t)
+  const old = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+  const logical = old.socketPath
+  unlinkSync(logical)
+  // A newer listener binds a fresh inode at the SAME logical pathname.
+  const newerDirFd = openSync(dir, 'r')
+  const newer = createServer(s => s.destroy())
+  await new Promise<void>((resolveListen, rejectListen) => {
+    newer.once('error', rejectListen)
+    newer.listen(`/proc/self/fd/${String(newerDirFd)}/acp.sock`, () => {
+      newer.off('error', rejectListen)
+      resolveListen()
+    })
+  })
+  assert.equal(lstatSync(logical).isSocket(), true, 'the newer server owns a socket at the path')
+  await old.close()
+  assert.equal(newer.listening, true, 'the newer server must keep listening after the old retirement')
+  assert.ok(pathExists(logical), 'the newer server pathname must survive the old listener retirement')
+  await new Promise<void>(resolveClose => newer.close(() => resolveClose()))
+  closeSync(newerDirFd)
+})
+
+test('a live foreign socket at the contract path is refused and never overwritten', async t => {
+  const { dir, scope } = newScope(t)
+  const logical = join(scope.dir, 'acp.sock')
+  const scopeFd = openSync(dir, 'r')
+  const foreign = createServer(socket => socket.destroy())
+  await new Promise<void>((resolveListen, rejectListen) => {
+    foreign.once('error', rejectListen)
+    foreign.listen(`/proc/self/fd/${String(scopeFd)}/acp.sock`, () => { foreign.off('error', rejectListen); resolveListen() })
+  })
+  const ino = lstatSync(logical).ino
+  try {
+    await assert.rejects(
+      startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG }),
+      (error: unknown) => error instanceof LocalAcpError && error.code === 'LOCAL_ACP_SOCKET_IN_USE',
+      'a live foreign socket must make our bind refuse with LOCAL_ACP_SOCKET_IN_USE',
+    )
+    assert.equal(foreign.listening, true, 'the foreign server keeps listening')
+    assert.equal(lstatSync(logical).ino, ino, 'the foreign socket inode is untouched (never overwritten)')
+    const connectable = await new Promise<boolean>(resolve => {
+      const client = connect(logical)
+      client.once('connect', () => { client.destroy(); resolve(true) })
+      client.once('error', () => resolve(false))
+    })
+    assert.equal(connectable, true, 'the foreign socket remains connectable at its path')
+  } finally {
+    await new Promise<void>(resolveClose => foreign.close(() => resolveClose()))
+    closeSync(scopeFd)
+  }
+})
+
+/**
+ * A crash BETWEEN the private bind and the private-name unlink (SIGKILL mid
+ * startup) leaves a stale `<scope.dir>/.acp-priv/acp.sock`. The next start of the
+ * SAME legal Host must recover it — not fail with EADDRINUSE — while the contract
+ * pathname is rebuilt as a real 0600 socket that answers ACP v1 initialize.
+ */
+test('a stale PRIVATE bind socket left by SIGKILL is recovered on the next start', async t => {
+  const { dir, scope } = newScope(t)
+  const privDir = join(dir, '.acp-priv')
+  mkdirSync(privDir, { recursive: true, mode: 0o700 })
+  const privSock = join(privDir, 'acp.sock')
+  // Child: raw-listen on the private path (crash window state), report, then hang.
+  const childScript = [
+    "const { createServer } = require('node:net')",
+    "const { openSync } = require('node:fs')",
+    "const fd = openSync(process.env.PRIVDIR, 'r')",
+    "const srv = createServer(s => s.destroy())",
+    "srv.listen('/proc/self/fd/' + fd + '/acp.sock', () => process.stdout.write('LISTENED\\n'))",
+    "setInterval(() => {}, 1000)",
+  ].join('\n')
+  const child = spawn(process.execPath, ['-e', childScript], {
+    env: { ...process.env, PRIVDIR: privDir },
+    stdio: ['ignore', 'pipe', 'inherit'],
+  })
+  await new Promise<void>((resolveReady, rejectReady) => {
+    let output = ''
+    child.stdout.on('data', chunk => {
+      output += chunk
+      if (output.includes('LISTENED')) resolveReady()
+    })
+    child.on('exit', code => rejectReady(new Error(`private-bind child exited early: ${String(code)}`)))
+    // bounded deadline: fail fast if the child never prints LISTENED (a real readiness signal, not a blind sleep)
+    setTimeout(() => rejectReady(new Error('private-bind child never reported LISTENED')), 15_000) // bounded deadline
+  })
+  child.kill('SIGKILL')
+  await new Promise<void>(resolveExit => child.on('exit', () => resolveExit()))
+  assert.equal(lstatSync(privSock).isSocket(), true, 'the SIGKILL must leave a stale private socket')
+
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+  try {
+    const info = lstatSync(listener.socketPath)
+    assert.equal(info.isSocket(), true, 'the contract path is a real socket after recovery')
+    assert.equal(info.mode & 0o777, 0o600, 'the recovered contract socket is 0600')
+    assert.equal(pathExists(privSock), false, 'the stale private bind name is removed during recovery')
+    const client = await RawClient.open(listener.socketPath)
+    try {
+      initialize(client, 1)
+      const reply = await client.next()
+      assert.equal((reply as { result?: { protocolVersion?: number } })?.result?.protocolVersion, 1,
+        'the recovered socket answers ACP v1 initialize')
+    } finally {
+      client.close()
+    }
+  } finally {
+    await listener.close()
+  }
+  assert.equal(pathExists(listener.socketPath), false, 'normal close retires the contract inode')
+  assert.equal(pathExists(privSock), false, 'the private bind name stays gone after close')
+})

@@ -954,6 +954,11 @@ interface PeerRemoteService {
     setEnabled(enabled: boolean): Promise<PeerRemoteResult>
     getAuthenticatedUrl(): Promise<PeerRemoteResult>
   }
+  /** The package's private local ACP listener control (`piTuiAcpAccess`, PO-1B). */
+  readonly piTuiAcpAccess?: {
+    getStatus(): Promise<PeerRemoteResult>
+    setEnabled(enabled: boolean): Promise<PeerRemoteResult>
+  }
   /**
    * The official generated settings namespace. The qualification Peer uses it
    * to read/write the profile-owned Web startup preference through the SAME
@@ -1724,6 +1729,120 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
             emit({
               m4a0: 'qualification',
               op: 'web-autostart',
+              processRole: 'client',
+              pid: process.pid,
+              action: 'write',
+              requested,
+              ok: write.ok && settled !== undefined,
+              ...(settled === undefined ? {} : settled),
+              readBack: settled?.autoStart === requested,
+              ...(write.ok
+                ? {}
+                : {
+                    errorCode: write.error?.code,
+                    ...(write.error?.message === undefined ? {} : { error: write.error.message.slice(0, 300) }),
+                  }),
+              ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+            })
+            return false
+          }
+          if (request.op === 'qualification-acp-access') {
+            // PO-1B qualification-only: the SAME authenticated non-TUI Peer drives
+            // the Host's private local ACP listener control through the real v2
+            // Gateway. Internal control op only — never a published CLI/HTTP
+            // surface; the response carries only the status vocabulary.
+            const enabled = request.acpEnabled
+            const acpAccess = remoteService?.piTuiAcpAccess
+            if (acpAccess === undefined) {
+              throw new Error('local client entry: the qualification Peer has no piTuiAcpAccess namespace')
+            }
+            // A supplied value is passed UNVALIDATED: the v2 Remote contract's
+            // argument codec is the one authority.
+            const result = enabled === undefined
+              ? await acpAccess.getStatus()
+              : await acpAccess.setEnabled(enabled as boolean)
+            emit({
+              m4a0: 'qualification',
+              op: 'acp-access',
+              processRole: 'client',
+              pid: process.pid,
+              action: enabled === undefined ? 'getStatus' : 'setEnabled',
+              ...(enabled === undefined ? {} : { enabled }),
+              ok: result.ok === true,
+              ...(result.ok
+                ? { status: result.value }
+                : {
+                    errorCode: result.error?.code,
+                    ...(result.error?.message === undefined ? {} : { error: result.error.message.slice(0, 300) }),
+                  }),
+              ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+            })
+            return false
+          }
+          if (request.op === 'qualification-acp-autostart') {
+            // PO-1B qualification-only: read/write the profile-owned ACP startup
+            // preference through the SAME official generated `settings` wire the
+            // Remote ConfigPort consumes. It never edits a profile file and never
+            // touches the current Host's ACP listener.
+            const settings = remoteService?.settings
+            if (settings === undefined) throw new Error('local client entry: the qualification Peer has no settings namespace')
+            const preferenceOf = (value: unknown): { autoStart: boolean; revision: number; userOverridden: boolean } | undefined => {
+              const namespaces = (value as { readonly namespaces?: readonly {
+                readonly ns?: unknown
+                readonly value?: unknown
+                readonly user?: unknown
+                readonly revision?: unknown
+              }[] } | undefined)?.namespaces
+              const entry = namespaces?.find(candidate => candidate.ns === 'pi-tui-acp-preferences')
+              if (entry === undefined) return undefined
+              const projected = entry.value as { readonly autoStart?: unknown } | undefined
+              if (typeof projected?.autoStart !== 'boolean' || typeof entry.revision !== 'number') return undefined
+              const user = entry.user as { readonly autoStart?: unknown } | undefined
+              return {
+                autoStart: projected.autoStart,
+                revision: entry.revision,
+                userOverridden: user?.autoStart !== undefined,
+              }
+            }
+            const before = await settings.describe()
+            const current = before.ok ? preferenceOf(before.value) : undefined
+            if (current === undefined) {
+              emit({
+                m4a0: 'qualification',
+                op: 'acp-autostart',
+                processRole: 'client',
+                pid: process.pid,
+                ok: false,
+                errorCode: 'preference/unavailable',
+                ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+              })
+              return false
+            }
+            const requested = request.acpAutoStart
+            if (requested === undefined) {
+              emit({
+                m4a0: 'qualification',
+                op: 'acp-autostart',
+                processRole: 'client',
+                pid: process.pid,
+                action: 'read',
+                ...current,
+                ok: true,
+                ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+              })
+              return false
+            }
+            if (typeof requested !== 'boolean') throw new Error('local client entry: qualification-acp-autostart requires a boolean acpAutoStart')
+            const write = await settings.mutate(
+              'pi-tui-acp-preferences',
+              [{ op: 'set', path: ['autoStart'], value: requested }],
+              current.revision,
+            )
+            const after = await settings.describe()
+            const settled = after.ok ? preferenceOf(after.value) : undefined
+            emit({
+              m4a0: 'qualification',
+              op: 'acp-autostart',
               processRole: 'client',
               pid: process.pid,
               action: 'write',

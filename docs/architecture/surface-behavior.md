@@ -621,6 +621,22 @@ the next launch. A non-current configuration backend offers no confirmable
 candidate, and the authoritative re-read confirms only the persisted
 preference.
 
+The local ACP v1 listener is exposed through TWO independent `/settings → Tools`
+rows that share one authoring surface but never one authority. `ACP Server` is
+the RUNTIME row: its value is the LIVE listener state read from the Host's
+private `piTuiAcpAccess` service (`On`/`Off`; a bind/close in flight is
+`Changing…` and offers no candidate; an unreadable/`unavailable`/non-Split
+Host is `Unavailable`, and a Direct backend states `Unavailable — Split Host
+only`). Confirming On/Off sends exactly ONE `setEnabled`, then re-reads the
+authoritative listener state; only an agreeing re-read is `Verified`, a
+rejected or unreadable outcome is classified from a fresh read and never
+replayed. `Auto-enable ACP on Host startup` is the PERSISTED row
+(`pi-tui-acp-preferences.autoStart`, default `Off (default)`, options On/Off,
+revision-checked user patch) that applies to the NEXT Split Host start; saving
+it never changes the current listener, and its Detail states that explicitly.
+On Direct the runtime row is a truthful Unavailable while the persisted
+preference stays editable for the Split Host the user may later start.
+
 ## Settings Workspace
 
 `/settings` and its real alias `/status` open ONE fullscreen lease with ONE

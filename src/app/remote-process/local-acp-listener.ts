@@ -22,7 +22,7 @@
  * @module app/remote-process/local-acp-listener
  */
 
-import { chmodSync, constants, closeSync, lstatSync, openSync, unlinkSync } from 'node:fs'
+import { chmodSync, constants, closeSync, linkSync, lstatSync, mkdirSync, openSync, rmdirSync, unlinkSync } from 'node:fs'
 import { connect as netConnect, createServer, type Server, type Socket } from 'node:net'
 import { join } from 'node:path'
 import {
@@ -58,6 +58,11 @@ const MAX_OUTPUT_BUFFER_BYTES = 256 * 1024
 const CONNECT_PROBE_TIMEOUT_MS = 500
 /** The logical socket file name inside the 0700 scope directory. */
 const SOCKET_FILE = 'acp.sock'
+/** Owner-only private subdirectory (inside the 0700 scope) where the server is
+ *  actually BOUND before its inode is hard-linked onto the contract path. Node's
+ *  server.close() unlink always targets this private dir, so it can never delete
+ *  a foreign inode at the contract path. */
+const PRIVATE_DIR = '.acp-priv'
 
 const NEWLINE = 0x0a
 
@@ -101,6 +106,13 @@ export interface LocalAcpListener {
   readonly socketPath: string
   /** The number of live connections this listener currently owns. */
   readonly connectionCount: () => number
+  /**
+   * Read-only proof that THIS listener is still valid: the bound `net.Server`
+   * is listening AND the logical path still carries this process's exact saved
+   * socket inode. Never rebinds, never reclaims a foreign inode and never
+   * mutates state — it only observes the authoritative ownership facts.
+   */
+  isListening(): boolean
   /** Stop accepting, tear down every connection, then retire the server. Idempotent. */
   close(): Promise<void>
   /** Synchronous, inode-identity-checked retirement of THIS process's own socket inode. */
@@ -517,14 +529,26 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
     throw new LocalAcpError('LOCAL_ACP_INVALID_MAX_CONNECTIONS', 'local acp: maxConnections must be an integer in 1..16')
   }
   const logicalPath = join(scope.dir, SOCKET_FILE)
-  const dirFd = openScopeDirFd(scope)
-  const physicalPath = fdSocketPath(dirFd)
+  // The scope dirfd is used ONLY to probe/reclaim a stale pathname BEFORE bind.
+  const scopeDirFd = openScopeDirFd(scope)
+  const scopeProbePath = fdSocketPath(scopeDirFd)
+  // The server is BOUND inside a private, owner-only subdirectory (fd-shortened)
+  // and its inode is then hard-linked onto the contract path (then the private
+  // name is unlinked). Node's net.Server.close() unlinks the path it was told to
+  // listen on; because that private name is already gone, the automatic unlink is
+  // always ENOENT and can never touch a foreign inode at the contract path. The
+  // private dirfd is kept OPEN across close, so
+  // its /proc/self/fd path can never be redirected to another directory by
+  // fd-number reuse — the fix does NOT rely on a released fd staying unused.
+  const privDir = join(scope.dir, PRIVATE_DIR)
+  let privFd: number | undefined
+  let scopeDirFdClosed = false
+  let privFdClosed = false
 
   let saved: SavedInode | undefined
   let server: Server | undefined
   let stopping = false
   let closed: Promise<void> | undefined
-  let dirFdClosed = false
 
   const context: ListenerContext = {
     diag,
@@ -533,13 +557,54 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
     connectionStates: new Map<Socket, ConnectionState>(),
   }
 
-  const closeDirFd = (): void => {
-    if (dirFdClosed) return
-    dirFdClosed = true
+  const closeScopeDirFd = (): void => {
+    if (scopeDirFdClosed) return
+    scopeDirFdClosed = true
     try {
-      closeSync(dirFd)
+      closeSync(scopeDirFd)
     } catch {
       // The fd was already closed by an earlier cleanup; nothing to release.
+    }
+  }
+
+  const closePrivFd = (): void => {
+    if (privFdClosed || privFd === undefined) return
+    privFdClosed = true
+    try {
+      closeSync(privFd)
+    } catch {
+      // Already closed.
+    }
+  }
+
+  const removePrivDir = (): void => {
+    try {
+      rmdirSync(privDir)
+    } catch {
+      // Not empty or already gone; best effort (never blocks retirement).
+    }
+  }
+
+  /**
+   * Remove ONLY this process's owned socket inode. Identity-checked against the
+   * exact saved (dev, ino, uid): a foreign inode that has since replaced the
+   * pathname is never unlinked. Used by graceful retire, bind-failure cleanup and
+   * the synchronous process-exit mirror.
+   */
+  const cleanupSync = (): void => {
+    if (saved === undefined) return
+    let current: ReturnType<typeof lstatSync>
+    try {
+      current = lstatSync(logicalPath)
+    } catch {
+      return
+    }
+    if (!current.isSocket() || current.uid !== saved.uid) return
+    if (current.dev !== saved.dev || current.ino !== saved.ino) return
+    try {
+      unlinkSync(logicalPath)
+    } catch {
+      // Another owner retired it first; the inode no longer needs this cleanup.
     }
   }
 
@@ -547,18 +612,20 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
     if (closed !== undefined) return closed
     stopping = true
     closed = (async () => {
-      if (server === undefined) return
-      const serverClose = new Promise<void>((resolveClose, rejectClose) => {
-        server!.close(error => (error === undefined ? resolveClose() : rejectClose(error)))
-      })
       for (const socket of context.connections) socket.destroy()
-      try {
-        await serverClose
-      } finally {
-        // Node unlinks the bound fd-shortened path while the dirfd is still
-        // open, so the real inode retires before the fd is released.
-        closeDirFd()
+      if (server !== undefined) {
+        // Keep privFd OPEN across close so the stored private bind path always
+        // resolves to OUR (now-empty) private dir → ENOENT; it can never be
+        // redirected to another directory by fd-number reuse.
+        await new Promise<void>(resolveClose => {
+          server!.close(() => resolveClose())
+        })
       }
+      // Remove ONLY our owned contract-path inode (identity-checked).
+      cleanupSync()
+      closeScopeDirFd()
+      closePrivFd()
+      removePrivDir()
     })()
     return closed
   }
@@ -578,7 +645,7 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
       if (existing.isSymbolicLink() || !existing.isSocket() || existing.uid !== uid) {
         throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: a non-socket, symlink or foreign-owned entry occupies the socket path')
       }
-      const verdict = await probeSocket(physicalPath)
+      const verdict = await probeSocket(scopeProbePath)
       if (verdict === 'open') {
         throw new LocalAcpError('LOCAL_ACP_SOCKET_IN_USE', 'local acp: a live listener already answers on the socket path')
       }
@@ -593,7 +660,57 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
       unlinkSync(logicalPath)
     }
 
-    // 2. Bind the fd-shortened kernel path.
+    // 2. Prepare the private owner-only dir and BIND the fd-shortened private path.
+    //    Create it NON-recursively and VALIDATE an existing entry as a real dir we
+    //    own BEFORE any chmod (never chmod through a symlink / foreign dir).
+    let privCreated = true
+    try {
+      mkdirSync(privDir, { mode: 0o700 })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private bind directory could not be created', error)
+      }
+      privCreated = false
+    }
+    if (!privCreated) {
+      const dirInfo = lstatSync(privDir)
+      if (dirInfo.isSymbolicLink() || !dirInfo.isDirectory() || dirInfo.uid !== uid) {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private bind path is not a directory owned by this uid')
+      }
+    }
+    chmodSync(privDir, 0o700)
+    privFd = openSync(privDir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+    const privBindPath = fdSocketPath(privFd)
+    // Recover a stale PRIVATE bind name left by a crash BETWEEN the private bind
+    // and the private-name unlink (e.g. SIGKILL mid-startup). Only this one
+    // anchored private name is considered — never a scope-wide scan, never another
+    // .acp-* entry. A live/foreign/unsafe occupant is refused; a proven-stale own
+    // socket inode is unlinked so the next bind does not hit EADDRINUSE.
+    let privExisting: ReturnType<typeof lstatSync> | undefined
+    try {
+      privExisting = lstatSync(privBindPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private bind path is not accessible', error)
+      }
+    }
+    if (privExisting !== undefined) {
+      if (privExisting.isSymbolicLink() || !privExisting.isSocket() || privExisting.uid !== uid) {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private bind path is occupied by a non-socket, symlink or foreign-owned entry')
+      }
+      const privVerdict = await probeSocket(privBindPath)
+      if (privVerdict === 'open') {
+        throw new LocalAcpError('LOCAL_ACP_SOCKET_IN_USE', 'local acp: a live listener already occupies the private bind path')
+      }
+      if (privVerdict !== 'refused') {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private bind path could not be proven stale')
+      }
+      const privRecheck = readSavedInode(privBindPath, uid)
+      if (privRecheck.dev !== privExisting.dev || privRecheck.ino !== privExisting.ino) {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private socket inode changed during the stale recover')
+      }
+      unlinkSync(privBindPath)
+    }
     server = createServer(socket => {
       if (stopping) {
         socket.destroy()
@@ -614,7 +731,7 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
     })
     await new Promise<void>((resolveListen, rejectListen) => {
       server!.once('error', rejectListen)
-      server!.listen(physicalPath, () => {
+      server!.listen(privBindPath, () => {
         server!.off('error', rejectListen)
         resolveListen()
       })
@@ -626,49 +743,81 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
       diag.warn('local-acp.error', { code: (error as NodeJS.ErrnoException).code ?? 'LOCAL_ACP_SERVER_ERROR' })
     })
 
-    // 3. Force and prove the 0600 owned socket inode BEFORE returning.
-    chmodSync(physicalPath, 0o600)
-    const info = lstatSync(physicalPath)
-    if (!info.isSocket() || info.uid !== uid || (info.mode & 0o777) !== 0o600) {
+    // 3. Force the private inode to 0600, then publish it onto the contract path
+    //    with a no-replace hard link and drop the private name (see below).
+    chmodSync(join(privDir, SOCKET_FILE), 0o600)
+    // Publish the socket with a KERNEL-ATOMIC NO-REPLACE operation: hard-link the
+    // private socket inode onto the contract path. If ANY foreign entry occupies
+    // the path — including one that appeared during the race — linkSync fails
+    // EEXIST and we NEVER overwrite it. This closes the check-then-rename TOCTOU.
+    try {
+      linkSync(join(privDir, SOCKET_FILE), logicalPath)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'EEXIST') {
+        throw new LocalAcpError('LOCAL_ACP_SOCKET_IN_USE', 'local acp: a foreign entry occupies the socket path (refusing to overwrite it)')
+      }
+      throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the socket path could not be published', error)
+    }
+    // The contract path now references OUR inode; capture identity immediately so
+    // any later failure removes only ours. Then drop the private name (the inode
+    // is kept by the contract link and the listening server fd); Node's later
+    // close-unlink targets this now-absent private name → ENOENT, never foreign.
+    const linked = lstatSync(logicalPath)
+    saved = { dev: linked.dev, ino: linked.ino, uid: linked.uid }
+    if (!linked.isSocket() || linked.uid !== uid) {
+      throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the published socket is not a socket owned by this uid')
+    }
+    unlinkSync(join(privDir, SOCKET_FILE))
+    if ((linked.mode & 0o777) !== 0o600) {
       throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the bound socket is not a 0600 socket owned by this uid')
     }
-    saved = { dev: info.dev, ino: info.ino, uid: info.uid }
+    closeScopeDirFd()
     diag.info('local-acp.listen', { connections: 0 })
   } catch (error) {
-    // Any failure after bind must not leave the bound socket behind.
+    // Any failure after bind must not leave OUR bound socket behind, and must
+    // never delete a foreign inode. Keep privFd open across close (private bind
+    // path → ENOENT), remove only our contract-path inode, then release fds.
+    for (const socket of context.connections) socket.destroy()
     if (server !== undefined) {
       try {
-        await new Promise<void>(resolveClose => server!.close(() => resolveClose()))
+        await new Promise<void>(resolveClose => {
+          server!.close(() => resolveClose())
+        })
       } catch {
         // The bind may never have completed; closing is best effort here.
       }
     }
-    closeDirFd()
+    cleanupSync()
+    closeScopeDirFd()
+    closePrivFd()
+    removePrivDir()
     throw error
   }
 
-  const cleanupSync = (): void => {
-    // After a graceful close the path is already gone (ENOENT): no-op. Only the
-    // exact saved inode, still a socket owned by this uid, is ever unlinked.
-    if (saved === undefined) return
+  const isListening = (): boolean => {
+    // A stopping/closed server or a never-bound one is definitively not listening.
+    if (stopping || closed !== undefined || server === undefined || !server.listening) return false
+    if (saved === undefined) return false
+    // The owned bound server can outlive an externally removed/replaced inode;
+    // only the exact saved (dev,ino,uid) socket proves this listener still owns
+    // the pathname it advertises.
     let current: ReturnType<typeof lstatSync>
     try {
       current = lstatSync(logicalPath)
     } catch {
-      return
+      return false
     }
-    if (!current.isSocket() || current.uid !== saved.uid) return
-    if (current.dev !== saved.dev || current.ino !== saved.ino) return
-    try {
-      unlinkSync(logicalPath)
-    } catch {
-      // Another owner retired it first; the inode no longer needs this cleanup.
-    }
+    return current.isSocket()
+      && current.uid === saved.uid
+      && current.dev === saved.dev
+      && current.ino === saved.ino
   }
 
   const handle: LocalAcpListener = {
     socketPath: logicalPath,
     connectionCount: () => context.connections.size,
+    isListening,
     close: retireServer,
     cleanupSync,
   }
