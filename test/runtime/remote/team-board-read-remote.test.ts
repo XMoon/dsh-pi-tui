@@ -230,6 +230,9 @@ test('Remote board subscribe notifies ONCE when an unknown binding resolves to a
   s.emitList() // unknown → proven child: the ONE eligibility-revocation notification
   assert.equal(child.face.size(), 0, 'a late child binding never gets a face listener')
   assert.equal(calls, 1, 'the unknown→child transition must notify once so the runtime revokes the Team page')
+  gen.set({ id: 'g2' })
+  gen.set({ id: 'g3' })
+  assert.equal(calls, 1, 'a stable child across reconnects must NOT re-notify (revoke is one-shot)')
   dispose()
 })
 

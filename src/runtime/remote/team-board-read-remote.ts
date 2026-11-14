@@ -206,20 +206,16 @@ export class RemoteTeamBoardReadPort implements TeamBoardReadPort {
         ? this.isListProvenChild(sessionId)
         : this.isProvenChild(sessionId, binding.session)
       const bindingChanged = !Object.is(binding, lastBinding)
-      if (!force && !bindingChanged) {
-        // Binding stable, but the list-origin classification may have flipped
-        // (a Session-list row arrives proving a child) — surface that transition.
-        if (childNow !== lastChildState) {
-          lastChildState = childNow
-          if (childNow) for (const off of faceOffs.splice(0)) off()
-          return true
-        }
-        return false
-      }
+      const childTransition = childNow !== lastChildState
+      if (!force && !bindingChanged && !childTransition) return false
       for (const off of faceOffs.splice(0)) off()
       lastBinding = binding
       lastChildState = childNow
-      if (childNow) return true // notify so the runtime revokes; attach NO face
+      if (childNow) {
+        // Notify ONLY on the TRANSITION into a child; a stable child across
+        // reconnects/rebinds must not re-notify (eligibility revoked once).
+        return childTransition
+      }
       if (binding === undefined) return true
       try {
         faceOffs.push(binding.session.projections.faceOf(AGENT_TEAM_KEY).subscribe(listener))
