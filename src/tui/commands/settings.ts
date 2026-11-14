@@ -466,6 +466,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   // owns the surface, and every read is (re)started on workspace open / `r` so a
   // reopened workspace never sits on a pre-read snapshot.
   let acpRuntimeStatus: AcpAccessStatus | undefined
+  /** The Connection generation the CURRENT `acpRuntimeStatus` was read under. A
+   *  cached observation is only current while this identity still matches the
+   *  live Host generation — `configReadiness()==='ready'` alone cannot prove a
+   *  reconnected Host B is the one that produced an earlier Host A state. */
+  let acpRuntimeGeneration: unknown
   let acpRuntimeFailure: string | undefined
   let acpRuntimeReadInFlight: { readonly serial: number; readonly promise: Promise<AcpAccessStatus | undefined> } | undefined
   let acpRuntimeReadSerial = 0
@@ -473,6 +478,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
 
   const readAcpRuntimeStatus = async (): Promise<{ status: AcpAccessStatus | undefined; fresh: boolean }> => {
     const serial = ++acpRuntimeReadSerial
+    // The generation is captured BEFORE dispatch; the port's own fence turns a
+    // read that races a generation change into a failure, and this captured
+    // identity is what the settled fact is bound to.
+    const generation = acpCurrentGeneration()
     const promise = (async (): Promise<AcpAccessStatus | undefined> => await runner.acpAccess.getStatus())()
     acpRuntimeReadInFlight = { serial, promise }
     let status: AcpAccessStatus | undefined
@@ -485,8 +494,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const fresh = serial === acpRuntimeReadSerial
     if (fresh) {
       // A resolved read (including an `unavailable` status) REPLACES the value;
-      // a thrown failure is UNKNOWN and drops it.
+      // a thrown failure is UNKNOWN and drops it. The generation binds the fact.
       acpRuntimeStatus = failure === undefined ? status : undefined
+      acpRuntimeGeneration = generation
       acpRuntimeFailure = failure
       acpRuntimeReadSettled = true
       activeSettingsWorkspace?.refreshAcpRuntimeRow()
@@ -495,9 +505,26 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return { status: failure === undefined ? status : undefined, fresh }
   }
 
+  /**
+   * The CURRENT Host generation identity, read through the port's observation
+   * capability. A structural runner double that does not model the Split-Host
+   * generation reports `undefined` (treated as Direct-like: no cross-Host risk).
+   */
+  const acpCurrentGeneration = (): unknown =>
+    typeof runner.acpAccess?.currentGeneration === 'function' ? runner.acpAccess.currentGeneration() : undefined
+
+  /**
+   * Whether the cached ACP observation still belongs to the CURRENT Host
+   * generation. A generation change (Host A → Host B) revokes both the cached
+   * state AND any user selection derived from it, before any new Confirm.
+   */
+  const acpRuntimeGenerationCurrent = (): boolean =>
+    Object.is(acpRuntimeGeneration, acpCurrentGeneration())
+
   /** Enter the pending state synchronously so no snapshot presents a stale value. */
   const beginAcpRuntimeRead = (): void => {
     acpRuntimeStatus = undefined
+    acpRuntimeGeneration = undefined
     acpRuntimeFailure = undefined
     acpRuntimeReadSettled = false
   }
@@ -529,6 +556,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     if (readiness === 'unavailable') return 'Unavailable'
     if (acpRuntimeFailure !== undefined) return 'Unavailable'
     if (!acpRuntimeReadSettled) return 'Loading…'
+    // A settled fact from a PRIOR Host generation is not a current fact.
+    if (!acpRuntimeGenerationCurrent()) return 'Checking…'
     const status = acpRuntimeStatus
     if (status === undefined) return 'Unavailable'
     switch (status.state) {
@@ -547,6 +576,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     if (readiness === 'unavailable') return 'the Host is unavailable'
     if (acpRuntimeFailure !== undefined) return 'status could not be read'
     if (!acpRuntimeReadSettled) return 'checking…'
+    if (!acpRuntimeGenerationCurrent()) return 'the Host changed; re-checking the current ACP state…'
     const status = acpRuntimeStatus
     if (status === undefined) return 'unavailable'
     switch (status.state) {
@@ -564,6 +594,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     if (readiness === 'unavailable') return 'unavailable'
     if (acpRuntimeFailure !== undefined) return 'read-error'
     if (!acpRuntimeReadSettled) return 'runtime'
+    if (!acpRuntimeGenerationCurrent()) return 'last-known'
     const status = acpRuntimeStatus
     if (status === undefined || status.state === 'unavailable') return 'unavailable'
     if (status.state === 'changing') return 'runtime'
@@ -577,6 +608,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const status = acpRuntimeStatus
     const confirmable = acpReadiness() === 'ready'
       && acpRuntimeReadSettled
+      && acpRuntimeGenerationCurrent()
       && acpRuntimeFailure === undefined
       && (status?.state === 'enabled' || status?.state === 'disabled')
     return {
@@ -703,7 +735,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const target = value === 'On' ? true : value === 'Off' ? false : undefined
     if (target === undefined) return { outcome: 'not-saved', reason: `"${value}" is not an ACP listener candidate` }
     const targetState = target ? 'enabled' : 'disabled'
+    const isDirect = runner.backendKind === 'direct'
+    // Bind the user's choice to the Host generation it was DISPLAYED under. A
+    // reconnected Host B must never receive a write derived from Host A's state.
+    const choiceGeneration = acpRuntimeGeneration
+    const dispatchGeneration = acpCurrentGeneration()
+    if (!isDirect && !Object.is(choiceGeneration, dispatchGeneration)) {
+      return { outcome: 'not-saved', reason: 'the Host changed since this setting was read; the change was not sent' }
+    }
+    const sameGeneration = (): boolean => Object.is(dispatchGeneration, acpCurrentGeneration())
     const pre = await readAcpRuntimeStatus()
+    if (!sameGeneration()) {
+      return { outcome: 'not-saved', reason: 'the Host changed while reading the ACP state; the change was not sent' }
+    }
     if (!pre.fresh || pre.status === undefined) {
       return { outcome: 'indeterminate', reason: 'the authoritative ACP listener state could not be read' }
     }
@@ -712,10 +756,15 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     if (before.state === 'unavailable') return { outcome: 'not-saved', reason: 'the ACP listener is unavailable' }
     if (before.state === targetState) return { outcome: 'verified' }
     try {
-      await runner.acpAccess.setEnabled(target)
+      // Pass the expected generation so the port refuses to dispatch to a Host
+      // that changed after the user's choice was made (no cross-Host write).
+      await runner.acpAccess.setEnabled(target, dispatchGeneration)
     } catch (error) {
+      if (!sameGeneration()) {
+        return { outcome: 'indeterminate', reason: `${safeErrorMessage(error)}; the Host changed during the write, so its outcome cannot be attributed` }
+      }
       const after = await readAcpRuntimeStatus()
-      if (!after.fresh || after.status === undefined) {
+      if (!sameGeneration() || !after.fresh || after.status === undefined) {
         return { outcome: 'indeterminate', reason: `${safeErrorMessage(error)}; the authoritative ACP listener state could not be re-read` }
       }
       if (after.status.state === targetState) {
@@ -723,9 +772,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       }
       return { outcome: 'not-saved', reason: safeErrorMessage(error) }
     }
+    if (!sameGeneration()) {
+      return { outcome: 'indeterminate', reason: 'the Host changed during the write; its outcome cannot be attributed' }
+    }
     const settled = await readAcpRuntimeStatus()
-    if (!settled.fresh || settled.status === undefined) {
-      return { outcome: 'indeterminate', reason: 'the write was dispatched but the ACP listener state could not be re-read' }
+    if (!sameGeneration() || !settled.fresh || settled.status === undefined) {
+      return { outcome: 'indeterminate', reason: 'the write was dispatched but the ACP listener state could not be re-read for this Host' }
     }
     if (settled.status.state === targetState) return { outcome: 'verified' }
     return { outcome: 'not-saved', reason: `the write reported success, but the ACP listener reads ${settled.status.state}` }
@@ -1277,6 +1329,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
      *  runtime-facts re-read seam (never a second observation state). Released
      *  with the workspace lease. */
     let disposePolicyWatch: (() => void) | undefined
+    /** PO-1B: the ACP listener observation lease. A Connection generation change
+     *  revokes the previous Host's ACP state/selection and re-reads the new Host
+     *  before any new Confirm; released with the workspace. */
+    let disposeAcpGenerationWatch: (() => void) | undefined
     // C2-R2: the per-open VERIFIED fullscreen intent. A Fullscreen confirm that
     // really stored its preference records the target here; the post-close
     // hand-off applies the LAST verified choice of THIS open only. It is not a
@@ -1399,6 +1455,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           // The policy observation subscription dies with this workspace.
           disposePolicyWatch?.()
           disposePolicyWatch = undefined
+          // The ACP generation observation dies with this workspace too.
+          disposeAcpGenerationWatch?.()
+          disposeAcpGenerationWatch = undefined
           // C2-R4: the mounted Web page's command reference dies with this open
           // (the panel itself disposes the instance on teardown). A late fact
           // settlement then repaints nothing.
@@ -1449,6 +1508,17 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     })
     startWebSettingsRead()
     startAcpRuntimeRead()
+    // A Connection generation change (Host A -> Host B) must revoke the previous
+    // Host's ACP observation and any selection derived from it, and re-read the
+    // new Host before a new Confirm is allowed. This subscription repaints even
+    // without a key press, so a cached On can never be revived as Host B's fact.
+    const subscribeAcpGeneration = runner.acpAccess?.subscribeGeneration
+    if (typeof subscribeAcpGeneration === 'function') {
+      disposeAcpGenerationWatch = subscribeAcpGeneration.call(runner.acpAccess, () => {
+        if (activeSettingsWorkspace?.token !== token) return
+        startAcpRuntimeRead()
+      })
+    }
     // M6-1 F8: the initial session-policy read starts only now that the
     // workspace lease was granted (a refused open captures no scope and
     // starts no read); the panel's first snapshot already started it.

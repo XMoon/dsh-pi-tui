@@ -52,8 +52,24 @@ export class RemoteAcpAccessPort implements AcpAccessPort {
     return this.fenced('status', namespace => namespace.getStatus())
   }
 
-  async setEnabled(enabled: boolean): Promise<AcpAccessStatus> {
+  async setEnabled(enabled: boolean, expectedGeneration?: unknown): Promise<AcpAccessStatus> {
+    // Fail BEFORE dispatch if the caller's choice belongs to a superseded Host
+    // generation, so an old selection is never written to a newly connected Host.
+    if (expectedGeneration !== undefined && !Object.is(this.generation.getSnapshot(), expectedGeneration)) {
+      throw new SupersededReadError('acp access toggle superseded: the Host generation changed before dispatch')
+    }
     return this.fenced('toggle', namespace => namespace.setEnabled(enabled))
+  }
+
+  /** The exact generation this adapter fences every call on (object identity). */
+  currentGeneration(): unknown {
+    return this.generation.getSnapshot()
+  }
+
+  /** Observe Connection generation changes so a caller can revoke a cached
+   *  observation and re-read before acting on a new Host. */
+  subscribeGeneration(listener: () => void): () => void {
+    return this.generation.subscribe(listener)
   }
 
   /**

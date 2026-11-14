@@ -255,6 +255,8 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   const acpAccess: import('../../src/runtime/acp-access-port.ts').AcpAccessPort = {
     getStatus: async () => ({ state: 'unavailable', reason: 'test' }),
     setEnabled: async () => ({ state: 'unavailable', reason: 'test' }),
+    currentGeneration: () => undefined,
+    subscribeGeneration: () => () => {},
   }
   const sessionWorkspaceFacts: import('../../src/runtime/session-workspace-facts-port.ts').SessionWorkspaceFactsPort = {
     readActivity: async () => [],

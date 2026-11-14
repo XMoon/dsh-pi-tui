@@ -98,3 +98,30 @@ test('UNIT: an unmounted namespace or a disconnected Client fails closed', async
   }, disconnected)
   await assert.rejects(port.getStatus(), /not connected to a Host/u)
 })
+
+test('UNIT: setEnabled refuses BEFORE dispatch when the expected generation is stale', async () => {
+  const generation = generationSource()
+  let dispatched = 0
+  const namespace: RemoteAcpAccessNamespace = {
+    getStatus: async () => ({ ok: true, value: { state: 'enabled' } }),
+    setEnabled: async () => { dispatched += 1; return { ok: true, value: { state: 'disabled' } } },
+  }
+  const port = new RemoteAcpAccessPort(namespace, generation)
+  const hostA = generation.getSnapshot()
+  // The Client reconnects to Host B before the user's Host-A choice is dispatched.
+  generation.set({ id: 2 })
+  await assert.rejects(port.setEnabled(false, hostA), /generation changed before dispatch/u)
+  assert.equal(dispatched, 0, 'a stale-Host choice must never reach the newly connected Host')
+})
+
+test('UNIT: currentGeneration exposes the live generation identity for observation binding', async () => {
+  const generation = generationSource()
+  const port = new RemoteAcpAccessPort({
+    getStatus: async () => ({ ok: true, value: { state: 'disabled' } }),
+    setEnabled: async () => ({ ok: true, value: { state: 'enabled' } }),
+  }, generation)
+  const first = port.currentGeneration()
+  assert.equal(first, generation.getSnapshot())
+  generation.set({ id: 2 })
+  assert.notEqual(port.currentGeneration(), first, 'a reconnect changes the observed generation identity')
+})

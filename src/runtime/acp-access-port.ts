@@ -45,6 +45,25 @@ export type AcpAccessStatus =
 export interface AcpAccessPort {
   /** The Host's current listener state, read live on every call. */
   getStatus(): Promise<AcpAccessStatus>
-  /** Enable or disable the local ACP listener on THIS Host. */
-  setEnabled(enabled: boolean): Promise<AcpAccessStatus>
+  /** Enable or disable the local ACP listener on THIS Host. When
+   *  `expectedGeneration` is supplied, the write is refused (thrown) BEFORE any
+   *  dispatch if the live Connection generation no longer matches it, so a user
+   *  choice derived from an old Host can never reach a newly connected Host. */
+  setEnabled(enabled: boolean, expectedGeneration?: unknown): Promise<AcpAccessStatus>
+  /**
+   * The opaque identity of the CURRENT Connection generation (object identity),
+   * or `undefined` while disconnected / on Direct. A caller captures it when it
+   * observes a state and compares it before acting, so a cached observation and
+   * a user choice are bound to the SAME Host generation — `configReadiness()`
+   * alone cannot prove a reconnected Host is the one that produced the state.
+   */
+  currentGeneration(): unknown
+  /**
+   * Observe Connection generation changes. The callback fires when the Host
+   * generation that produced the current observation is no longer current, so
+   * the caller can revoke cached state/candidates and re-read before allowing a
+   * new Confirm. Returns an unsubscribe. Direct (no transport generation) is a
+   * no-op.
+   */
+  subscribeGeneration(listener: () => void): () => void
 }

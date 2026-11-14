@@ -139,6 +139,15 @@ class DirectUnavailableAcpAccess implements AcpAccessPort {
   async setEnabled(): Promise<AcpAccessStatus> {
     return { state: 'unavailable', reason: DIRECT_ACP_ACCESS_REASON }
   }
+
+  /** Direct owns no transport generation. */
+  currentGeneration(): unknown {
+    return undefined
+  }
+
+  subscribeGeneration(): () => void {
+    return () => {}
+  }
 }
 
 /** The ONE statement of the Direct ACP capability gap (presentation reads it). */

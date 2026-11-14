@@ -37,5 +37,7 @@ export function unavailableAcpAccess(): AcpAccessPort {
   return {
     getStatus: async () => ({ state: 'unavailable', reason }),
     setEnabled: async () => ({ state: 'unavailable', reason }),
+    currentGeneration: () => undefined,
+    subscribeGeneration: () => () => {},
   }
 }

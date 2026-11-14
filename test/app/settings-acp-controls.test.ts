@@ -62,6 +62,9 @@ interface Harness {
   readonly acp: { status: AcpAccessStatus; setEnabledCalls: boolean[]; failure: string | undefined }
   readonly pref: { state: AcpStartupPreferenceState | undefined; writes: boolean[]; failNext: string | undefined }
   readonly setReadiness: (readiness: 'ready' | 'stale' | 'unavailable') => void
+  /** Simulate a Connection generation change (Host A -> Host B): replace the
+   *  opaque generation identity and notify the generation subscribers. */
+  readonly bumpGeneration: () => void
   readonly dispose: () => void
 }
 
@@ -110,12 +113,19 @@ function setup(options: {
     writes: [] as boolean[],
     failNext: undefined as string | undefined,
   }
+  // The opaque Connection generation identity (object) the ACP observation binds
+  // to; a reconnect (Host A -> Host B) replaces it and notifies subscribers.
+  let generation: object | undefined = { id: 1 }
+  const generationListeners = new Set<() => void>()
   const acpAccess: AcpAccessPort = {
     getStatus: async () => {
       if (options.acpUnavailable === true) throw new Error('the port is not mounted')
       return acp.status
     },
-    setEnabled: async (enabled: boolean) => {
+    setEnabled: async (enabled: boolean, expectedGeneration?: unknown) => {
+      if (expectedGeneration !== undefined && !Object.is(generation, expectedGeneration)) {
+        throw new Error('superseded: the Host generation changed before dispatch')
+      }
       acp.setEnabledCalls.push(enabled)
       // Apply the reached state BEFORE any fault, so a "dispatched but reply
       // lost" fault models an INDETERMINATE outcome (the reread shows the
@@ -127,6 +137,11 @@ function setup(options: {
         throw new Error(reason)
       }
       return acp.status
+    },
+    currentGeneration: () => generation,
+    subscribeGeneration: listener => {
+      generationListeners.add(listener)
+      return () => { generationListeners.delete(listener) }
     },
   }
   const ctx = new Context()
@@ -210,6 +225,10 @@ function setup(options: {
     acp,
     pref,
     setReadiness: next => { readiness = next },
+    bumpGeneration: () => {
+      generation = { id: ((generation as { id?: number } | undefined)?.id ?? 0) + 1 }
+      for (const listener of [...generationListeners]) listener()
+    },
     dispose: () => {
       startedApps.delete(app)
       if (!app.isDisposed()) app.dispose()
@@ -380,6 +399,28 @@ test('a stale Host is never presented as the current ACP listener state', async 
     await key(h, ENTER)
     assert.doesNotMatch(h.view(), /Choose value/u, 'a stale Host offers no confirmable candidate')
     assert.equal(h.acp.setEnabledCalls.length, 0)
+  } finally {
+    h.dispose()
+  }
+})
+
+test('a reconnect to a DIFFERENT Host revokes the prior ACP state without a key press', async () => {
+  const h = setup({ status: { state: 'enabled' } }) // Host A: ACP On
+  try {
+    await openTools(h)
+    await highlightRow(h, 'ACP Server')
+    assert.match(h.view(), /> ACP Server\s+On\b/u, 'Host A shows its real On state')
+    // Host A drops (config goes stale), then a DIFFERENT Host B reconnects and is
+    // ready with ACP Off. The generation changes and notifies subscribers — the
+    // real reconnect path — WITHOUT the user pressing `r`.
+    h.setReadiness('stale')
+    h.acp.status = { state: 'disabled' }
+    h.setReadiness('ready')
+    h.bumpGeneration()
+    await settle(h, 'the row to reflect Host B without r', frame => /> ACP Server\s+Off\b/u.test(frame))
+    assert.doesNotMatch(h.view(), /> ACP Server\s+On\b/u,
+      'the previous Host A On must never be revived as Host B\'s current fact')
+    assert.equal(h.acp.setEnabledCalls.length, 0, 'the generation-change repaint is a READ, never a write')
   } finally {
     h.dispose()
   }
