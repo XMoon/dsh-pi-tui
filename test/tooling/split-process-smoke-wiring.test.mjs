@@ -18,8 +18,9 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse as parseYaml } from 'yaml'
@@ -35,7 +36,8 @@ import {
   selectedPassLine,
 } from '../../scripts/lib/split-smoke-selection.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
-import { unitBelongsToRun, unitFileSafetyError } from '../../scripts/smoke/split-process/managed-host-m6-2b.mjs'
+import { encodeUnitValue } from '../../src/app/remote-process/local-host-manager.ts'
+import { encodeExecArg, stopAndRemoveManagedUnit, unitBelongsToRun, unitFileSafetyError } from '../../scripts/smoke/split-process/managed-host-m6-2b.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'split-process-smoke.mjs')
@@ -578,6 +580,70 @@ test('managed unit cleanup only matches this run\u2019s exact owner metadata and
   assert.equal(unitFileSafetyError({ ...safe, uid: 2000 }, uid), 'unsafe-file')
   assert.equal(unitFileSafetyError({ ...safe, mode: 0o100644 }, uid), 'unsafe-file')
   assert.equal(unitFileSafetyError({ ...safe, isFile: () => false }, uid), 'unsafe-file')
+  // Cleanup's ExecStart encoding MUST equal the production encoder for %/$/"/\.
+  for (const value of ['/a b/c', '/a%b$c', '/a\\b"c', '/sp ace/%/x$y']) {
+    assert.equal(encodeExecArg(value), encodeUnitValue(value, 'probe', true), `encode mismatch for ${JSON.stringify(value)}`)
+  }
+})
+
+test('cleanup actually stops and removes this run\u2019s unit and refuses foreign, unsafe and failed-stop cases', t => {
+  const uid = process.getuid?.()
+  const mkRun = ({ artifactBuild, contentBuild = artifactBuild, stopStatus = 0, symlink = false }) => {
+    const root = testLifecycle(t).tempDir('m62b-cleanup-')
+    const home = join(root, 'home'); mkdirSync(home, { mode: 0o700 })
+    const unitDir = join(home, '.config', 'systemd', 'user'); mkdirSync(unitDir, { recursive: true, mode: 0o700 })
+    const profileDir = join(root, 'profile'); mkdirSync(profileDir, { recursive: true, mode: 0o700 })
+    // A `%` in the install path proves the encoded-ExecStart match works.
+    const profilePackage = join(root, 'pkg%name'); mkdirSync(join(profilePackage, 'dist'), { recursive: true, mode: 0o700 })
+    writeFileSync(join(profilePackage, 'dist', 'local-host.mjs'), 'process.exit(0)\n')
+    const anchor = join(root, 'anchor.json'); writeFileSync(anchor, JSON.stringify({ version: '0.2.2-rc.3' }))
+    const scopeId = createHash('sha256').update(`dsh-pi-tui/local-scope/1\0${uid}\0${realpathSync(profileDir)}`).digest('hex')
+    const unit = `dsh-pi-tui@pi-tui-${scopeId.slice(0, 16)}.service`
+    const unitPath = join(unitDir, unit)
+    const hostEntry = realpathSync(join(profilePackage, 'dist', 'local-host.mjs'))
+    const content = ['[Unit]', 'X-DshPiTuiOwner=local-host-manager-v1', `X-DshPiTuiScopeId=${scopeId}`, `X-DshPiTuiInstallBuild=${contentBuild}`, '[Service]', `ExecStart="${process.execPath}" ${encodeExecArg(hostEntry)}`].join('\n')
+    if (symlink) {
+      const target = join(root, 'target')
+      writeFileSync(target, content, { mode: 0o600 })
+      symlinkSync(target, unitPath)
+    } else {
+      writeFileSync(unitPath, content, { mode: 0o600 })
+    }
+    const calls = []
+    const fakeRun = args => {
+      calls.push(args.join(' '))
+      if (args.includes('show')) return { status: 0, stdout: `LoadState=loaded\nActiveState=active\nFragmentPath=${unitPath}\nDropInPaths=\n`, stderr: '' }
+      if (args.includes('stop')) return { status: stopStatus, stdout: '', stderr: stopStatus === 0 ? '' : 'stop failed' }
+      return { status: 0, stdout: '', stderr: '' }
+    }
+    const installation = { profileDir, profilePackage, dshHome: join(root, 'dsh-home'), anchor }
+    const result = stopAndRemoveManagedUnit(installation, () => {}, undefined, {
+      uid, homeDir: home, systemctl: fakeRun, instanceBuild: () => undefined, artifactBuild: () => artifactBuild,
+    })
+    return { result, unitPath, calls }
+  }
+  // Happy AND pre-publish (no Host identity): recognized from the install artifact.
+  const ok = mkRun({ artifactBuild: 'b'.repeat(64) })
+  assert.equal(ok.result.removed, true)
+  assert.equal(existsSync(ok.unitPath), false)
+  assert.ok(ok.calls.some(c => c.includes('stop')), 'cleanup must call systemctl stop')
+  assert.ok(ok.calls.some(c => c.includes('daemon-reload')), 'cleanup must daemon-reload after unlink')
+  // A unit of a different build is left untouched.
+  const foreign = mkRun({ artifactBuild: 'b'.repeat(64), contentBuild: 'c'.repeat(64) })
+  assert.equal(foreign.result.removed, false)
+  assert.equal(existsSync(foreign.unitPath), true)
+  // A symlinked unit path is refused and its target kept.
+  const sym = mkRun({ artifactBuild: 'b'.repeat(64), symlink: true })
+  assert.equal(sym.result.removed, false)
+  assert.equal(existsSync(sym.unitPath), true)
+  // A failed stop never unlinks.
+  const failed = mkRun({ artifactBuild: 'b'.repeat(64), stopStatus: 1 })
+  assert.equal(failed.result.removed, false)
+  assert.equal(existsSync(failed.unitPath), true)
+  // No build known at all -> not ours, kept.
+  const nobuild = mkRun({ artifactBuild: undefined, contentBuild: 'b'.repeat(64) })
+  assert.equal(nobuild.result.removed, false)
+  assert.equal(existsSync(nobuild.unitPath), true)
 })
 
 test('the ACP UDS selected verdict accepts only the complete real-L6 proof', () => {
