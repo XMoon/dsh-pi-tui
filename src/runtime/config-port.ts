@@ -981,6 +981,13 @@ export type McpServerSources =
       readonly kind: 'ready'
       /** The effective configured `servers` keys (never registration names). */
       readonly configuredNames: readonly string[]
+      /**
+       * Opaque identity of the Host generation this key set was read from. A
+       * consumer MUST compare it with the roster generation it wants to
+       * classify and treat a mismatch as `Unknown`: a key set from another
+       * Host authority is never combined with a roster.
+       */
+      readonly generation: object
       /** The namespace revision the keys were read at, when exposed. */
       readonly revision?: number
     }

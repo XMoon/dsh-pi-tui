@@ -124,18 +124,22 @@ test('the wide frame paints the list and the selected detail, one marker and no 
   assert.equal(lines.length, 20, 'the page fills its exact grant')
 })
 
-test('the 44x8 narrow frame keeps the selected row, its status and a complete Esc affordance', () => {
-  const { page } = makePage(snapshot())
-  const lines = render(page, 44, 4 + 1)
-  const frame = lines.join('\n')
-  assert.match(frame, /alpha/u)
-  assert.match(frame, /Connected/u)
-  assert.match(frame, /Back \[Esc\]/u)
-  assert.ok(lines[lines.length - 1]!.includes('Back [Esc]'), 'the physical last row is the Action Bar')
-  const span = page.paintedEscapeSpan()
-  assert.ok(span !== undefined, 'a complete Esc affordance publishes its pointer span')
-  for (const line of lines) assert.ok(visibleWidth(line) <= 44, `no line may exceed the frame: ${line}`)
-  assert.equal(lines.length, 5, 'the page fills its exact grant (4 body + bar)')
+test('the 44-wide frame keeps the selected row, its status and a complete Esc at 8 and at the real 5-line child grant', () => {
+  for (const grant of [8, 5]) {
+    const { page } = makePage(snapshot())
+    // At a 44x8 terminal the root grants the page 5 lines (4 content + the one
+    // physical Action Bar); this page is also exercised at its full 8-line
+    // grant so a taller narrow grant cannot lose the Esc affordance either.
+    const lines = render(page, 44, grant)
+    const frame = lines.join('\n')
+    assert.match(frame, /alpha/u, `grant ${String(grant)} paints the selected row`)
+    assert.match(frame, /Connected/u, `grant ${String(grant)} paints the status`)
+    assert.match(frame, /Back \[Esc\]/u, `grant ${String(grant)} paints the complete Esc affordance`)
+    assert.ok(lines[lines.length - 1]!.includes('Back [Esc]'), 'the physical last row is the Action Bar')
+    assert.ok(page.paintedEscapeSpan() !== undefined, 'a complete Esc affordance publishes its pointer span')
+    for (const line of lines) assert.ok(visibleWidth(line) <= 44, `no line may exceed the frame: ${line}`)
+    assert.equal(lines.length, grant, 'the page fills its exact grant')
+  }
 })
 
 test('a probe that connected but did not confirm cleanup is its OWN result, never a pure success', () => {

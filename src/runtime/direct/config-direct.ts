@@ -191,12 +191,16 @@ export class DirectConfigPort implements ConfigPort {
   readonly backendStartupPreference: BackendStartupPreferenceConfig
   readonly acpStartupPreference: AcpStartupPreferenceConfig
   readonly mcpServerSources: McpServerSourcesConfig
+  /** FR3: the live Host MCP generation the source read is bound to. */
+  private readonly mcpGeneration: (() => object) | undefined
 
   constructor(
     ctx: HostContextLike,
     tuiSettings: TuiSettingsConfig | undefined,
     agentFor: (sessionId: string) => unknown | undefined,
+    mcpGeneration?: () => object,
   ) {
+    this.mcpGeneration = mcpGeneration
     this.tuiSettings = tuiSettings
     this.footerCommandTrust = new DirectFooterCommandTrust(ctx)
     this.footerCustomItems = new DirectFooterCustomItems(ctx)
@@ -212,7 +216,7 @@ export class DirectConfigPort implements ConfigPort {
     this.webStartupPreference = new DirectWebStartupPreferenceConfig(ctx)
     this.backendStartupPreference = new DirectBackendStartupPreferenceConfig(ctx)
     this.acpStartupPreference = new DirectAcpStartupPreferenceConfig(ctx)
-    this.mcpServerSources = new DirectMcpServerSourcesConfig(ctx)
+    this.mcpServerSources = new DirectMcpServerSourcesConfig(ctx, mcpGeneration)
   }
 }
 
@@ -2156,9 +2160,15 @@ const MCP_SERVER_SOURCES_NS = 'mcp-manager'
  */
 export class DirectMcpServerSourcesConfig implements McpServerSourcesConfig {
   private readonly ctx: HostContextLike
+  private readonly generation: () => object
+  /** A stable fallback identity for a composition that never wires the MCP
+   *  manager generation: it can never match a real roster generation, so a
+   *  consumer honestly reports Unknown instead of mixing authorities. */
+  private readonly unwiredGeneration = Object.freeze({})
 
-  constructor(ctx: HostContextLike) {
+  constructor(ctx: HostContextLike, generation?: () => object) {
     this.ctx = ctx
+    this.generation = generation ?? (() => this.unwiredGeneration)
   }
 
   read(): McpServerSources {
@@ -2185,6 +2195,7 @@ export class DirectMcpServerSourcesConfig implements McpServerSourcesConfig {
     return {
       kind: 'ready',
       configuredNames,
+      generation: this.generation(),
       ...descriptor.revision === undefined ? {} : { revision: descriptor.revision },
     }
   }

@@ -979,7 +979,10 @@ status arrives through `watch`). Failures are `unavailable`, `rejected`
 NEVER the configuration-source verdict. The read-only
 `ConfigPort.mcpServerSources` projects the EFFECTIVE `mcp-manager.servers` key
 set from the official Host Settings (Direct in-process; Remote through the ONE
-existing settings mirror and its `describe()` refresh). Classification is
+existing settings mirror and its `describe()` refresh); every `ready` read
+carries the opaque Host generation identity it was read from, and a consumer
+must treat a key set from another generation as `Unknown` rather than combine it
+with a roster. Classification is
 `Configured` when that key set holds the name, `Retained/removed` for a manager
 record with no live entry, `Plugin-owned` only for a live entry the CURRENT key
 set does not hold, and `Unknown` whenever the key set is not current/unreadable
