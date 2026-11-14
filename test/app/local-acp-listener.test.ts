@@ -672,16 +672,17 @@ test('a stale PRIVATE bind socket left by SIGKILL is recovered on the next start
     env: { ...process.env, PRIVDIR: privDir },
     stdio: ['ignore', 'pipe', 'inherit'],
   })
-  await new Promise<void>((resolveReady, rejectReady) => {
+  t.after(() => { try { child.kill('SIGKILL') } catch {} })
+  // bounded deadline: fail fast if the child never prints LISTENED (a real
+  // readiness signal, not a blind sleep). `withTimeout` clears its own timer.
+  await withTimeout(new Promise<void>((resolveReady, rejectReady) => {
     let output = ''
     child.stdout.on('data', chunk => {
       output += chunk
       if (output.includes('LISTENED')) resolveReady()
     })
     child.on('exit', code => rejectReady(new Error(`private-bind child exited early: ${String(code)}`)))
-    // bounded deadline: fail fast if the child never prints LISTENED (a real readiness signal, not a blind sleep)
-    setTimeout(() => rejectReady(new Error('private-bind child never reported LISTENED')), 15_000) // bounded deadline
-  })
+  }), 15_000, 'private-bind child never reported LISTENED')
   child.kill('SIGKILL')
   await new Promise<void>(resolveExit => child.on('exit', () => resolveExit()))
   assert.equal(lstatSync(privSock).isSocket(), true, 'the SIGKILL must leave a stale private socket')
