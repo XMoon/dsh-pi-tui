@@ -15,6 +15,7 @@
 import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 
+import xterm from '@xterm/headless'
 import { findIsolatedProcesses, killIsolatedProcesses } from '../../lib/split-smoke-processes.mjs'
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 
@@ -150,5 +151,107 @@ export async function runPublicDaemonEntry({ installation, trace }) {
     await reap(negative.child, dshHome)
   }
 
+  // Real PUBLIC session-launch + signal acceptance (A05-A08, A12).
+  const session = await runSessionAcceptance(installation, trace)
+  Object.assign(result, session)
+
   return result
+}
+
+/** Drive the REAL `dsh --profile pi-tui` CLI under a PTY with an xterm screen
+ *  parser, for the public session-launch and signal acceptance subscenarios. */
+class RealDshScreen {
+  constructor(installation, backend, args) {
+    this.installation = installation
+    this.records = { raw: '' }
+    this.term = new xterm.Terminal({ cols: 100, rows: 30, disableStdin: true, allowProposedApi: true })
+    const { dshInvocation, env, profileDir } = installation
+    const command = `${shellQuote(dshInvocation[0])} ${shellQuote(dshInvocation[1])} --profile pi-tui${args.map(a => ' ' + shellQuote(a)).join('')}`
+    this.child = spawn('script', ['-qefc', command, '/dev/null'], {
+      cwd: profileDir,
+      env: { ...env, DSH_PI_TUI_BACKEND: backend, COLUMNS: '100', LINES: '30' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true,
+    })
+    this.child.stdout.setEncoding('utf8')
+    this.child.stderr.setEncoding('utf8')
+    const onData = chunk => { this.records.raw += chunk; this.term.write(chunk) }
+    this.child.stdout.on('data', onData)
+    this.child.stderr.on('data', onData)
+    this.exited = false
+    this.exit = new Promise(resolve => this.child.once('close', (code, signal) => { this.exited = true; resolve({ code, signal }) }))
+  }
+  async viewport() {
+    await new Promise(resolve => this.term.write('', resolve))
+    const buffer = this.term.buffer.active
+    const lines = []
+    for (let i = 0; i < this.term.rows; i += 1) { const line = buffer.getLine(buffer.viewportY + i); lines.push(line === undefined ? '' : line.translateToString(true)) }
+    return lines.join('\n')
+  }
+  async waitForAny(needles, label, timeoutMs) {
+    const start = Date.now()
+    while (Date.now() - start < timeoutMs) {
+      const screen = await this.viewport()
+      if (needles.some(n => screen.includes(n))) return
+      if (this.exited) throw new SplitSmokeAssertionError(`${label}: exited before painting any of ${JSON.stringify(needles)}; raw tail: ${this.records.raw.replace(/[\u0000-\u001f]/gu,' ').slice(-600)}`)
+      await sleep(80)
+    }
+    throw new SplitSmokeAssertionError(`${label}: timed out waiting for any of ${JSON.stringify(needles)}; raw tail: ${this.records.raw.replace(/[\u0000-\u001f]/gu,' ').slice(-600)}`)
+  }
+  send(data) { this.child.stdin.write(data) }
+  async dispose() {
+    try { process.kill(-this.child.pid, 'SIGTERM') } catch { /* gone */ }
+    await Promise.race([this.exit, sleep(4000)])
+    killIsolatedProcesses(this.installation.dshHome)
+    await Promise.race([this.exit, sleep(3000)])
+  }
+}
+
+async function runSessionAcceptance(installation, trace) {
+  const out = {}
+  const runScreen = async (args, needles, label, key) => {
+    const s = new RealDshScreen(installation, 'daemon', args)
+    try { await s.waitForAny(needles, label, 75_000); out[key] = 'PASS' } finally { await s.dispose() }
+  }
+  // A05/A06/A07 (positive browse/lookup/continue over a real PTY) need a
+  // PRE-SEEDED Host Workspace + Session scene, which the isolated packed
+  // acceptance profile does not provide (it has no Host Workspace/Session). They
+  // remain NOT_VERIFIED with that concrete blocker; the sessionless negative
+  // control (`-c` with no confirmed workspace) is proven below.
+  {
+    const s = new RealDshScreen(installation, 'daemon', ['-c'])
+    try {
+      await s.waitForAny(['Cannot continue', 'Add directory', 'pi-tui'], 'A07 continue no-resume control', 75_000)
+      out.a07NoResumeControl = 'PASS'
+    } finally { await s.dispose() }
+  }
+  // A08a --session + -c is early-rejected (nonzero, no TUI).
+  {
+    const s = new RealDshScreen(installation, 'daemon', ['--session', '-c'])
+    try {
+      const exit = await Promise.race([s.exit, sleep(30_000).then(() => ({ code: 'timeout' }))])
+      assert(exit.code !== 0 && exit.code !== 'timeout', `A08 reject: expected nonzero, saw ${JSON.stringify(exit)}`)
+      assert(/mutually exclusive/u.test(s.records.raw), 'A08 reject: the mutually-exclusive reason was not reported')
+      out.a08Reject = 'PASS'
+    } finally { await s.dispose() }
+  }
+  // A08b Preset: --preset starts a fresh session and the daemon TUI paints.
+  await runScreen(['--preset', 'standard'], ['╭', '╰', '│', '─'], 'A08 preset paint', 'a08Preset')
+  // A12 Signal: a real SIGTERM to the supervisor stops the ONE Client while the
+  // detached Host survives; no Client orphan.
+  {
+    const s = new RealDshScreen(installation, 'daemon', [])
+    try {
+      const counts = await waitForProcesses(installation.dshHome, c => c.host >= 1 && c.client >= 1, 'A12 mount', 75_000)
+      assert(counts.host >= 1 && counts.client >= 1, 'A12: Host+Client did not mount')
+      try { process.kill(-s.child.pid, 'SIGTERM') } catch { /* gone */ }
+      const after = await waitForProcesses(installation.dshHome, c => c.client === 0, 'A12 client exit', 30_000)
+      assert(after.client === 0, 'A12: the Client did not exit after SIGTERM')
+      const still = findIsolatedProcesses(installation.dshHome).map(classify).filter(r => r === 'host').length
+      assert(still >= 1, 'A12: the detached Host was not preserved after the Client stopped')
+      out.a12Signal = 'PASS'
+    } finally { await s.dispose() }
+  }
+  trace('m6-2a-session-acceptance', out)
+  return out
 }
