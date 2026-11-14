@@ -545,6 +545,29 @@ export function assertSelectedVerdict(caseId, result) {
     `selected ${caseId}: the ACP shared Session View verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
     return
   }
+  if (caseId === 'acp.po3a-turn-events') {
+    assert(result?.status === 'PASS'
+      && result?.scope === 'REAL_SPLIT_PROCESS_L6'
+      && result?.acpVersionFromInstalledDsh === true
+      && result?.tuiAndAcpShareSession === true
+      && result?.promptAcceptedWhileRunning === true
+      && result?.ackIsNotCompletion === true
+      && result?.acpOnlyOutput === true
+      && result?.exactTurnCorrelation === true
+      && result?.updatesBeforeStopReason === true
+      && result?.tuiAfterPromptHistory === true
+      && result?.mixedTurnFailClosed === true
+      && result?.twoViewIsolation === true
+      && result?.disconnectKeepsHostTurn === true
+      && result?.staleGenerationNotReplayed === true
+      && result?.outputBackpressureIsolated === true
+      && result?.sameConnectionAfterFailure === true
+      && result?.hostIdentityKept === true
+      && result?.originalSplitClientIntact === true
+      && result?.l6EvidenceRecorded === true,
+    `selected ${caseId}: the ACP prompt-turn verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
+    return
+  }
   if (caseId === 'account.official-composition') {
     assert(result?.status === 'PASS'
       && result?.browser === 'PASS'

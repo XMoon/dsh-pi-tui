@@ -292,14 +292,15 @@ export async function runAcpPo1(context) {
       assert(capacity?.error?.data?.code === 'LOCAL_ACP_CAPACITY_EXCEEDED', 'the capacity rejection must name LOCAL_ACP_CAPACITY_EXCEEDED')
       await c5.closed
 
-      // The STILL-unsupported Session methods fail closed; PO-2 now implements
-      // `session/new|resume|close` on a real Host, so this raw socket contract
-      // checks the methods that remain unimplemented. An oversized frame closes
-      // only its own connection.
-      c1.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: 'unused', prompt: [] } })
+      // The STILL-unsupported Session methods fail closed; PO-2 implements
+      // `session/new|resume|close` and PO-3A admits `session/prompt` only on an
+      // ATTACHED View of a real Host, so a prompt from this unattached connection
+      // is refused with the View's stable code. An oversized frame closes only
+      // its own connection.
+      c1.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: 'unused', prompt: [{ type: 'text', text: 'x' }] } })
       const promptReject = await c1.next()
-      assert(promptReject?.error?.code === -32042, 'session/prompt must fail closed with -32042')
-      assert(promptReject?.error?.data?.code === 'LOCAL_ACP_SESSION_NOT_READY', 'session/prompt must name LOCAL_ACP_SESSION_NOT_READY')
+      assert(promptReject?.error?.code === -32602, 'an unattached session/prompt must fail closed with -32602')
+      assert(promptReject?.error?.data?.code === 'LOCAL_ACP_VIEW_NOT_OWNED', 'an unattached session/prompt must name LOCAL_ACP_VIEW_NOT_OWNED')
       c1.send({ jsonrpc: '2.0', id: 6, method: 'session/list', params: {} })
       const listReject = await c1.next()
       assert(listReject?.error?.code === -32042, 'session/list must fail closed with -32042')

@@ -63,6 +63,8 @@ import {
 import {
   type AcpCreateSessionOutcome,
   type AcpCreateWorkspaceOutcome,
+  type AcpPromptFactListener,
+  type AcpSessionPromptRequest,
   type HostAcpSessionAccess,
   type LiveAgentViewIdentity,
 } from './local-acp-session-view.ts'
@@ -454,6 +456,8 @@ interface SessionControllerLike {
   resolveAgent(sessionId: string): Promise<
     { agent: LiveAgentViewIdentity } | { error: { code: string; message: string } }
   >
+  /** The official Remote prompt surface; `signal` gates admission only. */
+  prompt(request: AcpSessionPromptRequest, signal: AbortSignal): Promise<{ readonly accepted: true }>
 }
 interface AgentRegistryLike {
   get(id: string): LiveAgentViewIdentity | undefined
@@ -533,6 +537,35 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
     resolveAgent: sessionId => sessionController.resolveAgent(sessionId),
     currentAgent: sessionId => agents.get(sessionId),
     currentSession: sessionId => sessions.get(sessionId),
+    prompt: (request, signal) => sessionController.prompt(request, signal),
+    /**
+     * Subscribe the View owner to the exact Host facts a prompt flight is
+     * correlated against. The Host Context, registries and Agent/Session objects
+     * stay on this side: only the observed identity payloads are forwarded, and
+     * the returned disposer removes exactly these listeners.
+     */
+    observePromptFacts(listener: AcpPromptFactListener): () => void {
+      const disposers = [
+        context.on('agent/inbox/inserted', payload => {
+          listener.onInboxInserted(payload.agent, payload.message)
+        }),
+        context.on('agent/inbox/claimed', payload => {
+          listener.onInboxClaimed(payload.agent, payload.message, payload.turn)
+        }),
+        context.on('session/event', (session, event) => {
+          listener.onSessionEvent(session, event)
+        }),
+        context.on('agent/error', payload => {
+          listener.onAgentError(payload.agent, payload.turn)
+        }),
+        context.on('agent/disposed', payload => {
+          listener.onAgentDisposed(payload.agent)
+        }),
+      ]
+      return () => {
+        for (const dispose of disposers) dispose()
+      }
+    },
   }
 }
 
