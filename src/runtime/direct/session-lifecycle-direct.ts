@@ -552,18 +552,20 @@ export class DirectSessionLifecycle implements SessionLifecycle {
         isSeeded: true,
         ...(composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }),
       }
-      // Fork is the official SIBLING with a different contract: the rc.3
-      // `SessionCommandController.fork` seeds a child from provider/model only
-      // and never takes the global default effort (the child's inherited
-      // pending/last-used model selection comes from the seed). Crop the
-      // complete activation fallback here, at the call, instead of redefining
-      // the fork semantics.
-      const fallback = this.agentOptions()
-      const forkAgentOptions = fallback.provider === undefined || fallback.model === undefined
-        ? {}
-        : { provider: fallback.provider, model: fallback.model }
       let handle: AgentHandle
       try {
+        // Fork is the official SIBLING with a different contract: the rc.3
+        // `SessionCommandController.fork` seeds a child from provider/model only
+        // and never takes the global default effort (the child's inherited
+        // pending/last-used model selection comes from the seed). Crop the
+        // complete activation fallback here, INSIDE the create failure boundary:
+        // a throwing Host default read must surface as the same structured
+        // gateway/internal rejection as an `agents.create` failure, never as an
+        // uncaught throw out of `fork`.
+        const fallback = this.agentOptions()
+        const forkAgentOptions = fallback.provider === undefined || fallback.model === undefined
+          ? {}
+          : { provider: fallback.provider, model: fallback.model }
         handle = await agents.create({
           sessionId: SessionId(`session-${randomUUID()}`),
           seed,

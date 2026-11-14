@@ -594,6 +594,38 @@ test('Direct maps an agents.create failure to gateway/internal, never session/fo
   }
 })
 
+test('Direct maps a throwing Host default read to gateway/internal instead of throwing out of fork', async () => {
+  // The fork fallback read is part of the child-create failure boundary: a Host
+  // default service whose volatile config read throws must become the same
+  // structured rejection as an `agents.create` failure, never an uncaught throw
+  // that breaks the ForkResult contract.
+  const source = observation({
+    events: [{ type: 'turn/end', seq: 0, time: T0, data: { turn: 1, reason: { kind: 'completed' } } }],
+  })
+  const lifecycle = new DirectSessionLifecycle({
+    get: name => {
+      if (name === 'sessionQuery') return { observeSession: async () => source }
+      if (name === 'agents') {
+        return {
+          create: async () => { throw new Error('create should not run') },
+          resume: async () => { throw new Error('resume should not run') },
+        }
+      }
+      if (name === 'agentDefaultModel') {
+        return { currentSelection: () => { throw new Error('volatile default unavailable') } }
+      }
+      return undefined
+    },
+  }, async preset => ({ agentPreset: preset, setup: () => {} }))
+
+  const result = await lifecycle.fork({ sourceSessionId: 'session-source' })
+  assert.equal(result.outcome.kind, 'rejected')
+  if (result.outcome.kind === 'rejected') {
+    assert.equal(result.outcome.error.code, 'gateway/internal')
+    assert.match(result.outcome.error.message, /volatile default unavailable/u)
+  }
+})
+
 test('Direct maps a missing Host fork service to gateway/internal', async () => {
   const lifecycle = new DirectSessionLifecycle({ get: () => undefined }, async () => ({ setup: () => {} }))
   const result = await lifecycle.fork({ sourceSessionId: 'session-source' })
