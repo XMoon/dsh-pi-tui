@@ -1503,6 +1503,7 @@ test('A01/A03: an approval of the OWN running turn goes ONLY to this connection 
   const request = view.access.promptCalls[0]!
   view.insert(request.requestId, 'm-b')
   view.access.pendingInbox.delete('m-b')
+  view.access.turnFence = { openTurnStartSeq: 700, lastTurn: 7 }
   view.claim('m-b', 7, request.requestId)
   let delegated = false
   const outcomePromise = view.registry.onApprovalRequest(
@@ -1549,6 +1550,7 @@ test('A04: a stale identity, an unknown optionId and a missing callId all fail c
     const request = view.access.promptCalls[0]!
     view.insert(request.requestId, 'm-b')
     view.access.pendingInbox.delete('m-b')
+    view.access.turnFence = { openTurnStartSeq: 300, lastTurn: 3 }
     view.claim('m-b', 3, request.requestId)
     let delegated = false
     const outcome = await view.registry.onApprovalRequest(
@@ -1568,6 +1570,7 @@ test('A04: a stale identity, an unknown optionId and a missing callId all fail c
     const request = view.access.promptCalls[0]!
     view.insert(request.requestId, 'm-b')
     view.access.pendingInbox.delete('m-b')
+    view.access.turnFence = { openTurnStartSeq: 400, lastTurn: 4 }
     view.claim('m-b', 4, request.requestId)
     const outcome = view.registry.onApprovalRequest(
       { agent: view.agent, toolName: 'bash', callId: 'call-3' },
@@ -1601,6 +1604,7 @@ test('A05: an upstream signal abort settles the reverse request as cancelled (ne
   const request = view.access.promptCalls[0]!
   view.insert(request.requestId, 'm-b')
   view.access.pendingInbox.delete('m-b')
+  view.access.turnFence = { openTurnStartSeq: 800, lastTurn: 8 }
   view.claim('m-b', 8, request.requestId)
   const upstream = new AbortController()
   const outcome = view.registry.onApprovalRequest(
@@ -1675,4 +1679,76 @@ test('a committed assistant message carrying a tool-call block projects the text
     'agent_message_chunk',
     'tool_call_update',
   ], 'the tool-call block in the assistant message is not duplicated or rejected')
+})
+
+test('RFL-001: a stale live-flight turn marker never suppresses the TUI responder of the current turn', async () => {
+  {
+    // The flight's claimed turn is no longer the official current turn: a
+    // NEW turn (TUI-owned) is open. The request must be delegated.
+    const view = promptView()
+    await view.attach()
+    const attempt = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-b')
+    view.access.pendingInbox.delete('m-b')
+    view.claim('m-b', 3, request.requestId)
+    // The official fence moved on to a foreign turn.
+    view.access.turnFence = { openTurnStartSeq: 900, lastTurn: 4 }
+    let delegated = 0
+    const outcome = await view.registry.onApprovalRequest(
+      { agent: view.agent, toolName: 'bash', callId: 'call-new-turn' },
+      async () => { delegated += 1; return 'allowed-once' },
+    )
+    assert.equal(delegated, 1, 'a request of the NEW current (TUI-owned) turn is delegated')
+    assert.equal(outcome, 'allowed-once')
+    assert.equal(view.permissionRequests.length, 0, 'no reverse request is issued for a foreign turn')
+    view.commit('turn/end', { turn: 3, reason: { kind: 'completed' } })
+    await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT'))
+  }
+  {
+    // The flight's turn terminalized (no open turn): the ask cannot legally
+    // belong to it, so the classification fails closed instead of asking.
+    const view = promptView()
+    await view.attach()
+    const attempt = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-b')
+    view.access.pendingInbox.delete('m-b')
+    view.claim('m-b', 5, request.requestId)
+    view.access.turnFence = { openTurnStartSeq: null, lastTurn: 5 }
+    let delegated = false
+    const outcome = await view.registry.onApprovalRequest(
+      { agent: view.agent, toolName: 'bash', callId: 'call-dead-turn' },
+      async () => { delegated = true; return 'rejected' },
+    )
+    assert.equal(outcome, 'unavailable', 'a dead declared turn fails closed')
+    assert.equal(delegated, false, 'a dead declared turn never reaches the TUI')
+    view.commit('turn/end', { turn: 5, reason: { kind: 'completed' } })
+    await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT'))
+  }
+})
+
+test('RFL-002: an Agent disposal clears its retired-turn fence for good', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-b')
+  view.access.pendingInbox.delete('m-b')
+  view.claim('m-b', 7, request.requestId)
+  // The Agent is disposed while the flight holds a claimed turn.
+  view.registry.onAgentDisposed(view.agent)
+  await assert.rejects(attempt, (error: unknown) => error instanceof LocalAcpViewError
+    && error.code === 'LOCAL_ACP_PROMPT_TURN_FAILED' && error.data.reason === 'agent-disposed')
+  // No turn/end will ever arrive for the disposed Agent. A later approval
+  // request must be delegated (no legal ACP owner remains), never trapped by
+  // a stale retired fence.
+  view.access.turnFence = { openTurnStartSeq: 1200, lastTurn: 8 }
+  let delegated = 0
+  const outcome = await view.registry.onApprovalRequest(
+    { agent: view.agent, toolName: 'bash', callId: 'call-after-dispose' },
+    async () => { delegated += 1; return 'rejected' },
+  )
+  assert.equal(delegated, 1, 'after disposal the request is delegated, not trapped')
+  assert.equal(outcome, 'rejected')
 })
