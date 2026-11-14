@@ -2039,6 +2039,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // operable nor keyboard-live, and the SAME instance comes back when the
     // last blocker settles (a stale captured scope retires it instead).
     historySearch?.syncBlocker(seat.hasModalSeat())
+    // T3-B1 §7: a HIGHER seat acquiring the input (a Modal, the temporary
+    // Reader, the Work Hub, a picker, the Queue sheet) RETIRES the Session Search
+    // card — the frozen contract has NO `parked` phase for it, so this is not a
+    // blocked-but-alive card that could reappear when the blocker settles. The
+    // retire drops the query, the targets, the source token, the pending reveal
+    // and the temporary disclosure grants in ONE place, and the higher seat's own
+    // owner keeps the frame meanwhile.
+    if (transcriptSearch?.holdsState() === true && !transcriptSearchSeatAdmitted()) retireSearchSeat()
     if (seat.hasModalSeat()) {
       sessionBrowser?.suspend()
       webPicker?.suspend()
@@ -2984,10 +2992,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const toolKeys = new Set<string>()
     const workflowRuns = new Set<WorkflowRunId>()
     const workflowPhases = new Map<WorkflowRunId, Set<string>>()
-    // The message's own Turn is the Focus root that must open to reveal it. A
-    // Command card carries no `turn` at all (its identity is the command run), so
-    // only a message kind that really has one grants a Focus root.
-    if ('turn' in message) focusTurns.add(message.turn)
+    // The message's own Turn is the Focus root, but ONLY for a row the focused
+    // projection really HIDES inside the Thought. `projectFocus` keeps the
+    // prompt/steer rows, surfaced context and the FINAL assistant OUTSIDE the
+    // Thought, so opening the Thought for one of those would reveal Process the
+    // target never needed (Finding 5). The ancestry test is the projection's own
+    // collapsed-Focus disposition — the SAME authority that decides what the
+    // Thought hides — never a second classifier.
+    if ('turn' in message && focusRootHides(message)) focusTurns.add(message.turn)
     // Work spans / clusters that really CONTAIN the message in this projection.
     for (const block of projectTranscriptStructure(lastMessages)) {
       if (block.kind === 'work') {
@@ -3032,6 +3044,28 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       workflowPhases,
     }
   }
+
+  /**
+   * T3-B1 Finding 5: whether the COLLAPSED focused projection would HIDE this
+   * row inside the Thought root. `projectFocus` is the ONE authority: project the
+   * SAME messages with NO turn expanded and ask whether the row is absent from
+   * the visible output while its turn is present. A row the projection keeps
+   * visible (the prompt/steer row, surfaced context, the final assistant, a
+   * standalone turn-less row) needs NO Thought grant.
+   */
+  const focusRootHides = (message: TranscriptMessage): boolean => {
+    if (lastTurnActivities === undefined) return false
+    const visible = new Set<TranscriptMessage>()
+    const projected = projectFocus(lastMessages, lastTurnActivities, EMPTY_PROBE_TURNS, true)
+    for (const block of projected) {
+      if (block.kind === 'message') visible.add(block.message)
+      else if (block.kind === 'work') {
+        for (const part of block.span.parts) if (part.kind === 'message') visible.add(part.message)
+      }
+    }
+    return !visible.has(message)
+  }
+  const EMPTY_PROBE_TURNS: ReadonlySet<number> = new Set()
 
   /**
    * The effective disclosure inputs of THIS frame: the manual sets PLUS the
@@ -5508,6 +5542,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           const retired = mainJournal.retireGone(input.event.ids)
           if (retired.length > 0) {
             for (const key of retired) retireRootContribution(key)
+            // T3-B1 (B1-13): an evicted root invalidates the CURRENT Search
+            // target's proven reachability, so the card states `Unavailable in
+            // current pane` instead of keeping a `Source-only` claim about a node
+            // the client no longer holds. Nothing is re-added and no stale-id
+            // reveal is ever sent.
+            transcriptSearch?.invalidateReachability()
             render()
           }
         }
@@ -5598,7 +5638,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           const owner = workDisclosureByPath.get(input.event.id)
             ?? workDisclosureByPath.get(input.event.id.startsWith('main.') ? input.event.id.slice('main.'.length) : input.event.id)
           const turn = owner === undefined ? undefined : focusWorkTurnByOwner.get(owner)
-          const admitted = preset === 'compact' || (turn !== undefined && expandedFocusTurns.has(turn))
+          // Finding 2: the admission reads the SAME effective state the frame was
+          // PAINTED from — a Thought opened by a search grant makes its Work
+          // collapsible by the user too (a painted card the user cannot collapse
+          // is the forbidden asymmetry).
+          const focusRootOpen = turn !== undefined
+            && (expandedFocusTurns.has(turn) || searchGrants?.focusTurns.has(turn) === true)
+          const admitted = preset === 'compact' || focusRootOpen
           if (owner !== undefined && admitted) {
             const wasExpanded = expandedWorkOwners.has(owner) || searchGrants?.workOwners.has(owner) === true
             const targetExpanded = input.event.collapsed !== true
@@ -5625,18 +5671,33 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
               const phaseState = innerTarget.kind === 'workflow-phase'
                 ? state.phases.get(innerTarget.phaseKey)
                 : undefined
+              // Finding 2: the effective state includes the CURRENT search grant
+              // (the frame's own `effectiveWorkflowDisclosureStates` projection),
+              // so a run/phase the search opened is collapsible by the user.
+              const grantedRun = searchGrants?.workflowRuns.has(innerTarget.owner.runId) === true
+              const grantedPhase = innerTarget.kind === 'workflow-phase'
+                && searchGrants?.workflowPhases.get(innerTarget.owner.runId)?.has(innerTarget.phaseKey) === true
               const wasExpanded = innerTarget.kind === 'workflow-run'
-                ? effectiveWorkflowRunOpen(state, innerTarget.owner)
+                ? (grantedRun || effectiveWorkflowRunOpen(state, innerTarget.owner))
                 : phaseState !== undefined
                   ? (() => {
                     const phase = workflowPhasePresentations(innerTarget.owner.members)
                       .find(candidate => candidate.key === innerTarget.phaseKey)
-                    return phase !== undefined && effectiveWorkflowPhaseOpen(state, phase)
+                    return grantedPhase
+                      || (phase !== undefined && effectiveWorkflowPhaseOpen(state, phase))
                   })()
                   : false
               if (wasExpanded !== targetExpanded) {
-                if (innerTarget.kind === 'workflow-run') state.userOpen = targetExpanded
-                else if (phaseState !== undefined) phaseState.userOpen = targetExpanded
+                if (targetExpanded) {
+                  if (innerTarget.kind === 'workflow-run') state.userOpen = true
+                  else if (phaseState !== undefined) phaseState.userOpen = true
+                } else {
+                  // The user's own collapse wins over the search's grant for THIS
+                  // navigation epoch (the same rule the other cards follow).
+                  if (grantedRun || grantedPhase) suppressSearchGrantsForEpoch()
+                  if (innerTarget.kind === 'workflow-run') state.userOpen = false
+                  else if (phaseState !== undefined) phaseState.userOpen = false
+                }
                 if (rebuildLastMain()) render()
               }
             }

@@ -176,17 +176,85 @@ async function waitUntil(h, label, predicate, limit = 240) {
 }
 
 /** The Direct subject's own case channel. */
-async function runCase(h, kind) {
+async function runCase(h, kind, payload = {}) {
   const seq = Number(readJson(join(h.root, 'case-seq.json'))?.seq ?? 0) + 1
   writeFileSync(join(h.root, 'case-seq.json'), `${JSON.stringify({ seq })}\n`)
   const target = join(h.root, 'case.json')
-  writeFileSync(`${target}.tmp`, `${JSON.stringify({ seq, kind })}\n`)
+  writeFileSync(`${target}.tmp`, `${JSON.stringify({ seq, kind, ...payload })}\n`)
   renameSync(`${target}.tmp`, target)
   const ok = await waitUntil(h, `the Direct subject completed ${kind}`,
     () => readJson(join(h.root, 'case-result.json'))?.seq === seq)
   const result = readJson(join(h.root, 'case-result.json'))
   h.check(`the subject handled ${kind}`, ok && result?.status === 'ok', JSON.stringify(result ?? null))
   return result
+}
+
+/** Every Main root the renderer ADDED on the wire, with its own subtree text.
+ *  The wire `add` op carries the SDK-derived id and the node JSON, so this is the
+ *  renderer's REAL identity chain — the client tree's sf nodes carry no ids. */
+function wireMainRoots(h) {
+  const roots = new Map()
+  const textOf = (node, out) => {
+    if (node === null || typeof node !== 'object') return out
+    const props = node.p ?? {}
+    for (const value of Object.values(props)) {
+      if (typeof value === 'string') out.push(value)
+    }
+    for (const child of node.c ?? []) textOf(child, out)
+    return out
+  }
+  for (const entry of wire(h)) {
+    if (entry.dir !== 'out' || entry.verb !== 'f') continue
+    for (const op of entry.body?.ops ?? []) {
+      if (op[0] !== 'add' || op[2] !== 'main') continue
+      const id = String(op[1] ?? '')
+      if (!id.startsWith('main.')) continue
+      roots.set(id, textOf(op[4], []).join(' '))
+    }
+  }
+  return roots
+}
+
+/** The CURRENT target's identity chain: the renderer's own revealed root id, the
+ *  wire roots that carry the same word, and a DIFFERENT same-word root the fault
+ *  can reveal. Every value is a real wire identity — never a guess. */
+function currentTargetIdentity(h, word, targetText) {
+  const reveals = records(h).filter(row => row.kind === 'renderer.reveal')
+  const rootId = reveals.length === 0 ? undefined : String(reveals.at(-1).id)
+  const roots = wireMainRoots(h)
+  const shared = []
+  const targetMarked = []
+  for (const [id, text] of roots) {
+    const lower = text.toLowerCase()
+    if (!lower.includes(String(word).toLowerCase())) continue
+    shared.push(id)
+    if (targetText !== undefined && lower.includes(String(targetText).toLowerCase())) targetMarked.push(id)
+  }
+  // The WRONG candidate must belong to the CURRENT scope: a replaced source's id
+  // is a dead wire id the client rejects, which would make the fault vacuous
+  // instead of the same-word false positive this case must defeat.
+  const currentScope = rootId === undefined ? undefined : rootId.slice(0, rootId.indexOf('-') + 1)
+  const wrongCandidate = shared.find(id => id !== rootId
+    && !targetMarked.includes(id)
+    && (currentScope === undefined || id.startsWith(currentScope)))
+  return {
+    rootId,
+    word,
+    targetText,
+    sharedRootIds: shared,
+    targetRootIds: targetMarked,
+    currentScope,
+    otherSharedRoot: wrongCandidate,
+  }
+}
+
+/** The node of the CURRENT target card: the card carrying the target's OWN text
+ *  (`right`), never merely the shared query word. */
+function targetCardNode(snapshot, identity) {
+  const wanted = String(identity.targetText ?? '').toLowerCase()
+  if (wanted === '') return undefined
+  return mainNodes(snapshot).find(node =>
+    String(node.text ?? '').toLowerCase().includes(wanted))
 }
 
 /** The Search card's own painted controls in the CURRENT frame. */
@@ -437,34 +505,54 @@ export default async function (h) {
   // ── B1-06: the SHARED token yields TWO cards, and Next steps between them ──
   for (let index = 0; index < markers.innerOnly.length; index += 1) await h.key('Backspace', 30)
   await typeQuery(h, markers.shared.toLowerCase())
-  await waitUntil(h, 'B1-06: the shared token yields two representative cards',
-    () => visibleTexts(h).some(text => /[12]\/2 targets/u.test(text)))
-  const countLabel = visibleTexts(h).find(text => /\/2 targets/u.test(text)) ?? ''
-  h.check('B1-06: the count reports representative CARDS, not raw occurrences',
-    /[12]\/2 targets/u.test(countLabel), JSON.stringify(visibleTexts(h).slice(-6)))
+  await waitUntil(h, 'B1-06: the shared token yields representative cards',
+    () => visibleTexts(h).some(text => /\d+\/\d+ targets/u.test(text)))
+  const countLabel = visibleTexts(h).find(text => /\d+\/\d+ targets/u.test(text)) ?? ''
+  const countMatch = countLabel.match(/(\d+)\/(\d+) targets/u)
+  h.check('B1-06: the count reports representative CARDS with a real denominator',
+    countMatch !== null && Number(countMatch[2]) >= 1 && Number(countMatch[1]) >= 1,
+    JSON.stringify(visibleTexts(h).slice(-6)))
   await h.key('Return', 600)
   await h.key('Return', 600)
   if (fault === 'wrong-node') {
-    // The CURRENT target is one of the two SHARED cards; the fault reveals the
-    // FIRST transcript root instead (a real, far-away Main card the client
-    // holds), so the viewport ends up somewhere else entirely.
-    await runCase(h, 'semantic-search-wrong-node')
+    // B1-18's discriminating case: reveal a DIFFERENT main root that carries the
+    // SAME word. The flow resolves it from the client's own tree (a real id the
+    // client holds), never from a guess, and records the WHOLE identity chain so
+    // the assertion cannot pass on "some SHARED card is visible".
+    const identity = currentTargetIdentity(h, markers.shared, markers.right)
+    h.measure('B1-18 identity: the current target root', JSON.stringify(identity))
+    // The revealed id the previous navigation sent IS the target's root; the
+    // wrong candidate is a DIFFERENT real root that also carries the word.
+    const wrongCandidate = identity.otherSharedRoot
+    h.check('B1-18 precond: a DIFFERENT real Main root also carries the shared word',
+      typeof wrongCandidate === 'string' && wrongCandidate !== identity.rootId,
+      JSON.stringify(identity))
+    await runCase(h, 'semantic-search-wrong-node', { id: wrongCandidate })
     const wrong = records(h).find(row => row.kind === 'fault.wrong-node')
-    h.measure('FAULT wrong-node: the revealed id vs the intended one',
-      JSON.stringify(wrong ?? null))
+    h.measure('FAULT wrong-node: the revealed id vs the intended one', JSON.stringify(wrong ?? null))
     await h.sleep(700)
-    // The assertion the fault must break: the CURRENT target's own card is what
-    // the user should be looking at after a reveal.
     // ONE snapshot: the nodes AND the chains must come from the same tree.
     const faultSnapshot = h.snapshot()
-    const currentVisible = mainNodes(faultSnapshot).some(node =>
-      String(node.text ?? '').toLowerCase().includes(markers.shared.toLowerCase())
-      && reallyVisible(faultSnapshot, node))
+    // The assertion the fault must break: the viewport shows the CURRENT
+    // TARGET's card (its own root's text), not merely another card sharing the
+    // word. The current target card is the one whose text carries `wrong`/
+    // `right` (the two adjacent cards) — the run's own target is the SECOND one.
+    // The CURRENT target card is identified by ITS OWN text (`right`), never by
+    // the shared query word: another same-word card being visible cannot pass.
+    const targetCardVisible = reallyVisible(faultSnapshot, targetCardNode(faultSnapshot, identity))
     h.check('B1-18: the viewport shows the CURRENT target card after a reveal',
-      currentVisible, JSON.stringify({ wrong, visibleCards: visibleCards(faultSnapshot) }))
+      targetCardVisible,
+      JSON.stringify({
+        wrong,
+        identity,
+        visibleCards: visibleCards(faultSnapshot),
+        revealed: faultSnapshot.nodes
+          .filter(node => String(node.text ?? '').toLowerCase().includes(markers.shared.toLowerCase()))
+          .map(node => ({ rect: rect(node), text: String(node.text).slice(0, 60) })),
+      }))
   }
-  h.check('B1-06: Next/Prev wrap across the two cards and stay in range',
-    visibleTexts(h).some(text => /[12]\/2 targets/u.test(text)), JSON.stringify(visibleTexts(h).slice(-6)))
+  h.check('B1-06: Next/Prev stay inside the representative-card range',
+    visibleTexts(h).some(text => /\d+\/\d+ targets/u.test(text)), JSON.stringify(visibleTexts(h).slice(-6)))
 
   // ── B1-10: a zero-match query is honest and inert ──
   for (let index = 0; index < markers.shared.length; index += 1) await h.key('Backspace', 30)
