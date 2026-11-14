@@ -208,6 +208,10 @@ interface McpEditorDraftState {
   url: string
   headers: Map<string, string>
   enabled: boolean
+  /** The EXPLICIT storage form of each env/header value, keyed `${field}:${key}`.
+   *  Absent means `reference` (the contract default); the user's choice is never
+   *  inferred from the typed text. */
+  forms: Map<string, 'reference' | 'literal'>
 }
 
 /** The open editor's authority binding. */
@@ -267,6 +271,7 @@ function emptyDraft(): McpEditorDraftState {
     url: '',
     headers: new Map(),
     enabled: true,
+    forms: new Map(),
   }
 }
 
@@ -283,7 +288,20 @@ function draftFromEntry(entry: McpClassifiedServerEntry): McpEditorDraftState {
     url: effective.url ?? '',
     headers: new Map(effective.headers ?? []),
     enabled: effective.enabled !== false,
+    // An existing stored value that IS a `${credential:REF}` token is a
+    // reference; anything else already in the profile is a literal.
+    forms: new Map([
+      ...[...(effective.env ?? [])].map(([key, value]): [string, 'reference' | 'literal'] =>
+        [`env:${key}`, isCredentialToken(value) ? 'reference' : 'literal']),
+      ...[...(effective.headers ?? [])].map(([key, value]): [string, 'reference' | 'literal'] =>
+        [`headers:${key}`, isCredentialToken(value) ? 'reference' : 'literal']),
+    ]),
   }
+}
+
+/** Whether one stored string is exactly an official `${credential:REF}` token. */
+function isCredentialToken(value: string): boolean {
+  return /^\$\{credential:[A-Za-z_][A-Za-z0-9_]*\}$/u.test(value)
 }
 
 /**
@@ -300,15 +318,22 @@ function externalCapabilityWarning(draft: McpServerEntryDraft): string | undefin
   return `${MCP_CONFIG_TEXT.externalService} ${MCP_HTTP_TARGET_MARKER}${safeHostOf(draft.url)}`
 }
 
-/** The host of one URL (no path, no query, no credential); the raw value when
- *  it cannot be parsed as a URL. */
+/**
+ * The HOST of one URL for the disclosure, and nothing else: never a path, a
+ * query, a userinfo section or a credential. A value that cannot be parsed
+ * fails CLOSED to `Unknown target` — echoing the raw string would leak exactly
+ * the part the disclosure must never show (a credential template embedded in a
+ * malformed URL, a token in a query string).
+ */
 function safeHostOf(url: string): string {
+  let parsed: URL
   try {
-    const parsed = new URL(url.replaceAll('${credential:', ''))
-    return parsed.host === '' ? url : parsed.host
+    parsed = new URL(url)
   } catch {
-    return url
+    return 'Unknown target'
   }
+  if (parsed.host === '') return 'Unknown target'
+  return parsed.host
 }
 
 /** Project the mutable draft onto the immutably-typed domain draft. */
@@ -753,15 +778,66 @@ export class McpServersController {
     const entries = [...dict.entries()].map(([key, existing]) => key === from ? [to, existing] as const : [key, existing] as const)
     dict.clear()
     for (const [key, existing] of entries) dict.set(key, existing)
+    // The storage FORM follows the rename (it is a property of the value, not
+    // of its key text).
+    const form = this.editor.draft.forms.get(`${field}:${from}`)
+    this.editor.draft.forms.delete(`${field}:${from}`)
+    if (form !== undefined) this.editor.draft.forms.set(`${field}:${to}`, form)
     this.deps.requestRender()
   }
 
-  /** Set one env/header value (replace the whole value, never a hidden dict). */
-  setEditorDictValue(field: 'env' | 'headers', key: string, value: string): void {
+  /**
+   * Set one env/header value. The stored FORM is an explicit user choice: a
+   * `${credential:REF}` reference (the default) or a literal persisted in the
+   * profile. A reference is written verbatim; a literal is written as typed
+   * after the caller acknowledged the persistence risk — the two are never
+   * silently converted into one another.
+   */
+  setEditorDictValue(field: 'env' | 'headers', key: string, value: string, form: 'reference' | 'literal' = 'reference'): void {
     if (this.disposed || this.editor === undefined) return
     const dict = field === 'env' ? this.editor.draft.env : this.editor.draft.headers
     if (!dict.has(key)) return
-    dict.set(key, value)
+    const formKey = `${field}:${key}`
+    if (form === 'literal') {
+      dict.set(key, value)
+      this.editor.draft.forms.set(formKey, 'literal')
+      this.deps.requestRender()
+      return
+    }
+    // A reference names a credential; the REF grammar is the official one.
+    const ref = value.trim().replace(/^\$\{credential:/u, '').replace(/\}$/u, '')
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(ref)) {
+      this.configStatus = { kind: 'rejected', text: 'Not saved · a credential reference needs a valid REF name' }
+      this.deps.requestRender()
+      return
+    }
+    dict.set(key, `\${credential:${ref}}`)
+    this.editor.draft.forms.set(formKey, 'reference')
+    this.deps.requestRender()
+  }
+
+  /** The stored FORM the form shows (and toggles) for one env/header value. */
+  dictValueForm(field: 'env' | 'headers', key: string): 'reference' | 'literal' {
+    return this.editor?.draft.forms.get(`${field}:${key}`) ?? 'reference'
+  }
+
+  /** Flip the storage form of one env/header value WITHOUT changing its text
+   *  meaning: the typed value is re-stored in the newly chosen form. */
+  setEditorDictForm(field: 'env' | 'headers', key: string, form: 'reference' | 'literal'): void {
+    if (this.disposed || this.editor === undefined) return
+    const dict = field === 'env' ? this.editor.draft.env : this.editor.draft.headers
+    const current = dict.get(key)
+    if (current === undefined) return
+    this.editor.draft.forms.set(`${field}:${key}`, form)
+    if (form === 'literal') {
+      // Keep the REFERENCE NAME as the literal text: switching the form must
+      // never silently drop what the user typed.
+      const ref = current.replace(/^\$\{credential:/u, '').replace(/\}$/u, '')
+      dict.set(key, ref)
+    } else {
+      this.setEditorDictValue(field, key, current, 'reference')
+      return
+    }
     this.deps.requestRender()
   }
 
@@ -770,6 +846,7 @@ export class McpServersController {
     if (this.disposed || this.editor === undefined) return
     const dict = field === 'env' ? this.editor.draft.env : this.editor.draft.headers
     dict.delete(key)
+    this.editor.draft.forms.delete(`${field}:${key}`)
     this.deps.requestRender()
   }
 

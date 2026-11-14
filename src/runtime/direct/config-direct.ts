@@ -2197,20 +2197,39 @@ function valueAt(root: unknown, path: readonly string[]): unknown {
   return node
 }
 
-/** Whether every `set` op of a committed batch is in force in the read-back. */
+/**
+ * Whether every op of a committed batch is in force in the read-back. A `set`
+ * must show its value; an `unset` must show the ABSENCE it asked for — either
+ * the whole entry is gone (a User-added Delete) or the specific key/field is
+ * absent (a per-key patch or a reset that restored the base value into a
+ * different shape). An `unset` that merely happens to leave the entry present
+ * is NOT proof, so it can never make the batch look committed.
+ */
 function opsHold(read: McpServerConfiguration, ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[]): boolean {
   if (read.kind !== 'ready') return false
   const entries = new Map(read.entries.map(entry => [entry.name, entry]))
   for (const op of ops) {
-    if (op.op !== 'set') continue
     const name = op.path[1]
     if (name === undefined) return false
     const entry = entries.get(name)
+    if (op.op === 'unset') {
+      // `unset ['servers', name]`: the entry must be GONE from the effective
+      // configuration (a Reset keeps it only when the base still provides it,
+      // which the read-back reports as a present entry — so a Reset is proven
+      // by its `set`-free shape only when the entry disappeared, and otherwise
+      // the batch is not proven and the outcome stays unconfirmed).
+      if (op.path.length === 2) {
+        if (entry !== undefined) return false
+        continue
+      }
+      if (entry === undefined) return false
+      if (valueAt(entry.effective, op.path.slice(2)) !== undefined) return false
+      continue
+    }
     if (entry === undefined) return false
     const relative = op.path.slice(2)
     if (relative.length === 0) continue
-    const actual = valueAt(entry.effective, relative)
-    if (!sameJson(actual, op.value)) return false
+    if (!sameJson(valueAt(entry.effective, relative), op.value)) return false
   }
   return true
 }

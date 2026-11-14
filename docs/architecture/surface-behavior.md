@@ -1488,7 +1488,12 @@ draft can reach outside the Host asks ONE explicit question before writing —
 `Enabling this server can execute an external command.` for a stdio entry, and
 `Enabling this server can send data to an external service. Target: <host>` for
 an HTTP entry (the host only, never a credential) — and only an affirmative
-answer dispatches the write.
+answer dispatches the write. Every env/header value carries an EXPLICIT storage
+form the user chooses — `Credential reference` (the default, written as the
+official `${credential:REF}` token) or `Literal (stored in profile)` — shown on
+its own row and never inferred from the typed text; the disclosure's HTTP target
+is the host alone and fails closed to `Unknown target` when the URL cannot be
+parsed, so no path, query or credential can be echoed.
 
 Keys: list `↑/↓` move, `Enter` opens the detail, `a` begins Add when the Host
 settings are current, `/` filters by name, `r` re-observes, `Esc` cancels search /
