@@ -58,6 +58,7 @@ import { runHerdrH1 } from '../smoke/split-process/herdr-h1.mjs'
 import { runWebProviderSettingsF3 } from '../smoke/split-process/web-provider-settings-f3.mjs'
 import { runHerdrH2, runHerdrH3 } from '../smoke/split-process/herdr-h2.mjs'
 import { runAcpPo1 } from '../smoke/split-process/acp-po1.mjs'
+import { runPublicDaemonEntry } from '../smoke/split-process/public-daemon-entry-m6-2a.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -317,6 +318,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'acp.po1-uds-ready',
     title: 'a real Host-owned bounded ACP v1 Unix socket initializes before Ready, fails Session methods closed, retires on stop and reclaims a stale inode',
     run: runAcpPo1,
+  }),
+  Object.freeze({
+    suite: 'public-entry',
+    id: 'public-entry.daemon-client-m6-2a',
+    title: 'the real installed dsh --profile pi-tui CLI selects the daemon backend and launches one foreground Client against one local Host, and an illegal backend fails closed',
+    run: runPublicDaemonEntry,
   }),
 ])
 

@@ -190,6 +190,10 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       read: () => undefined,
       setAutoStart: async (_value: boolean, _revision: number) => {},
     },
+    backendStartupPreference: {
+      read: () => undefined,
+      setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
+    },
   }
   const hostFile = {
     listReferences: async () => ({ kind: 'ok' as const, items: [] }),

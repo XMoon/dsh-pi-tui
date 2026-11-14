@@ -48,7 +48,7 @@ import { createDirectSettingsFixture } from '../support/direct-settings-fixture.
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
 import { themePickerRows } from '../../src/app/surface/theme-selection.ts'
-import type { CredentialProviderOption, TuiSettingsDoc, VisualToolsState, WebStartupPreferenceState } from '../../src/runtime/config-port.ts'
+import type { CredentialProviderOption, TuiSettingsDoc, VisualToolsState, WebStartupPreferenceState, BackendStartupPreferenceState, PublicBackendValue } from '../../src/runtime/config-port.ts'
 import { serializeTuiSettingsMutation } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -165,6 +165,12 @@ interface HarnessOptions {
   webStartupUnavailable?: boolean
   /** Make `setAutoStart` reject with this reason (a refused Host write). */
   webStartupWriteFailure?: string
+  /** M6-2A A5: the profile-owned startup backend the ConfigPort reads. */
+  backendStartupPreference?: BackendStartupPreferenceState
+  /** The startup backend section is absent/unreadable. */
+  backendStartupUnavailable?: boolean
+  /** Make `setBackend` reject with this reason (a refused Host write). */
+  backendStartupWriteFailure?: string
   /**
    * Compose a LIVE main Session for the About page: the exact seams the real
    * `/settings` command injects (`captureLiveSessionScope` / scope currency /
@@ -409,6 +415,8 @@ interface Harness {
   readonly visualState: () => VisualToolsState | undefined
   /** Every `webStartupPreference.setAutoStart` value the UI dispatched. */
   readonly webAutoStartWrites: () => readonly boolean[]
+  /** Every `backendStartupPreference.setBackend` value the UI dispatched. */
+  readonly backendStartupWrites: () => readonly PublicBackendValue[]
   /** Every byte the app wrote to the terminal (the raw write sink). */
   readonly writes: () => readonly string[]
   /** Run every owned task the harness is holding (`holdOwned`). */
@@ -448,7 +456,7 @@ interface Harness {
  *  conditional `Extensions` category is appended only while the extension
  *  settings registry has live rows, so a case that needs it walks by label. */
 const CATEGORY_ORDER = [
-  'About', 'Models', 'Account', 'Agent', 'Appearance',
+  'About', 'General', 'Models', 'Account', 'Agent', 'Appearance',
   'Conversation', 'Input & Terminal', 'Tools', 'Plugins',
 ]
 
@@ -457,7 +465,7 @@ const CATEGORY_ORDER = [
  *  the rail's own labels are the witness. */
 const railVisible = (vt: VirtualTerminal): boolean =>
   vt.getViewport().map(stripTerminalSequences)
-    .some(line => /^(?:> | {2})(?:About|Models|Account|Agent|Appearance|Conversation|Input & Terminal|Tools|Plugins|Extensions)(?: {2,}|\s*$)/u.test(line))
+    .some(line => /^(?:> | {2})(?:About|General|Models|Account|Agent|Appearance|Conversation|Input & Terminal|Tools|Plugins|Extensions)(?: {2,}|\s*$)/u.test(line))
 
 function setup(options: HarnessOptions = {}): Harness {
   const columns = options.columns ?? 120
@@ -479,6 +487,10 @@ function setup(options: HarnessOptions = {}): Harness {
   let webStartupState: WebStartupPreferenceState | undefined = options.webStartupUnavailable === true
     ? undefined
     : options.webStartupPreference ?? { autoStart: false, revision: 1, userOverridden: false }
+  const backendStartupWrites: PublicBackendValue[] = []
+  let backendStartupState: BackendStartupPreferenceState | undefined = options.backendStartupUnavailable === true
+    ? undefined
+    : options.backendStartupPreference ?? { backend: 'direct', revision: 1, userOverridden: false }
   /** The LIVE backend readiness the ConfigPort answers (a case can move it). */
   let readiness = options.readiness ?? 'ready'
   let externalVisualChange = options.visualToolsExternalChange
@@ -840,6 +852,19 @@ function setup(options: HarnessOptions = {}): Harness {
           }
         },
       },
+      backendStartupPreference: {
+        read: () => backendStartupState,
+        setBackend: async (value: PublicBackendValue, revision: number) => {
+          backendStartupWrites.push(value)
+          if (options.backendStartupWriteFailure !== undefined) throw new Error(options.backendStartupWriteFailure)
+          if (backendStartupState !== undefined && backendStartupState.revision !== revision) {
+            throw new Error(`settings namespace "tui-startup" changed since it was read (expected revision ${revision}, now ${backendStartupState.revision})`)
+          }
+          if (backendStartupState !== undefined) {
+            backendStartupState = { backend: value, revision: backendStartupState.revision + 1, userOverridden: true }
+          }
+        },
+      },
       footerCustomItems: {
         rawForPersistence: () => ({ kind: 'available' as const, value: options.footerCustomItemsRaw }),
       },
@@ -1016,6 +1041,7 @@ function setup(options: HarnessOptions = {}): Harness {
     warnings: () => warnings,
     visualWrites: () => visualWrites,
     webAutoStartWrites: () => webAutoStartWrites,
+    backendStartupWrites: () => backendStartupWrites,
     visualState: () => visualState,
     writes: () => writes,
     pluginPages: () => pluginPages,
@@ -1130,7 +1156,7 @@ test('200x60 and 160x40 paint the three-column projection with the real value/so
   for (const [columns, rows] of [[200, 60], [160, 40]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
     await h.open()
-    const paneRow = rowOf(h, 'Categories (9)')
+    const paneRow = rowOf(h, 'Categories (10)')
     const paneLine = h.rowsPlain()[paneRow]!
     assert.match(paneLine, /Rows \(4\)/, 'the middle column is the current category rows')
     assert.match(paneLine, /Details/, 'the third column is the detail pane')
@@ -1146,7 +1172,7 @@ test('100x40 and 76x24 project the medium composition per level and switch categ
   const h = setup({ columns, rows, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
   // L0 paints categories + rows only; the retired header arrows never paint.
-  assert.match(h.rowsPlain()[rowOf(h, 'Categories (9)')]!, /\[Categories \(9\)\]/, 'L0 owns the categories level')
+  assert.match(h.rowsPlain()[rowOf(h, 'Categories (10)')]!, /\[Categories \(10\)\]/, 'L0 owns the categories level')
   assert.ok(h.rowsPlain().some(line => line.includes('Rows (4)')), `the rows column exists:\n${h.view()}`)
   assert.ok(!h.view().includes('Details'), 'L0 does not paint the Detail column')
   assert.ok(!h.view().includes('←'), 'no medium header category arrows')
@@ -1158,7 +1184,7 @@ test('100x40 and 76x24 project the medium composition per level and switch categ
   // Enter advances to L1: rows + detail, no categories column.
   await key(h, '\r')
   assert.match(h.rowsPlain()[rowOf(h, 'Details')]!, /Details/, 'L1 paints the Detail column')
-  assert.ok(!h.view().includes('Categories (9)'), 'L1 hides the categories column')
+  assert.ok(!h.view().includes('Categories (10)'), 'L1 hides the categories column')
   // Right enters L2's inline choice directly from L1 on the same projection.
   await key(h, '\x1b[C')
   assert.match(h.view(), /Choose value/, 'the one-step detail entry opens the inline choice')
@@ -2428,8 +2454,8 @@ test('the workspace chrome paints the live palette tokens (dark → light)', asy
   // The active device and the cursor share `primary`; the identity word above
   // does NOT (it is weight-only). This is the exact split the vocabulary fixes:
   // ordinary focus is never the amber `borderFocus` (which equals `warning`).
-  const paneHeadRow = rowOf(h, '[Categories (9)]')
-  const paneHeadCol = cellIndexOf(h, paneHeadRow, '[Categories (9)]')
+  const paneHeadRow = rowOf(h, '[Categories (10)]')
+  const paneHeadCol = cellIndexOf(h, paneHeadRow, '[Categories (10)]')
   assert.equal(h.vt.getCellFgRgb(paneHeadRow, paneHeadCol), hexToRgb(currentPalette.primary),
     'the focused pane label wears the bracketed bold primary active device')
   const cursorRow = rowOf(h, '> Appearance')
@@ -2513,7 +2539,7 @@ test('the retired Legacy Copy cells are inert while the rails Copy All stays a r
 test('a click anywhere in a visible column takes that column focus', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' } })
   await h.open()
-  assert.match(h.rowsPlain()[rowOf(h, 'Categories (9)')]!, /\[Categories \(9\)\]/, 'the categories level owns focus at open')
+  assert.match(h.rowsPlain()[rowOf(h, 'Categories (10)')]!, /\[Categories \(10\)\]/, 'the categories level owns focus at open')
   // Clicking a row selects it and takes the rows level's focus (and therefore
   // the rows + detail composition).
   const iconRow = rowOf(h, 'Icon style')
@@ -2538,7 +2564,7 @@ test('100x3 paints real content in its only body row, not pane headers', async (
   const painted = h.rowsPlain()
   assert.equal(painted.length, 3)
   assert.ok(painted.some(line => line.includes('Configured theme')), `the only body row is real content:\n${h.view()}`)
-  assert.ok(!painted.some(line => line.includes('Categories (9)')), 'the pane header yields to the content row')
+  assert.ok(!painted.some(line => line.includes('Categories (10)')), 'the pane header yields to the content row')
   h.dispose()
 })
 
@@ -2664,8 +2690,8 @@ test('the wide geometry is exact and a 300-char value never squeezes the Action 
   const long = `file:${'x'.repeat(300)}`
   const h = setup({ columns: 200, rows: 60, doc: { theme: long } })
   await h.open()
-  const paneRow = rowOf(h, 'Categories (9)')
-  assert.equal(cellIndexOf(h, paneRow, '[Categories (9)]'), 0, 'the categories level starts at cell 0 and owns focus at L0')
+  const paneRow = rowOf(h, 'Categories (10)')
+  assert.equal(cellIndexOf(h, paneRow, '[Categories (10)]'), 0, 'the categories level starts at cell 0 and owns focus at L0')
   assert.equal(cellIndexOf(h, paneRow, 'Rows (4)'), 22 + 2, 'the row column starts after the 22-cell column and a 2-cell gap')
   assert.equal(cellIndexOf(h, paneRow, 'Details'), 22 + 2 + 42 + 2, 'the detail column starts after the 42-cell row column and a 2-cell gap')
   for (const [index, line] of h.vt.getViewport().entries()) {
@@ -2744,12 +2770,12 @@ test('an unhandled printable key is inert inside the workspace', async () => {
 test('a real category/row item click takes that level and selects the item', async () => {
   const wide = setup({ columns: 200, rows: 24, doc: { theme: 'dark' } })
   await wide.open()
-  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (9)')]!, /\[Categories \(9\)\]/, 'the categories level owns focus at open')
+  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (10)')]!, /\[Categories \(10\)\]/, 'the categories level owns focus at open')
   const displayRow = rowOf(wide, 'Conversation')
   press(wide, displayRow, 2)
   release(wide, displayRow, 2)
   await wide.vt.waitForRender()
-  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (9)')]!, /\[Categories \(9\)\]/, 'the clicked category keeps the categories level')
+  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (10)')]!, /\[Categories \(10\)\]/, 'the clicked category keeps the categories level')
   assert.ok(wide.rowsPlain().some(line => line.startsWith('> Conversation')), 'and selects the clicked category')
   await key(wide, '\x1b[B')
   assert.ok(wide.rowsPlain().some(line => line.startsWith('> Input & Terminal')), 'Down now moves the CATEGORY, not the row')
@@ -3272,20 +3298,20 @@ test('the medium projection is a pure function of focus: L0 categories+rows, L1/
   for (const columns of [76, 107]) {
     const h = setup({ columns, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
     await h.open()
-    assert.ok(h.rowsPlain().some(line => line.includes('Categories (9)')), `L0 categories at ${columns}:\n${h.view()}`)
+    assert.ok(h.rowsPlain().some(line => line.includes('Categories (10)')), `L0 categories at ${columns}:\n${h.view()}`)
     assert.ok(!h.view().includes('Details'), 'L0 paints no Detail pane')
     assert.ok(!h.view().includes('Copy value [C]'), 'L0 publishes no Detail button')
     await key(h, '\r')
     assert.ok(h.rowsPlain().some(line => line.includes('Details')), 'L1 paints rows+detail')
-    assert.ok(!h.view().includes('Categories (9)'), 'L1 drops the categories column')
+    assert.ok(!h.view().includes('Categories (10)'), 'L1 drops the categories column')
     await key(h, '\r')
     assert.ok(h.view().includes('Choose value'), 'L2 enters an inline choice without a second browse Enter')
     assert.ok(h.view().includes('Solarized'), 'the selected source identity remains visible')
-    assert.ok(!h.view().includes('Categories (9)'), 'L2 keeps the rows+detail projection')
+    assert.ok(!h.view().includes('Categories (10)'), 'L2 keeps the rows+detail projection')
     await key(h, '\x1b')
     assert.match(h.rowsPlain()[0]!, /· Rows/, 'Esc cancels L2 directly back to L1')
     await key(h, '\x1b')
-    assert.ok(h.rowsPlain().some(line => line.includes('Categories (9)')), 'Esc from L1 returns to categories+rows')
+    assert.ok(h.rowsPlain().some(line => line.includes('Categories (10)')), 'Esc from L1 returns to categories+rows')
     assert.ok(!h.view().includes('Details'), 'and hides the detail again')
     h.dispose()
   }
@@ -3557,7 +3583,7 @@ test('the projection table is frozen: below 76 columns one pane, 76..107 two, 10
     await h.open()
     await key(h, '\r') // L0 -> L1: the rows pane always, plus the detail when the width grants it
     const painted = h.rowsPlain()
-    assert.equal(painted.some(line => line.includes('Categories (9)')), panes === 3, `the categories pane at ${columns} columns:\n${h.view()}`)
+    assert.equal(painted.some(line => line.includes('Categories (10)')), panes === 3, `the categories pane at ${columns} columns:\n${h.view()}`)
     assert.equal(painted.some(line => line.includes('Details')), panes >= 2, `the detail pane at ${columns} columns:\n${h.view()}`)
     assertRowWidths(h, columns)
     h.dispose()
@@ -5206,7 +5232,7 @@ test('the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every size
 
       // §11.3.2/§4.5: exactly ONE chrome active device, and it is the focused pane
       // label. Wide/medium put the shared pane header on the body's first row, so
-      // the focused `[Categories (9)]` is the ONE primary label. The narrow
+      // the focused `[Categories (10)]` is the ONE primary label. The narrow
       // projection paints NO pane header at all: the plain list cursor is not a
       // chrome active device, so the returned device list is EMPTY there.
       const device = assertOneActiveDevice(frame, {
@@ -5265,7 +5291,7 @@ test('selecting Plugins previews the live plugin list inside ONE Settings chrome
     const frame = h.rowsPlain()
     // ONE shared pane header: the rail label plus the plugin column labels.
     // header0 / metadata1 / rule2 / pane header3 at both widths.
-    assert.match(frame[3]!, /^\[Categories \(9\)\]/, `the rail label owns the header:\n${h.view()}`)
+    assert.match(frame[3]!, /^\[Categories \(10\)\]/, `the rail label owns the header:\n${h.view()}`)
     assert.equal(cellIndexOf(h, 3, 'Plugins'), 24, `the plugin label starts the content column:\n${h.view()}`)
     if (dual) {
       assert.ok(frame[3]!.includes('Details'), `the >=120 preview also paints the Details column:\n${h.view()}`)
@@ -5284,7 +5310,7 @@ test('selecting Plugins previews the live plugin list inside ONE Settings chrome
       assert.equal(cellIndexOf(h, bodyRow, 'PLUGIN DETAIL'), 24 + 39 + 2, 'the Details column starts after the gutter')
       assert.equal(cellIndexOf(h, 3, 'Details'), 24 + 39 + 2, 'the shared header label sits on the same column')
     }
-    assert.match(frame[3]!, /\[Categories \(9\)\]/, 'the rail keeps the ONE active device')
+    assert.match(frame[3]!, /\[Categories \(10\)\]/, 'the rail keeps the ONE active device')
     assert.doesNotMatch(frame[3]!, /\[Plugins\]/, 'an unfocused preview is never the active device')
     assertBarIsLastRow(frame, (row, col) => h.vt.getCellFgRgb(row, col), 'Close [Esc]')
     assert.match(frame[frame.length - 1]!, /Tab focus/, 'the rail advertises the real Tab focus key')
@@ -5828,6 +5854,7 @@ test('a narrow Account deeplink → rail-browse About reads nothing; Enter reads
       configReadiness: () => 'ready',
       visualTools: { read: () => undefined, setEnabled: async (_enabled: boolean, _revision: number) => {} },
       webStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
+      backendStartupPreference: { read: () => undefined, setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {} },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined },
       subagentModelSelection: { available: () => false },
@@ -5990,7 +6017,7 @@ const SETTINGS_PROVIDERS: readonly CredentialProviderOption[] = [{
 /** The physical rows every multi-column frame must agree on. */
 const pr1Geometry = (h: Harness): { paneY: number; contentY: number; barY: number } => {
   const rows = h.rowsPlain()
-  const paneY = rows.findIndex(line => line.includes('Categories (9)'))
+  const paneY = rows.findIndex(line => line.includes('Categories (10)'))
   assert.ok(paneY >= 0, `the shared pane header must be painted:\n${h.view()}`)
   const contentY = paneY + 1
   assert.notEqual((rows[contentY] ?? '').trim(), '', `the first content row must carry real content:\n${h.view()}`)
@@ -6005,7 +6032,7 @@ test('direct and legacy settings categories share the pane-header, first-body an
       await direct.open(directCategory)
       const directGeometry = pr1Geometry(direct)
       const directHead = direct.rowsPlain()[directGeometry.paneY]!
-      assert.match(directHead, /\[Categories \(9\)\]/u, `the rail is the active device:\n${directHead}`)
+      assert.match(directHead, /\[Categories \(10\)\]/u, `the rail is the active device:\n${directHead}`)
       assert.match(directHead, new RegExp(`\\b${directCategory}\\b`, 'u'), `the right label names the page:\n${directHead}`)
       assert.doesNotMatch(directHead, /Rows \(|Details/u, 'the direct header fakes no legacy panes')
       assert.match(direct.rowsPlain().at(-1) ?? '', /Close \[Esc\]/u, 'the last row is the rail action bar')
@@ -6015,7 +6042,7 @@ test('direct and legacy settings categories share the pane-header, first-body an
       await legacy.open(legacyCategory)
       const legacyGeometry = pr1Geometry(legacy)
       const legacyHead = legacy.rowsPlain()[legacyGeometry.paneY]!
-      assert.match(legacyHead, /\[Categories \(9\)\].*Rows \(\d+\)/u, `the legacy panes stay adjacent:\n${legacyHead}`)
+      assert.match(legacyHead, /\[Categories \(10\)\].*Rows \(\d+\)/u, `the legacy panes stay adjacent:\n${legacyHead}`)
       legacy.dispose()
 
       assert.deepEqual(directGeometry, legacyGeometry,
@@ -6033,7 +6060,7 @@ test('120x24 and 120x40 paint header, metadata, rule, pane header, body and bar 
     assert.match(frame[0]!, /^Settings · Categories/u)
     assert.match(frame[1]!, /^Scope: /u)
     assert.match(frame[2]!, /^─+$/u)
-    assert.match(frame[3]!, /^\[Categories \(9\)\].*About/u)
+    assert.match(frame[3]!, /^\[Categories \(10\)\].*About/u)
     assert.doesNotMatch(frame[3]!, /Rows \(|Details/u, 'the direct projection paints exactly two labels')
     assert.match(frame[4]!, /^> About/u, 'the first real content row follows the pane header')
     assert.match(frame.at(-1) ?? '', /Close \[Esc\]/u)
@@ -6046,7 +6073,7 @@ test('120x24 and 120x40 paint header, metadata, rule, pane header, body and bar 
     assert.match(legacyFrame[0]!, /^Settings · Categories/u)
     assert.match(legacyFrame[1]!, /^Scope: /u)
     assert.match(legacyFrame[2]!, /^─+$/u)
-    assert.match(legacyFrame[3]!, /^\[Categories \(9\)\].*Rows \(4\).*Details/u,
+    assert.match(legacyFrame[3]!, /^\[Categories \(10\)\].*Rows \(4\).*Details/u,
       'the wide legacy frame keeps all three pane headers')
     assert.match(legacyFrame[4]!, /^ {2}About/u)
     assert.match(legacyFrame.at(-1) ?? '', /Close \[Esc\]/u)
@@ -6059,9 +6086,9 @@ test('medium legacy levels keep Categories+Rows at L0 and Rows+Details at L1/L2'
     const h = setup({ columns, rows: 24 })
     await h.open('Appearance')
     let frame = h.rowsPlain()
-    let pane = frame.findIndex(line => line.includes('Categories (9)'))
+    let pane = frame.findIndex(line => line.includes('Categories (10)'))
     assert.ok(pane >= 0)
-    assert.match(frame[pane]!, /\[Categories \(9\)\].*Rows \(4\)/u, 'L0 is Categories + Rows')
+    assert.match(frame[pane]!, /\[Categories \(10\)\].*Rows \(4\)/u, 'L0 is Categories + Rows')
     assert.doesNotMatch(frame[pane]!, /Details/u)
 
     await key(h, '\r') // L0 -> L1
@@ -6091,9 +6118,9 @@ test('the 72/75/76/107/108 breakpoint edges keep their projection and at most on
     if (columns < 76) {
       assert.ok(!direct.view().includes('Categories ('), `narrow paints no pane header:\n${direct.view()}`)
     } else {
-      const pane = frame.findIndex(line => line.includes('[Categories (9)]'))
+      const pane = frame.findIndex(line => line.includes('[Categories (10)]'))
       assert.ok(pane >= 0)
-      assert.match(frame[pane]!, /\[Categories \(9\)\].*About/u)
+      assert.match(frame[pane]!, /\[Categories \(10\)\].*About/u)
       assert.doesNotMatch(frame[pane]!, /Rows \(|Details/u)
     }
     direct.dispose()
@@ -6107,9 +6134,9 @@ test('the 72/75/76/107/108 breakpoint edges keep their projection and at most on
       assert.ok(!legacy.view().includes('Categories ('), `narrow paints no pane header:\n${legacy.view()}`)
       assert.ok(frame.some(line => line.startsWith('> Appearance')), 'the narrow list is the one pane')
     } else {
-      const pane = frame.findIndex(line => line.includes('Categories (9)'))
+      const pane = frame.findIndex(line => line.includes('Categories (10)'))
       assert.ok(pane >= 0)
-      assert.match(frame[pane]!, /\[Categories \(9\)\].*Rows \(4\)/u)
+      assert.match(frame[pane]!, /\[Categories \(10\)\].*Rows \(4\)/u)
       if (columns >= 108) assert.match(frame[pane]!, /Details/u, '108 is the three-column edge')
       else assert.doesNotMatch(frame[pane]!, /Details/u, '76..107 stays two-column')
     }
@@ -6174,7 +6201,7 @@ test('tiny heights grant only the allowed chrome and keep hidden actions inert',
     assert.equal(painted.some(line => line.startsWith('Settings ·')), headerRows === 1, 'the header needs two rows')
     assert.equal(painted.some(line => line.startsWith('Scope: ')), grant.meta, 'the diagnostic keeps its floor')
     assert.equal(painted.filter(line => /^─+$/.test(line)).length, grant.rule ? 1 : 0, 'the one rule keeps its floor')
-    assert.equal(painted.some(line => line.includes('Categories (9)')), grant.pane, 'the pane header keeps one content row')
+    assert.equal(painted.some(line => line.includes('Categories (10)')), grant.pane, 'the pane header keeps one content row')
     if (grant.pane) assert.notEqual((painted[contentY] ?? '').trim(), '', 'a granted pane header leaves real content below it')
     assert.match(painted.at(-1) ?? '', /Close \[Esc\]/u, 'the bar is the physical last row')
     assert.equal(contentY + grant.content, height - 1, 'the granted body ends directly above the bar')
@@ -6286,7 +6313,7 @@ test('pointer and wheel act only on the last-painted body cells', async () => {
   assert.equal(about.copied.length, 1, 'the painted Copy All button is the action')
   const stable = about.view()
 
-  const paneRow = about.rowsPlain().findIndex(line => line.includes('[Categories (9)]'))
+  const paneRow = about.rowsPlain().findIndex(line => line.includes('[Categories (10)]'))
   assert.ok(paneRow >= 0)
   press(about, paneRow, 30)
   release(about, paneRow, 30)
@@ -6331,7 +6358,7 @@ test('pointer and wheel act only on the last-painted body cells', async () => {
   const wheelHarness = setup({ columns: 80, rows: 10 })
   await wheelHarness.openHome()
   const frame0 = wheelHarness.view()
-  const wheelPane = wheelHarness.rowsPlain().findIndex(line => line.includes('Categories (9)'))
+  const wheelPane = wheelHarness.rowsPlain().findIndex(line => line.includes('Categories (10)'))
   assert.ok(wheelPane >= 0)
   wheel(wheelHarness, wheelPane, 2, true)
   await wheelHarness.vt.waitForRender()
@@ -6374,7 +6401,8 @@ test('a resize, category change or notice insertion between press and release re
   const accountRow = switched.rowsPlain().findIndex(line => line.slice(0, 22).trim() === 'Account')
   assert.ok(accountRow >= 0)
   press(switched, accountRow, 2)
-  await key(switched, '\u001b[B') // About -> Models bumps the state version
+  await key(switched, '\u001b[B') // About -> General bumps the state version
+  await key(switched, '\u001b[B') // General -> Models bumps the state version
   release(switched, accountRow, 2)
   await settle(switched)
   assert.match(switched.view(), /Models & Credentials/u)
@@ -6406,7 +6434,7 @@ test('CJK values wrap inside their pane and the pane-header device follows the l
     const h = setup({ columns, rows, doc: { theme: longValue } })
     await h.open('Appearance')
     if (columns >= 76) {
-      const pane = h.rowsPlain().findIndex(line => line.includes('[Categories (9)]'))
+      const pane = h.rowsPlain().findIndex(line => line.includes('[Categories (10)]'))
       assert.ok(pane >= 0)
       assert.ok(visibleWidth(h.vt.getViewport()[pane]!) <= columns, `the pane header fits ${columns}`)
     }
@@ -6424,7 +6452,7 @@ test('CJK values wrap inside their pane and the pane-header device follows the l
 
   const h = setup({ columns: 120, rows: 24 })
   await h.openHome()
-  let paneRow = h.rowsPlain().findIndex(line => line.includes('[Categories (9)]'))
+  let paneRow = h.rowsPlain().findIndex(line => line.includes('[Categories (10)]'))
   assert.ok(paneRow >= 0)
   assert.equal(h.vt.getCellFgRgb(paneRow, 0), hexToRgb(currentPalette.primary), 'the focused rail label uses primary')
   assert.equal(h.vt.getCellFgRgb(paneRow, cellIndexOf(h, paneRow, 'About')), hexToRgb(currentPalette.textDim),
@@ -6691,7 +6719,7 @@ test('a live registration appends Extensions and its row commits through the reg
   assert.equal(invalidations, 1, 'the registry invalidation reached the surface render path')
   await h.vt.waitForRender()
   await h.openHome()
-  assert.match(h.view(), /Categories \(10\)/u, 'the live directory appends the tenth category')
+  assert.match(h.view(), /Categories \(11\)/u, 'the live directory appends the eleventh category')
   await key(h, '\u001b[F')
   assert.match(h.view(), /^> Extensions/mu, `End reaches the live category:\n${h.view()}`)
   await key(h, '\r')
@@ -6724,7 +6752,7 @@ test('a live registration appends Extensions and its row commits through the reg
   await h.vt.waitForRender()
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'the rail owns the keyboard again')
   assert.match(h.view(), /^> Plugins/mu, 'the emptied Extensions category fell back to Plugins')
-  assert.match(h.view(), /Categories \(9\)/u, 'the empty directory paints the nine fixed categories')
+  assert.match(h.view(), /Categories \(10\)/u, 'the empty directory paints the nine fixed categories')
   await key(h, '\u001b')
   assert.ok(h.view().includes('❯'), 'Esc still closes the workspace legally')
   h.dispose()
@@ -6908,7 +6936,7 @@ test('a real extension fiber registration reaches the mounted Settings workspace
     await h.vt.waitForRender()
     await h.openHome()
     assert.match(h.rowsPlain()[0]!, /Settings · Categories/u)
-    assert.equal(h.view().includes('Categories (9)'), true, 'no Extensions category without live rows')
+    assert.equal(h.view().includes('Categories (10)'), true, 'no Extensions category without live rows')
 
     // A real plugin fiber registers through the PUBLIC service API.
     const fiber = ctx.plugin((pluginCtx) => {
@@ -6935,7 +6963,7 @@ test('a real extension fiber registration reaches the mounted Settings workspace
     await new Promise<void>(resolve => queueMicrotask(resolve))
     await new Promise<void>(resolve => setTimeout(resolve, 25))
     await h.vt.waitForRender()
-    assert.match(h.view(), /Categories \(10\)/u, 'the live registration appended Extensions with no user input')
+    assert.match(h.view(), /Categories \(11\)/u, 'the live registration appended Extensions with no user input')
     await key(h, '\u001b[F')
     await key(h, '\r')
     assert.match(h.rowsPlain()[0]!, /Settings · Extensions \[1\/1\] · [^ ]+ · Rows/u,
@@ -6951,7 +6979,7 @@ test('a real extension fiber registration reaches the mounted Settings workspace
     await h.vt.waitForRender()
     assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'the unload moved the keyboard to the rail')
     assert.match(h.view(), /^> Plugins/mu, 'the emptied Extensions category falls back to Plugins')
-    assert.match(h.view(), /Categories \(9\)/u, 'the category is retracted without user input')
+    assert.match(h.view(), /Categories \(10\)/u, 'the category is retracted without user input')
     // Neither the register nor the unload started the existing editor: the
     // Settings workspace still owns the frame.
     assert.match(h.rowsPlain()[0]!, /Settings · /u, 'the Settings workspace still owns the frame')
@@ -8019,7 +8047,7 @@ test('a real Registry revision change keeps an open new-field choice and revokes
   assert.equal(h.replacements(), 0, 'an old-frame Confirm never dispatches after the directory moved')
   assert.equal(h.doc.responseStyle, undefined, 'and the document is untouched')
   await h.vt.waitForRender()
-  assert.match(h.view(), /Categories \(10\)/u, 'the live directory really changed')
+  assert.match(h.view(), /Categories \(11\)/u, 'the live directory really changed')
   const afterRegister = h.view()
   assert.match(afterRegister, /Choose value/u, 'the open Response style choice survives')
   assert.match(afterRegister, /> concise/u, 'on the SAME candidate identity')
@@ -9478,4 +9506,146 @@ test('the Web preference never claims the current Host Web state was changed', a
   assert.doesNotMatch(detail, /enabled\b/u, 'the preference row never asserts the current frontend state')
   assert.match(detail, /current Host is not changed/u)
   h.dispose()
+})
+
+// ── M6-2A A5: the startup backend preference (`startup-backend`) ───────────
+//
+// The `Backend` row lives in the fixed `General` category. It is a PROFILE
+// preference for the NEXT cold launch, never the current process backend: every
+// case drives the REAL `/settings` composition and proves the value the user
+// picks, the port write that persists it and the authoritative re-read. An
+// explicit `DSH_PI_TUI_BACKEND` is a separate LAUNCH fact shown read-only.
+
+/** Open the `General` category and enter its single `Backend` row body (L1). */
+async function openStartupBackendRow(h: Harness): Promise<void> {
+  await h.open('General')
+  await key(h, '\r') // L0 categories -> L1 rows (on Backend)
+}
+
+test('the Backend row lives in the fixed General category and shows the profile default', async () => {
+  const saved = process.env.DSH_PI_TUI_BACKEND
+  delete process.env.DSH_PI_TUI_BACKEND
+  try {
+    const h = setup({ columns: 200, rows: 40 })
+    await h.open('General')
+    assert.match(h.view(), /^> General/mu, 'General is a reachable fixed category')
+    await key(h, '\r') // L0 -> L1
+    assert.match(h.view(), /Backend/u, 'the General category carries the Backend row')
+    assert.match(h.view(), /Direct \(default\)/u, 'the schema default Direct is marked not user-overridden')
+    assert.match(h.view(), /Applies on next launch; current TUI\/Host remains unchanged/u,
+      'the row states the next-launch lifetime instead of claiming a live effect')
+    assert.doesNotMatch(h.view(), /environment override/u, 'no environment fact without the variable')
+    h.dispose()
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PI_TUI_BACKEND
+    else process.env.DSH_PI_TUI_BACKEND = saved
+  }
+})
+
+test('the Backend row writes Daemon through its own port and verifies the re-read', async () => {
+  const saved = process.env.DSH_PI_TUI_BACKEND
+  delete process.env.DSH_PI_TUI_BACKEND
+  try {
+    const h = setup({ columns: 200, rows: 40 })
+    await openStartupBackendRow(h)
+    await key(h, '\r') // writable L1 -> L2 inline choice
+    assert.match(h.view(), /Choose value/u)
+    assert.match(h.view(), /> Direct/u, 'the current candidate carries the highlight')
+    await key(h, '\x1b[B') // Direct -> Daemon
+    assert.match(h.view(), /> Daemon/u)
+    assert.equal(h.backendStartupWrites().length, 0, 'choosing a candidate never writes')
+    await key(h, '\r')
+    await settle(h)
+    assert.deepEqual(h.backendStartupWrites(), ['daemon'], 'the port receives exactly one daemon write')
+    assert.match(h.view(), /Status\s+Verified/u, 'the authoritative re-read verified the write')
+    assert.match(h.view(), /Daemon/u, 'the verified row reports the persisted preference')
+    h.dispose()
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PI_TUI_BACKEND
+    else process.env.DSH_PI_TUI_BACKEND = saved
+  }
+})
+
+test('the (default) suffix follows USER provenance, not the effective value', async () => {
+  const declared = setup({
+    columns: 200,
+    rows: 40,
+    backendStartupPreference: { backend: 'daemon', revision: 2, userOverridden: true },
+  })
+  await declared.open('General')
+  await key(declared, '\r')
+  assert.match(declared.view(), /Daemon(?! \(default\))/u, 'a USER-declared Daemon carries no default mark')
+  declared.dispose()
+})
+
+test('an explicit DSH_PI_TUI_BACKEND is shown read-only and never written to the persisted value', async () => {
+  const saved = process.env.DSH_PI_TUI_BACKEND
+  try {
+    process.env.DSH_PI_TUI_BACKEND = 'daemon'
+    const h = setup({ columns: 200, rows: 40 })
+    await openStartupBackendRow(h)
+    assert.match(h.view(), /Current launch: daemon \(environment override\)/u,
+      'the environment override is a read-only launch fact')
+    assert.match(h.view(), /Direct \(default\)/u,
+      'the persisted Profile value stays Direct; the environment is never written into it')
+    assert.equal(h.backendStartupWrites().length, 0, 'reading the row never writes')
+    h.dispose()
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PI_TUI_BACKEND
+    else process.env.DSH_PI_TUI_BACKEND = saved
+  }
+})
+
+test('an invalid DSH_PI_TUI_BACKEND is reported as a read-only fact, never hidden', async () => {
+  const saved = process.env.DSH_PI_TUI_BACKEND
+  try {
+    process.env.DSH_PI_TUI_BACKEND = 'garbage'
+    const h = setup({ columns: 200, rows: 40 })
+    await openStartupBackendRow(h)
+    assert.match(h.view(), /Current launch: invalid value "garbage" \(environment override\)/u,
+      'an illegal environment value is still reported as a real launch fact')
+    h.dispose()
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PI_TUI_BACKEND
+    else process.env.DSH_PI_TUI_BACKEND = saved
+  }
+})
+
+test('an unreadable startup backend offers no confirmable candidate', async () => {
+  const h = setup({ columns: 200, rows: 40, backendStartupUnavailable: true })
+  await openStartupBackendRow(h)
+  assert.match(h.view(), /Backend/u)
+  assert.match(h.view(), /Unavailable/u, 'an absent section is reported, never the schema default')
+  await key(h, '\r')
+  assert.doesNotMatch(h.view(), /Choose value/u, 'no candidate exists without an authoritative read')
+  assert.equal(h.backendStartupWrites().length, 0)
+  h.dispose()
+})
+
+test('the General Backend row is reachable and operable at 108/76/75 columns and two heights', async () => {
+  const saved = process.env.DSH_PI_TUI_BACKEND
+  delete process.env.DSH_PI_TUI_BACKEND
+  try {
+    for (const columns of [108, 76, 75] as const) {
+      for (const rows of [24, 40] as const) {
+        const h = setup({ columns, rows })
+        await h.open('General')
+        if (columns >= 76) {
+          assert.match(h.view(), /Tab (?:focus|panes)/u, `the Tab hint is advertised at ${columns}x${rows}`)
+        } else {
+          // A narrow rail owns a single pane, so Tab is inert there and must not
+          // advertise a working pane switch.
+          assert.doesNotMatch(h.view(), /Tab (?:focus|panes)/u, `a narrow rail advertises no pane Tab at ${columns}x${rows}`)
+        }
+        await key(h, '\r') // L0 -> L1 (the Backend row)
+        assert.match(h.view(), /Backend/u, `the Backend row is reachable at ${columns}x${rows}`)
+        await key(h, '\r') // L1 -> L2 candidate choice
+        assert.match(h.view(), /Choose value/u, `the Backend row opens its candidate choice at ${columns}x${rows}`)
+        h.dispose()
+      }
+    }
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PI_TUI_BACKEND
+    else process.env.DSH_PI_TUI_BACKEND = saved
+  }
 })

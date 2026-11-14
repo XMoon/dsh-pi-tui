@@ -56,7 +56,7 @@ import type { EmbeddedPluginPage, PluginWorkspaceView } from '../plugin-manager/
  * ONE CONDITIONAL category: it is selectable only while the extension settings
  * registry has live rows (see {@link SettingsWorkspacePanel.currentCategoryOrder}). */
 export type SettingsWorkspaceCategoryId =
-  | 'about' | 'models' | 'account' | 'agent' | 'appearance' | 'conversation'
+  | 'about' | 'general' | 'models' | 'account' | 'agent' | 'appearance' | 'conversation'
   | 'input-terminal' | 'tools' | 'plugins' | 'extensions'
 
 /** The navigation level of the LEGACY configuration categories: `categories`
@@ -97,6 +97,7 @@ export type SettingsWorkspaceRowId =
   | 'terminal-progress'
   | 'visual-tools'
   | 'web-autostart'
+  | 'startup-backend'
   | 'web-settings'
   | 'approval'
   | 'default-permission'
@@ -129,7 +130,7 @@ export type SettingsWorkspaceFreshness = 'runtime' | 'ready' | 'last-known' | 'u
  * setting stays behind its category's `existing settings editor` launcher.
  */
 export type SettingsWorkspaceWritableField =
-  | 'theme' | 'display-preset' | 'visual-tools' | 'web-autostart'
+  | 'theme' | 'display-preset' | 'visual-tools' | 'web-autostart' | 'startup-backend'
   | 'icon-style' | 'expand' | 'thinking'
   | 'progress-updates' | 'response-style'
   | 'busy-enter' | 'git-attribution'
@@ -701,18 +702,19 @@ interface DetailProjection {
   readonly confirmCandidateVisible: boolean
 }
 
-/** The NINE category ids that always exist, in their visible order. `extensions`
+/** The TEN category ids that always exist, in their visible order. `extensions`
  *  is deliberately NOT a member: it is the ONE conditional category, appended
  *  by {@link SettingsWorkspacePanel.currentCategoryOrder} only while the
  *  extension settings registry has live rows. This is the ONE fixed order
  *  every projection, keyboard path and hit map reads. */
 const FIXED_CATEGORY_ORDER = [
-  'about', 'models', 'account', 'agent', 'appearance',
+  'about', 'general', 'models', 'account', 'agent', 'appearance',
   'conversation', 'input-terminal', 'tools', 'plugins',
 ] as const satisfies readonly SettingsWorkspaceCategoryId[]
 
 const CATEGORY_LABELS: Record<SettingsWorkspaceCategoryId, string> = {
   about: 'About',
+  general: 'General',
   models: 'Models',
   account: 'Account',
   agent: 'Agent',
@@ -763,6 +765,7 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
     || id === 'terminal-progress'
     || id === 'visual-tools'
     || id === 'web-autostart'
+    || id === 'startup-backend'
     || id === 'web-settings'
     || id === 'approval'
     || id === 'default-permission'

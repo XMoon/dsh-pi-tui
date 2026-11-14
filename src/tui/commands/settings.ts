@@ -48,7 +48,7 @@ import { themeDisplayName as themeDisplayNameOf } from '../pickers/theme-menu.ts
 import { SubagentModelAllowlistPicker, allowlistSummary, lastRouteWhileEnabled } from '../pickers/subagent-model-menu.ts'
 import { resolveThemeSelection, themePickerRows } from '../../app/surface/theme-selection.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
-import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings, type WebStartupPreferenceState } from '../../runtime/config-port.ts'
+import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings, type WebStartupPreferenceState, type BackendStartupPreferenceState, type PublicBackendValue } from '../../runtime/config-port.ts'
 import { isWebApiBilling } from '../../domain/web-provider-settings.ts'
 import {
   WEB_FETCH_PROVIDER_CANDIDATES,
@@ -1789,6 +1789,134 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return verifyCommittedWebAutostart(autoStart)
   }
 
+  /**
+   * The profile-owned startup backend (`tui-startup.backend`). It is a NEXT
+   * cold-launch fact only: this row never reports or switches the CURRENT
+   * process's backend, and committing it never spawns or stops a Host. An
+   * explicit `DSH_PI_TUI_BACKEND` override is a separate LAUNCH fact shown
+   * read-only; it is never written into the persisted value.
+   */
+  const backendStartupSummaryOf = (state: BackendStartupPreferenceState | undefined): string => {
+    if (state === undefined) return 'Unavailable'
+    const label = state.backend === 'daemon' ? 'Daemon' : 'Direct'
+    // `(default)` marks the schema default the USER layer does not declare; the
+    // Host form's provenance is the only source for that mark.
+    return state.userOverridden ? label : `${label} (default)`
+  }
+
+  /** The read-only environment-override fact for the Detail: the `DSH_PI_TUI_BACKEND`
+   *  value a cold launch would really consume. It is NEVER part of the persisted
+   *  preference and NEVER editable. An invalid value is still reported (it is a
+   *  real launch fact), so the row never hides an illegal environment override. */
+  const backendLaunchOverrideOf = (): string | undefined => {
+    const raw = process.env.DSH_PI_TUI_BACKEND
+    if (raw === undefined) return undefined
+    if (raw === 'direct' || raw === 'daemon') return `Current launch: ${raw} (environment override)`
+    return `Current launch: invalid value ${JSON.stringify(raw)} (environment override)`
+  }
+
+  const backendStartupEditOf = (
+    state: BackendStartupPreferenceState | undefined,
+    readiness: 'ready' | 'stale' | 'unavailable',
+  ): SettingsWorkspaceEdit => {
+    const editable = state !== undefined && readiness === 'ready'
+    const launchOverride = backendLaunchOverrideOf()
+    return {
+      field: 'startup-backend',
+      primary: 'persisted',
+      ...(state === undefined ? {} : { revision: state.revision }),
+      options: editable
+        ? [
+            { value: 'Direct', label: 'Direct', available: true, current: state.backend === 'direct' },
+            { value: 'Daemon', label: 'Daemon', available: true, current: state.backend === 'daemon' },
+          ]
+        : [],
+      // The live effect statement: the preference applies to the NEXT cold
+      // launch and leaves the running TUI/Host exactly as it is.
+      runtime: 'Applies on next launch; current TUI/Host remains unchanged',
+      ...(launchOverride === undefined ? {} : { runtimeEffect: launchOverride }),
+      persisted: backendStartupSummaryOf(state),
+    }
+  }
+
+  const backendStartupFreshnessOf = (
+    state: BackendStartupPreferenceState | undefined,
+    readiness: 'ready' | 'stale' | 'unavailable',
+  ): SettingsWorkspaceFreshness => state === undefined
+    ? 'unavailable'
+    : readiness === 'ready' ? 'ready' : 'last-known'
+
+  /** A candidate identity ('Direct'/'Daemon') as the public backend value. */
+  const backendStartupValueOf = (value: string): PublicBackendValue | undefined =>
+    value === 'Direct' ? 'direct' : value === 'Daemon' ? 'daemon' : undefined
+
+  /** The authoritative re-read of the committed PREFERENCE (never the current
+   *  process's backend, which this row does not own). */
+  const verifyCommittedBackendStartup = (expected: PublicBackendValue): SettingsWorkspaceCommitOutcome => {
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'unverified', reason: `the configuration is ${readiness}; the committed startup backend could not be re-read` }
+    }
+    const state = runner.config.backendStartupPreference.read()
+    if (state === undefined) {
+      return { outcome: 'unverified', reason: 'the committed startup backend preference could not be re-read' }
+    }
+    if (state.backend !== expected) {
+      return {
+        outcome: 'not-saved',
+        reason: `the write reported success, but the authoritative preference reads ${state.backend}`,
+      }
+    }
+    return { outcome: 'verified' }
+  }
+
+  /** Attribute a REJECTED preference write from a fresh authoritative read. */
+  const classifyRejectedBackendStartup = (
+    base: PublicBackendValue,
+    failureReason: string,
+  ): SettingsWorkspaceCommitOutcome => {
+    const state = runner.config.configReadiness() === 'ready'
+      ? runner.config.backendStartupPreference.read()
+      : undefined
+    if (state === undefined) {
+      return { outcome: 'indeterminate', reason: `${failureReason}; the authoritative preference could not be re-read` }
+    }
+    if (state.backend === base) return { outcome: 'not-saved', reason: failureReason }
+    return {
+      outcome: 'indeterminate',
+      reason: `${failureReason}; the authority no longer reads the value this request started from, so its outcome cannot be attributed`,
+    }
+  }
+
+  /** Commit the next-launch backend through the official revision-checked
+   *  settings write. It never spawns/stops a Host or switches the current TUI. */
+  const commitBackendStartup = async (
+    value: string,
+    revision: number | undefined,
+  ): Promise<SettingsWorkspaceCommitOutcome> => {
+    const backend = backendStartupValueOf(value)
+    if (backend === undefined) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a startup backend candidate` }
+    }
+    if (revision === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host setting exposed no revision this choice could be based on' }
+    }
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'not-saved', reason: `the configuration is ${readiness}; the startup backend was not changed` }
+    }
+    const base = runner.config.backendStartupPreference.read()
+    if (base === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host startup backend preference is unavailable; nothing was changed' }
+    }
+    try {
+      await runner.config.backendStartupPreference.setBackend(backend, revision)
+    } catch (error) {
+      return classifyRejectedBackendStartup(base.backend, safeErrorMessage(error))
+    }
+    return verifyCommittedBackendStartup(backend)
+  }
+
   /** The TUI-settings-document writers. Deliberately NARROWER than
    *  {@link SettingsWorkspaceWritableField}: the Host visual-tools switch and
    *  the two runtime-only disclosure fields have no document field at all, so
@@ -1974,6 +2102,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       switch (field) {
         case 'visual-tools': return commitVisualTools(request.value, request.revision)
         case 'web-autostart': return commitWebAutostart(request.value, request.revision)
+        case 'startup-backend': return commitBackendStartup(request.value, request.revision)
         case 'display-preset': return commitDisplayPreset(request.value)
         case 'theme': return commitTheme(request.value)
         case 'icon-style': return commitIconStyle(request.value)
@@ -3179,6 +3308,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const visualToolsFreshness = visualToolsFreshnessOf(visualTools, configReadiness)
     const webAutostart = runner.config.webStartupPreference.read()
     const webAutostartFreshness = webAutostartFreshnessOf(webAutostart, configReadiness)
+    // The startup backend selection has its OWN authority (the `tui-startup`
+    // Config section), read on this same snapshot: an unavailable or illegal
+    // Profile value is never presented as the shipped `direct` default.
+    const backendStartup = runner.config.backendStartupPreference.read()
+    const backendStartupFreshness = backendStartupFreshnessOf(backendStartup, configReadiness)
     // ── C2-R3 + M6-1 F8: the five Agent rows' read facts ────────────────────
     // PERMISSIONS. The approval row exists for a LIVE, still-current captured
     // scope; the row's VALUE comes from the ONE session-policy observation
@@ -3774,6 +3908,22 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           description: 'Automatically serves the Web frontend when a new Split Host starts. '
             + 'The current Host is not changed; use /web for immediate control. Browser opening remains manual.',
           edit: webAutostartEditOf(webAutostart, configReadiness),
+        },
+        {
+          // M6-2A A5: the NEXT cold-launch backend selection. A Host profile
+          // setting, not the current process backend: saving it never switches
+          // the running TUI/Host. An explicit DSH_PI_TUI_BACKEND override is a
+          // separate, read-only launch fact reported in the Detail.
+          id: 'startup-backend',
+          category: 'general',
+          label: 'Backend',
+          summary: backendStartupSummaryOf(backendStartup),
+          scope: 'DSH Host profile · next cold launch',
+          freshness: backendStartupFreshness,
+          description: 'Which backend a new launch runs: Direct runs the in-process TUI; Daemon launches one '
+            + 'foreground Client against a local Host. Applies to the next launch only; the current TUI/Host is not changed. '
+            + 'An explicit DSH_PI_TUI_BACKEND environment value overrides this for that launch and is shown read-only.',
+          edit: backendStartupEditOf(backendStartup, configReadiness),
         },
         {
           // C2-R4: the ONE discoverable entry to the Web provider settings

@@ -93,6 +93,9 @@ import type {
   WebProviderSettings,
   WebStartupPreferenceConfig,
   WebStartupPreferenceState,
+  BackendStartupPreferenceConfig,
+  BackendStartupPreferenceState,
+  PublicBackendValue,
   ConfigReadiness,
 } from '../config-port.ts'
 import {
@@ -181,6 +184,7 @@ export class DirectConfigPort implements ConfigPort {
   readonly web: WebProviderConfig
   readonly visualTools: VisualToolsConfig
   readonly webStartupPreference: WebStartupPreferenceConfig
+  readonly backendStartupPreference: BackendStartupPreferenceConfig
 
   constructor(
     ctx: HostContextLike,
@@ -200,6 +204,7 @@ export class DirectConfigPort implements ConfigPort {
     this.web = new DirectWebProviderConfig(ctx)
     this.visualTools = new DirectVisualToolsConfig(ctx)
     this.webStartupPreference = new DirectWebStartupPreferenceConfig(ctx)
+    this.backendStartupPreference = new DirectBackendStartupPreferenceConfig(ctx)
   }
 }
 
@@ -2025,4 +2030,71 @@ class DirectWebStartupPreferenceConfig implements WebStartupPreferenceConfig {
       { op: 'set', path: ['autoStart'], value },
     ], expectedRevision)
   }
+}
+
+/** The official profile entry id of the Host row that owns the startup backend
+ *  selection (its Loader row id is also its Settings namespace). */
+const TUI_STARTUP_NS = 'tui-startup'
+
+/**
+ * The Direct startup backend preference: the `tui-startup` form section's
+ * effective `backend` value. The write is a revision-checked path mutation of
+ * the exact `backend` field — never a whole-section replace, so an unrelated or
+ * unknown field is never pinned into the USER layer.
+ *
+ * FAIL-CLOSED: an effective `backend` value outside `direct|daemon` is NOT a
+ * read — `read()` returns `undefined` rather than mapping it to `direct`, so an
+ * illegal Profile value without an environment override fails closed in the
+ * launcher and the Settings row reports it as unreadable.
+ */
+class DirectBackendStartupPreferenceConfig implements BackendStartupPreferenceConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): BackendStartupPreferenceState | undefined {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    const descriptor = readSettingsDescriptor(settings, TUI_STARTUP_NS)
+    if (descriptor === undefined) return undefined
+    const value = formValueOf(descriptor)
+    const backend = value?.backend
+    // A value outside the closed public vocabulary is NOT a read: report the
+    // section unreadable instead of silently falling back to `direct`.
+    if (!isPublicBackendValue(backend)) return undefined
+    const revision = descriptor.revision
+    // Without the read revision the decision cannot be submitted conditionally;
+    // report the section unreadable rather than allowing a silent overwrite.
+    if (typeof revision !== 'number') return undefined
+    const user = descriptor.user
+    const userSection = typeof user === 'object' && user !== null && !Array.isArray(user)
+      ? user as Record<string, unknown>
+      : undefined
+    return {
+      backend,
+      revision,
+      userOverridden: userSection?.backend !== undefined,
+    }
+  }
+
+  async setBackend(value: PublicBackendValue, expectedRevision: number): Promise<void> {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    if (settings === undefined) throw new Error('the Host settings service is unavailable')
+    if (readSettingsDescriptor(settings, TUI_STARTUP_NS) === undefined) {
+      throw new Error('the "tui-startup" Host settings section is not mounted')
+    }
+    // Submit the revision the USER's decision was read at — never a revision
+    // observed at write time, which would turn an external edit into a silent
+    // overwrite.
+    await mutateSettings(settings, TUI_STARTUP_NS, [
+      { op: 'set', path: ['backend'], value },
+    ], expectedRevision)
+  }
+}
+
+/** The typed guard for the closed public backend vocabulary. A value outside
+ *  `direct|daemon` is never coerced into a default. */
+function isPublicBackendValue(value: unknown): value is PublicBackendValue {
+  return value === 'direct' || value === 'daemon'
 }

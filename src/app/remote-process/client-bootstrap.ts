@@ -50,6 +50,7 @@ import type { RemotePromptSerializer } from '../../runtime/remote/session-writer
 import type { HostDirectoryBrowseOutcome } from '../../runtime/host-directory-browse-port.ts'
 import { RemotePromptSerializerProduction } from '../../runtime/remote/prompt-serializer-remote.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
+import type { CliSessionLaunchIntent } from '../../startup.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { LocalInstanceRecord } from './local-discovery.ts'
 import type { LocalClientTransport } from './local-transport.ts'
@@ -64,6 +65,13 @@ export type {
 export interface LocalClientStartupFacts {
   readonly sessionId?: string
   readonly presetId?: string
+  /**
+   * The public CLI Session launch intent (M6-2A), forwarded single-path into
+   * the Client-local `tuiStartup` so the existing `bootstrap.ts` runner resolves
+   * browse/lookup/continue against the official Host roster. Mutually exclusive
+   * with `sessionId` (the internal exact channel).
+   */
+  readonly sessionLaunch?: CliSessionLaunchIntent
 }
 
 /** The authenticated Host facts projected into Client status. */
@@ -111,7 +119,7 @@ export interface LocalClientStatus {
   readonly fiberOwner: 'client-root'
   readonly rootFiberUid?: number
   readonly extensionService: { readonly present: true }
-  readonly startupFacts: { readonly sessionId?: string; readonly presetId?: string }
+  readonly startupFacts: { readonly sessionId?: string; readonly presetId?: string; readonly sessionLaunch?: CliSessionLaunchIntent }
   readonly host?: LocalClientHostFacts
   readonly generationId?: number
   readonly hostHome?: string
@@ -255,10 +263,17 @@ function hostFacts(record: LocalInstanceRecord): LocalClientHostFacts {
 }
 
 /** The exact Host startup facts object (never the Host-only readiness seam). */
-function startupFactsOf(startup: LocalClientStartupFacts): { readonly sessionId?: string; readonly presetId?: string } {
+function startupFactsOf(
+  startup: LocalClientStartupFacts,
+  includeLaunch = true,
+): { readonly sessionId?: string; readonly presetId?: string; readonly sessionLaunch?: CliSessionLaunchIntent } {
   return {
     ...(startup.sessionId === undefined ? {} : { sessionId: startup.sessionId }),
     ...(startup.presetId === undefined ? {} : { presetId: startup.presetId }),
+    // The public launch intent is consumed by the FIRST revision only: an HMR
+    // re-mount passes `includeLaunch: false` so an already-resolved lookup / `-c`
+    // never re-runs and cannot open a second Session.
+    ...(includeLaunch && startup.sessionLaunch !== undefined ? { sessionLaunch: startup.sessionLaunch } : {}),
   }
 }
 
@@ -771,7 +786,7 @@ async function startSurfaceLocalClient(
     await waitForAssemblyHold('domain', signal, composition.onQualification)
     signal?.throwIfAborted()
     const revisionStartup = {
-      ...startupFactsOf(startup),
+      ...startupFactsOf(startup, kind === 'initial'),
       ...(sessionIdOverride === undefined ? {} : { sessionId: sessionIdOverride }),
     }
     revision.ui = await createRemoteClientUiRuntime({ context, startup: revisionStartup })

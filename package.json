@@ -64,6 +64,10 @@
       "types": "./dist/web-preferences.d.mts",
       "default": "./dist/web-preferences.mjs"
     },
+    "./daemon-launcher": {
+      "types": "./dist/daemon-launcher.d.mts",
+      "default": "./dist/daemon-launcher.mjs"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },

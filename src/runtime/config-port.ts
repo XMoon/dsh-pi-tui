@@ -733,6 +733,56 @@ export interface WebStartupPreferenceConfig {
   setAutoStart(value: boolean, expectedRevision: number): Promise<void>
 }
 
+/** The public backend a cold launch runs: the in-process Direct TUI or the
+ *  foreground daemon Client. This is the SAME vocabulary the launcher's
+ *  `PublicBackend` uses, kept structural here so the port owns no startup
+ *  import. */
+export type PublicBackendValue = 'direct' | 'daemon'
+
+/**
+ * The profile-owned startup backend (`tui-startup.backend`): which backend a
+ * NEW cold launch runs. It is a CONFIGURATION fact, never the current process's
+ * backend — the running TUI/Host is fixed at launch and saving this preference
+ * never switches it.
+ *
+ * FAIL-CLOSED: a Profile value outside {@link PublicBackendValue} is NOT a
+ * read: `read()` returns `undefined` (unreadable) rather than silently mapping
+ * it to `direct`. An explicit `DSH_PI_TUI_BACKEND` override is a launch-time
+ * fact read separately by the UI; it never enters this state and never changes
+ * the persisted value.
+ */
+export interface BackendStartupPreferenceState {
+  /** The effective `backend` value the next cold launch will apply. */
+  readonly backend: PublicBackendValue
+  /** The namespace revision this state was read at; a Confirm submits it back
+   *  as the official `expectedRevision`, so an external write between the read
+   *  and the Confirm is a conflict instead of a silent last-write-wins. */
+  readonly revision: number
+  /** Whether the USER profile layer declares the value. `false` means the
+   *  effective value is the schema default — the only provenance the Host form
+   *  exposes — so the UI may mark it `[default]`; the default is never
+   *  re-derived here. */
+  readonly userOverridden: boolean
+}
+
+/**
+ * The profile-wide startup backend. The write is the official revision-checked
+ * settings mutation of the `tui-startup` entry's `backend` field. A resolved
+ * write is NOT a read-back: the caller must
+ * {@link BackendStartupPreferenceConfig.read} again and only that read earns
+ * `Verified`.
+ */
+export interface BackendStartupPreferenceConfig {
+  /** The current Host preference, or `undefined` when the profile section
+   *  cannot be read at all OR carries an invalid backend (fail-closed). Never a
+   *  fabricated default. */
+  read(): BackendStartupPreferenceState | undefined
+  /** Persist `backend` through the official settings write at the revision the
+   *  user's decision was read at. A stale revision is a refusal (the official
+   *  conflict), never a silent overwrite. */
+  setBackend(value: PublicBackendValue, expectedRevision: number): Promise<void>
+}
+
 /**
  * How current this backend's config reads are (M3-3B, plan §9.1).
  *
@@ -920,4 +970,6 @@ export interface ConfigPort {
   readonly visualTools: VisualToolsConfig
   /** The profile-owned Web startup preference for the NEXT Split Host launch. */
   readonly webStartupPreference: WebStartupPreferenceConfig
+  /** The profile-owned startup backend for the NEXT cold launch. */
+  readonly backendStartupPreference: BackendStartupPreferenceConfig
 }

@@ -11,6 +11,13 @@
     - id: tui-startup
       name: '@xmoon76/dsh-pi-tui/startup'
 
+    # M6-2A: the daemon Coordinator. Mounts ONLY when the startup row published
+    # `tuiDaemonStartup` (the daemon backend); it spawns the ONE foreground Client
+    # and owns its exit. It owns no Host, Session or Writer.
+    - id: pi-tui-daemon-launcher
+      name: '@xmoon76/dsh-pi-tui/daemon-launcher'
+      inject: [tuiDaemonStartup]
+
     # The extension platform (M3/E): the host provides the piTuiExtensions
     # service (third-party plugins inject it), the builtins row registers
     # the first-party chrome contributions through the SAME public API, and
@@ -64,9 +71,14 @@
     # `present` and `agent-instructions` rows read). The result contract carries
     # no `presentationMeta` — the final durable content is the drawing's
     # admission source.
+    # M6-2A: a Host business row that does NOT gate on `tuiStartup`. In the
+    # daemon supervisor PID it must not register tools or own Host state; the
+    # real Host (detached local-host.mjs) owns them. Disabled only for the
+    # daemon supervisor, live in Direct / Host-only.
     - id: pi-tui-visual-tools
       name: '@xmoon76/dsh-pi-tui/visual-tools'
       inject: [tools, agents, sessionQuery, sessionProjections]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     # The profile-owned Web startup preference (M5-W PR-C): ONE durable boolean,
     # `autoStart`, that a NEW Split Host reads BEFORE it becomes Ready. The row
@@ -89,6 +101,13 @@
     - id: webserver
       name: '@deepseek-ai/dsh-host-webserver'
       inject: [tuiStartup]
+      # M6-2A: `webserver` is an app-boot REQUIRED entry. Under the daemon
+      # backend the CLI/supervisor PID publishes `tuiDaemonStartup` and must not
+      # serve (the real Host does); leaving the row enabled-but-pending on
+      # `tuiStartup` would fail startup with "1 required plugin did not
+      # activate". A conditional `disabled` makes the row legitimately absent in
+      # the daemon supervisor and live in Direct / Host-only graphs.
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
       config:
         host: 127.0.0.1
         port: 0
@@ -127,6 +146,8 @@
     # no Connection, no transport.
     - id: job-controller
       name: '@deepseek-ai/dsh-api-job-controller'
+      # M6-2A: not gated on `tuiStartup`; must not mount in the daemon supervisor.
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     # Host-owned workspace membership (`ctx.workspaceRegistry`): D2.4 Direct
     # fork mirrors the official Host rule (use the source's directly owning
@@ -140,6 +161,10 @@
     # documented in docs/architecture/host-client.md.
     - id: workspace
       name: '@deepseek-ai/dsh-workspace'
+      # M6-2A: mounting this row performs the official one-time history bootstrap
+      # that WRITES workspace records. The daemon supervisor must not write Host
+      # state, so it is disabled only under the daemon backend.
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     # The ONE Host Workspace commands/follow owner over the registry above
     # (`ctx.workspaceController`, Typert namespace `workspace`): the same
@@ -225,11 +250,15 @@
     # historical send-time absolute-path rewrite is retired with it.
     - id: file-reference-local
       name: '@deepseek-ai/dsh-file-reference-local'
+      # M6-2A: not gated on `tuiStartup`; must not mount in the daemon supervisor.
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     # Shared Host prompt guidance for delivered file links and present results.
     # Independent of Web serving; inherited unchanged by Direct and Split Host.
     - id: deliverable-file-references
       name: '@deepseek-ai/dsh-deliverable-file-references'
+      # M6-2A: not gated on `tuiStartup`; must not mount in the daemon supervisor.
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     # The 0.1.7 declarative preset registry: preset identity, revisions and
     # default/selection policy are registry-owned (deployment `default` here;

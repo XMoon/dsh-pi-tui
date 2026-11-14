@@ -63,6 +63,12 @@ export const SETTINGS_DIRECT_PAGE_STUBS = {
     read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
     setAutoStart: async (_value: boolean, _revision: number) => {},
   },
+  /** The profile-owned startup backend: the schema default (`direct`, no user
+   *  override) at revision 1. Read on every `/settings` snapshot. */
+  backendStartupPreference: {
+    read: () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
+    setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
+  },
 } as const
 
 /**
@@ -80,5 +86,6 @@ export function settingsDirectPageConfig(config: Record<string, unknown>): Recor
     account: { ...SETTINGS_DIRECT_PAGE_STUBS.account, ...(own.account ?? {}) },
     visualTools: { ...SETTINGS_DIRECT_PAGE_STUBS.visualTools, ...(own.visualTools ?? {}) },
     webStartupPreference: { ...SETTINGS_DIRECT_PAGE_STUBS.webStartupPreference, ...(own.webStartupPreference ?? {}) },
+    backendStartupPreference: { ...SETTINGS_DIRECT_PAGE_STUBS.backendStartupPreference, ...(own.backendStartupPreference ?? {}) },
   }
 }

@@ -35,6 +35,7 @@ import { dirname, isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import { mergeCause } from '../remote/dispose-cause.ts'
+import type { CliSessionLaunchIntent } from '../../startup.ts'
 import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryControlRequest, type EntryRecordSink } from './entry-control.ts'
 import {
   bindProcessSeat,
@@ -162,11 +163,12 @@ function hostRecordForTrace(host: VerifiedLocalHost): Record<string, unknown> {
  * profile path. The parent directory's REAL path and ownership are validated
  * before the file is opened; a symlinked target is refused.
  */
-function createSurfaceRecordSink(): { emit: EntryRecordSink; close(): void } {
+function createSurfaceRecordSink(): { emit: EntryRecordSink; close(): void } | undefined {
   const target = process.env.SPLIT_PROCESS_CLIENT_RECORD_FILE
-  if (target === undefined || target === '') {
-    throw new Error('local client entry: surface mode requires SPLIT_PROCESS_CLIENT_RECORD_FILE')
-  }
+  // Optional: a real daemon Client is launched with NO record file. The
+  // surface sink is initialized only when the qualification channel explicitly
+  // injects one; otherwise the caller uses a silent, non-tty observation sink.
+  if (target === undefined || target === '') return undefined
   if (!isAbsolute(target)) {
     throw new Error('local client entry: the surface record file path must be absolute')
   }
@@ -196,9 +198,88 @@ function createSurfaceRecordSink(): { emit: EntryRecordSink; close(): void } {
   }
 }
 
+/** The private v1 public-launch data channel (M6-2A). Carries ONLY the public
+ *  `sessionLaunch`/`presetId` intent from the daemon Coordinator; it never
+ *  carries a token, Host URL, Profile secret or exact Session id. */
+const CLIENT_LAUNCH_ENVELOPE_ENV = 'SPLIT_PROCESS_CLIENT_LAUNCH_V1'
+/** A hard ceiling on the decoded envelope size (plan §A4.1: 16 KiB). */
+const MAX_CLIENT_LAUNCH_ENVELOPE_BYTES = 16 * 1024
+
+/** The decoded public launch envelope. */
+export interface ClientLaunchEnvelope {
+  readonly sessionLaunch?: CliSessionLaunchIntent
+  readonly presetId?: string
+}
+
+/** Decode ONE public launch intent, strictly: exactly the known keys, a browse
+ *  with an empty query, or a lookup with a non-empty query, or a continue with
+ *  no query. Every other shape fails closed before the Host is ensured. */
+function decodeLaunchIntent(value: unknown): CliSessionLaunchIntent {
+  if (!isRecord(value)) throw new Error('local client entry: the launch envelope sessionLaunch must be an object')
+  const keys = Object.keys(value).sort()
+  if (value.kind === 'browse') {
+    if (keys.length !== 2 || value.query !== '') {
+      throw new Error('local client entry: a browse launch is exactly { kind: "browse", query: "" }')
+    }
+    return { kind: 'browse', query: '' }
+  }
+  if (value.kind === 'lookup') {
+    if (keys.length !== 2 || typeof value.query !== 'string' || value.query.trim() === '') {
+      throw new Error('local client entry: a lookup launch needs exactly a non-empty "query"')
+    }
+    return { kind: 'lookup', query: value.query.trim() }
+  }
+  if (value.kind === 'continue') {
+    if (keys.length !== 1) throw new Error('local client entry: a continue launch carries no query')
+    return { kind: 'continue' }
+  }
+  throw new Error('local client entry: unknown launch envelope sessionLaunch kind')
+}
+
+/** Decode the raw envelope: bounded, valid JSON, exactly the known keys, and a
+ *  validated public intent. `version` is frozen at 1. */
+export function decodeClientLaunchEnvelope(raw: string): ClientLaunchEnvelope {
+  if (Buffer.byteLength(raw, 'utf8') > MAX_CLIENT_LAUNCH_ENVELOPE_BYTES) {
+    throw new Error('local client entry: the launch envelope exceeds 16 KiB')
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (error) {
+    throw new Error('local client entry: the launch envelope is not valid JSON', { cause: error })
+  }
+  if (!isRecord(parsed)) throw new Error('local client entry: the launch envelope must be a JSON object')
+  for (const key of Object.keys(parsed)) {
+    if (key !== 'version' && key !== 'sessionLaunch' && key !== 'presetId') {
+      throw new Error(`local client entry: unexpected launch envelope key ${JSON.stringify(key)}`)
+    }
+  }
+  if (parsed.version !== 1) throw new Error('local client entry: the launch envelope version must be 1')
+  const envelope: { sessionLaunch?: CliSessionLaunchIntent; presetId?: string } = {}
+  if ('sessionLaunch' in parsed) envelope.sessionLaunch = decodeLaunchIntent(parsed.sessionLaunch)
+  if ('presetId' in parsed) {
+    if (typeof parsed.presetId !== 'string' || parsed.presetId.trim() === '') {
+      throw new Error('local client entry: the launch envelope presetId must be a non-empty string')
+    }
+    envelope.presetId = parsed.presetId
+  }
+  return envelope
+}
+
+/** Read and decode the envelope when it is present; absent otherwise. */
+function readClientLaunchEnvelope(): ClientLaunchEnvelope | undefined {
+  const raw = process.env[CLIENT_LAUNCH_ENVELOPE_ENV]
+  return raw === undefined ? undefined : decodeClientLaunchEnvelope(raw)
+}
+
 /** The surface-mode startup intent: an explicit internal input, never a
- *  control-channel override of published behavior. */
-function surfaceStartupFacts(options: LocalClientEntryOptions): { sessionId?: string; presetId?: string } {
+ *  control-channel override of published behavior. The public envelope and the
+ *  internal exact `SPLIT_PROCESS_CLIENT_SESSION` channel are mutually exclusive;
+ *  the exact channel is what reexec and qualification use. */
+export function surfaceStartupFacts(
+  options: LocalClientEntryOptions,
+  envelope: ClientLaunchEnvelope | undefined,
+): { sessionId?: string; presetId?: string; sessionLaunch?: CliSessionLaunchIntent } {
   const sessionId = process.env.SPLIT_PROCESS_CLIENT_SESSION
   const presetId = process.env.SPLIT_PROCESS_CLIENT_PRESET
   if (options.mode !== 'surface') return {}
@@ -208,9 +289,18 @@ function surfaceStartupFacts(options: LocalClientEntryOptions): { sessionId?: st
   if (presetId !== undefined && presetId.trim() === '') {
     throw new Error('local client entry: SPLIT_PROCESS_CLIENT_PRESET must be non-empty when set')
   }
+  if (envelope !== undefined && sessionId !== undefined) {
+    throw new Error('local client entry: the public launch envelope is mutually exclusive with the internal exact Session channel')
+  }
+  const effectivePreset = envelope?.presetId !== undefined
+    ? envelope.presetId
+    : presetId === undefined || presetId === ''
+      ? undefined
+      : presetId
   return {
     ...(sessionId === undefined || sessionId === '' ? {} : { sessionId }),
-    ...(presetId === undefined || presetId === '' ? {} : { presetId }),
+    ...(effectivePreset === undefined ? {} : { presetId: effectivePreset }),
+    ...(envelope?.sessionLaunch === undefined ? {} : { sessionLaunch: envelope.sessionLaunch }),
   }
 }
 
@@ -516,6 +606,10 @@ export function createClientReexecChildEnvironment(
   for (const name of OLD_CLIENT_ENVIRONMENT) delete env[name]
   // A handoff never creates a fresh Session through a preset.
   delete env.SPLIT_PROCESS_CLIENT_PRESET
+  // The public launch envelope is consumed by the ORIGINAL Client only; a
+  // replacement Client resumes the confirmed exact Session instead, so the
+  // envelope must never ride the handoff (it would re-run lookup/-c).
+  delete env.SPLIT_PROCESS_CLIENT_LAUNCH_V1
   env.SPLIT_PROCESS_CLIENT_MODE = 'surface'
   env.SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID = intent.expectedInstanceId
   env.SPLIT_PROCESS_DSH_ANCHOR = intent.dshAnchor
@@ -1029,6 +1123,10 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   // contradictory environment is refused without touching a seat.
   const expectedHostInstanceId = expectedHostInstanceFromEnvironment(options.mode)
   assertHandoffSignalExclusivity(options.mode, expectedHostInstanceId)
+  // Decode the public launch envelope BEFORE any Host/seat/Context work: a
+  // malformed, oversized or contradictory envelope fails closed with no Host
+  // interaction. Surface mode only; the qualification/peer channels never read it.
+  const launchEnvelope = options.mode === 'surface' ? readClientLaunchEnvelope() : undefined
   const hostModules = await loadOfficialClientHost(options.dshAnchor)
   const dshHome = hostModules.resolveDshHome()
   const packageRoot = installedPackageRootFromEntry(import.meta.url)
@@ -1044,7 +1142,10 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   // telemetry channel (a private 0600 JSONL file). Qualification keeps the
   // frozen JSONL control channel on stdin/stdout.
   const recordSink = options.mode === 'surface' ? createSurfaceRecordSink() : undefined
-  const emit: EntryRecordSink = recordSink?.emit ?? writeEntryRecord
+  // Surface mode never writes JSON to the terminal. With no explicitly injected
+  // record file the sink is a silent, non-tty observation sink (never a
+  // writeEntryRecord fallback that would corrupt the TUI).
+  const emit: EntryRecordSink = recordSink?.emit ?? (options.mode === 'surface' ? () => {} : writeEntryRecord)
   // Publish the business PID before any seat/assembly work: a signal-stop test
   // must be able to address THIS process while it is still assembling and no
   // ready record exists yet. No secret/path is carried.
@@ -1710,7 +1811,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     }
     const clientContext = context
     if (clientContext === undefined) throw new Error('local client entry: the Client root Context is missing')
-    const surfaceFacts = surfaceStartupFacts(options)
+    const surfaceFacts = surfaceStartupFacts(options, launchEnvelope)
     /**
      * The ONE allowed process-composition edge into `app/bootstrap.ts`
      * (architecture gate: exact lazy dynamic import, this entry only). It runs

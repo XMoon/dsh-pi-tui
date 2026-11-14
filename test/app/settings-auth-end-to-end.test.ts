@@ -185,6 +185,10 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
         read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
         setAutoStart: async (_value: boolean, _revision: number) => {},
       },
+      backendStartupPreference: {
+        read: () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
+        setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
+      },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined },
       subagentModelSelection: { available: () => false },
@@ -1079,8 +1083,9 @@ test('the category rail paints the real Models and Account pages while the keybo
   await h.vt.waitForRender()
   assert.match(h.view(), /dsh-pi-tui/u, 'the About home is the first frame')
 
-  // Down to Models: the right column shows the REAL Models page at once.
-  await key(h, '\u001b[B')
+  // Down to Models (via General): the right column shows the REAL Models page at once.
+  await key(h, '\u001b[B') // About -> General
+  await key(h, '\u001b[B') // General -> Models
   assert.match(h.view(), /Models & Credentials/u, 'the rail shows the real Models page')
   assert.match(h.rows()[0]!, /Settings · Categories/u, 'the keyboard stays on the rail')
 
@@ -1097,8 +1102,9 @@ test('Enter on the rail hands the keyboard to the SAME Account page without runn
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
   await h.vt.waitForRender()
-  await key(h, '\u001b[B')
-  await key(h, '\u001b[B')
+  await key(h, '\u001b[B') // About -> General
+  await key(h, '\u001b[B') // General -> Models
+  await key(h, '\u001b[B') // Models -> Account
   assert.match(h.view(), /DeepSeek Account/u, 'the Account page is already on screen')
   const before = h.view()
 
@@ -1262,8 +1268,9 @@ test('a narrow rail selection never creates the invisible Account page, and Ente
   assert.match(h.rows()[0]!, /Settings · Categories/u, 'the narrow rail owns the list')
 
   // Browsing the invisible Account category must not start a Host watch.
-  await key(h, '\u001b[B')
-  await key(h, '\u001b[B')
+  await key(h, '\u001b[B') // About -> General
+  await key(h, '\u001b[B') // General -> Models
+  await key(h, '\u001b[B') // Models -> Account
   assert.equal(h.calls.filter(call => call === 'account:watch').length, 0,
     'browsing an invisible category never starts the Account watch')
   assert.equal(h.calls.filter(call => call === 'startSignIn').length, 0,
@@ -1283,8 +1290,9 @@ test('the wide rail previews the real page with exactly ONE watch, and the focus
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
   await h.vt.waitForRender()
-  await key(h, '\u001b[B')
-  await key(h, '\u001b[B')
+  await key(h, '\u001b[B') // About -> General
+  await key(h, '\u001b[B') // General -> Models
+  await key(h, '\u001b[B') // Models -> Account
   assert.match(h.view(), /DeepSeek Account/u, 'the rail previews the real Account page')
   assert.equal(h.calls.filter(call => call === 'account:watch').length, 1,
     'the wide rail preview starts exactly ONE watch')
@@ -1303,8 +1311,9 @@ test('a content press released on the rail does not select the category', async 
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
   await h.vt.waitForRender()
   const accountRow = railEntryRow(h, 'Account')
-  await key(h, '\u001b[B')
-  await key(h, '\u001b[B')
+  await key(h, '\u001b[B') // About -> General
+  await key(h, '\u001b[B') // General -> Models
+  await key(h, '\u001b[B') // Models -> Account
   const contentRow = rowOf(h, 'Status')
   // A press in the CONTENT, released on the RAIL: the rail must not act on it.
   // The selection stays exactly where the rail navigation left it, and the
@@ -1325,8 +1334,9 @@ test('a narrow rail selection is mounted when the terminal grows and the content
   await h.vt.waitForRender()
   // The narrow first frame is the About content: Esc returns to the list.
   await key(h, '\u001b')
-  await key(h, '\u001b[B')
-  await key(h, '\u001b[B')
+  await key(h, '\u001b[B') // About -> General
+  await key(h, '\u001b[B') // General -> Models
+  await key(h, '\u001b[B') // Models -> Account
   assert.match(h.view(), /^> Account/mu, 'the narrow rail selected the Account category')
   assert.equal(h.calls.filter(call => call === 'account:watch').length, 0,
     'the narrow rail browsed an invisible category: no Account watch was started')
@@ -1347,7 +1357,8 @@ test('the Models page is mounted the same way when the terminal grows', async ()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
   await h.vt.waitForRender()
   await key(h, '\u001b')
-  await key(h, '\u001b[B')
+  await key(h, '\u001b[B') // About -> General
+  await key(h, '\u001b[B') // General -> Models
   assert.match(h.view(), /^> Models/mu, 'the narrow rail selected the Models category')
   h.vt.resize(120, 40)
   await h.vt.waitForRender()
@@ -1506,7 +1517,7 @@ test('a resize to 120x7 rejects a mouse press/release on the old sign-out row', 
 async function openWebCredentialRow(h: Harness): Promise<void> {
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
   await waitForFrame(h.view, frame => frame.includes('Settings ·'), () => h.vt.waitForRender(), 'the Settings workspace')
-  for (let step = 0; step < 7; step += 1) await key(h, '\x1b[B') // About -> Tools
+  for (let step = 0; step < 8; step += 1) await key(h, '\x1b[B') // About -> Tools
   await key(h, '\r') // rows level
   // Walk the Tools rows until the Web launcher owns the selection (the M5-W
   // PR-C preference row sits between Visual tools and it).

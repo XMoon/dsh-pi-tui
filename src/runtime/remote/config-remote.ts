@@ -97,6 +97,9 @@ import type {
   VisualToolsState,
   WebStartupPreferenceConfig,
   WebStartupPreferenceState,
+  BackendStartupPreferenceConfig,
+  BackendStartupPreferenceState,
+  PublicBackendValue,
 } from '../config-port.ts'
 import { SupersededReadError } from '../read-error.ts'
 import { RemoteConfigWriteLifetime } from './config-write-lifetime.ts'
@@ -1811,6 +1814,71 @@ class RemoteWebStartupPreferenceConfig implements WebStartupPreferenceConfig {
   }
 }
 
+/** The official profile entry id of the Host row that owns the startup backend
+ *  selection (its Loader row id is also its Settings namespace). */
+const TUI_STARTUP_NS = 'tui-startup'
+
+/** The typed guard for the closed public backend vocabulary. A value outside
+ *  `direct|daemon` is never coerced into a default (fail-closed). */
+function isPublicBackendValue(value: unknown): value is PublicBackendValue {
+  return value === 'direct' || value === 'daemon'
+}
+
+/**
+ * The Remote startup backend preference: the mirrored `tui-startup` form
+ * section over the official generated settings remote. The write is a
+ * revision-checked path mutation and the mirror's post-settlement refresh is
+ * the only new authority — the mutate reply is never trusted as the new value.
+ *
+ * FAIL-CLOSED: an effective `backend` value outside `direct|daemon` is NOT a
+ * read — `read()` returns `undefined` rather than mapping it to `direct`.
+ */
+class RemoteBackendStartupPreferenceConfig implements BackendStartupPreferenceConfig {
+  private readonly mirror: RemoteConfigMirror
+
+  constructor(mirror: RemoteConfigMirror) {
+    this.mirror = mirror
+  }
+
+  read(): BackendStartupPreferenceState | undefined {
+    const view = this.mirror.namespace(TUI_STARTUP_NS)
+    if (view === undefined) return undefined
+    const value = plainRecord(view.value)
+    const backend = value?.backend
+    // A projection outside the closed public vocabulary is unreadable, never a
+    // silent `direct`.
+    if (!isPublicBackendValue(backend)) return undefined
+    const revision = view.revision
+    // Without the read revision the decision cannot be submitted conditionally;
+    // report the section unreadable rather than allowing a silent overwrite.
+    if (typeof revision !== 'number') return undefined
+    const user = plainRecord(view.user)
+    return {
+      backend,
+      revision,
+      userOverridden: user?.backend !== undefined,
+    }
+  }
+
+  async setBackend(value: PublicBackendValue, expectedRevision: number): Promise<void> {
+    const view = this.mirror.namespace(TUI_STARTUP_NS)
+    if (view === undefined) {
+      throw new Error(`settings namespace "${TUI_STARTUP_NS}" is not available in this deployment`)
+    }
+    if (view.value === undefined) {
+      throw new Error(`settings namespace "${TUI_STARTUP_NS}" exposes no form projection`)
+    }
+    // The decision's revision is the fence; `record` keeps a failed
+    // post-settlement refresh a currentness uncertainty, not proof of refusal.
+    await this.mirror.mutate(
+      TUI_STARTUP_NS,
+      [{ op: 'set', path: ['backend'], value }],
+      expectedRevision,
+      'record',
+    )
+  }
+}
+
 const WEB_PROVIDER_NS = 'web'
 const WEB_SEARCH_API_NS = 'web-deepseek-api'
 const WEB_API_KEY_REF = 'DEEPSEEK_API_KEY'
@@ -1849,6 +1917,7 @@ export class RemoteConfigPort implements ConfigPort {
   readonly web: WebProviderConfig
   readonly visualTools: VisualToolsConfig
   readonly webStartupPreference: WebStartupPreferenceConfig
+  readonly backendStartupPreference: BackendStartupPreferenceConfig
 
   /** `undefined` while the `tui-app` namespace is absent from the mirror
    *  (the port's documented absence contract). */
@@ -1900,6 +1969,7 @@ export class RemoteConfigPort implements ConfigPort {
     this.subagentModelSelection = new RemoteSubagentModelSelectionConfig(this.mirror)
     this.visualTools = new RemoteVisualToolsConfig(this.mirror)
     this.webStartupPreference = new RemoteWebStartupPreferenceConfig(this.mirror)
+    this.backendStartupPreference = new RemoteBackendStartupPreferenceConfig(this.mirror)
     this.web = new RemoteWebProviderConfig(this.mirror, this.credentialConfig)
   }
 

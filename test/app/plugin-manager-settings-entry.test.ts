@@ -307,8 +307,8 @@ test('120×40 previews Categories | List | Details and 80×24 previews Categorie
     await selectPlugins(vt)
     await vt.waitForRender()
     const view = vt.getViewport()
-    const headerRow = rowOf(view, 'Categories (9)')
-    assert.match(plain([view[headerRow]!]), /\[Categories \(9\)\]/, `${columns}: the rail is the ONE active device`)
+    const headerRow = rowOf(view, 'Categories (10)')
+    assert.match(plain([view[headerRow]!]), /\[Categories \(10\)\]/, `${columns}: the rail is the ONE active device`)
     assert.equal(cellIndexOf(view, headerRow, 'Plugins'), 24, `${columns}: the preview starts after the rail`)
     if (dual) {
       assert.match(plain([view[headerRow]!]), /Details/, `${columns}: the wide preview keeps the Details column label`)
