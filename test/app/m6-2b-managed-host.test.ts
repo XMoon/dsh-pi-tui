@@ -872,6 +872,40 @@ test('a unit carrying an extra ExecStartPre directive is refused', t => {
   assert.throws(() => inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir, fx.entry), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
 })
 
+test('a valid unit whose installed paths contain spaces is accepted', t => {
+  const uid = process.getuid?.() ?? 1000
+  const root = testLifecycle(t).tempDir('m62b-space-entry-')
+  const home = join(root, 'dsh home with spaces')
+  const profileRealpath = join(root, 'profile dir with spaces')
+  const packageRoot = join(root, 'package with spaces')
+  const anchorDir = join(root, 'dsh anchor dir')
+  mkdirSync(home, { recursive: true, mode: 0o700 })
+  mkdirSync(profileRealpath, { recursive: true, mode: 0o700 })
+  mkdirSync(join(packageRoot, 'dist'), { recursive: true, mode: 0o700 })
+  mkdirSync(anchorDir, { recursive: true })
+  writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.7' }))
+  const entry = join(packageRoot, 'dist', 'local-host.mjs')
+  writeFileSync(entry, 'process.exit(0)\n')
+  const anchor = join(anchorDir, 'package.json')
+  writeFileSync(anchor, JSON.stringify({ name: '@deepseek-ai/dsh', version: DSH_VERSION }), { mode: 0o644 })
+  const scope = scopeFromInstalledProfile({ dshHome: home, profileDir: profileRealpath, packageRoot, dshVersion: DSH_VERSION })
+  const unitDir = testLifecycle(t).tempDir('m62b-space-units-')
+  const content = renderUnitContent({
+    dshHome: home,
+    profileRealpath,
+    profile: 'pi-tui',
+    scopeId: scope.scopeId,
+    buildId: scope.buildId,
+    nodePath: process.execPath,
+    hostEntryPath: entry,
+    dshAnchor: anchor,
+  })
+  const unitPath = join(unitDir, buildUnitName('pi-tui', scope.scopeId))
+  writeFileSync(unitPath, content, { mode: 0o600 })
+  const result = inspectOwnedProfileUnit(scope, 'pi-tui', uid, unitDir, entry)
+  assert.equal(result.kind, 'owned', 'a controlled unit with spaced installed paths must stay owned')
+})
+
 test('a unit whose ExecStart points at another installation entry is refused', t => {
   const uid = process.getuid?.() ?? 1000
   const fx = controlledUnitFixture(t)
