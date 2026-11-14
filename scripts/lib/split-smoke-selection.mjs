@@ -62,6 +62,7 @@ import { runPublicDaemonEntry } from '../smoke/split-process/public-daemon-entry
 import { runAcpPo1bOptInControl } from '../smoke/split-process/acp-po1b.mjs'
 import { runAcpPo2SessionView } from '../smoke/split-process/acp-po2-session-view.mjs'
 import {
+  runManagedHostConcurrentColdStart,
   runManagedHostFallback,
   runManagedHostManagerError,
   runManagedHostSystemd,
@@ -349,6 +350,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'managed-host.m6-2b-systemd',
     title: 'a real public daemon Client cold start with a reachable systemd user manager installs ONE owned profile unit, the manager FragmentPath names it, one authenticated Host serves it, and only SIGTERM stops it',
     run: runManagedHostSystemd,
+  }),
+  Object.freeze({
+    suite: 'managed-host',
+    id: 'managed-host.m6-2b-concurrent-cold-start',
+    title: 'two public daemon Clients cold-start with no Host yet and converge to exactly one authenticated Host and one owned unit (both authenticate to the same Host PID)',
+    run: runManagedHostConcurrentColdStart,
   }),
   Object.freeze({
     suite: 'managed-host',

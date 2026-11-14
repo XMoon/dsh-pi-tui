@@ -588,7 +588,7 @@ test('managed unit cleanup only matches this run\u2019s exact owner metadata and
 
 test('cleanup actually stops and removes this run\u2019s unit and refuses foreign, unsafe and failed-stop cases', t => {
   const uid = process.getuid?.()
-  const mkRun = ({ artifactBuild, contentBuild = artifactBuild, stopStatus = 0, symlink = false, instanceBuild = () => undefined }) => {
+  const mkRun = ({ artifactBuild, contentBuild = artifactBuild, stopStatus = 0, symlink = false, reloadStatus = 0, instanceBuild = () => undefined }) => {
     const root = testLifecycle(t).tempDir('m62b-cleanup-')
     const home = join(root, 'home'); mkdirSync(home, { mode: 0o700 })
     const unitDir = join(home, '.config', 'systemd', 'user'); mkdirSync(unitDir, { recursive: true, mode: 0o700 })
@@ -614,6 +614,7 @@ test('cleanup actually stops and removes this run\u2019s unit and refuses foreig
       calls.push(args.join(' '))
       if (args.includes('show')) return { status: 0, stdout: `LoadState=loaded\nActiveState=active\nFragmentPath=${unitPath}\nDropInPaths=\n`, stderr: '' }
       if (args.includes('stop')) return { status: stopStatus, stdout: '', stderr: stopStatus === 0 ? '' : 'stop failed' }
+      if (args.includes('daemon-reload')) return { status: reloadStatus, stdout: '', stderr: reloadStatus === 0 ? '' : 'reload failed' }
       return { status: 0, stdout: '', stderr: '' }
     }
     const installation = { profileDir, profilePackage, dshHome: join(root, 'dsh-home'), anchor }
@@ -649,12 +650,18 @@ test('cleanup actually stops and removes this run\u2019s unit and refuses foreig
   const stale = mkRun({ artifactBuild: 'b'.repeat(64), contentBuild: 'a'.repeat(64), instanceBuild: () => 'a'.repeat(64) })
   assert.equal(stale.result.removed, false)
   assert.equal(existsSync(stale.unitPath), true)
+  // The file was unlinked but the manager reload failed: cleanup is NOT complete.
+  const reloadFail = mkRun({ artifactBuild: 'b'.repeat(64), reloadStatus: 1 })
+  assert.equal(reloadFail.result.removed, false)
+  assert.equal(reloadFail.result.reason, 'reload-failed')
+  assert.equal(reloadFail.result.fileRemoved, true)
+  assert.equal(existsSync(reloadFail.unitPath), false)
 })
 
 test('a cleanup that did not remove this run\u2019s unit fails the scenario verdict', () => {
   assert.equal(cleanupOutcomeError({ removed: true }), undefined)
   assert.equal(cleanupOutcomeError({ removed: false, reason: 'absent' }), undefined)
-  for (const reason of ['stop-failed', 'other-build', 'foreign-owner', 'no-artifact-build', 'not-this-install', 'unsafe-file', 'dropin']) {
+  for (const reason of ['stop-failed', 'other-build', 'foreign-owner', 'no-artifact-build', 'not-this-install', 'unsafe-file', 'dropin', 'reload-failed']) {
     assert.equal(typeof cleanupOutcomeError({ removed: false, reason }), 'string', `cleanup ${reason} must be a scenario failure`)
   }
   assert.equal(typeof cleanupOutcomeError(undefined), 'string')

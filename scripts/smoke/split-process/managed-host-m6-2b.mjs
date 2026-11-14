@@ -237,7 +237,11 @@ export function stopAndRemoveManagedUnit(installation, trace = () => {}, expecte
     if (stop.status !== 0) return { removed: false, reason: 'stop-failed' }
   }
   try { unlinkSync(unitPath) } catch (error) { if (error?.code !== 'ENOENT') return { removed: false, reason: 'unlink-failed' } }
-  run(['--user', '--no-pager', '--no-ask-password', 'daemon-reload'], runtimeDir)
+  // The unit FILE is gone, but the manager's loaded state is only refreshed once
+  // `daemon-reload` succeeds. Report a distinct failure if it does not, so a
+  // stale manager state is never reported as a completed cleanup.
+  const reload = run(['--user', '--no-pager', '--no-ask-password', 'daemon-reload'], runtimeDir)
+  if (reload.status !== 0) return { removed: false, fileRemoved: true, reason: 'reload-failed' }
   trace('managed-host-unit-removed', { unit })
   return { removed: true }
 }
@@ -369,17 +373,19 @@ export async function runManagedHostSystemd({ installation, trace, dshHome }) {
     assert(typeof identity.instanceId === 'string' && /^[0-9a-f-]{36}$/u.test(identity.instanceId), 'the Host identity has no instance id')
     unitBuildId = identity.buildId
     trace('managed-host-systemd-unit', { unit, loadState: props.LoadState, activeState: props.ActiveState })
-    // B10: a SECOND concurrent cold public Client attaches to the SAME single
-    // Host and the SAME single unit (never a second Host, never a unit rewrite).
+    // WARM REUSE (B02, NOT B10 cold-start): a second Client attaching while a
+    // Host is already running/Ready reuses the SAME single Host and unit. The
+    // genuine concurrent cold-start race is proven separately by
+    // runManagedHostConcurrentColdStart.
     const second = new PublicDshScreen(installation, 'daemon')
     try {
-      await waitForCounts(dshHome, counts => counts.host === 1 && counts.client >= 2, 'a second concurrent Client on the same Host', 90_000)
-      await second.waitForAny(['type a message', '╭'], 'the second managed Client', 120_000)
-      assert(hostPids(dshHome).length === 1, 'a second cold Client created or replaced the Host')
+      await waitForCounts(dshHome, counts => counts.host === 1 && counts.client >= 2, 'a second Client reusing a warm Host', 90_000)
+      await second.waitForAny(['type a message', '╭'], 'the second Client', 120_000)
+      assert(hostPids(dshHome).length === 1, 'a second Client created or replaced the Host')
       const props2 = showUnit(unit, runtimeDir)
       assert(props2.FragmentPath !== undefined && realpathSync(props2.FragmentPath) === realpathSync(expectedFragment), 'the second Client changed the unit FragmentPath')
       assert(props2.ActiveState === 'active', 'the unit is not active with two Clients')
-      trace('managed-host-concurrency', { clients: 2, hosts: 1 })
+      trace('managed-host-warm-reuse', { clients: 2, hosts: 1 })
       second.send('/exit\r')
       await second.exitWithin(60_000)
       await waitForCounts(dshHome, counts => counts.client === 1, 'the second Client exit', 30_000)
@@ -418,6 +424,61 @@ export async function runManagedHostSystemd({ installation, trace, dshHome }) {
     // Only SIGKILL the isolated set when no supervised unit remains; if our unit
     // could not be stopped/removed, killing a still-supervised Host would trip
     // Restart=on-failure, so we leave it and surface the failure above.
+    if (cleanup.removed === true || cleanup.reason === 'absent') killIsolatedProcesses(dshHome)
+  }
+  if (failure !== undefined) throw failure
+  return result
+}
+
+/**
+ * B10: TWO public Clients COLD-start with no Host yet. They must race the full
+ * readLocalRecord -> probe -> install unit -> daemon-reload -> start -> readiness
+ * chain and converge to ONE Host and ONE unit, with both Clients authenticated to
+ * that single Host (unit MainPID equals the published Host PID).
+ */
+export async function runManagedHostConcurrentColdStart({ installation, trace, dshHome }) {
+  const gate = isolatedGate()
+  if (!gate.qualified) return { status: 'NOT_VERIFIED', reason: gate.reason }
+  const uid = process.getuid()
+  const runtimeDir = existsSync(`/run/user/${String(uid)}`) ? `/run/user/${String(uid)}` : undefined
+  const probe = systemctl(['--user', '--no-pager', '--no-ask-password', 'show-environment'], runtimeDir)
+  if (probe.status !== 0) return { status: 'NOT_VERIFIED', reason: `NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: systemctl --user show-environment exited ${String(probe.status)}` }
+  const scopeId = profileScopeId(uid, installation.profileDir)
+  const unit = unitName('pi-tui', scopeId)
+  const expectedFragment = join(realpathSync(userInfo().homedir), '.config', 'systemd', 'user', unit)
+  assert(hostPids(dshHome).length === 0, 'the concurrent cold-start scene must begin with no Host')
+  // Launch BOTH clients before either has ensured a Host, so they race the full
+  // production start chain (not a warm reuse of an already-Ready Host).
+  const a = new PublicDshScreen(installation, 'daemon')
+  const b = new PublicDshScreen(installation, 'daemon')
+  let result
+  let failure
+  try {
+    await waitForCounts(dshHome, counts => counts.host === 1 && counts.client >= 2, 'one Host converged from two cold Clients', 120_000)
+    await a.waitForAny(['type a message', '╭'], 'cold Client A', 120_000)
+    await b.waitForAny(['type a message', '╭'], 'cold Client B', 120_000)
+    assert(hostPids(dshHome).length === 1, 'two cold Clients converged to more than one Host')
+    const props = showUnit(unit, runtimeDir)
+    assert(props.LoadState !== undefined && props.LoadState !== 'not-found', 'the converged unit is not loaded')
+    assert(props.FragmentPath !== undefined && realpathSync(props.FragmentPath) === realpathSync(expectedFragment), 'the converged unit FragmentPath is not the installed unit')
+    assert(props.ActiveState === 'active', 'the converged unit is not active')
+    const identity = readInstance(dshHome, scopeId)
+    assert(identity !== undefined && identity.scopeId === scopeId, 'the converged Host published no scope identity')
+    assert(Number(props.MainPID) === identity.hostPid, 'the unit MainPID is not the authenticated Host PID')
+    trace('managed-host-concurrent-cold-start', { hosts: 1, clients: 2 })
+    result = { status: 'PASS', scope: 'REAL_SYSTEMD_USER_L6', concurrentColdStart: true, oneHost: true, oneUnit: true, bothAuthenticated: true }
+  } catch (error) {
+    failure = error
+  } finally {
+    try { a.send('/exit\r') } catch { /* already gone */ }
+    try { b.send('/exit\r') } catch { /* already gone */ }
+    await a.exitWithin(60_000)
+    await b.exitWithin(60_000)
+    await a.dispose()
+    await b.dispose()
+    const cleanup = stopAndRemoveManagedUnit(installation, trace)
+    const outcomeError = cleanupOutcomeError(cleanup)
+    if (outcomeError !== undefined && failure === undefined) failure = new SplitSmokeAssertionError(outcomeError)
     if (cleanup.removed === true || cleanup.reason === 'absent') killIsolatedProcesses(dshHome)
   }
   if (failure !== undefined) throw failure
