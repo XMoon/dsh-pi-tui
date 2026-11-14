@@ -435,7 +435,7 @@ test('a surface startup protocol refusal states the code, preserved Host and exp
   assert.doesNotMatch(line, /\bpid\b|connectUrl|token|cookie|\/home\/|\/users\//iu)
   // Other typed scope failures are reported by CODE with a fixed recovery line;
   // the raw message (which can carry an endpoint / detail) is never echoed.
-  for (const code of ['HOST_UNRESPONSIVE', 'HOST_BUILD_INCOMPATIBLE']) {
+  for (const code of ['HOST_UNRESPONSIVE', 'HOST_BUILD_INCOMPATIBLE'] as const) {
     const other = surfaceStartupFailureLine(new LocalScopeError(code, 'local discovery: identity route answered HTTP 503 at http://10.0.0.1/x'))
     assert.equal(other, `split client surface: cannot establish the local Host (${code}); the Host was not stopped. Resolve the Host state and re-run: dsh --profile pi-tui`)
     assert.doesNotMatch(other, /503|10\.0\.0\.1|identity route/iu)
