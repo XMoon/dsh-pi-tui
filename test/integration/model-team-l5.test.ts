@@ -49,11 +49,11 @@ test('FR1 L5 Direct: the mounted /model Team row writes the real Host and reads 
   // A real turn creates the Root Session AND records modelSelection.lastUsed.
   const agent = await app.submitFirstPrompt('start the FR1 L5 scenario')
   await app.waitFor(() => teamOf(app.host).isEnabled(agent) === false, 'Team starts OFF')
-  await app.settle()
+  await app.vt.waitForRender()
 
   // Open /model through the real command path.
   for (const character of '/model') app.vt.sendInput(character)
-  await app.settle()
+  await app.vt.waitForRender()
   app.vt.sendInput('\r')
   await app.waitFor(() => app.view().includes('Agent Team'), 'the /model Team row mounts')
   assert.match(app.view(), /Agent Team\s+On\s+\[Off\]/u, `the picker reads the official OFF state:\n${app.view()}`)
@@ -61,7 +61,7 @@ test('FR1 L5 Direct: the mounted /model Team row writes the real Host and reads 
   // Tab to the Team row, Enter enables it: the official Host write runs and the
   // SAME frame repaints the authoritative ON state.
   app.vt.sendInput('\t')
-  await app.settle()
+  await app.vt.waitForRender()
   app.vt.sendInput('\r')
   await app.waitFor(() => teamOf(app.host).isEnabled(agent) === true, 'the official Host Team service turns ON')
   await app.waitFor(() => /Agent Team\s+\[On\]\s+Off/u.test(app.view()), 'the picker reads the ON projection back')
@@ -73,7 +73,7 @@ test('FR1 L5 Direct: the mounted /model Team row writes the real Host and reads 
   await app.waitFor(() => app.view().includes('Disable Agent Team'), 'the OFF confirmation seat mounts')
   assert.equal(teamOf(app.host).isEnabled(agent), true, 'opening the seat writes nothing')
   app.vt.sendInput('\x1b') // Esc cancels with zero writes
-  await app.settle()
+  await app.vt.waitForRender()
   assert.equal(teamOf(app.host).isEnabled(agent), true, 'Esc cancels the OFF with no Host write')
   await app.waitFor(() => !app.view().includes('Disable Agent Team'), 'the seat closes')
 
@@ -81,7 +81,7 @@ test('FR1 L5 Direct: the mounted /model Team row writes the real Host and reads 
   app.vt.sendInput('\r')
   await app.waitFor(() => app.view().includes('Disable Agent Team'), 'the OFF confirmation seat mounts again')
   app.vt.sendInput('\x1b[C') // Right -> focus the Disable action
-  await app.settle()
+  await app.vt.waitForRender()
   app.vt.sendInput('\r') // Confirm
   await app.waitFor(() => teamOf(app.host).isEnabled(agent) === false, 'the confirmed OFF reaches the Host')
   await app.waitFor(() => /Agent Team\s+On\s+\[Off\]/u.test(app.view()), 'the picker reads the OFF projection back')
