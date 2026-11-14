@@ -299,6 +299,47 @@ function readInstance(dshHome, scopeId) {
   }
 }
 
+/** Field 22 (`starttime`) from `/proc/<pid>/stat` (undefined when unavailable). */
+function linuxStarttime(pid) {
+  try {
+    const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
+    const close = stat.lastIndexOf(')')
+    if (close < 0) return undefined
+    const fields = stat.slice(close + 2).trim().split(/\s+/u)
+    return /^\d+$/u.test(fields[19] ?? '') ? fields[19] : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Authorization for the B13 crash scene. The registry PID is an unauthenticated
+ * hint; a SIGKILL is allowed only when the target is the VERIFIED managed unit's
+ * MainPID, a live Host process of THIS isolated scope, and the same kernel
+ * process identity (starttime) the published record names.
+ */
+export function killAuthorizationError({ targetPid, unitMainPid, hostPids: liveHostPids, publishedStarttime, liveStarttime }) {
+  if (!Number.isSafeInteger(targetPid) || targetPid < 1) return 'invalid target pid'
+  if (!Number.isSafeInteger(unitMainPid) || unitMainPid !== targetPid) return 'target pid is not the verified unit MainPID'
+  if (!Array.isArray(liveHostPids) || !liveHostPids.includes(targetPid)) return 'target pid is not a live Host process of this isolated scope'
+  if (typeof publishedStarttime !== 'string' || publishedStarttime === '' || publishedStarttime !== liveStarttime) return 'target pid kernel starttime does not match the published Host identity'
+  return null
+}
+
+/** Kill only an authorized target; returns whether a kill was actually issued. */
+export function killVerifiedHost({ targetPid, unitMainPid, hostPids: liveHostPids, publishedStarttime, readStarttime = linuxStarttime, kill = process.kill }) {
+  const reason = killAuthorizationError({
+    targetPid, unitMainPid, hostPids: liveHostPids, publishedStarttime, liveStarttime: readStarttime(targetPid),
+  })
+  if (reason !== null) return { killed: false, reason }
+  try {
+    kill(targetPid, 'SIGKILL')
+    return { killed: true }
+  } catch (error) {
+    return { killed: false, reason: `kill failed: ${error?.code ?? 'error'}` }
+  }
+}
+
 async function waitForCounts(dshHome, predicate, label, timeoutMs) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -608,7 +649,17 @@ export async function runManagedHostCrashRestart({ installation, trace, dshHome 
     assert(before !== undefined && before.scopeId === scopeId, 'the Host published no scope identity')
     const oldPid = before.hostPid
     const oldInstance = before.instanceId
-    process.kill(oldPid, 'SIGKILL')
+    const propsBefore = showUnit(unit, runtimeDir)
+    assert(propsBefore.ActiveState === 'active', 'the managed unit must be active before the crash')
+    // The registry PID is a hint, never kill authority: require the verified
+    // unit MainPID, an isolated Host process, and the same kernel starttime.
+    const killResult = killVerifiedHost({
+      targetPid: oldPid,
+      unitMainPid: Number(propsBefore.MainPID),
+      hostPids: hostPids(dshHome),
+      publishedStarttime: before.hostStarttime,
+    })
+    assert(killResult.killed === true, `refusing an unverified crash target: ${killResult.reason}`)
     await waitForCondition(() => {
       const current = readInstance(dshHome, scopeId)
       return current !== undefined && current.instanceId !== oldInstance && current.hostPid !== oldPid && hostPids(dshHome).includes(current.hostPid)

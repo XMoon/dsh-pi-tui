@@ -37,7 +37,7 @@ import {
 } from '../../scripts/lib/split-smoke-selection.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 import { encodeUnitValue, parseManagerUnitPath, userUnitPathUnsupportedReason } from '../../src/app/remote-process/local-host-manager.ts'
-import { cleanupOutcomeError, encodeExecArg, managedHostGateReason, stopAndRemoveManagedUnit, unitBelongsToRun, unitFileSafetyError } from '../../scripts/smoke/split-process/managed-host-m6-2b.mjs'
+import { cleanupOutcomeError, encodeExecArg, killVerifiedHost, managedHostGateReason, stopAndRemoveManagedUnit, unitBelongsToRun, unitFileSafetyError } from '../../scripts/smoke/split-process/managed-host-m6-2b.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'split-process-smoke.mjs')
@@ -656,6 +656,20 @@ test('cleanup actually stops and removes this run\u2019s unit and refuses foreig
   assert.equal(reloadFail.result.reason, 'reload-failed')
   assert.equal(reloadFail.result.fileRemoved, true)
   assert.equal(existsSync(reloadFail.unitPath), false)
+})
+
+test('the B13 crash kill is authorized only for the verified unit MainPID and Host identity', () => {
+  const killed = []
+  const kill = (pid, signal) => { killed.push([pid, signal]) }
+  const base = { targetPid: 42, unitMainPid: 42, hostPids: [42], publishedStarttime: '123', readStarttime: () => '123', kill }
+  assert.deepEqual(killVerifiedHost(base), { killed: true })
+  assert.deepEqual(killed, [[42, 'SIGKILL']])
+  killed.length = 0
+  assert.equal(killVerifiedHost({ ...base, unitMainPid: 43 }).killed, false) // not the unit MainPID
+  assert.equal(killVerifiedHost({ ...base, hostPids: [99] }).killed, false) // not this scope's Host
+  assert.equal(killVerifiedHost({ ...base, readStarttime: () => '999' }).killed, false) // starttime changed
+  assert.equal(killVerifiedHost({ ...base, targetPid: 0 }).killed, false) // invalid pid
+  assert.equal(killed.length, 0, 'an unverified target must never receive SIGKILL')
 })
 
 test('the managed-host smoke summary covers the whole registry (B10 concurrent case included)', () => {
