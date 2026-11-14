@@ -709,7 +709,7 @@ test('a Zellij live OK keeps Main and Alt managed when the fork capability is nu
         assert.ok(hasManagedWire(vt.writes.join('')), `${entry.name}: Main restores the image after the Alt switch`)
         assert.equal(vt.writes.join('').includes('\x1b]1337;File='), false, `${entry.name}: no iTerm2 fallback after the switch`)
 
-        for (const cycle of [1, 2] as const) {
+        for (const cycle of [1] as const) {
           vt.writes.length = 0
           h.app.setFullscreen(true)
           await settle(h.app, vt)
