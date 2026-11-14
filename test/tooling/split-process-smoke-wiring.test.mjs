@@ -36,8 +36,8 @@ import {
   selectedPassLine,
 } from '../../scripts/lib/split-smoke-selection.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
-import { encodeUnitValue } from '../../src/app/remote-process/local-host-manager.ts'
-import { cleanupOutcomeError, encodeExecArg, stopAndRemoveManagedUnit, unitBelongsToRun, unitFileSafetyError } from '../../scripts/smoke/split-process/managed-host-m6-2b.mjs'
+import { encodeUnitValue, managerUserUnitDir, parseManagerEnvironment, userUnitPathUnsupportedReason } from '../../src/app/remote-process/local-host-manager.ts'
+import { cleanupOutcomeError, encodeExecArg, managedHostGateReason, stopAndRemoveManagedUnit, unitBelongsToRun, unitFileSafetyError } from '../../scripts/smoke/split-process/managed-host-m6-2b.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'split-process-smoke.mjs')
@@ -665,6 +665,30 @@ test('a cleanup that did not remove this run\u2019s unit fails the scenario verd
     assert.equal(typeof cleanupOutcomeError({ removed: false, reason }), 'string', `cleanup ${reason} must be a scenario failure`)
   }
   assert.equal(typeof cleanupOutcomeError(undefined), 'string')
+})
+
+test('the managed-host native gate requires an attested non-root isolated account, not just HOME', t => {
+  const home = testLifecycle(t).tempDir('m62b-gate-')
+  const other = testLifecycle(t).tempDir('m62b-gate-other-')
+  const base = { isolatedHome: home, optIn: '1', markerExists: true, uid: 1000, accountHome: home }
+  assert.equal(managedHostGateReason(base), null)
+  // `export ISOLATED_HOME=$HOME` alone is NOT proof of isolation.
+  assert.equal(typeof managedHostGateReason({ ...base, optIn: undefined }), 'string')
+  assert.equal(typeof managedHostGateReason({ ...base, optIn: '0' }), 'string')
+  assert.equal(typeof managedHostGateReason({ ...base, markerExists: false }), 'string')
+  assert.equal(typeof managedHostGateReason({ ...base, uid: 0 }), 'string')
+  assert.equal(typeof managedHostGateReason({ ...base, accountHome: other }), 'string')
+  assert.equal(typeof managedHostGateReason({ ...base, isolatedHome: '' }), 'string')
+})
+
+test('a custom XDG_CONFIG_HOME or SYSTEMD_UNIT_PATH makes the fixed unit path unsupported', () => {
+  const home = '/home/u'
+  const fixed = join(home, '.config', 'systemd', 'user')
+  assert.equal(userUnitPathUnsupportedReason({}, home, fixed), null)
+  assert.deepEqual(parseManagerEnvironment('HOME=/home/u\nXDG_CONFIG_HOME=/home/u/.config-alt\n'), { HOME: '/home/u', XDG_CONFIG_HOME: '/home/u/.config-alt' })
+  assert.equal(managerUserUnitDir({ XDG_CONFIG_HOME: '/home/u/.config-alt' }, home), '/home/u/.config-alt/systemd/user')
+  assert.equal(typeof userUnitPathUnsupportedReason({ XDG_CONFIG_HOME: '/home/u/.config-alt' }, home, fixed), 'string')
+  assert.equal(typeof userUnitPathUnsupportedReason({ SYSTEMD_UNIT_PATH: '/custom' }, home, fixed), 'string')
 })
 
 test('the ACP UDS selected verdict accepts only the complete real-L6 proof', () => {

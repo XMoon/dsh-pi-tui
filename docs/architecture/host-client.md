@@ -401,6 +401,12 @@ authenticated carrier, the Session/Writer authority or readiness.
   (0600, hard link, never overwrite) under the account home's user unit
   directory, which must be real-directory owned by the uid on every component and
   never group/other-writable (a writable parent could swap the validated file).
+  That directory must be the manager's real user-unit search path: if the user
+  manager uses a custom `XDG_CONFIG_HOME` or a `SYSTEMD_UNIT_PATH` override, the
+  fixed `<account-home>/.config/systemd/user` target would not be loaded, so the
+  start fails closed before writing the unit rather than leaving an unloadable
+  one. (Broader non-default search-path support is an explicit contract decision,
+  not a cold-start side effect.)
   The Node interpreter in `ExecStart` is trusted by being an absolute, canonical,
   executable regular file — a normal user may run a root-owned `/usr/bin/node`.
   The product-private Host entry must be uid-owned, while the official DSH install

@@ -25,7 +25,39 @@ import { findIsolatedProcesses, killIsolatedProcesses, productionBuildId } from 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 
 const ISOLATED_HOME_ENV = 'SPLIT_PROCESS_MANAGED_HOST_ISOLATED_HOME'
+/** Explicit operator opt-in that this run targets a dedicated throwaway test account. */
+const ISOLATED_FLAG_ENV = 'SPLIT_PROCESS_MANAGED_HOST_ISOLATED'
+/** Operator-provisioned attestation file that marks a dedicated isolated account. */
+const ISOLATED_MARKER = '.dsh-pi-tui-managed-host-isolated'
 const SYSTEMCTL = '/usr/bin/systemctl'
+
+/**
+ * The native-L6 isolation gate. It refuses to touch a real user manager unless
+ * the run is an explicitly attested DEDICATED non-root throwaway account:
+ *  - `SPLIT_PROCESS_MANAGED_HOST_ISOLATED=1` (explicit operator opt-in),
+ *  - `SPLIT_PROCESS_MANAGED_HOST_ISOLATED_HOME` realpath == the account home,
+ *  - a provisioning marker file exists in that home, and
+ *  - the uid is a non-root uid.
+ * An env var equal to `$HOME` alone is NOT proof of isolation, so this stays
+ * NOT_VERIFIED rather than risking the real user manager. Returns a reason
+ * string when NOT qualified, else null.
+ */
+export function managedHostGateReason({ isolatedHome, optIn, markerExists, uid, accountHome }) {
+  if (optIn !== '1') return 'NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: set SPLIT_PROCESS_MANAGED_HOST_ISOLATED=1 on a dedicated throwaway test account'
+  if (isolatedHome === undefined || isolatedHome === '') return 'NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: set SPLIT_PROCESS_MANAGED_HOST_ISOLATED_HOME to the dedicated test account home'
+  let realHome
+  let acctHome
+  try {
+    realHome = realpathSync(isolatedHome)
+    acctHome = realpathSync(accountHome)
+  } catch {
+    return 'NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: the isolated/account home is unreadable'
+  }
+  if (realHome !== acctHome) return 'NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: the isolated HOME is not the account home; refusing to touch the real user manager'
+  if (typeof uid !== 'number' || uid === 0) return 'NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: a non-root dedicated test uid is required'
+  if (markerExists !== true) return `NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: this account is not attested as an isolated qualification account (missing ${ISOLATED_MARKER})`
+  return null
+}
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
@@ -37,25 +69,18 @@ function sleep(ms) {
 
 /** The isolated-environment gate: a dedicated test user whose account home IS the isolated home. */
 function isolatedGate() {
-  const home = process.env[ISOLATED_HOME_ENV]
-  if (home === undefined || home === '') {
-    return { qualified: false, reason: 'NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: set SPLIT_PROCESS_MANAGED_HOST_ISOLATED_HOME to a dedicated isolated test user home' }
-  }
-  let realHome
+  const isolatedHome = process.env[ISOLATED_HOME_ENV]
+  const optIn = process.env[ISOLATED_FLAG_ENV]
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
   let accountHome
-  try {
-    realHome = realpathSync(home)
-    accountHome = realpathSync(userInfo().homedir)
-  } catch (error) {
-    return { qualified: false, reason: `NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: isolated home unreadable (${error?.code ?? 'error'})` }
+  try { accountHome = userInfo().homedir } catch { accountHome = undefined }
+  let markerExists = false
+  if (isolatedHome !== undefined && isolatedHome !== '' && accountHome !== undefined) {
+    try { markerExists = existsSync(join(realpathSync(accountHome), ISOLATED_MARKER)) } catch { markerExists = false }
   }
-  if (realHome !== accountHome) {
-    return { qualified: false, reason: 'NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: the isolated HOME is not the account home; refusing to touch the real user manager' }
-  }
-  if (typeof process.getuid !== 'function') {
-    return { qualified: false, reason: 'NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: a Linux uid is required' }
-  }
-  return { qualified: true }
+  const reason = managedHostGateReason({ isolatedHome, optIn, markerExists, uid, accountHome })
+  if (reason === null) return { qualified: true }
+  return { qualified: false, reason }
 }
 
 /** The unit slug rule, mirrored from the production encoder (ASCII, bounded, safe lead). */
