@@ -49,6 +49,7 @@ import { DirectHostDirectoryBrowsePort } from './host-directory-browse-direct.ts
 import { DirectSessionPolicyPort } from './session-policy-direct.ts'
 import { DirectTeamModePort } from './team-mode-direct.ts'
 import type { WebAccessPort, WebAccessStatus, WebAccessUrl } from '../web-access-port.ts'
+import type { AcpAccessPort, AcpAccessStatus } from '../acp-access-port.ts'
 
 /** The minimal Host context surface the Direct adapters need (structural;
  * the services resolve from the running dsh installation). */
@@ -119,6 +120,30 @@ class DirectUnavailableWebAccess implements WebAccessPort {
 /** The ONE statement of the Direct capability gap (presentation reads it). */
 export const DIRECT_WEB_ACCESS_REASON = 'Web frontend controls are available only in a Split Client.'
 
+/**
+ * The Direct backend's local ACP listener control: a truthful UNAVAILABLE
+ * capability.
+ *
+ * The local ACP listener is a Split Host capability (it belongs to the Split
+ * Host's entry-owned controller surfaced through the private `piTuiAcpAccess`
+ * service). The Direct process owns no such listener; this adapter touches no
+ * socket, starts no Host and reports the real missing capability so the Settings
+ * row can say exactly that. The persisted `autoStart` preference is edited
+ * separately through the ConfigPort and remains writable on Direct.
+ */
+class DirectUnavailableAcpAccess implements AcpAccessPort {
+  async getStatus(): Promise<AcpAccessStatus> {
+    return { state: 'unavailable', reason: DIRECT_ACP_ACCESS_REASON }
+  }
+
+  async setEnabled(): Promise<AcpAccessStatus> {
+    return { state: 'unavailable', reason: DIRECT_ACP_ACCESS_REASON }
+  }
+}
+
+/** The ONE statement of the Direct ACP capability gap (presentation reads it). */
+export const DIRECT_ACP_ACCESS_REASON = 'The local ACP listener is available only in a Split Host.'
+
 /** Assemble the complete Direct `Backend` from the runner's resolvers. */
 export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
   return createDirectBackend(
@@ -167,6 +192,9 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     // M5-W PR-C: the Direct process owns no official Web frontend toggle; the
     // adapter reports that missing capability instead of faking a control.
     new DirectUnavailableWebAccess(),
+    // PO-1B: the Direct process owns no local ACP listener; report that missing
+    // capability instead of faking a control.
+    new DirectUnavailableAcpAccess(),
     // M5-U-A: the ONE read-authority port. Direct reads the live Agent status
     // and the official Workspace registry it already owns; it never fabricates
     // a cross-Session pending fact.

@@ -366,19 +366,28 @@ the kernel seat where one is required.
 
 ### Host-owned local ACP v1 front door (Unix socket)
 
-Alongside the authenticated loopback carrier, the one Host process opens ONE
+Alongside the authenticated loopback carrier, the one Host process can open ONE
 bounded ACP v1 front door over a pathname Unix domain socket inside its own
 0700 profile scope: `<scope.dir>/acp.sock`. It is a Host-owned ingress owned by
 the same Host entry that already holds the kernel Host seat and the Ready
 commit; it is never a package export, a second Host, a second Agent/Session
 owner, a TCP/HTTP endpoint, or an ACP byte stream on the Host's stdout (the
-control records remain the only stdout format).
+control records remain the only stdout format). The listener is **OPT-IN and
+default-OFF**: a new Split Host binds no socket unless the profile's independent
+`autoStart` preference enables it (see below).
 
-- **One owner, one scope.** The listener is created by the Host entry before
-  the registry Ready commit and stored on that entry's existing resource owner,
-  so the ONE `runProfile` shutdown owner and the synchronous process-exit
-  mirror release it. Different canonical Host profiles keep their own scope and
-  socket; the socket path is never derived from the Client cwd, `$PWD` or a
+- **One owner, one scope, two independent control facts.** A single
+  Host-entry-owned runtime controller is the ONLY socket owner per Host profile.
+  It is not a business Fiber, so a profile settings recomposition cannot dispose
+  a live socket. Its live state is the authority the private `piTuiAcpAccess`
+  Host service forwards (`getStatus` / `setEnabled`), and every call reads the
+  CURRENT `net.Server` plus its own socket inode. Two facts never merge: the
+  RUNTIME listener state (this controller) and the PROFILE `autoStart` preference
+  (`pi-tui-acp-preferences.autoStart`, a durable next-launch value persisted
+  through the ordinary revision-checked Settings user patch). Saving the
+  preference never enables or disables a running Host, and toggling the runtime
+  never rewrites the preference. Different canonical Host profiles keep their own
+  scope and socket; the path is never derived from the Client cwd, `$PWD` or a
   guessed profile hash.
 - **Unix socket only, 0700/0600.** The scope directory stays 0700; the socket
   inode is owned by the current UID and forced to 0600 before Ready. There is
@@ -387,11 +396,25 @@ control records remain the only stdout format).
   `DSH_HOME`/scope pathname still works; the public/logical path stays
   `<scope.dir>/acp.sock`, the inode stays in the scope, and the scope hash and
   `instance.json` schema are unchanged.
-- **Listen before Ready.** The socket must be bound, chmod/proven 0600 and
-  answering `initialize` before the existing `publishLocalHost` /
+- **Opt-in; bind before Ready only when enabled.** A new Split Host starts with
+  the listener DISABLED and still publishes a normal Ready. When the profile's
+  `pi-tui-acp-preferences.autoStart` is true the entry reads it after profile
+  settlement and binds the socket BEFORE the `publishLocalHost` /
   `writeLocalRecord` Ready commit, so a published registry never points at a
-  not-yet-listening socket. The listener has no second readiness or stop state
-  machine; a stop admitted while it is binding never emits Ready.
+  not-yet-listening socket. An `autoStart` bind failure (socket in use, unsafe
+  inode, resource exhaustion) is ONE bounded, redacted `acp-autostart-unavailable`
+  diagnostic that carries a fixed failure category plus the small state
+  vocabulary — never an exception message, socket path or token — and the Host
+  still publishes Ready with the listener in whatever state the controller
+  truthfully reports. A corrupted `pi-tui-acp-preferences` section is a
+  startup failure, never read as Off. At runtime, `setEnabled(false)` stops
+  accepting, disconnects every already-connected ACP peer and removes only this
+  process's owned socket inode; it never disposes a shared Agent, Session, Web,
+  Gateway or Connection owner, and the TUI/Session/Agent/Web frontend/Host PID
+  are untouched. `setEnabled(true)` re-binds the same socket through the SAME
+  safety checks. A stop admitted while the listener is binding never emits Ready;
+  the one official shutdown quiesces and closes the controller before it runs.
+  A SIGKILL leaves a stale inode for the next seat winner's safe reclaim.
 - **ACP v1 handshake, no Session capability yet.** The listener answers only
   the ACP v1 `initialize` (protocol version 1, `agentInfo.name` `dsh-pi-tui`,
   `agentInfo.version` the installed `@xmoon76/dsh-pi-tui` bundle version —

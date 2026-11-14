@@ -35,6 +35,7 @@ import { PI_TUI_HOST_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-con
 import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../runtime/remote/pi-tui-file-reference-contract.ts'
 import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../runtime/remote/pi-tui-terminal-progress-contract.ts'
 import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-web-access-contract.ts'
+import { PI_TUI_ACP_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-acp-access-contract.ts'
 import { PI_TUI_HOST_USER_SHELL_NAMESPACE } from '../../runtime/remote/pi-tui-host-user-shell-contract.ts'
 import { PI_TUI_SKILLS_NAMESPACE } from '../../runtime/remote/pi-tui-skills-contract.ts'
 import { PI_TUI_AUTHORIZATION_NAMESPACE } from '../../runtime/remote/pi-tui-authorization-contract.ts'
@@ -52,6 +53,7 @@ import {
   type LiveAgentLike as TerminalProgressLiveAgentLike,
 } from './features/terminal-progress.ts'
 import { PiTuiWebAccessHostService } from './features/web-access.ts'
+import { PiTuiAcpAccessHostService } from './features/acp-access.ts'
 import { PiTuiHostUserShellService } from './features/host-user-shell.ts'
 import {
   PiTuiSkillsHostService,
@@ -190,6 +192,16 @@ export async function apply(ctx: Context, config: TuiConfigValue): Promise<void>
     })
     fibers.push(webAccessFiber)
     await webAccessFiber
+    // The local ACP listener control facade: a stateless forwarder to the
+    // Host-entry-owned runtime controller (`piTuiAcpOwner`). The listener itself
+    // is owned by the entry, NOT by this business fiber, so a profile
+    // recomposition cannot dispose a live socket. On a Host whose entry has not
+    // (yet) provided the owner, the two methods answer a truthful `unavailable`.
+    const acpAccessFiber = ctx.inject(PiTuiAcpAccessHostService.inject, pluginCtx => {
+      new PiTuiAcpAccessHostService(pluginCtx)
+    })
+    fibers.push(acpAccessFiber)
+    await acpAccessFiber
     const hostUserShellFiber = ctx.inject(PiTuiHostUserShellService.inject, pluginCtx => {
       new PiTuiHostUserShellService(pluginCtx, {
         agentFor: sessionId => agentFor(ctx, sessionId) as import('./features/host-user-shell.ts').HostAgentLike | undefined,
@@ -260,6 +272,7 @@ export async function apply(ctx: Context, config: TuiConfigValue): Promise<void>
     assertPrivateBinding(ctx, 'piTuiFileReferences', PI_TUI_FILE_REFERENCES_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiTerminalProgress', PI_TUI_TERMINAL_PROGRESS_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiWebAccess', PI_TUI_WEB_ACCESS_NAMESPACE)
+    assertPrivateBinding(ctx, 'piTuiAcpAccess', PI_TUI_ACP_ACCESS_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiHostUserShell', PI_TUI_HOST_USER_SHELL_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiSkills', PI_TUI_SKILLS_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiAuthorization', PI_TUI_AUTHORIZATION_NAMESPACE)

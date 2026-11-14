@@ -23,6 +23,7 @@ import { PI_TUI_HOST_READY_SERVICE } from '../host/pi-tui-host-runtime.ts'
 import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../runtime/remote/pi-tui-file-reference-contract.ts'
 import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../runtime/remote/pi-tui-terminal-progress-contract.ts'
 import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-web-access-contract.ts'
+import { PI_TUI_ACP_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-acp-access-contract.ts'
 import { PI_TUI_SKILLS_NAMESPACE } from '../../runtime/remote/pi-tui-skills-contract.ts'
 import { PI_TUI_AUTHORIZATION_NAMESPACE } from '../../runtime/remote/pi-tui-authorization-contract.ts'
 import { PI_TUI_CREDENTIAL_RECORDS_NAMESPACE } from '../../runtime/remote/pi-tui-credential-records-contract.ts'
@@ -196,6 +197,7 @@ const PRIVATE_TYPERT_BINDINGS = [
   { serviceKey: 'piTuiFileReferences', namespace: PI_TUI_FILE_REFERENCES_NAMESPACE },
   { serviceKey: 'piTuiTerminalProgress', namespace: PI_TUI_TERMINAL_PROGRESS_NAMESPACE },
   { serviceKey: 'piTuiWebAccess', namespace: PI_TUI_WEB_ACCESS_NAMESPACE },
+  { serviceKey: 'piTuiAcpAccess', namespace: PI_TUI_ACP_ACCESS_NAMESPACE },
   { serviceKey: PI_TUI_SKILLS_NAMESPACE, namespace: PI_TUI_SKILLS_NAMESPACE },
   { serviceKey: 'piTuiAuthorization', namespace: PI_TUI_AUTHORIZATION_NAMESPACE },
   { serviceKey: PI_TUI_CREDENTIAL_RECORDS_NAMESPACE, namespace: PI_TUI_CREDENTIAL_RECORDS_NAMESPACE },
@@ -284,6 +286,10 @@ export function collectHostEntryStatus(
     // frontend itself stays OFF by default: the Host must be Ready with Web
     // disabled, and the toggle must never be a Web-composition prerequisite.
     PI_TUI_WEB_ACCESS_NAMESPACE,
+    // The ACP listener control facade is a Host-ready service even though the
+    // listener itself stays OFF by default: Ready must not depend on the socket
+    // being enabled, only on the control service being reachable.
+    PI_TUI_ACP_ACCESS_NAMESPACE,
     PI_TUI_SKILLS_NAMESPACE,
     PI_TUI_AUTHORIZATION_NAMESPACE,
     PI_TUI_CREDENTIAL_RECORDS_NAMESPACE,

@@ -100,6 +100,8 @@ import type {
   BackendStartupPreferenceConfig,
   BackendStartupPreferenceState,
   PublicBackendValue,
+  AcpStartupPreferenceConfig,
+  AcpStartupPreferenceState,
 } from '../config-port.ts'
 import { SupersededReadError } from '../read-error.ts'
 import { RemoteConfigWriteLifetime } from './config-write-lifetime.ts'
@@ -1845,19 +1847,11 @@ class RemoteBackendStartupPreferenceConfig implements BackendStartupPreferenceCo
     if (view === undefined) return undefined
     const value = plainRecord(view.value)
     const backend = value?.backend
-    // A projection outside the closed public vocabulary is unreadable, never a
-    // silent `direct`.
     if (!isPublicBackendValue(backend)) return undefined
     const revision = view.revision
-    // Without the read revision the decision cannot be submitted conditionally;
-    // report the section unreadable rather than allowing a silent overwrite.
     if (typeof revision !== 'number') return undefined
     const user = plainRecord(view.user)
-    return {
-      backend,
-      revision,
-      userOverridden: user?.backend !== undefined,
-    }
+    return { backend, revision, userOverridden: user?.backend !== undefined }
   }
 
   async setBackend(value: PublicBackendValue, expectedRevision: number): Promise<void> {
@@ -1868,11 +1862,54 @@ class RemoteBackendStartupPreferenceConfig implements BackendStartupPreferenceCo
     if (view.value === undefined) {
       throw new Error(`settings namespace "${TUI_STARTUP_NS}" exposes no form projection`)
     }
-    // The decision's revision is the fence; `record` keeps a failed
-    // post-settlement refresh a currentness uncertainty, not proof of refusal.
-    await this.mirror.mutate(
-      TUI_STARTUP_NS,
-      [{ op: 'set', path: ['backend'], value }],
+    await this.mirror.mutate(TUI_STARTUP_NS, [{ op: 'set', path: ['backend'], value }], expectedRevision, 'record')
+  }
+}
+
+/** The official profile entry id of the Host row that owns the ACP startup
+ *  preference (its Loader row id is also its Settings namespace). */
+const ACP_STARTUP_PREFERENCE_NS = 'pi-tui-acp-preferences'
+
+/**
+ * The Remote ACP startup preference: the mirrored `pi-tui-acp-preferences` form
+ * section over the official generated settings remote. The write is a
+ * revision-checked path mutation and the mirror's post-settlement refresh is the
+ * only new authority — the mutate reply is never trusted as the new value.
+ *
+ * It reads the preference only: the CURRENT Host's listener state has no
+ * settings projection and stays the private `piTuiAcpAccess` service's authority.
+ */
+class RemoteAcpStartupPreferenceConfig implements AcpStartupPreferenceConfig {
+  private readonly mirror: RemoteConfigMirror
+
+  constructor(mirror: RemoteConfigMirror) {
+    this.mirror = mirror
+  }
+
+  read(): AcpStartupPreferenceState | undefined {
+    const view = this.mirror.namespace(ACP_STARTUP_PREFERENCE_NS)
+    if (view === undefined) return undefined
+    const value = plainRecord(view.value)
+    const autoStart = value?.autoStart
+    if (typeof autoStart !== 'boolean') return undefined
+    const revision = view.revision
+    if (typeof revision !== 'number') return undefined
+    const user = plainRecord(view.user)
+    return { autoStart, revision, userOverridden: user?.autoStart !== undefined }
+  }
+
+  async setAutoStart(value: boolean, expectedRevision: number): Promise<void> {
+    const view = this.mirror.namespace(ACP_STARTUP_PREFERENCE_NS)
+    if (view === undefined) {
+      throw new Error(`settings namespace "${ACP_STARTUP_PREFERENCE_NS}" is not available in this deployment`)
+    }
+    if (view.value === undefined) {
+      throw new Error(`settings namespace "${ACP_STARTUP_PREFERENCE_NS}" exposes no form projection`)
+    }
+    await this.mirror.mutate(ACP_STARTUP_PREFERENCE_NS, [{ op: 'set', path: ['autoStart'], value }], expectedRevision, 'record')
+  }
+}
+
       expectedRevision,
       'record',
     )
@@ -1918,6 +1955,7 @@ export class RemoteConfigPort implements ConfigPort {
   readonly visualTools: VisualToolsConfig
   readonly webStartupPreference: WebStartupPreferenceConfig
   readonly backendStartupPreference: BackendStartupPreferenceConfig
+  readonly acpStartupPreference: AcpStartupPreferenceConfig
 
   /** `undefined` while the `tui-app` namespace is absent from the mirror
    *  (the port's documented absence contract). */
@@ -1970,6 +2008,7 @@ export class RemoteConfigPort implements ConfigPort {
     this.visualTools = new RemoteVisualToolsConfig(this.mirror)
     this.webStartupPreference = new RemoteWebStartupPreferenceConfig(this.mirror)
     this.backendStartupPreference = new RemoteBackendStartupPreferenceConfig(this.mirror)
+    this.acpStartupPreference = new RemoteAcpStartupPreferenceConfig(this.mirror)
     this.web = new RemoteWebProviderConfig(this.mirror, this.credentialConfig)
   }
 

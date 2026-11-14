@@ -23,7 +23,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { unavailableWebAccess } from '../support/web-access-fake.ts'
+import { unavailableAcpAccess, unavailableWebAccess } from '../support/web-access-fake.ts'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
@@ -221,6 +221,7 @@ function fakeRunnerDeps(options: {
   }
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -389,6 +390,7 @@ function fakeRunnerDeps(options: {
       config: runner.config,
       hostFile: runner.hostFile,
       webAccess: runner.webAccess,
+      acpAccess: runner.acpAccess,
       hostShellCompletion: { pathAuthority: 'host' as const, complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
     },
     session: {

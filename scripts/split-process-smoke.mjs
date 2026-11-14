@@ -506,6 +506,20 @@ export function assertSelectedVerdict(caseId, result) {
     `selected ${caseId}: the ACP UDS verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
     return
   }
+  if (caseId === 'acp.po1b-opt-in-control') {
+    assert(result?.status === 'PASS'
+      && result?.scope === 'REAL_SPLIT_PROCESS_L6'
+      && result?.defaultOffNoSocket === true
+      && result?.runtimeToggle === true
+      && result?.runtimeOffDisconnects === true
+      && result?.preferenceDoesNotChangeRuntime === true
+      && result?.autoStartBindsBeforeReady === true
+      && result?.autoStartFalseNoSocket === true
+      && result?.recomposeKeepsSameHost === true
+      && result?.originalSplitClientIntact === true,
+    `selected ${caseId}: the ACP opt-in control verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
+    return
+  }
   if (caseId === 'account.official-composition') {
     assert(result?.status === 'PASS'
       && result?.browser === 'PASS'

@@ -98,6 +98,8 @@ export type SettingsWorkspaceRowId =
   | 'visual-tools'
   | 'web-autostart'
   | 'startup-backend'
+  | 'acp-runtime'
+  | 'acp-autostart'
   | 'web-settings'
   | 'approval'
   | 'default-permission'
@@ -131,6 +133,7 @@ export type SettingsWorkspaceFreshness = 'runtime' | 'ready' | 'last-known' | 'u
  */
 export type SettingsWorkspaceWritableField =
   | 'theme' | 'display-preset' | 'visual-tools' | 'web-autostart' | 'startup-backend'
+  | 'acp-runtime' | 'acp-autostart'
   | 'icon-style' | 'expand' | 'thinking'
   | 'progress-updates' | 'response-style'
   | 'busy-enter' | 'git-attribution'

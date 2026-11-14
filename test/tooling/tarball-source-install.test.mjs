@@ -71,6 +71,10 @@ function candidateFiles() {
     'dist/daemon-launcher.mjs': "export const name = 'pi-tui-daemon-launcher'\n"
       + "export const inject = ['tuiDaemonStartup']\n"
       + "export const apply = () => {}\n",
+    // PO-1B: the profile-owned ACP startup preference row.
+    'dist/acp-preferences.mjs': "export const name = 'pi-tui-acp-preferences'\n"
+      + "export const Config = () => {}\n"
+      + "export const apply = () => {}\n",
     'dist/index.d.mts': 'export declare const SOURCE_PROBE: boolean\n',
     'dist/startup.d.mts': 'export declare const STARTUP_PROBE: boolean\n',
     'dist/extensions.d.mts': 'export declare const EXTENSIONS_PROBE: boolean\n',
@@ -91,6 +95,9 @@ function candidateFiles() {
       + 'export declare const apply: () => void\n',
     'dist/daemon-launcher.d.mts': 'export declare const name: string\n'
       + 'export declare const inject: string[]\n'
+      + 'export declare const apply: () => void\n',
+    'dist/acp-preferences.d.mts': 'export declare const name: string\n'
+      + 'export declare const Config: unknown\n'
       + 'export declare const apply: () => void\n',
     'cordis.patch.yml': 'patch: []\n',
     'README.md': '# source probe\n',
@@ -150,6 +157,7 @@ function makeFixture(life, { includePresets = true, candidatePeers = { [DSH_CLI]
       './performance-host': './dist/performance-host.mjs',
       './visual-tools': './dist/visual-tools.mjs',
       './web-preferences': './dist/web-preferences.mjs',
+      './acp-preferences': './dist/acp-preferences.mjs',
       './host-runtime': './dist/host-runtime.mjs',
       './daemon-launcher': './dist/daemon-launcher.mjs',
     },

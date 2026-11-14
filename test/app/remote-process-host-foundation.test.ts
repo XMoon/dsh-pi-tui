@@ -26,6 +26,7 @@ import { PI_TUI_HOST_READY_SERVICE } from '../../src/app/host/pi-tui-host-runtim
 import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../src/runtime/remote/pi-tui-file-reference-contract.ts'
 import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../src/runtime/remote/pi-tui-terminal-progress-contract.ts'
 import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../src/runtime/remote/pi-tui-web-access-contract.ts'
+import { PI_TUI_ACP_ACCESS_NAMESPACE } from '../../src/runtime/remote/pi-tui-acp-access-contract.ts'
 import { PI_TUI_SKILLS_NAMESPACE } from '../../src/runtime/remote/pi-tui-skills-contract.ts'
 import { PI_TUI_AUTHORIZATION_NAMESPACE } from '../../src/runtime/remote/pi-tui-authorization-contract.ts'
 import { PI_TUI_CREDENTIAL_RECORDS_NAMESPACE } from '../../src/runtime/remote/pi-tui-credential-records-contract.ts'
@@ -1106,6 +1107,7 @@ function hostContext(rows: FixtureRow[], overrides: Record<string, unknown> = {}
     records: new Map(),
   })
   services.set('piTuiWebAccess', typertService('piTuiWebAccess', PI_TUI_WEB_ACCESS_NAMESPACE))
+  services.set('piTuiAcpAccess', typertService('piTuiAcpAccess', PI_TUI_ACP_ACCESS_NAMESPACE))
   services.set('piTuiSkills', {
     ...typertService('piTuiSkills', PI_TUI_SKILLS_NAMESPACE),
     activeSubscriptions: 0,

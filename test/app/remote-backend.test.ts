@@ -34,6 +34,7 @@ test('the Remote backend advertises exactly its implemented capabilities', () =>
     hostShellCompletion: {} as RemoteBackendParts['hostShellCompletion'],
     deliveredFileRead: {} as RemoteBackendParts['deliveredFileRead'],
     webAccess: {} as RemoteBackendParts['webAccess'],
+    acpAccess: {} as RemoteBackendParts['acpAccess'],
     sessionWorkspaceFacts: {} as RemoteBackendParts['sessionWorkspaceFacts'],
     schedule: {} as RemoteBackendParts['schedule'],
     hostDirectoryBrowse: {} as RemoteBackendParts['hostDirectoryBrowse'],

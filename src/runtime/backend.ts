@@ -29,6 +29,7 @@ import type { HostUserShellPort } from './host-user-shell-port.ts'
 import type { HostShellCompletionPort } from './host-shell-completion-port.ts'
 import type { DeliveredFileReadPort } from './deliverables-port.ts'
 import type { WebAccessPort } from './web-access-port.ts'
+import type { AcpAccessPort } from './acp-access-port.ts'
 import type { SessionWorkspaceFactsPort } from './session-workspace-facts-port.ts'
 import type { SchedulePort } from './schedule-port.ts'
 import type { HostDirectoryBrowsePort } from './host-directory-browse-port.ts'
@@ -94,6 +95,10 @@ export interface Backend {
    *  `/web` surface over the Host's private `piTuiWebAccess` service. Direct
    *  serves the truthful-unavailable adapter. */
   readonly webAccess: WebAccessPort
+  /** The Split-Client local ACP listener control port (PO-1B): the explicit
+   *  Settings row over the Host's private `piTuiAcpAccess` service. Direct
+   *  serves the truthful-unavailable adapter. */
+  readonly acpAccess: AcpAccessPort
   /** The UI-neutral read-authority port (M5-U-A): Session activity facts over
    *  the caller's authorized roster plus the ONE official Workspace stream.
    *  Read-only; it owns no writer, store or cross-session cache. */
@@ -139,6 +144,7 @@ export function createDirectBackend(
   hostShellCompletion: HostShellCompletionPort,
   deliveredFileRead: DeliveredFileReadPort,
   webAccess: WebAccessPort,
+  acpAccess: AcpAccessPort,
   sessionWorkspaceFacts: SessionWorkspaceFactsPort,
   schedule: SchedulePort,
   hostDirectoryBrowse: HostDirectoryBrowsePort,
@@ -166,6 +172,7 @@ export function createDirectBackend(
     hostShellCompletion,
     deliveredFileRead,
     webAccess,
+    acpAccess,
     sessionWorkspaceFacts,
     schedule,
     hostDirectoryBrowse,

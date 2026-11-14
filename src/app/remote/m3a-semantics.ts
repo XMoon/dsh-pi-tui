@@ -55,6 +55,7 @@ import type { RemoteWorkspaceFilesNamespace } from '../../runtime/remote/deliver
 import type { SessionWorkspaceFactsPort } from '../../runtime/session-workspace-facts-port.ts'
 import { RemoteSessionWorkspaceFacts, type RemoteSessionFactsRemotes } from '../../runtime/remote/session-workspace-facts-remote.ts'
 import type { RemoteWebAccessNamespace } from '../../runtime/remote/web-access-remote.ts'
+import type { RemoteAcpAccessNamespace } from '../../runtime/remote/acp-access-remote.ts'
 import type { PiTuiHostUserShellNamespace } from '../../runtime/remote/pi-tui-host-user-shell-contract.ts'
 import type { PiTuiAuthorizationNamespace } from '../../runtime/remote/pi-tui-authorization-contract.ts'
 import type { PiTuiCredentialRecordsNamespace } from '../../runtime/remote/pi-tui-credential-records-contract.ts'
@@ -201,6 +202,11 @@ export interface RemoteM3ARuntimeSource {
      *  Web frontend control (`/web`). The SAME mounted contribution publishes
      *  it; `/web` is its only consumer. */
     readonly piTuiWebAccess: RemoteWebAccessNamespace
+    /** The PRIVATE `piTuiAcpAccess` namespace (PO-1B): the Split-Client local
+     *  ACP listener control (`/settings → Tools → ACP Server`). The SAME
+     *  mounted contribution publishes it; its only consumer is the Settings
+     *  runtime row through the `RemoteAcpAccessPort` adapter. */
+    readonly piTuiAcpAccess: RemoteAcpAccessNamespace
     readonly commands: RemoteCommandsSource
     readonly subagents: RemoteSubagentSource
     /** The rc.2 generated `userQuestions` namespace + the forwarded

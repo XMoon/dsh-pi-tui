@@ -194,6 +194,10 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       read: () => undefined,
       setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
     },
+    acpStartupPreference: {
+      read: () => undefined,
+      setAutoStart: async (_value: boolean, _revision: number) => {},
+    },
   }
   const hostFile = {
     listReferences: async () => ({ kind: 'ok' as const, items: [] }),
@@ -248,6 +252,10 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     setEnabled: async () => ({ state: 'unavailable', reason: 'test' }),
     getAuthenticatedUrl: async () => { throw new Error('test') },
   }
+  const acpAccess: import('../../src/runtime/acp-access-port.ts').AcpAccessPort = {
+    getStatus: async () => ({ state: 'unavailable', reason: 'test' }),
+    setEnabled: async () => ({ state: 'unavailable', reason: 'test' }),
+  }
   const sessionWorkspaceFacts: import('../../src/runtime/session-workspace-facts-port.ts').SessionWorkspaceFactsPort = {
     readActivity: async () => [],
     followWorkspaces: () => {
@@ -285,7 +293,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   // read-authority facts, the Host Schedule management surface and the
   // read-only Host directory browse. All stay wired and asserted below; none
   // replaces another.
-  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, sessionMarkdown, hostCommand, pluginManager, jobObservation, hostUserShell, { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) }, deliveredFileRead, webAccess, sessionWorkspaceFacts, schedule, hostDirectoryBrowse, sessionPolicy, teamMode)
+  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, sessionMarkdown, hostCommand, pluginManager, jobObservation, hostUserShell, { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) }, deliveredFileRead, webAccess, acpAccess, sessionWorkspaceFacts, schedule, hostDirectoryBrowse, sessionPolicy, teamMode)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)

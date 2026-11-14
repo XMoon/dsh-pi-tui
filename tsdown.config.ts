@@ -42,6 +42,8 @@ const bundleConfig = defineConfig({
     // (app/remote-process), flat dist subpath for the Loader. It is a plugin
     // entry, never a `bin` and never a public executable export.
     { 'daemon-launcher': './src/app/remote-process/daemon-launcher.ts' },
+    // PO-1B: the profile-owned ACP startup preference row. Same precedent.
+    { 'acp-preferences': './src/app/host/acp-preferences.ts' },
   ],
   format: ['esm'],
   outDir: 'dist',

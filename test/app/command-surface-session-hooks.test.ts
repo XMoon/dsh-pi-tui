@@ -97,6 +97,7 @@ function composeSurface(session: { readonly validateAutoWorkspace?: () => boolea
       config: {} as never,
       hostFile: {} as never,
       webAccess: {} as never,
+      acpAccess: {} as never,
       hostShellCompletion: {} as never,
     },
     session: {

@@ -101,6 +101,13 @@ export interface LocalAcpListener {
   readonly socketPath: string
   /** The number of live connections this listener currently owns. */
   readonly connectionCount: () => number
+  /**
+   * Read-only proof that THIS listener is still valid: the bound `net.Server`
+   * is listening AND the logical path still carries this process's exact saved
+   * socket inode. Never rebinds, never reclaims a foreign inode and never
+   * mutates state — it only observes the authoritative ownership facts.
+   */
+  isListening(): boolean
   /** Stop accepting, tear down every connection, then retire the server. Idempotent. */
   close(): Promise<void>
   /** Synchronous, inode-identity-checked retirement of THIS process's own socket inode. */
@@ -666,9 +673,29 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
     }
   }
 
+  const isListening = (): boolean => {
+    // A stopping/closed server or a never-bound one is definitively not listening.
+    if (stopping || closed !== undefined || server === undefined || !server.listening) return false
+    if (saved === undefined) return false
+    // The owned bound server can outlive an externally removed/replaced inode;
+    // only the exact saved (dev,ino,uid) socket proves this listener still owns
+    // the pathname it advertises.
+    let current: ReturnType<typeof lstatSync>
+    try {
+      current = lstatSync(logicalPath)
+    } catch {
+      return false
+    }
+    return current.isSocket()
+      && current.uid === saved.uid
+      && current.dev === saved.dev
+      && current.ino === saved.ino
+  }
+
   const handle: LocalAcpListener = {
     socketPath: logicalPath,
     connectionCount: () => context.connections.size,
+    isListening,
     close: retireServer,
     cleanupSync,
   }

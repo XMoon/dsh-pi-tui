@@ -48,7 +48,8 @@ import { themeDisplayName as themeDisplayNameOf } from '../pickers/theme-menu.ts
 import { SubagentModelAllowlistPicker, allowlistSummary, lastRouteWhileEnabled } from '../pickers/subagent-model-menu.ts'
 import { resolveThemeSelection, themePickerRows } from '../../app/surface/theme-selection.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
-import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings, type WebStartupPreferenceState, type BackendStartupPreferenceState, type PublicBackendValue } from '../../runtime/config-port.ts'
+import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings, type WebStartupPreferenceState, type BackendStartupPreferenceState, type PublicBackendValue, type AcpStartupPreferenceState } from '../../runtime/config-port.ts'
+import type { AcpAccessStatus } from '../../runtime/acp-access-port.ts'
 import { isWebApiBilling } from '../../domain/web-provider-settings.ts'
 import {
   WEB_FETCH_PROVIDER_CANDIDATES,
@@ -94,6 +95,7 @@ import type {
 type SettingsCommandRunner = Pick<
   TuiCommandRunner,
   | 'applyFooterSettings'
+  | 'acpAccess'
   | 'backendKind'
   | 'captureLiveSessionScope'
   | 'catalog'
@@ -366,6 +368,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   /** The `Tools`-category Web page row id (a NAVIGATION row: it never becomes a
    *  Workspace editable field, so the editable-row count is unchanged). */
   const WEB_LAUNCHER_ROW_ID = 'web-settings'
+  /** The ACP listener runtime row's fixed description (one string so the async
+   *  `refreshRow` repaint and the initial paint stay identical). */
+  const ACP_RUNTIME_DESCRIPTION = 'Enable or disable the local ACP v1 Unix socket listener on THIS Split Host. '
+    + 'This toggles the running Host only; it never changes the persisted auto-start preference and never starts, '
+    + 'stops or reconfigures any Session, Agent or other Host service. Off removes the socket and disconnects any '
+    + 'connected ACP peer; On re-binds the same socket through the same safety checks.'
   /** The SAME official candidate identities the Web page renders and the ONE
    *  commit entry accepts (one source, so the page and the writer can never
    *  disagree). */
@@ -447,6 +455,259 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const rereadWebSettings = async (): Promise<{ settings: WebProviderSettings | undefined; fresh: boolean }> => {
     beginWebSettingsRead()
     return await readWebSettings()
+  }
+
+  // ── PO-1B: the ACP listener RUNTIME row (async Host read) ───────────────
+  //
+  // The row's value is the LIVE listener state, read from the Host through the
+  // `acpAccess` port. It is the same async pattern as the Web provider page: a
+  // serial numbers the LATEST read so an earlier settlement can never overwrite
+  // a newer observation, the committed fact repaints whichever panel generation
+  // owns the surface, and every read is (re)started on workspace open / `r` so a
+  // reopened workspace never sits on a pre-read snapshot.
+  let acpRuntimeStatus: AcpAccessStatus | undefined
+  let acpRuntimeFailure: string | undefined
+  let acpRuntimeReadInFlight: { readonly serial: number; readonly promise: Promise<AcpAccessStatus | undefined> } | undefined
+  let acpRuntimeReadSerial = 0
+  let acpRuntimeReadSettled = false
+
+  const readAcpRuntimeStatus = async (): Promise<{ status: AcpAccessStatus | undefined; fresh: boolean }> => {
+    const serial = ++acpRuntimeReadSerial
+    const promise = (async (): Promise<AcpAccessStatus | undefined> => await runner.acpAccess.getStatus())()
+    acpRuntimeReadInFlight = { serial, promise }
+    let status: AcpAccessStatus | undefined
+    let failure: string | undefined
+    try {
+      status = await promise
+    } catch (error) {
+      failure = safeErrorMessage(error)
+    }
+    const fresh = serial === acpRuntimeReadSerial
+    if (fresh) {
+      // A resolved read (including an `unavailable` status) REPLACES the value;
+      // a thrown failure is UNKNOWN and drops it.
+      acpRuntimeStatus = failure === undefined ? status : undefined
+      acpRuntimeFailure = failure
+      acpRuntimeReadSettled = true
+      activeSettingsWorkspace?.refreshAcpRuntimeRow()
+    }
+    if (acpRuntimeReadInFlight?.serial === serial) acpRuntimeReadInFlight = undefined
+    return { status: failure === undefined ? status : undefined, fresh }
+  }
+
+  /** Enter the pending state synchronously so no snapshot presents a stale value. */
+  const beginAcpRuntimeRead = (): void => {
+    acpRuntimeStatus = undefined
+    acpRuntimeFailure = undefined
+    acpRuntimeReadSettled = false
+  }
+
+  /** Start ONE authoritative ACP listener read; the settled fact repaints the row. */
+  const startAcpRuntimeRead = (): void => {
+    beginAcpRuntimeRead()
+    activeSettingsWorkspace?.refreshAcpRuntimeRow()
+    detach('acp listener status read', async () => {
+      await readAcpRuntimeStatus()
+    }, { notify: false })
+  }
+
+  /** The row's human summary for the CURRENT listener state. */
+  const acpRuntimeSummaryOf = (): string => {
+    if (runner.backendKind === 'direct') return 'Unavailable — Split Host only'
+    if (acpRuntimeFailure !== undefined) return 'Unavailable'
+    if (!acpRuntimeReadSettled) return 'Loading…'
+    const status = acpRuntimeStatus
+    if (status === undefined) return 'Unavailable'
+    switch (status.state) {
+      case 'enabled': return 'On'
+      case 'disabled': return 'Off'
+      case 'changing': return 'Changing…'
+      case 'unavailable': return 'Unavailable'
+    }
+  }
+
+  /** The live runtime fact painted as the Detail `Runtime` line. */
+  const acpRuntimeFactOf = (): string => {
+    if (acpRuntimeFailure !== undefined) return 'status could not be read'
+    if (!acpRuntimeReadSettled) return 'checking…'
+    const status = acpRuntimeStatus
+    if (status === undefined) return 'unavailable'
+    switch (status.state) {
+      case 'enabled': return 'Listening on this Host'
+      case 'disabled': return 'Not listening'
+      case 'changing': return 'Applying a change…'
+      case 'unavailable': return `unavailable (${status.reason})`
+    }
+  }
+
+  const acpRuntimeFreshnessOf = (): SettingsWorkspaceFreshness => {
+    if (runner.backendKind === 'direct') return 'unavailable'
+    if (acpRuntimeFailure !== undefined) return 'read-error'
+    if (!acpRuntimeReadSettled) return 'runtime'
+    const status = acpRuntimeStatus
+    if (status === undefined || status.state === 'unavailable') return 'unavailable'
+    if (status.state === 'changing') return 'runtime'
+    return 'ready'
+  }
+
+  /** A settled On/Off is the only confirmable state; `changing`/`unavailable`/
+   *  unread offer NO candidate so Confirm is impossible. */
+  const acpRuntimeEditOf = (): SettingsWorkspaceEdit => {
+    const status = acpRuntimeStatus
+    const confirmable = runner.backendKind !== 'direct'
+      && acpRuntimeReadSettled
+      && acpRuntimeFailure === undefined
+      && (status?.state === 'enabled' || status?.state === 'disabled')
+    return {
+      field: 'acp-runtime',
+      primary: 'runtime',
+      options: confirmable
+        ? [
+            { value: 'On', label: 'On', available: true, current: status?.state === 'enabled' },
+            { value: 'Off', label: 'Off', available: true, current: status?.state === 'disabled' },
+          ]
+        : [],
+      runtime: acpRuntimeFactOf(),
+      persisted: 'Not applicable · runtime control',
+    }
+  }
+
+  // ── PO-1B: the ACP STARTUP preference row (persisted, next launch) ───────
+  const acpAutostartSummaryOf = (state: AcpStartupPreferenceState | undefined): string => {
+    if (state === undefined) return 'Unavailable'
+    // `Off (default)` marks the schema default the USER layer does not declare.
+    if (state.autoStart) return 'On'
+    return state.userOverridden ? 'Off' : 'Off (default)'
+  }
+
+  const acpAutostartEditOf = (
+    state: AcpStartupPreferenceState | undefined,
+    readiness: 'ready' | 'stale' | 'unavailable',
+  ): SettingsWorkspaceEdit => {
+    const editable = state !== undefined && readiness === 'ready'
+    return {
+      field: 'acp-autostart',
+      primary: 'persisted',
+      ...(state === undefined ? {} : { revision: state.revision }),
+      options: editable
+        ? [
+            { value: 'On', label: 'On', available: true, current: state.autoStart },
+            { value: 'Off', label: 'Off', available: true, current: !state.autoStart },
+          ]
+        : [],
+      runtime: 'applies on the next Split Host start; the current ACP listener is unchanged',
+      persisted: acpAutostartSummaryOf(state),
+    }
+  }
+
+  const acpAutostartFreshnessOf = (
+    state: AcpStartupPreferenceState | undefined,
+    readiness: 'ready' | 'stale' | 'unavailable',
+  ): SettingsWorkspaceFreshness => state === undefined
+    ? 'unavailable'
+    : readiness === 'ready' ? 'ready' : 'last-known'
+
+  const acpAutostartValueOf = (value: string): boolean | undefined =>
+    value === 'On' ? true : value === 'Off' ? false : undefined
+
+  const verifyCommittedAcpAutostart = (expected: boolean): SettingsWorkspaceCommitOutcome => {
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'unverified', reason: `the configuration is ${readiness}; the committed preference could not be re-read` }
+    }
+    const state = runner.config.acpStartupPreference.read()
+    if (state === undefined) {
+      return { outcome: 'unverified', reason: 'the committed ACP startup preference could not be re-read' }
+    }
+    if (state.autoStart !== expected) {
+      return {
+        outcome: 'not-saved',
+        reason: `the write reported success, but the authoritative preference reads ${state.autoStart ? 'On' : 'Off'}`,
+      }
+    }
+    return { outcome: 'verified' }
+  }
+
+  const classifyRejectedAcpAutostart = (
+    base: boolean,
+    failureReason: string,
+  ): SettingsWorkspaceCommitOutcome => {
+    const state = runner.config.configReadiness() === 'ready'
+      ? runner.config.acpStartupPreference.read()
+      : undefined
+    if (state === undefined) {
+      return { outcome: 'indeterminate', reason: `${failureReason}; the authoritative preference could not be re-read` }
+    }
+    if (state.autoStart === base) return { outcome: 'not-saved', reason: failureReason }
+    return {
+      outcome: 'indeterminate',
+      reason: `${failureReason}; the authority no longer reads the value this request started from, so its outcome cannot be attributed`,
+    }
+  }
+
+  /** Commit the next-launch preference through the official revision-checked
+   *  settings write. It never touches the current Host's ACP listener. */
+  const commitAcpAutostart = async (
+    value: string,
+    revision: number | undefined,
+  ): Promise<SettingsWorkspaceCommitOutcome> => {
+    const autoStart = acpAutostartValueOf(value)
+    if (autoStart === undefined) {
+      return { outcome: 'not-saved', reason: `"${value}" is not an ACP startup preference candidate` }
+    }
+    if (revision === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host setting exposed no revision this choice could be based on' }
+    }
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'not-saved', reason: `the configuration is ${readiness}; the ACP startup preference was not changed` }
+    }
+    const base = runner.config.acpStartupPreference.read()
+    if (base === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host ACP startup preference is unavailable; nothing was changed' }
+    }
+    try {
+      await runner.config.acpStartupPreference.setAutoStart(autoStart, revision)
+    } catch (error) {
+      return classifyRejectedAcpAutostart(base.autoStart, safeErrorMessage(error))
+    }
+    return verifyCommittedAcpAutostart(autoStart)
+  }
+
+  /** Commit the live listener toggle. It reads the authority BEFORE dispatch,
+   *  sends exactly ONE `setEnabled`, and reuses the authoritative reread for the
+   *  verdict. A rejected/dispatched-but-unreadable write is classified from a
+   *  fresh read and never replayed. */
+  const commitAcpRuntime = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    const target = value === 'On' ? true : value === 'Off' ? false : undefined
+    if (target === undefined) return { outcome: 'not-saved', reason: `"${value}" is not an ACP listener candidate` }
+    const targetState = target ? 'enabled' : 'disabled'
+    const pre = await readAcpRuntimeStatus()
+    if (!pre.fresh || pre.status === undefined) {
+      return { outcome: 'indeterminate', reason: 'the authoritative ACP listener state could not be read' }
+    }
+    const before = pre.status
+    if (before.state === 'changing') return { outcome: 'not-saved', reason: 'an ACP listener transition is already in progress' }
+    if (before.state === 'unavailable') return { outcome: 'not-saved', reason: 'the ACP listener is unavailable' }
+    if (before.state === targetState) return { outcome: 'verified' }
+    try {
+      await runner.acpAccess.setEnabled(target)
+    } catch (error) {
+      const after = await readAcpRuntimeStatus()
+      if (!after.fresh || after.status === undefined) {
+        return { outcome: 'indeterminate', reason: `${safeErrorMessage(error)}; the authoritative ACP listener state could not be re-read` }
+      }
+      if (after.status.state === targetState) {
+        return { outcome: 'indeterminate', reason: `${safeErrorMessage(error)}; the listener now reports ${after.status.state}, so this outcome cannot be attributed` }
+      }
+      return { outcome: 'not-saved', reason: safeErrorMessage(error) }
+    }
+    const settled = await readAcpRuntimeStatus()
+    if (!settled.fresh || settled.status === undefined) {
+      return { outcome: 'indeterminate', reason: 'the write was dispatched but the ACP listener state could not be re-read' }
+    }
+    if (settled.status.state === targetState) return { outcome: 'verified' }
+    return { outcome: 'not-saved', reason: `the write reported success, but the ACP listener reads ${settled.status.state}` }
   }
 
   const webSettingsAvailable = (): boolean => runner.config.web.available()
@@ -755,7 +1016,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  settles. A newer/closed generation never receives the result. The repaint is
    *  ROW-scoped: the Web authority changed, so the TUI settings document is never
    *  read a second time (one guarded document read per surface). */
-  let activeSettingsWorkspace: { readonly token: object; readonly refreshWebRow: () => void } | undefined
+  let activeSettingsWorkspace: { readonly token: object; readonly refreshWebRow: () => void; readonly refreshAcpRuntimeRow: () => void } | undefined
   /** The MOUNTED Web Search / Fetch page (C2-R4). It is created by the root's
    *  explicit activation, dies with the workspace, and is never a second
    *  settings authority: a fact settlement repaints the root, whose frame
@@ -952,6 +1213,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // The panel snapshots its source in its CONSTRUCTOR, so the pending state
     // must be in place before the lease is taken.
     if (webSettingsAvailable()) beginWebSettingsRead()
+    beginAcpRuntimeRead()
     // M6-1 F8: the initial session-policy read starts only after this
     // workspace's lease was granted. The panel's FIRST snapshot (constructor,
     // inside the granted open) already starts the observation's controlled
@@ -1152,7 +1414,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         },
       },
     )
-    activeSettingsWorkspace = { token, refreshWebRow: () => handle?.refreshRow(WEB_LAUNCHER_ROW_ID, webWorkspaceRowFacts()) }
+    activeSettingsWorkspace = { token, refreshWebRow: () => handle?.refreshRow(WEB_LAUNCHER_ROW_ID, webWorkspaceRowFacts()), refreshAcpRuntimeRow: () => handle?.refreshRow('acp-runtime', { summary: acpRuntimeSummaryOf(), freshness: acpRuntimeFreshnessOf(), description: ACP_RUNTIME_DESCRIPTION }) }
     // The observation's committed reads re-read THIS open workspace's rows
     // through the existing runtime-facts seam: a Host read that settles after
     // the first frame replaces `Checking…` without a key press.
@@ -1165,6 +1427,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       app.refreshSettingsWorkspaceRuntimeFacts()
     })
     startWebSettingsRead()
+    startAcpRuntimeRead()
     // M6-1 F8: the initial session-policy read starts only now that the
     // workspace lease was granted (a refused open captures no scope and
     // starts no read); the panel's first snapshot already started it.
@@ -2121,6 +2384,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         case 'visual-tools': return commitVisualTools(request.value, request.revision)
         case 'web-autostart': return commitWebAutostart(request.value, request.revision)
         case 'startup-backend': return commitBackendStartup(request.value, request.revision)
+        case 'acp-runtime': return commitAcpRuntime(request.value)
+        case 'acp-autostart': return commitAcpAutostart(request.value, request.revision)
         case 'display-preset': return commitDisplayPreset(request.value)
         case 'theme': return commitTheme(request.value)
         case 'icon-style': return commitIconStyle(request.value)
@@ -3331,6 +3596,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // Profile value is never presented as the shipped `direct` default.
     const backendStartup = runner.config.backendStartupPreference.read()
     const backendStartupFreshness = backendStartupFreshnessOf(backendStartup, configReadiness)
+    const acpAutostart = runner.config.acpStartupPreference.read()
+    const acpAutostartFreshness = acpAutostartFreshnessOf(acpAutostart, configReadiness)
     // ── C2-R3 + M6-1 F8: the five Agent rows' read facts ────────────────────
     // PERMISSIONS. The approval row exists for a LIVE, still-current captured
     // scope; the row's VALUE comes from the ONE session-policy observation
@@ -3942,6 +4209,34 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             + 'foreground Client against a local Host. Applies to the next launch only; the current TUI/Host is not changed. '
             + 'An explicit DSH_PI_TUI_BACKEND environment value overrides this for that launch and is shown read-only.',
           edit: backendStartupEditOf(backendStartup, configReadiness),
+        },
+        {
+          // PO-1B: the local ACP listener RUNTIME row. Its value is the LIVE
+          // Host listener state read through the `acpAccess` port (async); the
+          // row never reports the persisted preference. On Direct it is a
+          // truthful Unavailable (Split Host only) and offers no candidate.
+          id: 'acp-runtime',
+          category: 'tools',
+          label: 'ACP Server',
+          summary: acpRuntimeSummaryOf(),
+          scope: 'DSH Host · running Split Host ACP listener',
+          freshness: acpRuntimeFreshnessOf(),
+          description: ACP_RUNTIME_DESCRIPTION,
+          edit: acpRuntimeEditOf(),
+        },
+        {
+          // PO-1B: the NEXT-Split-Host-start ACP preference. A persisted profile
+          // fact independent of the running listener; saving it never binds or
+          // tears down the current socket.
+          id: 'acp-autostart',
+          category: 'tools',
+          label: 'Auto-enable ACP on Host startup',
+          summary: acpAutostartSummaryOf(acpAutostart),
+          scope: 'DSH Host profile · next Split Host start',
+          freshness: acpAutostartFreshness,
+          description: 'Automatically binds the local ACP v1 Unix socket listener when a new Split Host starts. '
+            + 'Affects the next Split Host start; the current ACP listener is unchanged. Use the ACP Server row for immediate control.',
+          edit: acpAutostartEditOf(acpAutostart, configReadiness),
         },
         {
           // C2-R4: the ONE discoverable entry to the Web provider settings

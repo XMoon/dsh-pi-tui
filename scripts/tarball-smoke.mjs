@@ -354,6 +354,8 @@ function main() {
     check('types dist/web-preferences.d.mts', has('dist/web-preferences.d.mts'))
     check('exports entry dist/daemon-launcher.mjs', has('dist/daemon-launcher.mjs'))
     check('types dist/daemon-launcher.d.mts', has('dist/daemon-launcher.d.mts'))
+    check('exports entry dist/acp-preferences.mjs', has('dist/acp-preferences.mjs'))
+    check('types dist/acp-preferences.d.mts', has('dist/acp-preferences.d.mts'))
     check('exports entry dist/host-runtime.mjs', has('dist/host-runtime.mjs'))
     check('types dist/host-runtime.d.mts', has('dist/host-runtime.d.mts'))
     // M4-B2-HF: ONE Loader subpath for the built-in Host composition. The two
@@ -495,7 +497,7 @@ function main() {
         const match = /\/\/#region\s+(\S+)/.exec(line)
         if (match) {
           const regionPath = match[1]
-          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/schema|app\/host\/features\/file-reference|app\/host\/features\/terminal-progress|app\/host\/performance-host|app\/host\/pi-tui-host-runtime|app\/host\/visual-tools|app\/host\/web-preferences|app\/remote-process\/daemon-launcher|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
+          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/schema|app\/host\/acp-preferences|app\/host\/features\/file-reference|app\/host\/features\/terminal-progress|app\/host\/performance-host|app\/host\/pi-tui-host-runtime|app\/host\/visual-tools|app\/host\/web-preferences|app\/remote-process\/daemon-launcher|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
           const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
           if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
         }
@@ -569,7 +571,8 @@ function main() {
             + "import('@xmoon76/dsh-pi-tui/extensions/advanced'), import('@xmoon76/dsh-pi-tui/extensions/unstable'),"
             + "import('@xmoon76/dsh-pi-tui/performance-host'), import('@xmoon76/dsh-pi-tui/visual-tools'),"
             + "import('@xmoon76/dsh-pi-tui/host-runtime'), import('@xmoon76/dsh-pi-tui/web-preferences'),"
-            + "import('@xmoon76/dsh-pi-tui/daemon-launcher')])"
+            + "import('@xmoon76/dsh-pi-tui/daemon-launcher'),"
+            + "import('@xmoon76/dsh-pi-tui/acp-preferences')])"
             + ".then(m => { if (m[4].ADVANCED_API_LEVEL !== 1) throw new Error('ADVANCED_API_LEVEL');"
             + "if (m[5].UNSTABLE_API_LEVEL !== 1) throw new Error('UNSTABLE_API_LEVEL');"
             + "if (m[6].name !== 'pi-tui-performance-host') throw new Error('performance-host row');"
@@ -595,6 +598,9 @@ function main() {
             + "if (m[10].name !== 'pi-tui-daemon-launcher') throw new Error('daemon-launcher row');"
             + "if (typeof m[10].apply !== 'function') throw new Error('daemon-launcher apply');"
             + "if (!Array.isArray(m[10].inject) || m[10].inject.length === 0) throw new Error('daemon-launcher inject');"
+            + "if (m[11].name !== 'pi-tui-acp-preferences') throw new Error('acp-preferences row');"
+            + "if (typeof m[11].Config !== 'function' && typeof m[11].Config !== 'object') throw new Error('acp-preferences Config');"
+            + "if (typeof m[11].apply !== 'function') throw new Error('acp-preferences apply');"
             + "console.log('imports-ok') })"
             + ".catch(e => { console.error(e.message); process.exit(1) })",
         ], { cwd: probeDir })

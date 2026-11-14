@@ -23,7 +23,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { unavailableWebAccess } from '../support/web-access-fake.ts'
+import { unavailableAcpAccess, unavailableWebAccess } from '../support/web-access-fake.ts'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -115,6 +115,8 @@ function setup(mode: Mode): Harness {
   const runner: TuiCommandRunner = {
 
     webAccess: unavailableWebAccess(),
+
+    acpAccess: unavailableAcpAccess(),
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,

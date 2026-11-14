@@ -748,7 +748,7 @@ test('the page deeplink is reachable and Esc cancels without a write', async t =
   await key(h, ESC) // list -> Tools rows
   // The root keeps the row's Detail focus, exactly like the allowlist picker
   // return: the Tools rows are painted again with the Web row selected.
-  assert.match(h.view(), /Rows \(3\)/u, 'Esc from the list returns to the Tools rows')
+  assert.match(h.view(), /Rows \(5\)/u, 'Esc from the list returns to the Tools rows')
   assert.match(h.view(), /Configure Web…/u, 'the Web row owns the frame again')
   assert.deepEqual(h.writes, [], 'the whole cancel path wrote nothing')
 })
@@ -934,7 +934,10 @@ test('a new read clears the previous read ERROR: pending, not a stale Unavailabl
   await key(h, ENTER)
   const firstFrame = h.view()
   assert.match(firstFrame, /Loading…/u, `the reopened workspace is pending again:\n${firstFrame}`)
-  assert.doesNotMatch(firstFrame, /Unavailable/u, 'the previous error state does not survive into the new read')
+  // Scope to the Web launcher row: the neighbouring ACP runtime row legitimately
+  // reports its own Unavailable state here, which is not this Web read's fact.
+  const webLauncherLine = firstFrame.split('\n').find(line => line.includes('Web Search / Fetch')) ?? ''
+  assert.doesNotMatch(webLauncherLine, /Unavailable/u, 'the previous error state does not survive into the new read')
   release()
   await settlePainted(h, 'the new read to paint the facts', frame =>
     frame.includes('Search: Messages') && !frame.includes('Loading…'))

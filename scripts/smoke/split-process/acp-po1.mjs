@@ -115,6 +115,11 @@ function socketPathOf(dshHome, scopeId) {
   return join(dshHome, 'run', 'dsh-pi-tui', scopeId, 'acp.sock')
 }
 
+/** The Linux abstract seat name one Host scope claims for this profile. */
+function socketSeatName(scopeId) {
+  return `\0dsh-pi-tui-h-${String(scopeId).slice(0, 40)}`
+}
+
 /**
  * Connect one raw ACP client through this process's OWN scope directory fd.
  *
@@ -160,6 +165,10 @@ export async function runAcpPo1(context) {
   const installedVersion = installation.manifest.version
   const startedHosts = []
   const startedClients = []
+  const startedPeers = []
+  let preferenceSequence = 0
+  let prepScopeId
+  let originalError
 
   const startHost = (extraEnv, label) => {
     const host = new EntryProcess('host', entries.host, { ...base, env: { ...base.env, ...extraEnv } })
@@ -172,8 +181,47 @@ export async function runAcpPo1(context) {
     assert(record.m4a0 === 'ready', `${label} did not reach Ready: ${JSON.stringify({ code: record.code, error: record.error, phase: record.phase })}`)
     return record
   }
+  const startPeer = async (label) => {
+    const peer = new EntryProcess('peer', entries.client, { ...base, env: { ...base.env, SPLIT_PROCESS_CLIENT_MODE: 'peer' } })
+    peer.qualificationLabel = label
+    startedPeers.push(peer)
+    await peer.waitFor(record => record.m4a0 === 'ready', `${label} peer ready`, 180_000)
+    return peer
+  }
+  const acpPreference = async (peer, label, value) => {
+    const requestId = `acp-pref-${String(++preferenceSequence)}-${String(process.pid)}`
+    peer.send({
+      op: 'qualification-acp-autostart',
+      requestId,
+      ...(value === undefined ? {} : { acpAutoStart: value }),
+    })
+    return peer.waitFor(entry => entry.op === 'acp-autostart' && entry.requestId === requestId,
+      `${label} acp-autostart`, 120_000)
+  }
 
   try {
+    // ── Preparation: the listener is default-OFF, so persist the profile-owned
+    // `pi-tui-acp-preferences.autoStart` preference TRUE before the Phase 0/1/2
+    // Hosts boot. A normal base-env Host reaches Ready with NO socket; a `peer`
+    // on the SAME profile reads the default (Off) and writes On through the real
+    // Settings wire. The prep Host never receives the acp-bound barrier env. ────
+    const prepHost = startHost({}, 'acp preference prep host')
+    const prepReady = await waitReady(prepHost, 'acp preference prep host ready')
+    prepScopeId = prepReady.localHost.scopeId
+    assert(findScopeDirBySocket(dshHome) === undefined, 'acp default-off: the base-env prep Host bound an acp.sock')
+    assert(!exists(socketPathOf(dshHome, prepScopeId)), 'acp default-off: no acp.sock may exist before autoStart is set')
+    const prepPeer = await startPeer('acp preference prep peer')
+    const defaultPreference = await acpPreference(prepPeer, 'acp preference default read', undefined)
+    assert(defaultPreference.ok === true && defaultPreference.autoStart === false && defaultPreference.userOverridden === false,
+      `acp preference prep: the default preference is ${JSON.stringify(defaultPreference)}`)
+    const savedOn = await acpPreference(prepPeer, 'acp preference write On', true)
+    assert(savedOn.ok === true && savedOn.autoStart === true && savedOn.userOverridden === true && savedOn.readBack === true,
+      `acp preference prep: the On write did not read back On: ${JSON.stringify(savedOn)}`)
+    assert((await prepPeer.shutdown()).code === 0, 'acp preference prep: the peer did not stop')
+    assert((await prepHost.shutdown()).code === 0, 'acp preference prep: the Host did not stop')
+    await seatFree(socketSeatName(prepScopeId), 20_000)
+    trace('acp/preference-prep', { defaultAutoStart: false, readBack: true, hostPid: prepReady.pid })
+
     // ── Phase 0: a stop admitted while the listener is bound but before the
     // registry commits must never publish Ready (P1-09). ─────────────────────
     const stopBarrier = join(workDir, `acp-stop-barrier-${String(process.pid)}`)
@@ -353,14 +401,61 @@ export async function runAcpPo1(context) {
       noTcpOrStdoutPollution: true,
       originalSplitClientIntact: true,
     }
+  } catch (error) {
+    originalError = error
+    throw error
   } finally {
     for (const client of startedClients) {
       try { await client.dispose() } catch { /* the runner backstop owns leftovers */ }
+    }
+    for (const peer of startedPeers) {
+      if (peer.exited) continue
+      try { await peer.shutdown() } catch { /* the global backstop owns leftovers */ }
     }
     for (const host of startedHosts) {
       if (host.exited) continue
       try { host.kill('SIGKILL') } catch { /* already gone */ }
       try { await host.waitForExit(30_000) } catch { /* the runner backstop owns leftovers */ }
+    }
+    // The profile-owned ACP startup preference is persistent state. Restore it to
+    // Off through the REAL Settings wire on a fresh Host/Peer even when the case
+    // failed after setting it, so a later case sees the documented default. Never
+    // rewrite the preference file directly. Best effort: if the original error is
+    // preserved, expose only the fixed recovery-failure category.
+    let recoveryError
+    if (prepScopeId !== undefined) {
+      const hostBoundary = startedHosts.length
+      const peerBoundary = startedPeers.length
+      try {
+        const resetHost = startHost({}, 'acp preference reset host')
+        await waitReady(resetHost, 'acp preference reset host ready')
+        const resetPeer = await startPeer('acp preference reset peer')
+        const reset = await acpPreference(resetPeer, 'acp preference reset', false)
+        assert(reset.ok === true && reset.autoStart === false && reset.readBack === true,
+          `acp preference reset did not read back Off: ${JSON.stringify(reset)}`)
+        trace('acp/preference-restored', { autoStart: false, readBack: true })
+      } catch (error) {
+        recoveryError = error
+      } finally {
+        for (const peer of startedPeers.slice(peerBoundary)) {
+          if (peer.exited) continue
+          try { await peer.shutdown() } catch { /* best effort */ }
+        }
+        for (const host of startedHosts.slice(hostBoundary)) {
+          if (host.exited) continue
+          try {
+            host.kill('SIGTERM')
+            host.child.stdin.end()
+            await host.waitForExit(60_000)
+          } catch {
+            try { host.kill('SIGKILL') } catch { /* already gone */ }
+          }
+        }
+      }
+    }
+    if (recoveryError !== undefined) {
+      if (originalError === undefined) throw recoveryError
+      trace('acp/preference-restore-failed', { result: 'recovery-failed-after-case-failure' })
     }
   }
 }

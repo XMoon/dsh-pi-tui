@@ -68,6 +68,10 @@
       "types": "./dist/daemon-launcher.d.mts",
       "default": "./dist/daemon-launcher.mjs"
     },
+    "./acp-preferences": {
+      "types": "./dist/acp-preferences.d.mts",
+      "default": "./dist/acp-preferences.mjs"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },

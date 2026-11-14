@@ -14,7 +14,7 @@
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { lstatSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { closeSync, openSync } from 'node:fs'
 import { connect } from 'node:net'
 import { join } from 'node:path'
@@ -538,3 +538,40 @@ async function withTimeout<T>(value: Promise<T>, timeoutMs: number, label: strin
     if (timer !== undefined) clearTimeout(timer)
   }
 }
+
+/**
+ * PO-1B: the read-only `isListening()` fact the runtime controller relies on to
+ * report `enabled`. It proves the bound server and the exact owned socket inode,
+ * never a rebind, and turns false the moment the owned inode is gone.
+ */
+test('isListening() is true while bound, false after close, and close is idempotent', async t => {
+  const { scope } = newScope(t)
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+  assert.equal(listener.isListening(), true, 'a freshly bound, 0600-owned socket must report listening')
+  await listener.close()
+  assert.equal(listener.isListening(), false, 'a closed listener must never report listening')
+  // Repeated close is inert (never throws, never resurrects the socket).
+  await listener.close()
+  assert.equal(listener.isListening(), false, 'a repeated close stays not-listening')
+})
+
+test('isListening() is false when the owned socket inode is removed externally', async t => {
+  const { scope } = newScope(t)
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+  assert.equal(listener.isListening(), true)
+  unlinkSync(listener.socketPath)
+  assert.equal(listener.isListening(), false, 'the bound server must not claim a path it no longer owns')
+  await listener.close()
+})
+
+test('a second listener after close re-binds the same pathname and reports listening', async t => {
+  const { scope } = newScope(t)
+  const first = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+  const path = first.socketPath
+  await first.close()
+  assert.equal(pathExists(path), false, 'the first close retires its owned inode')
+  const second = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+  assert.equal(second.socketPath, path, 'a re-enable reuses the same logical socket pathname')
+  assert.equal(second.isListening(), true)
+  await second.close()
+})

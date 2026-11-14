@@ -2563,6 +2563,8 @@ export function applyRunnerWithRuntime(
         hostFile: backend.hostFile,
         // M5-W PR-C: the Split-Client Web frontend control (`/web`).
         webAccess: backend.webAccess,
+        // PO-1B: the Split-Client local ACP listener control (Settings row).
+        acpAccess: backend.acpAccess,
         // The selected backend's live semantic completion authority. Direct
         // compgen stays on the in-process compatibility path; Remote calls Host.
         hostShellCompletion: backend.hostShellCompletion,

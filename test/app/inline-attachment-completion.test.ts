@@ -22,7 +22,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { unavailableWebAccess } from '../support/web-access-fake.ts'
+import { unavailableAcpAccess, unavailableWebAccess } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
@@ -300,6 +300,7 @@ function setup(
   ctx.provide('commands', commands as never)
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
