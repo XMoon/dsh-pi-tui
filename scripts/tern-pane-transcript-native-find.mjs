@@ -266,14 +266,20 @@ async function openFind(h, query, label) {
   return { state, togglesBefore: before, query, label }
 }
 
-/** Close the client's native Find with ONE Escape and prove it is gone. */
+/** Close the client's native Find with ONE Escape and prove it is REALLY
+ *  gone: state.find must be null/undefined AND the Find bar must no longer
+ *  carry its active state (a merely emptied query would still be an open
+ *  Find). */
 async function closeFind(h, label) {
   h.send('key', 'Escape')
   await h.sleep(400)
   const state = stateFind(h)
-  h.check(`${label}: Escape closes the native Find and state.find returns to null`,
-    state === null || state === undefined || (typeof state === 'object' && state.query === '' && (state.hits ?? 0) === 0),
-    JSON.stringify(state))
+  const bar = findBarNode(h.snapshot())
+  const barClass = String(bar?.class ?? '')
+  const barClosed = bar === undefined || !barClass.split(/\s+/u).includes('on')
+  h.check(`${label}: Escape closes the native Find (state.find gone, Find bar inactive)`,
+    (state === null || state === undefined) && barClosed,
+    JSON.stringify({ state, barClass: barClass || null }))
 }
 
 /** The client's OWN native Find bar, or undefined while it is closed. */
@@ -455,6 +461,13 @@ export default async function (h) {
   h.check('B04: Find Previous moves the current hit to another occurrence',
     currentBefore !== null && afterPrevious !== null && afterPrevious !== currentBefore,
     JSON.stringify({ before: currentBefore, afterPrevious }))
+  // The navigation must be VISIBLE: after the client walks to another
+  // occurrence, at least one row carrying the query must be in its viewport.
+  const navSnapshot = h.snapshot()
+  const navRows = mainNodes(navSnapshot).filter(node => String(node.text ?? '').includes(markers.shared))
+  h.check('B04: the navigated occurrence is really visible in the client viewport',
+    navRows.some(node => reallyVisible(navSnapshot, node)),
+    JSON.stringify(navRows.map(node => rect(node))))
   h.capture(`${preset}-find-next-1280x800-dark`, 'the native Find after one Previous navigation')
   const barSnap2 = h.snapshot()
   const findBarNext = findBarButton(barSnap2, 'Next match')
@@ -502,16 +515,22 @@ export default async function (h) {
   await closeFind(h, 'B09 close')
 
   // ── B05: the 25+ turn-old ARCHIVE token is reachable from a moved viewport ──
+  // The flow scrolls the viewport AWAY from the tail first; from here on the
+  // CLIENT owns the navigation — the flow must not wheel for this claim.
   h.send('wheel', 0, 900)
   await h.sleep(400)
   const openedArchive = await openFind(h, markers.archive, 'archive')
   h.check('B05: the client Find reaches the 25+ turn-old ARCHIVE token',
     openedArchive.state !== null && (openedArchive.state.hits ?? 0) >= 1,
     JSON.stringify(openedArchive.state))
-  const archiveWitness = await revealMainText(h, markers.archive)
-  h.check('B05: the ARCHIVE row is a real Main fragment the client actually paints',
-    archiveWitness !== undefined,
-    JSON.stringify(archiveWitness === undefined ? null : { rect: rect(archiveWitness.node) }))
+  // SOURCE→SINK: the Find navigation itself must bring the old row into the
+  // client's viewport. A witness produced by the flow's own wheel would be
+  // the test driver locating the row, not the Find.
+  const archiveSnapshot = h.snapshot()
+  const archiveNode = mainNodes(archiveSnapshot).find(node => String(node.text ?? '').includes(markers.archive))
+  h.check('B05: the client Find itself locates the old ARCHIVE row in its viewport',
+    archiveNode !== undefined && reallyVisible(archiveSnapshot, archiveNode),
+    JSON.stringify(archiveNode === undefined ? null : { rect: rect(archiveNode) }))
   h.capture(`${preset}-find-archive-1280x800-dark`, 'the native Find positioned on the old ARCHIVE row')
   h.check('B05: the Find navigation recreated no Session scope',
     records(h).filter(row => row.kind === 'scope.changed').length === 1,
@@ -592,11 +611,18 @@ export default async function (h) {
     && (String(node.id ?? '').includes('-msg-21') || String(node.p?.target ?? '').includes('t3a-inner-example')))
   if (!await pollUntil(h, toolBodyMaterialized, 120)) {
     if (innerCard === undefined) {
-      // MEASURED on the pinned binary: the Focus Thought root opens WITHOUT a
-      // nested Tool card on the wire — the Focus projection does not
-      // materialize the Tool's body under that root at all. The plan's rule is
-      // FACT CONSISTENCY, not a forced pass: record the absence and keep the
-      // Find claim limited to what the client really indexes.
+      // The zero-hit acceptance below is the MEASURED Focus limitation and is
+      // legal ONLY for the focus preset with a really-opened Thought root:
+      // Full/Compact must never degrade into it, or a broken tool mount would
+      // read as a normal zero-hit result.
+      if (preset !== 'focus') {
+        finish(h, { ...extra, qualification: 'TOOL_BODY_NOT_MATERIALIZED' })
+        return
+      }
+      const focusRootLive = rootToggle === undefined ? undefined : foldLive(h).get(rootToggle.id)
+      h.check('B16: the Focus Thought root is really open before the zero-hit acceptance',
+        focusRootLive !== undefined && focusRootLive.p.collapsed === false,
+        JSON.stringify(focusRootLive?.p ?? null))
       h.measure('B16: the opened Focus Thought root carries no nested Tool card on the wire (its Find document excludes the tool body)',
         JSON.stringify({ rootId: rootToggle?.id ?? null, innerToolNodes: 0 }))
       const openedInnerFocus = await openFind(h, markers.innerOnly, 'focus inner')
@@ -646,24 +672,38 @@ export default async function (h) {
     JSON.stringify({ manualToggles: records(h).filter(row => row.kind === 'client.toggle').slice(togglesBeforeRoot) }))
 
   // ── B17: a higher app seat (History search) stays the owner ──
+  // MEASURED CLIENT LIMITATION: the control channel cannot deliver a CTRL
+  // modifier to the pane program. `Control+r` arrives as the bare `r`
+  // (client consumes the modifier), `ctrl+r` / `control+r` arrive as
+  // meta+r, and a raw-key shell probe shows ZERO bytes for every Ctrl
+  // chord while shift/alt pass through. The History card's own positive
+  // premise therefore CANNOT be established in either lane — a physical
+  // keyboard run (OS_INPUT_VERIFIED) would be needed. Per the plan's
+  // record-the-actual-client-action rule, this block records the attempt
+  // and keeps only the non-penetration half as a real assertion; the B17
+  // row is reported NOT_EXERCISED_CLIENT_KEY_LIMIT, never a PASS.
   h.send('key', 'Control+r')
   await h.sleep(500)
-  const modalText = mainText(h) + h.descendantsText(regionNode(h.snapshot(), 'sf-layer') ?? {})
-  h.measure('B17: the app History-search seat opened over the Main',
-    JSON.stringify({ layerPresent: regionNode(h.snapshot(), 'sf-layer') !== undefined, modalText: modalText.slice(0, 120) }))
+  const dockForModal = regionNode(h.snapshot(), 'sf-dock')
+  const dockModalText = dockForModal === undefined ? '' : h.descendantsText(dockForModal)
+  h.capture(`${preset}-b17-history-attempt`, 'the client right after Control+r through the control channel')
+  h.measure('B17: the History seat stays closed after Control+r (client consumes the Ctrl modifier; recorded, never a PASS)',
+    JSON.stringify({ historyCardOpen: dockModalText.includes('Input History'), dockText: dockModalText.slice(0, 120) }))
   const openedModalFind = await openFind(h, markers.shared, 'modal seat')
-  h.measure('B17: the client Find behaviour under the higher app seat (recorded, not assumed)',
+  h.measure('B17: the client Find behaviour after the recorded History attempt (recorded, not assumed)',
     JSON.stringify(openedModalFind.state))
-  h.check('B17: the higher app seat blocked any new Session write during the Find probe',
+  h.check('B17: the History attempt and Find probe produced no new Session write',
     records(h).filter(row => row.kind === 'producer.writer.settled').length === settledBeforeFind,
     JSON.stringify({ settled: settledBeforeFind }))
   h.send('key', 'Escape')
   await h.sleep(400)
   h.send('key', 'Escape')
   await h.sleep(400)
-  h.check('B17: the History-search seat retired without any durable Session write',
+  h.check('B17: the attempt retired without any durable Session write',
     records(h).filter(row => row.kind === 'producer.writer.settled').length === settledBeforeFind,
     JSON.stringify({ settled: settledBeforeFind }))
+  h.measure('B17: disposition NOT_EXERCISED_CLIENT_KEY_LIMIT — the higher-seat premise needs an OS_INPUT_VERIFIED run',
+    JSON.stringify({ probeKeys: ['Control+r'], recorded: 'client consumes the Ctrl modifier; no History card; no unavailable notify' }))
 
   // ── B21: the viewport × appearance matrix keeps Find readable ──
   const matrix = []
@@ -684,6 +724,11 @@ export default async function (h) {
       h.measure(`${viewport.width}x${viewport.height}: GUI clamped Find bar`, JSON.stringify({
         requested: resize, actual: stats.viewport, findBarClass: bar?.class ?? null, find: openedViewport.state,
       }))
+      // The clamp itself stays a measurement, but the Find must still be
+      // present and usable at the ACTUAL window size.
+      h.check(`${viewport.width}x${viewport.height}: the native Find bar stays present and readable at the clamped size`,
+        bar !== undefined && openedViewport.state?.query === markers.shared,
+        JSON.stringify({ findBarClass: bar?.class ?? null, find: openedViewport.state, theme: state.theme }))
     } else {
       h.check(`${viewport.width}x${viewport.height}: the native Find bar stays present and readable`,
         bar !== undefined && openedViewport.state?.query === markers.shared,
@@ -713,6 +758,11 @@ export default async function (h) {
   const panesAfterSplit = h.ctl('state').panes ?? []
   const focusedAfterSplit = h.ctl('state').focused?.id ?? null
   if (panesAfterSplit.length !== 2) {
+    // A refused split is a real qualification failure: record a FAILED
+    // assertion so BOTH drivers exit non-zero (the ledger's qualification
+    // string alone never drives the exit code).
+    h.check('B18: the client split produced exactly two panes', false,
+      JSON.stringify({ reply: splitReply, panes: panesAfterSplit, focusedBefore, focusedAfterSplit }))
     finish(h, { ...extra, qualification: 'PANE_SPLIT_BLOCKER',
       paneSplitDetail: { reply: splitReply, panes: panesAfterSplit, focusedBefore, focusedAfterSplit } })
     return
@@ -773,6 +823,7 @@ export default async function (h) {
       'OS physical keyboard/IME/wheel',
       'G8 Owner visual acceptance',
       'any realtime refresh of an OPEN Find result list after a live append (reopened Find is the measured behaviour)',
+      'B17 NOT_EXERCISED_CLIENT_KEY_LIMIT: the control channel cannot deliver a Ctrl modifier to the pane program (MEASURED: Control+r arrives as bare r, ctrl+r/control+r as meta+r, raw-key shell probe shows zero bytes for every Ctrl chord); the History seat premise needs an OS_INPUT_VERIFIED run — the non-penetration half (no Session write around the attempt) is still asserted',
       'B19 NOT_VERIFIED: no real Session source switch is driven in this lane; the pre-switch/post-switch row-identity evidence stays with the T2/T3-0 source-generation lanes (this lane keeps scope.changed===1 throughout)',
       'B20 NOT_EXERCISED_REAL_GONE: no client retention/gone event occurred on the 28-Turn document in these runs; the gone contract evidence stays with the T2 real-path lanes; this lane claims no retention promise either way',
     ],
