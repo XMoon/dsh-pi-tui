@@ -186,21 +186,26 @@ export class RemoteTeamBoardReadPort implements TeamBoardReadPort {
 
   subscribe(sessionId: string, listener: () => void): () => void {
     // Root-only: a binding already PROVEN to be a child gets no subscription at
-    // all (no face, generation or Session-list listener, no board callback).
+    // all. With no binding, an official Session-list `origin === 'subagent'`
+    // row already proves the child, so it is refused too.
     const initial = this.sessions.binding(sessionId)
-    if (initial !== undefined && this.isProvenChild(sessionId, initial.session)) return () => {}
+    if (initial !== undefined ? this.isProvenChild(sessionId, initial.session) : this.isListProvenChild(sessionId)) {
+      return () => {}
+    }
     let faceOffs: Array<() => void> = []
     let lastBinding: unknown
     let disposed = false
-    /** (Re)arm the `agentTeam` face against the CURRENT binding. A confirmed
-     *  child never receives the Root board feed. */
+    /** (Re)arm the `agentTeam` face against the CURRENT binding. A proven child
+     *  (binding snapshot OR Session-list origin) never receives the board feed. */
     const rearm = (force: boolean): boolean => {
       const binding = this.sessions.binding(sessionId)
       if (!force && Object.is(binding, lastBinding)) return false
       for (const off of faceOffs.splice(0)) off()
       lastBinding = binding
+      if (binding === undefined ? this.isListProvenChild(sessionId) : this.isProvenChild(sessionId, binding.session)) {
+        return false
+      }
       if (binding === undefined) return true
-      if (this.isProvenChild(sessionId, binding.session)) return false
       try {
         faceOffs.push(binding.session.projections.faceOf(AGENT_TEAM_KEY).subscribe(listener))
       } catch (error) {
@@ -242,6 +247,11 @@ export class RemoteTeamBoardReadPort implements TeamBoardReadPort {
       if (lifecycle.removed === true) return false
       return Object.hasOwn(lifecycle, 'subagent') && lifecycle.subagent !== null
     }
+    return this.isListProvenChild(sessionId)
+  }
+
+  /** The official Session-list origin proves a child even without a binding. */
+  private isListProvenChild(sessionId: string): boolean {
     return this.sessions.list.getSnapshot().byId[sessionId]?.origin === 'subagent'
   }
 
