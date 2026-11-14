@@ -102,6 +102,8 @@ import type {
   PublicBackendValue,
   AcpStartupPreferenceConfig,
   AcpStartupPreferenceState,
+  McpServerSources,
+  McpServerSourcesConfig,
 } from '../config-port.ts'
 import { SupersededReadError } from '../read-error.ts'
 import { RemoteConfigWriteLifetime } from './config-write-lifetime.ts'
@@ -1950,6 +1952,7 @@ export class RemoteConfigPort implements ConfigPort {
   readonly webStartupPreference: WebStartupPreferenceConfig
   readonly backendStartupPreference: BackendStartupPreferenceConfig
   readonly acpStartupPreference: AcpStartupPreferenceConfig
+  readonly mcpServerSources: McpServerSourcesConfig
 
   /** `undefined` while the `tui-app` namespace is absent from the mirror
    *  (the port's documented absence contract). */
@@ -2003,6 +2006,11 @@ export class RemoteConfigPort implements ConfigPort {
     this.webStartupPreference = new RemoteWebStartupPreferenceConfig(this.mirror)
     this.backendStartupPreference = new RemoteBackendStartupPreferenceConfig(this.mirror)
     this.acpStartupPreference = new RemoteAcpStartupPreferenceConfig(this.mirror)
+    // The MCP configuration-source read reuses the SAME settings mirror (no
+    // second long-lived mirror): `refresh()` drives its existing serialized
+    // describe(), so a just-opened page reads a current key set instead of
+    // waiting for an unrelated invalidation.
+    this.mcpServerSources = new RemoteMcpServerSourcesConfig(this.mirror, () => this.describe())
     this.web = new RemoteWebProviderConfig(this.mirror, this.credentialConfig)
   }
 
@@ -2634,5 +2642,56 @@ class RemoteAccountConfig implements AccountConfig {
     this.disposed = true
     this.lifetime.abort(new SupersededReadError('remote Account adapter was disposed'))
     for (const handle of this.streams.keys()) this.releaseStream(handle)
+  }
+}
+
+/** The official settings namespace the shared Host MCP manager owns. */
+const MCP_SERVER_SOURCES_NS = 'mcp-manager'
+
+/**
+ * The Remote MCP configuration-source read over the ONE committed settings
+ * mirror. It never opens a second mirror and never writes: `ready` requires a
+ * CURRENT committed settings read whose `mcp-manager.servers` effective value
+ * is readable. A last-known (no-longer-current) snapshot is `stale`, and an
+ * absent namespace is `unavailable` — neither may be presented as a key set.
+ */
+class RemoteMcpServerSourcesConfig implements McpServerSourcesConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly refreshRead: () => Promise<void>
+
+  constructor(mirror: RemoteConfigMirror, refreshRead: () => Promise<void>) {
+    this.mirror = mirror
+    this.refreshRead = refreshRead
+  }
+
+  read(): McpServerSources {
+    const readiness = this.mirror.readiness()
+    if (readiness === 'unavailable') {
+      return { kind: 'unavailable', reason: 'no current Host settings snapshot is available' }
+    }
+    if (readiness !== 'ready') {
+      return { kind: 'stale', reason: 'the Host settings snapshot is not current' }
+    }
+    const descriptor = this.mirror.namespace(MCP_SERVER_SOURCES_NS)
+    if (descriptor === undefined) {
+      return {
+        kind: 'unavailable',
+        reason: 'the "mcp-manager" Host settings section is not mounted',
+      }
+    }
+    const section = plainRecord(descriptor.value)
+    const servers = section === undefined ? undefined : plainRecord(section.servers)
+    if (servers === undefined) {
+      return { kind: 'unavailable', reason: 'the "mcp-manager.servers" configuration is not readable' }
+    }
+    return {
+      kind: 'ready',
+      configuredNames: Object.freeze(Object.keys(servers)),
+      ...descriptor.revision === undefined ? {} : { revision: descriptor.revision },
+    }
+  }
+
+  async refresh(): Promise<void> {
+    await this.refreshRead()
   }
 }

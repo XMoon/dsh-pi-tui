@@ -38,6 +38,7 @@ import commandsRemote from '@deepseek-ai/dsh-commands/remote'
 import subagentsRemote from '@deepseek-ai/dsh-subagent/remote'
 import agentPresetsRemote from '@deepseek-ai/dsh-agent-preset-registry/remote'
 import pluginManagerRemote from '@deepseek-ai/dsh-plugin-manager/remote'
+import mcpManagerRemote from '@deepseek-ai/dsh-mcp-manager/remote'
 import permissionPresetsRemote from '@deepseek-ai/dsh-permission-presets/remote'
 import llmRemote from '@deepseek-ai/dsh-llm/remote'
 import sessionRemote from '@deepseek-ai/dsh-api-session-controller/remote'
@@ -345,6 +346,11 @@ export const REMOTE_CONTRIBUTIONS = [
   subagentsRemote,
   agentPresetsRemote,
   pluginManagerRemote,
+  // The official generated `mcpManager` management namespace (FR3): the ONE
+  // Host MCP manager's roster stream, probe and restart. It publishes the
+  // Remote face of the shared Host row the bundle mounts; this Client mounts
+  // no MCP server, client or status store of its own.
+  mcpManagerRemote,
   settingsRemote,
   accountRemote,
   permissionPresetsRemote,
@@ -382,6 +388,7 @@ export const REMOTE_CONTRIBUTION_SPECIFIERS = [
   '@deepseek-ai/dsh-subagent/remote',
   '@deepseek-ai/dsh-agent-preset-registry/remote',
   '@deepseek-ai/dsh-plugin-manager/remote',
+  '@deepseek-ai/dsh-mcp-manager/remote',
   '@deepseek-ai/dsh-api-settings-controller/remote',
   '@deepseek-ai/dsh-deepseek-account/remote',
   '@deepseek-ai/dsh-permission-presets/remote',

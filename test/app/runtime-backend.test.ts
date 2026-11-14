@@ -198,6 +198,10 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       read: () => undefined,
       setAutoStart: async (_value: boolean, _revision: number) => {},
     },
+    mcpServerSources: {
+      read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),
+      refresh: async () => {},
+    },
   }
   const hostFile = {
     listReferences: async () => ({ kind: 'ok' as const, items: [] }),
@@ -295,12 +299,28 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     read: () => ({ kind: 'unavailable', cause: 'authority-missing', reason: 'no live Team board in this fixture' }),
     subscribe: () => () => {},
   }
+  // FR3: the MCP server port (fail-closed fixture): no Host manager here.
+  const mcpServers: import('../../src/runtime/mcp-server-port.ts').McpServerPort = {
+    watch: async function* () {
+      yield { kind: 'invalidated' as const, reason: 'unavailable' as const }
+    },
+    probe: async (_name, _signal) => ({
+      kind: 'failed',
+      generation: {},
+      failure: { kind: 'unavailable', reason: 'no Host MCP manager in this fixture' },
+    }),
+    restart: async (_name, _signal) => ({
+      kind: 'failed',
+      generation: {},
+      failure: { kind: 'unavailable', reason: 'no Host MCP manager in this fixture' },
+    }),
+  }
   // S5-PR3, M5-U-A, S5-PR4 and Session Workspace PR1 add FOUR independent
   // required ports: the official Session Markdown read, the UI-neutral
   // read-authority facts, the Host Schedule management surface and the
   // read-only Host directory browse. All stay wired and asserted below; none
   // replaces another.
-  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, sessionMarkdown, hostCommand, pluginManager, jobObservation, hostUserShell, { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) }, deliveredFileRead, webAccess, acpAccess, sessionWorkspaceFacts, schedule, hostDirectoryBrowse, sessionPolicy, teamMode, teamBoard)
+  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, sessionMarkdown, hostCommand, pluginManager, jobObservation, hostUserShell, { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) }, deliveredFileRead, webAccess, acpAccess, sessionWorkspaceFacts, schedule, hostDirectoryBrowse, sessionPolicy, teamMode, teamBoard, mcpServers)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)
@@ -321,6 +341,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   assert.equal(backend.hostDirectoryBrowse, hostDirectoryBrowse)
   assert.equal(backend.teamMode, teamMode)
   assert.equal(backend.teamBoard, teamBoard)
+  assert.equal(backend.mcpServers, mcpServers)
   // Truthful advertisement: the backend serves EXACTLY the implemented
   // ports — nothing is advertised without a port.
   for (const capability of DIRECT_IMPLEMENTED_CAPABILITIES) {

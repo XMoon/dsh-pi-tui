@@ -93,6 +93,9 @@
     "jobController",
     "jobs"
   ],
+  "runtime/direct/mcp-server-direct.ts": [
+    "mcpManager"
+  ],
   "runtime/direct/model-selection-direct.ts": [
     "import:dsh-agent"
   ],

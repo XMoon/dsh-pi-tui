@@ -36,6 +36,7 @@ import type { HostDirectoryBrowsePort } from './host-directory-browse-port.ts'
 import type { SessionPolicyPort } from './session-policy-port.ts'
 import type { TeamModePort } from './team-mode-port.ts'
 import type { TeamBoardReadPort } from './team-board-read-port.ts'
+import type { McpServerPort } from './mcp-server-port.ts'
 
 /** The transport backends the TUI can run on. `direct` remains the
  * production/default; `remote` is the experimental M3-3B assembly that can be
@@ -125,6 +126,10 @@ export interface Backend {
    *  `agentTeam` projection's shared task board. No Team write is reachable
    *  through this port; `/model` keeps the only Team write (`teamMode`). */
   readonly teamBoard: TeamBoardReadPort
+  /** The MCP server management port (FR3): the ONE official Host manager's
+   *  roster/probe/restart. The Host stays the only fleet and status authority;
+   *  the configuration-source keys ride `config.mcpServerSources`. */
+  readonly mcpServers: McpServerPort
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -156,6 +161,7 @@ export function createDirectBackend(
   sessionPolicy: SessionPolicyPort,
   teamMode: TeamModePort,
   teamBoard: TeamBoardReadPort,
+  mcpServers: McpServerPort,
 ): Backend {
   return {
     kind: 'direct',
@@ -185,5 +191,6 @@ export function createDirectBackend(
     sessionPolicy,
     teamMode,
     teamBoard,
+    mcpServers,
   }
 }

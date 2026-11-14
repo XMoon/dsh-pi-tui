@@ -1221,6 +1221,10 @@ test('WS1-TABLE. the frozen /remote tables agree by package identity and the Cli
     REMOTE_CONTRIBUTION_SPECIFIERS.map(specifier => specifier.replace(/\/remote$/u, '')),
     'both tables must name the same packages in the same frozen order',
   )
+  const pluginManagerIndex = packages.indexOf('@deepseek-ai/dsh-plugin-manager')
+  const mcpManagerIndex = packages.indexOf('@deepseek-ai/dsh-mcp-manager')
+  assert.ok(pluginManagerIndex >= 0 && mcpManagerIndex === pluginManagerIndex + 1,
+    'FR3: the generated mcpManager namespace follows Plugin Manager in the frozen /remote order')
   const settingsIndex = packages.indexOf('@deepseek-ai/dsh-api-settings-controller')
   const accountIndex = packages.indexOf('@deepseek-ai/dsh-deepseek-account')
   assert.ok(settingsIndex >= 0 && accountIndex === settingsIndex + 1,

@@ -99,6 +99,8 @@ import type {
   AcpStartupPreferenceConfig,
   AcpStartupPreferenceState,
   ConfigReadiness,
+  McpServerSources,
+  McpServerSourcesConfig,
 } from '../config-port.ts'
 import {
   VISUAL_TOOLS_STATUS_SERVICE,
@@ -188,6 +190,7 @@ export class DirectConfigPort implements ConfigPort {
   readonly webStartupPreference: WebStartupPreferenceConfig
   readonly backendStartupPreference: BackendStartupPreferenceConfig
   readonly acpStartupPreference: AcpStartupPreferenceConfig
+  readonly mcpServerSources: McpServerSourcesConfig
 
   constructor(
     ctx: HostContextLike,
@@ -209,6 +212,7 @@ export class DirectConfigPort implements ConfigPort {
     this.webStartupPreference = new DirectWebStartupPreferenceConfig(ctx)
     this.backendStartupPreference = new DirectBackendStartupPreferenceConfig(ctx)
     this.acpStartupPreference = new DirectAcpStartupPreferenceConfig(ctx)
+    this.mcpServerSources = new DirectMcpServerSourcesConfig(ctx)
   }
 }
 
@@ -2140,3 +2144,51 @@ class DirectAcpStartupPreferenceConfig implements AcpStartupPreferenceConfig {
   }
 }
 
+
+/** The official settings namespace the shared Host MCP manager owns. */
+const MCP_SERVER_SOURCES_NS = 'mcp-manager'
+
+/**
+ * The Direct MCP configuration-source read. It projects the EFFECTIVE
+ * `mcp-manager.servers` key set from the official Host settings descriptor —
+ * the only evidence of which manager entries the configuration holds. It
+ * exposes no entry, transport, credential or secret, and it never writes.
+ */
+export class DirectMcpServerSourcesConfig implements McpServerSourcesConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): McpServerSources {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    if (settings === undefined) {
+      return { kind: 'unavailable', reason: 'the Host settings service is unavailable' }
+    }
+    const descriptor = readSettingsDescriptor(settings, MCP_SERVER_SOURCES_NS)
+    if (descriptor === undefined) {
+      return {
+        kind: 'unavailable',
+        reason: 'the "mcp-manager" Host settings section is not mounted',
+      }
+    }
+    const value = descriptor.value
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return { kind: 'unavailable', reason: 'the "mcp-manager" settings section is not readable' }
+    }
+    const servers = (value as Record<string, unknown>).servers
+    if (typeof servers !== 'object' || servers === null || Array.isArray(servers)) {
+      return { kind: 'unavailable', reason: 'the "mcp-manager.servers" configuration is not readable' }
+    }
+    const configuredNames = Object.freeze(Object.keys(servers as Record<string, unknown>))
+    return {
+      kind: 'ready',
+      configuredNames,
+      ...descriptor.revision === undefined ? {} : { revision: descriptor.revision },
+    }
+  }
+
+  /** Direct reads the in-process Host authority, so a read is already current. */
+  async refresh(): Promise<void> {}
+}

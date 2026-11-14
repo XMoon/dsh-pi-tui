@@ -17,6 +17,7 @@ import { RemoteConfigWriteLifetime } from '../../runtime/remote/config-write-lif
 import { RemoteSessionPolicyPort } from '../../runtime/remote/session-policy-remote.ts'
 import { RemoteTeamModePort } from '../../runtime/remote/team-mode-remote.ts'
 import { RemoteTeamBoardReadPort } from '../../runtime/remote/team-board-read-remote.ts'
+import { RemoteMcpServerPort } from '../../runtime/remote/mcp-server-remote.ts'
 import { RemoteSessionArchive } from '../../runtime/remote/session-archive-remote.ts'
 import { RemoteSessionMarkdown } from '../../runtime/remote/session-markdown-remote.ts'
 import { createRemoteBackend } from '../../runtime/remote/backend-remote.ts'
@@ -234,6 +235,13 @@ export async function createRemoteBackendRuntime(
         // namespace is required (the board is a projection, not an RPC).
         teamBoard: new RemoteTeamBoardReadPort({
           sessions: options.runtime.sessions,
+          connection: { generation: options.runtime.connection.generation },
+        }),
+        // FR3: the official generated `mcpManager` namespace (roster stream,
+        // probe, restart) over the SAME Connection generation source. A missing
+        // mounted namespace is a truthful unavailable, never a Direct path.
+        mcpServers: new RemoteMcpServerPort({
+          remote: { mcpManager: options.runtime.remote.mcpManager },
           connection: { generation: options.runtime.connection.generation },
         }),
       }),

@@ -351,7 +351,7 @@ function assertAllRowsDisabled(fixture: WebAccessFixture): void {
 
 /** The shared Host witnesses a fixture's composition mounted. */
 interface SharedHostWitness {
-  readonly uid: number | undefined
+  readonly uid: number | null | undefined
   readonly service: unknown
   readonly applies: number
 }
