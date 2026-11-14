@@ -26,6 +26,7 @@ import {
   encodeUnitValue,
   ensureOwnedUnitDir,
   installProfileUnit,
+  inspectTrustedDshAnchor,
   inspectTrustedExecutable,
   probeUserManager,
   profileIdentityDigest,
@@ -238,7 +239,7 @@ test('the real systemd parser accepts the rendered unit with space, percent, dol
   const entry = join(root, 'local-host.mjs')
   writeFileSync(entry, 'process.exit(0)\n')
   const anchor = join(root, 'dsh-package.json')
-  writeFileSync(anchor, JSON.stringify({ name: '@deepseek-ai/dsh', version: DSH_VERSION }))
+  writeFileSync(anchor, JSON.stringify({ name: '@deepseek-ai/dsh', version: DSH_VERSION }), { mode: 0o644 })
   for (const [label, sub] of [
     ['normal', 'wd_normal'],
     ['space', 'weird one'],
@@ -289,6 +290,45 @@ test('the node interpreter is trusted by executability, not by uid ownership', t
   assert.equal(lstatSync(nonExec).mode & 0o111, 0, 'the probe file must not be executable')
   assert.throws(() => inspectTrustedExecutable(nonExec, 'node executable'), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
   assert.throws(() => inspectTrustedExecutable(dir, 'node executable'), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+})
+
+test('the DSH install anchor is trusted by identity/version/permissions, not by uid ownership', t => {
+  // A root-owned readable regular non-writable file is accepted (no uid rule).
+  const rootOwned = ['/usr/bin/systemctl', '/bin/sh', '/usr/bin/env'].find(probe => {
+    try {
+      const real = realpathSync(probe)
+      const info = lstatSync(real)
+      return info.isFile() && info.uid !== process.getuid?.()
+    } catch {
+      return false
+    }
+  })
+  if (rootOwned !== undefined) assert.doesNotThrow(() => inspectTrustedDshAnchor(rootOwned), 'a root-owned DSH anchor must be accepted')
+  const dir = testLifecycle(t).tempDir('m62b-dsh-anchor-')
+  const good = join(dir, 'anchor.json')
+  writeFileSync(good, JSON.stringify({ name: '@deepseek-ai/dsh', version: DSH_VERSION }), { mode: 0o644 })
+  assert.doesNotThrow(() => inspectTrustedDshAnchor(good))
+  const writable = join(dir, 'writable.json')
+  writeFileSync(writable, '{}')
+  chmodSync(writable, 0o666)
+  assert.throws(() => inspectTrustedDshAnchor(writable), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+  assert.throws(() => inspectTrustedDshAnchor(dir), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+  assert.throws(() => inspectTrustedDshAnchor(join(dir, 'missing.json')), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+})
+
+test('a DSH anchor that is not the @deepseek-ai/dsh package is refused before any unit is written', async t => {
+  const fx = managedFixture(t)
+  const fakeName = join(dirname(fx.anchor), 'fake.json')
+  writeFileSync(fakeName, `${JSON.stringify({ name: '@evil/dsh', version: DSH_VERSION })}\n`, { mode: 0o644 })
+  const unitDir = testLifecycle(t).tempDir('m62b-fakename-')
+  await assert.rejects(
+    startManagedHostCandidate(
+      { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: fakeName, profile: 'pi-tui' },
+      { probe: async (): Promise<UserManagerProbe> => ({ kind: 'available' }), unitDir: () => unitDir, systemctl: async () => exited(0) },
+    ),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
+  )
+  assert.deepEqual(readdirSync(unitDir), [])
 })
 
 test('a group/other-writable unit directory is refused while a 0700 chain is accepted', t => {
@@ -421,7 +461,7 @@ function managedFixture(t: TestContext): ManagedFixture {
   const anchorDir = join(root, 'dsh')
   mkdirSync(anchorDir, { recursive: true })
   const anchor = join(anchorDir, 'package.json')
-  writeFileSync(anchor, `${JSON.stringify({ name: '@deepseek-ai/dsh', version: DSH_VERSION })}\n`)
+  writeFileSync(anchor, `${JSON.stringify({ name: '@deepseek-ai/dsh', version: DSH_VERSION })}\n`, { mode: 0o644 })
   const scope = scopeFromInstalledProfile({ dshHome: home, profileDir: profile, packageRoot, dshVersion: DSH_VERSION })
   return { scope, entry: join(packageRoot, 'dist', 'local-host.mjs'), anchor, markerPath }
 }
@@ -586,7 +626,7 @@ test('a failed daemon-reload or start is HOST_MANAGER_START_FAILED, never a fall
 test('a DSH anchor pinned to a different runtime is refused before any unit is written', async t => {
   const fx = managedFixture(t)
   const wrongAnchor = join(dirname(fx.anchor), 'wrong.json')
-  writeFileSync(wrongAnchor, `${JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.1-rc.4' })}\n`)
+  writeFileSync(wrongAnchor, `${JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.1-rc.4' })}\n`, { mode: 0o644 })
   const unitDir = testLifecycle(t).tempDir('m62b-wronganchor-')
   await assert.rejects(
     startManagedHostCandidate(

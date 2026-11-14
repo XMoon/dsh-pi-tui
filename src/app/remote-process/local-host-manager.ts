@@ -455,8 +455,8 @@ function inspectOwnedRegular(path: string, label: string, uid: number): string {
  * Validate a trusted EXECUTABLE the unit will run (the Node interpreter). Its
  * trust is "an absolute, canonical, executable regular file", NOT "owned by this
  * uid": a system Node such as `/usr/bin/node` is normally root-owned yet a
- * normal user may run it. Only the product-private Host entry and the installed
- * DSH anchor are held to the uid-ownership rule.
+ * normal user may run it. Only the product-private Host entry is held to the
+ * uid-ownership rule; the official DSH anchor has its own trust rule below.
  */
 export function inspectTrustedExecutable(path: string, label: string): string {
   let real: string
@@ -472,6 +472,30 @@ export function inspectTrustedExecutable(path: string, label: string): string {
   return real
 }
 
+/**
+ * Validate the official DSH install anchor (`@deepseek-ai/dsh/package.json`).
+ * Its trust is "a readable, canonical, non-group/other-writable regular file
+ * declaring the exact `@deepseek-ai/dsh` package and the pinned runtime version"
+ * — NOT uid ownership: a normal user may run against a root-owned, system-wide
+ * DSH install. The caller checks the package identity and exact version pin.
+ */
+export function inspectTrustedDshAnchor(path: string): string {
+  let real: string
+  try {
+    real = realpathSync(path)
+  } catch (error) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the DSH anchor is not readable', error)
+  }
+  const info = lstatSync(real)
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the DSH anchor must be a regular file')
+  }
+  if ((info.mode & 0o022) !== 0) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the DSH anchor must not be group/other writable')
+  }
+  return real
+}
+
 /** Collect and validate the exact installed facts one unit is rendered from. */
 function collectUnitFacts(options: HostStartOptions, uid: number): UnitFacts {
   // The Node interpreter is a system executable: trust absolute + executable,
@@ -480,7 +504,10 @@ function collectUnitFacts(options: HostStartOptions, uid: number): UnitFacts {
   // The Host entry and DSH anchor are product-private files installed under the
   // user's own profile, so they keep the strict uid-ownership rule.
   const hostEntryPath = inspectOwnedRegular(options.hostEntryPath, 'Host entry', uid)
-  const dshAnchor = inspectOwnedRegular(options.dshAnchor, 'DSH anchor', uid)
+  // The DSH anchor is the OFFICIAL install anchor (may be a root-owned system
+  // install), so it is trusted by package identity + pinned version + safe
+  // permissions, not by uid ownership.
+  const dshAnchor = inspectTrustedDshAnchor(options.dshAnchor)
   let manifest: unknown
   try {
     manifest = JSON.parse(readFileSync(dshAnchor, 'utf8'))

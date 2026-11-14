@@ -18,7 +18,7 @@ import { join } from 'node:path'
 
 import xterm from '@xterm/headless'
 import { findIsolatedProcesses, killIsolatedProcesses } from '../../lib/split-smoke-processes.mjs'
-import { stopAndRemoveManagedUnit } from './managed-host-m6-2b.mjs'
+import { cleanupOutcomeError, stopAndRemoveManagedUnit } from './managed-host-m6-2b.mjs'
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { hostSessionHeader, hostSessionEvents, hostAssistantHasText } from '../../lib/split-smoke-sessions.mjs'
 
@@ -179,11 +179,14 @@ async function reap(child, installation) {
   // `Restart=on-failure`); stop it through the manager BEFORE killing the Host so
   // it cannot be resurrected, and remove the owned unit so the next scene starts
   // from a truly Host-free state. No-op when no owned unit exists (e.g. CI's
-  // no-user-manager fallback).
-  stopAndRemoveManagedUnit(installation)
+  // no-user-manager fallback). A this-run unit that fails to clean up must fail
+  // the scene instead of leaving a supervised Host behind.
+  const cleanup = stopAndRemoveManagedUnit(installation)
   try { process.kill(-child.pid, 'SIGTERM') } catch { /* already gone */ }
   await sleep(200)
-  killIsolatedProcesses(installation.dshHome)
+  if (cleanup.removed === true || cleanup.reason === 'absent') killIsolatedProcesses(installation.dshHome)
+  const outcomeError = cleanupOutcomeError(cleanup)
+  if (outcomeError !== undefined) throw new SplitSmokeAssertionError(outcomeError)
 }
 
 export async function runPublicDaemonEntry({ installation, trace }) {
@@ -308,12 +311,16 @@ class RealDshScreen {
   send(data) { this.child.stdin.write(data) }
   async dispose() {
     // Stop an owned managed unit through the manager BEFORE the kill backstop so
-    // `Restart=on-failure` cannot resurrect the Host; no-op without a unit.
-    stopAndRemoveManagedUnit(this.installation)
+    // `Restart=on-failure` cannot resurrect the Host; no-op without a unit. A
+    // this-run unit that fails to clean up fails the scene rather than leaving a
+    // supervised Host behind.
+    const cleanup = stopAndRemoveManagedUnit(this.installation)
     try { process.kill(-this.child.pid, 'SIGTERM') } catch { /* gone */ }
     await Promise.race([this.exit, sleep(4000)])
-    killIsolatedProcesses(this.installation.dshHome)
+    if (cleanup.removed === true || cleanup.reason === 'absent') killIsolatedProcesses(this.installation.dshHome)
     await Promise.race([this.exit, sleep(3000)])
+    const outcomeError = cleanupOutcomeError(cleanup)
+    if (outcomeError !== undefined) throw new SplitSmokeAssertionError(outcomeError)
   }
 }
 
