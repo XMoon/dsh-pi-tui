@@ -505,12 +505,18 @@ export default async function (h) {
   // ── B1-06: the SHARED token yields TWO cards, and Next steps between them ──
   for (let index = 0; index < markers.innerOnly.length; index += 1) await h.key('Backspace', 30)
   await typeQuery(h, markers.shared.toLowerCase())
-  await waitUntil(h, 'B1-06: the shared token yields representative cards',
-    () => visibleTexts(h).some(text => /\d+\/\d+ targets/u.test(text)))
-  const countLabel = visibleTexts(h).find(text => /\d+\/\d+ targets/u.test(text)) ?? ''
+  await waitUntil(h, 'B1-06: the shared token yields its representative cards',
+    () => visibleTexts(h).some(text => /\d+\/2 targets/u.test(text)))
+  const countLabel = visibleTexts(h).find(text => /\d+\/2 targets/u.test(text)) ?? ''
   const countMatch = countLabel.match(/(\d+)\/(\d+) targets/u)
-  h.check('B1-06: the count reports representative CARDS with a real denominator',
-    countMatch !== null && Number(countMatch[2]) >= 1 && Number(countMatch[1]) >= 1,
+  // The seed's OWN shape decides the number, and it is MEASURED, not assumed:
+  // Turn 14 appends TWO adjacent assistant rows in one step and the Folder folds
+  // them into ONE representative card (the merged card owns both texts), while
+  // Turn 25 is a second, independent card. So the shared word has exactly TWO
+  // representative cards — and the raw occurrence count is higher than two. A
+  // wrong grouping (one card for everything, or a phantom third) fails here.
+  h.check('B1-06: the shared token reports exactly 2 representative cards',
+    countMatch !== null && Number(countMatch[2]) === 2 && Number(countMatch[1]) >= 1,
     JSON.stringify(visibleTexts(h).slice(-6)))
   await h.key('Return', 600)
   await h.key('Return', 600)
@@ -551,8 +557,9 @@ export default async function (h) {
           .map(node => ({ rect: rect(node), text: String(node.text).slice(0, 60) })),
       }))
   }
-  h.check('B1-06: Next/Prev stay inside the representative-card range',
-    visibleTexts(h).some(text => /\d+\/\d+ targets/u.test(text)), JSON.stringify(visibleTexts(h).slice(-6)))
+  const afterSteps = visibleTexts(h).find(text => /\d+\/2 targets/u.test(text)) ?? ''
+  h.check('B1-06: Next/Prev stay inside the 2-card range',
+    /[12]\/2 targets/u.test(afterSteps), JSON.stringify(visibleTexts(h).slice(-6)))
 
   // ── B1-10: a zero-match query is honest and inert ──
   for (let index = 0; index < markers.shared.length; index += 1) await h.key('Backspace', 30)

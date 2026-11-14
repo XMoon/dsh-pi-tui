@@ -717,12 +717,42 @@ test('a gone root invalidates the target reachability: the card says Unavailable
   h.pane.event({ ev: 'gone', sf, ids: [revealedId], raw: {} })
   await h.painted(() => h.texts().some(text => text.includes('Unavailable in current pane')),
     `the evicted root is reported honestly :: ${JSON.stringify(h.texts().slice(-5))}`)
+  // RFL-016: an UNRELATED root's eviction must NOT poison the current target.
+  // (The target's own root was evicted above; re-open a fresh card to test the
+  // unrelated case on a live, reachable target.)
   // No stale-id reveal follows the eviction.
   const revealsAfterGone = h.revealOps().length
   h.renderer.display.commitDisplaySubject({}, {}, undefined)
   await h.absent()
   assert.equal(h.revealOps().length, revealsAfterGone,
     'a passive repaint after gone never sends a stale-id reveal')
+})
+
+test('an UNRELATED root eviction leaves the current target reachable (no false Unavailable)', async (t) => {
+  const h = await mountSearchPane(t)
+  h.key(ALT_SHIFT_S)
+  await h.painted(() => h.cardPainted(), 'the card painted')
+  for (const ch of INNER_ONLY.toLowerCase()) h.key(char(ch))
+  await h.painted(() => (h.queryField()?.text ?? '') === INNER_ONLY.toLowerCase(), 'the query installed')
+  await h.painted(() => h.texts().some(text => text.includes('/1 targets')), 'one target')
+  h.key(ENTER)
+  await h.painted(() => h.revealOps().length > 0, 'the reveal op')
+  const targetRoot = h.revealOps().at(-1)!.id
+  // The client evicts a DIFFERENT root (a real id from another Main block).
+  const otherRoot = h.pane.frames()
+    .flatMap(frame => frame.ops)
+    .filter(op => op[0] === 'add' && typeof op[1] === 'string'
+      && String(op[1]).startsWith('main.') && op[1] !== targetRoot)
+    .map(op => String(op[1]))
+    .at(0)
+  assert.ok(otherRoot !== undefined && otherRoot !== targetRoot, 'a different Main root exists')
+  const sf = h.pane.frames().at(-1)!.sf
+  h.pane.event({ ev: 'gone', sf, ids: [otherRoot], raw: {} })
+  await h.absent()
+  // The CURRENT target's root is still attached: the card must keep the
+  // card-level claim instead of claiming the target is unavailable.
+  assert.equal(h.texts().some(text => text.includes('Unavailable in current pane')), false,
+    `an unrelated eviction never poisons the target :: ${JSON.stringify(h.texts().slice(-5))}`)
 })
 
 test('a VISIBLE prompt row hit opens NO Thought (the row never lived inside it)', async (t) => {
