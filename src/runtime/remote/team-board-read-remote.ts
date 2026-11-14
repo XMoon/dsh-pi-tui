@@ -187,13 +187,16 @@ export class RemoteTeamBoardReadPort implements TeamBoardReadPort {
   subscribe(sessionId: string, listener: () => void): () => void {
     let faceOffs: Array<() => void> = []
     let lastBinding: unknown
-    /** (Re)arm the `agentTeam` face against the CURRENT binding. */
+    let disposed = false
+    /** (Re)arm the `agentTeam` face against the CURRENT binding. A confirmed
+     *  child never receives the Root board feed. */
     const rearm = (force: boolean): boolean => {
       const binding = this.sessions.binding(sessionId)
       if (!force && Object.is(binding, lastBinding)) return false
       for (const off of faceOffs.splice(0)) off()
       lastBinding = binding
       if (binding === undefined) return true
+      if (this.isProvenChild(sessionId, binding.session)) return false
       try {
         faceOffs.push(binding.session.projections.faceOf(AGENT_TEAM_KEY).subscribe(listener))
       } catch (error) {
@@ -209,17 +212,33 @@ export class RemoteTeamBoardReadPort implements TeamBoardReadPort {
     // same-id rebuilt owner produces a NEW face; re-arm on every generation
     // change so a retired binding's callback is never mistaken for current.
     const generationOff = this.generation.subscribe(() => {
+      if (disposed) return
       rearm(true)
       listener()
     })
     const listOff = this.sessions.list.subscribe?.(() => {
+      if (disposed) return
       if (rearm(false)) listener()
     })
     return () => {
+      // Explicit idempotence: the returned disposer is safe to call repeatedly
+      // even if a lower-layer off is not itself idempotent.
+      if (disposed) return
+      disposed = true
       generationOff()
       listOff?.()
       for (const off of faceOffs.splice(0)) off()
     }
+  }
+
+  /** Whether the exact Session is PROVEN to be a child (never the Root board). */
+  private isProvenChild(sessionId: string, session: RemoteTeamBoardSessionFace): boolean {
+    if (typeof session.getSnapshot === 'function') {
+      const lifecycle = session.getSnapshot()
+      if (lifecycle.removed === true) return false
+      return Object.hasOwn(lifecycle, 'subagent') && lifecycle.subagent !== null
+    }
+    return this.sessions.list.getSnapshot().byId[sessionId]?.origin === 'subagent'
   }
 
   /**

@@ -149,3 +149,13 @@ test('Direct board subscribes to the SAME Session agentTeam changes only, and di
   assert.equal(calls, 1, 'a disposed subscription never fires again')
   assert.equal(changed.offCalls, 1, 'dispose releases exactly once')
 })
+
+test('Direct board subscribe is Root-only: a confirmed child registers no listener', () => {
+  const { port, listeners, session, emit } = harness({ isRoot: false, projection: { enabled: true, tasks: [] } })
+  let calls = 0
+  const dispose = port.subscribe('root', () => { calls += 1 })
+  assert.equal(listeners.size, 0, 'a child never attaches an agentTeam listener')
+  emit(session, 'agentTeam')
+  assert.equal(calls, 0, 'a child receives no board callback')
+  dispose()
+})
