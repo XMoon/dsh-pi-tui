@@ -13,7 +13,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, existsSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 
 import xterm from '@xterm/headless'
@@ -64,6 +64,17 @@ function firstChildPid(pid) {
 function processCounts(dshHome) {
   const roles = findIsolatedProcesses(dshHome).map(classify)
   return { host: roles.filter(r => r === 'host').length, client: roles.filter(r => r === 'client').length }
+}
+
+/** Wait until the painted viewport contains at least `n` occurrences of `needle`. */
+async function waitScreenCount(screen, needle, n, label, timeoutMs) {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    const text = await screen.viewport()
+    if (text.split(needle).length - 1 >= n) return
+    await sleep(120)
+  }
+  throw new SplitSmokeAssertionError(`${label}: viewport never showed ${n}x ${JSON.stringify(needle)}`)
 }
 
 /** The live detached Host PIDs for this isolated DSH home. */
@@ -237,7 +248,10 @@ export async function runPublicDaemonEntry({ installation, trace }) {
     trace('m6-2a-composed-roster', { authorityDisabled: 9 })
   }
 
-  // Real PUBLIC session-launch + signal acceptance (A08 reject, A12 signal).
+  // R6-02: real runtime Loader entry.disabled / fiber state in the supervisor.
+  result.runtimeLoader = await runRuntimeLoaderAudit(installation, trace)
+
+  // Real PUBLIC session-launch + signal acceptance.
   const session = await runSceneAcceptance(installation, trace)
   Object.assign(result, session)
 
@@ -247,7 +261,7 @@ export async function runPublicDaemonEntry({ installation, trace }) {
 /** Drive the REAL `dsh --profile pi-tui` CLI under a PTY with an xterm screen
  *  parser, for the public session-launch and signal acceptance subscenarios. */
 class RealDshScreen {
-  constructor(installation, backend, args) {
+  constructor(installation, backend, args, extraEnv = {}) {
     this.installation = installation
     this.records = { raw: '' }
     this.term = new xterm.Terminal({ cols: 100, rows: 30, disableStdin: true, allowProposedApi: true })
@@ -255,7 +269,7 @@ class RealDshScreen {
     const command = `${shellQuote(dshInvocation[0])} ${shellQuote(dshInvocation[1])} --profile pi-tui${args.map(a => ' ' + shellQuote(a)).join('')}`
     this.child = spawn('script', ['-qefc', command, '/dev/null'], {
       cwd: profileDir,
-      env: { ...env, ...(backend === undefined ? {} : { DSH_PI_TUI_BACKEND: backend }), COLUMNS: '100', LINES: '30' },
+      env: { ...env, ...(backend === undefined ? {} : { DSH_PI_TUI_BACKEND: backend }), ...extraEnv, COLUMNS: '100', LINES: '30' },
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: true,
     })
@@ -349,6 +363,39 @@ function newestSessionId(dshHome) {
     }
   }
   return best
+}
+
+/** R6-02: read the ACTUAL runtime Loader entry.disabled/fiber state in the real
+ *  daemon supervisor Context (not the composed --dump-config strings). */
+async function runRuntimeLoaderAudit(installation, trace) {
+  const dumpPath = join(installation.dshHome, 'loader-dump.json')
+  try { unlinkSync(dumpPath) } catch { /* absent */ }
+  const s = new RealDshScreen(installation, 'daemon', [], { M62A_LOADER_DUMP: dumpPath })
+  try {
+    await waitForProcesses(installation.dshHome, c => c.host >= 1 && c.client >= 1, 'R6-02 loader audit mount', 90_000)
+    let dump
+    const deadline = Date.now() + 60_000
+    while (Date.now() < deadline) {
+      if (existsSync(dumpPath)) {
+        try { dump = JSON.parse(readFileSync(dumpPath, 'utf8')) } catch { /* partial */ }
+        if (Array.isArray(dump)) break
+      }
+      await sleep(200)
+    }
+    assert(Array.isArray(dump), `R6-02: runtime Loader dump was not produced${dump && dump.error ? ` (${String(dump.error)})` : ''}`)
+    const pick = (id) => dump.find(row => row.id === id || row.id === `include:${id}` || row.id.endsWith(`:${id}`))
+    for (const id of ['session', 'session-persistence-jsonl', 'storage-json', 'jobs', 'typert-gateway', 'remote-access', 'deepseek-account', 'authorization', 'credentials']) {
+      const row = pick(id)
+      assert(row !== undefined, `R6-02: the runtime supervisor Loader has no row for ${id} (ids sample: ${dump.map(r => r.id).slice(0, 8).join(',')})`)
+      assert(row.disabled === true, `R6-02: runtime Loader row ${row.id} disabled=${String(row.disabled)} (expected the !!js expression to evaluate true)`)
+    }
+    for (const id of ['timer', 'llm', 'tools']) {
+      const row = pick(id)
+      if (row !== undefined) assert(row.disabled === false, `R6-02: control row ${row.id} must stay ENABLED in the supervisor`)
+    }
+    trace('m6-2a-runtime-loader-audit', { rows: dump.length })
+    return 'PASS'
+  } finally { await s.dispose() }
 }
 
 async function runSceneAcceptance(installation, trace) {
@@ -490,8 +537,20 @@ async function runSceneAcceptance(installation, trace) {
       assert(oneLeft, `A09: the first Client's exit did not settle (last counts=${JSON.stringify(last)})`)
       const hostsAfter = hostPids(installation.dshHome)
       assert(hostsAfter.length === 1 && hostsAfter[0] === hostPidA, `A09: the Host was stopped/replaced when the first Client exited (hosts=${hostsAfter.join(',')})`)
-      // B still reads the same Session after A exited.
-      await b.waitForAny(['hello stub scene', 'stub answer', seeded.shortId], 'A09 B still reads session after A exit', 60_000)
+      // B must still drive a NEW Host-owned Session write after A exited (a stale
+      // screen re-read would not prove B is still connected). Send a fresh turn
+      // and require the persisted Host Session log to GROW with new events AND
+      // the painted viewport to show the new reply.
+      const eventsBefore = hostSessionEvents(installation.dshHome, seeded.sessionId).length
+      b.send('second turn after A exit\r')
+      let grew = false
+      const growDeadline = Date.now() + 90_000
+      while (Date.now() < growDeadline) {
+        if (hostSessionEvents(installation.dshHome, seeded.sessionId).length > eventsBefore) { grew = true; break }
+        await sleep(200)
+      }
+      assert(grew, 'A09: Client B performed no NEW Host Session write after A exited (persisted events did not grow)')
+      await waitScreenCount(b, 'stub answer', 2, 'A09 B new reply', 60_000)
       out.a09HostReuse = 'PASS'
     } finally {
       // Soft-stop A is already exited; B.dispose kills the shared isolated set.
