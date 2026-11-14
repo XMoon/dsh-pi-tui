@@ -22,6 +22,8 @@ import {
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+
 const silentDiag = {
   debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {},
 } as unknown as Diag
@@ -190,6 +192,21 @@ test('dispose escalates to SIGKILL within the SAME budget when SIGTERM does not 
   children[0].autoExitSignal = 'SIGKILL' // only SIGKILL triggers the exit
   assert.equal(await c.dispose(), true)
   assert.deepEqual(children[0].kills, ['SIGTERM', 'SIGKILL'], 'escalates to SIGKILL inside the budget')
+})
+
+test('dispose does NOT resolve until the child has actually exited', async () => {
+  const { spawnImpl, children } = fakeSpawn()
+  const exitCodes: number[] = []
+  const c = coordinator(children, exitCodes, spawnImpl, { shutdownBudgetMs: 3000 })
+  c.start()
+  let resolved = false
+  let value: boolean | undefined
+  const pending = c.dispose().then(v => { resolved = true; value = v; return v })
+  await sleep(60)
+  assert.equal(resolved, false, 'dispose must stay pending while the child is still alive')
+  children[0].finish(0)
+  assert.equal(await pending, true)
+  assert.equal(value, true)
 })
 
 test('an unresponsive child is an ABNORMAL cleanup result, never success', async () => {
