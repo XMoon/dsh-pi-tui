@@ -157,6 +157,27 @@ function reallyVisible(snapshot, node) {
     && visibleSpan(snapshot.chains, node, 'y') >= 4
 }
 
+/**
+ * The turns whose query rows the client currently paints INSIDE its viewport:
+ * each visible query row is attributed to the nearest `Turn N:` label ABOVE it
+ * (the turn's own user row), so a navigation that moves the reading position
+ * to another occurrence changes this set.
+ */
+function visibleQueryTurns(snapshot, query) {
+  const rows = mainNodes(snapshot)
+  const visible = rows.filter(node => String(node.text ?? '').includes(query) && reallyVisible(snapshot, node))
+  return visible.map(node => {
+    const y = rect(node)[1]
+    const label = rows
+      .filter(other => {
+        const oy = rect(other)[1]
+        return oy <= y && oy >= y - 130 && /^Turn \d+:/u.test(String(other.text ?? ''))
+      })
+      .sort((a, b) => rect(b)[1] - rect(a)[1])[0]
+    return label === undefined ? null : (String(label.text).match(/^Turn (\d+):/u)?.[1] ?? null)
+  }).filter(turn => turn !== null)
+}
+
 /** A bounded predicate poll that records NOTHING: a probe whose alternative
  *  path can still succeed must not leave a permanent failed assertion behind. */
 async function pollUntil(h, predicate, limit = 240) {
@@ -426,28 +447,16 @@ export default async function (h) {
     JSON.stringify({ class: findBar?.class ?? null }))
   h.capture(`${preset}-find-open-1280x800-dark`, 'the native Find bar open over the seeded continuous Main')
 
-  // B07: real typing while Find is open reaches the client Find, not the app.
-  h.send('type', 'X')
-  await h.sleep(400)
-  const typedState = stateFind(h)
-  const dockAfterType = h.descendantsText(regionNode(h.snapshot(), 'sf-dock') ?? {})
-  h.check('B07: typed characters are consumed by the client Find input',
-    typedState !== null && String(typedState.query ?? '').endsWith('X'),
-    JSON.stringify(typedState))
-  h.check('B07: the typed character never reaches the app composer draft',
-    !dockAfterType.includes('X') && !dockAfterType.includes(markers.shared),
-    JSON.stringify(dockAfterType.slice(0, 120)))
-  h.send('key', 'Backspace')
-  await h.sleep(300)
-  h.check('B07: the Find query is restored after the probe Backspace',
-    stateFind(h)?.query === markers.shared, JSON.stringify(stateFind(h)))
-
   // B04: Next moves to another occurrence and Previous comes back. MEASURED on
   // the pinned binary: the Find bar's own controls are "Previous match ⇧⌘G"
   // and "Next match ⌘G"; Enter walks OLDER hits. The round trip therefore
   // clicks the client's OWN Previous/Next buttons (control-injected pointer,
   // the geometry oracle, never a synthetic find event).
   const currentBefore = stateFind(h)?.current ?? null
+  // The visible-turn baseline is taken BEFORE the navigation click: it is the
+  // position the client located when the Find opened.
+  const beforeSnapshot = h.snapshot()
+  const turnsBefore = visibleQueryTurns(beforeSnapshot, markers.shared)
   const barSnap = h.snapshot()
   const findBarPrev = findBarButton(barSnap, 'Previous match')
   h.check('B04: the native Find bar paints its own Previous and Next controls',
@@ -461,13 +470,16 @@ export default async function (h) {
   h.check('B04: Find Previous moves the current hit to another occurrence',
     currentBefore !== null && afterPrevious !== null && afterPrevious !== currentBefore,
     JSON.stringify({ before: currentBefore, afterPrevious }))
-  // The navigation must be VISIBLE: after the client walks to another
-  // occurrence, at least one row carrying the query must be in its viewport.
+  // The navigation must be VISIBLE and must actually CHANGE the reading
+  // position: the visible query-row set is attributed to its turns, and the
+  // turns visible after the Previous click must be DIFFERENT from the ones
+  // visible before it — a client that only flips state.find.current without
+  // moving the reading position fails this.
   const navSnapshot = h.snapshot()
-  const navRows = mainNodes(navSnapshot).filter(node => String(node.text ?? '').includes(markers.shared))
-  h.check('B04: the navigated occurrence is really visible in the client viewport',
-    navRows.some(node => reallyVisible(navSnapshot, node)),
-    JSON.stringify(navRows.map(node => rect(node))))
+  const turnsAfter = visibleQueryTurns(navSnapshot, markers.shared)
+  h.check('B04: the navigated occurrence is a DIFFERENT turn than the one visible before the navigation',
+    turnsAfter.length > 0 && turnsBefore.length > 0 && turnsAfter.every(turn => !turnsBefore.includes(turn)),
+    JSON.stringify({ turnsBefore, turnsAfter }))
   h.capture(`${preset}-find-next-1280x800-dark`, 'the native Find after one Previous navigation')
   const barSnap2 = h.snapshot()
   const findBarNext = findBarButton(barSnap2, 'Next match')
@@ -479,6 +491,40 @@ export default async function (h) {
   h.check('B04: Find Next returns to the earlier occurrence',
     afterNext !== null && afterNext === currentBefore,
     JSON.stringify({ before: currentBefore, afterPrevious, afterNext }))
+  // The Next click must also bring the reading position BACK to the initially
+  // visible turn: the round trip is a real navigation, not a state flip.
+  const backSnapshot = h.snapshot()
+  const turnsAfterNext = visibleQueryTurns(backSnapshot, markers.shared)
+  h.check('B04: Find Next brings the reading position back to the initially visible turn',
+    turnsAfterNext.length > 0 && turnsBefore.length > 0
+      && turnsBefore.every(turn => turnsAfterNext.includes(turn)),
+    JSON.stringify({ turnsBefore, turnsAfterNext }))
+
+  // B07: real typing while Find is open reaches the client Find, not the app.
+  // The two navigation clicks above moved the client focus to the buttons:
+  // click the Find input itself once to put the caret back into the query
+  // field before the typing probe.
+  const inputSnap = h.snapshot()
+  const findInput = inputSnap.nodes.find(node => node.tag === 'input'
+    && String(node.class ?? '').split(/\s+/u).includes('find-in'))
+  h.check('B07: the native Find query field is a real clickable input',
+    findInput !== undefined && await h.click(inputSnap.chains, findInput),
+    JSON.stringify(findInput?.rect ?? null))
+  h.send('type', 'X')
+  await h.sleep(400)
+  const typedState = stateFind(h)
+  const dockAfterType = h.descendantsText(regionNode(h.snapshot(), 'sf-dock') ?? {})
+  h.check('B07: typed characters are consumed by the client Find input',
+    typedState !== null && String(typedState.query ?? '').includes('X')
+      && String(typedState.query ?? '') !== markers.shared,
+    JSON.stringify(typedState))
+  h.check('B07: the typed character never reaches the app composer draft',
+    !dockAfterType.includes('X') && !dockAfterType.includes(markers.shared),
+    JSON.stringify(dockAfterType.slice(0, 120)))
+  h.send('key', 'Backspace')
+  await h.sleep(300)
+  h.check('B07: the Find query is restored after the probe Backspace',
+    stateFind(h)?.query === markers.shared, JSON.stringify(stateFind(h)))
 
   // B07/B23: the Find journey mutated NO application state.
   h.check('B07: the Find journey submitted no new prompt to the Direct writer',
@@ -519,6 +565,15 @@ export default async function (h) {
   // CLIENT owns the navigation — the flow must not wheel for this claim.
   h.send('wheel', 0, 900)
   await h.sleep(400)
+  // POSITIVE PREMISE: the old ARCHIVE row must really be OUTSIDE the client
+  // viewport before the search, or a later "the Find located it" claim could
+  // pass on a row that was already painted there.
+  const premiseSnapshot = h.snapshot()
+  const premiseRow = mainNodes(premiseSnapshot).find(node => String(node.text ?? '').includes(markers.archive))
+  const premiseVisible = premiseRow !== undefined && reallyVisible(premiseSnapshot, premiseRow)
+  h.check('B05: the old ARCHIVE row is outside the client viewport before the search',
+    !premiseVisible,
+    JSON.stringify({ rowPresent: premiseRow !== undefined, visible: premiseVisible, rect: premiseRow === undefined ? null : rect(premiseRow) }))
   const openedArchive = await openFind(h, markers.archive, 'archive')
   h.check('B05: the client Find reaches the 25+ turn-old ARCHIVE token',
     openedArchive.state !== null && (openedArchive.state.hits ?? 0) >= 1,
@@ -616,6 +671,11 @@ export default async function (h) {
       // Full/Compact must never degrade into it, or a broken tool mount would
       // read as a normal zero-hit result.
       if (preset !== 'focus') {
+        // A FAILED assertion before finish(): the drivers' exit code is the
+        // failed-assertion count, never the qualification string, so this
+        // branch must exit non-zero (same contract as PANE_SPLIT_BLOCKER).
+        h.check('B14: the Turn 10 Tool body must materialize in full/compact once the root is open', false,
+          JSON.stringify({ preset, innerCard: innerCard === undefined ? null : innerCard.id, rootId: rootToggle?.id ?? null }))
         finish(h, { ...extra, qualification: 'TOOL_BODY_NOT_MATERIALIZED' })
         return
       }
@@ -625,6 +685,8 @@ export default async function (h) {
         JSON.stringify(focusRootLive?.p ?? null))
       h.measure('B16: the opened Focus Thought root carries no nested Tool card on the wire (its Find document excludes the tool body)',
         JSON.stringify({ rootId: rootToggle?.id ?? null, innerToolNodes: 0 }))
+      h.measure('B16: FOCUS TOOL-BODY READABILITY LIMIT — the opened root paints no tool body, so the plan\'s "expanded body readable" positive is NOT exercised for this preset; the zero-hit observation below is a capability limit, never a complete positive acceptance',
+        JSON.stringify({ rootId: rootToggle?.id ?? null, disposition: 'recorded client capability limit' }))
       const openedInnerFocus = await openFind(h, markers.innerOnly, 'focus inner')
       h.check('B16: the native Find reports zero hits while the opened Focus root carries no Tool card on its wire',
         openedInnerFocus.state !== null && (openedInnerFocus.state.hits ?? 0) === 0,
@@ -824,6 +886,7 @@ export default async function (h) {
       'G8 Owner visual acceptance',
       'any realtime refresh of an OPEN Find result list after a live append (reopened Find is the measured behaviour)',
       'B17 NOT_EXERCISED_CLIENT_KEY_LIMIT: the control channel cannot deliver a Ctrl modifier to the pane program (MEASURED: Control+r arrives as bare r, ctrl+r/control+r as meta+r, raw-key shell probe shows zero bytes for every Ctrl chord); the History seat premise needs an OS_INPUT_VERIFIED run — the non-penetration half (no Session write around the attempt) is still asserted',
+      'B16 FOCUS TOOL-BODY READABILITY LIMIT: the opened Focus Thought root carries no nested Tool card on the wire, so the expanded-tool-body positive is not exercised in focus; the measured zero-hit observation is a recorded client capability limit, never a complete positive acceptance',
       'B19 NOT_VERIFIED: no real Session source switch is driven in this lane; the pre-switch/post-switch row-identity evidence stays with the T2/T3-0 source-generation lanes (this lane keeps scope.changed===1 throughout)',
       'B20 NOT_EXERCISED_REAL_GONE: no client retention/gone event occurred on the 28-Turn document in these runs; the gone contract evidence stays with the T2 real-path lanes; this lane claims no retention promise either way',
     ],
