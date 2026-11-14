@@ -231,6 +231,7 @@ class FakeTeamAttempt implements ModelPickerTeamAttempt {
   readonly confirmRequired: boolean
   private readonly team: FakeTeam
   runCalls = 0
+  abandonCalls = 0
 
   constructor(team: FakeTeam, enabled: boolean, confirmRequired: boolean) {
     this.team = team
@@ -242,6 +243,10 @@ class FakeTeamAttempt implements ModelPickerTeamAttempt {
     this.runCalls += 1
     this.team.setEnabledCalls.push(this.enabled)
     return this.team.consumeRun(this.enabled)
+  }
+
+  abandon(): void {
+    this.abandonCalls += 1
   }
 }
 
@@ -2528,6 +2533,61 @@ test('an indeterminate Team write stays unknown on recheck and never re-sends', 
   assert.equal(team.setEnabledCalls.length, 1, 'recheck never re-sends')
   assert.ok(viewOf(h.vt).includes('Outcome unknown'), 'the old readback cannot downgrade unknown to failed')
   assert.ok(!viewOf(h.vt).includes('Save failed'), 'unknown must never become a Retryable failure')
+  h.app.stop()
+})
+
+test('disposing the picker mid-write still releases the command-owned Team latch', async () => {
+  const team = new FakeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  const manual = team.queueManualRun()
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, team })
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r') // non-confirmed ON write starts and awaits the Host
+  await h.vt.waitForRender()
+  assert.equal(team.attempts.length, 1)
+  const attempt = team.attempts[0]!
+  assert.equal(attempt.abandonCalls, 0, 'the latch is held while the write is in flight')
+  h.picker.dispose() // the UI goes away before the Host settles
+  manual.resolve({ kind: 'committed' })
+  await h.vt.waitForRender()
+  assert.equal(attempt.abandonCalls, 1, 'settlement releases the latch even after UI disposal')
+  h.app.stop()
+})
+
+test('disposing the picker before a rejected settlement also releases the latch', async () => {
+  const team = new FakeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  const manual = team.queueManualRun()
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, team })
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  const attempt = team.attempts[0]!
+  h.picker.dispose()
+  manual.resolve({ kind: 'rejected', reason: 'permission denied' })
+  await h.vt.waitForRender()
+  assert.equal(attempt.abandonCalls, 1, 'a rejected settlement after disposal still releases the latch')
+  h.app.stop()
+})
+
+test('an effort press is rejected when the internal selection moved before the repaint', async () => {
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [
+      model('a', { name: 'Alpha', efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'low' }),
+      model('b', { name: 'Beta', efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'low' }),
+    ] }],
+    default: { provider: 'p1', model: 'a' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'a' } })
+  const lines = h.picker.render(72).map(stripAnsi) // paints A
+  const row = lines.findIndex(line => line.includes('Reasoning Effort'))
+  const col = visibleWidth(lines[row]!.slice(0, lines[row]!.indexOf('High')))
+  h.picker.handleInput(DOWN) // internal selection -> B WITHOUT a repaint
+  h.picker.handleMouse(mouse('press', col, row, 72, 24))
+  h.picker.handleMouse(mouse('click', col, row, 72, 24))
+  const after = h.picker.render(72).map(stripAnsi) // now paints B
+  assert.ok(effortLineOf(after)?.includes('[Low]'),
+    `a pre-repaint selection move must reject the press rather than retarget B:\n${after.join('\n')}`)
   h.app.stop()
 })
 

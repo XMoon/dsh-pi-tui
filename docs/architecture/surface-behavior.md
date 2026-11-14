@@ -1441,13 +1441,20 @@ single-purpose confirmation seat (`src/tui/pickers/team-disable-confirmation.ts`
 mounted next to the picker. It is a logical Root seat of its own: closing
 `/model` does not cancel it, `Cancel`/`Esc` perform zero Host writes, the
 default focus is Cancel, and an indeterminate write offers only a read-only
-Recheck/Close. A committed write stays on `Checking saved state…` until a fresh
-projection read proves the target, then closes once.
+Recheck/Close. A committed write stays on `Checking saved state…`; a fresh
+projection read that equals the target proves it and closes the seat once. Only
+an in-flight Host **request** (`Saving…`) is uncloseable. `Checking saved
+state…` is not an in-flight request, so `Esc` (or the owning surface) may close
+the seat safely without claiming the write landed, and a `stale` authority
+(superseded Session / lost Connection) retires it automatically; a transiently
+`unavailable` readback stays `Checking…` but remains exitable.
 
 The pointer contract follows the same last-painted-frame rule: only a complete
 visible Team `On`/`Off` token or an Effort candidate is hittable; a press
-followed by a resize, re-hydration or a different frame never commits; an
-Effort click changes the draft only and never submits the model. Below `64`
+followed by a resize, re-hydration or a different frame never commits. An
+Effort hit is bound to the `(provider, model)` identity that PAINTED it, so a
+selection move before the repaint cannot retarget another model; an Effort click
+changes the draft only and never submits the model. Below `64`
 content columns the strip compacts to `Effort: <value>`; the Team row and the
 footer hint remain visible down to `44×8`.
 

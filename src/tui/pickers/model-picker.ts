@@ -212,6 +212,8 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     readonly width: number
     readonly teamRow: number
     readonly effortRow: number
+    /** The (provider, model) identity the painted Effort tokens belong to. */
+    readonly effortModelKey: string | undefined
     readonly teamHits: readonly TeamHit[]
     readonly effortHits: readonly EffortHit[]
   } | undefined
@@ -650,7 +652,16 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   private runTeamAttempt(attempt: ModelPickerTeamAttempt): void {
     this.teamPhase = { kind: 'saving', target: attempt.enabled }
     this.deps.requestRender()
-    this.deps.runOwned('team mode', () => attempt.run(), {
+    this.deps.runOwned('team mode', async () => {
+      try {
+        return await attempt.run()
+      } finally {
+        // The command owns the shared Team latch; release it even when this
+        // picker was disposed while the Host write was settling. The UI's
+        // disposed flag only governs repainting, never write ownership.
+        attempt.abandon?.()
+      }
+    }, {
       isCancellation: () => this.disposed,
       onResult: (outcome) => {
         if (this.disposed) return
@@ -668,9 +679,6 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
           this.teamPhase = { kind: 'idle' }
           this.teamNotice = outcome.reason
         }
-        // A non-confirmed gesture owns the shared latch only for its one write:
-        // release it once the settlement is known.
-        attempt.abandon?.()
         this.deps.requestRender()
       },
       onError: (error) => {
@@ -680,7 +688,6 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
           target: attempt.enabled,
           message: error instanceof Error ? error.message : String(error),
         }
-        attempt.abandon?.()
         this.deps.requestRender()
       },
     })
@@ -780,17 +787,23 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       const hit = frame.effortHits.find(candidate => event.x >= candidate.start && event.x < candidate.end)
       if (hit === undefined) return { handled: true }
       const selected = this.modelsList.getSelectedItem()
+      // The hit belongs to LAST PAINTED geometry; bind the gesture to the model
+      // identity that OWNED those painted tokens, not to an internal selection
+      // that moved before the repaint. Both must agree when the gesture starts.
+      const paintedModelKey = frame.effortModelKey
       if (event.type === 'press') {
         if (event.button !== 'left') return { handled: true }
-        // Bind the gesture to the full model identity that owned the painted
-        // row; a selection move between press and release must not retarget it.
-        if (selected === null) return { handled: true }
-        this.pressed = { kind: 'effort', modelKey: selected.value, value: hit.value }
+        if (selected === null || paintedModelKey === undefined || selected.value !== paintedModelKey) {
+          return { handled: true }
+        }
+        this.pressed = { kind: 'effort', modelKey: paintedModelKey, value: hit.value }
         return { handled: true, focus: true }
       }
       if (event.type !== 'click' || event.button !== 'left') return { handled: true }
       if (pressed === undefined || pressed.kind !== 'effort'
-        || pressed.value !== hit.value || pressed.modelKey !== (selected?.value ?? '')) {
+        || pressed.value !== hit.value
+        || pressed.modelKey !== paintedModelKey
+        || selected?.value !== pressed.modelKey) {
         return { handled: true }
       }
       if (selected !== null) this.selectEffortDraft(selected.value, hit.value)
@@ -819,6 +832,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
         width,
         teamRow: 0,
         effortRow: -1,
+        effortModelKey: undefined,
         teamHits: team.hits,
         effortHits: [],
       }
@@ -838,6 +852,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       width,
       teamRow,
       effortRow,
+      effortModelKey: effort.modelKey,
       teamHits: team.hits,
       effortHits: effort.hits,
     }
@@ -849,18 +864,20 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   }
 
   /** The Reasoning Effort strip for the LIST-SELECTED model. */
-  private renderEffortLine(width: number): { line: string; hits: readonly EffortHit[] } {
+  private renderEffortLine(width: number): { line: string; hits: readonly EffortHit[]; modelKey: string | undefined } {
     const item = this.modelsList.getSelectedItem()
     const row = item === null ? undefined : this.modelRows.get(item.value)
     if (row === undefined) {
-      return { line: this.paintStrip(width, `${EFFORT_LABEL}   ${color.textDim('—')}`), hits: [] }
+      return { line: this.paintStrip(width, `${EFFORT_LABEL}   ${color.textDim('—')}`), hits: [], modelKey: undefined }
     }
     const identity = modelIdentity(row.providerId, row.modelId)
+    const modelKey = item === null ? undefined : item.value
     const choices = this.choicesByModel.get(identity) ?? []
     if (choices.length === 0) {
       return {
         line: this.paintStrip(width, `${EFFORT_LABEL}   ${color.textDim('No reasoning effort for this model')}`),
         hits: [],
+        modelKey,
       }
     }
     const draft = this.effortChoices.get(identity) ?? choices[0]!.value
@@ -874,6 +891,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       return {
         line: this.paintStrip(width, sanitizedPhysicalLine(line)),
         hits: end <= width ? [{ start, end, value: draft }] : [],
+        modelKey,
       }
     }
     // Wide layout: label + every candidate, the current draft bracketed.
@@ -907,6 +925,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       return {
         line: this.paintStrip(width, sanitizedPhysicalLine(`Effort: ${label} · ←→`)),
         hits: [],
+        modelKey,
       }
     }
     const hits: EffortHit[] = []
@@ -920,7 +939,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       }
       column += textWidth
     }
-    return { line: build(visible), hits }
+    return { line: build(visible), hits, modelKey }
   }
 
   /** The Agent Team row: the only place the saved mode is presented. */
