@@ -364,8 +364,15 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private discardConfirm = false
   /** FR4: Esc while the Save is unsettled — a notice, never a discard prompt. */
   private configSavingNotice = false
-  /** RC-B: the last painted confirmation body could not show every safety fact. */
-  private confirmBodyBlocked = false
+  /**
+   * The confirmation the LAST PAINTED frame admitted, by exact identity.
+   *
+   * A plain boolean would be shared across questions: when `s`/`t`/`x` opens a
+   * NEW question the page has not painted yet, the previous frame's `false`
+   * would authorise the new one. Executability is therefore bound to the
+   * identity that really painted — an unpainted question is never executable.
+   */
+  private paintedConfirmation: { readonly identity: string; readonly blocked: boolean } | undefined
   private disposed = false
   private revision = 0
   private paint: McpPagePaint | undefined
@@ -457,7 +464,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         return
       }
       if (data === 'y' || data === 'Y') {
-        if (!this.confirmBodyBlocked) this.controller.answerConfigConfirm(true)
+        if (this.confirmationVerdict(snapshot) === 'ready') this.controller.answerConfigConfirm(true)
       }
       // No other key may dispatch a Host write.
       return
@@ -466,6 +473,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     // explicit `d` drops the draft (zero official writes).
     if (this.discardConfirm) {
       if (data === 'd' || data === 'D') {
+        // The discard body states what is dropped; when the current grant
+        // cannot paint that fact, `d` is refused exactly like `y` is for the
+        // other confirmations (the bar offers only cancel).
+        if (this.confirmationVerdict(snapshot) !== 'ready') return
         this.discardConfirm = false
         this.formInput = undefined
         this.controller.discardEditor()
@@ -489,7 +500,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         return
       }
       if (data === 'y' || data === 'Y') {
-        if (!this.confirmBodyBlocked) this.controller.answerRestart(true)
+        if (this.confirmationVerdict(snapshot) === 'ready') this.controller.answerRestart(true)
       }
       // No other key may dispatch a Host operation.
       return
@@ -995,7 +1006,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         this.handleInput('\x1b')
         return
       case 'confirm':
-        if (this.confirmBodyBlocked) return
+        if (this.confirmationVerdict(snapshot) !== 'ready') return
         if (snapshot.configConfirm !== undefined) this.controller.answerConfigConfirm(true)
         else if (snapshot.confirmingName !== undefined) this.controller.answerRestart(true)
         return
@@ -1068,12 +1079,44 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       || action === 'discard' || action === 'apply-input'
   }
 
+  /** The exact confirmation the CURRENT state asks, or undefined when none is
+   *  open. The id names every fact the answer would commit. */
+  private confirmationIdentity(snapshot: McpServersSnapshot): string | undefined {
+    if (this.discardConfirm) return 'discard'
+    const confirm = snapshot.configConfirm
+    if (confirm !== undefined) {
+      switch (confirm.kind) {
+        case 'save': return `save|${confirm.name}|${String(confirm.capturedRevision)}|${confirm.warning ?? ''}`
+        case 'delete': return `delete|${confirm.name}|${String(confirm.capturedRevision)}`
+        case 'reset': return `reset|${confirm.name}|${String(confirm.capturedRevision)}`
+        case 'toggle': return `toggle|${confirm.name}|${String(confirm.capturedRevision)}|${String(confirm.nextEnabled)}`
+      }
+    }
+    if (snapshot.confirmingName !== undefined) return `restart|${snapshot.confirmingName}`
+    return undefined
+  }
+
+  /**
+   * The admission verdict for the OPEN confirmation. `unpainted` means the
+   * question exists in state but no frame has yet painted its facts — the
+   * answer is refused exactly like a blocked one, so a key that arrives inside
+   * the render window can never commit an unreviewed write.
+   */
+  private confirmationVerdict(snapshot: McpServersSnapshot): 'none' | 'unpainted' | 'blocked' | 'ready' {
+    const identity = this.confirmationIdentity(snapshot)
+    if (identity === undefined) return 'none'
+    const painted = this.paintedConfirmation
+    if (painted === undefined || painted.identity !== identity) return 'unpainted'
+    return painted.blocked ? 'blocked' : 'ready'
+  }
+
   /** Whether a modal decision owns the surface right now (keyboard + mouse). */
   private modalOwned(): boolean {
     const snapshot = this.controller.snapshot()
     return snapshot.configConfirm !== undefined
       || snapshot.confirmingName !== undefined
       || this.discardConfirm
+      || this.formInput !== undefined
       || this.searching
   }
 
@@ -1372,7 +1415,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       : Math.max(1, width - this.wideListWidth() - 2)
     const confirmation = this.confirmationBody(snapshot, confirmationWidth,
       this.view === 'editor' ? Math.max(1, bodyRows - 2) : Math.max(1, bodyRows))
-    this.confirmBodyBlocked = confirmation.blocked
+    const confirmationIdentity = this.confirmationIdentity(snapshot)
+    this.paintedConfirmation = confirmationIdentity === undefined
+      ? undefined
+      : { identity: confirmationIdentity, blocked: confirmation.blocked }
     if (this.view === 'editor') {
       const editorFrame = this.renderEditor(snapshot, width, bodyRows, confirmation)
       lines.push(...editorFrame.lines)
@@ -1737,8 +1783,8 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     // bar offers only the escape. This branch precedes every confirmation
     // branch (Save, Toggle, Delete, Reset) so `Y confirm` is never painted on
     // an unreviewable question.
-    if (this.confirmBodyBlocked
-      && (snapshot.configConfirm !== undefined || snapshot.confirmingName !== undefined || this.discardConfirm)) {
+    const verdict = this.confirmationVerdict(snapshot)
+    if (verdict === 'blocked' || verdict === 'unpainted') {
       return paintBar([
         { text: 'Resize to review the target and its consequence', short: 'Resize to review', priority: 1000 },
         { text: 'Esc cancel', short: 'Esc', priority: 999, action: 'cancel' },
@@ -1782,14 +1828,6 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     }
     if (this.view === 'editor') {
       if (this.formInput !== undefined) return paintBar(EDITOR_INPUT_HINTS, width, true)
-      // RC-B: a confirmation whose target/consequence cannot be fully painted
-      // must not be executable — the bar says why and offers only cancel.
-      if (this.confirmBodyBlocked) {
-        return paintBar([
-          { text: 'Resize to review the target and its consequence', short: 'Resize to review', priority: 1000 },
-          { text: 'Esc cancel', short: 'Esc', priority: 999, action: 'cancel' },
-        ], width, true)
-      }
       // While the Save is unsettled the draft is FROZEN: `s Save` would be a
       // second submit and the navigation keys would be inert, so only the
       // truthful leave affordance is painted.

@@ -1500,13 +1500,18 @@ Detail for the rest), wrapped at THAT column's real width with unbreakable
 tokens hard-split, so a narrow frame with a long server name or HTTP host still
 shows the whole fact; the Action Bar carries only the decision
 (`y confirm · Esc cancel`). A confirmation is executable only while its entire
-fact set fits the rows the current grant really gives it: otherwise the bar
+fact set fits the rows the current grant really gives it, and only for the
+question the last painted frame actually admitted: a question that opened but
+has not painted yet is refused exactly like a blocked one, so a key arriving
+inside a render window can never commit an unreviewed write. Otherwise the bar
 paints no affirmative key, says `Resize to review…`, and both the key and the
 pointer refuse — an uninformed `y` is never accepted. A pointer obeys the same
 modal authority as the keyboard: while a confirmation, discard prompt, restart
 question or search owns the surface, no click can change the draft, and every
 painted Action-Bar segment — including the input bar's `Enter apply` — is a
-pointer target for its own intent. Every env/header value carries an EXPLICIT storage
+pointer target for its own intent. An ACTIVE form input is such a modal too: the
+body cannot be clicked behind it, while its own `Enter apply` / `Esc cancel`
+stay reachable. Every env/header value carries an EXPLICIT storage
 form the user chooses — `Credential reference` (the default, written as the
 official `${credential:REF}` token) or `Literal (stored in profile)` — shown on
 its own row and never inferred from the typed text; the disclosure's HTTP target
