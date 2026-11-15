@@ -1501,9 +1501,13 @@ tokens hard-split, so a narrow frame with a long server name or HTTP host still
 shows the whole fact; the Action Bar carries only the decision
 (`y confirm · Esc cancel`). A confirmation is executable only while its entire
 fact set fits the rows the current grant really gives it, and only for the
-question the last painted frame actually admitted: a question that opened but
-has not painted yet is refused exactly like a blocked one, so a key arriving
-inside a render window can never commit an unreviewed write. Otherwise the bar
+specific question INSTANCE the last painted frame admitted: each opening gets
+a fresh instance identity (including a same-name/same-revision question after a
+Host generation replacement, and a discard prompt reopened before repaint).
+The Host generation is retired with its open question; a new question cannot
+inherit an older frame's admission. A question that opened but has not painted
+yet is refused exactly like a blocked one, so a key arriving inside a render
+window can never commit an unreviewed write. Otherwise the bar
 paints no affirmative key, says `Resize to review…`, and both the key and the
 pointer refuse — an uninformed `y` is never accepted. A pointer obeys the same
 modal authority as the keyboard: while a confirmation, discard prompt, restart

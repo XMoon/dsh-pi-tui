@@ -460,6 +460,7 @@ test('a dirty form Esc opens the discard confirmation; only `d` drops the draft'
   page.handleInput('\r')
   assert.equal(controller.calls.includes('discardEditor'), false)
   page.handleInput('\x1b')
+  render(page, 100, 16) // the reopened discard question must paint before `d`
   page.handleInput('d')
   assert.equal(controller.calls.includes('discardEditor'), true)
   assert.equal(controller.calls.includes('saveEditor'), false)
@@ -476,7 +477,7 @@ test('a clean form Esc closes the editor without a discard prompt', () => {
 test('the delete confirmation names the exact server and only `y` dispatches', () => {
   const { page, controller } = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
-    configConfirm: { kind: 'delete', name: 'alpha', capturedRevision: 1 },
+    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 1 },
   }))
   const frame = render(page, 100, 14).join('\n')
   assert.match(frame, /Delete alpha\? This removes your added configuration permanently/u)
@@ -492,7 +493,7 @@ test('the delete confirmation names the exact server and only `y` dispatches', (
 test('the reset confirmation never uses Delete wording', () => {
   const { page } = makePage(snapshot({
     selectedConfig: { ...CONFIG_FACET, canDelete: false, canReset: true, provenance: 'overridden' },
-    configConfirm: { kind: 'reset', name: 'alpha', capturedRevision: 1 },
+    configConfirm: { question: 1, kind: 'reset', name: 'alpha', capturedRevision: 1 },
   }))
   const frame = render(page, 100, 14).join('\n')
   assert.match(frame, /Remove your override and restore the inherited configuration for alpha\?/u)
@@ -502,7 +503,7 @@ test('the reset confirmation never uses Delete wording', () => {
 test('the toggle confirmation says the process may change', () => {
   const { page } = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
-    configConfirm: { kind: 'toggle', name: 'alpha', nextEnabled: false, capturedRevision: 1 },
+    configConfirm: { question: 1, kind: 'toggle', name: 'alpha', nextEnabled: false, capturedRevision: 1 },
   }))
   const frame = render(page, 100, 14).join('\n')
   assert.match(frame, /Change saved configuration\? The MCP process may stop or start/u)
@@ -533,7 +534,7 @@ test('a conflict status stays an error and keeps the draft visible', () => {
 test('a control-byte/CJK server name is sanitized in the confirmation bar', () => {
   const { page } = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
-    configConfirm: { kind: 'delete', name: 'bad\u0007name日本', capturedRevision: 1 },
+    configConfirm: { question: 1, kind: 'delete', name: 'bad\u0007name日本', capturedRevision: 1 },
   }))
   const lines = render(page, 100, 14)
   const frame = lines.join('\n')
@@ -548,18 +549,18 @@ test('a confirmation bar never drops its target sentence, even at 100 columns', 
   // and no readable question. The target is a safety fact and outranks the
   // answer hints.
   for (const width of [100, 80, 72, 44]) {
-    const deletePage = makePage(snapshot({ selectedConfig: CONFIG_FACET, configConfirm: { kind: 'delete', name: 'alpha', capturedRevision: 1 } }))
+    const deletePage = makePage(snapshot({ selectedConfig: CONFIG_FACET, configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 1 } }))
     const deleteBar = render(deletePage.page, width, 14).at(-1) ?? ''
     assert.match(deleteBar, /Delete alpha\?/u, `width ${String(width)}: the Delete subject must survive`)
 
     const resetPage = makePage(snapshot({
       selectedConfig: { ...CONFIG_FACET, canDelete: false, canReset: true, provenance: 'overridden' },
-      configConfirm: { kind: 'reset', name: 'alpha', capturedRevision: 1 },
+      configConfirm: { question: 1, kind: 'reset', name: 'alpha', capturedRevision: 1 },
     }))
     const resetBar = render(resetPage.page, width, 14).at(-1) ?? ''
     assert.match(resetBar, /override|Reset alpha\?/u, `width ${String(width)}: the Reset subject must survive`)
 
-    const togglePage = makePage(snapshot({ selectedConfig: CONFIG_FACET, configConfirm: { kind: 'toggle', name: 'alpha', nextEnabled: false, capturedRevision: 1 } }))
+    const togglePage = makePage(snapshot({ selectedConfig: CONFIG_FACET, configConfirm: { question: 1, kind: 'toggle', name: 'alpha', nextEnabled: false, capturedRevision: 1 } }))
     const toggleBar = render(togglePage.page, width, 14).at(-1) ?? ''
     assert.match(toggleBar, /Change (saved configuration|config)\?/u, `width ${String(width)}: the toggle subject must survive`)
 
@@ -585,6 +586,7 @@ test('a Save confirmation paints the external-capability subject at every width'
       selectedConfig: CONFIG_FACET,
       editor: editorSnapshot({ dirty: true }),
       configConfirm: {
+        question: 1,
         kind: 'save',
         name: 'alpha',
         warning: 'Enabling this server can execute an external command.',
@@ -605,7 +607,7 @@ test('a Save confirmation only dispatches on `y`, never on another key', () => {
   const { page, controller } = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
     editor: editorSnapshot({ dirty: true }),
-    configConfirm: { kind: 'save', name: 'alpha', warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
+    configConfirm: { question: 1, kind: 'save', name: 'alpha', warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
   }))
   render(page, 100, 16)
   for (const key of ['s', 'e', 'd', 'u', '\r']) page.handleInput(key)
@@ -621,7 +623,7 @@ test('a compacted HTTP confirmation keeps the host in the body and the decision 
     openEditor(page, 'e', width, 20)
     controller.snapshotValue = {
       ...controller.snapshotValue,
-      configConfirm: { kind: 'save', name: 'alpha', warning, capturedRevision: 1 },
+      configConfirm: { question: 1, kind: 'save', name: 'alpha', warning, capturedRevision: 1 },
     }
     const frame = render(page, width, 20).join('\n')
     // The BODY carries the capability fact and the target host (wrapped,
@@ -920,7 +922,7 @@ test('a pointer cannot change the draft while a confirmation owns the page', () 
   // The user presses `s`: the disclosure question opens over the SAME draft.
   controller.snapshotValue = {
     ...controller.snapshotValue,
-    configConfirm: { kind: 'save', name: 'alpha', warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
+    configConfirm: { question: 1, kind: 'save', name: 'alpha', warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
   }
   const lines = render(page, 100, 20)
   const transportLine = lines.findIndex(line => line.includes('Transport:'))
@@ -975,7 +977,7 @@ test('the Save disclosure lives in the body at 44 columns, not only in the bar',
   openEditor(page, 'e', 44, 8)
   controller.snapshotValue = {
     ...controller.snapshotValue,
-    configConfirm: { kind: 'save', name: 'a'.repeat(32), warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
+    configConfirm: { question: 1, kind: 'save', name: 'a'.repeat(32), warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
   }
   const frame = render(page, 44, 8).join('\n')
   // The complete safety fact is painted in the body (wrapped), even though the
@@ -995,7 +997,7 @@ test('the Save disclosure lives in the body at 44 columns, not only in the bar',
   openEditor(small.page, 'e', 44, 4)
   small.controller.snapshotValue = {
     ...small.controller.snapshotValue,
-    configConfirm: { kind: 'save', name: 'a'.repeat(32), warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
+    configConfirm: { question: 1, kind: 'save', name: 'a'.repeat(32), warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
   }
   const smallFrame = render(small.page, 44, 4).join('\n')
   assert.doesNotMatch(smallFrame, /Y confirm/u, `no affirmative key on an unreviewable frame: ${smallFrame}`)
@@ -1061,7 +1063,7 @@ test('a Detail confirmation (toggle) paints its consequence body and blocks when
   // the target and consequence before reaching the `Y confirm` bar.
   const wide = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
-    configConfirm: { kind: 'toggle', name: 'alpha', nextEnabled: false, capturedRevision: 1 },
+    configConfirm: { question: 1, kind: 'toggle', name: 'alpha', nextEnabled: false, capturedRevision: 1 },
   }))
   // A user reached the Detail before the question opened; the view is detail.
   ;(wide.page as unknown as { view: string }).view = 'detail'
@@ -1073,7 +1075,7 @@ test('a Detail confirmation (toggle) paints its consequence body and blocks when
   // At 44x5 the fact set still fits its 4 body rows, so it stays confirmable.
   const fits = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
-    configConfirm: { kind: 'toggle', name: 'a'.repeat(32), nextEnabled: false, capturedRevision: 1 },
+    configConfirm: { question: 1, kind: 'toggle', name: 'a'.repeat(32), nextEnabled: false, capturedRevision: 1 },
   }))
   ;(fits.page as unknown as { view: string }).view = 'detail'
   const fitsFrame = render(fits.page, 44, 5).join('\n')
@@ -1084,7 +1086,7 @@ test('a Detail confirmation (toggle) paints its consequence body and blocks when
   // and says why: the admission is the VISIBLE content, not the wrap result.
   const tiny = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
-    configConfirm: { kind: 'toggle', name: 'a'.repeat(32), nextEnabled: false, capturedRevision: 1 },
+    configConfirm: { question: 1, kind: 'toggle', name: 'a'.repeat(32), nextEnabled: false, capturedRevision: 1 },
   }))
   ;(tiny.page as unknown as { view: string }).view = 'detail'
   const tinyFrame = render(tiny.page, 44, 3).join('\n')
@@ -1100,7 +1102,7 @@ test('a fully painted long HTTP host is NOT blocked (the split inserted no space
   openEditor(page, 'e', 44, 20)
   controller.snapshotValue = {
     ...controller.snapshotValue,
-    configConfirm: { kind: 'save', name: 'svc', warning, capturedRevision: 1 },
+    configConfirm: { question: 1, kind: 'save', name: 'svc', warning, capturedRevision: 1 },
   }
   const lines = render(page, 44, 20).map(line => line.trimEnd())
   const frame = lines.join('\n')
@@ -1197,7 +1199,7 @@ test('a question that has not painted yet is not executable (no cross-question a
   controller.calls.length = 0
   controller.snapshotValue = {
     ...controller.snapshotValue,
-    configConfirm: { kind: 'save', name: 'alpha', warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
+    configConfirm: { question: 1, kind: 'save', name: 'alpha', warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
   }
   // No render between opening the question and the answer.
   page.handleInput('y')
@@ -1218,14 +1220,14 @@ test('a question that has not painted yet is not executable (no cross-question a
   openEditor(second.page, 'e', 100, 20)
   second.controller.snapshotValue = {
     ...second.controller.snapshotValue,
-    configConfirm: { kind: 'toggle', name: 'alpha', nextEnabled: false, capturedRevision: 1 },
+    configConfirm: { question: 1, kind: 'toggle', name: 'alpha', nextEnabled: false, capturedRevision: 1 },
   }
   render(second.page, 100, 20) // the toggle question paints → admitted
   second.controller.calls.length = 0
   // A different question replaces it without a repaint between.
   second.controller.snapshotValue = {
     ...second.controller.snapshotValue,
-    configConfirm: { kind: 'delete', name: 'alpha', capturedRevision: 1 },
+    configConfirm: { question: 2, kind: 'delete', name: 'alpha', capturedRevision: 1 },
   }
   second.page.handleInput('y')
   assert.deepEqual(second.controller.calls.filter(call => call.startsWith('answerConfigConfirm')), [],
@@ -1238,7 +1240,7 @@ test('a blocked question refuses both the key and the pointer confirm intent', (
   controller.calls.length = 0
   controller.snapshotValue = {
     ...controller.snapshotValue,
-    configConfirm: { kind: 'save', name: 'a'.repeat(32), warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
+    configConfirm: { question: 1, kind: 'save', name: 'a'.repeat(32), warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
   }
   const frame = render(page, 44, 4).join('\n')
   assert.match(frame, /Resize to review/u)
@@ -1253,7 +1255,7 @@ test('a grant with no body rows can never confirm: nothing was painted to review
   const { page, controller } = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
     editor: editorSnapshot({ dirty: true }),
-    configConfirm: { kind: 'save', name: 'a', warning: 'Short.', capturedRevision: 1 },
+    configConfirm: { question: 1, kind: 'save', name: 'a', warning: 'Short.', capturedRevision: 1 },
   }))
   // The editor is open before the question arrives (as a user's would be).
   openEditor(page, 'e', 100, 20)
@@ -1268,4 +1270,19 @@ test('a grant with no body rows can never confirm: nothing was painted to review
   page.handleInput('y')
   assert.deepEqual(controller.calls.filter(call => call.startsWith('answerConfigConfirm')), [],
     'a zero-row grant must refuse the answer')
+})
+
+test('a reopened discard needs a new painted admission for both keyboard and pointer', () => {
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
+  openEditor(page)
+  page.handleInput('\x1b')
+  render(page, 100, 16)
+  page.handleInput('\x1b') // keep editing
+  page.handleInput('\x1b') // reopen before another paint
+  page.handleInput('d')
+  page.activateBarSpan('bar:discard') // the previous frame's target is stale too
+  assert.equal(controller.calls.includes('discardEditor'), false)
+  render(page, 100, 16)
+  page.handleInput('d')
+  assert.equal(controller.calls.includes('discardEditor'), true)
 })

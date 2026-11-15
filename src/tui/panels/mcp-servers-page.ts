@@ -362,6 +362,8 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private formInput: { readonly row: McpFormRow; readonly input: Input; readonly initial: string } | undefined
   /** FR4: the pending `Discard changes?` confirmation of a dirty form. */
   private discardConfirm = false
+  /** A fresh instance on each opening, including a reopen before repaint. */
+  private discardQuestion = 0
   /** FR4: Esc while the Save is unsettled — a notice, never a discard prompt. */
   private configSavingNotice = false
   /**
@@ -447,8 +449,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       snapshot.operation?.phase ?? '',
       String(snapshot.rows.length),
       snapshot.editor === undefined ? '' : `editor:${snapshot.editor.mode}:${String(this.formFocus)}:${snapshot.editor.dirty ? 'dirty' : 'clean'}`,
-      snapshot.configConfirm === undefined ? '' : `confirm:${snapshot.configConfirm.kind}:${snapshot.configConfirm.name}`,
-      this.discardConfirm ? 'discard' : '',
+      this.confirmationIdentity(snapshot) ?? '',
       this.configSavingNotice ? 'saving-notice' : '',
     ].join(':')
   }
@@ -658,8 +659,9 @@ export class McpServersPage implements EmbeddedSpecialistPage {
 
   /** Invoke one delegated last-row intent by its painted id. */
   activateBarSpan(id: string): void {
+    if (this.paint?.identity !== this.gestureIdentity()) return
     const span = this.lastBarSpans.find(candidate => candidate.id === id)
-    if (span === undefined) return
+    if (span === undefined || (this.modalOwned() && !this.isModalAction(span.action))) return
     this.runBarAction(span.action, this.controller.snapshot())
     this.bumpRevision()
   }
@@ -812,6 +814,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         return
       }
       if (editor.dirty) {
+        this.discardQuestion += 1
         this.discardConfirm = true
         this.bumpRevision()
         return
@@ -1011,7 +1014,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         else if (snapshot.confirmingName !== undefined) this.controller.answerRestart(true)
         return
       case 'discard':
-        if (this.discardConfirm) {
+        if (this.discardConfirm && this.confirmationVerdict(snapshot) === 'ready') {
           this.discardConfirm = false
           this.formInput = undefined
           this.controller.discardEditor()
@@ -1082,17 +1085,19 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   /** The exact confirmation the CURRENT state asks, or undefined when none is
    *  open. The id names every fact the answer would commit. */
   private confirmationIdentity(snapshot: McpServersSnapshot): string | undefined {
-    if (this.discardConfirm) return 'discard'
+    if (this.discardConfirm) return `discard|${String(this.discardQuestion)}`
     const confirm = snapshot.configConfirm
     if (confirm !== undefined) {
       switch (confirm.kind) {
-        case 'save': return `save|${confirm.name}|${String(confirm.capturedRevision)}|${confirm.warning ?? ''}`
-        case 'delete': return `delete|${confirm.name}|${String(confirm.capturedRevision)}`
-        case 'reset': return `reset|${confirm.name}|${String(confirm.capturedRevision)}`
-        case 'toggle': return `toggle|${confirm.name}|${String(confirm.capturedRevision)}|${String(confirm.nextEnabled)}`
+        case 'save': return `save|${String(confirm.question)}|${confirm.name}|${String(confirm.capturedRevision)}|${confirm.warning ?? ''}`
+        case 'delete': return `delete|${String(confirm.question)}|${confirm.name}|${String(confirm.capturedRevision)}`
+        case 'reset': return `reset|${String(confirm.question)}|${confirm.name}|${String(confirm.capturedRevision)}`
+        case 'toggle': return `toggle|${String(confirm.question)}|${confirm.name}|${String(confirm.capturedRevision)}|${String(confirm.nextEnabled)}`
       }
     }
-    if (snapshot.confirmingName !== undefined) return `restart|${snapshot.confirmingName}`
+    if (snapshot.confirmingName !== undefined) {
+      return `restart|${String(snapshot.restartQuestion)}|${snapshot.confirmingName}`
+    }
     return undefined
   }
 
@@ -1463,11 +1468,12 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       targets.push({ kind: 'action', action: span.action, row: barRow, startCol: span.startCol, endCol: span.endCol })
     }
     lines.push(fit(bar.line, width))
+    const paintedIdentity = this.gestureIdentity()
     this.paint = {
       width,
       rows: this.rowGrant,
       targets,
-      identity: this.gestureIdentity(),
+      identity: paintedIdentity,
     }
     return lines.slice(0, this.rowGrant)
   }

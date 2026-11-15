@@ -98,6 +98,8 @@ export interface McpServersSnapshot {
   readonly selectedName?: string
   /** The name awaiting the user's restart confirmation (`y`/`Esc` only). */
   readonly confirmingName?: string
+  /** The restart question's INSTANCE token (same rule as `configConfirm`). */
+  readonly restartQuestion?: number
   readonly operation?: McpServersOperationState
   readonly lastProbe?: McpServersProbeReport
   /** The ONE transient notice of this open. */
@@ -154,6 +156,13 @@ export interface McpEditorSnapshot {
 /** FR4: one pending CRUD confirmation. */
 export interface McpConfigConfirmSnapshot {
   readonly kind: 'delete' | 'reset' | 'toggle' | 'save'
+  /**
+   * The QUESTION INSTANCE this decision belongs to: a fresh value on every
+   * opening (and on every generation retirement). A painted admission is bound
+   * to one token, so a later question that happens to name the same server at
+   * the same revision can never inherit an earlier question's review.
+   */
+  readonly question: number
   readonly name: string
   /** For `toggle`: the enabled value that would be written. */
   readonly nextEnabled?: boolean
@@ -373,6 +382,7 @@ export class McpServersController {
    *  same-named server. */
   private confirming: {
     readonly name: string
+    readonly question: number
     readonly generation: McpServerGeneration
     readonly entryToken: object
   } | undefined
@@ -454,7 +464,7 @@ export class McpServersController {
       ...this.phaseReason === undefined ? {} : { phaseReason: this.phaseReason },
       rows: Object.freeze(rows),
       ...this.selected === undefined ? {} : { selectedName: this.selected },
-      ...this.confirming === undefined ? {} : { confirmingName: this.confirming.name },
+      ...this.confirming === undefined ? {} : { confirmingName: this.confirming.name, restartQuestion: this.confirming.question },
       ...this.operation === undefined ? {} : { operation: this.operation },
       ...this.lastProbe === undefined ? {} : { lastProbe: this.lastProbe },
       ...this.notice === undefined ? {} : { notice: this.notice },
@@ -538,7 +548,7 @@ export class McpServersController {
     const generation = this.currentGeneration()
     const entryToken = this.entryTokens.get(name)
     if (generation === undefined || entryToken === undefined) return
-    this.confirming = { name, generation, entryToken }
+    this.confirming = { name, question: this.nextQuestion(), generation, entryToken }
     this.notice = undefined
     this.deps.requestRender()
   }
@@ -922,6 +932,7 @@ export class McpServersController {
     if (warning !== undefined && this.configConfirm === undefined) {
       this.configConfirm = {
         kind: 'save',
+        question: this.nextQuestion(),
         name: this.editor.draft.name,
         warning,
         capturedRevision: this.editor.revision,
@@ -1010,6 +1021,7 @@ export class McpServersController {
     this.configStatus = undefined
     this.configConfirm = {
       kind: 'toggle',
+      question: this.nextQuestion(),
       name: entry.name,
       nextEnabled: entry.effective.enabled === false,
       capturedRevision: this.configuration.revision,
@@ -1025,7 +1037,7 @@ export class McpServersController {
     if (this.configuration.kind !== 'ready') return
     this.editor = undefined
     this.configStatus = undefined
-    this.configConfirm = { kind: 'delete', name: entry.name, capturedRevision: this.configuration.revision }
+    this.configConfirm = { kind: 'delete', question: this.nextQuestion(), name: entry.name, capturedRevision: this.configuration.revision }
     this.deps.requestRender()
   }
 
@@ -1037,7 +1049,7 @@ export class McpServersController {
     if (this.configuration.kind !== 'ready') return
     this.editor = undefined
     this.configStatus = undefined
-    this.configConfirm = { kind: 'reset', name: entry.name, capturedRevision: this.configuration.revision }
+    this.configConfirm = { kind: 'reset', question: this.nextQuestion(), name: entry.name, capturedRevision: this.configuration.revision }
     this.deps.requestRender()
   }
 
@@ -1248,6 +1260,14 @@ export class McpServersController {
     }, { signal: controller.signal })
   }
 
+  /** Monotonic across Host replacements; each question opening takes a fresh token. */
+  private questionSerial = 0
+
+  private nextQuestion(): number {
+    this.questionSerial += 1
+    return this.questionSerial
+  }
+
   /**
    * Retire every fact bound to the REPLACED Host authority: any in-flight
    * operation, the restart confirmation, the last probe report and a completed
@@ -1280,6 +1300,10 @@ export class McpServersController {
     this.configuration = { kind: 'unavailable', reason: 'the Host authority changed' }
     this.editor = undefined
     this.configConfirm = undefined
+    // Retiring a question consumes its instance too: a replacement Host may ask
+    // about the same name at the same revision, and that question must be
+    // painted before it can be answered.
+    this.questionSerial += 1
     this.configWriteToken += 1
     this.configStatus = undefined
   }
