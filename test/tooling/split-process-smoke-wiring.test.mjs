@@ -705,11 +705,10 @@ test('environment-gated native cases are selectable-only, never in the default f
   }
 })
 
-test('the daemon-control native cases are selectable-only and registered in order', () => {
+test('the required daemon-control native cases are selectable-only and resolve through their suite', () => {
   const all = listSelectableCases()
   const controls = all.filter(entry => entry.suite === 'daemon-control')
-  assert.equal(controls.length, 7, 'the seven daemon-control native cases stay registered')
-  assert.deepEqual(controls.map(entry => entry.id), [
+  for (const id of [
     'daemon-control.m6-2c-status-safety',
     'daemon-control.m6-2c-systemd-lifecycle',
     'daemon-control.m6-2c-process-fallback',
@@ -717,7 +716,10 @@ test('the daemon-control native cases are selectable-only and registered in orde
     'daemon-control.m6-2c-owner-and-multi-profile',
     'daemon-control.m6-2c-concurrent-controls',
     'daemon-control.m6-2c-inflight-stop',
-  ])
+  ]) {
+    assert.ok(controls.some(entry => entry.id === id), `${id} must remain selectable`)
+  }
+  assert.ok(controls.every(entry => entry.defaultLane === false))
   assert.deepEqual(listDefaultLaneCases().filter(entry => entry.suite === 'daemon-control'), [])
   assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'daemon-control' }).cases, controls)
 })

@@ -714,6 +714,44 @@ test('inspectOwnedProfileUnit accepts the exact owned definition and reports its
   }
 })
 
+test('real Node and Host entry paths with literal quotes round-trip through unit ownership validation', async t => {
+  const fx = controlledUnitFixture(t)
+  const root = testLifecycle(t).tempDir('m62c-exec-quote-')
+  for (const name of ['space here', 'back\\slash', 'double"quote', 'back\\"quote', 'trailing"']) {
+    await t.test(name, () => {
+      const dist = join(root, name, 'dist')
+      mkdirSync(dist, { recursive: true, mode: 0o700 })
+      // Use real executable and Host files, including a terminal quote, so
+      // structural delimiters cannot be confused with literal path bytes.
+      const nodePath = join(dist, `node-${name}`)
+      const entry = join(dist, `local-host-${name}`)
+      writeFileSync(nodePath, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+      writeFileSync(entry, 'process.exit(0)\n', { mode: 0o600 })
+      const content = renderUnitContent({
+        dshHome: fx.scope.dshHome,
+        profileRealpath: fx.scope.profileRealpath,
+        profile: 'pi-tui',
+        scopeId: fx.scope.scopeId,
+        buildId: fx.scope.buildId,
+        nodePath,
+        hostEntryPath: entry,
+        dshAnchor: fx.anchor,
+      })
+      writeFileSync(fx.unitPath, content, { mode: 0o600 })
+      const result = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir, entry)
+      assert.equal(result.kind, 'owned', 'the renderer output must decode both real paths exactly')
+      if (result.kind === 'owned') assert.equal(result.hostEntry, entry)
+
+      writeFileSync(fx.unitPath, `${content}ExecStop=/bin/true\n`, { mode: 0o600 })
+      assert.throws(
+        () => inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir, entry),
+        error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
+        'accepting escaped paths must not allow an extra Exec directive',
+      )
+    })
+  }
+})
+
 test('inspectOwnedProfileUnit refuses a foreign owner marker, a wrong scope and a tampered Home', t => {
   const uid = process.getuid?.() ?? 1000
   const foreign = controlledUnitFixture(t)
