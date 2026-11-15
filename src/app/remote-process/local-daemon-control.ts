@@ -243,6 +243,15 @@ function toDaemonControlError(error: unknown): DaemonControlError {
   return new DaemonControlError('MANAGER_OR_OS_FAILURE', 'an unexpected local management failure occurred', error)
 }
 
+/** Add recovery context only to a completed operation's failed confirmation. */
+function afterCommittedAction(failure: DaemonControlError, action: string): DaemonControlError {
+  return new DaemonControlError(
+    failure.code,
+    `${action} may already be committed; final verification failed. Run daemon status before retrying. ${failure.reason}`,
+    failure,
+  )
+}
+
 /** Throw when the supervisor is shutting down and the operation must settle. */
 function assertNotAborted(signal: AbortSignal | undefined): void {
   if (signal !== undefined && signal.aborted) {
@@ -757,7 +766,7 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
     // blocking failure (identity/ownership/manager) AND the Host is Ready. The
     // warm-start manager-error exemption above is deliberately NOT reapplied
     // here: this command's OS work is done, so the post facts are complete.
-    if (post.failure !== undefined) throw post.failure
+    if (post.failure !== undefined) throw afterCommittedAction(post.failure, 'the Host start')
     if (post.status.host !== 'ready') throw refuseHostState(post.status)
     return { code: 0, stdout: formatDaemonStatus(post.status), stderr: '' }
   })
@@ -772,7 +781,7 @@ async function runStop(profile: DaemonControlProfile, deps: DaemonControlDeps): 
     assertNotAborted(deps.signal)
     await stopFromSnapshot(profile, pre, deps)
     const post = await readSnapshot(profile, deps, inspected)
-    if (post.failure !== undefined) throw post.failure
+    if (post.failure !== undefined) throw afterCommittedAction(post.failure, 'the Host stop')
     if (post.status.host !== 'stopped') throw refuseHostState(post.status)
     return { code: 0, stdout: formatDaemonStatus(post.status), stderr: RUNNING_WORK_NOTICE }
   })
@@ -820,7 +829,7 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
       throw toDaemonControlError(error)
     }
     const post = await readSnapshot(profile, deps, scope)
-    if (post.failure !== undefined) throw post.failure
+    if (post.failure !== undefined) throw afterCommittedAction(post.failure, 'the Host restart')
     if (post.status.host !== 'ready') throw refuseHostState(post.status)
     if (oldInstance !== undefined && post.record?.instanceId === oldInstance) {
       throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the restart did not produce a new Host instance')
@@ -866,7 +875,7 @@ async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDe
       // The unlink/reload are already committed; a failed post confirmation
       // cannot be rolled back. Report the incomplete verification with its
       // stable code instead of claiming a completed uninstall.
-      throw post.failure
+      throw afterCommittedAction(post.failure, 'the profile unit removal')
     }
     if (existsSync(pre.unit.filePath)) {
       throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'the profile unit could not be confirmed removed; re-run status to confirm')
