@@ -816,11 +816,51 @@ export async function runAcpPo3bCancelApproval(context) {
       ? []
       : racingSessionEvents.filter(event =>
         event.type === 'approval/decided' && String(event.data?.id) === askedId)
-    const lateApprovalNoLeak = racingResponse?.result?.stopReason === 'cancelled'
+    const racingNoLateGrant = racingResponse?.result?.stopReason === 'cancelled'
       && newAsked.length === 1
       && pairedDecision.length === 1
       && pairedDecision[0].data?.outcome === 'cancelled'
     releaseHeldTurn()
+
+    // ── F2/A06-real) A flight that fails EARLY (the real View output bound)
+    // keeps its retired-turn approval attribution through a close: the second
+    // tool's approval arrives after the flight died and must NEVER reach the
+    // TUI; the fence dies on the turn's real terminal.
+    const failflowStart = (hostSessionEvents(dshHome, sessionAp) ?? []).length
+    const failflowNotifications = []
+    conn2.send({ jsonrpc: '2.0', id: 6, method: 'session/prompt', params: { sessionId: sessionAp, prompt: [{ type: 'text', text: 'po3b-failflow ask' }] } })
+    const fail1Permission = await waitForPermissionRequest(conn2, 'F2 the first failflow approval', 180_000)
+    conn2.send({ jsonrpc: '2.0', id: fail1Permission.id, result: { outcome: { outcome: 'selected', optionId: 'allow-once' } } })
+    // The over-capacity output fails the flight while the turn runs tool2.
+    const failflowResponse = await readUntilResponse(conn2, 6, failflowNotifications)
+    assert(failflowResponse?.error?.code === -32603
+      && failflowResponse?.error?.data?.code === 'LOCAL_ACP_PROMPT_OUTPUT_BACKPRESSURE',
+      `F2: the over-capacity turn must fail the flight (got ${JSON.stringify(failflowResponse?.result ?? failflowResponse?.error)})`)
+    // The client closes the View; the old turn is STILL running tool2.
+    const failflowClose = await sendRequest(conn2, 7, 'session/close', { sessionId: sessionAp })
+    assert(failflowClose?.error === undefined && typeof failflowClose?.result === 'object',
+      `F2: the close must detach after the failed flight settled (got ${JSON.stringify(failflowClose?.error ?? failflowClose?.result)})`)
+    // tool2's approval now arrives with NO flight and a CLOSED connection: the
+    // retired-turn fence must answer it fail-closed, and the TUI (none here)
+    // would otherwise receive it — prove the Host audit records `unavailable`.
+    const failflowDecidedUnavailable = await waitForHostSessionEventAfter(dshHome, sessionAp, failflowStart,
+      event => event.type === 'approval/decided' && event.data?.outcome === 'unavailable',
+      'F2: the post-failure approval to be decided fail-closed (never delegated)', 180_000)
+    void failflowDecidedUnavailable
+    await waitForHostSessionEventAfter(dshHome, sessionAp, failflowStart,
+      event => event.type === 'turn/end',
+      'F2: the retired turn to reach its own real terminal', 180_000)
+    // MEASURED: the failed-flight fence kept the attribution — the only
+    // post-failure approval decision is `unavailable` and no TUI channel ever
+    // existed for it (this Session has no TUI client at all).
+    const failflowEvents = (hostSessionEvents(dshHome, sessionAp) ?? []).slice(failflowStart)
+    const failflowLateDecisions = failflowEvents.filter(event =>
+      event.type === 'approval/decided' && event.data?.outcome === 'unavailable')
+    const failflowAllowedLate = failflowEvents.filter(event =>
+      event.type === 'approval/decided' && event.data?.outcome === 'allowed-once')
+    const lateApprovalNoLeak = racingNoLateGrant
+      && failflowLateDecisions.length >= 1
+      && failflowAllowedLate.length === 1
 
     // ── G01) Two independent ACP Sessions stay isolated.
     const workspaceDir2 = join(workDir, 'po3b-workspaces', 'isolation')

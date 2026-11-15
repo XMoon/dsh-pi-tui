@@ -171,6 +171,7 @@ class C1Model extends LlmAdapter {
     this.neverSetup = neverSetup
     this.toolIssued = new Set()
     this.longTurnCount = new Map()
+    this.failflowStep = new Map()
     this.childHeld = false
   }
 
@@ -491,6 +492,70 @@ class C1Model extends LlmAdapter {
         yield { type: 'block-start', index: 0, blockType: 'text' }
         yield { type: 'text-delta', index: 0, text: `po3b never armed ${token}` }
         yield { type: 'block-end', index: 0, block: { type: 'text', text: `po3b never armed ${token}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      // PO-3B F2 qualification only: `po3b-failflow` drives ONE turn through
+      // tool1 (its approval settles normally) -> an over-capacity committed
+      // output (the real View output bound fails the flight) -> tool2 (its
+      // approval arrives AFTER the flight failed, proving the retired-turn
+      // fence). The per-session step counter keys each model request.
+      if (userText.includes('po3b-failflow')) {
+        const key = `failflow:${sessionId}`
+        const step = (this.failflowStep?.get(key) ?? 0) + 1
+        this.failflowStep ??= new Map()
+        this.failflowStep.set(key, step)
+        const marker = join(this.root, `po3b-failflow-${sessionId}.marker`)
+        const command = `printf 'po3b-failflow' > ${shellQuote(marker)}`
+        if (step === 1) {
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield {
+            type: 'block-end',
+            index: 0,
+            block: {
+              type: 'tool-call',
+              id: `c1-po3b-fail1-${sessionId}`,
+              name: 'bash',
+              arguments: JSON.stringify({
+                command,
+                description: 'Create the harmless PO-3B failflow marker',
+                sandbox_permissions: 'danger-full-access',
+                justification: 'Qualification verifies the retired-turn approval fence on an isolated harmless command.',
+              }),
+            },
+          }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }
+          return
+        }
+        if (step === 2) {
+          // The over-capacity committed output fails the View flight while
+          // the SAME turn continues to tool2.
+          for (let index = 0; index < 200; index += 1) {
+            yield { type: 'block-start', index, blockType: 'text' }
+            yield { type: 'block-end', index, block: { type: 'text', text: `po3b-failflow-block-${String(index)}-${token}` } }
+          }
+          yield { type: 'block-start', index: 200, blockType: 'tool-call' }
+          yield {
+            type: 'block-end',
+            index: 200,
+            block: {
+              type: 'tool-call',
+              id: `c1-po3b-fail2-${sessionId}`,
+              name: 'bash',
+              arguments: JSON.stringify({
+                command,
+                description: 'The second harmless PO-3B failflow approval',
+                sandbox_permissions: 'danger-full-access',
+                justification: 'Qualification verifies the retired-turn approval fence on an isolated harmless command.',
+              }),
+            },
+          }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }
+          return
+        }
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: `po3b failflow settled ${token}` }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `po3b failflow settled ${token}` } }
         yield { type: 'finish', reason: { kind: 'stop' } }
         return
       }
