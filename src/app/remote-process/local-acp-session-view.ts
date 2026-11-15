@@ -427,6 +427,8 @@ interface InflightPrompt {
   readonly settleAdmission: () => void
   /** PO-3B: output delivery is closed; queued-but-unsent updates are dropped. */
   deliveryClosed: boolean
+  /** PO-3B F2: the owned turn already reached its durable terminal record. */
+  ownTurnEnded: boolean
   /**
    * PO-3B: pending reverse permission requests keyed by their exact callId,
    * alive only for THIS flight's lifetime (never a second global registry).
@@ -898,6 +900,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         admission.resolve()
       },
       deliveryClosed: false,
+      ownTurnEnded: false,
       permissionRequests: new Map(),
     }
     // Observe the settlement promise BEFORE the first await: an abort, physical
@@ -1069,6 +1072,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       const flight = claim.inflight
       if (flight === undefined || flight.settledDone) continue
       if (typeof data?.turn !== 'number' || flight.turn === undefined || data.turn !== flight.turn) continue
+      // The durable terminal of the OWNED turn arrives before the async
+      // settlement drains (mixed or not): record it so a later failPrompt
+      // never plants a retired-turn fence for a turn that already ended.
+      if (event.type === 'turn/end') flight.ownTurnEnded = true
       if (flight.mixed) {
         // A mixed turn projects NOTHING further; it can only settle as a
         // failure once the turn reaches its own terminal record.
@@ -1688,8 +1695,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // A flight that already holds its official claimed turn but settles before
     // that turn's `turn/end` keeps a transient retired-turn fence: a LATE
     // approval/request of the still-running turn stays ACP-owned (never
-    // delegated to the TUI) until the real terminal record arrives.
-    if (flight.turn !== undefined) claim.retiringTurn = { turn: flight.turn }
+    // delegated to the TUI) until the real terminal record arrives. A turn
+    // whose durable terminal ALREADY arrived has nothing left to fence.
+    if (flight.turn !== undefined && !flight.ownTurnEnded) claim.retiringTurn = { turn: flight.turn }
     if (claim.inflight === flight) claim.inflight = undefined
     flight.settled.reject(error)
   }
