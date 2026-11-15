@@ -935,11 +935,17 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     const statusRows = 1
     const inputRows = this.formInput === undefined ? 0 : 1
     const bodyRows = Math.max(1, rows - statusRows - inputRows)
-    // Keep the focused row inside the painted window before painting.
+    // Keep the focused row inside the painted window. The scroller reasons in
+    // PHYSICAL content rows (group headers occupy rows too), never in field
+    // indices: a short grant would otherwise let the focused field scroll out
+    // of view while the user believes they are editing it.
+    const probe = renderMcpConfigForm(editor, width, bodyRows, this.formFocus, 0,
+      (field, key) => this.controller.dictValueForm(field, key))
     const formRowCount = mcpFormRows(editor, (field, key) => this.controller.dictValueForm(field, key)).length
     if (this.formFocus >= formRowCount) this.formFocus = Math.max(0, formRowCount - 1)
-    if (this.formFocus < this.formOffset) this.formOffset = this.formFocus
-    if (this.formFocus >= this.formOffset + bodyRows) this.formOffset = this.formFocus - bodyRows + 1
+    const focusedRow = probe.focusedContentRow >= 0 ? probe.focusedContentRow : 0
+    if (focusedRow < this.formOffset) this.formOffset = focusedRow
+    if (focusedRow >= this.formOffset + bodyRows) this.formOffset = focusedRow - bodyRows + 1
     const rendered = renderMcpConfigForm(editor, width, bodyRows, this.formFocus, this.formOffset,
       (field, key) => this.controller.dictValueForm(field, key))
     const lines = [...rendered.lines]

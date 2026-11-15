@@ -200,7 +200,7 @@ export function renderMcpConfigForm(
   focusIndex: number,
   offset: number,
   formOf: (field: 'env' | 'headers', key: string) => 'reference' | 'literal' = (_field, _key) => 'reference',
-): { readonly lines: string[]; readonly painted: readonly McpFormPaintedRow[]; readonly maxOffset: number } {
+): { readonly lines: string[]; readonly painted: readonly McpFormPaintedRow[]; readonly maxOffset: number; readonly focusedContentRow: number } {
   const formRows = mcpFormRows(editor, formOf)
   const content: { readonly text: string; readonly row?: McpFormRow; readonly group?: McpFormGroup }[] = []
   let lastGroup: McpFormGroup | undefined
@@ -217,6 +217,10 @@ export function renderMcpConfigForm(
   }
   const viewport = Math.max(1, rows)
   const maxOffset = Math.max(0, content.length - viewport)
+  // The focused FIELD's PHYSICAL content row (group headers occupy rows too).
+  // The scroller must reason in painted rows, never in field indices.
+  const focusedRowId = formRows[focusIndex]?.id
+  const focusedContentRow = content.findIndex(entry => entry.row?.id === focusedRowId)
   const clamped = Math.min(Math.max(0, offset), maxOffset)
   const lines: string[] = []
   const painted: McpFormPaintedRow[] = []
@@ -229,7 +233,7 @@ export function renderMcpConfigForm(
     lines.push(fit(truncateToWidth(sanitizedPhysicalLine(entry.text), width, '…', false), width))
     if (entry.row !== undefined) painted.push({ row: entry.row, line: index })
   }
-  return { lines, painted, maxOffset }
+  return { lines, painted, maxOffset, focusedContentRow }
 }
 
 /** The one-line form status sentence (never a secret). */
