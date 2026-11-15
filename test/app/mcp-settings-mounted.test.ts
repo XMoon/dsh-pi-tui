@@ -123,6 +123,11 @@ interface Harness {
   readonly manager: FixtureManager
   /** The LIVE embedded MCP page of the open Settings workspace, when mounted. */
   readonly embeddedMcpPage: () => EmbeddedSpecialistPage | undefined
+  /** The LIVE Settings workspace root (the ONE pointer owner of the frame). */
+  readonly settingsPanel: () => {
+    onCellPress(x: number, y: number): void
+    onCellClick(x: number, y: number): void
+  } | undefined
   readonly settingsMutateCalls: string[]
   /** Hold the NEXT mutation in flight (deferred settlement). */
   holdSettingsMutation: () => () => void
@@ -297,6 +302,13 @@ function setup(options: { readonly columns?: number; readonly rows?: number; rea
       if (lease === undefined || lease.kind !== 'settings') return undefined
       const panel = lease.panel as { specialistPage?: EmbeddedSpecialistPage } | undefined
       return panel?.specialistPage
+    },
+    settingsPanel: () => {
+      const lease = (app as unknown as { workspaceLease?: { kind?: string; panel?: unknown } }).workspaceLease
+      if (lease === undefined || lease.kind !== 'settings') return undefined
+      const panel = lease.panel as { onCellPress?: unknown; onCellClick?: unknown } | undefined
+      if (panel?.onCellPress === undefined || panel.onCellClick === undefined) return undefined
+      return panel as { onCellPress(x: number, y: number): void; onCellClick(x: number, y: number): void }
     },
     settingsMutateCalls,
     holdSettingsMutation: () => {
@@ -673,27 +685,53 @@ test('Esc during an unsettled Save never offers a Discard that would imply cance
   assert.equal(h.settingsMutateCalls.length, 1, 'no replay after settlement')
 })
 
-test('a REAL Root-seam pointer chain drives the page: press, release, intent', async () => {
+test('the Settings ROOT drives a real pointer click into the MCP page (and refuses a stale one)', async () => {
   const h = setup()
   await openMcpPage(h)
-  // The page under the live workspace lease publishes its own last-row spans
-  // exactly as the Root consumes them. Find the mounted page through the
-  // app's Settings lease and drive the delegation seam the Root uses.
-  const page = h.embeddedMcpPage()
-  assert.ok(page !== undefined, 'the MCP specialist page must be mounted')
-  // 1) The page painted Add in its bar.
-  await frames(h.vt, 2)
-  const spans = page.paintedBarSpans?.() ?? []
-  assert.ok(spans.some(span => span.id === 'bar:add'),
-    `the Add affordance must be published for the Root: ${spans.map(s => s.id).join(',')}`)
-  // 2) Releasing that span runs the SAME intent the keyboard `a` would.
+  const panel = h.settingsPanel()
+  assert.ok(panel !== undefined, 'the Settings workspace root must be live')
+
+  // The row/column come from the ACTUAL painted frame — the same cells the user
+  // clicks. The Root resolves them against its own last-painted hit map.
+  const locate = (label: string): { row: number; col: number } => {
+    const lines = h.vt.getViewport().map(stripTerminalSequences)
+    const row = lines.findIndex(line => line.includes(label))
+    assert.ok(row >= 0, `missing ${label} in the painted frame:\n${lines.join('\n')}`)
+    return { row, col: lines[row]!.indexOf(label) + 1 }
+  }
+
+  // 1) POSITIVE: Root press + release on the painted `a Add` opens the form.
+  const add = locate('a Add')
   const before = h.view()
-  page.activateBarSpan?.('bar:add')
+  panel.onCellPress(add.col, add.row)
+  panel.onCellClick(add.col, add.row)
   await frames(h.vt, 2)
   await flushOwnedTurns()
   await frames(h.vt, 2)
-  assert.notEqual(h.view(), before, 'the delegated Add changed the frame')
-  assert.match(h.view(), /Identity/u, 'the delegated Add opened the form')
-  // 3) Zero writes happened: opening a form is navigation, not persistence.
+  assert.notEqual(h.view(), before, 'the Root click must reach the page intent')
+  assert.match(h.view(), /Identity/u, 'the Root click opened the configuration form')
   assert.deepEqual(h.settingsMutateCalls, [], 'a navigation intent never writes')
+
+  // 2) NEGATIVE (stale gesture): a press whose frame repaints before the
+  //    release must not activate anything — the Root revokes the gesture.
+  // Leave the form: Esc asks to discard, `d` drops the untouched draft.
+  await press(h.vt, '\x1b')
+  await frames(h.vt, 2)
+  await press(h.vt, 'd')
+  await frames(h.vt, 2)
+  // Dropping the draft returns to the Detail; the LIST is one Esc further back.
+  await press(h.vt, '\x1b')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  const again = locate('a Add')
+  panel.onCellPress(again.col, again.row)
+  await press(h.vt, '\x1b[B') // repaint between press and release
+  await frames(h.vt, 2)
+  const stale = h.view()
+  panel.onCellClick(again.col, again.row)
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.equal(h.view(), stale, 'a stale release must not reach any page intent')
+  assert.deepEqual(h.settingsMutateCalls, [], 'a refused gesture never writes')
 })

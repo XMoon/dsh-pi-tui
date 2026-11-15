@@ -614,18 +614,23 @@ test('a Save confirmation only dispatches on `y`, never on another key', () => {
   assert.deepEqual(controller.calls, ['answerConfigConfirm:true'])
 })
 
-test('a compacted HTTP disclosure still names its target host', () => {
+test('a compacted HTTP confirmation keeps the host in the body and the decision in the bar', () => {
   const warning = 'Enabling this server can send data to an external service. Target: mcp.example.test'
   for (const width of [200, 100, 80, 44]) {
-    const { page } = makePage(snapshot({
-      selectedConfig: CONFIG_FACET,
-      editor: editorSnapshot({ transport: 'streamable-http', dirty: true }),
+    const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ transport: 'streamable-http', dirty: true }) }))
+    openEditor(page, 'e', width, 20)
+    controller.snapshotValue = {
+      ...controller.snapshotValue,
       configConfirm: { kind: 'save', name: 'alpha', warning, capturedRevision: 1 },
-    }))
-    const bar = render(page, width, 16).at(-1) ?? ''
-    assert.match(bar, /alpha/u, `width ${String(width)}: the server must survive compaction`)
-    assert.match(bar, /mcp\.example\.test/u,
-      `width ${String(width)}: the target host must survive compaction`)
+    }
+    const frame = render(page, width, 20).join('\n')
+    // The BODY carries the capability fact and the target host (wrapped,
+    // hard-split); it must be readable at every width.
+    assert.match(frame, /external service/u, `width ${String(width)}: the capability fact must be in the body`)
+    assert.match(frame, /mcp\.example\.test/u, `width ${String(width)}: the target host must be in the body`)
+    // The BAR keeps the decision keys, whatever the name/host length.
+    assert.match(frame, /Y confirm|\by\b/u, `width ${String(width)}: the affirmative key survives`)
+    assert.match(frame, /Esc/u, `width ${String(width)}: the escape key survives`)
   }
 })
 
@@ -1029,4 +1034,86 @@ test('the value input hint states what an empty Enter really does per storage fo
   const referenceFrame = render(referencePage.page, 100, 20).join('\n')
   assert.match(referenceFrame, /Enter on empty keeps current/u,
     `a reference must state that an empty Enter keeps the value: ${referenceFrame}`)
+})
+
+test('a Detail confirmation (toggle) paints its consequence body and blocks when it cannot fit', () => {
+  // The Detail hosts the Toggle/Delete/Reset/Restart confirmations. The
+  // confirmation body is painted at the TOP of the Detail, so the user reads
+  // the target and consequence before reaching the `Y confirm` bar.
+  const wide = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    configConfirm: { kind: 'toggle', name: 'alpha', nextEnabled: false, capturedRevision: 1 },
+  }))
+  // A user reached the Detail before the question opened; the view is detail.
+  ;(wide.page as unknown as { view: string }).view = 'detail'
+  const wideFrame = render(wide.page, 100, 24).join('\n')
+  assert.match(wideFrame, /Disable server alpha\./u, 'the toggle consequence is painted in the Detail body')
+  assert.match(wideFrame, /may stop/u)
+  assert.match(wideFrame, /Y confirm/u)
+
+  // At 44x5 the fact set still fits its 4 body rows, so it stays confirmable.
+  const fits = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    configConfirm: { kind: 'toggle', name: 'a'.repeat(32), nextEnabled: false, capturedRevision: 1 },
+  }))
+  ;(fits.page as unknown as { view: string }).view = 'detail'
+  const fitsFrame = render(fits.page, 44, 5).join('\n')
+  assert.match(fitsFrame, /may stop/u, 'the whole consequence is visible at 44x5')
+  assert.match(fitsFrame, /Y confirm/u, 'a fully visible confirmation stays executable')
+
+  // A grant that cannot show the whole consequence paints NO affirmative key
+  // and says why: the admission is the VISIBLE content, not the wrap result.
+  const tiny = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    configConfirm: { kind: 'toggle', name: 'a'.repeat(32), nextEnabled: false, capturedRevision: 1 },
+  }))
+  ;(tiny.page as unknown as { view: string }).view = 'detail'
+  const tinyFrame = render(tiny.page, 44, 3).join('\n')
+  assert.doesNotMatch(tinyFrame, /Y confirm/u, 'an unreviewable confirmation paints no affirmative key')
+  assert.match(tinyFrame, /Resize to review/u)
+  assert.match(tinyFrame, /Esc/u)
+})
+
+test('a fully painted long HTTP host is NOT blocked (the split inserted no space)', () => {
+  const host = 'a'.repeat(63)
+  const warning = `Enabling this server can send data to an external service. Target: ${host}`
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ transport: 'streamable-http', dirty: true }) }))
+  openEditor(page, 'e', 44, 20)
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    configConfirm: { kind: 'save', name: 'svc', warning, capturedRevision: 1 },
+  }
+  const lines = render(page, 44, 20).map(line => line.trimEnd())
+  const frame = lines.join('\n')
+  // The host is fully painted, split across two lines by the hard wrap…
+  const joined = lines.map(line => line.trim()).join('')
+  assert.ok(joined.includes(host), `the whole 63-character host must be painted:\n${frame}`)
+  // …so the decision is executable, not blocked.
+  assert.doesNotMatch(frame, /Resize to review/u, 'a fully painted long host must not be blocked')
+  assert.match(frame, /Y confirm|\by\b/u)
+})
+
+test('the input-mode bar commits through the SAME path as the keyboard Enter', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ env: [{ key: 'E', value: 'stored' }], dirty: true }),
+  }))
+  controller.formValue = 'literal'
+  openEditor(page, 'e')
+  for (let step = 0; step < 14; step += 1) {
+    const focused = /▸ ([^:\n]+):/u.exec(render(page, 100, 20).join('\n'))
+    if (focused !== null && (focused[1] ?? '').trim() === 'Env E') break
+    page.handleInput('\x1b[B')
+  }
+  page.handleInput('\r')
+  // The input bar publishes `Enter apply` as a real pointer intent; the spans
+  // are captured from the frame that really painted the input.
+  render(page, 100, 20)
+  const spans = page.paintedBarSpans()
+  assert.ok(spans.some(span => span.id === 'bar:apply-input'),
+    `the apply affordance must be published: ${spans.map(s => s.id).join(',')}`)
+  // Activating it runs the SAME commit the keyboard Enter does.
+  page.activateBarSpan('bar:apply-input')
+  assert.ok(controller.calls.includes('setDictValue:env:E=:literal'),
+    `the apply intent must commit the value: ${controller.calls.join(',')}`)
 })

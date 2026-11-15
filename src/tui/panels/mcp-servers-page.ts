@@ -23,7 +23,6 @@
 
 import { Input, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
 import type { McpManagedServerStatus } from '@deepseek-ai/dsh-mcp-manager/types'
-import { MCP_HTTP_TARGET_MARKER } from '../../app/command/mcp-servers.ts'
 import type {
   McpConfigStatus,
   McpServerSourceLabel,
@@ -129,6 +128,7 @@ function composeRow(left: string, right: string, width: number): string {
 /** One Action-Bar intent a pointer may invoke (never a bare glyph). */
 type McpBarAction =
   | 'back'
+  | 'apply-input'
   | 'enter-detail'
   | 'add'
   | 'edit'
@@ -241,33 +241,60 @@ const MCP_CONFIRM_BODY_MAX_LINES = 5
  * Wrap one sentence into at most `maxLines` cell-accurate lines, HARD-SPLITTING
  * a token that alone exceeds the width. A safety fact may never be dropped
  * because one legal value (a 63-character DNS label, a 32-character name) has
- * no break opportunity.
+ * no break opportunity. Returns the lines AND the reconstruction of the source
+ * they really painted: a hard split is a mid-token break (no space inserted),
+ * while a normal word wrap is a space break. The caller compares the
+ * reconstruction to the source text to decide VISIBILITY, so the proof is the
+ * painted content itself — never the assumption that wrapping succeeded.
  */
-function wrapCellsHard(text: string, width: number, maxLines: number): string[] {
+function wrapCellsHard(text: string, width: number, maxLines: number): {
+  readonly lines: readonly string[]
+  /** The source text the painted lines really reproduce (spaces normalized). */
+  readonly reproduced: string
+} {
   const lines: string[] = []
+  const breaks: boolean[] = []
   let current = ''
+  const flush = (): void => {
+    if (current === '') return
+    lines.push(current)
+    breaks.push(false)
+    current = ''
+  }
   for (const word of sanitizedPhysicalLine(text).split(' ').filter(part => part !== '')) {
     let rest = word
     while (visibleWidth(rest) > Math.max(1, width)) {
-      if (current !== '') { lines.push(current); current = '' }
-      if (lines.length >= maxLines) return lines
+      flush()
+      if (lines.length >= maxLines) return { lines, reproduced: lines.join(' ') }
       let take = 0
       while (take < rest.length && visibleWidth(rest.slice(0, take + 1)) <= width) take += 1
       if (take === 0) take = 1
       lines.push(rest.slice(0, take))
+      breaks.push(true) // a hard split: mid-token, no space belongs here
       rest = rest.slice(take)
+      if (lines.length >= maxLines) return { lines, reproduced: reconstruct(lines, breaks) }
     }
     const candidate = current === '' ? rest : `${current} ${rest}`
     if (visibleWidth(candidate) <= width) {
       current = candidate
       continue
     }
-    if (current !== '') lines.push(current)
+    flush()
     current = rest
-    if (lines.length >= maxLines) return lines
+    if (lines.length >= maxLines) return { lines, reproduced: reconstruct(lines, breaks) }
   }
-  if (current !== '' && lines.length < maxLines) lines.push(current)
-  return lines
+  flush()
+  return { lines, reproduced: reconstruct(lines, breaks) }
+}
+
+/** Rejoin painted lines with the separator each break really was. */
+function reconstruct(lines: readonly string[], breaks: readonly boolean[]): string {
+  let out = ''
+  for (let index = 0; index < lines.length; index += 1) {
+    out += lines[index] ?? ''
+    if (index < breaks.length - 1 && breaks[index] === false) out += ' '
+  }
+  return out
 }
 
 /** The long list/detail hints, shortened when the frame is tight. */
@@ -290,7 +317,7 @@ const EDITOR_HINTS: readonly McpBarSegment[] = [
   { text: 'Back [Esc]', priority: 1000, action: 'back' },
 ]
 const EDITOR_INPUT_HINTS: readonly McpBarSegment[] = [
-  { text: 'Enter apply', short: 'Enter', priority: 30 },
+  { text: 'Enter apply', short: 'Enter', priority: 30, action: 'apply-input' },
   { text: 'Esc cancel', short: 'Esc', priority: 1000, action: 'cancel' },
 ]
 const DISCARD_HINTS: readonly McpBarSegment[] = [
@@ -959,6 +986,11 @@ export class McpServersPage implements EmbeddedSpecialistPage {
           this.handleInput('\r')
         }
         return
+      case 'apply-input':
+        // The input-mode bar's `Enter apply` is the SAME commit the keyboard
+        // Enter runs — no second input handler.
+        this.handleInput('\r')
+        return
       case 'cancel':
         this.handleInput('\x1b')
         return
@@ -1030,7 +1062,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   /** The Action-Bar intents a MODAL may accept from a pointer: its own
    *  decision, never a body change. */
   private isModalAction(action: McpBarAction): boolean {
-    return action === 'confirm' || action === 'cancel' || action === 'keep-editing' || action === 'discard'
+    // The input-mode bar is the input's OWN decision surface: apply/cancel are
+    // reachable in that modal exactly like confirm/cancel are in a question.
+    return action === 'confirm' || action === 'cancel' || action === 'keep-editing'
+      || action === 'discard' || action === 'apply-input'
   }
 
   /** Whether a modal decision owns the surface right now (keyboard + mouse). */
@@ -1106,28 +1141,30 @@ export class McpServersPage implements EmbeddedSpecialistPage {
    * `blocked` reports that even that could not fit — the page then refuses to
    * confirm rather than accepting an uninformed `y`.
    */
-  private confirmationBody(snapshot: McpServersSnapshot, width: number): {
+  private confirmationBody(snapshot: McpServersSnapshot, width: number, availableRows: number): {
     readonly lines: readonly string[]
     readonly blocked: boolean
   } {
     if (this.discardConfirm) {
-      return this.wrapConfirmation('Discard changes? Unsaved edits are dropped; nothing has been written yet.', width)
+      return this.wrapConfirmation('Discard changes? Unsaved edits are dropped; nothing has been written yet.', width, availableRows)
     }
     const confirm = snapshot.configConfirm
     if (confirm !== undefined) {
       const name = confirm.name
       switch (confirm.kind) {
         case 'save':
-          return this.wrapConfirmation(`Save server ${name}. ${confirm.warning ?? 'This writes the profile configuration.'}`, width)
+          return this.wrapConfirmation(`Save server ${name}. ${confirm.warning ?? 'This writes the profile configuration.'}`, width, availableRows)
         case 'delete':
           return this.wrapConfirmation(
             `Permanently delete server ${name} from this profile. This removes your added configuration; it cannot be undone here.`,
             width,
+            availableRows,
           )
         case 'reset':
           return this.wrapConfirmation(
             `Reset server ${name} to its inherited configuration. Your override is replaced by the base layer value.`,
             width,
+            availableRows,
           )
         case 'toggle':
           return this.wrapConfirmation(
@@ -1135,6 +1172,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
               ? 'The MCP process may start.'
               : 'The MCP process may stop; live tools may be interrupted.'}`,
             width,
+            availableRows,
           )
       }
     }
@@ -1142,17 +1180,25 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       return this.wrapConfirmation(
         `Restart server ${snapshot.confirmingName}. Live tools may be interrupted while it rebuilds.`,
         width,
+        availableRows,
       )
     }
     return { lines: [], blocked: false }
   }
 
-  /** Wrap a confirmation sentence, hard-splitting unbreakable tokens. */
-  private wrapConfirmation(text: string, width: number): { readonly lines: readonly string[]; readonly blocked: boolean } {
-    const lines = wrapCellsHard(text, width, MCP_CONFIRM_BODY_MAX_LINES)
-    const consumed = lines.join(' ').replace(/\s+/gu, ' ')
+  /**
+   * Wrap a confirmation sentence, hard-splitting unbreakable tokens. The
+   * visibility proof concatenates the painted lines WITHOUT separators: a hard
+   * split does not insert a space into the text, so joining with spaces would
+   * falsely mismatch a fully-painted long host and block a legal confirmation.
+   */
+  private wrapConfirmation(text: string, width: number, availableRows: number): { readonly lines: readonly string[]; readonly blocked: boolean } {
     const wanted = sanitizedPhysicalLine(text).replace(/\s+/gu, ' ')
-    return { lines, blocked: consumed !== wanted }
+    const wrapped = wrapCellsHard(text, width, MCP_CONFIRM_BODY_MAX_LINES)
+    const complete = wrapped.reproduced.replace(/\s+/gu, ' ') === wanted
+    // The admission is the CURRENT GRANT: a fact set that wraps completely but
+    // does not fit the rows this frame really gives cannot be reviewed either.
+    return { lines: wrapped.lines, blocked: !complete || wrapped.lines.length > Math.max(1, availableRows) }
   }
 
   /**
@@ -1312,11 +1358,23 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       this.bumpRevision()
     }
     if (!this.searching) this.reconcileSelection(snapshot)
+    // The confirmation body belongs to whichever view hosts the question: the
+    // Editor hosts Save/discard, the DETAIL hosts Toggle/Delete/Reset/Restart.
+    // It is wrapped and admitted against the column that REALLY paints it —
+    // the wide Detail is a narrower column than the frame, and the Editor
+    // spends rows on its identity and status lines. A fact set is executable
+    // only when it fits THAT grant, never the frame's nominal width.
     const targets: McpPaintedTarget[] = []
     const lines: string[] = []
     const layout = mcpServersLayoutFor(width, bodyRows)
+    const confirmationWidth = this.view === 'editor' || layout !== 'wide'
+      ? width
+      : Math.max(1, width - this.wideListWidth() - 2)
+    const confirmation = this.confirmationBody(snapshot, confirmationWidth,
+      this.view === 'editor' ? Math.max(1, bodyRows - 2) : Math.max(1, bodyRows))
+    this.confirmBodyBlocked = confirmation.blocked
     if (this.view === 'editor') {
-      const editorFrame = this.renderEditor(snapshot, width, bodyRows)
+      const editorFrame = this.renderEditor(snapshot, width, bodyRows, confirmation)
       lines.push(...editorFrame.lines)
       // Every painted field row is a pointer target on THIS frame; a press whose
       // frame repaints never completes (the identity/revision check above).
@@ -1334,12 +1392,12 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       const listWidth = this.wideListWidth()
       const detailWidth = Math.max(1, width - listWidth - 2)
       const left = this.renderList(snapshot, listWidth, bodyRows, targets)
-      const right = this.renderDetail(snapshot, detailWidth, bodyRows)
+      const right = this.renderDetail(snapshot, detailWidth, bodyRows, confirmation)
       for (let index = 0; index < bodyRows; index += 1) {
         lines.push(composeRow(left[index] ?? '', right[index] ?? '', width))
       }
     } else if (this.view === 'detail') {
-      lines.push(...this.renderDetail(snapshot, width, bodyRows).map(line => fit(line, width)))
+      lines.push(...this.renderDetail(snapshot, width, bodyRows, confirmation).map(line => fit(line, width)))
     } else {
       lines.push(...this.renderList(snapshot, width, bodyRows, targets))
     }
@@ -1366,7 +1424,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   /** FR4: the whole-page configuration form (never a third column). Returns the
    *  painted lines AND the physical rows of the fields that were painted, so
    *  the caller can register them as pointer targets. */
-  private renderEditor(snapshot: McpServersSnapshot, width: number, rows: number): {
+  private renderEditor(snapshot: McpServersSnapshot, width: number, rows: number, confirmation: { readonly lines: readonly string[] }): {
     readonly lines: string[]
     readonly fieldRows: readonly { readonly id: string; readonly index: number; readonly line: number }[]
   } {
@@ -1386,10 +1444,6 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     // wrapped (long host names hard-split, never dropped), so the safety facts
     // survive any Action Bar compaction. `blocked` means the current grant
     // cannot show them all — the page then refuses to confirm.
-    const confirmation = this.confirmationBody(snapshot, width)
-    // Publish the admission result for the key/pointer gates: a confirmation
-    // whose target/consequence cannot be fully painted must not be executable.
-    this.confirmBodyBlocked = confirmation.blocked
     const disclosure = confirmation.lines
     const bodyRows = Math.max(1, rows - statusRows - inputRows - identityLines.length - disclosure.length)
     // Keep the focused row inside the painted window. The scroller reasons in
@@ -1659,8 +1713,8 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     return entry?.effective.transport
   }
 
-  private renderDetail(snapshot: McpServersSnapshot, width: number, rows: number): string[] {
-    const lines: string[] = []
+  private renderDetail(snapshot: McpServersSnapshot, width: number, rows: number, confirmation: { readonly lines: readonly string[] }): string[] {
+    const lines: string[] = [...confirmation.lines.map(line => fit(color.warning(line), width))]
     const noticeRows = snapshot.notice === undefined ? 0 : 1
     const viewport = Math.max(1, rows - noticeRows)
     const all = this.detailLines(snapshot)
@@ -1678,6 +1732,18 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   }
 
   private renderBar(width: number, snapshot: McpServersSnapshot): ReturnType<typeof paintBar> {
+    // RC-B: a confirmation whose target/consequence cannot be fully painted in
+    // the CURRENT frame is not executable — neither key nor pointer — so its
+    // bar offers only the escape. This branch precedes every confirmation
+    // branch (Save, Toggle, Delete, Reset) so `Y confirm` is never painted on
+    // an unreviewable question.
+    if (this.confirmBodyBlocked
+      && (snapshot.configConfirm !== undefined || snapshot.confirmingName !== undefined || this.discardConfirm)) {
+      return paintBar([
+        { text: 'Resize to review the target and its consequence', short: 'Resize to review', priority: 1000 },
+        { text: 'Esc cancel', short: 'Esc', priority: 999, action: 'cancel' },
+      ], width, true)
+    }
     if (snapshot.configConfirm !== undefined) {
       const confirm = snapshot.configConfirm
       const name = sanitizedPhysicalLine(confirm.name)
@@ -1696,24 +1762,14 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         )
       }
       if (confirm.kind === 'save') {
-        // The external-capability disclosure is the question: it must survive
-        // whole-segment drops AND its compaction must keep the SAFETY FACT —
-        // for an HTTP entry the compaction still names the target host (a
-        // bare `Save configuration?` would hide what the user is enabling).
-        // The exact server name is part of the question.
-        const warning = confirm.warning === undefined
-          ? `Save ${sanitizedPhysicalLine(confirm.name)}?`
-          : `Save ${sanitizedPhysicalLine(confirm.name)} — ${confirm.warning}`
-        const markerAt = warning.indexOf(MCP_HTTP_TARGET_MARKER)
-        // The compaction keeps the SERVER and the safety fact (the target host
-        // for an HTTP entry): the shortest form that still answers "which
-        // server, and what does it reach?".
-        const short = markerAt === -1
-          ? `Save ${sanitizedPhysicalLine(confirm.name)}?`
-          : `${sanitizedPhysicalLine(confirm.name)} · ${warning.slice(markerAt + MCP_HTTP_TARGET_MARKER.length)}`
-        // The compaction must still answer BOTH "which capability?" and
-        // "which target?", so the tests assert `external service` + the host.
-        return paintBar([{ text: warning, short, priority: 1000 }, ...CONFIRM_HINTS], width, true)
+        // The BODY carries the target + capability + consequence (wrapped and
+        // hard-split); the bar carries the DECISION and must never let a long
+        // server name or HTTP host push `Y confirm`/`Esc` out of the row. The
+        // question segment therefore drops FIRST when the row is tight.
+        return paintBar([
+          { text: `Save ${sanitizedPhysicalLine(confirm.name)}?`, short: 'Save?', priority: 800 },
+          ...CONFIRM_HINTS,
+        ], width, true)
       }
       return paintBar(
         [{ text: 'Change saved configuration? The MCP process may stop or start', short: 'Change config?', priority: 1000 }, ...CONFIRM_HINTS],
