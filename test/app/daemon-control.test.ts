@@ -263,6 +263,52 @@ test('status reports an activating unit with no registry as starting, never stop
   assert.match(result.stdout, /^manager=systemd$/mu)
 })
 
+test('restart stops and replaces an activating unit that has not published a Host', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'activating', mainPid: 0 })
+  const newRecord = recordOf(fx.scope, { instanceId: '44444444-4444-4444-8444-444444444444', hostPid: 6464 })
+  let stopped = false
+  let ensured = 0
+  let stoppedBeforeEnsure = false
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, depsOf(fx, {
+    systemctl: async args => {
+      const outcome = await systemctl.run(args)
+      if (args.includes('stop')) stopped = true
+      return outcome
+    },
+    readRecord: () => (ensured > 0 ? newRecord : undefined),
+    inspectProcess: recordValue => (recordValue?.instanceId === newRecord.instanceId ? 'alive' : 'dead'),
+    authenticate: async recordValue => ({ record: recordValue, cookie: 'c', identity: recordValue }),
+    ensureHost: async () => {
+      stoppedBeforeEnsure = stopped
+      ensured += 1
+      return { record: newRecord, cookie: 'c', identity: newRecord }
+    },
+  }))
+  assertCode(result, 0)
+  assert.equal(ensured, 1)
+  assert.equal(stoppedBeforeEnsure, true, 'the explicit restart must stop the activating unit before starting a new Host')
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), true, 'systemctl stop must be issued for the activating unit')
+  assert.match(result.stdout, /^instance=44444444$/mu)
+})
+
+test('restart never starts after an activating unit stop fails', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'activating', mainPid: 0, stopResult: exited(1) })
+  let ensured = 0
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+    ensureHost: async () => { ensured += 1; throw new Error('must not start a second Host') },
+  }))
+  assert(result.code !== 0, 'a failed stop must fail the restart')
+  assert.equal(ensured, 0, 'restart must not start after an unconfirmed stop')
+  assert.equal(systemctl.calls.some(args => args.includes('start')), false)
+})
+
 test('status reports an unconfirmed transitional unit state as unknown and nonzero', async t => {
   const fx = fixture(t)
   const unit = writeOwnedUnit(fx)

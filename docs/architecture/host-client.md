@@ -506,7 +506,10 @@ stdout/stderr.
   there is no live registry Host): authentication is a Ready verdict, not the
   unit-ownership verdict. Foreign identity, wrong scope, wrong `FragmentPath`, a
   mismatched `MainPID` and a strict-absence Host without a fresh authenticated
-  identity remain refusals. A restart must still stop the
+  identity remain refusals. A surface startup failure prints the controlled code,
+  states that the Host was not stopped, and points at `daemon status`,
+  `daemon logs` and an explicitly user-chosen `daemon restart`; it never tells
+  the user to signal a PID and never promises that recovery will succeed. A restart must still stop the
   old instance and prove a new authenticated Ready instance; a failed recovery
   reports the real failure.
 - **restart and uninstall are ONE explicit transition.** `restart` stops, awaits

@@ -165,6 +165,9 @@ test('surface failure line strips paths, URLs and control characters from an ent
 test('an unknown surface failure is a fixed concise reason, never the raw message', () => {
   const line = surfaceStartupFailureLine(new Error('boom at /etc/passwd http://host/x'))
   assert.match(line, /startup failed before the TUI mounted/u)
+  assert.match(line, /dsh --profile pi-tui daemon status/u)
+  assert.match(line, /dsh --profile pi-tui daemon logs/u)
+  assert.match(line, /dsh --profile pi-tui daemon restart/u)
   assert.ok(!line.includes('/etc/passwd') && !line.includes('http://host'), 'raw detail not surfaced')
 })
 
