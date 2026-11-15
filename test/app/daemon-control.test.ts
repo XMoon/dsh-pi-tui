@@ -374,6 +374,102 @@ test('a unit file the manager has not loaded cannot claim a healthy live Host', 
   assert.equal(existsSync(unit.path), true, 'the unowned-by-manager file must stay untouched')
 })
 
+test('a rejected systemctl stop is not reported as a committed action', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: 4242, stopResult: exited(1, '', 'rejected') })
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+  }))
+  assertCode(result, 4, /could not stop the unit/u)
+  assert.doesNotMatch(result.stderr, /may already be committed|Run daemon status/u,
+    'the manager rejected stop before a committed stop request was observed')
+  assert.equal(existsSync(unit.path), true)
+})
+
+test('an active unit that accepts stop but misses its deadline reports committed-but-unconfirmed', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const activeState = 'active'
+  let stopCalls = 0
+  const systemctl = async (args: readonly string[]): Promise<SystemctlResult> => {
+    if (args.includes('stop')) stopCalls += 1
+    return exited(0, [
+      'LoadState=loaded',
+      `ActiveState=${activeState}`,
+      `FragmentPath=${unit.path}`,
+      'DropInPaths=',
+      `MainPID=${activeState === 'active' ? '4242' : '0'}`,
+      'UnitFileState=disabled',
+      '',
+    ].join('\n'))
+  }
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    systemctl,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+    stopTimeoutMs: 1,
+  }))
+  assertCode(result, 5, /TRANSITION_UNCERTAIN/u)
+  assert.match(result.stderr, /Host stop may already be committed; final verification failed/u)
+  assert.match(result.stderr, /Run daemon status before retrying/u)
+  assert.equal(stopCalls, 1, 'systemd accepted the stop request before the confirmation timeout')
+})
+
+test('post-stop manager query failure retains ownership refusal and recovery guidance', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const fake = unitSystemctl(unit.path, { activeState: 'active', mainPid: 4242 })
+  let stopCalls = 0
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    systemctl: async args => {
+      if (args.includes('stop')) stopCalls += 1
+      if (args.includes('show') && stopCalls > 0) {
+        return exited(0, 'LoadState=loaded\nActiveState=inactive\nFragmentPath=/foreign.service\nDropInPaths=\nMainPID=0\n')
+      }
+      return fake.run(args)
+    },
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(stopCalls, 1)
+  assert.match(result.stderr, /stop may already be committed; final verification failed/u)
+  assert.match(result.stderr, /Run daemon status before retrying/u)
+  assert.equal(existsSync(unit.path), true)
+})
+
+test('completed start and restart requests report an unconfirmed expected result without retrying', { skip: process.platform !== 'linux' }, async t => {
+  for (const verb of ['start', 'restart'] as const) {
+    await t.test(verb, async t => {
+      const fx = fixture(t)
+      const old = recordOf(fx.scope)
+      let oldAlive = verb === 'restart'
+      let ensured = 0
+      let signals = 0
+      const result = await runDaemonControl({ verb }, fx.profile, depsOf(fx, {
+        probe: async (): Promise<UserManagerProbe> => ({ kind: 'absent' }),
+        readRecord: () => (verb === 'restart' && (oldAlive || ensured > 0) ? old : undefined),
+        inspectProcess: () => 'alive',
+        authenticate: async record => ({ record, cookie: 'c', identity: record }),
+        readCmdline: () => `node\0${join(fx.profile.packageRoot, 'dist', 'local-host.mjs')}\0`,
+        readStarttime: () => oldAlive ? old.hostStarttime : undefined,
+        kill: () => { signals += 1; oldAlive = false },
+        ensureHost: async () => { ensured += 1; return { record: old, cookie: 'c', identity: old } },
+        sleep: async () => {},
+        now: () => 0,
+      }))
+      assertCode(result, 5, /TRANSITION_UNCERTAIN/u)
+      assert.equal(ensured, 1)
+      assert.equal(signals, verb === 'restart' ? 1 : 0)
+      assert.match(result.stderr, /may already be committed; final verification failed/u)
+      assert.match(result.stderr, /Run daemon status before retrying/u)
+      assert.match(result.stderr, verb === 'start' ? /Host is stopped/u : /did not produce a new Host instance/u)
+      assert.equal(result.stdout, '')
+    })
+  }
+})
+
 test('an inactive owned unit with no Host is stopped and stop stays an idempotent no-op', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
   const unit = writeOwnedUnit(fx)
@@ -694,6 +790,8 @@ test('a stop that cannot confirm the Host exit is TRANSITION_UNCERTAIN, not stop
     now: () => now,
   }))
   assertCode(result, 5, /TRANSITION_UNCERTAIN/u)
+  assert.match(result.stderr, /Host stop may already be committed; final verification failed/u)
+  assert.match(result.stderr, /Run daemon status before retrying/u)
 })
 
 /** Wait until a held fake entered its awaited phase (real event, no fixed sleep). */
@@ -1288,6 +1386,8 @@ test('uninstall reports a failed daemon-reload instead of claiming completion', 
   const systemctl = unitSystemctl(unit.path, { activeState: 'inactive', mainPid: 0, reloadResult: exited(1, '', 'reload failed') })
   const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, depsOf(fx, { systemctl: systemctl.run }))
   assertCode(result, 4, /MANAGER_OR_OS_FAILURE/u)
+  assert.match(result.stderr, /profile unit removal may already be committed; final verification failed/u)
+  assert.match(result.stderr, /Run daemon status before retrying/u)
   assert.equal(existsSync(unit.path), false, 'the file removal itself is recorded before the reload failure')
 })
 
