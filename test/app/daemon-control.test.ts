@@ -10,7 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -558,6 +558,40 @@ test('start refuses an incompatible live Host without starting another one', { s
   assert.equal(ensured, 0)
 })
 
+test('start reuses an authenticated Host even when the user manager is erroring', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  let ensured = 0
+  const systemctlCalls: string[][] = []
+  const result = await runDaemonControl({ verb: 'start' }, fx.profile, depsOf(fx, {
+    probe: async (): Promise<UserManagerProbe> => ({ kind: 'error', reason: 'bus is broken' }),
+    systemctl: async args => { systemctlCalls.push([...args]); return { kind: 'exited', code: 0, stdout: '', stderr: '' } },
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    ensureHost: async () => { ensured += 1; throw new Error('a live Host must be reused, not re-ensured') },
+  }))
+  assertCode(result, 0)
+  assert.equal(ensured, 0, 'a live authenticated Host must be reused without any ensure call')
+  assert.equal(systemctlCalls.length, 0, 'no systemctl start may be issued for a reused Host')
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.match(result.stdout, /^instance=11111111$/mu)
+})
+
+test('status with a manager error still reports a reused Host as ready', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    probe: async (): Promise<UserManagerProbe> => ({ kind: 'error', reason: 'bus is broken' }),
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.match(result.stdout, /^user-manager=error$/mu)
+})
+
 test('start reports a manager error without falling back to a process Host', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
   let ensured = 0
@@ -589,6 +623,66 @@ test('restart refuses to start when the old Host exit is unconfirmed', { skip: p
   }))
   assertCode(result, 5, /TRANSITION_UNCERTAIN/u)
   assert.equal(ensured, 0, 'a stop that did not settle must never be followed by a start')
+})
+
+test('restart refuses an owned unit from another installed build and leaves it untouched', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const otherBuild = 'a'.repeat(64)
+  const content = renderUnitContent({
+    dshHome: fx.scope.dshHome,
+    profileRealpath: fx.scope.profileRealpath,
+    profile: 'pi-tui',
+    scopeId: fx.scope.scopeId,
+    buildId: otherBuild,
+    nodePath: process.execPath,
+    hostEntryPath: join(fx.profile.packageRoot, 'dist', 'local-host.mjs'),
+    dshAnchor: fx.profile.installAnchor,
+  })
+  const path = join(fx.unitDir, fx.unitName)
+  writeFileSync(path, content, { mode: 0o600 })
+  const systemctl = unitSystemctl(path, { activeState: 'inactive', mainPid: 0 })
+  let ensured = 0
+  // No live Host: the pre-flight reaches the owned-unit build check directly.
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+    ensureHost: async () => { ensured += 1; throw new Error('must not start past a refused unit') },
+  }))
+  assertCode(result, 3, /another installed build/u)
+  assert.equal(ensured, 0)
+  assert.equal(readFileSync(path, 'utf8'), content, 'the other-build unit file must be untouched')
+})
+
+test('restart refuses an ACTIVE other-build Host before stopping it', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const otherBuild = 'a'.repeat(64)
+  const content = renderUnitContent({
+    dshHome: fx.scope.dshHome,
+    profileRealpath: fx.scope.profileRealpath,
+    profile: 'pi-tui',
+    scopeId: fx.scope.scopeId,
+    buildId: otherBuild,
+    nodePath: process.execPath,
+    hostEntryPath: join(fx.profile.packageRoot, 'dist', 'local-host.mjs'),
+    dshAnchor: fx.profile.installAnchor,
+  })
+  const path = join(fx.unitDir, fx.unitName)
+  writeFileSync(path, content, { mode: 0o600 })
+  const record = recordOf(fx.scope)
+  const systemctl = unitSystemctl(path, { activeState: 'active', mainPid: record.hostPid })
+  let ensured = 0
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    ensureHost: async () => { ensured += 1; throw new Error('must not start past a refused unit') },
+  }))
+  assertCode(result, 3, /another installed build/u)
+  assert.equal(ensured, 0)
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), false, 'the live other-build Host must NOT be stopped by a refused restart')
+  assert.equal(readFileSync(path, 'utf8'), content, 'the other-build unit file must be untouched')
 })
 
 test('restart starts a fresh authenticated instance after the old Host stopped', { skip: process.platform !== 'linux' }, async t => {

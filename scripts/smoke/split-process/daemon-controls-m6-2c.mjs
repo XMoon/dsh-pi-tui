@@ -439,7 +439,9 @@ export async function runDaemonControlOwnerAndMultiProfile({ installation, trace
     assert(refused.status === 3, `a foreign unit must be refused with exit 3, saw ${String(refused.status)}`)
     assert(readFileSync(unitPathA, 'utf8') === foreign, 'a foreign unit must never be rewritten or removed')
     unlinkSync(unitPathA)
-    // The explicit restart migrates a controlled old-build unit after owner proof.
+    // Owner decision: an owned unit from ANOTHER installed build is refused by
+    // restart (cross-build migration is M6-2D work), never rewritten, and the
+    // explicit uninstall of a verified same-build unit still works afterwards.
     const oldBuildId = 'a'.repeat(64)
     const encoded = value => `"${value.replace(/\\/gu, '\\\\').replace(/"/gu, '\\"').replace(/%/gu, '%%').replace(/\$/gu, '$$')}"`
     const oldUnit = [
@@ -468,12 +470,17 @@ export async function runDaemonControlOwnerAndMultiProfile({ installation, trace
       '',
     ].join('\n')
     writeFileSync(unitPathA, oldUnit, { mode: 0o600 })
-    assert(systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload']).status === 0, 'daemon-reload failed before the old-build migration')
-    const migrated = assertStatus(runDaemon(installation, ['restart']), { host: 'ready' }, 'the old-build controlled restart')
-    assert(migrated.instance !== restartedA.instance, 'the migrated restart must create a new instance')
-    assert(!readFileSync(unitPathA, 'utf8').includes(`X-DshPiTuiInstallBuild=${oldBuildId}`),
-      'the explicit restart must replace the old controlled unit definition')
-    assertStatus(runDaemon(second, ['status']), { host: 'ready' }, 'profile B after the old-build migration')
+    assert(systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload']).status === 0, 'daemon-reload failed before the old-build refusal')
+    const refusedOldBuild = runDaemon(installation, ['restart'])
+    assert(refusedOldBuild.status === 3, `an old-build unit must be refused by restart with exit 3, saw ${String(refusedOldBuild.status)}`)
+    assert(readFileSync(unitPathA, 'utf8') === oldUnit, 'a refused old-build unit must never be rewritten or removed')
+    // Remove the old-build unit through the manager-verified uninstall path so
+    // the closing uninstall assertions still exercise the same-build flow.
+    const removedOld = runDaemon(installation, ['uninstall'])
+    assert(removedOld.status === 0, `uninstalling the old-build unit must succeed: ${removedOld.stderr.slice(-300)}`)
+    assert(existsSync(unitPathA) === false, 'the old-build unit file must be removed by uninstall')
+    assertStatus(runDaemon(installation, ['start']), { host: 'ready' }, 'profile A restart after the old-build refusal')
+    assertStatus(runDaemon(second, ['status']), { host: 'ready' }, 'profile B after the old-build refusal')
     // Uninstall A removes only A's unit; B stays ready.
     assertStatus(runDaemon(installation, ['uninstall']), { unit: 'none' }, 'profile A uninstall')
     assert(existsSync(unitPathA) === false, 'uninstall must remove only profile A unit')
@@ -486,7 +493,7 @@ export async function runDaemonControlOwnerAndMultiProfile({ installation, trace
       twoProfiles: true,
       crossProfileUnaffected: true,
       foreignUnitRefused: true,
-      oldBuildMigrated: true,
+      oldBuildRefusedNotMigrated: true,
       uninstallOwnerScoped: true,
     }
   } catch (error) {
