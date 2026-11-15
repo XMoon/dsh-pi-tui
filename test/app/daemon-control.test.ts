@@ -842,6 +842,7 @@ test('start reports a manager error without falling back to a process Host', { s
     ensureHost: async () => { ensured += 1; throw new Error('must not ensure') },
   }))
   assertCode(result, 4, /MANAGER_OR_OS_FAILURE/u)
+  assert.doesNotMatch(result.stderr, /already.*committed|final verification failed/u, 'a pre-flight refusal committed no operation')
   assert.equal(ensured, 0)
 })
 
@@ -1168,6 +1169,8 @@ test('start does not report success when the new Host fails the post-snapshot ow
   }))
   assert.equal(ensured, 1, 'the cold start must have run ensure exactly once')
   assertCode(result, 3, /does not supervise the authenticated Host/u)
+  assert.match(result.stderr, /may already be committed; final verification failed/u)
+  assert.match(result.stderr, /daemon status/u)
   assert.doesNotMatch(result.stdout, /^host=ready$/mu)
 })
 
@@ -1214,8 +1217,34 @@ test('restart does not report success when the new instance fails the post-snaps
   // produced on the authenticated path) and still must not be reported as a
   // completed restart: the failure wins over the Ready observation.
   assertCode(result, 3, /does not supervise the authenticated Host/u)
+  assert.match(result.stderr, /Host restart may already be committed; final verification failed/u)
+  assert.match(result.stderr, /daemon status/u)
   assert.doesNotMatch(result.stdout, /previous=/u, 'a failed post-snapshot must not print a completed restart block')
   assert.doesNotMatch(result.stdout, /^host=ready$/mu, 'a failed post-snapshot must not be presented as Ready success')
+})
+
+test('stop reports committed-but-unconfirmed when the post-snapshot query fails', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: 4242 })
+  let probes = 0
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    probe: async (): Promise<UserManagerProbe> => {
+      probes += 1
+      return probes === 1 ? { kind: 'available' } : { kind: 'error', reason: 'bus failed after stop' }
+    },
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+    readStarttime: () => undefined,
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 4, /user manager is unavailable/u)
+  assert.match(result.stderr, /Host stop may already be committed; final verification failed/u)
+  assert.match(result.stderr, /Run daemon status before retrying/u)
+  assert.equal(systemctl.calls.filter(args => args.includes('stop')).length, 1)
+  assert.equal(existsSync(unit.path), true, 'stop must never remove the owned unit')
 })
 
 test('uninstall reports an incomplete verification when the post-snapshot manager query fails', { skip: process.platform !== 'linux' }, async t => {
@@ -1247,6 +1276,8 @@ test('uninstall reports an incomplete verification when the post-snapshot manage
     now: () => 0,
   }))
   assertCode(result, 4, /user manager is unavailable/u)
+  assert.match(result.stderr, /profile unit removal may already be committed; final verification failed/u)
+  assert.match(result.stderr, /daemon status/u)
   assert.equal(existsSync(unit.path), false, 'the owned unit file must be removed (the OS action committed)')
   assert.equal(reloads, 1, 'daemon-reload must run exactly once')
 })
