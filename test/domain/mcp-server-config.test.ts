@@ -262,3 +262,47 @@ test('projectMcpServerEntry keeps transport facts and drops non-string noise', (
   assert.equal(projectMcpServerEntry({ transport: 'stdio', args: ['a', 2] }), undefined)
   assert.equal(projectMcpServerEntry(undefined), undefined)
 })
+
+test('a transport switch keeps the NEW transport\'s freshly added dict entries', () => {
+  // stdio -> streamable-http with a new Authorization header.
+  const effective = { transport: 'stdio' as const, command: '/bin/echo', args: ['a'], env: new Map([['OLD', 'v']]), cwd: '', enabled: true }
+  const draft = httpDraft({
+    headers: new Map([['Authorization', 'Bearer ${credential:T}']]),
+  })
+  const ops = mcpEditOps('srv', effective, draft, diffMcpServerDraft(effective, draft))
+  const byPath = new Map(ops.map(op => [op.path.join('.'), op]))
+  assert.equal(byPath.get('servers.srv.transport')?.value, 'streamable-http')
+  assert.equal(byPath.get('servers.srv.url')?.value, 'https://example.test/mcp')
+  // The NEW header must reach the mutation — this is the regression: the old
+  // code dropped the whole headers patch on a switch.
+  assert.deepEqual(
+    ops.find(op => op.path.join('.') === 'servers.srv.headers.Authorization'),
+    { op: 'set', path: ['servers', 'srv', 'headers', 'Authorization'], value: 'Bearer ${credential:T}' },
+  )
+  // The abandoned stdio fields are still reset to the schema defaults.
+  assert.deepEqual(byPath.get('servers.srv.command'), { op: 'set', path: ['servers', 'srv', 'command'], value: '' })
+  assert.deepEqual(byPath.get('servers.srv.env'), { op: 'set', path: ['servers', 'srv', 'env'], value: {} })
+  // A switch never emits a per-key unset that could restore an inherited key.
+  for (const op of ops) assert.equal(op.op, 'set', 'a switch never unsets a field')
+
+  // streamable-http -> stdio with a new env var (the symmetric path).
+  const effectiveHttp = { transport: 'streamable-http' as const, url: 'https://old.test/rpc', headers: new Map([['H', 'v']]), enabled: true }
+  const draftStdio = stdioDraft({ env: new Map([['TOKEN', '${credential:T}']]) })
+  const opsBack = mcpEditOps('srv', effectiveHttp, draftStdio, diffMcpServerDraft(effectiveHttp, draftStdio))
+  assert.deepEqual(
+    opsBack.find(op => op.path.join('.') === 'servers.srv.env.TOKEN'),
+    { op: 'set', path: ['servers', 'srv', 'env', 'TOKEN'], value: '${credential:T}' },
+  )
+  assert.deepEqual(
+    opsBack.find(op => op.path.join('.') === 'servers.srv.headers'),
+    { op: 'set', path: ['servers', 'srv', 'headers'], value: {} },
+  )
+  for (const op of opsBack) assert.equal(op.op, 'set')
+})
+
+test('a NON-switch edit still emits per-key unsets for removed dict entries', () => {
+  const effective = { transport: 'stdio' as const, command: '/bin/echo', args: [], env: new Map([['KEEP', 'k'], ['DROP', 'd']]), cwd: '', enabled: true }
+  const draft = stdioDraft({ env: new Map([['KEEP', 'k']]) })
+  const ops = mcpEditOps('srv', effective, draft, diffMcpServerDraft(effective, draft))
+  assert.deepEqual(ops, [{ op: 'unset', path: ['servers', 'srv', 'env', 'DROP'] }])
+})

@@ -2797,8 +2797,13 @@ class RemoteMcpServerConfigurationConfig implements McpServerConfigurationConfig
     expectedRevision: number,
     pinnedGeneration: object,
   ): Promise<McpConfigWriteOutcome> {
-    // The generation fence: refuse BEFORE dispatch when the pinned Host
-    // authority is no longer the live one.
+    // The generation fence runs TWICE: once here (fail fast, before anything is
+    // queued) and once INSIDE the serialized write queue at dispatch time. The
+    // queue is async: a Connection may swap Hosts between the entry check and
+    // the actual RPC, and a Host B that happens to carry the same namespace
+    // revision must still never receive Host A's edit intent. The dispatch-time
+    // check throws out of the mirror's write task, which surfaces as this
+    // method's failure — never as a dispatch.
     if (!Object.is(this.mirror.readyGeneration(), pinnedGeneration)) {
       return {
         kind: 'failed',
@@ -2812,7 +2817,19 @@ class RemoteMcpServerConfigurationConfig implements McpServerConfigurationConfig
       // `record`: a write whose post-settlement refresh cannot complete is a
       // committed-but-unverified fact (`outcome-unconfirmed`), never a fake
       // refusal — exactly the FR4 unconfirmed contract.
-      await this.mirror.mutate(MCP_SERVER_SOURCES_NS, wireOps, expectedRevision, 'record')
+      await this.mirror.mutate(MCP_SERVER_SOURCES_NS, wireOps, expectedRevision, 'record', () => {
+        if (!Object.is(this.mirror.readyGeneration(), pinnedGeneration)) {
+          // Thrown inside the queue BEFORE the RPC: the write was never
+          // dispatched, so this is a PROVEN refusal of a stale-authority
+          // intent. The `settings/writer-superseded` code (a registered
+          // pre-invocation refusal in the shared classifier) keeps the
+          // settlement `rejected` instead of `outcome-unconfirmed`.
+          throw Object.assign(
+            new Error('the Host authority changed before the write was dispatched'),
+            { code: 'settings/writer-superseded' },
+          )
+        }
+      })
     } catch (error) {
       const message = remoteFailureMessage(error)
       const code = remoteFailureCode(error)

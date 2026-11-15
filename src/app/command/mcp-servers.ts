@@ -828,16 +828,27 @@ export class McpServersController {
     const dict = field === 'env' ? this.editor.draft.env : this.editor.draft.headers
     const current = dict.get(key)
     if (current === undefined) return
-    this.editor.draft.forms.set(`${field}:${key}`, form)
     if (form === 'literal') {
       // Keep the REFERENCE NAME as the literal text: switching the form must
       // never silently drop what the user typed.
-      const ref = current.replace(/^\$\{credential:/u, '').replace(/\}$/u, '')
-      dict.set(key, ref)
-    } else {
-      this.setEditorDictValue(field, key, current, 'reference')
+      dict.set(key, current.replace(/^\$\{credential:/u, '').replace(/\}$/u, ''))
+      this.editor.draft.forms.set(`${field}:${key}`, 'literal')
+      this.deps.requestRender()
       return
     }
+    // Target form `reference`: VALIDATE the conversion first. The value and
+    // its declared form are a PAIR — a conversion that cannot produce a legal
+    // `${credential:REF}` token must leave BOTH untouched (a value shown as a
+    // credential reference that is not one is a persistence-semantics lie), so
+    // the check happens before any state changes.
+    const ref = current.trim().replace(/^\$\{credential:/u, '').replace(/\}$/u, '')
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(ref)) {
+      this.configStatus = { kind: 'rejected', text: 'Not saved · this value cannot become a credential reference (the REF name is invalid); edit the value first' }
+      this.deps.requestRender()
+      return
+    }
+    dict.set(key, `\${credential:${ref}}`)
+    this.editor.draft.forms.set(`${field}:${key}`, 'reference')
     this.deps.requestRender()
   }
 
@@ -1225,6 +1236,18 @@ export class McpServersController {
       this.operation = undefined
       this.notice = undefined
     }
+    // FR4: the configuration facts are generation-bound too. The descriptor
+    // verdict degrades to unavailable, and an open draft/confirmation bound to
+    // the replaced Host dies with it (zero writes). A config write ALREADY
+    // DISPATCHED is never claimed cancelled: its settlement simply stops being
+    // this page's business — the write token is retired so a late result can
+    // never repaint the new Host's page, and the in-flight latch is released so
+    // the new authority's page is not locked by the old saving state.
+    this.configuration = { kind: 'unavailable', reason: 'the Host authority changed' }
+    this.editor = undefined
+    this.configConfirm = undefined
+    this.configWriteToken += 1
+    this.configStatus = undefined
   }
 
   private acceptWatchEvent(event: McpServerWatchEvent): void {
@@ -1251,10 +1274,6 @@ export class McpServersController {
     // previous Host's probe report/feedback/confirmation never describes it.
     if (this.generation !== undefined && !Object.is(this.generation, event.roster.generation)) {
       this.retireGenerationBoundState()
-      // FR4: an open draft bound to the replaced Host is retired with it.
-      this.configuration = { kind: 'unavailable', reason: 'the Host authority changed' }
-      this.editor = undefined
-      this.configConfirm = undefined
       if (this.operation?.kind === 'probe') {
         this.operation = undefined
         this.notice = undefined

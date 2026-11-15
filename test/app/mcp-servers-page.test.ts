@@ -640,3 +640,50 @@ test('the form exposes an explicit storage-form row that the user can switch', (
   const after = render(page, 100, 20).join('\n')
   assert.match(after, /stored as: Literal \(stored in profile\)/u, 'the switch is painted')
 })
+
+test('the focused field stays visible while walking the form at short grants', () => {
+  for (const [width, rows] of [[80, 10], [44, 8]] as const) {
+    const { page } = makePage(snapshot({
+      selectedConfig: CONFIG_FACET,
+      editor: editorSnapshot({
+        args: ['--one', '--two', '--three'],
+        env: [
+          { key: 'A', value: '${credential:A}' },
+          { key: 'B', value: '${credential:B}' },
+          { key: 'C', value: '${credential:C}' },
+        ],
+        dirty: true,
+      }),
+    }))
+    openEditor(page, 'a', width, rows)
+    // Walk every field; after each step the FOCUSED label must be painted.
+    for (let step = 0; step < 24; step += 1) {
+      page.handleInput('\x1b[B')
+      const frame = render(page, width, rows).join('\n')
+      const focused = /▸ ([^:\n]+):/u.exec(frame)
+      assert.ok(focused !== null, `${width}x${rows} step ${String(step)}: a focused row must be painted`)
+      assert.notEqual((focused[1] ?? '').trim(), '', `${width}x${rows} step ${String(step)}: the focus marker labels a field`)
+    }
+    // Save and Esc remain reachable at the floor after walking.
+    const final = render(page, width, rows).join('\n')
+    assert.match(final, /s Save/u, `${width}x${rows}: Save stays reachable`)
+    assert.match(final, /Back \[Esc\]/u, `${width}x${rows}: Esc stays reachable`)
+  }
+})
+
+test('adding rows keeps later fields reachable and the focus visible', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ dirty: true }),
+  }))
+  openEditor(page, 'e', 80, 10)
+  // Add three argument rows, then walk past them into the env rows.
+  controller.addEditorArg()
+  controller.addEditorArg()
+  controller.addEditorArg()
+  for (let step = 0; step < 20; step += 1) {
+    page.handleInput('\x1b[B')
+    const frame = render(page, 80, 10).join('\n')
+    assert.match(frame, /▸ [^:\n]+:/u, `step ${String(step)}: the focused field is painted`)
+  }
+})

@@ -274,20 +274,22 @@ export function mcpEditOps(name: string, effective: McpClassifiedServerEntry['ef
     if (patch.scalars.has('command')) ops.push({ op: 'set', path: [...root, 'command'], value: draft.command })
     if (patch.scalars.has('cwd')) ops.push({ op: 'set', path: [...root, 'cwd'], value: draft.cwd })
     if (patch.scalars.has('args')) ops.push({ op: 'set', path: [...root, 'args'], value: [...draft.args] })
-    // `env` is a stdio field only: its per-key patch rides ONLY here (a switch
-    // already cleared the whole dict above, and the switch itself never emits
-    // a per-key unset that could restore an inherited value).
+    // `env` is a stdio field only. On a TRANSPORT SWITCH the abandoned dict was
+    // already reset wholesale above, so the per-key patch of the NEW transport
+    // rides as plain `set`s (an unset could restore an inherited key the user
+    // never asked to restore); without a switch the ordinary per-key patch
+    // applies.
     const envPatch = patch.env
-    if (!switched && envPatch !== undefined) {
+    if (envPatch !== undefined) {
       for (const [key, value] of envPatch.set) ops.push({ op: 'set', path: [...root, 'env', key], value })
-      for (const key of envPatch.unset) ops.push({ op: 'unset', path: [...root, 'env', key] })
+      if (!switched) for (const key of envPatch.unset) ops.push({ op: 'unset', path: [...root, 'env', key] })
     }
   } else {
     if (patch.scalars.has('url')) ops.push({ op: 'set', path: [...root, 'url'], value: draft.url })
     const headersPatch = patch.headers
-    if (!switched && headersPatch !== undefined) {
+    if (headersPatch !== undefined) {
       for (const [key, value] of headersPatch.set) ops.push({ op: 'set', path: [...root, 'headers', key], value })
-      for (const key of headersPatch.unset) ops.push({ op: 'unset', path: [...root, 'headers', key] })
+      if (!switched) for (const key of headersPatch.unset) ops.push({ op: 'unset', path: [...root, 'headers', key] })
     }
   }
   if (patch.scalars.has('enabled')) ops.push({ op: 'set', path: [...root, 'enabled'], value: draft.enabled })

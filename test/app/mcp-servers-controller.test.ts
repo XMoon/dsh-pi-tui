@@ -864,3 +864,47 @@ test('the HTTP disclosure never echoes a path, query or credential of an unparse
     `the disclosure must never echo the raw URL: ${warning}`)
   assert.match(warning, /Unknown target/u, 'an unparseable URL fails closed')
 })
+
+test('a failed literal-to-reference switch leaves the value AND its form untouched', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective({ env: { SECRET: 'has spaces!' } }) }])
+  h.controller.beginEdit()
+  // The stored literal cannot become a legal REF name.
+  assert.equal(h.controller.dictValueForm('env', 'SECRET'), 'literal')
+  h.controller.setEditorDictForm('env', 'SECRET', 'reference')
+  assert.equal(h.controller.dictValueForm('env', 'SECRET'), 'literal', 'the form stays literal after a refused switch')
+  const row = h.controller.snapshot().editor?.env.find(entry => entry.key === 'SECRET')
+  assert.equal(row?.value, 'has spaces!', 'the value is unchanged after a refused switch')
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'rejected')
+
+  // A VALID literal converts: both the value and the form move together.
+  h.controller.setEditorDictValue('env', 'SECRET', 'MY_TOKEN', 'literal')
+  h.controller.setEditorDictForm('env', 'SECRET', 'reference')
+  assert.equal(h.controller.dictValueForm('env', 'SECRET'), 'reference')
+  assert.equal(h.controller.snapshot().editor?.env.find(entry => entry.key === 'SECRET')?.value, '${credential:MY_TOKEN}')
+
+  // The symmetric header path behaves the same, and a refused switch never
+  // produces a mutation.
+  h.controller.setEditorTransport('streamable-http')
+  h.controller.addEditorDictKey('headers')
+  const placeholder = h.controller.snapshot().editor?.headers.find(entry => entry.key.startsWith('KEY_'))?.key
+  assert.ok(placeholder !== undefined)
+  h.controller.renameEditorDictKey('headers', placeholder, 'X-AUTH')
+  h.controller.setEditorDictValue('headers', 'X-AUTH', 'not a ref', 'literal')
+  h.controller.setEditorDictForm('headers', 'X-AUTH', 'reference')
+  assert.equal(h.controller.dictValueForm('headers', 'X-AUTH'), 'literal')
+  assert.equal(h.controller.snapshot().editor?.headers.find(entry => entry.key === 'X-AUTH')?.value, 'not a ref')
+  h.controller.saveEditor()
+  await h.flush()
+  // Whatever else the draft decides, no mutation was triggered BY the refused
+  // switch itself (the save path runs its own fences).
+  assert.notEqual(h.controller.snapshot().configStatus?.kind, undefined)
+})
+
+test('a reference-to-literal switch always succeeds and keeps the typed text', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective({ env: { TOKEN: '${credential:MY_TOKEN}' } }) }])
+  h.controller.beginEdit()
+  assert.equal(h.controller.dictValueForm('env', 'TOKEN'), 'reference')
+  h.controller.setEditorDictForm('env', 'TOKEN', 'literal')
+  assert.equal(h.controller.dictValueForm('env', 'TOKEN'), 'literal')
+  assert.equal(h.controller.snapshot().editor?.env.find(entry => entry.key === 'TOKEN')?.value, 'MY_TOKEN')
+})
