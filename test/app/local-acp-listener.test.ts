@@ -27,11 +27,12 @@ import {
   startLocalAcpListener,
   type LocalAcpListener,
 } from '../../src/app/remote-process/local-acp-listener.ts'
-import type {
-  AcpPromptFactListener,
-  AcpSessionPromptRequest,
-  HostAcpSessionAccess,
-  LiveAgentViewIdentity,
+import {
+  AcpSessionViewRegistry,
+  type AcpPromptFactListener,
+  type AcpSessionPromptRequest,
+  type HostAcpSessionAccess,
+  type LiveAgentViewIdentity,
 } from '../../src/app/remote-process/local-acp-session-view.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
@@ -764,6 +765,7 @@ function makeFakeAccess(): {
   agentOf: (id: string) => LiveAgentViewIdentity | undefined
   prompts: AcpSessionPromptRequest[]
   facts: () => AcpPromptFactListener | undefined
+  observeCalls: () => number
   removedMessageIds: string[]
   cancelledTurns: Array<{ readonly turn: number; readonly keepInbox: boolean }>
   turnFence: { openTurnStartSeq: number | null; lastTurn: number }
@@ -774,6 +776,7 @@ function makeFakeAccess(): {
   const cancelledTurns: Array<{ readonly turn: number; readonly keepInbox: boolean }> = []
   const turnFence = { openTurnStartSeq: null as number | null, lastTurn: 0 }
   let facts: AcpPromptFactListener | undefined
+  let observeCalls = 0
   let counter = 0
   return {
     access: {
@@ -819,12 +822,14 @@ function makeFakeAccess(): {
         return { kind: 'current' as const, openTurn: turnFence.openTurnStartSeq === null ? null : turnFence.lastTurn }
       },
       observePromptFacts(listener: AcpPromptFactListener) {
+        observeCalls += 1
         facts = listener
         return () => { facts = undefined }
       },
     },
     prompts,
     facts: () => facts,
+    observeCalls: () => observeCalls,
     agentOf: (id: string) => agents.get(id),
     seed: (id: string, cwd: string) => {
       const agent = { id, session: { id, header: { cwd } } }
@@ -1398,5 +1403,82 @@ test('R701-01b: retirement returns promptly while a shared turn is still running
     assert.equal(fake.facts(), undefined, 'the subscription is disposed at the real terminal')
   } finally {
     client.close()
+  }
+})
+
+test('R701-03: an Off -> On overlap keeps exactly ONE Host fact/approval subscription', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  // The controller-owned registry (shared across listener rebinds).
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const listenerA = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access, views: registry })
+  const clientA = await RawClient.open(listenerA.socketPath)
+  fake.seed('session-old', '/host/old')
+  fake.seed('session-new', '/host/new')
+  try {
+    initialize(clientA, 1)
+    await clientA.next()
+    clientA.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-old', cwd: '/host/old' } })
+    assert.deepEqual(((await clientA.next()) as { result?: unknown }).result, {})
+    // Unsettled work on the OLD listener: a claimed turn whose flight fails
+    // early, leaving a retired-turn approval fence behind.
+    clientA.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'session-old', prompt: [{ type: 'text', text: 'old' }] } })
+    const oldRequest = await waitForFact(() => fake.prompts[0], 'the old prompt')
+    const factsA = fake.facts()
+    const oldAgent = fake.agentOf('session-old')
+    assert.ok(factsA !== undefined && oldAgent !== undefined)
+    factsA.onInboxInserted(oldAgent, { id: 'm-old', source: { kind: 'user', rpcId: oldRequest.requestId } })
+    fake.turnFence.openTurnStartSeq = 10
+    fake.turnFence.lastTurn = 1
+    factsA.onInboxClaimed(oldAgent, { id: 'm-old', source: { kind: 'user', rpcId: oldRequest.requestId } }, 1)
+    factsA.onAgentError(oldAgent, 1)
+    assert.equal(fake.observeCalls(), 1, 'the only subscription is the registry-owned one')
+    // RUNTIME OFF: the socket dies, but the fence keeps the work unsettled.
+    await listenerA.close()
+    assert.equal(fake.facts() !== undefined, true, 'the registry-owned subscription survives the Off')
+    // RUNTIME ON immediately: the new listener reuses the SAME registry.
+    const listenerB = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access, views: registry })
+    try {
+      assert.equal(fake.observeCalls(), 1, 'the rebind must NOT register a second subscription')
+      const clientB = await RawClient.open(listenerB.socketPath)
+      try {
+        initialize(clientB, 1)
+        await clientB.next()
+        clientB.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-new', cwd: '/host/new' } })
+        assert.deepEqual(((await clientB.next()) as { result?: unknown }).result, {})
+        clientB.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'session-new', prompt: [{ type: 'text', text: 'new' }] } })
+        const newRequest = await waitForFact(() => fake.prompts[1], 'the new prompt')
+        const facts = fake.facts()
+        const newAgent = fake.agentOf('session-new')
+        assert.ok(facts !== undefined && newAgent !== undefined)
+        facts.onInboxInserted(newAgent, { id: 'm-new', source: { kind: 'user', rpcId: newRequest.requestId } })
+        facts.onInboxClaimed(newAgent, { id: 'm-new', source: { kind: 'user', rpcId: newRequest.requestId } }, 2)
+        facts.onSessionEvent(newAgent.session, {
+          type: 'assistant/message',
+          data: { turn: 2, message: { id: 'm-new', content: [{ type: 'text', text: 'one update' }] } },
+        })
+        // EXACTLY ONE session/update: a duplicate subscription would emit two.
+        const update = (await clientB.next()) as { method?: string; params?: { update?: { sessionUpdate?: string } } }
+        assert.equal(update.method, 'session/update')
+        assert.equal(update.params?.update?.sessionUpdate, 'agent_message_chunk')
+        assert.equal(await clientB.silent(500), true, 'no duplicate update arrived from a second subscription')
+        facts.onSessionEvent(newAgent.session, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
+        const response = (await clientB.next()) as { id?: number; result?: { stopReason?: string } }
+        assert.equal(response.id, 3)
+        assert.equal(response.result?.stopReason, 'end_turn')
+      } finally {
+        clientB.close()
+      }
+      // The OLD work ends for real: the fence dies, the registry settles and
+      // the controller-owned disposal is the ONE release.
+      assert.equal(fake.observeCalls(), 1)
+    } finally {
+      await listenerB.close()
+    }
+    assert.equal(fake.facts() !== undefined, true, 'the registry still owns its single subscription')
+    registry.disposeFacts()
+    assert.equal(fake.facts(), undefined, 'the controller-owned registry releases the ONE subscription')
+  } finally {
+    clientA.close()
   }
 })

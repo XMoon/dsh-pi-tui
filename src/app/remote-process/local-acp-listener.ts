@@ -700,21 +700,17 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
       : { sessionAccess, views: sharedViews ?? new AcpSessionViewRegistry(diag) }),
   }
 
-  // The prompt-flight fact subscription belongs to THIS listener lifetime: it
-  // is installed BEFORE the socket can accept a request and removed exactly
-  // once when the listener retires (or fails to bind). The same installation
-  // binds the ONE Host access the fact callbacks (and the scoped
-  // cancellations) act through.
+  // The ONE Host fact/approval subscription. A BIND-LOCAL registry is owned by
+  // this listener and is disposed after its accepted work settles; a
+  // CONTROLLER-owned (shared) registry outlives listener rebinds and is
+  // disposed by the controller, so an Off -> On overlap never registers the
+  // same registry twice (R701-03). Installation is idempotent either way.
   const views = context.views
-  let disposePromptFacts: (() => void) | undefined
-  if (views !== undefined && sessionAccess !== undefined) {
-    views.bindAccess(sessionAccess)
-    disposePromptFacts = sessionAccess.observePromptFacts(views)
-  }
+  const ownsFacts = views !== undefined && sessionAccess !== undefined && sharedViews === undefined
+  if (views !== undefined && sessionAccess !== undefined) views.observeFacts(sessionAccess)
   const releasePromptFacts = (): void => {
-    const dispose = disposePromptFacts
-    disposePromptFacts = undefined
-    dispose?.()
+    if (!ownsFacts) return
+    views?.disposeFacts()
   }
 
   const closeScopeDirFd = (): void => {
@@ -806,10 +802,7 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
    * shutdown are never blocked by a shared turn's duration.
    */
   const disposeFactsWhenSettled = (): void => {
-    if (views === undefined || disposePromptFacts === undefined) {
-      releasePromptFacts()
-      return
-    }
+    if (views === undefined || !ownsFacts) return
     runDetached('local acp: Host fact subscription retirement', async () => {
       await views.whenHostWorkSettled()
       releasePromptFacts()
