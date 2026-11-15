@@ -997,25 +997,38 @@ test('late facts of a settled old View never reach a new claim', async () => {
   assert.equal(next.notifications.length, 0, 'an old generation turn is never replayed to a new claim')
 })
 
-test('an aborted ACP request releases only the View flight and leaves the Host turn alone', async () => {
+test('an aborted ACP request scopes to the owned turn like any other cancel and never fakes a result', async () => {
   const view = promptView()
   await view.attach()
   const controller = new AbortController()
   const attempt = view.start('abort me', controller.signal)
   const request = view.access.promptCalls[0]!
   view.insert(request.requestId, 'm-1')
+  view.access.pendingInbox.delete('m-1')
+  view.access.turnFence = { openTurnStartSeq: 800, lastTurn: 8 }
+  view.access.agentStatus = 'running'
   view.claim('m-1', 8, request.requestId)
+  // The SDK RequestSignal abort is a CHANNEL fact: it routes through the SAME
+  // scoped cancellation and only the real user-aborted turn/end settles it.
   controller.abort(new Error('client went away'))
-  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_ABORTED'))
-  view.commit('assistant/message', assistantData(8, 'm-1', [{ type: 'text', text: 'after abort' }]))
-  assert.equal(view.notifications.length, 0)
+  assert.deepEqual(view.access.cancelledTurns, [{ turn: 8, keepInbox: true }], 'the exact owned turn is user-cancelled')
+  assert.equal(view.notifications.length, 0, 'a dead channel delivers nothing')
   assert.equal(view.access.promptCalls.length, 1, 'abort never re-dispatches the prompt')
+  view.commit('assistant/message', assistantData(8, 'm-1', [{ type: 'text', text: 'after abort' }]))
+  assert.equal(view.notifications.length, 0, 'post-abort committed output is not delivered')
+  view.commit('turn/end', { turn: 8, reason: { kind: 'aborted', reason: { kind: 'user' } } })
+  assert.deepEqual(await attempt, { stopReason: 'cancelled' })
   // The View is still attached and can take a new prompt afterwards.
   const second = view.start('next prompt')
   const secondRequest = view.access.promptCalls[1]!
   view.insert(secondRequest.requestId, 'm-2')
+  view.access.pendingInbox.delete('m-2')
+  view.access.turnFence = { openTurnStartSeq: 900, lastTurn: 9 }
+  view.access.agentStatus = 'running'
   view.claim('m-2', 9, secondRequest.requestId)
   view.commit('assistant/message', assistantData(9, 'm-2', [{ type: 'text', text: 'second answer' }]))
+  view.access.turnFence = { openTurnStartSeq: null, lastTurn: 9 }
+  view.access.agentStatus = 'idle'
   view.commit('turn/end', { turn: 9, reason: { kind: 'completed' } })
   assert.deepEqual(await second, { stopReason: 'end_turn' })
 })
@@ -1296,11 +1309,11 @@ test('a failure while the Host admission is pending never becomes an unhandled r
       let finishAdmission!: (value: { readonly accepted: true }) => void
       view.access.promptImpl = async () => await new Promise(resolveAdmission => { finishAdmission = resolveAdmission })
       const attempt = view.start('release while admitting')
-      view.registry.releaseConnection(view.conn)
+      view.registry.releaseConnection(view.conn, view.access)
       await new Promise(resolveTick => setTimeout(resolveTick, 20))
       assert.deepEqual(unhandled, [], 'a released View must not leave the flight rejection unhandled')
       finishAdmission({ accepted: true })
-      await assert.rejects(attempt, isPromptError('LOCAL_ACP_VIEW_CLOSED'))
+      await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_ABORTED'))
       assert.equal(view.access.promptCalls.length, 1)
     }
     {
@@ -1753,4 +1766,106 @@ test('RFL-002: an Agent disposal clears its retired-turn fence for good', async 
   )
   assert.equal(delegated, 1, 'after disposal the request is delegated, not trapped')
   assert.equal(outcome, 'rejected')
+})
+
+test('F1: an SDK disconnect during a pending admission still removes the LATE-inserted message exactly', async () => {
+  const view = promptView()
+  await view.attach()
+  let finishAdmission!: (value: { readonly accepted: true }) => void
+  view.access.promptImpl = async () => await new Promise(resolveAdmission => { finishAdmission = resolveAdmission })
+  const controller = new AbortController()
+  const attempt = view.start('late after death', controller.signal)
+  const request = view.access.promptCalls[0]!
+  // The physical channel dies while the Host admission is still in flight.
+  controller.abort(new Error('socket gone'))
+  assert.deepEqual(view.access.removedMessageIds, [], 'nothing is removable before the durable id exists')
+  assert.equal(view.registry.hasClaim('P1'), true, 'the claim keeps its attribution through the disconnect')
+  // The official admission completes LATE and inserts the message: the
+  // surviving fence must remove exactly it.
+  view.access.pendingInbox.add('m-late-f1')
+  view.registry.onInboxInserted(view.agent, view.message('m-late-f1', request.requestId))
+  assert.deepEqual(view.access.removedMessageIds, ['m-late-f1'], 'the late-inserted message is removed exactly once')
+  finishAdmission({ accepted: true })
+  assert.deepEqual(await attempt, { stopReason: 'cancelled' })
+})
+
+test('F1: a disconnect while the turn is running cancels the exact owned turn through the surviving claim', async () => {
+  const view = promptView()
+  await view.attach()
+  const controller = new AbortController()
+  const attempt = view.start('running at death', controller.signal)
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-run')
+  view.access.pendingInbox.delete('m-run')
+  view.access.turnFence = { openTurnStartSeq: 600, lastTurn: 6 }
+  view.access.agentStatus = 'running'
+  view.claim('m-run', 6, request.requestId)
+  controller.abort(new Error('socket gone'))
+  assert.deepEqual(view.access.cancelledTurns, [{ turn: 6, keepInbox: true }], 'the SDK abort routes through the scoped cancellation')
+  assert.equal(view.notifications.length, 0, 'a dead channel delivers nothing')
+  view.commit('turn/end', { turn: 6, reason: { kind: 'aborted', reason: { kind: 'user' } } })
+  assert.deepEqual(await attempt, { stopReason: 'cancelled' })
+})
+
+test('F2: a close after an early flight failure keeps the retired-turn approval fence (no TUI leak)', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-f2')
+  view.access.pendingInbox.delete('m-f2')
+  view.claim('m-f2', 4, request.requestId)
+  // The flight fails early (an output delivery failure) BEFORE its turn ended.
+  view.registry.onAgentError(view.agent, 4)
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_TURN_FAILED'))
+  // The client closes the View; the old turn is STILL running.
+  view.access.turnFence = { openTurnStartSeq: 400, lastTurn: 4 }
+  await view.registry.closeSession(view.conn, view.access, 'P1')
+  // A late approval of that exact turn must NOT be delegated to the TUI.
+  let delegated = false
+  const outcome = await view.registry.onApprovalRequest(
+    { agent: view.agent, toolName: 'bash', callId: 'call-f2' },
+    async () => { delegated = true; return 'allowed-once' },
+  )
+  assert.equal(delegated, false, 'the retired ACP turn approval never reaches the TUI after the close')
+  assert.equal(outcome, 'unavailable')
+  // The fence dies on the real turn/end; a LATER TUI turn delegates again.
+  view.commit('turn/end', { turn: 4, reason: { kind: 'error', error: { message: 'x', code: 'UNKNOWN' } } })
+  view.access.turnFence = { openTurnStartSeq: 500, lastTurn: 5 }
+  let delegatedAfter = 0
+  await view.registry.onApprovalRequest(
+    { agent: view.agent, toolName: 'bash', callId: 'call-next' },
+    async () => { delegatedAfter += 1; return 'rejected' },
+  )
+  assert.equal(delegatedAfter, 1, 'after the fence died a TUI turn delegates again')
+})
+
+test('F2: a physical disconnect after an early flight failure keeps the retired-turn fence too', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-f2b')
+  view.access.pendingInbox.delete('m-f2b')
+  view.claim('m-f2b', 7, request.requestId)
+  view.registry.onAgentError(view.agent, 7)
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_TURN_FAILED'))
+  view.access.turnFence = { openTurnStartSeq: 700, lastTurn: 7 }
+  view.registry.releaseConnection(view.conn, view.access)
+  let delegated = false
+  const outcome = await view.registry.onApprovalRequest(
+    { agent: view.agent, toolName: 'bash', callId: 'call-f2b' },
+    async () => { delegated = true; return 'allowed-once' },
+  )
+  assert.equal(delegated, false, 'a disconnect does not leak the retired ACP turn approval to the TUI')
+  assert.equal(outcome, 'unavailable')
+  view.commit('turn/end', { turn: 7, reason: { kind: 'error', error: { message: 'x', code: 'UNKNOWN' } } })
+  // The fence died with the real terminal; a new TUI turn is delegated.
+  view.access.turnFence = { openTurnStartSeq: 800, lastTurn: 8 }
+  let delegatedAfter = 0
+  await view.registry.onApprovalRequest(
+    { agent: view.agent, toolName: 'bash', callId: 'call-after' },
+    async () => { delegatedAfter += 1; return 'rejected' },
+  )
+  assert.equal(delegatedAfter, 1)
 })

@@ -667,7 +667,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
 
   /** Release one settled claim and record the idempotent close fact. */
   private finishClose(state: ConnectionViewState, sessionId: string, claim: ViewClaim): Record<string, never> {
-    if (this.claims.get(sessionId) === claim) this.claims.delete(sessionId)
+    // A retired-turn approval fence may still outlive its failed flight until
+    // the real turn/end or Agent disposal ends it (F2): the View detaches, but
+    // the fence keeps the claim so a LATE approval of that exact ACP-owned
+    // turn can never be delegated to the TUI. A fence-less claim is released.
+    if (claim.retiringTurn === undefined && this.claims.get(sessionId) === claim) {
+      this.claims.delete(sessionId)
+    }
     // This close also cancels any in-flight attach for this connection (same
     // generation semantics as PO-2); a superseded op can never re-commit.
     state.phase = 'idle'
@@ -712,16 +718,15 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (reason === 'disconnect') flight.deliveryClosed = true
     flight.cancelRequested = true
     this.addressCancelIntent(claim, flight, access)
-    // Wait for the flight's own settlement, which the fact callbacks drive.
-    // observeSettled already guards the rejection against going unhandled.
+    // Wait for the flight's own settlement, which the fact callbacks drive:
+    // a proven queued removal, the exact turn's real terminal, or the
+    // admission's own classified failure. observeSettled already guards the
+    // rejection against going unhandled.
     const outcome = await flight.settled.promise.then(() => 'settled', (error: unknown) => error)
-    if (reason !== 'disconnect') {
-      if (outcome !== 'settled') throw outcome
-      return
-    }
-    // A disconnected View cannot answer the ACP request, but the Host turn may
-    // still be running: the flight settled (or failed) is all this side owns.
-    return
+    // A close (and an explicit cancel observed by the client) surfaces an
+    // unproven settlement as its real error; a disconnect has no channel left
+    // to answer, so its flight's own settlement is all this side owns.
+    if (reason !== 'disconnect' && outcome !== 'settled') throw outcome
   }
 
   /**
@@ -895,11 +900,20 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // request below and is never swallowed.
     observeSettled(flight.settled.promise, () => {})
     const onAbort = (): void => {
-      this.failPrompt(claim, flight, promptError(
-        'LOCAL_ACP_PROMPT_ABORTED',
-        'the ACP prompt request was aborted before a real Host settlement',
-        JSONRPC_INTERNAL_ERROR,
-      ))
+      // The SDK aborts the RequestSignal both when THIS connection dies and
+      // when the client cancels the request. Either way the ACP channel can
+      // no longer receive anything, but that is a CHANNEL fact, never a Host
+      // cancellation proof (F1): the message may still be admitted late,
+      // queued or running on the exact Agent. Close delivery, kill the
+      // reverse channel, and route the intent through the SAME scoped
+      // cancellation every other path uses; the real Host facts alone settle
+      // the flight (never this signal).
+      flight.deliveryClosed = true
+      this.abortPermissionRequests(flight)
+      if (!flight.settledDone && !flight.cancelRequested) {
+        flight.cancelRequested = true
+        if (this.access !== undefined) this.addressCancelIntent(claim, flight, this.access)
+      }
     }
     requestSignal.addEventListener('abort', onAbort, { once: true })
     flight.detachAbort = () => requestSignal.removeEventListener('abort', onAbort)
@@ -924,6 +938,16 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           this.failPrompt(claim, flight, promptError(
             'LOCAL_ACP_PROMPT_STALE_AGENT',
             'the accepted prompt was not observed on the Agent generation this View attached; it was not re-dispatched',
+            JSONRPC_INTERNAL_ERROR,
+          ))
+        } else if (flight.messageId === undefined && flight.deliveryClosed && flight.cancelRequested) {
+          // The admission resolved AFTER the channel died and this View never
+          // observed its own durable message: there is no live channel to
+          // answer, no message fact to cancel and no turn to attribute, so
+          // the flight ends bounded instead of waiting forever.
+          this.failPrompt(claim, flight, promptError(
+            'LOCAL_ACP_PROMPT_ABORTED',
+            'the ACP prompt request was aborted before a real Host settlement',
             JSONRPC_INTERNAL_ERROR,
           ))
         } else {
@@ -1256,18 +1280,19 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       const flight = claim.inflight
       if (flight !== undefined) {
         const bound = access ?? this.access
-        if (bound === undefined || flight.messageId === undefined) {
-          // No Host access was bound, or the flight has no durable Host fact
-          // to cancel: keep the PO-3A fail-closed release.
+        if (bound === undefined) {
+          // No Host access was ever bound (raw-socket contracts): keep the
+          // PO-3A fail-closed release.
           this.failPrompt(claim, flight, new LocalAcpViewError(
             'LOCAL_ACP_VIEW_CLOSED',
             'the ACP connection closed before the prompt settled',
             JSONRPC_INTERNAL_ERROR,
           ))
-          this.claims.delete(sessionId)
+          this.releaseClaimIfUnfenced(sessionId, claim)
           continue
         }
-        // The flight owns a real Host fact: the same scoped cancellation runs;
+        // The flight owns (or may still acquire) a real Host fact: the same
+        // scoped cancellation runs — the late-insertion fence included — and
         // its proven settlement (or its real failure) releases the claim.
         runDetached('local acp: disconnect cancellation', async () => {
           try {
@@ -1280,8 +1305,22 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         }, { diag: this.diag })
         continue
       }
+      // No open flight: the claim may still carry the retired-turn approval
+      // fence of an ALREADY-failed flight whose turn has not ended. Dropping
+      // it would leak that turn's approvals to the TUI (F2); keep the claim
+      // until the fence dies on its own facts.
+      if (claim.retiringTurn !== undefined) continue
       this.claims.delete(sessionId)
     }
+  }
+
+  /**
+   * Release one claim after a fail-closed flight UNLESS it still carries a
+   * retired-turn fence that must survive until its own facts end it.
+   */
+  private releaseClaimIfUnfenced(sessionId: string, claim: ViewClaim): void {
+    if (claim.retiringTurn !== undefined) return
+    if (this.claims.get(sessionId) === claim) this.claims.delete(sessionId)
   }
 
   /** Release one disconnect claim after its flight settled. */
