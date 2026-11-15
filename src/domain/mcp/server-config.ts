@@ -114,11 +114,16 @@ function validTemplateSyntax(value: string): boolean {
   return true
 }
 
-/** Whether one env/header key is acceptable (non-empty, no control chars,
- *  no `.`/`$`/newline — the official path op turns it into a settings path
- *  segment, so a path-meta key is refused before dispatch). */
+/**
+ * Whether one env/header key is acceptable. The official Settings path op uses
+ * each segment as a LITERAL object key (`Object.defineProperty(result, head)`),
+ * and the `mcp-manager` schema types env/headers as `z.dict(String)` with no
+ * key grammar of its own — so a dot, a `$` or a colon is a legal key. Only an
+ * empty key and embedded control characters are refused (they cannot be
+ * painted or round-tripped).
+ */
 function validMapKey(key: string): boolean {
-  return key !== '' && !/[\u0000-\u001f\u007f]/u.test(key) && !key.includes('.') && !key.includes('$')
+  return key !== '' && !/[\u0000-\u001f\u007f]/u.test(key)
 }
 
 /**

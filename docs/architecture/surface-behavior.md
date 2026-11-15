@@ -1498,9 +1498,9 @@ for keys the BASE layer does not own only: the official per-key `unset` on a
 base-owned key RESTORES the inherited value (it cannot delete it), so such rows
 state `Inherited · cannot remove here` and a backspace on them is inert.
 
-Keys: list `↑/↓` move, `Enter` opens the detail, `a` begins Add when the Host
-settings are current, `/` filters by name, `r` re-observes, `Esc` cancels search /
-returns to Tools; detail `p` probes, `x` asks
+Keys: list `↑/↓` move, `Enter` opens the detail, `a` begins Add from the LIST
+when the Host settings are current and no configuration write is unsettled, `/`
+filters by name, `r` re-observes, `Esc` cancels search / returns to Tools; detail `p` probes, `x` asks
 `Restart <name>? Live tools may be interrupted` (only `y` dispatches, `Esc`
 cancels), `e` edits, `t` asks
 `Change saved configuration? The MCP process may stop or start`, `d` asks the
@@ -1510,10 +1510,12 @@ exact-name Delete confirmation, `u` asks the Reset-to-inherited confirmation,
 can reach outside the Host), `Esc` leaves an input or asks the discard
 confirmation; while an input is active `a/e/t/d/u/s` are text.
 Delete/Reset/toggle/Save confirmations respond only to `y` or `Esc`. While searching,
-`p/x/r/y` and every CRUD key are query text only. Every action requires a
-current observation, a same-generation current settings descriptor, an exact
-listed entry and no in-flight operation; `loading`/`stale`/`unavailable` states
-explain themselves and expose no executable action. A write uses ONE official
+`p/x/r/y` and every CRUD key are query text only. Probe/Restart require a
+current manager observation, a live (not retained) listed entry and no in-flight
+operation; they do NOT depend on the configuration descriptor. Every
+configuration edit additionally requires the same-generation current settings
+descriptor and that entry's config source; `loading`/`stale`/`unavailable`
+states explain themselves and expose no executable action. A write uses ONE official
 revision-checked settings mutation; the result is `Saving configuration…`,
 `Saved · waiting for Host reconcile`, a revision conflict, an unavailable Host,
 a proven refusal, or `Outcome unconfirmed …` after a lost settlement. A saved

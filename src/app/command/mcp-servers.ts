@@ -709,8 +709,15 @@ export class McpServersController {
 
   /** Replace one scalar field of the open draft. A synchronous reentrancy
    *  guard: nothing else may have closed the editor in between. */
+  /** Replace one scalar field of the open draft.
+   *
+   *  Every draft mutator carries the SAME two gates: the form must exist, and
+   *  no configuration write may be unsettled. Once a Save is dispatched the
+   *  draft is FROZEN until it settles — an edit typed after dispatch would be
+   *  silently dropped when the write closes the form, and a second submit
+   *  would race the first. This is the one `saving` state the page paints. */
   setEditorField(field: 'name' | 'command' | 'cwd' | 'url', value: string): void {
-    if (this.disposed || this.editor === undefined) return
+    if (this.disposed || this.editor === undefined || this.configStatusIsInFlight()) return
     if (field === 'name' && this.editor.mode === 'edit') return
     this.editor.draft[field] = value
     this.deps.requestRender()
@@ -718,7 +725,7 @@ export class McpServersController {
 
   /** Switch the draft transport (an explicit user choice). */
   setEditorTransport(transport: McpServerTransport): void {
-    if (this.disposed || this.editor === undefined) return
+    if (this.disposed || this.editor === undefined || this.configStatusIsInFlight()) return
     if (this.editor.draft.transport === transport) return
     this.editor.draft.transport = transport
     this.deps.requestRender()
@@ -726,21 +733,21 @@ export class McpServersController {
 
   /** Toggle the draft's `enabled`. */
   setEditorEnabled(enabled: boolean): void {
-    if (this.disposed || this.editor === undefined) return
+    if (this.disposed || this.editor === undefined || this.configStatusIsInFlight()) return
     this.editor.draft.enabled = enabled
     this.deps.requestRender()
   }
 
   /** Insert one empty argument row (each argument is its own row). */
   addEditorArg(): void {
-    if (this.disposed || this.editor === undefined) return
+    if (this.disposed || this.editor === undefined || this.configStatusIsInFlight()) return
     this.editor.draft.args.push('')
     this.deps.requestRender()
   }
 
   /** Edit one argument VALUE. */
   setEditorArg(index: number, value: string): void {
-    if (this.disposed || this.editor === undefined) return
+    if (this.disposed || this.editor === undefined || this.configStatusIsInFlight()) return
     if (index < 0 || index >= this.editor.draft.args.length) return
     this.editor.draft.args[index] = value
     this.deps.requestRender()
@@ -748,7 +755,7 @@ export class McpServersController {
 
   /** Remove one argument row. */
   removeEditorArg(index: number): void {
-    if (this.disposed || this.editor === undefined) return
+    if (this.disposed || this.editor === undefined || this.configStatusIsInFlight()) return
     if (index < 0 || index >= this.editor.draft.args.length) return
     this.editor.draft.args.splice(index, 1)
     this.deps.requestRender()
@@ -756,7 +763,7 @@ export class McpServersController {
 
   /** Insert one empty env/header row. */
   addEditorDictKey(field: 'env' | 'headers'): void {
-    if (this.disposed || this.editor === undefined) return
+    if (this.disposed || this.editor === undefined || this.configStatusIsInFlight()) return
     const dict = field === 'env' ? this.editor.draft.env : this.editor.draft.headers
     // A unique placeholder key: the user renames it; a duplicate real key is
     // refused by `validateMcpServerDraft`'s map-key rules / the official
@@ -770,10 +777,23 @@ export class McpServersController {
   /** Rename one env/header key (a duplicate key is refused by the draft
    *  validation, not merged). */
   renameEditorDictKey(field: 'env' | 'headers', from: string, to: string): void {
-    if (this.disposed || this.editor === undefined) return
+    if (this.disposed || this.editor === undefined || this.configStatusIsInFlight()) return
     const dict = field === 'env' ? this.editor.draft.env : this.editor.draft.headers
     if (!dict.has(from) || from === to) return
     if (dict.has(to)) return
+    // A base-owned key may not be renamed: the official per-key `unset` on the
+    // OLD name RESTORES its inherited value, so the save would leave BOTH the
+    // old and the new key in force while the form showed only one. The same
+    // base-ownership fact that gates Remove gates Rename; the VALUE stays
+    // editable. Refuse loudly instead of silently dropping the edit.
+    if (!this.canRemoveDictKey(field, from)) {
+      this.configStatus = {
+        kind: 'rejected',
+        text: 'Not saved · an inherited key cannot be renamed; edit its value or add a new key',
+      }
+      this.deps.requestRender()
+      return
+    }
     // Rebuild the map to keep the edited order stable.
     const entries = [...dict.entries()].map(([key, existing]) => key === from ? [to, existing] as const : [key, existing] as const)
     dict.clear()
@@ -794,7 +814,7 @@ export class McpServersController {
    * silently converted into one another.
    */
   setEditorDictValue(field: 'env' | 'headers', key: string, value: string, form: 'reference' | 'literal' = 'reference'): void {
-    if (this.disposed || this.editor === undefined) return
+    if (this.disposed || this.editor === undefined || this.configStatusIsInFlight()) return
     const dict = field === 'env' ? this.editor.draft.env : this.editor.draft.headers
     if (!dict.has(key)) return
     const formKey = `${field}:${key}`
@@ -824,7 +844,7 @@ export class McpServersController {
   /** Flip the storage form of one env/header value WITHOUT changing its text
    *  meaning: the typed value is re-stored in the newly chosen form. */
   setEditorDictForm(field: 'env' | 'headers', key: string, form: 'reference' | 'literal'): void {
-    if (this.disposed || this.editor === undefined) return
+    if (this.disposed || this.editor === undefined || this.configStatusIsInFlight()) return
     const dict = field === 'env' ? this.editor.draft.env : this.editor.draft.headers
     const current = dict.get(key)
     if (current === undefined) return
@@ -867,7 +887,7 @@ export class McpServersController {
   /** Remove one env/header row (User-added keys only — the official per-key
    *  `unset` on a base-owned key would restore the inherited value). */
   removeEditorDictKey(field: 'env' | 'headers', key: string): void {
-    if (this.disposed || this.editor === undefined) return
+    if (this.disposed || this.editor === undefined || this.configStatusIsInFlight()) return
     if (!this.canRemoveDictKey(field, key)) return
     const dict = field === 'env' ? this.editor.draft.env : this.editor.draft.headers
     dict.delete(key)

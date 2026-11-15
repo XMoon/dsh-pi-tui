@@ -176,21 +176,6 @@ const LIST_HINTS: readonly ActionBarSegment[] = [
   // truncates it).
   { text: 'Back [Esc]', priority: 1000 },
 ]
-const DETAIL_ACTION_HINTS: readonly ActionBarSegment[] = [
-  { text: 'p probe', priority: 30 },
-  { text: 'x restart', priority: 25 },
-  { text: 'e edit', priority: 24 },
-  { text: 't enable/disable', short: 't toggle', priority: 23 },
-  { text: 'd delete', priority: 22 },
-  { text: 'u reset', priority: 21 },
-  { text: 'r refresh', priority: 10 },
-  { text: 'Back [Esc]', priority: 1000 },
-]
-const DETAIL_READONLY_HINTS: readonly ActionBarSegment[] = [
-  { text: '↑/↓ scroll', short: '↑/↓', priority: 20 },
-  { text: 'r refresh', priority: 10 },
-  { text: 'Back [Esc]', priority: 1000 },
-]
 const EDITOR_HINTS: readonly ActionBarSegment[] = [
   { text: '↑/↓ field', short: '↑/↓', priority: 30 },
   { text: 'Enter edit', short: 'Enter', priority: 25 },
@@ -1257,6 +1242,15 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     }
     if (this.view === 'editor') {
       if (this.formInput !== undefined) return paintBar(EDITOR_INPUT_HINTS, width, true)
+      // While the Save is unsettled the draft is FROZEN: `s Save` would be a
+      // second submit and the navigation keys would be inert, so only the
+      // truthful leave affordance is painted.
+      if (snapshot.configStatus?.kind === 'saving') {
+        return paintBar([
+          { text: 'Saving configuration…', short: 'Saving…', priority: 1000 },
+          { text: 'Esc', priority: 999 },
+        ], width, true)
+      }
       return paintBar(EDITOR_HINTS, width, true)
     }
     if (snapshot.confirmingName !== undefined) {
@@ -1273,18 +1267,35 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     if (this.searching) return paintBar(SEARCH_HINTS, width, true)
     if (this.inDetail()) {
       const selectedRow = snapshot.rows.find(row => row.name === snapshot.selectedName)
-      const actionable = snapshot.phase === 'ready'
+      // Probe/Restart follow the FR3 roster rules only: a live entry on a
+      // current observation with no in-flight operation. A retained cleanup
+      // record (`configured:false`) is diagnostic only.
+      const operable = snapshot.phase === 'ready'
         && snapshot.operation?.phase !== 'running'
         && snapshot.selectedName !== undefined
-        // A retained cleanup record (`configured:false`) is diagnostic only:
-        // no Probe/Restart affordance may be painted or dispatched.
         && selectedRow?.configured === true
-      // A CRUD affordance is painted ONLY for a config-owned entry proven by
-      // the same-generation descriptor (the key set alone is not enough).
-      const crud = snapshot.selectedConfig !== undefined
-      return paintBar(actionable && crud ? DETAIL_ACTION_HINTS : DETAIL_READONLY_HINTS, width, true)
+      // Each CRUD affordance is painted from the facet the controller actually
+      // computed from the same-generation descriptor: a plugin-owned server has
+      // no config entry (so no `e/t/d/u`) but STILL offers `p/x`, while an
+      // inherited entry offers edit/toggle but neither Delete nor Reset.
+      const facet = snapshot.selectedConfig
+      const segments: ActionBarSegment[] = []
+      if (operable) {
+        segments.push({ text: 'p probe', priority: 30 }, { text: 'x restart', priority: 25 })
+      }
+      if (facet !== undefined) {
+        segments.push({ text: 'e edit', priority: 24 })
+        if (facet.canToggle) segments.push({ text: 't enable/disable', short: 't toggle', priority: 23 })
+        if (facet.canDelete) segments.push({ text: 'd delete', priority: 22 })
+        if (facet.canReset) segments.push({ text: 'u reset', priority: 21 })
+      }
+      segments.push({ text: 'r refresh', priority: 10 }, { text: 'Back [Esc]', priority: 1000 })
+      return paintBar(segments, width, true)
     }
-    const addable = snapshot.phase === 'ready' && snapshot.config?.kind === 'ready'
+    const addable = snapshot.phase === 'ready'
+      && snapshot.config?.kind === 'ready'
+      // Add dispatches a write, so it is not offered while one is unsettled.
+      && snapshot.configStatus?.kind !== 'saving'
     return paintBar(addable ? LIST_HINTS : LIST_HINTS.filter(segment => !segment.text.includes('Add')), width, true)
   }
 }

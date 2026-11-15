@@ -950,3 +950,100 @@ test('a user-added server has no base keys, so every env key is removable', asyn
   h.controller.removeEditorDictKey('env', 'MINE')
   assert.equal(h.controller.snapshot().editor?.env.some(entry => entry.key === 'MINE'), false)
 })
+
+test('an inherited key cannot be renamed, but its value stays editable', async () => {
+  const h = await readyHarness([{
+    name: 'inherited',
+    provenance: 'inherited',
+    effective: stdioEffective({ env: { BASE_KEY: 'base-value' }, headers: {} }),
+    baseKeys: { env: ['BASE_KEY'], headers: [] },
+  }], 4)
+  h.controller.beginEdit()
+  h.controller.renameEditorDictKey('env', 'BASE_KEY', 'RENAMED')
+  // A rename would emit an unset of the OLD name (restoring the inherited value)
+  // plus a set of the NEW one: both would exist. It is refused, loudly.
+  assert.equal(h.controller.snapshot().editor?.env.some(entry => entry.key === 'BASE_KEY'), true,
+    'the base-owned key keeps its name')
+  assert.equal(h.controller.snapshot().editor?.env.some(entry => entry.key === 'RENAMED'), false,
+    'no renamed copy is created')
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'rejected')
+  // The VALUE of the inherited key stays editable.
+  h.controller.setEditorDictValue('env', 'BASE_KEY', 'my-override', 'literal')
+  assert.equal(h.controller.snapshot().editor?.env.find(entry => entry.key === 'BASE_KEY')?.value, 'my-override')
+
+  // A user-added key on the same inherited server renames normally.
+  h.controller.addEditorDictKey('env')
+  const placeholder = h.controller.snapshot().editor?.env.find(entry => entry.key.startsWith('KEY_'))?.key
+  assert.ok(placeholder !== undefined)
+  h.controller.renameEditorDictKey('env', placeholder, 'MINE')
+  assert.equal(h.controller.snapshot().editor?.env.some(entry => entry.key === 'MINE'), true)
+
+  // The Header direction behaves the same.
+  h.controller.setEditorTransport('streamable-http')
+  h.controller.renameEditorDictKey('headers', 'H', 'H2')
+  assert.notEqual(h.controller.snapshot().configStatus?.kind, 'saved')
+})
+
+test('a header key owned by the base layer cannot be renamed either', async () => {
+  const h = await readyHarness([{
+    name: 'inherited',
+    provenance: 'inherited',
+    effective: { transport: 'streamable-http', url: 'https://x.test/rpc', headers: { 'X-Base': 'v' }, enabled: true },
+    baseKeys: { env: [], headers: ['X-Base'] },
+  }], 2)
+  h.controller.beginEdit()
+  h.controller.renameEditorDictKey('headers', 'X-Base', 'X-Renamed')
+  assert.equal(h.controller.snapshot().editor?.headers.some(entry => entry.key === 'X-Base'), true)
+  assert.equal(h.controller.snapshot().editor?.headers.some(entry => entry.key === 'X-Renamed'), false)
+  h.controller.setEditorDictValue('headers', 'X-Base', 'new-value', 'literal')
+  assert.equal(h.controller.snapshot().editor?.headers.find(entry => entry.key === 'X-Base')?.value, 'new-value')
+})
+
+test('a dispatched Save freezes the draft: later edits are refused and never lost silently', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  let release!: (outcome: McpConfigWriteOutcome) => void
+  h.configuration.outcome = () => new Promise<McpConfigWriteOutcome>(resolve => { release = resolve }) as never
+  h.controller.beginEdit()
+  h.controller.setEditorField('command', '/bin/true')
+  h.controller.saveEditor()
+  if (h.controller.snapshot().configConfirm?.kind === 'save') h.controller.answerConfigConfirm(true)
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'saving')
+  // Every draft mutator is inert while the write is unsettled — the edit is
+  // refused BEFORE it can be silently dropped by the closing form.
+  h.controller.setEditorField('command', '/bin/false')
+  h.controller.setEditorTransport('streamable-http')
+  h.controller.setEditorEnabled(false)
+  h.controller.addEditorArg()
+  h.controller.addEditorDictKey('env')
+  h.controller.setEditorDictValue('env', 'K', 'v', 'literal')
+  assert.equal(h.controller.snapshot().editor?.command, '/bin/true', 'the frozen draft keeps the submitted value')
+  assert.equal(h.controller.snapshot().editor?.transport, 'stdio')
+  assert.equal(h.controller.snapshot().editor?.args.length, 0)
+  // A second submit is a no-op (no second mutation).
+  h.controller.saveEditor()
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 1)
+  release({ kind: 'saved', revision: 9 })
+  await h.flush()
+  assert.equal(h.controller.snapshot().editor, undefined, 'the settled form closes')
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'saved')
+})
+
+test('a refused conversion during a Save cannot downgrade the saving state', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective({ env: { E: '${credential:E}' } }) }])
+  let release!: (outcome: McpConfigWriteOutcome) => void
+  h.configuration.outcome = () => new Promise<McpConfigWriteOutcome>(resolve => { release = resolve }) as never
+  h.controller.beginEdit()
+  h.controller.setEditorField('command', '/bin/true')
+  h.controller.saveEditor()
+  if (h.controller.snapshot().configConfirm?.kind === 'save') h.controller.answerConfigConfirm(true)
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'saving')
+  // A malformed conversion would normally set `rejected`; while saving it must
+  // not touch the status (that would re-open the Save gate).
+  h.controller.setEditorDictForm('env', 'E', 'literal')
+  h.controller.setEditorDictValue('env', 'E', 'not a ref')
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'saving', 'the saving latch is not downgraded')
+  assert.equal(h.controller.canEditConfiguration(), false)
+  release({ kind: 'saved', revision: 9 })
+  await h.flush()
+})

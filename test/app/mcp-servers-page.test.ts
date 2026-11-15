@@ -717,3 +717,73 @@ test('a base-owned env key states it cannot be removed and backspace does nothin
   assert.deepEqual(controller.calls.filter(call => call.startsWith('removeDict')), [],
     'a base-owned key never reaches the removal intent')
 })
+
+test('the Detail Action Bar advertises exactly the actions the controller allows', () => {
+  // User-added: probe/restart + the full CRUD set that the facet allows.
+  const userAdded = makePage(snapshot({
+    selectedConfig: { ...CONFIG_FACET, canDelete: true, canReset: false },
+  }))
+  render(userAdded.page, 120, 20)
+  userAdded.page.handleInput('\r')
+  const userBar = render(userAdded.page, 120, 20).at(-1) ?? ''
+  for (const hint of [/p probe/u, /x restart/u, /e edit/u, /t (toggle|enable\/disable)/u, /d delete/u]) {
+    assert.match(userBar, hint, `user-added bar must offer ${String(hint)}`)
+  }
+  assert.doesNotMatch(userBar, /u reset/u, 'user-added has no override to reset')
+
+  // Inherited (unmodified): edit + toggle, NEITHER delete nor reset.
+  const inherited = makePage(snapshot({
+    selectedConfig: { name: 'alpha', provenance: 'inherited', canToggle: true, canDelete: false, canReset: false },
+  }))
+  render(inherited.page, 120, 20)
+  inherited.page.handleInput('\r')
+  const inheritedBar = render(inherited.page, 120, 20).at(-1) ?? ''
+  assert.match(inheritedBar, /e edit/u)
+  assert.match(inheritedBar, /t (toggle|enable\/disable)/u)
+  assert.doesNotMatch(inheritedBar, /d delete/u, 'an inherited entry offers no Delete')
+  assert.doesNotMatch(inheritedBar, /u reset/u, 'an unmodified inherited entry offers no Reset')
+
+  // Overridden: edit + toggle + reset, no Delete.
+  const overridden = makePage(snapshot({
+    selectedConfig: { name: 'alpha', provenance: 'overridden', canToggle: true, canDelete: false, canReset: true },
+  }))
+  render(overridden.page, 120, 20)
+  overridden.page.handleInput('\r')
+  const overriddenBar = render(overridden.page, 120, 20).at(-1) ?? ''
+  assert.match(overriddenBar, /u reset/u)
+  assert.doesNotMatch(overriddenBar, /d delete/u)
+
+  // Plugin-owned: NO CRUD, but the FR3 Probe/Restart ARE available.
+  const pluginOwned = makePage(snapshot({ selectedConfig: undefined }))
+  pluginOwned.controller.canOperateSelected = () => true
+  render(pluginOwned.page, 120, 20)
+  pluginOwned.page.handleInput('\r')
+  const pluginBar = render(pluginOwned.page, 120, 20).at(-1) ?? ''
+  assert.match(pluginBar, /p probe/u, 'a plugin-owned server is still probeable (FR3)')
+  assert.match(pluginBar, /x restart/u, 'a plugin-owned server is still restartable (FR3)')
+  assert.doesNotMatch(pluginBar, /e edit|t toggle|d delete|u reset/u)
+
+  // Retained cleanup record: no CRUD and no Probe/Restart.
+  const retained = makePage(snapshot({
+    rows: [{ name: 'gone', configured: false, status: { state: 'failed', reason: 'cleanup', result: { closeConfirmed: false } }, source: 'Retained/removed' }],
+    selectedName: 'gone',
+    selectedConfig: undefined,
+  }))
+  retained.controller.canOperateSelected = () => false
+  render(retained.page, 120, 20)
+  retained.page.handleInput('\r')
+  const retainedBar = render(retained.page, 120, 20).at(-1) ?? ''
+  assert.doesNotMatch(retainedBar, /p probe|x restart|e edit|d delete|u reset/u)
+
+  // A write in flight: the editor bar no longer advertises `s Save`.
+  const saving = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ dirty: true }),
+    configStatus: { kind: 'saving', text: 'Saving configuration…' },
+  }))
+  openEditor(saving.page, 'e')
+  const savingBar = render(saving.page, 120, 20).at(-1) ?? ''
+  assert.doesNotMatch(savingBar, /s Save/u, 'a frozen draft must not advertise Save')
+  assert.match(savingBar, /Saving/u)
+  assert.match(savingBar, /Esc/u)
+})
