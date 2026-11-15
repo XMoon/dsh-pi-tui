@@ -16,7 +16,7 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { dirname, join } from 'node:path'
 import { userInfo } from 'node:os'
@@ -262,7 +262,7 @@ export async function runDaemonControlStatusSafety({ installation, trace, dshHom
 }
 
 /** The full public lifecycle against the real user manager. */
-export async function runDaemonControlSystemdLifecycle({ installation, trace, dshHome }) {
+export async function runDaemonControlSystemdLifecycle({ installation, trace, dshHome, workDir }) {
   const gate = isolatedGate()
   if (!gate.qualified) return notVerified(gate.reason)
   if (!managerAvailable()) return notVerified('NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: systemctl --user show-environment did not succeed')
@@ -271,6 +271,8 @@ export async function runDaemonControlSystemdLifecycle({ installation, trace, ds
   const unit = profileUnitName('pi-tui', scopeId)
   const unitPath = unitPathOf(unit)
   const profileManifest = readFileSync(join(installation.profileDir, 'package.json'))
+  const dropInDir = `${unitPath}.d`
+  let dropInPath
   let failure
   let result
   try {
@@ -288,18 +290,68 @@ export async function runDaemonControlSystemdLifecycle({ installation, trace, ds
     await waitFor(() => hostPids(dshHome).length === 0, 'the stopped Host exit', 30_000)
     const stoppedAgain = runDaemon(installation, ['stop'])
     assertStatus(stoppedAgain, { host: 'stopped' }, 'daemon stop idempotence')
-    const restartedFromStopped = runDaemon(installation, ['start'])
-    const beforeRestart = assertStatus(restartedFromStopped, { host: 'ready' }, 'the restart precondition start')
-    const restarted = runDaemon(installation, ['restart'])
-    const afterRestart = assertStatus(restarted, { host: 'ready' }, 'daemon restart')
+    const defaults = readFileSync(unitPath, 'utf8')
+    const customized = `${defaults}\n[Service]\nEnvironment="MY_CUSTOM_FLAG=1"\nRestartSec=5\nExecStartPre=/usr/bin/true\n`
+    writeFileSync(unitPath, customized, { mode: 0o600 })
+    chmodSync(unitPath, 0o644)
+    assert(systemctl(['--user', 'daemon-reload']).status === 0, 'reload the user-edited service')
+    const edited = assertStatus(runDaemon(installation, ['start']), { host: 'ready', manager: 'systemd' }, 'user-edited 0644 service')
+    assert(readFileSync(`/proc/${edited.pid}/environ`, 'utf8').split('\0').includes('MY_CUSTOM_FLAG=1'), 'the real Host received the user Environment directive')
+    assertStatus(runDaemon(installation, ['status']), { host: 'ready' }, 'custom service status')
+    assertStatus(runDaemon(installation, ['stop']), { host: 'stopped' }, 'custom service stop')
+    assert(readFileSync(unitPath, 'utf8') === customized && (statSync(unitPath).mode & 0o777) === 0o644, 'management preserves user service text and 0644 mode')
+
+    // Exercise the native systemctl edit workflow using an editor that writes
+    // only the fixture's requested drop-in. script supplies systemctl's TTY.
+    const editor = join(workDir, 'user-unit-editor.sh')
+    writeFileSync(editor, "#!/bin/sh\nprintf '%s\\n' '[Service]' 'Environment=\"MY_DROPIN_FLAG=1\"' 'RestartSec=5' > \"$1\"\n", { mode: 0o700 })
+    const edit = spawnSync('script', ['-qefc', `${SYSTEMCTL} --user edit ${unit}`, '/dev/null'], {
+      env: { ...process.env, XDG_RUNTIME_DIR: runtimeDir(), SYSTEMD_EDITOR: editor }, encoding: 'utf8', timeout: 30_000,
+    })
+    assert(edit.status === 0, `native systemctl edit must succeed: ${edit.stderr?.slice(-400)}`)
+    const loadedDropIns = systemctl(['--user', 'show', unit, '-p', 'DropInPaths', '--value'])
+    dropInPath = join(dropInDir, 'override.conf')
+    assert(loadedDropIns.status === 0 && loadedDropIns.stdout.includes(dropInPath), 'systemd loaded the actual user drop-in')
+    const dropInBytes = readFileSync(dropInPath, 'utf8')
+    const beforeRestart = assertStatus(runDaemon(installation, ['start']), { host: 'ready' }, 'start with a real drop-in')
+    assert(readFileSync(`/proc/${beforeRestart.pid}/environ`, 'utf8').split('\0').includes('MY_DROPIN_FLAG=1'), 'the Host received the real drop-in environment')
+    const afterRestart = assertStatus(runDaemon(installation, ['restart']), { host: 'ready' }, 'restart preserves customized service and drop-in')
     assert(afterRestart.instance !== beforeRestart.instance, 'restart must produce a NEW Host instance')
     assert(hostPids(dshHome).length === 1, 'restart must not leave two Hosts')
+    assert(readFileSync(unitPath, 'utf8') === customized && readFileSync(dropInPath, 'utf8') === dropInBytes, 'restart must not restore defaults or change drop-ins')
+    assertStatus(runDaemon(installation, ['stop']), { host: 'stopped' }, 'stop before the bad ExecStart control')
+
+    const broken = customized.replace(/^ExecStart=.*$/mu, 'ExecStart=/usr/bin/false')
+    writeFileSync(unitPath, broken)
+    assert(systemctl(['--user', 'daemon-reload']).status === 0, 'reload the user-selected non-Host command')
+    const failedStart = runDaemon(installation, ['start'])
+    assert(failedStart.status !== 0 && /MANAGER_OR_OS_FAILURE|TRANSITION_UNCERTAIN/u.test(failedStart.stderr), 'a non-Host service reports an actual startup/readiness failure')
+    assert(hostPids(dshHome).length === 0 && processCounts(dshHome).client === 0, 'bad ExecStart starts no fallback Host or Client')
+    assert(readFileSync(unitPath, 'utf8') === broken, 'failed start must not rewrite user configuration')
+    assert(systemctl(['--user', 'stop', unit]).status === 0, 'stop the fixture non-Host service')
+    writeFileSync(unitPath, customized)
+    const sourceDir = join(workDir, 'user-service-source')
+    mkdirSync(sourceDir, { mode: 0o700 })
+    const source = join(sourceDir, unit)
+    writeFileSync(source, customized, { mode: 0o644 })
+    unlinkSync(unitPath)
+    symlinkSync(source, unitPath)
+    assert(systemctl(['--user', 'daemon-reload']).status === 0, 'reload the user-linked service')
+    const linked = assertStatus(runDaemon(installation, ['start']), { host: 'ready', manager: 'systemd' }, 'user-linked service start')
+    const fragment = systemctl(['--user', 'show', unit, '-p', 'FragmentPath', '--value'])
+    assert(fragment.status === 0 && realpathSync(fragment.stdout.trim()) === realpathSync(source), 'manager FragmentPath resolves to the exact user configuration source')
+    assertStatus(runDaemon(installation, ['status']), { host: 'ready' }, 'linked service status')
+    assert(runDaemon(installation, ['logs']).status === 0, 'drop-ins and links do not deny the target unit journal')
+    assertStatus(runDaemon(installation, ['stop']), { host: 'stopped' }, 'linked service stop')
+    assertStatus(runDaemon(installation, ['start']), { host: 'ready' }, 'linked service restart precondition')
     const removed = runDaemon(installation, ['uninstall'])
     assertStatus(removed, { unit: 'none', host: 'stopped' }, 'daemon uninstall')
-    assert(existsSync(unitPath) === false, 'uninstall must remove only the profile unit file')
+    assert(existsSync(unitPath) === false, 'uninstall must remove only the profile unit link')
+    assert(readFileSync(source, 'utf8') === customized, 'uninstall preserves the linked configuration source')
+    assert(readFileSync(dropInPath, 'utf8') === dropInBytes, 'uninstall preserves user drop-ins')
     assert(readFileSync(join(installation.profileDir, 'package.json')).equals(profileManifest),
       'uninstall must not rewrite the Profile manifest')
-    trace('daemon-control-systemd-lifecycle', { instance: afterRestart.instance })
+    trace('daemon-control-systemd-lifecycle', { instance: afterRestart.instance, customUnitPreserved: true, loadedDropIn: true, mode0644: true, sourcePreserved: true, badExecNoFallback: true })
     result = {
       status: 'PASS',
       scope: 'REAL_SYSTEMD_USER_L6',
@@ -313,6 +365,12 @@ export async function runDaemonControlSystemdLifecycle({ installation, trace, ds
     failure = error
   } finally {
     cleanupCase(installation, trace)
+    if (dropInPath !== undefined) {
+      // This isolated Profile's drop-in was created by this case; the public
+      // uninstall assertion above proved it survived. Fixture teardown owns it.
+      rmSync(dropInDir, { recursive: true, force: true })
+      systemctl(['--user', 'daemon-reload'])
+    }
   }
   if (failure !== undefined) throw failure
   return result

@@ -38,7 +38,7 @@ import {
 } from '../../scripts/lib/split-smoke-selection.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 import { encodeUnitValue, parseManagerUnitPath, userUnitPathUnsupportedReason } from '../../src/app/remote-process/local-host-manager.ts'
-import { cleanupOutcomeError, encodeExecArg, killVerifiedHost, managedHostGateReason, stopAndRemoveManagedUnit, unitBelongsToRun, unitFileSafetyError } from '../../scripts/smoke/split-process/managed-host-m6-2b.mjs'
+import { cleanupOutcomeError, killVerifiedHost, managedHostGateReason, stopAndRemoveManagedUnit, unitBelongsToRun, unitFileSafetyError } from '../../scripts/smoke/split-process/managed-host-m6-2b.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'split-process-smoke.mjs')
@@ -582,23 +582,20 @@ test('managed unit cleanup only matches this run\u2019s exact owner metadata and
   const base = { scopeId, hostEntry, publishedBuildId: buildId }
   assert.equal(unitBelongsToRun(content, base), null)
   assert.equal(unitBelongsToRun(content, { ...base, scopeId: 'c'.repeat(64) }), 'foreign-scope')
-  assert.equal(unitBelongsToRun(content, { ...base, hostEntry: '/other/inst/dist/local-host.mjs' }), 'other-install')
+  assert.equal(unitBelongsToRun(content.replace('ExecStart=', 'ExecStartPre='), base), null)
   assert.equal(unitBelongsToRun(content, { ...base, publishedBuildId: 'd'.repeat(64) }), 'other-build')
   assert.equal(unitBelongsToRun(content, { ...base, publishedBuildId: undefined }), 'no-published-build')
   assert.equal(unitBelongsToRun(content, { ...base, publishedBuildId: '' }), 'no-published-build')
   assert.equal(unitBelongsToRun(content.replace('local-host-manager-v1', 'someone-else'), base), 'foreign-owner')
-  // An unsafe cleanup target (symlink / wrong owner / wrong mode / non-file) is refused.
+  // User links and 0644 files are valid; foreign owners and non-config files are not.
   const uid = 1000
   const safe = { isSymbolicLink: () => false, isFile: () => true, uid, mode: 0o100600 }
   assert.equal(unitFileSafetyError(safe, uid), null)
-  assert.equal(unitFileSafetyError({ ...safe, isSymbolicLink: () => true }, uid), 'unsafe-file')
+  assert.equal(unitFileSafetyError({ ...safe, isSymbolicLink: () => true }, uid), null)
   assert.equal(unitFileSafetyError({ ...safe, uid: 2000 }, uid), 'unsafe-file')
-  assert.equal(unitFileSafetyError({ ...safe, mode: 0o100644 }, uid), 'unsafe-file')
+  assert.equal(unitFileSafetyError({ ...safe, mode: 0o100644 }, uid), null)
   assert.equal(unitFileSafetyError({ ...safe, isFile: () => false }, uid), 'unsafe-file')
-  // Cleanup's ExecStart encoding MUST equal the production encoder for %/$/"/\.
-  for (const value of ['/a b/c', '/a%b$c', '/a\\b"c', '/sp ace/%/x$y']) {
-    assert.equal(encodeExecArg(value), encodeUnitValue(value, 'probe', true), `encode mismatch for ${JSON.stringify(value)}`)
-  }
+
 })
 
 test('cleanup actually stops and removes this run\u2019s unit and refuses foreign, unsafe and failed-stop cases', t => {
@@ -616,7 +613,7 @@ test('cleanup actually stops and removes this run\u2019s unit and refuses foreig
     const unit = `dsh-pi-tui@pi-tui-${scopeId.slice(0, 16)}.service`
     const unitPath = join(unitDir, unit)
     const hostEntry = realpathSync(join(profilePackage, 'dist', 'local-host.mjs'))
-    const content = ['[Unit]', 'X-DshPiTuiOwner=local-host-manager-v1', `X-DshPiTuiScopeId=${scopeId}`, `X-DshPiTuiInstallBuild=${contentBuild}`, '[Service]', `ExecStart="${process.execPath}" ${encodeExecArg(hostEntry)}`].join('\n')
+    const content = ['[Unit]', 'X-DshPiTuiOwner=local-host-manager-v1', `X-DshPiTuiScopeId=${scopeId}`, `X-DshPiTuiInstallBuild=${contentBuild}`, '[Service]', `ExecStart="${process.execPath}" ${encodeUnitValue(hostEntry, 'fixture entry', true)}`].join('\n')
     if (symlink) {
       const target = join(root, 'target')
       writeFileSync(target, content, { mode: 0o600 })
@@ -648,10 +645,10 @@ test('cleanup actually stops and removes this run\u2019s unit and refuses foreig
   const foreign = mkRun({ artifactBuild: 'b'.repeat(64), contentBuild: 'c'.repeat(64) })
   assert.equal(foreign.result.removed, false)
   assert.equal(existsSync(foreign.unitPath), true)
-  // A symlinked unit path is refused and its target kept.
+  // A user configuration link is removed, leaving its source untouched.
   const sym = mkRun({ artifactBuild: 'b'.repeat(64), symlink: true })
-  assert.equal(sym.result.removed, false)
-  assert.equal(existsSync(sym.unitPath), true)
+  assert.equal(sym.result.removed, true)
+  assert.equal(existsSync(sym.unitPath), false)
   // A failed stop never unlinks.
   const failed = mkRun({ artifactBuild: 'b'.repeat(64), stopStatus: 1 })
   assert.equal(failed.result.removed, false)
@@ -732,7 +729,7 @@ test('the required daemon-control native cases are selectable-only and resolve t
 test('a cleanup that did not remove this run\u2019s unit fails the scenario verdict', () => {
   assert.equal(cleanupOutcomeError({ removed: true }), undefined)
   assert.equal(cleanupOutcomeError({ removed: false, reason: 'absent' }), undefined)
-  for (const reason of ['stop-failed', 'other-build', 'foreign-owner', 'no-artifact-build', 'not-this-install', 'unsafe-file', 'dropin', 'reload-failed']) {
+  for (const reason of ['stop-failed', 'other-build', 'foreign-owner', 'no-artifact-build', 'not-this-install', 'unsafe-file', 'reload-failed']) {
     assert.equal(typeof cleanupOutcomeError({ removed: false, reason }), 'string', `cleanup ${reason} must be a scenario failure`)
   }
   assert.equal(typeof cleanupOutcomeError(undefined), 'string')

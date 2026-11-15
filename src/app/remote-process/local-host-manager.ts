@@ -33,7 +33,6 @@ import {
   openSync,
   readFileSync,
   realpathSync,
-  renameSync,
   unlinkSync,
   writeSync,
 } from 'node:fs'
@@ -627,31 +626,20 @@ export function userUnitPathUnsupportedReason(unitPathValue: string, targetDir: 
 
 /** The result of one atomic unit installation. */
 export interface UnitInstallResult {
-  /** True when THIS call created the unit file; false when an identical one existed. */
+  /** True when THIS call created the unit file; false when a target already existed. */
   readonly created: boolean
 }
 
-/** Read a controlled existing unit file strictly (0600 regular file owned by uid, no symlink). */
-function readOwnedUnitFile(path: string, uid: number): string {
-  const info = lstatSync(path)
-  if (info.isSymbolicLink() || !info.isFile() || info.uid !== uid || (info.mode & 0o777) !== 0o600) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: ${path} is not a 0600 regular file owned by uid ${String(uid)}`)
-  }
-  return readFileSync(path, 'utf8')
-}
-
 /**
- * Atomically install ONE unit file: write a private 0600 temp, `fsync`, then
- * `linkSync` it into place so an existing file is never overwritten. Two
- * concurrent identical installs converge on byte-identical content; any
- * pre-existing byte difference is `HOST_MANAGER_UNIT_CONFLICT` and is left
- * untouched.
+ * Atomically install ONE default unit file. A pre-existing target is a user
+ * configuration fact, not a template conflict: leave it byte-for-byte untouched
+ * and let the later identity/FragmentPath checks decide whether this Profile may
+ * manage it. Two concurrent creators still converge on exactly one winner.
  */
 export function installProfileUnit(options: {
   readonly unitDir: string
   readonly unitName: string
   readonly content: string
-  readonly uid: number
 }): UnitInstallResult {
   const finalPath = join(options.unitDir, options.unitName)
   const tempPath = join(options.unitDir, `.${options.unitName}.${String(process.pid)}.${randomUUID()}.tmp`)
@@ -680,12 +668,8 @@ export function installProfileUnit(options: {
       try { unlinkSync(tempPath) } catch { /* temp may not exist */ }
       throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: the unit could not be installed atomically', linkError)
     }
-    // A concurrent or earlier install won the name: it must be OUR identical unit.
-    const existing = readOwnedUnitFile(finalPath, options.uid)
-    if (existing !== options.content) {
-      try { unlinkSync(tempPath) } catch { /* temp may not exist */ }
-      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: an existing unit has a different owner metadata or install build')
-    }
+    // Existing regular files and user-created symlinks are preserved. The
+    // downstream identity inspection owns the authorization decision.
   } finally {
     try { unlinkSync(tempPath) } catch { /* temp may already be gone */ }
   }
@@ -697,8 +681,6 @@ export interface UnitLoadState {
   readonly loadState: string
   readonly activeState: string
   readonly fragmentPath: string
-  /** The drop-in override paths the manager actually loaded (empty when none). */
-  readonly dropInPaths: string
   /** The unit's current main PID (`0` when inactive or not reported). */
   readonly mainPid: string
   /** The manager's install state (`UnitFileState`), e.g. `disabled`/`enabled`. */
@@ -723,7 +705,6 @@ async function showUnit(unitName: string, runtimeDir: string | undefined, system
       '-p', 'LoadState',
       '-p', 'ActiveState',
       '-p', 'FragmentPath',
-      '-p', 'DropInPaths',
       '-p', 'MainPID',
       '-p', 'UnitFileState',
       unitName,
@@ -741,19 +722,12 @@ async function showUnit(unitName: string, runtimeDir: string | undefined, system
     loadState: read('LoadState'),
     activeState: read('ActiveState'),
     fragmentPath: read('FragmentPath'),
-    dropInPaths: read('DropInPaths'),
     mainPid: read('MainPID'),
     unitFileState: read('UnitFileState'),
   }
 }
 
-/**
- * Verify the manager actually loads THIS controlled target from THIS file and
- * from NO drop-in override. A `FragmentPath` alone is not enough: a same-named
- * `*.d/*.conf` drop-in can override `ExecStart`/`Environment`/`Restart` while
- * `FragmentPath` still names our owned file, so any loaded drop-in is a
- * `HOST_MANAGER_UNIT_CONFLICT` and the manager is never started.
- */
+/** Verify the manager loaded this Profile's canonical unit target. */
 function assertUnitOwned(state: UnitLoadState, finalPath: string): void {
   if (state.loadState === '' || state.loadState === 'not-found') {
     throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: the installed unit is not loaded by the manager')
@@ -770,10 +744,8 @@ function assertUnitOwned(state: UnitLoadState, finalPath: string): void {
   if (realFragment !== realpathSync(finalPath)) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the manager loaded a different unit file than the installed target')
   }
-  const dropIns = state.dropInPaths.split(/\s+/u).filter(path => path !== '')
-  if (dropIns.length > 0) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the loaded unit has one or more drop-in overrides')
-  }
+  // Drop-ins are user-owned runtime configuration. systemd merges them;
+  // their presence does not change this unit's identity.
 }
 
 async function waitForUnitLoaded(unitName: string, runtimeDir: string | undefined, systemctl: SystemctlRunner): Promise<UnitLoadState> {
@@ -791,22 +763,24 @@ async function waitForUnitLoaded(unitName: string, runtimeDir: string | undefine
 // These are the ONLY management writes of the Host supervision boundary. They
 // never create a Host, never run a Session/Agent and never replace the official
 // Host shutdown owner: stop sends the manager's SIGTERM, uninstall removes only
-// the verified profile unit file, and replacement happens only after an explicit
-// restart has already proven the old instance stopped.
+// the verified profile unit path. Runtime configuration is never rewritten.
 
-/** One controlled profile unit file proven from the filesystem alone. */
+/** One profile unit path whose identity metadata belongs to this scope/profile. */
 export interface OwnedProfileUnit {
   readonly unitName: string
   readonly unitDir: string
+  /** The unit path as named by this Profile; it may be a user-created symlink. */
   readonly filePath: string
-  /** The installed Host entry this unit was proven to start. */
-  readonly hostEntry: string
   readonly content: string
+  readonly resolvedPath: string
   /** The install build the unit file declares; may differ from the current build. */
   readonly installBuild: string
-  /** The filesystem identity captured when this exact file was validated. */
+  /** Canonical target identity captured for TOCTOU re-checks. */
   readonly device: number
   readonly inode: number
+  /** Identity of the named unit path itself, including a symlink inode. */
+  readonly pathDevice: number
+  readonly pathInode: number
 }
 
 /** The read-only file ownership answer: this Profile's unit, or none at all. */
@@ -887,71 +861,41 @@ function readUnitMetadata(lines: readonly string[], key: string): string {
   return matches[0].slice(key.length + 1)
 }
 
-/**
- * Split one ExecStart value into its argument tokens, honouring systemd's
- * double-quoted form (a quoted argument may contain spaces). Quoting state is
- * strict: an unterminated quote is a malformed line, never a token boundary.
- */
-function tokenizeExecStart(line: string): string[] {
-  const tokens: string[] = []
-  let current = ''
-  let quoted = false
-  let started = false
-  for (let index = 0; index < line.length; index += 1) {
-    const character = line[index]
-    if (quoted) {
-      if (character === '\\') {
-        // The renderer encodes a literal quote as `\\"` and a literal
-        // backslash as `\\\\`; preserve the pair for decodeUnitArg while
-        // preventing the escaped quote from closing this argument.
-        current += character
-        const escaped = line[index + 1]
-        if (escaped !== undefined) {
-          current += escaped
-          index += 1
-        }
-        continue
-      }
-      if (character === '"') quoted = false
-      else current += character
-      continue
+/** Read the named user unit and its regular canonical target without mutation. */
+function readUnitFileIdentity(filePath: string, uid: number): {
+  readonly content: string
+  readonly resolvedPath: string
+  readonly pathDevice: number
+  readonly pathInode: number
+  readonly device: number
+  readonly inode: number
+} {
+  try {
+    const pathInfo = lstatSync(filePath)
+    if (pathInfo.uid !== uid) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit path is not owned by this uid')
     }
-    if (character === '"') {
-      quoted = true
-      started = true
-      continue
+    const resolvedPath = realpathSync(filePath)
+    const target = lstatSync(resolvedPath)
+    if (!target.isFile()) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit target is not a regular configuration file')
     }
-    if (/\s/u.test(character)) {
-      if (started) {
-        tokens.push(current)
-        current = ''
-        started = false
-      }
-      continue
+    return {
+      content: readFileSync(resolvedPath, 'utf8'),
+      resolvedPath,
+      pathDevice: pathInfo.dev,
+      pathInode: pathInfo.ino,
+      device: target.dev,
+      inode: target.ino,
     }
-    current += character
-    started = true
+  } catch (error) {
+    if (error instanceof LocalScopeError) throw error
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit configuration could not be read', error)
   }
-  if (quoted) throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the ExecStart has an unterminated quote')
-  if (started) tokens.push(current)
-  return tokens
 }
 
-/** Decode one token; tokenizeExecStart has already removed its delimiters. */
-function decodeUnitArg(encoded: string): string {
-  return encoded.replace(/%%/gu, '%').replace(/\$\$/gu, '$').replace(/\\([\\"])/gu, '$1')
-}
-
-/**
- * Prove the content is the EXACT controlled execution template for this
- * Profile: the owner/scope/profile/build metadata above plus ONE ExecStart
- * whose only two arguments are a real executable interpreter and THIS
- * installation's Host entry. "A line that mentions the entry" is not enough —
- * an ExecStart that runs another program with the entry as an argument, or any
- * extra Exec* directive anywhere in the file, could run arbitrary programs
- * under this unit's name and is refused.
- */
-function assertOwnedUnitContent(content: string, scope: LocalScope, profile: string, expectedHostEntry: string): void {
+/** Runtime directives belong to the user and systemd; only metadata proves scope. */
+function inspectUnitIdentity(content: string, scope: LocalScope): string {
   const lines = content.split('\n')
   if (readUnitMetadata(lines, 'X-DshPiTuiOwner') !== UNIT_OWNER_MARKER) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit is not owned by this product')
@@ -962,122 +906,44 @@ function assertOwnedUnitContent(content: string, scope: LocalScope, profile: str
   if (readUnitMetadata(lines, 'X-DshPiTuiProfileIdentity') !== profileIdentityDigest(scope.profileRealpath)) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit belongs to another canonical profile')
   }
-  if (!/^[0-9a-f]{64}$/u.test(readUnitMetadata(lines, 'X-DshPiTuiInstallBuild'))) {
+  const installBuild = readUnitMetadata(lines, 'X-DshPiTuiInstallBuild')
+  if (!/^[0-9a-f]{64}$/u.test(installBuild)) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit has no valid install build identity')
   }
-  const required = new Set([
-    'Type=exec',
-    `WorkingDirectory=${encodeUnitPath(scope.profileRealpath, 'WorkingDirectory')}`,
-    encodeEnvironment('DSH_HOME', scope.dshHome),
-    encodeEnvironment('SPLIT_PROCESS_PROFILE', profile),
-    'Restart=on-failure',
-  ])
-  for (const line of required) {
-    if (!lines.includes(line)) {
-      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit definition does not match this Profile')
-    }
-  }
-  // Exactly ONE process-spawning directive in the whole file, and it is the
-  // ExecStart. Any ExecStartPre/ExecStop/ExecReload/ExecStartPost or a second
-  // Exec* line is an uncontrolled execution surface.
-  const execDirectives = lines.filter(line => /^Exec[A-Za-z]+=/u.test(line))
-  if (execDirectives.length !== 1 || !execDirectives[0].startsWith('ExecStart=')) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit must define exactly one ExecStart and no other Exec directive')
-  }
-  // Tokenize the command line the way systemd does: double-quoted arguments may
-  // contain spaces, and the renderer quotes every path for exactly that
-  // reason. A whitespace split would reject every valid unit whose installed
-  // path contains a space.
-  const args = tokenizeExecStart(execDirectives[0].slice('ExecStart='.length))
-  if (args.length !== 2) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the ExecStart must take exactly the interpreter and the Host entry')
-  }
-  const interpreter = decodeUnitArg(args[0])
-  inspectTrustedExecutable(interpreter, 'unit interpreter')
-  const entry = decodeUnitArg(args[1])
-  let realEntry: string
-  try {
-    realEntry = realpathSync(entry)
-  } catch (error) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit Host entry is not readable', error)
-  }
-  if (realEntry !== realpathSync(expectedHostEntry)) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit does not start this installation Host entry')
-  }
-  const entryInfo = lstatSync(realEntry)
-  if (entryInfo.isSymbolicLink() || !entryInfo.isFile()) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit Host entry must be a regular file')
-  }
+  return installBuild
 }
 
-/**
- * Prove the file AT THE PATH is still the exact inode/content this unit
- * inspection validated. The check is repeated immediately before every write or
- * signal so a swapped/named-replaced file is refused instead of overwritten or
- * stopped. A same-uid process can still mutate the path after the final `lstat`;
- * that residual window is inherent to path-based units and is reported, never
- * silently accepted.
- */
+/** Compare this operation's observation, never the generated default template. */
 function assertUnitFileIdentity(unit: OwnedProfileUnit, uid: number): void {
-  let info
-  try {
-    info = lstatSync(unit.filePath)
-  } catch (error) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file is no longer present', error)
-  }
-  if (info.isSymbolicLink() || !info.isFile() || info.uid !== uid || (info.mode & 0o777) !== 0o600
-    || info.dev !== unit.device || info.ino !== unit.inode) {
+  const current = readUnitFileIdentity(unit.filePath, uid)
+  if (current.pathDevice !== unit.pathDevice || current.pathInode !== unit.pathInode
+    || current.resolvedPath !== unit.resolvedPath
+    || current.device !== unit.device || current.inode !== unit.inode
+    || current.content !== unit.content) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file changed during the transition')
   }
-  if (readFileSync(unit.filePath, 'utf8') !== unit.content) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit content changed during the transition')
-  }
 }
 
-/**
- * The expected Host entry path is derived by the CALLER from the real installed
- * package root (`join(packageRoot, 'dist', 'local-host.mjs')`); there is no
- * fallback guess. Tests that omit it must pass it explicitly.
- */
-const HOST_ENTRY_REQUIRED = 'managed Host: the expected Host entry path is required'
-
-/** Read ONE existing profile unit file without creating or mutating anything.
- *  `unitDir` is an explicit test seam; production always derives it from the
- *  account home. */
-export function inspectOwnedProfileUnit(scope: LocalScope, profile: string, uid: number, unitDir?: string, expectedHostEntry?: string): OwnedProfileUnitInspection {
+/** Inspect the exact Profile unit path, following a user-created configuration link. */
+export function inspectOwnedProfileUnit(scope: LocalScope, profile: string, uid: number, unitDir?: string): OwnedProfileUnitInspection {
   const dir = unitDir ?? inspectExistingUserUnitDir(uid)
   if (dir === undefined) return { kind: 'none' }
   const unitName = buildUnitName(profile, scope.scopeId)
   const filePath = join(dir, unitName)
-  let info
   try {
-    info = lstatSync(filePath)
+    lstatSync(filePath)
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'none' }
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file is not accessible', error)
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit path is not accessible', error)
   }
-  if (info.isSymbolicLink() || !info.isFile() || info.uid !== uid || (info.mode & 0o777) !== 0o600) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit must be a 0600 regular file owned by this uid')
-  }
-  const content = readFileSync(filePath, 'utf8')
-  if (expectedHostEntry === undefined) throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', HOST_ENTRY_REQUIRED)
-  assertOwnedUnitContent(content, scope, profile, expectedHostEntry)
-  return {
-    kind: 'owned',
-    unitName,
-    unitDir: dir,
-    filePath,
-    hostEntry: expectedHostEntry,
-    content,
-    installBuild: readUnitMetadata(content.split('\n'), 'X-DshPiTuiInstallBuild'),
-    device: info.dev,
-    inode: info.ino,
-  }
+  const file = readUnitFileIdentity(filePath, uid)
+  return { kind: 'owned', unitName, unitDir: dir, filePath,
+    installBuild: inspectUnitIdentity(file.content, scope), ...file }
 }
 
 /**
  * Query the manager facts of ONE owned profile unit and cross-check that the
- * manager really loads THIS file with no drop-in override. A `not-found`
+ * manager really loads THIS file, including a canonical symlink target. A `not-found`
  * LoadState is returned as such (the file exists but is not loaded); every
  * contradicting fact is an ownership refusal.
  */
@@ -1090,7 +956,7 @@ export async function queryOwnedProfileUnit(
   if (state.loadState === 'not-found') {
     return { loadState: state.loadState, activeState: state.activeState, mainPid: 0, unitFileState: state.unitFileState }
   }
-  assertUnitOwned(state, unit.filePath)
+  assertUnitOwned(state, unit.resolvedPath)
   return {
     loadState: state.loadState,
     activeState: state.activeState,
@@ -1159,7 +1025,7 @@ export async function stopOwnedProfileUnit(
  * uninstall. The caller owns the `daemon-reload` that follows.
  */
 export function uninstallOwnedProfileUnit(unit: OwnedProfileUnit, scope: LocalScope, profile: string, uid: number): void {
-  const current = inspectOwnedProfileUnit(scope, profile, uid, unit.unitDir, unit.hostEntry)
+  const current = inspectOwnedProfileUnit(scope, profile, uid, unit.unitDir)
   if (current.kind !== 'owned' || current.filePath !== unit.filePath
     || current.device !== unit.device || current.inode !== unit.inode) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file changed during the transition')
@@ -1196,7 +1062,6 @@ export async function startManagedHostCandidate(
   if (uid === undefined) throw new LocalScopeError('B1_PLATFORM_UNSUPPORTED', 'managed Host: the user id is unavailable')
   const systemctl = deps.systemctl ?? runSystemctl
   const runtimeDir = selectRuntimeDir(uid)
-  const facts = collectUnitFacts(options, uid)
   const unitDir = (deps.unitDir ?? resolveUserUnitDir)(uid)
   // The fixed plan path (<account-home>/.config/systemd/user) must be in the
   // RUNNING manager's actual UnitPath. The manager's exported environment block
@@ -1215,18 +1080,26 @@ export async function startManagedHostCandidate(
     }
   }
   const unitName = buildUnitName(options.profile, options.scope.scopeId)
-  const content = renderUnitContent(facts)
-  const finalPath = join(unitDir, unitName)
-  const installed = installProfileUnit({ unitDir, unitName, content, uid })
+  let unit = inspectOwnedProfileUnit(options.scope, options.profile, uid, unitDir)
+  let created = false
+  if (unit.kind === 'none') {
+    const facts = collectUnitFacts(options, uid)
+    created = installProfileUnit({ unitDir, unitName, content: renderUnitContent(facts) }).created
+    unit = inspectOwnedProfileUnit(options.scope, options.profile, uid, unitDir)
+  }
+  if (unit.kind !== 'owned' || unit.installBuild !== options.scope.buildId) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit belongs to another installed build or could not be confirmed')
+  }
   let state = await showUnit(unitName, runtimeDir, systemctl)
-  if (installed.created || state.loadState === 'not-found') {
+  if (created || state.loadState === 'not-found') {
     const reload = await systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload'], runtimeDir)
     if (reload.kind !== 'exited' || reload.code !== 0) {
       throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: systemctl daemon-reload failed after the unit install')
     }
     state = await waitForUnitLoaded(unitName, runtimeDir, systemctl)
   }
-  assertUnitOwned(state, finalPath)
+  assertUnitOwned(state, unit.resolvedPath)
+  assertUnitFileIdentity(unit, uid)
   const start = await systemctl(['--user', '--no-pager', '--no-ask-password', 'start', unitName], runtimeDir)
   if (start.kind !== 'exited' || start.code !== 0) {
     throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: systemctl could not start the unit')

@@ -396,34 +396,30 @@ authenticated carrier, the Session/Writer authority or readiness.
   handoff — requests a managed start. Internal qualification/peer/manual surface
   launches and the Client reexec handoff keep the exact historic detached
   process path and install no user unit.
-- **Owned unit, no silent upgrade.** One unit per `(uid, canonical profile)` scope
-  is named `dsh-pi-tui@<slug>-<scope prefix>.service` and installed atomically
-  (0600, hard link, never overwrite) under the account home's user unit
-  directory, which must be real-directory owned by the uid on every component and
-  never group/other-writable (a writable parent could swap the validated file).
-  That directory must be present in the RUNNING manager's actual user-unit search
-  path, read from its `UnitPath` property (`systemctl --user show -p UnitPath`);
-  the environment block it exports to child processes is not that authority. If
-  `UnitPath` cannot be queried or does not contain the fixed target, the start
-  fails closed before writing the unit rather than leaving an unloadable one.
-  (Broader non-default search-path support is an explicit contract decision, not
-  a cold-start side effect.)
-  The Node interpreter in `ExecStart` is trusted by being an absolute, canonical,
-  executable regular file — a normal user may run a root-owned `/usr/bin/node`.
-  The product-private Host entry must be uid-owned, while the official DSH install
-  anchor is trusted by its declared `@deepseek-ai/dsh` identity, its exact pinned
-  runtime version and a safe (non-group/other-writable) regular file — not by uid
-  ownership, so a normal user may run against a root-owned system-wide DSH. Full
-  `scopeId`, profile identity and install build are carried in
-  the unit owner metadata, and the manager's actual
-  `FragmentPath`/`LoadState`/`DropInPaths` must name the installed file with no
-  drop-in override. A different build, a foreign owner, a drop-in or a symlink is
-  `HOST_MANAGER_UNIT_CONFLICT` and is never rewritten; automatic cross-build
-  upgrade is a separate explicit lifecycle capability, not a cold start side
-  effect. The unit carries only the minimal startup facts and official
-  environment anchors — never a token, Cookie or secret, never a one-shot backend
-  selector or qualification injection — and has no `[Install]`/enable, no
-  `Type=notify`, `Restart=on-failure` with limits and journal output.
+- **User-owned unit identity.** The systemd user unit belongs to the user. Its
+  identity is the exact profile unit name
+  (`dsh-pi-tui@<slug>-<scope prefix>.service`), the
+  `X-DshPiTuiOwner`, `X-DshPiTuiScopeId`, `X-DshPiTuiProfileIdentity` and
+  `X-DshPiTuiInstallBuild` metadata, and the running manager's canonical
+  `FragmentPath` matching the canonical target of that profile unit path. The
+  target must be a readable regular file; an existing legal 0644 unit and a
+  user-created symlink to such a target are supported. Runtime directives —
+  including `ExecStart`, `WorkingDirectory`, `Environment`, `Restart`,
+  `ExecStartPre`, `ExecStop` and drop-ins — belong to the user and systemd and
+  are not unit identity requirements. Host authentication and `MainPID` still
+  prove readiness and supervision separately.
+- **Initial installation and reuse.** A missing unit is created atomically as
+  0600 under the account home's user-unit directory, with no overwrite. The
+  running manager's `UnitPath` must include that directory before installation.
+  The initial definition uses validated installation facts and minimal official
+  environment anchors, carries no token, Cookie, secret, one-shot backend
+  selector or qualification injection, and is not enabled automatically. An
+  existing unit with matching identity is reused without restoring runtime
+  defaults. `daemon-reload` is needed only for initial installation or a verified
+  unit not yet loaded by the manager; a loaded matching unit is not reloaded on
+  every start. A foreign identity, different install build or mismatched
+  canonical `FragmentPath` is `HOST_MANAGER_UNIT_CONFLICT` and is never
+  overwritten; cross-build replacement belongs to an explicit upgrade flow.
 - **Fallback and stop ownership.** The only fallback is the strict-absence
   detached process spawn with its private 0600 `host.log`, no periodic
   auto-restart (only the manager restarts a supervised Host). Host stop remains
@@ -498,7 +494,7 @@ stdout/stderr.
   authenticated live fallback Host is stopped only by one SIGTERM to the
   verified original PID after re-checking the kernel starttime and the product
   Host entry command identity; no process group and no `pkill`. A live Host with
-  no provable ownership, a foreign/symlinked/drop-in/wrong-scope unit, a stale
+  no provable ownership, a foreign or wrong-scope unit, a stale
   PID or an identity mismatch is refused instead of being signalled. A timeout
   is exit 5 and never escalates to SIGKILL or claims `stopped`.
 - **restart and uninstall are ONE explicit transition.** `restart` stops, awaits
@@ -507,10 +503,11 @@ stdout/stderr.
   whose install build differs from THIS installation is refused (exit 3) and
   left untouched: cross-build unit replacement belongs to the explicit upgrade
   flow, not to a management command — the unit metadata alone cannot prove a
-  historical build's compatibility. `uninstall` stops and
-  removes ONLY the verified owned profile unit and reloads; it never removes the
-  Profile, `DSH_HOME`, Sessions, credentials, `launch.json` or another Profile's
-  unit, and it never kills a strict-absence fallback Host. A reload failure is
+  historical build's compatibility. `uninstall` stops the verified unit, unlinks
+  only this Profile's unit path, and reloads. For a symlink this leaves its source
+  target intact; drop-in files are also retained. It never removes the Profile,
+  `DSH_HOME`, Sessions, credentials, `launch.json` or another Profile's unit, and
+  it never kills a strict-absence fallback Host. A reload failure is
   reported as a failure, never as a completed uninstall. A cold `start` never
   silently upgrades a different build. A mutating verb's exit 0 requires the
   post-transition snapshot to contain NO blocking failure AND the expected

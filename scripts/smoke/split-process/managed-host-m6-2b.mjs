@@ -111,26 +111,6 @@ function systemctl(args, runtimeDir) {
   })
 }
 
-/**
- * Mirror the production ExecStart argument encoding (encodeUnitValue with
- * commandLine=true): backslash, double-quote, `%` specifier and `$` variable
- * escapes, wrapped in double quotes. Cleanup must match the ENCODED form the
- * unit file actually contains, not the raw path (`%`/`$`/`\`/`"`).
- */
-export function encodeExecArg(value) {
-  let out = ''
-  for (const character of value) {
-    switch (character) {
-      case '\\': out += '\\\\'; break
-      case '"': out += '\\"'; break
-      case '%': out += '%%'; break
-      case '$': out += '$$'; break
-      default: out += character
-    }
-  }
-  return `"${out}"`
-}
-
 function showUnit(unit, runtimeDir, run = systemctl) {
   const result = run(['--user', '--no-pager', '--no-ask-password', 'show', '-p', 'LoadState', '-p', 'ActiveState', '-p', 'FragmentPath', '-p', 'MainPID', '-p', 'UnitFileState', '-p', 'DropInPaths', unit], runtimeDir)
   if (result.status !== 0) throw new SplitSmokeAssertionError(`managed-host: systemctl show failed for ${unit}`)
@@ -163,37 +143,31 @@ function installedArtifactBuildId(installation) {
 }
 
 /**
- * Decide whether a unit FILE belongs to THIS run — the exact scope, this
- * installation's Host-entry path (unique per install) and the Host's/artifact's
- * install build. Returns a stable reason string when it is NOT ours, else null.
- * The ExecStart match uses the SAME encoding the production unit applies.
+ * Decide whether a unit file belongs to this isolated run's scope and build. Returns a stable reason string when it is NOT ours, else null.
  */
-export function unitBelongsToRun(content, { scopeId, hostEntry, publishedBuildId }) {
+export function unitBelongsToRun(content, { scopeId, publishedBuildId }) {
   const lines = content.split('\n')
   if (!lines.includes('X-DshPiTuiOwner=local-host-manager-v1')) return 'foreign-owner'
   if (!lines.includes(`X-DshPiTuiScopeId=${scopeId}`)) return 'foreign-scope'
   // A missing/empty install build cannot bind the unit to this run: NOT ours.
   if (typeof publishedBuildId !== 'string' || publishedBuildId === '') return 'no-published-build'
   if (!lines.includes(`X-DshPiTuiInstallBuild=${publishedBuildId}`)) return 'other-build'
-  const encodedHostEntry = encodeExecArg(hostEntry)
-  if (!lines.some(line => line.startsWith('ExecStart=') && line.includes(encodedHostEntry))) return 'other-install'
   return null
 }
 
 /**
- * A cleanup target must be OUR private unit file: a same-uid, 0600, regular
- * (non-symlink) file. Returns a stable reason when unsafe, else null.
+ * A cleanup target must be OUR private unit file: a same-uid regular file or user-created configuration link. Returns a stable reason when unsafe, else null.
  */
 export function unitFileSafetyError(info, uid) {
-  if (info.isSymbolicLink() || !info.isFile() || info.uid !== uid || (info.mode & 0o777) !== 0o600) return 'unsafe-file'
+  if ((!info.isSymbolicLink() && !info.isFile()) || info.uid !== uid) return 'unsafe-file'
   return null
 }
 
 /**
  * Stop and remove THIS run's managed unit, and only when it is provably ours:
- * a same-uid 0600 non-symlink unit file, matching owner/scope/encoded Host-entry/
- * install build, and (if loaded) a manager FragmentPath that names this exact
- * file with no drop-in. The install build comes from the live Host identity when
+ * a same-uid unit path, matching owner/scope/install build, and (if loaded) a
+ * canonical manager FragmentPath matching its configuration target. User
+ * runtime directives and drop-ins are preserved. The install build comes from the live Host identity when
  * available, else from the verified installation artifact (pre-publish case), so
  * a unit created before the Host published identity is still cleaned up. A
  * failed stop never silently unlinks. `deps` is a test seam; production omits it.
@@ -231,8 +205,6 @@ export function stopAndRemoveManagedUnit(installation, trace = () => {}, expecte
   if (fileError !== null) return { removed: false, reason: fileError }
   let content
   try { content = readFileSync(unitPath, 'utf8') } catch { return { removed: false, reason: 'unreadable' } }
-  let hostEntry
-  try { hostEntry = realpathSync(join(installation.profilePackage, 'dist', 'local-host.mjs')) } catch { return { removed: false, reason: 'no-entry' } }
   const instanceBuild = deps.instanceBuild ?? (() => readInstance(installation.dshHome, scopeId)?.buildId)
   const artifactBuild = deps.artifactBuild ?? (() => installedArtifactBuildId(installation))
   // The CANDIDATE artifact fingerprint is the necessary ownership condition: a
@@ -247,7 +219,7 @@ export function stopAndRemoveManagedUnit(installation, trace = () => {}, expecte
     return { removed: false, reason: 'not-this-install' }
   }
   const publishedBuildId = candidateBuild
-  const foreign = unitBelongsToRun(content, { scopeId, hostEntry, publishedBuildId })
+  const foreign = unitBelongsToRun(content, { scopeId, publishedBuildId })
   if (foreign !== null) return { removed: false, reason: foreign }
   const runtimeDir = deps.runtimeDir !== undefined
     ? deps.runtimeDir
@@ -258,7 +230,6 @@ export function stopAndRemoveManagedUnit(installation, trace = () => {}, expecte
     let realFragment
     try { realFragment = realpathSync(props.FragmentPath) } catch { return { removed: false, reason: 'fragment-unreadable' } }
     if (realFragment !== realpathSync(unitPath)) return { removed: false, reason: 'fragment-mismatch' }
-    if ((props.DropInPaths ?? '').trim() !== '') return { removed: false, reason: 'dropin' }
     const stop = run(['--user', '--no-pager', '--no-ask-password', 'stop', unit], runtimeDir)
     if (stop.status !== 0) return { removed: false, reason: 'stop-failed' }
   }

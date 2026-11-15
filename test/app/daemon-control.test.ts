@@ -310,7 +310,7 @@ test('an activating unit without a matching MainPID cannot claim the authenticat
     }))
     // The handshake really is Ready — the refusal is the supervision
     // attribution, which must make the COMMAND fail.
-    assertCode(result, 3, /does not supervise the authenticated Host/u)
+    assertCode(result, 3, /unit MainPID is not the authenticated Host/u)
     assert.match(result.stdout, /^host=ready$/mu, `MainPID=${String(mainPid)}: the Ready observation itself stays truthful`)
   }
 })
@@ -626,7 +626,7 @@ test('a foreign or unsafe unit file is refused before any Host claim', async t =
   assert.doesNotMatch(result.stdout, /^host=ready$/mu)
 })
 
-test('a symlinked unit file is refused, not followed', async t => {
+test('a user-linked unit with Profile metadata is followed for status', async t => {
   const fx = fixture(t)
   const unit = writeOwnedUnit(fx)
   const real = join(fx.unitDir, 'real.service')
@@ -635,7 +635,8 @@ test('a symlinked unit file is refused, not followed', async t => {
   unlinkSync(unit.path)
   symlinkSync(real, unit.path)
   const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx))
-  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assertCode(result, 0)
+  assert.match(result.stdout, /^manager=systemd$/mu)
 })
 
 test('an unsupported platform exits 3 before touching the filesystem', async t => {
@@ -1266,7 +1267,7 @@ test('start does not report success when the new Host fails the post-snapshot ow
     now: () => 0,
   }))
   assert.equal(ensured, 1, 'the cold start must have run ensure exactly once')
-  assertCode(result, 3, /does not supervise the authenticated Host/u)
+  assertCode(result, 3, /unit MainPID is not the authenticated Host/u)
   assert.match(result.stderr, /may already be committed; final verification failed/u)
   assert.match(result.stderr, /daemon status/u)
   assert.doesNotMatch(result.stdout, /^host=ready$/mu)
@@ -1314,7 +1315,7 @@ test('restart does not report success when the new instance fails the post-snaps
   // The post snapshot reached `host=ready` (the ownership refusal is only
   // produced on the authenticated path) and still must not be reported as a
   // completed restart: the failure wins over the Ready observation.
-  assertCode(result, 3, /does not supervise the authenticated Host/u)
+  assertCode(result, 3, /unit MainPID is not the authenticated Host/u)
   assert.match(result.stderr, /Host restart may already be committed; final verification failed/u)
   assert.match(result.stderr, /daemon status/u)
   assert.doesNotMatch(result.stdout, /previous=/u, 'a failed post-snapshot must not print a completed restart block')
