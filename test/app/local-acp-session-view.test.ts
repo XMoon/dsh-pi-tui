@@ -2115,6 +2115,7 @@ test('LC-01: an UNCONFIRMED unclaimed cancellation is never turned into a succes
   const second = view.start('while fenced').then(() => 'resolved' as const, (error: unknown) => error)
   const raced = await Promise.race([
     second,
+    // Bounded negative observation: the refusal must arrive without any new Host fact.
     new Promise<'timeout'>(resolve => { setTimeout(() => { resolve('timeout') }, 1_000) }),
   ])
   assert.ok(raced instanceof LocalAcpViewError && raced.code === 'LOCAL_ACP_PROMPT_IN_FLIGHT',
