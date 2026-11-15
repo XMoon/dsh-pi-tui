@@ -241,14 +241,18 @@ export async function runDaemonControlStatusSafety({ installation, trace, dshHom
     const tamperedStatus = statusOf(tampered.stdout)
     assert(tamperedStatus.host !== 'ready' && tamperedStatus.host !== 'stopped',
       `an unauthenticated Host must not report ready or stopped: ${tampered.stdout}`)
+    // The Owner contract: an authentication failure is not a unit-ownership
+    // verdict. With the launch material still broken, an EXPLICIT stop must
+    // still manage the verified unit through systemd; the product does not
+    // auto-recover.
+    const tamperedStop = runDaemon(installation, ['stop'])
+    assertStatus(tamperedStop, { host: 'stopped' }, 'stop with tampered authentication')
+    await waitFor(() => hostPids(dshHome).length === 0, 'the tampered-auth service Host exit', 30_000)
+    assert(processCounts(dshHome).host === 0, 'the explicit stop must stop the verified unit, not leave a second Host')
     writeFileSync(launchPath, launchBefore, { mode: 0o600 })
     launchBefore = undefined
-    assert(hostPids(dshHome).length === 1, 'tampering the read-only launch material must not kill the Host')
-    const stopped = runDaemon(installation, ['stop'])
-    assertStatus(stopped, { host: 'stopped' }, 'the status-safety cleanup stop')
-    await waitFor(() => hostPids(dshHome).length === 0, 'the status-safety Host exit', 30_000)
-    trace('daemon-control-status-safety', { instance: ready.instance, tamperedExit: tampered.status })
-    result = { status: 'PASS', scope: 'REAL_SYSTEMD_USER_L6', noHostStatusPure: true, activeNotReady: true, envIndependent: true }
+    trace('daemon-control-status-safety', { instance: ready.instance, tamperedExit: tampered.status, tamperedStop: tamperedStop.status })
+    result = { status: 'PASS', scope: 'REAL_SYSTEMD_USER_L6', noHostStatusPure: true, activeNotReady: true, envIndependent: true, authenticationFailureRecoverable: true }
   } catch (error) {
     failure = error
   } finally {
