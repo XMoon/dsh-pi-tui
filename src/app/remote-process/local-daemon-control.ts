@@ -20,7 +20,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
   assertClientHostCompatible,
@@ -192,6 +192,8 @@ interface Snapshot {
   readonly probe: UserManagerProbe
   readonly unit: OwnedProfileUnit | undefined
   readonly unitState: DaemonUnitState
+  /** The manager's raw ActiveState; `unitState` is the coarse presentation. */
+  readonly unitActiveState: string
   readonly unitMainPid: number
   readonly record: LocalInstanceRecord | undefined
   readonly processAlive: boolean
@@ -324,6 +326,7 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
       probe,
       unit: undefined,
       unitState: 'unknown',
+      unitActiveState: '',
       unitMainPid: 0,
       record: undefined,
       processAlive: false,
@@ -395,25 +398,48 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
         exitCode = mapped.exitCode
       }
     }
-    if (failure === undefined && authenticated !== undefined) {
-      if (unit !== undefined && unitState === 'active') {
+    if (failure === undefined && authenticated !== undefined && unit !== undefined && probe.kind === 'available') {
+      // The manager is live and this profile's unit is loaded. The unit's own
+      // reported state decides whether the supervision fact is settled:
+      //   active       + MainPID == Host PID -> verified systemd supervision
+      //   activating   + MainPID == Host PID -> same (the start is converging
+      //                                     onto the already-authenticated Host)
+      //   deactivating / reloading / unrecognized -> the fact is in flux, the
+      //                                     authenticated handshake cannot turn
+      //                                     that into a full success
+      //   MainPID 0 or a different PID under active/activating -> the manager
+      //                                     does not supervise THIS Host; the
+      //                                     ownership answer stays refused.
+      // Classify the manager's RAW ActiveState, never the coarse `unitState`
+      // (which maps `activating` to `unknown` too and would swallow the
+      // legitimate converging case).
+      const running = unitActiveState === 'active' || unitActiveState === 'activating'
+      const ended = unitActiveState === 'inactive' || unitActiveState === 'failed'
+      if (!running && !ended) {
+        // deactivating / reloading / an unrecognized ActiveState: the fact is in
+        // flux, so the authenticated handshake cannot make this a success.
+        host = 'unknown'
+        failure = new DaemonControlError('TRANSITION_UNCERTAIN', `the profile unit is in an unconfirmed state (${unitActiveState === '' ? 'unknown' : unitActiveState})`)
+        exitCode = failure.exitCode
+      } else if (running) {
+        // Only a RUNNING-or-STARTING unit claims the Host. Its MainPID must
+        // then be exactly the authenticated Host's PID; an ended unit
+        // (inactive/failed) supervises nothing and the live Host is a fallback.
         if (unitMainPid !== record.hostPid) {
           failure = new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the active profile unit does not supervise the authenticated Host')
           exitCode = failure.exitCode
         }
-      } else if (probe.kind === 'available' && (unitActiveState === 'deactivating' || unitActiveState === 'reloading')) {
-        // The handshake answered, but the manager is actively retiring or
-        // reloading this unit: the Host may be gone before any caller acts on
-        // the answer, so this is the same TRANSITION_UNCERTAIN as the
-        // no-registry path below — never a full success.
-        host = 'unknown'
-        failure = new DaemonControlError('TRANSITION_UNCERTAIN', `the profile unit is in an unconfirmed state (${unitActiveState})`)
-        exitCode = failure.exitCode
       } else {
-        // A live fallback Host under a manager that is now absent (or with no
-        // loaded unit) is process-supervised, never the inactive unit's.
-        manager = probe.kind === 'absent' ? 'process' : 'unmanaged'
+        // Ended unit (inactive/failed) under a live manager: the Host beside it
+        // is not supervised by it.
+        manager = 'unmanaged'
       }
+      // else: manager stays `systemd` (set above) and host stays `ready`.
+    } else if (failure === undefined && authenticated !== undefined) {
+      // No live-manager-supervised unit for this Host: absent manager with a
+      // live unit FILE is the stale-file case (the file loads nothing); a live
+      // fallback Host under a strictly absent manager is process-supervised.
+      manager = probe.kind === 'absent' ? 'process' : 'unmanaged'
     }
   } else if (unitState === 'active' || unitActiveState === 'activating') {
     // Manager supervision without an authenticated identity is never Ready. An
@@ -453,6 +479,7 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
     probe,
     unit,
     unitState,
+    unitActiveState,
     unitMainPid,
     record,
     processAlive,
@@ -615,14 +642,18 @@ async function stopFromSnapshot(
   snapshot: Snapshot,
   deps: DaemonControlDeps,
 ): Promise<void> {
-  const { probe, unit, unitState, unitMainPid, record, processAlive } = snapshot
+  const { probe, unit, unitState, unitActiveState, unitMainPid, record, processAlive } = snapshot
   if (probe.kind === 'error') {
     throw new DaemonControlError('MANAGER_OR_OS_FAILURE', `the user manager is unavailable: ${probe.reason}`)
   }
   const systemctl = deps.systemctl ?? runSystemctl
   const liveHost = processAlive && record !== undefined
   if (liveHost) {
-    const unitSupervisesHost = unit !== undefined && unitState === 'active' && unitMainPid === record.hostPid
+    // The SAME running-supervisor rule the snapshot classifier applies, so a
+    // verified `activating` unit (start converged onto this Host) is stoppable
+    // through its own unit instead of being refused as unattributed.
+    const running = unitActiveState === 'active' || unitActiveState === 'activating'
+    const unitSupervisesHost = unit !== undefined && running && unitMainPid === record.hostPid
     if (unitSupervisesHost) {
       if (probe.kind !== 'available') {
         throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'the user manager cannot verify the profile unit')
@@ -632,7 +663,7 @@ async function stopFromSnapshot(
       await waitForHostStopped(record, unitMainPid, deps)
       return
     }
-    if (probe.kind === 'absent' && unitState !== 'active') {
+    if (probe.kind === 'absent' && !running) {
       const authenticate = deps.authenticate ?? authenticateLocalHost
       try {
         await authenticate(record, snapshot.scope)
@@ -718,6 +749,11 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
       throw toDaemonControlError(error)
     }
     const post = await readSnapshot(profile, deps, scope)
+    // A cold start's completion needs BOTH facts: the post-snapshot found no
+    // blocking failure (identity/ownership/manager) AND the Host is Ready. The
+    // warm-start manager-error exemption above is deliberately NOT reapplied
+    // here: this command's OS work is done, so the post facts are complete.
+    if (post.failure !== undefined) throw post.failure
     if (post.status.host !== 'ready') throw refuseHostState(post.status)
     return { code: 0, stdout: formatDaemonStatus(post.status), stderr: '' }
   })
@@ -732,6 +768,7 @@ async function runStop(profile: DaemonControlProfile, deps: DaemonControlDeps): 
     assertNotAborted(deps.signal)
     await stopFromSnapshot(profile, pre, deps)
     const post = await readSnapshot(profile, deps, inspected)
+    if (post.failure !== undefined) throw post.failure
     if (post.status.host !== 'stopped') throw refuseHostState(post.status)
     return { code: 0, stdout: formatDaemonStatus(post.status), stderr: RUNNING_WORK_NOTICE }
   })
@@ -779,6 +816,7 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
       throw toDaemonControlError(error)
     }
     const post = await readSnapshot(profile, deps, scope)
+    if (post.failure !== undefined) throw post.failure
     if (post.status.host !== 'ready') throw refuseHostState(post.status)
     if (oldInstance !== undefined && post.record?.instanceId === oldInstance) {
       throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the restart did not produce a new Host instance')
@@ -820,6 +858,15 @@ async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDe
       throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'daemon-reload failed after removing the profile unit')
     }
     const post = await readSnapshot(profile, deps, inspected)
+    if (post.failure !== undefined) {
+      // The unlink/reload are already committed; a failed post confirmation
+      // cannot be rolled back. Report the incomplete verification with its
+      // stable code instead of claiming a completed uninstall.
+      throw post.failure
+    }
+    if (existsSync(pre.unit.filePath)) {
+      throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'the profile unit could not be confirmed removed; re-run status to confirm')
+    }
     return { code: 0, stdout: formatDaemonStatus(post.status), stderr: RUNNING_WORK_NOTICE }
   })
 }

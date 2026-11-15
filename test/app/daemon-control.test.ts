@@ -278,6 +278,101 @@ test('status reports an unconfirmed transitional unit state as unknown and nonze
   assert.match(result.stdout, /^manager=systemd$/mu)
 })
 
+test('an activating unit that supervises the authenticated Host is verified systemd supervision', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'activating', mainPid: record.hostPid })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  // A start that has already converged onto the authenticated Host IS verified
+  // systemd supervision: ready + systemd, not `unmanaged` and not uncertain.
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.match(result.stdout, /^manager=systemd$/mu)
+})
+
+test('an activating unit without a matching MainPID cannot claim the authenticated Host', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope)
+  for (const mainPid of [0, 9001]) {
+    const systemctl = unitSystemctl(unit.path, { activeState: 'activating', mainPid })
+    const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+      systemctl: systemctl.run,
+      readRecord: () => record,
+      inspectProcess: () => 'alive',
+      authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    }))
+    // The handshake really is Ready — the refusal is the supervision
+    // attribution, which must make the COMMAND fail.
+    assertCode(result, 3, /does not supervise the authenticated Host/u)
+    assert.match(result.stdout, /^host=ready$/mu, `MainPID=${String(mainPid)}: the Ready observation itself stays truthful`)
+  }
+})
+
+test('a reloading unit or an unrecognized ActiveState stays uncertain beside a live Host', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope)
+  for (const activeState of ['reloading', 'maintenance']) {
+    const systemctl = unitSystemctl(unit.path, { activeState, mainPid: record.hostPid })
+    const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+      systemctl: systemctl.run,
+      readRecord: () => record,
+      inspectProcess: () => 'alive',
+      authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    }))
+    assertCode(result, 5, /TRANSITION_UNCERTAIN/u)
+    assert.match(result.stdout, /^host=unknown$/mu, `${activeState} must not report a confirmed Host`)
+    assert.doesNotMatch(result.stdout, /^host=ready$/mu)
+  }
+})
+
+test('an inactive owned unit with no Host is stopped and stop stays an idempotent no-op', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'inactive', mainPid: 0 })
+  const status = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+  }))
+  assertCode(status, 0)
+  assert.match(status.stdout, /^host=stopped$/mu)
+  assert.match(status.stdout, /^manager=systemd$/mu)
+  assert.match(status.stdout, /^unit-state=inactive$/mu)
+  const stop = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(stop, 0)
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), false, 'an inactive unit needs no stop call')
+  assert.equal(existsSync(unit.path), true, 'stop must never remove the unit file')
+})
+
+test('a unit file the manager has not loaded gets no supervision attribution', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const systemctl = unitSystemctl(unit.path, { loadState: 'not-found', activeState: 'inactive', mainPid: 0 })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^unit-state=not-found$/mu)
+  assert.match(result.stdout, /^manager=unmanaged$/mu, 'an unloaded file is not systemd supervision')
+  assert.equal(existsSync(unit.path), true)
+})
+
 test('a live Host that fails the authenticated handshake is unresponsive and nonzero', async t => {
   const fx = fixture(t)
   const record = recordOf(fx.scope)
@@ -421,6 +516,32 @@ test('stop with no live Host and no owned unit is an idempotent no-op', { skip: 
   assertCode(result, 0)
   assert.match(result.stdout, /^host=stopped$/mu)
   assert.equal(systemctl.calls.some(args => args.includes('stop')), false, 'nothing may be stopped')
+})
+
+test('stop uses the unit of an activating supervisor that owns the Host', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'activating', mainPid: record.hostPid })
+  let signals = 0
+  let stopped = false
+  const run = async (args: readonly string[]): Promise<SystemctlResult> => {
+    const result = await systemctl.run(args)
+    if (args.includes('stop')) stopped = true
+    return result
+  }
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    systemctl: run,
+    readRecord: () => (stopped ? undefined : record),
+    inspectProcess: () => (stopped ? 'dead' : 'alive'),
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    kill: () => { signals += 1 },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), true, 'the verified unit must be stopped through the manager')
+  assert.equal(signals, 0, 'a unit-supervised Host is never PID-signalled')
 })
 
 test('stop refuses a live Host with no verifiable supervision attribution', { skip: process.platform !== 'linux' }, async t => {
@@ -971,6 +1092,122 @@ test('uninstall stops and removes only the verified profile unit, then reloads',
   assert.equal(systemctl.calls.some(args => args.includes('stop')), true)
   assert.equal(systemctl.calls.some(args => args.includes('daemon-reload')), true)
   assert.equal(existsSync(join(fx.scope.dir, 'instance.json')), false)
+})
+
+test('start does not report success when the new Host fails the post-snapshot ownership check', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope)
+  let ensured = 0
+  let postPhase = false
+  // Pre: no Host, an inactive owned unit (a legal cold start). Post: the Host is
+  // authenticated BUT the manager's MainPID belongs to a different process.
+  const systemctl = unitSystemctl(unit.path, { activeState: 'inactive', mainPid: 0 })
+  const systemctlWithPost = async (args: readonly string[]): Promise<SystemctlResult> => {
+    const result = await systemctl.run(args)
+    void result
+    return exited(0, [
+      'LoadState=loaded',
+      `ActiveState=active`,
+      `FragmentPath=${unit.path}`,
+      'DropInPaths=',
+      `MainPID=${String(postPhase ? 9999 : 0)}`,
+      'UnitFileState=disabled',
+      '',
+    ].join('\n'))
+  }
+  const result = await runDaemonControl({ verb: 'start' }, fx.profile, depsOf(fx, {
+    systemctl: systemctlWithPost,
+    readRecord: () => (ensured > 0 ? record : undefined),
+    inspectProcess: recordValue => recordValue === undefined ? 'dead' : 'alive',
+    authenticate: async recordValue => ({ record: recordValue, cookie: 'c', identity: recordValue }),
+    ensureHost: async () => { ensured += 1; postPhase = true; return { record, cookie: 'c', identity: record } },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assert.equal(ensured, 1, 'the cold start must have run ensure exactly once')
+  assertCode(result, 3, /does not supervise the authenticated Host/u)
+  assert.doesNotMatch(result.stdout, /^host=ready$/mu)
+})
+
+test('restart does not report success when the new instance fails the post-snapshot check', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const oldRecord = recordOf(fx.scope)
+  const newRecord = recordOf(fx.scope, { instanceId: '22222222-2222-4222-8222-222222222222', hostPid: 5252 })
+  let ensured = 0
+  let phase: 'old' | 'stopped' | 'new' = 'old'
+  // The manager is available during the pre/stop phases (so the stop goes
+  // through the verified unit) and again after ensure, where the post-snapshot
+  // reports host=ready together with an ownership failure: the unit is active
+  // but its MainPID is NOT the new Host. `ready` alone must not be success.
+  const systemctl = async (args: readonly string[]): Promise<SystemctlResult> => {
+    if (args.includes('stop')) { phase = phase === 'old' ? 'stopped' : phase; return exited(0) }
+    if (args.includes('show')) {
+      return exited(0, [
+        'LoadState=loaded',
+        `ActiveState=${phase === 'old' ? 'active' : phase === 'stopped' ? 'inactive' : 'active'}`,
+        `FragmentPath=${unit.path}`,
+        'DropInPaths=',
+        `MainPID=${String(phase === 'old' ? oldRecord.hostPid : phase === 'new' ? 9999 : 0)}`,
+        'UnitFileState=disabled',
+        '',
+      ].join('\n'))
+    }
+    return exited(0)
+  }
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, depsOf(fx, {
+    systemctl,
+    readRecord: () => (phase === 'old' ? oldRecord : phase === 'new' ? newRecord : undefined),
+    inspectProcess: recordValue => recordValue === undefined ? 'dead' : 'alive',
+    authenticate: async recordValue => ({ record: recordValue, cookie: 'c', identity: recordValue }),
+    readCmdline: () => `node\0${join(fx.profile.packageRoot, 'dist', 'local-host.mjs')}\0`,
+    readStarttime: () => phase === 'old' ? oldRecord.hostStarttime : undefined,
+    kill: () => {},
+    ensureHost: async () => { ensured += 1; phase = 'new'; return { record: newRecord, cookie: 'c', identity: newRecord } },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assert.equal(ensured, 1, 'the restart must have run ensure exactly once')
+  // The post snapshot reached `host=ready` (the ownership refusal is only
+  // produced on the authenticated path) and still must not be reported as a
+  // completed restart: the failure wins over the Ready observation.
+  assertCode(result, 3, /does not supervise the authenticated Host/u)
+  assert.doesNotMatch(result.stdout, /previous=/u, 'a failed post-snapshot must not print a completed restart block')
+  assert.doesNotMatch(result.stdout, /^host=ready$/mu, 'a failed post-snapshot must not be presented as Ready success')
+})
+
+test('uninstall reports an incomplete verification when the post-snapshot manager query fails', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  let reloads = 0
+  let postPhase = false
+  const systemctl = async (args: readonly string[]): Promise<SystemctlResult> => {
+    if (args.includes('daemon-reload')) { reloads += 1; postPhase = true; return exited(0) }
+    if (args.includes('stop')) return exited(0)
+    return exited(0, [
+      'LoadState=loaded',
+      'ActiveState=inactive',
+      `FragmentPath=${unit.path}`,
+      'DropInPaths=',
+      'MainPID=0',
+      'UnitFileState=disabled',
+      '',
+    ].join('\n'))
+  }
+  const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, depsOf(fx, {
+    systemctl,
+    probe: async (): Promise<UserManagerProbe> => (postPhase
+      ? { kind: 'error', reason: 'bus broke after the reload' }
+      : { kind: 'available' }),
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 4, /user manager is unavailable/u)
+  assert.equal(existsSync(unit.path), false, 'the owned unit file must be removed (the OS action committed)')
+  assert.equal(reloads, 1, 'daemon-reload must run exactly once')
 })
 
 test('uninstall reports a failed daemon-reload instead of claiming completion', { skip: process.platform !== 'linux' }, async t => {
