@@ -126,6 +126,24 @@ function composeRow(left: string, right: string, width: number): string {
   return fit(left + ' '.repeat(width - leftWidth - rightWidth) + right, width)
 }
 
+/** One Action-Bar intent a pointer may invoke (never a bare glyph). */
+type McpBarAction =
+  | 'back'
+  | 'enter-detail'
+  | 'add'
+  | 'edit'
+  | 'toggle'
+  | 'delete'
+  | 'reset'
+  | 'probe'
+  | 'restart'
+  | 'save'
+  | 'confirm'
+  | 'cancel'
+  | 'discard'
+  | 'keep-editing'
+  | 'refresh'
+
 /** One painted hit target of the LAST frame, in page-local cells. A form row
  *  carries the FIELD identity so a click activates exactly the row that was
  *  painted (never a row that scrolled into that cell afterwards). */
@@ -147,6 +165,14 @@ type McpPaintedTarget =
       readonly startCol: number
       readonly endCol: number
     }
+  | {
+      readonly kind: 'action'
+      /** The semantic intent the painted bar segment advertises. */
+      readonly action: McpBarAction
+      readonly row: number
+      readonly startCol: number
+      readonly endCol: number
+    }
 
 /** The last painted frame's geometry (the only pointer authority). */
 interface McpPagePaint {
@@ -158,60 +184,92 @@ interface McpPagePaint {
 
 /** Build one action-bar line from segments (whole segments only) and report the
  *  painted geometry of the Esc affordance, when it really painted whole. */
-function paintBar(segments: readonly ActionBarSegment[], width: number, lastIsEscape: boolean): {
+function paintBar(segments: readonly McpBarSegment[], width: number, lastIsEscape: boolean): {
   readonly line: string
   readonly escape?: { readonly startCol: number; readonly endCol: number }
+  /** Every PAINTED segment with its cells, in display order. A segment the
+   *  layout dropped is absent here, so a pointer target is never invented. */
+  readonly spans: readonly { readonly action: McpBarAction | undefined; readonly startCol: number; readonly endCol: number }[]
 } {
   const layout = layoutActionBarRow(segments, width)
   if (layout.truncated || layout.spans.length === 0) {
-    return { line: color.textMuted(truncateToWidth(layout.text, Math.max(0, width), '…', true)) }
+    return { line: color.textMuted(truncateToWidth(layout.text, Math.max(0, width), '…', true)), spans: [] }
   }
   let painted = ''
   let escape: { startCol: number; endCol: number } | undefined
+  const spans: { action: McpBarAction | undefined; startCol: number; endCol: number }[] = []
   for (const span of layout.spans) {
     if (painted !== '') painted += ACTION_BAR_SEPARATOR
     const isLast = span.inputIndex === segments.length - 1
     painted += isLast && lastIsEscape ? paintActionSpan(span.text, 'secondary') : color.textMuted(span.text)
     if (isLast && lastIsEscape) escape = { startCol: span.startCol, endCol: span.endCol }
+    spans.push({ action: segments[span.inputIndex]?.action, startCol: span.startCol, endCol: span.endCol })
   }
-  return { line: painted, ...escape === undefined ? {} : { escape } }
+  return { line: painted, ...escape === undefined ? {} : { escape }, spans }
 }
 
+/**
+ * Wrap one sentence into at most `maxLines` cell-accurate lines (a word that
+ * cannot fit is left on its own line and truncated by the caller). Used for a
+ * safety disclosure that must not depend on a one-line Action Bar.
+ */
+function wrapCells(text: string, width: number, maxLines: number): string[] {
+  const words = sanitizedPhysicalLine(text).split(' ').filter(word => word !== '')
+  const lines: string[] = []
+  let current = ''
+  for (const word of words) {
+    const candidate = current === '' ? word : `${current} ${word}`
+    if (visibleWidth(candidate) <= width || current === '') {
+      current = candidate
+      continue
+    }
+    lines.push(current)
+    current = word
+    if (lines.length === maxLines) return lines
+  }
+  if (current !== '' && lines.length < maxLines) lines.push(current)
+  return lines
+}
+
+/** A bar segment that may advertise a pointer intent. */
+type McpBarSegment = ActionBarSegment & { readonly action?: McpBarAction }
+
 /** The long list/detail hints, shortened when the frame is tight. */
-const LIST_HINTS: readonly ActionBarSegment[] = [
+const LIST_HINTS: readonly McpBarSegment[] = [
   { text: '↑/↓ move', short: '↑/↓', priority: 30 },
-  { text: 'Enter details', short: 'Enter', priority: 20 },
-  { text: 'a Add', priority: 18 },
+  { text: 'Enter details', short: 'Enter', priority: 20, action: 'enter-detail' },
+  { text: 'a Add', priority: 18, action: 'add' },
   { text: '/ search', priority: 15 },
-  { text: 'r refresh', priority: 10 },
+  { text: 'r refresh', priority: 10, action: 'refresh' },
   // The Esc affordance is the ONE required segment at every width: it is never
   // compacted away from `Verb [Esc]` (only a frame too narrow for even that
   // truncates it).
-  { text: 'Back [Esc]', priority: 1000 },
+  { text: 'Back [Esc]', priority: 1000, action: 'back' },
 ]
-const EDITOR_HINTS: readonly ActionBarSegment[] = [
+const EDITOR_HINTS: readonly McpBarSegment[] = [
   { text: '↑/↓ field', short: '↑/↓', priority: 30 },
   { text: 'Enter edit', short: 'Enter', priority: 25 },
   { text: 'Tab next', short: 'Tab', priority: 20 },
-  { text: 's Save', priority: 40 },
-  { text: 'Back [Esc]', priority: 1000 },
+  { text: 's Save', priority: 40, action: 'save' },
+  { text: 'Back [Esc]', priority: 1000, action: 'back' },
 ]
-const EDITOR_INPUT_HINTS: readonly ActionBarSegment[] = [
+const EDITOR_INPUT_HINTS: readonly McpBarSegment[] = [
   { text: 'Enter apply', short: 'Enter', priority: 30 },
-  { text: 'Esc cancel', short: 'Esc', priority: 1000 },
+  { text: 'Esc cancel', short: 'Esc', priority: 1000, action: 'cancel' },
 ]
-const DISCARD_HINTS: readonly ActionBarSegment[] = [
-  { text: 'Keep editing', short: 'Keep', priority: 900 },
-  { text: 'Esc', priority: 999 },
+const DISCARD_HINTS: readonly McpBarSegment[] = [
+  { text: 'Keep editing', short: 'Keep', priority: 900, action: 'keep-editing' },
+  { text: 'Discard', short: 'd', priority: 899, action: 'discard' },
+  { text: 'Esc', priority: 999, action: 'keep-editing' },
 ]
 /** The confirmation ANSWER segments. `Esc` is the required affordance and `y`
  *  is the only affirmative key, so both are compacted (never dropped) before
  *  the target sentence — the target sentence itself carries the HIGHEST
  *  priority, because a confirmation whose subject vanished would let the user
  *  answer a question they cannot read (§7.2 "safety facts kept"). */
-const CONFIRM_HINTS: readonly ActionBarSegment[] = [
-  { text: 'Y confirm', short: 'y', priority: 900 },
-  { text: 'Esc cancel', short: 'Esc', priority: 999 },
+const CONFIRM_HINTS: readonly McpBarSegment[] = [
+  { text: 'Y confirm', short: 'y', priority: 900, action: 'confirm' },
+  { text: 'Esc cancel', short: 'Esc', priority: 999, action: 'cancel' },
 ]
 const SEARCH_HINTS: readonly ActionBarSegment[] = [
   { text: 'type to filter', priority: 20 },
@@ -567,9 +625,17 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   }
 
   private openFormInput(row: McpFormRow, initial: string): void {
+    // N10: the placeholder states what an EMPTY Enter really does for the
+    // storage form this key uses — a literal CAN be committed as the empty
+    // string, so the old `blank keeps current` hint was a lie for that form.
+    const placeholder = row.action.kind === 'edit-dict-value'
+      ? this.controller.dictValueForm(row.action.field, row.action.key) === 'literal'
+        ? 'value (Enter on empty sets it empty · Esc keeps current)'
+        : 'credential REF name (Enter on empty keeps current · Esc cancels)'
+      : ''
     const input = new Input({
       prompt: '> ',
-      placeholder: row.action.kind === 'edit-dict-value' ? 'new value (blank keeps current)' : '',
+      placeholder,
       placeholderStyle: color.textDim,
     })
     input.setValue(initial)
@@ -711,6 +777,11 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     if (this.disposed) return undefined
     const paint = this.paint
     if (paint === undefined || event.width !== paint.width) return undefined
+    // N11: a MODAL decision owns the surface exactly like it owns the keyboard.
+    // While a confirmation/discard/question owns the page, a pointer must not
+    // change the draft (or the selection) the question is about: the answer
+    // would then commit a configuration the user never saw.
+    if (this.modalOwned()) return undefined
     const bodyRows = Math.max(0, paint.rows - 1)
     if (event.height !== bodyRows && event.height !== paint.rows) return undefined
     if (event.type === 'wheel') {
@@ -761,7 +832,9 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         || (pressed.target.kind === 'server-row' && target.kind === 'server-row'
           && pressed.target.name !== target.name)
         || (pressed.target.kind === 'form-row' && target.kind === 'form-row'
-          && pressed.target.id !== target.id)) return undefined
+          && pressed.target.id !== target.id)
+        || (pressed.target.kind === 'action' && target.kind === 'action'
+          && pressed.target.action !== target.action)) return undefined
       const snapshot = this.controller.snapshot()
       if (target.kind === 'form-row') {
         // A form-row click is the Enter equivalent on THAT row: focus it and
@@ -776,12 +849,98 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         this.bumpRevision()
         return { handled: true }
       }
+      if (target.kind === 'action') {
+        this.runBarAction(target.action, snapshot)
+        this.bumpRevision()
+        return { handled: true }
+      }
       this.controller.select(target.name, this.visibleNames(snapshot))
       if (this.layoutClass() === 'wide') this.wideFocus = 'list'
       this.bumpRevision()
       return { handled: true }
     }
     return undefined
+  }
+
+  /**
+   * Invoke one Action-Bar intent from a pointer click. Every action goes
+   * through the SAME controller admission the keyboard key would use — the bar
+   * never invents a capability, it only mirrors the painted affordance.
+   */
+  private runBarAction(action: McpBarAction, snapshot: McpServersSnapshot): void {
+    switch (action) {
+      case 'back':
+        if (this.view === 'editor') {
+          if (snapshot.configStatus?.kind === 'saving') {
+            this.configSavingNotice = true
+            break
+          }
+          this.handleInput('\x1b')
+          return
+        }
+        if (this.view === 'detail') {
+          this.handleInput('\x1b')
+          return
+        }
+        if (this.wideFocus === 'detail') {
+          this.wideFocus = 'list'
+          break
+        }
+        this.done()
+        return
+      case 'cancel':
+        this.handleInput('\x1b')
+        return
+      case 'confirm':
+        if (snapshot.configConfirm !== undefined) this.controller.answerConfigConfirm(true)
+        else if (snapshot.confirmingName !== undefined) this.controller.answerRestart(true)
+        return
+      case 'discard':
+        if (this.discardConfirm) {
+          this.discardConfirm = false
+          this.formInput = undefined
+          this.controller.discardEditor()
+          this.configSavingNotice = false
+          this.view = this.layoutClass() === 'wide' ? 'list' : 'detail'
+        }
+        return
+      case 'keep-editing':
+        if (this.discardConfirm) this.discardConfirm = false
+        return
+      case 'add':
+        if (!this.inDetail() && this.controller.canBeginAdd()) {
+          this.controller.beginAdd()
+          this.enterEditor()
+        }
+        return
+      case 'edit':
+        if (this.controller.canBeginEdit()) {
+          this.controller.beginEdit()
+          this.enterEditor()
+        }
+        return
+      case 'toggle':
+        if (this.controller.canEditConfiguration()) this.controller.beginToggle()
+        return
+      case 'delete':
+        if (this.controller.canEditConfiguration()) this.controller.beginDelete()
+        return
+      case 'reset':
+        if (this.controller.canEditConfiguration()) this.controller.beginReset()
+        return
+      case 'probe':
+        if (this.controller.canOperateSelected()) this.controller.probe()
+        return
+      case 'restart':
+        if (this.controller.canOperateSelected()) this.controller.beginRestart()
+        return
+      case 'refresh':
+        this.controller.refresh()
+        return
+      case 'save':
+        if (this.view === 'editor') this.handleInput('s')
+        return
+    }
   }
 
   dispose(): void {
@@ -796,6 +955,15 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     this.controller.dispose()
   }
 
+  /** Whether a modal decision owns the surface right now (keyboard + mouse). */
+  private modalOwned(): boolean {
+    const snapshot = this.controller.snapshot()
+    return snapshot.configConfirm !== undefined
+      || snapshot.confirmingName !== undefined
+      || this.discardConfirm
+      || this.searching
+  }
+
   invalidate(): void {}
 
   /** The pane-header line the root paints inside the shared body grant. */
@@ -805,15 +973,28 @@ export class McpServersPage implements EmbeddedSpecialistPage {
    * the server that happened to be selected in the list before Add started.
    */
   paneHeader(width: number): string {
-    const editorIdentity = this.editorIdentity()
+    const identity = this.editorIdentity()
     if (this.layoutClass() !== 'wide') {
+      // The FORM target is the one fact that must survive a narrow header: the
+      // page label is dropped first, then the source, so the user can always
+      // read WHICH server and WHICH mode they are editing (N08). The identity
+      // is never silently dropped by composeRow.
+      if (identity !== undefined) {
+        const room = width - visibleWidth(MCP_SERVERS_PAGE_TITLE) - 3
+        const compact = identity.full.length > 0 && room >= visibleWidth(identity.full)
+          ? identity.full
+          : room >= visibleWidth(identity.withoutSource) ? identity.withoutSource : identity.name
+        return fit(this.focused
+          ? composeRow(color.textDim(MCP_SERVERS_PAGE_TITLE), color.textStrong(compact, 'primary'), width)
+          : composeRow(color.textDim(MCP_SERVERS_PAGE_TITLE), color.text(compact), width), width)
+      }
       const left = this.focused
         ? color.textStrong(`[${MCP_SERVERS_PAGE_TITLE}]`, 'primary')
         : color.textDim(MCP_SERVERS_PAGE_TITLE)
-      return editorIdentity === undefined ? left : composeRow(left, color.text(editorIdentity), width)
+      return left
     }
-    if (editorIdentity !== undefined) {
-      return composeRow(color.textDim(MCP_SERVERS_PAGE_TITLE), color.textStrong(editorIdentity, 'primary'), width)
+    if (identity !== undefined) {
+      return composeRow(color.textDim(MCP_SERVERS_PAGE_TITLE), color.textStrong(identity.full, 'primary'), width)
     }
     const listActive = this.wideFocus === 'list'
     const left = listActive
@@ -825,14 +1006,18 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     return composeRow(left, right, width)
   }
 
-  /** The `Name · Add/Edit · source` identity of the OPEN form, when one is. */
-  private editorIdentity(): string | undefined {
+  /**
+   * The tiered `Name · Add/Edit · source` identity of the OPEN form. The narrow
+   * header drops the SOURCE first, then the mode, so the NAME is the last fact
+   * kept — the target identity is the contract, the source is the detail.
+   */
+  private editorIdentity(): { readonly full: string; readonly withoutSource: string; readonly name: string } | undefined {
     const editor = this.controller.snapshot().editor
     if (editor === undefined) return undefined
     const name = editor.name === '' ? '(unnamed)' : sanitizedPhysicalLine(editor.name)
     const mode = editor.mode === 'add' ? 'Add' : 'Edit'
     const source = editor.mode === 'add' ? 'new user server' : this.editorSourceLabel()
-    return `${name} · ${mode} · ${source}`
+    return { full: `${name} · ${mode} · ${source}`, withoutSource: `${name} · ${mode}`, name }
   }
 
   /** The source of the entry being edited (from the same descriptor). */
@@ -1012,6 +1197,11 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     while (lines.length < bodyRows) lines.push(fit('', width))
     const bar = this.renderBar(width, snapshot)
     this.paintedEscapeSpanValue = bar.escape
+    const barRow = lines.length
+    for (const span of bar.spans) {
+      if (span.action === undefined) continue
+      targets.push({ kind: 'action', action: span.action, row: barRow, startCol: span.startCol, endCol: span.endCol })
+    }
     lines.push(fit(bar.line, width))
     this.paint = {
       width,
@@ -1035,7 +1225,15 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     }
     const statusRows = 1
     const inputRows = this.formInput === undefined ? 0 : 1
-    const bodyRows = Math.max(1, rows - statusRows - inputRows)
+    // N13: a Save question's SAFETY FACT lives in the body, wrapped, so it
+    // survives any Action Bar compaction (44 columns, a 32-character name, a
+    // long HTTP host). The bar only carries the decision.
+    const disclosure = snapshot.configConfirm?.kind === 'save'
+      ? wrapCells(snapshot.configConfirm.warning === undefined
+        ? `Save ${snapshot.configConfirm.name}?`
+        : `Save ${snapshot.configConfirm.name} — ${snapshot.configConfirm.warning}`, width, 3)
+      : []
+    const bodyRows = Math.max(1, rows - statusRows - inputRows - disclosure.length)
     // Keep the focused row inside the painted window. The scroller reasons in
     // PHYSICAL content rows (group headers occupy rows too), never in field
     // indices: a short grant would otherwise let the focused field scroll out
@@ -1053,7 +1251,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     const rendered = renderMcpConfigForm(editor, width, bodyRows, this.formFocus, this.formOffset,
       (field, key) => this.controller.dictValueForm(field, key),
       (field, key) => this.controller.canRemoveDictKey(field, key))
-    const lines = [...rendered.lines]
+    const lines = [...disclosure.map(line => fit(color.warning(line), width)), ...rendered.lines]
     if (this.formInput !== undefined) {
       const [inputLine] = this.formInput.input.render(width)
       lines.push(fit(color.textMuted('edit: ') + (inputLine ?? ''), width))

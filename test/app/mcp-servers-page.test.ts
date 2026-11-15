@@ -454,7 +454,8 @@ test('a dirty form Esc opens the discard confirmation; only `d` drops the draft'
   page.handleInput('\x1b')
   const confirm = render(page, 100, 16).join('\n')
   assert.match(confirm, /Discard changes\? \[Keep editing\] \[Discard d\]/u)
-  assert.match(confirm, /Keep editing · Esc/u)
+  // The bar now offers BOTH the keep and the discard affordance to a pointer.
+  assert.match(confirm, /Keep editing · (d \()?Discard|Keep editing · Discard/u)
   // Enter keeps editing: nothing is discarded and no write happens.
   page.handleInput('\r')
   assert.equal(controller.calls.includes('discardEditor'), false)
@@ -901,4 +902,124 @@ test('a form-row click activates the same intent as Enter, and a repaint refuses
   render(page, 100, 18)
   page.handleMouse({ ...mouseBase, type: 'click', x: 2, y: transportLine, width: 100, height: 19 })
   assert.deepEqual(controller.calls, [], 'a stale press never activates a field')
+})
+
+test('a pointer cannot change the draft while a confirmation owns the page', () => {
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
+  openEditor(page, 'e')
+  controller.calls.length = 0
+  // The user presses `s`: the disclosure question opens over the SAME draft.
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    configConfirm: { kind: 'save', name: 'alpha', warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
+  }
+  const lines = render(page, 100, 20)
+  const transportLine = lines.findIndex(line => line.includes('Transport:'))
+  assert.ok(transportLine >= 0)
+  const mouse = { button: 'left' as const, screenX: 1, screenY: 1, width: 100, height: 19, shift: false, alt: false, ctrl: false }
+  // Every pointer gesture is refused while the question is open: no draft
+  // change can slip in between the disclosure and the answer.
+  page.handleMouse({ ...mouse, type: 'press', x: 2, y: transportLine })
+  page.handleMouse({ ...mouse, type: 'click', x: 2, y: transportLine })
+  assert.deepEqual(controller.calls, [], 'no draft mutation may bypass the open confirmation')
+  assert.equal(page.handleMouse({ ...mouse, type: 'click', x: 2, y: transportLine }), undefined)
+
+  // After the question is answered, the SAME click works again (positive
+  // control: the lock is the modal, not a broken mouse path).
+  const plain = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
+  openEditor(plain.page, 'e')
+  const plainLines = render(plain.page, 100, 20)
+  const plainTransport = plainLines.findIndex(line => line.includes('Transport:'))
+  plain.page.handleMouse({ ...mouse, type: 'press', x: 2, y: plainTransport })
+  plain.page.handleMouse({ ...mouse, type: 'click', x: 2, y: plainTransport })
+  assert.ok(plain.controller.calls.includes('setTransport'), 'a non-modal field click still works')
+})
+
+test('the mouse can complete the whole loop: detail, Add, field, Save, confirm', () => {
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET, config: { kind: 'ready', generation: {}, revision: 1, entries: [] } }))
+  const mouse = { button: 'left' as const, screenX: 1, screenY: 1, shift: false, alt: false, ctrl: false }
+  const clickLabel = (width: number, rows: number, label: string): boolean => {
+    page.setMaxRows(rows)
+    const lines = page.render(width).map(line => stripTerminalSequences(line))
+    const y = lines.findIndex(line => line.includes(label))
+    if (y < 0) return false
+    const col = (lines[y] ?? '').indexOf(label) + 1
+    page.handleMouse({ ...mouse, type: 'press', x: col, y, width, height: rows - 1 })
+    page.handleMouse({ ...mouse, type: 'click', x: col, y, width, height: rows - 1 })
+    return true
+  }
+  // 1) The list's `a Add` is clickable.
+  assert.ok(clickLabel(100, 20, 'a Add'), 'the Add affordance must be a pointer target')
+  assert.ok(controller.calls.includes('beginAdd'), `the Add click must run the intent: ${controller.calls.join(',')}`)
+  // 2) The form's `s Save` is clickable and opens the disclosure (the fake
+  //    controller reports the save intent through saveEditor).
+  controller.calls.length = 0
+  assert.ok(clickLabel(100, 20, 's Save'), 'the Save affordance must be a pointer target')
+  assert.ok(controller.calls.includes('saveEditor'), `the Save click must run the intent: ${controller.calls.join(',')}`)
+})
+
+test('the Save disclosure lives in the body at 44 columns, not only in the bar', () => {
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
+  openEditor(page, 'e', 44, 8)
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    configConfirm: { kind: 'save', name: 'a'.repeat(32), warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
+  }
+  const frame = render(page, 44, 8).join('\n')
+  // The complete safety fact is painted in the body (wrapped), even though the
+  // 32-character name and the narrow bar cannot hold it.
+  assert.match(frame, /execute an external\s+command\./u, `the capability must be in the body: ${frame}`)
+  // The decision keys survive even when the question segment drops.
+  assert.match(frame, /(Y confirm|y)\b/u, `the affirmative key must survive: ${frame}`)
+  assert.match(frame, /Esc/u)
+})
+
+test('the narrow header keeps the form target identity at every width', () => {
+  // The identity is projected from the OPEN editor snapshot, so the header is
+  // checked directly (entering via `a` would replace it with an empty draft).
+  const { page } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ mode: 'add', name: 'a'.repeat(32), nameEditable: true, dirty: true }),
+  }))
+  page.setMaxRows(8)
+  for (const width of [44, 72, 80, 120]) {
+    const header = stripTerminalSequences(page.paneHeader(width))
+    assert.match(header, new RegExp('a'.repeat(32)), `width ${String(width)}: the name must survive: ${header}`)
+    assert.ok(visibleWidth(header) <= width, `width ${String(width)}: the header must not overflow`)
+  }
+})
+
+test('the value input hint states what an empty Enter really does per storage form', () => {
+  const literalPage = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ env: [{ key: 'E', value: 'stored' }], dirty: true }),
+  }))
+  literalPage.controller.formValue = 'literal'
+  openEditor(literalPage.page, 'e')
+  for (let step = 0; step < 14; step += 1) {
+    const focused = /▸ ([^:\n]+):/u.exec(render(literalPage.page, 100, 20).join('\n'))
+    if (focused !== null && (focused[1] ?? '').trim() === 'Env E') break
+    literalPage.page.handleInput('\x1b[B')
+  }
+  literalPage.page.handleInput('\r')
+  const literalFrame = render(literalPage.page, 100, 20).join('\n')
+  assert.match(literalFrame, /Enter on empty sets it empty/u,
+    `a literal must state that an empty Enter clears: ${literalFrame}`)
+  assert.doesNotMatch(literalFrame, /blank keeps current/u)
+
+  const referencePage = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ env: [{ key: 'E', value: '${credential:E}' }], dirty: true }),
+  }))
+  referencePage.controller.formValue = 'reference'
+  openEditor(referencePage.page, 'e')
+  for (let step = 0; step < 14; step += 1) {
+    const focused = /▸ ([^:\n]+):/u.exec(render(referencePage.page, 100, 20).join('\n'))
+    if (focused !== null && (focused[1] ?? '').trim() === 'Env E') break
+    referencePage.page.handleInput('\x1b[B')
+  }
+  referencePage.page.handleInput('\r')
+  const referenceFrame = render(referencePage.page, 100, 20).join('\n')
+  assert.match(referenceFrame, /Enter on empty keeps current/u,
+    `a reference must state that an empty Enter keeps the value: ${referenceFrame}`)
 })
