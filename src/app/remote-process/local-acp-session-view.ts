@@ -108,6 +108,9 @@ export interface HostAcpSessionAccess {
    */
   cancelPending(sessionId: string, agent: LiveAgentViewIdentity, session: object, messageId: string):
     'removed' | 'not-pending' | 'stale'
+  /** Read the exact official pending inbox projection after a discard checkpoint. */
+  pendingMessage(sessionId: string, agent: LiveAgentViewIdentity, session: object, messageId: string):
+    'pending' | 'absent' | 'stale'
   /**
    * Synchronously address the official user cancel at the CURRENT open turn of
    * the exact Agent. The turn must be open, be the last turn, and belong to a
@@ -339,6 +342,12 @@ export interface ConnectionViewState {
   op: number
 }
 
+/** The official turn checkpoint and the responder that already owned it. */
+interface TurnProvenance {
+  readonly turn: number | null
+  readonly origin: 'acp' | 'tui' | 'unknown'
+}
+
 /** The transient unclaimed Host obligation of one claim (PO-3B v1.1 §3). */
 interface UnclaimedHostObligation {
   /** The View-minted request identity the obligation belongs to. */
@@ -347,6 +356,8 @@ interface UnclaimedHostObligation {
   messageId?: string
   /** The official admission classification this obligation tracks. */
   admission: 'pending' | 'accepted' | 'unconfirmed'
+  /** Minimal turn provenance retained if this message is later claimed. */
+  turnProvenance?: TurnProvenance
 }
 
 /** One reservation held by exactly one connection. Its object identity IS the reservation identity. */
@@ -368,12 +379,12 @@ interface ViewClaim {
   /**
    * PO-3B: the retired turn attribution fence. A flight that already obtained
    * the official claimed turn but settled (or was released) BEFORE its
-   * `turn/end` keeps exactly this transient record so a LATE `approval/request`
-   * of that still-running turn can never be delegated to the TUI. It dies on
-   * the matching `turn/end` (or the Agent's disposal) and is never reused for
-   * output or a new prompt.
+   * `turn/end` keeps exactly this transient record for a LATE `approval/request`.
+   * ACP-origin turns remain intercepted; TUI-origin turns retain their original
+   * responder. It dies on the matching `turn/end` (or the Agent's disposal)
+   * and is never reused for output or a new prompt.
    */
-  retiringTurn?: { readonly turn: number }
+  retiringTurn?: TurnProvenance
   /**
    * PO-3B v1.1: the transient UNCLAIMED Host obligation fence. It is created
    * only when the local Flight settled while the official Host had not yet
@@ -405,13 +416,14 @@ interface InflightPrompt {
   phase: 'admitting' | 'queued' | 'claimed' | 'settling'
   messageId?: string
   turn?: number
-  /**
-   * The most recent turn claimed by a FOREIGN message while this flight had no
+  /** The most recent turn claimed by a FOREIGN message while this flight had no
    * own turn yet. Claims are monotonic and a same-batch claim emits the
    * foreign message before the queued one, so one marker answers "did the turn
    * that claims me already carry another user's message?".
    */
   foreignTurn?: number
+  /** The official open turn and its approval origin before Host admission. */
+  turnProvenance?: TurnProvenance
   mixed: boolean
   assistantText: boolean
   pendingUpdates: number
@@ -755,6 +767,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (state.lastClosedSessionId === sessionId) return {}
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_NOT_OWNED', 'this ACP connection holds no view for that session', JSONRPC_INVALID_PARAMS)
     }
+    // A detached claim observes Host settlement only; another Session may now
+    // own this connection's attaching/attached View.
+    if (claim.detachedWithFence) return {}
     // Join only an attempt that is STILL in flight: a failed attempt is not a
     // settlement proof and must not lock the retry (v1.1 §5.B.3).
     const inFlightAttempt = claim.closing
@@ -821,11 +836,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     return this.finishClose(state, sessionId, claim)
   }
 
-  /**
-   * End one unclaimed obligation on a REAL terminal fact (exact removal, the
-   * official discarded notice, promotion to a claimed turn's fence, or the
-   * exact Agent's disposal) and release a detached claim when nothing else
-   * remains.
+  /** End one unclaimed obligation on a real terminal fact. A discarded notice
+   * only schedules a checkpoint; official pending absence is verified later.
    */
   private dropUnclaimedObligation(claim: ViewClaim): void {
     claim.unclaimedHostObligation = undefined
@@ -852,6 +864,17 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     this.notifyWorkSettled()
   }
 
+  private retainRetiringTurn(claim: ViewClaim, turn: TurnProvenance): void {
+    const existing = claim.retiringTurn
+    if (existing !== undefined && existing.turn !== turn.turn) {
+      const current = claim.exactAgent !== undefined && claim.exactSession !== undefined
+        ? this.access?.currentTurn(claim.sessionId, claim.exactAgent, claim.exactSession)
+        : undefined
+      if (current?.kind === 'current' && current.openTurn === existing.turn) return
+    }
+    claim.retiringTurn = turn
+  }
+
   /** Release a detached claim once no Host obligation or fence remains. */
   private releaseDetachedIfSettled(claim: ViewClaim): void {
     if (!claim.detachedWithFence) return
@@ -863,6 +886,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
 
   /** Release one settled claim and record the idempotent close fact. */
   private finishClose(state: ConnectionViewState, sessionId: string, claim: ViewClaim): Record<string, never> {
+    if (this.claims.get(sessionId) !== claim || claim.detachedWithFence || state.phase === 'closed') return {}
     // A transient terminal fact may still outlive the View: a retired-turn
     // approval fence (F2) or an unclaimed Host obligation (v1.1). The View
     // detaches, but the claim survives so a LATE approval of that exact
@@ -891,7 +915,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    */
   cancelSession(state: ConnectionViewState, access: HostAcpSessionAccess, sessionId: string): void {
     const claim = this.claims.get(sessionId)
-    if (claim === undefined || claim.connectionIdentity !== state) return
+    if (claim === undefined || claim.connectionIdentity !== state || claim.detachedWithFence) return
     const flight = claim.inflight
     if (flight === undefined || flight.settledDone) return
     // Commit the intent FIRST so a late insertion/claim still observes it.
@@ -1068,6 +1092,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       state.phase !== 'attached'
       || claim === undefined
       || claim.connectionIdentity !== state
+      || claim.detachedWithFence
       || claim.exactAgent === undefined
       || claim.exactSession === undefined
     ) {
@@ -1098,10 +1123,20 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       )
     }
 
+    const currentAtFlightStart = access.currentTurn(request.sessionId, claim.exactAgent, claim.exactSession)
+    if (currentAtFlightStart.kind === 'stale') {
+      throw promptError('LOCAL_ACP_PROMPT_STALE_AGENT', 'the borrowed turn identity changed before admission', JSONRPC_INVALID_PARAMS)
+    }
     const admission = Promise.withResolvers<void>()
     const flight: InflightPrompt = {
       requestId: randomUUID(),
       phase: 'admitting',
+      ...(currentAtFlightStart.openTurn === null ? {} : {
+        turnProvenance: {
+          turn: currentAtFlightStart.openTurn,
+          origin: claim.retiringTurn?.turn === currentAtFlightStart.openTurn ? claim.retiringTurn.origin : 'tui',
+        },
+      }),
       mixed: false,
       assistantText: false,
       pendingUpdates: 0,
@@ -1212,20 +1247,35 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     return await flight.settled.promise
   }
 
-  /** One message entered the live inbox: correlate the View-minted request id. */
+  /** The source of a turn already open when this exact ACP message is inserted. */
+  private turnProvenanceAtOwnInsertion(claim: ViewClaim, agent: LiveAgentViewIdentity): TurnProvenance | undefined {
+    const session = claim.exactSession
+    const access = this.access
+    if (session === undefined || access === undefined) return undefined
+    const checkpoint = access.currentTurn(claim.sessionId, agent, session)
+    if (checkpoint.kind === 'stale') return { turn: null, origin: 'unknown' }
+    if (checkpoint.openTurn === null) return undefined
+    return {
+      turn: checkpoint.openTurn,
+      origin: claim.retiringTurn?.turn === checkpoint.openTurn ? claim.retiringTurn.origin : 'tui',
+    }
+  }
+
+  /** One message entered or re-entered the live inbox: correlate the View-minted request id. */
   onInboxInserted(agent: LiveAgentViewIdentity, message: AcpUserMessageLike): void {
     const rpcId = message.source?.kind === 'user' ? message.source.rpcId : undefined
     for (const claim of this.claims.values()) {
-      // A LATE insertion of the request this claim still owes a Host terminal
-      // fact for: bind the exact id, then remove it exactly on the current
-      // facts. Only a real removal proves the obligation is over.
+      // Reinserted obligations use the same exact-id checkpoint as live Flights.
       const obligation = claim.unclaimedHostObligation
       if (
-        obligation !== undefined && obligation.messageId === undefined
-        && claim.exactAgent === agent && rpcId !== undefined && rpcId === obligation.requestId
+        obligation !== undefined && claim.exactAgent === agent
+        && (obligation.messageId === message.id
+          || (obligation.messageId === undefined && rpcId !== undefined && rpcId === obligation.requestId))
       ) {
+        const firstInsertion = obligation.messageId === undefined
         obligation.messageId = message.id
-        if (claim.exactSession !== undefined && this.access !== undefined) {
+        obligation.turnProvenance = this.turnProvenanceAtOwnInsertion(claim, agent)
+        if (firstInsertion && claim.exactSession !== undefined && this.access !== undefined) {
           const removed = this.access.cancelPending(claim.sessionId, agent, claim.exactSession, message.id)
           if (removed === 'removed') this.dropUnclaimedObligation(claim)
         }
@@ -1246,14 +1296,14 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         }
         continue
       }
-      if (flight.messageId !== undefined) continue
-      if (rpcId !== undefined && rpcId === flight.requestId) {
-        // Save the durable id FIRST so every later path addresses the exact
-        // message; a cancellation that arrived before this fact now sees it.
-        flight.messageId = message.id
-        if (flight.cancelRequested && this.access !== undefined) {
-          this.addressCancelIntent(claim, flight, this.access)
-        }
+      if (flight.messageId !== message.id
+        && (flight.messageId !== undefined || rpcId === undefined || rpcId !== flight.requestId)) continue
+      // Save the durable id before cancellation and refresh its turn source on
+      // every same-id reinsert, before the official Inbox wakes the driver.
+      flight.messageId = message.id
+      flight.turnProvenance = this.turnProvenanceAtOwnInsertion(claim, agent)
+      if (flight.cancelRequested && this.access !== undefined) {
+        this.addressCancelIntent(claim, flight, this.access)
       }
     }
   }
@@ -1272,7 +1322,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       const obligation = claim.unclaimedHostObligation
       if (obligation !== undefined && obligation.messageId === message.id) {
         claim.unclaimedHostObligation = undefined
-        if (claim.inflight === undefined) claim.retiringTurn = { turn }
+        this.retainRetiringTurn(claim, {
+          turn,
+          origin: obligation.turnProvenance?.turn === turn ? obligation.turnProvenance.origin : 'acp',
+        })
         this.notifyWorkSettled()
       }
       const flight = claim.inflight
@@ -1281,7 +1334,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         if (flight.turn === undefined) {
           flight.turn = turn
           if (flight.phase === 'admitting' || flight.phase === 'queued') flight.phase = 'claimed'
-          if (flight.foreignTurn === turn) flight.mixed = true
+          const turnProvenance = flight.turnProvenance
+          if (turnProvenance?.turn === turn || flight.foreignTurn === turn) flight.mixed = true
           flight.foreignTurn = undefined
           // A pending cancellation now has its authoritative turn: address it
           // in this SAME callback stack before the Agent can run further.
@@ -1345,17 +1399,32 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
-   * One official inbox discard notice: the message left the pending lists for
-   * good. For a standing unclaimed obligation this is its terminal proof
-   * (v1.1 §4); a live-flight cancellation keeps its own proven removal path.
+   * A discard only triggers verification: edit/steer can reinsert the same id
+   * within the current synchronous Host mutation. Cross it once, then read the
+   * official pending projection and the CURRENT responsibility of this claim.
    */
   onInboxDiscarded(agent: LiveAgentViewIdentity, message: AcpUserMessageLike): void {
+    const messageId = message.id
     for (const claim of this.claims.values()) {
-      if (claim.exactAgent !== agent) continue
-      const obligation = claim.unclaimedHostObligation
-      if (obligation !== undefined && obligation.messageId === message.id) {
-        this.dropUnclaimedObligation(claim)
-      }
+      if (claim.exactAgent !== agent || claim.exactSession === undefined) continue
+      if (claim.inflight?.messageId !== messageId && claim.unclaimedHostObligation?.messageId !== messageId) continue
+      const session = claim.exactSession
+      const sessionId = claim.sessionId
+      runDetached('local acp: inbox discard checkpoint', async () => {
+        await Promise.resolve()
+        if (this.claims.get(sessionId) !== claim || claim.exactAgent !== agent || claim.exactSession !== session) return
+        const flight = claim.inflight
+        const obligation = claim.unclaimedHostObligation
+        if (flight?.messageId !== messageId && obligation?.messageId !== messageId) return
+        if (this.access?.pendingMessage(sessionId, agent, session, messageId) !== 'absent') return
+        if (flight?.messageId === messageId) {
+          if (flight.settledDone || flight.turn !== undefined || flight.cancelKind !== undefined) return
+          flight.cancelKind = 'queued-removed'
+          this.settleQueuedRemoval(claim, flight)
+        } else if (obligation?.messageId === messageId) {
+          this.dropUnclaimedObligation(claim)
+        }
+      }, { diag: this.diag })
     }
   }
 
@@ -1443,28 +1512,24 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       return 'unavailable'
     }
     const flight = owner.inflight
-    const declaredTurn = flight !== undefined && !flight.settledDone && flight.turn !== undefined
-      ? flight.turn
-      : owner.retiringTurn?.turn
-    if (declaredTurn === undefined) {
-      // No ACP declaration at all: the open turn (if any) belongs to another
-      // owner (the TUI). Delegated exactly once.
-      return await next()
+    const currentTurn = fence.openTurn
+    if (currentTurn === null) {
+      return flight?.turn !== undefined || owner.retiringTurn !== undefined ? 'unavailable' : await next()
     }
-    if (fence.openTurn !== declaredTurn) {
-      // The declared turn is no longer the official open current turn (it
-      // terminalized, or a newer turn began). This View cannot own the
-      // request: with no open turn the ask cannot legally belong to it
-      // (fail closed); with another open turn, that turn is the TUI's.
-      return fence.openTurn === null ? 'unavailable' : await next()
-    }
-    // The declared turn IS the official open current turn: PROVEN ACP-owned.
-    // Never delegate it to the TUI.
+    // Match the official open turn first; a later queued Flight never hides
+    // the retiring ACP turn or takes its original TUI responder.
+    const declaredTurn: TurnProvenance | undefined = owner.retiringTurn?.turn === currentTurn
+      ? owner.retiringTurn
+      : flight !== undefined && !flight.settledDone && flight.turn === currentTurn
+        ? { turn: currentTurn, origin: flight.turnProvenance?.turn === currentTurn ? flight.turnProvenance.origin : 'acp' }
+        : flight?.turnProvenance?.turn === currentTurn
+          ? flight.turnProvenance
+          : undefined
+    if (declaredTurn === undefined) return await next()
+    if (declaredTurn.origin === 'unknown') return 'unavailable'
+    if (declaredTurn.origin === 'tui') return await next()
     if (flight === undefined || flight.settledDone || flight.cancelRequested || flight.mixed
-      || request.callId === undefined) {
-      // No live channel to ask (settled/retired, cancelled, mixed, or a
-      // request without a tool callId): fail closed; the official service
-      // records its own audit pair with this outcome.
+      || request.callId === undefined || flight.turn !== currentTurn) {
       return 'unavailable'
     }
     const pending = flight.permissionRequests.get(request.callId)
@@ -1982,7 +2047,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // approval/request of the still-running turn stays ACP-owned (never
     // delegated to the TUI) until the real terminal record arrives. A turn
     // whose durable terminal ALREADY arrived has nothing left to fence.
-    if (flight.turn !== undefined && !flight.ownTurnEnded) claim.retiringTurn = { turn: flight.turn }
+    if (flight.turn !== undefined && !flight.ownTurnEnded) {
+      this.retainRetiringTurn(claim, {
+        turn: flight.turn,
+        origin: flight.turnProvenance?.turn === flight.turn ? flight.turnProvenance.origin : 'acp',
+      })
+    }
     // The UNCLAIMED responsibility (v1.1 §3/§5.A.3) is transferred to the
     // claim BEFORE the flight is dropped whenever the official Host has not
     // proven terminal status and no turn was claimed:
@@ -1991,15 +2061,20 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // An owned claimed turn is covered by `retiringTurn` above, a definite
     // pre-insertion rejection leaves nothing behind, and the disposed-Agent
     // terminal (ownTurnEnded) covered.
-    if (flight.turn === undefined && !flight.ownTurnEnded) {
+    if (flight.turn === undefined && !flight.ownTurnEnded && flight.cancelKind !== 'queued-removed') {
       if (flight.messageId !== undefined) {
         claim.unclaimedHostObligation = {
           requestId: flight.requestId,
           messageId: flight.messageId,
           admission: flight.admissionSettled ? 'unconfirmed' : 'accepted',
+          ...(flight.turnProvenance === undefined ? {} : { turnProvenance: flight.turnProvenance }),
         }
       } else if (!flight.admissionSettled) {
-        claim.unclaimedHostObligation = { requestId: flight.requestId, admission: 'pending' }
+        claim.unclaimedHostObligation = {
+          requestId: flight.requestId,
+          admission: 'pending',
+          ...(flight.turnProvenance === undefined ? {} : { turnProvenance: flight.turnProvenance }),
+        }
       }
     }
     if (claim.inflight === flight) claim.inflight = undefined

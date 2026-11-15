@@ -480,7 +480,11 @@ interface SessionRegistryLike {
  * callback stack that read the current-turn fence.
  */
 interface AgentCancelSeamLike {
-  readonly inbox: { remove(messageId: string): boolean }
+  readonly inbox: {
+    remove(messageId: string): boolean
+    readonly nextTurn: readonly { readonly id: string }[]
+    readonly nextStep: readonly { readonly id: string }[]
+  }
   cancel(cause: { readonly kind: 'user' }, options?: { readonly keepInbox?: boolean }): void
 }
 
@@ -568,6 +572,14 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
       const liveSession = sessions.get(sessionId)
       if (liveAgent !== agent || liveSession !== session || agent.session !== session) return 'stale'
       return (agent as unknown as AgentCancelSeamLike).inbox.remove(messageId) === true ? 'removed' : 'not-pending'
+    },
+    pendingMessage: (sessionId, agent, session, messageId) => {
+      const liveAgent = agents.get(sessionId)
+      const liveSession = sessions.get(sessionId)
+      if (liveAgent !== agent || liveSession !== session || agent.session !== session) return 'stale'
+      const inbox = (agent as unknown as AgentCancelSeamLike).inbox
+      return inbox.nextTurn.some(message => message.id === messageId)
+        || inbox.nextStep.some(message => message.id === messageId) ? 'pending' : 'absent'
     },
     cancelCurrentTurn: (sessionId, agent, session, turn) => {
       const liveAgent = agents.get(sessionId)

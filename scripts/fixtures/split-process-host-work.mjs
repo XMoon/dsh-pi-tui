@@ -481,6 +481,38 @@ class C1Model extends LlmAdapter {
     }
 
     if (this.scenario === 'acp-po3b') {
+      // The latest queue-probe user input avoids matching an earlier Turn's
+      // marker in the assembled history. Hold before the second step's tool
+      // activation so the smoke can cancel B after it joined TUI Turn A.
+      const queueInput = (options.messages ?? [])
+        .filter(message => message?.role === 'user')
+        .flatMap(message => (message.content ?? []).filter(part => part?.type === 'text').map(part => part.text))
+        .findLast(text => typeof text === 'string' && /^po3b-(?:tui|acp)-q/u.test(text))
+      if (queueInput === 'po3b-acp-qsteer') {
+        const key = `reverse-steer:${sessionId}`
+        if (!this.toolIssued.has(key)) {
+          this.toolIssued.add(key)
+          this.record('reverse-steer-awaiting-approval', { sessionId })
+          await waitForBarrier(process.env.C1_PO3B_REVERSE_APPROVAL, signal)
+          const marker = join(this.root, `po3b-reverse-steer-${sessionId}.marker`)
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield { type: 'block-end', index: 0, block: {
+            type: 'tool-call', id: `po3b-reverse-steer-${sessionId}`, name: 'bash',
+            arguments: JSON.stringify({
+              command: `printf 'reverse-steer' > ${shellQuote(marker)}`,
+              description: 'Create the harmless reverse-steer approval marker',
+              sandbox_permissions: 'danger-full-access',
+              justification: 'Qualification checks that the original TUI Turn retains its approval responder.',
+            }),
+          } }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }
+          return
+        }
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `reverse-steer settled ${token}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
       // A one-time official approval-policy switch for the never negative:
       // the marker prompt itself is answered as a plain turn, and every LATER
       // approval ask in this Session is decided by the OFFICIAL `never`
