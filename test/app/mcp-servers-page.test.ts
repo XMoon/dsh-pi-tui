@@ -1247,3 +1247,25 @@ test('a blocked question refuses both the key and the pointer confirm intent', (
   assert.deepEqual(controller.calls.filter(call => call.startsWith('answerConfigConfirm')), [],
     'a blocked question accepts neither input path')
 })
+
+test('a grant with no body rows can never confirm: nothing was painted to review', () => {
+  // 200x2 leaves the Root one header row and one Action Bar row — zero body.
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ dirty: true }),
+    configConfirm: { kind: 'save', name: 'a', warning: 'Short.', capturedRevision: 1 },
+  }))
+  // The editor is open before the question arrives (as a user's would be).
+  openEditor(page, 'e', 100, 20)
+  ;(page as unknown as { view: string }).view = 'editor'
+  controller.calls.length = 0
+  const lines = render(page, 200, 2)
+  const frame = lines.join('\n')
+  const body = lines.slice(0, -1).join('\n')
+  assert.doesNotMatch(body, /Short\./u, `the fact cannot be painted in a zero-row body: ${frame}`)
+  assert.doesNotMatch(frame, /Y confirm/u, `a zero-row grant paints no affirmative key: ${frame}`)
+  assert.match(frame, /Resize to review/u)
+  page.handleInput('y')
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('answerConfigConfirm')), [],
+    'a zero-row grant must refuse the answer')
+})

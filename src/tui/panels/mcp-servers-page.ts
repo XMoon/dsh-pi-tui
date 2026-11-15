@@ -1241,7 +1241,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     const complete = wrapped.reproduced.replace(/\s+/gu, ' ') === wanted
     // The admission is the CURRENT GRANT: a fact set that wraps completely but
     // does not fit the rows this frame really gives cannot be reviewed either.
-    return { lines: wrapped.lines, blocked: !complete || wrapped.lines.length > Math.max(1, availableRows) }
+    return { lines: wrapped.lines, blocked: !complete || availableRows <= 0 || wrapped.lines.length > availableRows }
   }
 
   /**
@@ -1413,8 +1413,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     const confirmationWidth = this.view === 'editor' || layout !== 'wide'
       ? width
       : Math.max(1, width - this.wideListWidth() - 2)
-    const confirmation = this.confirmationBody(snapshot, confirmationWidth,
-      this.view === 'editor' ? Math.max(1, bodyRows - 2) : Math.max(1, bodyRows))
+    // The rows the facts REALLY get. A zero-row grant stays zero: an editor
+    // whose identity + status lines already consume the whole body, or a frame
+    // whose body collapsed, cannot show a confirmation at all.
+    const confirmationRows = this.view === 'editor' ? bodyRows - 2 : bodyRows
+    const confirmation = confirmationRows <= 0
+      ? { lines: [] as readonly string[], blocked: this.confirmationIdentity(snapshot) !== undefined }
+      : this.confirmationBody(snapshot, confirmationWidth, confirmationRows)
     const confirmationIdentity = this.confirmationIdentity(snapshot)
     this.paintedConfirmation = confirmationIdentity === undefined
       ? undefined

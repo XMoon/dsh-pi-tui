@@ -129,6 +129,8 @@ interface Harness {
     onCellClick(x: number, y: number): void
   } | undefined
   readonly settingsMutateCalls: string[]
+  /** How many times the page re-read the official descriptor (readback). */
+  readonly settingsDescribeCalls: () => number
   /** Hold the NEXT mutation in flight (deferred settlement). */
   holdSettingsMutation: () => () => void
   readonly invoke: (name: string, rawInput?: string) => Promise<unknown>
@@ -164,6 +166,7 @@ function setup(options: { readonly columns?: number; readonly rows?: number; rea
   const manager = new FixtureManager(managedList())
   const managerMounted = options.withManager !== false
   const settingsMutateCalls: string[] = []
+  let settingsDescribeCalls = 0
   let settingsHold: Promise<void> | undefined
   let settingsRevision = 3
   const alphaEntry = { transport: 'stdio', command: '/bin/echo', args: [], env: {}, cwd: '', enabled: true }
@@ -171,6 +174,7 @@ function setup(options: { readonly columns?: number; readonly rows?: number; rea
     get: (name: string): unknown => name === 'settings'
       ? {
           describe: () => [{
+            ...(settingsDescribeCalls += 1, {}),
             ns: 'mcp-manager',
             value: { servers: { alpha: alphaEntry } },
             base: { servers: {} },
@@ -311,6 +315,7 @@ function setup(options: { readonly columns?: number; readonly rows?: number; rea
       return panel as { onCellPress(x: number, y: number): void; onCellClick(x: number, y: number): void }
     },
     settingsMutateCalls,
+    settingsDescribeCalls: () => settingsDescribeCalls,
     holdSettingsMutation: () => {
       let release!: () => void
       settingsHold = new Promise<void>(resolve => { release = resolve })
@@ -771,4 +776,57 @@ test('a y that arrives inside the render window never commits an unpainted Save'
   await flushOwnedTurns()
   await frames(h.vt, 3)
   assert.equal(h.settingsMutateCalls.length, 1, 'the painted question dispatches exactly one write')
+})
+
+test('a real Root mouse chain commits a Save through the Host and re-reads it', async () => {
+  const h = setup()
+  await openMcpPage(h)
+  const panel = h.settingsPanel()
+  assert.ok(panel !== undefined, 'the Settings workspace root must be live')
+  const click = async (label: string): Promise<void> => {
+    const lines = h.vt.getViewport().map(stripTerminalSequences)
+    const row = lines.findIndex(line => line.includes(label))
+    assert.ok(row >= 0, `missing ${label} in the painted frame:\n${lines.join('\n')}`)
+    const col = lines[row]!.indexOf(label) + 1
+    panel.onCellPress(col, row)
+    panel.onCellClick(col, row)
+    await frames(h.vt, 2)
+    await flushOwnedTurns()
+    await frames(h.vt, 2)
+  }
+
+  // 1) Root click on `a Add` opens the form (already proven; needed to build a draft).
+  await click('a Add')
+  assert.match(h.view(), /Identity/u)
+  // 2) The draft's text is typed with the ordinary keyboard (the input path is
+  //    not what this case proves).
+  await press(h.vt, '\r')
+  for (const char of 'mouse-save') await h.vt.sendInput(char)
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+  for (let step = 0; step < 6; step += 1) {
+    const focused = /▸ ([^:\n]+):/u.exec(h.view())
+    if (focused !== null && (focused[1] ?? '').trim().startsWith('Command')) break
+    await press(h.vt, '\x1b[B')
+  }
+  await press(h.vt, '\r')
+  for (const char of '/bin/sleep') await h.vt.sendInput(char)
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+
+  // 3) Root click on `s Save` opens the visible question with its facts.
+  await click('s Save')
+  assert.match(h.view(), /can execute an external command/u, 'the question paints its safety fact')
+  assert.match(h.view(), /Y confirm/u, 'the question offers the decision')
+  assert.deepEqual(h.settingsMutateCalls, [], 'asking the question writes nothing')
+
+  // 4) Root click on `Y confirm` dispatches ONE official mutation…
+  const readsBefore = h.settingsDescribeCalls()
+  await click('Y confirm')
+  assert.deepEqual(h.settingsMutateCalls, ['mcp-manager'], 'exactly ONE official mcp-manager mutation')
+
+  // 5) …and the page re-reads the official descriptor afterwards (readback).
+  assert.ok(h.settingsDescribeCalls() > readsBefore, 'the write is followed by an authoritative re-read')
+  assert.match(h.view(), /Saved · waiting for Host reconcile|Saved/u,
+    `the saved verdict comes from the re-read descriptor: ${h.view()}`)
 })
