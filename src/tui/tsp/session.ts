@@ -102,6 +102,8 @@ import { pickWelcomeWhaleVariant, welcomeWhalePlainLines } from '../components/w
 import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
 import type { TspFooterAffordances } from '../../domain/footer/layout.ts'
 import { TspWorkHub, workHubPaneWidthSupported } from './work-hub.ts'
+import type { TranscriptStructureBlock, TranscriptWorkSpan } from '../transcript/structure.ts'
+import type { ContextCluster } from '../transcript/context-structure.ts'
 import {
   WORK_DETAILS_REGION,
   buildWorkDetails,
@@ -117,7 +119,7 @@ import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { TaskPanelItem } from '../../app/surface/task-presentation.ts'
 import type { PendingInputPresentation, PendingTailRow, QueueItem } from '../../app/surface/pending-presentation.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
-import { projectFocus, type FocusProjectedBlock } from '../transcript/focus-projection.ts'
+import { consecutiveTurnGroup, focusProjectionTurnOf, projectFocus, type FocusProjectedBlock } from '../transcript/focus-projection.ts'
 import { FocusTimingStore } from '../transcript/focus-timing.ts'
 import type { DisplayState } from '../../domain/display/preset.ts'
 import type { ToolPresenter } from '../transcript/tool-presentation.ts'
@@ -2877,6 +2879,32 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     return { order, nodeIds, targets, copyButtons, transcriptCopyButtons: transcriptCopies }
   }
 
+  /** Whether one canonical Work span really contains `message`: directly as a
+   *  message part, or through a snapshot-only Context cluster nested inside it. */
+  const workSpanContains = (span: TranscriptWorkSpan, message: TranscriptMessage): boolean => {
+    for (const part of span.parts) {
+      if (part.kind === 'message') {
+        if (part.message === message) return true
+        continue
+      }
+      if (part.cluster.members.includes(message as never)) return true
+    }
+    return false
+  }
+
+  /** Every canonical Context cluster of one structure — top-level AND nested in a
+   *  Work span (the SAME membership `clusterByMemberOf` derives). */
+  const clustersOf = (structure: readonly TranscriptStructureBlock[]): readonly ContextCluster[] => {
+    const out: ContextCluster[] = []
+    for (const block of structure) {
+      if (block.kind === 'context-cluster') out.push(block.cluster)
+      else if (block.kind === 'work') {
+        for (const part of block.span.parts) if (part.kind === 'context-cluster') out.push(part.cluster)
+      }
+    }
+    return out
+  }
+
   /**
    * T3-B1: the SEARCH-ONLY disclosure grants of the CURRENT target.
    *
@@ -3001,10 +3029,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // Thought hides — never a second classifier.
     if ('turn' in message && focusRootHides(message)) focusTurns.add(message.turn)
     // Work spans / clusters that really CONTAIN the message in this projection.
-    for (const block of projectTranscriptStructure(lastMessages)) {
+    // The membership authority is the SAME canonical structure the mapper uses:
+    // a snapshot-only Context cluster nested INSIDE a Work span makes its members
+    // belong to BOTH ancestors, so the walk covers `span.parts` (not only direct
+    // message parts) and the top-level cluster blocks.
+    const structure = projectTranscriptStructure(lastMessages)
+    for (const block of structure) {
       if (block.kind === 'work') {
-        const owns = block.span.parts.some(part => part.kind === 'message' && part.message === message)
-        if (owns) workOwners.add(block.span.owner)
+        if (!workSpanContains(block.span, message)) continue
+        workOwners.add(block.span.owner)
         continue
       }
       if (block.kind === 'context-cluster') {
@@ -3013,13 +3046,30 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         }
       }
     }
+    // A cluster nested inside the Work span the target lives in opens too: the
+    // mapper renders it as that Work's own part, so both ancestors are needed.
+    for (const cluster of clustersOf(structure)) {
+      if (cluster.members.includes(message as never)) clusterOwners.add(cluster.owner as TranscriptMessage)
+    }
     if (message.kind === 'thinking') thinkingOwners.add(message)
     else if (message.kind === 'system' && message.context === true) contextRowOwners.add(message)
     else if (message.kind === 'command' || message.kind === 'compaction') commandCompactionOwners.add(message)
     else if (message.kind === 'tool') {
       // The tool card's OWN disclosure key (the SAME key the toggle route
       // admits): a body that is folded behind the card opens for this target.
-      toolKeys.add(scopeKeys.keyFor(message))
+      // A hit inside a NESTED sub-call must open EVERY ancestor level, because
+      // the mapper keys each child as `${parentDisclosure}/sub-<subCallId>`: the
+      // match's own `subcall-field` source carries that exact path.
+      const rootKey = scopeKeys.keyFor(message)
+      toolKeys.add(rootKey)
+      const hitSource = target.match.source
+      if (hitSource.kind === 'subcall-field') {
+        let path = rootKey
+        for (const subCallId of hitSource.subCallIds) {
+          path = `${path}/sub-${subCallId}`
+          toolKeys.add(path)
+        }
+      }
     } else if (message.kind === 'workflow') {
       // The run opens for the target; a hit on a phase/member opens THAT phase
       // (the match's own closed-vocabulary source carries the phase key).
@@ -3054,10 +3104,25 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * standalone turn-less row) needs NO Thought grant.
    */
   const focusRootHides = (message: TranscriptMessage): boolean => {
-    if (lastTurnActivities === undefined) return false
+    // The Focus disposition only exists in the FOCUS preset: under Full/Compact
+    // every row is visible and no Thought root exists, so the probe is skipped
+    // entirely instead of projecting history the preset never folds.
+    if (options.displayState?.preset !== 'focus') return false
+    const activities = lastTurnActivities
+    if (activities === undefined) return false
+    const turn = focusProjectionTurnOf(message)
+    if (turn === undefined) return false
+    // ONE turn's own group, never the whole loaded history: the probe asks about
+    // a single row, so projecting every other turn's Thought is pure waste (and
+    // it ran on every query keystroke). `consecutiveTurnGroup` is the SAME
+    // segmentation `projectFocus` walks, so the slice cannot disagree with it.
+    const start = lastMessages.indexOf(message)
+    if (start < 0) return false
+    let groupStart = start
+    while (groupStart > 0 && focusProjectionTurnOf(lastMessages[groupStart - 1]!) === turn) groupStart -= 1
+    const group = consecutiveTurnGroup(lastMessages, groupStart, turn)
     const visible = new Set<TranscriptMessage>()
-    const projected = projectFocus(lastMessages, lastTurnActivities, EMPTY_PROBE_TURNS, true)
-    for (const block of projected) {
+    for (const block of projectFocus(group, activities, EMPTY_PROBE_TURNS, true)) {
       if (block.kind === 'message') visible.add(block.message)
       else if (block.kind === 'work') {
         for (const part of block.span.parts) if (part.kind === 'message') visible.add(part.message)

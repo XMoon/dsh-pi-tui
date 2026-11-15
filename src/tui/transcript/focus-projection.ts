@@ -159,7 +159,7 @@ export type FocusProjectedBlock =
  * run-owner component cache supports that), and the semantic disclosure
  * identity stays the turn number.
  */
-function focusProjectionTurnOf(message: TranscriptMessage): number | undefined {
+export function focusProjectionTurnOf(message: TranscriptMessage): number | undefined {
   if (message.kind === 'command') return undefined
   if (message.kind === 'compaction' && message.sourceCommand !== undefined) return undefined
   return 'turn' in message ? message.turn : undefined
@@ -581,7 +581,15 @@ function collapsedFocusRowDisposition(
  * @param start - the run's first index.
  * @param turn - the run's turn number.
  */
-function consecutiveTurnGroup(messages: readonly TranscriptMessage[], start: number, turn: number): TranscriptMessage[] {
+/**
+ * The consecutive rows of ONE Focus projection turn, starting at `start`.
+ *
+ * Exported so a caller that needs the Focus disposition of a SINGLE row can
+ * project that turn's own group instead of the whole loaded history (the search
+ * seat's ancestry probe). It is the SAME segmentation `projectFocus` walks, so
+ * the slice and the full projection can never disagree.
+ */
+export function consecutiveTurnGroup(messages: readonly TranscriptMessage[], start: number, turn: number): TranscriptMessage[] {
   const group: TranscriptMessage[] = [messages[start]!]
   let index = start + 1
   while (index < messages.length) {
