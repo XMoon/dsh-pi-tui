@@ -18,13 +18,17 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { userInfo } from 'node:os'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { findIsolatedProcesses, killIsolatedProcesses } from '../../lib/split-smoke-processes.mjs'
 import { createSplitSmokeProfile } from '../../lib/split-smoke-profile.mjs'
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
+import { hostAssistantHasText, hostSessionEvents, hostUserTexts } from '../../lib/split-smoke-sessions.mjs'
 import { managedHostGateReason, stopAndRemoveManagedUnit } from './managed-host-m6-2b.mjs'
+
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 
 const ISOLATED_HOME_ENV = 'SPLIT_PROCESS_MANAGED_HOST_ISOLATED_HOME'
 const ISOLATED_FLAG_ENV = 'SPLIT_PROCESS_MANAGED_HOST_ISOLATED'
@@ -564,6 +568,122 @@ export async function runDaemonControlConcurrentControls({ installation, trace, 
     cleanupCase(installation, trace)
     stopAndRemoveManagedUnit(second, trace)
     killIsolatedProcesses(second.dshHome)
+  }
+  if (failure !== undefined) throw failure
+  return result
+}
+
+/**
+ * C13: a REAL Host Session turn stays in flight across `stop`, and the restarted
+ * Host never replays it.
+ *
+ * A systemd-managed Host strips the internal test-patch channel, so the offline
+ * model route is installed as ORDINARY profile configuration (a row in the
+ * profile's own `cordis.patch.yml` pointing at a module inside the profile).
+ * The fixture creates one real Agent through the official service, sends one
+ * follow-up turn and holds the model stream until the Host's shutdown signal.
+ */
+export async function runDaemonControlInflightStop({ installation, trace, dshHome, workDir }) {
+  const gate = isolatedGate()
+  if (!gate.qualified) return notVerified(gate.reason)
+  if (!managerAvailable()) return notVerified('NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: systemctl --user show-environment did not succeed')
+  const proofPath = join(workDir, 'c13-inflight.jsonl')
+  const sessionId = `m6-2c-inflight-${String(process.pid)}-${String(Date.now())}`
+  const fixturePath = join(installation.profileDir, 'm6-2c-inflight-work.mjs')
+  const patchPath = join(installation.profileDir, 'cordis.patch.yml')
+  writeFileSync(proofPath, '', { mode: 0o600 })
+  writeFileSync(fixturePath, readFileSync(join(SCRIPT_DIR, '..', '..', 'fixtures', 'daemon-control-inflight-work.mjs')), { mode: 0o600 })
+  const markerPath = join(installation.profileDir, 'm6-2c-inflight-submitted.marker')
+  const patchBefore = readFileSync(patchPath, 'utf8')
+  const proofEvents = () => readFileSync(proofPath, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+    try { return [JSON.parse(line)] } catch { return [] }
+  })
+  let failure
+  let result
+  try {
+    writeFileSync(patchPath, [
+      '- insert:',
+      '    - id: m6-2c-inflight-work',
+      `      name: '${pathToFileURL(fixturePath).href}'`,
+      '      inject: [llm, agents, tools]',
+      '      config:',
+      `        proofPath: '${proofPath}'`,
+      `        sessionId: '${sessionId}'
+        markerPath: '${markerPath}'`,
+      `        cwd: '${installation.profileDir}'`,
+      '- id: agent-default-model',
+      '  config:',
+      '    provider: c1-qualification',
+      '    model: c1',
+      '',
+    ].join('\n'), { mode: 0o600 })
+
+    const started = runDaemon(installation, ['start'])
+    assertStatus(started, { host: 'ready', manager: 'systemd' }, 'the C13 managed Host')
+
+    // The turn must be REAL and in flight before stop: the offline route has
+    // already produced its first chunk and is still holding the stream.
+    const deadline = Date.now() + 120_000
+    while (Date.now() < deadline && !proofEvents().some(event => event.kind === 'turn-start')) {
+      await sleep(200)
+    }
+    const inFlight = proofEvents().find(event => event.kind === 'turn-start')
+    assert(inFlight !== undefined, 'the C13 turn never started inside the managed Host')
+    const startedSession = proofEvents().find(event => event.kind === 'session-created')
+    assert(startedSession !== undefined, 'the C13 Agent was never created')
+
+    // The turn is unbounded, so the Host cannot always drain inside
+    // TimeoutStopSec. Both truthful outcomes are allowed — a reported failure
+    // and a reported stop — but a "success" MUST mean the Host really exited,
+    // and a failure MUST use the stable taxonomy. Neither may claim completion.
+    const stopped = runDaemon(installation, ['stop'])
+    if (stopped.status === 0) {
+      assertStatus(stopped, { host: 'stopped' }, 'the C13 in-flight stop')
+    } else {
+      assert(/MANAGER_OR_OS_FAILURE|HOST_STOP_TIMEOUT|TRANSITION_UNCERTAIN/u.test(`${stopped.stdout}${stopped.stderr}`),
+        `the C13 in-flight stop must report a stable failure code, saw: ${stopped.stderr.slice(-500)}`)
+    }
+    await waitFor(() => hostPids(dshHome).length === 0, 'the C13 Host exit with an in-flight turn', 60_000)
+    assert(systemctl(['--user', '--no-pager', 'is-active', profileUnitName('pi-tui', profileScopeId(process.getuid(), installation.profileDir))]).stdout.trim() !== 'active',
+      'the C13 unit must not stay active after an in-flight stop')
+    assert(!proofEvents().some(event => event.kind === 'turn-released'),
+      'the C13 turn must not settle during the stop')
+    // A failed stop leaves the unit in `failed`; an explicit start clears it.
+    systemctl(['--user', '--no-pager', 'reset-failed'])
+    const restarted = runDaemon(installation, ['start'])
+    const after = assertStatus(restarted, { host: 'ready', manager: 'systemd' }, 'the C13 restart')
+    assert(after.instance !== statusOf(started.stdout).instance, 'the C13 restart must create a new instance')
+    // reason: bounded observation window for an automatic replay; the restarted
+    // Host has no client, so any second turn-start would be a replay.
+    await sleep(15_000)
+    const turnStarts = proofEvents().filter(event => event.kind === 'turn-start').length
+    assert(turnStarts === 1,
+      `the restarted Host must never replay the interrupted turn (turn-start=${String(turnStarts)}: ${JSON.stringify(proofEvents().map(event => event.kind))})`)
+
+    const events = hostSessionEvents(dshHome, String(startedSession.sessionId))
+    assert(events !== undefined, 'the interrupted Session must keep its durable log')
+    assert(hostUserTexts(events).includes('C13 in-flight turn'),
+      'the interrupted turn must keep its real user message')
+    assert(!hostAssistantHasText(events, 'C13 partial answer finished'),
+      'the interrupted turn must never gain a completed assistant message')
+
+    trace('daemon-control-inflight-stop', { session: String(startedSession.sessionId), instance: after.instance })
+    result = {
+      status: 'PASS',
+      scope: 'REAL_SYSTEMD_USER_L6',
+      inFlightAtStop: true,
+      hostExited: true,
+      stopExit: stopped.status,
+      noReplay: true,
+      noFabricatedCompletion: true,
+    }
+  } catch (error) {
+    failure = error
+  } finally {
+    try { writeFileSync(patchPath, patchBefore, { mode: 0o600 }) } catch { /* best effort */ }
+    try { unlinkSync(fixturePath) } catch { /* best effort */ }
+    try { unlinkSync(markerPath) } catch { /* best effort */ }
+    cleanupCase(installation, trace)
   }
   if (failure !== undefined) throw failure
   return result

@@ -78,6 +78,7 @@ import { runAcpPo3bCancelApproval } from '../smoke/split-process/acp-po3b-cancel
 import { runAcpPo4aContentInput } from '../smoke/split-process/acp-po4a-content-input.mjs'
 import {
   runDaemonControlConcurrentControls,
+  runDaemonControlInflightStop,
   runDaemonControlManagerError,
   runDaemonControlOwnerAndMultiProfile,
   runDaemonControlProcessFallback,
@@ -491,6 +492,13 @@ const CASE_REGISTRY = Object.freeze([
     id: 'daemon-control.m6-2c-concurrent-controls',
     title: 'the short-lived admin seat refuses a second profile-scoped management command with BUSY, leaves another Profile independent, and two concurrent starts converge on ONE Host',
     run: runDaemonControlConcurrentControls
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-2c-inflight-stop',
+    title: 'a REAL Host Session turn in flight is interrupted by stop, the Host exits, and the restarted Host never replays it or fabricates its completion',
+    run: runDaemonControlInflightStop
   }),
 ])
 
