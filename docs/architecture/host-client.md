@@ -547,10 +547,14 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     truthfully while the prompt keeps its real error, and a close that could
     not prove a settlement reports that failure and is re-evaluated on the
     then-current facts by a later close (never a fabricated success, never a
-    swallowed failure). A physical disconnect of a flight that already owns its
-    durable message fact drives the same scoped cancellation before the claim
-    is released; a flight with no durable fact yet keeps the fail-closed
-    release.
+    swallowed failure). An UNPROVEN cancellation — a stale exact identity that
+    may hide a pending message or a running turn — is never converted into a
+    successful detach by later closes, physical disconnect or subscription
+    retirement: the reservation and its Host fact attribution survive until a
+    real terminal fact (the exact Agent's disposal) settles it. A physical
+    disconnect of a flight that already owns its durable message fact drives
+    the same scoped cancellation before the claim is released; a flight with no
+    durable fact yet keeps the fail-closed release.
   - **Approval ownership (PO-3B).** The official Agent-scoped
     `approval/request` waterfall has exactly ONE classification seat ahead of
     the TUI forwarding listener. A request whose exact Agent matches a View

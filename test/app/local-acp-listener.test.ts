@@ -1469,8 +1469,12 @@ test('R701-03: an Off -> On overlap keeps exactly ONE Host fact/approval subscri
       } finally {
         clientB.close()
       }
-      // The OLD work ends for real: the fence dies, the registry settles and
-      // the controller-owned disposal is the ONE release.
+      // The OLD work ends for real: its durable turn/end kills the fence and
+      // settles the registry.
+      const oldFacts = fake.facts()
+      assert.ok(oldFacts !== undefined)
+      oldFacts.onSessionEvent(oldAgent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'error', error: { message: 'x', code: 'UNKNOWN' } } } })
+      await registry.whenHostWorkSettled()
       assert.equal(fake.observeCalls(), 1)
     } finally {
       await listenerB.close()

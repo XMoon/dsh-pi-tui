@@ -363,9 +363,17 @@ interface ViewClaim {
    */
   retiringTurn?: { readonly turn: number }
   /**
-   * PO-3B F2: set when a close detached this View while a retired-turn fence
-   * still had to survive. The claim then lives ONLY for that fence and is
-   * deleted at the fence's own death facts (turn/end / Agent disposal).
+   * PO-3B: set when this claim's cancellation could NOT be proven (a stale
+   * exact identity may hide a pending message or a running turn the View can
+   * no longer address). Local flight state being cleared is NOT a Host
+   * settlement: the reservation and the Host fact subscription must survive
+   * until a real terminal fact (the exact Agent's disposal) settles it.
+   */
+  unprovenCancellation?: boolean
+  /**
+   * PO-3B F2: set when the View detached while a transient terminal fact still
+   * had to arrive (a retired-turn fence, or an unproven cancellation). The
+   * claim then lives ONLY for that fact and is deleted when it settles.
    */
   detachedWithFence?: boolean
 }
@@ -563,6 +571,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     for (const claim of this.claims.values()) {
       if (claim.inflight !== undefined && !claim.inflight.settledDone) return true
       if (claim.retiringTurn !== undefined) return true
+      if (claim.unprovenCancellation === true) return true
     }
     return false
   }
@@ -728,14 +737,24 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   ): Promise<Record<string, never>> {
     const claim = this.claims.get(sessionId)
     if (claim !== undefined && claim.connectionIdentity === state) {
+      if (claim.unprovenCancellation === true) {
+        // An earlier cancellation could not be proven and no later Host fact
+        // has settled it: a repeated close must NOT turn that into a success
+        // merely because the local flight is gone (R701-05).
+        throw promptError(
+          'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED',
+          'the earlier cancellation could not be proven and no later Host fact settled it',
+          JSONRPC_INTERNAL_ERROR,
+        )
+      }
       const closing = claim.closing
       if (closing !== undefined) {
         const outcome = await closing.then(() => 'ok' as const, (error: unknown) => error)
         if (outcome === 'ok') return {}
         // A previous close could not PROVE its settlement. Re-evaluate on the
         // CURRENT facts instead of replaying that failure forever: once the
-        // claim owns no open flight and no retired fence, the Host work is
-        // provably over and the detach is truthful (R701-04).
+        // claim owns no open flight, no retired fence AND no unproven
+        // cancellation, the Host work is provably over (R701-04).
         if (claim.inflight === undefined && claim.retiringTurn === undefined) {
           claim.closing = undefined
           return this.finishClose(state, sessionId, claim)
@@ -1248,7 +1267,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       }
       // Disposal ends the retired-turn fence for good (a disposed Agent can
       // never reach its turn/end), so it is cleared AFTER the failure
-      // transition, which would otherwise preserve that dead turn.
+      // transition, which would otherwise preserve that dead turn. The same
+      // terminal fact settles an UNPROVEN cancellation (R701-05): a disposed
+      // Agent can never execute the message the View could not remove.
+      if (claim.unprovenCancellation === true) claim.unprovenCancellation = false
       this.endRetiringFence(claim.sessionId, claim)
     }
   }
@@ -1432,9 +1454,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
             // below still honours a fence born from that failure.
           }
           // A failure DURING the disconnect may have planted a retired-turn
-          // fence (RFL-005): the claim then survives for that fence alone and
-          // dies at the fence's own facts, never leaking the approval.
-          if (claim.retiringTurn !== undefined) {
+          // fence (RFL-005) or left an unproven cancellation (R701-05): the
+          // claim then survives for that terminal fact alone and dies at it,
+          // never leaking the approval and never faking a settled detach.
+          if (claim.retiringTurn !== undefined || claim.unprovenCancellation === true) {
             claim.detachedWithFence = true
             return
           }
@@ -1443,10 +1466,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         continue
       }
       // No open flight: the claim may still carry the retired-turn approval
-      // fence of an ALREADY-failed flight whose turn has not ended. Dropping
-      // it would leak that turn's approvals to the TUI (F2); keep the claim
-      // until the fence dies on its own facts.
-      if (claim.retiringTurn !== undefined) {
+      // fence of an ALREADY-failed flight whose turn has not ended (F2), or a
+      // cancellation that was never proven (R701-05). Dropping either would
+      // leak the approval to the TUI or fake a settled detach; keep the claim
+      // until a real terminal fact settles it.
+      if (claim.retiringTurn !== undefined || claim.unprovenCancellation === true) {
         claim.detachedWithFence = true
         continue
       }
@@ -1462,7 +1486,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    */
   private endRetiringFence(sessionId: string, claim: ViewClaim): void {
     claim.retiringTurn = undefined
-    if (claim.detachedWithFence && claim.inflight === undefined && this.claims.get(sessionId) === claim) {
+    // A detached claim dies only when NO transient terminal fact remains: an
+    // unproven cancellation is itself such a fact (R701-05).
+    if (
+      claim.detachedWithFence && claim.inflight === undefined
+      && claim.unprovenCancellation !== true
+      && this.claims.get(sessionId) === claim
+    ) {
       this.claims.delete(sessionId)
     }
     this.notifyWorkSettled()
@@ -1819,6 +1849,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // approval/request of the still-running turn stays ACP-owned (never
     // delegated to the TUI) until the real terminal record arrives. A turn
     // whose durable terminal ALREADY arrived has nothing left to fence.
+    if (error.code === 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED') {
+      // A cancellation the View could not prove leaves possibly-live Host work
+      // behind: keep the claim (and its attribution) until a real terminal
+      // fact settles it — never treat this local settlement as a detach proof.
+      claim.unprovenCancellation = true
+    }
     if (flight.turn !== undefined && !flight.ownTurnEnded) claim.retiringTurn = { turn: flight.turn }
     if (claim.inflight === flight) claim.inflight = undefined
     this.notifyWorkSettled()
