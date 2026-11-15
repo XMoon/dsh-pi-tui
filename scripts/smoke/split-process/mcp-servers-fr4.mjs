@@ -305,7 +305,9 @@ export async function runMcpServersFr4(context) {
     await typeValue(client, serverScript, 'FR4 add arg')
     client.send('s')
     // The Save discloses the external command it enables; only `y` writes.
-    await waitForPattern(client, /fr4-user · (Enabling this server can execute an external command|External command)/u,
+    // The disclosure names the server; its compacted form keeps the server and
+    // the capability fact.
+    await waitForPattern(client, /fr4-user[^\n]*(Enabling this server can execute an external command|External command)/u,
       'FR4 add stdio disclosure')
     client.send('y')
     await waitForSaved(client, 'FR4 add stdio')
@@ -337,7 +339,7 @@ export async function runMcpServersFr4(context) {
     client.send('s')
     // The disclosure names the SERVER and the TARGET HOST (never a credential,
     // path or query). On a tight bar it compacts to `<server> · <host>`.
-    await waitForPattern(client, /fr4-http · 127\.0\.0\.1/u, 'FR4 add http disclosure')
+    await waitForPattern(client, /fr4-http[^\n]*127\.0\.0\.1/u, 'FR4 add http disclosure')
     const disclosure = await frameOf(client)
     assert(disclosure.includes('127.0.0.1'), 'FR4: the HTTP disclosure must name its target host')
     assert(!/credential/u.test(disclosure), 'FR4: the disclosure must never show a credential')
@@ -368,7 +370,7 @@ export async function runMcpServersFr4(context) {
     await sleep(200)
     await typeValue(client, '--fr4-edited', 'FR4 edit arg')
     client.send('s')
-    await waitForPattern(client, /fr4-user · (Enabling this server can execute an external command|External command)/u,
+    await waitForPattern(client, /fr4-user[^\n]*(Enabling this server can execute an external command|External command)/u,
       'FR4 edit disclosure')
     client.send('y')
     await waitForSaved(client, 'FR4 edit')
@@ -478,7 +480,7 @@ export async function runMcpServersFr4(context) {
     client.send('s')
     // The disclosure comes FIRST (it is a question about the draft, not about
     // the revision); answering it is when the stale revision is discovered.
-    await waitForPattern(client, /fr4-http · (Enabling|127\.0\.0\.1)/u, 'FR4 A save disclosure')
+    await waitForPattern(client, /fr4-http[^\n]*(Enabling|127\.0\.0\.1)/u, 'FR4 A save disclosure')
     client.send('y')
     await waitForPattern(client, /Not saved · (configuration changed|the Host authority changed)/u, 'FR4 A stale-save refusal')
     const conflictFrame = await frameOf(client)
