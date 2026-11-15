@@ -1607,12 +1607,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * end/error/destroy or Host Off; it is idempotent and never touches another
    * connection's claim or any Host Agent/Session.
    *
-   * PO-3B: a flight that already owns a real Host fact (its durable message
-   * id) is no longer dropped synchronously — the SAME scoped cancellation runs
-   * (a queued removal or the exact turn's user cancel) and only the proven
-   * settlement releases the claim. A flight with no durable fact yet has no
-   * Host object any cancellation could address, so it keeps the PO-3A
-   * fail-closed release.
+   * PO-3B: a flight with a durable message fact drives the SAME scoped
+   * cancellation (queued removal or exact-turn user cancel). A pending
+   * admission retains its request identity and claim for late insertion;
+   * only proven Host settlement, or classified admission with no inserted
+   * message on the exact identity, releases the responsibility. Without any
+   * bound Host access, raw-socket contracts retain the PO-3A fail-closed path.
    */
   releaseConnection(state: ConnectionViewState, access?: HostAcpSessionAccess): void {
     state.phase = 'closed'
