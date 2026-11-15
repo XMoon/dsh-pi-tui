@@ -887,6 +887,17 @@ async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDe
     if (pre.probe.kind !== 'available') {
       throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'the user manager cannot verify the profile unit')
     }
+    // A live registry Host makes the STOP target part of the uninstall
+    // authorization. Any unit state that will be stopped must prove it is the
+    // same MainPID; an ended/not-found unit is unlink-only and may coexist with
+    // an unrelated fallback Host.
+    if (pre.processAlive && pre.record !== undefined
+      && pre.unitState !== 'inactive' && pre.unitState !== 'not-found') {
+      const running = pre.unitActiveState === 'active' || pre.unitActiveState === 'activating'
+      if (!running || pre.unitMainPid !== pre.record.hostPid) {
+        throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the profile unit MainPID is not the live Host; refusing to uninstall')
+      }
+    }
     const systemctl = deps.systemctl ?? runSystemctl
     assertNotAborted(deps.signal)
     if (pre.unitState === 'active' || pre.unitState === 'unknown') {
