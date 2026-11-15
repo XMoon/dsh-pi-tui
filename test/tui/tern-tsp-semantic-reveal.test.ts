@@ -46,6 +46,8 @@ const OLD_ONLY = 'T3B1_OLD_ARCHIVE_ONLY'
 const INNER_ONLY = 'T3B1_INNER_TOOL_ONLY'
 const SHARED = 'T3B1_SHARED'
 const WORKFLOW_MARKER = 'T3B1_WF_RUN_ONLY'
+/** Inside a NESTED PTC sub-call's result body only. */
+const NESTED_ONLY = 'T3B1_NESTED_SUBCALL_ONLY'
 const WORKFLOW_MEMBER_MARKER = 'T3B1_WF_MEMBER_LABEL'
 
 function ev(type: string, data: Record<string, unknown>, seq: number): SessionEvent {
@@ -119,7 +121,58 @@ function seedFolder(): TranscriptFolder {
   }, seq++))
   events.push(ev('step/end', { turn: 2, step: 0 }, seq++))
   events.push(ev('turn/end', { turn: 2, reason: { kind: 'completed' } }, seq++))
-  turn(3, 'a later request', `the later answer carries ${SHARED} again`)
+  // Turn 3: ONE PTC root tool whose CHILD sub-call result carries NESTED_ONLY.
+  // The child body is folded independently of its parent, so a hit inside it must
+  // open BOTH disclosure levels.
+  events.push(ev('turn/start', { turn: 3 }, seq++))
+  events.push(ev('user/message', {
+    id: MessageId('t3b1-u-3n'), role: 'user', content: [{ type: 'text', text: 'run a shell child' }], source: { kind: 'user' },
+  }, seq++))
+  events.push(ev('step/start', { turn: 3, step: 0 }, seq++))
+  events.push(ev('tool/call', {
+    turn: 3, step: 0, callId: ToolCallId('call-t3b1-ptc'), name: 'run_code', arguments: '{}',
+  }, seq++))
+  events.push(ev('tool/ptc-dispatch-start', {
+    rootCallId: ToolCallId('call-t3b1-ptc'),
+    parentCallId: ToolCallId('call-t3b1-ptc'),
+    subCallId: 'child-nested',
+    name: 'bash',
+    arguments: { command: 'echo nested', description: 'nested child' },
+  }, seq++))
+  events.push(ev('tool/ptc-dispatch', {
+    rootCallId: ToolCallId('call-t3b1-ptc'),
+    parentCallId: ToolCallId('call-t3b1-ptc'),
+    subCallId: 'child-nested',
+    name: 'bash',
+    arguments: { command: 'echo nested', description: 'nested child' },
+    isError: false,
+    content: [{ type: 'text', text: `child stdout line\n${NESTED_ONLY} lives in the nested child result` }],
+  }, seq++))
+  events.push(ev('tool/result', {
+    turn: 3,
+    step: 0,
+    message: {
+      id: MessageId('t3b1-tool-3n'),
+      role: 'tool',
+      toolCallId: ToolCallId('call-t3b1-ptc'),
+      content: [{ type: 'text', text: 'program complete' }],
+      source: { kind: 'tool', callId: ToolCallId('call-t3b1-ptc') },
+    },
+  }, seq++))
+  events.push(ev('assistant/message', {
+    turn: 3,
+    step: 0,
+    message: {
+      id: MessageId('t3b1-a-3n'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'the ptc program finished' }],
+      source: { kind: 'model', provider: 'scripted', model: 'scripted' },
+    },
+    stream: [],
+  }, seq++))
+  events.push(ev('step/end', { turn: 3, step: 0 }, seq++))
+  events.push(ev('turn/end', { turn: 3, reason: { kind: 'completed' } }, seq++))
+  turn(4, 'a later request', `the later answer carries ${SHARED} again`)
   // Turn 4: ONE Workflow run whose member label carries the workflow marker. The
   // run starts fact-driven CLOSED, so the search grant is the only opener.
   events.push(ev('turn/start', { turn: 4 }, seq++))
@@ -652,25 +705,35 @@ test('a higher seat RETIRES the card: closing it does not bring the old search b
   // The REAL higher-seat acquisition: the production interaction presenter
   // presents an official Question form, which IS the modal seat.
   // A REPRESENTABLE question (the presenter refuses a payload it cannot paint).
+  // The signal is the REAL settlement path this test drives: aborting it settles
+  // the flow, so the modal genuinely CLOSES instead of being merely painted.
+  const abort = new AbortController()
   const asked = h.renderer.interaction.askQuestions(
     [{ id: 'q-1', question: 'Proceed?', options: [{ label: 'Yes' }] }] as never,
-    undefined,
+    abort.signal,
     undefined,
     false,
   )
-  // The prompt is a modal: the seat retires instead of parking behind it.
   asked.catch(() => {})
+  // The prompt is a modal: the seat retires instead of parking behind it.
   await h.absent()
   h.renderer.display.commitDisplaySubject({}, {}, undefined)
   await h.absent()
   assert.equal(h.cardPainted(), false, 'the card is not painted while the modal owns the input')
-  // A repaint after the higher seat settles must NOT resurrect the old search:
-  // the seat was RETIRED, not parked.
+  // A repaint while the modal is still up must NOT resurrect the old search.
   h.renderer.display.commitDisplaySubject({}, {}, undefined)
   await h.absent()
   assert.equal(h.cardPainted(), false, 'the retired card never comes back')
   assert.equal(h.queryField(), undefined, 'the old query field is gone')
-  assert.equal(h.composerNode()?.text, 'q', 'the draft was never touched')
+  // A REAL settlement: aborting the flow closes the modal, then the full round
+  // trip proves the Composer returns and the old search does not.
+  abort.abort()
+  await h.painted(() => h.composerNode() !== undefined, 'the Composer returned after the modal closed')
+  await h.painted(() => h.cardPainted() === false, 'no card after the modal closed')
+  assert.equal(h.composerNode()?.text, 'q', 'the draft survived the whole round trip')
+  h.renderer.display.commitDisplaySubject({}, {}, undefined)
+  await h.absent()
+  assert.equal(h.cardPainted(), false, 'the retired card never returns after the modal closes')
 })
 
 test('closing the search retracts the grant: the body folds again and no manual state was written', async (t) => {
@@ -769,6 +832,27 @@ test('a VISIBLE prompt row hit opens NO Thought (the row never lived inside it)'
   // hidden process (the tool body) on top of it.
   assert.equal(h.texts().some(text => text.includes(INNER_ONLY)), false,
     `a visible-row hit never opens unrelated Process :: ${JSON.stringify(h.texts().slice(-5))}`)
+})
+
+test('a hit inside a NESTED PTC sub-call opens EVERY disclosure level of its ancestry', async (t) => {
+  const h = await mountSearchPane(t)
+  // The nested body is folded twice (parent card + child card) before the search.
+  assert.equal(h.texts().some(text => text.includes(NESTED_ONLY)), false,
+    'the seed really keeps the nested child body folded')
+  h.key(ALT_SHIFT_S)
+  await h.painted(() => h.cardPainted(), 'the card painted')
+  for (const ch of NESTED_ONLY.toLowerCase()) h.key(char(ch))
+  await h.painted(() => (h.queryField()?.text ?? '') === NESTED_ONLY.toLowerCase(), 'the query installed')
+  await h.painted(() => h.texts().some(text => /\d+\/\d+ targets/u.test(text)), 'a settled target')
+  h.key(ENTER)
+  // BOTH the parent tool key and the child's `${parent}/sub-<id>` key must be
+  // granted: the marker only lives in the child's own body.
+  await h.painted(() => h.texts().some(text => text.includes(NESTED_ONLY)),
+    `the nested child body became readable :: ${JSON.stringify(h.texts().slice(-4))}`)
+  h.key(ESCAPE)
+  await h.painted(() => h.composerNode() !== undefined, 'the Composer restored')
+  assert.equal(h.texts().some(text => text.includes(NESTED_ONLY)), false,
+    'closing the search retracts both levels of the ancestry grant')
 })
 
 // ── E. Currentness: a dead source retires the card ───────────────────────────

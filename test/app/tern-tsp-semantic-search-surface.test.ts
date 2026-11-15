@@ -427,6 +427,83 @@ test('a disposed surface answers nothing: no stale snapshot, no resolution, no c
   assert.equal(binding.current(before.source), false)
 })
 
+test('query edits reuse the Folder refinement instead of re-scanning the whole history', async (t) => {
+  const h = await mountSurface(t)
+  const binding = h.binding()
+  // A prefix-extension chain is the case the Folder's refinement exists for: each
+  // longer query must be a REFINED scan over the previous round's candidates,
+  // never a fresh full scan of the loaded history.
+  const words = ['b1_surface_main_only', 'b1_surface_main_only_x', 'b1_surface_main_only_xy']
+  // The source token is minted by the FIRST snapshot and reused for the chain:
+  // the refinement only applies while it names the same source.
+  const first = binding.snapshot(words[0]!)
+  assert.ok(first !== undefined)
+  let previous = { query: words[0]!, matches: first.matches, revision: first.revision }
+  for (const query of words.slice(1)) {
+    const snapshot = binding.snapshot(query, {
+      previousQuery: previous.query,
+      previousMatches: previous.matches,
+      revision: previous.revision,
+      source: first.source,
+    })
+    assert.ok(snapshot !== undefined)
+    previous = { query, matches: snapshot.matches, revision: snapshot.revision }
+  }
+  const diagnostics = h.mainFolder().searchDiagnosticsForTest()
+  assert.ok(diagnostics.refinedScans > 0,
+    `the refinement path really ran :: ${JSON.stringify(diagnostics)}`)
+  assert.equal(diagnostics.fullScans, 1,
+    `exactly ONE full scan (the first round); every extension refined :: ${JSON.stringify(diagnostics)}`)
+})
+
+test('a long history: query edits refine instead of rescanning, and the search index stays stable', () => {
+  // 1,200 official turns is well past the plan's 1,000-card long-history bound.
+  // This is the FOLDER authority the binding calls (the scripted pane's single
+  // frame budget cannot carry a 1,200-turn transcript, so the perf claim is
+  // measured on the search authority itself, not on a rendered frame).
+  const long = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  let seq = 0
+  for (let turn = 1; turn <= 1200; turn += 1) {
+    events.push(ev('turn/start', { turn }, seq++))
+    events.push(ev('user/message', {
+      id: MessageId(`lh-u-${turn}`), role: 'user',
+      content: [{ type: 'text', text: `turn ${turn} prompt` }], source: { kind: 'user' },
+    }, seq++))
+    events.push(ev('step/start', { turn, step: 0 }, seq++))
+    events.push(ev('assistant/message', {
+      turn, step: 0,
+      message: {
+        id: MessageId(`lh-a-${turn}`), role: 'assistant',
+        content: [{ type: 'text', text: `turn ${turn} answer needle_${turn}` }],
+        source: { kind: 'model', provider: 'scripted', model: 'scripted' },
+      },
+      stream: [],
+    }, seq++))
+    events.push(ev('step/end', { turn, step: 0 }, seq++))
+    events.push(ev('turn/end', { turn, reason: { kind: 'completed' } }, seq++))
+  }
+  long.apply(events)
+  const first = long.search('turn 500 answer')
+  assert.ok(first.length > 0, 'the long history really holds the target')
+  const revision = long.searchRevision()
+  let previousQuery = 'turn 500 answer'
+  let previousMatches = first
+  const started = Date.now()
+  for (const query of ['turn 500 answer n', 'turn 500 answer ne', 'turn 500 answer nee']) {
+    previousMatches = long.search(query, { previousQuery, previousMatches, revision })
+    previousQuery = query
+  }
+  const elapsed = Date.now() - started
+  const diagnostics = long.searchDiagnosticsForTest()
+  assert.equal(diagnostics.fullScans, 1,
+    `the first round is the ONLY full scan over 1,200 turns :: ${JSON.stringify(diagnostics)}`)
+  assert.equal(diagnostics.refinedScans, 3,
+    `every extension refined over the previous candidates :: ${JSON.stringify(diagnostics)}`)
+  assert.ok(elapsed < 1500,
+    `three refined rounds over 1,200 turns took ${elapsed}ms (a full rescan per keystroke is the regression)`)
+})
+
 test('the renderer opens the card against the composed binding and searches the real Folder', async (t) => {
   const h = await mountSurface(t)
   await h.key(ALT_SHIFT_S)
