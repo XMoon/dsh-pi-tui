@@ -87,12 +87,14 @@ test('an invalid template token is refused in every templated field', () => {
   assert.deepEqual(validateMcpServerDraft('s', stdioDraft({ args: ['--token=${credential:TOKEN}'] })), [])
 })
 
-test('an env/header key that cannot be a settings path segment is refused', () => {
-  for (const key of ['', 'a.b', 'a$b', 'a\nb']) {
+test('only an empty or control-character env/header key is refused', () => {
+  // The official path op uses each segment as a LITERAL object key and the
+  // mcp-manager schema types these dicts as `z.dict(String)`, so a dot or a
+  // `$` is legal (they are covered by the official-segment test below).
+  for (const key of ['', 'a\u0001b', 'a\nb']) {
     assert.ok(validateMcpServerDraft('s', stdioDraft({ env: new Map([[key, 'v']]) })).length > 0, JSON.stringify(key))
     assert.ok(validateMcpServerDraft('h', httpDraft({ headers: new Map([[key, 'v']]) })).length > 0, JSON.stringify(key))
   }
-  // A plain key is fine.
   assert.deepEqual(validateMcpServerDraft('s', stdioDraft({ env: new Map([['API_TOKEN', 'v']]) })), [])
 })
 
@@ -305,4 +307,23 @@ test('a NON-switch edit still emits per-key unsets for removed dict entries', ()
   const draft = stdioDraft({ env: new Map([['KEEP', 'k']]) })
   const ops = mcpEditOps('srv', effective, draft, diffMcpServerDraft(effective, draft))
   assert.deepEqual(ops, [{ op: 'unset', path: ['servers', 'srv', 'env', 'DROP'] }])
+})
+
+test('official Settings path segments are literal keys, so a dot or `$` is a legal env/header key', () => {
+  // The official SettingsPathOp applies each segment with
+  // `Object.defineProperty(target, head)`, and `mcp-manager` types env/headers
+  // as `z.dict(String)`: there is no dot/dollar grammar to reject. Only an
+  // empty key and embedded control characters are refused.
+  for (const key of ['X.Trace', 'X$Trace', 'A:B', 'a/b', 'UPPER', 'with space']) {
+    assert.deepEqual(validateMcpServerDraft('srv', stdioDraft({ env: new Map([[key, 'v']]) })), [], JSON.stringify(key))
+    assert.deepEqual(validateMcpServerDraft('h', httpDraft({ headers: new Map([[key, 'v']]) })), [], JSON.stringify(key))
+  }
+  for (const key of ['', 'a\u0001b']) {
+    assert.ok(validateMcpServerDraft('srv', stdioDraft({ env: new Map([[key, 'v']]) })).length > 0, JSON.stringify(key))
+  }
+  // The key travels through the ops as ONE segment, never split on the dot.
+  const effective = { transport: 'stdio' as const, command: '/bin/echo', args: [], env: new Map<string, string>(), cwd: '', enabled: true }
+  const draft = stdioDraft({ env: new Map([['X.Trace', 'v']]) })
+  const ops = mcpEditOps('srv', effective, draft, diffMcpServerDraft(effective, draft))
+  assert.deepEqual(ops, [{ op: 'set', path: ['servers', 'srv', 'env', 'X.Trace'], value: 'v' }])
 })
