@@ -463,14 +463,18 @@ stdout/stderr.
   `unit-state` and `compatibility` (plus a bounded `pid`/`instance` while one
   is live). `manager`
   names the VERIFIED supervision attribution (`systemd` for a verified loaded
-  profile unit, `process` for an authenticated strict-absence Host, otherwise
-  `unmanaged`); it never means "systemctl exists". `ActiveState=active` or a
+  profile unit under a LIVE manager, `process` for an authenticated
+  strict-absence Host, otherwise
+  `unmanaged`); it never means "systemctl exists" — a unit FILE on disk without
+  a live manager proves nothing. `ActiveState=active` or a
   registry PID is not readiness: a supervised but unauthenticated Host is
   `starting`/`unresponsive`, and an unreadable/contradictory state is `unknown`.
   A manager-reported `activating` unit is a Host that may still come up: it is
   reported `starting` (never `stopped`) even before any `MainPID` exists, while
   any other unconfirmed transition (`deactivating`, `reloading`, an unrecognized
-  `ActiveState`) is `unknown` with a nonzero exit. `MainPID=0` alone never
+  `ActiveState`) is `unknown` with a nonzero exit — including when the Host's
+  own handshake still answers, because the supervisor may retire it before any
+  caller acts on that answer. `MainPID=0` alone never
   proves a Host is stopped.
   A missing Host with no unit conflict is `stopped` and exit 0; manager error,
   unsafe/foreign unit, incompatible protocol/DSH and unverifiable liveness are
