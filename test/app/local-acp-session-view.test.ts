@@ -1949,3 +1949,34 @@ test('RFL-006: an Agent disposal also releases a detached fenced claim', async (
   view.registry.onAgentDisposed(view.agent)
   assert.equal(view.registry.hasClaim('P1'), false, 'the disposal releases the fenced claim')
 })
+
+test('PO3A-G replay: mixed fail -> later clean turns -> close -> a fresh connection attaches the SAME Session', async () => {
+  const view = promptView()
+  await view.attach()
+  // E: a mixed turn fails closed after its own turn/end.
+  const mixedAttempt = view.start('mixed')
+  const mixedRequest = view.access.promptCalls[0]!
+  view.insert(mixedRequest.requestId, 'm-mixed')
+  view.access.pendingInbox.delete('m-mixed')
+  view.claim('m-steer', 2, 'tui-steer')
+  view.claim('m-mixed', 2, mixedRequest.requestId)
+  view.commit('assistant/message', assistantData(2, 'm-mixed', [{ type: 'text', text: 'half' }]))
+  view.commit('turn/end', { turn: 2, reason: { kind: 'completed' } })
+  await assert.rejects(mixedAttempt, isPromptError('LOCAL_ACP_PROMPT_MIXED_TURN'))
+  await flushOutput()
+  // F: later clean turns settle normally.
+  const cleanAttempt = view.start('clean')
+  const cleanRequest = view.access.promptCalls[1]!
+  view.insert(cleanRequest.requestId, 'm-clean')
+  view.access.pendingInbox.delete('m-clean')
+  view.claim('m-clean', 3, cleanRequest.requestId)
+  view.commit('assistant/message', assistantData(3, 'm-clean', [{ type: 'text', text: 'answer' }]))
+  view.commit('turn/end', { turn: 3, reason: { kind: 'completed' } })
+  assert.deepEqual(await cleanAttempt, { stopReason: 'end_turn' })
+  // G: close, then a FRESH connection attaches the SAME Session.
+  assert.deepEqual(await view.registry.closeSession(view.conn, view.access, 'P1'), {})
+  assert.equal(view.registry.hasClaim('P1'), false, 'the mixed-failed claim is fully released')
+  const conn3 = view.registry.createConnection()
+  await view.registry.resumeSession(conn3, view.access, { sessionId: 'P1', cwd: '/w' })
+  assert.equal(view.registry.phaseOf(conn3), 'attached')
+})
