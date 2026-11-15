@@ -824,8 +824,18 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
     const pre = await readSnapshot(profile, deps, inspected)
     const authOnlyUnitRecovery = verifiedUnitManagementAdmitted(pre)
       && (pre.record === undefined || !pre.processAlive || pre.unitMainPid === pre.record.hostPid)
+    // An explicit restart is a unit operation, not a Ready verdict. A verified
+    // current-Profile unit that is active/activating may be stuck before
+    // readiness (for example ExecStartPre); the same verified stop target that
+    // `stop` accepts must be restartable. Transitional/foreign states remain
+    // refusals.
+    const verifiedUnitRestart = pre.unit !== undefined
+      && pre.probe.kind === 'available'
+      && (pre.unitActiveState === 'active' || pre.unitActiveState === 'activating')
+      && (pre.record === undefined || !pre.processAlive || pre.unitMainPid === pre.record.hostPid)
     if (pre.failure !== undefined && !authOnlyUnitRecovery) throw pre.failure
-    if (pre.status.host !== 'ready' && pre.status.host !== 'stopped' && !authOnlyUnitRecovery) throw refuseHostState(pre.status)
+    if (pre.status.host !== 'ready' && pre.status.host !== 'stopped'
+      && !authOnlyUnitRecovery && !verifiedUnitRestart) throw refuseHostState(pre.status)
     const oldInstance = pre.record?.instanceId
     // Owner decision (M6-2C scope): an owned unit from ANOTHER installed build
     // is never migrated here. Cross-build unit replacement is M6-2D work; this

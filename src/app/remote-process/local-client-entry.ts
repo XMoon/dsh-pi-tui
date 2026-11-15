@@ -2436,19 +2436,20 @@ async function waitForStartupHold(path: string, signal: AbortSignal): Promise<vo
 /**
  * The human-facing surface line for one startup failure. The live-Host
  * protocol/DSH refusal gets a dedicated, actionable line that names the code,
- * keeps the old Host untouched, requires an explicit owner-verified OS stop
- * and says that automatic in-memory migration is unsupported. It never
+ * keeps the old Host untouched and points at the public daemon management
+ * commands for diagnosis and an explicit user-chosen recovery. It never
  * includes the registry PID, the launch URL/token or a private profile path.
- * Every other startup failure keeps the existing diagnostic.
+ * Every other startup failure keeps the existing diagnostic plus the same
+ * daemon-oriented recovery guidance.
  */
 export function surfaceStartupFailureLine(error: unknown): string {
   if (error instanceof LocalScopeError) {
     if (error.code === 'HOST_PROTOCOL_INCOMPATIBLE') {
-      return 'HOST_PROTOCOL_INCOMPATIBLE: Another live local Host for this profile uses a different local protocol or DSH runtime. The Host has not been stopped or replaced. Finish or save your work in that Host, then explicitly stop that Host through its normal operating-system shutdown signal and start a compatible Host. Automatic upgrade and migration of in-memory work are not supported.'
+      return 'HOST_PROTOCOL_INCOMPATIBLE: Another live local Host for this profile uses a different local protocol or DSH runtime. The Host has not been stopped or replaced. Inspect it with: dsh --profile pi-tui daemon status; read its logs with: dsh --profile pi-tui daemon logs. If you decide this Profile service is yours to recover, run: dsh --profile pi-tui daemon restart. Recovery is not guaranteed; Automatic upgrade and migration of in-memory work are not supported.'
     }
     // Every other typed scope failure is a controlled code; never echo the raw
     // message (it can carry a private profile path / Host origin).
-    return `split client surface: cannot establish the local Host (${error.code}); the Host was not stopped. Resolve the Host state and re-run: dsh --profile pi-tui`
+    return `split client surface: cannot establish the local Host (${error.code}); the Host was not stopped. Inspect it with: dsh --profile pi-tui daemon status; read its logs with: dsh --profile pi-tui daemon logs. If you choose to recover, run: dsh --profile pi-tui daemon restart; recovery is not guaranteed.`
   }
   return `split client surface: ${controlledSurfaceReason(error)}`
 }
@@ -2464,7 +2465,7 @@ function controlledSurfaceReason(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error)
   const entryPrefix = 'local client entry: '
   if (raw.startsWith(entryPrefix)) return sanitizeSurfaceText(raw.slice(entryPrefix.length))
-  return 'startup failed before the TUI mounted; see the Host log for detail and re-run dsh --profile pi-tui'
+  return 'startup failed before the TUI mounted; see the Host log for detail. Inspect with: dsh --profile pi-tui daemon status and dsh --profile pi-tui daemon logs; if you choose to recover, run dsh --profile pi-tui daemon restart (not guaranteed).'
 }
 
 /** Strip control characters, URLs and absolute paths; bound the length. */

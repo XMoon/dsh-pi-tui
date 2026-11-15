@@ -420,15 +420,18 @@ test('the B1 Client transport mounts exactly the three Node client halves and no
   assert.match(source, /streamBaseUrl: origin/u)
 })
 
-test('a surface startup protocol refusal states the code, preserved Host and explicit manual stop', () => {
+test('a surface startup protocol refusal states the code, preserved Host and daemon recovery guidance', () => {
   const line = surfaceStartupFailureLine(
     new LocalScopeError('HOST_PROTOCOL_INCOMPATIBLE', 'local discovery: the live Host uses a different local protocol or DSH runtime'),
   )
   assert.match(line, /^HOST_PROTOCOL_INCOMPATIBLE: /u)
   assert.match(line, /different local protocol or DSH runtime/u)
   assert.match(line, /has not been stopped or replaced/u)
-  assert.match(line, /explicitly stop that Host through its normal operating-system shutdown signal/u)
-  assert.match(line, /start a compatible Host/u)
+  assert.match(line, /dsh --profile pi-tui daemon status/u)
+  assert.match(line, /dsh --profile pi-tui daemon logs/u)
+  assert.match(line, /dsh --profile pi-tui daemon restart/u)
+  assert.match(line, /Recovery is not guaranteed/u)
+  assert.doesNotMatch(line, /operating-system shutdown signal/u)
   assert.match(line, /Automatic upgrade and migration of in-memory work are not supported/u)
   // The refusal must not turn an unauthenticated registry candidate into a
   // displayed PID/kill target or leak the private launch material.
@@ -437,7 +440,10 @@ test('a surface startup protocol refusal states the code, preserved Host and exp
   // the raw message (which can carry an endpoint / detail) is never echoed.
   for (const code of ['HOST_UNRESPONSIVE', 'HOST_BUILD_INCOMPATIBLE'] as const) {
     const other = surfaceStartupFailureLine(new LocalScopeError(code, 'local discovery: identity route answered HTTP 503 at http://10.0.0.1/x'))
-    assert.equal(other, `split client surface: cannot establish the local Host (${code}); the Host was not stopped. Resolve the Host state and re-run: dsh --profile pi-tui`)
+    assert.match(other, new RegExp(`cannot establish the local Host \\(${code}\\)`, 'u'))
+    assert.match(other, /dsh --profile pi-tui daemon status/u)
+    assert.match(other, /dsh --profile pi-tui daemon logs/u)
+    assert.match(other, /dsh --profile pi-tui daemon restart/u)
     assert.doesNotMatch(other, /503|10\.0\.0\.1|identity route/iu)
   }
 })
