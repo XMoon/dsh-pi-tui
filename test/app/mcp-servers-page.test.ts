@@ -787,3 +787,22 @@ test('the Detail Action Bar advertises exactly the actions the controller allows
   assert.match(savingBar, /Saving/u)
   assert.match(savingBar, /Esc/u)
 })
+
+test('a config write in flight removes every detail CRUD affordance from the bar', () => {
+  // Toggle/Delete/Reset settle on the DETAIL view (no form open), so the bar is
+  // visible while the write is unsettled: it must not advertise an Edit the
+  // controller refuses, while Probe/Restart stay independently available.
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: { ...CONFIG_FACET, canDelete: true, canReset: true },
+    configStatus: { kind: 'saving', text: 'Saving configuration…' },
+  }))
+  // The controller denies every edit while saving.
+  controller.canBeginEdit = () => false
+  render(page, 120, 20)
+  page.handleInput('\r')
+  const bar = render(page, 120, 20).at(-1) ?? ''
+  assert.doesNotMatch(bar, /e edit/u, 'no Edit while a write is unsettled')
+  assert.match(bar, /p probe/u, 'Probe is independent of the config write')
+  assert.match(bar, /x restart/u)
+  assert.match(bar, /Back \[Esc\]/u)
+})

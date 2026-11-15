@@ -1284,7 +1284,9 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         segments.push({ text: 'p probe', priority: 30 }, { text: 'x restart', priority: 25 })
       }
       if (facet !== undefined) {
-        segments.push({ text: 'e edit', priority: 24 })
+        // `e` uses the SAME predicate the key handler uses, so the painted bar
+        // can never advertise an Edit the controller would refuse.
+        if (this.controller.canBeginEdit()) segments.push({ text: 'e edit', priority: 24 })
         if (facet.canToggle) segments.push({ text: 't enable/disable', short: 't toggle', priority: 23 })
         if (facet.canDelete) segments.push({ text: 'd delete', priority: 22 })
         if (facet.canReset) segments.push({ text: 'u reset', priority: 21 })
