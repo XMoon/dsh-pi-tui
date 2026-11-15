@@ -1493,7 +1493,10 @@ form the user chooses — `Credential reference` (the default, written as the
 official `${credential:REF}` token) or `Literal (stored in profile)` — shown on
 its own row and never inferred from the typed text; the disclosure's HTTP target
 is the host alone and fails closed to `Unknown target` when the URL cannot be
-parsed, so no path, query or credential can be echoed.
+parsed, so no path, query or credential can be echoed. Per-key Remove is offered
+for keys the BASE layer does not own only: the official per-key `unset` on a
+base-owned key RESTORES the inherited value (it cannot delete it), so such rows
+state `Inherited · cannot remove here` and a backspace on them is inert.
 
 Keys: list `↑/↓` move, `Enter` opens the detail, `a` begins Add when the Host
 settings are current, `/` filters by name, `r` re-observes, `Esc` cancels search /

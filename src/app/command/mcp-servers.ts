@@ -852,9 +852,23 @@ export class McpServersController {
     this.deps.requestRender()
   }
 
-  /** Remove one env/header row. */
+  /**
+   * Whether one env/header key of the OPEN entry may be removed. The official
+   * per-key `unset` RESTORES a base-owned key (it cannot delete it), so a key
+   * the base layer owns is not removable: the removal gate is derived from the
+   * SAME descriptor the entry was classified by, never from USER key presence.
+   */
+  canRemoveDictKey(field: 'env' | 'headers', key: string): boolean {
+    if (this.disposed || this.editor === undefined) return false
+    const baseKeys = field === 'env' ? this.editor.entry?.baseKeys?.env : this.editor.entry?.baseKeys?.headers
+    return baseKeys?.has(key) !== true
+  }
+
+  /** Remove one env/header row (User-added keys only — the official per-key
+   *  `unset` on a base-owned key would restore the inherited value). */
   removeEditorDictKey(field: 'env' | 'headers', key: string): void {
     if (this.disposed || this.editor === undefined) return
+    if (!this.canRemoveDictKey(field, key)) return
     const dict = field === 'env' ? this.editor.draft.env : this.editor.draft.headers
     dict.delete(key)
     this.editor.draft.forms.delete(`${field}:${key}`)

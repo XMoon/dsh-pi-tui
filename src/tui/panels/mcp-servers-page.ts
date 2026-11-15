@@ -522,7 +522,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         return
       case 'add-arg':
         this.controller.addEditorArg()
-        this.formFocus = Math.min(this.formFocus + 1, mcpFormRows(snapshot.editor as NonNullable<McpServersSnapshot['editor']>).length - 1)
+        this.formFocus += 1
         this.bumpRevision()
         return
       case 'add-dict-row':
@@ -622,7 +622,11 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       this.bumpRevision()
       return
     }
-    const rows = mcpFormRows(editor)
+    // The SAME removal gate the renderer uses: a base-owned key row is not
+    // removable, so a backspace on it must not even reach the intent.
+    const rows = mcpFormRows(editor,
+      (field, key) => this.controller.dictValueForm(field, key),
+      (field, key) => this.controller.canRemoveDictKey(field, key))
     if (matchesKey(data, 'escape')) {
       if (editor.dirty) {
         this.discardConfirm = true
@@ -664,7 +668,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
           case 'edit-dict-key': this.controller.removeEditorDictKey(row.action.field, row.action.key); break
           default: break
         }
-        this.formFocus = Math.max(0, Math.min(this.formFocus, mcpFormRows(snapshot.editor as NonNullable<McpServersSnapshot['editor']>).length - 1))
+        this.formFocus = Math.max(0, Math.min(this.formFocus, rows.length - 1))
         this.bumpRevision()
       }
       return
@@ -940,14 +944,18 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     // indices: a short grant would otherwise let the focused field scroll out
     // of view while the user believes they are editing it.
     const probe = renderMcpConfigForm(editor, width, bodyRows, this.formFocus, 0,
-      (field, key) => this.controller.dictValueForm(field, key))
-    const formRowCount = mcpFormRows(editor, (field, key) => this.controller.dictValueForm(field, key)).length
+      (field, key) => this.controller.dictValueForm(field, key),
+      (field, key) => this.controller.canRemoveDictKey(field, key))
+    const formRowCount = mcpFormRows(editor,
+      (field, key) => this.controller.dictValueForm(field, key),
+      (field, key) => this.controller.canRemoveDictKey(field, key)).length
     if (this.formFocus >= formRowCount) this.formFocus = Math.max(0, formRowCount - 1)
     const focusedRow = probe.focusedContentRow >= 0 ? probe.focusedContentRow : 0
     if (focusedRow < this.formOffset) this.formOffset = focusedRow
     if (focusedRow >= this.formOffset + bodyRows) this.formOffset = focusedRow - bodyRows + 1
     const rendered = renderMcpConfigForm(editor, width, bodyRows, this.formFocus, this.formOffset,
-      (field, key) => this.controller.dictValueForm(field, key))
+      (field, key) => this.controller.dictValueForm(field, key),
+      (field, key) => this.controller.canRemoveDictKey(field, key))
     const lines = [...rendered.lines]
     if (this.formInput !== undefined) {
       const [inputLine] = this.formInput.input.render(width)

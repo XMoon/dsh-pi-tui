@@ -106,6 +106,7 @@ import type {
   McpConfigWriteOutcome,
 } from '../config-port.ts'
 import {
+  baseDictKeysOf,
   classifyMcpServerProvenance,
   projectMcpServerEntry,
   type McpClassifiedServerEntry,
@@ -2166,6 +2167,15 @@ class DirectAcpStartupPreferenceConfig implements AcpStartupPreferenceConfig {
 }
 
 
+/** The `servers` map of one descriptor layer (own keys), or undefined. */
+function plainServersOf(layer: unknown): Record<string, unknown> | undefined {
+  if (typeof layer !== 'object' || layer === null || Array.isArray(layer)) return undefined
+  const servers = (layer as { servers?: unknown }).servers
+  return typeof servers === 'object' && servers !== null && !Array.isArray(servers)
+    ? servers as Record<string, unknown>
+    : undefined
+}
+
 /** The official settings namespace the shared Host MCP manager owns. */
 const MCP_SERVER_SOURCES_NS = 'mcp-manager'
 
@@ -2340,12 +2350,14 @@ export class DirectMcpServerConfigurationConfig implements McpServerConfiguratio
     // the same read; a name that appears in neither layer of THIS descriptor
     // is not config-owned and is simply absent from the entries.
     const entries: McpClassifiedServerEntry[] = []
+    const baseServers = plainServersOf(descriptor.base)
     for (const name of Object.keys(servers as Record<string, unknown>)) {
       const provenance = classifyMcpServerProvenance(descriptor.base, { servers }, name)
       if (provenance === undefined) continue
       const effective = projectMcpServerEntry(detachedSection((servers as Record<string, unknown>)[name]))
       if (effective === undefined) continue
-      entries.push({ name, provenance, effective })
+      const baseKeys = baseDictKeysOf(baseServers?.[name])
+      entries.push({ name, provenance, effective, ...baseKeys === undefined ? {} : { baseKeys } })
     }
     return {
       kind: 'ready',
