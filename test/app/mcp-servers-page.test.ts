@@ -984,6 +984,25 @@ test('the Save disclosure lives in the body at 44 columns, not only in the bar',
   // The decision keys survive even when the question segment drops.
   assert.match(frame, /(Y confirm|y)\b/u, `the affirmative key must survive: ${frame}`)
   assert.match(frame, /Esc/u)
+  // POSITIVE control: at 44x8 the whole fact set fits, so `y` really dispatches.
+  page.handleInput('y')
+  assert.ok(controller.calls.includes('answerConfigConfirm:true'),
+    `a fully reviewed confirmation must be accepted: ${controller.calls.join(',')}`)
+
+  // NEGATIVE control on the same frame budget: when the granted rows cannot show
+  // the facts, no affirmative key is painted and `y` is refused.
+  const small = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
+  openEditor(small.page, 'e', 44, 4)
+  small.controller.snapshotValue = {
+    ...small.controller.snapshotValue,
+    configConfirm: { kind: 'save', name: 'a'.repeat(32), warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
+  }
+  const smallFrame = render(small.page, 44, 4).join('\n')
+  assert.doesNotMatch(smallFrame, /Y confirm/u, `no affirmative key on an unreviewable frame: ${smallFrame}`)
+  assert.match(smallFrame, /Resize to review/u)
+  small.page.handleInput('y')
+  assert.deepEqual(small.controller.calls.filter(call => call.startsWith('answerConfigConfirm')), [],
+    'an unreviewable confirmation must refuse the key')
 })
 
 test('the narrow header keeps the form target identity at every width', () => {
