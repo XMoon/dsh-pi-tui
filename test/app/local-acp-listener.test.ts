@@ -769,6 +769,7 @@ function makeFakeAccess(): {
   removedMessageIds: string[]
   cancelledTurns: Array<{ readonly turn: number; readonly keepInbox: boolean }>
   turnFence: { openTurnStartSeq: number | null; lastTurn: number }
+  staleCancel: { value: boolean }
 } {
   const agents = new Map<string, { id: string; session: { id: string; header: { cwd: string } } }>()
   const prompts: AcpSessionPromptRequest[] = []
