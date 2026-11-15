@@ -121,6 +121,8 @@ interface Harness {
   readonly app: TuiApp
   readonly manager: FixtureManager
   readonly settingsMutateCalls: string[]
+  /** Hold the NEXT mutation in flight (deferred settlement). */
+  holdSettingsMutation: () => () => void
   readonly invoke: (name: string, rawInput?: string) => Promise<unknown>
   readonly view: () => string
 }
@@ -154,6 +156,7 @@ function setup(options: { readonly columns?: number; readonly rows?: number; rea
   const manager = new FixtureManager(managedList())
   const managerMounted = options.withManager !== false
   const settingsMutateCalls: string[] = []
+  let settingsHold: Promise<void> | undefined
   let settingsRevision = 3
   const alphaEntry = { transport: 'stdio', command: '/bin/echo', args: [], env: {}, cwd: '', enabled: true }
   const settingsCtx = {
@@ -169,6 +172,7 @@ function setup(options: { readonly columns?: number; readonly rows?: number; rea
           mutate: async (ns: string, ops: readonly unknown[]) => {
             settingsMutateCalls.push(ns)
             if (ops.length === 0) return
+            if (settingsHold !== undefined) await settingsHold
             settingsRevision += 1
           },
         }
@@ -286,6 +290,11 @@ function setup(options: { readonly columns?: number; readonly rows?: number; rea
     app,
     manager,
     settingsMutateCalls,
+    holdSettingsMutation: () => {
+      let release!: () => void
+      settingsHold = new Promise<void>(resolve => { release = resolve })
+      return () => { settingsHold = undefined; release() }
+    },
     invoke: async (name, rawInput = '') => {
       const definition = defs.find(candidate => candidate.name === name)
       assert.ok(definition?.handler !== undefined, `${name} must be registered`)
@@ -493,7 +502,8 @@ test('dirty Esc in the mounted form shows the discard confirmation and writes no
   await press(h.vt, '\x1b')
   await frames(h.vt)
   assert.match(h.view(), /Discard changes\?/u)
-  assert.match(lastLine(h), /Keep editing · Esc/u)
+  // The bar offers Keep editing AND Discard to a pointer, both with Esc.
+  assert.match(lastLine(h), /Keep editing · Discard · Esc/u)
   // Keep editing (Enter), then a second Esc and an explicit `d` discard.
   await press(h.vt, '\r')
   await press(h.vt, '\x1b')
@@ -607,14 +617,13 @@ test('the form never paints a row twice and never loses the page chrome', async 
 test('Esc during an unsettled Save never offers a Discard that would imply cancellation', async () => {
   const h = setup()
   await openMcpPage(h)
-  // Open Add, name it, then Save — but hold the write so it is unsettled.
+  // A valid draft: Add a name and a command.
   await press(h.vt, 'a')
   await frames(h.vt, 2)
   await press(h.vt, '\r')
   for (const char of 'held-save') await h.vt.sendInput(char)
   await press(h.vt, '\r')
   await frames(h.vt, 2)
-  // A valid draft needs a command: focus the Command row and set it.
   for (let step = 0; step < 6; step += 1) {
     const focused = /▸ ([^:\n]+):/u.exec(h.view())
     if (focused !== null && (focused[1] ?? '').trim().startsWith('Command')) break
@@ -624,23 +633,33 @@ test('Esc during an unsettled Save never offers a Discard that would imply cance
   for (const char of '/bin/sleep') await h.vt.sendInput(char)
   await press(h.vt, '\r')
   await frames(h.vt, 2)
-  // The external-capability question comes first.
+  // Ask to save and answer the disclosure: the mutation is now DISPATCHED but
+  // the fixture holds it, so the page is really in the unsettled window.
+  const release = h.holdSettingsMutation()
   await press(h.vt, 's')
   await frames(h.vt)
   assert.match(h.view(), /Enabling this server can execute an external command/u)
-  // Answer it: the write is now dispatched and unsettled (the fixture's
-  // mutate settles on the microtask queue, so the saving state is observed by
-  // pausing the owned chain through the fixture's own recording).
-  const mutateCount = h.settingsMutateCalls.length
   await press(h.vt, 'y')
+  await frames(h.vt, 3)
+  // The write is in flight: the page says it is saving and offers no discard.
+  assert.match(h.view(), /Saving configuration/u)
+  assert.doesNotMatch(h.view(), /Discard changes\?/u)
+  // Esc now must NOT open a discard prompt, and `d` must not drop the draft.
+  await press(h.vt, '\x1b')
   await frames(h.vt, 2)
-  await flushOwnedTurns()
-  await frames(h.vt, 2)
-  // Whatever the settlement, the page must never present a Discard that
-  // pretends the dispatched write was cancelled.
-  const frame = h.view()
-  assert.doesNotMatch(frame, /Discard changes\?/u,
+  assert.doesNotMatch(h.view(), /Discard changes\?/u,
     'a dispatched write must never offer a Discard prompt')
-  assert.ok(h.settingsMutateCalls.length >= mutateCount, 'no mutation was lost')
-  assert.ok(h.settingsMutateCalls.length <= mutateCount + 1, 'exactly ONE dispatched mutation')
+  assert.match(h.view(), /cannot be cancelled here/u,
+    'the page states the write cannot be cancelled')
+  await press(h.vt, 'd')
+  await frames(h.vt, 2)
+  assert.match(h.view(), /Saving configuration/u, 'the draft/write stays alive after `d`')
+  assert.equal(h.settingsMutateCalls.length, 1, 'exactly ONE dispatched mutation')
+  // Release the Host: the write settles and the form closes.
+  release()
+  await frames(h.vt, 3)
+  await flushOwnedTurns()
+  await frames(h.vt, 3)
+  assert.match(h.view(), /Saved · waiting for Host reconcile/u)
+  assert.equal(h.settingsMutateCalls.length, 1, 'no replay after settlement')
 })

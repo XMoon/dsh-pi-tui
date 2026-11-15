@@ -1472,9 +1472,9 @@ are the official ones; there is no invented `connected-ish`/`installed` flag.
 non-current settings read never becomes `Plugin-owned`.
 
 For a server the SAME current Host settings descriptor proves configuration-owned,
-the Detail also offers `Add`, `Edit`, Enable/Disable, permanent `Delete`
+the Detail also offers `Edit`, Enable/Disable, permanent `Delete`
 (User-added entries only) and `Reset to inherited` (entries whose effective
-configuration differs from the base only). Add and Edit open a whole-page
+configuration differs from the base only). `Add` is a LIST action (the `a` key); Add and Edit open a whole-page
 scrollable form inside the same specialist whose fixed header always names the
 FORM's target (`<name> · Add/Edit · <source>` — `(unnamed)` before a new name is
 typed), never the server selected in the list: `Identity` (name/transport/enabled),
@@ -1490,7 +1490,12 @@ draft can reach outside the Host asks ONE explicit question before writing —
 `Enabling this server can execute an external command.` for a stdio entry, and
 `Enabling this server can send data to an external service. Target: <host>` for
 an HTTP entry (the host only, never a credential) — and only an affirmative
-answer dispatches the write. Every env/header value carries an EXPLICIT storage
+answer dispatches the write. The disclosure is painted in the BODY (wrapped), so
+a narrow frame with a long server name still shows the full fact; the Action Bar
+carries only the decision (`y confirm · Esc cancel`). A pointer obeys the same
+modal authority as the keyboard: while a confirmation, discard prompt, restart
+question or search owns the surface, no click can change the draft, and every
+painted Action-Bar segment is itself a pointer target for its own intent. Every env/header value carries an EXPLICIT storage
 form the user chooses — `Credential reference` (the default, written as the
 official `${credential:REF}` token) or `Literal (stored in profile)` — shown on
 its own row and never inferred from the typed text; the disclosure's HTTP target
