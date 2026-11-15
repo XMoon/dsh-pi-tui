@@ -263,6 +263,8 @@ export interface AcpPromptFactListener {
   onInboxClaimed(agent: LiveAgentViewIdentity, message: AcpUserMessageLike, turn: number): void
   /** One committed durable Session event. */
   onSessionEvent(session: object, event: AcpSessionEventLike): void
+  /** One official inbox discard notice for a removed message. */
+  onInboxDiscarded(agent: LiveAgentViewIdentity, message: AcpUserMessageLike): void
   /** One Agent interval failure carrying the owning turn. */
   onAgentError(agent: LiveAgentViewIdentity, turn: number): void
   /** The exact live Agent was disposed. */
@@ -337,6 +339,16 @@ export interface ConnectionViewState {
   op: number
 }
 
+/** The transient unclaimed Host obligation of one claim (PO-3B v1.1 §3). */
+interface UnclaimedHostObligation {
+  /** The View-minted request identity the obligation belongs to. */
+  readonly requestId: string
+  /** The official inserted message id, once observed. */
+  messageId?: string
+  /** The official admission classification this obligation tracks. */
+  admission: 'pending' | 'accepted' | 'unconfirmed'
+}
+
 /** One reservation held by exactly one connection. Its object identity IS the reservation identity. */
 interface ViewClaim {
   readonly connectionIdentity: ConnectionViewState
@@ -363,13 +375,14 @@ interface ViewClaim {
    */
   retiringTurn?: { readonly turn: number }
   /**
-   * PO-3B: set when this claim's cancellation could NOT be proven (a stale
-   * exact identity may hide a pending message or a running turn the View can
-   * no longer address). Local flight state being cleared is NOT a Host
-   * settlement: the reservation and the Host fact subscription must survive
-   * until a real terminal fact (the exact Agent's disposal) settles it.
+   * PO-3B v1.1: the transient UNCLAIMED Host obligation fence. It is created
+   * only when the local Flight settled while the official Host had not yet
+   * PROVEN the request terminal and no turn was claimed: the exact inserted
+   * message (or the still-pending admission) may still execute. Local flight
+   * state being cleared is NOT a Host settlement — the reservation and the
+   * Host fact observer survive until an official terminal fact settles it.
    */
-  unprovenCancellation?: boolean
+  unclaimedHostObligation?: UnclaimedHostObligation
   /**
    * PO-3B F2: set when the View detached while a transient terminal fact still
    * had to arrive (a retired-turn fence, or an unproven cancellation). The
@@ -442,6 +455,8 @@ interface InflightPrompt {
    * nothing about cancellation safety.
    */
   ownTurnEnded: boolean
+  /** The stable classification this flight settled with (set by failPrompt). */
+  failureCode?: LocalAcpSessionErrorCode
   /**
    * PO-3B: pending reverse permission requests keyed by their exact callId,
    * alive only for THIS flight's lifetime (never a second global registry).
@@ -571,7 +586,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     for (const claim of this.claims.values()) {
       if (claim.inflight !== undefined && !claim.inflight.settledDone) return true
       if (claim.retiringTurn !== undefined) return true
-      if (claim.unprovenCancellation === true) return true
+      if (claim.unclaimedHostObligation !== undefined) return true
     }
     return false
   }
@@ -736,53 +751,124 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     sessionId: string,
   ): Promise<Record<string, never>> {
     const claim = this.claims.get(sessionId)
-    if (claim !== undefined && claim.connectionIdentity === state) {
-      if (claim.unprovenCancellation === true) {
-        // An earlier cancellation could not be proven and no later Host fact
-        // has settled it: a repeated close must NOT turn that into a success
-        // merely because the local flight is gone (R701-05).
+    if (claim === undefined || claim.connectionIdentity !== state) {
+      if (state.lastClosedSessionId === sessionId) return {}
+      throw new LocalAcpViewError('LOCAL_ACP_VIEW_NOT_OWNED', 'this ACP connection holds no view for that session', JSONRPC_INVALID_PARAMS)
+    }
+    // Join only an attempt that is STILL in flight: a failed attempt is not a
+    // settlement proof and must not lock the retry (v1.1 §5.B.3).
+    const inFlightAttempt = claim.closing
+    if (inFlightAttempt !== undefined) return await inFlightAttempt
+    const attempt = this.closeClaim(state, sessionId, claim, access)
+    claim.closing = attempt
+    try {
+      return await attempt
+    } finally {
+      if (claim.closing === attempt) claim.closing = undefined
+    }
+  }
+
+  /**
+   * One close attempt against the CURRENT official Host facts (v1.1 §4): a
+   * safe detach needs a real terminal proof — an exact queued removal, the
+   * owned turn's `turn/end` (or its exact Agent's disposal), or a definite
+   * pre-insertion admission rejection. A local flight having disappeared is
+   * never such a proof.
+   */
+  private async closeClaim(
+    state: ConnectionViewState,
+    sessionId: string,
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+  ): Promise<Record<string, never>> {
+    // An unclaimed obligation may still execute. Try ONE exact removal on the
+    // current facts; anything short of a real removal is unconfirmed.
+    const obligation = claim.unclaimedHostObligation
+    if (obligation !== undefined) {
+      if (obligation.messageId !== undefined && claim.exactAgent !== undefined && claim.exactSession !== undefined) {
+        const removed = access.cancelPending(sessionId, claim.exactAgent, claim.exactSession, obligation.messageId)
+        if (removed === 'removed') this.dropUnclaimedObligation(claim)
+      }
+      if (claim.unclaimedHostObligation !== undefined) {
         throw promptError(
           'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED',
-          'the earlier cancellation could not be proven and no later Host fact settled it',
+          'the accepted prompt has no proven Host terminal status yet',
           JSONRPC_INTERNAL_ERROR,
         )
       }
-      const closing = claim.closing
-      if (closing !== undefined) {
-        const outcome = await closing.then(() => 'ok' as const, (error: unknown) => error)
-        if (outcome === 'ok') return {}
-        // A previous close could not PROVE its settlement. Re-evaluate on the
-        // CURRENT facts instead of replaying that failure forever: once the
-        // claim owns no open flight, no retired fence AND no unproven
-        // cancellation, the Host work is provably over (R701-04).
-        if (claim.inflight === undefined && claim.retiringTurn === undefined) {
-          claim.closing = undefined
-          return this.finishClose(state, sessionId, claim)
-        }
-        throw outcome
-      }
-      const flight = claim.inflight
-      if (flight !== undefined) {
-        // Serialize the close: every later close (and a physical disconnect
-        // racing it) joins this ONE real settlement; no second removal/cancel.
-        const settlement = this.cancelOwnedFlight(claim, flight, access, 'closing')
-          .then(() => this.finishClose(state, sessionId, claim))
-        claim.closing = settlement
-        return await settlement
-      }
-      return this.finishClose(state, sessionId, claim)
     }
-    if (state.lastClosedSessionId === sessionId) return {}
-    throw new LocalAcpViewError('LOCAL_ACP_VIEW_NOT_OWNED', 'this ACP connection holds no view for that session', JSONRPC_INVALID_PARAMS)
+    const flight = claim.inflight
+    if (flight !== undefined) {
+      const outcome = await this.cancelOwnedFlight(claim, flight, access, 'closing')
+        .then(() => 'ok' as const, (error: unknown) => error)
+      if (outcome !== 'ok') {
+        // A prompt failure is not a close proof (R701-04): only a real Host
+        // terminal (its own turn/end, an Agent disposal, or a definite
+        // pre-insertion rejection) lets the close proceed.
+        const terminal = flight.ownTurnEnded || flight.failureCode === 'LOCAL_ACP_PROMPT_HOST_REJECTED'
+        if (!terminal) throw outcome
+      }
+    }
+    // Re-read: the settled flight/cancellation may have planted a fence or an
+    // obligation while this close was waiting.
+    if (claim.unclaimedHostObligation !== undefined) {
+      throw promptError(
+        'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED',
+        'the accepted prompt has no proven Host terminal status yet',
+        JSONRPC_INTERNAL_ERROR,
+      )
+    }
+    return this.finishClose(state, sessionId, claim)
+  }
+
+  /**
+   * End one unclaimed obligation on a REAL terminal fact (exact removal, the
+   * official discarded notice, promotion to a claimed turn's fence, or the
+   * exact Agent's disposal) and release a detached claim when nothing else
+   * remains.
+   */
+  private dropUnclaimedObligation(claim: ViewClaim): void {
+    claim.unclaimedHostObligation = undefined
+    this.releaseDetachedIfSettled(claim)
+    this.notifyWorkSettled()
+  }
+
+  /**
+   * The official admission of a flight that already settled while its
+   * obligation was still `pending`: a definite pre-insertion rejection proves
+   * nothing was admitted (terminal), while an accepted admission keeps the
+   * obligation for the exact late-insertion/terminal fact (v1.1 §5.A.4).
+   */
+  private settleUnclaimedAdmission(claim: ViewClaim, flight: InflightPrompt): void {
+    const obligation = claim.unclaimedHostObligation
+    if (obligation === undefined || obligation.requestId !== flight.requestId) return
+    if (obligation.admission !== 'pending') return
+    if (flight.failureCode === 'LOCAL_ACP_PROMPT_HOST_REJECTED') {
+      // Definite rejection with no insertion fact: nothing was admitted.
+      this.dropUnclaimedObligation(claim)
+      return
+    }
+    obligation.admission = 'accepted'
+    this.notifyWorkSettled()
+  }
+
+  /** Release a detached claim once no Host obligation or fence remains. */
+  private releaseDetachedIfSettled(claim: ViewClaim): void {
+    if (!claim.detachedWithFence) return
+    if (claim.inflight !== undefined) return
+    if (claim.retiringTurn !== undefined) return
+    if (claim.unclaimedHostObligation !== undefined) return
+    if (this.claims.get(claim.sessionId) === claim) this.claims.delete(claim.sessionId)
   }
 
   /** Release one settled claim and record the idempotent close fact. */
   private finishClose(state: ConnectionViewState, sessionId: string, claim: ViewClaim): Record<string, never> {
-    // A retired-turn approval fence may still outlive its failed flight until
-    // the real turn/end or Agent disposal ends it (F2): the View detaches, but
-    // the fence keeps the claim so a LATE approval of that exact ACP-owned
-    // turn can never be delegated to the TUI. A fence-less claim is released.
-    if (claim.retiringTurn !== undefined) {
+    // A transient terminal fact may still outlive the View: a retired-turn
+    // approval fence (F2) or an unclaimed Host obligation (v1.1). The View
+    // detaches, but the claim survives so a LATE approval of that exact
+    // ACP-owned turn can never be delegated to the TUI and a late insertion is
+    // still observed. A claim with no such fact is released now.
+    if (claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined) {
       claim.detachedWithFence = true
     } else if (this.claims.get(sessionId) === claim) {
       this.claims.delete(sessionId)
@@ -987,7 +1073,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     ) {
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_NOT_OWNED', 'this ACP connection holds no view for that session', JSONRPC_INVALID_PARAMS)
     }
-    if (claim.inflight !== undefined) {
+    if (claim.inflight !== undefined || claim.unclaimedHostObligation !== undefined) {
+      // A previous accepted Prompt still owes a Host terminal fact: the View
+      // must not stack a second Host responsibility on top of it (v1.1 §5.D).
       throw promptError('LOCAL_ACP_PROMPT_IN_FLIGHT', 'a prompt is already in flight for this session view', JSONRPC_INVALID_PARAMS)
     }
     const content = validatePromptContent(request.prompt)
@@ -1119,6 +1207,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       }
     } finally {
       flight.settleAdmission()
+      this.settleUnclaimedAdmission(claim, flight)
     }
     return await flight.settled.promise
   }
@@ -1127,6 +1216,20 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   onInboxInserted(agent: LiveAgentViewIdentity, message: AcpUserMessageLike): void {
     const rpcId = message.source?.kind === 'user' ? message.source.rpcId : undefined
     for (const claim of this.claims.values()) {
+      // A LATE insertion of the request this claim still owes a Host terminal
+      // fact for: bind the exact id, then remove it exactly on the current
+      // facts. Only a real removal proves the obligation is over.
+      const obligation = claim.unclaimedHostObligation
+      if (
+        obligation !== undefined && obligation.messageId === undefined
+        && claim.exactAgent === agent && rpcId !== undefined && rpcId === obligation.requestId
+      ) {
+        obligation.messageId = message.id
+        if (claim.exactSession !== undefined && this.access !== undefined) {
+          const removed = this.access.cancelPending(claim.sessionId, agent, claim.exactSession, message.id)
+          if (removed === 'removed') this.dropUnclaimedObligation(claim)
+        }
+      }
       const flight = claim.inflight
       if (flight === undefined || flight.settledDone) continue
       if (claim.exactAgent !== agent) {
@@ -1163,6 +1266,15 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   onInboxClaimed(agent: LiveAgentViewIdentity, message: AcpUserMessageLike, turn: number): void {
     for (const claim of this.claims.values()) {
       if (claim.exactAgent !== agent) continue
+      // The old unclaimed message was formally CLAIMED into turn T: the
+      // obligation becomes the claimed-turn approval fence and stays until T's
+      // own terminal (v1.1 §4).
+      const obligation = claim.unclaimedHostObligation
+      if (obligation !== undefined && obligation.messageId === message.id) {
+        claim.unclaimedHostObligation = undefined
+        if (claim.inflight === undefined) claim.retiringTurn = { turn }
+        this.notifyWorkSettled()
+      }
       const flight = claim.inflight
       if (flight === undefined || flight.settledDone) continue
       if (flight.messageId !== undefined && message.id === flight.messageId) {
@@ -1232,6 +1344,21 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
   }
 
+  /**
+   * One official inbox discard notice: the message left the pending lists for
+   * good. For a standing unclaimed obligation this is its terminal proof
+   * (v1.1 §4); a live-flight cancellation keeps its own proven removal path.
+   */
+  onInboxDiscarded(agent: LiveAgentViewIdentity, message: AcpUserMessageLike): void {
+    for (const claim of this.claims.values()) {
+      if (claim.exactAgent !== agent) continue
+      const obligation = claim.unclaimedHostObligation
+      if (obligation !== undefined && obligation.messageId === message.id) {
+        this.dropUnclaimedObligation(claim)
+      }
+    }
+  }
+
   /** One Agent interval failure: only the owned turn of the exact Agent is attributed. */
   onAgentError(agent: LiveAgentViewIdentity, turn: number): void {
     for (const claim of this.claims.values()) {
@@ -1270,7 +1397,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // transition, which would otherwise preserve that dead turn. The same
       // terminal fact settles an UNPROVEN cancellation (R701-05): a disposed
       // Agent can never execute the message the View could not remove.
-      if (claim.unprovenCancellation === true) claim.unprovenCancellation = false
+      if (claim.unclaimedHostObligation !== undefined) this.dropUnclaimedObligation(claim)
       this.endRetiringFence(claim.sessionId, claim)
     }
   }
@@ -1457,8 +1584,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           // fence (RFL-005) or left an unproven cancellation (R701-05): the
           // claim then survives for that terminal fact alone and dies at it,
           // never leaking the approval and never faking a settled detach.
-          if (claim.retiringTurn !== undefined || claim.unprovenCancellation === true) {
+          if (claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined) {
             claim.detachedWithFence = true
+            this.notifyWorkSettled()
             return
           }
           this.releaseClaimAfterDisconnect(sessionId, claim)
@@ -1466,15 +1594,27 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         continue
       }
       // No open flight: the claim may still carry the retired-turn approval
-      // fence of an ALREADY-failed flight whose turn has not ended (F2), or a
-      // cancellation that was never proven (R701-05). Dropping either would
-      // leak the approval to the TUI or fake a settled detach; keep the claim
-      // until a real terminal fact settles it.
-      if (claim.retiringTurn !== undefined || claim.unprovenCancellation === true) {
+      // fence of an ALREADY-failed flight whose turn has not ended (F2), or an
+      // unclaimed Host obligation (v1.1). A disconnect is not a settlement, but
+      // it may still drive ONE exact removal when the message is known — only
+      // a real removal ends the obligation; anything else keeps the claim.
+      const obligation = claim.unclaimedHostObligation
+      const bound = access ?? this.access
+      if (
+        obligation !== undefined && obligation.messageId !== undefined
+        && claim.exactAgent !== undefined && claim.exactSession !== undefined && bound !== undefined
+      ) {
+        if (bound.cancelPending(sessionId, claim.exactAgent, claim.exactSession, obligation.messageId) === 'removed') {
+          this.dropUnclaimedObligation(claim)
+        }
+      }
+      if (claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined) {
         claim.detachedWithFence = true
         continue
       }
-      this.claims.delete(sessionId)
+      if (this.claims.get(sessionId) === claim) {
+        this.claims.delete(sessionId)
+      }
     }
     this.notifyWorkSettled()
   }
@@ -1486,15 +1626,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    */
   private endRetiringFence(sessionId: string, claim: ViewClaim): void {
     claim.retiringTurn = undefined
-    // A detached claim dies only when NO transient terminal fact remains: an
-    // unproven cancellation is itself such a fact (R701-05).
-    if (
-      claim.detachedWithFence && claim.inflight === undefined
-      && claim.unprovenCancellation !== true
-      && this.claims.get(sessionId) === claim
-    ) {
-      this.claims.delete(sessionId)
-    }
+    this.releaseDetachedIfSettled(claim)
     this.notifyWorkSettled()
   }
 
@@ -1844,18 +1976,32 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     flight.foreignTurn = undefined
     flight.deliveryClosed = true
     this.abortPermissionRequests(flight)
+    flight.failureCode = error.code
     // A flight that already holds its official claimed turn but settles before
     // that turn's `turn/end` keeps a transient retired-turn fence: a LATE
     // approval/request of the still-running turn stays ACP-owned (never
     // delegated to the TUI) until the real terminal record arrives. A turn
     // whose durable terminal ALREADY arrived has nothing left to fence.
-    if (error.code === 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED') {
-      // A cancellation the View could not prove leaves possibly-live Host work
-      // behind: keep the claim (and its attribution) until a real terminal
-      // fact settles it — never treat this local settlement as a detach proof.
-      claim.unprovenCancellation = true
-    }
     if (flight.turn !== undefined && !flight.ownTurnEnded) claim.retiringTurn = { turn: flight.turn }
+    // The UNCLAIMED responsibility (v1.1 §3/§5.A.3) is transferred to the
+    // claim BEFORE the flight is dropped whenever the official Host has not
+    // proven terminal status and no turn was claimed:
+    //   - an inserted message that was never claimed (any failure reason);
+    //   - an admission still in flight (no insertion fact observed yet).
+    // An owned claimed turn is covered by `retiringTurn` above, a definite
+    // pre-insertion rejection leaves nothing behind, and the disposed-Agent
+    // terminal (ownTurnEnded) covered.
+    if (flight.turn === undefined && !flight.ownTurnEnded) {
+      if (flight.messageId !== undefined) {
+        claim.unclaimedHostObligation = {
+          requestId: flight.requestId,
+          messageId: flight.messageId,
+          admission: flight.admissionSettled ? 'unconfirmed' : 'accepted',
+        }
+      } else if (!flight.admissionSettled) {
+        claim.unclaimedHostObligation = { requestId: flight.requestId, admission: 'pending' }
+      }
+    }
     if (claim.inflight === flight) claim.inflight = undefined
     this.notifyWorkSettled()
     flight.settled.reject(error)

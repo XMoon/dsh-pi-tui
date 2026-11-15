@@ -604,6 +604,11 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
         context.on('agent/inbox/claimed', payload => {
           listener.onInboxClaimed(payload.agent, payload.message, payload.turn)
         }),
+        // The official discard notice is the documented way to learn which
+        // message an ordinary inbox removal dropped (v1.1 §4 terminal proof).
+        context.on('agent/inbox/discarded', payload => {
+          listener.onInboxDiscarded(payload.agent, payload.message)
+        }),
         context.on('session/event', (session, event) => {
           listener.onSessionEvent(session, event)
         }),

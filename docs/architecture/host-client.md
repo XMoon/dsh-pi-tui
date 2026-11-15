@@ -550,8 +550,13 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     swallowed failure). An UNPROVEN cancellation — a stale exact identity that
     may hide a pending message or a running turn — is never converted into a
     successful detach by later closes, physical disconnect or subscription
-    retirement: the reservation and its Host fact attribution survive until a
-    real terminal fact (the exact Agent's disposal) settles it. A physical
+    retirement: the reservation keeps ONE transient unclaimed-Host-obligation
+    record (the exact request id, the official inserted message id once known,
+    and the admission classification) and survives until a real terminal fact
+    settles it — the exact queued removal or its official discard notice, the
+    message being claimed into a turn whose own terminal then ends the fence,
+    or the exact Agent's disposal. While that record is open, a new prompt is
+    refused with `LOCAL_ACP_PROMPT_IN_FLIGHT`. A physical
     disconnect of a flight that already owns its durable message fact drives
     the same scoped cancellation before the claim is released; a flight with no
     durable fact yet keeps the fail-closed release.
