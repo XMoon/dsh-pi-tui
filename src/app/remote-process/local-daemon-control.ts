@@ -294,6 +294,9 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
   const runtimeDir = runtimeDirOf(deps)
   let unit: OwnedProfileUnit | undefined
   let unitState: DaemonUnitState = 'not-found'
+  /** The manager's raw ActiveState, kept because `unitState` cannot tell an
+   *  in-progress start from any other unclassified state. */
+  let unitActiveState = ''
   let unitMainPid = 0
   try {
     const inspected = inspectOwnedProfileUnit(scope, profile.name, uid, deps.unitDir, hostEntryOf(profile))
@@ -302,6 +305,7 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
       if (probe.kind === 'available') {
         const state = await queryOwnedProfileUnit(inspected, runtimeDir, systemctl)
         unitMainPid = state.mainPid
+        unitActiveState = state.loadState === 'not-found' ? '' : state.activeState
         unitState = state.loadState === 'not-found'
           ? 'not-found'
           : state.activeState === 'active'
@@ -342,7 +346,7 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
   let host: DaemonHostState = 'stopped'
   // A verified, loaded profile unit is the supervision attribution even before
   // the Host reaches authenticated readiness (ActiveState is not readiness).
-  let manager: DaemonManagerKind = unit !== undefined && unitState !== 'not-found' && unitState !== 'unknown'
+  let manager: DaemonManagerKind = unit !== undefined && unitState !== 'not-found'
     ? 'systemd'
     : 'unmanaged'
   let compatibility: DaemonCompatibility = 'none'
@@ -401,9 +405,19 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
         manager = probe.kind === 'absent' ? 'process' : 'unmanaged'
       }
     }
-  } else if (unitState === 'active') {
-    // Active manager supervision without an authenticated identity is never Ready.
+  } else if (unitState === 'active' || unitActiveState === 'activating') {
+    // Manager supervision without an authenticated identity is never Ready. An
+    // `activating` unit (possibly with MainPID not assigned yet) is a Host that
+    // may still come up — never "stopped".
     host = 'starting'
+  } else if (probe.kind === 'available' && unitState === 'unknown') {
+    // A LIVE manager reports a state we cannot classify as ended
+    // (deactivating/reloading/unrecognized): the Host outcome is genuinely
+    // unconfirmed, so this is not a success. With an absent manager the unit
+    // cannot be running at all, and a manager error is reported as such below.
+    host = 'unknown'
+    failure = new DaemonControlError('TRANSITION_UNCERTAIN', `the profile unit is in an unconfirmed state (${unitActiveState === '' ? 'unknown' : unitActiveState})`)
+    exitCode = failure.exitCode
   }
   if (failure === undefined && probe.kind === 'error') {
     // The manager error is a separate observation from the Host handshake:
