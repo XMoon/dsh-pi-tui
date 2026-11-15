@@ -2090,3 +2090,50 @@ test('R701-04 sibling: an early failure during a pending close fails ONCE, then 
     'the close re-evaluates on the now-proven terminal instead of replaying the stale failure')
   assert.equal(view.registry.hasClaim('P1'), false)
 })
+
+test('R701-05: an UNPROVEN queued cancellation is never turned into a successful close by a repeat close', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  // The durable message EXISTS but was never claimed (no turn yet).
+  view.insert(request.requestId, 'm-stale-queued')
+  view.access.pendingInbox.delete('m-stale-queued')
+  // The exact identity is gone: the pending removal cannot be proven.
+  view.access.turnFence = 'stale'
+  const first = view.registry.closeSession(view.conn, view.access, 'P1')
+  await assert.rejects(first, isPromptError('LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'))
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'))
+  assert.deepEqual(view.access.removedMessageIds, [], 'no removal was ever proven')
+  // A repeat close must NOT succeed merely because the local flight is gone.
+  await assert.rejects(view.registry.closeSession(view.conn, view.access, 'P1'),
+    isPromptError('LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'))
+  assert.equal(view.registry.hasClaim('P1'), true, 'the reservation survives an unproven cancellation')
+  // The exact Agent's disposal is the real terminal fact that settles it.
+  view.registry.onAgentDisposed(view.agent)
+  assert.deepEqual(await view.registry.closeSession(view.conn, view.access, 'P1'), {},
+    'the real terminal fact allows the detach')
+  assert.equal(view.registry.hasClaim('P1'), false)
+})
+
+test('R701-05 sibling: a physical disconnect keeps an unproven claim and its Host attribution', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-stale-disc')
+  view.access.pendingInbox.delete('m-stale-disc')
+  view.access.turnFence = 'stale'
+  view.registry.closeSession(view.conn, view.access, 'P1').catch(() => {})
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'))
+  // A disconnect must not delete the unproven claim: its Host work may still
+  // be live and its fact subscription must keep observing.
+  view.registry.releaseConnection(view.conn, view.access)
+  await new Promise(resolveTick => setImmediate(resolveTick))
+  assert.equal(view.registry.hasClaim('P1'), true, 'the unproven claim survives the disconnect')
+  assert.equal(view.registry.hasUnsettledHostWork(), true, 'the Host work is still unsettled (subscription retained)')
+  // The exact Agent disposal settles it.
+  view.registry.onAgentDisposed(view.agent)
+  assert.equal(view.registry.hasClaim('P1'), false, 'the disposal releases the detached unproven claim')
+  assert.equal(view.registry.hasUnsettledHostWork(), false)
+})
