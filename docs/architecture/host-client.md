@@ -510,11 +510,13 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     open prompt flight it first performs the scoped cancellation below and
     settles before detaching; a repeated close on the same connection is
     idempotent.
-  - A physical socket end/error/destroy, runtime Off or Host shutdown releases
-    the connection's View through the scoped-cancellation contract above (an
-    open flight with its durable fact is cancelled exactly and the claim is
-    released on the proven settlement; a fact-less flight fails closed); the
-    Session, Agent and writer keep their Host authority, and a pending
+  - A physical socket end/error/destroy, runtime Off or Host shutdown retires
+    the network connection immediately and drives the scoped-cancellation
+    contract below. Pending admission retains the request identity, claim and
+    fact observer so a late insertion is still cancelled exactly. The claim is
+    released only after proven Host settlement, or after classified admission
+    on the exact Host identity proves there was no inserted message. The
+    Session, Agent and writer keep their Host authority; a pending
     create/resume whose connection closed never publishes an attached View.
   - `session/list`, `session/set_config_option` and image/MCP prompts are NOT
     provided by this View and fail closed with their stable `LOCAL_ACP_*` code.
@@ -570,10 +572,12 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     external removal also settles an active queued prompt as `cancelled` after
     admission classification and output drain; edit/steer must not settle it.
     While that record is open, a new prompt is refused with
-    `LOCAL_ACP_PROMPT_IN_FLIGHT`. A physical
-    disconnect of a flight that already owns its durable message fact drives
-    the same scoped cancellation before the claim is released; a flight with no
-    durable fact yet keeps the fail-closed release.
+    `LOCAL_ACP_PROMPT_IN_FLIGHT`. A physical disconnect drives the same scoped
+    cancellation for the durable message fact. If admission is still pending,
+    its request identity and responsibility survive for late insertion. A
+    classified admission with no inserted message on the exact Host identity
+    can fail closed and release; loss of the transport alone cannot prove that
+    condition.
   - **Approval ownership (PO-3B).** The official Agent-scoped
     `approval/request` waterfall has exactly ONE classification seat ahead of
     the TUI forwarding listener. The classifier matches the exact Agent and
