@@ -90,6 +90,16 @@ terminal check — then record what was actually run. Visual quality itself is a
 unrun frame or terminal check is reported `NOT_RUN`, never as PASS. The vocabulary
 lives in that one document; do not restate it here.
 
+**Interaction-only changes are not exempt:** When a PR adds or changes a
+user-reachable PiTui Fullscreen keyboard/mouse route, state transition or
+specialist page without changing painted cells, review the complete relevant
+AltScreen mouse journey under
+[`overlay-focus.md` §7](../architecture/overlay-focus.md#7-regression-checklist-for-future-changes)
+(including explicit contract-backed keyboard-only exceptions). An existing
+clickable row or a passing `handleMouse` test does not prove Enter/confirm,
+Esc/back/cancel and recovery coverage. Record the actual pointer-route evidence
+and its provenance; Regular/Main and TSP-native retain their separate contracts.
+
 **Renderer-qualified visual review:** For PiTui-painted ANSI changes, keep the VirtualTerminal and real-terminal checks above. For changes to **TSP-native** nodes (Picker, Strip, Reader, native overlay), the VirtualTerminal is not evidence of Tern's layout, scroll or input. In addition to the source→intent→admission→business sink proof, require the relevant versioned Tern headless client lane, real pane dimensions, node/ancestor clipping and PNG plus pointer/keyboard paths appropriate to the changed behavior. Treat the physical GUI, IME, wheel/trackpad, font scaling and the real OS dark appearance not actually run as `NOT_VERIFIED` or Owner-accepted limitations, never `PASS`; the client's own light/dark rendering is reachable headlessly (`appearance`) and in a live window via the `appearance:dark` action (`plugins run appearance:dark`, sent once) or Preferences › Appearance, so a headless run is not by itself a reason to mark it unverified. The GUI lane's pointer/key input is `CONTROL_INJECTED_INPUT`, not `OS_INPUT_VERIFIED`; do not promote it to physical-input evidence. A unit CI pass cannot close Owner visual acceptance. See [`tsp/foundation.md`](../tsp/foundation.md) §6 and the owning TSP product contract; do not duplicate their specification here.
 
 **Major UX supersession:** When a review contains a frozen product redesign, compare the PR to the **current Owner-accepted contract**, not a historical plan's retired Must list. Confirm that the docs mark retired screens, event semantics, tests and evidence as historical, while business authority/currentness and still-valid acceptance remain intact. Avoid promoting a single panel's measured geometry into a shared SDK/renderer rule.

@@ -431,6 +431,60 @@ When you add or change an overlay path, cover the family it belongs to:
   `remountOrder` front after a reentrant mount; no shadow state (`wasFocused`,
   `desiredFocus`, ordinals, `previouslyFocused`) may reappear.
 
+### Fullscreen pointer-journey coverage for interactive surface changes
+
+Adding or materially changing a **user-reachable PiTui interaction** (workspace,
+picker, modal, specialist Settings page, or embedded editor-seat view) requires
+an explicit **Fullscreen/AltScreen pointer-coverage disposition**, even if the
+diff only adds keyboard handling or paints a new action hint. Review the
+**complete user journey**, not only the rows that already implement
+`handleMouse` or a successful individual click.
+
+- **Inventory the painted actions in each reachable state.** For entry,
+  selection, editing, primary action/commit, confirmation, cancellation,
+  back/close and failure recovery where relevant, record the keyboard intent,
+  currently painted affordance, pointer target and semantic owner. Classify
+  each as pointer-action, contract-backed keyboard-only, informational/inert,
+  disabled/unavailable, or not visible/applicable. A missing pointer route
+  cannot be reclassified as intentionally keyboard-only without an owning
+  product-contract reason. Neither `Enter`/`Esc` text nor every Action Bar hint
+  is automatically a clickable button.
+- **Prove the intended mouse-supported task end to end.** A pointer-capable
+  primary flow must not depend on an undisclosed keyboard-only `Enter` to
+  commit or `Esc` to back out. Exercise a pointer-only positive journey and
+  its applicable cancel/back/close branch; an existing explicitly frozen
+  keyboard-only or partially pointer-enabled surface is an exception to
+  **document**, not permission to silently change it. Expanding such a
+  surface's action scope requires the owning product-contract/Owner decision.
+- **Converge on one semantic admission path.** A pointer action and its keyboard
+  equivalent reach the same existing action/controller and authority; pointer
+  entry creates no second Host writer, persistent draft, or cancellation
+  state. Preserve state-dependent `Esc` ladders, pending confirmation,
+  disabled/read-only restrictions, and selection-vs-commit separation (for
+  example, choosing an effort candidate must not itself persist the choice).
+- **Prove real, current targets.** Only complete, actually painted action
+  spans/rows in the live owner are eligible. Match press and release to the
+  same action, view/state and last-painted geometry. Invalidate on relevant
+  keyboard navigation, page/selection changes, re-projection, resize,
+  scroll, modal replacement, focus/seat transfer and asynchronous identity
+  retirement. The applicable modal/seat owner must win; stale input must not
+  reach a newer action or business sink.
+- **Use proportional evidence.** Test the real pointer event route through a
+  positive user journey plus meaningful negatives (inert/disabled/unpainted
+  target, stale or mismatched press/release, relevant narrow layout), and
+  retain the keyboard route. A direct handler call or an existing row-click
+  unit test alone does not prove mouse completeness. Record headless/injected,
+  real terminal and physical-device evidence separately; mark unrun lanes
+  `NOT_RUN`/`NOT_VERIFIED`, never `PASS`.
+
+This gate **does not** create generic pointer handlers or broaden existing
+scoped Action Bar/status-bar exceptions in
+[design-language.md](./design-language.md) and
+[surface-behavior.md](./surface-behavior.md). Regular/Main retains its
+existing no-application-pointer boundary. TSP-native surfaces use their own
+SDK/client event and qualification contract in
+[../tsp/foundation.md](../tsp/foundation.md), not PiTui cell hit maps.
+
 ## 8. By-design boundaries
 
 - An editor-seat modal (Question / Save Location) is **not** a managed

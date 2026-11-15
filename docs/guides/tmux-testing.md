@@ -63,6 +63,45 @@ tmux send-keys -t demo Enter
 tmux kill-session -t demo 2>/dev/null              # cleanup
 ```
 
+## Fullscreen pointer-journey check (interactive surface changes)
+
+Use this for a new/changed **PiTui Fullscreen/AltScreen** interaction after its
+headless route and geometry tests. The owning interaction contract is
+[../architecture/overlay-focus.md](../architecture/overlay-focus.md#7-regression-checklist-for-future-changes);
+this is only the reusable real-terminal verification procedure.
+
+1. Open the reachable surface in Fullscreen and capture the **actually painted**
+   frame. Inventory visible primary, confirm, cancel, back/close and recovery
+   actions as applicable. Distinguish clickable segments from pure keyboard
+   hints, disabled actions and clipped/unpainted text. Do **not** assume every
+   `Enter`/`Esc` hint has a mouse hit target.
+2. Using the terminal's mouse (with tmux mouse forwarding enabled when needed),
+   complete one intended pointer-supported primary task **without pressing
+   keyboard Enter to commit**. Where the surface has a pointer back/cancel
+   affordance, exercise its actual state-dependent escape/cancel ladder by
+   clicking it, then reopen and verify the remaining close path. Check that
+   draft-only selections do not cause an early Host write.
+3. Repeat a relevant negative: click a disabled/inert segment or outside the
+   complete painted span; press one target and release on another; change the
+   page, modal owner or viewport before release. Neither a stale business
+   write nor an accidental close may occur. Confirm keyboard navigation and
+   commit/cancel still work as before.
+4. Recheck the changed interaction at its relevant normal and narrow terminal
+   sizes (for example 80×24 and 44×20 where the surface is reachable) and
+   the pending/unknown state if it is part of the feature. Verify the action
+   remains fully painted and the mouse target follows its live location.
+5. Record terminal/version/tmux mode, actual action sequence and the observed
+   state/sink. A real tmux capture proves painted terminal output, **not** a
+   click by itself. Headless SGR injection or a programmatic mouse event is
+   separate evidence from a physical mouse; state the actual input provenance.
+   Record unavailable physical-device checks as `NOT_VERIFIED` rather than
+   silently claiming they ran.
+
+Regular/Main intentionally has no application mouse path; TSP-native control
+injection follows the separate Tern client qualification procedures. Scale the
+check to the changed user journey; no full-surface replay is required for an
+unrelated data-only change.
+
 ## Task Quick terminal check
 
 Use this only after the corresponding headless interaction/geometry tests pass. Follow **Environment prep**: use a fresh disposable worktree-local `DSH_HOME` with a test profile that links the worktree build; never reuse an isolated home containing old sessions. For a model-backed run, the authorized source inputs are `$HOME/.dsh/.credentials.yaml` and `$HOME/.dsh/profiles/pi-tui-dev/cordis.patch.yml`; copy only after explicit authorization for those exact files, preserving mode `0600` for credentials. Do not copy the whole profile or `sessions/`, `storages/` and `user-history/`; configure test-only options in the isolated home as needed. Never read or print copied contents. Save evidence under a private worktree `temp/` directory and report the artifact paths/status in the PR review record, not as a durable pass claim in this procedure.

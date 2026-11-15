@@ -923,6 +923,13 @@ Copy into every PR that changes a visible surface:
 [ ] Do the advertised keys come from the live effective keymap, ONE per
     action (the primary binding)?
 [ ] Action bar: whole-segment drops only; no partial word; safety facts kept?
+[ ] For new/changed interactive PiTui Fullscreen states, is each painted action
+    classified for mouse support, including Enter/confirm, Esc/back/cancel,
+    pending and recovery, with explicit contract reasons for inert/key-only?
+[ ] Can a pointer-only user finish each intended mouse-supported primary
+    journey and its applicable exit without a hidden keyboard step? Were
+    the live hit route, keyboard equivalence and negative controls verified
+    under overlay-focus.md §7 (or honestly marked NOT_RUN/NOT_APPLICABLE)?
 [ ] New glyphs: ASCII or EAW neutral/narrow/halfwidth (§4.3)?
 [ ] Wide / medium / narrow / short / CJK: full interaction still reachable
     (frozen matrix: 200×50, 120×40, 100×40, 80×24, 80×10, 72×24, 44×20)?
@@ -933,6 +940,24 @@ Copy into every PR that changes a visible surface:
 [ ] before/after frames from the real VirtualTerminal included, plus a real
     terminal check per docs/guides/tmux-testing.md. Unrun items are marked NOT_RUN.
 ```
+
+The **interaction coverage authority** for the two mouse checklist items is
+[overlay-focus.md](./overlay-focus.md#7-regression-checklist-for-future-changes):
+this checklist is an entry point, not a new source of pointer permissions.
+Keyboard-only and inert action hints remain legitimate only where the owning
+product contract says so; a new action does not inherit mouse behavior merely
+because it is painted as a hint. The pointer check is `NOT_APPLICABLE` for
+non-interactive changes, Regular/Main application mouse routes and TSP-native
+surfaces (which have their own pointer/key review).
+
+The **interaction coverage authority** for the two mouse checklist items is
+[overlay-focus.md](./overlay-focus.md#7-regression-checklist-for-future-changes):
+this checklist is an entry point, not a new source of pointer permissions.
+Keyboard-only and inert action hints remain legitimate only where the owning
+product contract says so; a new action does not inherit mouse behavior merely
+because it is painted as a hint. The pointer check is `NOT_APPLICABLE` for
+non-interactive changes, Regular/Main application mouse routes and TSP-native
+surfaces (which have their own pointer/key review).
 
 Visual beauty is an Owner/Reviewer judgement. "All tests pass" never closes a
 visual item, and an unrun screenshot must never be reported as PASS.
