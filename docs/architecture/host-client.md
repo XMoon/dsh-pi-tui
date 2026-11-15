@@ -472,10 +472,11 @@ stdout/stderr.
   nonzero and are never reported as `stopped`.
 - **start reuses before it creates.** `start` first authenticates and reuses a
   live compatible Host, so a warm start is idempotent on the same
-  `instanceId` — including while the user manager is erroring: a manager error
-  only fails commands that still NEED the manager, never the authenticated
-  reuse of a live Host. Otherwise it creates only the needed 0700 scope run
-  directory and asks the existing
+  `instanceId` — including while the user manager is erroring: reuse needs no
+  manager, so a manager error never fails that path (`status` still reports
+  the same combination nonzero, because its question — "is everything
+  confirmed?" — includes the supervisor). Otherwise it creates only the needed
+  0700 scope run directory and asks the existing
   `ensureLocalHost({hostStartPolicy:'public-managed'})` to bring one up, then
   waits for authenticated readiness. A manager error never degrades to the
   process fallback; a different installed build or unknown unit is a conflict;

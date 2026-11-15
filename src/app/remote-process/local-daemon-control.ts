@@ -405,11 +405,12 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
     // Active manager supervision without an authenticated identity is never Ready.
     host = 'starting'
   }
-  if (failure === undefined && probe.kind === 'error' && host !== 'ready') {
-    // A manager error only fails commands that would NEED the manager. An
-    // already-authenticated compatible Host is reused exactly like
-    // ensureLocalHost reuses it: the manager decides supervision for a NEW
-    // Host, never the reuse of a live one (B02/C05).
+  if (failure === undefined && probe.kind === 'error') {
+    // The manager error is a separate observation from the Host handshake:
+    // `host=ready` stays truthful, but the supervisor state is unconfirmed, so
+    // `status` still exits 4 per its contract. Mutating verbs decide their OWN
+    // reuse need: runStart treats a ready Host as not needing the manager, so
+    // it never reaches this snapshot's failure through its reuse path.
     failure = new DaemonControlError('MANAGER_OR_OS_FAILURE', `the user manager is unavailable: ${probe.reason}`)
     exitCode = failure.exitCode
   }
@@ -655,8 +656,17 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
   const inspected = inspectScope(profile, deps)
   return await withAdminSeat(inspected, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
+    // The snapshot's failure set is the STATUS contract (a manager error is a
+    // nonzero diagnostic). `start` owns a different question — does THIS
+    // command still need the manager? An authenticated ready Host does not: it
+    // is reused exactly like ensureLocalHost reuses it (B02/C05), manager or
+    // not. Any other failure (unsafe unit, incompatible/unresponsive Host)
+    // still refuses the start.
+    if (pre.status.host === 'ready') {
+      if (pre.failure !== undefined && pre.failure.code !== 'MANAGER_OR_OS_FAILURE') throw pre.failure
+      return { code: 0, stdout: formatDaemonStatus(pre.status), stderr: '' }
+    }
     if (pre.failure !== undefined) throw pre.failure
-    if (pre.status.host === 'ready') return { code: 0, stdout: formatDaemonStatus(pre.status), stderr: '' }
     if (pre.status.host !== 'stopped' && pre.status.host !== 'starting') throw refuseHostState(pre.status)
     // The long read-only snapshot above may have taken seconds. Shutdown that
     // arrived during it must be observed BEFORE creating the run directory or

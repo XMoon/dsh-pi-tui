@@ -1105,10 +1105,18 @@ export async function stopOwnedProfileUnit(
   timeoutMs: number = UNIT_STOP_TIMEOUT_MS,
 ): Promise<StopOwnedProfileUnitResult> {
   const before = await queryOwnedProfileUnit(unit, runtimeDir, systemctl)
-  const active = before.activeState === 'active' || before.activeState === 'activating'
-    || before.activeState === 'deactivating' || before.activeState === 'reloading'
-  if (!active || (before.mainPid === 0 && before.activeState !== 'active')) {
+  // Only a state systemd itself reports as ENDED is a stop no-op. A transition
+  // state (`activating`/`deactivating`/`reloading`) or an unrecognized state
+  // must go through `systemctl stop` even with MainPID not yet assigned —
+  // an `activating` unit with MainPID=0 can still finish starting a Host, and
+  // returning early there would claim success while the Host comes up.
+  const ended = before.activeState === 'inactive' || before.activeState === 'failed'
+  if (ended) {
     return { stopped: false, alreadyInactive: true, mainPid: before.mainPid }
+  }
+  if (before.activeState !== 'active' && before.activeState !== 'activating'
+    && before.activeState !== 'deactivating' && before.activeState !== 'reloading') {
+    throw new LocalScopeError('HOST_MANAGER_START_FAILED', `managed Host: the unit is in an unrecognized state (${before.activeState})`)
   }
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
   if (uid === undefined) throw new LocalScopeError('B1_PLATFORM_UNSUPPORTED', 'managed Host: the user id is unavailable')
