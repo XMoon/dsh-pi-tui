@@ -766,9 +766,13 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
     stopping = true
     closed = (async () => {
       for (const socket of context.connections) socket.destroy()
-      // Stop observing Host facts only after new connections stopped being
-      // accepted; every pending connection View was released by the teardown
-      // above, so no flight can still be waiting for a fact.
+      // Stop accepting is immediate, but the ONE Host fact subscription must
+      // outlive the sockets exactly as long as the ACCEPTED work does
+      // (R701-01): a pending admission may still insert late, a running turn
+      // may still reach its terminal, and a retired-turn fence may still own
+      // an approval. The Views' scoped cancellations settle all of those on
+      // the real Host facts; only then is the subscription disposed.
+      await views?.whenHostWorkSettled()
       releasePromptFacts()
       if (server !== undefined) {
         // Keep privFd OPEN across close so the stored private bind path always

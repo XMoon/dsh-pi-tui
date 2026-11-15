@@ -488,6 +488,8 @@ function turnEndUserAborted(data: unknown): boolean {
  */
 export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private readonly claims = new Map<string, ViewClaim>()
+  /** Waiters for "every claim's Host work settled" (listener retirement). */
+  private readonly workWaiters = new Set<PromiseWithResolvers<void>>()
   private readonly diag: Diag
   /**
    * The Host access the fact callbacks may act through. It is bound exactly
@@ -513,6 +515,41 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   /** The number of live reservations/attachments (qualification diagnosis only). */
   claimCount(): number {
     return this.claims.size
+  }
+
+  /**
+   * Whether ANY claim still owns unsettled Host work that the prompt-fact
+   * subscription must keep observing: an open flight (pending admission,
+   * queued message, running turn or its drain) or a detached retired-turn
+   * approval fence. When this is false, retiring the Host fact subscription
+   * can no longer strand any accepted ACP work (R701-01).
+   */
+  hasUnsettledHostWork(): boolean {
+    for (const claim of this.claims.values()) {
+      if (claim.inflight !== undefined && !claim.inflight.settledDone) return true
+      if (claim.retiringTurn !== undefined) return true
+    }
+    return false
+  }
+
+  /**
+   * Resolve when every claim's Host work has settled: flights completed or
+   * failed, detached fences ended at their own death facts. Event-driven: the
+   * settlement transitions notify the waiters, no polling.
+   */
+  whenHostWorkSettled(): Promise<void> {
+    if (!this.hasUnsettledHostWork()) return Promise.resolve()
+    const waiter = Promise.withResolvers<void>()
+    this.workWaiters.add(waiter)
+    return waiter.promise
+  }
+
+  /** Notify (and drop) every work waiter after a settlement transition. */
+  private notifyWorkSettled(): void {
+    if (this.hasUnsettledHostWork()) return
+    const waiters = [...this.workWaiters]
+    this.workWaiters.clear()
+    for (const waiter of waiters) waiter.resolve()
   }
 
   /** Whether a Session is currently reserved or attached by ANY connection. */
@@ -683,6 +720,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       claim.detachedWithFence = true
     } else if (this.claims.get(sessionId) === claim) {
       this.claims.delete(sessionId)
+      this.notifyWorkSettled()
     }
     // This close also cancels any in-flight attach for this connection (same
     // generation semantics as PO-2); a superseded op can never re-commit.
@@ -728,6 +766,25 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (reason === 'disconnect') flight.deliveryClosed = true
     flight.cancelRequested = true
     this.addressCancelIntent(claim, flight, access)
+    if (
+      flight.admissionSettled && flight.messageId === undefined && flight.cancelKind === undefined
+      && !flight.settledDone
+      && Object.is(access.currentAgent(claim.sessionId), claim.exactAgent)
+      && Object.is(access.currentSession(claim.sessionId), claim.exactSession)
+    ) {
+      // The official admission already resolved and this View never observed
+      // its own message on the exact attached identity: the official
+      // insertion fact is synchronous with the accepted admission, so no
+      // durable Host object exists for this requestId. Nothing can ever be
+      // cancelled or attributed — end bounded instead of holding the
+      // reservation (and the listener's Host fact subscription) forever.
+      this.failPrompt(claim, flight, promptError(
+        'LOCAL_ACP_PROMPT_ABORTED',
+        'the ACP prompt request was aborted before a real Host settlement',
+        JSONRPC_INTERNAL_ERROR,
+      ))
+      return
+    }
     // Wait for the flight's own settlement, which the fact callbacks drive:
     // a proven queued removal, the exact turn's real terminal, or the
     // admission's own classified failure. observeSettled already guards the
@@ -1337,6 +1394,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       }
       this.claims.delete(sessionId)
     }
+    this.notifyWorkSettled()
   }
 
   /**
@@ -1349,6 +1407,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (claim.detachedWithFence && claim.inflight === undefined && this.claims.get(sessionId) === claim) {
       this.claims.delete(sessionId)
     }
+    this.notifyWorkSettled()
   }
 
   /**
@@ -1367,6 +1426,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   /** Release one disconnect claim after its flight settled. */
   private releaseClaimAfterDisconnect(sessionId: string, claim: ViewClaim): void {
     if (this.claims.get(sessionId) === claim) this.claims.delete(sessionId)
+    this.notifyWorkSettled()
   }
 
   /**
@@ -1699,6 +1759,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // whose durable terminal ALREADY arrived has nothing left to fence.
     if (flight.turn !== undefined && !flight.ownTurnEnded) claim.retiringTurn = { turn: flight.turn }
     if (claim.inflight === flight) claim.inflight = undefined
+    this.notifyWorkSettled()
     flight.settled.reject(error)
   }
 
@@ -1713,6 +1774,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     flight.deliveryClosed = true
     this.abortPermissionRequests(flight)
     if (claim.inflight === flight) claim.inflight = undefined
+    this.notifyWorkSettled()
     flight.settled.resolve(result)
   }
 
