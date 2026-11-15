@@ -1635,8 +1635,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * retired-turn fence that must survive until its own facts end it.
    */
   private releaseClaimIfUnfenced(sessionId: string, claim: ViewClaim): void {
-    if (claim.retiringTurn !== undefined) {
-      // The fence survives for its own facts; the claim dies with it.
+    if (claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined) {
+      // The fence/obligation survives for its own facts; the claim dies with it.
       claim.detachedWithFence = true
       return
     }
