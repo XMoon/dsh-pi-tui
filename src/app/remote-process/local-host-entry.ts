@@ -61,6 +61,7 @@ import {
   type LocalAcpListener,
 } from './local-acp-listener.ts'
 import {
+  AcpSessionViewRegistry,
   type AcpCreateSessionOutcome,
   type AcpCreateWorkspaceOutcome,
   type AcpPromptFactListener,
@@ -664,6 +665,11 @@ function remoteErrorSessionId(error: unknown): string | undefined {
  */
 export function createAcpController(options: AcpControlControllerOptions): AcpControlController {
   const { scope, maxConnections, diag, sessionAccess } = options
+  // ONE View/claim registry for this controller's whole lifetime: an Off ->
+  // On rebind must not lose a retired-turn approval fence (or any claim), or
+  // the fresh registry would let a new connection bypass one-View-per-Session
+  // and delegate the old turn's approval to the TUI.
+  const views = sessionAccess === undefined ? undefined : new AcpSessionViewRegistry(diag)
   let listener: LocalAcpListener | undefined
   let tail: Promise<unknown> = Promise.resolve()
   let inFlight = 0
@@ -709,7 +715,7 @@ export function createAcpController(options: AcpControlControllerOptions): AcpCo
           scope,
           maxConnections,
           diag,
-          ...(sessionAccess === undefined ? {} : { sessionAccess }),
+          ...(sessionAccess === undefined ? {} : { sessionAccess, views }),
         })
         return listener.isListening()
           ? { state: 'enabled' }

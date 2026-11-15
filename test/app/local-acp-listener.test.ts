@@ -1310,7 +1310,7 @@ test('a TUI-owned approval never reaches the ACP connection and a second Session
   }
 })
 
-test('R701-01: a runtime Off keeps the Host fact subscription until the late insertion is cancelled', async t => {
+test('R701-01: a runtime Off keeps the Host fact subscription until the LATE insertion (after Off) is cancelled', async t => {
   const { scope } = newScope(t)
   const fake = makeFakeAccess()
   const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
@@ -1321,8 +1321,7 @@ test('R701-01: a runtime Off keeps the Host fact subscription until the late ins
     fake.seed('session-off', '/host/proj')
     client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-off', cwd: '/host/proj' } })
     assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
-    // An admission is still PENDING when the runtime turns the listener Off.
-    // Hold the admission until the test releases it (the late-admission leg).
+    // Hold the official admission so the message does NOT exist yet.
     let releaseAdmission!: () => void
     const admissionHeld = new Promise<void>(resolveHeld => { releaseAdmission = resolveHeld })
     const promptsRef = fake.prompts
@@ -1333,26 +1332,70 @@ test('R701-01: a runtime Off keeps the Host fact subscription until the late ins
       return await originalPrompt(request, new AbortController().signal)
     }
     client.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'session-off', prompt: [{ type: 'text', text: 'off race' }] } })
-    await waitForFact(() => fake.prompts[0], 'the held admission call')
-    // The official admission completes and inserts the message (the real
-    // insertion fact is synchronous with the accepted admission).
+    const request = await waitForFact(() => fake.prompts[0], 'the held admission call')
+    // RUNTIME OFF FIRST: the sockets die and retirement begins while no
+    // durable message id exists. Retirement must NOT block on the shared turn
+    // and must NOT drop the Host fact subscription.
+    const closing = listener.close()
+    await new Promise(resolveTick => setImmediate(resolveTick))
+    assert.equal(fake.facts() !== undefined, true, 'the subscription survives the Off while work is unsettled')
+    // NOW the late insertion happens, strictly AFTER the Off: only the
+    // surviving subscription can observe it and remove it exactly.
     releaseAdmission()
     const facts = fake.facts()
     const agent = fake.agentOf('session-off')
     assert.ok(facts !== undefined && agent !== undefined)
-    facts.onInboxInserted(agent, { id: 'm-off', source: { kind: 'user', rpcId: fake.prompts[0]!.requestId } })
-    await new Promise(resolveTick => setImmediate(resolveTick))
-    // Runtime Off NOW: the socket dies and the listener retires, but the
-    // Host fact subscription must survive until the cancellation settles.
-    const closing = listener.close()
-    // The removal happens during the retirement's scoped cancellation, before
-    // the subscription is disposed.
+    facts.onInboxInserted(agent, { id: 'm-late-off', source: { kind: 'user', rpcId: request.requestId } })
     for (let guard = 0; guard < 200 && fake.removedMessageIds.length === 0; guard += 1) {
       await new Promise(resolveTick => setImmediate(resolveTick))
     }
-    assert.deepEqual(fake.removedMessageIds, ['m-off'], 'the late-inserted message is removed exactly by the surviving subscription')
+    assert.deepEqual(fake.removedMessageIds, ['m-late-off'],
+      'the message inserted AFTER the Off is removed exactly by the surviving subscription')
     await closing
-    assert.equal(fake.facts(), undefined, 'the subscription is disposed only after the work settled')
+    assert.equal(fake.facts(), undefined, 'the subscription is disposed once the accepted work settled')
+  } finally {
+    client.close()
+  }
+})
+
+test('R701-01b: retirement returns promptly while a shared turn is still running (Off never blocks on work it may not cancel)', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    fake.seed('session-mixed', '/host/proj')
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-mixed', cwd: '/host/proj' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'session-mixed', prompt: [{ type: 'text', text: 'mixed' }] } })
+    const request = await waitForFact(() => fake.prompts[0], 'the running prompt')
+    const facts = fake.facts()
+    const agent = fake.agentOf('session-mixed')
+    assert.ok(facts !== undefined && agent !== undefined)
+    // A MIXED turn: the ACP message and a TUI steer share the running turn, so
+    // the View may NOT cancel the Agent (D23) and can only wait for turn/end.
+    facts.onInboxInserted(agent, { id: 'm-mixed', source: { kind: 'user', rpcId: request.requestId } })
+    fake.turnFence.openTurnStartSeq = 10
+    fake.turnFence.lastTurn = 1
+    facts.onInboxClaimed(agent, { id: 'm-steer', source: { kind: 'user', rpcId: 'tui-steer' } }, 1)
+    facts.onInboxClaimed(agent, { id: 'm-mixed', source: { kind: 'user', rpcId: request.requestId } }, 1)
+    // Runtime Off must return promptly even though the turn is still running.
+    const startedAt = Date.now()
+    await listener.close()
+    const elapsed = Date.now() - startedAt
+    assert.ok(elapsed < 5_000, `retirement must not block on a shared turn (took ${String(elapsed)}ms)`)
+    assert.equal(listener.isListening(), false, 'the socket entry retired immediately')
+    assert.deepEqual(fake.cancelledTurns, [], 'a mixed turn is never Agent-cancelled (D23)')
+    // The subscription is STILL alive for the running turn's facts.
+    assert.ok(fake.facts() !== undefined, 'the Host fact subscription outlives the network entry')
+    // The turn ends for real: the subscription is disposed after that fact.
+    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    for (let guard = 0; guard < 200 && fake.facts() !== undefined; guard += 1) {
+      await new Promise(resolveTick => setImmediate(resolveTick))
+    }
+    assert.equal(fake.facts(), undefined, 'the subscription is disposed at the real terminal')
   } finally {
     client.close()
   }

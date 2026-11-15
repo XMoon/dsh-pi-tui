@@ -136,6 +136,13 @@ export interface StartLocalAcpListenerOptions {
    * PO-1 fail-closed Session behaviour (used by the raw socket contracts).
    */
   readonly sessionAccess?: HostAcpSessionAccess
+  /**
+   * The ONE View/claim registry. The controller owns it across listener
+   * rebinds so a retired-turn approval fence (or any claim) survives an
+   * Off -> On cycle and the one-View-per-Session rule keeps holding.
+   * Omitted keeps the bind-local registry (raw socket contracts).
+   */
+  readonly views?: AcpSessionViewRegistry
 }
 
 /**
@@ -653,7 +660,7 @@ function readSavedInode(path: string, uid: number): SavedInode {
  * responsible for committing Ready AFTER this resolves.
  */
 export async function startLocalAcpListener(options: StartLocalAcpListenerOptions): Promise<LocalAcpListener> {
-  const { scope, maxConnections, diag, sessionAccess } = options
+  const { scope, maxConnections, diag, sessionAccess, views: sharedViews } = options
   const uid = process.getuid?.()
   if (typeof uid !== 'number') {
     throw new LocalAcpError('LOCAL_ACP_SOCKET_PATH_UNSUPPORTED', 'local acp: the current uid is unavailable')
@@ -690,7 +697,7 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
     connectionStates: new Map<Socket, ConnectionState>(),
     ...(sessionAccess === undefined
       ? {}
-      : { sessionAccess, views: new AcpSessionViewRegistry(diag) }),
+      : { sessionAccess, views: sharedViews ?? new AcpSessionViewRegistry(diag) }),
   }
 
   // The prompt-flight fact subscription belongs to THIS listener lifetime: it
@@ -766,14 +773,11 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
     stopping = true
     closed = (async () => {
       for (const socket of context.connections) socket.destroy()
-      // Stop accepting is immediate, but the ONE Host fact subscription must
-      // outlive the sockets exactly as long as the ACCEPTED work does
-      // (R701-01): a pending admission may still insert late, a running turn
-      // may still reach its terminal, and a retired-turn fence may still own
-      // an approval. The Views' scoped cancellations settle all of those on
-      // the real Host facts; only then is the subscription disposed.
-      await views?.whenHostWorkSettled()
-      releasePromptFacts()
+      // Retirement is the NETWORK entry's lifetime, never the Host work's:
+      // stop accepting, close the sockets and retire our inode immediately so
+      // a runtime Off or SIGTERM can always progress to the official Host
+      // shutdown (R701-01b). The ONE Host fact subscription is handed to its
+      // own settled-driven disposer instead of blocking here.
       if (server !== undefined) {
         // Keep privFd OPEN across close so the stored private bind path always
         // resolves to OUR (now-empty) private dir → ENOENT; it can never be
@@ -787,8 +791,29 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
       closeScopeDirFd()
       closePrivFd()
       removePrivDir()
+      disposeFactsWhenSettled()
     })()
     return closed
+  }
+
+  /**
+   * Dispose the ONE Host fact subscription once every ACCEPTED piece of work
+   * has settled on real Host facts (a pending admission inserted/classified,
+   * a queued removal committed, the owned turn's terminal drained, or a
+   * retired-turn fence ended). It never cancels work the ACP View may not
+   * cancel (D23 mixed turns) and never guesses with a timer: the registry's
+   * own settlement transitions resolve it. Detached, so retirement and Host
+   * shutdown are never blocked by a shared turn's duration.
+   */
+  const disposeFactsWhenSettled = (): void => {
+    if (views === undefined || disposePromptFacts === undefined) {
+      releasePromptFacts()
+      return
+    }
+    runDetached('local acp: Host fact subscription retirement', async () => {
+      await views.whenHostWorkSettled()
+      releasePromptFacts()
+    }, { diag })
   }
 
   try {
