@@ -814,7 +814,18 @@ async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDe
   })
 }
 
-/** Run one fixed `journalctl --user --unit <verified-name>` invocation. */
+/**
+ * Run one fixed `journalctl --user-unit <verified-name>` invocation.
+ *
+ * `--unit` filters the SYSTEM unit field (`_SYSTEMD_UNIT`), so with `--user` it
+ * never matches a user unit's entries — it silently prints nothing. The user
+ * unit field is selected by `--user-unit` (`_SYSTEMD_USER_UNIT`), which is the
+ * only form that returns the managed unit's journal.
+ */
+export function journalctlArgs(unit: string, lines: number): string[] {
+  return ['--user-unit', unit, '--no-pager', '-o', 'cat', '-n', String(lines)]
+}
+
 function runJournalctl(unit: string, lines: number): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise(resolve => {
     let settled = false
@@ -829,7 +840,7 @@ function runJournalctl(unit: string, lines: number): Promise<{ code: number; std
     }
     let child
     try {
-      child = spawn(JOURNALCTL, ['--user', '--unit', unit, '--no-pager', '-o', 'cat', '-n', String(lines)], {
+      child = spawn(JOURNALCTL, journalctlArgs(unit, lines), {
         shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
         env: process.env,
