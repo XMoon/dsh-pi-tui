@@ -190,10 +190,15 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         setDefaultPreset: async () => {},
         applyPermissionPreset: async () => ({ kind: 'applied' as const }),
       },
+      subagentLimits: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
       subagentModelSelection: {
-        available: () => false,
-        get: () => ({ enabled: false, allowedModels: [] }),
-        set: async () => {},
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
       },
       presetDefault: {
         available: () => true,

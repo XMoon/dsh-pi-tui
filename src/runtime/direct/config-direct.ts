@@ -16,7 +16,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/config-direct
  */
 
-import type { Context } from '@deepseek-ai/cordis'
+import { symbols, type Context } from '@deepseek-ai/cordis'
 import { randomUUID } from 'node:crypto'
 import {
   credentialKeyId,
@@ -41,6 +41,7 @@ import {
 import { cancellationError } from '../process/tasks.ts'
 import { SupersededReadError } from '../read-error.ts'
 import { safeErrorMessage } from '../process/errors.ts'
+import { projectSubagentLimits, projectSubagentModelSelection, type SubagentSectionProjection } from '../subagent-settings.ts'
 import {
   resolveTrustedFooterCommand,
   resolveUserCommandItemActivationIds,
@@ -84,8 +85,13 @@ import type {
   ProviderCatalogSnapshot,
   ProviderProfileConfig,
   ProviderProfileFacts,
-  SubagentAllowedModelRoute,
+  SubagentLimits,
+  SubagentLimitsConfig,
+  SubagentModelSelection,
   SubagentModelSelectionConfig,
+  SectionPatch,
+  SectionRead,
+  SectionMutationOutcome,
   TuiSettingsConfig,
   VisualToolsConfig,
   VisualToolsState,
@@ -198,6 +204,7 @@ export class DirectConfigPort implements ConfigPort {
   readonly account: AccountConfig
   readonly permissions: PermissionConfig
   readonly presetDefault: PresetDefaultConfig
+  readonly subagentLimits: SubagentLimitsConfig
   readonly subagentModelSelection: SubagentModelSelectionConfig
   readonly web: WebProviderConfig
   readonly visualTools: VisualToolsConfig
@@ -225,6 +232,7 @@ export class DirectConfigPort implements ConfigPort {
     this.account = new DirectAccountConfig(ctx)
     this.permissions = new DirectPermissionConfig(ctx, agentFor)
     this.presetDefault = new DirectPresetDefaultConfig(ctx)
+    this.subagentLimits = new DirectSubagentLimitsConfig(ctx)
     this.subagentModelSelection = new DirectSubagentModelSelectionConfig(ctx)
     this.web = new DirectWebProviderConfig(ctx)
     this.visualTools = new DirectVisualToolsConfig(ctx)
@@ -258,6 +266,52 @@ function readSettingsDescriptor(settings: SettingsServiceLike | undefined, ns: s
     // A throwing projection read degrades to "no descriptor" — the caller's
     // own fail-soft rules decide what that means.
     return undefined
+  }
+}
+
+function settingsAuthorityOf(settings: SettingsServiceLike): object {
+  const cordisService = settings as SettingsServiceLike & { readonly [symbols.original]?: SettingsServiceLike }
+  return cordisService[symbols.original] ?? settings
+}
+
+function readDirectSubagentSection<T extends object>(
+  ctx: HostContextLike,
+  namespace: string,
+  project: (effective: unknown, inherited: unknown) => SubagentSectionProjection<T> | undefined,
+): SectionRead<T> {
+  const settings = ctx.get('settings') as SettingsServiceLike | undefined
+  if (settings === undefined) return { kind: 'unavailable', reason: 'the Host settings service is unavailable' }
+
+  let descriptors: readonly SettingsDescriptorLike[] | undefined
+  try {
+    descriptors = settings.describe()
+  } catch (error) {
+    return { kind: 'unreadable', reason: `the Host settings descriptor read failed: ${safeErrorMessage(error)}` }
+  }
+  if (!Array.isArray(descriptors)) {
+    return { kind: 'unreadable', reason: 'the Host settings descriptor list is not readable' }
+  }
+  const descriptor = descriptors.find(entry => entry.ns === namespace)
+  if (descriptor === undefined) {
+    return { kind: 'unavailable', reason: 'the official Host settings section is not mounted' }
+  }
+  if (typeof descriptor.revision !== 'number' || !Number.isSafeInteger(descriptor.revision) || descriptor.revision < 0) {
+    return { kind: 'unreadable', reason: 'the official Host settings revision is not readable' }
+  }
+  let projected: SubagentSectionProjection<T> | undefined
+  try {
+    projected = project(descriptor.value, descriptor.base)
+  } catch (error) {
+    return { kind: 'unreadable', reason: `the official Host settings value is not readable: ${safeErrorMessage(error)}` }
+  }
+  if (projected === undefined) {
+    return { kind: 'unreadable', reason: 'the official Host settings value or inherited base is not readable' }
+  }
+  return {
+    kind: 'ready',
+    generation: settingsAuthorityOf(settings),
+    revision: descriptor.revision,
+    ...projected,
   }
 }
 
@@ -1701,12 +1755,64 @@ export class DirectPresetDefaultConfig implements PresetDefaultConfig {
   }
 }
 
-/** The Direct subagent model-selection config: the OFFICIAL
- * `subagentModelSelection` service (`subagent-model-selection-settings`
- * entry) owns the live preference read; the entry's Settings form is the
- * WRITE surface — mounting the service alone does NOT enable anything;
- * the section defaults to disabled with an empty allowlist, and each NEW
- * session samples the preference at composition time. */
+/** Official subagent settings use the caller's captured Settings authority and CAS revision. */
+async function mutateDirectSubagentSection(
+  ctx: HostContextLike,
+  namespace: string,
+  ops: readonly SettingsMutationOp[],
+  expectedRevision: number,
+  generation: object,
+): Promise<SectionMutationOutcome> {
+  const settings = ctx.get('settings') as SettingsServiceLike | undefined
+  if (settings === undefined || !Object.is(settingsAuthorityOf(settings), generation)) {
+    return { kind: 'rejected', reason: 'the Host settings authority changed; refresh before saving' }
+  }
+  if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
+  try {
+    await settings.mutate(namespace, ops, expectedRevision)
+    return { kind: 'accepted' }
+  } catch (error) {
+    const reason = safeErrorMessage(error)
+    if ((error as { readonly code?: unknown } | null)?.code === 'SETTINGS_CONFLICT') {
+      return { kind: 'conflict', reason }
+    }
+    // ConfigEditor can persist before Loader reconciliation throws. An unknown
+    // dispatched failure therefore cannot prove the profile stayed unchanged.
+    return { kind: 'outcome-unconfirmed', reason }
+  }
+}
+
+export class DirectSubagentLimitsConfig implements SubagentLimitsConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): SectionRead<SubagentLimits> {
+    return readDirectSubagentSection(this.ctx, 'subagent', projectSubagentLimits)
+  }
+
+  async refresh(): Promise<void> {}
+
+  async mutate(
+    patch: SectionPatch<SubagentLimits>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome> {
+    const ops: SettingsMutationOp[] = []
+    for (const field of ['maxDepth', 'maxActiveSubagents'] as const) {
+      const edit = patch[field]
+      if (edit === undefined) continue
+      ops.push(edit.kind === 'reset'
+        ? { op: 'unset', path: [field] }
+        : { op: 'set', path: [field], value: edit.value })
+    }
+    return mutateDirectSubagentSection(this.ctx, 'subagent', ops, expectedRevision, generation)
+  }
+}
+
+/** The official model-selection section is sampled by new top-level Sessions. */
 export class DirectSubagentModelSelectionConfig implements SubagentModelSelectionConfig {
   private readonly ctx: HostContextLike
 
@@ -1714,73 +1820,29 @@ export class DirectSubagentModelSelectionConfig implements SubagentModelSelectio
     this.ctx = ctx
   }
 
-  private settings(): SettingsServiceLike | undefined {
-    return this.ctx.get('settings') as SettingsServiceLike | undefined
+  read(): SectionRead<SubagentModelSelection> {
+    return readDirectSubagentSection(this.ctx, 'subagent-model-selection-settings', projectSubagentModelSelection)
   }
 
-  private selection(): { current(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } } | undefined {
-    return this.ctx.get('subagentModelSelection') as { current(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } } | undefined
-  }
+  async refresh(): Promise<void> {}
 
-  available(): boolean {
-    // The OFFICIAL capability is the subagentModelSelection service (its
-    // settings entry exists only while the service mounts). Without the
-    // official service the /settings rows must not appear at all.
-    return this.selection() !== undefined && this.settings() !== undefined
-  }
-
-  get(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } {
-    const selection = this.selection()
-    // No official service mounted at all: this is the shipped default, and
-    // `available()` already refuses to offer the rows (a caller that still asks
-    // gets the honest absence of a section, not a fabricated saved value).
-    if (selection === undefined) return { enabled: false, allowedModels: [] }
-    // A THROWING official read is UNREADABLE, never `{enabled:false, []}`: the
-    // shipped default is not the stored value, and handing it to a writer would
-    // let `enabled:false` + an empty list overwrite routes the Host still holds.
-    // The read therefore fails loud and every writer/verifier must handle it.
-    const current = selection.current()
-    return {
-      enabled: current.enabled === true,
-      allowedModels: (current.allowedModels ?? []).flatMap(route => {
-        const candidate = route as { provider?: unknown; model?: unknown }
-        return typeof candidate?.provider === 'string' && typeof candidate?.model === 'string'
-          ? [{ provider: candidate.provider, model: candidate.model }]
-          : []
-      }),
+  async mutate(
+    patch: SectionPatch<SubagentModelSelection>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome> {
+    const ops: SettingsMutationOp[] = []
+    if (patch.enabled !== undefined) {
+      ops.push(patch.enabled.kind === 'reset'
+        ? { op: 'unset', path: ['enabled'] }
+        : { op: 'set', path: ['enabled'], value: patch.enabled.value })
     }
-  }
-
-  async set(value: { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }): Promise<void> {
-    // Client-side pre-validation with the OFFICIAL rules (fail fast before
-    // the write; the Host validates again on the section boundary):
-    // duplicates by provider+model, and enabled requires at least one route.
-    assertOfficialSubagentRoutes(value.allowedModels)
-    if (value.enabled && value.allowedModels.length === 0) {
-      throw new Error('enabled subagent model selection requires at least one allowed model')
+    if (patch.allowedModels !== undefined) {
+      ops.push(patch.allowedModels.kind === 'reset'
+        ? { op: 'unset', path: ['allowedModels'] }
+        : { op: 'set', path: ['allowedModels'], value: patch.allowedModels.value.map(route => ({ ...route })) })
     }
-    const settings = this.settings()
-    if (settings === undefined) throw new Error('settings service unavailable')
-    await mutateSettings(settings, 'subagent-model-selection-settings', [
-      { op: 'set', path: ['enabled'], value: value.enabled },
-      { op: 'set', path: ['allowedModels'], value: value.allowedModels.map(route => ({ ...route })) },
-    ])
-  }
-}
-
-/** The official route-list rules (mirrored client-side so a malformed edit
- * fails before the Host write; same messages as the Host validator). */
-function assertOfficialSubagentRoutes(routes: readonly SubagentAllowedModelRoute[]): void {
-  const seen = new Set<string>()
-  for (const route of routes) {
-    if (route.provider.length === 0 || route.model.length === 0) {
-      throw new Error('subagent model selection requires non-empty provider and model ids')
-    }
-    const key = `${route.provider}\u0000${route.model}`
-    if (seen.has(key)) {
-      throw new Error(`subagent model selection repeats route "${route.provider}/${route.model}"`)
-    }
-    seen.add(key)
+    return mutateDirectSubagentSection(this.ctx, 'subagent-model-selection-settings', ops, expectedRevision, generation)
   }
 }
 

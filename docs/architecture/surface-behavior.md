@@ -842,26 +842,23 @@ specialist-page contract below).
   three-level browse (L0 categories, L1 rows, L2 detail). `About`, `Models`,
   `Account` and `Plugins` remain direct content pages. `General` holds the ONE
   startup backend row.
-- Twenty-one configuration rows are writable, in writer kinds that are never
-  conflated: the configured theme, the transcript display preset, the icon style,
-  the mid-turn progress-updates cadence, the response style, Git attribution,
-  Home/End keys, Mouse wheel lines, Notifications, Notification method,
-  Terminal progress and the `Agent` user-shell sandbox policy are persisted
-  through the ONE serialized TUI settings document; the profile-wide
-  `Visual tools` switch and the `General` startup backend (`Direct`/`Daemon`)
-  selector are the Host profile's revision-checked form sections
-  (`pi-tui-visual-tools` and `tui-startup.backend`);
-  the `Agent` `Approval policy` is the official per-Session durable policy
-  event (write-through, no document field), `Default permission` is the Host
-  permission default, and
-  `Subagent model selection` is the official subagent model-selection section;
-  transcript detail (`Ctrl+O`) and thinking detail (`Alt+T`) are Client-local
-  RUNTIME-ONLY disclosure states with no document field at all, so their Detail
-  states `not applicable — runtime-only` and their `Verified` claims only the
-  live runtime fact. `Submit while busy`, `Fullscreen` and the `Agent` user-shell
-  sandbox policy are the PERSIST-FIRST document rows (see below); the subagent
-  allowlist is a specialist PAGE action, not an L2 scalar writer. Browsing never
-  writes, and the configuration rows expose no copy verb at all.
+- Configuration rows keep their distinct writer kinds: the configured theme,
+  transcript display preset, icon style, mid-turn progress-updates cadence,
+  response style, Git attribution, Home/End keys, Mouse wheel lines,
+  Notifications, Notification method, Terminal progress and `Agent` user-shell
+  sandbox policy are persisted through the ONE serialized TUI settings document;
+  the profile-wide `Visual tools` switch and `General` startup backend
+  (`Direct`/`Daemon`) selector are the Host profile's revision-checked form
+  sections (`pi-tui-visual-tools` and `tui-startup.backend`); `Agent`'s
+  `Approval policy` is the official per-Session durable policy event,
+  `Default permission` is the Host permission default, and its single
+  `Subagent settings` entry stages the Host-owned limits and model-selection
+  sections in one embedded page. Transcript detail (`Ctrl+O`) and thinking
+  detail (`Alt+T`) remain Client-local RUNTIME-ONLY disclosure states with no
+  document field, so their Detail states `not applicable — runtime-only` and
+  `Verified` claims only the live runtime fact. `Submit while busy`,
+  `Fullscreen` and `Agent` user-shell sandbox are PERSIST-FIRST rows (see below).
+  Browsing never writes, and the configuration rows expose no copy verb at all.
 - The document-backed rows do NOT share one apply/persist order, and the
   contract keeps their differences instead of normalizing them:
   - `Submit while busy`, `Fullscreen` and the `Agent` user-shell sandbox policy
@@ -928,17 +925,15 @@ specialist-page contract below).
     when the readable document carries none, an explicit unknown when it cannot
     be read), and a normalizer's fallback is never presented as the stored
     value.
-- `Agent` owns FIVE rows in this frozen order: `Approval policy (this session)`
+- `Agent` owns FOUR rows in this frozen order: `Approval policy (this session)`
   (only while a live, still-current captured Session exists — the row stays
   visible with its truthful state when the Host policy read is checking,
   unavailable or failed, and offers no confirmable candidate until a proven
-  read answers) → `Default
-  permission` (only while the Host advertises a preset roster) →
-  `Subagent allowed models` + `Subagent model selection` (BOTH only while the
-  official subagent model-selection section and the model catalog are
-  available) → `User shell sandbox policy` (always painted). The category stays
-  in the fixed rail even when every row is unavailable, and `Agent` has NO
-  transition launcher any more: it has no unmigrated field left.
+  read answers) → `Default permission` (only while the Host advertises a preset
+  roster) → `Subagent settings` (always reachable so each official section can
+  state its own readiness) → `User shell sandbox policy` (always painted). The
+  category stays in the fixed rail even when every row is unavailable, and
+  `Agent` has NO transition launcher any more: it has no unmigrated field left.
   - `Approval policy` is scope-pinned and reads the PROVEN Host fact: the
     workspace captures ONE live Session scope on open and never re-targets it.
     A session switch makes the captured scope stale — the Confirm is refused
@@ -968,53 +963,45 @@ specialist-page contract below).
     running Session's preset, sandbox and approval knobs are untouched — and a
     Host port without a settings service REFUSES explicitly instead of
     succeeding as a no-op.
-  - `Subagent allowed models` opens the EXISTING subagent allowlist picker in
-    this same workspace body (same screen lease, same chrome, the picker's own
-    semantic hint as the physical last row) through the ONE explicit
-    `Manage allowed models…` action. Its `Esc` returns to the Agent rows — never
-    a category, never the conversation — and the row summary is re-read from the
-    official section on the way back. `Subagent model selection` is the same
-    official section's `enabled`: enabling with an EMPTY allowlist performs
-    ZERO official writes, states the setup guidance and moves the selection to
-    the allowlist row through a typed follow-up outcome (never by parsing the
-    message); disabling keeps every saved route; `Verified` requires BOTH the
-    toggle and the route list to read back.
-  - Both subagent surfaces write through ONE command-owner section queue (the
-    workspace toggle and its embedded picker). Every user action is an intent,
-    and the queue applies it to the official section as it stands when that
-    intent's turn comes:
-    - the toggle owns ONLY `enabled`;
-    - a picker toggle owns exactly ONE `(provider, model)` pair, applied as an
-      add or a remove — never a replacement of the whole list, so two surfaces
-      (or two picker instances, one still writing) compose instead of erasing
-      each other's routes. An add never creates a DUPLICATE grant (an existing
-      pair is re-appended, so the stored order may differ from the click order)
-      and a remove of an absent pair changes nothing.
-
-    The half an action does not own is re-read from the official section INSIDE
-    the queue, immediately before the write. A slow earlier write therefore can
-    never land after a newer intent, and a payload captured before an earlier
-    write settled can never erase it. An intent is REFUSED before any write when
-    its turn finds the backend non-current, the section unavailable/unreadable,
-    or the FRESH section in a state the intent cannot legally produce (the
-    last-route-while-enabled rule is decided there, in FIFO order, never from a
-    picker's earlier view): those refusals perform ZERO writes and report a typed
-    cause. A write that was dispatched and then rejected by the section is a
-    DIFFERENT failure — it surfaces as a failed write with its own reason, never
-    as a refusal. The queue is a serialization + rebase barrier, not a second
-    settings authority: the official section stays the only stored value, and a
-    surface may only report facts it actually read back. An optimistic marker is
-    therefore never summarised as saved: a close reports the last confirmed list,
-    a successful fresh readback updates it, a rejected write that cannot read
-    back rolls the surface back to that last confirmed list, and a write whose
-    readback is unreadable keeps the last confirmed value rather than inventing
-    one.
+  - `Subagent settings` is the single embedded page for the official `subagent`
+    limits and `subagent-model-selection-settings` preference. It mounts in this
+    workspace's existing body and screen lease; the Root keeps the physical
+    Action Bar and Esc. Enter or the painted Agent-row click opens the page, and
+    its Back/Discard exit returns to the Agent rows. The page order is fixed:
+    Limits (`maxDepth`, `maxActiveSubagents`), then Model selection (`enabled`,
+    `allowedModels`).
+  - Drafts are per-open Client-local state. Editing numbers, toggling Enabled,
+    selecting or removing a `(provider, model)` route, and Reset only stage
+    field intents. The grouped Model Directory is read-only; a route toggle
+    sends no Host mutation. Saved routes remain visible and removable when the
+    directory or that provider is unavailable; absence is claimed only from a
+    current successful directory read.
+  - Save validates the staged fields and dispatches at most one exact-revision
+    mutation per dirty namespace, Limits first. Selection is dispatched only
+    while the original Host generation remains current. The two namespaces are
+    not a transaction: each settles and reads back independently, a successful
+    namespace is not rolled back when the other fails, and only its own verified
+    fields leave the draft. A revision conflict requires an explicit Refresh;
+    a dispatched Remote write with lost settlement is Outcome unconfirmed and
+    is never replayed automatically. A verified result requires a current
+    same-generation authoritative readback, not only an ACK.
+  - Reset stages one official field-level `unset` and never substitutes
+    `set(inherited)`, edits a profile file, or creates another writer. DSH
+    computes and returns the current effective value. Its official `unset` may
+    materialize that value in the USER patch when a sibling field remains
+    overridden; physical USER-field deletion and `overridden=false` are not
+    Reset success criteria. The UI's `Inherited` / `Overridden` label compares
+    the same descriptor's effective value with its base, not USER-key presence.
+  - Limits affect later subagent delegations. Model-selection policy is sampled
+    when a new top-level Session is composed; an existing Session keeps its
+    recorded policy after settings change.
   - Every `Agent` row that owns a Host write refuses to offer a confirmable
     candidate while its authority cannot vouch for the value: a non-`ready`
     backend (or an unreadable document) keeps the row and its truthful
     last-known/raw facts but offers no candidate, so the UI never invites a
-    Confirm that the writer must refuse. The delegation rows keep their
-    last-known values labelled as such instead of claiming `Ready`/`[current]`.
+    Confirm that the writer must refuse. `Subagent settings` remains reachable
+    and labels each unavailable or last-known section independently; unavailable
+    or stale values are read-only.
   - `User shell sandbox policy` is a PERSIST-FIRST TUI-document row: `Value` is
     the RAW stored `localShellSandbox` (`not set` when absent, the invalid raw
     value when illegal, `unknown` when the document cannot be read), `Runtime`
@@ -1149,7 +1136,7 @@ specialist-page contract below).
   non-empty query never advertises it. A dirty Footer turns it into the
   Save/Discard/Keep guard. Closing either professional page returns to that
   row's ROWS level — never to an intermediary Detail panel — so the very next
-  back key (Esc or `←`) reaches the category rail; the subagent allowlist and
+  back key (Esc or `←`) reaches the category rail; the Subagent settings and
   Web Search / Fetch pages keep their own `Detail → row` ladder. Every
   sub-page keeps its own meaning (`←` still moves a Footer item between zones,
   and a non-empty Keybinding query still moves the search cursor). A page that

@@ -1066,7 +1066,7 @@ A **PiTui-painted** overlay is the same vocabulary in a rounded `Frame` instead 
 
 | Item | Rule |
 |---|---|
-| Title | role 1 (bold `textStrong`) as the **first row inside the frame**; a title is never inset into the frame's top rule (`╭─ Title ─╮` is not our device — it would fight the `Frame` geometry contract). A context suffix (`Subagent allowed models`) is role 2. |
+| Title | role 1 (bold `textStrong`) as the **first row inside the frame**; a title is never inset into the frame's top rule (`╭─ Title ─╮` is not our device — it would fight the `Frame` geometry contract). A context suffix (`Subagent settings`) is role 2. |
 | Count / status | role 12, **right-aligned on the title row** (`Models` … `3/8`), exactly as a workspace header aligns its badge. Not a title suffix. |
 | Selection | `> ` in `primary` + the row's text in bold `textStrong` (§5). |
 | Current value | the state chip `[current]` in `textMuted` (§4.5), placed at the end of the row's content — or inside the row's right-aligned fact slot when it has one (`/model`'s badge group, the vendored `SettingsList` value slot). **Never recoloured by selection** — pre-paint it at the call site when the row paints itself as one string. No arrow, no bare word, no leading `✓` gutter. Two states are two chips (`[current] [unavailable]`), not one joined pair. **Painted whole or not at all**: in a slot whose width only the renderer knows, hand it whole parts (`valueParts`, X061) — it reserves one chip and drops the rest whole, and the label is what truncates. |

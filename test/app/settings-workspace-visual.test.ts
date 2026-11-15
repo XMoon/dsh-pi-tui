@@ -193,7 +193,7 @@ interface HarnessOptions {
    * value lives on the object handed in, so a case can prove the downstream
    * effect on the SAME instance the production seam consumes (never on a UI
    * copy): the session approval override, the Host permission default, the
-   * official subagent model-selection section and the official model directory.
+   * typed Subagent limits and model-selection sections, and the official model directory.
    */
   agent?: {
     /** The live session scope the workspace pins (absent = sessionless). */
@@ -224,16 +224,19 @@ interface HarnessOptions {
       enabled: boolean
       allowedModels: { provider: string; model: string }[]
     }
+    /** The official delegation limits section (absent = ready with defaults). */
+    readonly limits?: {
+      maxDepth: number
+      maxActiveSubagents: number
+    }
     /**
      * Hold every official subagent section write until the returned promise
      * settles: the ONLY way a case can observe a real in-flight section write
-     * (the production queue serializes on it).
+     * (the controller's Save latch owns it).
      */
     readonly gateSectionWrite?: () => Promise<void>
-    /** Make the official section's `get()` throw while `available()` stays
-     *  true: the READY-backend unreadable case, distinct from a non-current
-     *  backend. */
-    readonly getFailure?: () => string | undefined
+    /** Return an unreadable Selection read while its typed port remains mounted. */
+    readonly readFailure?: () => string | undefined
     /** The official grouped model directory the allowlist picker reads. */
     readonly directory?: readonly {
       readonly id: string
@@ -431,6 +434,8 @@ interface Harness {
   readonly agent: NonNullable<HarnessOptions['agent']>
   /** Every official subagent section write, in dispatch order. */
   readonly subagentWrites: () => readonly { enabled: boolean; allowedModels: readonly { provider: string; model: string }[] }[]
+  /** Every official delegation-limits write, in dispatch order. */
+  readonly subagentLimitsWrites: () => readonly { maxDepth?: number; maxActiveSubagents?: number }[]
   /** Every Host permission-default write, in dispatch order. */
   readonly permissionWrites: () => readonly string[]
   /** The LIVE official subagent section the harness's seam serves. */
@@ -503,6 +508,11 @@ function setup(options: HarnessOptions = {}): Harness {
   // the exact instance the production consumer would read.
   const agent = options.agent ?? {}
   const subagentWrites: { enabled: boolean; allowedModels: { provider: string; model: string }[] }[] = []
+  const subagentLimitsWrites: { maxDepth?: number; maxActiveSubagents?: number }[] = []
+  const limitsGeneration = {}
+  let limitsRevision = 1
+  let subagentLimits = { maxDepth: agent.limits?.maxDepth ?? 1, maxActiveSubagents: agent.limits?.maxActiveSubagents ?? 8 }
+  const limitsBase = { maxDepth: 1, maxActiveSubagents: 8 }
   const permissionWrites: string[] = []
   const approvalState = agent.approval ?? { value: undefined as 'ask' | 'never' | undefined }
   const policyGenerationSlot = agent.generation ?? { value: agent.policyGeneration ?? {} }
@@ -555,6 +565,8 @@ function setup(options: HarnessOptions = {}): Harness {
       },
     }
   }
+  const subagentGeneration = limitsGeneration
+  let subagentRevision = 1
   let subagentSection = agent.subagent === undefined
     ? undefined
     : { enabled: agent.subagent.enabled, allowedModels: agent.subagent.allowedModels.map(route => ({ ...route })) }
@@ -886,23 +898,59 @@ function setup(options: HarnessOptions = {}): Harness {
           agent.permissionDefault.value = name
         },
       },
-      subagentModelSelection: {
-        available: () => subagentSection !== undefined,
-        get: () => {
-          // The READY-but-UNREADABLE authority: the capability still answers,
-          // the value cannot be read. It must never be presented as an empty
-          // section that a write may base itself on.
-          const failure = agent.getFailure?.()
-          if (failure !== undefined) throw new Error(failure)
-          return subagentSection === undefined
-            ? { enabled: false, allowedModels: [] }
-            : { enabled: subagentSection.enabled, allowedModels: subagentSection.allowedModels.map(route => ({ ...route })) }
+      subagentLimits: {
+        read: () => {
+          if (readiness !== 'ready') return { kind: 'unreadable', reason: 'Host settings are not current' }
+          return { kind: 'ready', generation: limitsGeneration, revision: limitsRevision,
+            effective: structuredClone(subagentLimits),
+            inherited: { ...limitsBase },
+            overridden: {
+              maxDepth: subagentLimits.maxDepth !== limitsBase.maxDepth,
+              maxActiveSubagents: subagentLimits.maxActiveSubagents !== limitsBase.maxActiveSubagents,
+            } }
         },
-        set: async (value: { enabled: boolean; allowedModels: readonly { provider: string; model: string }[] }) => {
+        refresh: async () => {},
+        mutate: async (patch: import('../../src/runtime/config-port.ts').SectionPatch<import('../../src/runtime/config-port.ts').SubagentLimits>, revision: number, generation: object) => {
+          if (revision !== limitsRevision || generation !== limitsGeneration) return { kind: 'conflict', reason: 'revision changed' }
           await agent.gateSectionWrite?.()
-          subagentWrites.push({ enabled: value.enabled, allowedModels: value.allowedModels.map(route => ({ ...route })) })
-          if (subagentSection === undefined) throw new Error('settings service unavailable')
-          subagentSection = { enabled: value.enabled, allowedModels: value.allowedModels.map(route => ({ ...route })) }
+          const apply = (field: 'maxDepth' | 'maxActiveSubagents'): number => {
+            const edit = patch[field]
+            if (edit === undefined) return subagentLimits[field]
+            if (edit.kind === 'reset') return limitsBase[field]
+            return edit.value
+          }
+          const next = { maxDepth: apply('maxDepth'), maxActiveSubagents: apply('maxActiveSubagents') }
+          subagentLimits = next
+          limitsRevision += 1
+          subagentLimitsWrites.push({
+            ...patch.maxDepth === undefined ? {} : { maxDepth: next.maxDepth },
+            ...patch.maxActiveSubagents === undefined ? {} : { maxActiveSubagents: next.maxActiveSubagents },
+          })
+          return { kind: 'accepted' }
+        },
+      },
+      subagentModelSelection: {
+        read: () => {
+          const failure = agent.readFailure?.()
+          if (failure !== undefined) return { kind: 'unreadable', reason: failure }
+          if (readiness !== 'ready') return { kind: 'unreadable', reason: 'Host settings are not current' }
+          if (subagentSection === undefined) return { kind: 'unavailable', reason: 'Model selection is not mounted.' }
+          return { kind: 'ready', generation: subagentGeneration, revision: subagentRevision,
+            effective: structuredClone(subagentSection),
+            inherited: { enabled: false, allowedModels: [] },
+            overridden: { enabled: subagentSection.enabled, allowedModels: subagentSection.allowedModels.length !== 0 } }
+        },
+        refresh: async () => {},
+        mutate: async (patch: import('../../src/runtime/config-port.ts').SectionPatch<import('../../src/runtime/config-port.ts').SubagentModelSelection>, revision: number, generation: object) => {
+          if (revision !== subagentRevision || generation !== subagentGeneration) return { kind: 'conflict', reason: 'revision changed' }
+          await agent.gateSectionWrite?.()
+          if (subagentSection === undefined) return { kind: 'rejected', reason: 'not mounted' }
+          const enabled = patch.enabled === undefined ? subagentSection.enabled : patch.enabled.kind === 'reset' ? false : patch.enabled.value
+          const routes = patch.allowedModels === undefined ? subagentSection.allowedModels : patch.allowedModels.kind === 'reset' ? [] : patch.allowedModels.value
+          subagentSection = { enabled, allowedModels: routes.map(route => ({ ...route })) }
+          subagentRevision += 1
+          subagentWrites.push(structuredClone(subagentSection))
+          return { kind: 'accepted' }
         },
       },
       // The Web provider section is Host-only (S2/PR-B): this stub composes no
@@ -1025,6 +1073,7 @@ function setup(options: HarnessOptions = {}): Harness {
     doc,
     agent,
     subagentWrites: () => subagentWrites,
+    subagentLimitsWrites: () => subagentLimitsWrites,
     permissionWrites: () => permissionWrites,
     subagentSection: () => subagentSection,
     notices: () => notices,
@@ -1667,7 +1716,7 @@ test('a copy settled after the workspace closed never notifies the restored surf
 
 // ── A-11: the legacy compatibility bridge ─────────────────────────────────
 
-test('Agent paints only the five availability-gated rows and no legacy launcher', async () => {
+test('Agent paints the single Subagent entry among its availability-gated rows and no legacy launcher', async () => {
   const h = setup({
     columns: 140,
     rows: 44,
@@ -1687,7 +1736,7 @@ test('Agent paints only the five availability-gated rows and no legacy launcher'
   await key(h, '\r') // L0 -> L1 (the Agent rows level)
   assert.match(h.rowsPlain()[0]!, /Settings · Agent · Rows/)
   const rows = h.rowsPlain()
-  const order = ['Approval policy (this session)', 'Default permission', 'Subagent allowed models', 'Subagent model selection', 'User shell sandbox policy']
+  const order = ['Approval policy (this session)', 'Default permission', 'Subagent settings', 'User shell sandbox policy']
     .map(label => rows.findIndex(line => line.includes(label)))
   for (const [index, row] of order.entries()) {
     assert.ok(row >= 0, `Agent paints ${JSON.stringify(order[index])}:\n${h.view()}`)
@@ -1711,7 +1760,7 @@ test('Agent paints only the five availability-gated rows and no legacy launcher'
   h.dispose()
 })
 
-test('Agent hides the approval and delegation rows when their authority is absent', async () => {
+test('Agent hides session-scoped approval but retains Subagent unavailability when its authority is absent', async () => {
   // Sessionless Direct with the capability present: no session-scoped row.
   const sessionless = setup({
     columns: 140,
@@ -1723,7 +1772,7 @@ test('Agent hides the approval and delegation rows when their authority is absen
   assert.doesNotMatch(sessionless.view(), /Approval policy \(this session\)/u, 'a sessionless surface paints no approval row')
   assert.match(sessionless.view(), /Default permission/u, 'the Host-authority rows do not need a Session')
   assert.match(sessionless.view(), /User shell sandbox policy/u, 'the document row does not need a Session')
-  assert.doesNotMatch(sessionless.view(), /Subagent (?:allowed models|model selection)/u, 'no official section means no delegation rows')
+  assert.match(sessionless.view(), /Subagent settings/u, 'one reachable page states the unavailable sections')
   sessionless.dispose()
 
   // M6-1 F8: a pinned live Session with an UNAVAILABLE approval side keeps
@@ -2012,135 +2061,131 @@ test('a session switch revokes the approval row instead of re-targeting the new 
   h.dispose()
 })
 
-test('the allowlist row mounts the EXISTING picker in the same workspace and toggles the official section', async () => {
-  const h = setup({
-    columns: 140,
-    rows: 40,
-    agent: {
-      sessionId: 'session-live',
-      approvalAvailable: true,
-      permissionNames: ['workspace-write'],
-      permissionDefault: { value: 'workspace-write' },
-      subagent: { enabled: false, allowedModels: [] },
-      directory: [
-        { id: 'p1', name: 'Provider One', models: [{ id: 'm1', name: 'Model One' }, { id: 'm2', name: 'Model Two' }] },
-        { id: 'p2', name: 'Provider Two', models: [{ id: 'm1' }] },
-      ],
-    },
-  })
-  await openAgentRow(h, 'Subagent allowed models')
-  // Tab focuses the Detail WITHOUT activating anything (the Manage action is
-  // painted there), then Enter mounts the SAME picker.
-  await key(h, '\t')
-  assert.match(h.view(), /Manage allowed models…/u, `the ONE explicit Manage action is painted:\n${h.view()}`)
-  await key(h, '\r')
-  const picker = h.view()
-  assert.match(picker, /Subagent allowed models/u, `the picker is painted in the same lease:\n${picker}`)
-  assert.match(picker, /Provider One|Provider Two/u, 'the official grouped directory really painted')
-  assert.match(picker, /Enter toggle/u, 'the picker keeps its own semantic hint on the last row')
-  // The picker is searchable: filter down to one route and toggle it.
-  await key(h, 'm')
+test('Subagent settings stages Enabled and routes in one lease until explicit Save', async () => {
+  const h = setup({ columns: 120, rows: 40, agent: {
+    subagent: { enabled: false, allowedModels: [] },
+    directory: [{ id: 'p1', name: 'Provider One', models: [{ id: 'm1', name: 'Model One' }] }],
+  } })
+  await openAgentRow(h, 'Subagent settings')
   await key(h, '\r')
   await settle(h)
-  assert.equal(h.subagentWrites().length, 1, 'exactly ONE official section write')
-  assert.deepEqual(h.subagentWrites()[0]?.allowedModels, [{ provider: 'p1', model: 'm1' }],
-    'the write carries the exact (provider, model) pair')
-  assert.equal(h.subagentSection()?.allowedModels.length, 1, 'the official section really changed')
-  // Esc leaves the picker (NOT the workspace) and returns to the Agent rows.
-  await key(h, '\x1b')
-  const back = h.view()
-  assert.match(back, /Settings · Agent/u, `Esc returns to the Agent rows, not the conversation:\n${back}`)
-  assert.match(back, /1 route/u, 'the row summary follows the committed official section')
-  // RE-ENTERING the picker must paint the grant that was really committed — the
-  // marker is derived from the official section, never from the closed page.
-  // Esc from the closed picker's Detail first, then reopen through the row.
-  await key(h, '\x1b') // closed picker's Detail -> Rows
-  // Tab moves the keyboard to the Detail WITHOUT activating the row (Enter on a
-  // specialist row mounts the page), then the painted Manage action opens a
-  // FRESH picker instance.
-  await key(h, '\t')
-  await key(h, '\r')
-  const reopened = h.view()
-  assert.match(reopened, /Subagent allowed models/u, `the picker is mounted again:\n${reopened}`)
-  // The reopened picker's working copy comes from the OFFICIAL section, so the
-  // committed route is still granted there and NO second write is dispatched by
-  // merely looking.
-  assert.deepEqual(h.subagentSection()?.allowedModels, [{ provider: 'p1', model: 'm1' }],
-    `the committed route is still in the official section:\n${JSON.stringify(h.subagentSection())}`)
-  assert.equal(h.subagentWrites().length, 1,
-    'reopening the picker reads the section and dispatches NO second write')
-  // The VISIBLE marker: the reopened picker paints the committed route as
-  // allowed. A picker that ignored the section would paint an unmarked list.
-  const grantedLine = reopened.split('\n').find(line => /Model One|m1/u.test(line) && /allowed/u.test(line))
-  assert.ok(grantedLine !== undefined,
-    `the reopened picker marks the committed route as allowed:\n${reopened}`)
-  await key(h, '\x1b')
-  assert.match(h.view(), /1 route/u, `the outer row still summarises the committed grant:\n${h.view()}`)
-  h.dispose()
-})
-
-test('enabling the toggle with an EMPTY allowlist writes nothing and moves to the allowlist row', async () => {
-  const h = setup({
-    columns: 120,
-    rows: 40,
-    agent: {
-      sessionId: 'session-live',
-      approvalAvailable: true,
-      permissionNames: ['workspace-write'],
-      permissionDefault: { value: 'workspace-write' },
-      subagent: { enabled: false, allowedModels: [] },
-      directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }] }],
-    },
-  })
-  await openAgentRow(h, 'Subagent model selection')
-  await key(h, '\r')
-  await key(h, '\x1b[B') // off -> on
-  await key(h, '\r')
-  await settle(h)
-  assert.deepEqual(h.subagentWrites(), [], 'an empty allowlist means ZERO official writes')
-  assert.equal(h.agent.subagent?.enabled, false, 'the section stays off')
-  const view = h.view()
-  assert.match(view, /Select at least one Subagent allowed model before enabling model selection\./u,
-    `the exact guidance is shown:\n${view}`)
-  assert.match(agentSelectedRowLabel(h), /^Subagent allowed models/u,
-    `the typed follow-up moved the selection to the allowlist row:\n${view}`)
-  h.dispose()
-})
-
-test('enabling and disabling the toggle preserves every saved route', async () => {
-  const h = setup({
-    columns: 120,
-    rows: 40,
-    agent: {
-      sessionId: 'session-live',
-      approvalAvailable: true,
-      permissionNames: ['workspace-write'],
-      permissionDefault: { value: 'workspace-write' },
-      subagent: { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
-      directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }] }],
-    },
-  })
-  await openAgentRow(h, 'Subagent model selection')
-  await key(h, '\r')
+  assert.match(h.view(), /Maximum recursion depth/u)
+  assert.doesNotMatch(h.view(), /Subagent allowed models|Subagent model selection/u)
   await key(h, '\x1b[B')
-  await key(h, '\r')
+  await key(h, '\x1b[B')
+  await key(h, '\r') // stage Enabled
+  await key(h, 's')
   await settle(h)
-  assert.deepEqual(h.subagentWrites(), [{ enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] }],
-    'enabling keeps the existing route')
-  assert.match(h.view(), /Verified/u, 'both section halves read back')
-  // Disable again in a FRESH open: the routes survive.
-  for (let step = 0; step < 3; step += 1) await key(h, '\x1b')
+  assert.equal(h.subagentWrites().length, 0, 'enabled + empty routes never dispatches')
+  assert.match(h.view(), /at least one allowed route/u)
+  await key(h, '\x1b[B')
+  await key(h, '\r') // Manage
   await settle(h)
-  assert.doesNotMatch(h.view(), /Settings ·/u, `the workspace closed:\n${h.view()}`)
-  await openAgentRow(h, 'Subagent model selection')
-  await key(h, '\r')
-  await key(h, '\x1b[A') // the section reads enabled: on -> off
-  await key(h, '\r')
+  assert.match(h.view(), /Provider One/u)
+  await key(h, '\r') // stage first route
+  assert.equal(h.subagentWrites().length, 0, 'directory Enter only edits draft')
+  await key(h, '\x1b')
+  await key(h, 's')
   await settle(h)
-  assert.equal(h.subagentWrites().length, 2, 'the second toggle dispatched ONE write')
-  assert.deepEqual(h.subagentWrites()[1], { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
-    'disabling never clears the saved routes')
-  assert.equal(h.subagentSection()?.allowedModels.length, 1, 'the official section still carries the route')
+  assert.deepEqual(h.subagentSection(), { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] })
+  assert.equal(h.subagentWrites().length, 1)
+  assert.match(h.view(), /Selection: Verified/u)
+  await key(h, '\x1b')
+  assert.match(h.view(), /Settings · Agent · Rows/u)
+  h.dispose()
+})
+
+test('the embedded Subagent page keeps its selection and Save bar inside every frozen Settings viewport', async () => {
+  const matrix = [
+    [200, 50, 'dark', 'symbols'],
+    [120, 40, 'light', 'minimal'],
+    [100, 40, 'plugin:acme/solarized', 'emoji'],
+    [80, 24, 'dark', 'symbols'],
+    [80, 10, 'light', 'minimal'],
+    [72, 24, 'dark', 'emoji'],
+    [44, 20, 'light', 'symbols'],
+    [44, 8, 'plugin:acme/solarized', 'minimal'],
+  ] as const
+  for (const [columns, rows, theme, iconStyle] of matrix) {
+    const h = setup({ columns, rows, doc: { theme }, iconStyle,
+      ...(theme === 'plugin:acme/solarized' ? { themes: pluginThemes() } : {}),
+      agent: {
+        subagent: { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
+        directory: [{ id: 'p1', name: 'Provider One', models: [{ id: 'm1', name: 'Model One' }] }],
+      },
+    })
+    await h.open('Agent')
+    await key(h, '\r')
+    for (let step = 0; step < 8 && !h.rowsPlain().some(line => />\s+Subagent settings/u.test(line)); step += 1) {
+      await key(h, '\x1b[B')
+    }
+    assert.ok(h.rowsPlain().some(line => />\s+Subagent settings/u.test(line)),
+      `${columns}x${rows}: the Subagent row must be selectable:\n${h.view()}`)
+    await key(h, '\r')
+    await settle(h)
+    assert.match(h.view(), /Settings · Agent · Subagent settings/u, `${columns}x${rows}: the page identity stays visible`)
+    assertRowWidths(h, columns)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u, `${columns}x${rows}: the Root-owned exit stays painted`)
+    for (let step = 0; step < 2; step += 1) await key(h, '\x1b[B')
+    await key(h, '\r') // Enabled changes only the per-open draft.
+    assert.equal(h.subagentWrites().length, 0, `${columns}x${rows}: staging has no Host write`)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Save \[S\]/u, `${columns}x${rows}: the dirty primary action stays complete`)
+    await key(h, 's')
+    await settle(h)
+    assert.equal(h.subagentWrites().length, 1, `${columns}x${rows}: Save reaches the typed section once`)
+    assert.match(h.view(), /Selection: Verified/u, `${columns}x${rows}: the section readback is visible`)
+    assertRowWidths(h, columns)
+    h.dispose()
+  }
+})
+
+test('the real Settings Root row and delegated spans complete the Subagent pointer journey', async () => {
+  const h = setup({ columns: 120, rows: 40, agent: {
+    subagent: { enabled: false, allowedModels: [] },
+    directory: [{ id: 'p1', name: 'Provider One', models: [{ id: 'm1', name: 'Model One' }] }],
+  } })
+  const clickText = async (text: string, last = false): Promise<void> => {
+    const row = last ? h.rowsPlain().length - 1 : rowOf(h, text)
+    const col = cellIndexOf(h, row, text)
+    press(h, row, col)
+    // The Root requests a render after admitting a body press; the child's
+    // next painted frame is what a release must resolve against.
+    await h.vt.waitForRender()
+    release(h, row, col)
+    await settle(h)
+  }
+  await h.open('Agent')
+  await key(h, '\r')
+  await clickText('Subagent settings')
+  assert.match(h.view(), /Maximum recursion depth/u, 'Root painted row click opens the real embedded page')
+  await clickText('Enabled')
+  await clickText('Manage…')
+  assert.match(h.view(), /Provider One/u, `the managed row opens the model directory:\n${h.view()}`)
+  await clickText('Model One')
+  assert.equal(h.subagentWrites().length, 0)
+  await clickText('Back [Esc]', true)
+  // The numeric field and its Reset are pointer-operable too: the input accepts
+  // normal text, while Apply stays a painted bar action.
+  await clickText('Maximum recursion depth')
+  await key(h, '2')
+  await clickText('Apply [Enter]', true)
+  await clickText('Reset')
+  assert.match(h.view(), /Reset staged/u, 'the pointer Reset really staged the draft')
+  assert.match(h.view(), /Save \[S\]/u, 'the dirty page paints its delegated Save')
+  await clickText('Save [S]', true)
+  assert.equal(h.subagentWrites().length, 1, 'Root delegated Save is the only writer')
+  assert.deepEqual(h.subagentLimitsWrites(), [{ maxDepth: 1 }],
+    'the Reset staged one official maxDepth unset/effective restore')
+  assert.deepEqual(h.subagentSection(), { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] })
+  await clickText('Enabled')
+  await clickText('Back [Esc]', true)
+  assert.match(h.view(), /Discard unsaved changes\? y\/N/u)
+  await clickText('Keep [Esc]', true)
+  assert.match(h.view(), /Maximum recursion depth/u)
+  await clickText('Back [Esc]', true)
+  await clickText('Discard [Y]', true)
+  assert.match(h.view(), /Settings · Agent · Rows/u)
+  assert.equal(h.subagentWrites().length, 1, 'discard never sends another Host write')
   h.dispose()
 })
 
@@ -2174,220 +2219,6 @@ test('the user shell sandbox policy Confirm stores the raw document value only',
   assert.equal(h.replacements(), 2, 'exactly one whole-document write per Confirm')
   assert.match(h.view(), /Next ! \/ !! uses bypass/u, 'the consumer effect flipped back through the UI')
   h.dispose()
-})
-
-test('one queued section write cannot resurrect a route a pending picker write removed', async () => {
-  // The cross-surface failure this queue must prevent: the picker removes a
-  // route (its write is still in flight), the user leaves the picker and flips
-  // the toggle. The toggle owns ONLY `enabled`, so the route list it writes must
-  // come from the FRESH section inside the queue — not from the snapshot the
-  // user saw before the removal settled.
-  let openGate: (() => void) | undefined
-  const gate = new Promise<void>(resolve => { openGate = resolve })
-  const h = setup({
-    columns: 120,
-    rows: 40,
-    agent: {
-      sessionId: 'session-live',
-      approvalAvailable: true,
-      permissionNames: ['workspace-write'],
-      permissionDefault: { value: 'workspace-write' },
-      // Enabled with TWO routes: disabling must keep whatever routes survive,
-      // and the picker's removal is what they are.
-      subagent: { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }, { provider: 'p1', model: 'm2' }] },
-      directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }, { id: 'm2' }] }],
-      gateSectionWrite: () => gate,
-    },
-  })
-  await openAgentRow(h, 'Subagent allowed models')
-  await key(h, '\r') // Detail focus
-  await key(h, '\r') // Manage → the picker
-  assert.match(h.view(), /P1/u, `the picker painted the official directory:\n${h.view()}`)
-  // Walk to m2 and toggle it OFF: that section write is held open.
-  await key(h, '\x1b[B')
-  await key(h, '\r')
-  await settle(h, 2)
-  // Leave the picker (its own Esc) and flip the toggle while the removal is
-  // still in flight. The toggle is 'on' -> 'off', so it needs no route gate.
-  await key(h, '\x1b') // picker Esc -> the allowlist row's Detail
-  await key(h, '\x1b') // Detail -> Rows
-  for (let step = 0; step < 8 && !agentSelectedRowLabel(h).includes('Subagent model selection'); step += 1) {
-    await key(h, '\x1b[B')
-  }
-  assert.match(agentSelectedRowLabel(h), /^Subagent model selection/u, `the toggle row was reached:\n${h.view()}`)
-  await key(h, '\r')
-  await key(h, '\x1b[A') // the current candidate is `on` → `off`
-  await key(h, '\r')
-  await settle(h, 2)
-  assert.deepEqual(h.subagentWrites(), [], 'nothing settles while the first write is held')
-
-  openGate!()
-  await settle(h, 12)
-  const writes = h.subagentWrites()
-  assert.ok(writes.length >= 2, `both intents committed in order: ${JSON.stringify(writes)}`)
-  // The INVARIANT this queue exists for: whatever the ORDER, no write after the
-  // picker's removal may resurrect the route the user withdrew, and the toggle
-  // must own only the `enabled` half.
-  const removalIndex = writes.findIndex(write => write.allowedModels.length === 1)
-  assert.ok(removalIndex >= 0, `the picker's removal committed: ${JSON.stringify(writes)}`)
-  const survived = writes[removalIndex]!.allowedModels
-  assert.equal(survived.length, 1, 'the picker removed exactly one of the two routes')
-  assert.equal(writes[removalIndex]!.enabled, true,
-    'the picker kept the CURRENT enabled half instead of the value it saw when it was built')
-  // The defect this queue prevents is RESURRECTION, not "every later write
-  // equals the removal's list": a later picker intent may legitimately change
-  // the list again. What may never happen is the withdrawn (provider, model)
-  // reappearing.
-  const removedRoute = writes[0]!.allowedModels.length === 1 && survived[0]!.model === 'm1' ? 'm2' : 'm1'
-  const afterRemoval = writes.slice(removalIndex + 1)
-  for (const write of afterRemoval) {
-    assert.ok(!write.allowedModels.some(route => route.model === removedRoute),
-      `the withdrawn route ${removedRoute} was resurrected: ${JSON.stringify(writes)}`)
-  }
-  const final = h.subagentSection()
-  assert.equal(final?.enabled, false, 'the toggle really landed')
-  assert.ok(!(final?.allowedModels ?? []).some(route => route.model === removedRoute),
-    `the withdrawn route ${removedRoute} never came back: ${JSON.stringify(final)}`)
-  h.dispose()
-})
-
-test('a queued allowlist write is REFUSED when the backend goes stale while the first turn is held', async () => {
-  // Ready at dispatch time, then the Client loses currentness while the write
-  // waits: the queued turn must refuse from the FRESH authority at its own
-  // turn, never write the last-known section back, and the refusal must reach
-  // the user with its real reason.
-  let openGate: (() => void) | undefined
-  const gate = new Promise<void>(resolve => { openGate = resolve })
-  let gateStarted!: () => void
-  const started = new Promise<void>(resolve => { gateStarted = resolve })
-  const h = setup({
-    columns: 120,
-    rows: 40,
-    agent: {
-      sessionId: 'session-live',
-      approvalAvailable: true,
-      permissionNames: ['workspace-write'],
-      permissionDefault: { value: 'workspace-write' },
-      subagent: { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] },
-      directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }, { id: 'm2' }] }],
-      gateSectionWrite: () => { gateStarted(); return gate },
-      // The ready -> stale transition happens ONLY after the first turn is
-      // already in flight.
-      getFailure: undefined,
-    },
-  })
-  await openAgentRow(h, 'Subagent allowed models')
-  await key(h, '\r') // Detail focus
-  await key(h, '\r') // Manage → the picker
-  assert.match(h.view(), /P1/u, `the picker painted the official directory:\n${h.view()}`)
-  // First intent: add m2. Its section write starts and is held.
-  await key(h, '\x1b[B') // m1 -> m2
-  await key(h, '\r')
-  await started
-  // Second intent: remove m1. It queues behind the held write.
-  await key(h, '\x1b[A') // m2 -> m1
-  await key(h, '\r')
-  await settle(h, 2)
-  assert.deepEqual(h.subagentWrites(), [], 'nothing settles while the first turn is held')
-
-  // The Client loses currentness while the second intent waits for its turn.
-  h.setReadiness('stale')
-  openGate!()
-  await settle(h, 12)
-
-  assert.equal(h.subagentWrites().length, 1, 'only the ready-time turn wrote the section')
-  assert.deepEqual(h.subagentWrites()[0]?.allowedModels, [{ provider: 'p1', model: 'm1' }, { provider: 'p1', model: 'm2' }],
-    'the first write carried the fresh section plus its own route')
-  // The queued stale turn wrote NOTHING: the last-known section was not written back.
-  assert.deepEqual(h.subagentSection(), {
-    enabled: true,
-    allowedModels: [{ provider: 'p1', model: 'm1' }, { provider: 'p1', model: 'm2' }],
-  }, 'the stale turn never removed m1')
-  // The refusal is diagnosable and reaches the user (no silent success).
-  assert.ok(h.notices().some(notice => /allowlist write failed: the configuration is stale/u.test(notice)),
-    `the queued turn's real refusal reached the user: ${JSON.stringify(h.notices())}`)
-  h.dispose()
-})
-
-test('a READY but UNREADABLE official section is never written as an empty config', async () => {
-  // The one-shot failure targets the COMMIT read (the snapshot opened from a
-  // readable section, so the row and its candidates exist); the following
-  // refresh reads the section again and paints the real refusal.
-  let failNextRead = false
-  const h = setup({
-    columns: 120,
-    rows: 40,
-    agent: {
-      sessionId: 'session-live',
-      approvalAvailable: true,
-      permissionNames: ['workspace-write'],
-      permissionDefault: { value: 'workspace-write' },
-      subagent: { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
-      directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }] }],
-      getFailure: () => {
-        if (!failNextRead) return undefined
-        failNextRead = false
-        return 'the official section could not be read'
-      },
-    },
-  })
-  await openAgentRow(h, 'Subagent model selection')
-  await key(h, '\r') // Detail + choice (off)
-  await key(h, '\x1b[B') // off -> on
-  failNextRead = true
-  await key(h, '\r') // Confirm: the commit's authoritative read throws
-  await settle(h)
-
-  assert.deepEqual(h.subagentWrites(), [], 'an unreadable section produces ZERO official writes')
-  assert.deepEqual(h.subagentSection(), { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
-    'the section is not rewritten from a fabricated empty base')
-  const view = h.view()
-  assert.match(view, /Not saved/u, `the refusal is reported:\n${view}`)
-  assert.match(detailsPaneText(h).replace(/\s+/gu, ' '),
-    /the official subagent model-selection section could not be read: the official section could not be read/u,
-    `the real read failure is on screen:\n${view}`)
-  assert.doesNotMatch(view, /Status\s+Verified/u, 'an unreadable section is never Verified')
-  h.dispose()
-})
-
-test('a NON-CURRENT backend paints no confirmable Agent candidate and claims no current value', async () => {
-  for (const readiness of ['stale', 'unavailable'] as const) {
-    const h = setup({
-      columns: 140,
-      rows: 44,
-      readiness,
-      doc: { localShellSandbox: 'bypass' },
-      agent: {
-        sessionId: 'session-live',
-        approvalAvailable: true,
-        approval: { value: 'ask' },
-        permissionNames: ['workspace-write', 'danger-full-access'],
-        permissionDefault: { value: 'workspace-write' },
-        subagent: { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] },
-        directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }] }],
-      },
-    })
-    await h.open('Agent')
-    await key(h, '\r')
-    // The delegation rows report the LAST-KNOWN state and claim no [current],
-    // and the Manage action is NOT offered (the picker would refuse anyway).
-    assert.match(h.view(), /Subagent allowed models/u, `${readiness}: the row stays reachable`)
-    await openRowInAgent(h, 'Subagent allowed models')
-    await key(h, '\r')
-    assert.doesNotMatch(h.view(), /Manage allowed models…/u,
-      `${readiness}: a non-current section offers no Manage action:\n${h.view()}`)
-    assert.doesNotMatch(h.view(), /Provider One/u, `${readiness}: the picker never mounts`)
-    // Back to the rows level before walking to the toggle.
-    await key(h, '\x1b')
-    await openRowInAgent(h, 'Subagent model selection')
-    await key(h, '\r') // its Detail cannot open a choice with no candidates
-    const view = h.view()
-    assert.match(view, /No candidate is available for this setting right now\./u,
-      `${readiness}: a non-current section offers NO confirmable candidate:\n${view}`)
-    assert.doesNotMatch(view, /\[current\]/u, `${readiness}: no [current] chip on an unconfirmed value`)
-    assert.doesNotMatch(view, /Enter confirm/u, `${readiness}: no confirm affordance is advertised`)
-    h.dispose()
-  }
 })
 
 test('the default permission and shell policy rows offer no candidate on a non-ready backend', async () => {
@@ -5865,7 +5696,8 @@ test('a narrow Account deeplink → rail-browse About reads nothing; Enter reads
       acpStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined },
-      subagentModelSelection: { available: () => false },
+      subagentLimits: { read: () => ({ kind: 'unavailable', reason: 'not mounted' }) },
+      subagentModelSelection: { read: () => ({ kind: 'unavailable', reason: 'not mounted' }) },
       web: { available: () => false },
       credentials: { available: () => false, recordsSupported: () => false },
       providers: { available: () => false },

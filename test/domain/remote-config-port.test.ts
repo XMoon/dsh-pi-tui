@@ -87,7 +87,6 @@ interface FakeState {
 type EventListener = (...args: unknown[]) => void
 
 const TUI_NS = 'tui-app'
-const SUBAGENT_NS = 'subagent-model-selection-settings'
 const WEB_NS = 'web'
 const WEB_API_NS = 'web-deepseek-api'
 const WEB_DEFAULTS = {
@@ -907,53 +906,8 @@ test('presetDefault falls back to the roster default and round-trips the saved v
   assert.equal(port.presetDefault.get(), 'alpha')
 })
 
-test('subagent model selection validates, writes the official section, and rolls back a failed write', async () => {
-  const { port, state } = createBackend(current => {
-    current.namespaces.set(SUBAGENT_NS, {
-      ns: SUBAGENT_NS,
-      value: { enabled: false, allowedModels: [] },
-      revision: 1,
-    })
-  })
-  await port.describe()
-  assert.equal(port.subagentModelSelection.available(), true)
-  assert.deepEqual(port.subagentModelSelection.get(), { enabled: false, allowedModels: [] })
-
-  await assert.rejects(
-    () => port.subagentModelSelection.set({ enabled: true, allowedModels: [] }),
-    /requires at least one allowed model/,
-  )
-  await assert.rejects(
-    () => port.subagentModelSelection.set({ enabled: false, allowedModels: [{ provider: '', model: 'm' }] }),
-    /non-empty provider and model ids/,
-  )
-  await assert.rejects(
-    () => port.subagentModelSelection.set({
-      enabled: false,
-      allowedModels: [{ provider: 'p', model: 'm' }, { provider: 'p', model: 'm' }],
-    }),
-    /repeats route "p\/m"/,
-  )
-
-  await port.subagentModelSelection.set({ enabled: true, allowedModels: [{ provider: 'p', model: 'm' }] })
-  assert.deepEqual(state.mutateCalls[state.mutateCalls.length - 1], {
-    ns: SUBAGENT_NS,
-    ops: [
-      { op: 'set', path: ['enabled'], value: true },
-      { op: 'set', path: ['allowedModels'], value: [{ provider: 'p', model: 'm' }] },
-    ],
-    revision: 1,
-  })
-  assert.deepEqual(port.subagentModelSelection.get(), { enabled: true, allowedModels: [{ provider: 'p', model: 'm' }] })
-
-  // A failed Host write must leave the authoritative state intact.
-  state.mutateFailure = { code: 'settings/rejected', message: 'refused' }
-  await assert.rejects(
-    () => port.subagentModelSelection.set({ enabled: true, allowedModels: [{ provider: 'q', model: 'n' }] }),
-    /settings\.mutate\(subagent-model-selection-settings\) failed: refused/,
-  )
-  assert.deepEqual(port.subagentModelSelection.get(), { enabled: true, allowedModels: [{ provider: 'p', model: 'm' }] })
-})
+// Typed subagent section behavior is covered by the owner-layer
+// test/runtime/remote/config-subagent-remote.test.ts suite.
 
 /* ------------------------------------------------------------------------- *
  * Footer trust / custom items (USER layer only).
@@ -1561,28 +1515,8 @@ test('a committed write whose post-settlement refresh fails is not a refusal —
   assert.equal(port.tuiSettings!.get().theme, external, 'which already carries the requested value')
   state.mutateFailure = undefined
 
-  // NEGATIVE CONTROL: a direct `mutate` consumer keeps the FAILURE. Its caller
-  // re-reads the mirror and would otherwise present a last-known value as the
-  // committed one (the subagent model-selection toggle does exactly that).
-  const subagent = createBackend(current => {
-    current.namespaces.set(SUBAGENT_NS, {
-      ns: SUBAGENT_NS,
-      value: { enabled: false, allowedModels: [] },
-      revision: 1,
-    })
-  })
-  await subagent.port.describe()
-  subagent.state.describeFailure = { code: 'gateway/unavailable', message: 'offline again' }
-  await assert.rejects(
-    async () => {
-      await subagent.port.subagentModelSelection.set({
-        enabled: true,
-        allowedModels: [{ provider: 'smoke', model: 'smoke-model' }],
-      })
-    },
-    /settings\.describe failed/u,
-    'the rereading consumer must not treat a stale snapshot as a committed write',
-  )
+  // Subagent accepted writes with unreadable post-settlement snapshots have
+  // their own typed outcome/readback regression in config-subagent-remote.test.ts.
 })
 
 test('an empty replace diff is a no-op only once the mirror is current', async () => {

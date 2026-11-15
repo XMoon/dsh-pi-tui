@@ -45,7 +45,9 @@ import { runDetached, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { color } from '../theme/runtime.ts'
 import { themeDisplayName as themeDisplayNameOf } from '../pickers/theme-menu.ts'
-import { SubagentModelAllowlistPicker, allowlistSummary, lastRouteWhileEnabled } from '../pickers/subagent-model-menu.ts'
+import { allowlistSummary } from '../pickers/subagent-model-menu.ts'
+import { SubagentSettingsController } from '../../app/command/subagent-settings.ts'
+import { SubagentSettingsPage } from '../panels/subagent-settings-page.ts'
 import { resolveThemeSelection, themePickerRows } from '../../app/surface/theme-selection.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
 import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings, type WebStartupPreferenceState, type BackendStartupPreferenceState, type PublicBackendValue, type AcpStartupPreferenceState } from '../../runtime/config-port.ts'
@@ -162,7 +164,6 @@ const TERMINAL_PROGRESS_CANDIDATES = ['9;4+7501', '9;4', '7501', 'off'] as const
  *  bypass fallback). The default-permission roster is NOT a constant: its
  *  candidates are the Host's own advertised preset ids, in Host order. */
 const APPROVAL_CANDIDATES = ['ask', 'never'] as const
-const SUBAGENT_SELECTION_CANDIDATES = ['off', 'on'] as const
 const LOCAL_SHELL_SANDBOX_CANDIDATES = ['bypass', 'sandbox'] as const
 
 /** C2-R5: the Footer page's native-mode candidates, in their frozen order. The
@@ -1111,155 +1112,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     readonly initialSpecialist?: import('../panels/settings-workspace-panel.ts').SettingsWorkspaceSpecialistRoute
   }
 
-  /**
-   * C2-R3: the ONE official-section write queue of this command owner.
-   *
-   * The official `subagent-model-selection` section is ONE stored value with TWO
-   * halves, and every surface (the embedded allowlist picker and the workspace
-   * toggle) edits only ONE half per user action. A queue that merely serialized
-   * whole-section payloads captured BEFORE their turn would let an earlier
-   * intent be erased by a later payload built from a stale snapshot — the exact
-   * "a slow earlier write lands after a newer one" failure. Each queued item is
-   * therefore an INTENT over ONE half,
-   * and its payload is rebuilt from a FRESH official read INSIDE the queue,
-   * right before the write:
-   *  - a route edit replaces the allowlist and keeps the CURRENT `enabled`;
-   *  - an enabled edit sets the flag and keeps the CURRENT routes.
-   * It is a serialization + rebase barrier, not a settings authority: the
-   * official section stays the only stored value and each caller keeps its own
-   * real settlement.
-   */
-  interface OfficialSectionState {
-    readonly enabled: boolean
-    readonly allowedModels: readonly import('../../runtime/config-port.ts').SubagentAllowedModelRoute[]
-  }
-  let subagentSectionTail: Promise<void> = Promise.resolve()
-  const enqueueSubagentSectionWrite = <T>(write: () => Promise<T>): Promise<T> => {
-    // The tail absorbs the failure so one rejection can never lock the queue;
-    // the caller's own promise keeps the REAL settlement.
-    const turn = subagentSectionTail.then(write, write)
-    subagentSectionTail = turn.then(() => undefined, () => undefined)
-    return turn
-  }
-  /** Whether the official section may be written RIGHT NOW: the section must be
-   *  available AND the backend must vouch for its values. A stale/unavailable
-   *  mirror keeps readable last-known values, so a write built from it would
-   *  overwrite whatever the Host changed while this Client was not current. */
-  const subagentSectionWritable = (): boolean =>
-    runner.config.subagentModelSelection.available() && runner.config.configReadiness() === 'ready'
-  /**
-   * Why the official section could not be written when its turn came. A
-   * PRECONDITION refusal is the user's own setup problem (navigate + guide);
-   * every other cause is a real failure the caller must surface.
-   */
-  type OfficialSectionRefusal =
-    | { readonly kind: 'empty-allowlist' }
-    | { readonly kind: 'last-route-while-enabled' }
-    | { readonly kind: 'not-writable'; readonly reason: string }
-    | { readonly kind: 'unreadable'; readonly reason: string }
-  type OfficialSectionEditOutcome =
-    | { readonly kind: 'written'; readonly section: OfficialSectionState }
-    | { readonly kind: 'refused'; readonly refusal: OfficialSectionRefusal }
-
-  /** The current section, or why it cannot be used as a base right now. */
-  const readOfficialSection = (
-    section: import('../../runtime/config-port.ts').SubagentModelSelectionConfig,
-  ): { readonly section?: OfficialSectionState; readonly refusal?: OfficialSectionRefusal } => {
-    // The CAPABILITY is re-proved at the write's own turn, not only when the
-    // user acted: a section that became unavailable while this intent waited
-    // must not be written from whatever `get()` would answer then.
-    if (!section.available()) {
-      return { refusal: { kind: 'not-writable', reason: 'the official subagent settings are unavailable on this backend' } }
-    }
-    const readiness = runner.config.configReadiness()
-    if (readiness !== 'ready') {
-      // A stale/unavailable backend keeps readable LAST-KNOWN values: writing
-      // them back would overwrite whatever the Host changed while this Client
-      // was not current.
-      return { refusal: { kind: 'not-writable', reason: `the configuration is ${readiness}` } }
-    }
-    try {
-      const latest = section.get()
-      return {
-        section: {
-          enabled: latest.enabled,
-          allowedModels: latest.allowedModels.map(route => ({ ...route })),
-        },
-      }
-    } catch (error) {
-      // An UNREADABLE official section is never a usable base and never a
-      // verifiable result: the caller must surface the failure.
-      return { refusal: { kind: 'unreadable', reason: safeErrorMessage(error) } }
-    }
-  }
-
-  /**
-   * Queue ONE section edit. `rebase` runs INSIDE the queue against the FRESH
-   * official section and must change ONLY the half this intent owns, copying the
-   * other half verbatim. Returning `undefined` refuses the edit with ZERO writes
-   * for a caller-declared reason (the setup precondition).
-   *
-   * The outcome is EXPLICIT about why nothing was written: a non-writable
-   * backend and an unreadable section are NOT successful settlements, so no
-   * picker can paint a silent rollback as if its intent had committed.
-   */
-  const queueSubagentSectionEdit = (
-    rebase: (fresh: OfficialSectionState) => OfficialSectionState | undefined,
-    refusalOf?: (fresh: OfficialSectionState) => OfficialSectionRefusal | undefined,
-  ): Promise<OfficialSectionEditOutcome> => enqueueSubagentSectionWrite(async () => {
-    const section = runner.config.subagentModelSelection
-    const base = readOfficialSection(section)
-    if (base.refusal !== undefined) return { kind: 'refused', refusal: base.refusal }
-    const fresh = base.section!
-    const declared = refusalOf?.(fresh)
-    if (declared !== undefined) return { kind: 'refused', refusal: declared }
-    const payload = rebase(fresh)
-    if (payload === undefined) return { kind: 'refused', refusal: { kind: 'empty-allowlist' } }
-    await section.set(payload)
-    return { kind: 'written', section: payload }
-  })
-  /** The narrow queue-backed section adapter the existing picker consumes. A
-   *  refusal REJECTS: the picker must never treat "nothing was written" as a
-   *  successful settlement. */
-  const queuedSubagentSelection = (): import('../../runtime/config-port.ts').SubagentModelSelectionConfig => ({
-    available: () => subagentSectionWritable(),
-    get: () => runner.config.subagentModelSelection.get(),
-    set: async (value) => {
-      const outcome = await queueSubagentSectionEdit(fresh => ({
-        enabled: fresh.enabled,
-        allowedModels: value.allowedModels.map(route => ({ ...route })),
-      }))
-      if (outcome.kind === 'written') return
-      throw new Error(refusalMessage(outcome.refusal))
-    },
-  })
-  /**
-   * Apply ONE route intent against the section the queue really holds when the
-   * write's turn comes. Two picker instances therefore compose instead of
-   * overwriting each other: an add keeps every route the section already has,
-   * a remove drops exactly one `(provider, model)` pair.
-   */
-  const queuedRouteIntent = async (
-    route: import('../../runtime/config-port.ts').SubagentAllowedModelRoute,
-    direction: 'add' | 'remove',
-  ): Promise<void> => {
-    const outcome = await queueSubagentSectionEdit(
-      fresh => ({
-        enabled: fresh.enabled,
-        allowedModels: applyRouteIntent(fresh.allowedModels, route, direction),
-      }),
-      // Removing the LAST route of an ENABLED section would leave the official
-      // section invalid. This is decided HERE, from the FRESH section, in FIFO
-      // order — a locally-decided version would refuse an operation that a
-      // queued `enabled:false` makes legal.
-      fresh => lastRouteWhileEnabled(fresh.enabled, fresh.allowedModels, route)
-        ? { kind: 'last-route-while-enabled' }
-        : undefined,
-    )
-    if (outcome.kind === 'written') return
-    throw new Error(refusalMessage(outcome.refusal))
-  }
-
   const openSettingsWorkspaceWith = (spec: WorkspaceOpenSpec): import('../../tui-app.ts').SettingsWorkspaceHandle => {
     // C2-R5: a typed deeplink NEVER guesses its row. Validate the exact pair
     // BEFORE the screen lease is taken, so a mismatched request fails as a real
@@ -1380,41 +1232,27 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         },
         createModelsPage,
         createAccountPage,
-        // C2-R3: the ONE embedded specialist page — the EXISTING subagent
-        // allowlist picker mounted in this same workspace body. It is created
-        // only by an explicit Manage/Enter, reads the OFFICIAL section and the
-        // official model directory, and writes through the SAME serialized
-        // section queue as the workspace toggle.
-        createSubagentAllowlistPicker: (done, onAuthoritativeChange) => {
-          // The section must be AVAILABLE *and* CURRENT: opening a picker over a
-          // stale mirror would let the user toggle routes that can never commit.
-          if (!subagentSectionWritable() || !runner.catalog.models.available()) return undefined
-          return new SubagentModelAllowlistPicker({
-            selection: queuedSubagentSelection(),
-            // Each toggle submits ONLY the pair it changed, applied to the
-            // section the queue holds at write time (two picker instances compose).
-            routeIntent: {
-              add: route => queuedRouteIntent(route, 'add'),
-              remove: route => queuedRouteIntent(route, 'remove'),
-            },
-            catalog: runner.catalog.models,
-            notify: (message, kind) => app.notify(message, kind),
+        createSubagentSettingsPage: (done, onAuthoritativeChange) => {
+          const controller = new SubagentSettingsController({
+            limits: runner.config.subagentLimits,
+            selection: runner.config.subagentModelSelection,
             requestRender: () => app.requestRender(),
-            diag: runner.diag,
-            done: () => { done() },
-            // A settlement that lands after the user closed the picker still
-            // refreshes the Agent row facts of the workspace they are now
-            // looking at: the outer surface re-reads the OFFICIAL section, so
-            // the picker's display string is never trusted as the fact.
-            summarize: () => { onAuthoritativeChange() },
-            runOwned: (label, task, options) => {
-              runOwned(label, task, {
-                diag: runner.diag,
-                sessionId: () => runner.currentSessionId,
-                ...options,
-              })
+            onAuthoritativeChange,
+            runOwned: (label, task) => {
+              runOwned(label, task, { diag: runner.diag, sessionId: () => runner.currentSessionId })
             },
           })
+          const page = new SubagentSettingsPage({
+            controller,
+            catalog: runner.catalog.models,
+            requestRender: () => app.requestRender(),
+            done,
+            runOwned: (label, task, options) => {
+              runOwned(label, task, { diag: runner.diag, sessionId: () => runner.currentSessionId, ...options })
+            },
+          })
+          controller.start()
+          return page
         },
         // C2-R4: the ONE embedded Web Search / Fetch page, mounted in this same
         // workspace body on the Tools row's explicit activation. The page reads
@@ -2539,7 +2377,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         case 'terminal-progress': return commitTerminalProgress(request.value)
         case 'approval': return commitApproval(request.value, approvalScope)
         case 'default-permission': return commitDefaultPermission(request.value)
-        case 'subagent-model-selection': return commitSubagentSelection(request.value)
         case 'local-shell-sandbox': return commitLocalShellSandbox(request.value)
         case 'footer-mode': return commitFooterMode(request.value)
         default: {
@@ -3061,59 +2898,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * shell routing, the permission presets or the Host sandbox default is
    * touched here, and no local switch is introduced.
    */
-  /**
-   * The official section for READ-ONLY projection, or `undefined` when the
-   * authority cannot answer. Callers must treat `undefined` as "no rows", never
-   * as the shipped default: a fabricated `off`/empty section handed to a writer
-   * would erase routes the Host still stores.
-   */
-  const readSubagentSectionOrUndefined = (): OfficialSectionState | undefined => {
-    // An UNAVAILABLE section answers with the shipped default rather than
-    // throwing (the Direct adapter's absent-service shape), and that default is
-    // NOT a stored value: it may not become a rollback target, a write base or a
-    // saved summary.
-    if (!runner.config.subagentModelSelection.available()) return undefined
-    try {
-      const latest = runner.config.subagentModelSelection.get()
-      return {
-        enabled: latest.enabled,
-        allowedModels: latest.allowedModels.map(route => ({ ...route })),
-      }
-    } catch {
-      return undefined
-    }
-  }
-
-  /** Whether two official allowlists carry the SAME ordered (provider,model)
-   *  pairs. The pair is the only route identity: a display name never compares. */
-  /** The human-readable reason of one section refusal. */
-  const refusalMessage = (refusal: OfficialSectionRefusal): string => {
-    switch (refusal.kind) {
-      case 'empty-allowlist': return 'Select at least one Subagent allowed model before enabling model selection.'
-      case 'last-route-while-enabled': return 'disable subagent model selection before removing the last route'
-      case 'not-writable': return `${refusal.reason}; the official subagent settings were not changed`
-      case 'unreadable': return `the official subagent settings could not be read (${refusal.reason}); nothing was changed`
-    }
-  }
-
-  /** Apply one route intent to a FRESH route list (the queue's rebase step). */
-  const applyRouteIntent = (
-    fresh: readonly import('../../runtime/config-port.ts').SubagentAllowedModelRoute[],
-    route: import('../../runtime/config-port.ts').SubagentAllowedModelRoute,
-    direction: 'add' | 'remove',
-  ): readonly import('../../runtime/config-port.ts').SubagentAllowedModelRoute[] => {
-    const without = fresh.filter(existing => !(existing.provider === route.provider && existing.model === route.model))
-    return direction === 'remove'
-      ? without
-      : [...without, { provider: route.provider, model: route.model }]
-  }
-
-  const sameAllowlist = (
-    left: readonly import('../../runtime/config-port.ts').SubagentAllowedModelRoute[],
-    right: readonly import('../../runtime/config-port.ts').SubagentAllowedModelRoute[],
-  ): boolean => left.length === right.length
-    && left.every((route, index) => route.provider === right[index]?.provider && route.model === right[index]?.model)
-
   const commitLocalShellSandbox = (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
     if (!isCandidateOf(value, LOCAL_SHELL_SANDBOX_CANDIDATES)) {
       return Promise.resolve({ outcome: 'not-saved', reason: `"${value}" is not a user shell sandbox policy candidate` })
@@ -3375,109 +3159,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       outcome: 'not-saved',
       reason: `the write reported success, but the Host permission default reads ${readback}`,
     }
-  }
-
-  /**
-   * C2-R3: the official subagent model-selection toggle. It runs INSIDE the one
-   * section write queue, so a pending picker write can never be reordered. The
-   * fresh section read inside the queue is what decides the payload: enabling
-   * with ZERO allowed routes is refused with NO official write at all and the
-   * typed follow-up sends the user to the allowlist row. Disabling always keeps
-   * every saved route.
-   */
-  const commitSubagentSelection = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
-    if (!isCandidateOf(value, SUBAGENT_SELECTION_CANDIDATES)) {
-      return { outcome: 'not-saved', reason: `"${value}" is not a subagent model selection candidate` }
-    }
-    const desired = value === 'on'
-    return enqueueSubagentSectionWrite(async (): Promise<SettingsWorkspaceCommitOutcome> => {
-      const section = runner.config.subagentModelSelection
-      if (!section.available()) {
-        return { outcome: 'not-saved', reason: 'the official subagent model-selection section is unavailable on this backend' }
-      }
-      // A stale/unavailable backend keeps readable LAST-KNOWN values: writing
-      // them back would overwrite whatever the Host changed while this Client
-      // was not current, so the commit is refused BEFORE any dispatch.
-      const readiness = runner.config.configReadiness()
-      if (readiness !== 'ready') {
-        return {
-          outcome: 'not-saved',
-          reason: `the configuration is ${readiness}; the official subagent section could not be confirmed current, so it was not changed`,
-        }
-      }
-      let latest: OfficialSectionState
-      try {
-        latest = section.get()
-      } catch (error) {
-        return { outcome: 'not-saved', reason: `the official subagent model-selection section could not be read: ${safeErrorMessage(error)}` }
-      }
-      if (desired && latest.allowedModels.length === 0) {
-        // Zero official writes: the setup precondition is stated where the user
-        // can still read it (the app notice survives the navigation) and the
-        // ONE typed follow-up moves the selection to the allowlist row.
-        const reason = 'Select at least one Subagent allowed model before enabling model selection.'
-        app.notify(reason, 'info')
-        return { outcome: 'not-saved', reason, followUpRowId: 'subagent-model-allowlist' }
-      }
-      // This intent owns the `enabled` half ONLY: the route list comes from the
-      // FRESH read made above (inside the queue), so a picker write that landed
-      // while this request waited is preserved instead of being overwritten by
-      // a stale snapshot.
-      const base: OfficialSectionState = {
-        enabled: latest.enabled,
-        allowedModels: latest.allowedModels.map(route => ({ ...route })),
-      }
-      try {
-        await section.set({ enabled: desired, allowedModels: base.allowedModels.map(route => ({ ...route })) })
-      } catch (error) {
-        // Attribute from a fresh official read: only a section still carrying
-        // the BASE value refutes THIS request. An unreadable readback cannot
-        // attribute anything, so the outcome stays indeterminate.
-        let readback: OfficialSectionState
-        try {
-          if (!section.available()) throw new Error('the section is no longer available')
-          readback = section.get()
-        } catch {
-          return {
-            outcome: 'indeterminate',
-            reason: `${safeErrorMessage(error)}; the official section could not be re-read, so the outcome cannot be attributed`,
-          }
-        }
-        if (readback.enabled === desired && sameAllowlist(readback.allowedModels, base.allowedModels)) {
-          return {
-            outcome: 'indeterminate',
-            reason: `the write failed (${safeErrorMessage(error)}), but the official section already reads this selection`,
-          }
-        }
-        if (readback.enabled === base.enabled && sameAllowlist(readback.allowedModels, base.allowedModels)) {
-          return { outcome: 'not-saved', reason: safeErrorMessage(error) }
-        }
-        return {
-          outcome: 'indeterminate',
-          reason: `${safeErrorMessage(error)}; the official section no longer reads the value this request started from either`,
-        }
-      }
-      // Save/verify means BOTH halves of the section: the toggle AND the list.
-      // A THROWING readback cannot refute the commit — the write DID return
-      // success, so the honest verdict is `unverified`, never `not-saved`.
-      let readback: OfficialSectionState
-      try {
-        if (!section.available()) throw new Error('the section is no longer available')
-        readback = section.get()
-      } catch (error) {
-        return {
-          outcome: 'unverified',
-          reason: `the write reported success, but the official section could not be re-read: ${safeErrorMessage(error)}`,
-        }
-      }
-      if (readback.enabled === desired && sameAllowlist(readback.allowedModels, base.allowedModels)) {
-        return { outcome: 'verified' }
-      }
-      return {
-        outcome: 'not-saved',
-        reason: `the write reported success, but the official section reads enabled=${readback.enabled ? 'on' : 'off'} with ${readback.allowedModels.length} allowed ${readback.allowedModels.length === 1 ? 'route' : 'routes'}`,
-      }
-    })
   }
 
   const commitDisplayPreset = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
@@ -3834,66 +3515,25 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         persisted: defaultPermission ?? 'unknown',
       },
     }]
-    // DELEGATION. BOTH rows appear together, and only while the OFFICIAL
-    // section AND the model catalog are available (the existing availability
-    // contract): the allowlist is the setup dependency of the toggle.
-    const subagentAvailable = runner.config.subagentModelSelection.available() && runner.catalog.models.available()
-    // An UNREADABLE official section is not a value: the rows are withheld
-    // instead of being painted from a fabricated `off`/empty default (writing
-    // that back would erase the Host's stored routes).
-    const subagentSelection = subagentAvailable ? readSubagentSectionOrUndefined() : undefined
-    // The section's VALUES must be current for either row to claim them: a
-    // stale/unavailable backend keeps readable LAST-KNOWN values, which are
-    // reported as such and can never be confirmed into a write.
-    const subagentFreshness: SettingsWorkspaceFreshness = configReadiness === 'ready'
-      ? 'ready'
-      : configReadiness === 'stale' ? 'last-known' : 'unavailable'
-    const subagentWritable = subagentFreshness === 'ready'
-    const subagentRows: SettingsWorkspaceRow[] = subagentSelection === undefined ? [] : [{
-      // The specialist page reaches the ONE official section through the SAME
-      // serialized write queue as the toggle: this row deliberately has NO
-      // `edit` (a scalar candidate list would be a second writer).
-      id: 'subagent-model-allowlist',
-      category: 'agent',
-      label: 'Subagent allowed models',
-      summary: allowlistSummary(subagentSelection.allowedModels),
-      scope: 'Official subagent model-selection section',
-      freshness: subagentFreshness,
-      description: 'The child LLM routes the official subagent tool may pick from in a NEW session. '
-        + 'Manage opens the searchable official model directory in this same workspace; every toggle writes the '
-        + 'official settings section. Saved routes stay removable even when the current catalog does not list them. '
-        + 'A running Agent keeps its existing tool schema. Persisted: the official subagent-model-selection section.',
-      specialist: 'subagent-allowlist',
-      // Only a CURRENT section may open the picker: a stale mirror would let the
-      // user toggle routes that can never commit.
-      specialistAvailable: subagentWritable,
-    }, {
-      id: 'subagent-model-selection',
-      category: 'agent',
-      label: 'Subagent model selection',
-      summary: subagentSelection.enabled ? 'on' : 'off',
-      value: subagentSelection.enabled ? 'on' : 'off',
-      scope: 'Official subagent model-selection section',
-      freshness: subagentFreshness,
-      description: 'Whether a NEW session\'s subagent tool may pick a child provider/model from the allowed routes. '
-        + 'Changes new sessions only; the running session keeps its existing tool schema. '
-        + 'Enabling requires at least one allowed route; disabling keeps the saved routes. '
-        + 'Persisted: the official subagent-model-selection section.',
-      edit: {
-        field: 'subagent-model-selection',
-        primary: 'persisted',
-        // A non-current backend offers NO confirmable candidate: a write built
-        // from last-known values would overwrite whatever the Host changed while
-        // this Client was not current.
-        options: subagentWritable ? SUBAGENT_SELECTION_CANDIDATES.map(value => ({
-          value,
-          label: value,
-          available: true,
-          current: (subagentSelection.enabled ? 'on' : 'off') === value,
-        })) : [],
-        runtime: `${subagentSelection.allowedModels.length} allowed ${subagentSelection.allowedModels.length === 1 ? 'route' : 'routes'} · applies to new sessions`,
-        persisted: subagentSelection.enabled ? 'on' : 'off',
-      },
+    // Both official sections remain independently readable inside one page.
+    // A missing catalog or one unavailable namespace never hides the other.
+    const subagentLimits = runner.config.subagentLimits.read()
+    const subagentSelection = runner.config.subagentModelSelection.read()
+    const limitsSummary = subagentLimits.kind === 'ready'
+      ? `Limits: depth ${subagentLimits.effective.maxDepth}, parallelism ${subagentLimits.effective.maxActiveSubagents}`
+      : `Limits: ${subagentLimits.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`
+    const selectionSummary = subagentSelection.kind === 'ready'
+      ? `Model selection: ${subagentSelection.effective.enabled ? 'On' : 'Off'} · ${allowlistSummary(subagentSelection.effective.allowedModels)}`
+      : `Model selection: ${subagentSelection.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`
+    const subagentRows: SettingsWorkspaceRow[] = [{
+      id: 'subagent-settings', category: 'agent', label: 'Subagent settings',
+      summary: `${limitsSummary} · ${selectionSummary}`,
+      scope: 'Host profile · official settings',
+      freshness: configReadiness === 'ready' ? 'ready' : configReadiness === 'stale' ? 'last-known' : 'unavailable',
+      description: 'Stage subagent limits, model selection and allowed routes in one page, then Save. '
+        + 'The two official settings sections save independently. Limits affect later delegation; '
+        + 'model selection is sampled only by new top-level Sessions.',
+      specialist: 'subagent-settings',
     }]
     // EXECUTION POLICY. The RAW document value is the primary fact; the
     // consumer's bypass fallback is stated separately so a missing/invalid raw

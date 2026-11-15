@@ -564,6 +564,7 @@ async function mountSettingsWorkspace(
     readonly tuiSettings: unknown
     readonly footerCustomItems: unknown
     readonly permissions: unknown
+    readonly subagentLimits: unknown
     readonly subagentModelSelection: unknown
     /** S2/PR-B: the Web provider sub-domain (the Remote adapter's static
      *  unavailable/refuse implementation) and the credential surface the Web
@@ -663,6 +664,7 @@ async function mountSettingsWorkspace(
       configReadiness: () => config.configReadiness(),
       footerCustomItems: config.footerCustomItems,
       permissions: config.permissions,
+      subagentLimits: config.subagentLimits,
       subagentModelSelection: config.subagentModelSelection,
       web: config.web,
       // Preserve the prototype-owned availability method: the settings-page

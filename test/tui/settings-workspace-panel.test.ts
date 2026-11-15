@@ -372,14 +372,14 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       },
     },
     {
-      id: 'subagent-model-allowlist',
+      id: 'subagent-settings',
       category: 'agent',
-      label: 'Subagent allowed models',
-      summary: '1 route',
-      scope: 'Official subagent model-selection section',
+      label: 'Subagent settings',
+      summary: 'Limits: depth 1, parallelism 8 · Model selection: Off · 0 routes',
+      scope: 'Host profile · official settings',
       freshness: 'ready',
-      description: 'the official allowed child routes',
-      specialist: 'subagent-allowlist',
+      description: 'Stage subagent limits, model selection and allowed routes in one page, then Save.',
+      specialist: 'subagent-settings',
     },
     {
       id: 'default-permission',
@@ -489,8 +489,7 @@ class FakePage implements SettingsAuthPage {
  * CURRENT page and only inside its own painted cells.
  */
 class FakeSpecialistPage implements EmbeddedSpecialistPage {
-  readonly title = 'Subagent allowed models'
-  readonly breadcrumbSuffix = 'Allowed models'
+  readonly title = 'Subagent settings'
   inputs: string[] = []
   presses: { readonly type: string; readonly x: number; readonly y: number }[] = []
   grants: number[] = []
@@ -662,7 +661,7 @@ function setup(options: {
   readonly snapshot?: () => SettingsWorkspaceSnapshot
   /** The LIVE extension directory seam (`SettingsWorkspaceSource.extensionDirectory`). */
   readonly directory?: () => { readonly revision: number; readonly count: number }
-  /** C2-R3: build the embedded subagent allowlist page for the Agent row. */
+  /** C2-R3: build the embedded single Subagent settings page for the Agent row. */
   readonly specialistPage?: boolean
   /** C2-R4: build the embedded Web Search / Fetch page for the Tools row. */
   readonly webPage?: boolean
@@ -752,10 +751,9 @@ function setup(options: {
       return page
     },
     ...options.specialistPage === true ? {
-      createSubagentAllowlistPicker: (done: () => void, onAuthoritativeChange: () => void) => {
+      createSubagentSettingsPage: (done: () => void, onAuthoritativeChange: () => void) => {
         specialistBuilds += 1
         const page = new FakeSpecialistPage()
-        // The picker's own close returns to the Agent rows (never a category).
         ;(page as unknown as { done: () => void }).done = done
         ;(page as unknown as { refresh: () => void }).refresh = () => {
           specialistRefreshes += 1
@@ -2183,7 +2181,7 @@ test('Agent has no legacy launcher while Input & Terminal ends on the Keyboard s
   plain(h)
   walkTo(h, 'agent')
   const agent = plain(h)
-  assert.match(agent, /Subagent allowed models|Default permission/u, 'the migrated Agent rows are painted')
+  assert.match(agent, /Subagent settings|Default permission/u, 'the migrated Agent rows are painted')
   assert.doesNotMatch(agent, /Agent settings…/u, 'Agent has no unmigrated field left, so it paints no launcher')
   assert.equal(h.closes(), 0, 'focusing the Agent rail closes nothing')
   assert.equal(h.commits(), 0, 'browsing never writes')
@@ -3130,19 +3128,21 @@ test('the extension Detail states the raw facts and the readonly / choice-mismat
   assert.match(detail, /Change…/u, 'a writable registration still offers its choice')
 })
 
-// ── C2-R3: the ONE embedded specialist page (subagent allowlist) ───────────
+// ── C2-R3: the ONE embedded Subagent settings page ─────────────────────────
 
-/** Walk the rail to Agent and its Rows level, then to the allowlist row. */
-const openAllowlistRow = (h: Harness): void => {
+/** Walk the rail to Agent and its Rows level, then to the single page row. */
+const openSubagentRow = (h: Harness): void => {
   walkTo(h, 'agent')
   h.panel.handleInput('\r') // rail -> rows
 }
 
-test('the specialist row mounts ONE embedded page inside the same workspace and delegates only to it', () => {
+test('the single Subagent settings row mounts ONE embedded page inside the same workspace and delegates only to it', () => {
   const h = setup({ specialistPage: true })
-  openAllowlistRow(h)
+  openSubagentRow(h)
   const rows = plain(h)
-  assert.match(rows, /Subagent allowed models/u, 'the allowlist row is painted')
+  assert.match(rows, /Subagent settings/u, 'the single page row is painted')
+  assert.doesNotMatch(rows, /Subagent allowed models|Subagent model selection/u,
+    'the two retired instant rows are gone')
   assert.equal(h.specialistBuilds(), 0, 'focusing the row never builds the page')
   h.panel.handleInput('\r') // rows -> detail (no choice for a specialist row)
   assert.equal(h.closes(), 0, 'entering the Detail never closes the workspace')
@@ -3153,13 +3153,13 @@ test('the specialist row mounts ONE embedded page inside the same workspace and 
   // The page owns the BODY: its own lines are painted and the hint is the
   // physical last row.
   const frame = plain(h)
-  assert.match(frame, /SPECIALIST HEADER/u, `the picker body is painted inside the workspace:\n${frame}`)
-  assert.match(frame, /\nspecialist hint\s*$/u, 'the picker hint becomes the ONE last-row bar')
-  assert.match(frame, /Settings · Agent · Subagent allowed models · Allowed models/u,
+  assert.match(frame, /SPECIALIST HEADER/u, `the page body is painted inside the workspace:\n${frame}`)
+  assert.match(frame, /\nspecialist hint\s*$/u, 'the page hint becomes the ONE last-row bar')
+  assert.match(frame, /Settings · Agent · Subagent settings/u,
     'the header states the sub-view identity')
-  // Keyboard goes to the picker only.
+  // Keyboard goes to the page only.
   h.panel.handleInput('x')
-  assert.deepEqual(page.inputs, ['x'], 'the picker owns the keyboard')
+  assert.deepEqual(page.inputs, ['x'], 'the page owns the keyboard')
   assert.equal(h.closes(), 0, 'a plain key never closes the workspace')
   // Entering again never builds a second page.
   h.panel.handleInput('\r')
@@ -3167,7 +3167,7 @@ test('the specialist row mounts ONE embedded page inside the same workspace and 
   assert.ok(page.grants.length > 0 && page.grants.every(grant => grant >= 1), 'the body granted at least one row')
 })
 
-test('the picker Esc returns to the Agent rows with a fresh official snapshot and never closes the workspace', () => {
+test('the page Esc returns to the Agent rows with a fresh official snapshot and never closes the workspace', () => {
   let reads = 0
   const h = setup({
     specialistPage: true,
@@ -3176,23 +3176,23 @@ test('the picker Esc returns to the Agent rows with a fresh official snapshot an
       return SNAPSHOT
     },
   })
-  openAllowlistRow(h)
+  openSubagentRow(h)
   h.panel.handleInput('\r')
   const page = h.specialistPages[0]!
   const before = reads
-  ;(page as unknown as { done: () => void }).done() // the picker's own Esc
-  assert.equal(h.closes(), 0, 'the picker Esc never closes the workspace')
+  ;(page as unknown as { done: () => void }).done() // the page's own Esc
+  assert.equal(h.closes(), 0, 'the page Esc never closes the workspace')
   assert.equal(page.disposed, true, 'the page is disposed exactly once')
   assert.ok(reads > before, 'returning re-reads the row authority')
-  assert.doesNotMatch(plain(h), /SPECIALIST HEADER/u, 'the picker body is gone')
-  assert.match(plain(h), /Settings · Agent · Subagent allowed models/u,
-    'the Agent row that opened the page owns the frame again')
+  assert.doesNotMatch(plain(h), /SPECIALIST HEADER/u, 'the page body is gone')
+  assert.match(plain(h), /Settings · Agent · Rows/u,
+    'closing the specialist returns to the single Subagent settings row list')
   assert.match(plain(h), /Rows \(2\)|\[Rows \(2\)\]/u, 'the rows pane is painted again')
 })
 
 test('a category change and a workspace teardown dispose the page; late callbacks never revive it', () => {
   const change = setup({ specialistPage: true })
-  openAllowlistRow(change)
+  openSubagentRow(change)
   change.panel.handleInput('\r')
   const page = change.specialistPages[0]!
   // A category change while the page is mounted disposes it. The mounted page
@@ -3204,7 +3204,7 @@ test('a category change and a workspace teardown dispose the page; late callback
   assert.doesNotMatch(plain(change), /SPECIALIST HEADER/u, 'the disposed page is never painted')
 
   const teardown = setup({ specialistPage: true })
-  openAllowlistRow(teardown)
+  openSubagentRow(teardown)
   teardown.panel.handleInput('\r')
   const last = teardown.specialistPages[0]!
   teardown.panel.dispose()
@@ -3227,7 +3227,7 @@ test('a row change while the page is mounting disposes the superseded instance',
       if (built === 1) (panel as unknown as { selectRow: (id: string) => void }).selectRow('default-permission')
     },
   })
-  openAllowlistRow(h)
+  openSubagentRow(h)
   h.panel.handleInput('\r')
   assert.equal(h.specialistBuilds(), 1, 'the factory really ran once')
   assert.equal(h.specialistPages[0]?.disposed, true, 'the superseded page was disposed instead of mounted')
@@ -3236,11 +3236,11 @@ test('a row change while the page is mounting disposes the superseded instance',
 
 test('a pointer gesture only resolves inside the painted page cells under the same frame revision', () => {
   const h = setup({ columns: 120, rows: 40, specialistPage: true })
-  openAllowlistRow(h)
+  openSubagentRow(h)
   h.panel.handleInput('\r')
   const page = h.specialistPages[0]!
   const frame = plain(h).split('\n')
-  const paneHeaderRow = frame.findIndex(line => line.includes('[Subagent allowed models]'))
+  const paneHeaderRow = frame.findIndex(line => line.includes('[Subagent settings]'))
   assert.ok(paneHeaderRow >= 0, `the specialist pane header is painted:\n${frame.join('\n')}`)
   // The page's own FIRST body line paints one row below the pane header.
   const bodyRow = paneHeaderRow + 1
@@ -3267,103 +3267,47 @@ test('a pointer gesture only resolves inside the painted page cells under the sa
   assert.deepEqual(page.presses, [], 'chrome cells never reach the embedded page')
 })
 
-test('the specialist page is refused on a frame with no body row and the row still paints', () => {
+test('the specialist page mounts with one body row and is never built without a body', () => {
   const h = setup({ columns: 120, rows: 3, specialistPage: true })
-  openAllowlistRow(h)
+  openSubagentRow(h)
   const frame = plain(h)
   assert.match(frame, /Settings · Agent · Rows/u, 'the rows level still paints at the floor')
   h.panel.handleInput('\r')
-  // Below the body floor the root admits no activation: no page is built.
-  assert.equal(h.specialistBuilds(), 0, 'an invisible body never starts the picker')
+  assert.equal(h.specialistBuilds(), 1, 'one real content row may mount the specialist page')
+
+  const floor = setup({ columns: 120, rows: 2, specialistPage: true })
+  openSubagentRow(floor)
+  floor.panel.handleInput('\r')
+  assert.equal(floor.specialistBuilds(), 0, 'an invisible body never starts the page')
 })
 
-test('an 80x24 frame still reaches the Agent rows and the picker grant stays inside the body', () => {
+test('an 80x24 frame still reaches the Agent rows and the page grant stays inside the body', () => {
   const h = setup({ columns: 80, rows: 24, specialistPage: true })
-  openAllowlistRow(h)
+  openSubagentRow(h)
   h.panel.handleInput('\r')
   // The grant is set by the FIRST frame that paints the page.
   plain(h)
   const page = h.specialistPages[0]!
-  assert.equal(page.disposed, false, 'a regular short frame mounts the picker')
+  assert.equal(page.disposed, false, 'a regular short frame mounts the page')
   // The grant is the body + the ONE physical action row, never the whole
   // terminal: the chrome rows are not handed to the child.
   const grant = page.grants.at(-1) ?? 0
   const frame = plain(h).split('\n')
   assert.ok(frame.length <= 24, `the frame never exceeds the terminal rows:\n${frame.join('\n')}`)
-  assert.ok(grant >= 1 && grant < 24, `the picker grant is bounded by the body, got ${grant}`)
-  assert.match(frame.at(-1) ?? '', /specialist hint/u, 'the picker hint owns the ONE last row')
+  assert.ok(grant >= 1 && grant < 24, `the page grant is bounded by the body, got ${grant}`)
+  assert.match(frame.at(-1) ?? '', /specialist hint/u, 'the page hint owns the ONE last row')
 })
 
-test('a picker write that settles AFTER the picker closed still refreshes the Agent row summary', () => {
-  let sections = ['0 routes']
-  let reads = 0
-  const h = setup({
-    specialistPage: true,
-    snapshot: () => {
-      reads += 1
-      return {
-        ...SNAPSHOT,
-        rows: SNAPSHOT.rows.map(row => row.id === 'subagent-model-allowlist'
-          ? { ...row, summary: sections[sections.length - 1]! }
-          : row),
-      }
-    },
-  })
-  openAllowlistRow(h)
-  h.panel.handleInput('\r') // mount the picker
-  const page = h.specialistPages[0]!
-  const readsBefore = reads
-  ;(page as unknown as { done: () => void }).done() // the picker closes FIRST
-  assert.ok(reads > readsBefore, 'closing re-reads the facts once')
-  assert.match(plain(h), /0 routes/u, 'the row still shows the pre-write summary')
-
-  // The write settles AFTER the close: the authoritative summary CHANGED, and
-  // the live workspace must show it instead of staying stale.
-  sections = [...sections, '1 route']
-  const readsAfterClose = reads
-  ;(page as unknown as { refresh: () => void }).refresh()
-  assert.ok(reads > readsAfterClose, 'a late settlement re-reads the row authority')
-  assert.match(plain(h), /1 route/u, `the row converges after the late settle:\n${plain(h)}`)
-  assert.doesNotMatch(plain(h), /SPECIALIST HEADER/u, 'the closed picker is never repainted')
-})
-
-test('a late settlement after the WORKSPACE was disposed changes nothing', () => {
-  let sections = ['0 routes']
-  let renders = 0
-  const h = setup({
-    specialistPage: true,
-    snapshot: () => ({
-      ...SNAPSHOT,
-      rows: SNAPSHOT.rows.map(row => row.id === 'subagent-model-allowlist'
-        ? { ...row, summary: sections[sections.length - 1]! }
-        : row),
-    }),
-  })
-  openAllowlistRow(h)
-  h.panel.handleInput('\r')
-  const page = h.specialistPages[0]!
-  h.panel.dispose()
-  sections = [...sections, '1 route']
-  renders = 0
-  const before = plain(h)
-  ;(page as unknown as { refresh: () => void }).refresh()
-  assert.equal(plain(h), before, 'a disposed workspace is never repainted or re-read into a live frame')
-  assert.doesNotMatch(plain(h), /SPECIALIST HEADER/u, 'and no picker is resurrected')
-})
-
-test('an unreadable official section withholds the delegation rows instead of fabricating them', () => {
-  // The projection reads the section through a throwing-seam case: the Agent
-  // category must still paint (it is a fixed category) but the two delegation
-  // rows may not be invented from the shipped default.
+test('a removed specialist row leaves the Agent category and its empty-state navigation reachable', () => {
+  // This is the Root's directory-removal contract. The Subagent command source
+  // separately decides whether its row is present and how it marks availability.
   let reads = 0
   const h = setup({
     snapshot: () => {
       reads += 1
-      // The production projection withholds the rows when the read fails; this
-      // fixture mirrors that contract by simply not painting them.
       return {
         ...SNAPSHOT,
-        rows: SNAPSHOT.rows.filter(row => row.id !== 'subagent-model-allowlist'),
+        rows: SNAPSHOT.rows.filter(row => row.id !== 'subagent-settings'),
       }
     },
   })
@@ -3371,7 +3315,7 @@ test('an unreadable official section withholds the delegation rows instead of fa
   h.panel.handleInput('\r')
   const frame = plain(h)
   assert.match(frame, /Settings · Agent · Rows/u, `the Agent category still paints:\n${frame}`)
-  assert.doesNotMatch(frame, /Subagent allowed models/u, 'an unreadable section paints no allowlist row')
+  assert.doesNotMatch(frame, /Subagent settings/u, 'an unreadable section paints no page row')
   // …and the Agent category, once EVERY row is withheld, states its real empty
   // state instead of painting an unexplained blank list.
   // A WIDE frame has room for the whole sentence.

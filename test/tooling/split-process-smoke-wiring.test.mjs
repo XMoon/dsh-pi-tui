@@ -170,6 +170,7 @@ test('the extracted split-smoke modules import without starting a lane', (t) => 
     'scripts/lib/split-smoke-selection.mjs',
     'scripts/smoke/split-process/host-runtime-disabled.mjs',
     'scripts/smoke/split-process/account-composition.mjs',
+    'scripts/smoke/split-process/subagent-settings-fr5a.mjs',
     'scripts/split-process-smoke.mjs',
     'scripts/split-process-upgrade-smoke.mjs',
   ].map(relative => JSON.stringify(pathToFileURL(join(ROOT, relative)).href))
@@ -472,6 +473,10 @@ test('the selectable registry is the single source for listing, resolution and t
   const cases = listSelectableCases()
   assert.ok(Array.isArray(cases) && cases.length > 0, 'the registry must expose at least one case')
   assert.equal(new Set(cases.map(entry => entry.id)).size, cases.length, 'every registered case ID must be unique')
+  const subagentSettings = cases.find(entry => entry.id === 'subagent.settings-fr5a')
+  assert.ok(subagentSettings, 'FR5-A requires a registered real two-Client qualification')
+  assert.equal(subagentSettings.suite, 'subagent-settings')
+  assert.equal(typeof subagentSettings.run, 'function')
   for (const entry of cases) {
     assert.equal(typeof entry.id, 'string', 'a registered case must expose a string ID')
     assert.ok(entry.id !== '', 'a registered case ID must be non-empty')
