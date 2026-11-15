@@ -153,6 +153,13 @@ export class MentionProvider implements AutocompleteProvider {
      * identity is the permission — see {@link InlineAttachmentAcceptance}).
      * Empty for every request that offered none. */
     attachments: readonly AutocompleteItem[]
+    /** WHICH filesystem authority produced this answer. A HOST answer (a Host
+     * `@` mention, a Host shell fact, an extension list) is bound to the Host
+     * file scope it was resolved under; a CLIENT-local answer (the declared
+     * `/attach` + `/image` path argument and the inline action/skill lexicon)
+     * never reads the Host filesystem, so the Host scope is not its authority
+     * and its `localCwd` is. */
+    scopeAuthority: 'host' | 'client'
   } | null = null
   /** The monotonically increasing request generation (plan §9.2 latest-
    * only): minted at REQUEST START (getSuggestions entry). A result —
@@ -369,6 +376,7 @@ export class MentionProvider implements AutocompleteProvider {
       if (context.leading || suggestions === null) {
         return this.withRequestSnapshot(
           generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, suggestions,
+          true, true, 'client',
         )
       }
       // THE INLINE seat (any other position): the rows are tagged so an
@@ -382,7 +390,9 @@ export class MentionProvider implements AutocompleteProvider {
       // Tab shortcut alike) without a fork change, while the rows keep their
       // ranked order (the dropdown highlights the top candidate). The replaced
       // span is re-derived in applyCompletion from the live document, so the
-      // prefix is not needed there either.
+      // prefix is not needed there either. The rows are CLIENT-local: the
+      // declared argument was answered by this machine's own discovery, never
+      // by the Host filesystem.
       return this.withRequestSnapshot(
         generation,
         requestScope,
@@ -392,6 +402,9 @@ export class MentionProvider implements AutocompleteProvider {
         cursorLine,
         cursorCol,
         { prefix: '', items: this.tagInlinePathItems(suggestions.items, context.command) },
+        true,
+        true,
+        'client',
       )
     }
 
@@ -463,13 +476,21 @@ export class MentionProvider implements AutocompleteProvider {
         // leading command and falls through to submit, while an inline
         // accept must only insert the reference. The result binds the
         // FULL request snapshot (strict fence), so a stale dropdown can
-        // never apply into a changed draft or a switched scope.
-        return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, { prefix: inline.query, items })
+        // never apply into a changed draft or a switched input mode. These
+        // rows are CLIENT-local too: the fixed attachment actions and the
+        // detached skill lexicon never read the Host filesystem.
+        return this.withRequestSnapshot(
+          generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol,
+          { prefix: inline.query, items }, true, true, 'client',
+        )
       }
       // No candidates: clear the snapshot (nothing to accept) — the same
       // null-clears contract as the file path, so a later direct apply
       // can never reuse an older request's dropdown.
-      return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, null)
+      return this.withRequestSnapshot(
+        generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, null,
+        true, true, 'client',
+      )
     }
     // 6. PROMPT MODE leading command name (the FIRST logical line's
     // command seat only — a later line's leading `/name` is an inline
@@ -654,6 +675,9 @@ export class MentionProvider implements AutocompleteProvider {
      *  marker on a foreign row must therefore never authorize a local file
      *  read. */
     grantAttachments = true,
+    /** The authority that produced `result` (see the snapshot field). Every
+     *  caller that does not state one answers from the Host. */
+    scopeAuthority: 'host' | 'client' = 'host',
   ): T {
     if (generation !== this.requestGeneration) return result
     if (result === null) this.requestSnapshot = null
@@ -668,6 +692,7 @@ export class MentionProvider implements AutocompleteProvider {
       attachments: grantAttachments
         ? result.items.filter(item => isInlineAttachmentAction(item) || isInlineAttachmentPath(item))
         : [],
+      scopeAuthority,
     }
     return result
   }
@@ -756,7 +781,16 @@ export class MentionProvider implements AutocompleteProvider {
     if (snapshot === null) return false
     if (snapshot.cursorLine !== cursorLine || snapshot.cursorCol !== cursorCol) return false
     if (snapshot.mode !== this.inputModeSource()) return false
-    if (!sameHostFileScope(snapshot.scope, this.scopeOf())) return false
+    // The Host file scope is an answer's authority ONLY when the Host really
+    // produced it. A CLIENT-local answer never touches the Host filesystem, so
+    // its `localCwd` below is the whole scope: a Host workspace
+    // identity/revision change — the sessionless preflight confirming the
+    // launch directory right after the mount, an A→B→A Workspace selection —
+    // must not make its rows unapplicable. Fencing it against a fact it never
+    // depended on leaves the rows PAINTED while the accept writes nothing (the
+    // seat holds no Host scope of its own), i.e. the user's Enter becomes a
+    // silent no-op that completes nothing.
+    if (snapshot.scopeAuthority === 'host' && !sameHostFileScope(snapshot.scope, this.scopeOf())) return false
     if (snapshot.localCwd !== this.localCwdOf()) return false
     if (snapshot.lines.length !== lines.length) return false
     for (let index = 0; index < snapshot.lines.length; index += 1) {

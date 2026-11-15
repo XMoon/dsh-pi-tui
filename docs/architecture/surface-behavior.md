@@ -2293,7 +2293,15 @@ resolver, claims map or ranking implementation.
   commit, a formal completion-scope change, a cleared draft, a Session
   publication, a hydration window, a disposed renderer, or a higher input seat
   taking the keys. A late answer and a click on an older frame's row are dropped on
-  the same fence.
+  the same fence. The Host file scope is a completion-scope fact ONLY for the
+  answers the Host produced (the `@` mention and Host shell facts): the declared
+  path argument and the inline action/skill lexicon are Client-local, so their
+  snapshot is scoped by the Client cwd, the document and the input mode — a Host
+  workspace identity/revision change (including the sessionless mount's own
+  first-workspace preflight confirming the launch directory, and an A→B→A
+  selection) never fences them. That is the one case a painted Client-local row
+  would otherwise stay visible while its accept wrote nothing, because the seat
+  holds no Host scope of its own to withdraw it.
 - While the list is open it owns ↑/↓, Tab/Shift+Tab, plain Enter and Escape:
   Escape closes only the list, and a modified or otherwise unconsumed key retires
   the list first and then reaches its existing owner exactly once — so a visible

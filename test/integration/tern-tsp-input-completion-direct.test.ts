@@ -560,6 +560,22 @@ function rowTexts(fixture: DirectTspFixture): string[] {
   return rowTitles(fixture).map(title => title.split(' — ')[0]!)
 }
 
+/**
+ * The Welcome's committed Host-directory line, read from the wire.
+ *
+ * The sessionless mount states the next-create Workspace proposal there, and a
+ * confirmed line ("Host directory: …") is the PRODUCTION terminal report of the
+ * mount's ONE workspace preflight — the same commit that moves the completion
+ * scope from `{unselected, revision 0}` to the confirmed Workspace identity.
+ * Waiting on it is what makes the preflight race below a real ordering, never a
+ * timing guess.
+ */
+function welcomeWorkspaceLines(fixture: DirectTspFixture): string[] {
+  return wireNodes(fixture.pane)
+    .filter(node => node.id.includes('welcome-workspace') && typeof node.p.text === 'string')
+    .map(node => String(node.p.text))
+}
+
 /** One real Enter key the seat owns (accept a highlighted candidate). */
 function pressEnter(fixture: DirectTspFixture): void {
   fixture.pane.input.type(ENTER)
@@ -1299,6 +1315,79 @@ test('a first-line `/image` argument completes ONLY the argument, and the NEXT E
   } finally {
     recorder.detach()
     stores.detach()
+    // reason: fixture.settle() awaits ownership cleanup, not a timer (receiver-blind guard).
+    await fixture.settle()
+  }
+})
+
+/**
+ * The mount's OWN sessionless workspace preflight, landing under an OPEN inline
+ * seat: the dropdown that was painted under the unselected Workspace scope must
+ * still accept. The seat holds no Host scope (it re-checks only the live
+ * document, the caret, the catalog revision and its own admission), so a Host
+ * scope change can never withdraw its rows — if the Provider refuses the apply,
+ * the user's Enter is consumed and completes NOTHING while the half-typed draft
+ * stays in the composer. The preflight is PARKED through the paint and released
+ * after it, and the Welcome's committed `Host directory:` line is the production
+ * report of the commit, so the ordering is a real fact rather than a window.
+ */
+test('an inline `/image` seat painted before the sessionless workspace preflight still accepts after it commits (never a silent Enter)', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['ID-PREFLIGHT'],
+    composerActions: true,
+    nativeImages: true,
+    holdWorkspacePreflight: true,
+  })
+  const stores = watchDraftStores()
+  const recorder = fixture.recordPrompts(() => {})
+  try {
+    await waitForInputDelivery(fixture.pane)
+    const shots = join(fixture.workRoot, 'shots')
+    mkdirSync(shots, { recursive: true })
+    const png = await realPng()
+    const image = join(shots, 'photo.png')
+    writeFileSync(image, png)
+
+    // (1) The action row is painted while the Workspace preflight is parked.
+    await prepareDraft(fixture, '看一下 /im')
+    await settle(fixture, 'the inline /image action row', () => rowTexts(fixture).includes('/image'))
+    assert.equal(welcomeWorkspaceLines(fixture).some(text => text.startsWith('Host directory: ')), false,
+      'the Workspace preflight has not committed yet, so the Welcome still states a proposal')
+
+    // (2) Release it and wait for the PRODUCTION commit report: the Welcome's
+    // confirmed Host directory. This is the exact instant the completion scope
+    // moves from the unselected proposal to the confirmed Workspace identity.
+    fixture.releaseWorkspacePreflight?.()
+    await settle(fixture, 'the committed Host directory on the Welcome', () =>
+      welcomeWorkspaceLines(fixture).some(text => text.startsWith('Host directory: ')))
+    assert.equal(rowTexts(fixture).includes('/image'), true,
+      'the Client-local action row stays painted across the Host scope change (the seat holds no Host scope)')
+    assert.equal(stores.imageAdds.length, 0, 'offering the action row staged nothing')
+
+    // (3) The Enter AFTER the commit is the accept it always was.
+    pressEnter(fixture)
+    await settle(fixture, 'the action accept to write `/image `', () =>
+      composerText(fixture) === '看一下 /image ' && composerCursor(fixture) === '看一下 /image '.length)
+    assert.equal(stores.imageAdds.length, 0, 'the action accept itself staged nothing')
+    assert.equal(recorder.calls(), 0, 'the action accept never submitted the draft')
+
+    // (4) The same seat's FILE row, accepted after the same commit, runs the
+    // real Client-local intake (the CI-reported shape of this race).
+    await editAtCaret(fixture, `看一下 /image ${shots}/ph`, `${shots}/ph`)
+    await settle(fixture, 'the real file row', () => rowTexts(fixture).includes(image))
+    pressEnter(fixture)
+    await waitFor('the real Client-local read to stage the accepted file', () => stores.imageAdds.length === 1, 25_000)
+    const staged = stores.imageAdds[0]!
+    assert.deepEqual(staged.bytes, png, 'the staged bytes ARE the real file bytes (readImageFile ran)')
+    assert.equal(staged.mediaType, 'image/png', 'the media type came from the bytes, never the extension')
+    await settle(fixture, 'the placeholder to splice into the draft', () =>
+      composerText(fixture) === `看一下 ${staged.placeholder} `)
+    assert.equal(recorder.calls(), 0, 'the whole intake submitted nothing')
+  } finally {
+    recorder.detach()
+    stores.detach()
+    fixture.releaseWorkspacePreflight?.()
     // reason: fixture.settle() awaits ownership cleanup, not a timer (receiver-blind guard).
     await fixture.settle()
   }
