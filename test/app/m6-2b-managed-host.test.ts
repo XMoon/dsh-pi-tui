@@ -352,52 +352,28 @@ function unitDirFor(t: TestContext): string {
 
 test('a first install creates a 0600 unit and an identical second install converges', t => {
   const dir = unitDirFor(t)
-  const uid = process.getuid?.() as number
-  const first = installProfileUnit({ unitDir: dir, unitName: 'dsh-pi-tui@pi-tui-aaaaaaaaaaaaaaaa.service', content: 'hello\n', uid })
+  const first = installProfileUnit({ unitDir: dir, unitName: 'dsh-pi-tui@pi-tui-aaaaaaaaaaaaaaaa.service', content: 'hello\n' })
   assert.equal(first.created, true)
   const finalPath = join(dir, 'dsh-pi-tui@pi-tui-aaaaaaaaaaaaaaaa.service')
   assert.equal(lstatSync(finalPath).mode & 0o777, 0o600)
   assert.equal(readFileSync(finalPath, 'utf8'), 'hello\n')
-  const second = installProfileUnit({ unitDir: dir, unitName: 'dsh-pi-tui@pi-tui-aaaaaaaaaaaaaaaa.service', content: 'hello\n', uid })
+  const second = installProfileUnit({ unitDir: dir, unitName: 'dsh-pi-tui@pi-tui-aaaaaaaaaaaaaaaa.service', content: 'hello\n' })
   assert.equal(second.created, false)
 })
 
-test('a pre-existing unit with different content is a conflict and is never overwritten', t => {
+test('an existing user unit or configuration link is never overwritten by installation', t => {
   const dir = unitDirFor(t)
-  const uid = process.getuid?.() as number
   const name = 'dsh-pi-tui@pi-tui-aaaaaaaaaaaaaaaa.service'
-  installProfileUnit({ unitDir: dir, unitName: name, content: 'old-build\n', uid })
-  assert.throws(
-    () => installProfileUnit({ unitDir: dir, unitName: name, content: 'new-build\n', uid }),
-    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
-  )
-  assert.equal(readFileSync(join(dir, name), 'utf8'), 'old-build\n')
-})
-
-test('a symlinked or wrongly-permissioned target unit is refused', t => {
-  const dir = unitDirFor(t)
-  const uid = process.getuid?.() as number
-  const name = 'dsh-pi-tui@pi-tui-bbbbbbbbbbbbbbbb.service'
-  const target = join(dir, 'elsewhere')
-  writeFileSync(target, 'x', { mode: 0o600 })
+  const target = join(dir, 'user-source.service')
+  writeFileSync(target, 'user configuration\n', { mode: 0o644 })
   symlinkSync(target, join(dir, name))
-  assert.throws(
-    () => installProfileUnit({ unitDir: dir, unitName: name, content: 'x', uid }),
-    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
-  )
-  // A real but wrongly-permissioned file is refused too.
-  const name2 = 'dsh-pi-tui@pi-tui-cccccccccccccccc.service'
-  writeFileSync(join(dir, name2), 'x', { mode: 0o644 })
-  chmodSync(join(dir, name2), 0o644)
-  assert.throws(
-    () => installProfileUnit({ unitDir: dir, unitName: name2, content: 'x', uid }),
-    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
-  )
+  assert.equal(installProfileUnit({ unitDir: dir, unitName: name, content: 'defaults\n' }).created, false)
+  assert.equal(lstatSync(join(dir, name)).isSymbolicLink(), true)
+  assert.equal(readFileSync(target, 'utf8'), 'user configuration\n')
 })
 
 test('concurrent identical installs converge to exactly one creator and one intact file', async t => {
   const dir = unitDirFor(t)
-  const uid = process.getuid?.() as number
   const name = 'dsh-pi-tui@pi-tui-dddddddddddddddd.service'
   const content = renderUnitContent(unitFacts())
   const moduleUrl = pathToFileURL(join(ROOT, 'src', 'app', 'remote-process', 'local-host-manager.ts')).href
@@ -405,7 +381,7 @@ test('concurrent identical installs converge to exactly one creator and one inta
   writeFileSync(childPath, [
     `import { installProfileUnit } from ${JSON.stringify(moduleUrl)}`,
     `try {`,
-    `  const r = installProfileUnit({ unitDir: ${JSON.stringify(dir)}, unitName: ${JSON.stringify(name)}, content: ${JSON.stringify(content)}, uid: ${uid} })`,
+    `  const r = installProfileUnit({ unitDir: ${JSON.stringify(dir)}, unitName: ${JSON.stringify(name)}, content: ${JSON.stringify(content)} })`,
     `  console.log(JSON.stringify({ created: r.created }))`,
     `} catch (error) {`,
     `  console.log(JSON.stringify({ created: false, error: error?.code ?? error?.message }))`,
@@ -571,26 +547,23 @@ test('a manager reporting a different FragmentPath is a unit conflict', async t 
   )
 })
 
-test('a loaded drop-in override is a unit conflict even when the FragmentPath is our file', async t => {
+test('a loaded user drop-in preserves unit identity and starts through systemd', async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-dropin-')
   const finalPath = join(unitDir, buildUnitName('pi-tui', fx.scope.scopeId))
   const fake = fakeSystemctl(finalPath)
   const withDropIn = async (args: readonly string[]): Promise<SystemctlResult> => {
     if (args.includes('show')) {
-      // Our owned file is the FragmentPath, but a same-named drop-in would
-      // override ExecStart/Environment/Restart — this must fail closed.
+      // The manager owns drop-in interpretation; the fragment still identifies our unit.
       return exited(0, `LoadState=loaded\nActiveState=inactive\nFragmentPath=${finalPath}\nDropInPaths=/etc/systemd/user/${buildUnitName('pi-tui', fx.scope.scopeId)}.d/override.conf\n`)
     }
     return fake.run(args)
   }
-  await assert.rejects(
-    startManagedHostCandidate(
-      { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: fx.anchor, profile: 'pi-tui' },
-      { probe: async (): Promise<UserManagerProbe> => ({ kind: 'available' }), unitDir: () => unitDir, systemctl: withDropIn },
-    ),
-    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
+  await startManagedHostCandidate(
+    { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: fx.anchor, profile: 'pi-tui' },
+    { probe: async (): Promise<UserManagerProbe> => ({ kind: 'available' }), unitDir: () => unitDir, systemctl: withDropIn },
   )
+  assert.ok(fake.calls.some(call => call.includes('start')))
 })
 
 test('a failed daemon-reload or start is HOST_MANAGER_START_FAILED, never a fallback', async t => {
@@ -667,21 +640,6 @@ function controlledUnitFixture(t: TestContext, buildId?: string): ControlUnitFix
   return { ...fx, unitDir, unitPath, content }
 }
 
-/** The production ExecStart argument encoder, mirrored for tamper fixtures. */
-function encodeUnitValueForTest(value: string): string {
-  let out = ''
-  for (const character of value) {
-    switch (character) {
-      case '\\': out += '\\\\'; break
-      case '"': out += '\\"'; break
-      case '%': out += '%%'; break
-      case '$': out += '$$'; break
-      default: out += character
-    }
-  }
-  return `"${out}"`
-}
-
 function managerState(path: string, activeState: string, mainPid: number) {
   const calls: string[][] = []
   const run = async (args: readonly string[]): Promise<SystemctlResult> => {
@@ -698,14 +656,14 @@ function managerState(path: string, activeState: string, mainPid: number) {
 test('inspectOwnedProfileUnit reports none for an empty unit directory without creating anything', t => {
   const fx = controlledUnitFixture(t)
   const emptyDir = testLifecycle(t).tempDir('m62b-empty-units-')
-  const result = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, emptyDir, fx.entry)
+  const result = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, emptyDir)
   assert.deepEqual(result, { kind: 'none' })
   assert.equal(existsSync(emptyDir), true)
 })
 
 test('inspectOwnedProfileUnit accepts the exact owned definition and reports its install build', t => {
   const fx = controlledUnitFixture(t)
-  const result = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir, fx.entry)
+  const result = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir)
   assert.equal(result.kind, 'owned')
   if (result.kind === 'owned') {
     assert.equal(result.unitName, buildUnitName('pi-tui', fx.scope.scopeId))
@@ -714,72 +672,85 @@ test('inspectOwnedProfileUnit accepts the exact owned definition and reports its
   }
 })
 
-test('real Node and Host entry paths with literal quotes round-trip through unit ownership validation', async t => {
+test('unit inspection refuses foreign, wrong-scope, wrong-Profile, invalid and duplicate metadata', t => {
+  const uid = process.getuid?.() ?? 1000
   const fx = controlledUnitFixture(t)
-  const root = testLifecycle(t).tempDir('m62c-exec-quote-')
-  for (const name of ['space here', 'back\\slash', 'double"quote', 'back\\"quote', 'trailing"']) {
-    await t.test(name, () => {
-      const dist = join(root, name, 'dist')
-      mkdirSync(dist, { recursive: true, mode: 0o700 })
-      // Use real executable and Host files, including a terminal quote, so
-      // structural delimiters cannot be confused with literal path bytes.
-      const nodePath = join(dist, `node-${name}`)
-      const entry = join(dist, `local-host-${name}`)
-      writeFileSync(nodePath, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
-      writeFileSync(entry, 'process.exit(0)\n', { mode: 0o600 })
-      const content = renderUnitContent({
-        dshHome: fx.scope.dshHome,
-        profileRealpath: fx.scope.profileRealpath,
-        profile: 'pi-tui',
-        scopeId: fx.scope.scopeId,
-        buildId: fx.scope.buildId,
-        nodePath,
-        hostEntryPath: entry,
-        dshAnchor: fx.anchor,
-      })
-      writeFileSync(fx.unitPath, content, { mode: 0o600 })
-      const result = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir, entry)
-      assert.equal(result.kind, 'owned', 'the renderer output must decode both real paths exactly')
-      if (result.kind === 'owned') assert.equal(result.hostEntry, entry)
-
-      writeFileSync(fx.unitPath, `${content}ExecStop=/bin/true\n`, { mode: 0o600 })
-      assert.throws(
-        () => inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir, entry),
-        error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
-        'accepting escaped paths must not allow an extra Exec directive',
-      )
-    })
+  for (const content of [
+    fx.content.replace('X-DshPiTuiOwner=local-host-manager-v1', 'X-DshPiTuiOwner=other'),
+    fx.content.replace(`X-DshPiTuiScopeId=${fx.scope.scopeId}`, `X-DshPiTuiScopeId=${'0'.repeat(64)}`),
+    fx.content.replace(`X-DshPiTuiProfileIdentity=${profileIdentityDigest(fx.scope.profileRealpath)}`, `X-DshPiTuiProfileIdentity=${'0'.repeat(64)}`),
+    fx.content.replace(`X-DshPiTuiInstallBuild=${fx.scope.buildId}`, 'X-DshPiTuiInstallBuild=unknown'),
+    `${fx.content}X-DshPiTuiOwner=local-host-manager-v1\n`,
+  ]) {
+    writeFileSync(fx.unitPath, content, { mode: 0o600 })
+    assert.throws(() => inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
   }
 })
 
-test('inspectOwnedProfileUnit refuses a foreign owner marker, a wrong scope and a tampered Home', t => {
+test('user runtime directives, 0644 units and linked configuration retain Profile identity', async t => {
+  const fx = controlledUnitFixture(t)
   const uid = process.getuid?.() ?? 1000
-  const foreign = controlledUnitFixture(t)
-  writeFileSync(foreign.unitPath, foreign.content.replace('X-DshPiTuiOwner=local-host-manager-v1', 'X-DshPiTuiOwner=other'), { mode: 0o600 })
-  assert.throws(() => inspectOwnedProfileUnit(foreign.scope, 'pi-tui', uid, foreign.unitDir, foreign.entry), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
-
-  const wrongHome = controlledUnitFixture(t)
-  writeFileSync(wrongHome.unitPath, wrongHome.content.replace(/DSH_HOME=[^"]+/u, 'DSH_HOME=/tmp/other'), { mode: 0o600 })
-  assert.throws(() => inspectOwnedProfileUnit(wrongHome.scope, 'pi-tui', uid, wrongHome.unitDir, wrongHome.entry), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+  const content = fx.content.replace('Restart=on-failure', 'Restart=no').replace(/^ExecStart=.*$/mu, 'ExecStart=/bin/false')
+    + 'ExecStartPre=/usr/bin/true\nExecStop=/usr/bin/true\nEnvironment="MY_CUSTOM_FLAG=1"\nRestartSec=5\n'
+  writeFileSync(fx.unitPath, content, { mode: 0o600 })
+  chmodSync(fx.unitPath, 0o644)
+  const observed = inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir)
+  assert.equal(observed.kind, 'owned')
+  const source = join(fx.unitDir, 'source.service')
+  renameSync(fx.unitPath, source)
+  symlinkSync(source, fx.unitPath)
+  const linked = inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir)
+  if (linked.kind !== 'owned') return assert.fail('expected linked owned unit')
+  assert.equal(linked.resolvedPath, realpathSync(source))
+  await startManagedHostCandidate(
+    { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: fx.anchor, profile: 'pi-tui' },
+    { probe: async () => ({ kind: 'available' }), unitDir: () => fx.unitDir, systemctl: async (args, runtimeDir) => {
+      assert.equal(args.includes('daemon-reload'), false, 'loaded customized services are not implicitly reloaded')
+      return await managerState(source, 'inactive', 0).run(args)
+    } },
+  )
+  assert.equal(readFileSync(source, 'utf8'), content)
+  uninstallOwnedProfileUnit(linked, fx.scope, 'pi-tui', uid)
+  assert.equal(existsSync(fx.unitPath), false)
+  assert.equal(readFileSync(source, 'utf8'), content, 'uninstall removes only the link, never its configuration source')
 })
 
-test('inspectOwnedProfileUnit refuses a symlink or a looser mode', t => {
+test('a named unit changed after inspection is refused before stop or unlink', async t => {
+  const fx = controlledUnitFixture(t)
   const uid = process.getuid?.() ?? 1000
-  const linked = controlledUnitFixture(t)
-  const real = join(linked.unitDir, 'real.service')
-  writeFileSync(real, linked.content, { mode: 0o600 })
-  unlinkSync(linked.unitPath)
-  symlinkSync(real, linked.unitPath)
-  assert.throws(() => inspectOwnedProfileUnit(linked.scope, 'pi-tui', uid, linked.unitDir, linked.entry), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir)
+  if (unit.kind !== 'owned') return assert.fail('expected owned unit')
+  const replacement = `${fx.unitPath}.replacement`
+  writeFileSync(replacement, fx.content, { mode: 0o644 })
+  renameSync(replacement, fx.unitPath)
+  const manager = managerState(fx.unitPath, 'active', 4242)
+  await assert.rejects(() => stopOwnedProfileUnit(unit, undefined, manager.run), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+  assert.equal(manager.calls.some(args => args.includes('stop')), false)
+  assert.throws(() => uninstallOwnedProfileUnit(unit, fx.scope, 'pi-tui', uid), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+  assert.equal(existsSync(fx.unitPath), true)
+})
 
-  const loose = controlledUnitFixture(t)
-  chmodSync(loose.unitPath, 0o644)
-  assert.throws(() => inspectOwnedProfileUnit(loose.scope, 'pi-tui', uid, loose.unitDir, loose.entry), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+test('dangling/non-file links fail identity inspection, and a retargeted link cannot be uninstalled', t => {
+  const fx = controlledUnitFixture(t)
+  const uid = process.getuid?.() ?? 1000
+  const source = join(fx.unitDir, 'source.service')
+  renameSync(fx.unitPath, source)
+  symlinkSync(source, fx.unitPath)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir)
+  if (unit.kind !== 'owned') return assert.fail('expected linked unit')
+  unlinkSync(fx.unitPath)
+  symlinkSync(fx.unitDir, fx.unitPath)
+  assert.throws(() => inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+  assert.throws(() => uninstallOwnedProfileUnit(unit, fx.scope, 'pi-tui', uid), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+  unlinkSync(fx.unitPath)
+  symlinkSync(join(fx.unitDir, 'missing.service'), fx.unitPath)
+  assert.throws(() => inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+  assert.equal(readFileSync(source, 'utf8'), fx.content)
 })
 
 test('stopOwnedProfileUnit is a no-op for an inactive unit and never issues stop', async t => {
   const fx = controlledUnitFixture(t)
-  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir, fx.entry)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir)
   assert.equal(unit.kind, 'owned')
   if (unit.kind !== 'owned') return
   const fake = managerState(fx.unitPath, 'inactive', 0)
@@ -790,7 +761,7 @@ test('stopOwnedProfileUnit is a no-op for an inactive unit and never issues stop
 
 test('stopOwnedProfileUnit stops an active unit and returns its original MainPID', async t => {
   const fx = controlledUnitFixture(t)
-  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir, fx.entry)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir)
   if (unit.kind !== 'owned') return assert.fail('expected an owned unit')
   let active = 'active'
   let mainPid = 4242
@@ -812,7 +783,7 @@ test('stopOwnedProfileUnit stops an active unit and returns its original MainPID
 
 test('an activating unit with no MainPID still goes through systemctl stop', async t => {
   const fx = controlledUnitFixture(t)
-  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir, fx.entry)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir)
   if (unit.kind !== 'owned') return assert.fail('expected an owned unit')
   let state = { active: 'activating', mainPid: 0 }
   const calls: string[][] = []
@@ -832,7 +803,7 @@ test('an activating unit with no MainPID still goes through systemctl stop', asy
 
 test('an unrecognized unit state is refused instead of claimed as stopped', async t => {
   const fx = controlledUnitFixture(t)
-  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir, fx.entry)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir)
   if (unit.kind !== 'owned') return assert.fail('expected an owned unit')
   const calls: string[][] = []
   const run = async (args: readonly string[]): Promise<SystemctlResult> => {
@@ -848,7 +819,7 @@ test('an unrecognized unit state is refused instead of claimed as stopped', asyn
 
 test('a stop that never leaves the active state is HOST_STOP_TIMEOUT, never success', async t => {
   const fx = controlledUnitFixture(t)
-  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir, fx.entry)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir)
   if (unit.kind !== 'owned') return assert.fail('expected an owned unit')
   const fake = managerState(fx.unitPath, 'active', 4242)
   await assert.rejects(() => stopOwnedProfileUnit(unit, undefined, fake.run, 50), error => isCode(error, 'HOST_STOP_TIMEOUT'))
@@ -857,7 +828,7 @@ test('a stop that never leaves the active state is HOST_STOP_TIMEOUT, never succ
 test('uninstallOwnedProfileUnit removes only the verified profile unit file', t => {
   const uid = process.getuid?.() ?? 1000
   const fx = controlledUnitFixture(t)
-  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir, fx.entry)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir)
   if (unit.kind !== 'owned') return assert.fail('expected an owned unit')
   uninstallOwnedProfileUnit(unit, fx.scope, 'pi-tui', uid)
   assert.equal(existsSync(fx.unitPath), false)

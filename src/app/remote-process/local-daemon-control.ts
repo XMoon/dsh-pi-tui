@@ -288,11 +288,6 @@ function inspectScope(profile: DaemonControlProfile, deps: DaemonControlDeps): L
   }
 }
 
-/** The installed Host entry path of this Profile's package (never guessed). */
-function hostEntryOf(profile: DaemonControlProfile): string {
-  return join(profile.packageRoot, 'dist', 'local-host.mjs')
-}
-
 /** Resolve the fixed runtime dir for the current user. */
 function runtimeDirOf(deps: DaemonControlDeps): string | undefined {
   return selectRuntimeDir(uidOf(deps))
@@ -311,7 +306,7 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
   let unitActiveState = ''
   let unitMainPid = 0
   try {
-    const inspected = inspectOwnedProfileUnit(scope, profile.name, uid, deps.unitDir, hostEntryOf(profile))
+    const inspected = inspectOwnedProfileUnit(scope, profile.name, uid, deps.unitDir)
     if (inspected.kind === 'owned') {
       unit = inspected
       if (probe.kind === 'available') {
@@ -440,7 +435,7 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
         // then be exactly the authenticated Host's PID; an ended unit
         // (inactive/failed) supervises nothing and the live Host is a fallback.
         if (unitMainPid !== record.hostPid) {
-          failure = new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the active profile unit does not supervise the authenticated Host')
+          failure = new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the unit MainPID is not the authenticated Host; use systemctl --user for this custom service')
           exitCode = failure.exitCode
         }
       } else {
@@ -1029,7 +1024,7 @@ async function runLogs(profile: DaemonControlProfile, intent: DaemonControlInten
   const uid = uidOf(deps)
   let unit: OwnedProfileUnit | undefined
   try {
-    const inspected = inspectOwnedProfileUnit(scope, profile.name, uid, deps.unitDir, hostEntryOf(profile))
+    const inspected = inspectOwnedProfileUnit(scope, profile.name, uid, deps.unitDir)
     if (inspected.kind === 'owned') unit = inspected
   } catch (error) {
     throw toDaemonControlError(error)
@@ -1049,7 +1044,7 @@ async function runLogs(profile: DaemonControlProfile, intent: DaemonControlInten
   } else if (unit !== undefined) {
     // The journal belongs to the unit the manager actually loads. A disk file
     // with valid owner metadata is not enough: verify FragmentPath names THIS
-    // file and no drop-in overrides it, exactly like stop/uninstall do.
+    // file (or its canonical link target), exactly like stop/uninstall do.
     const systemctl = deps.systemctl ?? runSystemctl
     let loaded = false
     try {
