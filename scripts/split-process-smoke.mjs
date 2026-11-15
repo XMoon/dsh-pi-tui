@@ -592,6 +592,29 @@ export function assertSelectedVerdict(caseId, result) {
     `selected ${caseId}: the ACP scoped-cancel/approval verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
     return
   }
+  if (caseId === 'acp.po4a-content-input') {
+    assert(result?.status === 'PASS'
+      && result?.scope === 'REAL_SPLIT_PROCESS_L6'
+      && result?.imageCapabilityAdvertised === true
+      && result?.resourceLinkAdmittedAsText === true
+      && result?.imageOnlyAdmitted === true
+      && result?.mixedContentOrderPreserved === true
+      && result?.largeImageFrameOverOneMiB === true
+      && result?.hostRejectedInvalidAndOverLimit === true
+      && result?.imageCancelScopedToOwnAdmission === true
+      && result?.tuiRemainsActive === true
+      && result?.perSessionViewIsolation === true
+      && result?.sameSessionReattach === true
+      && result?.hostIdentityKept === true
+      && result?.readImageVerified === true
+      && result?.l6EvidenceRecorded === true
+      && Number.isInteger(result?.evidence?.largeFrameBytes)
+      && result.evidence.largeFrameBytes > 1024 * 1024
+      && Array.isArray(result?.evidence?.imageProbes)
+      && result.evidence.imageProbes.length >= 3,
+    `selected ${caseId}: the ACP content-input verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
+    return
+  }
   if (caseId === 'account.official-composition') {
     assert(result?.status === 'PASS'
       && result?.browser === 'PASS'

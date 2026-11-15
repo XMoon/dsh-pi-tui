@@ -486,10 +486,16 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
   listener answers the ACP v1 `initialize` (protocol version 1, `agentInfo.name`
   `dsh-pi-tui`, `agentInfo.version` the installed `@xmoon76/dsh-pi-tui` bundle
   version — never the DSH engine version). When the Host installs the shared
-  Session View it advertises exactly `sessionCapabilities: { resume: {}, close:
-  {} }` and never `loadSession`, prompt/image/MCP capability, `session/list` or
-  config options. The View is a BORROW of the Host's own Agent and Session,
-  never a second owner:
+  Session View it advertises `sessionCapabilities: { resume: {}, close: {} }`
+  and never `loadSession`, `session/list`, config options or MCP capability.
+  Inline image capability is advertised only on that connection when the Host's
+  boot-frozen Attachment Store and exact configured default model route explicitly
+  declare image support; unknown services, route metadata or attachment media
+  support are negative. The capability is frozen for the connection at
+  `initialize`. Every image prompt is checked again against the exact attached
+  Agent's current model route and is refused before Host dispatch unless that
+  route explicitly declares image support. The View is a BORROW of the Host's
+  own Agent and Session, never a second owner:
   - One ACP connection may borrow **at most one** Host Session (one View), and
     one Host Session carries **at most one** ACP View at a time, while any
     number of human Split TUI Clients may still reference the same Session.
@@ -504,6 +510,48 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     request `cwd` never changes the Session cwd/model/workspace; a difference is
     only recorded as a fixed non-sensitive note. A second ACP connection for a
     Session already held is refused, and the TUI is never subject to that limit.
+  - **Prompt content admission.** The attached View accepts standard ACP `text`,
+    `resource_link`, and capability-negotiated `image` blocks in their original
+    order. Adjacent text and resource links become ordered text content using the
+    standard `[resource_link name=<JSON string> uri=<JSON string>]` literal;
+    a resource URI is descriptive text, not authorization, and is never fetched
+    or dereferenced by the Host. Embedded `resource`, `audio`, private file/upload
+    blocks and unknown content fail closed. A prompt may contain non-whitespace
+    text, an image, or both. A negotiated image must use a supported raster MIME;
+    wire bytes, canonical Base64, actual media, count/size/pixel limits and durable
+    references are validated by the official Host Session Controller and its
+    Attachment Store, which are the sole image admission and persistence owners.
+    The ACP adapter never writes a second attachment copy and durable Session
+    messages contain image references, never Base64. Image capability is not
+    inferred from a client declaration, an arbitrary available model or the TUI
+    selection display.
+  - `session/prompt` with text/resource_link-only content preserves the existing
+    behavior. The View mints ONE stable `requestId`, submits exactly ONE official
+    `SessionController.prompt` in queue mode, and correlates the real Host facts
+    — `source.rpcId` at `agent/inbox/inserted`, the claimed turn of that exact
+    message id (`agent/inbox/claimed`), the committed `data.turn` events and
+    `turn/end` — before answering a real ACP StopReason (`end_turn` /
+    `max_tokens`). Only the committed output of that claimed turn is projected as
+    standard `session/update` notifications, and the answer is sent after the
+    turn's `turn/end` and the ordered notification drain. A turn that also claims
+    another user's message (e.g. a TUI steer) is a MIXED turn: no further output
+    is projected and the request fails closed with
+    `LOCAL_ACP_PROMPT_MIXED_TURN`, never a fabricated success. A completed turn
+    without real non-empty assistant text fails
+    `LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT`. Message ordering, the bounded
+    per-connection output cap and the one-View-per-Session rule are unchanged;
+    `session/close` and physical-dispatch release semantics are owned by the
+    scoped-cancellation contract above.
+  - **Bounded input.** Text-only and unnegotiated connections retain the legacy
+    1 MiB frame and 2 MiB unconsumed-input limits. An image-enabled connection
+    derives its larger per-frame and unconsumed bounds from that Host's official
+    boot-frozen `attachments.imageLimits` (Base64 expansion, preserved text/wire
+    allowance, bounded per-image metadata and the JSON-RPC envelope). This
+    transport budget is not an alternate image policy: business image byte,
+    count, MIME and dimension limits remain the official Attachment Store's.
+    Each socket has independent accounting and a breach closes only that
+    connection; the reader assembles each fragmented NDJSON line with one
+    concatenation rather than repeatedly copying the pending image frame.
   - `session/close` detaches ONLY this connection's View/reservation: it never
     disposes, flushes or resumes the Agent/Session, so a TUI referencing the
     same Session keeps working and a later connection may resume again. With an
@@ -518,8 +566,9 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     on the exact Host identity proves there was no inserted message. The
     Session, Agent and writer keep their Host authority; a pending
     create/resume whose connection closed never publishes an attached View.
-  - `session/list`, `session/set_config_option` and image/MCP prompts are NOT
-    provided by this View and fail closed with their stable `LOCAL_ACP_*` code.
+  - `session/list`, `session/set_config_option`, MCP prompts and committed
+    assistant/tool image projection are NOT provided by this View and fail
+    closed with their stable `LOCAL_ACP_*` code.
   - **Scoped cancellation (PO-3B).** `session/cancel` addresses ONLY this
     connection's own unsettled prompt flight, decided from authoritative Host
     facts — never an Agent-global cancel, a status/timing guess or an

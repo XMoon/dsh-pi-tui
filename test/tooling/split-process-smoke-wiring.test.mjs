@@ -901,6 +901,26 @@ test('the ACP PO-3B scoped-cancel/approval selected verdict accepts only the com
   assert.ok(registered, 'the PO-3B case must be registered in the selectable registry')
   assert.equal(typeof registered.run, 'function', 'the registered case must carry its real runner')
 })
+test('the ACP PO-4A content-input selected verdict requires the complete real-L6 wire and Host evidence', () => {
+  const complete = {
+    status: 'PASS', scope: 'REAL_SPLIT_PROCESS_L6', imageCapabilityAdvertised: true,
+    resourceLinkAdmittedAsText: true, imageOnlyAdmitted: true, mixedContentOrderPreserved: true,
+    largeImageFrameOverOneMiB: true, hostRejectedInvalidAndOverLimit: true,
+    imageCancelScopedToOwnAdmission: true, tuiRemainsActive: true, perSessionViewIsolation: true,
+    sameSessionReattach: true, hostIdentityKept: true, readImageVerified: true, l6EvidenceRecorded: true,
+    evidence: { largeFrameBytes: 1_200_000, imageProbes: [{ success: true }, { success: true }, { success: true }] },
+  }
+  assert.equal(assertSelectedVerdict('acp.po4a-content-input', complete), undefined)
+  assert.throws(() => assertSelectedVerdict('acp.po4a-content-input', { ...complete, readImageVerified: false }),
+    /selected acp\.po4a-content-input/u)
+  assert.throws(() => assertSelectedVerdict('acp.po4a-content-input', {
+    ...complete, evidence: { ...complete.evidence, largeFrameBytes: 1024 * 1024 },
+  }), /selected acp\.po4a-content-input/u)
+  const entry = listSelectableCases().find(item => item.id === 'acp.po4a-content-input')
+  assert.ok(entry && entry.defaultLane === false, 'PO-4A remains selectable-only, not part of the default L6 lane')
+  assert.equal(typeof entry.run, 'function')
+})
+
 test('a selected result names only the selectable scope', () => {
   const first = listSelectableCases()[0]
   assert.ok(first, 'the registry must expose a case')

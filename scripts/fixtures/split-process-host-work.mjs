@@ -44,6 +44,8 @@ const SCENARIOS = new Set([
   // PO-3B: held long turns + ONE official approval tool call + the never
   // policy negative, staged against the scoped ACP cancel/approval owner.
   'acp-po3b',
+  // PO-4A content admission: only this scenario declares the test route's image modality.
+  'acp-po4a',
   // Host-liveness qualification scenarios. They only reach official Host
   // services (`goals`, `schedule`, `Agent.runMaintenance`) and record facts.
   'goal-armed',
@@ -162,13 +164,14 @@ function recordPromptFacts(options) {
 }
 
 class C1Model extends LlmAdapter {
-  constructor(scenario, proof, root, agentStatusOf, neverSetup) {
+  constructor(scenario, proof, root, agentStatusOf, neverSetup, imageProbe) {
     super()
     this.scenario = scenario
     this.proof = proof
     this.root = root
     this.agentStatusOf = agentStatusOf
     this.neverSetup = neverSetup
+    this.imageProbe = imageProbe
     this.toolIssued = new Set()
     this.longTurnCount = new Map()
     this.failflowStep = new Map()
@@ -180,11 +183,21 @@ class C1Model extends LlmAdapter {
   }
 
   async resolveModel(provider, model) {
-    return { provider, id: model, name: model }
+    const po4a = this.scenario === 'acp-po4a' && process.env.C1_PO4A_IMAGE_CAPABLE === '1'
+    return {
+      provider,
+      id: model,
+      name: model,
+      ...(po4a && model === 'c1' ? { inputModalities: ['text', 'image'] } : {}),
+      ...(po4a && model === 'c1-text-only' ? { inputModalities: ['text'] } : {}),
+    }
   }
 
   async listModels() {
     const models = [{ provider: 'c1-qualification', id: 'c1', name: 'c1' }]
+    if (this.scenario === 'acp-po4a' && process.env.C1_PO4A_IMAGE_CAPABLE === '1') {
+      models.push({ provider: 'c1-qualification', id: 'c1-text-only', name: 'c1-text-only', inputModalities: ['text'] })
+    }
     // Qualification-only: a SECOND offline route so the sessionless default
     // save case can prove a REAL default change. No other case sets this env.
     const extra = process.env.C1_EXTRA_MODEL
@@ -208,6 +221,25 @@ class C1Model extends LlmAdapter {
     const userText = allUserText(options.messages ?? [])
     const afterTool = Array.isArray(options.messages) && options.messages.at(-1)?.role === 'tool'
     const token = `${this.scenario}-${sessionId}`
+
+    if (this.scenario === 'acp-po4a') {
+      const latestUser = [...(options.messages ?? [])].reverse().find(message => message?.role === 'user')
+      const latestUserText = (latestUser?.content ?? [])
+        .map(part => typeof part?.text === 'string' ? part.text : '')
+        .join('')
+      if (latestUserText.includes('po4a-held-tui')) {
+        this.record('po4a-tui-turn-held', { sessionId })
+        await waitForBarrier(process.env.C1_PO4A_TUI_HOLD, signal)
+        this.record('po4a-tui-turn-released', { sessionId })
+      }
+      await this.imageProbe?.(sessionId)
+      const answer = `acp-po4a answer ${token}`
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: answer }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: answer } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
 
     if (this.scenario === 'f1-shell' || this.scenario === 'f4-file') {
       yield { type: 'block-start', index: 0, blockType: 'text' }
@@ -687,10 +719,52 @@ export async function apply(ctx) {
         official.setApprovalPolicy(agent.session, 'never')
       }
     : undefined
+  if (scenario === 'acp-po4a') {
+    ctx.effect(() => ctx.on('agent/inbox/discarded', ({ agent, message }) => {
+      if (agent === undefined || message?.source?.kind !== 'user') return
+      record('po4a-inbox-discarded', {
+        sessionId: String(agent.id),
+        messageId: String(message.id),
+        rpcId: String(message.source.rpcId ?? ''),
+      })
+    }), 'po4a-discarded-observer')
+  }
+
+  const imageProbe = scenario === 'acp-po4a'
+    ? async sessionId => {
+        const probeDir = process.env.C1_PO4A_IMAGE_PROBE_DIR
+        if (probeDir === undefined || probeDir === '') return
+        const agent = ctx.agents.get(sessionId)
+        if (agent === undefined) throw new Error('m4-c1-host-work: PO-4A image probe could not resolve the live Agent')
+        const events = agent.session.snapshotEvents()
+        const message = [...events].reverse().find(event => event.type === 'user/message')?.data
+        const image = message?.content?.find(part => part?.type === 'image')
+        if (image === undefined) return
+        if (image.attachment === undefined) throw new Error('m4-c1-host-work: PO-4A image probe found no durable image reference')
+        const stored = await ctx.attachments.readImage(image.attachment)
+        const digest = createHash('sha256').update(stored.data).digest('hex')
+        if (stored.ref.attachmentId !== `sha256:${digest}` || stored.ref.bytes !== stored.data.byteLength) {
+          throw new Error('m4-c1-host-work: PO-4A readImage bytes did not match their durable reference')
+        }
+        const expected = process.env.C1_PO4A_EXPECTED_IMAGE_SHA256
+        if (expected !== undefined && expected !== '' && expected !== digest) {
+          throw new Error('m4-c1-host-work: PO-4A image digest did not match the expected input')
+        }
+        appendFileSync(join(probeDir, 'image-probe.jsonl'), `${JSON.stringify({
+          sessionId,
+          attachmentId: stored.ref.attachmentId,
+          mediaType: stored.ref.mediaType,
+          bytes: stored.ref.bytes,
+          sha256: digest,
+          success: true,
+        })}\n`, { mode: 0o600 })
+      }
+    : undefined
+
   const model = new C1Model(scenario, proof, root, sessionId => {
     const agent = ctx.agents.get(sessionId)
     return agent === undefined ? undefined : agent.status
-  }, neverSetup)
+  }, neverSetup, imageProbe)
 
   ctx.effect(() => ctx.llm.registerAdapter(['c1-qualification'], model))
 
@@ -1631,6 +1705,21 @@ export async function apply(ctx) {
       },
     })))
   }
+  if (scenario === 'acp-po4a') {
+    const attachments = ctx.attachments
+    const saveImages = attachments.saveImages
+    attachments.saveImages = async function (inputs) {
+      const hold = process.env.C1_PO4A_ADMISSION_HOLD
+      if (hold !== undefined && hold !== '' && existsSync(hold)) {
+        rmSync(hold, { force: true })
+        record('po4a-image-admission-held', { imageCount: inputs.length })
+        await waitForBarrier(process.env.C1_PO4A_ADMISSION_RELEASE, new AbortController().signal)
+        record('po4a-image-admission-released', { imageCount: inputs.length })
+      }
+      return await saveImages.call(this, inputs)
+    }
+  }
+
   if (scenario === 'f7a-authorization') {
     // F7A qualification flows. The official `ctx.authorization` seam owns the
     // attempt, the mutual exclusion and the credential write; this row only

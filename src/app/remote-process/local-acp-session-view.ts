@@ -42,7 +42,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { SessionUpdate, StopReason } from '@agentclientprotocol/sdk'
+import type { ContentBlock as AcpWireContentBlock, SessionUpdate, StopReason } from '@agentclientprotocol/sdk'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { observeSettled, runDetached } from '../../runtime/process/tasks.ts'
 
@@ -99,6 +99,10 @@ export interface HostAcpSessionAccess {
   currentAgent(sessionId: string): LiveAgentViewIdentity | undefined
   /** The CURRENT live Session object for a Session id, or `undefined`. */
   currentSession(sessionId: string): object | undefined
+  /** The current boot-frozen Host image limits needed to derive UDS framing. */
+  imageLimits(): AcpImageLimits | undefined
+  /** Whether the exact configured Host default route explicitly accepts images. */
+  supportsImagePrompts(): Promise<boolean>
   /** Submit ONE prompt through the official Session Controller (queue mode only). */
   prompt(request: AcpSessionPromptRequest, signal: AbortSignal): Promise<{ readonly accepted: true }>
   /**
@@ -230,10 +234,20 @@ export interface AcpResumeSessionParams {
   readonly mcpServers?: readonly unknown[]
 }
 
-/** One standard text prompt part in the client's original order. */
-export interface AcpTextPromptPart {
-  readonly type: 'text'
-  readonly text: string
+/** Raster MIME vocabulary shared by the ACP wire and official Host admission. */
+export const ACP_IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const
+
+/** The official Host content accepted by this ACP input adapter. */
+export type AcpPromptPart =
+  | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'image'; readonly mediaType: typeof ACP_IMAGE_MEDIA_TYPES[number]; readonly data: string }
+
+/** Read-only transport inputs from the Host's boot-frozen attachment limits. */
+export interface AcpImageLimits {
+  readonly maxImageBytes: number
+  readonly maxImagesPerMessage: number
+  readonly maxMessageImageBytes: number
+  readonly mediaTypes: readonly string[]
 }
 
 /**
@@ -245,7 +259,7 @@ export interface AcpSessionPromptRequest {
   readonly requestId: string
   readonly sessionId: string
   readonly mode: 'queue'
-  readonly content: readonly AcpTextPromptPart[]
+  readonly content: readonly AcpPromptPart[]
 }
 
 /** The minimal `session/prompt` request facts this module validates. */
@@ -1066,8 +1080,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
-   * Admit ONE text prompt on this connection's attached View and settle it on
-   * the exact Host facts. The slot and the View-minted `requestId` are committed
+   * Admit one ACP text/resource_link/image prompt on this connection's attached View and
+   * settle it on the exact Host facts. The slot and the View-minted `requestId` are committed
    * BEFORE the official prompt call, so a synchronous inbox notice or a second
    * pipelined request can never be attributed to a later flight.
    *
@@ -1081,6 +1095,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     access: HostAcpSessionAccess,
     request: AcpPromptSessionParams,
     requestSignal: AbortSignal,
+    imageEnabled: boolean,
     sendUpdate: (update: SessionUpdate) => Promise<void>,
     requestPermission?: (params: AcpRequestPermissionParams, options?: { readonly signal?: AbortSignal }) => Promise<AcpRequestPermissionResponse>,
   ): Promise<AcpPromptResult> {
@@ -1103,7 +1118,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // must not stack a second Host responsibility on top of it (v1.1 §5.D).
       throw promptError('LOCAL_ACP_PROMPT_IN_FLIGHT', 'a prompt is already in flight for this session view', JSONRPC_INVALID_PARAMS)
     }
-    const content = validatePromptContent(request.prompt)
+    const content = validatePromptContent(request.prompt, imageEnabled)
     if (requestSignal.aborted) {
       throw promptError('LOCAL_ACP_PROMPT_ABORTED', 'the ACP prompt request was aborted before admission', JSONRPC_INVALID_PARAMS)
     }
@@ -2135,25 +2150,61 @@ function validateCwd(cwd: string): void {
 }
 
 /**
- * Admit one ACP prompt as ordered standard text parts. PO-3A is a TEXT-ONLY
- * phase: an empty/whitespace-only prompt, a missing block or any non-text
- * block is refused before any Host dispatch, and order is preserved verbatim.
+ * Validate and normalize standard ACP prompt blocks in client order.
+ * `resource_link` blocks become official bracketed text hints; inline images
+ * require this connection's negotiated Host capability. Embedded resource,
+ * audio, unknown blocks, empty prompts and whitespace-only text stay rejected
+ * before any Host dispatch.
  */
-function validatePromptContent(prompt: readonly unknown[]): readonly AcpTextPromptPart[] {
+function validatePromptContent(prompt: readonly unknown[], imageEnabled: boolean): readonly AcpPromptPart[] {
   if (!Array.isArray(prompt) || prompt.length === 0) {
-    throw promptError('LOCAL_ACP_PROMPT_INVALID_CONTENT', 'a prompt must contain at least one non-empty text block', JSONRPC_INVALID_PARAMS)
+    throw promptError('LOCAL_ACP_PROMPT_INVALID_CONTENT', 'a prompt must contain non-empty text or an image', JSONRPC_INVALID_PARAMS)
   }
-  const content: AcpTextPromptPart[] = []
+  const content: AcpPromptPart[] = []
+  let pendingText = ''
+  const flushText = (): void => {
+    if (pendingText.length === 0) return
+    content.push({ type: 'text', text: pendingText })
+    pendingText = ''
+  }
   for (const block of prompt) {
-    const type = (block as { readonly type?: unknown } | null)?.type
-    const text = (block as { readonly text?: unknown } | null)?.text
-    if (type !== 'text' || typeof text !== 'string') {
-      throw promptError('LOCAL_ACP_PROMPT_INVALID_CONTENT', 'this Host accepts standard ACP text prompt blocks only', JSONRPC_INVALID_PARAMS)
+    const wireBlock = block as AcpWireContentBlock | null | undefined
+    if (wireBlock === null || wireBlock === undefined) {
+      throw promptError('LOCAL_ACP_PROMPT_INVALID_CONTENT', 'the prompt contains an invalid content block', JSONRPC_INVALID_PARAMS)
     }
-    content.push({ type: 'text', text })
+    const type = wireBlock.type
+    if (type === 'text') {
+      if (typeof wireBlock.text !== 'string') {
+        throw promptError('LOCAL_ACP_PROMPT_INVALID_CONTENT', 'the prompt contains an invalid text block', JSONRPC_INVALID_PARAMS)
+      }
+      pendingText += wireBlock.text
+      continue
+    }
+    if (type === 'resource_link') {
+      if (typeof wireBlock.name !== 'string' || typeof wireBlock.uri !== 'string') {
+        throw promptError('LOCAL_ACP_PROMPT_INVALID_CONTENT', 'the prompt contains an invalid resource link', JSONRPC_INVALID_PARAMS)
+      }
+      pendingText += `\n[resource_link name=${JSON.stringify(wireBlock.name)} uri=${JSON.stringify(wireBlock.uri)}]\n`
+      continue
+    }
+    if (type === 'image') {
+      if (!imageEnabled || typeof wireBlock.mimeType !== 'string' || typeof wireBlock.data !== 'string'
+        || !ACP_IMAGE_MEDIA_TYPES.includes(wireBlock.mimeType as typeof ACP_IMAGE_MEDIA_TYPES[number])) {
+        throw promptError('LOCAL_ACP_PROMPT_INVALID_CONTENT', 'this connection cannot accept the requested image block', JSONRPC_INVALID_PARAMS)
+      }
+      flushText()
+      content.push({
+        type: 'image',
+        mediaType: wireBlock.mimeType as typeof ACP_IMAGE_MEDIA_TYPES[number],
+        data: wireBlock.data,
+      })
+      continue
+    }
+    throw promptError('LOCAL_ACP_PROMPT_INVALID_CONTENT', 'this Host accepts standard ACP text, resource_link and negotiated image blocks only', JSONRPC_INVALID_PARAMS)
   }
-  if (!content.some(part => part.text.trim().length > 0)) {
-    throw promptError('LOCAL_ACP_PROMPT_INVALID_CONTENT', 'a prompt must include non-whitespace text', JSONRPC_INVALID_PARAMS)
+  flushText()
+  if (!content.some(part => part.type === 'image' || (part.type === 'text' && part.text.trim().length > 0))) {
+    throw promptError('LOCAL_ACP_PROMPT_INVALID_CONTENT', 'a prompt must include non-whitespace text or an image', JSONRPC_INVALID_PARAMS)
   }
   return content
 }

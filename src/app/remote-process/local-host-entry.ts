@@ -62,6 +62,8 @@ import {
 } from './local-acp-listener.ts'
 import {
   AcpSessionViewRegistry,
+  ACP_IMAGE_MEDIA_TYPES,
+  type AcpImageLimits,
   type AcpCreateSessionOutcome,
   type AcpCreateWorkspaceOutcome,
   type AcpPromptFactListener,
@@ -450,7 +452,39 @@ export interface AcpControlControllerOptions {
   readonly sessionAccess?: HostAcpSessionAccess
 }
 
-/** Structural views of the official Host services the ACP Session View borrows. */
+interface AttachmentServiceLike {
+  readonly imageLimits: AcpImageLimits & { readonly maxImagePixels?: number; readonly maxImageDimension?: number }
+}
+
+interface LlmServiceLike {
+  resolveModelInfo(provider: string, model: string): Promise<{ readonly inputModalities?: readonly string[] }>
+}
+
+interface DefaultModelServiceLike {
+  currentSelection(): { readonly provider: string; readonly model: string; readonly reasoningEffort?: string } | undefined
+}
+
+interface AgentModelLike {
+  current(): { readonly provider: string; readonly model: string; readonly reasoningEffort?: string } | undefined
+}
+
+function imageRouteError(reason: string, message: string): Error & {
+  readonly isDSHRemoteError: true
+  readonly code: 'session/attachment-invalid'
+  readonly details: { readonly reason: string }
+} {
+  return Object.assign(new Error(message), {
+    isDSHRemoteError: true as const,
+    code: 'session/attachment-invalid' as const,
+    details: { reason },
+  })
+}
+
+interface ImageRouteAgentLike extends LiveAgentViewIdentity {
+  readonly model?: AgentModelLike
+}
+
+/** The structural views of the official Host services the ACP access borrows. */
 interface WorkspaceControllerLike {
   create(request: { path: string }): Promise<{ workspace: { workspaceId: string; path: string }; created: boolean }>
 }
@@ -512,6 +546,9 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
   const sessionController = context.reflect.get('sessionController') as SessionControllerLike | undefined
   const agents = context.reflect.get('agents') as AgentRegistryLike | undefined
   const sessions = context.reflect.get('sessions') as SessionRegistryLike | undefined
+  const attachments = context.reflect.get('attachments') as AttachmentServiceLike | undefined
+  const llm = context.reflect.get('llm') as LlmServiceLike | undefined
+  const agentDefaultModel = context.reflect.get('agentDefaultModel') as DefaultModelServiceLike | undefined
   if (
     workspaceController === undefined
     || sessionController === undefined
@@ -564,7 +601,58 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
     resolveAgent: sessionId => sessionController.resolveAgent(sessionId),
     currentAgent: sessionId => agents.get(sessionId),
     currentSession: sessionId => sessions.get(sessionId),
-    prompt: (request, signal) => sessionController.prompt(request, signal),
+    imageLimits: () => attachments?.imageLimits,
+    supportsImagePrompts: async () => {
+      if (attachments === undefined || llm === undefined || agentDefaultModel === undefined) return false
+      try {
+        const route = agentDefaultModel.currentSelection()
+        if (route === undefined
+          || !attachments.imageLimits.mediaTypes.some(mediaType => (ACP_IMAGE_MEDIA_TYPES as readonly string[]).includes(mediaType))) {
+          return false
+        }
+        const model = await llm.resolveModelInfo(route.provider, route.model)
+        return model.inputModalities?.includes('image') === true
+      } catch {
+        return false
+      }
+    },
+    prompt: async (request, signal) => {
+      if (!request.content.some(part => part.type === 'image')) {
+        return await sessionController.prompt(request, signal)
+      }
+      signal.throwIfAborted()
+      const agent = agents.get(request.sessionId) as ImageRouteAgentLike | undefined
+      const session = sessions.get(request.sessionId)
+      if (agent === undefined || session === undefined || agent.session !== session || agent.model === undefined) {
+        throw imageRouteError('IMAGE_ROUTE_UNKNOWN', 'the attached Agent route is unavailable for image input')
+      }
+      const route = agent.model.current()
+      if (route === undefined || route.provider.length === 0 || route.model.length === 0 || llm === undefined) {
+        throw imageRouteError('IMAGE_ROUTE_UNKNOWN', 'the attached Agent route is unavailable for image input')
+      }
+      let model: Awaited<ReturnType<LlmServiceLike['resolveModelInfo']>>
+      try {
+        model = await llm.resolveModelInfo(route.provider, route.model)
+      } catch {
+        throw imageRouteError('IMAGE_ROUTE_UNKNOWN', 'the attached Agent route could not be verified for image input')
+      }
+      if (model.inputModalities?.includes('image') !== true) {
+        throw imageRouteError('MODEL_DOES_NOT_SUPPORT_IMAGES', 'the attached Agent route does not declare image input')
+      }
+      // DSH rc.3 session-controller/src/commands.ts:349-386 checks the route
+      // inside its image-admission chain but permits unknown modalities. A
+      // concurrent selectModel can follow this preflight; the PO-4A PR records
+      // the Owner-accepted upstream limitation and its barrier evidence.
+      signal.throwIfAborted()
+      const currentAgent = agents.get(request.sessionId)
+      const currentSession = sessions.get(request.sessionId)
+      const currentRoute = (currentAgent as ImageRouteAgentLike | undefined)?.model?.current()
+      if (currentAgent !== agent || currentSession !== session || agent.session !== session
+        || currentRoute?.provider !== route.provider || currentRoute.model !== route.model) {
+        throw imageRouteError('IMAGE_ROUTE_CHANGED', 'the attached Agent route changed during image capability verification')
+      }
+      return await sessionController.prompt(request, signal)
+    },
     cancelPending: (sessionId, agent, session, messageId) => {
       // The EXACT live identity is re-verified synchronously: only the very
       // Agent/Session objects this View attached may be touched.
