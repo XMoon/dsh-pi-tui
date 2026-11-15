@@ -396,3 +396,72 @@ test('a pre-invocation gateway refusal stays a rejection', async () => {
   if (outcome.kind !== 'failed') return
   assert.equal(outcome.failure.kind, 'rejected')
 })
+
+test('a queued write whose Host is swapped before dispatch never reaches Host B', async () => {
+  // Host B carries the SAME namespace revision: only the generation fence can
+  // stop the stale intent. The mutation promise is created while Host A is
+  // current; the swap lands before the serialized queue runs the task.
+  let generation: { id: number } = { id: 1 }
+  const listeners = new Set<() => void>()
+  let dispatchCalls = 0
+  const fixture = makePort({
+    namespaces: [{ ns: 'mcp-manager', base: { servers: {} }, user: { servers: {} }, value: { servers: {} }, revision: 5 }],
+  })
+  void fixture
+  // Reuse the shared fixture's remote but intercept mutate to count dispatches
+  // and swap the generation when the queued task starts. This needs the real
+  // port, so build it inline.
+  const remote = {
+    settings: {
+      describe: async () => ({ ok: true as const, value: { writable: true, hasDocument: true, namespaces: [{ ns: 'mcp-manager', base: { servers: {} }, user: { servers: {} }, value: { servers: {} }, revision: 5 }] } }),
+      mutate: async () => { dispatchCalls += 1; return { ok: true as const, value: {} } },
+    },
+    credentials: { describe: async () => ({ ok: true as const, value: {} }) },
+    commands: { execute: async () => ({ ok: false as const, error: { code: 'unused', message: 'unused' } }) },
+    permissionPresets: { catalog: async () => ({ ok: true as const, value: { options: [] } }) },
+    agentPresets: { list: async () => ({ ok: true as const, value: { presets: [] } }) },
+    llm: { listConfigurableProviders: async () => ({ ok: true as const, value: [] }) },
+    $on: () => () => {},
+  }
+  const { RemoteConfigPort } = await import('../../../src/runtime/remote/config-remote.ts')
+  const port = new RemoteConfigPort({
+    remote,
+    connection: { generation: {
+      getSnapshot: () => generation as never,
+      subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
+    } },
+  } as never)
+  await port.describe()
+  const read = port.mcpServerConfiguration.read()
+  assert.equal(read.kind, 'ready')
+  if (read.kind !== 'ready') return
+  const pending = port.mcpServerConfiguration.mutate(
+    [{ op: 'set', path: ['servers', 'x'], value: stdioEntry() }],
+    read.revision,
+    read.generation,
+  )
+  // The serialized queue has not run the RPC yet: swap to Host B (same
+  // revision on the wire) and wake the mirror.
+  generation = { id: 2 }
+  for (const listener of [...listeners]) listener()
+  const outcome = await pending
+  assert.equal(dispatchCalls, 0, 'Host B must receive ZERO mutations')
+  assert.equal(outcome.kind, 'failed')
+  if (outcome.kind !== 'failed') return
+  assert.equal(outcome.failure.kind, 'rejected', 'a never-dispatched stale intent is a proven refusal')
+  // The same write on a stable generation still succeeds.
+  const read2 = port.mcpServerConfiguration.read()
+  assert.equal(read2.kind, 'ready')
+  if (read2.kind !== 'ready') return
+  await port.describe()
+  const read3 = port.mcpServerConfiguration.read()
+  assert.equal(read3.kind, 'ready')
+  if (read3.kind !== 'ready') return
+  const okOutcome = await port.mcpServerConfiguration.mutate(
+    [{ op: 'set', path: ['servers', 'y'], value: stdioEntry() }],
+    read3.revision,
+    read3.generation,
+  )
+  assert.equal(okOutcome.kind, 'saved')
+  assert.equal(dispatchCalls, 1, 'exactly one dispatch for the healthy path')
+})

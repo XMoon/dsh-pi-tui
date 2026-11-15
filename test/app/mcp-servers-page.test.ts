@@ -95,6 +95,8 @@ class StubController {
   }
   formValue: 'reference' | 'literal' = 'reference'
   removeEditorDictKey(field: string, key: string): void { this.calls.push(`removeDict:${field}:${key}`) }
+  canRemoveDictKey(_field: string, _key: string): boolean { return this.keysRemovable }
+  keysRemovable = true
   addable = true
   editable = true
   dispose(): void {}
@@ -686,4 +688,32 @@ test('adding rows keeps later fields reachable and the focus visible', () => {
     const frame = render(page, 80, 10).join('\n')
     assert.match(frame, /▸ [^:\n]+:/u, `step ${String(step)}: the focused field is painted`)
   }
+})
+
+test('a base-owned env key states it cannot be removed and backspace does nothing', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({
+      env: [{ key: 'BASE_KEY', value: 'base-value' }, { key: 'USER_KEY', value: '${credential:U}' }],
+      dirty: true,
+    }),
+  }))
+  // The stub denies removal of exactly BASE_KEY.
+  controller.canRemoveDictKey = (_field: string, key: string) => key !== 'BASE_KEY'
+  openEditor(page, 'e')
+  const frame = render(page, 120, 24).join('\n')
+  assert.match(frame, /BASE_KEY · Inherited · cannot remove here/u,
+    'the base-owned key states why Remove is absent')
+  // Focus the BASE_KEY row and press backspace: nothing is removed.
+  for (let step = 0; step < 14; step += 1) {
+    const focused = /▸ ([^:\n]+):/u.exec(render(page, 120, 24).join('\n'))
+    if (focused !== null && (focused[1] ?? '').trim() === 'Env key') {
+      const withBase = render(page, 120, 24).join('\n').includes('BASE_KEY · Inherited')
+      if (withBase) break
+    }
+    page.handleInput('\x1b[B')
+  }
+  page.handleInput('\x7f')
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('removeDict')), [],
+    'a base-owned key never reaches the removal intent')
 })

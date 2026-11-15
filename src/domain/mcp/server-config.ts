@@ -87,6 +87,14 @@ export interface McpClassifiedServerEntry {
     readonly headers?: ReadonlyMap<string, string>
     readonly enabled?: boolean
   }
+  /** The BASE (inherited) entry's env/headers key sets, when the descriptor
+   *  exposed a base entry with dict fields. The per-key removal policy: an
+   *  official per-key `unset` on a base-owned key RESTORES the inherited value
+   *  (it cannot delete), so only keys the base does not own are removable. */
+  readonly baseKeys?: {
+    readonly env?: ReadonlySet<string>
+    readonly headers?: ReadonlySet<string>
+  }
 }
 
 /** One validation problem of a draft (never a secret). */
@@ -359,6 +367,22 @@ export function classifyMcpServerProvenance(base: unknown, value: unknown, name:
   if (valueServers === undefined || !Object.hasOwn(valueServers, name)) return undefined
   if (baseServers === undefined || !Object.hasOwn(baseServers, name)) return 'user-added'
   return structurallyEqual(baseServers[name], valueServers[name]) ? 'inherited' : 'overridden'
+}
+
+/**
+ * The base dict key sets of one raw base entry (own keys only), or `undefined`
+ * when the descriptor carries no base entry / no dict fields.
+ */
+export function baseDictKeysOf(baseEntry: unknown): { env?: ReadonlySet<string>; headers?: ReadonlySet<string> } | undefined {
+  if (!isPlainRecord(baseEntry)) return undefined
+  const of = (value: unknown): ReadonlySet<string> | undefined => {
+    if (!isPlainRecord(value)) return undefined
+    return new Set(Object.keys(value))
+  }
+  const env = of(baseEntry.env)
+  const headers = of(baseEntry.headers)
+  if (env === undefined && headers === undefined) return undefined
+  return { ...env === undefined ? {} : { env }, ...headers === undefined ? {} : { headers } }
 }
 
 /** Project one effective entry value into the transport-fact DTO (strings,

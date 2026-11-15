@@ -419,7 +419,7 @@ async function saveAcknowledging(h: Harness): Promise<void> {
 function configOf(
   generation: object,
   revision: number,
-  entries: readonly { name: string; provenance: 'user-added' | 'inherited' | 'overridden'; effective: Record<string, unknown> }[],
+  entries: readonly { name: string; provenance: 'user-added' | 'inherited' | 'overridden'; effective: Record<string, unknown>; baseKeys?: { env: string[]; headers: string[] } }[],
 ): McpServerConfiguration {
   return {
     kind: 'ready',
@@ -428,7 +428,17 @@ function configOf(
     entries: entries.map(entry => {
       const effective = projectMcpServerEntry(entry.effective)
       assert.ok(effective !== undefined, `the test entry ${entry.name} must project`)
-      return { name: entry.name, provenance: entry.provenance, effective }
+      return {
+        name: entry.name,
+        provenance: entry.provenance,
+        effective,
+        ...entry.baseKeys === undefined ? {} : {
+          baseKeys: {
+            ...entry.baseKeys.env.length > 0 ? { env: new Set(entry.baseKeys.env) } : {},
+            ...entry.baseKeys.headers.length > 0 ? { headers: new Set(entry.baseKeys.headers) } : {},
+          },
+        },
+      }
     }),
   }
 }
@@ -907,4 +917,36 @@ test('a reference-to-literal switch always succeeds and keeps the typed text', a
   h.controller.setEditorDictForm('env', 'TOKEN', 'literal')
   assert.equal(h.controller.dictValueForm('env', 'TOKEN'), 'literal')
   assert.equal(h.controller.snapshot().editor?.env.find(entry => entry.key === 'TOKEN')?.value, 'MY_TOKEN')
+})
+
+test('an inherited (base-owned) env key offers no Remove and removing it is a no-op', async () => {
+  const h = await readyHarness([{
+    name: 'inherited',
+    provenance: 'inherited',
+    effective: stdioEffective({ env: { BASE_KEY: 'base-value', OTHER: 'also-base' } }),
+    baseKeys: { env: ['BASE_KEY', 'OTHER'], headers: [] },
+  }], 4)
+  h.controller.beginEdit()
+  // Both keys come from the base layer: the official per-key unset would
+  // RESTORE them, so Remove is not offered.
+  assert.equal(h.controller.canRemoveDictKey('env', 'BASE_KEY'), false)
+  h.controller.removeEditorDictKey('env', 'BASE_KEY')
+  assert.equal(h.controller.snapshot().editor?.env.some(entry => entry.key === 'BASE_KEY'), true,
+    'a base-owned key survives the refused removal')
+
+  // A key the base does NOT own — even on an INHERITED server — stays removable.
+  h.controller.addEditorDictKey('env')
+  const placeholder = h.controller.snapshot().editor?.env.find(entry => entry.key.startsWith('KEY_'))?.key
+  assert.ok(placeholder !== undefined)
+  assert.equal(h.controller.canRemoveDictKey('env', placeholder), true)
+  h.controller.removeEditorDictKey('env', placeholder)
+  assert.equal(h.controller.snapshot().editor?.env.some(entry => entry.key === placeholder), false)
+})
+
+test('a user-added server has no base keys, so every env key is removable', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective({ env: { MINE: 'v' } }) }])
+  h.controller.beginEdit()
+  assert.equal(h.controller.canRemoveDictKey('env', 'MINE'), true)
+  h.controller.removeEditorDictKey('env', 'MINE')
+  assert.equal(h.controller.snapshot().editor?.env.some(entry => entry.key === 'MINE'), false)
 })

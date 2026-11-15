@@ -45,6 +45,9 @@ export interface McpFormRow {
   readonly action: McpFormAction
   /** Rows a `backspace` may remove (arg / dict key rows). */
   readonly removable?: boolean
+  /** Dict KEY rows the base layer owns: the official per-key unset RESTORES
+   *  the inherited value, so Remove is not offered for them. */
+  readonly inheritedKey?: boolean
 }
 
 /** Whether one string is a stored `${credential:REF}` reference. */
@@ -68,6 +71,7 @@ function dictValueText(value: string): string {
 export function mcpFormRows(
   editor: McpEditorSnapshot,
   formOf: (field: 'env' | 'headers', key: string) => 'reference' | 'literal' = (_field, _key) => 'reference',
+  keyRemovable: (field: 'env' | 'headers', key: string) => boolean = (_field, _key) => true,
 ): readonly McpFormRow[] {
   const rows: McpFormRow[] = []
   if (editor.nameEditable) {
@@ -117,13 +121,16 @@ export function mcpFormRows(
     }
     rows.push({ id: 'env-add', group: 'Parameters', label: 'Env', value: '+ Add env var', action: { kind: 'add-dict-row', field: 'env' } })
     for (const entry of editor.env) {
+      const envRemovable = keyRemovable('env', entry.key)
       rows.push({
         id: `env-key:${entry.key}`,
         group: 'Parameters',
         label: 'Env key',
-        value: entry.key,
+        // A base-owned key states WHY Remove is not offered instead of
+        // silently omitting the fact.
+        value: envRemovable ? entry.key : `${entry.key} · Inherited · cannot remove here`,
         action: { kind: 'edit-dict-key', field: 'env', key: entry.key },
-        removable: true,
+        ...envRemovable ? { removable: true } : { inheritedKey: true },
       })
       rows.push({
         id: `env-value:${entry.key}`,
@@ -151,13 +158,14 @@ export function mcpFormRows(
     })
     rows.push({ id: 'header-add', group: 'Parameters', label: 'Headers', value: '+ Add header', action: { kind: 'add-dict-row', field: 'headers' } })
     for (const entry of editor.headers) {
+      const headerRemovable = keyRemovable('headers', entry.key)
       rows.push({
         id: `header-key:${entry.key}`,
         group: 'Parameters',
         label: 'Header key',
-        value: entry.key,
+        value: headerRemovable ? entry.key : `${entry.key} · Inherited · cannot remove here`,
         action: { kind: 'edit-dict-key', field: 'headers', key: entry.key },
-        removable: true,
+        ...headerRemovable ? { removable: true } : { inheritedKey: true },
       })
       rows.push({
         id: `header-value:${entry.key}`,
@@ -200,8 +208,9 @@ export function renderMcpConfigForm(
   focusIndex: number,
   offset: number,
   formOf: (field: 'env' | 'headers', key: string) => 'reference' | 'literal' = (_field, _key) => 'reference',
+  keyRemovable: (field: 'env' | 'headers', key: string) => boolean = (_field, _key) => true,
 ): { readonly lines: string[]; readonly painted: readonly McpFormPaintedRow[]; readonly maxOffset: number; readonly focusedContentRow: number } {
-  const formRows = mcpFormRows(editor, formOf)
+  const formRows = mcpFormRows(editor, formOf, keyRemovable)
   const content: { readonly text: string; readonly row?: McpFormRow; readonly group?: McpFormGroup }[] = []
   let lastGroup: McpFormGroup | undefined
   for (const row of formRows) {
