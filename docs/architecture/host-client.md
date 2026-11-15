@@ -508,7 +508,7 @@ stdout/stderr.
   reported as a failure, never as a completed uninstall. A cold `start` never
   silently upgrades a different build.
 - **logs use one proven source.** An owned profile unit reads the fixed
-  `/usr/bin/journalctl --user --unit <verified-name> --no-pager -o cat` with a
+  `/usr/bin/journalctl --user-unit <verified-name> --no-pager -o cat` with a
   bounded line count; only a strictly absent user manager may tail the private
   0600 `host.log` in this profile scope. There is no arbitrary path/command
   input, no journal fallback to an unrelated file and no business side effect;

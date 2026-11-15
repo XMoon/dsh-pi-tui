@@ -29,6 +29,7 @@ import {
 } from '../../src/app/remote-process/local-host-manager.ts'
 import {
   formatDaemonStatus,
+  journalctlArgs,
   runDaemonControl,
   sanitizeLogText,
   type DaemonControlDeps,
@@ -832,6 +833,15 @@ test('logs refuses a private file when a user manager exists without an owned un
     hostLogTail: async () => { throw new Error('must not read') },
   }))
   assertCode(result, 4, /LOG_SOURCE_UNAVAILABLE/u)
+})
+
+test('journalctl selects the USER unit field, not the system unit field', () => {
+  // `--user --unit X` filters `_SYSTEMD_UNIT` and therefore never matches a
+  // user unit's entries: it exits 0 with empty output on a real host. The user
+  // unit field is selected by `--user-unit` (`_SYSTEMD_USER_UNIT`).
+  const args = journalctlArgs('pi-tui-x.service', 20)
+  assert.deepEqual(args, ['--user-unit', 'pi-tui-x.service', '--no-pager', '-o', 'cat', '-n', '20'])
+  assert.equal(args.includes('--unit'), false, 'the system-unit selector must never be used for a user unit')
 })
 
 test('sanitizeLogText redacts the whole credential value behind common header schemes', () => {
