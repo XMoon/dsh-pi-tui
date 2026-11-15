@@ -888,11 +888,6 @@ function readUnitMetadata(lines: readonly string[], key: string): string {
 }
 
 /**
- * Prove that a unit file is the controlled definition for THIS (scope, profile)
- * pair. The installed build may differ (an older compatible build): that is the
- * explicit `restart` migration input, not a cold-start rewrite permission.
- */
-/**
  * Split one ExecStart value into its argument tokens, honouring systemd's
  * double-quoted form (a quoted argument may contain spaces). Quoting state is
  * strict: an unterminated quote is a malformed line, never a token boundary.
@@ -905,6 +900,18 @@ function tokenizeExecStart(line: string): string[] {
   for (let index = 0; index < line.length; index += 1) {
     const character = line[index]
     if (quoted) {
+      if (character === '\\') {
+        // The renderer encodes a literal quote as `\\"` and a literal
+        // backslash as `\\\\`; preserve the pair for decodeUnitArg while
+        // preventing the escaped quote from closing this argument.
+        current += character
+        const escaped = line[index + 1]
+        if (escaped !== undefined) {
+          current += escaped
+          index += 1
+        }
+        continue
+      }
       if (character === '"') quoted = false
       else current += character
       continue
@@ -930,9 +937,9 @@ function tokenizeExecStart(line: string): string[] {
   return tokens
 }
 
-/** Decode one systemd double-quoted command argument back to its raw value. */
+/** Decode one token; tokenizeExecStart has already removed its delimiters. */
 function decodeUnitArg(encoded: string): string {
-  return encoded.replace(/^"|"$/gu, '').replace(/%%/gu, '%').replace(/\\\\/gu, '\\').replace(/\$\$/gu, '$').replace(/\\"/gu, '"')
+  return encoded.replace(/%%/gu, '%').replace(/\$\$/gu, '$').replace(/\\([\\"])/gu, '$1')
 }
 
 /**
