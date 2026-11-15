@@ -344,9 +344,11 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
   const readRecord = deps.readRecord ?? readLocalRecord
   const inspectProcess = deps.inspectProcess ?? inspectHostProcess
   let host: DaemonHostState = 'stopped'
-  // A verified, loaded profile unit is the supervision attribution even before
-  // the Host reaches authenticated readiness (ActiveState is not readiness).
-  let manager: DaemonManagerKind = unit !== undefined && unitState !== 'not-found'
+  // A verified, LOADED profile unit is the supervision attribution even before
+  // the Host reaches authenticated readiness (ActiveState is not readiness). A
+  // unit FILE on disk proves nothing: without a live manager nothing is loaded,
+  // so the attribution stays `unmanaged` exactly like the logs source rule.
+  let manager: DaemonManagerKind = unit !== undefined && unitState !== 'not-found' && probe.kind === 'available'
     ? 'systemd'
     : 'unmanaged'
   let compatibility: DaemonCompatibility = 'none'
@@ -399,6 +401,14 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
           failure = new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the active profile unit does not supervise the authenticated Host')
           exitCode = failure.exitCode
         }
+      } else if (probe.kind === 'available' && (unitActiveState === 'deactivating' || unitActiveState === 'reloading')) {
+        // The handshake answered, but the manager is actively retiring or
+        // reloading this unit: the Host may be gone before any caller acts on
+        // the answer, so this is the same TRANSITION_UNCERTAIN as the
+        // no-registry path below — never a full success.
+        host = 'unknown'
+        failure = new DaemonControlError('TRANSITION_UNCERTAIN', `the profile unit is in an unconfirmed state (${unitActiveState})`)
+        exitCode = failure.exitCode
       } else {
         // A live fallback Host under a manager that is now absent (or with no
         // loaded unit) is process-supervised, never the inactive unit's.

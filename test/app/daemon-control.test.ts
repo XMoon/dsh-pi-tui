@@ -201,6 +201,51 @@ test('an active unit without an authenticated Host reports starting, never ready
   assert.doesNotMatch(result.stdout, /^host=ready$/mu)
 })
 
+test('status reports an absent manager with a stale unit file as unmanaged, never systemd', async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    probe: async (): Promise<UserManagerProbe> => ({ kind: 'absent' }),
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^user-manager=absent$/mu)
+  assert.match(result.stdout, /^manager=unmanaged$/mu, 'a unit FILE on disk is not supervision: the absent manager loads nothing')
+  assert.match(result.stdout, /^unit-state=unknown$/mu)
+  assert.match(result.stdout, /^host=stopped$/mu)
+  assert.equal(existsSync(unit.path), true)
+})
+
+test('status reports an authenticated Host under a deactivating unit as uncertain, never success', async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'deactivating', mainPid: record.hostPid })
+  let ensured = 0
+  const status = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(status, 5, /TRANSITION_UNCERTAIN/u)
+  assert.match(status.stdout, /^host=unknown$/mu)
+  assert.doesNotMatch(status.stdout, /^host=ready$/mu, 'an authenticated handshake cannot outrank an unconfirmed supervisor')
+  // start must NOT reuse a Host the manager is retiring, and must not start one.
+  const start = await runDaemonControl({ verb: 'start' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    ensureHost: async () => { ensured += 1; throw new Error('must not start past an uncertain transition') },
+  }))
+  assert(start.code !== 0, `start must refuse an uncertain unit transition, saw ${String(start.code)}`)
+  assert(/TRANSITION_UNCERTAIN/u.test(`${start.stdout}${start.stderr}`), 'start must carry the stable uncertain code')
+  assert.equal(ensured, 0)
+  assert.equal(existsSync(unit.path), true)
+})
+
 test('status reports an activating unit with no registry as starting, never stopped', async t => {
   const fx = fixture(t)
   const unit = writeOwnedUnit(fx)
