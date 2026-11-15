@@ -649,6 +649,18 @@ export interface EmbeddedSpecialistPage extends Component {
   /** The page's own SEMANTIC identity for a pointer gesture (view + the
    *  transient phases its Esc really acts on), re-proved at the release. */
   gestureIdentity?(): string
+  /**
+   * The NON-Esc last-row spans the page's own Action Bar really painted, with
+   * an opaque page-owned intent id. The Root owns the physical row (it paints
+   * it, and Esc stays the Root's single target): these spans DELEGATE to the
+   * page through {@link activateBarSpan} at release. The spans are in the
+   * page's own content columns of the LAST rendered frame; a span the layout
+   * dropped is absent, so a pointer target is never invented.
+   */
+  paintedBarSpans?(): readonly { readonly id: string; readonly startCol: number; readonly endCol: number }[]
+  /** Invoke one delegated last-row intent (the id came from
+   *  {@link paintedBarSpans} of the same frame). */
+  activateBarSpan?(id: string): void
 }
 
 /** One pane the current frame actually paints: its level and absolute geometry.
@@ -660,7 +672,7 @@ interface PaneLayout {
 }
 
 interface HitTarget {
-  readonly kind: 'category' | 'row' | 'pane' | 'change' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action' | 'bar-escape'
+  readonly kind: 'category' | 'row' | 'pane' | 'change' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action' | 'bar-escape' | 'bar-span'
   /** The stable identity: a category id, a row id, the pane name, a candidate
    *  value or the button verb. */
   readonly id: string
@@ -3902,13 +3914,22 @@ export class SettingsWorkspacePanel implements Component {
     this.paintedSpecialistBox = page === undefined
       ? undefined
       : { x: 0, top: geometry.contentTop, width: plan.width, rows: contentRows }
-    // The SINGLE last-row pointer target is the child's own painted Esc span;
-    // the specialised body hit maps stay exactly as the page painted them (the
-    // root never adds a second owner to the same release).
+    // The last row's Esc target stays the ROOT's single owner. The child's
+    // own NON-Esc Action-Bar spans are registered as DELEGATED targets: the
+    // root owns the physical row and forwards the release to the child's
+    // `activateBarSpan` (never a second mouse handler over the same cells).
     const barSpan = page?.paintedEscapeSpan?.()
-    this.paintedTargets = barSpan === undefined
-      ? []
-      : [this.barEscapeTarget(lines.length - 1, barSpan)]
+    const delegated = (page?.paintedBarSpans?.() ?? []).map(span => ({
+      kind: 'bar-span' as const,
+      id: span.id,
+      row: lines.length - 1,
+      startCol: span.startCol,
+      endCol: span.endCol,
+    }))
+    this.paintedTargets = [
+      ...barSpan === undefined ? [] : [this.barEscapeTarget(lines.length - 1, barSpan)],
+      ...delegated,
+    ]
     this.paintedPanes = {}
     this.paintedContentBox = undefined
     this.paintedRevision = this.revision
@@ -5267,10 +5288,11 @@ export class SettingsWorkspacePanel implements Component {
     // A new press always supersedes the other owner's press state.
     this.pressedGesture = undefined
     this.contentPressed = undefined
-    // The ONE physical last-row Esc affordance belongs to the ROOT's gesture
-    // path: it is recorded with the same owning identity and never reaches a
-    // child content/body owner (no second owner for one release).
-    const barTarget = this.barEscapeTargetAt(x, y)
+    // The last row belongs to the ROOT's gesture path — BOTH of its target
+    // kinds: the Esc affordance and the child's DELEGATED Action-Bar spans.
+    // Both are recorded with the same owning identity and never reach a child
+    // content/body owner (no second owner for one release).
+    const barTarget = this.barTargetAt(x, y)
     if (barTarget !== undefined) {
       this.recordGesture(barTarget)
       return
@@ -5412,7 +5434,8 @@ export class SettingsWorkspacePanel implements Component {
     }
     // A recorded last-row Esc gesture resolves against the ROOT's painted hit
     // map only (the child content owner is never consulted for it).
-    if (this.pressedGesture?.target.kind === 'bar-escape') {
+    if (this.pressedGesture?.target.kind === 'bar-escape'
+      || this.pressedGesture?.target.kind === 'bar-span') {
       const target = this.takeGesture(x, y)
       if (target !== undefined) this.activate(target)
       return
@@ -5544,6 +5567,12 @@ export class SettingsWorkspacePanel implements Component {
         // every pending/dirty refusal). It is never a second visible-layer
         // `if (focus === ...)` navigation ladder.
         this.handleInput('\x1b')
+        return
+      }
+      case 'bar-span': {
+        // A DELEGATED last-row intent: the child's own Action Bar painted this
+        // span and owns the semantics; the root only owns the physical row.
+        this.specialistPage?.activateBarSpan?.(target.id)
         return
       }
       case 'category': {
@@ -5691,6 +5720,14 @@ export class SettingsWorkspacePanel implements Component {
   private barEscapeTargetAt(x: number, y: number): HitTarget | undefined {
     return this.paintedTargets.find(target =>
       target.kind === 'bar-escape' && target.row === y && x >= target.startCol && x < target.endCol)
+  }
+
+  /** The last-row target at a cell — the Root-owned Esc affordance OR a child's
+   *  DELEGATED Action-Bar span (both live on the Root's physical row). */
+  private barTargetAt(x: number, y: number): HitTarget | undefined {
+    return this.paintedTargets.find(target =>
+      (target.kind === 'bar-escape' || target.kind === 'bar-span')
+      && target.row === y && x >= target.startCol && x < target.endCol)
   }
 
   /** Record the ONE press-time target with the complete owning identity the

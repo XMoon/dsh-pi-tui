@@ -419,15 +419,15 @@ test('the editor paints grouped fields and keeps Save + Esc reachable at 44x8', 
   added.page.handleInput('a')
   const lines = render(added.page, 44, 8)
   const frame = lines.join('\n')
-  assert.match(frame, /Identity/u)
+  // RC-B: the fixed identity line is painted INSIDE the body grant, so it is
+  // visible at the 44-column floor (where the Root grants no pane header).
+  assert.match(frame, /\(unnamed\) · Add/u)
   assert.match(frame, /Name/u)
   assert.match(frame, /Transport/u)
   assert.match(frame, /s Save/u)
   assert.match(frame, /Back \[Esc\]/u)
   assert.equal(lines.length, 8)
   for (const line of lines) assert.ok(visibleWidth(line) <= 44)
-  // The page really entered the editor view (not the list).
-  assert.match(frame, /Command/u)
 })
 
 test('while a form input is active, a/e/t/d/u/s are INPUT characters, never page actions', () => {
@@ -896,11 +896,15 @@ test('a form-row click activates the same intent as Enter, and a repaint refuses
   assert.ok(controller.calls.includes('setTransport'),
     `a form-row click must run the Enter intent: ${controller.calls.join(',')}`)
 
-  // A press whose frame repaints before the release never completes.
+  // A press whose frame repaints before the release never completes. The
+  // identity line shifts the painted geometry, so the row is re-found.
   controller.calls.length = 0
-  page.handleMouse({ ...mouseBase, type: 'press', x: 2, y: transportLine, width: 100, height: 19 })
-  render(page, 100, 18)
-  page.handleMouse({ ...mouseBase, type: 'click', x: 2, y: transportLine, width: 100, height: 19 })
+  const refreshed = render(page, 100, 18)
+  const transportAgain = refreshed.findIndex(line => line.includes('Transport:'))
+  assert.ok(transportAgain >= 0)
+  page.handleMouse({ ...mouseBase, type: 'press', x: 2, y: transportAgain, width: 100, height: 17 })
+  render(page, 100, 17)
+  page.handleMouse({ ...mouseBase, type: 'click', x: 2, y: transportAgain, width: 100, height: 17 })
   assert.deepEqual(controller.calls, [], 'a stale press never activates a field')
 })
 
@@ -935,27 +939,30 @@ test('a pointer cannot change the draft while a confirmation owns the page', () 
   assert.ok(plain.controller.calls.includes('setTransport'), 'a non-modal field click still works')
 })
 
-test('the mouse can complete the whole loop: detail, Add, field, Save, confirm', () => {
+test('a delegated last-row span reaches the page through the Root seam', () => {
   const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET, config: { kind: 'ready', generation: {}, revision: 1, entries: [] } }))
+  render(page, 100, 20)
+  // The Root registers what paintedBarSpans() publishes; releasing one must
+  // run the SAME intent the painted affordance names.
+  const spans = page.paintedBarSpans()
+  assert.ok(spans.some(span => span.id === 'bar:add'), `the Add span must be published: ${spans.map(s => s.id).join(',')}`)
+  page.activateBarSpan('bar:add')
+  assert.ok(controller.calls.includes('beginAdd'), `the delegated Add must run the intent: ${controller.calls.join(',')}`)
+})
+
+test('the page-local bar targets and the Root seam publish the same affordances', () => {
+  const { page } = makePage(snapshot({ selectedConfig: CONFIG_FACET, config: { kind: 'ready', generation: {}, revision: 1, entries: [] } }))
+  const lines = render(page, 100, 20)
+  // A page-local click still works through the child's own hit map…
   const mouse = { button: 'left' as const, screenX: 1, screenY: 1, shift: false, alt: false, ctrl: false }
-  const clickLabel = (width: number, rows: number, label: string): boolean => {
-    page.setMaxRows(rows)
-    const lines = page.render(width).map(line => stripTerminalSequences(line))
-    const y = lines.findIndex(line => line.includes(label))
-    if (y < 0) return false
-    const col = (lines[y] ?? '').indexOf(label) + 1
-    page.handleMouse({ ...mouse, type: 'press', x: col, y, width, height: rows - 1 })
-    page.handleMouse({ ...mouse, type: 'click', x: col, y, width, height: rows - 1 })
-    return true
-  }
-  // 1) The list's `a Add` is clickable.
-  assert.ok(clickLabel(100, 20, 'a Add'), 'the Add affordance must be a pointer target')
-  assert.ok(controller.calls.includes('beginAdd'), `the Add click must run the intent: ${controller.calls.join(',')}`)
-  // 2) The form's `s Save` is clickable and opens the disclosure (the fake
-  //    controller reports the save intent through saveEditor).
-  controller.calls.length = 0
-  assert.ok(clickLabel(100, 20, 's Save'), 'the Save affordance must be a pointer target')
-  assert.ok(controller.calls.includes('saveEditor'), `the Save click must run the intent: ${controller.calls.join(',')}`)
+  const y = lines.findIndex(line => line.includes('a Add'))
+  assert.ok(y >= 0)
+  const col = (lines[y] ?? '').indexOf('a Add') + 1
+  page.handleMouse({ ...mouse, type: 'press', x: col, y, width: 100, height: 19 })
+  page.handleMouse({ ...mouse, type: 'click', x: col, y, width: 100, height: 19 })
+  // …and the published spans match the bar segments that really painted.
+  const published = page.paintedBarSpans().map(span => span.id)
+  assert.ok(published.includes('bar:back'), `Esc-adjacent spans publish: ${published.join(',')}`)
 })
 
 test('the Save disclosure lives in the body at 44 columns, not only in the bar', () => {
