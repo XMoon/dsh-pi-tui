@@ -871,6 +871,9 @@ test('the ACP PO-3B scoped-cancel/approval selected verdict accepts only the com
     policyNeverUnbypassed: true,
     lateApprovalNoLeak: true,
     twoViewsIsolated: true,
+    queueRemoveSettled: true,
+    steerMixedOwnership: true,
+    queueEditRetained: true,
     tuiAndAcpShareSession: true,
     hostIdentityKept: true,
     l6EvidenceRecorded: true,
@@ -880,6 +883,13 @@ test('the ACP PO-3B scoped-cancel/approval selected verdict accepts only the com
   const missing = { ...complete }
   delete missing.runningCancelExactTurn
   assert.throws(() => assertSelectedVerdict('acp.po3b-cancel-approval', missing), /selected acp\.po3b-cancel-approval/u)
+  // The queue-mutation proofs are required, not optional evidence.
+  const missingQueue = { ...complete }
+  delete missingQueue.queueRemoveSettled
+  assert.throws(() => assertSelectedVerdict('acp.po3b-cancel-approval', missingQueue), /selected acp\.po3b-cancel-approval/u)
+  const missingEdit = { ...complete }
+  delete missingEdit.queueEditRetained
+  assert.throws(() => assertSelectedVerdict('acp.po3b-cancel-approval', missingEdit), /selected acp\.po3b-cancel-approval/u)
   // A proof field that is present but false is a rejected verdict.
   assert.throws(() => assertSelectedVerdict('acp.po3b-cancel-approval', { ...complete, acpApprovalOnly: false }),
     /selected acp\.po3b-cancel-approval/u)

@@ -583,6 +583,9 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.policyNeverUnbypassed === true
       && result?.lateApprovalNoLeak === true
       && result?.twoViewsIsolated === true
+      && result?.queueRemoveSettled === true
+      && result?.steerMixedOwnership === true
+      && result?.queueEditRetained === true
       && result?.tuiAndAcpShareSession === true
       && result?.hostIdentityKept === true
       && result?.l6EvidenceRecorded === true,

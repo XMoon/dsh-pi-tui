@@ -535,9 +535,12 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
       `turn/end {reason:{kind:'aborted',reason:{kind:'user'}}}` plus the
       ordered notification drain. A turn that already reached its real terminal
       keeps its real result (`end_turn`/`max_tokens`/the true failure);
-    - a MIXED turn (a TUI steer claimed into the same turn) is NEVER
-      Agent-cancelled: the request keeps its `LOCAL_ACP_PROMPT_MIXED_TURN`
-      failure and the TUI steer keeps its authority;
+    - a MIXED turn (the ACP message and another user's message claimed into
+      the same turn) is NEVER Agent-cancelled: the request keeps its
+      `LOCAL_ACP_PROMPT_MIXED_TURN` failure. A turn already open when the ACP
+      flight begins retains its original approval owner when the ACP message
+      is later steered into it; claiming that message does not transfer the
+      whole turn to ACP;
     - a cancellation that cannot prove either fact fails closed with
       `LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED` instead of fabricating `cancelled`.
     `session/close` with an open flight performs the SAME scoped cancellation
@@ -553,25 +556,42 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     retirement: the reservation keeps ONE transient unclaimed-Host-obligation
     record (the exact request id, the official inserted message id once known,
     and the admission classification) and survives until a real terminal fact
-    settles it — the exact queued removal or its official discard notice, the
-    message being claimed into a turn whose own terminal then ends the fence,
-    or the exact Agent's disposal. While that record is open, a new prompt is
-    refused with `LOCAL_ACP_PROMPT_IN_FLIGHT`. A physical
+    settles it — an exact queued removal, an exact Host state checkpoint after
+    a discard, the message being claimed into a turn whose own terminal then
+    ends the fence, or the exact Agent's disposal. `agent/inbox/discarded`
+    alone is not terminal: official queue edits and steering can remove and
+    reinsert the same id within one synchronous mutation. The notice schedules
+    one microtask past that mutation stack, then reads the exact live
+    Agent/Session and both official Inbox lists and checks the message's
+    official claimed-turn facts. Pending retains the responsibility; claimed
+    retains the turn fence; only absent with no claim and still-exact identities
+    proves removal. A stale identity leaves the responsibility unconfirmed.
+    This checks lifecycle state, not the provenance of a queue action. A real
+    external removal also settles an active queued prompt as `cancelled` after
+    admission classification and output drain; edit/steer must not settle it.
+    While that record is open, a new prompt is refused with
+    `LOCAL_ACP_PROMPT_IN_FLIGHT`. A physical
     disconnect of a flight that already owns its durable message fact drives
     the same scoped cancellation before the claim is released; a flight with no
     durable fact yet keeps the fail-closed release.
   - **Approval ownership (PO-3B).** The official Agent-scoped
     `approval/request` waterfall has exactly ONE classification seat ahead of
-    the TUI forwarding listener. A request whose exact Agent matches a View
-    claim AND whose turn is that claim's live flight turn (or its transient
-    retired-turn fence — a flight that settled before its `turn/end`) is
-    ACP-owned: it is answered ONLY through a standard reverse
-    `session/request_permission` on that View's own ACP connection with the
-    fixed `allow-once`/`reject-once` one-shot options, and NEVER delegated to
-    the TUI channel. Any unprovable, stale, cancelled, mixed, disconnected,
-    unknown-option or malformed outcome fails closed as `unavailable` (never an
-    automatic allow and never a fallback to the TUI). A turn proven NOT
-    ACP-owned keeps the TUI's own approval sheet; the Host `approval.policy`
+    the TUI forwarding listener. The classifier matches the exact Agent and
+    official open turn against the live flight or its transient retired-turn
+    fence, retaining the responder that owned an already-open turn when the
+    exact ACP message entered it. A turn originating from ACP is answered ONLY
+    through a standard reverse `session/request_permission` on that View's own
+    ACP connection with the fixed `allow-once`/`reject-once` one-shot options,
+    and NEVER delegated to the TUI channel. When the ACP message joins a
+    validated TUI-origin turn, the prompt is mixed but its approvals still go
+    only to the original TUI responder. Foreign message claim order alone
+    proves mixed input, not the original approval owner. This origin survives
+    an early Flight failure in the existing obligation/retired-turn fence. An
+    ACP-origin mixed turn or
+    unknown origin remains fail-closed. Other unprovable, stale, cancelled,
+    disconnected, unknown-option or malformed outcomes fail closed as
+    `unavailable` (never an automatic allow or an ACP-owned fallback to the
+    TUI). The Host `approval.policy`
     (e.g. `never`) and sandbox policy stay ahead of the waterfall and are
     never bypassed. The official `approval/asked`/`approval/decided` audit
     pair stays the single decision record; this View adds no second audit

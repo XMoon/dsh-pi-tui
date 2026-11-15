@@ -256,6 +256,9 @@ export async function runAcpPo3bCancelApproval(context) {
   let sequence = 0
   let host
   let barrier
+  let queueRemoveSettled = false
+  let steerMixedOwnership = false
+  let queueEditRetained = false
 
   const track = client => {
     acpClients.push(client)
@@ -315,8 +318,10 @@ export async function runAcpPo3bCancelApproval(context) {
     mkdirSync(join(workDir, 'po3b-workspaces'), { recursive: true, mode: 0o700 })
     barrier = join(workDir, `po3b-hold-${String(process.pid)}.release`)
     rmSync(barrier, { force: true })
+    const reverseApprovalBarrier = join(workDir, `po3b-reverse-approval-${String(process.pid)}.release`)
     const started = await startC1Host('acp-po3b', 'po3b A host', {
       C1_HOLD_LONG_TURN: barrier,
+      C1_PO3B_REVERSE_APPROVAL: reverseApprovalBarrier,
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '16',
     })
     const mainWorkRoot = started.workRoot
@@ -685,6 +690,220 @@ export async function runAcpPo3bCancelApproval(context) {
       && (hostSessionEvents(dshHome, sessionA) ?? []).some(event =>
         event.type === 'turn/end' && event.data?.turn === closeTuiTurn)
 
+    // ── Q1) R701-06: a REAL TUI queue REMOVE of a queued ACP message is a
+    //         real terminal fact: the prompt settles cancelled, the View can
+    //         close, and the running TUI turn is untouched.
+    {
+      holdNextTurn()
+      const q1TuiStart = (hostSessionEvents(dshHome, sessionA) ?? []).length
+      tuiA.send('po3b-tui-q1\r')
+      await waitForHostSessionEventAfter(dshHome, sessionA, q1TuiStart,
+        event => event.type === 'user/message' && userMessageText(event) === 'po3b-tui-q1',
+        'Q1: the TUI turn to be committed inside its held step', 120_000)
+      const { client: qConn } = await openInitialized(scopeDir, 'Q1 queue connection')
+      try {
+        const q1Resume = await sendRequest(qConn, 2, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
+        assert(q1Resume?.error === undefined, 'Q1: the queue connection must attach Session A')
+        const q1Start = (hostSessionEvents(dshHome, sessionA) ?? []).length
+        qConn.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: sessionA, prompt: [{ type: 'text', text: 'po3b-acp-qremove' }] } })
+        const q1Queued = await waitForHostSessionEventAfter(dshHome, sessionA, q1Start,
+          event => event.type === 'agent/inbox/spliced'
+            && event.data?.target === 'next-turn'
+            && (event.data.inserted ?? []).some(message => (message.content ?? []).some(part => part?.text === 'po3b-acp-qremove')),
+          'Q1: the ACP message to be queued', 120_000)
+        const q1Item = (q1Queued.data.inserted ?? []).find(message =>
+          (message.content ?? []).some(part => part?.text === 'po3b-acp-qremove'))
+        assert(typeof q1Item?.id === 'string', 'Q1: the queued ACP message must carry its durable id')
+        // The REAL TUI queue manager removes the ACP message through the
+        // official updateQueue.
+        tuiA.send('\x1bi')
+        await tuiA.waitForScreen('Delete [D]', 'Q1: the real queue manager is painted', 60_000)
+        await tuiA.waitForScreen('po3b-acp-qremove', 'Q1: the exact queued occurrence is visible', 60_000)
+        tuiA.send('d')
+        await tuiA.waitForScreen('Delete queued message', 'Q1: the delete confirmation is painted', 60_000)
+        tuiA.send('\r')
+        const q1Removed = await waitForHostSessionEventAfter(dshHome, sessionA, q1Start,
+          event => event.type === 'agent/inbox/spliced'
+            && event.data?.outcome === 'canceled'
+            && event.data?.target === 'next-turn',
+          'Q1: the official queue remove to commit', 120_000)
+        const q1Discard = await waitForC1WorkEvent(mainWorkRoot,
+          event => event.kind === 'po3b-inbox-discarded' && event.messageId === q1Item.id,
+          'Q1: official discarded identity of the removed ACP message', 60_000)
+        await tuiA.waitForScreen('0 queued', 'Q1: the queue manager observed the removal', 60_000)
+        tuiA.send('\x1b')
+        await tuiA.waitForScreenGone('Delete [D]', 'Q1: queue manager closed', 60_000)
+        const q1Notifications = []
+        const q1Response = await readUntilResponse(qConn, 3, q1Notifications)
+        assert(q1Response?.result?.stopReason === 'cancelled',
+          `Q1: the externally removed prompt must settle cancelled (got ${JSON.stringify(q1Response?.result ?? q1Response?.error)})`)
+        const q1Close = await sendRequest(qConn, 4, 'session/close', { sessionId: sessionA })
+        assert(q1Close?.error === undefined, 'Q1: the close must detach after the real removal')
+        // MEASURED: the real queue remove produced a durable canceled splice,
+        // the prompt settled cancelled, the View closed, and the TUI turn ran.
+        queueRemoveSettled = q1Response?.result?.stopReason === 'cancelled'
+          && q1Discard.messageId === q1Item.id
+          && (hostSessionEvents(dshHome, sessionA) ?? []).every(event =>
+            !(event.type === 'user/message' && userMessageText(event) === 'po3b-acp-qremove'))
+          && q1Close?.result !== undefined
+          && (hostSessionEvents(dshHome, sessionA) ?? []).slice(q1Start)
+            .some(event => event.type === 'agent/inbox/spliced' && event.data?.outcome === 'canceled')
+        releaseHeldTurn()
+        await waitForHostSessionEventAfter(dshHome, sessionA, q1TuiStart,
+          event => event.type === 'turn/end',
+          'Q1: the untouched TUI turn to complete', 180_000)
+      } finally {
+        qConn.close()
+      }
+    }
+
+    // ── Q2) R701-07: the REAL TUI steers the queued ACP message into its OWN
+    //         running turn. The official open Turn predates the Flight and
+    //         the exact message is then claimed into that Turn: the ACP cancel
+    //         must NOT cancel the TUI turn, and the request fails mixed.
+    {
+      holdNextTurn()
+      const q2TuiStart = (hostSessionEvents(dshHome, sessionA) ?? []).length
+      tuiA.send('po3b-tui-q2\r')
+      await waitForHostSessionEventAfter(dshHome, sessionA, q2TuiStart,
+        event => event.type === 'user/message' && userMessageText(event) === 'po3b-tui-q2',
+        'Q2: the TUI turn to be committed inside its held step', 120_000)
+      const { client: qConn } = await openInitialized(scopeDir, 'Q2 steer connection')
+      try {
+        const q2Resume = await sendRequest(qConn, 2, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
+        assert(q2Resume?.error === undefined, 'Q2: the steer connection must attach Session A')
+        const q2Start = (hostSessionEvents(dshHome, sessionA) ?? []).length
+        qConn.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: sessionA, prompt: [{ type: 'text', text: 'po3b-acp-qsteer' }] } })
+        await waitForHostSessionEventAfter(dshHome, sessionA, q2Start,
+          event => event.type === 'agent/inbox/spliced'
+            && event.data?.target === 'next-turn'
+            && (event.data.inserted ?? []).some(message => (message.content ?? []).some(part => part?.text === 'po3b-acp-qsteer')),
+          'Q2: the ACP message to be queued', 120_000)
+        tuiA.send('\x13')
+        const q2Steered = await waitForHostSessionEventAfter(dshHome, sessionA, q2Start,
+          event => event.type === 'agent/inbox/spliced'
+            && event.data?.target === 'next-step'
+            && (event.data.inserted ?? []).some(message => (message.content ?? []).some(part => part?.text === 'po3b-acp-qsteer')),
+          'Q2: the official steer to move the ACP message into next-step', 120_000)
+        void q2Steered
+        // Let the held step finish: the step boundary claims the steered
+        // message into the TUI turn itself.
+        releaseHeldTurn()
+        const q2Claimed = await waitForFact(async () => {
+          const events = hostSessionEvents(dshHome, sessionA) ?? []
+          const index = userMessageIndexOf(events, 'po3b-acp-qsteer', q2Start)
+          return index < 0 ? undefined : turnOfEvent(events, index)
+        }, 'Q2: the steered ACP message to be claimed into the running turn', 120_000)
+        const q2TuiTurn = userMessageTurnOf(hostSessionEvents(dshHome, sessionA) ?? [], 'po3b-tui-q2', q2TuiStart)
+        assert(q2Claimed === q2TuiTurn, 'Q2: the steered message must join the TUI-owned turn')
+        // The ACP cancel arrives with the message inside the TUI turn: D23
+        // forbids an Agent-global cancel, and the request fails mixed.
+        await waitForC1WorkEvent(mainWorkRoot,
+          event => event.kind === 'reverse-steer-awaiting-approval' && event.sessionId === sessionA,
+          'Q2: the claimed ACP message reached the held next model step', 60_000)
+        const q2Notifications = []
+        qConn.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: sessionA } })
+        // A subsequent request's reply proves the notification passed through
+        // this connection before the held approval is released.
+        qConn.send({ jsonrpc: '2.0', id: 4, method: 'session/list', params: {} })
+        const q2Probe = await readUntilResponse(qConn, 4, q2Notifications)
+        assert(q2Probe?.error?.data?.code === 'LOCAL_ACP_SESSION_NOT_READY', 'Q2: connection advanced past cancel')
+        writeFileSync(reverseApprovalBarrier, 'release\n', { mode: 0o600 })
+        const q2Asked = await waitForHostSessionEventAfter(dshHome, sessionA, q2Start,
+          event => event.type === 'approval/asked' && event.data?.callId === `po3b-reverse-steer-${sessionA}`,
+          'Q2: exact approval audit for the original TUI-owned Turn', 60_000)
+        await tuiA.waitForScreen('[y] Allow once', 'Q2: the original TUI owns the approval sheet', 60_000)
+        tuiA.send('n')
+        const q2Decision = await waitForHostSessionEventAfter(dshHome, sessionA, q2Start,
+          event => event.type === 'approval/decided' && event.data?.id === q2Asked.data.id,
+          'Q2: exact TUI-rejected approval audit pair', 60_000)
+        assert(q2Decision.data.outcome === 'rejected', 'Q2: the real TUI reply is the official decision')
+        const q2Response = await readUntilResponse(qConn, 3, q2Notifications)
+        assert(q2Response?.error?.code === -32603
+          && q2Response?.error?.data?.code === 'LOCAL_ACP_PROMPT_MIXED_TURN',
+          `Q2: the steered message must fail closed as mixed (got ${JSON.stringify(q2Response?.result ?? q2Response?.error)})`)
+        const q2End = await waitForHostSessionEventAfter(dshHome, sessionA, q2Start,
+          event => event.type === 'turn/end' && event.data?.turn === q2TuiTurn,
+          'Q2: the TUI turn to reach its own terminal', 180_000)
+        assert(q2End.data?.reason?.kind !== 'aborted',
+          'Q2: the TUI turn must NOT be user-aborted by the ACP cancel')
+        const q2Close = await sendRequest(qConn, 5, 'session/close', { sessionId: sessionA })
+        assert(q2Close?.error === undefined, 'Q2: the close must detach after the real terminal')
+        // MEASURED: the steered message joined the TUI-owned turn, that turn
+        // was NOT aborted by the ACP cancel, and the request failed mixed.
+        steerMixedOwnership = q2Claimed === q2TuiTurn
+          && q2End.data?.reason?.kind !== 'aborted'
+          && q2Response?.error?.data?.code === 'LOCAL_ACP_PROMPT_MIXED_TURN'
+          && q2Decision.data.outcome === 'rejected'
+          && !existsSync(join(mainWorkRoot, `po3b-reverse-steer-${sessionA}.marker`))
+          && q2Close?.result !== undefined
+      } finally {
+        qConn.close()
+      }
+    }
+
+    // ── Q3) R701-06: a REAL TUI queue EDIT re-inserts the same id; the prompt
+    //         keeps waiting for its real turn instead of settling early.
+    {
+      holdNextTurn()
+      const q3TuiStart = (hostSessionEvents(dshHome, sessionA) ?? []).length
+      tuiA.send('po3b-tui-q3\r')
+      await waitForHostSessionEventAfter(dshHome, sessionA, q3TuiStart,
+        event => event.type === 'user/message' && userMessageText(event) === 'po3b-tui-q3',
+        'Q3: the TUI turn to be committed inside its held step', 120_000)
+      const { client: qConn } = await openInitialized(scopeDir, 'Q3 edit connection')
+      try {
+        const q3Resume = await sendRequest(qConn, 2, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
+        assert(q3Resume?.error === undefined, 'Q3: the edit connection must attach Session A')
+        const q3Start = (hostSessionEvents(dshHome, sessionA) ?? []).length
+        const q3Notifications = []
+        qConn.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: sessionA, prompt: [{ type: 'text', text: 'po3b-acp-qedit' }] } })
+        const q3Initial = await waitForHostSessionEventAfter(dshHome, sessionA, q3Start,
+          event => event.type === 'agent/inbox/spliced'
+            && event.data?.target === 'next-turn'
+            && (event.data.inserted ?? []).some(message => (message.content ?? []).some(part => part?.text === 'po3b-acp-qedit')),
+          'Q3: the ACP message to be queued', 120_000)
+        tuiA.send('\x1bi')
+        await tuiA.waitForScreen('Delete [D]', 'Q3: the real queue manager is painted', 60_000)
+        await tuiA.waitForScreen('po3b-acp-qedit', 'Q3: the exact occurrence is visible', 60_000)
+        tuiA.send('\r')
+        await tuiA.waitForScreen('Edit queued message', 'Q3: the edit page is painted', 60_000)
+        tuiA.send('\x05')
+        tuiA.send(' edited')
+        tuiA.send('\x13')
+        const q3Edited = await waitForHostSessionEventAfter(dshHome, sessionA, q3Start,
+          event => event.type === 'agent/inbox/spliced'
+            && event.data?.target === 'next-turn'
+            && (event.data.removedCount ?? 0) === 1
+            && (event.data.inserted ?? []).some(message =>
+              (message.content ?? []).some(part => typeof part?.text === 'string' && part.text.startsWith('po3b-acp-qedit'))),
+          'Q3: the official edit to re-insert the same content in place', 120_000)
+        const q3Replacement = q3Edited.data.inserted.find(message =>
+          (message.content ?? []).some(part => part?.text === 'po3b-acp-qedit edited'))
+        assert(typeof q3Replacement?.id === 'string', 'Q3: edited text and its original occurrence id are committed')
+        await tuiA.waitForScreen('Delete [D]', 'Q3: the saved edit returned to Browse', 60_000)
+        tuiA.send('\x1b')
+        await tuiA.waitForScreenGone('Delete [D]', 'Q3: queue manager closed', 60_000)
+        // Bounded negative observation after the official edit commit: the
+        // controlled TUI step remains held, so no legitimate B terminal can occur.
+        assert(await qConn.silent(1_500),
+          'Q3: an edited (still pending) message must NOT settle the prompt early')
+        releaseHeldTurn()
+        const q3Response = await readUntilResponse(qConn, 3, q3Notifications)
+        assert(q3Response?.result?.stopReason === 'end_turn',
+          `Q3: the edited message must still run its real turn (got ${JSON.stringify(q3Response?.result ?? q3Response?.error)})`)
+        queueEditRetained = q3Response?.result?.stopReason === 'end_turn'
+          && q3Replacement.id === q3Initial.data.inserted.find(message =>
+            (message.content ?? []).some(part => part?.text === 'po3b-acp-qedit')).id
+          && (hostSessionEvents(dshHome, sessionA) ?? []).some(event =>
+            event.type === 'user/message' && userMessageText(event) === 'po3b-acp-qedit edited')
+        const q3Close = await sendRequest(qConn, 4, 'session/close', { sessionId: sessionA })
+        assert(q3Close?.error === undefined, 'Q3: the close must detach after the real turn')
+      } finally {
+        qConn.close()
+      }
+    }
+
     // ── A01..A03) Approval ownership on a fresh Session.
     const { client: conn2 } = await openInitialized(scopeDir, 'A approval connection')
     const approvalWorkspace = join(workDir, 'po3b-workspaces', 'approval')
@@ -1007,6 +1226,9 @@ export async function runAcpPo3bCancelApproval(context) {
         policyNeverUnbypassed,
         lateApprovalNoLeak,
         twoViewsIsolated,
+        queueRemoveSettled,
+        steerMixedOwnership,
+        queueEditRetained,
         tuiAndAcpShareSession,
         hostIdentityKept,
         naturalResultKept,
@@ -1044,6 +1266,9 @@ export async function runAcpPo3bCancelApproval(context) {
       policyNeverUnbypassed,
       lateApprovalNoLeak,
       twoViewsIsolated,
+      queueRemoveSettled,
+      steerMixedOwnership,
+      queueEditRetained,
       tuiAndAcpShareSession,
       hostIdentityKept,
       l6EvidenceRecorded: /^[0-9a-f]{64}$/u.test(String(evidence.candidateSha256))

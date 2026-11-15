@@ -770,11 +770,13 @@ function makeFakeAccess(): {
   cancelledTurns: Array<{ readonly turn: number; readonly keepInbox: boolean }>
   turnFence: { openTurnStartSeq: number | null; lastTurn: number }
   staleCancel: { value: boolean }
+  pendingInbox: Set<string>
 } {
   const agents = new Map<string, { id: string; session: { id: string; header: { cwd: string } } }>()
   const prompts: AcpSessionPromptRequest[] = []
   const removedMessageIds: string[] = []
   const cancelledTurns: Array<{ readonly turn: number; readonly keepInbox: boolean }> = []
+  const pendingInbox = new Set<string>()
   const turnFence = { openTurnStartSeq: null as number | null, lastTurn: 0 }
   let facts: AcpPromptFactListener | undefined
   let observeCalls = 0
@@ -807,10 +809,16 @@ function makeFakeAccess(): {
         prompts.push(request)
         return { accepted: true as const }
       },
+      pendingMessage(sessionId: string, agent: LiveAgentViewIdentity, session: object, messageId: string) {
+        if (agents.get(sessionId) !== agent || agents.get(sessionId)?.session !== session || agent.session !== session) return 'stale'
+        return pendingInbox.has(messageId) ? 'pending' : 'absent'
+      },
       cancelPending(sessionId: string, agent: LiveAgentViewIdentity, session: object, messageId: string) {
         if (staleCancel.value) return 'stale'
         if (agents.get(sessionId) !== agent || agents.get(sessionId)?.session !== session) return 'stale'
+        if (!pendingInbox.delete(messageId)) return 'not-pending'
         removedMessageIds.push(messageId)
+        facts?.onInboxDiscarded(agent, { id: messageId })
         return 'removed'
       },
       cancelCurrentTurn(sessionId: string, agent: LiveAgentViewIdentity, session: object, turn: number) {
@@ -826,7 +834,26 @@ function makeFakeAccess(): {
       },
       observePromptFacts(listener: AcpPromptFactListener) {
         observeCalls += 1
-        facts = listener
+        facts = {
+          onInboxInserted(agent, message) {
+            pendingInbox.add(message.id)
+            listener.onInboxInserted(agent, message)
+          },
+          onInboxClaimed(agent, message, turn) {
+            pendingInbox.delete(message.id)
+            listener.onInboxClaimed(agent, message, turn)
+          },
+          onInboxDiscarded: (agent, message) => listener.onInboxDiscarded(agent, message),
+          onSessionEvent(session, event) {
+            if (event.type === 'turn/end' && (event.data as { turn?: number }).turn === turnFence.lastTurn) {
+              turnFence.openTurnStartSeq = null
+            }
+            listener.onSessionEvent(session, event)
+          },
+          onAgentError: (agent, turn) => listener.onAgentError(agent, turn),
+          onAgentDisposed: agent => listener.onAgentDisposed(agent),
+          onApprovalRequest: (request, next) => listener.onApprovalRequest(request, next),
+        }
         return () => { facts = undefined }
       },
     },
@@ -841,6 +868,7 @@ function makeFakeAccess(): {
     },
     removedMessageIds,
     cancelledTurns,
+    pendingInbox,
     turnFence,
     staleCancel,
   }
@@ -960,6 +988,9 @@ test('session/new carries the authoritative created session id in JSON-RPC error
     },
     async prompt() {
       return { accepted: true as const }
+    },
+    pendingMessage() {
+      return 'stale' as const
     },
     cancelPending() {
       return 'stale' as const
@@ -1545,6 +1576,74 @@ test('LC-01 (UDS): an unconfirmed unclaimed cancellation fails the first AND the
   }
 })
 
+test('a same-id edit stays pending over UDS, true removal settles, and a later borrowed TUI turn keeps its responder', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  const agent = fake.seed('session-checkpoint', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: agent.id, cwd: '/host/proj' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: agent.id, prompt: [{ type: 'text', text: 'edit me' }] } })
+    const request = await waitForFact(() => fake.prompts[0], 'the editable queued prompt')
+    const facts = fake.facts()!
+    const message = { id: 'm-checkpoint', source: { kind: 'user', rpcId: request.requestId } }
+    facts.onInboxInserted(agent, message)
+    facts.onInboxDiscarded(agent, message)
+    facts.onInboxInserted(agent, message)
+    // A socket round trip crosses the checkpoint and proves the live Flight stayed reserved.
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId: agent.id, prompt: [{ type: 'text', text: 'too early' }] } })
+    const blocked = (await client.next()) as { id?: number; error?: { data?: { code?: string } } }
+    assert.equal(blocked.id, 4)
+    assert.equal(blocked.error?.data?.code, 'LOCAL_ACP_PROMPT_IN_FLIGHT')
+    fake.pendingInbox.delete(message.id)
+    facts.onInboxDiscarded(agent, message)
+    const removed = (await client.next()) as { id?: number; result?: { stopReason?: string } }
+    assert.equal(removed.id, 3)
+    assert.equal(removed.result?.stopReason, 'cancelled')
+    assert.deepEqual(fake.removedMessageIds, [], 'an external remove is observed without a second removal')
+
+    // The TUI turn is already open before the next ACP Flight exists.
+    fake.turnFence.openTurnStartSeq = 100
+    fake.turnFence.lastTurn = 5
+    facts.onInboxClaimed(agent, { id: 'm-tui', source: { kind: 'user', rpcId: 'tui' } }, 5)
+    client.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: agent.id, prompt: [{ type: 'text', text: 'steer me' }] } })
+    const borrowed = await waitForFact(() => fake.prompts[1], 'the borrowed-turn prompt')
+    const borrowedMessage = { id: 'm-borrowed', source: { kind: 'user', rpcId: borrowed.requestId } }
+    facts.onInboxInserted(agent, borrowedMessage)
+    fake.pendingInbox.delete(borrowedMessage.id)
+    facts.onInboxDiscarded(agent, borrowedMessage)
+    facts.onInboxInserted(agent, borrowedMessage)
+    facts.onInboxClaimed(agent, borrowedMessage, 5)
+    let delegated = 0
+    assert.equal(await facts.onApprovalRequest({ agent, toolName: 'bash', callId: 'tui-ask' }, async () => {
+      delegated += 1
+      return 'allowed-once'
+    }), 'allowed-once')
+    assert.equal(delegated, 1, 'the original TUI outcome is preserved exactly once')
+    client.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: agent.id } })
+    // An unrelated request is a delivery barrier for the preceding cancel notification.
+    client.send({ jsonrpc: '2.0', id: 6, method: 'session/list', params: {} })
+    const barrier = (await client.next()) as { id?: number }
+    assert.equal(barrier.id, 6, 'no ACP permission or prompt settlement was sent for the TUI-owned running turn')
+    assert.deepEqual(fake.cancelledTurns, [], 'the shared TUI turn is never cancelled')
+    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 5, reason: { kind: 'completed' } } })
+    const mixed = (await client.next()) as { id?: number; error?: { data?: { code?: string } } }
+    assert.equal(mixed.id, 5)
+    assert.equal(mixed.error?.data?.code, 'LOCAL_ACP_PROMPT_MIXED_TURN')
+    client.send({ jsonrpc: '2.0', id: 7, method: 'session/close', params: { sessionId: agent.id } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    client.send({ jsonrpc: '2.0', id: 8, method: 'session/resume', params: { sessionId: agent.id, cwd: '/host/proj' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {}, 'real terminal settlement permits reattach')
+  } finally {
+    client.close()
+  }
+})
+
 test('LC-02 (UDS): a disconnect keeps the unconfirmed obligation and the observer until a real terminal fact', async t => {
   const { scope } = newScope(t)
   const fake = makeFakeAccess()
@@ -1578,20 +1677,21 @@ test('LC-02 (UDS): a disconnect keeps the unconfirmed obligation and the observe
     assert.equal(conflict.error?.data?.code, 'LOCAL_ACP_VIEW_ALREADY_ATTACHED',
       'the disconnected but unresolved obligation still holds the Session')
     assert.ok(fake.facts() !== undefined, 'the Host fact observer survives the disconnect')
-    // The real terminal fact releases the detached claim.
-    facts.onAgentDisposed(agent)
-    for (let guard = 0; guard < 200; guard += 1) {
-      const id = 100 + guard
-      b.send({ jsonrpc: '2.0', id, method: 'session/resume', params: { sessionId: 'session-lc2', cwd: '/host/proj' } })
-      let probe: { id?: number; error?: { data?: { code?: string } }; result?: unknown } | undefined
-      for (;;) {
-        const message = (await b.next()) as { id?: number; error?: { data?: { code?: string } }; result?: unknown }
-        if (message.id === id) { probe = message; break }
-      }
-      if (probe.result !== undefined) return
-      assert.equal(probe.error?.data?.code, 'LOCAL_ACP_VIEW_ALREADY_ATTACHED', `no other outcome is acceptable (got ${JSON.stringify(probe)})`)
-    }
-    assert.fail('the Session never became attachable after the terminal fact')
+    const message = { id: 'm-lc2', source: { kind: 'user', rpcId: request.requestId } }
+    // replace commits the same id before discarded(old), then inserted(new).
+    facts.onInboxDiscarded(agent, message)
+    facts.onInboxInserted(agent, message)
+    await Promise.resolve()
+    assert.equal(fake.pendingInbox.has(message.id), true)
+    b.send({ jsonrpc: '2.0', id: 3, method: 'session/resume', params: { sessionId: 'session-lc2', cwd: '/host/proj' } })
+    const stillHeld = (await b.next()) as { error?: { data?: { code?: string } } }
+    assert.equal(stillHeld.error?.data?.code, 'LOCAL_ACP_VIEW_ALREADY_ATTACHED', 'edit retains the disconnected obligation')
+    // Only an exact, live checkpoint proving real absence releases the claim.
+    fake.pendingInbox.delete(message.id)
+    facts.onInboxDiscarded(agent, message)
+    await Promise.resolve()
+    b.send({ jsonrpc: '2.0', id: 4, method: 'session/resume', params: { sessionId: 'session-lc2', cwd: '/host/proj' } })
+    assert.deepEqual(((await b.next()) as { result?: unknown }).result, {}, 'the Session is attachable after true removal')
   } finally {
     b.close()
   }
