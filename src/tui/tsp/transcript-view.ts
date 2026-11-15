@@ -2563,7 +2563,12 @@ function focusMainBlocks(
     if (block.kind === 'message') {
       const owner = block.focusPresentationOwner
       const slot = owner === undefined ? undefined : slotsByOwner.get(owner)
-      const descriptor = messageDescriptor(block.message, keys.keyFor(block.message), options, block.truncated === true)
+      // A row that paints at the TOP level carries the scope prefix; a row that
+      // nests under an already-prefixed Focus root keeps its bare child key.
+      const key = slot !== undefined && slot.expanded
+        ? keys.keyFor(block.message)
+        : `${prefix}${keys.keyFor(block.message)}`
+      const descriptor = messageDescriptor(block.message, key, options, block.truncated === true)
       if (slot !== undefined && slot.expanded) slot.children.push(descriptor)
       else if (owner === undefined || slot === undefined) rows.push(descriptor)
       continue
@@ -2572,7 +2577,7 @@ function focusMainBlocks(
     const slot = owner === undefined ? undefined : slotsByOwner.get(owner)
     if (slot === undefined) {
       rows.push(...block.span.parts.map(part => part.kind === 'message'
-        ? messageDescriptor(part.message, keys.keyFor(part.message), options)
+        ? messageDescriptor(part.message, `${prefix}${keys.keyFor(part.message)}`, options)
         : clusterDescriptor(part.cluster, keys, options, prefix)))
       continue
     }

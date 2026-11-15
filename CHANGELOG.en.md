@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Opening Session Search in TSP Focus no longer crashes the renderer.** Focus top-level user and final-assistant rows now carry the same presentation scope prefix as every other top-level row; after a source or scope replacement an old `main.msg-N` can no longer collide with a same-named row in the new scope, and the Search card opens, closes and restores the original Composer and draft normally.
+
 - **Running `/new` from an already open Session no longer loses that command's settlement record.** The old Session is now closed only after the new Session is ready AND the command executor has written the `/new` completion record, so the record is persisted instead of failing with `cannot append outside a SessionStore`; the new Session's visibility and resumability are unchanged.
 
 - **`/new` creates a Session on a sessionless Remote Client.** With a Host-confirmed automatic Workspace, the first `/new` in a Split/Remote Client now creates and opens the new Session instead of falsely reporting that the verified local workspace changed; the refusal now happens only when the local directory-equivalence proof has actually been revoked.

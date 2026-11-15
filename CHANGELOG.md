@@ -36,6 +36,8 @@
 
 ### 修复
 
+- **TSP Focus 阅读模式下打开 Session Search 不再导致渲染器崩溃。** Focus 顶层的用户行与最终回答行现在与其他顶层行一样携带 presentation scope 前缀；替换来源或新 scope 后，旧 scope 的 `main.msg-N` 不会再与新 scope 的同名行冲突，Search 卡可正常打开、关闭并保留原 Composer 与草稿。
+
 - **在已打开的会话中执行 `/new` 不再丢失命令结算记录。** 旧会话会在新会话就绪后、命令执行器写回本次 `/new` 的完成记录时才被关闭，因此该记录能正常保存，不会再出现 `cannot append outside a SessionStore`；新会话的可见与可恢复行为不变。
 
 - **Remote 模式下无 Session 时 `/new` 可以创建会话。** 在 Host 已自动确认的 Workspace 上，Split/Remote Client 首次输入 `/new` 现在会创建并打开新 Session，不再误报“验证过的本地 Workspace 已变化”；只有本地目录等价性证明确实失效时才会拒绝并要求重新选择 Host Workspace。
