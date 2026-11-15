@@ -1869,3 +1869,83 @@ test('F2: a physical disconnect after an early flight failure keeps the retired-
   )
   assert.equal(delegatedAfter, 1)
 })
+
+test('RFL-005: a failure landing DURING the disconnect keeps its retired fence and never leaks the approval', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-r5')
+  view.access.pendingInbox.delete('m-r5')
+  view.claim('m-r5', 3, request.requestId)
+  view.access.turnFence = { openTurnStartSeq: 300, lastTurn: 3 }
+  view.access.agentStatus = 'running'
+  // The disconnect's scoped cancellation aborts the exact turn; the flight
+  // then ALSO fails (the race: a real failure beats the aborted turn/end).
+  view.access.cancelCurrentTurnImpl = turn => {
+    const result = view.access.cancelCurrentTurnImpl === undefined ? 'not-current' : 'addressed'
+    void turn
+    view.access.cancelledTurns.push({ turn, keepInbox: true })
+    view.access.agentStatus = 'idle'
+    view.access.turnFence = { openTurnStartSeq: null, lastTurn: turn }
+    // The racing failure lands before the real terminal record.
+    view.registry.onAgentError(view.agent, turn)
+    return result
+  }
+  view.registry.releaseConnection(view.conn, view.access)
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_TURN_FAILED'))
+  // The late approval of the still-running turn must NOT reach the TUI even
+  // though the disconnect task already finished its cancellation.
+  view.access.turnFence = { openTurnStartSeq: 300, lastTurn: 3 }
+  let delegated = false
+  const outcome = await view.registry.onApprovalRequest(
+    { agent: view.agent, toolName: 'bash', callId: 'call-r5' },
+    async () => { delegated = true; return 'allowed-once' },
+  )
+  assert.equal(delegated, false, 'a fence born during the disconnect never leaks to the TUI')
+  assert.equal(outcome, 'unavailable')
+  // The fence dies on the real terminal and the claim is RELEASED (RFL-006).
+  view.commit('turn/end', { turn: 3, reason: { kind: 'aborted', reason: { kind: 'user' } } })
+  assert.equal(view.registry.hasClaim('P1'), false, 'the fenced claim is released at the fence death')
+})
+
+test('RFL-006: a detached fenced claim is released on the real turn/end and the Session is attachable again', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-r6')
+  view.access.pendingInbox.delete('m-r6')
+  view.claim('m-r6', 5, request.requestId)
+  view.registry.onAgentError(view.agent, 5)
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_TURN_FAILED'))
+  // A close detaches the View while the fence is alive.
+  view.access.turnFence = { openTurnStartSeq: 500, lastTurn: 5 }
+  await view.registry.closeSession(view.conn, view.access, 'P1')
+  assert.equal(view.registry.hasClaim('P1'), true, 'the fenced claim survives the close')
+  // The real terminal ends the fence AND releases the claim.
+  view.commit('turn/end', { turn: 5, reason: { kind: 'error', error: { message: 'x', code: 'UNKNOWN' } } })
+  assert.equal(view.registry.hasClaim('P1'), false, 'the claim is released at the fence death (no permanent ALREADY_ATTACHED)')
+  // A fresh connection may attach the SAME Session again.
+  const conn2 = view.registry.createConnection()
+  await view.registry.resumeSession(conn2, view.access, { sessionId: 'P1', cwd: '/w' })
+  assert.equal(view.registry.phaseOf(conn2), 'attached')
+})
+
+test('RFL-006: an Agent disposal also releases a detached fenced claim', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-r6b')
+  view.access.pendingInbox.delete('m-r6b')
+  view.claim('m-r6b', 6, request.requestId)
+  view.registry.onAgentError(view.agent, 6)
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_TURN_FAILED'))
+  view.access.turnFence = { openTurnStartSeq: 600, lastTurn: 6 }
+  view.registry.releaseConnection(view.conn, view.access)
+  assert.equal(view.registry.hasClaim('P1'), true, 'the fenced claim survives the disconnect')
+  // The disposal ends the fence and releases the detached claim.
+  view.registry.onAgentDisposed(view.agent)
+  assert.equal(view.registry.hasClaim('P1'), false, 'the disposal releases the fenced claim')
+})

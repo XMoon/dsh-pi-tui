@@ -362,6 +362,12 @@ interface ViewClaim {
    * output or a new prompt.
    */
   retiringTurn?: { readonly turn: number }
+  /**
+   * PO-3B F2: set when a close detached this View while a retired-turn fence
+   * still had to survive. The claim then lives ONLY for that fence and is
+   * deleted at the fence's own death facts (turn/end / Agent disposal).
+   */
+  detachedWithFence?: boolean
 }
 
 /** The maximum number of not-yet-written notifications ONE prompt flight may queue. */
@@ -671,7 +677,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // the real turn/end or Agent disposal ends it (F2): the View detaches, but
     // the fence keeps the claim so a LATE approval of that exact ACP-owned
     // turn can never be delegated to the TUI. A fence-less claim is released.
-    if (claim.retiringTurn === undefined && this.claims.get(sessionId) === claim) {
+    if (claim.retiringTurn !== undefined) {
+      claim.detachedWithFence = true
+    } else if (this.claims.get(sessionId) === claim) {
       this.claims.delete(sessionId)
     }
     // This close also cancels any in-flight attach for this connection (same
@@ -1056,7 +1064,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // The retired-turn fence dies on its own terminal record even when no
       // flight is open any more (the flight settled before this turn/end).
       if (event.type === 'turn/end' && typeof data?.turn === 'number' && claim.retiringTurn?.turn === data.turn) {
-        claim.retiringTurn = undefined
+        this.endRetiringFence(claim.sessionId, claim)
       }
       const flight = claim.inflight
       if (flight === undefined || flight.settledDone) continue
@@ -1119,7 +1127,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // Disposal ends the retired-turn fence for good (a disposed Agent can
       // never reach its turn/end), so it is cleared AFTER the failure
       // transition, which would otherwise preserve that dead turn.
-      claim.retiringTurn = undefined
+      this.endRetiringFence(claim.sessionId, claim)
     }
   }
 
@@ -1298,8 +1306,15 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           try {
             await this.cancelOwnedFlight(claim, flight, bound, 'disconnect')
           } catch {
-            // The flight settled with its real failure; the claim is released
-            // below either way.
+            // The flight settled with its real failure; the claim release
+            // below still honours a fence born from that failure.
+          }
+          // A failure DURING the disconnect may have planted a retired-turn
+          // fence (RFL-005): the claim then survives for that fence alone and
+          // dies at the fence's own facts, never leaking the approval.
+          if (claim.retiringTurn !== undefined) {
+            claim.detachedWithFence = true
+            return
           }
           this.releaseClaimAfterDisconnect(sessionId, claim)
         }, { diag: this.diag })
@@ -1309,7 +1324,22 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // fence of an ALREADY-failed flight whose turn has not ended. Dropping
       // it would leak that turn's approvals to the TUI (F2); keep the claim
       // until the fence dies on its own facts.
-      if (claim.retiringTurn !== undefined) continue
+      if (claim.retiringTurn !== undefined) {
+        claim.detachedWithFence = true
+        continue
+      }
+      this.claims.delete(sessionId)
+    }
+  }
+
+  /**
+   * End one retired-turn fence: clear it and, when the View already detached
+   * (a close/disconnect left the claim alive ONLY for this fence), release
+   * the claim so the Session can be attached again (RFL-006).
+   */
+  private endRetiringFence(sessionId: string, claim: ViewClaim): void {
+    claim.retiringTurn = undefined
+    if (claim.detachedWithFence && claim.inflight === undefined && this.claims.get(sessionId) === claim) {
       this.claims.delete(sessionId)
     }
   }
@@ -1319,7 +1349,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * retired-turn fence that must survive until its own facts end it.
    */
   private releaseClaimIfUnfenced(sessionId: string, claim: ViewClaim): void {
-    if (claim.retiringTurn !== undefined) return
+    if (claim.retiringTurn !== undefined) {
+      // The fence survives for its own facts; the claim dies with it.
+      claim.detachedWithFence = true
+      return
+    }
     if (this.claims.get(sessionId) === claim) this.claims.delete(sessionId)
   }
 
