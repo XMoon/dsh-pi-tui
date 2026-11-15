@@ -1195,6 +1195,7 @@ test('the production Host access subscribes the prompt fact sink and disposes ex
     onInboxInserted: (agent, message) => { seen.push(`inserted:${agent.id}:${message.id}:${String(message.source?.rpcId)}`) },
     onInboxClaimed: (agent, message, turn) => { seen.push(`claimed:${agent.id}:${message.id}:${String(turn)}`) },
     onSessionEvent: (session, event) => { seen.push(`event:${String((session as { id: string }).id)}:${event.type}`) },
+    onInboxDiscarded: (agent, message) => { seen.push(`discarded:${agent.id}:${message.id}`) },
     onAgentError: (agent, turn) => { seen.push(`error:${agent.id}:${String(turn)}`) },
     onAgentDisposed: agent => { seen.push(`disposed:${agent.id}`) },
     onApprovalRequest: (request, next) => {
@@ -2091,14 +2092,14 @@ test('R701-04 sibling: an early failure during a pending close fails ONCE, then 
   assert.equal(view.registry.hasClaim('P1'), false)
 })
 
-test('R701-05: an UNPROVEN queued cancellation is never turned into a successful close by a repeat close', async () => {
+test('LC-01: an UNCONFIRMED unclaimed cancellation is never turned into a successful close by a repeat close', async () => {
   const view = promptView()
   await view.attach()
   const attempt = view.start()
   const request = view.access.promptCalls[0]!
   // The durable message EXISTS but was never claimed (no turn yet).
-  view.insert(request.requestId, 'm-stale-queued')
-  view.access.pendingInbox.delete('m-stale-queued')
+  view.insert(request.requestId, 'm-lc1')
+  view.access.pendingInbox.delete('m-lc1')
   // The exact identity is gone: the pending removal cannot be proven.
   view.access.turnFence = 'stale'
   const first = view.registry.closeSession(view.conn, view.access, 'P1')
@@ -2108,32 +2109,70 @@ test('R701-05: an UNPROVEN queued cancellation is never turned into a successful
   // A repeat close must NOT succeed merely because the local flight is gone.
   await assert.rejects(view.registry.closeSession(view.conn, view.access, 'P1'),
     isPromptError('LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'))
-  assert.equal(view.registry.hasClaim('P1'), true, 'the reservation survives an unproven cancellation')
-  // The exact Agent's disposal is the real terminal fact that settles it.
+  assert.equal(view.registry.hasClaim('P1'), true, 'the reservation survives an unconfirmed obligation')
+  assert.equal(view.registry.hasUnsettledHostWork(), true, 'the Host work is still unsettled')
+  // A minted Prompt is refused while the old Host responsibility is open.
+  const second = view.start('while fenced').then(() => 'resolved' as const, (error: unknown) => error)
+  const raced = await Promise.race([
+    second,
+    new Promise<'timeout'>(resolve => { setTimeout(() => { resolve('timeout') }, 1_000) }),
+  ])
+  assert.ok(raced instanceof LocalAcpViewError && raced.code === 'LOCAL_ACP_PROMPT_IN_FLIGHT',
+    `a Prompt must be refused while the old Host obligation is open (got ${String(raced)})`)
+  // The exact Agent's disposal is a real terminal fact that settles it.
   view.registry.onAgentDisposed(view.agent)
   assert.deepEqual(await view.registry.closeSession(view.conn, view.access, 'P1'), {},
-    'the real terminal fact allows the detach')
+    'only the real terminal fact allows the detach')
   assert.equal(view.registry.hasClaim('P1'), false)
 })
 
-test('R701-05 sibling: a physical disconnect keeps an unproven claim and its Host attribution', async () => {
+test('LC-02: a physical disconnect keeps the unconfirmed unclaimed obligation and its Host attribution', async () => {
   const view = promptView()
   await view.attach()
   const attempt = view.start()
   const request = view.access.promptCalls[0]!
-  view.insert(request.requestId, 'm-stale-disc')
-  view.access.pendingInbox.delete('m-stale-disc')
+  view.insert(request.requestId, 'm-lc2')
+  view.access.pendingInbox.delete('m-lc2')
   view.access.turnFence = 'stale'
   view.registry.closeSession(view.conn, view.access, 'P1').catch(() => {})
   await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'))
-  // A disconnect must not delete the unproven claim: its Host work may still
-  // be live and its fact subscription must keep observing.
+  // The socket is gone, but the Host work is not: the claim, its Session
+  // reservation and the fact observer must all survive.
   view.registry.releaseConnection(view.conn, view.access)
   await new Promise(resolveTick => setImmediate(resolveTick))
-  assert.equal(view.registry.hasClaim('P1'), true, 'the unproven claim survives the disconnect')
-  assert.equal(view.registry.hasUnsettledHostWork(), true, 'the Host work is still unsettled (subscription retained)')
-  // The exact Agent disposal settles it.
+  assert.equal(view.registry.hasClaim('P1'), true, 'the obligation claim survives the disconnect')
+  assert.equal(view.registry.hasUnsettledHostWork(), true, 'the Host work is still unsettled (observer retained)')
+  // Another ACP connection must NOT silently take over the same Session.
+  const other = view.registry.createConnection()
+  await assert.rejects(view.registry.resumeSession(other, view.access, { sessionId: 'P1', cwd: '/w' }),
+    isViewError('LOCAL_ACP_VIEW_ALREADY_ATTACHED'))
+  // The exact Agent's disposal is a real terminal proof: the obligation ends,
+  // the detached claim is released, and the Session becomes attachable again.
   view.registry.onAgentDisposed(view.agent)
-  assert.equal(view.registry.hasClaim('P1'), false, 'the disposal releases the detached unproven claim')
+  assert.equal(view.registry.hasClaim('P1'), false, 'the terminal fact releases the detached claim')
   assert.equal(view.registry.hasUnsettledHostWork(), false)
+  await view.registry.resumeSession(other, view.access, { sessionId: 'P1', cwd: '/w' })
+  assert.equal(view.registry.phaseOf(other), 'attached')
+})
+
+test('LC-04: an early failure + claimed turn detaches after the real turn/end and the prompt keeps its own error', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-lc4')
+  view.access.pendingInbox.delete('m-lc4')
+  view.access.turnFence = { openTurnStartSeq: 100, lastTurn: 2 }
+  view.access.agentStatus = 'running'
+  view.claim('m-lc4', 2, request.requestId)
+  // The flight fails early while its claimed turn still runs.
+  view.registry.onAgentError(view.agent, 2)
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_TURN_FAILED'))
+  // The real terminal ends the turn: close detaches and a new connection resumes.
+  view.commit('turn/end', { turn: 2, reason: { kind: 'error', error: { message: 'x', code: 'UNKNOWN' } } })
+  assert.deepEqual(await view.registry.closeSession(view.conn, view.access, 'P1'), {})
+  assert.equal(view.registry.hasClaim('P1'), false)
+  const next = view.registry.createConnection()
+  await view.registry.resumeSession(next, view.access, { sessionId: 'P1', cwd: '/w' })
+  assert.equal(view.registry.phaseOf(next), 'attached')
 })

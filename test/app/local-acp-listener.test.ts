@@ -777,6 +777,7 @@ function makeFakeAccess(): {
   const turnFence = { openTurnStartSeq: null as number | null, lastTurn: 0 }
   let facts: AcpPromptFactListener | undefined
   let observeCalls = 0
+  const staleCancel = { value: false }
   let counter = 0
   return {
     access: {
@@ -806,6 +807,7 @@ function makeFakeAccess(): {
         return { accepted: true as const }
       },
       cancelPending(sessionId: string, agent: LiveAgentViewIdentity, session: object, messageId: string) {
+        if (staleCancel.value) return 'stale'
         if (agents.get(sessionId) !== agent || agents.get(sessionId)?.session !== session) return 'stale'
         removedMessageIds.push(messageId)
         return 'removed'
@@ -839,6 +841,7 @@ function makeFakeAccess(): {
     removedMessageIds,
     cancelledTurns,
     turnFence,
+    staleCancel,
   }
 }
 
@@ -1484,5 +1487,111 @@ test('R701-03: an Off -> On overlap keeps exactly ONE Host fact/approval subscri
     assert.equal(fake.facts(), undefined, 'the controller-owned registry releases the ONE subscription')
   } finally {
     clientA.close()
+  }
+})
+
+test('LC-01 (UDS): an unconfirmed unclaimed cancellation fails the first AND the repeat close until a real terminal fact', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const a = await RawClient.open(listener.socketPath)
+  try {
+    initialize(a, 1)
+    await a.next()
+    fake.seed('session-lc1', '/host/proj')
+    a.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-lc1', cwd: '/host/proj' } })
+    assert.deepEqual(((await a.next()) as { result?: unknown }).result, {})
+    a.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'session-lc1', prompt: [{ type: 'text', text: 'queued' }] } })
+    const request = await waitForFact(() => fake.prompts[0], 'the ACP prompt')
+    const facts = fake.facts()
+    const agent = fake.agentOf('session-lc1')
+    assert.ok(facts !== undefined && agent !== undefined)
+    // The exact message exists but was never claimed.
+    facts.onInboxInserted(agent, { id: 'm-lc1', source: { kind: 'user', rpcId: request.requestId } })
+    // The official identity check fails: the pending removal cannot be proven.
+    fake.staleCancel.value = true
+    a.send({ jsonrpc: '2.0', id: 4, method: 'session/close', params: { sessionId: 'session-lc1' } })
+    const first = (await a.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(first.error?.data?.code, 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED')
+    a.send({ jsonrpc: '2.0', id: 5, method: 'session/close', params: { sessionId: 'session-lc1' } })
+    const repeat = (await a.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(repeat.error?.data?.code, 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED',
+      'a repeat close must not turn the unconfirmed cancellation into success')
+    assert.deepEqual(fake.removedMessageIds, [], 'no removal was ever proven')
+    // Another ACP connection cannot silently take over the Session.
+    const b = await RawClient.open(listener.socketPath)
+    try {
+      initialize(b, 1)
+      await b.next()
+      b.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-lc1', cwd: '/host/proj' } })
+      const conflict = (await b.next()) as { error?: { data?: { code?: string } } }
+      assert.equal(conflict.error?.data?.code, 'LOCAL_ACP_VIEW_ALREADY_ATTACHED')
+    } finally {
+      b.close()
+    }
+    // The exact Agent's disposal is the real terminal fact.
+    facts.onAgentDisposed(agent)
+    a.send({ jsonrpc: '2.0', id: 6, method: 'session/close', params: { sessionId: 'session-lc1' } })
+    let settled: { id?: number; result?: unknown; error?: unknown } | undefined
+    for (;;) {
+      const message = (await a.next()) as { id?: number; result?: unknown; error?: unknown }
+      if (message.id === 6) { settled = message; break }
+    }
+    assert.deepEqual(settled.result, {}, 'the real terminal fact allows the detach')
+  } finally {
+    a.close()
+  }
+})
+
+test('LC-02 (UDS): a disconnect keeps the unconfirmed obligation and the observer until a real terminal fact', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const a = await RawClient.open(listener.socketPath)
+  fake.seed('session-lc2', '/host/proj')
+  initialize(a, 1)
+  await a.next()
+  a.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-lc2', cwd: '/host/proj' } })
+  assert.deepEqual(((await a.next()) as { result?: unknown }).result, {})
+  a.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'session-lc2', prompt: [{ type: 'text', text: 'queued' }] } })
+  const request = await waitForFact(() => fake.prompts[0], 'the ACP prompt')
+  const facts = fake.facts()
+  const agent = fake.agentOf('session-lc2')
+  assert.ok(facts !== undefined && agent !== undefined)
+  facts.onInboxInserted(agent, { id: 'm-lc2', source: { kind: 'user', rpcId: request.requestId } })
+  fake.staleCancel.value = true
+  a.send({ jsonrpc: '2.0', id: 4, method: 'session/close', params: { sessionId: 'session-lc2' } })
+  const failed = (await a.next()) as { error?: { data?: { code?: string } } }
+  assert.equal(failed.error?.data?.code, 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED')
+  // The physical socket goes away; the Host responsibility must not.
+  a.close()
+  await a.closed
+  const b = await RawClient.open(listener.socketPath)
+  try {
+    initialize(b, 1)
+    await b.next()
+    b.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-lc2', cwd: '/host/proj' } })
+    const conflict = (await b.next()) as { error?: { data?: { code?: string } } }
+    assert.equal(conflict.error?.data?.code, 'LOCAL_ACP_VIEW_ALREADY_ATTACHED',
+      'the disconnected but unresolved obligation still holds the Session')
+    assert.ok(fake.facts() !== undefined, 'the Host fact observer survives the disconnect')
+    // The real terminal fact releases the detached claim.
+    facts.onAgentDisposed(agent)
+    for (let guard = 0; guard < 200; guard += 1) {
+      const id = 100 + guard
+      b.send({ jsonrpc: '2.0', id, method: 'session/resume', params: { sessionId: 'session-lc2', cwd: '/host/proj' } })
+      let probe: { id?: number; error?: { data?: { code?: string } }; result?: unknown } | undefined
+      for (;;) {
+        const message = (await b.next()) as { id?: number; error?: { data?: { code?: string } }; result?: unknown }
+        if (message.id === id) { probe = message; break }
+      }
+      if (probe.result !== undefined) return
+      assert.equal(probe.error?.data?.code, 'LOCAL_ACP_VIEW_ALREADY_ATTACHED', `no other outcome is acceptable (got ${JSON.stringify(probe)})`)
+    }
+    assert.fail('the Session never became attachable after the terminal fact')
+  } finally {
+    b.close()
   }
 })
