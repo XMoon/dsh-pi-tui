@@ -1493,12 +1493,20 @@ draft can reach outside the Host asks ONE explicit question before writing —
 `Enabling this server can execute an external command.` for a stdio entry, and
 `Enabling this server can send data to an external service. Target: <host>` for
 an HTTP entry (the host only, never a credential) — and only an affirmative
-answer dispatches the write. The disclosure is painted in the BODY (wrapped), so
-a narrow frame with a long server name still shows the full fact; the Action Bar
-carries only the decision (`y confirm · Esc cancel`). A pointer obeys the same
+answer dispatches the write. EVERY dangerous confirmation — Save,
+Enable/Disable, Delete, Reset and Restart — paints the same target / action /
+consequence body in the view that hosts it (the form for Save and discard, the
+Detail for the rest), wrapped at THAT column's real width with unbreakable
+tokens hard-split, so a narrow frame with a long server name or HTTP host still
+shows the whole fact; the Action Bar carries only the decision
+(`y confirm · Esc cancel`). A confirmation is executable only while its entire
+fact set fits the rows the current grant really gives it: otherwise the bar
+paints no affirmative key, says `Resize to review…`, and both the key and the
+pointer refuse — an uninformed `y` is never accepted. A pointer obeys the same
 modal authority as the keyboard: while a confirmation, discard prompt, restart
 question or search owns the surface, no click can change the draft, and every
-painted Action-Bar segment is itself a pointer target for its own intent. Every env/header value carries an EXPLICIT storage
+painted Action-Bar segment — including the input bar's `Enter apply` — is a
+pointer target for its own intent. Every env/header value carries an EXPLICIT storage
 form the user chooses — `Credential reference` (the default, written as the
 official `${credential:REF}` token) or `Literal (stored in profile)` — shown on
 its own row and never inferred from the typed text; the disclosure's HTTP target
