@@ -1127,7 +1127,13 @@ export async function stopOwnedProfileUnit(
   }
   const deadline = Date.now() + timeoutMs
   for (;;) {
-    const after = await queryOwnedProfileUnit(unit, runtimeDir, systemctl)
+    let after: OwnedProfileUnitState
+    try {
+      after = await queryOwnedProfileUnit(unit, runtimeDir, systemctl)
+    } catch (error) {
+      if (!(error instanceof LocalScopeError)) throw error
+      throw new LocalScopeError(error.code, `managed Host stop may already be committed; final verification failed. Run daemon status before retrying. ${error.message}`, error)
+    }
     const settled = after.loadState === 'not-found'
       || after.activeState === 'inactive'
       || after.activeState === 'failed'
@@ -1135,7 +1141,7 @@ export async function stopOwnedProfileUnit(
       return { stopped: true, alreadyInactive: false, mainPid: before.mainPid }
     }
     if (Date.now() >= deadline) {
-      throw new LocalScopeError('HOST_STOP_TIMEOUT', 'managed Host: the unit did not stop within the bounded window')
+      throw new LocalScopeError('HOST_STOP_TIMEOUT', 'managed Host stop may already be committed; final verification failed. Run daemon status before retrying. The unit did not stop within the bounded window')
     }
     await new Promise(resolve => setTimeout(resolve, UNIT_STOP_POLL_MS))
   }

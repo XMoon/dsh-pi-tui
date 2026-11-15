@@ -230,8 +230,9 @@ function toDaemonControlError(error: unknown): DaemonControlError {
       case 'PROCESS_STARTTIME_UNAVAILABLE':
         return new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', error.message, error)
       case 'HOST_STOP_TIMEOUT':
-      case 'HOST_START_TIMEOUT':
         return new DaemonControlError('TRANSITION_UNCERTAIN', error.message, error)
+      case 'HOST_START_TIMEOUT':
+        return afterCommittedAction(new DaemonControlError('TRANSITION_UNCERTAIN', error.message, error), 'Host start')
       case 'DAEMON_CONTROL_BUSY':
         return new DaemonControlError('DAEMON_CONTROL_BUSY', 'another daemon control operation is already running for this profile', error)
       case 'HOST_UNRESPONSIVE':
@@ -672,8 +673,12 @@ async function stopFromSnapshot(
         throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'the user manager cannot verify the profile unit')
       }
       assertNotAborted(deps.signal)
-      await stopOwnedProfileUnit(unit, runtimeDirOf(deps), systemctl)
-      await waitForHostStopped(record, unitMainPid, deps)
+      await stopOwnedProfileUnit(unit, runtimeDirOf(deps), systemctl, deps.stopTimeoutMs)
+      try {
+        await waitForHostStopped(record, unitMainPid, deps)
+      } catch (error) {
+        throw afterCommittedAction(toDaemonControlError(error), 'Host stop')
+      }
       return
     }
     if (probe.kind === 'absent' && !running) {
@@ -697,15 +702,23 @@ async function stopFromSnapshot(
       } catch (error) {
         throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'the verified Host process could not be signalled', error)
       }
-      await waitForHostStopped(record, record.hostPid, deps)
+      try {
+        await waitForHostStopped(record, record.hostPid, deps)
+      } catch (error) {
+        throw afterCommittedAction(toDaemonControlError(error), 'Host stop')
+      }
       return
     }
     throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'a live Host has no verifiable supervision attribution')
   }
   if (unit !== undefined && unitState !== 'not-found' && probe.kind === 'available') {
     assertNotAborted(deps.signal)
-    await stopOwnedProfileUnit(unit, runtimeDirOf(deps), systemctl)
-    await waitForHostStopped(undefined, unitMainPid, deps)
+    await stopOwnedProfileUnit(unit, runtimeDirOf(deps), systemctl, deps.stopTimeoutMs)
+    try {
+      await waitForHostStopped(undefined, unitMainPid, deps)
+    } catch (error) {
+      throw afterCommittedAction(toDaemonControlError(error), 'Host stop')
+    }
   }
   // No live Host and no manager-supervised unit: already stopped. With a
   // strictly absent manager the unit file cannot be loaded at all.
@@ -761,14 +774,16 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
     } catch (error) {
       throw toDaemonControlError(error)
     }
-    const post = await readSnapshot(profile, deps, scope)
-    // A cold start's completion needs BOTH facts: the post-snapshot found no
-    // blocking failure (identity/ownership/manager) AND the Host is Ready. The
-    // warm-start manager-error exemption above is deliberately NOT reapplied
-    // here: this command's OS work is done, so the post facts are complete.
-    if (post.failure !== undefined) throw afterCommittedAction(post.failure, 'the Host start')
-    if (post.status.host !== 'ready') throw refuseHostState(post.status)
-    return { code: 0, stdout: formatDaemonStatus(post.status), stderr: '' }
+    // A cold start's completion needs BOTH facts: no blocking failure and
+    // authenticated readiness. The warm-start exemption does not apply here.
+    try {
+      const post = await readSnapshot(profile, deps, scope)
+      if (post.failure !== undefined) throw post.failure
+      if (post.status.host !== 'ready') throw refuseHostState(post.status)
+      return { code: 0, stdout: formatDaemonStatus(post.status), stderr: '' }
+    } catch (error) {
+      throw afterCommittedAction(toDaemonControlError(error), 'Host start')
+    }
   })
 }
 
@@ -780,10 +795,14 @@ async function runStop(profile: DaemonControlProfile, deps: DaemonControlDeps): 
     if (pre.failure !== undefined) throw pre.failure
     assertNotAborted(deps.signal)
     await stopFromSnapshot(profile, pre, deps)
-    const post = await readSnapshot(profile, deps, inspected)
-    if (post.failure !== undefined) throw afterCommittedAction(post.failure, 'the Host stop')
-    if (post.status.host !== 'stopped') throw refuseHostState(post.status)
-    return { code: 0, stdout: formatDaemonStatus(post.status), stderr: RUNNING_WORK_NOTICE }
+    try {
+      const post = await readSnapshot(profile, deps, inspected)
+      if (post.failure !== undefined) throw post.failure
+      if (post.status.host !== 'stopped') throw refuseHostState(post.status)
+      return { code: 0, stdout: formatDaemonStatus(post.status), stderr: RUNNING_WORK_NOTICE }
+    } catch (error) {
+      throw afterCommittedAction(toDaemonControlError(error), 'Host stop')
+    }
   })
 }
 
@@ -808,16 +827,16 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
     }
     assertNotAborted(deps.signal)
     await stopFromSnapshot(profile, pre, deps)
-    assertNotAborted(deps.signal)
-    const scope = scopeFromInstalledProfile({
-      dshHome: profile.home,
-      profileDir: profile.dir,
-      packageRoot: profile.packageRoot,
-      dshVersion: profile.dshVersion,
-    })
-    assertNotAborted(deps.signal)
-    const ensureHost = deps.ensureHost ?? ensureLocalHost
     try {
+      assertNotAborted(deps.signal)
+      const scope = scopeFromInstalledProfile({
+        dshHome: profile.home,
+        profileDir: profile.dir,
+        packageRoot: profile.packageRoot,
+        dshVersion: profile.dshVersion,
+      })
+      assertNotAborted(deps.signal)
+      const ensureHost = deps.ensureHost ?? ensureLocalHost
       await ensureHost({
         scope,
         hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
@@ -825,19 +844,19 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
         profile: profile.name,
         hostStartPolicy: 'public-managed',
       })
+      const post = await readSnapshot(profile, deps, scope)
+      if (post.failure !== undefined) throw post.failure
+      if (post.status.host !== 'ready') throw refuseHostState(post.status)
+      if (oldInstance !== undefined && post.record?.instanceId === oldInstance) {
+        throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the restart did not produce a new Host instance')
+      }
+      return {
+        code: 0,
+        stdout: `previous=${oldInstance === undefined ? 'none' : oldInstance.slice(0, 8)}\n${formatDaemonStatus(post.status)}`,
+        stderr: RUNNING_WORK_NOTICE,
+      }
     } catch (error) {
-      throw toDaemonControlError(error)
-    }
-    const post = await readSnapshot(profile, deps, scope)
-    if (post.failure !== undefined) throw afterCommittedAction(post.failure, 'the Host restart')
-    if (post.status.host !== 'ready') throw refuseHostState(post.status)
-    if (oldInstance !== undefined && post.record?.instanceId === oldInstance) {
-      throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the restart did not produce a new Host instance')
-    }
-    return {
-      code: 0,
-      stdout: `previous=${oldInstance === undefined ? 'none' : oldInstance.slice(0, 8)}\n${formatDaemonStatus(post.status)}`,
-      stderr: RUNNING_WORK_NOTICE,
+      throw afterCommittedAction(toDaemonControlError(error), 'Host restart')
     }
   })
 }
@@ -858,29 +877,32 @@ async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDe
     const systemctl = deps.systemctl ?? runSystemctl
     assertNotAborted(deps.signal)
     if (pre.unitState === 'active' || pre.unitState === 'unknown') {
-      await stopOwnedProfileUnit(pre.unit, runtimeDirOf(deps), systemctl)
+      await stopOwnedProfileUnit(pre.unit, runtimeDirOf(deps), systemctl, deps.stopTimeoutMs)
       // Only the unit's own Host is waited for; an unrelated strict-absence
       // fallback Host is never killed by uninstall.
       const ownHost = pre.record !== undefined && pre.record.hostPid === pre.unitMainPid ? pre.record : undefined
-      await waitForHostStopped(ownHost, pre.unitMainPid, deps)
+      try {
+        await waitForHostStopped(ownHost, pre.unitMainPid, deps)
+      } catch (error) {
+        throw afterCommittedAction(toDaemonControlError(error), 'Host stop for uninstall')
+      }
     }
     assertNotAborted(deps.signal)
     uninstallOwnedProfileUnit(pre.unit, pre.scope, profile.name, uidOf(deps))
-    const reload = await systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload'], runtimeDirOf(deps))
-    if (reload.kind !== 'exited' || reload.code !== 0) {
-      throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'daemon-reload failed after removing the profile unit')
+    try {
+      const reload = await systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload'], runtimeDirOf(deps))
+      if (reload.kind !== 'exited' || reload.code !== 0) {
+        throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'daemon-reload failed after removing the profile unit')
+      }
+      const post = await readSnapshot(profile, deps, inspected)
+      if (post.failure !== undefined) throw post.failure
+      if (existsSync(pre.unit.filePath)) {
+        throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'the profile unit could not be confirmed removed')
+      }
+      return { code: 0, stdout: formatDaemonStatus(post.status), stderr: RUNNING_WORK_NOTICE }
+    } catch (error) {
+      throw afterCommittedAction(toDaemonControlError(error), 'profile unit removal')
     }
-    const post = await readSnapshot(profile, deps, inspected)
-    if (post.failure !== undefined) {
-      // The unlink/reload are already committed; a failed post confirmation
-      // cannot be rolled back. Report the incomplete verification with its
-      // stable code instead of claiming a completed uninstall.
-      throw afterCommittedAction(post.failure, 'the profile unit removal')
-    }
-    if (existsSync(pre.unit.filePath)) {
-      throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'the profile unit could not be confirmed removed; re-run status to confirm')
-    }
-    return { code: 0, stdout: formatDaemonStatus(post.status), stderr: RUNNING_WORK_NOTICE }
   })
 }
 
