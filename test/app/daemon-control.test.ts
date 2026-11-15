@@ -200,6 +200,38 @@ test('an active unit without an authenticated Host reports starting, never ready
   assert.doesNotMatch(result.stdout, /^host=ready$/mu)
 })
 
+test('status reports an activating unit with no registry as starting, never stopped', async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  // Real `systemctl show` shape: systemd accepted the start, no MainPID yet and
+  // the Host has not published instance.json.
+  const systemctl = unitSystemctl(unit.path, { activeState: 'activating', mainPid: 0 })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+  }))
+  assert.doesNotMatch(result.stdout, /^host=stopped$/mu, 'an activating unit is not a stopped Host')
+  assert.match(result.stdout, /^host=starting$/mu)
+  assert.match(result.stdout, /^unit-state=unknown$/mu)
+  assert.match(result.stdout, /^manager=systemd$/mu)
+})
+
+test('status reports an unconfirmed transitional unit state as unknown and nonzero', async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'deactivating', mainPid: 0 })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+  }))
+  assertCode(result, 5, /TRANSITION_UNCERTAIN/u)
+  assert.match(result.stdout, /^host=unknown$/mu)
+  assert.doesNotMatch(result.stdout, /^host=stopped$/mu)
+  assert.match(result.stdout, /^manager=systemd$/mu)
+})
+
 test('a live Host that fails the authenticated handshake is unresponsive and nonzero', async t => {
   const fx = fixture(t)
   const record = recordOf(fx.scope)

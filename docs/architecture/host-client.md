@@ -467,6 +467,11 @@ stdout/stderr.
   `unmanaged`); it never means "systemctl exists". `ActiveState=active` or a
   registry PID is not readiness: a supervised but unauthenticated Host is
   `starting`/`unresponsive`, and an unreadable/contradictory state is `unknown`.
+  A manager-reported `activating` unit is a Host that may still come up: it is
+  reported `starting` (never `stopped`) even before any `MainPID` exists, while
+  any other unconfirmed transition (`deactivating`, `reloading`, an unrecognized
+  `ActiveState`) is `unknown` with a nonzero exit. `MainPID=0` alone never
+  proves a Host is stopped.
   A missing Host with no unit conflict is `stopped` and exit 0; manager error,
   unsafe/foreign unit, incompatible protocol/DSH and unverifiable liveness are
   nonzero and are never reported as `stopped`.
