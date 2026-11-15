@@ -1,18 +1,19 @@
 /**
- * FR3 L6 — the mounted `Settings · Tools · MCP servers` user loop.
+ * The mounted `Settings · Tools · MCP servers` input and persistence paths.
  *
  * Drives the REAL `/settings` command, the REAL `TuiApp` Settings workspace
  * lease, the REAL `SettingsWorkspacePanel`, the REAL per-open
- * `McpServersController` and the REAL Direct MCP port/source adapters over a
- * controlled Host manager fixture. Only the Host service boundaries are fakes
- * (an in-process manager with a live watch/probe/restart, and the official
- * settings descriptor projection) — never a pre-computed UI DTO.
+ * `McpServersController` and the Direct MCP page adapters. Routine cases use a
+ * controlled Host manager/settings boundary; the Root-pointer persistence case
+ * additionally mounts the official Loader, ConfigEditor and SettingsForms over
+ * a disposable profile and reads its patch back. No real user profile, external
+ * MCP server or physical terminal is used.
  *
  * The case proves: the page is reachable from Tools; `configured:true` is never
  * shown as Configured without the settings key evidence; a plugin entry and a
  * retained cleanup record are classified separately; Probe/Restart reach the
- * Host exactly once; Esc cancels a restart; the page writes no configuration;
- * and closing/reopening leaves ONE watch at a time.
+ * Host exactly once; Esc cancels a restart; only reviewed, explicit
+ * confirmations write configuration; and reopening leaves ONE watch at a time.
  *
  * @module @xmoon76/dsh-pi-tui/mcp-settings-mounted.test
  */
@@ -20,6 +21,15 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
+import ConfigEditor from '@deepseek-ai/dsh-config-editor'
+import SettingsForms from '@deepseek-ai/dsh-settings'
+import { loadProfileDirectory, mountRootInclude } from '@deepseek-ai/dsh-app-boot'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
@@ -33,8 +43,9 @@ import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.
 import { selectSettingsCategory } from '../support/settings-rail.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { DirectMcpServerPort, type DirectMcpHostContextLike } from '../../src/runtime/direct/mcp-server-direct.ts'
+import type { McpServersController } from '../../src/app/command/mcp-servers.ts'
 import type { EmbeddedSpecialistPage } from '../../src/tui/panels/settings-workspace-panel.ts'
-import { DirectMcpServerConfigurationConfig, DirectMcpServerSourcesConfig } from '../../src/runtime/direct/config-direct.ts'
+import { DirectMcpServerConfigurationConfig, DirectMcpServerSourcesConfig, type SettingsServiceLike, type SettingsMutationOp } from '../../src/runtime/direct/config-direct.ts'
 import type { McpServerWatchEvent } from '../../src/runtime/mcp-server-port.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -121,6 +132,8 @@ interface Harness {
   readonly vt: VirtualTerminal
   readonly app: TuiApp
   readonly manager: FixtureManager
+  /** Replace the controlled Host manager through the Direct service event. */
+  readonly replaceManager: () => FixtureManager
   /** The LIVE embedded MCP page of the open Settings workspace, when mounted. */
   readonly embeddedMcpPage: () => EmbeddedSpecialistPage | undefined
   /** The LIVE Settings workspace root (the ONE pointer owner of the frame). */
@@ -137,7 +150,13 @@ interface Harness {
   readonly view: () => string
 }
 
-function setup(options: { readonly columns?: number; readonly rows?: number; readonly withManager?: boolean } = {}): Harness {
+function setup(options: {
+  readonly columns?: number
+  readonly rows?: number
+  readonly withManager?: boolean
+  readonly inheritedAlpha?: boolean
+  readonly settingsService?: SettingsServiceLike
+} = {}): Harness {
   const ctx = new Context()
   const vt = new VirtualTerminal(options.columns ?? 100, options.rows ?? 30)
   const app = new TuiApp(vt, {
@@ -164,6 +183,8 @@ function setup(options: { readonly columns?: number; readonly rows?: number; rea
   } as never)
 
   const manager = new FixtureManager(managedList())
+  let currentManager = manager
+  const serviceListeners = new Set<(name: string) => void>()
   const managerMounted = options.withManager !== false
   const settingsMutateCalls: string[] = []
   let settingsDescribeCalls = 0
@@ -173,16 +194,24 @@ function setup(options: { readonly columns?: number; readonly rows?: number; rea
   const settingsCtx = {
     get: (name: string): unknown => name === 'settings'
       ? {
-          describe: () => [{
-            ...(settingsDescribeCalls += 1, {}),
-            ns: 'mcp-manager',
-            value: { servers: { alpha: alphaEntry } },
-            base: { servers: {} },
-            user: { servers: { alpha: alphaEntry } },
-            revision: settingsRevision,
-          }],
-          mutate: async (ns: string, ops: readonly unknown[]) => {
+          describe: () => {
+            settingsDescribeCalls += 1
+            if (options.settingsService !== undefined) return options.settingsService.describe()
+            return [{
+              ns: 'mcp-manager',
+              value: { servers: { alpha: alphaEntry } },
+              base: { servers: options.inheritedAlpha === true
+                ? { alpha: { ...alphaEntry, command: '/bin/true' } }
+                : {} },
+              user: { servers: { alpha: alphaEntry } },
+              revision: settingsRevision,
+            }]
+          },
+          mutate: async (ns: string, ops: readonly SettingsMutationOp[], expectedRevision?: number) => {
             settingsMutateCalls.push(ns)
+            if (options.settingsService !== undefined) {
+              return options.settingsService.mutate(ns, ops, expectedRevision)
+            }
             if (ops.length === 0) return
             if (settingsHold !== undefined) await settingsHold
             settingsRevision += 1
@@ -192,8 +221,12 @@ function setup(options: { readonly columns?: number; readonly rows?: number; rea
   }
   // The REAL Direct adapters over the controlled Host services.
   const hostCtx: DirectMcpHostContextLike = {
-    get: (name: string): unknown => (name === 'mcpManager' && managerMounted ? manager : undefined),
-    on: ((_event: string, _listener: (name: string) => void) => () => {}) as unknown as DirectMcpHostContextLike['on'],
+    get: (name: string): unknown => (name === 'mcpManager' && managerMounted ? currentManager : undefined),
+    on: ((event: string, listener: (name: string) => void) => {
+      if (event !== 'internal/service') return () => {}
+      serviceListeners.add(listener)
+      return () => { serviceListeners.delete(listener) }
+    }) as unknown as DirectMcpHostContextLike['on'],
   }
   const mcpServers = new DirectMcpServerPort(hostCtx)
   // The source read shares the manager's OWN generation, so the page can prove
@@ -301,6 +334,11 @@ function setup(options: { readonly columns?: number; readonly rows?: number; rea
     vt,
     app,
     manager,
+    replaceManager: () => {
+      currentManager = new FixtureManager(managedList())
+      for (const listener of [...serviceListeners]) listener('mcpManager')
+      return currentManager
+    },
     embeddedMcpPage: () => {
       const lease = (app as unknown as { workspaceLease?: { kind?: string; panel?: unknown } }).workspaceLease
       if (lease === undefined || lease.kind !== 'settings') return undefined
@@ -778,8 +816,46 @@ test('a y that arrives inside the render window never commits an unpainted Save'
   assert.equal(h.settingsMutateCalls.length, 1, 'the painted question dispatches exactly one write')
 })
 
-test('a real Root mouse chain commits a Save through the Host and re-reads it', async () => {
-  const h = setup()
+test('Root pointer Save and Confirm persist through official SettingsForms and read back the profile', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('mcp-mouse-profile-')
+  const profileDir = join(root, 'profile')
+  const bundleDir = join(root, 'mcp-bundle')
+  const patchPath = join(profileDir, 'cordis.patch.yml')
+  const require = createRequire(import.meta.url)
+  const anchor = join(process.cwd(), 'package.json')
+  mkdirSync(join(profileDir, 'node_modules'), { recursive: true })
+  mkdirSync(bundleDir)
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+    name: 'mcp-mouse-profile', private: true,
+    dsh: { profile: { bundles: ['mcp-mouse-bundle'], patch: 'cordis.patch.yml' } },
+  }))
+  writeFileSync(join(bundleDir, 'package.json'), JSON.stringify({
+    name: 'mcp-mouse-bundle', version: '0.0.0', private: true,
+    dsh: { bundle: { patch: ['./cordis.patch.yml'] } },
+  }))
+  writeFileSync(join(bundleDir, 'cordis.patch.yml'), `- insert:\n    - id: mcp-manager\n      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-mcp-manager'))}\n      config:\n        servers: {}\n`)
+  symlinkSync(bundleDir, join(profileDir, 'node_modules', 'mcp-mouse-bundle'), 'dir')
+  writeFileSync(patchPath, '[]\n')
+  const host = new Context()
+  life.defer(() => host.fiber.dispose())
+  host.provide('tools', { register: () => () => {}, unregister: () => {} } as never)
+  host.provide('credentials', { get: () => undefined } as never)
+  await host.plugin(Loader)
+  host.provide('profileContext', {
+    name: 'mcp-mouse-profile', dir: profileDir, patchPath, installAnchor: anchor,
+    cwd: root, home: root, startedBundles: [], overlays: [], telemetryDisabledEnv: undefined,
+  } as never)
+  await host.plugin(ConfigEditor)
+  await host.plugin(SettingsForms)
+  const profile = loadProfileDirectory('dsh', profileDir, anchor)
+  await mountRootInclude(host, patchPath,
+    [...profile.layers.flatMap(layer => layer.patches), ...profile.patches], pathToFileURL(anchor).href, 'dsh')
+  await host.loader.await()
+  const settingsService = host.get('settings') as SettingsServiceLike
+  const before = settingsService.describe()!.find(row => row.ns === 'mcp-manager')!
+  const h = setup({ settingsService })
+  life.defer(() => h.app.dispose())
   await openMcpPage(h)
   const panel = h.settingsPanel()
   assert.ok(panel !== undefined, 'the Settings workspace root must be live')
@@ -798,35 +874,209 @@ test('a real Root mouse chain commits a Save through the Host and re-reads it', 
   // 1) Root click on `a Add` opens the form (already proven; needed to build a draft).
   await click('a Add')
   assert.match(h.view(), /Identity/u)
-  // 2) The draft's text is typed with the ordinary keyboard (the input path is
-  //    not what this case proves).
-  await press(h.vt, '\r')
-  for (const char of 'mouse-save') await h.vt.sendInput(char)
-  await press(h.vt, '\r')
-  await frames(h.vt, 2)
-  for (let step = 0; step < 6; step += 1) {
-    const focused = /▸ ([^:\n]+):/u.exec(h.view())
-    if (focused !== null && (focused[1] ?? '').trim().startsWith('Command')) break
-    await press(h.vt, '\x1b[B')
-  }
-  await press(h.vt, '\r')
-  for (const char of '/bin/sleep') await h.vt.sendInput(char)
-  await press(h.vt, '\r')
-  await frames(h.vt, 2)
+  // Text still arrives through the normal keyboard input; opening, applying,
+  // saving and confirming all travel through the Root's painted pointer cells.
+  await click('Name:')
+  for (const char of 'mouse-save') h.vt.sendInput(char)
+  await frames(h.vt)
+  await click('Enter apply')
+  await click('Command:')
+  for (const char of '/bin/sleep') h.vt.sendInput(char)
+  await frames(h.vt)
+  await click('Enter apply')
+  await click('Enabled:') // toggle it off, so this fixture starts no process
+  assert.match(h.view(), /Enabled: no/u)
 
   // 3) Root click on `s Save` opens the visible question with its facts.
   await click('s Save')
   assert.match(h.view(), /can execute an external command/u, 'the question paints its safety fact')
   assert.match(h.view(), /Y confirm/u, 'the question offers the decision')
-  assert.deepEqual(h.settingsMutateCalls, [], 'asking the question writes nothing')
+  assert.deepEqual(settingsService.describe()!.find(row => row.ns === 'mcp-manager')!.value, before.value,
+    'asking the question does not mutate the official namespace')
 
   // 4) Root click on `Y confirm` dispatches ONE official mutation…
-  const readsBefore = h.settingsDescribeCalls()
+  assert.deepEqual(h.settingsMutateCalls, [])
   await click('Y confirm')
-  assert.deepEqual(h.settingsMutateCalls, ['mcp-manager'], 'exactly ONE official mcp-manager mutation')
-
-  // 5) …and the page re-reads the official descriptor afterwards (readback).
-  assert.ok(h.settingsDescribeCalls() > readsBefore, 'the write is followed by an authoritative re-read')
+  assert.deepEqual(h.settingsMutateCalls, ['mcp-manager'])
   assert.match(h.view(), /Saved · waiting for Host reconcile|Saved/u,
     `the saved verdict comes from the re-read descriptor: ${h.view()}`)
+  const after = settingsService.describe()!.find(row => row.ns === 'mcp-manager')!
+  assert.ok(after.revision! > before.revision!, 'the official namespace revision advanced')
+  const servers = (after.value as { servers: Record<string, { command: string; enabled: boolean }> }).servers
+  assert.equal(servers['mouse-save']!.command, '/bin/sleep')
+  assert.equal(servers['mouse-save']!.enabled, false)
+  assert.match(readFileSync(patchPath, 'utf8'), /mouse-save/u, 'ConfigEditor persisted the profile patch')
+  const controller = (h.embeddedMcpPage() as unknown as { controller: McpServersController }).controller
+  const config = controller.snapshot().config!
+  assert.equal(config.kind, 'ready')
+  if (config.kind !== 'ready') assert.fail('the page must hold the official committed descriptor')
+  assert.equal(config.revision, after.revision)
+  assert.equal(config.entries.find(entry => entry.name === 'mouse-save')?.effective.command, '/bin/sleep')
+})
+
+test('a replacement manager cannot reuse the painted admission of an identical toggle question', async t => {
+  const h = setup()
+  await openMcpPage(h)
+  await press(h.vt, '\r')
+  await press(h.vt, 't')
+  assert.match(h.view(), /Disable server alpha/u)
+  const page = h.embeddedMcpPage()!
+  const controller = (page as unknown as { controller: McpServersController }).controller
+  const questionA = controller.snapshot().configConfirm!
+  const configA = controller.snapshot().config!
+  assert.equal(configA.kind, 'ready')
+
+  // Hold only this production-created consumer's paint. Root input routing and
+  // controller/Direct service events still run; the old question stays on screen.
+  const render = page.render
+  const oldFrame = render.call(page, h.vt.columns)
+  page.render = () => oldFrame
+  t.after(() => { page.render = render })
+
+  const managerB = h.replaceManager()
+  await flushOwnedTurns()
+  assert.equal(controller.snapshot().configConfirm, undefined, 'A question retired on the real service event')
+  h.vt.sendInput('r')
+  await flushOwnedTurns()
+  const configB = controller.snapshot().config!
+  assert.equal(configB.kind, 'ready', 'B descriptor is current before asking a new question')
+  if (configA.kind !== 'ready' || configB.kind !== 'ready') assert.fail('both descriptors must be ready')
+  assert.notEqual(configA.generation, configB.generation)
+  assert.equal(configA.revision, configB.revision, 'same revision is deliberate')
+  h.vt.sendInput('t')
+  const questionB = controller.snapshot().configConfirm!
+  assert.equal(questionB.kind, questionA.kind)
+  assert.equal(questionB.name, questionA.name)
+  assert.equal(questionB.capturedRevision, questionA.capturedRevision)
+  assert.notEqual(questionB.question, questionA.question, 'a replacement question is a fresh instance')
+
+  // B has not painted. The old admitted A facts must authorise neither key nor
+  // the Root's old Confirm cells, even though name/revision/consequence match.
+  h.vt.sendInput('y')
+  const lines = h.vt.getViewport().map(stripTerminalSequences)
+  const row = lines.findIndex(line => line.includes('Y confirm'))
+  assert.ok(row >= 0)
+  const col = lines[row]!.indexOf('Y confirm') + 1
+  const root = h.settingsPanel()!
+  root.onCellPress(col, row)
+  root.onCellClick(col, row)
+  await flushOwnedTurns()
+  assert.deepEqual(h.settingsMutateCalls, [])
+  assert.equal(controller.snapshot().configConfirm?.question, questionB.question, 'B question still awaits review')
+  assert.deepEqual(managerB.restarts, [])
+
+  // Release paint. The same question becomes executable only after its facts
+  // actually land in the Settings frame.
+  page.render = render
+  h.app.requestRender()
+  await frames(h.vt, 2)
+  assert.match(h.view(), /Disable server alpha/u)
+  await press(h.vt, 'y')
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.deepEqual(h.settingsMutateCalls, ['mcp-manager'])
+})
+
+test('a discard reopened before repaint cannot reuse its previous admitted prompt', async () => {
+  const h = setup()
+  await openMcpPage(h)
+  await press(h.vt, 'a')
+  await press(h.vt, '\x1b')
+  assert.match(h.view(), /Discard changes\?/u)
+  const page = h.embeddedMcpPage()!
+  const controller = (page as unknown as { controller: McpServersController }).controller
+  const original = controller.snapshot().editor
+  assert.ok(original !== undefined)
+  // Keep editing, reopen, answer — synchronously, with no frame in between.
+  h.vt.sendInput('\x1b')
+  h.vt.sendInput('\x1b')
+  h.vt.sendInput('d')
+  assert.ok(controller.snapshot().editor !== undefined, 'the newly opened prompt has not been reviewed')
+  assert.deepEqual(h.settingsMutateCalls, [])
+  await frames(h.vt, 2)
+  assert.match(h.view(), /Discard changes\?/u)
+  await press(h.vt, 'd')
+  assert.equal(controller.snapshot().editor, undefined, 'the freshly painted prompt may discard')
+})
+
+test('each Detail operation refuses an unpainted answer and accepts a freshly painted question', async t => {
+  for (const key of ['t', 'd', 'u', 'x']) {
+    await t.test(key, async () => {
+      const h = setup({ inheritedAlpha: key === 'u' })
+      await openMcpPage(h)
+      await press(h.vt, '\r')
+      h.vt.sendInput(key)
+      h.vt.sendInput('y')
+      await flushOwnedTurns()
+      assert.deepEqual(h.settingsMutateCalls, [], 'no configuration write before the question paints')
+      assert.deepEqual(h.manager.restarts, [], 'no restart before the question paints')
+      await frames(h.vt, 2)
+      assert.match(lastLine(h), /Y confirm/u)
+      await press(h.vt, 'y')
+      await flushOwnedTurns()
+      if (key === 'x') assert.deepEqual(h.manager.restarts, ['alpha'])
+      else assert.deepEqual(h.settingsMutateCalls, ['mcp-manager'])
+    })
+  }
+})
+
+test('a Settings frame with zero body rows removes Confirm and refuses its answer until resized', async () => {
+  const h = setup()
+  await openMcpPage(h)
+  await press(h.vt, '\r')
+  await press(h.vt, 't')
+  assert.match(h.view(), /Disable server alpha/u)
+  h.vt.resize(200, 2)
+  await frames(h.vt, 2)
+  assert.equal(h.vt.getViewport().length, 2)
+  assert.doesNotMatch(h.view(), /Disable server alpha/u, 'Root painted no confirmation body')
+  assert.match(lastLine(h), /Resize to review/u)
+  assert.doesNotMatch(lastLine(h), /Y confirm/u)
+  await press(h.vt, 'y')
+  await flushOwnedTurns()
+  assert.deepEqual(h.settingsMutateCalls, [])
+  h.vt.resize(100, 30)
+  await frames(h.vt, 2)
+  assert.match(h.view(), /Disable server alpha/u)
+  await press(h.vt, 'y')
+  await flushOwnedTurns()
+  assert.deepEqual(h.settingsMutateCalls, ['mcp-manager'])
+})
+
+test('zero-row Settings grants refuse every detail confirmation, including Restart', async t => {
+  for (const key of ['t', 'd', 'u', 'x']) {
+    await t.test(key, async () => {
+      const h = setup({ inheritedAlpha: key === 'u' })
+      await openMcpPage(h)
+      await press(h.vt, '\r')
+      await press(h.vt, key)
+      await frames(h.vt, 2)
+      h.vt.resize(200, 2)
+      await frames(h.vt, 2)
+      assert.doesNotMatch(h.view(), /Y confirm/u, 'zero body rows paint no affirmative action')
+      assert.match(lastLine(h), /Resize to review/u)
+      await press(h.vt, 'y')
+      await flushOwnedTurns()
+      assert.deepEqual(h.settingsMutateCalls, [], 'no configuration confirmation can dispatch')
+      assert.deepEqual(h.manager.restarts, [], 'no restart can dispatch')
+    })
+  }
+})
+
+test('a zero-row discard body refuses `d` and preserves the draft', async () => {
+  const h = setup()
+  await openMcpPage(h)
+  await press(h.vt, 'a')
+  await press(h.vt, '\x1b')
+  assert.match(h.view(), /nothing has been written yet/u)
+  h.vt.resize(200, 2)
+  await frames(h.vt, 2)
+  assert.doesNotMatch(h.view(), /Y confirm|Discard \\[d\\]/u)
+  assert.match(lastLine(h), /Resize to review/u)
+  await press(h.vt, 'd')
+  await flushOwnedTurns()
+  const page = h.embeddedMcpPage()!
+  const controller = (page as unknown as { controller: McpServersController }).controller
+  assert.ok(controller.snapshot().editor !== undefined, 'the refused answer keeps the draft')
+  assert.deepEqual(h.settingsMutateCalls, [])
 })
