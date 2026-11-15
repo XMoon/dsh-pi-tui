@@ -1980,3 +1980,113 @@ test('PO3A-G replay: mixed fail -> later clean turns -> close -> a fresh connect
   await view.registry.resumeSession(conn3, view.access, { sessionId: 'P1', cwd: '/w' })
   assert.equal(view.registry.phaseOf(conn3), 'attached')
 })
+
+test('R701-04: a close pending over a MIXED turn detaches after the real turn/end (no cached failure)', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start('mixed close')
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-mixed-close')
+  view.access.pendingInbox.delete('m-mixed-close')
+  view.access.turnFence = { openTurnStartSeq: 500, lastTurn: 5 }
+  view.access.agentStatus = 'running'
+  view.claim('m-mixed-close', 5, request.requestId)
+  // A TUI steer is claimed into the SAME turn BEFORE the close.
+  view.claim('m-steer-close', 5, 'tui-steer')
+  // The client closes the View while the mixed turn is STILL running.
+  const closing = view.registry.closeSession(view.conn, view.access, 'P1')
+  // D23: the mixed turn is never Agent-cancelled.
+  assert.deepEqual(view.access.cancelledTurns, [], 'the mixed turn keeps running (never Agent-cancelled)')
+  // The turn reaches its real terminal: the PROMPT keeps its mixed failure.
+  view.commit('turn/end', { turn: 5, reason: { kind: 'completed' } })
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_MIXED_TURN'))
+  // ...and the SAME close completes instead of caching that prompt failure.
+  assert.deepEqual(await closing, {}, 'the close detaches after the proven Host terminal')
+  assert.equal(view.registry.hasClaim('P1'), false, 'the claim is released')
+  // A repeated close stays idempotent.
+  assert.deepEqual(await view.registry.closeSession(view.conn, view.access, 'P1'), {})
+  // A FRESH connection can resume the SAME Session.
+  const conn2 = view.registry.createConnection()
+  await view.registry.resumeSession(conn2, view.access, { sessionId: 'P1', cwd: '/w' })
+  assert.equal(view.registry.phaseOf(conn2), 'attached')
+})
+
+test('R701-04 sibling: a close pending over a turn that ends with a real FAILURE also detaches truthfully', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start('failing close')
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-fail-close')
+  view.access.pendingInbox.delete('m-fail-close')
+  view.access.turnFence = { openTurnStartSeq: 700, lastTurn: 7 }
+  view.access.agentStatus = 'running'
+  view.claim('m-fail-close', 7, request.requestId)
+  const closing = view.registry.closeSession(view.conn, view.access, 'P1')
+  // The owned turn reaches a real ERROR terminal (not a cancellation).
+  view.commit('turn/end', { turn: 7, reason: { kind: 'error', error: { message: 'boom', code: 'UNKNOWN' } } })
+  await assert.rejects(attempt, (error: unknown) => error instanceof LocalAcpViewError
+    && error.code === 'LOCAL_ACP_PROMPT_TURN_FAILED' && error.data.reason === 'error')
+  assert.deepEqual(await closing, {}, 'the close completes on the real failed terminal')
+  assert.equal(view.registry.hasClaim('P1'), false)
+})
+
+test('R701-04 negative: an UNPROVEN close (stale identity) still fails closed and keeps the View', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-stale-close')
+  view.access.pendingInbox.delete('m-stale-close')
+  view.access.turnFence = { openTurnStartSeq: 900, lastTurn: 9 }
+  view.access.agentStatus = 'running'
+  view.claim('m-stale-close', 9, request.requestId)
+  // The exact identity is gone: neither removal nor turn cancel can be proven.
+  view.access.turnFence = 'stale'
+  await assert.rejects(view.registry.closeSession(view.conn, view.access, 'P1'),
+    isPromptError('LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'))
+  assert.equal(view.registry.hasClaim('P1'), true, 'an unproven close never detaches')
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'))
+})
+
+test('R701-04 sibling: an Agent disposal during a pending close lets the close complete', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-disp-close')
+  view.access.pendingInbox.delete('m-disp-close')
+  view.access.turnFence = { openTurnStartSeq: 300, lastTurn: 3 }
+  view.access.agentStatus = 'running'
+  view.claim('m-disp-close', 3, request.requestId)
+  const closing = view.registry.closeSession(view.conn, view.access, 'P1')
+  view.registry.onAgentDisposed(view.agent)
+  await assert.rejects(attempt, (error: unknown) => error instanceof LocalAcpViewError
+    && error.code === 'LOCAL_ACP_PROMPT_TURN_FAILED' && error.data.reason === 'agent-disposed')
+  assert.deepEqual(await closing, {}, 'the disposed Agent is a provable terminal: real detach, no error')
+  assert.equal(view.registry.hasClaim('P1'), false, 'the claim is released')
+  assert.deepEqual(await view.registry.closeSession(view.conn, view.access, 'P1'), {}, 'repeated close is idempotent')
+})
+
+test('R701-04 sibling: an early failure during a pending close fails ONCE, then a later close succeeds on the real terminal', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-early-close')
+  view.access.pendingInbox.delete('m-early-close')
+  view.access.turnFence = { openTurnStartSeq: 400, lastTurn: 4 }
+  view.access.agentStatus = 'running'
+  view.claim('m-early-close', 4, request.requestId)
+  const closing = view.registry.closeSession(view.conn, view.access, 'P1')
+  // The flight fails early while its turn is still running: the close cannot
+  // claim a settlement and reports the real failure.
+  view.registry.onAgentError(view.agent, 4)
+  await assert.rejects(closing, isPromptError('LOCAL_ACP_PROMPT_TURN_FAILED'))
+  assert.equal(view.registry.hasClaim('P1'), true, 'the fenced claim survives the failed close')
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_TURN_FAILED'))
+  // The real turn terminal ends the fence: a repeated close now succeeds.
+  view.commit('turn/end', { turn: 4, reason: { kind: 'error', error: { message: 'x', code: 'UNKNOWN' } } })
+  assert.deepEqual(await view.registry.closeSession(view.conn, view.access, 'P1'), {},
+    'the close re-evaluates on the now-proven terminal instead of replaying the stale failure')
+  assert.equal(view.registry.hasClaim('P1'), false)
+})

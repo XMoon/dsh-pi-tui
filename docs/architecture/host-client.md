@@ -541,11 +541,16 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     - a cancellation that cannot prove either fact fails closed with
       `LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED` instead of fabricating `cancelled`.
     `session/close` with an open flight performs the SAME scoped cancellation
-    and detaches only after the proven settlement (a repeated close awaits the
-    same settlement; never a second removal/cancel). A physical disconnect of a
-    flight that already owns its durable message fact drives the same scoped
-    cancellation before the claim is released; a flight with no durable fact
-    yet keeps the fail-closed release.
+    and detaches only after the proven settlement; the prompt's own outcome is
+    NOT the close proof — a mixed/failed turn that reached its durable
+    `turn/end` (or whose exact Agent was disposed) lets the close detach
+    truthfully while the prompt keeps its real error, and a close that could
+    not prove a settlement reports that failure and is re-evaluated on the
+    then-current facts by a later close (never a fabricated success, never a
+    swallowed failure). A physical disconnect of a flight that already owns its
+    durable message fact drives the same scoped cancellation before the claim
+    is released; a flight with no durable fact yet keeps the fail-closed
+    release.
   - **Approval ownership (PO-3B).** The official Agent-scoped
     `approval/request` waterfall has exactly ONE classification seat ahead of
     the TUI forwarding listener. A request whose exact Agent matches a View
