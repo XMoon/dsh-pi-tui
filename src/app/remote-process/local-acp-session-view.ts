@@ -868,7 +868,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // detaches, but the claim survives so a LATE approval of that exact
     // ACP-owned turn can never be delegated to the TUI and a late insertion is
     // still observed. A claim with no such fact is released now.
-    if (claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined) {
+    if (claim.retiringTurn !== undefined) {
       claim.detachedWithFence = true
     } else if (this.claims.get(sessionId) === claim) {
       this.claims.delete(sessionId)
