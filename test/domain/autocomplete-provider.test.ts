@@ -818,18 +818,58 @@ test('inline skill accept applies the reference and never submits', async (t) =>
   assert.deepEqual(appliedSpaced, { lines: ['请用 /eli5 看看'], cursorLine: 0, cursorCol: 9 })
 })
 
-test('a scope switch fences the open inline dropdown (no stale accept)', async (t) => {
+test('a CLIENT-local inline dropdown survives a Host workspace selection change (the Client cwd is its authority)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  let scope: import('../../src/runtime/host-file-port.ts').HostFileScope = { kind: 'workspace', workspaceId: 'workspace-a', selectionRevision: 1 }
+  let scope: import('../../src/runtime/host-file-port.ts').HostFileScope = { kind: 'workspace', selectionRevision: 0 }
   const provider = new MentionProvider([], root, fallbackSeam(root).port, undefined, () => scope, undefined, undefined, SKILLS, EMPTY_DIRECT_SHELL_COMPLETION)
   const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
   assert.ok(result !== null)
-  // The Workspace selection revision changes while the dropdown is open.
-  scope = { kind: 'workspace', workspaceId: 'workspace-a', selectionRevision: 2 }
+  // The sessionless workspace preflight confirms the launch directory while
+  // the dropdown is open: the Host scope gains its identity and a new
+  // revision. The inline lexicon (and the fixed attachment actions beside it)
+  // never read the Host filesystem, so its rows are still the exact ones THIS
+  // Client wrote and the accept must land — the seat keeps them PAINTED (it
+  // holds no Host scope of its own), so refusing here is an Enter that
+  // silently completes nothing.
+  scope = { kind: 'workspace', workspaceId: 'workspace-a', selectionRevision: 1 }
   const applied = provider.applyCompletion(['请用 /el'], 0, 6, result.items[0]!, result.prefix)
-  assert.deepEqual(applied, { lines: ['请用 /el'], cursorLine: 0, cursorCol: 6 },
-    'a switched scope must fence the old dropdown')
+  assert.deepEqual(applied, { lines: ['请用 /eli5 '], cursorLine: 0, cursorCol: 9 },
+    'a Host scope change must not fence a Client-local inline dropdown')
+  // The Client cwd IS that answer's scope: a change there still fences it.
+  const cwd = { value: root }
+  const localCwdScoped = new MentionProvider(
+    [], root, fallbackSeam(root).port, undefined, () => scope, undefined, () => cwd.value, SKILLS, EMPTY_DIRECT_SHELL_COMPLETION,
+  )
+  const painted = await localCwdScoped.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
+  assert.ok(painted !== null)
+  cwd.value = '/somewhere-else'
+  assert.deepEqual(
+    localCwdScoped.applyCompletion(['请用 /el'], 0, 6, painted.items[0]!, painted.prefix),
+    { lines: ['请用 /el'], cursorLine: 0, cursorCol: 6 },
+    'the Client-local cwd is the answer authority and still fences the dropdown',
+  )
+})
+
+test('a Host-scoped dropdown is fenced by a workspace selection change (no stale accept)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  let scope: import('../../src/runtime/host-file-port.ts').HostFileScope = { kind: 'workspace', workspaceId: 'workspace-a', selectionRevision: 1 }
+  const seam: import('../../src/runtime/host-file-port.ts').HostFilePort = {
+    listReferences: async () => ({ kind: 'ok', items: [{ path: 'file-one.txt', kind: 'file' }] }),
+    resolveReference: async () => ({ kind: 'missing' }),
+    canonicalizeMentions: async (_scope, text) => text,
+  }
+  const provider = new MentionProvider([], root, seam, undefined, () => scope, undefined, undefined, SKILLS, EMPTY_DIRECT_SHELL_COMPLETION)
+  const result = await provider.getSuggestions(['@file'], 0, 5, { signal: abort })
+  assert.ok(result !== null)
+  // The Workspace selection revision changes while the dropdown is open: the
+  // `@` rows were resolved against the OLD Host workspace, so they must never
+  // apply under the new one.
+  scope = { kind: 'workspace', workspaceId: 'workspace-a', selectionRevision: 2 }
+  const applied = provider.applyCompletion(['@file'], 0, 5, result.items[0]!, result.prefix)
+  assert.deepEqual(applied, { lines: ['@file'], cursorLine: 0, cursorCol: 5 },
+    'a switched Host scope must fence the old dropdown')
 })
 
 test('a changed draft fences the open inline dropdown (no stale accept)', async (t) => {
