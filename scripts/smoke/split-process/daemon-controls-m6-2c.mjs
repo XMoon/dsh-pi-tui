@@ -646,8 +646,15 @@ export async function runDaemonControlInflightStop({ installation, trace, dshHom
     await waitFor(() => hostPids(dshHome).length === 0, 'the C13 Host exit with an in-flight turn', 60_000)
     assert(systemctl(['--user', '--no-pager', 'is-active', profileUnitName('pi-tui', profileScopeId(process.getuid(), installation.profileDir))]).stdout.trim() !== 'active',
       'the C13 unit must not stay active after an in-flight stop')
-    assert(!proofEvents().some(event => event.kind === 'turn-released'),
-      'the C13 turn must not settle during the stop')
+    // A graceful stop must abort the in-flight turn (the fixture records the
+    // Host's own shutdown signal reaching the stream). A manager-enforced stop
+    // kills the cgroup, so no abort is observable — but in BOTH cases the turn
+    // must leave no completed assistant message (asserted below against the
+    // durable Session log, which is the settlement authority).
+    const aborted = proofEvents().some(event => event.kind === 'turn-aborted')
+    if (stopped.status === 0) {
+      assert(aborted, 'a successful in-flight stop must abort the turn instead of letting it settle')
+    }
     // A failed stop leaves the unit in `failed`; an explicit start clears it.
     systemctl(['--user', '--no-pager', 'reset-failed'])
     const restarted = runDaemon(installation, ['start'])
@@ -664,16 +671,25 @@ export async function runDaemonControlInflightStop({ installation, trace, dshHom
     assert(events !== undefined, 'the interrupted Session must keep its durable log')
     assert(hostUserTexts(events).includes('C13 in-flight turn'),
       'the interrupted turn must keep its real user message')
+    assert(!events.some(event => event.type === 'assistant/message'),
+      'the interrupted turn must never settle into an assistant message')
     assert(!hostAssistantHasText(events, 'C13 partial answer finished'),
-      'the interrupted turn must never gain a completed assistant message')
+      'the interrupted turn must never gain its completion text')
 
-    trace('daemon-control-inflight-stop', { session: String(startedSession.sessionId), instance: after.instance })
+    trace('daemon-control-inflight-stop', {
+      session: String(startedSession.sessionId),
+      instance: after.instance,
+      stopExit: stopped.status,
+      turnAborted: aborted,
+      turnStarts,
+    })
     result = {
       status: 'PASS',
       scope: 'REAL_SYSTEMD_USER_L6',
       inFlightAtStop: true,
       hostExited: true,
       stopExit: stopped.status,
+      turnAborted: aborted,
       noReplay: true,
       noFabricatedCompletion: true,
     }
