@@ -398,9 +398,12 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
         exitCode = mapped.exitCode
       }
     }
-    if (failure === undefined && authenticated !== undefined && unit !== undefined && probe.kind === 'available') {
-      // The manager is live and this profile's unit is loaded. The unit's own
-      // reported state decides whether the supervision fact is settled:
+    if (failure === undefined && authenticated !== undefined && unit !== undefined
+      && probe.kind === 'available' && unitState !== 'not-found') {
+      // The manager is live and this profile's unit is ACTUALLY LOADED (a unit
+      // file with LoadState=not-found is loaded by nothing, so it cannot claim
+      // or disclaim this Host). The unit's own reported state decides whether
+      // the supervision fact is settled:
       //   active       + MainPID == Host PID -> verified systemd supervision
       //   activating   + MainPID == Host PID -> same (the start is converging
       //                                     onto the already-authenticated Host)
@@ -412,7 +415,8 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
       //                                     ownership answer stays refused.
       // Classify the manager's RAW ActiveState, never the coarse `unitState`
       // (which maps `activating` to `unknown` too and would swallow the
-      // legitimate converging case).
+      // legitimate converging case). `unitActiveState` is only populated for a
+      // LOADED unit, so an unloaded file can never reach the flux branch.
       const running = unitActiveState === 'active' || unitActiveState === 'activating'
       const ended = unitActiveState === 'inactive' || unitActiveState === 'failed'
       if (!running && !ended) {

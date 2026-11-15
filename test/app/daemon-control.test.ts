@@ -333,6 +333,47 @@ test('a reloading unit or an unrecognized ActiveState stays uncertain beside a l
   }
 })
 
+test('a unit file the manager has not loaded cannot claim a healthy live Host', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope)
+  const systemctl = unitSystemctl(unit.path, { loadState: 'not-found', activeState: 'inactive', mainPid: 0 })
+  const deps = {
+    systemctl: systemctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive' as const,
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }
+  // An unloaded file loads nothing, so it neither supervises nor disclaims the
+  // Host: this is the ordinary live fallback under a live manager.
+  const status = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, deps))
+  assertCode(status, 0)
+  assert.match(status.stdout, /^host=ready$/mu)
+  assert.match(status.stdout, /^manager=unmanaged$/mu)
+  assert.match(status.stdout, /^unit-state=not-found$/mu)
+  // ...and a warm start reuses that Host without touching any OS state.
+  let ensured = 0
+  const start = await runDaemonControl({ verb: 'start' }, fx.profile, depsOf(fx, {
+    ...deps,
+    ensureHost: async () => { ensured += 1; throw new Error('a healthy Host must be reused') },
+  }))
+  assertCode(start, 0)
+  assert.equal(ensured, 0)
+  assert.match(start.stdout, /^instance=11111111$/mu)
+  // stop must refuse: an unloaded file grants no supervision attribution.
+  let signals = 0
+  const stop = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    ...deps,
+    kill: () => { signals += 1 },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(stop, 3)
+  assert.equal(signals, 0, 'no PID signal without a supervision attribution')
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), false, 'no systemctl stop without a loaded unit')
+  assert.equal(existsSync(unit.path), true, 'the unowned-by-manager file must stay untouched')
+})
+
 test('an inactive owned unit with no Host is stopped and stop stays an idempotent no-op', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
   const unit = writeOwnedUnit(fx)
