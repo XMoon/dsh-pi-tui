@@ -578,7 +578,7 @@ test('start reuses an authenticated Host even when the user manager is erroring'
   assert.match(result.stdout, /^instance=11111111$/mu)
 })
 
-test('status with a manager error still reports a reused Host as ready', { skip: process.platform !== 'linux' }, async t => {
+test('status keeps host=ready under a manager error but still exits 4 per its contract', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
   const record = recordOf(fx.scope)
   const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
@@ -587,7 +587,9 @@ test('status with a manager error still reports a reused Host as ready', { skip:
     inspectProcess: () => 'alive',
     authenticate: async () => ({ record, cookie: 'c', identity: record }),
   }))
-  assertCode(result, 0)
+  // The Host observation stays truthful; the supervisor state is unconfirmed,
+  // so the diagnostic command stays nonzero (plan §3.2/§3.3).
+  assertCode(result, 4, /MANAGER_OR_OS_FAILURE/u)
   assert.match(result.stdout, /^host=ready$/mu)
   assert.match(result.stdout, /^user-manager=error$/mu)
 })

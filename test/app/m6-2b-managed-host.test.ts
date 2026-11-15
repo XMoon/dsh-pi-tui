@@ -772,6 +772,42 @@ test('stopOwnedProfileUnit stops an active unit and returns its original MainPID
   assert.equal(calls.some(args => args.includes('stop')), true)
 })
 
+test('an activating unit with no MainPID still goes through systemctl stop', async t => {
+  const fx = controlledUnitFixture(t)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir, fx.entry)
+  if (unit.kind !== 'owned') return assert.fail('expected an owned unit')
+  let state = { active: 'activating', mainPid: 0 }
+  const calls: string[][] = []
+  const run = async (args: readonly string[]): Promise<SystemctlResult> => {
+    calls.push([...args])
+    if (args.includes('stop')) {
+      state = { active: 'inactive', mainPid: 0 }
+      return exited(0)
+    }
+    return exited(0, [`LoadState=loaded`, `ActiveState=${state.active}`, `FragmentPath=${fx.unitPath}`, 'DropInPaths=', `MainPID=${String(state.mainPid)}`, 'UnitFileState=disabled', ''].join('\n'))
+  }
+  const result = await stopOwnedProfileUnit(unit, undefined, run)
+  assert.equal(result.stopped, true, 'an activating unit must be stopped through the manager, not treated as already inactive')
+  assert.equal(result.alreadyInactive, false)
+  assert.equal(calls.some(args => args.includes('stop')), true, 'systemctl stop must be issued for an activating unit')
+})
+
+test('an unrecognized unit state is refused instead of claimed as stopped', async t => {
+  const fx = controlledUnitFixture(t)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir, fx.entry)
+  if (unit.kind !== 'owned') return assert.fail('expected an owned unit')
+  const calls: string[][] = []
+  const run = async (args: readonly string[]): Promise<SystemctlResult> => {
+    calls.push([...args])
+    return exited(0, ['LoadState=loaded', 'ActiveState=maintenance', `FragmentPath=${fx.unitPath}`, 'DropInPaths=', 'MainPID=0', 'UnitFileState=disabled', ''].join('\n'))
+  }
+  await assert.rejects(
+    () => stopOwnedProfileUnit(unit, undefined, run),
+    error => isCode(error, 'HOST_MANAGER_START_FAILED'),
+  )
+  assert.equal(calls.some(args => args.includes('stop')), false, 'an unrecognized state must not be silently stopped or claimed')
+})
+
 test('a stop that never leaves the active state is HOST_STOP_TIMEOUT, never success', async t => {
   const fx = controlledUnitFixture(t)
   const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir, fx.entry)
