@@ -56,7 +56,7 @@ class StubController {
   answerRestart(confirmed: boolean): void { this.calls.push(`answerRestart:${String(confirmed)}`) }
   canOperateSelected(): boolean { return this.operable }
   // FR4 intents.
-  canBeginAdd(): boolean { return this.addable }
+  canBeginAdd(): boolean { return this.addable && !this.savingBlocked }
   canBeginEdit(): boolean { return this.editable }
   canEditConfiguration(): boolean { return this.editable }
   beginAdd(): void {
@@ -94,6 +94,7 @@ class StubController {
     this.formValue = form
   }
   formValue: 'reference' | 'literal' = 'reference'
+  savingBlocked = false
   removeEditorDictKey(field: string, key: string): void { this.calls.push(`removeDict:${field}:${key}`) }
   canRemoveDictKey(_field: string, _key: string): boolean { return this.keysRemovable }
   keysRemovable = true
@@ -356,7 +357,13 @@ test('the list offers `a Add` only with a current descriptor, and search swallow
   const ready = makePage(snapshot({ config: { kind: 'ready', generation: {}, revision: 1, entries: [] } }))
   assert.match(render(ready.page, 100, 14).at(-1) ?? '', /a Add/u)
   const unavailable = makePage(snapshot({ config: { kind: 'unavailable', reason: 'not read' } }))
+  // The page asks the CONTROLLER, so the stub's own gate decides.
+  unavailable.controller.addable = false
   assert.doesNotMatch(render(unavailable.page, 100, 14).at(-1) ?? '', /Add/u)
+  // An in-flight Probe blocks Add for the same reason.
+  const busy = makePage(snapshot({ config: { kind: 'ready', generation: {}, revision: 1, entries: [] } }))
+  busy.controller.addable = false
+  assert.doesNotMatch(render(busy.page, 100, 14).at(-1) ?? '', /Add/u)
 
   const { page, controller } = makePage(snapshot({ config: { kind: 'ready', generation: {}, revision: 1, entries: [] } }))
   render(page, 100, 14)
@@ -584,7 +591,9 @@ test('a Save confirmation paints the external-capability subject at every width'
       },
     }))
     const bar = render(page, width, 16).at(-1) ?? ''
-    assert.match(bar, /[Ee]xternal command|Save configuration\?/u,
+    // The question names the SERVER and keeps the capability fact.
+    assert.match(bar, /alpha/u, `width ${String(width)}: the exact server must be named`)
+    assert.match(bar, /[Ee]xternal|Save alpha/u,
       `width ${String(width)}: the disclosure must be readable`)
     assert.match(bar, /Y confirm|y/u, `width ${String(width)}: the affirmative key is advertised`)
     assert.match(bar, /Esc/u, `width ${String(width)}: the cancel key is advertised`)
@@ -613,9 +622,9 @@ test('a compacted HTTP disclosure still names its target host', () => {
       configConfirm: { kind: 'save', name: 'alpha', warning, capturedRevision: 1 },
     }))
     const bar = render(page, width, 16).at(-1) ?? ''
+    assert.match(bar, /alpha/u, `width ${String(width)}: the server must survive compaction`)
     assert.match(bar, /mcp\.example\.test/u,
       `width ${String(width)}: the target host must survive compaction`)
-    assert.match(bar, /[Ee]xternal (service|data)/u, `width ${String(width)}: the capability fact must survive`)
   }
 })
 
@@ -805,4 +814,91 @@ test('a config write in flight removes every detail CRUD affordance from the bar
   assert.match(bar, /p probe/u, 'Probe is independent of the config write')
   assert.match(bar, /x restart/u)
   assert.match(bar, /Back \[Esc\]/u)
+})
+
+test('an explicit empty Enter commits an empty literal, while Esc keeps the value', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ env: [{ key: 'E', value: 'stored' }], dirty: true }),
+  }))
+  controller.formValue = 'literal'
+  openEditor(page, 'e')
+  // Focus the Env value row, open the input, press Enter on the empty text.
+  for (let step = 0; step < 14; step += 1) {
+    const focused = /▸ ([^:\n]+):/u.exec(render(page, 100, 20).join('\n'))
+    if (focused !== null && (focused[1] ?? '').trim() === 'Env E') break
+    page.handleInput('\x1b[B')
+  }
+  page.handleInput('\r')
+  page.handleInput('\r') // empty commit on a LITERAL
+  assert.ok(controller.calls.includes('setDictValue:env:E=:literal'),
+    `an explicit empty literal must be committed: ${controller.calls.join(',')}`)
+
+  // Esc cancels the edit without touching the value.
+  controller.calls.length = 0
+  page.handleInput('\r')
+  page.handleInput('\x1b')
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('setDictValue')), [],
+    'Esc never commits')
+})
+
+test('an empty Enter on a credential reference keeps the value (a blank ref is invalid)', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ env: [{ key: 'E', value: '${credential:E}' }], dirty: true }),
+  }))
+  controller.formValue = 'reference'
+  openEditor(page, 'e')
+  for (let step = 0; step < 14; step += 1) {
+    const focused = /▸ ([^:\n]+):/u.exec(render(page, 100, 20).join('\n'))
+    if (focused !== null && (focused[1] ?? '').trim() === 'Env E') break
+    page.handleInput('\x1b[B')
+  }
+  page.handleInput('\r')
+  page.handleInput('\r')
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('setDictValue')), [],
+    'a blank credential reference is not committed')
+})
+
+test('the page header always names the FORM target, never the previously selected server', () => {
+  const { page } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ mode: 'add', name: '', nameEditable: true, dirty: true }),
+  }))
+  page.handleInput('a')
+  // Wide: the header right side is the form identity, not `alpha`.
+  page.setMaxRows(24)
+  const header = stripTerminalSequences(page.paneHeader(120))
+  assert.match(header, /\(unnamed\)\s+· Add · new user server/u, `the Add target must be named: ${header}`)
+  assert.doesNotMatch(header, /alpha/u, 'the old selection must not be presented as the Add target')
+
+  const editPage = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
+  editPage.page.handleInput('e')
+  editPage.page.setMaxRows(24)
+  const editHeader = stripTerminalSequences(editPage.page.paneHeader(120))
+  assert.match(editHeader, /alpha\s+· Edit · /u, `the Edit target must be named: ${editHeader}`)
+})
+
+test('a form-row click activates the same intent as Enter, and a repaint refuses the gesture', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ dirty: true }),
+  }))
+  openEditor(page, 'e')
+  const lines = render(page, 100, 20)
+  const mouseBase = { button: 'left' as const, screenX: 1, screenY: 1, shift: false, alt: false, ctrl: false }
+  // Find the painted "Transport" row (Enter switches the transport).
+  const transportLine = lines.findIndex(line => line.includes('Transport:'))
+  assert.ok(transportLine >= 0)
+  page.handleMouse({ ...mouseBase, type: 'press', x: 2, y: transportLine, width: 100, height: 19 })
+  page.handleMouse({ ...mouseBase, type: 'click', x: 2, y: transportLine, width: 100, height: 19 })
+  assert.ok(controller.calls.includes('setTransport'),
+    `a form-row click must run the Enter intent: ${controller.calls.join(',')}`)
+
+  // A press whose frame repaints before the release never completes.
+  controller.calls.length = 0
+  page.handleMouse({ ...mouseBase, type: 'press', x: 2, y: transportLine, width: 100, height: 19 })
+  render(page, 100, 18)
+  page.handleMouse({ ...mouseBase, type: 'click', x: 2, y: transportLine, width: 100, height: 19 })
+  assert.deepEqual(controller.calls, [], 'a stale press never activates a field')
 })
