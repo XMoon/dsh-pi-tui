@@ -482,14 +482,19 @@ function turnEndUserAborted(data: unknown): boolean {
 }
 
 /**
- * The pure View/claim lifecycle for ONE listener lifetime. A fresh registry is
- * created on every `setEnabled(true)` bind; a rebind never shares a previous
- * connection's claims.
+ * The pure View/claim lifecycle. The registry's lifetime is owned by its
+ * OWNER: the ACP controller holds ONE registry across listener rebinds so a
+ * retired-turn approval fence and the one-View-per-Session rule survive an
+ * Off -> On cycle, and that same registry carries the ONE Host fact/approval
+ * subscription; a raw-socket listener without a controller creates a
+ * bind-local registry and owns both its claims and its subscription.
  */
 export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private readonly claims = new Map<string, ViewClaim>()
   /** Waiters for "every claim's Host work settled" (listener retirement). */
   private readonly workWaiters = new Set<PromiseWithResolvers<void>>()
+  /** The ONE Host fact/approval subscription of this registry (R701-03). */
+  private factsDisposer: (() => void) | undefined
   private readonly diag: Diag
   /**
    * The Host access the fact callbacks may act through. It is bound exactly
@@ -500,6 +505,31 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
 
   constructor(diag: Diag) {
     this.diag = diag
+  }
+
+  /**
+   * Install the ONE Host fact/approval subscription for this registry, if it
+   * is not installed yet. The subscription belongs to the REGISTRY's owner
+   * (a bind-local registry is owned by its listener; the controller-owned
+   * registry outlives listener rebinds), never to an individual bind — an
+   * Off -> On overlap must not register the same registry twice (R701-03).
+   */
+  observeFacts(access: HostAcpSessionAccess): void {
+    this.bindAccess(access)
+    if (this.factsDisposer !== undefined) return
+    this.factsDisposer = access.observePromptFacts(this)
+  }
+
+  /** Whether the ONE Host fact subscription is currently installed. */
+  hasFactsObserver(): boolean {
+    return this.factsDisposer !== undefined
+  }
+
+  /** Dispose the ONE Host fact subscription (idempotent). */
+  disposeFacts(): void {
+    const dispose = this.factsDisposer
+    this.factsDisposer = undefined
+    dispose?.()
   }
 
   /** Bind the ONE Host access the prompt-fact lifecycle may act through. */

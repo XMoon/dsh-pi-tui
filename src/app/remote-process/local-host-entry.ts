@@ -754,13 +754,26 @@ export function createAcpController(options: AcpControlControllerOptions): AcpCo
     close: () =>
       serialize(async () => {
         quiescing = true
-        if (listener === undefined) return { state: 'disabled' }
-        const current = listener
-        listener = undefined
-        try {
-          await current.close()
-        } catch (error) {
-          diag.warn('local-acp.error', { code: 'LOCAL_ACP_CLOSE_FAILED', cause: String(error) })
+        if (listener !== undefined) {
+          const current = listener
+          listener = undefined
+          try {
+            await current.close()
+          } catch (error) {
+            diag.warn('local-acp.error', { code: 'LOCAL_ACP_CLOSE_FAILED', cause: String(error) })
+          }
+        }
+        // The CONTROLLER owns the shared registry's ONE Host fact/approval
+        // subscription across rebinds (R701-03), so it releases it here — and
+        // only after every accepted piece of work settled on real Host facts,
+        // detached so the Host shutdown itself is never blocked by a shared
+        // turn it may not cancel (D23).
+        const viewsToRetire = views
+        if (viewsToRetire !== undefined && viewsToRetire.hasFactsObserver()) {
+          runDetached('local acp: shared fact subscription retirement', async () => {
+            await viewsToRetire.whenHostWorkSettled()
+            viewsToRetire.disposeFacts()
+          }, { diag })
         }
         return { state: 'disabled' }
       }).then(() => undefined),
