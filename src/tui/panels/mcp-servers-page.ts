@@ -126,14 +126,27 @@ function composeRow(left: string, right: string, width: number): string {
   return fit(left + ' '.repeat(width - leftWidth - rightWidth) + right, width)
 }
 
-/** One painted hit target of the LAST frame, in page-local cells. */
-interface McpPaintedTarget {
-  readonly kind: 'server-row'
-  readonly name: string
-  readonly row: number
-  readonly startCol: number
-  readonly endCol: number
-}
+/** One painted hit target of the LAST frame, in page-local cells. A form row
+ *  carries the FIELD identity so a click activates exactly the row that was
+ *  painted (never a row that scrolled into that cell afterwards). */
+type McpPaintedTarget =
+  | {
+      readonly kind: 'server-row'
+      readonly name: string
+      readonly row: number
+      readonly startCol: number
+      readonly endCol: number
+    }
+  | {
+      readonly kind: 'form-row'
+      /** The painted row's stable id (the field identity). */
+      readonly id: string
+      /** The index in the form's field list, resolved at paint time. */
+      readonly index: number
+      readonly row: number
+      readonly startCol: number
+      readonly endCol: number
+    }
 
 /** The last painted frame's geometry (the only pointer authority). */
 interface McpPagePaint {
@@ -228,6 +241,8 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private formInput: { readonly row: McpFormRow; readonly input: Input; readonly initial: string } | undefined
   /** FR4: the pending `Discard changes?` confirmation of a dirty form. */
   private discardConfirm = false
+  /** FR4: Esc while the Save is unsettled — a notice, never a discard prompt. */
+  private configSavingNotice = false
   private disposed = false
   private revision = 0
   private paint: McpPagePaint | undefined
@@ -237,7 +252,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private paintedEscapeSpanValue: { readonly startCol: number; readonly endCol: number } | undefined
   private grantAwaitingPaintValue = true
   private pressed: {
-    readonly name: string
+    readonly target: McpPaintedTarget
     readonly row: number
     readonly startCol: number
     readonly endCol: number
@@ -302,6 +317,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       snapshot.editor === undefined ? '' : `editor:${snapshot.editor.mode}:${String(this.formFocus)}:${snapshot.editor.dirty ? 'dirty' : 'clean'}`,
       snapshot.configConfirm === undefined ? '' : `confirm:${snapshot.configConfirm.kind}:${snapshot.configConfirm.name}`,
       this.discardConfirm ? 'discard' : '',
+      this.configSavingNotice ? 'saving-notice' : '',
     ].join(':')
   }
 
@@ -489,6 +505,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     this.formOffset = 0
     this.formInput = undefined
     this.discardConfirm = false
+    this.configSavingNotice = false
     this.bumpRevision()
   }
 
@@ -585,11 +602,21 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       }
       case 'edit-dict-value': {
         const { field, key } = active.row.action
-        // An empty commit keeps the stored value (the form never rewrites a
-        // hidden value it did not just type). A non-empty commit uses the FORM
-        // the user explicitly chose for this key.
+        const form = this.controller.dictValueForm(field, key)
+        // The input starts EMPTY for a stored value (it is never re-displayed),
+        // so "unchanged" and "explicitly empty" are different keys:
+        // - Esc cancels the edit (the value stays as it was);
+        // - an EMPTY Enter on a LITERAL commits the empty string — the official
+        //   schema allows it, and for a base-owned key (which cannot be removed)
+        //   it is the only way to override an inherited value with nothing;
+        // - an EMPTY Enter on a CREDENTIAL REFERENCE keeps the current value: a
+        //   blank reference is not a valid `${credential:REF}` token.
         if (value !== '') {
-          this.controller.setEditorDictValue(field, key, value, this.controller.dictValueForm(field, key))
+          this.controller.setEditorDictValue(field, key, value, form)
+          break
+        }
+        if (form === 'literal') {
+          this.controller.setEditorDictValue(field, key, '', 'literal')
         }
         break
       }
@@ -613,6 +640,14 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       (field, key) => this.controller.dictValueForm(field, key),
       (field, key) => this.controller.canRemoveDictKey(field, key))
     if (matchesKey(data, 'escape')) {
+      // A DISPATCHED write is already on its way to the Host: leaving the form
+      // cannot cancel it, so a `Discard changes?` prompt here would imply that
+      // it can. The form stays put and says so instead.
+      if (snapshot.configStatus?.kind === 'saving') {
+        this.configSavingNotice = true
+        this.bumpRevision()
+        return
+      }
       if (editor.dirty) {
         this.discardConfirm = true
         this.bumpRevision()
@@ -621,9 +656,16 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       this.controller.discardEditor()
       this.formFocus = 0
       this.formOffset = 0
+      this.configSavingNotice = false
       this.view = this.layoutClass() === 'wide' ? 'list' : 'detail'
       this.bumpRevision()
       return
+    }
+    if (this.configSavingNotice) {
+      // Any further key dismisses the notice; it never becomes a discard.
+      this.configSavingNotice = false
+      this.bumpRevision()
+      if (matchesKey(data, 'escape')) return
     }
     if (data === 's' || data === 'S') {
       // Save runs ONLY while the form is the current, painted view.
@@ -689,7 +731,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         return undefined
       }
       this.pressed = {
-        name: target.name,
+        target,
         row: target.row,
         startCol: target.startCol,
         endCol: target.endCol,
@@ -710,11 +752,30 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         || pressed.identity !== paint.identity
         || pressed.width !== paint.width
         || pressed.rows !== paint.rows
-        || pressed.name !== target.name
         || pressed.row !== target.row
         || pressed.startCol !== target.startCol
-        || pressed.endCol !== target.endCol) return undefined
+        || pressed.endCol !== target.endCol
+        // The TARGET identity must match too: a repaint that moved a different
+        // row into the same cell refuses the gesture.
+        || pressed.target.kind !== target.kind
+        || (pressed.target.kind === 'server-row' && target.kind === 'server-row'
+          && pressed.target.name !== target.name)
+        || (pressed.target.kind === 'form-row' && target.kind === 'form-row'
+          && pressed.target.id !== target.id)) return undefined
       const snapshot = this.controller.snapshot()
+      if (target.kind === 'form-row') {
+        // A form-row click is the Enter equivalent on THAT row: focus it and
+        // activate the same intent.
+        this.formFocus = target.index
+        const row = mcpFormRows(snapshot.editor as NonNullable<McpServersSnapshot['editor']>,
+          (field, key) => this.controller.dictValueForm(field, key),
+          (field, key) => this.controller.canRemoveDictKey(field, key))[target.index]
+        if (row !== undefined && snapshot.configStatus?.kind !== 'saving') {
+          this.activateFormRow(row, snapshot)
+        }
+        this.bumpRevision()
+        return { handled: true }
+      }
       this.controller.select(target.name, this.visibleNames(snapshot))
       if (this.layoutClass() === 'wide') this.wideFocus = 'list'
       this.bumpRevision()
@@ -731,17 +792,28 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     this.paintedEscapeSpanValue = undefined
     this.formInput = undefined
     this.discardConfirm = false
+    this.configSavingNotice = false
     this.controller.dispose()
   }
 
   invalidate(): void {}
 
   /** The pane-header line the root paints inside the shared body grant. */
+  /**
+   * The page header. It always names the identity the CURRENT view edits: with
+   * the form open that is the FORM's target (`Name · Add/Edit · source`), never
+   * the server that happened to be selected in the list before Add started.
+   */
   paneHeader(width: number): string {
+    const editorIdentity = this.editorIdentity()
     if (this.layoutClass() !== 'wide') {
-      return this.focused
+      const left = this.focused
         ? color.textStrong(`[${MCP_SERVERS_PAGE_TITLE}]`, 'primary')
         : color.textDim(MCP_SERVERS_PAGE_TITLE)
+      return editorIdentity === undefined ? left : composeRow(left, color.text(editorIdentity), width)
+    }
+    if (editorIdentity !== undefined) {
+      return composeRow(color.textDim(MCP_SERVERS_PAGE_TITLE), color.textStrong(editorIdentity, 'primary'), width)
     }
     const listActive = this.wideFocus === 'list'
     const left = listActive
@@ -751,6 +823,28 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       ? color.textDim(this.controller.snapshot().selectedName ?? 'Selected server')
       : color.textStrong(`[${this.controller.snapshot().selectedName ?? 'Selected server'}]`, 'primary')
     return composeRow(left, right, width)
+  }
+
+  /** The `Name · Add/Edit · source` identity of the OPEN form, when one is. */
+  private editorIdentity(): string | undefined {
+    const editor = this.controller.snapshot().editor
+    if (editor === undefined) return undefined
+    const name = editor.name === '' ? '(unnamed)' : sanitizedPhysicalLine(editor.name)
+    const mode = editor.mode === 'add' ? 'Add' : 'Edit'
+    const source = editor.mode === 'add' ? 'new user server' : this.editorSourceLabel()
+    return `${name} · ${mode} · ${source}`
+  }
+
+  /** The source of the entry being edited (from the same descriptor). */
+  private editorSourceLabel(): string {
+    const snapshot = this.controller.snapshot()
+    const entry = snapshot.config?.kind === 'ready'
+      ? snapshot.config.entries.find(candidate => candidate.name === snapshot.editor?.name)
+      : undefined
+    if (entry === undefined) return 'configuration'
+    return entry.provenance === 'user-added'
+      ? 'user-added'
+      : entry.provenance === 'inherited' ? 'inherited' : 'overridden (user)'
   }
 
   // ── layout helpers ────────────────────────────────────────────────────────
@@ -888,7 +982,20 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     const lines: string[] = []
     const layout = mcpServersLayoutFor(width, bodyRows)
     if (this.view === 'editor') {
-      lines.push(...this.renderEditor(snapshot, width, bodyRows))
+      const editorFrame = this.renderEditor(snapshot, width, bodyRows)
+      lines.push(...editorFrame.lines)
+      // Every painted field row is a pointer target on THIS frame; a press whose
+      // frame repaints never completes (the identity/revision check above).
+      for (const fieldRow of editorFrame.fieldRows) {
+        targets.push({
+          kind: 'form-row',
+          id: fieldRow.id,
+          index: fieldRow.index,
+          row: fieldRow.line,
+          startCol: 0,
+          endCol: width,
+        })
+      }
     } else if (layout === 'wide') {
       const listWidth = this.wideListWidth()
       const detailWidth = Math.max(1, width - listWidth - 2)
@@ -915,11 +1022,16 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     return lines.slice(0, this.rowGrant)
   }
 
-  /** FR4: the whole-page configuration form (never a third column). */
-  private renderEditor(snapshot: McpServersSnapshot, width: number, rows: number): string[] {
+  /** FR4: the whole-page configuration form (never a third column). Returns the
+   *  painted lines AND the physical rows of the fields that were painted, so
+   *  the caller can register them as pointer targets. */
+  private renderEditor(snapshot: McpServersSnapshot, width: number, rows: number): {
+    readonly lines: string[]
+    readonly fieldRows: readonly { readonly id: string; readonly index: number; readonly line: number }[]
+  } {
     const editor = snapshot.editor
     if (editor === undefined) {
-      return [fit(color.textDim('The configuration form was closed'), width)]
+      return { lines: [fit(color.textDim('The configuration form was closed'), width)], fieldRows: [] }
     }
     const statusRows = 1
     const inputRows = this.formInput === undefined ? 0 : 1
@@ -946,14 +1058,26 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       const [inputLine] = this.formInput.input.render(width)
       lines.push(fit(color.textMuted('edit: ') + (inputLine ?? ''), width))
     }
-    const statusText = this.discardConfirm
-      ? 'Discard changes? [Keep editing] [Discard d]'
-      : mcpFormStatusText(editor, snapshot.configStatus?.text)
+    const pinned = `rev ${String(editor.capturedRevision)}`
+    const statusText = this.configSavingNotice
+      ? 'Already saving — the write cannot be cancelled here'
+      : this.discardConfirm
+        ? 'Discard changes? [Keep editing] [Discard d]'
+        : `${mcpFormStatusText(editor, snapshot.configStatus?.text)} · ${pinned}`
     const painted = truncateToWidth(sanitizedPhysicalLine(statusText), width, '…', false)
     lines.push(fit(this.discardConfirm || snapshot.configStatus === undefined
       ? color.textDim(painted)
       : this.configStatusInk({ ...snapshot.configStatus, text: painted }), width))
-    return lines.slice(0, rows)
+    // The field rows that really painted, with their PHYSICAL line index (the
+    // input/status lines below them are not fields).
+    const formRows = mcpFormRows(editor,
+      (field, key) => this.controller.dictValueForm(field, key),
+      (field, key) => this.controller.canRemoveDictKey(field, key))
+    const fieldRows = rendered.painted.flatMap(paintedRow => {
+      const index = formRows.findIndex(candidate => candidate.id === paintedRow.row.id)
+      return index < 0 ? [] : [{ id: paintedRow.row.id, index, line: paintedRow.line }]
+    })
+    return { lines: lines.slice(0, rows), fieldRows }
   }
 
   /** The list column of the wide/compact projections. */
@@ -1219,14 +1343,17 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         // whole-segment drops AND its compaction must keep the SAFETY FACT —
         // for an HTTP entry the compaction still names the target host (a
         // bare `Save configuration?` would hide what the user is enabling).
-        const warning = confirm.warning ?? 'Save this configuration?'
+        // The exact server name is part of the question.
+        const warning = confirm.warning === undefined
+          ? `Save ${sanitizedPhysicalLine(confirm.name)}?`
+          : `Save ${sanitizedPhysicalLine(confirm.name)} — ${confirm.warning}`
         const markerAt = warning.indexOf(MCP_HTTP_TARGET_MARKER)
-        // The compaction keeps the TARGET HOST itself (the shortest form that
-        // still answers "which external service?"); the full sentence is used
-        // whenever the row has room for it.
+        // The compaction keeps the SERVER and the safety fact (the target host
+        // for an HTTP entry): the shortest form that still answers "which
+        // server, and what does it reach?".
         const short = markerAt === -1
-          ? 'External command?'
-          : `External service: ${warning.slice(markerAt + MCP_HTTP_TARGET_MARKER.length)}`
+          ? `Save ${sanitizedPhysicalLine(confirm.name)}?`
+          : `${sanitizedPhysicalLine(confirm.name)} · ${warning.slice(markerAt + MCP_HTTP_TARGET_MARKER.length)}`
         // The compaction must still answer BOTH "which capability?" and
         // "which target?", so the tests assert `external service` + the host.
         return paintBar([{ text: warning, short, priority: 1000 }, ...CONFIRM_HINTS], width, true)
@@ -1294,10 +1421,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       segments.push({ text: 'r refresh', priority: 10 }, { text: 'Back [Esc]', priority: 1000 })
       return paintBar(segments, width, true)
     }
-    const addable = snapshot.phase === 'ready'
-      && snapshot.config?.kind === 'ready'
-      // Add dispatches a write, so it is not offered while one is unsettled.
-      && snapshot.configStatus?.kind !== 'saving'
+    // The List Add hint uses the SAME gate the `a` key handler calls, so an
+    // in-flight Probe/Restart or a non-ready descriptor can never advertise an
+    // Add that does nothing.
+    const addable = this.controller.canBeginAdd()
     return paintBar(addable ? LIST_HINTS : LIST_HINTS.filter(segment => !segment.text.includes('Add')), width, true)
   }
 }

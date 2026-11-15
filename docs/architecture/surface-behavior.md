@@ -1475,7 +1475,9 @@ For a server the SAME current Host settings descriptor proves configuration-owne
 the Detail also offers `Add`, `Edit`, Enable/Disable, permanent `Delete`
 (User-added entries only) and `Reset to inherited` (entries whose effective
 configuration differs from the base only). Add and Edit open a whole-page
-scrollable form inside the same specialist: `Identity` (name/transport/enabled),
+scrollable form inside the same specialist whose fixed header always names the
+FORM's target (`<name> · Add/Edit · <source>` — `(unnamed)` before a new name is
+typed), never the server selected in the list: `Identity` (name/transport/enabled),
 `Connection` (stdio command/working dir or HTTP URL), `Parameters` (one row per
 argument or key/value pair) and a `Status` line with the fixed `Save`/`Esc` bar.
 An Edit keeps the name read-only; a rename is two explicit actions. A stored
@@ -1506,9 +1508,16 @@ cancels), `e` edits, `t` asks
 `Change saved configuration? The MCP process may stop or start`, `d` asks the
 exact-name Delete confirmation, `u` asks the Reset-to-inherited confirmation,
 `r` refreshes, `Esc` returns to the list. In a form, `↑/↓`/`Tab` move focus,
-`Enter` activates a field or row, `s` asks to save (an external-capability acknowledgement first when the draft
-can reach outside the Host), `Esc` leaves an input or asks the discard
-confirmation; while an input is active `a/e/t/d/u/s` are text.
+`Enter` activates a field or row (a click on a painted field row is the same
+intent, under the same last-painted press/release rule), `s` asks to save (an
+external-capability acknowledgement first, naming the exact server, when the
+draft can reach outside the Host), `Esc` leaves an input or asks the discard
+confirmation — except while a Save is unsettled, where `Esc` reports that the
+dispatched write cannot be cancelled here instead of offering a discard. While
+an input is active `a/e/t/d/u/s` are text. An empty Enter on a `Literal` value
+commits the empty string (the only way to override an inherited value with
+nothing, since a base-owned key cannot be removed); an empty Enter on a
+`Credential reference` keeps the current value.
 Delete/Reset/toggle/Save confirmations respond only to `y` or `Esc`. While searching,
 `p/x/r/y` and every CRUD key are query text only. Probe/Restart require a
 current manager observation, a live (not retained) listed entry and no in-flight

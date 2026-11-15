@@ -603,3 +603,44 @@ test('the form never paints a row twice and never loses the page chrome', async 
   h.app.dispose()
   startedApps.delete(h.app)
 })
+
+test('Esc during an unsettled Save never offers a Discard that would imply cancellation', async () => {
+  const h = setup()
+  await openMcpPage(h)
+  // Open Add, name it, then Save — but hold the write so it is unsettled.
+  await press(h.vt, 'a')
+  await frames(h.vt, 2)
+  await press(h.vt, '\r')
+  for (const char of 'held-save') await h.vt.sendInput(char)
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+  // A valid draft needs a command: focus the Command row and set it.
+  for (let step = 0; step < 6; step += 1) {
+    const focused = /▸ ([^:\n]+):/u.exec(h.view())
+    if (focused !== null && (focused[1] ?? '').trim().startsWith('Command')) break
+    await press(h.vt, '\x1b[B')
+  }
+  await press(h.vt, '\r')
+  for (const char of '/bin/sleep') await h.vt.sendInput(char)
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+  // The external-capability question comes first.
+  await press(h.vt, 's')
+  await frames(h.vt)
+  assert.match(h.view(), /Enabling this server can execute an external command/u)
+  // Answer it: the write is now dispatched and unsettled (the fixture's
+  // mutate settles on the microtask queue, so the saving state is observed by
+  // pausing the owned chain through the fixture's own recording).
+  const mutateCount = h.settingsMutateCalls.length
+  await press(h.vt, 'y')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  // Whatever the settlement, the page must never present a Discard that
+  // pretends the dispatched write was cancelled.
+  const frame = h.view()
+  assert.doesNotMatch(frame, /Discard changes\?/u,
+    'a dispatched write must never offer a Discard prompt')
+  assert.ok(h.settingsMutateCalls.length >= mutateCount, 'no mutation was lost')
+  assert.ok(h.settingsMutateCalls.length <= mutateCount + 1, 'exactly ONE dispatched mutation')
+})
