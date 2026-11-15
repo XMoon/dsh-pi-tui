@@ -367,6 +367,12 @@ export async function runAcpPo3bCancelApproval(context) {
     await assertSameHost(identityBefore, 'B Host after the ACP resume')
 
     // ── C01) An idle ACP cancel while a REAL TUI turn runs never touches it.
+    // The REAL TUI must be settled on Session A (its own surface-status) before
+    // the held turn is staged: an input sent while the surface is still
+    // mounting can be dropped and would look like a product failure.
+    await waitForSurfaceStatus(tuiA, record => record.sessionOpen === true
+      && record.openSessionId === sessionA && record.transport === 'connected',
+    'C01: the REAL TUI is settled on Session A')
     holdNextTurn()
     const eventsBeforeC = hostSessionEvents(dshHome, sessionA) ?? []
     const tuiAStart = eventsBeforeC.length
