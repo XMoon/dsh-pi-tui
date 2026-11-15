@@ -427,7 +427,12 @@ interface InflightPrompt {
   readonly settleAdmission: () => void
   /** PO-3B: output delivery is closed; queued-but-unsent updates are dropped. */
   deliveryClosed: boolean
-  /** PO-3B F2: the owned turn already reached its durable terminal record. */
+  /**
+   * PO-3B F2: this flight's Host work is provably TERMINAL — the owned turn
+   * reached its durable `turn/end`, or the exact Agent was disposed (nothing
+   * can ever run that turn again). A prompt failure after this fact says
+   * nothing about cancellation safety.
+   */
   ownTurnEnded: boolean
   /**
    * PO-3B: pending reverse permission requests keyed by their exact callId,
@@ -724,7 +729,19 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     const claim = this.claims.get(sessionId)
     if (claim !== undefined && claim.connectionIdentity === state) {
       const closing = claim.closing
-      if (closing !== undefined) return await closing
+      if (closing !== undefined) {
+        const outcome = await closing.then(() => 'ok' as const, (error: unknown) => error)
+        if (outcome === 'ok') return {}
+        // A previous close could not PROVE its settlement. Re-evaluate on the
+        // CURRENT facts instead of replaying that failure forever: once the
+        // claim owns no open flight and no retired fence, the Host work is
+        // provably over and the detach is truthful (R701-04).
+        if (claim.inflight === undefined && claim.retiringTurn === undefined) {
+          claim.closing = undefined
+          return this.finishClose(state, sessionId, claim)
+        }
+        throw outcome
+      }
       const flight = claim.inflight
       if (flight !== undefined) {
         // Serialize the close: every later close (and a physical disconnect
@@ -820,10 +837,18 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // admission's own classified failure. observeSettled already guards the
     // rejection against going unhandled.
     const outcome = await flight.settled.promise.then(() => 'settled', (error: unknown) => error)
-    // A close (and an explicit cancel observed by the client) surfaces an
-    // unproven settlement as its real error; a disconnect has no channel left
-    // to answer, so its flight's own settlement is all this side owns.
-    if (reason !== 'disconnect' && outcome !== 'settled') throw outcome
+    // A disconnect has no channel left to answer, so its flight's own
+    // settlement is all this side owns.
+    if (reason === 'disconnect') return
+    if (outcome === 'settled') return
+    // A PROMPT outcome is not a cancellation-safety proof (R701-04): once the
+    // owned turn's durable terminal arrived, the Host work is provably over —
+    // a mixed or failed turn keeps ITS OWN prompt error — so the close may
+    // detach truthfully instead of caching that rejection forever.
+    if (flight.ownTurnEnded) return
+    // Only an unproven settlement (e.g. a stale identity that may hide a late
+    // insertion) surfaces as the real close/cancel error.
+    throw outcome
   }
 
   /**
@@ -1211,6 +1236,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (claim.exactAgent !== agent) continue
       const flight = claim.inflight
       if (flight !== undefined && !flight.settledDone) {
+        // Disposal ends this flight's Host work for good: the disposed Agent
+        // can never run the turn or reach its turn/end.
+        flight.ownTurnEnded = true
         this.failPrompt(claim, flight, promptError(
           'LOCAL_ACP_PROMPT_TURN_FAILED',
           'the owned Agent was disposed before the prompt settled',
@@ -1450,7 +1478,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       claim.detachedWithFence = true
       return
     }
-    if (this.claims.get(sessionId) === claim) this.claims.delete(sessionId)
+    if (this.claims.get(sessionId) === claim) {
+      this.claims.delete(sessionId)
+      this.notifyWorkSettled()
+    }
   }
 
   /** Release one disconnect claim after its flight settled. */
@@ -1586,6 +1617,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private releaseReservation(state: ConnectionViewState, claim: ViewClaim): void {
     if (this.claims.get(claim.sessionId) === claim && claim.connectionIdentity === state) {
       this.claims.delete(claim.sessionId)
+      this.notifyWorkSettled()
     }
   }
 
