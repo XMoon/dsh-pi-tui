@@ -198,6 +198,8 @@ interface Snapshot {
   readonly record: LocalInstanceRecord | undefined
   readonly processAlive: boolean
   readonly authenticated: VerifiedLocalHost | undefined
+  /** True only when the authenticated `/connect` handshake failed for a live Host. */
+  readonly hostAuthenticationFailed: boolean
   readonly status: DaemonControlStatus
   readonly exitCode: number
   readonly failure: DaemonControlError | undefined
@@ -336,6 +338,7 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
       record: undefined,
       processAlive: false,
       authenticated: undefined,
+      hostAuthenticationFailed: false,
       status: {
         profile: profile.name,
         manager: 'unmanaged',
@@ -361,6 +364,7 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
     : 'unmanaged'
   let compatibility: DaemonCompatibility = 'none'
   let authenticated: VerifiedLocalHost | undefined
+  let hostAuthenticationFailed = false
   let failure: DaemonControlError | undefined
   let exitCode = 0
   let record: LocalInstanceRecord | undefined
@@ -399,6 +403,7 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
       } catch (error) {
         const mapped = toDaemonControlError(error)
         host = 'unresponsive'
+        hostAuthenticationFailed = true
         failure = mapped
         exitCode = mapped.exitCode
       }
@@ -493,6 +498,7 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
     record,
     processAlive,
     authenticated,
+    hostAuthenticationFailed,
     status: {
       profile: profile.name,
       manager,
@@ -547,6 +553,16 @@ async function withAdminSeat<T>(scope: LocalScope, operation: () => Promise<T>):
   } finally {
     await seat.close()
   }
+}
+
+/** A live Host authentication failure is a diagnosis, not a unit-ownership
+ *  verdict. A verified current-Profile unit remains manageable through the
+ *  manager; every other snapshot failure keeps its normal admission. The
+ *  product never auto-recovers — this only permits an explicit user command. */
+function verifiedUnitManagementAdmitted(snapshot: Snapshot): boolean {
+  return snapshot.hostAuthenticationFailed
+    && snapshot.unit !== undefined
+    && snapshot.probe.kind === 'available'
 }
 
 /** A stable local error for an unknown Host state. */
@@ -787,7 +803,7 @@ async function runStop(profile: DaemonControlProfile, deps: DaemonControlDeps): 
   const inspected = inspectScope(profile, deps)
   return await withAdminSeat(inspected, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
-    if (pre.failure !== undefined) throw pre.failure
+    if (pre.failure !== undefined && !verifiedUnitManagementAdmitted(pre)) throw pre.failure
     assertNotAborted(deps.signal)
     await stopFromSnapshot(profile, pre, deps)
     try {
@@ -806,8 +822,10 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
   const inspected = inspectScope(profile, deps)
   return await withAdminSeat(inspected, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
-    if (pre.failure !== undefined) throw pre.failure
-    if (pre.status.host !== 'ready' && pre.status.host !== 'stopped') throw refuseHostState(pre.status)
+    const authOnlyUnitRecovery = verifiedUnitManagementAdmitted(pre)
+      && (pre.record === undefined || !pre.processAlive || pre.unitMainPid === pre.record.hostPid)
+    if (pre.failure !== undefined && !authOnlyUnitRecovery) throw pre.failure
+    if (pre.status.host !== 'ready' && pre.status.host !== 'stopped' && !authOnlyUnitRecovery) throw refuseHostState(pre.status)
     const oldInstance = pre.record?.instanceId
     // Owner decision (M6-2C scope): an owned unit from ANOTHER installed build
     // is never migrated here. Cross-build unit replacement is M6-2D work; this
@@ -861,7 +879,7 @@ async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDe
   const inspected = inspectScope(profile, deps)
   return await withAdminSeat(inspected, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
-    if (pre.failure !== undefined) throw pre.failure
+    if (pre.failure !== undefined && !verifiedUnitManagementAdmitted(pre)) throw pre.failure
     if (pre.unit === undefined) {
       // No owned unit: nothing to remove, and a fallback Host is never killed.
       return { code: 0, stdout: formatDaemonStatus(pre.status), stderr: RUNNING_WORK_NOTICE }

@@ -523,6 +523,54 @@ test('a live Host that fails the authenticated handshake is unresponsive and non
   assert.doesNotMatch(result.stdout, /^host=stopped$/mu)
 })
 
+test('stop acts on a verified unit when Host authentication fails, without a PID signal', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: record.hostPid })
+  let stopped = false
+  let signals = 0
+  const systemctlRun = async (args: readonly string[]): Promise<SystemctlResult> => {
+    const result = await systemctl.run(args)
+    if (args.includes('stop')) stopped = true
+    return result
+  }
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    systemctl: systemctlRun,
+    readRecord: () => (stopped ? undefined : record),
+    inspectProcess: () => (stopped ? 'dead' : 'alive'),
+    authenticate: async () => { throw new LocalScopeError('HOST_AUTH_FAILED', 'tampered launch material') },
+    kill: () => { signals += 1 },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=stopped$/mu)
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), true, 'the verified unit must be stopped through the manager')
+  assert.equal(signals, 0, 'authentication failure never authorizes a PID signal')
+  assert.equal(existsSync(unit.path), true, 'stop must not remove the unit file')
+})
+
+test('stop refuses a mismatched unit MainPID even when Host authentication failed', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: 9999 })
+  let signals = 0
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => { throw new LocalScopeError('HOST_AUTH_FAILED', 'tampered launch material') },
+    kill: () => { signals += 1 },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), false, 'a mismatched unit is not the authenticated Host target')
+  assert.equal(signals, 0, 'a mismatched target is never PID-signalled')
+})
+
 test('a live Host with a different DSH runtime reports incompatible, not stopped', async t => {
   const fx = fixture(t)
   const record = recordOf(fx.scope, { dshVersion: '0.1.0' })
@@ -1027,6 +1075,57 @@ test('restart refuses an ACTIVE other-build Host before stopping it', { skip: pr
   assert.equal(readFileSync(path, 'utf8'), content, 'the other-build unit file must be untouched')
 })
 
+test('restart recovers a verified unit when the old Host authentication fails', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const oldRecord = recordOf(fx.scope)
+  const newRecord = recordOf(fx.scope, { instanceId: '33333333-3333-4333-8333-333333333333', hostPid: 6363 })
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: oldRecord.hostPid })
+  let stopped = false
+  let ensured = 0
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, depsOf(fx, {
+    systemctl: async args => {
+      const outcome = await systemctl.run(args)
+      if (args.includes('stop')) stopped = true
+      return outcome
+    },
+    readRecord: () => (stopped ? (ensured > 0 ? newRecord : undefined) : oldRecord),
+    inspectProcess: recordValue => (recordValue?.instanceId === newRecord.instanceId ? 'alive' : stopped ? 'dead' : 'alive'),
+    authenticate: async recordValue => {
+      if (recordValue.instanceId === oldRecord.instanceId) throw new LocalScopeError('HOST_AUTH_FAILED', 'tampered launch material')
+      return { record: recordValue, cookie: 'c', identity: recordValue }
+    },
+    ensureHost: async () => { ensured += 1; return { record: newRecord, cookie: 'c', identity: newRecord } },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.equal(ensured, 1)
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), true, 'the verified old unit must be stopped')
+  assert.match(result.stdout, /^instance=33333333$/mu)
+  assert.doesNotMatch(result.stdout, /^host=unresponsive$/mu, 'the new Host must be authenticated, not inherited as unresponsive')
+})
+
+test('restart refuses an unmatched live Host even when authentication failed', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const oldRecord = recordOf(fx.scope)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: 9999 })
+  let ensured = 0
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => oldRecord,
+    inspectProcess: () => 'alive',
+    authenticate: async () => { throw new LocalScopeError('HOST_AUTH_FAILED', 'tampered launch material') },
+    ensureHost: async () => { ensured += 1; throw new Error('must not start a second Host past an unmatched supervisor') },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(ensured, 0)
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), false, 'an unmatched unit is not stopped as the old Host')
+})
+
 test('restart starts a fresh authenticated instance after the old Host stopped', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
   const oldRecord = recordOf(fx.scope)
@@ -1233,6 +1332,48 @@ test('uninstall stops and removes only the verified profile unit, then reloads',
   assert.equal(systemctl.calls.some(args => args.includes('stop')), true)
   assert.equal(systemctl.calls.some(args => args.includes('daemon-reload')), true)
   assert.equal(existsSync(join(fx.scope.dir, 'instance.json')), false)
+})
+
+test('uninstall removes a verified unit when Host authentication fails, without a PID signal', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: record.hostPid })
+  let stopped = false
+  let signals = 0
+  const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, depsOf(fx, {
+    systemctl: async args => {
+      const outcome = await systemctl.run(args)
+      if (args.includes('stop')) stopped = true
+      return outcome
+    },
+    readRecord: () => (stopped ? undefined : record),
+    inspectProcess: () => (stopped ? 'dead' : 'alive'),
+    authenticate: async () => { throw new LocalScopeError('HOST_AUTH_FAILED', 'tampered launch material') },
+    kill: () => { signals += 1 },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.equal(existsSync(unit.path), false, 'the verified unit path must be removed')
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), true)
+  assert.equal(systemctl.calls.some(args => args.includes('daemon-reload')), true)
+  assert.equal(signals, 0, 'uninstall never falls back to an unverified PID signal')
+  assert.equal(existsSync(join(fx.scope.dir, 'instance.json')), false, 'uninstall must not create registry state')
+})
+
+test('uninstall still refuses an unverified unit when Host authentication fails', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  writeFileSync(unit.path, unit.content.replace('X-DshPiTuiOwner=local-host-manager-v1', 'X-DshPiTuiOwner=someone-else'), { mode: 0o600 })
+  const record = recordOf(fx.scope)
+  const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, depsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => { throw new LocalScopeError('HOST_AUTH_FAILED', 'tampered launch material') },
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(existsSync(unit.path), true, 'an unverified unit is never removed')
 })
 
 test('start does not report success when the new Host fails the post-snapshot ownership check', { skip: process.platform !== 'linux' }, async t => {
