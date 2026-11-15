@@ -1376,6 +1376,25 @@ test('uninstall still refuses an unverified unit when Host authentication fails'
   assert.equal(existsSync(unit.path), true, 'an unverified unit is never removed')
 })
 
+test('uninstall refuses a live Host whose verified unit MainPID differs', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: 9999 })
+  const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => { throw new LocalScopeError('HOST_AUTH_FAILED', 'tampered launch material') },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), false, 'a mismatched unit must not be stopped')
+  assert.equal(systemctl.calls.some(args => args.includes('daemon-reload')), false, 'a refused uninstall must not reload')
+  assert.equal(existsSync(unit.path), true, 'a mismatched unit path must remain')
+})
+
 test('start does not report success when the new Host fails the post-snapshot ownership check', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
   const unit = writeOwnedUnit(fx)
