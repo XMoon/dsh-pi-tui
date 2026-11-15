@@ -44,8 +44,6 @@ import {
   inspectOwnedProfileUnit,
   probeUserManager,
   queryOwnedProfileUnit,
-  renderCurrentProfileUnit,
-  replaceStoppedOwnedProfileUnit,
   runSystemctl,
   selectRuntimeDir,
   stopOwnedProfileUnit,
@@ -407,7 +405,11 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
     // Active manager supervision without an authenticated identity is never Ready.
     host = 'starting'
   }
-  if (failure === undefined && probe.kind === 'error') {
+  if (failure === undefined && probe.kind === 'error' && host !== 'ready') {
+    // A manager error only fails commands that would NEED the manager. An
+    // already-authenticated compatible Host is reused exactly like
+    // ensureLocalHost reuses it: the manager decides supervision for a NEW
+    // Host, never the reuse of a live one (B02/C05).
     failure = new DaemonControlError('MANAGER_OR_OS_FAILURE', `the user manager is unavailable: ${probe.reason}`)
     exitCode = failure.exitCode
   }
@@ -709,25 +711,19 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
     if (pre.failure !== undefined) throw pre.failure
     if (pre.status.host !== 'ready' && pre.status.host !== 'stopped') throw refuseHostState(pre.status)
     const oldInstance = pre.record?.instanceId
+    // Owner decision (M6-2C scope): an owned unit from ANOTHER installed build
+    // is never migrated here. Cross-build unit replacement is M6-2D work; this
+    // stage refuses it BEFORE any stop so a refused restart leaves the running
+    // old-build Host and its unit exactly as they were, instead of guessing the
+    // old build's compatibility from its metadata alone.
+    if (pre.unit !== undefined && pre.unit.installBuild !== pre.scope.buildId) {
+      throw new DaemonControlError(
+        'IDENTITY_OR_OWNERSHIP_REFUSED',
+        'the profile unit belongs to another installed build; removing or replacing it is deferred to the upgrade flow',
+      )
+    }
     assertNotAborted(deps.signal)
     await stopFromSnapshot(profile, pre, deps)
-    const systemctl = deps.systemctl ?? runSystemctl
-    if (pre.unit !== undefined && pre.unit.installBuild !== pre.scope.buildId) {
-      assertNotAborted(deps.signal)
-      const rendered = renderCurrentProfileUnit({
-        scope: pre.scope,
-        hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
-        dshAnchor: profile.installAnchor,
-        profile: profile.name,
-      })
-      assertNotAborted(deps.signal)
-      replaceStoppedOwnedProfileUnit(pre.unit, pre.scope, profile.name, uidOf(deps), rendered.content)
-      assertNotAborted(deps.signal)
-      const reload = await systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload'], runtimeDirOf(deps))
-      if (reload.kind !== 'exited' || reload.code !== 0) {
-        throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'daemon-reload failed after the controlled unit replacement')
-      }
-    }
     assertNotAborted(deps.signal)
     const scope = scopeFromInstalledProfile({
       dshHome: profile.home,

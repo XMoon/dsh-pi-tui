@@ -472,12 +472,14 @@ stdout/stderr.
   nonzero and are never reported as `stopped`.
 - **start reuses before it creates.** `start` first authenticates and reuses a
   live compatible Host, so a warm start is idempotent on the same
-  `instanceId`. Otherwise it creates only the needed 0700 scope run directory and
-  asks the existing `ensureLocalHost({hostStartPolicy:'public-managed'})` to
-  bring one up, then waits for authenticated readiness. A manager error never
-  degrades to the process fallback; a different installed build or unknown unit
-  is a conflict; a live unauthenticated/incompatible Host is never replaced or
-  killed.
+  `instanceId` — including while the user manager is erroring: a manager error
+  only fails commands that still NEED the manager, never the authenticated
+  reuse of a live Host. Otherwise it creates only the needed 0700 scope run
+  directory and asks the existing
+  `ensureLocalHost({hostStartPolicy:'public-managed'})` to bring one up, then
+  waits for authenticated readiness. A manager error never degrades to the
+  process fallback; a different installed build or unknown unit is a conflict;
+  a live unauthenticated/incompatible Host is never replaced or killed.
 - **stop needs proven supervision.** A verified owned profile unit is stopped
   only through `systemctl --user stop <verified-name>`, followed by a bounded
   wait for the original MainPID to exit. With a strictly absent user manager, an
@@ -489,10 +491,11 @@ stdout/stderr.
   is exit 5 and never escalates to SIGKILL or claims `stopped`.
 - **restart and uninstall are ONE explicit transition.** `restart` stops, awaits
   a confirmed old-instance exit, and only then starts a new instance; a stop
-  that is unknown, failed or still running forbids the start. When the verified
-  owned unit belongs to an older compatible build, the explicit `restart` may
-  replace that STOPPED unit atomically (same scope, profile identity and owner
-  metadata; no drop-in) and reload it before the new start. `uninstall` stops and
+  that is unknown, failed or still running forbids the start. An owned unit
+  whose install build differs from THIS installation is refused (exit 3) and
+  left untouched: cross-build unit replacement belongs to the explicit upgrade
+  flow, not to a management command — the unit metadata alone cannot prove a
+  historical build's compatibility. `uninstall` stops and
   removes ONLY the verified owned profile unit and reloads; it never removes the
   Profile, `DSH_HOME`, Sessions, credentials, `launch.json` or another Profile's
   unit, and it never kills a strict-absence fallback Host. A reload failure is

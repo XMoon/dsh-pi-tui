@@ -473,7 +473,7 @@ const CASE_REGISTRY = Object.freeze([
     suite: 'daemon-control',
     defaultLane: false,
     id: 'daemon-control.m6-2c-owner-and-multi-profile',
-    title: 'two real Profiles keep independent Hosts and units; management of one never affects the other, a foreign unit is refused, and an explicit restart migrates only a controlled old-build unit',
+    title: 'two real Profiles keep independent Hosts and units; management of one never affects the other, and a foreign or other-build unit is refused and never rewritten',
     run: runDaemonControlOwnerAndMultiProfile,
   }),
   Object.freeze({

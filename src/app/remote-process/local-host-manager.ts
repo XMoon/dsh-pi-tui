@@ -106,22 +106,6 @@ export interface UnitFacts {
 /** The readiness request returned by a managed start; it is never readiness itself. */
 export type HostStartObservation = () => Error | undefined
 
-/**
- * Render the CURRENT installed definition of this Profile's managed unit. The
- * explicit restart uses it only after the old instance stopped, so a cold start
- * can never rewrite another build's unit.
- */
-export function renderCurrentProfileUnit(options: HostStartOptions): { readonly unitName: string; readonly content: string; readonly installBuild: string } {
-  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
-  if (uid === undefined) throw new LocalScopeError('B1_PLATFORM_UNSUPPORTED', 'managed Host: the user id is unavailable')
-  const facts = collectUnitFacts(options, uid)
-  return {
-    unitName: buildUnitName(options.profile, options.scope.scopeId),
-    content: renderUnitContent(facts),
-    installBuild: facts.buildId,
-  }
-}
-
 /** Replace absolute paths so a probe reason never leaks a private path. */
 function sanitizeReason(text: string): string {
   const line = text.split(/\r?\n/u).map(part => part.trim()).find(part => part !== '') ?? ''
@@ -1146,51 +1130,6 @@ export async function stopOwnedProfileUnit(
       throw new LocalScopeError('HOST_STOP_TIMEOUT', 'managed Host: the unit did not stop within the bounded window')
     }
     await new Promise(resolve => setTimeout(resolve, UNIT_STOP_POLL_MS))
-  }
-}
-
-/**
- * Atomically replace one STOPPED owned profile unit with a freshly rendered
- * definition. Only an explicit restart reaches this function, and only after
- * the old instance was proven stopped. The current file is re-proven before the
- * rename so a swapped/foreign file is never overwritten.
- */
-export function replaceStoppedOwnedProfileUnit(
-  unit: OwnedProfileUnit,
-  scope: LocalScope,
-  profile: string,
-  uid: number,
-  content: string,
-): { readonly replaced: boolean } {
-  const current = inspectOwnedProfileUnit(scope, profile, uid, unit.unitDir, unit.hostEntry)
-  if (current.kind === 'none' || current.filePath !== unit.filePath) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file changed during the transition')
-  }
-  if (current.kind !== 'owned' || current.device !== unit.device || current.inode !== unit.inode) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file changed during the transition')
-  }
-  if (current.content === content) return { replaced: false }
-  const tempPath = join(dirname(unit.filePath), `.${unit.unitName}.${String(process.pid)}.${randomUUID()}.tmp`)
-  let fd: number | undefined
-  try {
-    fd = openSync(tempPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
-    fchmodSync(fd, 0o600)
-    const buffer = Buffer.from(content, 'utf8')
-    let offset = 0
-    while (offset < buffer.length) offset += writeSync(fd, buffer, offset, buffer.length - offset)
-    fsyncSync(fd)
-    closeSync(fd)
-    fd = undefined
-    // The last observable check before the atomic overwrite: the path must still
-    // be the inode/content this explicit restart validated.
-    assertUnitFileIdentity(unit, uid)
-    renameSync(tempPath, unit.filePath)
-    return { replaced: true }
-  } catch (error) {
-    if (fd !== undefined) closeSync(fd)
-    try { unlinkSync(tempPath) } catch { /* temp may not exist */ }
-    if (error instanceof LocalScopeError) throw error
-    throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: the profile unit could not be replaced atomically', error)
   }
 }
 
