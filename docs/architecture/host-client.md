@@ -474,8 +474,10 @@ stdout/stderr.
   any other unconfirmed transition (`deactivating`, `reloading`, an unrecognized
   `ActiveState`) is `unknown` with a nonzero exit — including when the Host's
   own handshake still answers, because the supervisor may retire it before any
-  caller acts on that answer. `MainPID=0` alone never
-  proves a Host is stopped.
+  caller acts on that answer. An `active`/`activating` unit whose `MainPID` is
+  NOT the authenticated Host's PID is an ownership refusal, and an ended unit
+  (`inactive`/`failed`) beside a live Host supervises nothing. `MainPID=0` alone
+  never proves a Host is stopped.
   A missing Host with no unit conflict is `stopped` and exit 0; manager error,
   unsafe/foreign unit, incompatible protocol/DSH and unverifiable liveness are
   nonzero and are never reported as `stopped`.
@@ -510,7 +512,14 @@ stdout/stderr.
   Profile, `DSH_HOME`, Sessions, credentials, `launch.json` or another Profile's
   unit, and it never kills a strict-absence fallback Host. A reload failure is
   reported as a failure, never as a completed uninstall. A cold `start` never
-  silently upgrades a different build.
+  silently upgrades a different build. A mutating verb's exit 0 requires the
+  post-transition snapshot to contain NO blocking failure AND the expected
+  outcome: `start`/`restart` need an authenticated Ready Host (plus a new
+  `instanceId` for `restart`), `stop` needs `host=stopped`, and `uninstall` needs
+  the owned unit confirmed gone after a successful `daemon-reload`. A Ready
+  observation never outranks a supervision/ownership failure, and an uninstall
+  whose OS actions committed but whose confirmation failed reports the failure
+  (no reinstall, no rollback).
 - **logs use one proven source.** An owned profile unit reads the fixed
   `/usr/bin/journalctl --user-unit <verified-name> --no-pager -o cat` with a
   bounded line count; only a strictly absent user manager may tail the private
