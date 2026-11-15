@@ -8,7 +8,7 @@
  *
  * ```text
  * TUI settings / footer trust / custom items / providers / permissions /
- * preset default / subagent model selection
+ * preset default / subagent limits and model selection
  *   -> one serialized, generation-aware Client-local settings mirror over
  *      remote.settings.describe()
  * provider directory -> remote.llm.listConfigurableProviders()
@@ -86,8 +86,13 @@ import type {
   ProviderCatalogSnapshot,
   ProviderProfileConfig,
   ProviderProfileFacts,
-  SubagentAllowedModelRoute,
+  SubagentLimits,
+  SubagentLimitsConfig,
+  SubagentModelSelection,
   SubagentModelSelectionConfig,
+  SectionPatch,
+  SectionRead,
+  SectionMutationOutcome,
   WebProviderConfig,
   WebProviderSettings,
   TuiSettingsConfig,
@@ -114,6 +119,7 @@ import {
   projectMcpServerEntry,
   type McpClassifiedServerEntry,
 } from '../../domain/mcp/server-config.ts'
+import { projectSubagentLimits, projectSubagentModelSelection, type SubagentSectionProjection } from '../subagent-settings.ts'
 import { SupersededReadError } from '../read-error.ts'
 import { RemoteConfigWriteLifetime } from './config-write-lifetime.ts'
 import { RemoteAuthorizationConfig } from './authorization-remote.ts'
@@ -130,7 +136,7 @@ import type { RemotePresetRemotes } from './preset-remote.ts'
 import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
 import { classifyRemoteWriteFailure, remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
-import { isRemoteBusinessRefusalCode } from '../write-outcome.ts'
+import { GATEWAY_PRE_INVOCATION_CODES, isRemoteBusinessRefusalCode } from '../write-outcome.ts'
 import type { PermissionPresetApplyOutcome } from '../config-port.ts'
 
 /* ------------------------------------------------------------------------- *
@@ -283,6 +289,7 @@ const HOST_RUNTIME_TUI_SETTINGS_NS = 'split-host-pi-tui-runtime'
 const PROVIDER_SETTINGS_NS = 'llm-pi-ai'
 const PERMISSION_SETTINGS_NS = 'permission'
 const PRESET_REGISTRY_NS = 'agent-preset-registry'
+const SUBAGENT_LIMITS_NS = 'subagent'
 const SUBAGENT_SETTINGS_NS = 'subagent-model-selection-settings'
 const VISUAL_TOOLS_NS = 'pi-tui-visual-tools'
 
@@ -731,9 +738,9 @@ class RemoteConfigMirror {
    * `refreshFailure` owns the ONE ambiguity left: the official mutate may have
    * committed while the post-settlement refresh could not complete. `reject`
    * (default) keeps that as a failed write, which is what a caller that RE-READS
-   * the mirror afterwards needs — it must never mistake a last-known value for the
-   * committed one (`RemoteSubagentModelSelectionConfig.set`). `record` reports the
-   * committed write as committed, marks the snapshot non-current and records the
+   * the mirror afterwards needs — it must never mistake a last-known value for
+   * the committed one. `record` reports the committed write as committed,
+   * marks the snapshot non-current and records the
    * cause; the whole-document `replace` uses it so its consumer re-reads the
    * authority itself and reports accepted-but-unverified instead of a refusal.
    *
@@ -1642,7 +1649,7 @@ class RemotePermissionConfig implements PermissionConfig {
 }
 
 /* ------------------------------------------------------------------------- *
- * Preset default + subagent model selection.
+ * Preset default + subagent settings.
  * ------------------------------------------------------------------------- */
 
 class RemotePresetDefaultConfig implements PresetDefaultConfig {
@@ -1671,59 +1678,158 @@ class RemotePresetDefaultConfig implements PresetDefaultConfig {
   }
 }
 
-class RemoteSubagentModelSelectionConfig implements SubagentModelSelectionConfig {
-  private readonly mirror: RemoteConfigMirror
-
-  constructor(mirror: RemoteConfigMirror) {
-    this.mirror = mirror
-  }
-
-  available(): boolean {
-    // BOTH the official settings section and a readable settings backend.
-    return this.mirror.usable() && this.mirror.namespace(SUBAGENT_SETTINGS_NS) !== undefined
-  }
-
-  get(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } {
-    const section = plainRecord(this.mirror.namespace(SUBAGENT_SETTINGS_NS)?.value)
-    if (section === undefined) return { enabled: false, allowedModels: [] }
-    const allowedModels = (Array.isArray(section.allowedModels) ? section.allowedModels : []).flatMap(route => {
-      const candidate = route as { readonly provider?: unknown; readonly model?: unknown }
-      return typeof candidate?.provider === 'string' && typeof candidate?.model === 'string'
-        ? [{ provider: candidate.provider, model: candidate.model }]
-        : []
-    })
-    return { enabled: section.enabled === true, allowedModels }
-  }
-
-  async set(value: { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }): Promise<void> {
-    // Client-side pre-validation with the official rules (the Host validates
-    // again on the section boundary): fail fast before any write.
-    assertOfficialSubagentRoutes(value.allowedModels)
-    if (value.enabled && value.allowedModels.length === 0) {
-      throw new Error('enabled subagent model selection requires at least one allowed model')
+function readRemoteSubagentSection<T extends object>(
+  mirror: RemoteConfigMirror,
+  namespace: string,
+  project: (effective: unknown, inherited: unknown) => SubagentSectionProjection<T> | undefined,
+): SectionRead<T> {
+  const readiness = mirror.readiness()
+  if (readiness === 'unavailable') {
+    const failure = mirror.lastRefreshFailure()
+    if (mirror.usable() && failure !== undefined) {
+      return { kind: 'unreadable', reason: `the Host settings read failed: ${remoteFailureMessage(failure)}` }
     }
-    // The mirror never patches optimistically, so a failed write leaves the
-    // authoritative snapshot untouched and the next get() reads authority.
-    await this.mirror.mutate(SUBAGENT_SETTINGS_NS, [
-      { op: 'set', path: ['enabled'], value: value.enabled },
-      { op: 'set', path: ['allowedModels'], value: value.allowedModels.map(route => ({ ...route })) },
-    ])
+    return { kind: 'unavailable', reason: 'no current Host settings snapshot is available' }
+  }
+  if (readiness !== 'ready') {
+    return { kind: 'unreadable', reason: 'the Host settings snapshot is not current' }
+  }
+  const generation = mirror.readyGeneration()
+  if (generation === undefined) {
+    return { kind: 'unreadable', reason: 'the Host settings snapshot is not current' }
+  }
+  const descriptor = mirror.namespace(namespace)
+  if (descriptor === undefined) {
+    return { kind: 'unavailable', reason: 'the official Host settings section is not mounted' }
+  }
+  if (typeof descriptor.revision !== 'number' || !Number.isSafeInteger(descriptor.revision) || descriptor.revision < 0) {
+    return { kind: 'unreadable', reason: 'the official Host settings revision is not readable' }
+  }
+  const projected = project(descriptor.value, descriptor.base)
+  if (projected === undefined) {
+    return { kind: 'unreadable', reason: 'the official Host settings value or inherited base is not readable' }
+  }
+  return { kind: 'ready', generation, revision: descriptor.revision, ...projected }
+}
+
+async function mutateRemoteSubagentSection(
+  mirror: RemoteConfigMirror,
+  namespace: string,
+  ops: readonly RemoteSettingsPathOp[],
+  expectedRevision: number,
+  generation: object,
+): Promise<SectionMutationOutcome> {
+  const currentGeneration = mirror.readyGeneration()
+  if (currentGeneration === undefined || !Object.is(currentGeneration, generation)) {
+    return { kind: 'rejected', reason: 'the Host authority changed; refresh before saving' }
+  }
+  const current = mirror.namespace(namespace)
+  if (current === undefined) {
+    return { kind: 'rejected', reason: 'the official Host settings section is not mounted' }
+  }
+  if (current.revision !== expectedRevision) {
+    return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
+  }
+  if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
+
+  let dispatchAdmitted = false
+  try {
+    await mirror.mutate(namespace, ops, expectedRevision, 'record', (descriptor, queuedRevision) => {
+      if (!Object.is(mirror.readyGeneration(), generation)) {
+        throw Object.assign(new Error('the Host authority changed before dispatch'), { code: 'settings/writer-superseded' })
+      }
+      if (descriptor.revision !== expectedRevision || queuedRevision !== expectedRevision) {
+        throw Object.assign(new Error('the Host settings section changed since it was read'), { code: 'settings/conflict' })
+      }
+      dispatchAdmitted = true
+    })
+    return { kind: 'accepted' }
+  } catch (error) {
+    const reason = remoteFailureMessage(error)
+    const code = remoteFailureCode(error)
+    if (code === 'settings/conflict' || code === 'SETTINGS_CONFLICT') {
+      return { kind: 'conflict', reason }
+    }
+    if (!dispatchAdmitted) {
+      return { kind: 'rejected', reason }
+    }
+    // The official controller can label a post-persistence Loader failure as
+    // settings/rejected. Only Gateway pre-invocation refusals prove no edit ran.
+    if (code === 'gateway/bad-request' || (code !== undefined && GATEWAY_PRE_INVOCATION_CODES.has(code))) {
+      return { kind: 'rejected', reason }
+    }
+    return { kind: 'outcome-unconfirmed', reason }
   }
 }
 
-/** The official route-list rules (mirrored client-side so a malformed edit
- *  fails before the Host write; same messages as the Host validator). */
-function assertOfficialSubagentRoutes(routes: readonly SubagentAllowedModelRoute[]): void {
-  const seen = new Set<string>()
-  for (const route of routes) {
-    if (route.provider.length === 0 || route.model.length === 0) {
-      throw new Error('subagent model selection requires non-empty provider and model ids')
+class RemoteSubagentLimitsConfig implements SubagentLimitsConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly refreshRead: () => Promise<void>
+
+  constructor(mirror: RemoteConfigMirror, refreshRead: () => Promise<void>) {
+    this.mirror = mirror
+    this.refreshRead = refreshRead
+  }
+
+  read(): SectionRead<SubagentLimits> {
+    return readRemoteSubagentSection(this.mirror, SUBAGENT_LIMITS_NS, projectSubagentLimits)
+  }
+
+  async refresh(): Promise<void> {
+    await this.refreshRead()
+  }
+
+  async mutate(
+    patch: SectionPatch<SubagentLimits>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome> {
+    const ops: RemoteSettingsPathOp[] = []
+    for (const field of ['maxDepth', 'maxActiveSubagents'] as const) {
+      const edit = patch[field]
+      if (edit === undefined) continue
+      ops.push(edit.kind === 'reset'
+        ? { op: 'unset', path: [field] }
+        : { op: 'set', path: [field], value: edit.value })
     }
-    const key = `${route.provider}\u0000${route.model}`
-    if (seen.has(key)) {
-      throw new Error(`subagent model selection repeats route "${route.provider}/${route.model}"`)
+    return mutateRemoteSubagentSection(this.mirror, SUBAGENT_LIMITS_NS, ops, expectedRevision, generation)
+  }
+}
+
+class RemoteSubagentModelSelectionConfig implements SubagentModelSelectionConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly refreshRead: () => Promise<void>
+
+  constructor(mirror: RemoteConfigMirror, refreshRead: () => Promise<void>) {
+    this.mirror = mirror
+    this.refreshRead = refreshRead
+  }
+
+  read(): SectionRead<SubagentModelSelection> {
+    return readRemoteSubagentSection(this.mirror, SUBAGENT_SETTINGS_NS, projectSubagentModelSelection)
+  }
+
+  async refresh(): Promise<void> {
+    await this.refreshRead()
+  }
+
+  async mutate(
+    patch: SectionPatch<SubagentModelSelection>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome> {
+    const ops: RemoteSettingsPathOp[] = []
+    if (patch.enabled !== undefined) {
+      ops.push(patch.enabled.kind === 'reset'
+        ? { op: 'unset', path: ['enabled'] }
+        : { op: 'set', path: ['enabled'], value: patch.enabled.value })
     }
-    seen.add(key)
+    if (patch.allowedModels !== undefined) {
+      ops.push(patch.allowedModels.kind === 'reset'
+        ? { op: 'unset', path: ['allowedModels'] }
+        : { op: 'set', path: ['allowedModels'], value: patch.allowedModels.value.map(route => ({ ...route })) })
+    }
+    return mutateRemoteSubagentSection(this.mirror, SUBAGENT_SETTINGS_NS, ops, expectedRevision, generation)
   }
 }
 
@@ -1972,6 +2078,7 @@ export class RemoteConfigPort implements ConfigPort {
   readonly account: AccountConfig
   readonly permissions: PermissionConfig
   readonly presetDefault: PresetDefaultConfig
+  readonly subagentLimits: SubagentLimitsConfig
   readonly subagentModelSelection: SubagentModelSelectionConfig
   readonly web: WebProviderConfig
   readonly visualTools: VisualToolsConfig
@@ -2028,7 +2135,8 @@ export class RemoteConfigPort implements ConfigPort {
     this.account = this.accountConfig
     this.permissions = new RemotePermissionConfig(this.mirror, source.remote.commands)
     this.presetDefault = new RemotePresetDefaultConfig(this.mirror)
-    this.subagentModelSelection = new RemoteSubagentModelSelectionConfig(this.mirror)
+    this.subagentLimits = new RemoteSubagentLimitsConfig(this.mirror, () => this.describe())
+    this.subagentModelSelection = new RemoteSubagentModelSelectionConfig(this.mirror, () => this.describe())
     this.visualTools = new RemoteVisualToolsConfig(this.mirror)
     this.webStartupPreference = new RemoteWebStartupPreferenceConfig(this.mirror)
     this.backendStartupPreference = new RemoteBackendStartupPreferenceConfig(this.mirror)

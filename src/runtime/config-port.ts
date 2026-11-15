@@ -519,23 +519,72 @@ export interface SubagentAllowedModelRoute {
   readonly model: string
 }
 
-/** The official subagent model-selection preference (the DSH
- * `subagent-model-selection-settings` settings namespace, whose values the
- * `subagent-model-selection` service owns Host-side). The TUI reads and writes
- * the OFFICIAL section through this sub-domain — it never maintains a
- * parallel TUI-owned subagent routing setting. Sampling is per NEW
- * session composition: a settings change never rewrites the tool schema
- * of an Agent that is already running. */
+/** A staged edit of one field in an official volatile Settings section. */
+export type FieldPatch<T> =
+  | { readonly kind: 'set'; readonly value: T }
+  | { readonly kind: 'reset' }
+
+/** Only semantic field names and values cross the application port. */
+export type SectionPatch<T extends object> = {
+  readonly [K in keyof T]?: FieldPatch<T[K]>
+}
+
+/** One current official Host Settings descriptor projected into typed facts. */
+export type SectionRead<T extends object> =
+  | {
+      readonly kind: 'ready'
+      readonly generation: object
+      readonly revision: number
+      readonly effective: T
+      readonly inherited: T
+      /** Effective-to-inherited difference; not USER patch key presence. */
+      readonly overridden: Readonly<Record<keyof T, boolean>>
+    }
+  | { readonly kind: 'unavailable' | 'unreadable'; readonly reason: string }
+
+/** The Settings RPC settlement before the required authoritative readback. */
+export type SectionMutationOutcome =
+  | { readonly kind: 'accepted' }
+  | { readonly kind: 'conflict'; readonly reason: string }
+  | { readonly kind: 'rejected'; readonly reason: string }
+  | { readonly kind: 'outcome-unconfirmed'; readonly reason: string }
+
+/** Official DSH subagent limits, read from the volatile `subagent` section. */
+export interface SubagentLimits {
+  readonly maxDepth: number
+  readonly maxActiveSubagents: number
+}
+
+/** One typed section of the official Host configuration. */
+export interface SubagentLimitsConfig {
+  read(): SectionRead<SubagentLimits>
+  /** Direct already reads the Host; Remote refreshes the existing shared mirror. */
+  refresh(): Promise<void>
+  /** Dispatches one operation batch at the user's exact revision and generation. */
+  mutate(
+    patch: SectionPatch<SubagentLimits>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome>
+}
+
+export interface SubagentModelSelection {
+  readonly enabled: boolean
+  readonly allowedModels: readonly SubagentAllowedModelRoute[]
+}
+
+/** Official next-top-level-Session model-selection preference. Existing
+ * Sessions keep their sampled policy. */
 export interface SubagentModelSelectionConfig {
-  /** Whether the Host settings section is present (it registers when the
-   * deployment mounts the subagent-model-selection-settings service). */
-  available(): boolean
-  /** The current official preference (defaults: disabled, empty list). */
-  get(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }
-  /** Persist the official section. Rejects with the official validation
-   * error when enabling without at least one route, or when the list
-   * repeats a provider+model pair. */
-  set(value: { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }): Promise<void>
+  read(): SectionRead<SubagentModelSelection>
+  /** Direct already reads the Host; Remote refreshes the existing shared mirror. */
+  refresh(): Promise<void>
+  /** Dispatches one operation batch at the user's exact revision and generation. */
+  mutate(
+    patch: SectionPatch<SubagentModelSelection>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome>
 }
 
 /** The saved agent-preset default sub-domain (`/preset default`): the
@@ -1137,7 +1186,9 @@ export interface ConfigPort {
   readonly permissions: PermissionConfig
   /** The saved default agent preset. */
   readonly presetDefault: PresetDefaultConfig
-  /** The official subagent model-selection preference. */
+  /** The official volatile subagent depth/capacity settings. */
+  readonly subagentLimits: SubagentLimitsConfig
+  /** The official next-session subagent model-selection preference. */
   readonly subagentModelSelection: SubagentModelSelectionConfig
   /** The official Web provider selection + Search/Fetch API options. */
   readonly web: WebProviderConfig

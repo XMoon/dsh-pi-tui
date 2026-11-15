@@ -33,6 +33,9 @@
  *                token->Cookie->official Web shell, two-way Session/Turn,
  *                Question/Approval first settlement, TUI reload/exit/SIGKILL,
  *                `/web` toggle + recomposition, locality and the feature matrix
+ *   T76 FR5-A Subagent settings: two authenticated Split Clients share the
+ *                official Limits/Selection sections, one Save verifies partial
+ *                success and the stale editor cannot overwrite the Host profile
  *   T73 the official Web frontend runtime toggle on ONE Host: default-off
  *                serving, setEnabled(true) mounting the 59 declared rows,
  *                setEnabled(false) while a real TUI holds an accepted Turn (the

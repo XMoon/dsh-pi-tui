@@ -1033,6 +1033,31 @@ idle, while any other active row (an official autonomous service, a
 third-party plugin or a future row) fails closed as an unqualified Host source.
 The epoch invalidates overlapping reads but is not an atomic barrier.
 
+### Subagent settings authority
+
+The official `subagent` limits and `subagent-model-selection-settings`
+preference are Host-owned Settings. `ConfigPort.subagentLimits` and
+`ConfigPort.subagentModelSelection` expose them as TWO typed semantic
+sub-domains; a consumer never names a namespace or a JSON path. Each `read()`
+projects ONE current descriptor into detached typed `effective` and `inherited`
+values with its exact revision and opaque Host generation, and reports
+`unavailable`/`unreadable` rather than inventing schema defaults. A rewrite is
+one official revision-checked settings mutation built from the caller's field
+intents; Reset is the official field `unset`, never `set(inherited)`.
+
+Direct reads the live in-process settings service and uses its current Settings
+service authority identity as the generation. Remote uses the ONE existing settings mirror and
+the mirror's current Connection generation; it refuses a replaced generation
+before dispatch (and again inside the shared write queue), uses the caller's
+captured revision rather than a refreshed one, and keeps the existing accepted
+write lifetime across the Host settlement and post-write refresh. A dispatched
+write whose settlement cannot be observed is `outcome-unconfirmed`, never a
+proven refusal. DSH rc.3 may materialize a Reset value in the USER patch while a
+sibling override remains; the resulting effective value is the Host authority,
+and no consumer may require USER-field deletion as Reset success. Settings page
+drafts, dirty state and pointer state remain Client-local and never cross the
+boundary.
+
 ### MCP server management (ONE Host manager)
 
 The ONE official Host MCP manager (`@deepseek-ai/dsh-mcp-manager`,

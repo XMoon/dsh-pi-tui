@@ -1964,13 +1964,8 @@ export interface SettingsWorkspaceOpenOptions {
   ) => SettingsAuthPage | undefined
   /** The Account page factory. */
   readonly createAccountPage?: (initial: AccountInitialView) => SettingsAuthPage | undefined
-  /**
-   * C2-R3: the ONE embedded specialist page factory (the existing subagent
-   * allowlist picker). It is mounted in the SAME Settings lease/body when the
-   * user explicitly activates the row that carries `specialist`; `done` returns
-   * to the Agent rows and `onAuthoritativeChange` asks for a fresh row read.
-   */
-  readonly createSubagentAllowlistPicker?: (
+  /** FR5-A: the one staged Subagent settings page in the SAME Settings lease. */
+  readonly createSubagentSettingsPage?: (
     done: () => void,
     onAuthoritativeChange: () => void,
   ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
@@ -27305,9 +27300,9 @@ export class TuiApp {
       ...(options.onOpenPlugins === undefined ? {} : { onOpenPlugins: options.onOpenPlugins }),
       ...(options.createModelsPage === undefined ? {} : { createModelsPage: options.createModelsPage }),
       ...(options.createAccountPage === undefined ? {} : { createAccountPage: options.createAccountPage }),
-      ...(options.createSubagentAllowlistPicker === undefined
+      ...(options.createSubagentSettingsPage === undefined
         ? {}
-        : { createSubagentAllowlistPicker: options.createSubagentAllowlistPicker }),
+        : { createSubagentSettingsPage: options.createSubagentSettingsPage }),
       ...(options.createWebSettingsPage === undefined
         ? {}
         : { createWebSettingsPage: options.createWebSettingsPage }),

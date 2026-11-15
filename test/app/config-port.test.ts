@@ -1028,66 +1028,8 @@ test('the session-policy port reads the exact live Session and classifies each s
   assert.deepEqual(ghost, { kind: 'unavailable', sessionId: 'session-ghost', reason: 'session-not-live' })
 })
 
-// ── subagent model selection (the official settings section) ──────────────
-
-test('subagentModelSelection reads the official service and degrades to the shipped default', () => {
-  const config = port({
-    subagentModelSelection: { current: () => ({ enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }, { provider: 'p', model: 'm2' }] }) },
-    settings: settings({}),
-  }).subagentModelSelection
-  assert.equal(config.available(), true)
-  const current = config.get()
-  assert.equal(current.enabled, true)
-  assert.deepEqual(current.allowedModels, [{ provider: 'p', model: 'm1' }, { provider: 'p', model: 'm2' }])
-
-  // A THROWING official read is UNREADABLE, never the shipped default: a writer
-  // handed `{enabled:false, []}` would erase routes the Host still stores.
-  const throwing = port({ subagentModelSelection: { current: () => { throw new Error('official read failed') } }, settings: settings({}) }).subagentModelSelection
-  assert.throws(() => throwing.get(), /official read failed/u,
-    'an unreadable official section must fail loud, not fabricate the default')
-
-  const missing = port({ subagentModelSelection: { current: () => ({ enabled: false, allowedModels: [] }) }, settings: settings({}) }).subagentModelSelection
-  assert.deepEqual(missing.get(), { enabled: false, allowedModels: [] }, 'the service reads its own shipped default')
-  const noService = port({}).subagentModelSelection
-  assert.equal(noService.available(), false)
-  assert.deepEqual(noService.get(), { enabled: false, allowedModels: [] })
-  // A generic settings service WITHOUT the official subagentModelSelection
-  // service is NOT the capability: the /settings rows must not appear.
-  const settingsOnly = port({ settings: settings({}) }).subagentModelSelection
-  assert.equal(settingsOnly.available(), false, 'settings alone must not advertise the official section')
-})
-
-test('subagentModelSelection writes the whole official section through the settings service', async () => {
-  const writes: Array<{ ns: string; ops: unknown }> = []
-  const config = port({ settings: settings({}, writes) }).subagentModelSelection
-  await config.set({ enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }] })
-  assert.equal(writes.length, 1)
-  assert.equal(writes[0]!.ns, 'subagent-model-selection-settings')
-  assert.deepEqual(writes[0]!.ops, [
-    { op: 'set', path: ['enabled'], value: true },
-    { op: 'set', path: ['allowedModels'], value: [{ provider: 'p', model: 'm1' }] },
-  ])
-})
-
-test('subagentModelSelection enforces the official validation rules client-side', async () => {
-  const writes: Array<{ ns: string; ops: unknown }> = []
-  const config = port({ settings: settings({}, writes) }).subagentModelSelection
-  await assert.rejects(
-    config.set({ enabled: true, allowedModels: [] }),
-    /requires at least one allowed model/u,
-    'enabling with an empty allowlist is refused before the Host write',
-  )
-  await assert.rejects(
-    config.set({ enabled: false, allowedModels: [{ provider: 'p', model: 'm' }, { provider: 'p', model: 'm' }] }),
-    /repeats route/u,
-    'duplicate provider+model routes are refused',
-  )
-  await assert.rejects(
-    config.set({ enabled: false, allowedModels: [{ provider: '', model: 'm' }] }),
-    /non-empty provider and model/u,
-  )
-  assert.deepEqual(writes, [], 'a rejected write never reaches the settings service')
-})
+// Typed subagent descriptor/CAS/reset behavior is covered by the owner-layer
+// test/runtime/direct/config-subagent-direct.test.ts suite.
 
 // ── the profile-wide visual tools switch ──────────────────────────────────
 

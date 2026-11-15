@@ -51,6 +51,7 @@ import { runWebProductQualification } from '../smoke/split-process/web-product.m
 import { runWebRuntimeToggle } from '../smoke/split-process/web-runtime-toggle.mjs'
 import { runMcpServersFr3 } from '../smoke/split-process/mcp-servers-fr3.mjs'
 import { runMcpServersFr4 } from '../smoke/split-process/mcp-servers-fr4.mjs'
+import { runSubagentSettingsFr5A } from '../smoke/split-process/subagent-settings-fr5a.mjs'
 import { runWebStartupPreference } from '../smoke/split-process/web-startup-preference.mjs'
 import { runF2AccountComposition } from '../smoke/split-process/account-composition.mjs'
 import { runF7AProviderAuthorization } from '../smoke/split-process/provider-authorization-f7a.mjs'
@@ -89,7 +90,9 @@ const SELECTABLE_SCOPE = 'SELECTABLE_ONLY'
  * authenticated-link chain; `surface`, `multi-client` and `navigation` own the
  * real-surface, shared-Session and non-destructive Client scenes; `recovery`
  * owns the detached-interaction, HMR/signal and unknown-write Host-death
- * continuity evidence; `account` owns the official Account Controller, verified callback and PKCE proof; `web` owns the official Web composition, the live
+ * continuity evidence; `account` owns the official Account Controller, verified
+ * callback and PKCE proof; `subagent-settings` owns the FR5-A dual-namespace
+ * authenticated Settings proof; `web` owns the official Web composition, the live
  * runtime toggle, the profile startup preference and the product Browser/TUI
  * matrix.
  */
@@ -285,6 +288,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'mcp.servers-fr4',
     title: 'real Split Host and Clients edit the official mcp-manager configuration through the Settings CAS: inherited classification, Add/Edit/Disable/Enable/Delete/Reset, a dirty-discard with zero writes, a plugin-owned refusal and a two-client revision conflict',
     run: runMcpServersFr4,
+  }),
+  Object.freeze({
+    suite: 'subagent-settings',
+    id: 'subagent.settings-fr5a',
+    title: 'two authenticated Split Clients save the official Subagent settings partial result and refuse the stale Profile revision',
+    run: runSubagentSettingsFr5A,
   }),
   Object.freeze({
     suite: 'web',

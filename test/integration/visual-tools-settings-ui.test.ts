@@ -1,6 +1,17 @@
 /**
- * The production `/settings → Tools → Visual tools` decision over the REAL
- * Direct configuration plane, with a real model request on each side.
+ * Production Settings decisions over the REAL Direct configuration plane:
+ * Visual tools and the two Subagent settings namespaces.
+ *
+ * ```text
+ * TuiApp / SettingsWorkspacePanel
+ *   -> /settings → Agent → Subagent settings (real keyboard)
+ *   -> SubagentSettingsPage → SubagentSettingsController staged Save
+ *   -> DirectConfigPort.subagentLimits / subagentModelSelection
+ *   -> official SettingsForms.mutate → real ConfigEditor USER profile write
+ *   -> real Loader volatile commit → the NEXT fresh Session's durable policy
+ * ```
+ *
+ * Visual tools keeps its own regression chain:
  *
  * ```text
  * TuiApp / SettingsWorkspacePanel Confirm
@@ -11,24 +22,32 @@
  *   -> the next real AgentLoop request's tool catalog / PTC SDK
  * ```
  *
+ * EVIDENCE: the Subagent cases drive the production page through real terminal
+ * input into the real official Loader/ConfigEditor/SettingsForms and the real
+ * profile document; a fresh Session's durable `subagent/model-selection-policy`
+ * event is the model-facing sink. The only substituted boundary is the model
+ * endpoint in the visual-tools case.
+ *
  * FIXTURE MANIFEST
  * - REAL: TuiApp + VirtualTerminal + the registered `/settings` command, the
- *   production DirectConfigPort, the shared visual-tools profile plane (real
- *   Loader/ConfigEditor/SettingsForms/Host row/ToolRuntime), the real AgentLoop
- *   and an in-process recording LLM adapter (the only stand-in: the model
- *   endpoint itself).
- * - STAND-INS: application capabilities this command path never exercises
+ *   production DirectConfigPort, the real profile/bundle Loader,
+ *   ConfigEditor/SettingsForms, the official `subagent` and
+ *   `subagent-model-selection-settings` rows, the real AgentLoop/Agent creation
+ *   and an in-process recording LLM adapter.
+ * - STAND-INS: application capabilities these command paths never exercise
  *   (sessions/readers, clipboard, providers/account/authorization seams) are
  *   inert stubs, exactly like the established Settings visual harness; they
- *   answer no Host fact this case asserts.
+ *   answer no Host fact these cases assert.
  * - ABSENT: a physical terminal and a real user DSH_HOME.
  * @module @xmoon76/dsh-pi-tui/test/integration/visual-tools-settings-ui
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test, { type TestContext } from 'node:test'
 import { join } from 'node:path'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, symbols } from '@deepseek-ai/cordis'
+import type SettingsForms from '@deepseek-ai/dsh-settings'
+import type { SectionRead } from '../../src/runtime/config-port.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import {
@@ -51,6 +70,7 @@ import {
   SVG_TOOL_NAME,
 } from '../../src/domain/visual/tools.ts'
 import SessionQuerySqlite from '@deepseek-ai/dsh-session-query-sqlite'
+import { visibleWidth, stripTerminalSequences } from '@xmoon76/pi-tui'
 import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.ts'
 import type { TuiCommandRunner } from '../../src/commands.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -61,7 +81,6 @@ import { mountPermissionDefaultPlane } from '../support/permission-default-fixtu
 import { mountSubagentSectionPlane } from '../support/subagent-section-fixture.ts'
 import { bindScopeParent, createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import * as tool from '@deepseek-ai/dsh-tool-subagent'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -584,140 +603,425 @@ test('a real Approval policy Confirm is what THAT Session\'s next approval reque
   assert.ok(otherOutcome !== undefined, 'the bystander really performed an approval ask')
 })
 
-test('a real Agent toggle Confirm is what the NEXT Session\'s subagent tool samples', async t => {
+function readySection<T extends object>(read: SectionRead<T>): Extract<SectionRead<T>, { kind: 'ready' }> {
+  if (read.kind !== 'ready') assert.fail(`the official section must be ready: ${read.reason}`)
+  return read
+}
+
+async function settingsKey(ui: UiHarness, data: string): Promise<void> {
+  ui.vt.sendInput(data)
+  await ui.vt.waitForRender()
+}
+
+async function openSubagentSettings(ui: UiHarness): Promise<void> {
+  ui.invoke('settings')
+  await ui.vt.waitForRender()
+  await selectSettingsCategory(ui.vt, 'Agent')
+  await settingsKey(ui, '\r')
+  for (let step = 0; step < 6 && !/> Subagent settings/u.test(ui.vt.getViewport().join('\n')); step += 1) {
+    await settingsKey(ui, '\x1b[B')
+  }
+  assert.match(ui.vt.getViewport().join('\n'), /> Subagent settings/u)
+  await settingsKey(ui, '\r')
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Settings · Agent · Subagent settings/u.test(frame) && /Limits · Ready/u.test(frame) && /Model selection · Ready/u.test(frame),
+    () => ui.vt.waitForRender(),
+    'the production Subagent page must finish its authoritative refresh',
+  )
+}
+
+async function selectSubagentField(ui: UiHarness, label: string): Promise<void> {
+  for (let step = 0; step < 4 && !ui.vt.getViewport().some(line => line.includes(`> ${label}`)); step += 1) {
+    await settingsKey(ui, '\x1b[B')
+  }
+  assert.ok(ui.vt.getViewport().some(line => line.includes(`> ${label}`)), `field ${label} must be selected:\n${ui.vt.getViewport().join('\n')}`)
+}
+
+async function stageSubagentNumber(ui: UiHarness, label: string, value: string): Promise<void> {
+  await selectSubagentField(ui, label)
+  await settingsKey(ui, '\r')
+  assert.match(ui.vt.getViewport().join('\n'), new RegExp(`Edit ${label}`, 'u'))
+  await settingsKey(ui, '\x15')
+  await settingsKey(ui, value)
+  await settingsKey(ui, '\r')
+}
+
+async function clickPainted(ui: UiHarness, text: string, rowHint?: number): Promise<void> {
+  const lines = ui.vt.getViewport().map(stripTerminalSequences)
+  const row = rowHint ?? lines.findIndex(line => line.includes(text))
+  assert.ok(row >= 0 && row < lines.length, `painted row ${JSON.stringify(text)} must exist:\n${lines.join('\n')}`)
+  const line = lines[row]!
+  const offset = line.indexOf(text)
+  assert.ok(offset >= 0, `painted cell ${JSON.stringify(text)} must exist on row ${row}: ${line}`)
+  const column = visibleWidth(line.slice(0, offset))
+  ui.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  if (row !== lines.length - 1) await ui.vt.waitForRender()
+  ui.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+  await ui.vt.waitForRender()
+}
+
+async function clickSubagentFieldAction(ui: UiHarness, field: string, action: string): Promise<void> {
+  const lines = ui.vt.getViewport().map(stripTerminalSequences)
+  const fieldRow = lines.findIndex(line => line.includes(field))
+  assert.ok(fieldRow >= 0, `field row ${field} must be painted:\n${lines.join('\n')}`)
+  const detail = lines[fieldRow + 1]!
+  const actionColumn = detail.lastIndexOf(action)
+  assert.ok(actionColumn >= 0, `${action} must be painted beside ${field}: ${detail}`)
+  const row = fieldRow + 1
+  const column = visibleWidth(detail.slice(0, actionColumn))
+  ui.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  await ui.vt.waitForRender()
+  ui.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+  await ui.vt.waitForRender()
+}
+
+function recordOfficialSubagentMutations(ctx: Context, t: TestContext) {
+  const proxy = ctx.get('settings') as SettingsForms & { readonly [symbols.original]?: SettingsForms }
+  const official = proxy[symbols.original] ?? proxy
+  const original = official.mutate
+  const calls: Array<{ ns: string; ops: Parameters<SettingsForms['mutate']>[1]; revision: number | undefined }> = []
+  t.mock.method(official, 'mutate', function (this: SettingsForms, ...args: Parameters<SettingsForms['mutate']>) {
+    calls.push({ ns: args[0], ops: structuredClone(args[1]), revision: args[2] })
+    return original.apply(this, args)
+  })
+  return { official, calls }
+}
+
+test('Subagent settings Save persists both namespaces and only new top-level Sessions sample selection changes', async t => {
   const life = testLifecycle(t)
   const ctx = new Context()
   life.defer(() => ctx.fiber.dispose())
   await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
   await ctx.plugin(AgentLoop, { agents: [] })
-  await ctx.plugin(SubagentRuntime)
-  await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
   await ctx.plugin(Loader)
-  await mountPermissionPrerequisites(ctx)
-  // The official section is a CONFIGURABLE plugin row: it needs a real settings
-  // plane, exactly like the permission default case below.
-  await mountSubagentSectionPlane(ctx, life.tempDir('subagent-section-plane-'), {
-    enabled: true,
-    allowedModels: [{ provider: 'alpha', model: 'fast' }],
+  const route = [{ provider: 'alpha', model: 'fast' }]
+  const plane = await mountSubagentSectionPlane(ctx, life.tempDir('subagent-section-plane-'), {
+    enabled: true, allowedModels: route,
   })
+  await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
   const port = new DirectConfigPort(ctx, undefined, () => undefined)
-
-  // The catalog the picker reads: one provider with one model.
+  const recorder = recordOfficialSubagentMutations(ctx, t)
   ctx.llm.registerAdapter(['alpha'], new CatalogAdapterForUi())
-
-  // A standing preset composition, exactly like the shipped base layer.
-  const preset = createScope(ctx, { preset: 'r3-agent-toggle' })
+  const preset = createScope(ctx, { preset: 'subagent-settings' })
   await preset.ctx.plugin(tool, { provider: 'spawn', modelSelection: true, modelDiscovery: true })
-
-  /** A NEW Session joined to the standing preset. */
-  const createSession = async (id: string): Promise<{ session: unknown; agent: unknown }> => {
-    const handle = await ctx.agents.create({
-      sessionId: SessionId(id) as never,
-      setup: (agentCtx) => {
-        bindScopeParent(scopeOf(agentCtx)!, scopeOf(preset.ctx)!)
-      },
-    })
-    return { session: (handle.agent as unknown as { session: unknown }).session, agent: handle.agent }
+  const createSession = async (id: string) => ctx.agents.create({
+    sessionId: SessionId(id) as never,
+    setup: agentCtx => { bindScopeParent(scopeOf(agentCtx)!, scopeOf(preset.ctx)!) },
+  })
+  const sampledPolicy = (agent: unknown): readonly { provider: string; model: string }[] => {
+    const session = (agent as { session: { snapshotEvents(): readonly { type: string; data?: { allowedModels?: readonly { provider: string; model: string }[] } }[] } }).session
+    return session.snapshotEvents().find(event => event.type === 'subagent/model-selection-policy')?.data?.allowedModels ?? []
   }
-  /** Whether the Session's subagent tool DECLARES the route fields (DSH 0.2.2
-   *  declares them statically in the shipped preset; the setting samples a
-   *  per-Session POLICY instead of hiding the schema). */
   const declaresRoutes = (agent: unknown): boolean => {
     const schema = ctx.tools.schemas(agent as never).find(candidate => candidate.name === 'subagent')
     const properties = (schema?.parameters as { properties?: Record<string, unknown> } | undefined)?.properties
-    return properties?.['provider'] !== undefined && properties?.['model'] !== undefined
+    return properties?.provider !== undefined && properties.model !== undefined
   }
-  /** The durable model-selection policy this Session sampled at creation. */
-  const sampledPolicy = (agent: unknown): readonly { provider: string; model: string }[] => {
-    const session = (agent as { session: { snapshotEvents(): readonly { type?: string; data?: { allowedModels?: readonly { provider: string; model: string }[] } }[] } }).session
-    const policy = session.snapshotEvents().filter(event => event.type === 'subagent/model-selection-policy').at(-1)
-    return [...(policy?.data?.allowedModels ?? [])]
-  }
+  const before = await createSession('subagent-settings-before')
+  assert.deepEqual(sampledPolicy(before.agent), route)
+  assert.equal(declaresRoutes(before.agent), true)
 
-  // Baseline: the section is ENABLED, so a new Session samples the allowlist
-  // (and the shipped declaration exposes the route fields either way).
-  const before = await createSession('r3-toggle-before')
-  assert.deepEqual(sampledPolicy(before.agent), [{ provider: 'alpha', model: 'fast' }],
-    'the enabled section samples its allowlist per Session')
-  assert.equal(declaresRoutes(before.agent), true, 'the shipped declaration exposes the route fields')
-
-  // The REAL UI: /settings -> Agent -> Subagent model selection -> Confirm off.
   const ui = mountSettingsUi(port)
-  t.after(() => ui.dispose())
+  life.defer(() => ui.dispose())
+  await openSubagentSettings(ui)
+  const limitsOpened = readySection(port.subagentLimits.read())
+  const selectionOpened = readySection(port.subagentModelSelection.read())
+  await selectSubagentField(ui, 'Enabled')
+  await settingsKey(ui, '\r')
+  await stageSubagentNumber(ui, 'Maximum recursion depth', '0')
+  await stageSubagentNumber(ui, 'Subagent parallelism limit', '2')
+  assert.equal(recorder.calls.length, 0, 'staging through real keyboard input writes neither namespace')
+  assert.deepEqual(readySection(port.subagentLimits.read()).effective, { maxDepth: 1, maxActiveSubagents: 8 })
+  assert.equal(readySection(port.subagentModelSelection.read()).effective.enabled, true)
+  await settingsKey(ui, 's')
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Limits: Verified/u.test(frame) && /Selection: Verified/u.test(frame),
+    () => ui.vt.waitForRender(), 'both independent namespace writes must verify',
+  )
+  assert.deepEqual(recorder.calls, [
+    { ns: 'subagent', ops: [
+      { op: 'set', path: ['maxDepth'], value: 0 },
+      { op: 'set', path: ['maxActiveSubagents'], value: 2 },
+    ], revision: limitsOpened.revision },
+    { ns: 'subagent-model-selection-settings', ops: [{ op: 'set', path: ['enabled'], value: false }], revision: selectionOpened.revision },
+  ])
+  assert.deepEqual(readySection(port.subagentLimits.read()).effective, { maxDepth: 0, maxActiveSubagents: 2 })
+  assert.deepEqual(plane.userConfig('subagent'), { maxDepth: 0, maxActiveSubagents: 2 })
+  const afterDisable = readySection(port.subagentModelSelection.read())
+  assert.deepEqual(afterDisable.effective, { enabled: false, allowedModels: route })
+  assert.deepEqual(plane.userConfig('subagent-model-selection-settings'), afterDisable.effective,
+    'the real profile document preserves the untouched routes')
+  const after = await createSession('subagent-settings-disabled')
+  assert.deepEqual(sampledPolicy(after.agent), [])
+  assert.deepEqual(sampledPolicy(before.agent), route, 'the existing Session retains its durable policy')
+  assert.equal(declaresRoutes(after.agent), true, 'the tool schema stays static in the current official preset')
+
+  await selectSubagentField(ui, 'Enabled')
+  await settingsKey(ui, '\r')
+  assert.equal(readySection(port.subagentModelSelection.read()).effective.enabled, false)
+  await settingsKey(ui, 's')
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Selection: Verified/u.test(frame),
+    () => ui.vt.waitForRender(), 'the re-enable Save must verify')
+  assert.deepEqual(readySection(port.subagentModelSelection.read()).effective, { enabled: true, allowedModels: route })
+  const reEnabled = await createSession('subagent-settings-reenabled')
+  assert.deepEqual(sampledPolicy(reEnabled.agent), route)
+  assert.deepEqual(sampledPolicy(before.agent), route)
+  assert.deepEqual(sampledPolicy(after.agent), [], 'a previously created disabled Session is never hot-rewritten')
+  assert.deepEqual(readySection(port.subagentLimits.read()).effective, { maxDepth: 0, maxActiveSubagents: 2 },
+    'a selection-only Save preserves both limits')
+})
+
+test('a Root pointer journey stages both namespaces, saves to Host, and discards before exit', async t => {
+  const life = testLifecycle(t)
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
+  await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(Loader)
+  const route = [{ provider: 'alpha', model: 'fast' }]
+  const plane = await mountSubagentSectionPlane(ctx, life.tempDir('subagent-pointer-plane-'), {
+    enabled: false, allowedModels: route,
+    limits: { maxDepth: 1, maxActiveSubagents: 8 },
+    userLimits: { maxDepth: 3, maxActiveSubagents: 5 },
+  })
+  const port = new DirectConfigPort(ctx, undefined, () => undefined)
+  const { calls } = recordOfficialSubagentMutations(ctx, t)
+  const openedLimits = readySection(port.subagentLimits.read())
+  const openedSelection = readySection(port.subagentModelSelection.read())
+  const ui = mountSettingsUi(port)
+  life.defer(() => ui.dispose())
+
   ui.invoke('settings')
   await ui.vt.waitForRender()
   await selectSettingsCategory(ui.vt, 'Agent')
-  ui.vt.sendInput('\r')
-  await ui.vt.waitForRender()
-  // Walk down to the toggle row (the allowlist row precedes it, and a live
-  // Session adds the approval row first). The cursor cell is the one that
-  // starts with `> ` inside the Rows pane.
-  const selectedLabel = (): string => {
-    for (const line of ui.vt.getViewport()) {
-      const marker = line.indexOf('> ')
-      if (marker < 0) continue
-      const after = line.slice(marker + 2)
-      if (/^(?:Approval policy|Default permission|Subagent|User shell)/u.test(after)) {
-        return after.replace(/\u001b\[[0-9;]*m/gu, '').trim()
-      }
-    }
-    return ''
-  }
-  for (let step = 0; step < 6 && !selectedLabel().startsWith('Subagent model selection'); step += 1) {
-    ui.vt.sendInput('\x1b[B')
-    await ui.vt.waitForRender()
-  }
-  assert.match(selectedLabel(), /^Subagent model selection/u,
-    `the toggle row is selected:\n${ui.vt.getViewport().join('\n')}`)
-  ui.vt.sendInput('\r') // open the inline choice
-  await ui.vt.waitForRender()
-  assert.match(ui.vt.getViewport().join('\n'), /Choose value/u, 'the inline choice is open')
-  // The candidate list is [off, on]; `on` is current, so UP selects `off`.
-  ui.vt.sendInput('\x1b[A')
-  await ui.vt.waitForRender()
-  ui.vt.sendInput('\r') // explicit Confirm
-  await waitForFrame(
-    () => ui.vt.getViewport().join('\n'),
-    frame => /Status\s+Verified/u.test(frame),
-    () => ui.vt.waitForRender(),
-    'the subagent toggle Confirm must settle as Verified',
-  )
+  await settingsKey(ui, '\r')
+  await clickPainted(ui, 'Subagent settings')
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Limits · Ready/u.test(frame) && /Model selection · Ready/u.test(frame),
+    () => ui.vt.waitForRender(), 'a painted Root row click opens the real embedded page')
 
-  // The UI decision reached the OFFICIAL section ...
-  assert.deepEqual(port.subagentModelSelection.get(), { enabled: false, allowedModels: [{ provider: 'alpha', model: 'fast' }] },
-    'disabling kept the saved route and flipped only enabled')
+  // Pointer-open the numeric input, type its value, then use the painted Apply
+  // action. Reset is a separate operation on the sibling capacity field.
+  await clickPainted(ui, 'Maximum recursion depth')
+  await settingsKey(ui, '\x15')
+  await settingsKey(ui, '0')
+  await clickPainted(ui, 'Apply [Enter]')
+  await clickSubagentFieldAction(ui, 'Subagent parallelism limit', 'Reset')
+  await clickSubagentFieldAction(ui, 'Allowed models', 'Manage…')
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Fast/u.test(frame),
+    () => ui.vt.waitForRender(), 'the current provider directory is painted')
+  await clickPainted(ui, 'Search [/]', ui.vt.getViewport().length - 1)
+  await settingsKey(ui, 'fast')
+  await clickPainted(ui, 'Done [Enter]', ui.vt.getViewport().length - 1)
+  assert.match(ui.vt.getViewport().join('\n'), /Fast/u, 'pointer-opened Search filters the painted directory')
+  await clickPainted(ui, 'Fast')
+  assert.equal(calls.length, 0, 'Root and directory clicks stage only; neither section mutates before Save')
+  await clickPainted(ui, 'Back [Esc]')
+  await clickPainted(ui, 'Save [S]')
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Limits: Verified/u.test(frame) && /Selection: Verified/u.test(frame),
+    () => ui.vt.waitForRender(), 'the painted Root Save settles both official sections')
 
-  // ... and the NEXT Session samples NO policy. The route FIELDS stay declared
-  // (DSH 0.2.2 made that static, which is not a capability regression): without
-  // a policy, explicit selection is limited to the parent route.
-  const after = await createSession('r3-toggle-after')
-  assert.deepEqual(sampledPolicy(after.agent), [],
-    'a Session composed after the UI disable samples no model-selection policy')
-  assert.equal(declaresRoutes(after.agent), true,
-    'the shipped declaration keeps the route fields; the setting decides the policy')
-  assert.deepEqual(sampledPolicy(before.agent), [{ provider: 'alpha', model: 'fast' }],
-    'the already-composed Session is never hot-rewritten')
+  assert.deepEqual(calls, [
+    { ns: 'subagent', ops: [
+      { op: 'set', path: ['maxDepth'], value: 0 },
+      { op: 'unset', path: ['maxActiveSubagents'] },
+    ], revision: openedLimits.revision },
+    { ns: 'subagent-model-selection-settings', ops: [
+      { op: 'set', path: ['allowedModels'], value: [] },
+    ], revision: openedSelection.revision },
+  ])
+  assert.deepEqual(readySection(port.subagentLimits.read()).effective, { maxDepth: 0, maxActiveSubagents: 8 })
+  assert.deepEqual(plane.userConfig('subagent'), { maxDepth: 0, maxActiveSubagents: 8 })
+  assert.deepEqual(readySection(port.subagentModelSelection.read()).effective, { enabled: false, allowedModels: [] })
+  assert.deepEqual(plane.userConfig('subagent-model-selection-settings'), { enabled: false, allowedModels: [] })
 
-  // THE REVERSE TRIP through the SAME UI: enable again (the saved route survived
-  // the disable, so this needs no allowlist detour), and a NEW Session samples
-  // the route fields again.
-  ui.vt.sendInput('\r') // reopen the settled row's choice
+  // Pointer-only exit: a second numeric edit is kept dirty until Back opens the
+  // painted question, and only the explicit Discard returns to the Agent rows.
+  await clickPainted(ui, 'Maximum recursion depth')
+  await settingsKey(ui, '\x15')
+  await settingsKey(ui, '1')
+  await clickPainted(ui, 'Apply [Enter]')
+  await clickPainted(ui, 'Back [Esc]')
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Discard unsaved changes\? y\/N/u.test(frame),
+    () => ui.vt.waitForRender(), 'Back exposes the dirty decision')
+  await clickPainted(ui, 'Discard [Y]')
+  assert.match(ui.vt.getViewport().join('\n'), /Settings · Agent · Rows/u)
+  assert.equal(calls.length, 2, 'Discard does not issue another official mutation')
+  assert.deepEqual(plane.userConfig('subagent'), { maxDepth: 0, maxActiveSubagents: 8 })
+})
+
+test('a Root pointer Save keeps an official partial result visible and lets the user Refresh and exit', async t => {
+  const life = testLifecycle(t)
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
+  await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(Loader)
+  const route = [{ provider: 'alpha', model: 'fast' }]
+  const plane = await mountSubagentSectionPlane(ctx, life.tempDir('subagent-pointer-partial-plane-'), {
+    enabled: false, allowedModels: route,
+    limits: { maxDepth: 1, maxActiveSubagents: 8 },
+    homeLimits: { maxDepth: 4, maxActiveSubagents: 8 },
+  })
+  const port = new DirectConfigPort(ctx, undefined, () => undefined)
+  const { calls } = recordOfficialSubagentMutations(ctx, t)
+  const openedLimits = readySection(port.subagentLimits.read())
+  const openedSelection = readySection(port.subagentModelSelection.read())
+  const ui = mountSettingsUi(port)
+  life.defer(() => ui.dispose())
+  await openSubagentSettings(ui)
+
+  await selectSubagentField(ui, 'Enabled')
+  await settingsKey(ui, '\r')
+  await stageSubagentNumber(ui, 'Maximum recursion depth', '0')
+  assert.equal(calls.length, 0, 'pointer Save remains the first Host mutation')
+  await clickPainted(ui, 'Save [S]')
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Limits: Outcome unconfirmed/u.test(frame) && /Selection: Verified/u.test(frame),
+    () => ui.vt.waitForRender(), 'the Root bar must show each official section result independently')
+  assert.deepEqual(calls, [
+    { ns: 'subagent', ops: [{ op: 'set', path: ['maxDepth'], value: 0 }], revision: openedLimits.revision },
+    { ns: 'subagent-model-selection-settings', ops: [{ op: 'set', path: ['enabled'], value: true }], revision: openedSelection.revision },
+  ])
+  assert.equal(plane.userConfig('subagent'), undefined, 'the home overlay leaves Limits unpersisted')
+  assert.deepEqual(plane.userConfig('subagent-model-selection-settings'), { enabled: true, allowedModels: route },
+    'the independent Selection write reaches the real profile despite the Limits refusal')
+  assert.deepEqual(readySection(port.subagentLimits.read()).effective, { maxDepth: 4, maxActiveSubagents: 8 })
+  assert.deepEqual(readySection(port.subagentModelSelection.read()).effective, { enabled: true, allowedModels: route })
+
+  await clickPainted(ui, 'Refresh [R]')
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Discard unsaved changes\? y\/N/u.test(frame),
+    () => ui.vt.waitForRender(), 'Refresh from a partial Save requests explicit draft discard')
+  // The second action is on the same cell; wait past PiTui's 500ms double-click window so it is a deliberate confirmation.
+  await new Promise<void>(resolve => setTimeout(resolve, 550))
+  await clickPainted(ui, 'Discard [Y]')
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Limits · Ready/u.test(frame) && /Model selection · Ready/u.test(frame),
+    () => ui.vt.waitForRender(), 'the painted Refresh action re-reads both official sections')
+  await clickPainted(ui, 'Back [Esc]')
+  assert.match(ui.vt.getViewport().join('\n'), /Settings · Agent · Rows/u, 'Back exits to the Agent rows after refresh')
+  assert.equal(calls.length, 2, 'discard and refresh never replay either official mutation')
+  assert.equal(plane.userConfig('subagent'), undefined)
+})
+
+test('Subagent Reset sends official unset at the captured revision and verifies effective inheritance with USER materialization', async t => {
+  const life = testLifecycle(t)
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
+  await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(Loader)
+  const baseRoutes = [{ provider: 'alpha', model: 'fast' }]
+  const plane = await mountSubagentSectionPlane(ctx, life.tempDir('subagent-reset-plane-'), {
+    enabled: false, allowedModels: baseRoutes,
+    limits: { maxDepth: 3, maxActiveSubagents: 8 },
+    userSelection: { enabled: true, allowedModels: [{ provider: 'saved', model: 'unlisted' }] },
+    userLimits: { maxDepth: 5, maxActiveSubagents: 2 },
+  })
+  const port = new DirectConfigPort(ctx, undefined, () => undefined)
+  const { official, calls } = recordOfficialSubagentMutations(ctx, t)
+  const ui = mountSettingsUi(port)
+  life.defer(() => ui.dispose())
+  await openSubagentSettings(ui)
+  const opened = readySection(port.subagentModelSelection.read())
+  assert.deepEqual(opened.overridden, { enabled: true, allowedModels: true })
+  await selectSubagentField(ui, 'Allowed models')
+  await settingsKey(ui, 'x')
+  assert.equal(calls.length, 0, 'Reset stages an operation rather than committing it')
+  assert.deepEqual(readySection(port.subagentModelSelection.read()).effective.allowedModels, [{ provider: 'saved', model: 'unlisted' }])
+  await settingsKey(ui, 's')
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Selection: Verified/u.test(frame),
+    () => ui.vt.waitForRender(), 'an accepted unset with authoritative readback must verify')
+  assert.deepEqual(calls, [{ ns: 'subagent-model-selection-settings', ops: [{ op: 'unset', path: ['allowedModels'] }], revision: opened.revision }])
+  const readback = readySection(port.subagentModelSelection.read())
+  assert.deepEqual(readback.effective, { enabled: true, allowedModels: baseRoutes })
+  assert.deepEqual(readback.overridden, { enabled: true, allowedModels: false }, 'Source compares effective values with inherited values')
+  const descriptor = official.describe().find(row => row.ns === 'subagent-model-selection-settings')
+  assert.deepEqual(descriptor?.user, { enabled: true, allowedModels: baseRoutes }, 'official USER readback may materialize the inherited array')
+  assert.deepEqual(plane.userConfig('subagent-model-selection-settings'), descriptor?.user)
+  assert.deepEqual(readySection(port.subagentLimits.read()).effective, { maxDepth: 5, maxActiveSubagents: 2 })
+
+  const limitsOpened = readySection(port.subagentLimits.read())
+  await selectSubagentField(ui, 'Maximum recursion depth')
+  await settingsKey(ui, 'x')
+  await settingsKey(ui, 's')
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Limits: Verified/u.test(frame),
+    () => ui.vt.waitForRender(), 'the limit Reset must verify through the same page')
+  assert.deepEqual(calls[1], { ns: 'subagent', ops: [{ op: 'unset', path: ['maxDepth'] }], revision: limitsOpened.revision })
+  assert.deepEqual(readySection(port.subagentLimits.read()).effective, { maxDepth: 3, maxActiveSubagents: 2 }, 'Reset preserves the sibling capacity override')
+  assert.deepEqual(plane.userConfig('subagent'), { maxDepth: 3, maxActiveSubagents: 2 })
+  assert.deepEqual(readySection(port.subagentModelSelection.read()).effective, readback.effective)
+
+  const countBeforeInvalid = calls.length
+  await stageSubagentNumber(ui, 'Subagent parallelism limit', '0')
+  await settingsKey(ui, 's')
+  assert.match(ui.vt.getViewport().join('\n'), /safe integer from 1/u)
+  assert.equal(calls.length, countBeforeInvalid, 'capacity zero cannot cross the official mutation boundary')
+  await stageSubagentNumber(ui, 'Subagent parallelism limit', String(Number.MAX_SAFE_INTEGER))
+  await settingsKey(ui, 's')
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Limits: Verified/u.test(frame),
+    () => ui.vt.waitForRender(), 'a safe capacity endpoint must verify')
+  assert.equal(readySection(port.subagentLimits.read()).effective.maxActiveSubagents, Number.MAX_SAFE_INTEGER)
+})
+
+test('a stale Subagent editor cannot overwrite a newer official profile revision', async t => {
+  const life = testLifecycle(t)
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
+  await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(Loader)
+  const plane = await mountSubagentSectionPlane(ctx, life.tempDir('subagent-conflict-plane-'), { enabled: false, allowedModels: [] })
+  const port = new DirectConfigPort(ctx, undefined, () => undefined)
+  const otherEditor = new DirectConfigPort(ctx, undefined, () => undefined)
+  const { calls } = recordOfficialSubagentMutations(ctx, t)
+  const ui = mountSettingsUi(port)
+  life.defer(() => ui.dispose())
+  await openSubagentSettings(ui)
+  const opened = readySection(port.subagentLimits.read())
+  await stageSubagentNumber(ui, 'Maximum recursion depth', '2')
+  // TuiApp owns a process-global terminal slot, so the second editor here is
+  // a separate production Direct port over the same real Settings service.
+  const newer = readySection(otherEditor.subagentLimits.read())
+  assert.deepEqual(await otherEditor.subagentLimits.mutate({ maxDepth: { kind: 'set', value: 0 } }, newer.revision, newer.generation), { kind: 'accepted' })
+  const landedCalls = calls.length
+  ui.app.requestRender()
   await ui.vt.waitForRender()
-  ui.vt.sendInput('\x1b[B') // off -> on
-  await ui.vt.waitForRender()
-  ui.vt.sendInput('\r')
-  await waitForFrame(
-    () => ui.vt.getViewport().join('\n'),
-    frame => /Status\s+Verified/u.test(frame) && /on\b/u.test(frame),
-    () => ui.vt.waitForRender(),
-    'the re-enable Confirm must settle as Verified',
-  )
-  assert.deepEqual(port.subagentModelSelection.get(),
-    { enabled: true, allowedModels: [{ provider: 'alpha', model: 'fast' }] },
-    're-enabling kept the saved route and flipped only enabled')
-  const reEnabled = await createSession('r3-toggle-reenabled')
-  assert.deepEqual(sampledPolicy(reEnabled.agent), [{ provider: 'alpha', model: 'fast' }],
-    'a Session composed after the UI re-enable samples the saved allowlist again')
+  assert.match(ui.vt.getViewport().join('\n'), /Last-known · read-only/u)
+  await settingsKey(ui, 's')
+  assert.equal(calls.length, landedCalls, 'the stale painted editor dispatches no save')
+  const refused = await port.subagentLimits.mutate({ maxDepth: { kind: 'set', value: 2 } }, opened.revision, opened.generation)
+  assert.equal(refused.kind, 'conflict', 'the official SettingsForms CAS also refuses direct stale dispatch')
+  assert.deepEqual(calls.at(-1), { ns: 'subagent', ops: [{ op: 'set', path: ['maxDepth'], value: 2 }], revision: opened.revision })
+  assert.equal(readySection(port.subagentLimits.read()).effective.maxDepth, 0)
+  assert.deepEqual(plane.userConfig('subagent'), { maxDepth: 0, maxActiveSubagents: 8 })
+})
+
+test('a Subagent profile write blocked by a temporary home overlay stays unverified and preserves the document', async t => {
+  const life = testLifecycle(t)
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
+  await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(Loader)
+  const plane = await mountSubagentSectionPlane(ctx, life.tempDir('subagent-overlay-plane-'), {
+    enabled: false, allowedModels: [], homeLimits: { maxDepth: 4, maxActiveSubagents: 8 },
+  })
+  const port = new DirectConfigPort(ctx, undefined, () => undefined)
+  const { calls } = recordOfficialSubagentMutations(ctx, t)
+  const ui = mountSettingsUi(port)
+  life.defer(() => ui.dispose())
+  await openSubagentSettings(ui)
+  const opened = readySection(port.subagentLimits.read())
+  assert.equal(opened.effective.maxDepth, 4)
+  await stageSubagentNumber(ui, 'Maximum recursion depth', '0')
+  await settingsKey(ui, 's')
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Limits: Outcome unconfirmed/u.test(frame),
+    () => ui.vt.waitForRender(), 'the official overlay refusal must never paint Verified')
+  assert.deepEqual(calls, [{ ns: 'subagent', ops: [{ op: 'set', path: ['maxDepth'], value: 0 }], revision: opened.revision }])
+  assert.equal(readySection(port.subagentLimits.read()).effective.maxDepth, 4)
+  assert.equal(plane.userConfig('subagent'), undefined, 'the ConfigEditor refusal did not create a profile override')
+  assert.match(ui.vt.getViewport().join('\n'), /home patch or command-line overlay/u)
+  assert.doesNotMatch(ui.vt.getViewport().join('\n'), /Limits: Verified/u)
 })
 
 test('a real Settings Confirm drives the Host registry and the next model request', async t => {

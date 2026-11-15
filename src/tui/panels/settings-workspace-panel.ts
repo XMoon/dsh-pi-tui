@@ -103,8 +103,7 @@ export type SettingsWorkspaceRowId =
   | 'web-settings'
   | 'approval'
   | 'default-permission'
-  | 'subagent-model-allowlist'
-  | 'subagent-model-selection'
+  | 'subagent-settings'
   | 'local-shell-sandbox'
   | 'footer-mode'
   | 'footer-configurator'
@@ -140,7 +139,7 @@ export type SettingsWorkspaceWritableField =
   | 'busy-enter' | 'git-attribution'
   | 'home-end-keys' | 'fullscreen' | 'wheel-scroll-lines'
   | 'notification-mode' | 'notification-method' | 'terminal-progress'
-  | 'approval' | 'default-permission' | 'subagent-model-selection' | 'local-shell-sandbox'
+  | 'approval' | 'default-permission' | 'local-shell-sandbox'
   | 'footer-mode'
   // C2-R6: a live extension registration's own field identity. The command
   // layer routes it to the extension settings registry; it never reaches a
@@ -218,7 +217,7 @@ export interface SettingsWorkspaceRow {
    *  Search / Fetch settings page). It is a presentation seam only — no
    *  document field, no writer, no second lease. A row without it never has a
    *  specialist page. */
-  readonly specialist?: 'subagent-allowlist' | 'web-settings' | 'footer-configurator' | 'keybindings' | 'mcp-servers'
+  readonly specialist?: 'subagent-settings' | 'web-settings' | 'footer-configurator' | 'keybindings' | 'mcp-servers'
   /** Whether the row's specialist page may be opened RIGHT NOW. Absent = yes.
    *  A non-current authority (a stale/unavailable backend) paints the row and
    *  its last-known facts but offers no Manage action, because the page could
@@ -279,13 +278,7 @@ export interface SettingsWorkspaceCommitRequest {
 export interface SettingsWorkspaceCommitOutcome {
   readonly outcome: 'verified' | 'not-saved' | 'unverified' | 'indeterminate'
   readonly reason?: string
-  /** C2-R3: the ONE typed follow-up navigation a refusal may carry (the
-   *  subagent toggle refused because the allowlist is empty points the user at
-   *  the allowlist row). It is a one-shot UI instruction returned ONLY with a
-   *  `not-saved` outcome; the panel applies it while this request is still the
-   *  live one. It is not a second settings authority and it is never derived
-   *  from the reason text. */
-  readonly followUpRowId?: 'subagent-model-allowlist'
+
 }
 
 /** The row's commit status as the Detail pane paints it: the status WORD, its
@@ -378,15 +371,9 @@ export interface SettingsWorkspacePanelIntents {
   ) => SettingsAuthPage | undefined
   /** The lazily built Account direct page. */
   readonly createAccountPage?: (initial: AccountInitialView) => SettingsAuthPage | undefined
-  /**
-   * C2-R3: the ONE embedded specialist page factory, activated ONLY by an
-   * explicit Manage/Enter on a row that carries `specialist`. It returns the
-   * EXISTING subagent allowlist picker instance, which is mounted in this
-   * workspace's body under the SAME screen lease (no second alt-screen).
-   * `done` returns to the Agent rows; `onAuthoritativeChange` asks the root
-   * for a fresh snapshot of that row.
-   */
-  readonly createSubagentAllowlistPicker?: (
+  /** FR5-A: one staged page for both official subagent Settings sections,
+   * mounted in this workspace body under the SAME screen lease. */
+  readonly createSubagentSettingsPage?: (
     done: () => void,
     onAuthoritativeChange: () => void,
   ) => EmbeddedSpecialistPage | undefined
@@ -791,8 +778,7 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
     || id === 'web-settings'
     || id === 'approval'
     || id === 'default-permission'
-    || id === 'subagent-model-allowlist'
-    || id === 'subagent-model-selection'
+    || id === 'subagent-settings'
     || id === 'local-shell-sandbox'
     || id === 'footer-mode'
     || id === 'footer-configurator'
@@ -3227,8 +3213,8 @@ export class SettingsWorkspacePanel implements Component {
     specialist: NonNullable<SettingsWorkspaceRow['specialist']>,
   ): { readonly label: string } | undefined {
     switch (specialist) {
-      case 'subagent-allowlist':
-        return this.intents.createSubagentAllowlistPicker === undefined ? undefined : { label: 'Manage allowed models…' }
+      case 'subagent-settings':
+        return this.intents.createSubagentSettingsPage === undefined ? undefined : { label: 'Configure subagent settings…' }
       case 'web-settings':
         return this.intents.createWebSettingsPage === undefined ? undefined : { label: 'Configure Web…' }
       case 'footer-configurator':
@@ -3723,8 +3709,8 @@ export class SettingsWorkspacePanel implements Component {
     // (its list or its detail) above the single Action Bar. The two C2-R5 pages
     // may be mounted with ZERO content rows (bar-only) because a command
     // deeplink must still land on them and their own bar keeps Esc reachable.
-    const floor = row.specialist === 'subagent-allowlist'
-      ? 2
+    const floor = row.specialist === 'subagent-settings'
+      ? 1
       : row.specialist === 'web-settings' || row.specialist === 'mcp-servers'
         ? 1
         : 0
@@ -3740,15 +3726,15 @@ export class SettingsWorkspacePanel implements Component {
       // category rail like every other Settings level, instead of first landing
       // on a Detail summary the user never asked for. The other embedded pages
       // keep their documented `Detail → row` ladder.
-      if ((row.specialist === 'footer-configurator' || row.specialist === 'keybindings')
+      if ((row.specialist === 'footer-configurator' || row.specialist === 'keybindings' || row.specialist === 'subagent-settings')
         && this.focus === 'detail') {
         this.leaveDetailTo('rows')
       }
     }
     const changed = (): void => { this.refreshSpecialistSummary() }
     switch (row.specialist) {
-      case 'subagent-allowlist':
-        page = this.intents.createSubagentAllowlistPicker?.(done, changed)
+      case 'subagent-settings':
+        page = this.intents.createSubagentSettingsPage?.(done, changed)
         break
       case 'web-settings':
         page = this.intents.createWebSettingsPage?.(done, (initial) => {
@@ -5055,16 +5041,7 @@ export class SettingsWorkspacePanel implements Component {
     const phase = this.editPhase
     if (phase.kind !== 'pending' || phase.requestId !== requestId) return
     this.settle(phase.field, phase.attempted, outcome, phase.registrationToken)
-    // C2-R3: the ONE typed follow-up a refusal may carry. It is applied only
-    // after the settlement is committed above and only while this request is
-    // still the live one, so a late or superseded result can never move the
-    // user. Navigation only — never a write.
-    const followUp = outcome.followUpRowId
-    if (followUp === undefined || outcome.outcome !== 'not-saved') return
-    const current = this.editPhase
-    if (current.kind !== 'settled' || current.attempted !== phase.attempted) return
-    if (!this.snapshot.rows.some(row => row.id === followUp && row.category === this.categoryId)) return
-    this.selectRow(followUp, 'rows')
+
   }
 
   /** Record a settled outcome and re-read the authorities: the Detail then shows
@@ -5588,6 +5565,10 @@ export class SettingsWorkspacePanel implements Component {
         // (Enter/Right then decide between the Detail, the choice and the
         // row's specialist page).
         this.selectRow(target.id, 'rows')
+        if (target.id === 'subagent-settings') {
+          const row = this.selectedRow()
+          if (row?.specialist === 'subagent-settings') this.openSpecialist(row)
+        }
         return
       }
       case 'about-action': {
