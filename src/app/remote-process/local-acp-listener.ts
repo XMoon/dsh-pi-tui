@@ -22,6 +22,7 @@
  * @module app/remote-process/local-acp-listener
  */
 
+import { constants as bufferConstants } from 'node:buffer'
 import { chmodSync, constants, closeSync, linkSync, lstatSync, mkdirSync, openSync, rmdirSync, unlinkSync } from 'node:fs'
 import { connect as netConnect, createServer, type Server, type Socket } from 'node:net'
 import { join } from 'node:path'
@@ -39,6 +40,7 @@ import { runDetached } from '../../runtime/process/tasks.ts'
 import {
   AcpSessionViewRegistry,
   LocalAcpViewError,
+  type AcpImageLimits,
   type ConnectionViewState,
   type HostAcpSessionAccess,
 } from './local-acp-session-view.ts'
@@ -56,6 +58,55 @@ const MAX_INPUT_FRAME_BYTES = 1024 * 1024
 const MAX_INPUT_UNCONSUMED_BYTES = 2 * 1024 * 1024
 /** At most this many requests may be dispatched concurrently on ONE connection. */
 const MAX_PENDING_REQUESTS = 8
+/** Bytes reserved per image block for JSON metadata around its encoded data. */
+const IMAGE_METADATA_BYTES = 65_536
+/** Bytes reserved for the JSON-RPC envelope and its trailing newline. */
+const JSON_ENVELOPE_BYTES = 4_096
+
+/** The per-connection input bounds; image limits widen only this connection. */
+interface ConnectionInputBounds {
+  readonly maxFrameBytes: number
+  readonly maxUnconsumedBytes: number
+}
+
+/** The legacy text-only bounds every connection uses until it negotiates image. */
+const TEXT_ONLY_BOUNDS: ConnectionInputBounds = {
+  maxFrameBytes: MAX_INPUT_FRAME_BYTES,
+  maxUnconsumedBytes: MAX_INPUT_UNCONSUMED_BYTES,
+}
+
+/**
+ * Derive the bounded input budget of an image-negotiated connection from the
+ * Host's OWN boot-frozen attachment limits. The arithmetic models canonical
+ * base64, one configured count of image metadata allowances, the preserved
+ * text/wire budget and one JSON-RPC envelope. It is not a second image policy:
+ * real count/byte/pixel admission remains the official Attachment Store's.
+ *
+ * @param limits - the exact Host attachment limits, or undefined without a store.
+ * @returns the bounds, or undefined when a safe bound cannot be represented.
+ */
+export function deriveImageInputBounds(limits: AcpImageLimits | undefined): ConnectionInputBounds | undefined {
+  if (limits === undefined) return undefined
+  const { maxMessageImageBytes, maxImagesPerMessage } = limits
+  if (!Number.isSafeInteger(maxMessageImageBytes) || maxMessageImageBytes <= 0
+    || !Number.isSafeInteger(maxImagesPerMessage) || maxImagesPerMessage <= 0
+    || !Number.isSafeInteger(limits.maxImageBytes) || limits.maxImageBytes <= 0) {
+    return undefined
+  }
+  const encoded = 4 * Math.ceil(maxMessageImageBytes / 3)
+  const imageFrameBytes = encoded
+    + MAX_INPUT_FRAME_BYTES
+    + IMAGE_METADATA_BYTES * maxImagesPerMessage
+    + JSON_ENVELOPE_BYTES
+  const maxFrameBytes = Math.max(MAX_INPUT_FRAME_BYTES, imageFrameBytes)
+  const maxUnconsumedBytes = maxFrameBytes + MAX_INPUT_FRAME_BYTES
+  if (!Number.isSafeInteger(encoded) || !Number.isSafeInteger(imageFrameBytes) || !Number.isSafeInteger(maxFrameBytes)
+    || !Number.isSafeInteger(maxUnconsumedBytes)
+    || maxFrameBytes > bufferConstants.MAX_LENGTH || maxUnconsumedBytes > bufferConstants.MAX_LENGTH) {
+    return undefined
+  }
+  return { maxFrameBytes, maxUnconsumedBytes }
+}
 /** A single outbound ACP frame may not exceed this many bytes. */
 const MAX_OUTPUT_FRAME_BYTES = 256 * 1024
 /** Total bytes buffered in the socket awaiting flush on ONE connection. */
@@ -168,6 +219,10 @@ interface ConnectionState {
   initialized: boolean
   pendingRequests: number
   closed: boolean
+  /** Whether THIS connection negotiated inline image prompts during its initialize. */
+  imageEnabled: boolean
+  /** The input bounds derived from the Host image limits; text-only until negotiated. */
+  inputBounds: ConnectionInputBounds
   /** The connection-scoped Session View state; present only when Session View is installed. */
   view?: ConnectionViewState
 }
@@ -193,19 +248,22 @@ function rejectSessionNotReady(): never {
   )
 }
 
-/** Build the bounded input side: raw UTF-8 byte lines under frame/queue caps. */
-function createBoundedInput(
+/** Build the bounded input side: raw UTF-8 byte lines under the connection's current caps. */
+/** @internal The owner test feeds real Unix-socket bytes while holding the stream reader. */
+export function createBoundedInput(
   socket: Socket,
+  state: ConnectionState,
   fail: (code: string) => void,
 ): ReadableStream<Uint8Array> {
+  /** Fragments of the current, not-yet-terminated line. */
+  const line: Buffer[] = []
+  let lineBytes = 0
   const queue: Uint8Array[] = []
-  let pending: Buffer = Buffer.alloc(0)
+  let queuedByteCount = 0
   let controller: ReadableStreamDefaultController<Uint8Array> | undefined
   let finished = false
   let controllerClosed = false
   let paused = false
-
-  const queuedBytes = (): number => queue.reduce((total, frame) => total + frame.byteLength, 0)
 
   const closeController = (): void => {
     if (controllerClosed || controller === undefined) return
@@ -217,12 +275,20 @@ function createBoundedInput(
     }
   }
 
+  /** The stream's OWN already-enqueued bytes, measured against its fixed high-water mark. */
+  const streamBufferedBytes = (): number => controller === undefined
+    ? 0
+    : Math.max(0, MAX_INPUT_FRAME_BYTES - (controller.desiredSize ?? MAX_INPUT_FRAME_BYTES))
+
   const pump = (): void => {
     if (controller === undefined) return
     while (queue.length > 0) {
       if ((controller.desiredSize ?? 1) <= 0) break
       const frame = queue.shift()
-      if (frame !== undefined) controller.enqueue(frame)
+      if (frame !== undefined) {
+        queuedByteCount -= frame.byteLength
+        controller.enqueue(frame)
+      }
     }
     if (queue.length > 0) {
       if (!paused) {
@@ -238,39 +304,66 @@ function createBoundedInput(
     if (finished) closeController()
   }
 
-  const onData = (chunk: Buffer): void => {
-    if (finished) return
-    pending = pending.length === 0 ? chunk : Buffer.concat([pending, chunk])
-    for (;;) {
-      const newline = pending.indexOf(NEWLINE)
-      if (newline === -1) break
-      if (newline > MAX_INPUT_FRAME_BYTES) {
-        finished = true
-        detach()
-        fail('LOCAL_ACP_INPUT_FRAME_TOO_LARGE')
-        return
-      }
-      // Copy line + newline out of the shared buffer so later `subarray` views
-      // never alias a buffer that is still being appended to.
-      const frame = Uint8Array.prototype.slice.call(pending, 0, newline + 1) as Uint8Array
-      pending = pending.subarray(newline + 1)
-      queue.push(frame)
-    }
-    if (pending.length > MAX_INPUT_FRAME_BYTES) {
-      finished = true
-      detach()
-      fail('LOCAL_ACP_INPUT_FRAME_TOO_LARGE')
+  const detach = (): void => {
+    socket.off('data', onData)
+    socket.off('end', onEnd)
+    socket.off('close', onClose)
+    socket.off('error', onError)
+  }
+
+  const failConnection = (code: string): void => {
+    finished = true
+    detach()
+    fail(code)
+  }
+
+  const completeLine = (end: Buffer): void => {
+    // The established per-frame cap excludes the terminating newline.
+    if (lineBytes - 1 > state.inputBounds.maxFrameBytes) {
+      failConnection('LOCAL_ACP_INPUT_FRAME_TOO_LARGE')
       return
     }
-    // Total unconsumed bytes across the partial line, the frame queue and the
-    // stream's own already-enqueued (backpressured) buffer stay under the cap.
-    const streamBuffered = controller === undefined
-      ? 0
-      : Math.max(0, MAX_INPUT_FRAME_BYTES - (controller.desiredSize ?? MAX_INPUT_FRAME_BYTES))
-    if (queuedBytes() + pending.length + streamBuffered > MAX_INPUT_UNCONSUMED_BYTES) {
-      finished = true
-      detach()
-      fail('LOCAL_ACP_INPUT_OVERFLOW')
+    line.push(end)
+    // ONE concatenation per complete frame, only when the line spanned chunks;
+    // a single-chunk line is copied so no socket pool buffer is retained.
+    const frame = line.length === 1
+      ? Uint8Array.prototype.slice.call(line[0]) as Uint8Array
+      : Buffer.concat(line)
+    line.length = 0
+    lineBytes = 0
+    queue.push(frame)
+    queuedByteCount += frame.byteLength
+  }
+
+  /**
+   * Scan one raw chunk by UTF-8 bytes. Every byte is forwarded verbatim; a
+   * newline completes exactly one NDJSON frame, so truncated or multi-byte
+   * characters stay intact across chunks.
+   */
+  const onData = (chunk: Buffer): void => {
+    if (finished) return
+    let offset = 0
+    while (offset < chunk.length) {
+      const newline = chunk.indexOf(NEWLINE, offset)
+      if (newline === -1) {
+        const rest = chunk.subarray(offset)
+        line.push(rest)
+        lineBytes += rest.length
+        break
+      }
+      lineBytes += newline + 1 - offset
+      completeLine(chunk.subarray(offset, newline + 1))
+      if (finished) return
+      offset = newline + 1
+    }
+    if (lineBytes > state.inputBounds.maxFrameBytes) {
+      failConnection('LOCAL_ACP_INPUT_FRAME_TOO_LARGE')
+      return
+    }
+    // Total unconsumed bytes across the partial line, the complete-frame queue
+    // and the stream's own already-enqueued buffer stay under the dynamic cap.
+    if (queuedByteCount + lineBytes + streamBufferedBytes() > state.inputBounds.maxUnconsumedBytes) {
+      failConnection('LOCAL_ACP_INPUT_OVERFLOW')
       return
     }
     pump()
@@ -291,13 +384,6 @@ function createBoundedInput(
   const onError = (): void => {
     finished = true
     closeController()
-  }
-
-  const detach = (): void => {
-    socket.off('data', onData)
-    socket.off('end', onEnd)
-    socket.off('close', onClose)
-    socket.off('error', onError)
   }
 
   return new ReadableStream<Uint8Array>({
@@ -358,6 +444,7 @@ function buildAgentApp(
   fail: (code: string) => void,
 ) {
   const app = agent({ name: AGENT_NAME })
+  let initializeComplete = false
 
   const beginRequest = (): void => {
     state.pendingRequests += 1
@@ -390,18 +477,30 @@ function buildAgentApp(
         )
       }
       // Commit the initialized state before the response leaves the handler so
-      // a pipelined duplicate initialize is rejected deterministically.
+      // a pipelined duplicate initialize is rejected deterministically. The
+      // capability itself is resolved ONCE, before the response: the Host's own
+      // exact default route and attachment store decide it, and the connection
+      // keeps this frozen result for every later session/prompt.
       state.initialized = true
+      if (context.sessionAccess !== undefined && state.view !== undefined) {
+        const imageEnabled = await context.sessionAccess.supportsImagePrompts()
+        const bounds = imageEnabled ? deriveImageInputBounds(context.sessionAccess.imageLimits()) : undefined
+        if (bounds !== undefined) {
+          state.imageEnabled = true
+          state.inputBounds = bounds
+        }
+      }
+      initializeComplete = true
       return {
         protocolVersion: PROTOCOL_VERSION,
         agentInfo: { name: AGENT_NAME, title: AGENT_NAME, version: context.bundleVersion },
         agentCapabilities: {
           loadSession: false,
-          promptCapabilities: { image: false, audio: false, embeddedContext: false },
+          promptCapabilities: { image: state.imageEnabled, audio: false, embeddedContext: false },
           mcpCapabilities: { http: false, sse: false },
           // Advertise the shared-Session capability ONLY when this Host really
-          // installed the connection-scoped View. Never claim prompt, image or
-          // MCP capability; `session/list`/`loadSession` stay unavailable.
+          // installed the connection-scoped View. `session/list`/`loadSession`
+          // stay unavailable, and image follows the Host capability above.
           sessionCapabilities: context.sessionAccess !== undefined ? { resume: {}, close: {} } : {},
         },
         authMethods: [],
@@ -432,7 +531,7 @@ function buildAgentApp(
     // SDK's STANDARD schema (typed params), and any View rejection is mapped
     // onto a JSON-RPC RequestError that keeps the stable data code.
     const requireInitialized = (): void => {
-      if (!state.initialized) {
+      if (!state.initialized || !initializeComplete) {
         throw new RequestError(
           -32042,
           'ACP Session operations require a completed initialize',
@@ -485,7 +584,7 @@ function buildAgentApp(
       beginRequest()
       try {
         requireInitialized()
-        return await views.promptSession(view, access, params, signal, async update => {
+        return await views.promptSession(view, access, params, signal, state.imageEnabled, async update => {
           await client.notify(methods.client.session.update, { sessionId: params.sessionId, update })
         }, async (permissionParams, options) => {
           return await client.request(methods.client.session.requestPermission, {
@@ -540,6 +639,8 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
     initialized: false,
     pendingRequests: 0,
     closed: false,
+    imageEnabled: false,
+    inputBounds: TEXT_ONLY_BOUNDS,
     ...(view === undefined ? {} : { view }),
   }
   context.connectionStates.set(socket, state)
@@ -584,7 +685,7 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
   })
   socket.on('close', teardown)
 
-  const input = createBoundedInput(socket, fail)
+  const input = createBoundedInput(socket, state, fail)
   const output = createBoundedOutput(socket, fail)
   const app = buildAgentApp(state, view, context, fail)
   const stream = ndJsonStream(output, input)

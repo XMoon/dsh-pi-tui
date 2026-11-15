@@ -22,6 +22,7 @@ import {
   LocalAcpViewError,
   type AcpCreateSessionOutcome,
   type AcpCreateWorkspaceOutcome,
+  type AcpImageLimits,
   type AcpPromptFactListener,
   type AcpSessionPromptRequest,
   type HostAcpSessionAccess,
@@ -165,6 +166,9 @@ class FakeAccess implements HostAcpSessionAccess {
     if (this.turnFence === 'stale') return { kind: 'stale' }
     return { kind: 'current', openTurn: this.turnFence.openTurnStartSeq === null ? null : this.turnFence.lastTurn }
   }
+
+  imageLimits(): AcpImageLimits | undefined { return { maxImageBytes: 4, maxImagesPerMessage: 2, maxMessageImageBytes: 8, mediaTypes: ['image/png'] } }
+  supportsImagePrompts(): Promise<boolean> { return Promise.resolve(false) }
 
   observePromptFacts(_listener: AcpPromptFactListener): () => void {
     return () => {}
@@ -592,6 +596,86 @@ test('the production Host pending lookup reads both official inbox lists and rej
   assert.equal(access.pendingMessage('S', agent, session, 'absent'), 'stale', 'the Agent must still drive the exact Session')
 })
 
+test('the Host image facade reads the default and exact live model routes and refuses unknown or stale admission', async () => {
+  const session = { id: 'S-image', header: { cwd: '/w' } }
+  let route: { provider: string; model: string } | undefined = { provider: 'provider', model: 'image' }
+  const agent = { id: session.id, session, model: { current: () => route } }
+  let liveAgent: typeof agent | undefined = agent
+  let liveSession: typeof session | undefined = session
+  const limits = { maxImageBytes: 4, maxImagesPerMessage: 2, maxMessageImageBytes: 8, mediaTypes: ['image/png'] }
+  const dispatched: AcpSessionPromptRequest[] = []
+  const resolved: Array<[string, string]> = []
+  let resolveInfo: (provider: string, model: string) => Promise<{ inputModalities?: readonly string[] }> =
+    async (_provider, model) => model === 'image' ? { inputModalities: ['text', 'image'] } : {}
+  let store: { imageLimits: AcpImageLimits } | undefined = { imageLimits: limits }
+  let defaultRoute: { provider: string; model: string } | undefined = { provider: 'provider', model: 'image' }
+  let defaultModel: { currentSelection: () => typeof route } | undefined = { currentSelection: () => defaultRoute }
+  const llm = { resolveModelInfo: async (provider: string, model: string) => {
+    resolved.push([provider, model])
+    return await resolveInfo(provider, model)
+  } }
+  const context = {
+    reflect: { get(name: string) {
+      if (name === 'workspaceController') return {}
+      if (name === 'sessionController') return { prompt: async (request: AcpSessionPromptRequest) => { dispatched.push(request); return { accepted: true } } }
+      if (name === 'agents') return { get: () => liveAgent }
+      if (name === 'sessions') return { get: () => liveSession }
+      if (name === 'attachments') return store
+      if (name === 'agentDefaultModel') return defaultModel
+      if (name === 'llm') return llm
+      return undefined
+    } },
+  } as unknown as Parameters<typeof createHostAcpSessionAccess>[0]
+  const access = createHostAcpSessionAccess(context)
+  assert.equal(access.imageLimits(), limits)
+  assert.equal(await access.supportsImagePrompts(), true)
+  assert.deepEqual(resolved, [['provider', 'image']])
+  const request: AcpSessionPromptRequest = {
+    requestId: 'image-request', sessionId: session.id, mode: 'queue',
+    content: [{ type: 'image', mediaType: 'image/png', data: 'AQID' }],
+  }
+  assert.deepEqual(await access.prompt(request, new AbortController().signal), { accepted: true })
+  assert.equal(dispatched.length, 1)
+  assert.equal(dispatched[0], request, 'the facade forwards once without persisting or rewriting image bytes')
+
+  route = { provider: 'provider', model: 'text-only' }
+  resolveInfo = async (_provider, model) => model === 'text-only' ? { inputModalities: ['text'] } : {}
+  await assert.rejects(access.prompt(request, new AbortController().signal), (error: unknown) =>
+    (error as { code?: string }).code === 'session/attachment-invalid')
+  assert.equal(dispatched.length, 1)
+
+  route = { provider: 'provider', model: 'unknown' }
+  resolveInfo = async () => ({})
+  await assert.rejects(access.prompt(request, new AbortController().signal), (error: unknown) =>
+    (error as { code?: string }).code === 'session/attachment-invalid')
+  assert.equal(dispatched.length, 1)
+  route = { provider: 'provider', model: 'image' }
+  const gate = deferred<{ inputModalities?: readonly string[] }>()
+  resolveInfo = async () => await gate.promise
+  const stale = access.prompt(request, new AbortController().signal)
+  liveAgent = { ...agent }
+  gate.resolve({ inputModalities: ['image'] })
+  await assert.rejects(stale, (error: unknown) => (error as { code?: string }).code === 'session/attachment-invalid')
+  assert.equal(dispatched.length, 1, 'a new Agent under the same Session id receives no old image request')
+
+  liveAgent = agent
+  const abortGate = deferred<{ inputModalities?: readonly string[] }>()
+  resolveInfo = async () => await abortGate.promise
+  const controller = new AbortController()
+  const aborted = access.prompt(request, controller.signal)
+  controller.abort()
+  abortGate.resolve({ inputModalities: ['image'] })
+  await assert.rejects(aborted, { name: 'AbortError' })
+  assert.equal(dispatched.length, 1)
+
+  store = undefined
+  assert.equal(await createHostAcpSessionAccess(context).supportsImagePrompts(), false)
+  store = { imageLimits: limits }
+  defaultModel = undefined
+  assert.equal(await createHostAcpSessionAccess(context).supportsImagePrompts(), false)
+  liveSession = undefined
+})
+
 test('the production Host access classifier maps official errors to the right create outcome', async () => {
   let workspaceImpl: () => Promise<unknown> = async () => ({ workspace: { workspaceId: 'ws', path: '/w' }, created: true })
   let sessionImpl: () => Promise<unknown> = async () => ({ sessionId: 'S' })
@@ -662,7 +746,7 @@ function promptView(sessionId = 'P1'): {
   notifications: SessionUpdate[]
   permissionRequests: Array<{ params: import('../../src/app/remote-process/local-acp-session-view.ts').AcpRequestPermissionParams; signal?: AbortSignal; respond: (response: import('../../src/app/remote-process/local-acp-session-view.ts').AcpRequestPermissionResponse) => void; fail: (error: unknown) => void }>
   attach: () => Promise<void>
-  start: (text?: string, signal?: AbortSignal) => Promise<{ stopReason: string }>
+  start: (text?: string, signal?: AbortSignal, prompt?: readonly unknown[], imageEnabled?: boolean) => Promise<{ stopReason: string }>
   insert: (rpcId: string, messageId: string, text?: string) => void
   claim: (messageId: string, turn: number, rpcId?: string) => void
   commit: (type: string, data: Record<string, unknown>) => void
@@ -693,8 +777,8 @@ function promptView(sessionId = 'P1'): {
     permissionRequests,
     message,
     attach: async () => { await registry.resumeSession(conn, access, { sessionId, cwd: '/w' }) },
-    start: (text = 'hello', signal = new AbortController().signal) =>
-      registry.promptSession(conn, access, { sessionId, prompt: [{ type: 'text', text }] }, signal, sendUpdate, (params, options) =>
+    start: (text = 'hello', signal = new AbortController().signal, prompt = [{ type: 'text', text }], imageEnabled = false) =>
+      registry.promptSession(conn, access, { sessionId, prompt }, signal, imageEnabled, sendUpdate, (params, options) =>
         new Promise((resolveAsk, rejectAsk) => {
           permissionRequests.push({
             params,
@@ -936,18 +1020,68 @@ test('invalid prompt admission is refused before any Host dispatch', async () =>
     [],
     [{ type: 'text', text: '   ' }],
     [{ type: 'image', mimeType: 'image/png', data: 'AAAA' }],
-    [{ type: 'resource_link', name: 'x', uri: 'file:///x' }],
+    [{ type: 'resource' }],
+    [{ type: 'audio', mimeType: 'audio/wav', data: 'AAAA' }],
+    [{ type: 'unknown' }],
   ]) {
     await assert.rejects(
-      view.registry.promptSession(view.conn, view.access, { sessionId: 'P1', prompt }, signal, async () => {}),
+      view.registry.promptSession(view.conn, view.access, { sessionId: 'P1', prompt }, signal, false, async () => {}),
       isPromptError('LOCAL_ACP_PROMPT_INVALID_CONTENT'),
     )
   }
   await assert.rejects(
-    view.registry.promptSession(view.conn, view.access, { sessionId: 'OTHER', prompt: [{ type: 'text', text: 'x' }] }, signal, async () => {}),
+    view.registry.promptSession(view.conn, view.access, { sessionId: 'OTHER', prompt: [{ type: 'text', text: 'x' }] }, signal, false, async () => {}),
     isPromptError('LOCAL_ACP_VIEW_NOT_OWNED'),
   )
   assert.equal(view.access.promptCalls.length, 0, 'no invalid prompt reaches the Host')
+})
+
+test('resource_link becomes the official ordered text hint and negotiated images keep their position', async () => {
+  const view = promptView()
+  await view.attach()
+  const link = { type: 'resource_link', name: 'a "file"', uri: 'file:///host/private.png' }
+  const prompt = [
+    { type: 'text', text: 'before' },
+    link,
+    { type: 'text', text: 'middle' },
+    { type: 'image', mimeType: 'image/png', data: 'AQID' },
+    { type: 'text', text: 'after' },
+  ]
+  const attempt = view.start('', undefined, prompt, true)
+  const request = view.access.promptCalls[0]!
+  assert.deepEqual(request.content, [
+    { type: 'text', text: `before\n[resource_link name=${JSON.stringify(link.name)} uri=${JSON.stringify(link.uri)}]\nmiddle` },
+    { type: 'image', mediaType: 'image/png', data: 'AQID' },
+    { type: 'text', text: 'after' },
+  ])
+  view.insert(request.requestId, 'm-mixed')
+  view.claim('m-mixed', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-mixed', [{ type: 'text', text: 'accepted' }]))
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
+
+test('an image-only prompt reaches the Host without inserting an empty text block', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start('', undefined, [{ type: 'image', mimeType: 'image/jpeg', data: '/w==' }], true)
+  const request = view.access.promptCalls[0]!
+  assert.deepEqual(request.content, [{ type: 'image', mediaType: 'image/jpeg', data: '/w==' }])
+  view.insert(request.requestId, 'm-image-only')
+  view.claim('m-image-only', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-image-only', [{ type: 'text', text: 'seen' }]))
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
+
+test('an unlisted image MIME is refused even when this connection negotiated image', async () => {
+  const view = promptView()
+  await view.attach()
+  await assert.rejects(
+    view.start('', undefined, [{ type: 'image', mimeType: 'image/svg+xml', data: 'AAAA' }], true),
+    isPromptError('LOCAL_ACP_PROMPT_INVALID_CONTENT'),
+  )
+  assert.equal(view.access.promptCalls.length, 0)
 })
 
 test('a second concurrent prompt is refused and the Host dispatch count stays exactly one', async () => {
@@ -1148,6 +1282,7 @@ test('a failed notification or an over-capacity output queue fails only this Vie
       access,
       { sessionId: 'P2', prompt: [{ type: 'text', text: 'x' }] },
       new AbortController().signal,
+      false,
       async () => { throw new Error('socket gone') },
     )
     const failingRequest = access.promptCalls[0]!

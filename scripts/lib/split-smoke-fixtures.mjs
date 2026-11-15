@@ -109,7 +109,7 @@ export function writeC1WorkFixture(profileDir, workDir, options = {}) {
     '- insert:',
     '    - id: split-process-host-work',
     `      name: '${pathToFileURL(fixturePath).href}'`,
-    `      inject: [llm, tools, jobs, subagents, agents, typertGateway, connection, skills${options.shellPolicyPatches === true ? ', settings' : ''}${options.fileProbe === true ? ', attachments' : ''}${options.webSettingsProbe === true ? ', settings, credentials' : ''}${options.mcpManagerProbe === true ? ', mcpManager' : ''}]`,
+    `      inject: [llm, tools, jobs, subagents, agents, typertGateway, connection, skills${options.shellPolicyPatches === true ? ', settings' : ''}${options.fileProbe === true || options.imageProbe === true ? ', attachments' : ''}${options.imageProbe === true ? ', agentDefaultModel' : ''}${options.webSettingsProbe === true ? ', settings, credentials' : ''}${options.mcpManagerProbe === true ? ', mcpManager' : ''}]`,
     // The default agent route is normally forced to the offline fixture. A case
     // that must exercise the OFFICIAL writable `agent-default-model` profile
     // entry (the sessionless default-model save) sets `keepBaseDefaultModel` so
@@ -122,6 +122,14 @@ export function writeC1WorkFixture(profileDir, workDir, options = {}) {
       '    model: c1',
       '',
     ]),
+    ...(options.imageProbe === true ? [
+      '- id: attachment-local',
+      '  config:',
+      '    maxImageBytes: 2097152',
+      '    maxImagesPerMessage: 4',
+      '    maxMessageImageBytes: 8388608',
+      '',
+    ] : []),
   ]
   const patchPath = join(workDir, 'm4-c1-work.patch.yml')
   writeFileSync(patchPath, rows.join('\n'), { mode: 0o600 })

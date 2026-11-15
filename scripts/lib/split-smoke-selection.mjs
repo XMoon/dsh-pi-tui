@@ -74,6 +74,7 @@ import {
 } from '../smoke/split-process/managed-host-m6-2b.mjs'
 import { runAcpPo3aTurnEvents } from '../smoke/split-process/acp-po3a-turn-events.mjs'
 import { runAcpPo3bCancelApproval } from '../smoke/split-process/acp-po3b-cancel-approval.mjs'
+import { runAcpPo4aContentInput } from '../smoke/split-process/acp-po4a-content-input.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -424,6 +425,13 @@ const CASE_REGISTRY = Object.freeze([
     id: 'acp.po3b-cancel-approval',
     title: 'session/cancel and session/close scope to the exact shared-host turn (queued removal, exact running user-abort, mixed fail-closed) and the approval waterfall routes ACP-owned turns to the same connection only',
     run: runAcpPo3bCancelApproval,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    defaultLane: false,
+    id: 'acp.po4a-content-input',
+    title: 'one real Host and TUI admit standard ACP resource_link and image prompts, verify durable image refs, carry a fragmented frame above 1 MiB, reject invalid inputs and preserve the TUI turn on scoped cancellation',
+    run: runAcpPo4aContentInput,
   }),
 ])
 

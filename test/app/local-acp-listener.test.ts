@@ -22,6 +22,8 @@ import test, { type TestContext } from 'node:test'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import { type LocalScope } from '../../src/app/remote-process/local-scope.ts'
 import {
+  createBoundedInput,
+  deriveImageInputBounds,
   LocalAcpError,
   parseAcpMaxConnections,
   startLocalAcpListener,
@@ -29,6 +31,7 @@ import {
 } from '../../src/app/remote-process/local-acp-listener.ts'
 import {
   AcpSessionViewRegistry,
+  type AcpImageLimits,
   type AcpPromptFactListener,
   type AcpSessionPromptRequest,
   type HostAcpSessionAccess,
@@ -108,6 +111,11 @@ class RawClient {
 
   sendRaw(text: string): void {
     this.socket.write(text)
+  }
+
+  /** Write raw UTF-8 bytes exactly as given (fragmentation/byte-boundary tests). */
+  writeRaw(bytes: Uint8Array): void {
+    this.socket.write(bytes)
   }
 
   /** Stop reading from the kernel so the peer's output bound is exercised. */
@@ -759,7 +767,7 @@ test('a stale PRIVATE bind socket left by SIGKILL is recovered on the next start
 })
 
 /** A minimal in-memory Host Session access that keeps EXACT object identity. */
-function makeFakeAccess(): {
+function makeFakeAccess(options: { readonly imageLimits?: AcpImageLimits; readonly supportsImagePrompts?: () => Promise<boolean> } = {}): {
   access: HostAcpSessionAccess
   seed: (id: string, cwd: string) => LiveAgentViewIdentity
   agentOf: (id: string) => LiveAgentViewIdentity | undefined
@@ -804,6 +812,12 @@ function makeFakeAccess(): {
       },
       currentSession(sessionId: string) {
         return agents.get(sessionId)?.session
+      },
+      imageLimits() {
+        return options.imageLimits
+      },
+      supportsImagePrompts() {
+        return options.supportsImagePrompts?.() ?? Promise.resolve(false)
       },
       async prompt(request: AcpSessionPromptRequest) {
         prompts.push(request)
@@ -986,6 +1000,12 @@ test('session/new carries the authoritative created session id in JSON-RPC error
     currentSession() {
       return undefined
     },
+    imageLimits() {
+      return undefined
+    },
+    supportsImagePrompts() {
+      return Promise.resolve(false)
+    },
     async prompt() {
       return { accepted: true as const }
     },
@@ -1057,7 +1077,7 @@ test('session/prompt admits one attached text prompt and answers the real stop r
     })
     const request = await waitForFact(() => fake.prompts[0], 'the Host prompt request')
     assert.equal(request.mode, 'queue')
-    assert.deepEqual(request.content, [{ type: 'text', text: 'first' }, { type: 'text', text: 'second' }])
+    assert.deepEqual(request.content, [{ type: 'text', text: 'firstsecond' }])
     assert.equal(fake.prompts.length, 1)
     const facts = fake.facts()
     assert.ok(facts !== undefined, 'the listener registered its prompt fact subscription')
@@ -1694,5 +1714,324 @@ test('LC-02 (UDS): a disconnect keeps the unconfirmed obligation and the observe
     assert.deepEqual(((await b.next()) as { result?: unknown }).result, {}, 'the Session is attachable after true removal')
   } finally {
     b.close()
+  }
+})
+
+// ── PO-4A: image negotiation and bounded image input over the REAL socket ──
+
+test('the image input budget derives only from safe Host attachment limits', () => {
+  const bounds = deriveImageInputBounds({
+    maxImageBytes: 64,
+    maxImagesPerMessage: 3,
+    maxMessageImageBytes: 300,
+    mediaTypes: ['image/png'],
+  })
+  assert.deepEqual(bounds, {
+    maxFrameBytes: 400 + 1024 * 1024 + 65_536 * 3 + 4_096,
+    maxUnconsumedBytes: 400 + 1024 * 1024 + 65_536 * 3 + 4_096 + 1024 * 1024,
+  })
+  const larger = deriveImageInputBounds({
+    maxImageBytes: 128,
+    maxImagesPerMessage: 4,
+    maxMessageImageBytes: 600,
+    mediaTypes: ['image/png'],
+  })
+  assert.ok(larger !== undefined)
+  assert.ok(larger.maxFrameBytes > bounds.maxFrameBytes, 'the frame budget grows with configured Host image limits')
+  assert.ok(larger.maxUnconsumedBytes > bounds.maxUnconsumedBytes, 'the unconsumed budget grows with Host limits')
+  assert.equal(deriveImageInputBounds(undefined), undefined, 'no store means no image budget')
+  for (const limits of [
+    { maxImageBytes: 0, maxImagesPerMessage: 1, maxMessageImageBytes: 3, mediaTypes: ['image/png'] },
+    { maxImageBytes: 1, maxImagesPerMessage: 0, maxMessageImageBytes: 3, mediaTypes: ['image/png'] },
+    { maxImageBytes: 1, maxImagesPerMessage: 1, maxMessageImageBytes: -1, mediaTypes: ['image/png'] },
+    { maxImageBytes: 1, maxImagesPerMessage: Number.MAX_SAFE_INTEGER, maxMessageImageBytes: 3, mediaTypes: ['image/png'] },
+  ]) {
+    assert.equal(deriveImageInputBounds(limits), undefined, 'unsafe arithmetic cannot advertise image')
+  }
+})
+
+test('initialize advertises image only when Host capability and usable limits agree', async t => {
+  const { scope } = newScope(t)
+  const limits = { maxImageBytes: 64, maxImagesPerMessage: 2, maxMessageImageBytes: 300, mediaTypes: ['image/png'] }
+  const imageFake = makeFakeAccess({ imageLimits: limits, supportsImagePrompts: () => Promise.resolve(true) })
+  const imageListener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: imageFake.access })
+  t.after(() => imageListener.close())
+  const client = await RawClient.open(imageListener.socketPath)
+  try {
+    initialize(client, 1)
+    const init = (await client.next()) as {
+      result?: { agentCapabilities: { promptCapabilities: { image: boolean; audio: boolean; embeddedContext: boolean } } }
+    }
+    assert.equal(init.result?.agentCapabilities.promptCapabilities.image, true)
+    assert.equal(init.result?.agentCapabilities.promptCapabilities.audio, false)
+    assert.equal(init.result?.agentCapabilities.promptCapabilities.embeddedContext, false)
+  } finally {
+    client.close()
+  }
+
+  const noStoreFake = makeFakeAccess({ supportsImagePrompts: () => Promise.resolve(true) })
+  const noStoreScope = newScope(t).scope
+  const noStoreListener = await startLocalAcpListener({ scope: noStoreScope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: noStoreFake.access })
+  t.after(() => noStoreListener.close())
+  const noStoreClient = await RawClient.open(noStoreListener.socketPath)
+  try {
+    initialize(noStoreClient, 1)
+    const init = (await noStoreClient.next()) as { result?: { agentCapabilities: { promptCapabilities: { image: boolean } } } }
+    assert.equal(init.result?.agentCapabilities.promptCapabilities.image, false, 'no image store means no image capability')
+  } finally {
+    noStoreClient.close()
+  }
+})
+
+test('pipelined Session operations stay uninitialized until asynchronous image capability settles', async t => {
+  const { scope } = newScope(t)
+  const capability = Promise.withResolvers<boolean>()
+  const entered = Promise.withResolvers<void>()
+  const fake = makeFakeAccess({
+    imageLimits: { maxImageBytes: 64, maxImagesPerMessage: 2, maxMessageImageBytes: 300, mediaTypes: ['image/png'] },
+    supportsImagePrompts: () => { entered.resolve(); return capability.promise },
+  })
+  fake.seed('session-pipeline', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await entered.promise
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-pipeline', cwd: '/host/proj' } })
+    const preComplete = (await client.next()) as { id?: number; error?: { data?: { code?: string } } }
+    assert.equal(preComplete.id, 2)
+    assert.equal(preComplete.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_INITIALIZED',
+      'session operations cannot race ahead of the initialize response')
+    capability.resolve(true)
+    const init = (await client.next()) as { id?: number; result?: { agentCapabilities?: { promptCapabilities?: { image?: boolean } } } }
+    assert.equal(init.id, 1)
+    assert.equal(init.result?.agentCapabilities?.promptCapabilities?.image, true)
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/resume', params: { sessionId: 'session-pipeline', cwd: '/host/proj' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {},
+      'the Session becomes available after capability and initialize response commit')
+  } finally {
+    client.close()
+  }
+})
+
+test('an uninitialized sibling keeps the text-only input cap while an image connection stays usable', async t => {
+  const { scope } = newScope(t)
+  const limits = { maxImageBytes: 64, maxImagesPerMessage: 2, maxMessageImageBytes: 300, mediaTypes: ['image/png'] }
+  const fake = makeFakeAccess({ imageLimits: limits, supportsImagePrompts: () => Promise.resolve(true) })
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const imageConnection = await RawClient.open(listener.socketPath)
+  const textSibling = await RawClient.open(listener.socketPath)
+  try {
+    initialize(imageConnection, 1)
+    const init = (await imageConnection.next()) as { result?: { agentCapabilities: { promptCapabilities: { image: boolean } } } }
+    assert.equal(init.result?.agentCapabilities.promptCapabilities.image, true)
+    // The sibling never negotiated image: its own frame cap stays at 1 MiB.
+    textSibling.sendRaw('{"jsonrpc":"2.0","id":1,"method":"session/list","params":{"x":"')
+    textSibling.sendRaw('a'.repeat(1024 * 1024 + 16))
+    await expectClose(textSibling)
+    // The image connection was not affected by the sibling's breach.
+    imageConnection.send({ jsonrpc: '2.0', id: 2, method: 'session/list', params: {} })
+    const reply = (await imageConnection.next()) as { error?: { data?: { code?: string } } }
+    assert.equal(reply.error?.data?.code, 'LOCAL_ACP_SESSION_NOT_READY')
+  } finally {
+    imageConnection.close()
+    textSibling.close()
+  }
+})
+
+/** One canonical-base64-ish image prompt frame padded to an exact UTF-8 byte length. */
+function imagePromptFrame(sessionId: string, contentBytes: number): string {
+  const skeleton = JSON.stringify({
+    jsonrpc: '2.0', id: 3, method: 'session/prompt',
+    params: { sessionId, prompt: [{ type: 'image', mimeType: 'image/png', data: '' }] },
+  })
+  const dataLength = contentBytes - skeleton.length
+  assert.ok(dataLength > 0, 'the requested frame is too small for its JSON envelope')
+  return JSON.stringify({
+    jsonrpc: '2.0', id: 3, method: 'session/prompt',
+    params: { sessionId, prompt: [{ type: 'image', mimeType: 'image/png', data: 'A'.repeat(dataLength) }] },
+  }) + '\n'
+}
+
+test('a fragmented image prompt frame above 1 MiB reaches the attached View intact', async t => {
+  const { scope } = newScope(t)
+  const limits = { maxImageBytes: 2 * 1024 * 1024, maxImagesPerMessage: 2, maxMessageImageBytes: 2 * 1024 * 1024, mediaTypes: ['image/png'] }
+  const fake = makeFakeAccess({ imageLimits: limits, supportsImagePrompts: () => Promise.resolve(true) })
+  fake.seed('session-image', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    const init = (await client.next()) as { result?: { agentCapabilities: { promptCapabilities: { image: boolean } } } }
+    assert.equal(init.result?.agentCapabilities.promptCapabilities.image, true)
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-image', cwd: '/host/proj' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+
+    const data = 'A'.repeat(1_200_000)
+    const frame = JSON.stringify({
+      jsonrpc: '2.0', id: 3, method: 'session/prompt',
+      params: {
+        sessionId: 'session-image',
+        prompt: [{ type: 'text', text: '前🙂后' }, { type: 'image', mimeType: 'image/png', data }],
+      },
+    }) + '\n'
+    const bytes = Buffer.from(frame, 'utf8')
+    assert.ok(bytes.length > 1024 * 1024, 'the frame must cross the legacy 1 MiB cap')
+    // Fragments split the JSON envelope, the multi-byte CJK/emoji text and the
+    // base64 payload; the reader must forward every UTF-8 byte in order.
+    const cuts = [0, 1, 7, 4_093, 65_536, 700_000, 1_200_000, bytes.length]
+    for (let index = 1; index < cuts.length; index += 1) {
+      client.writeRaw(bytes.subarray(cuts[index - 1], cuts[index]))
+    }
+    const request = await waitForFact(() => fake.prompts[0], 'the fragmented large image prompt')
+    assert.equal(request.content[0]?.type, 'text')
+    assert.equal((request.content[0] as { text: string }).text, '前🙂后')
+    assert.equal(request.content[1]?.type, 'image')
+    assert.equal((request.content[1] as { mediaType: string }).mediaType, 'image/png')
+    assert.equal((request.content[1] as { data: string }).data, data)
+
+    const facts = fake.facts()
+    const agent = fake.agentOf('session-image')
+    assert.ok(facts !== undefined && agent !== undefined)
+    const message = { id: 'm-image', source: { kind: 'user', rpcId: request.requestId } }
+    facts.onInboxInserted(agent, message)
+    facts.onInboxClaimed(agent, message, 1)
+    facts.onSessionEvent(agent.session, {
+      type: 'assistant/message',
+      data: { turn: 1, message: { id: 'm-image', content: [{ type: 'text', text: 'large frame accepted' }] } },
+    })
+    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    const update = (await client.next()) as { method?: string; params?: { update?: { sessionUpdate?: string } } }
+    assert.equal(update.method, 'session/update')
+    assert.equal(update.params?.update?.sessionUpdate, 'agent_message_chunk')
+    const response = (await client.next()) as { id?: number; result?: { stopReason?: string } }
+    assert.equal(response.id, 3)
+    assert.equal(response.result?.stopReason, 'end_turn')
+  } finally {
+    client.close()
+  }
+})
+
+test('several individually bounded frames exceed the per-connection unconsumed budget without harming a UDS sibling', async t => {
+  const { dir, scope } = newScope(t)
+  const limits = {
+    maxImageBytes: 250_000,
+    maxImagesPerMessage: 1,
+    maxMessageImageBytes: 250_000,
+    mediaTypes: ['image/png'],
+  }
+  const bounds = deriveImageInputBounds(limits)
+  assert.ok(bounds !== undefined)
+  const largerBounds = deriveImageInputBounds({ ...limits, maxImageBytes: 500_000, maxMessageImageBytes: 500_000 })
+  assert.ok(largerBounds !== undefined && largerBounds.maxUnconsumedBytes > bounds.maxUnconsumedBytes,
+    'the real connection budget is derived from the current Host limits')
+  const perFrameBytes = 1_300_000
+  assert.ok(perFrameBytes < bounds.maxFrameBytes, 'each queued frame stays under the negotiated per-frame cap')
+  assert.ok(2 * (perFrameBytes + 1) > bounds.maxUnconsumedBytes,
+    'the combined frames exceed only the total unconsumed cap')
+  const frame = (id: number): string => {
+    const make = (blob: string): string => JSON.stringify({
+      jsonrpc: '2.0', id, method: 'session/list', params: { blob },
+    })
+    const emptyLength = Buffer.byteLength(make(''))
+    const payload = make('x'.repeat(perFrameBytes - emptyLength))
+    assert.equal(Buffer.byteLength(payload), perFrameBytes)
+    return `${payload}\n`
+  }
+
+  const dirFd = openSync(dir, 'r')
+  const socketPath = `/proc/self/fd/${String(dirFd)}/bounded-input.sock`
+  const failed = Promise.withResolvers<string>()
+  const peers: Array<{ readonly socket: import('node:net').Socket; readonly reader?: ReadableStreamDefaultReader<Uint8Array> }> = []
+  const server = createServer((socket) => {
+    const input = createBoundedInput(socket, { inputBounds: bounds } as never, code => {
+      failed.resolve(code)
+      socket.destroy()
+    })
+    peers.push({ socket, ...(peers.length === 1 ? { reader: input.getReader() } : {}) })
+  })
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once('error', rejectListen)
+    server.listen(socketPath, resolveListen)
+  })
+  const victim = await RawClient.open(socketPath)
+  const healthy = await RawClient.open(socketPath)
+  try {
+    await waitForFact(() => peers.length === 2 ? peers : undefined, 'both bounded-input UDS peers')
+    assert.equal(peers.length, 2, 'both test clients are accepted by the real Unix socket server')
+    const healthyPeer = peers[1]!
+    assert.ok(healthyPeer.reader !== undefined)
+    const healthyRead = healthyPeer.reader.read()
+    const smallFrame = '{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"healthy"}}\n'
+    healthy.sendRaw(smallFrame)
+    const firstHealthy = await withTimeout(healthyRead, 5_000, 'healthy UDS input frame')
+    assert.deepEqual(Buffer.from(firstHealthy.value!), Buffer.from(smallFrame), 'the sibling consumes its exact wire bytes')
+
+    // The victim stream intentionally has no reader yet: the producer/consumer
+    // gap is the real bounded-input backpressure state being qualified.
+    victim.sendRaw(frame(10) + frame(11))
+    const code = await withTimeout(failed.promise, 5_000, 'aggregate unconsumed input overflow')
+    assert.equal(code, 'LOCAL_ACP_INPUT_OVERFLOW', 'neither complete frame crosses its own bound')
+    await withTimeout(victim.closed, 5_000, 'victim socket closes on only its aggregate overflow')
+
+    const healthyNext = healthyPeer.reader.read()
+    healthy.sendRaw(smallFrame)
+    const secondHealthy = await withTimeout(healthyNext, 5_000, 'healthy sibling remains readable')
+    assert.deepEqual(Buffer.from(secondHealthy.value!), Buffer.from(smallFrame))
+    const healthyAgain = healthyPeer.reader.read()
+    healthy.sendRaw(smallFrame)
+    const thirdHealthy = await withTimeout(healthyAgain, 5_000, 'healthy sibling remains open after victim overflow')
+    assert.deepEqual(Buffer.from(thirdHealthy.value!), Buffer.from(smallFrame))
+  } finally {
+    victim.close()
+    healthy.close()
+    for (const peer of peers) peer.reader?.releaseLock()
+    await new Promise<void>(resolveClose => server.close(() => resolveClose()))
+    closeSync(dirFd)
+  }
+})
+
+test('the derived frame budget accepts exactly its bound and rejects one byte above', async t => {
+  const { scope } = newScope(t)
+  const limits: AcpImageLimits = {
+    maxImageBytes: 64,
+    maxImagesPerMessage: 1,
+    maxMessageImageBytes: 3,
+    mediaTypes: ['image/png'],
+  }
+  const bounds = deriveImageInputBounds(limits)
+  assert.ok(bounds !== undefined)
+  const fake = makeFakeAccess({ imageLimits: limits, supportsImagePrompts: () => Promise.resolve(true) })
+  fake.seed('session-at', '/host/proj')
+  fake.seed('session-above', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+
+  const accepted = await RawClient.open(listener.socketPath)
+  const rejected = await RawClient.open(listener.socketPath)
+  try {
+    initialize(accepted, 1)
+    await accepted.next()
+    initialize(rejected, 1)
+    await rejected.next()
+    accepted.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-at', cwd: '/host/proj' } })
+    assert.deepEqual(((await accepted.next()) as { result?: unknown }).result, {})
+    rejected.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-above', cwd: '/host/proj' } })
+    assert.deepEqual(((await rejected.next()) as { result?: unknown }).result, {})
+
+    accepted.sendRaw(imagePromptFrame('session-at', bounds.maxFrameBytes))
+    const request = await waitForFact(() => fake.prompts[0], 'the at-bound image prompt')
+    assert.equal(request.sessionId, 'session-at')
+    rejected.sendRaw(imagePromptFrame('session-above', bounds.maxFrameBytes + 1))
+    await expectClose(rejected)
+    accepted.send({ jsonrpc: '2.0', id: 4, method: 'session/list', params: {} })
+    const reply = (await accepted.next()) as { error?: { data?: { code?: string } } }
+    assert.equal(reply.error?.data?.code, 'LOCAL_ACP_SESSION_NOT_READY', 'the accepted connection stays healthy')
+  } finally {
+    accepted.close()
+    rejected.close()
   }
 })
