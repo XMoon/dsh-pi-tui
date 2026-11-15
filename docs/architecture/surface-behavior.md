@@ -1474,10 +1474,13 @@ non-current settings read never becomes `Plugin-owned`.
 For a server the SAME current Host settings descriptor proves configuration-owned,
 the Detail also offers `Edit`, Enable/Disable, permanent `Delete`
 (User-added entries only) and `Reset to inherited` (entries whose effective
-configuration differs from the base only). `Add` is a LIST action (the `a` key); Add and Edit open a whole-page
-scrollable form inside the same specialist whose fixed header always names the
-FORM's target (`<name> · Add/Edit · <source>` — `(unnamed)` before a new name is
-typed), never the server selected in the list: `Identity` (name/transport/enabled),
+configuration differs from the base only). `Add` is a LIST action (the `a`
+key); Add and Edit open a whole-page scrollable form inside the same specialist.
+The form's FIXED identity line is painted INSIDE the body grant (the Root grants
+no pane-header row on a narrow layout): wide shows
+`<name> · Add/Edit · <source>`, narrow degrades source → mode and keeps the full
+NAME and mode as the last facts — never the server selected in the list before
+Add started: `Identity` (name/transport/enabled),
 `Connection` (stdio command/working dir or HTTP URL), `Parameters` (one row per
 argument or key/value pair) and a `Status` line with the fixed `Save`/`Esc` bar.
 An Edit keeps the name read-only; a rename is two explicit actions. A stored

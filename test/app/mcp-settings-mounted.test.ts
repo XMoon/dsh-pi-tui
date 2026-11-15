@@ -33,6 +33,7 @@ import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.
 import { selectSettingsCategory } from '../support/settings-rail.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { DirectMcpServerPort, type DirectMcpHostContextLike } from '../../src/runtime/direct/mcp-server-direct.ts'
+import type { EmbeddedSpecialistPage } from '../../src/tui/panels/settings-workspace-panel.ts'
 import { DirectMcpServerConfigurationConfig, DirectMcpServerSourcesConfig } from '../../src/runtime/direct/config-direct.ts'
 import type { McpServerWatchEvent } from '../../src/runtime/mcp-server-port.ts'
 
@@ -120,6 +121,8 @@ interface Harness {
   readonly vt: VirtualTerminal
   readonly app: TuiApp
   readonly manager: FixtureManager
+  /** The LIVE embedded MCP page of the open Settings workspace, when mounted. */
+  readonly embeddedMcpPage: () => EmbeddedSpecialistPage | undefined
   readonly settingsMutateCalls: string[]
   /** Hold the NEXT mutation in flight (deferred settlement). */
   holdSettingsMutation: () => () => void
@@ -289,6 +292,12 @@ function setup(options: { readonly columns?: number; readonly rows?: number; rea
     vt,
     app,
     manager,
+    embeddedMcpPage: () => {
+      const lease = (app as unknown as { workspaceLease?: { kind?: string; panel?: unknown } }).workspaceLease
+      if (lease === undefined || lease.kind !== 'settings') return undefined
+      const panel = lease.panel as { specialistPage?: EmbeddedSpecialistPage } | undefined
+      return panel?.specialistPage
+    },
     settingsMutateCalls,
     holdSettingsMutation: () => {
       let release!: () => void
@@ -662,4 +671,29 @@ test('Esc during an unsettled Save never offers a Discard that would imply cance
   await frames(h.vt, 3)
   assert.match(h.view(), /Saved · waiting for Host reconcile/u)
   assert.equal(h.settingsMutateCalls.length, 1, 'no replay after settlement')
+})
+
+test('a REAL Root-seam pointer chain drives the page: press, release, intent', async () => {
+  const h = setup()
+  await openMcpPage(h)
+  // The page under the live workspace lease publishes its own last-row spans
+  // exactly as the Root consumes them. Find the mounted page through the
+  // app's Settings lease and drive the delegation seam the Root uses.
+  const page = h.embeddedMcpPage()
+  assert.ok(page !== undefined, 'the MCP specialist page must be mounted')
+  // 1) The page painted Add in its bar.
+  await frames(h.vt, 2)
+  const spans = page.paintedBarSpans?.() ?? []
+  assert.ok(spans.some(span => span.id === 'bar:add'),
+    `the Add affordance must be published for the Root: ${spans.map(s => s.id).join(',')}`)
+  // 2) Releasing that span runs the SAME intent the keyboard `a` would.
+  const before = h.view()
+  page.activateBarSpan?.('bar:add')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.notEqual(h.view(), before, 'the delegated Add changed the frame')
+  assert.match(h.view(), /Identity/u, 'the delegated Add opened the form')
+  // 3) Zero writes happened: opening a form is navigation, not persistence.
+  assert.deepEqual(h.settingsMutateCalls, [], 'a navigation intent never writes')
 })

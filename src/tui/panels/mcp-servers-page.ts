@@ -234,6 +234,42 @@ function wrapCells(text: string, width: number, maxLines: number): string[] {
 /** A bar segment that may advertise a pointer intent. */
 type McpBarSegment = ActionBarSegment & { readonly action?: McpBarAction }
 
+/** The body line budget one confirmation may consume. */
+const MCP_CONFIRM_BODY_MAX_LINES = 5
+
+/**
+ * Wrap one sentence into at most `maxLines` cell-accurate lines, HARD-SPLITTING
+ * a token that alone exceeds the width. A safety fact may never be dropped
+ * because one legal value (a 63-character DNS label, a 32-character name) has
+ * no break opportunity.
+ */
+function wrapCellsHard(text: string, width: number, maxLines: number): string[] {
+  const lines: string[] = []
+  let current = ''
+  for (const word of sanitizedPhysicalLine(text).split(' ').filter(part => part !== '')) {
+    let rest = word
+    while (visibleWidth(rest) > Math.max(1, width)) {
+      if (current !== '') { lines.push(current); current = '' }
+      if (lines.length >= maxLines) return lines
+      let take = 0
+      while (take < rest.length && visibleWidth(rest.slice(0, take + 1)) <= width) take += 1
+      if (take === 0) take = 1
+      lines.push(rest.slice(0, take))
+      rest = rest.slice(take)
+    }
+    const candidate = current === '' ? rest : `${current} ${rest}`
+    if (visibleWidth(candidate) <= width) {
+      current = candidate
+      continue
+    }
+    if (current !== '') lines.push(current)
+    current = rest
+    if (lines.length >= maxLines) return lines
+  }
+  if (current !== '' && lines.length < maxLines) lines.push(current)
+  return lines
+}
+
 /** The long list/detail hints, shortened when the frame is tight. */
 const LIST_HINTS: readonly McpBarSegment[] = [
   { text: '↑/↓ move', short: '↑/↓', priority: 30 },
@@ -301,9 +337,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private discardConfirm = false
   /** FR4: Esc while the Save is unsettled — a notice, never a discard prompt. */
   private configSavingNotice = false
+  /** RC-B: the last painted confirmation body could not show every safety fact. */
+  private confirmBodyBlocked = false
   private disposed = false
   private revision = 0
   private paint: McpPagePaint | undefined
+  /** The last painted Action-Bar spans (id + action + cells), page-local. */
+  private lastBarSpans: readonly { readonly id: string; readonly action: McpBarAction; readonly startCol: number; readonly endCol: number }[] = []
   /** The frame being painted (layout decisions must read THIS grant, not the
    *  previous frame's paint). */
   private rendering: { readonly width: number; readonly bodyRows: number } | undefined
@@ -389,7 +429,9 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         this.controller.answerConfigConfirm(false)
         return
       }
-      if (data === 'y' || data === 'Y') this.controller.answerConfigConfirm(true)
+      if (data === 'y' || data === 'Y') {
+        if (!this.confirmBodyBlocked) this.controller.answerConfigConfirm(true)
+      }
       // No other key may dispatch a Host write.
       return
     }
@@ -419,7 +461,9 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         this.controller.answerRestart(false)
         return
       }
-      if (data === 'y' || data === 'Y') this.controller.answerRestart(true)
+      if (data === 'y' || data === 'Y') {
+        if (!this.confirmBodyBlocked) this.controller.answerRestart(true)
+      }
       // No other key may dispatch a Host operation.
       return
     }
@@ -564,6 +608,21 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     this.formInput = undefined
     this.discardConfirm = false
     this.configSavingNotice = false
+    this.bumpRevision()
+  }
+
+  /** The non-Esc Action-Bar spans this page's own bar really painted. The
+   *  Settings Root owns the physical last row and DELEGATES these to
+   *  {@link activateBarSpan}; the ids are `bar:<action>`. */
+  paintedBarSpans(): readonly { readonly id: string; readonly startCol: number; readonly endCol: number }[] {
+    return this.lastBarSpans.map(span => ({ id: span.id, startCol: span.startCol, endCol: span.endCol }))
+  }
+
+  /** Invoke one delegated last-row intent by its painted id. */
+  activateBarSpan(id: string): void {
+    const span = this.lastBarSpans.find(candidate => candidate.id === id)
+    if (span === undefined) return
+    this.runBarAction(span.action, this.controller.snapshot())
     this.bumpRevision()
   }
 
@@ -777,11 +836,14 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     if (this.disposed) return undefined
     const paint = this.paint
     if (paint === undefined || event.width !== paint.width) return undefined
-    // N11: a MODAL decision owns the surface exactly like it owns the keyboard.
-    // While a confirmation/discard/question owns the page, a pointer must not
-    // change the draft (or the selection) the question is about: the answer
-    // would then commit a configuration the user never saw.
-    if (this.modalOwned()) return undefined
+    // A MODAL decision owns the BODY exactly like it owns the keyboard: a
+    // pointer must not change the draft or the selection the question is
+    // about. Its OWN decision actions (confirm/cancel/keep/discard) stay
+    // reachable — otherwise a mouse user could be trapped in a question the
+    // keyboard can answer. Body targets are refused; the modal's action
+    // segments are resolved below against the same painted spans.
+    const modal = this.modalOwned()
+    if (modal && event.type === 'wheel') return undefined
     const bodyRows = Math.max(0, paint.rows - 1)
     if (event.height !== bodyRows && event.height !== paint.rows) return undefined
     if (event.type === 'wheel') {
@@ -794,8 +856,11 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       }
       return { handled: true }
     }
-    const target = paint.targets.find(candidate => candidate.row === event.y
+    const hit = paint.targets.find(candidate => candidate.row === event.y
       && event.x >= candidate.startCol && event.x < candidate.endCol)
+    const target = modal
+      ? hit !== undefined && hit.kind === 'action' && this.isModalAction(hit.action) ? hit : undefined
+      : hit
     if (event.type === 'press') {
       if (target === undefined || event.button !== 'left') {
         this.pressed = undefined
@@ -888,10 +953,17 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         }
         this.done()
         return
+      case 'enter-detail':
+        // The List's visible `Enter details` affordance IS the keyboard Enter.
+        if (!this.inDetail() && snapshot.selectedName !== undefined) {
+          this.handleInput('\r')
+        }
+        return
       case 'cancel':
         this.handleInput('\x1b')
         return
       case 'confirm':
+        if (this.confirmBodyBlocked) return
         if (snapshot.configConfirm !== undefined) this.controller.answerConfigConfirm(true)
         else if (snapshot.confirmingName !== undefined) this.controller.answerRestart(true)
         return
@@ -955,6 +1027,12 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     this.controller.dispose()
   }
 
+  /** The Action-Bar intents a MODAL may accept from a pointer: its own
+   *  decision, never a body change. */
+  private isModalAction(action: McpBarAction): boolean {
+    return action === 'confirm' || action === 'cancel' || action === 'keep-editing' || action === 'discard'
+  }
+
   /** Whether a modal decision owns the surface right now (keyboard + mouse). */
   private modalOwned(): boolean {
     const snapshot = this.controller.snapshot()
@@ -1004,6 +1082,77 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       ? color.textDim(this.controller.snapshot().selectedName ?? 'Selected server')
       : color.textStrong(`[${this.controller.snapshot().selectedName ?? 'Selected server'}]`, 'primary')
     return composeRow(left, right, width)
+  }
+
+  /**
+   * The editor's FIXED identity line: `▸ <Name> · Add/Edit` plus the source
+   * when it fits. The name and the mode are the target identity (never the
+   * previously selected server); the source is the detail.
+   */
+  private editorIdentityLine(
+    identity: { readonly full: string; readonly withoutSource: string; readonly name: string },
+    width: number,
+  ): string {
+    const marker = color.textStrong('▸ ', 'primary')
+    for (const tier of [identity.full, identity.withoutSource, identity.name]) {
+      if (visibleWidth(`▸ ${tier}`) <= width) return fit(marker + color.textStrong(tier, 'primary'), width)
+    }
+    return fit(marker + color.textStrong(identity.name, 'primary'), width)
+  }
+
+  /**
+   * The BODY of one pending confirmation: the exact target, the action and its
+   * consequence / external reach. Long unbreakable tokens are hard-split, and
+   * `blocked` reports that even that could not fit — the page then refuses to
+   * confirm rather than accepting an uninformed `y`.
+   */
+  private confirmationBody(snapshot: McpServersSnapshot, width: number): {
+    readonly lines: readonly string[]
+    readonly blocked: boolean
+  } {
+    if (this.discardConfirm) {
+      return this.wrapConfirmation('Discard changes? Unsaved edits are dropped; nothing has been written yet.', width)
+    }
+    const confirm = snapshot.configConfirm
+    if (confirm !== undefined) {
+      const name = confirm.name
+      switch (confirm.kind) {
+        case 'save':
+          return this.wrapConfirmation(`Save server ${name}. ${confirm.warning ?? 'This writes the profile configuration.'}`, width)
+        case 'delete':
+          return this.wrapConfirmation(
+            `Permanently delete server ${name} from this profile. This removes your added configuration; it cannot be undone here.`,
+            width,
+          )
+        case 'reset':
+          return this.wrapConfirmation(
+            `Reset server ${name} to its inherited configuration. Your override is replaced by the base layer value.`,
+            width,
+          )
+        case 'toggle':
+          return this.wrapConfirmation(
+            `${confirm.nextEnabled === true ? 'Enable' : 'Disable'} server ${name}. ${confirm.nextEnabled === true
+              ? 'The MCP process may start.'
+              : 'The MCP process may stop; live tools may be interrupted.'}`,
+            width,
+          )
+      }
+    }
+    if (snapshot.confirmingName !== undefined) {
+      return this.wrapConfirmation(
+        `Restart server ${snapshot.confirmingName}. Live tools may be interrupted while it rebuilds.`,
+        width,
+      )
+    }
+    return { lines: [], blocked: false }
+  }
+
+  /** Wrap a confirmation sentence, hard-splitting unbreakable tokens. */
+  private wrapConfirmation(text: string, width: number): { readonly lines: readonly string[]; readonly blocked: boolean } {
+    const lines = wrapCellsHard(text, width, MCP_CONFIRM_BODY_MAX_LINES)
+    const consumed = lines.join(' ').replace(/\s+/gu, ' ')
+    const wanted = sanitizedPhysicalLine(text).replace(/\s+/gu, ' ')
+    return { lines, blocked: consumed !== wanted }
   }
 
   /**
@@ -1198,8 +1347,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     const bar = this.renderBar(width, snapshot)
     this.paintedEscapeSpanValue = bar.escape
     const barRow = lines.length
+    this.lastBarSpans = []
     for (const span of bar.spans) {
       if (span.action === undefined) continue
+      this.lastBarSpans = [...this.lastBarSpans, { id: `bar:${span.action}`, action: span.action, startCol: span.startCol, endCol: span.endCol }]
       targets.push({ kind: 'action', action: span.action, row: barRow, startCol: span.startCol, endCol: span.endCol })
     }
     lines.push(fit(bar.line, width))
@@ -1225,15 +1376,22 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     }
     const statusRows = 1
     const inputRows = this.formInput === undefined ? 0 : 1
-    // N13: a Save question's SAFETY FACT lives in the body, wrapped, so it
-    // survives any Action Bar compaction (44 columns, a 32-character name, a
-    // long HTTP host). The bar only carries the decision.
-    const disclosure = snapshot.configConfirm?.kind === 'save'
-      ? wrapCells(snapshot.configConfirm.warning === undefined
-        ? `Save ${snapshot.configConfirm.name}?`
-        : `Save ${snapshot.configConfirm.name} — ${snapshot.configConfirm.warning}`, width, 3)
-      : []
-    const bodyRows = Math.max(1, rows - statusRows - inputRows - disclosure.length)
+    // RC-B: the editor's fixed IDENTITY line is painted INSIDE the body grant.
+    // The Root's narrow layout grants no pane-header row (`paneHeaderRows = 0`),
+    // so a child `paneHeader()` is never drawn there: the identity must be part
+    // of the child's own content to be a real, always-visible fact.
+    const identity = this.editorIdentity()
+    const identityLines = identity === undefined ? [] : [this.editorIdentityLine(identity, width)]
+    // RC-B: a confirmation's TARGET + ACTION + CONSEQUENCE live in the body,
+    // wrapped (long host names hard-split, never dropped), so the safety facts
+    // survive any Action Bar compaction. `blocked` means the current grant
+    // cannot show them all — the page then refuses to confirm.
+    const confirmation = this.confirmationBody(snapshot, width)
+    // Publish the admission result for the key/pointer gates: a confirmation
+    // whose target/consequence cannot be fully painted must not be executable.
+    this.confirmBodyBlocked = confirmation.blocked
+    const disclosure = confirmation.lines
+    const bodyRows = Math.max(1, rows - statusRows - inputRows - identityLines.length - disclosure.length)
     // Keep the focused row inside the painted window. The scroller reasons in
     // PHYSICAL content rows (group headers occupy rows too), never in field
     // indices: a short grant would otherwise let the focused field scroll out
@@ -1251,7 +1409,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     const rendered = renderMcpConfigForm(editor, width, bodyRows, this.formFocus, this.formOffset,
       (field, key) => this.controller.dictValueForm(field, key),
       (field, key) => this.controller.canRemoveDictKey(field, key))
-    const lines = [...disclosure.map(line => fit(color.warning(line), width)), ...rendered.lines]
+    const lines = [...identityLines, ...disclosure.map(line => fit(color.warning(line), width)), ...rendered.lines]
     if (this.formInput !== undefined) {
       const [inputLine] = this.formInput.input.render(width)
       lines.push(fit(color.textMuted('edit: ') + (inputLine ?? ''), width))
@@ -1271,9 +1429,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     const formRows = mcpFormRows(editor,
       (field, key) => this.controller.dictValueForm(field, key),
       (field, key) => this.controller.canRemoveDictKey(field, key))
+    const fixedRowsAbove = identityLines.length + disclosure.length
     const fieldRows = rendered.painted.flatMap(paintedRow => {
       const index = formRows.findIndex(candidate => candidate.id === paintedRow.row.id)
-      return index < 0 ? [] : [{ id: paintedRow.row.id, index, line: paintedRow.line }]
+      return index < 0 ? [] : [{ id: paintedRow.row.id, index, line: paintedRow.line + fixedRowsAbove }]
     })
     return { lines: lines.slice(0, rows), fieldRows }
   }
@@ -1567,6 +1726,14 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     }
     if (this.view === 'editor') {
       if (this.formInput !== undefined) return paintBar(EDITOR_INPUT_HINTS, width, true)
+      // RC-B: a confirmation whose target/consequence cannot be fully painted
+      // must not be executable — the bar says why and offers only cancel.
+      if (this.confirmBodyBlocked) {
+        return paintBar([
+          { text: 'Resize to review the target and its consequence', short: 'Resize to review', priority: 1000 },
+          { text: 'Esc cancel', short: 'Esc', priority: 999, action: 'cancel' },
+        ], width, true)
+      }
       // While the Save is unsettled the draft is FROZEN: `s Save` would be a
       // second submit and the navigation keys would be inert, so only the
       // truthful leave affordance is painted.
@@ -1604,19 +1771,19 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       // no config entry (so no `e/t/d/u`) but STILL offers `p/x`, while an
       // inherited entry offers edit/toggle but neither Delete nor Reset.
       const facet = snapshot.selectedConfig
-      const segments: ActionBarSegment[] = []
+      const segments: McpBarSegment[] = []
       if (operable) {
-        segments.push({ text: 'p probe', priority: 30 }, { text: 'x restart', priority: 25 })
+        segments.push({ text: 'p probe', priority: 30, action: 'probe' }, { text: 'x restart', priority: 25, action: 'restart' })
       }
       if (facet !== undefined) {
         // `e` uses the SAME predicate the key handler uses, so the painted bar
         // can never advertise an Edit the controller would refuse.
-        if (this.controller.canBeginEdit()) segments.push({ text: 'e edit', priority: 24 })
-        if (facet.canToggle) segments.push({ text: 't enable/disable', short: 't toggle', priority: 23 })
-        if (facet.canDelete) segments.push({ text: 'd delete', priority: 22 })
-        if (facet.canReset) segments.push({ text: 'u reset', priority: 21 })
+        if (this.controller.canBeginEdit()) segments.push({ text: 'e edit', priority: 24, action: 'edit' })
+        if (facet.canToggle) segments.push({ text: 't enable/disable', short: 't toggle', priority: 23, action: 'toggle' })
+        if (facet.canDelete) segments.push({ text: 'd delete', priority: 22, action: 'delete' })
+        if (facet.canReset) segments.push({ text: 'u reset', priority: 21, action: 'reset' })
       }
-      segments.push({ text: 'r refresh', priority: 10 }, { text: 'Back [Esc]', priority: 1000 })
+      segments.push({ text: 'r refresh', priority: 10, action: 'refresh' }, { text: 'Back [Esc]', priority: 1000, action: 'back' })
       return paintBar(segments, width, true)
     }
     // The List Add hint uses the SAME gate the `a` key handler calls, so an
