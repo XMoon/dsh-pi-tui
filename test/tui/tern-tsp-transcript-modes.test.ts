@@ -428,6 +428,15 @@ test('Focus materializes one native Thought root per occurrence and nests collap
     turnActivities: activities,
     window: LATEST_WINDOW,
   }, keys)
+  // T3-B1 Focus regression: EVERY top-level row carries the scope namespace.
+  // Focus top-level message rows previously used the bare `msg-N` key while
+  // their enclosing roots used `sN-`, so a new presentation scope could reuse
+  // the same `main.msg-N` id for a different message kind and the journal
+  // rejected the retained-root diff (`op add parents under main`).
+  const topLevelIds = collapsed.filter(node => node.parent === 'main').map(node => node.id)
+  assert.ok(topLevelIds.length > 0, 'Focus paints top-level rows')
+  assert.ok(topLevelIds.every(id => id.startsWith('main.s1-')),
+    `every Focus top-level row is scope-namespaced :: ${JSON.stringify(topLevelIds)}`)
   const roots = nodesOf(collapsed, 'section').filter(node => node.parent === 'main')
   assert.equal(roots.length, 1, 'one consecutive turn occurrence paints one top-level Thought section')
   assert.equal(roots[0]!.props['collapsible'], true)
@@ -708,6 +717,21 @@ test('Focus Preparing previews attach once to the exact trailing Work owner', ()
     'opening the tail Work never copies Preparing into the earlier Work')
   assert.equal(expandedTail.filter(node => node.id.includes('preparing-focus-tail-preparing') && node.parent === tailSection.id).length, 1,
   `opening the exact trailing Work materializes one Preparing row inside that Work: ${JSON.stringify(expandedTail.filter(node => node.id.includes('preparing-focus-tail-preparing')))}`)
+})
+
+test('a replaced source scope cannot reuse a Focus top-level message identity', () => {
+  // The exact T3-B1 crash shape: the retired scope's user row and the incoming
+  // scope's assistant row both took the bare `main.msg-N` id because Focus
+  // top-level message rows ignored `scopePrefix`. A retained-root diff then saw
+  // the same id change node kind and the journal rejected it.
+  const folder = twoWorkFolder()
+  const options = { preset: 'focus' as const, turnActivities: folder.turnActivities(), window: LATEST_WINDOW }
+  const first = flatten(folder.messages(), { ...options, scopePrefix: 's1-' })
+  const second = flatten(folder.messages(), { ...options, scopePrefix: 's2-' })
+  const firstTop = new Set(first.filter(node => node.parent === 'main').map(node => node.id))
+  const secondTop = new Set(second.filter(node => node.parent === 'main').map(node => node.id))
+  assert.ok(firstTop.size > 0 && secondTop.size > 0)
+  for (const id of secondTop) assert.ok(!firstTop.has(id), `the new scope id ${id} shares nothing with the retired scope`)
 })
 
 test('a replaced source scope cannot reuse the previous Work section identity', () => {
