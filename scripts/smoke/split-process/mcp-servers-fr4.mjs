@@ -307,8 +307,9 @@ export async function runMcpServersFr4(context) {
     // The Save discloses the external command it enables; only `y` writes.
     // The disclosure names the server; its compacted form keeps the server and
     // the capability fact.
-    await waitForPattern(client, /fr4-user[^\n]*(Enabling this server can execute an external command|External command)/u,
-      'FR4 add stdio disclosure')
+    await waitForPattern(client, /can execute an external command/u, 'FR4 add stdio disclosure')
+    assert(/Save fr4-user\?/u.test(await frameOf(client)),
+      'FR4: the stdio confirmation must name the exact server')
     client.send('y')
     await waitForSaved(client, 'FR4 add stdio')
     assert(patchText(context.installation.profileDir) !== revisionBefore,
@@ -339,9 +340,13 @@ export async function runMcpServersFr4(context) {
     client.send('s')
     // The disclosure names the SERVER and the TARGET HOST (never a credential,
     // path or query). On a tight bar it compacts to `<server> · <host>`.
-    await waitForPattern(client, /fr4-http[^\n]*127\.0\.0\.1/u, 'FR4 add http disclosure')
+    await waitForPattern(client, /Save fr4-http\?/u, 'FR4 add http confirmation')
     const disclosure = await frameOf(client)
-    assert(disclosure.includes('127.0.0.1'), 'FR4: the HTTP disclosure must name its target host')
+    assert(/can send data to an external service/u.test(disclosure),
+      'FR4: the HTTP confirmation must state the capability in the body')
+    assert(disclosure.includes('Target:'), 'FR4: the HTTP confirmation must name its target marker')
+    assert(disclosure.includes('127.0.0.1'), 'FR4: the HTTP confirmation must name its target host')
+    assert(/Y confirm/u.test(disclosure), 'FR4: the HTTP confirmation must offer the decision')
     assert(!/credential/u.test(disclosure), 'FR4: the disclosure must never show a credential')
     client.send('y')
     await waitForSaved(client, 'FR4 add http')
@@ -370,8 +375,9 @@ export async function runMcpServersFr4(context) {
     await sleep(200)
     await typeValue(client, '--fr4-edited', 'FR4 edit arg')
     client.send('s')
-    await waitForPattern(client, /fr4-user[^\n]*(Enabling this server can execute an external command|External command)/u,
-      'FR4 edit disclosure')
+    await waitForPattern(client, /can execute an external command/u, 'FR4 edit disclosure')
+    assert(/Save fr4-user\?/u.test(await frameOf(client)),
+      'FR4: the edit confirmation must name the exact server')
     client.send('y')
     await waitForSaved(client, 'FR4 edit')
     const afterEdit = patchText(context.installation.profileDir)
@@ -480,7 +486,7 @@ export async function runMcpServersFr4(context) {
     client.send('s')
     // The disclosure comes FIRST (it is a question about the draft, not about
     // the revision); answering it is when the stale revision is discovered.
-    await waitForPattern(client, /fr4-http[^\n]*(Enabling|127\.0\.0\.1)/u, 'FR4 A save disclosure')
+    await waitForPattern(client, /Save fr4-http\?/u, 'FR4 A save disclosure')
     client.send('y')
     await waitForPattern(client, /Not saved · (configuration changed|the Host authority changed)/u, 'FR4 A stale-save refusal')
     const conflictFrame = await frameOf(client)
