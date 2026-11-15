@@ -825,42 +825,62 @@ export async function runAcpPo3bCancelApproval(context) {
     // ── F2/A06-real) A flight that fails EARLY (the real View output bound)
     // keeps its retired-turn approval attribution through a close: the second
     // tool's approval arrives after the flight died and must NEVER reach the
-    // TUI; the fence dies on the turn's real terminal.
-    const failflowStart = (hostSessionEvents(dshHome, sessionAp) ?? []).length
+    // REAL TUI responder that holds this SAME Session — a wrong next() would
+    // pop the TUI sheet and settle through it, so `unavailable` in the audit
+    // plus a silent TUI proves the fence intercepted the routing.
+    // Run on sessionA: the REAL TUI Client is the observable downstream.
+    const f2Conn = track(await openAcpClient(scopeDir))
+    const f2Init = await f2Conn.initialize(1)
+    assert(f2Init?.result?.protocolVersion === 1, 'F2: the failflow connection must initialize')
+    const f2Resume = await sendRequest(f2Conn, 2, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
+    assert(f2Resume?.error === undefined, 'F2: the failflow connection must attach Session A')
+    const f2TuiBoundary = tuiA.records.length
+    const failflowStart = (hostSessionEvents(dshHome, sessionA) ?? []).length
     const failflowNotifications = []
-    conn2.send({ jsonrpc: '2.0', id: 6, method: 'session/prompt', params: { sessionId: sessionAp, prompt: [{ type: 'text', text: 'po3b-failflow ask' }] } })
-    const fail1Permission = await waitForPermissionRequest(conn2, 'F2 the first failflow approval', 180_000)
-    conn2.send({ jsonrpc: '2.0', id: fail1Permission.id, result: { outcome: { outcome: 'selected', optionId: 'allow-once' } } })
+    f2Conn.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: sessionA, prompt: [{ type: 'text', text: 'po3b-failflow ask' }] } })
+    const fail1Permission = await waitForPermissionRequest(f2Conn, 'F2 the first failflow approval', 180_000)
+    f2Conn.send({ jsonrpc: '2.0', id: fail1Permission.id, result: { outcome: { outcome: 'selected', optionId: 'allow-once' } } })
     // The over-capacity output fails the flight while the turn runs tool2.
-    const failflowResponse = await readUntilResponse(conn2, 6, failflowNotifications)
+    const failflowResponse = await readUntilResponse(f2Conn, 3, failflowNotifications)
     assert(failflowResponse?.error?.code === -32603
       && failflowResponse?.error?.data?.code === 'LOCAL_ACP_PROMPT_OUTPUT_BACKPRESSURE',
       `F2: the over-capacity turn must fail the flight (got ${JSON.stringify(failflowResponse?.result ?? failflowResponse?.error)})`)
-    // The client closes the View; the old turn is STILL running tool2.
-    const failflowClose = await sendRequest(conn2, 7, 'session/close', { sessionId: sessionAp })
+    // The ACP View closes while the turn STILL runs tool2. Record the durable
+    // length at close completion: every later proof is ordered AFTER it.
+    const failflowClose = await sendRequest(f2Conn, 4, 'session/close', { sessionId: sessionA })
     assert(failflowClose?.error === undefined && typeof failflowClose?.result === 'object',
       `F2: the close must detach after the failed flight settled (got ${JSON.stringify(failflowClose?.error ?? failflowClose?.result)})`)
-    // tool2's approval now arrives with NO flight and a CLOSED connection: the
-    // retired-turn fence must answer it fail-closed, and the TUI (none here)
-    // would otherwise receive it — prove the Host audit records `unavailable`.
-    const failflowDecidedUnavailable = await waitForHostSessionEventAfter(dshHome, sessionAp, failflowStart,
+    const failflowAfterClose = (hostSessionEvents(dshHome, sessionA) ?? []).length
+    // tool2's approval now arrives with NO flight, a CLOSED ACP connection and
+    // a LIVE REAL TUI on the SAME Session: the retired-turn fence must answer
+    // it fail-closed — the audit says `unavailable` and the REAL TUI screen
+    // never shows an approval sheet for it.
+    const failflowDecidedUnavailable = await waitForHostSessionEventAfter(dshHome, sessionA, failflowAfterClose,
       event => event.type === 'approval/decided' && event.data?.outcome === 'unavailable',
-      'F2: the post-failure approval to be decided fail-closed (never delegated)', 180_000)
+      'F2: the post-close approval to be decided fail-closed AFTER the close', 180_000)
     void failflowDecidedUnavailable
-    await waitForHostSessionEventAfter(dshHome, sessionAp, failflowStart,
+    // The REAL TUI must not have received the dead question's sheet: no
+    // approval interaction was mounted for it after the close boundary.
+    const tuiApprovalAfterClose = tuiA.records.filter(record =>
+      tuiA.records.indexOf(record) >= f2TuiBoundary
+      && record.m4b2s === 'surface-status')
+    void tuiApprovalAfterClose
+    assert(!(await tuiScreenShows(tuiA, '[y] Allow once', 1_500)),
+      'F2: the REAL TUI must never show the dead ACP turn approval sheet after the close')
+    await waitForHostSessionEventAfter(dshHome, sessionA, failflowAfterClose,
       event => event.type === 'turn/end',
-      'F2: the retired turn to reach its own real terminal', 180_000)
+      'F2: the retired turn to reach its own real terminal after the close', 180_000)
     // MEASURED: the failed-flight fence kept the attribution — the only
-    // post-failure approval decision is `unavailable` and no TUI channel ever
-    // existed for it (this Session has no TUI client at all).
-    const failflowEvents = (hostSessionEvents(dshHome, sessionAp) ?? []).slice(failflowStart)
+    // post-close approval decision is `unavailable` (ordered after the close),
+    // the earlier allow is exactly one, and the REAL TUI stayed silent.
+    const failflowEvents = (hostSessionEvents(dshHome, sessionA) ?? []).slice(failflowAfterClose)
     const failflowLateDecisions = failflowEvents.filter(event =>
       event.type === 'approval/decided' && event.data?.outcome === 'unavailable')
-    const failflowAllowedLate = failflowEvents.filter(event =>
-      event.type === 'approval/decided' && event.data?.outcome === 'allowed-once')
+    const failflowAllAllowed = (hostSessionEvents(dshHome, sessionA) ?? []).slice(failflowStart)
+      .filter(event => event.type === 'approval/decided' && event.data?.outcome === 'allowed-once')
     const lateApprovalNoLeak = racingNoLateGrant
       && failflowLateDecisions.length >= 1
-      && failflowAllowedLate.length === 1
+      && failflowAllAllowed.length === 1
 
     // ── G01) Two independent ACP Sessions stay isolated.
     const workspaceDir2 = join(workDir, 'po3b-workspaces', 'isolation')
@@ -1040,6 +1060,16 @@ export async function runAcpPo3bCancelApproval(context) {
     }
     try { await dispose() } catch { /* the global backstop owns leftovers */ }
     try { await awaitSceneSeatFree().catch(() => {}) } catch { /* seat proof is best effort on failure */ }
+  }
+}
+
+/** Whether the REAL TUI screen shows the needle within a bounded window. */
+async function tuiScreenShows(tui, needle, windowMs) {
+  try {
+    await tui.waitForScreen(needle, 'screen probe', windowMs)
+    return true
+  } catch {
+    return false
   }
 }
 

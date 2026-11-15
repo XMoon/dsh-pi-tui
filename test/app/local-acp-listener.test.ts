@@ -1309,3 +1309,51 @@ test('a TUI-owned approval never reaches the ACP connection and a second Session
     b.close()
   }
 })
+
+test('R701-01: a runtime Off keeps the Host fact subscription until the late insertion is cancelled', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    fake.seed('session-off', '/host/proj')
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-off', cwd: '/host/proj' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    // An admission is still PENDING when the runtime turns the listener Off.
+    // Hold the admission until the test releases it (the late-admission leg).
+    let releaseAdmission!: () => void
+    const admissionHeld = new Promise<void>(resolveHeld => { releaseAdmission = resolveHeld })
+    const promptsRef = fake.prompts
+    const originalPrompt = fake.access.prompt.bind(fake.access)
+    ;(fake.access as { prompt: unknown }).prompt = async (request: AcpSessionPromptRequest) => {
+      promptsRef.push(request)
+      await admissionHeld
+      return await originalPrompt(request, new AbortController().signal)
+    }
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'session-off', prompt: [{ type: 'text', text: 'off race' }] } })
+    await waitForFact(() => fake.prompts[0], 'the held admission call')
+    // The official admission completes and inserts the message (the real
+    // insertion fact is synchronous with the accepted admission).
+    releaseAdmission()
+    const facts = fake.facts()
+    const agent = fake.agentOf('session-off')
+    assert.ok(facts !== undefined && agent !== undefined)
+    facts.onInboxInserted(agent, { id: 'm-off', source: { kind: 'user', rpcId: fake.prompts[0]!.requestId } })
+    await new Promise(resolveTick => setImmediate(resolveTick))
+    // Runtime Off NOW: the socket dies and the listener retires, but the
+    // Host fact subscription must survive until the cancellation settles.
+    const closing = listener.close()
+    // The removal happens during the retirement's scoped cancellation, before
+    // the subscription is disposed.
+    for (let guard = 0; guard < 200 && fake.removedMessageIds.length === 0; guard += 1) {
+      await new Promise(resolveTick => setImmediate(resolveTick))
+    }
+    assert.deepEqual(fake.removedMessageIds, ['m-off'], 'the late-inserted message is removed exactly by the surviving subscription')
+    await closing
+    assert.equal(fake.facts(), undefined, 'the subscription is disposed only after the work settled')
+  } finally {
+    client.close()
+  }
+})
