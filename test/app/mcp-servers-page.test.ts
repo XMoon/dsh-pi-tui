@@ -1136,3 +1136,114 @@ test('the input-mode bar commits through the SAME path as the keyboard Enter', (
   assert.ok(controller.calls.includes('setDictValue:env:E=:literal'),
     `the apply intent must commit the value: ${controller.calls.join(',')}`)
 })
+
+test('a discard whose fact set cannot be painted refuses `d` like any other confirmation', () => {
+  // Generous grant: the discard body fits, so `d` really drops the draft.
+  const roomy = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
+  openEditor(roomy.page, 'e', 100, 20)
+  roomy.page.handleInput('\x1b')
+  const roomyFrame = render(roomy.page, 100, 20).join('\n')
+  assert.match(roomyFrame, /nothing has been written yet/u, 'the discard body states what is dropped')
+  roomy.page.handleInput('d')
+  assert.ok(roomy.controller.calls.includes('discardEditor'), 'a fully visible discard is executable')
+
+  // A grant too small for the fact set: no affirmative affordance and `d` is
+  // refused — the bar offers only cancel.
+  const tight = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
+  openEditor(tight.page, 'e', 44, 3)
+  tight.page.handleInput('\x1b')
+  const tightFrame = render(tight.page, 44, 3).join('\n')
+  assert.doesNotMatch(tightFrame, /Discard \[d\]|Discard changes\? \[Keep/u,
+    `no executable discard affordance on an unreviewable frame: ${tightFrame}`)
+  assert.match(tightFrame, /Resize to review/u)
+  tight.page.handleInput('d')
+  assert.deepEqual(tight.controller.calls.filter(call => call === 'discardEditor'), [],
+    'an unreviewable discard must refuse `d`')
+})
+
+test('an active form input owns the body: a pointer cannot switch fields behind it', () => {
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
+  openEditor(page, 'e', 100, 20)
+  // Focus the Command row (an Edit's Name is read-only) and open its input.
+  for (let step = 0; step < 6; step += 1) {
+    const focused = /▸ ([^:\n]+):/u.exec(render(page, 100, 20).join('\n'))
+    if (focused !== null && (focused[1] ?? '').trim().startsWith('Command')) break
+    page.handleInput('\x1b[B')
+  }
+  page.handleInput('\r')
+  render(page, 100, 20)
+  const lines = render(page, 100, 20)
+  const transportLine = lines.findIndex(line => line.includes('Transport:'))
+  assert.ok(transportLine >= 0)
+  const mouse = { button: 'left' as const, screenX: 1, screenY: 1, shift: false, alt: false, ctrl: false }
+  controller.calls.length = 0
+  // A body row click must be refused while the input owns the page…
+  page.handleMouse({ ...mouse, type: 'press', x: 2, y: transportLine, width: 100, height: 19 })
+  page.handleMouse({ ...mouse, type: 'click', x: 2, y: transportLine, width: 100, height: 19 })
+  assert.deepEqual(controller.calls, [], 'the input modal owns the body for the pointer too')
+
+  // …while its OWN apply/cancel spans stay reachable.
+  const spans = page.paintedBarSpans().map(span => span.id)
+  assert.ok(spans.includes('bar:apply-input'), `the input bar publishes apply: ${spans.join(',')}`)
+  assert.ok(spans.includes('bar:cancel'), `the input bar publishes cancel: ${spans.join(',')}`)
+})
+
+test('a question that has not painted yet is not executable (no cross-question authorisation)', () => {
+  // A question can open in state and be answered before its frame paints. The
+  // verdict is bound to the PAINTED identity, so `y` must be refused then —
+  // the previous frame's admission (no modal → false) must not carry over.
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
+  openEditor(page, 'e', 100, 20)
+  controller.calls.length = 0
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    configConfirm: { kind: 'save', name: 'alpha', warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
+  }
+  // No render between opening the question and the answer.
+  page.handleInput('y')
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('answerConfigConfirm')), [],
+    'an unpainted question must refuse its answer')
+
+  // After the frame paints the same answer is accepted.
+  const frame = render(page, 100, 20).join('\n')
+  assert.match(frame, /can execute an external command/u)
+  page.handleInput('y')
+  assert.ok(controller.calls.includes('answerConfigConfirm:true'),
+    `a painted question accepts the answer: ${controller.calls.join(',')}`)
+
+  // The decisive case: a PREVIOUS question already painted (so an admission
+  // exists), then a DIFFERENT question opens and is answered before painting.
+  // The old admission must not authorise the new question.
+  const second = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
+  openEditor(second.page, 'e', 100, 20)
+  second.controller.snapshotValue = {
+    ...second.controller.snapshotValue,
+    configConfirm: { kind: 'toggle', name: 'alpha', nextEnabled: false, capturedRevision: 1 },
+  }
+  render(second.page, 100, 20) // the toggle question paints → admitted
+  second.controller.calls.length = 0
+  // A different question replaces it without a repaint between.
+  second.controller.snapshotValue = {
+    ...second.controller.snapshotValue,
+    configConfirm: { kind: 'delete', name: 'alpha', capturedRevision: 1 },
+  }
+  second.page.handleInput('y')
+  assert.deepEqual(second.controller.calls.filter(call => call.startsWith('answerConfigConfirm')), [],
+    'a NEW unpainted question must not reuse the previous admission')
+})
+
+test('a blocked question refuses both the key and the pointer confirm intent', () => {
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
+  openEditor(page, 'e', 44, 4)
+  controller.calls.length = 0
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    configConfirm: { kind: 'save', name: 'a'.repeat(32), warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
+  }
+  const frame = render(page, 44, 4).join('\n')
+  assert.match(frame, /Resize to review/u)
+  page.handleInput('y')
+  page.activateBarSpan('bar:confirm')
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('answerConfigConfirm')), [],
+    'a blocked question accepts neither input path')
+})

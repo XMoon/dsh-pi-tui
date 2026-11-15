@@ -735,3 +735,40 @@ test('the Settings ROOT drives a real pointer click into the MCP page (and refus
   assert.equal(h.view(), stale, 'a stale release must not reach any page intent')
   assert.deepEqual(h.settingsMutateCalls, [], 'a refused gesture never writes')
 })
+
+test('a y that arrives inside the render window never commits an unpainted Save', async () => {
+  const h = setup()
+  await openMcpPage(h)
+  // A valid draft: Add, name it, set a command.
+  await press(h.vt, 'a')
+  await frames(h.vt, 2)
+  await press(h.vt, '\r')
+  for (const char of 'window-save') await h.vt.sendInput(char)
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+  for (let step = 0; step < 6; step += 1) {
+    const focused = /▸ ([^:\n]+):/u.exec(h.view())
+    if (focused !== null && (focused[1] ?? '').trim().startsWith('Command')) break
+    await press(h.vt, '\x1b[B')
+  }
+  await press(h.vt, '\r')
+  for (const char of '/bin/sleep') await h.vt.sendInput(char)
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+
+  // `s` opens the question and `y` answers it BEFORE the question frame paints:
+  // the answer must be refused, so no Host mutation happens.
+  h.vt.sendInput('s')
+  h.vt.sendInput('y')
+  await frames(h.vt, 3)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.deepEqual(h.settingsMutateCalls, [], 'an unpainted question must never dispatch a write')
+  // The question is still open and now painted: the answer is accepted.
+  assert.match(h.view(), /can execute an external command/u)
+  await press(h.vt, 'y')
+  await frames(h.vt, 3)
+  await flushOwnedTurns()
+  await frames(h.vt, 3)
+  assert.equal(h.settingsMutateCalls.length, 1, 'the painted question dispatches exactly one write')
+})
