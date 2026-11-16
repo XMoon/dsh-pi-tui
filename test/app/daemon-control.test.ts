@@ -617,6 +617,100 @@ test('stop refuses a mismatched unit MainPID even when Host authentication faile
   assert.equal(signals, 0, 'a mismatched target is never PID-signalled')
 })
 
+test('stop acts on a verified unit when the live Host protocol is incompatible', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope, { protocol: 'dsh-pi-tui/local/0' as typeof LOCAL_PROTOCOL })
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: record.hostPid })
+  let stopped = false
+  let signals = 0
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    systemctl: async args => {
+      const outcome = await systemctl.run(args)
+      if (args.includes('stop')) stopped = true
+      return outcome
+    },
+    readRecord: () => (stopped ? undefined : record),
+    inspectProcess: () => (stopped ? 'dead' : 'alive'),
+    authenticate: async () => { throw new Error('incompatible Host must not be authenticated') },
+    kill: () => { signals += 1 },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=stopped$/mu)
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), true)
+  assert.equal(signals, 0, 'incompatible supervision is never a PID signal')
+})
+
+test('stop refuses an incompatible Host whose unit MainPID differs', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope, { protocol: 'dsh-pi-tui/local/0' as typeof LOCAL_PROTOCOL })
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: 9999 })
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    kill: () => { throw new Error('must not signal') },
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), false)
+})
+
+test('restart replaces a verified incompatible Host after stopping its unit', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const oldRecord = recordOf(fx.scope, { protocol: 'dsh-pi-tui/local/0' as typeof LOCAL_PROTOCOL })
+  const newRecord = recordOf(fx.scope, { instanceId: '55555555-5555-4555-8555-555555555555', hostPid: 6565 })
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: oldRecord.hostPid })
+  let stopped = false
+  let ensured = 0
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, depsOf(fx, {
+    systemctl: async args => {
+      const outcome = await systemctl.run(args)
+      if (args.includes('stop')) stopped = true
+      return outcome
+    },
+    readRecord: () => (stopped ? (ensured > 0 ? newRecord : undefined) : oldRecord),
+    inspectProcess: recordValue => (recordValue?.instanceId === newRecord.instanceId ? 'alive' : stopped ? 'dead' : 'alive'),
+    authenticate: async recordValue => {
+      if (recordValue.protocol !== LOCAL_PROTOCOL) throw new LocalScopeError('HOST_PROTOCOL_INCOMPATIBLE', 'different runtime')
+      return { record: recordValue, cookie: 'c', identity: recordValue }
+    },
+    ensureHost: async () => { ensured += 1; return { record: newRecord, cookie: 'c', identity: newRecord } },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.equal(ensured, 1)
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), true)
+  assert.match(result.stdout, /^instance=55555555$/mu)
+})
+
+test('uninstall removes a verified incompatible Host unit', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope, { protocol: 'dsh-pi-tui/local/0' as typeof LOCAL_PROTOCOL })
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: record.hostPid })
+  let stopped = false
+  const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, depsOf(fx, {
+    systemctl: async args => {
+      const outcome = await systemctl.run(args)
+      if (args.includes('stop')) stopped = true
+      return outcome
+    },
+    readRecord: () => (stopped ? undefined : record),
+    inspectProcess: () => (stopped ? 'dead' : 'alive'),
+    authenticate: async () => { throw new Error('incompatible Host must not be authenticated') },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.equal(existsSync(unit.path), false)
+  assert.equal(systemctl.calls.some(args => args.includes('stop')), true)
+})
+
 test('a live Host with a different DSH runtime reports incompatible, not stopped', async t => {
   const fx = fixture(t)
   const record = recordOf(fx.scope, { dshVersion: '0.1.0' })

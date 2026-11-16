@@ -497,21 +497,23 @@ stdout/stderr.
   no provable ownership, a foreign or wrong-scope unit, a stale
   PID or an identity mismatch is refused instead of being signalled. A timeout
   is exit 5 and never escalates to SIGKILL or claims `stopped`.
-- **Authentication failure is reported, not auto-recovered.** A live Host that
-  fails the Cookie/identity/starttime handshake is `unresponsive` with a
-  nonzero diagnostic; the product never restarts, stops, rewrites or enables a
-  unit on its own. An explicit `stop`, `restart` or `uninstall` may still act on
-  an already-verified current-Profile unit when the manager is available and
-  the unit's `MainPID` is the live Host PID the command is about to stop (or
-  there is no live registry Host): authentication is a Ready verdict, not the
-  unit-ownership verdict. Foreign identity, wrong scope, wrong `FragmentPath`, a
-  mismatched `MainPID` and a strict-absence Host without a fresh authenticated
-  identity remain refusals. A surface startup failure prints the controlled code,
-  states that the Host was not stopped, and points at `daemon status`,
-  `daemon logs` and an explicitly user-chosen `daemon restart`; it never tells
-  the user to signal a PID and never promises that recovery will succeed. A restart must still stop the
-  old instance and prove a new authenticated Ready instance; a failed recovery
-  reports the real failure.
+- **Authentication or compatibility failure is reported, not auto-recovered.**
+  A live Host that fails the Cookie/identity/starttime handshake is
+  `unresponsive`; one whose protocol or DSH runtime differs is `incompatible`.
+  Both are nonzero diagnostics, and the product never restarts, stops,
+  rewrites or enables a unit on its own. An explicit `stop`, `restart` or
+  `uninstall` may still act on an already-verified current-Profile unit when
+  the manager is available and the unit's `MainPID` is the live Host PID the
+  command is about to stop (or there is no live registry Host): readiness and
+  compatibility are Host verdicts, not the unit-ownership verdict. Foreign
+  identity, wrong scope, wrong `FragmentPath`, a mismatched `MainPID` and a
+  strict-absence Host without a fresh authenticated identity remain refusals.
+  A restart still stops the old instance and proves a new authenticated Ready
+  instance; a failed recovery reports the real failure. A surface startup
+  failure prints the controlled code, states that the Host was not stopped,
+  and points at `daemon status`, `daemon logs` and an explicitly user-chosen
+  `daemon restart` for the ACTIVE profile; it never tells the user to signal a
+  PID and never promises that recovery will succeed.
 - **restart and uninstall are ONE explicit transition.** `restart` stops, awaits
   a confirmed old-instance exit, and only then starts a new instance; a stop
   that is unknown, failed or still running forbids the start. An owned unit
