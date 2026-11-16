@@ -331,12 +331,17 @@ export class SubagentSettingsController {
         }
         if (this.disposed || token !== this.operation) return
         if (selectionDirty && selection.kind === 'ready') {
-          // Re-prove the original Host after the first namespace settles. Never
-          // send the second half to a replacement Host, including same revisions.
+          // Re-prove the original Host after the first namespace settles. A
+          // missing Limits descriptor is a local section loss, not evidence that
+          // Selection's Host was replaced: Selection's own current generation is
+          // the authority for its dispatch. A contradicting live Limits
+          // descriptor still rejects the cross-Host case.
           const live = this.deps.selection.read()
           const firstLive = limitsDirty ? this.deps.limits.read() : undefined
-          if (live.kind !== 'ready' || live.generation !== selection.generation
-            || (limitsDirty && (firstLive?.kind !== 'ready' || limits.kind !== 'ready' || firstLive.generation !== limits.generation))) {
+          const firstAuthorityChanged = limitsDirty && firstLive?.kind === 'ready'
+            && ((limits.kind === 'ready' && firstLive.generation !== limits.generation)
+              || (limits.kind !== 'ready' && live.kind === 'ready' && live.generation !== firstLive.generation))
+          if (live.kind !== 'ready' || live.generation !== selection.generation || firstAuthorityChanged) {
             this.selection.status = { kind: 'not-saved', text: 'Not saved · Host authority unavailable; refresh before retrying.' }
           } else {
             this.selection.status = { kind: 'saving', text: 'Saving…' }
