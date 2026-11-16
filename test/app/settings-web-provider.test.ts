@@ -787,7 +787,7 @@ test('an unavailable section offers no write and no candidates', async t => {
   assert.match(page, /the Host Web provider settings are not available on this backend/u, 'the Detail names the real reason')
   // Enter opens the read-only Detail; Enter there must not write.
   await openWebRow(h, 0)
-  assert.doesNotMatch(h.view(), /Enter confirm/u, 'no confirm affordance exists without an authority')
+  assert.doesNotMatch(h.view(), /Confirm \[Enter\]/u, 'no confirm affordance exists without an authority')
   await key(h, ENTER)
   await new Promise(resolve => setTimeout(resolve, 10))
   await h.vt.waitForRender()
@@ -824,7 +824,7 @@ test('a configured custom provider id stays visible and offers no candidate', as
   assert.match(detail, /Current: acme-search/u)
   assert.match(detail, /CUSTOM route/u, 'the Detail states that it is not selectable here')
   assert.doesNotMatch(detail, /› /u, 'no selectable candidate is painted')
-  assert.doesNotMatch(detail, /Enter confirm/u, 'no Confirm affordance exists for a custom route')
+  assert.doesNotMatch(detail, /Confirm \[Enter\]/u, 'no Confirm affordance exists for a custom route')
   await key(h, ENTER)
   await new Promise(resolve => setTimeout(resolve, 10))
   await h.vt.waitForRender()
@@ -1121,7 +1121,7 @@ test('a verified billing write reads back the committed mode on its own row', as
   await openWebPage(h)
   await openWebRow(h, 4) // the Search Billing row
   assert.match(h.view(), /Current: Automatic/u)
-  assert.match(h.view(), /Enter confirm/u)
+  assert.match(h.view(), /Confirm \[Enter\]/u)
   await chooseCandidate(h, 1) // Automatic -> Account
   const mark = settledWritesMark(h)
   await key(h, ENTER)
@@ -1326,13 +1326,13 @@ test('a stale backend keeps the readable facts but offers no candidate and dispa
   const detail = h.view()
   assert.match(detail, /Current: Messages/u, 'the readable fact is still painted')
   assert.match(detail, /read-only until it reconnects/u, `the refusal names the reason:\n${detail}`)
-  assert.doesNotMatch(detail, /Enter confirm/u, 'no Confirm affordance exists on a non-current backend')
+  assert.doesNotMatch(detail, /Confirm \[Enter\]/u, 'no Confirm affordance exists on a non-current backend')
   await key(h, ENTER)
   assert.deepEqual(h.writes, [], 'a stale backend dispatches nothing')
   // Recovery: a ready backend + a fresh read restore the candidates.
   h.setReadiness('ready')
   await key(h, 'r')
-  await settlePainted(h, 'the recovered candidates', frame => frame.includes('Enter confirm'))
+  await settlePainted(h, 'the recovered candidates', frame => frame.includes('Confirm [Enter]'))
   await chooseCandidate(h, 1) // Messages (the current value) -> DeepSeek Search API
   await key(h, ENTER)
   await settlePainted(h, 'the recovered verified write', frame => frame.includes('Verified'))
@@ -1475,22 +1475,22 @@ test('the wheel scrolls a cropped list by moving the visible selection (44 and 8
   }
 })
 
-test('a resize that crops the highlighted candidate removes the Enter confirm affordance', async t => {
+test('a resize that crops the highlighted candidate removes the Confirm [Enter] affordance', async t => {
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 2) // count Detail
   await key(h, DOWN) // 10 -> 20
-  assert.match(h.view(), /Enter confirm/u)
+  assert.match(h.view(), /Confirm \[Enter\]/u)
   h.vt.resize(120, 3)
   await h.vt.waitForRender()
   const cropped = h.view()
-  assert.doesNotMatch(cropped, /Enter confirm/u, `a cropped candidate offers no Confirm:\n${cropped}`)
+  assert.doesNotMatch(cropped, /Confirm \[Enter\]/u, `a cropped candidate offers no Confirm:\n${cropped}`)
   await key(h, ENTER)
   assert.deepEqual(h.writes, [], 'Enter on an invisible candidate dispatches nothing')
   h.vt.resize(120, 40)
   await h.vt.waitForRender()
-  assert.match(h.view(), /Enter confirm · Back \[Esc\]/u, 'the restored frame advertises the Confirm again')
+  assert.match(h.view(), /Confirm \[Enter\] · Back \[Esc\]/u, 'the restored frame advertises the Confirm again')
   await key(h, ENTER)
   await settlePainted(h, 'the confirmed count write', frame => frame.includes('Verified'))
   assert.deepEqual(h.writes, ['count:20'])
@@ -1533,7 +1533,7 @@ test('a list wheel re-anchors the Detail on the NEW row authoritative candidates
   assert.doesNotMatch(credential, /› Clear in Models…/u)
 })
 
-test('a dispatched choice write never advertises Enter confirm while it is saving', async t => {
+test('a dispatched choice write never advertises Confirm [Enter] while it is saving', async t => {
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
   h.store.writeDelayMs = 300
@@ -1544,12 +1544,12 @@ test('a dispatched choice write never advertises Enter confirm while it is savin
   await key(h, ENTER)
   const saving = h.view()
   assert.match(saving, /Saving…/u, `the in-flight state is painted:\n${saving}`)
-  assert.doesNotMatch(saving, /Enter confirm/u, `no Confirm is advertised while saving:\n${saving}`)
+  assert.doesNotMatch(saving, /Confirm \[Enter\]/u, `no Confirm is advertised while saving:\n${saving}`)
   await key(h, ENTER) // must not dispatch a second intent
   await awaitWriteSettlement(h, 'search:deepseek-search-api', mark)
   assert.equal(h.writes.length, 1, 'Enter while saving dispatched nothing')
   assert.match(h.view(), /Verified/u)
-  await settlePainted(h, 'the settled bar', frame => frame.includes('Enter confirm'))
+  await settlePainted(h, 'the settled bar', frame => frame.includes('Confirm [Enter]'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'])
 })
 
@@ -1790,7 +1790,7 @@ test('the page states the rc.2 defaults, billing and read-only overrides', async
       'the override env NAME is allowed as a fact')
     assert.doesNotMatch(billingFrame, /secret|user:|token=/u,
       `no credential material is painted on the billing Detail:\n${billingFrame}`)
-    assert.doesNotMatch(billingFrame, /Enter confirm/u,
+    assert.doesNotMatch(billingFrame, /Confirm \[Enter\]/u,
       'an overridden billing row offers no Confirm affordance')
     overridden.handleInput('\r') // Enter with no candidate: zero writes
     assert.deepEqual(overriddenWrites, [], 'the overridden billing row never dispatches a write')
@@ -1834,6 +1834,7 @@ test('the page bar publishes the complete Esc span in its OWN content columns', 
   try {
     // Before ANY paint there is no frame to describe.
     assert.equal(page.paintedEscapeSpan(), undefined)
+    assert.deepEqual(page.paintedBarSpans(), [], 'no delegated span exists before the first paint')
     page.setMaxRows(20)
     // Paint the frame FIRST: the span always describes the last completed paint.
     const bar = (): string => stripTerminalSequences(page.render(80).at(-1)!)
@@ -1846,25 +1847,135 @@ test('the page bar publishes the complete Esc span in its OWN content columns', 
       assert.equal(span.endCol - span.startCol, visibleWidth(`${verb} [Esc]`),
         'painting the affordance never changes its visible width')
     }
+    const confirmSpan = (): { readonly startCol: number; readonly endCol: number } | undefined =>
+      page.paintedBarSpans().find(span => span.id === 'web:confirm')
+    const expectConfirm = (): void => {
+      const painted = bar()
+      const span = confirmSpan()
+      assert.ok(span !== undefined, 'the Detail publishes the delegated Confirm')
+      assert.equal(painted.slice(span.startCol, span.endCol), 'Confirm [Enter]',
+        'the delegated span covers exactly the plain confirm verb')
+      assert.equal(span.endCol - span.startCol, visibleWidth('Confirm [Enter]'))
+    }
 
-    // List region: Esc returns to the Tools rows (the affordance names that Back).
+    // List region: Esc returns to the Tools rows (the affordance names that Back)
+    // and NO confirm target is painted.
     expectVerb('Back')
+    assert.equal(confirmSpan(), undefined, 'a list frame publishes no Confirm')
     // Detail region: Esc returns to the page list. The region/row transition
     // changes the page's OWN gesture identity even when the bar verb repeats.
     const listIdentity = page.gestureIdentity()
     page.handleInput('\r')
     expectVerb('Back')
+    expectConfirm()
     assert.notEqual(page.gestureIdentity(), listIdentity,
       'opening the detail changes the page gesture identity')
+    // 20 columns cannot fit `Confirm [Enter] · Back [Esc]` whole: the commit
+    // verb is dropped, never truncated, and the Esc affordance survives.
+    page.render(20)
+    assert.equal(confirmSpan(), undefined, 'a width that cannot fit the whole verb publishes no Confirm')
+    assert.ok(page.paintedEscapeSpan() !== undefined, 'the Esc affordance survives the drop')
     page.handleInput('\x1b')
     expectVerb('Back')
 
     // No wording fits at all: the bar is empty and carries no geometry.
     page.render(8)
     assert.equal(page.paintedEscapeSpan(), undefined, 'a dropped wording advertises no Esc')
+    assert.equal(confirmSpan(), undefined, 'a dropped wording advertises no Confirm')
   } finally {
     page.dispose()
   }
+})
+
+test('the delegated Confirm re-proves the LIVE authority and revokes a stale gesture', async () => {
+  let facts: WebSettingsFacts = {
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-official',
+      fetchProvider: 'http',
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {},
+      credential: { configured: true, source: 'file' },
+    },
+  }
+  const commits: string[] = []
+  const page = new WebSettingsPage({
+    readFacts: () => facts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => true,
+    commit: async (id, requested) => {
+      commits.push(`${id}:${requested}`)
+      return { kind: 'verified', actual: requested }
+    },
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: (_label, task) => { void task() },
+    done: () => {},
+  })
+  const settle = async (): Promise<void> => {
+    for (let index = 0; index < 20; index += 1) await Promise.resolve()
+  }
+  try {
+    page.setMaxRows(20)
+    page.render(140) // list
+    page.handleInput('\r') // the provider Detail
+    page.render(140)
+    assert.equal(page.paintedBarSpans().length, 1, 'precondition — the Detail publishes Confirm')
+    // The live candidate the authority holds is already current; confirming it
+    // still joins the command owner's FIFO exactly once.
+    page.activateBarSpan('web:confirm')
+    await settle()
+    assert.deepEqual(commits, ['web-search-provider:deepseek-official'],
+      'the delegated Confirm runs the original confirmSelected sink exactly once')
+    // A DISPATCHED write owns the row: the same target cannot enqueue a second
+    // intent while the phase is saving.
+    page.activateBarSpan('web:confirm')
+    await settle()
+    assert.equal(commits.length, 1, 'no second intent is enqueued while saving')
+
+    // The authority becomes pending WITHOUT any page state change: the painted
+    // snapshot is no longer a commit base.
+    page.render(140)
+    const before = page.gestureIdentity()
+    facts = { kind: 'pending' }
+    assert.equal(page.gestureIdentity(), before, 'precondition — the page identity is unchanged')
+    page.activateBarSpan('web:confirm')
+    await settle()
+    assert.equal(commits.length, 1, 'a pending authority dispatches nothing')
+
+    // An externally CUSTOM route removes every official candidate.
+    facts = {
+      kind: 'ready',
+      settings: {
+        searchProvider: 'custom-route',
+        fetchProvider: 'http',
+        api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+        advanced: {},
+        credential: { configured: true, source: 'file' },
+      },
+    }
+    page.activateBarSpan('web:confirm')
+    await settle()
+    assert.equal(commits.length, 1, 'a custom route dispatches nothing')
+
+    // A wheel starts a new semantic frame even when it scrolls nothing.
+    page.activateBarSpan('web:confirm')
+    await settle()
+    assert.equal(commits.length, 1, 'a stale target stays inert')
+    page.handleMouse({
+      type: 'wheel', button: 'none', x: 1, y: 1, screenX: 1, screenY: 1,
+      width: 140, height: 20, shift: false, alt: false, ctrl: false, wheelDelta: 1,
+    })
+    page.activateBarSpan('web:confirm')
+    await settle()
+    assert.equal(commits.length, 1, 'a wheel revokes the pending Confirm target')
+  } finally {
+    page.dispose()
+  }
+  page.activateBarSpan('web:confirm')
+  await settle()
+  assert.equal(commits.length, 1, 'a disposed page dispatches nothing')
 })
 
 test('Billing rows are Not selected and inert when their API provider is not the current route', async () => {
@@ -1964,4 +2075,117 @@ test('Host override values are terminal-sanitized before the Configured override
   } finally {
     page.dispose()
   }
+})
+
+// ── C2: the delegated mouse Confirm through the real command owner ────────
+
+/** One native SGR left-button press/release pair (1-based terminal cells). */
+function pointerClick(h: Harness, row: number, column: number): void {
+  h.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  h.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+}
+
+/** The painted (row, cell) of the LAST line containing `word`. */
+function paintedWordCell(h: Harness, word: string): { readonly row: number; readonly column: number } {
+  const lines = h.view().split('\n')
+  const row = lines.findLastIndex(line => line.includes(word))
+  assert.ok(row >= 0, `${word} is not painted:\n${h.view()}`)
+  const column = lines[row]!.indexOf(word)
+  assert.ok(column >= 0, `${word} has no painted column`)
+  return { row, column }
+}
+
+/**
+ * Wait out the alt screen's DOUBLE_CLICK window before the next gesture on the
+ * same painted word: a fast repeat reads as a word-selection double click, not
+ * a second disclosure (the fork's REAL 500ms contract, not a blind wait).
+ */
+async function settlePointerClick(h: Harness): Promise<void> {
+  await new Promise<void>(resolve => setTimeout(resolve, 550))
+  await h.vt.waitForRender()
+}
+
+test('a delegated mouse Confirm is the ONE write through the existing Web FIFO', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1) // Messages -> DeepSeek Search API (draft only)
+  assert.deepEqual(h.writes, [], 'moving the draft writes nothing')
+  const mark = settledWritesMark(h)
+  const point = paintedWordCell(h, 'Confirm [Enter]')
+  pointerClick(h, point.row, point.column + 1)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', mark)
+  await settlePainted(h, 'the verified provider Detail', frame =>
+    frame.includes('Current: DeepSeek Search API') && frame.includes('Verified'))
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'exactly ONE official setter')
+  assert.deepEqual(h.log, ['begin:search:deepseek-search-api', 'search:deepseek-search-api'],
+    'the click joined the ONE existing command-owner FIFO')
+  assert.equal(h.maxConcurrentWrites(), 1)
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+})
+
+test('a Host read between the Confirm press and release writes nothing', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
+  const point = paintedWordCell(h, 'Confirm [Enter]')
+  h.vt.sendInput(`\x1b[<0;${point.column + 1};${point.row + 1}M`)
+  // A Host refresh between the press and the release makes the authority
+  // pending (and starts a new child semantic frame): the release must write
+  // nothing against the pre-refresh snapshot.
+  const releaseRead = h.holdAllReads()
+  await key(h, 'r')
+  h.vt.sendInput(`\x1b[<0;${point.column + 1};${point.row + 1}m`)
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, [], 'the stale release never dispatches a write')
+  releaseRead()
+  await settlePainted(h, 'the refreshed Detail', frame =>
+    frame.includes('Confirm [Enter]') && !frame.includes('Loading…'))
+  // A fresh complete gesture writes exactly once.
+  await settlePointerClick(h)
+  const mark = settledWritesMark(h)
+  const fresh = paintedWordCell(h, 'Confirm [Enter]')
+  pointerClick(h, fresh.row, fresh.column + 1)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', mark)
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'])
+})
+
+test('two mouse Confirms join the ONE FIFO and never overlap', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  // Long enough that intent B really arrives while A is still in flight, even
+  // with the deliberate pacing past the alt screen's double-click window.
+  h.store.writeDelayMs = 1_000
+  await openWebPage(h)
+  // Intent A (search provider): clicked, deliberately slow.
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
+  const first = paintedWordCell(h, 'Confirm [Enter]')
+  pointerClick(h, first.row, first.column + 1)
+  // Intent B (count 10 -> 20) while A is still in flight: it joins the SAME
+  // single FIFO, so it can only START after A settled.
+  await webListTop(h)
+  await openWebRow(h, 2)
+  await chooseCandidate(h, 2) // 5,10,20,50 -> 20
+  await settlePainted(h, 'the second row Detail with Confirm', frame => frame.includes('Confirm [Enter]'))
+  // The bar cell is unchanged between the two Details: pace the second click
+  // past the alt screen's double-click word selection (it still lands while
+  // intent A's slow Host write is in flight).
+  await settlePointerClick(h)
+  const markB = settledWritesMark(h)
+  const second = paintedWordCell(h, 'Confirm [Enter]')
+  pointerClick(h, second.row, second.column + 1)
+  await awaitWriteSettlement(h, 'count:20', markB)
+  assert.deepEqual(h.log, [
+    'begin:search:deepseek-search-api',
+    'search:deepseek-search-api',
+    'begin:count:20',
+    'count:20',
+  ], 'the second mouse intent does not even START until the first settled')
+  assert.equal(h.maxConcurrentWrites(), 1, 'never two Web writes in flight at once')
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+  assert.equal(h.store.web.api.count, 20)
 })
