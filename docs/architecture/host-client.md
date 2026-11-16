@@ -701,8 +701,11 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
       rejects unobserved: a real content/transport failure fails the one request
       (with `LOCAL_ACP_PROMPT_OUTPUT_FAILED` for delivery), and a closed flight
       drops only output it has not yet handed to the transport. The flight's own
-      AbortSignal stops only ITS output IO on close/disconnect/Off/disposal/MIXED
-      — it never cancels or disposes the Host Agent.
+      AbortSignal stops only ITS output IO on close/disconnect/Off/disposal — it
+      never cancels or disposes the Host Agent. A MIXED turn stops projecting from
+      the moment the foreign claim is proven: notifications already handed to the
+      transport stay delivered, a queued-but-unsent update is dropped, and the
+      request fails closed with `LOCAL_ACP_PROMPT_MIXED_TURN`.
     - A completed turn needs at least ONE visible assistant output: non-empty
       committed text or a committed assistant image, so an image-only turn
       succeeds. A turn with no visible output keeps the stable
@@ -729,10 +732,12 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     shrink, re-encode or re-describe a committed image, and never derived from
     `initialize.promptCapabilities.image`. A frame above the legacy cap is
     written in 64 KiB chunks under the same unwritten-backlog bound, waiting at
-    most 30 seconds per kernel drain; a stalled reader, an over-budget frame or a
-    socket fault closes ONLY that connection (`LOCAL_ACP_OUTPUT_BACKPRESSURE` /
-    `LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE`) and never touches the Host, an Agent, a
-    Session or a sibling connection.
+    most 30 seconds per kernel drain. A reader that never drains is closed as
+    `LOCAL_ACP_OUTPUT_BACKPRESSURE` and a frame above the connection budget as
+    `LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE`; a socket close/error ends that drain wait
+    immediately and keeps its real errno as the diagnostic. Every one of these
+    affects ONLY that connection and never the Host, an Agent, a Session or a
+    sibling connection.
   - `session/close` detaches ONLY this connection's View/reservation: it never
     disposes, flushes or resumes the Agent/Session, so a TUI referencing the
     same Session keeps working and a later connection may resume again. With an

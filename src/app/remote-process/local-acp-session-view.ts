@@ -2006,7 +2006,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       return
     }
     const messageId = message.id
-    this.enqueueOutputTask(claim, flight, entries.length, async () => {
+    const toUpdates = async (): Promise<readonly SessionUpdate[]> => {
       const updates: SessionUpdate[] = []
       for (const entry of entries) {
         if (entry.kind === 'thought') {
@@ -2023,7 +2023,22 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         }
       }
       return updates
-    })
+    }
+    if (entries.every(entry => entry.kind !== 'message-image')) {
+      this.enqueueOutputTask(claim, flight, entries.length, (): SessionUpdate[] => {
+        const updates: SessionUpdate[] = []
+        for (const entry of entries) {
+          if (entry.kind === 'thought') {
+            updates.push({ sessionUpdate: 'agent_thought_chunk', messageId, content: { type: 'text', text: entry.text } })
+          } else if (entry.kind === 'message') {
+            updates.push({ sessionUpdate: 'agent_message_chunk', messageId, content: { type: 'text', text: entry.text } })
+          }
+        }
+        return updates
+      })
+      return
+    }
+    this.enqueueOutputTask(claim, flight, entries.length, toUpdates)
   }
 
   /** Project one committed tool call of the owned turn as a standard start update. */
@@ -2042,7 +2057,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       status: 'in_progress',
       ...(rawInput === undefined ? {} : { rawInput }),
     }
-    this.enqueueOutputTask(claim, flight, 1, async () => [update])
+    this.enqueueOutputTask(claim, flight, 1, () => [update])
   }
 
   /**
@@ -2089,7 +2104,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
     const toolCallId = message.toolCallId
     const status = message.isError === true ? 'failed' : 'completed'
-    this.enqueueOutputTask(claim, flight, 1, async () => {
+    const toUpdate = async (): Promise<readonly SessionUpdate[]> => {
       const content: ToolCallContent[] = []
       for (const entry of entries) {
         if (entry.kind === 'tool') {
@@ -2104,7 +2119,18 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       }
       const update: SessionUpdate = { sessionUpdate: 'tool_call_update', toolCallId, status, content }
       return [update]
-    })
+    }
+    if (entries.every(entry => entry.kind !== 'tool-image')) {
+      this.enqueueOutputTask(claim, flight, 1, (): SessionUpdate[] => {
+        const content: ToolCallContent[] = []
+        for (const entry of entries) {
+          if (entry.kind === 'tool') content.push({ type: 'content', content: { type: 'text', text: entry.text } })
+        }
+        return [{ sessionUpdate: 'tool_call_update', toolCallId, status, content }]
+      })
+      return
+    }
+    this.enqueueOutputTask(claim, flight, 1, toUpdate)
   }
 
   /**
@@ -2136,7 +2162,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     claim: ViewClaim,
     flight: InflightPrompt,
     reserve: number,
-    build: () => Promise<readonly SessionUpdate[]>,
+    build: () => readonly SessionUpdate[] | Promise<readonly SessionUpdate[]>,
   ): void {
     if (reserve === 0 || flight.settledDone) return
     flight.pendingUpdates += reserve
@@ -2154,7 +2180,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         // that has not yet been handed to the transport. Notifications already
         // sent cannot be retracted, but a queued event is still ours to drop.
         if (flight.settledDone || flight.mixed || flight.deliveryClosed) return
-        const updates = await build()
+        const built = build()
+        // A synchronously converted event is handed to the transport without an
+        // extra microtask, preserving the pre-PO-4C delivery timing for text.
+        const updates = Array.isArray(built) ? built : await built
         for (const update of updates) {
           if (flight.settledDone || flight.mixed || flight.deliveryClosed) return
           try {
@@ -2238,12 +2267,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
 
   /**
    * Commit the MIXED fact of one flight. A turn that also claims another user's
-   * message projects nothing further, and its not-yet-finished image reads stop:
-   * they belong to output this View may no longer deliver.
+   * message projects nothing that was committed from this point on. Events that
+   * were already committed BEFORE the mix keep their ordered delivery (the
+   * existing PO-3A contract: the client may see the pre-mix half, then the
+   * request fails closed). No new output IO starts after this fact.
    */
   private markFlightMixed(flight: InflightPrompt): void {
     flight.mixed = true
-    flight.outputAbort.abort()
   }
 
   /** Fail one flight exactly once and release its slot and correlation state. */
