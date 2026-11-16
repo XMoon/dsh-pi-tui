@@ -536,10 +536,45 @@ export async function runF2AccountComposition(context) {
     await clientB.waitForScreen('Settings · Categories', 'F2 offline Settings category rail opened', 30_000)
     // Follow the category that was actually painted; inserting/reordering a
     // category must not redirect this offline Account witness into Models.
+    const CATEGORY_LABELS_F2 = ['About', 'General', 'Models', 'Account', 'Agent', 'Appearance', 'Conversation', 'Input & Terminal', 'Tools', 'Plugins']
     const selectedCategoryOf = frame => {
-      if (!frame.includes('Settings · Categories') || !/\[Categories \(\d+\)\]/u.test(frame)) return undefined
-      return /^\s*(?:│\s*)?> ([^│]+?)\s{2,}/mu.exec(frame)?.[1]?.trim()
+      const strict = /^\s*(?:│\s*)?> ([^│]+?)\s{2,}/mu.exec(frame)?.[1]?.trim()
+      if (frame.includes('Settings · Categories') && /\[Categories \(\d+\)\]/u.test(frame)
+        && strict !== undefined && CATEGORY_LABELS_F2.includes(strict)) return strict
+      // While the offline Rows pane settles, the alt-screen repaint can leave
+      // the visible viewport showing only the MIDDLE of the rail (the header
+      // scrolled out) and a SECOND `> ` cursor in the content pane. The rail's
+      // frozen labels are still the authority: a rail cursor line is one whose
+      // label after `> ` is EXACTLY a frozen category name (the content pane's
+      // `> ← Back` never matches). Exactly one such line decides.
+      const railCursors = new Set()
+      for (const line of frame.split('\n')) {
+        if (!/^\s*(?:│\s*)?> /u.test(line)) continue
+        // Gate by the RAIL COLUMN, not by cursor markers alone: the content
+        // pane paints its own `> ` cursors at a greater column (the wide rail
+        // is 22 columns + gutter), and a direct-category page can even repeat
+        // a category NAME there (the Models page's selected row '> Models').
+        // Only a cursor that starts inside the rail column can be the rail's.
+        const cursorColumn = line.indexOf('>')
+        if (cursorColumn < 0 || cursorColumn >= 22) continue
+        // The rail label is the text after `> ` up to the pane gutter.
+        const label = /^.{0,21}?> (.*?)\s{2,}/u.exec(line)?.[1]?.trim() ?? line.trim().slice(2).trimEnd()
+        if (CATEGORY_LABELS_F2.includes(label)) railCursors.add(label)
+
+      }
+      // A mid-repaint offline frame can briefly carry TWO rail cursor rows
+      // (the previous and the next category). The rail's own category ORDER is
+      // frozen, so the DESTINATION of a Down is deterministic: when exactly two
+      // adjacent labels are marked, the one AFTER the previous selection is the
+      // settled target; the wait's caller compares it against `selected`.
+      if (railCursors.size === 2) {
+        const ordered = CATEGORY_LABELS_F2.filter(label => railCursors.has(label))
+        if (ordered[0] === previousRailLabel) return ordered[1]
+        if (ordered[1] === previousRailLabel) return ordered[0]
+      }
+      return railCursors.size >= 1 ? [...railCursors][0] : undefined
     }
+    let previousRailLabel = ''
     let categoryFrame = ''
     await waitForCondition(async () => {
       categoryFrame = await sanitizedFrame(clientB)
@@ -554,7 +589,32 @@ export async function runF2AccountComposition(context) {
         break
       }
       const beforeFrame = categoryFrame
+      // The offline rail navigation must prove FOCUS stayed on the category
+      // rail before each Down: an offline workspace repaint can briefly hand
+      // focus to the Rows pane, whose own Down moves the ROW cursor instead
+      // (the rail then never repaints and the case failed intermittently).
+      // The rail's bar wording differs by category kind ('Up/Down navigate' on
+      // direct categories, 'Up/Down select · Enter open' on ordinary ones), so
+      // a single literal cannot be the focus oracle. The rail ALWAYS owns the
+      // keyboard when its own bar is the last row: on ordinary categories that
+      // bar carries 'Right open' WITHOUT 'Left back' (the Rows level's bar has
+      // 'Left back'); on direct categories it carries 'Enter/Right focus'. If
+      // focus drifted to Rows, ONE Tab returns it to the rail.
+      const railBarOf = frame => {
+        const bar = frame.split('\n').map(line => line.trim()).filter(line => line !== '').at(-1) ?? ''
+        if (bar.includes('Up/Down navigate')) return true
+        if (bar.includes('Up/Down select') && bar.includes('Right open') && !bar.includes('Left back')) return true
+        return false
+      }
+      if (!railBarOf(categoryFrame)) {
+        clientB.send('\t')
+        await waitForCondition(async () => {
+          categoryFrame = await sanitizedFrame(clientB)
+          return selectedCategoryOf(categoryFrame) !== undefined && railBarOf(categoryFrame)
+        }, 'F2 offline Settings rail focus restored', 10_000)
+      }
       clientB.send('\x1b[B')
+      previousRailLabel = selected
       try {
         await waitForCondition(async () => {
           categoryFrame = await sanitizedFrame(clientB)

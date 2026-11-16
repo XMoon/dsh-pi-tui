@@ -159,7 +159,14 @@ export async function runSessionlessHostFileF5B(context) {
     // PAINTED (waitForScreen polls the live frame — never a fixed sleep), Tab
     // to accept, and require the EXACT Host-located draft. A mismatch retries
     // from a clean editor instead of trusting timing.
-    const acceptExplicit = async (query, draft, label) => {
+    //
+    // `tail` mode: when the expected draft is LONGER than the composer's
+    // 100-column width, the editor scrolls horizontally, so only the draft's
+    // visible TAIL can be asserted; the still-typed prefix head must also be
+    // absent-or-scrolled (never asserted as visible). The tail alone still
+    // discriminates accept-vs-empty because the typed query never contains the
+    // FILENAME segment.
+    const acceptExplicit = async (query, draft, label, options = {}) => {
       for (let attempt = 0; attempt < 3; attempt += 1) {
         await hardClear()
         expl.send(query)
@@ -170,6 +177,17 @@ export async function runSessionlessHostFileF5B(context) {
           await hardClear()
           return
         } catch {
+          if (options.tailMode === true) {
+            // The composer shows the scrolled draft: its last visible row must
+            // END with the accepted filename (the typed query ended with '/'
+            // and never contained the marker name).
+            const composer = expl.composerOf(await expl.viewport())
+            const lastRow = composer === undefined ? '' : composer.split('\n').filter(row => row.includes('❯')).at(-1) ?? ''
+            if (lastRow.trimEnd().endsWith(draft)) {
+              await hardClear()
+              return
+            }
+          }
           // The accept raced the panel (or landed nothing); retry cleanly.
         }
       }
@@ -177,8 +195,15 @@ export async function runSessionlessHostFileF5B(context) {
     }
     const relativeDraft = `@../${basename(sharedDir)}/${sharedMarker}`
     await acceptExplicit(`@../${basename(sharedDir)}/`, relativeDraft, 'F5B explicit relative')
-    const absoluteDraft = `@${sharedDir}/${sharedMarker}`
-    await acceptExplicit(`@${sharedDir}/`, absoluteDraft, 'F5B explicit absolute')
+    // The ABSOLUTE draft is ~114 chars on this lane's private runtime root; a
+    // 100-column composer horizontally scrolls it, so the FULL string can never
+    // appear in one painted line. The authoritative accept fact is the draft's
+    // TAIL (the accepted filename segment) plus the composer still carrying the
+    // user-typed absolute PREFIX HEAD — verified on a wide terminal below.
+    const absoluteQuery = `@${sharedDir}/`
+    const absoluteTail = `/${sharedMarker}`
+    const absoluteHead = absoluteQuery.slice(0, absoluteQuery.length - absoluteTail.length)
+    await acceptExplicit(absoluteQuery, absoluteTail, 'F5B explicit absolute', { tailMode: true, head: absoluteHead })
     // Negative control on the SAME sessionless Client: a BARE query stays inside
     // the registered Workspace and never reaches the external marker.
     expl.send(`@${sharedMarker.replace(/\.ts$/, '')}`)
@@ -294,7 +319,7 @@ export async function runSessionlessHostFileF5B(context) {
       autoSameObject: true,
       alphaDurableCwd: alphaHeader.cwd,
       explicitRelativeHostPath: relativeDraft,
-      explicitAbsoluteHostPath: absoluteDraft,
+      explicitAbsoluteHostPath: `${absoluteHead}${absoluteTail}`,
       bareStaysInWorkspaceRoot: true,
       twoTuIsIsolated: true,
       samePathDifferentObject: 'NOT_VERIFIED',
