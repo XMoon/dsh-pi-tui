@@ -55,6 +55,76 @@ function fixtureDeps(life: ReturnType<typeof testLifecycle>): {
   return { deps, cwd, out, target }
 }
 
+/** The visible column of `label` on one painted prompt line (ANSI-stripped). */
+function paintedColumn(line: string, label: string): number {
+  const plain = paintedText(line)
+  const column = plain.indexOf(label)
+  assert.ok(column >= 0, `${label} is not painted:\n${line}`)
+  return column
+}
+
+/** One painted line with its SGR styling stripped. */
+function paintedText(line: string): string {
+  return line.replace(/\u001b\[[0-9;]*m/gu, '')
+}
+
+/** The painted `label` cell of the LAST (action) row. */
+function actionPoint(rendered: readonly string[], label: string): { readonly row: number; readonly column: number } {
+  const row = rendered.length - 1
+  const line = rendered[row]
+  assert.ok(line !== undefined, 'the prompt paints an action row')
+  return { row, column: paintedColumn(line, label) }
+}
+
+/** One prompt-local pointer event at a painted cell (the frame passes its
+ *  painted content height, and these tests must too). */
+function pointerEvent(
+  point: { readonly row: number; readonly column: number },
+  type: 'press' | 'click',
+  geometry: { readonly width: number; readonly height: number },
+): {
+  type: 'press' | 'click'
+  button: 'left'
+  x: number
+  y: number
+  screenX: number
+  screenY: number
+  width: number
+  height: number
+  shift: false
+  alt: false
+  ctrl: false
+  clickCount?: number
+} {
+  return {
+    type,
+    button: 'left',
+    x: point.column,
+    y: point.row,
+    screenX: point.column,
+    screenY: point.row,
+    width: geometry.width,
+    height: geometry.height,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    ...(type === 'click' ? { clickCount: 1 } : {}),
+  }
+}
+
+/** One complete press+click on a painted action label of the LAST row. */
+function clickAction(
+  prompt: SaveLocationPrompt,
+  rendered: readonly string[],
+  label: string,
+  width = 60,
+): void {
+  const point = actionPoint(rendered, label)
+  const geometry = { width, height: rendered.length }
+  prompt.handleMouse(pointerEvent(point, 'press', geometry))
+  prompt.handleMouse(pointerEvent(point, 'click', geometry))
+}
+
 test('initial directory is ./ and the filename row is fixed', (t) => {
   const { deps } = fixtureDeps(testLifecycle(t))
   let result: SaveLocationResult | undefined
@@ -523,7 +593,7 @@ test('mouse parity: clicking the Directory row positions the private Input curso
   // clicking col 14 places the cursor after 'a' (cursor 3).
   prompt.handleMouse({
     type: 'press', button: 'left', x: 14, y: row, screenX: 14, screenY: row,
-    width: 60, height: 24, shift: false, alt: false, ctrl: false,
+    width: 60, height: rendered.length, shift: false, alt: false, ctrl: false,
   })
   prompt.handleInput('X')
   assert.equal(prompt.getValue(), './aXbc', 'the click must position the Input cursor')
@@ -543,16 +613,16 @@ test('mouse parity: a suggestion press selects and a click accepts it (Tab seman
   assert.ok(row >= 0, `suggestion row missing:\n${rendered.join('\n')}`)
   prompt.handleMouse({
     type: 'press', button: 'left', x: 2, y: row, screenX: 2, screenY: row,
-    width: 60, height: 24, shift: false, alt: false, ctrl: false,
+    width: 60, height: rendered.length, shift: false, alt: false, ctrl: false,
   })
   prompt.handleMouse({
     type: 'click', button: 'left', x: 2, y: row, screenX: 2, screenY: row,
-    width: 60, height: 24, shift: false, alt: false, ctrl: false, clickCount: 1,
+    width: 60, height: rendered.length, shift: false, alt: false, ctrl: false, clickCount: 1,
   })
   assert.equal(prompt.getValue(), 'src/', 'the click must accept the suggestion like Tab')
 })
 
-test('mouse parity: title, file, error, and hint rows are inert', (t) => {
+test('mouse parity: title and file rows and the action-row gap cells are inert', (t) => {
   const { deps } = fixtureDeps(testLifecycle(t))
   const prompt = new SaveLocationPrompt(
     { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
@@ -562,15 +632,230 @@ test('mouse parity: title, file, error, and hint rows are inert', (t) => {
   const rendered = prompt.render(60)
   const titleRow = rendered.findIndex(line => line.includes('Save session archive'))
   const fileRow = rendered.findIndex(line => line.includes('dsh-session-session-abc.zip'))
-  const hintRow = rendered.findIndex(line => line.includes('esc cancel'))
-  assert.ok(titleRow >= 0 && fileRow >= 0 && hintRow >= 0)
-  const event = (y: number) => ({
-    type: 'press' as const, button: 'left' as const, x: 5, y, screenX: 5, screenY: y,
-    width: 60, height: 24, shift: false, alt: false, ctrl: false,
+  assert.ok(titleRow >= 0 && fileRow >= 0)
+  const geometry = { width: 60, height: rendered.length }
+  const event = (y: number, x: number) => pointerEvent({ row: y, column: x }, 'press', geometry)
+  assert.equal(prompt.handleMouse(event(titleRow, 5)), undefined, 'title must be inert')
+  assert.equal(prompt.handleMouse(event(fileRow, 5)), undefined, 'file row must be inert')
+  // The separator cells between the complete verbs are inert: the visible
+  // columns after `Save [Enter]` (12 cells) belong to ` · `.
+  assert.match(paintedText(rendered.at(-1) ?? ''), /Save \[Enter\] · Cancel \[Esc\]/u)
+  assert.equal(prompt.handleMouse(event(rendered.length - 1, 13)), undefined,
+    'the gap between the verbs must not be a button')
+})
+
+// ── C1: the clickable action row (Save / Dismiss / Cancel / Yes / No) ──────
+
+test('C1-S01 action row: Save runs the original confirm and selects a collision-free directory', (t) => {
+  const { deps, cwd } = fixtureDeps(testLifecycle(t))
+  const results: SaveLocationResult[] = []
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    (value) => { results.push(value) },
+  )
+  const rendered = prompt.render(60)
+  assert.match(paintedText(rendered.at(-1) ?? ''), /Save \[Enter\] · Cancel \[Esc\]/u)
+  clickAction(prompt, rendered, 'Save [Enter]')
+  assert.deepEqual(results, [{ kind: 'selected', directory: cwd, overwrite: false }])
+})
+
+test('C1-S02 action row: Dismiss suggestions hides them first and the next frame offers Cancel', async (t) => {
+  const { deps } = fixtureDeps(testLifecycle(t))
+  const results: SaveLocationResult[] = []
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    (value) => { results.push(value) },
+  )
+  await new Promise<void>(resolve => setTimeout(resolve, 10)) // the initial suggestion lands
+  assert.equal(prompt.getSuggestions().length, 1, 'precondition — suggestion visible')
+  let rendered = prompt.render(60)
+  assert.match(paintedText(rendered.at(-1) ?? ''), /Save \[Enter\] · Dismiss suggestions \[Esc\]/u)
+  clickAction(prompt, rendered, 'Dismiss suggestions [Esc]')
+  assert.equal(prompt.getSuggestions().length, 0, 'Dismiss only closes the suggestions')
+  assert.deepEqual(results, [], 'Dismiss never settles the save')
+  rendered = prompt.render(60)
+  assert.match(paintedText(rendered.at(-1) ?? ''), /Save \[Enter\] · Cancel \[Esc\]/u,
+    'the next frame advertises the real Cancel')
+  clickAction(prompt, rendered, 'Cancel [Esc]')
+  assert.deepEqual(results, [{ kind: 'cancelled' }])
+})
+
+test('C1-S03 action row: collision No returns to editing and Yes replaces exactly once', (t) => {
+  const { deps, out } = fixtureDeps(testLifecycle(t))
+  const results: SaveLocationResult[] = []
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    (value) => { results.push(value) },
+  )
+  prompt.handleInput('out')
+  prompt.handleInput('\r')
+  assert.equal(prompt.isConfirming(), true, 'precondition — collision confirmation')
+  let rendered = prompt.render(60)
+  assert.match(paintedText(rendered.at(-1) ?? ''), /Yes \[Y\] · No \[N\]/u)
+  clickAction(prompt, rendered, 'No [N]')
+  assert.equal(prompt.isConfirming(), false, 'No returns to directory editing')
+  assert.deepEqual(results, [], 'No never settles the command')
+  // The directory row is editable again; Save re-enters the same collision.
+  rendered = prompt.render(60)
+  clickAction(prompt, rendered, 'Save [Enter]')
+  assert.equal(prompt.isConfirming(), true)
+  rendered = prompt.render(60)
+  clickAction(prompt, rendered, 'Yes [Y]')
+  assert.deepEqual(results, [{ kind: 'selected', directory: out, overwrite: true }])
+  // A settled prompt paints its last frame but can never settle a second time.
+  clickAction(prompt, prompt.render(60), 'Yes [Y]')
+  assert.equal(results.length, 1, 'the per-open settle latch wins')
+})
+
+test('C1-S04 action row: an invalid directory keeps the error and never settles', (t) => {
+  const { deps } = fixtureDeps(testLifecycle(t))
+  const results: SaveLocationResult[] = []
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    (value) => { results.push(value) },
+  )
+  prompt.handleInput('nope')
+  let rendered = prompt.render(60)
+  clickAction(prompt, rendered, 'Save [Enter]')
+  assert.deepEqual(results, [], 'an invalid directory must not settle')
+  assert.match(prompt.getValidationError() ?? '', /not a directory/u)
+  rendered = prompt.render(60)
+  assert.ok(rendered.some(line => line.includes('directory does not exist')), 'the error stays visible')
+  assert.match(paintedText(rendered.at(-1) ?? ''), /Save \[Enter\] · Cancel \[Esc\]/u)
+  clickAction(prompt, rendered, 'Cancel [Esc]')
+  assert.deepEqual(results, [{ kind: 'cancelled' }])
+})
+
+test('C1-S05 action row: a stale press never runs after a key, wheel or resize', (t) => {
+  const { deps, cwd } = fixtureDeps(testLifecycle(t))
+  const results: SaveLocationResult[] = []
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    (value) => { results.push(value) },
+  )
+  // A semantic key between the press and the click refuses the gesture.
+  let rendered = prompt.render(60)
+  let point = actionPoint(rendered, 'Save [Enter]')
+  let geometry = { width: 60, height: rendered.length }
+  prompt.handleMouse(pointerEvent(point, 'press', geometry))
+  prompt.handleInput('\x1b[C') // Right: cursor move, no value change
+  prompt.handleMouse(pointerEvent(point, 'click', geometry))
+  assert.deepEqual(results, [], 'a key between press and click must refuse')
+  // A wheel between the press and the click refuses it even when it scrolls
+  // nothing (no suggestion row under the pointer).
+  rendered = prompt.render(60)
+  point = actionPoint(rendered, 'Save [Enter]')
+  geometry = { width: 60, height: rendered.length }
+  prompt.handleMouse(pointerEvent(point, 'press', geometry))
+  prompt.handleMouse({
+    type: 'wheel', button: 'none', x: point.column, y: point.row,
+    screenX: point.column, screenY: point.row,
+    width: geometry.width, height: geometry.height, shift: false, alt: false, ctrl: false, wheelDelta: 1,
   })
-  assert.equal(prompt.handleMouse(event(titleRow)), undefined, 'title must be inert')
-  assert.equal(prompt.handleMouse(event(fileRow)), undefined, 'file row must be inert')
-  assert.equal(prompt.handleMouse(event(hintRow)), undefined, 'hint must be inert')
+  prompt.handleMouse(pointerEvent(point, 'click', geometry))
+  assert.deepEqual(results, [], 'a wheel between press and click must refuse')
+  // A resize between the press and the click refuses it (the frame grant moved).
+  rendered = prompt.render(60)
+  point = actionPoint(rendered, 'Save [Enter]')
+  prompt.handleMouse(pointerEvent(point, 'press', { width: 60, height: rendered.length }))
+  const narrowed = prompt.render(40)
+  prompt.handleMouse(pointerEvent(actionPoint(narrowed, 'Save [Enter]'), 'click',
+    { width: 40, height: narrowed.length }))
+  assert.deepEqual(results, [], 'a resize between press and click must refuse')
+  // A fresh complete gesture against the CURRENT frame still runs.
+  clickAction(prompt, narrowed, 'Save [Enter]', 40)
+  assert.deepEqual(results, [{ kind: 'selected', directory: cwd, overwrite: false }])
+})
+
+test('C1-S05 action row: a settled completion refresh refuses the pre-refresh press', async (t) => {
+  let resolveCompletion: ((items: DirectoryCompletionCandidate[] | null) => void) | undefined
+  const deps: SaveLocationDeps = {
+    resolveDirectory: input => input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: () => new Promise<DirectoryCompletionCandidate[] | null>((resolve) => { resolveCompletion = resolve }),
+  }
+  const results: SaveLocationResult[] = []
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    (value) => { results.push(value) },
+  )
+  const rendered = prompt.render(60)
+  const point = actionPoint(rendered, 'Save [Enter]')
+  const geometry = { width: 60, height: rendered.length }
+  prompt.handleMouse(pointerEvent(point, 'press', geometry))
+  resolveCompletion?.([{ value: 'src/', displayPath: 'src' }])
+  await new Promise<void>(resolve => setTimeout(resolve, 10))
+  prompt.handleMouse(pointerEvent(point, 'click', geometry))
+  assert.deepEqual(results, [], 'the async completion must refuse the old press')
+  const next = prompt.render(60)
+  assert.match(paintedText(next.at(-1) ?? ''), /Dismiss suggestions \[Esc\]/u,
+    'the new frame really changed the action row')
+  clickAction(prompt, next, 'Save [Enter]')
+  assert.deepEqual(results, [{ kind: 'selected', directory: './', overwrite: false }])
+})
+
+test('C1-S06 action row: a settled prompt never acts again', (t) => {
+  const { deps } = fixtureDeps(testLifecycle(t))
+  const results: SaveLocationResult[] = []
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    (value) => { results.push(value) },
+  )
+  clickAction(prompt, prompt.render(60), 'Save [Enter]')
+  assert.equal(results.length, 1, 'precondition — the first gesture settled')
+  // The component can still render its last frame, but the per-open latch
+  // rejects every later gesture.
+  const rendered = prompt.render(60)
+  const point = actionPoint(rendered, 'Save [Enter]')
+  const geometry = { width: 60, height: rendered.length }
+  assert.equal(prompt.handleMouse(pointerEvent(point, 'press', geometry)), undefined)
+  assert.equal(prompt.handleMouse(pointerEvent(point, 'click', geometry)), undefined)
+  assert.equal(results.length, 1, 'the settled prompt can never settle twice')
+  prompt.dispose()
+})
+
+test('C1-S07 action row: narrow widths drop whole verbs and keep the safe exit', (t) => {
+  const { deps } = fixtureDeps(testLifecycle(t))
+  const results: SaveLocationResult[] = []
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    (value) => { results.push(value) },
+  )
+  const wide = prompt.render(40)
+  assert.match(paintedText(wide.at(-1) ?? ''), /Save \[Enter\] · Cancel \[Esc\]/u)
+  const narrow = prompt.render(16)
+  assert.match(paintedText(narrow.at(-1) ?? ''), /Cancel \[Esc\]/u, 'the safe exit survives')
+  assert.doesNotMatch(paintedText(narrow.at(-1) ?? ''), /Save/u, 'the whole Save verb is dropped')
+  // Nothing fits: the row paints no action and publishes no hit target.
+  const tiny = prompt.render(10)
+  const tinyPoint = { row: tiny.length - 1, column: 0 }
+  assert.equal(prompt.handleMouse(pointerEvent(tinyPoint, 'press', { width: 10, height: tiny.length })), undefined)
+  assert.deepEqual(results, [])
+  // A narrow collision row keeps the safe No verb and drops Yes whole.
+  prompt.handleInput('out')
+  prompt.handleInput('\r')
+  const collision = prompt.render(10)
+  assert.match(paintedText(collision.at(-1) ?? ''), /No \[N\]/u)
+  assert.doesNotMatch(paintedText(collision.at(-1) ?? ''), /Yes/u)
+  clickAction(prompt, collision, 'No [N]', 10)
+  assert.equal(prompt.isConfirming(), false)
+  assert.deepEqual(results, [])
+  // The 44x20 editor-seat grant (inner width 40) paints both collision verbs.
+  prompt.handleInput('\r') // './out' is unchanged: the same collision returns
+  assert.equal(prompt.isConfirming(), true)
+  const roomy = prompt.render(40)
+  assert.match(paintedText(roomy.at(-1) ?? ''), /Yes \[Y\] · No \[N\]/u)
+  clickAction(prompt, roomy, 'Yes [Y]', 40)
+  assert.equal(results.length, 1)
 })
 
 test('mouse parity: a stale pressed VALUE is released on click mismatch (no ghost accept)', async (t) => {
@@ -593,11 +878,11 @@ test('mouse parity: a stale pressed VALUE is released on click mismatch (no ghos
   assert.ok(srcRow >= 0 && libRow >= 0, `suggestion rows missing:\n${rendered.join('\n')}`)
   const press = (y: number) => ({
     type: 'press' as const, button: 'left' as const, x: 2, y, screenX: 2, screenY: y,
-    width: 60, height: 24, shift: false, alt: false, ctrl: false,
+    width: 60, height: rendered.length, shift: false, alt: false, ctrl: false,
   })
   const click = (y: number) => ({
     type: 'click' as const, button: 'left' as const, x: 2, y, screenX: 2, screenY: y,
-    width: 60, height: 24, shift: false, alt: false, ctrl: false, clickCount: 1,
+    width: 60, height: rendered.length, shift: false, alt: false, ctrl: false, clickCount: 1,
   })
   prompt.handleMouse(press(srcRow)) // pressed identity = 'src/'
   const p = prompt as unknown as { suggestions: Array<{ value: string; displayPath: string }>; mousePressedValue: string | undefined }
@@ -635,7 +920,7 @@ test('mouse parity: the collision confirmation blocks directory-row editing (ine
   const before = prompt.getValue()
   const handled = prompt.handleMouse({
     type: 'press', button: 'left', x: 14, y: directoryRow, screenX: 14, screenY: directoryRow,
-    width: 60, height: 24, shift: false, alt: false, ctrl: false,
+    width: 60, height: rendered.length, shift: false, alt: false, ctrl: false,
   })
   assert.equal(handled, undefined, 'the confirmation must be inert to mouse input')
   assert.equal(prompt.getValue(), before, 'the directory value must not change')
@@ -663,7 +948,7 @@ test('mouse parity: a REAL wheel event (button "none") moves the suggestion sele
   // move the suggestion cursor despite the left-button gate.
   const result = prompt.handleMouse({
     type: 'wheel', button: 'none', x: 2, y: libRow, screenX: 2, screenY: libRow,
-    width: 60, height: 24, shift: false, alt: false, ctrl: false, wheelDelta: 1,
+    width: 60, height: rendered.length, shift: false, alt: false, ctrl: false, wheelDelta: 1,
   })
   assert.ok(result?.handled, 'the wheel over a suggestion must be handled')
   const state = prompt as unknown as { suggestionCursor: number }
@@ -728,11 +1013,11 @@ test('mouse parity: a click on an inert row releases the pressed identity (no st
   assert.ok(srcRow >= 0, `suggestion row missing:\n${rendered.join('\n')}`)
   const press = (y: number) => ({
     type: 'press' as const, button: 'left' as const, x: 2, y, screenX: 2, screenY: y,
-    width: 60, height: 24, shift: false, alt: false, ctrl: false,
+    width: 60, height: rendered.length, shift: false, alt: false, ctrl: false,
   })
   const click = (y: number) => ({
     type: 'click' as const, button: 'left' as const, x: 2, y, screenX: 2, screenY: y,
-    width: 60, height: 24, shift: false, alt: false, ctrl: false, clickCount: 1,
+    width: 60, height: rendered.length, shift: false, alt: false, ctrl: false, clickCount: 1,
   })
   prompt.handleMouse(press(srcRow))
   const state = prompt as unknown as { mousePressedValue: string | undefined }

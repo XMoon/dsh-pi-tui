@@ -24,6 +24,7 @@ import {
   Input,
   dispatchMouseEvent,
   matchesKey,
+  visibleWidth,
   type Component,
   type Focusable,
   type TuiMouseEvent,
@@ -31,6 +32,7 @@ import {
 } from '@xmoon76/pi-tui'
 import { Frame } from '../components/frame.ts'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
+import { ACTION_BAR_SEPARATOR } from '../presentation/action-bar.ts'
 import { color } from '../theme/runtime.ts'
 import type { DirectoryCompletionCandidate } from '../../client/file-completion/directory-completion.ts'
 
@@ -76,6 +78,37 @@ export interface SaveLocationDeps {
 /** How many suggestion rows are rendered (the rest are summarized). */
 const VISIBLE_SUGGESTIONS = 8
 
+/** One clickable verb of the prompt's final action row. */
+type SaveAction = 'save' | 'dismiss-suggestions' | 'cancel' | 'yes' | 'no'
+
+/** One complete painted action segment of the LAST render. */
+interface SaveActionHit {
+  readonly action: SaveAction
+  readonly row: number
+  readonly startCol: number
+  readonly endCol: number
+}
+
+/** One action-row segment before the current width decides which survive. */
+interface SaveActionSegment {
+  readonly action: SaveAction
+  readonly text: string
+}
+
+/**
+ * The press-time identity of one action gesture. The click may only run the
+ * EXACT action segment painted in the SAME semantic frame: a repaint that
+ * moved another verb onto the cell, a resize, a suggestion refresh or any
+ * keyboard/wheel change must never hand the press to a different action.
+ */
+interface ArmedSaveAction extends SaveActionHit {
+  readonly width: number
+  readonly height: number
+  readonly revision: number
+  readonly confirming: boolean
+  readonly suggestions: number
+}
+
 /**
  * The interactive Save Location prompt. Renders the fixed filename row and
  * the editable directory row, with directory suggestions below; Enter
@@ -116,6 +149,16 @@ export class SaveLocationPrompt implements Component, Focusable {
   private mousePressedValue: string | undefined
   /** Render width from the last paint (stale-geometry guard). */
   private lastRenderWidth = 0
+  /** Render height from the last paint (stale-geometry guard). */
+  private lastRenderHeight = 0
+  /** Painted action segments of the LAST render (the only pointer grant). */
+  private actionHits: SaveActionHit[] = []
+  /** The arm-time identity of the pressed action (undefined = none). */
+  private armedAction: ArmedSaveAction | undefined
+  /** Local monotonic semantic generation: a press only belongs to the frame
+   *  meaning it was armed in. It is NOT a second transaction authority — the
+   *  prompt's business state stays `selectedDirectory`/`confirming`/`settled`. */
+  private revision = 0
   /** Called when the prompt needs a re-render (async completion results). */
   onChange: (() => void) | undefined
 
@@ -133,6 +176,9 @@ export class SaveLocationPrompt implements Component, Focusable {
       if (this.settled) return
       this.settled = true
       this.completionAbort.abort()
+      this.armedAction = undefined
+      this.mousePressedValue = undefined
+      this.actionHits = []
       onDone(result)
     }
     this.input.setValue(request.initialDirectory)
@@ -178,6 +224,18 @@ export class SaveLocationPrompt implements Component, Focusable {
     return this.validationError
   }
 
+  /**
+   * A semantic change of what the painted prompt MEANS: every press-time
+   * identity and the previous frame's action hit map die with it (the next
+   * render publishes the new one). The prompt's business state is untouched;
+   * this only makes a pre-change press unable to complete after the change.
+   */
+  private markSemanticChange(): void {
+    this.revision += 1
+    this.actionHits = []
+    this.armedAction = undefined
+  }
+
   /** Refresh the directory suggestions for the current field value. Each
    * refresh owns its generation AND its abort controller: a superseded
    * refresh aborts the previous scan (rapid typing must not leave
@@ -191,6 +249,8 @@ export class SaveLocationPrompt implements Component, Focusable {
     const raw = this.input.getValue()
     this.suggestions = []
     this.suggestionCursor = 0
+    // The visible action row changes with the suggestions (Dismiss ⇄ Cancel).
+    this.markSemanticChange()
     // The completion refresh is a component-internal async UI refresh — a
     // rejection degrades to no suggestions and the result is fenced by the
     // generation latch (never a bare fire-and-forget task).
@@ -200,6 +260,9 @@ export class SaveLocationPrompt implements Component, Focusable {
         if (this.settled || generation !== this.completionGeneration) return
         this.suggestions = items ?? []
         this.suggestionCursor = 0
+        // A settled suggestion list is a NEW painted meaning: a press made
+        // against the previous list can never accept/act on this one.
+        this.markSemanticChange()
         this.onChange?.()
       })
   }
@@ -218,6 +281,7 @@ export class SaveLocationPrompt implements Component, Focusable {
     if (this.suggestions.length === 0) return
     const count = Math.min(this.suggestions.length, VISIBLE_SUGGESTIONS)
     this.suggestionCursor = (this.suggestionCursor + direction + count) % count
+    this.markSemanticChange()
   }
 
   /** Enter: validate the typed directory, then handle a target collision. */
@@ -225,6 +289,7 @@ export class SaveLocationPrompt implements Component, Focusable {
     const directory = this.deps.resolveDirectory(this.input.getValue())
     if (!this.deps.isDirectory(directory)) {
       this.validationError = 'directory does not exist or is not a directory'
+      this.markSemanticChange()
       return
     }
     this.validationError = undefined
@@ -233,8 +298,10 @@ export class SaveLocationPrompt implements Component, Focusable {
       this.confirming = true
       this.suggestions = []
       this.input.focused = false
+      this.markSemanticChange()
       return
     }
+    this.markSemanticChange()
     this.onDone({ kind: 'selected', directory, overwrite: false })
   }
 
@@ -243,8 +310,10 @@ export class SaveLocationPrompt implements Component, Focusable {
     if (this.suggestions.length > 0) {
       this.suggestions = []
       this.suggestionCursor = 0
+      this.markSemanticChange()
       return
     }
+    this.markSemanticChange()
     this.onDone({ kind: 'cancelled' })
   }
 
@@ -253,26 +322,43 @@ export class SaveLocationPrompt implements Component, Focusable {
    * Inputs): the Directory row click-positions the private Input; a
    * suggestion row press selects (resolved by stable VALUE, so an async
    * completion refresh between paint and press cannot select a different
-   * row) and a click accepts it (the Tab semantic). Title/File/error/
-   * collision/hint rows stay inert.
+   * row) and a click accepts it (the Tab semantic). The painted action row's
+   * complete `Verb [Key]` segments are clickable; every other row stays inert.
+   * A press only ARMS the segment — the click must re-prove the same complete
+   * target (action, cells, frame geometry and semantic revision) before the
+   * existing keyboard sink runs.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-    // A click ends any gesture: release the pressed identity up front —
-    // a click on inert/width-mismatched geometry must not leave a stale
-    // latch that a later click could match. The local copy still guards
-    // the valid-row comparison below.
+    if (this.settled) {
+      this.armedAction = undefined
+      this.mousePressedValue = undefined
+      this.actionHits = []
+      return undefined
+    }
+    // Every press starts a fresh gesture: a stale armed action or pressed
+    // suggestion identity can never be revived by this gesture's click.
+    if (event.type === 'press') {
+      this.armedAction = undefined
+      this.mousePressedValue = undefined
+    }
+    // A click consumes both press-time identities, even when its geometry or
+    // target no longer matches (nothing may survive into a later gesture).
     const pressedValue = this.mousePressedValue
-    if (event.type === 'click') this.mousePressedValue = undefined
-    // The row map is only valid for the last painted width.
-    if (event.width !== this.lastRenderWidth) return undefined
-    // Collision confirmation is a modal state (y/Enter replaces, n/Esc
-    // returns): the directory/suggestion rows are inert while it shows.
-    if (this.confirming) return undefined
+    const armed = this.armedAction
+    if (event.type === 'click') {
+      this.mousePressedValue = undefined
+      this.armedAction = undefined
+    }
+    // The hit maps are only valid for the exact frame they were painted for.
+    if (event.width !== this.lastRenderWidth || event.height !== this.lastRenderHeight) return undefined
     // Wheel is normalized by the TUI with button "none" (never "left"):
     // it must be handled BEFORE the left-button gate, or a real wheel
-    // over a suggestion never reaches moveSuggestion.
+    // over a suggestion never reaches moveSuggestion. Any wheel revokes a
+    // pending button/suggestion press, even when it scrolls nothing.
     if (event.type === 'wheel') {
       if (!event.wheelDelta) return undefined
+      this.armedAction = undefined
+      this.mousePressedValue = undefined
       const suggestion = this.suggestionRows.find(entry => entry.row === event.y)
       if (!suggestion) return undefined
       this.moveSuggestion(event.wheelDelta < 0 ? -1 : 1)
@@ -281,6 +367,43 @@ export class SaveLocationPrompt implements Component, Focusable {
     if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) {
       return undefined
     }
+    // A painted action segment is recognized BEFORE the directory and
+    // suggestion rows: a button must never be swallowed by an Input/row hit.
+    const actionHit = this.actionHits.find(hit =>
+      hit.row === event.y && event.x >= hit.startCol && event.x < hit.endCol)
+    if (event.type === 'press') {
+      if (actionHit !== undefined) {
+        this.armedAction = {
+          ...actionHit,
+          width: event.width,
+          height: event.height,
+          revision: this.revision,
+          confirming: this.confirming,
+          suggestions: this.suggestions.length,
+        }
+        return { handled: true }
+      }
+      // A press on the action row between its complete segments is inert (the
+      // latches were released at handler entry).
+      if (this.actionHits.some(hit => hit.row === event.y)) return undefined
+    } else if (armed !== undefined) {
+      // Click: only the EXACT armed target of the SAME semantic frame runs.
+      if (actionHit === undefined) return undefined
+      if (armed.action !== actionHit.action
+        || armed.row !== actionHit.row
+        || armed.startCol !== actionHit.startCol
+        || armed.endCol !== actionHit.endCol
+        || armed.width !== event.width
+        || armed.height !== event.height
+        || armed.revision !== this.revision
+        || armed.confirming !== this.confirming
+        || armed.suggestions !== this.suggestions.length) return undefined
+      this.runAction(actionHit.action)
+      return { handled: true }
+    }
+    // Collision confirmation is a modal state (y/Enter replaces, n/Esc
+    // returns): the directory/suggestion rows are inert while it shows.
+    if (this.confirming) return undefined
     // Directory row: click-to-position the private Input. The row is
     // 'Directory: ' + the Input's render with the prompt stripped; the
     // Input's value starts at ITS OWN local x=2 (the '> ' prompt), at
@@ -294,10 +417,6 @@ export class SaveLocationPrompt implements Component, Focusable {
     const suggestion = this.suggestionRows.find(entry => entry.row === event.y)
     if (suggestion !== undefined) {
       if (event.type === 'press') {
-        // Every press starts a fresh gesture: clear any latched pressed
-        // identity first (a rejected stale press must not leave an old
-        // VALUE that a later synthetic click could match).
-        this.mousePressedValue = undefined
         // Resolve the CURRENT cursor by the pressed VALUE (a completion
         // refresh between paint and press may have reordered the list
         // WITHOUT a repaint). No match => reject.
@@ -323,8 +442,24 @@ export class SaveLocationPrompt implements Component, Focusable {
     return undefined
   }
 
+  /** Run one proven action gesture through the EXISTING keyboard sinks: the
+   *  mouse never re-implements the directory validation, collision ladder or
+   *  settle ordering. */
+  private runAction(action: SaveAction): void {
+    switch (action) {
+      case 'save': this.confirmDirectory(); return
+      case 'dismiss-suggestions': this.handleEscape(); return
+      case 'cancel': this.handleEscape(); return
+      case 'yes': this.handleInput('y'); return
+      case 'no': this.handleInput('n'); return
+    }
+  }
+
   handleInput(data: string): void {
     if (data === '\u0000') return
+    // Every real key starts a new semantic frame: a pending action press can
+    // never complete against the state this key changes (or re-affirms).
+    this.markSemanticChange()
     if (this.confirming) {
       // Collision confirmation: y/Enter replaces, n/Esc returns to the
       // directory selection (never cancels the whole command automatically).
@@ -362,6 +497,10 @@ export class SaveLocationPrompt implements Component, Focusable {
   }
 
   invalidate(): void {
+    // A repaint invalidates the PREVIOUS frame's hit map only; the prompt's
+    // business state and every pending settle gate stay untouched.
+    this.actionHits = []
+    this.armedAction = undefined
     this.input.invalidate()
   }
 
@@ -369,6 +508,7 @@ export class SaveLocationPrompt implements Component, Focusable {
     this.lastRenderWidth = width
     this.directoryRow = -1
     this.suggestionRows = []
+    this.actionHits = []
     const safeWidth = Math.max(1, width)
     const lines: string[] = []
     lines.push(color.textStrong(this.request.title))
@@ -391,10 +531,7 @@ export class SaveLocationPrompt implements Component, Focusable {
       lines.push(color.textDim(` ${target}`))
       lines.push('')
       lines.push('Replace existing file?')
-      lines.push(color.textDim('y yes · n no'))
-      return lines
-    }
-    if (this.suggestions.length > 0) {
+    } else if (this.suggestions.length > 0) {
       lines.push('')
       const visible = this.suggestions.slice(0, VISIBLE_SUGGESTIONS)
       this.suggestionRows = []
@@ -415,8 +552,61 @@ export class SaveLocationPrompt implements Component, Focusable {
       }
     }
     lines.push('')
-    lines.push(color.textDim('tab complete · ↵ save · esc cancel'))
+    const actions = this.buildActionRow(lines.length, safeWidth)
+    this.actionHits = actions.hits
+    lines.push(actions.line)
+    this.lastRenderHeight = lines.length
     return lines
+  }
+
+  /** The actions the CURRENT prompt state may paint: the forward verb first,
+   *  the safe exit last. The state alone decides the wording — never ANSI. */
+  private actionRowSegments(): readonly SaveActionSegment[] {
+    if (this.confirming) {
+      return [
+        { action: 'yes', text: 'Yes [Y]' },
+        { action: 'no', text: 'No [N]' },
+      ]
+    }
+    if (this.suggestions.length > 0) {
+      return [
+        { action: 'save', text: 'Save [Enter]' },
+        { action: 'dismiss-suggestions', text: 'Dismiss suggestions [Esc]' },
+      ]
+    }
+    return [
+      { action: 'save', text: 'Save [Enter]' },
+      { action: 'cancel', text: 'Cancel [Esc]' },
+    ]
+  }
+
+  /** Pack the richest action row that fits WHOLE: the complete row first, then
+   *  the safe exit alone. A verb is never painted as half a word and a dropped
+   *  segment publishes no hit target; the keyboard ladder always remains. */
+  private buildActionRow(row: number, width: number): {
+    readonly line: string
+    readonly hits: SaveActionHit[]
+  } {
+    const candidates = this.actionRowSegments()
+    for (let keepFrom = 0; keepFrom < candidates.length; keepFrom += 1) {
+      const kept = candidates.slice(keepFrom)
+      const text = kept.map(segment => segment.text).join(ACTION_BAR_SEPARATOR)
+      if (visibleWidth(text) > width) continue
+      const hits: SaveActionHit[] = []
+      let column = 0
+      for (const [index, segment] of kept.entries()) {
+        if (index > 0) column += visibleWidth(ACTION_BAR_SEPARATOR)
+        const startCol = column
+        const endCol = startCol + visibleWidth(segment.text)
+        hits.push({ action: segment.action, row, startCol, endCol })
+        column = endCol
+      }
+      // Role 14 affordances: the clickable verbs use the action ink while the
+      // inert separators stay in the muted hint role.
+      const line = kept.map(segment => color.primary(segment.text)).join(color.textMuted(ACTION_BAR_SEPARATOR))
+      return { line, hits }
+    }
+    return { line: '', hits: [] }
   }
 
   /** Cancel the prompt (surface dispose / runner abort): settle cancelled
@@ -426,6 +616,9 @@ export class SaveLocationPrompt implements Component, Focusable {
     this.settled = true
     this.completionAbort.abort()
     this.suggestions = []
+    this.actionHits = []
+    this.armedAction = undefined
+    this.mousePressedValue = undefined
   }
 }
 
