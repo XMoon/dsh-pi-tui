@@ -50,6 +50,7 @@ import {
   assert,
   assertDeepEqual,
   assertEqual,
+  assertMatch,
   assertNotEqual,
   assertProfileClientPeers,
   installedPayloadHash,
@@ -88,10 +89,6 @@ const CREDENTIAL_RECORD_BLOCK = [
 ].join('\n')
 /** The addressable record keys in the official credentials document. */
 const CREDENTIAL_RECORD_KEY_PATTERN = /^ {2}([a-z][a-z0-9-]*\/[a-z][a-z0-9-]*):$/gmu
-
-function assertMatch(actual, pattern, message) {
-  assert(typeof actual === 'string' && pattern.test(actual), message)
-}
 
 async function sleep(ms) {
   return await new Promise(resolveSleep => setTimeout(resolveSleep, ms))
@@ -729,10 +726,9 @@ export async function runManagedDaemonUpgrade(context) {
     const newSessionSha256 = sha256(sessionLogPath(dshHome, sessionId))
     assertEqual(newSessionSha256, oldSessionAfterStop,
       'the upgraded Host readback changed the durable Session bytes after the first managed resume')
-    fragment.session.readbackOnNew = {
-      stableAfterFirstResume: true,
-      appendedEvents: appendedEventTypes(readbackEvents, seededEvents.length),
-    }
+    const newAppended = appendedEventTypes(readbackEvents, oldReadEvents.length)
+    assertEqual(newAppended.length, 0, 'the upgraded Host readback appended Session events after the first resume')
+    fragment.session.readbackOnNew = { stableAfterFirstResume: true, appendedEvents: newAppended }
     assertEqual(processCounts(dshHome).host, 1, 'the new managed stage did not keep exactly one Host')
 
     newClientA.send('/exit\r')
@@ -837,10 +833,9 @@ export async function runManagedDaemonUpgrade(context) {
     const rollbackSessionSha256 = sha256(sessionLogPath(dshHome, sessionId))
     assertEqual(rollbackSessionSha256, oldSessionAfterStop,
       'the rollback readback changed the durable Session bytes after the first managed resume')
-    fragment.session.readbackOnRollback = {
-      stableAfterFirstResume: true,
-      appendedEvents: appendedEventTypes(rollbackEvents, seededEvents.length),
-    }
+    const rollbackAppended = appendedEventTypes(rollbackEvents, oldReadEvents.length)
+    assertEqual(rollbackAppended.length, 0, 'the rollback readback appended Session events after the first resume')
+    fragment.session.readbackOnRollback = { stableAfterFirstResume: true, appendedEvents: rollbackAppended }
     rollbackClient.send('/exit\r')
     const rollbackExit = await rollbackClient.waitForExit(120_000)
     assertEqual(rollbackExit.code, 0, `the rollback Client /exit was ${JSON.stringify(rollbackExit)}`)
