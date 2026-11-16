@@ -48,9 +48,11 @@ import { themeDisplayName as themeDisplayNameOf } from '../pickers/theme-menu.ts
 import { allowlistSummary } from '../pickers/subagent-model-menu.ts'
 import { SubagentSettingsController } from '../../app/command/subagent-settings.ts'
 import { SubagentSettingsPage } from '../panels/subagent-settings-page.ts'
+import { HostNumericSettingsController, type HostNumericSettingsPort } from '../../app/command/host-numeric-settings.ts'
+import { HostNumericSettingsPage } from '../panels/host-numeric-settings-page.ts'
 import { resolveThemeSelection, themePickerRows } from '../../app/surface/theme-selection.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
-import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings, type WebStartupPreferenceState, type BackendStartupPreferenceState, type PublicBackendValue, type AcpStartupPreferenceState } from '../../runtime/config-port.ts'
+import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings, type WebStartupPreferenceState, type BackendStartupPreferenceState, type PublicBackendValue, type AcpStartupPreferenceState, type SectionRead, type SectionMutationOutcome, type SessionLogUpload, type AgentLoopSettings, type ShellExecutionSettings } from '../../runtime/config-port.ts'
 import type { AcpAccessStatus } from '../../runtime/acp-access-port.ts'
 import { isWebApiBilling } from '../../domain/web-provider-settings.ts'
 import {
@@ -1232,6 +1234,75 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         },
         createModelsPage,
         createAccountPage,
+        createHostNumericSettingsPage: (kind, done, onAuthoritativeChange) => {
+          const requestRender = (): void => { if (!app.isDisposed()) app.requestRender() }
+          const runOwnedTask = (label: string, task: () => Promise<void>): void => {
+            runOwned(label, task, { diag: runner.diag, sessionId: () => runner.currentSessionId })
+          }
+          if (kind === 'agent-loop') {
+            const fields = [{ key: 'maxParallelToolCalls' as const, label: 'Parallel tool calls' }]
+            const controller = new HostNumericSettingsController<AgentLoopSettings>({
+              port: runner.config.agentLoopSettings,
+              fields,
+              requestRender,
+              onAuthoritativeChange,
+              runOwned: runOwnedTask,
+            })
+            return new HostNumericSettingsPage<AgentLoopSettings>({
+              controller,
+              fields,
+              spec: {
+                title: 'Agent loop',
+                sourceHeading: source => source.kind === 'ready'
+                  ? `Host profile · effective settings · revision ${source.revision}`
+                  : `Host profile · ${source.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`,
+                help: [
+                  'The effective value is the current official agent-loop setting; Overridden compares it with the inherited base.',
+                  'The next Agent step samples the new parallel cap. Tool calls already dispatched are never rewritten.',
+                  'Reset stages the official unset operation and then shows the Host readback; the USER patch may keep the inherited value.',
+                ],
+              },
+              requestRender,
+              done,
+            })
+          }
+          const shell = runner.config.shellExecutionSettings
+          const fields = [
+            { key: 'timeoutMs' as const, label: 'Command timeout (ms)' },
+            { key: 'maxOutputBytes' as const, label: 'Output cap per stream (bytes)' },
+          ]
+          // The typed port needs the ACTIVE executor identity the page read;
+          // the controller hands the captured read back at Save.
+          const port: HostNumericSettingsPort<ShellExecutionSettings> = {
+            read: () => shell.read(),
+            refresh: () => shell.refresh(),
+            mutate: (patch, revision, generation, base) => shell.mutate(patch, revision, generation, base.effective.executor),
+          }
+          const controller = new HostNumericSettingsController<ShellExecutionSettings>({
+            port,
+            fields,
+            requestRender,
+            onAuthoritativeChange,
+            runOwned: runOwnedTask,
+          })
+          return new HostNumericSettingsPage<ShellExecutionSettings>({
+            controller,
+            fields,
+            spec: {
+              title: 'Shell execution',
+              sourceHeading: source => source.kind === 'ready'
+                ? `Host model-tool executor · ${source.effective.executor === 'bash' ? 'POSIX Bash' : 'Windows PowerShell'}`
+                : 'Host model-tool executor · unavailable',
+              help: [
+                'These are the official model-tool shell caps of the ACTIVE Host executor. Both fields save as one revision-checked Host mutation.',
+                'New shell executions use the caps; a running subprocess keeps its current timeout. The ! / !! user-shell policy is separate.',
+                'Reset stages the official unset operation and then shows the Host readback; the USER patch may keep the inherited value.',
+              ],
+            },
+            requestRender,
+            done,
+          })
+        },
         createSubagentSettingsPage: (done, onAuthoritativeChange) => {
           const controller = new SubagentSettingsController({
             limits: runner.config.subagentLimits,
@@ -2026,6 +2097,119 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return verifyCommittedWebAutostart(autoStart)
   }
 
+  /** The ONE General `Session log upload` row: the official
+   *  `session-log-deepseek.enabled` contributor. `Reset` is a real third
+   *  candidate (official `unset` + Host readback), not a hidden toggle. */
+  const sessionLogUploadRowOf = (
+    read: SectionRead<SessionLogUpload>,
+    readiness: 'ready' | 'stale' | 'unavailable',
+  ): SettingsWorkspaceRow[] => {
+    // No official namespace = no row at all: an absent contributor is never
+    // presented as a default-off switch.
+    if (read.kind === 'unavailable') return []
+    const ready = read.kind === 'ready'
+    const editable = ready && readiness === 'ready'
+    const value = ready ? read.effective.enabled ? 'On' : 'Off' : 'Current unknown'
+    return [{
+      id: 'session-log-upload',
+      category: 'general',
+      label: 'Session log upload',
+      summary: value,
+      ...(ready ? { value } : {}),
+      scope: 'DSH Host profile · official DeepSeek API requests',
+      freshness: ready && readiness === 'ready' ? 'ready' : ready ? 'last-known' : 'last-known',
+      description: 'Send session log data with requests to the official DeepSeek API. '
+        + 'Session data can include conversation content. This is the official session-log-deepseek contributor: '
+        + 'it uploads the not-yet-accepted session-log suffix only when the official Host conditions are met. '
+        + 'Turning it Off stops future contributions; it does not retract data already sent. '
+        + 'Reset sends the official unset and then shows whatever current value the Host reads back — which may be On again. '
+        + 'Whether data is really contributed is decided only by the current official Host descriptor.',
+      edit: {
+        field: 'session-log-upload',
+        primary: 'persisted',
+        ...(ready ? { revision: read.revision, generation: read.generation } : {}),
+        options: editable
+          ? [
+              { value: 'On', label: 'On', available: true, current: read.effective.enabled },
+              { value: 'Off', label: 'Off', available: true, current: !read.effective.enabled },
+              // The official unset is always a legitimate intent while the
+              // current Host serves the section; it may read back On.
+              { value: 'Reset', label: 'Reset', available: true, current: false },
+            ]
+          : [],
+        runtime: 'Applies to future requests that meet the official contribution conditions; already-sent data is not retracted',
+        persisted: ready
+          ? `${read.effective.enabled ? 'On' : 'Off'} · ${read.overridden.enabled ? 'Overridden' : 'Inherited'}${read.effective.enabled ? ' · may upload conversation content' : ''}`
+          : 'Current unknown',
+      },
+    }]
+  }
+
+  /** Commit the ONE official `session-log-deepseek.enabled` field. The write is
+   *  the caller's exact revision and Host generation; Reset is the official
+   *  field `unset`, and the verdict comes from a fresh current readback. */
+  const commitSessionLogUpload = async (
+    value: string,
+    revision: number | undefined,
+    generation: object | undefined,
+  ): Promise<SettingsWorkspaceCommitOutcome> => {
+    const patch = value === 'Reset'
+      ? { enabled: { kind: 'reset' as const } }
+      : value === 'On'
+        ? { enabled: { kind: 'set' as const, value: true } }
+        : value === 'Off'
+          ? { enabled: { kind: 'set' as const, value: false } }
+          : undefined
+    if (patch === undefined) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a Session log upload candidate` }
+    }
+    if (revision === undefined || generation === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host setting exposed no revision this choice could be based on' }
+    }
+    if (runner.config.configReadiness() !== 'ready') {
+      return { outcome: 'not-saved', reason: 'the Host settings are not current; the session log upload setting was not changed' }
+    }
+    const base = runner.config.sessionLogUpload.read()
+    if (base.kind !== 'ready') {
+      return { outcome: 'not-saved', reason: 'the Host session log upload setting is unavailable; nothing was changed' }
+    }
+    if (base.revision !== revision || base.generation !== generation) {
+      return { outcome: 'not-saved', reason: 'the Host settings changed since this choice was read; refresh to review' }
+    }
+    let outcome: SectionMutationOutcome
+    try {
+      outcome = await runner.config.sessionLogUpload.mutate(patch, revision, generation)
+    } catch (error) {
+      return { outcome: 'indeterminate', reason: `Outcome unconfirmed · ${safeErrorMessage(error)}; refresh before retrying` }
+    }
+    if (outcome.kind === 'conflict') {
+      return { outcome: 'not-saved', reason: `Not saved · ${outcome.reason}; refresh to review` }
+    }
+    if (outcome.kind === 'rejected') {
+      return { outcome: 'not-saved', reason: `Not saved · ${outcome.reason}` }
+    }
+    if (outcome.kind === 'outcome-unconfirmed') {
+      return { outcome: 'indeterminate', reason: `Outcome unconfirmed · ${outcome.reason}; possibly saved; refresh before retrying` }
+    }
+    const readback = runner.config.configReadiness() === 'ready'
+      ? runner.config.sessionLogUpload.read()
+      : undefined
+    if (readback === undefined || readback.kind !== 'ready' || readback.generation !== generation) {
+      return { outcome: 'unverified', reason: 'the accepted write has no current Host readback; refresh to review' }
+    }
+    // Reset is verified by the accepted official unset + current readback; the
+    // effective value may be On again and the USER field may stay materialized.
+    if (value === 'Reset') return { outcome: 'verified' }
+    const expected = value === 'On'
+    if (readback.effective.enabled !== expected) {
+      return {
+        outcome: 'not-saved',
+        reason: `the write reported success, but the authoritative setting reads ${readback.effective.enabled ? 'On' : 'Off'}`,
+      }
+    }
+    return { outcome: 'verified' }
+  }
+
   /**
    * The profile-owned startup backend (`tui-startup.backend`). It is a NEXT
    * cold-launch fact only: this row never reports or switches the CURRENT
@@ -2357,6 +2541,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       switch (field) {
         case 'visual-tools': return commitVisualTools(request.value, request.revision)
         case 'web-autostart': return commitWebAutostart(request.value, request.revision)
+        case 'session-log-upload': return commitSessionLogUpload(request.value, request.revision, request.generation)
         case 'startup-backend': return commitBackendStartup(request.value, request.revision)
         case 'acp-runtime': return commitAcpRuntime(request.value)
         case 'acp-autostart': return commitAcpAutostart(request.value, request.revision)
@@ -3415,6 +3600,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const backendStartupFreshness = backendStartupFreshnessOf(backendStartup, configReadiness)
     const acpAutostart = runner.config.acpStartupPreference.read()
     const acpAutostartFreshness = acpAutostartFreshnessOf(acpAutostart, configReadiness)
+    // FR5-B: the official Agent-loop, active-shell and session-log sections.
+    // Each read reports its own unavailable/unreadable state; no schema default
+    // is ever substituted for a failed read.
+    const agentLoopSettings = runner.config.agentLoopSettings.read()
+    const shellExecutionSettings = runner.config.shellExecutionSettings.read()
+    const sessionLogUpload = runner.config.sessionLogUpload.read()
     // ── C2-R3 + M6-1 F8: the five Agent rows' read facts ────────────────────
     // PERMISSIONS. The approval row exists for a LIVE, still-current captured
     // scope; the row's VALUE comes from the ONE session-policy observation
@@ -3959,6 +4150,25 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           },
         },
         {
+          // FR5-B: the ONE Agent-loop numeric specialist entry. The page stages
+          // the official `agent-loop.maxParallelToolCalls` field; this row never
+          // writes it directly.
+          id: 'agent-loop',
+          category: 'agent',
+          label: 'Agent loop',
+          summary: agentLoopSettings.kind === 'ready'
+            ? `Parallel tool calls: ${agentLoopSettings.effective.maxParallelToolCalls}`
+            : `Parallel tool calls: ${agentLoopSettings.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`,
+          scope: 'Host profile · effective official settings',
+          freshness: agentLoopSettings.kind === 'ready'
+            ? configReadiness === 'ready' ? 'ready' : 'last-known'
+            : agentLoopSettings.kind === 'unavailable' ? 'unavailable' : 'read-error',
+          description: 'Stage the official agent-loop parallel tool-call cap in one page, then Save. '
+            + 'The next Agent step reads the new cap; tool calls already dispatched are unchanged. '
+            + 'Reset sends the official field unset and shows the Host readback.',
+          specialist: 'agent-loop-settings',
+        },
+        {
           // The ONE built-in Visual tools switch: a Host-profile setting, not a
           // TUI preference. The row stays visible when the authority is
           // unavailable (the category exists), but `edit.options` is empty in
@@ -3974,18 +4184,23 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           edit: visualToolsEditOf(visualTools, configReadiness),
         },
         {
-          // M5-W PR-C: the NEXT-Host-launch Web preference. It is a Host profile
-          // setting, not the current Web state: saving it never enables or
-          // disables the running Host, and `/web` remains the immediate control.
-          id: 'web-autostart',
+          // FR5-B: the ONE Shell-execution numeric specialist entry. It edits
+          // the ACTIVE Host model-tool executor row (POSIX Bash or Windows
+          // PowerShell) — never the `!`/`!!` user-shell policy.
+          id: 'shell-execution',
           category: 'tools',
-          label: 'Auto-enable Web on Host startup',
-          summary: webAutostartSummaryOf(webAutostart),
-          scope: 'DSH Host profile · next Split Host launch',
-          freshness: webAutostartFreshness,
-          description: 'Automatically serves the Web frontend when a new Split Host starts. '
-            + 'The current Host is not changed; use /web for immediate control. Browser opening remains manual.',
-          edit: webAutostartEditOf(webAutostart, configReadiness),
+          label: 'Shell execution',
+          summary: shellExecutionSettings.kind === 'ready'
+            ? `Timeout ${shellExecutionSettings.effective.timeoutMs} ms · Output cap ${shellExecutionSettings.effective.maxOutputBytes} bytes · ${shellExecutionSettings.effective.executor === 'bash' ? 'POSIX Bash' : 'Windows PowerShell'}`
+            : `Active executor: ${shellExecutionSettings.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`,
+          scope: 'DSH Host profile · active model-tool shell executor',
+          freshness: shellExecutionSettings.kind === 'ready'
+            ? configReadiness === 'ready' ? 'ready' : 'last-known'
+            : shellExecutionSettings.kind === 'unavailable' ? 'unavailable' : 'read-error',
+          description: 'Stage the command timeout and per-stream output cap of the ACTIVE Host model-tool shell executor, then Save. '
+            + 'Both fields are one revision-checked Host mutation. New shell executions use them; a running subprocess keeps its current timeout. '
+            + 'The executor row is chosen by the Host, not this client. This is not the ! / !! user-shell sandbox policy.',
+          specialist: 'shell-execution-settings',
         },
         {
           // M6-2A A5: the NEXT cold-launch backend selection. A Host profile
@@ -4004,6 +4219,38 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           edit: backendStartupEditOf(backendStartup, configReadiness),
         },
         {
+          // M5-W PR-C: the NEXT-Host-launch Web preference. It is a Host profile
+          // setting, not the current Web state: saving it never enables or
+          // disables the running Host, and `/web` remains the immediate control.
+          // FR5-B moved the row to General (same id, same port) so the
+          // next-Split-Host-launch preferences live together.
+          id: 'web-autostart',
+          category: 'general',
+          label: 'Start Web automatically',
+          summary: webAutostartSummaryOf(webAutostart),
+          scope: 'DSH Host profile · next Split Host launch',
+          freshness: webAutostartFreshness,
+          description: 'Automatically serves the Web frontend when a new Split Host starts. '
+            + 'The current Host is not changed; use /web for immediate control. Browser opening remains manual.',
+          edit: webAutostartEditOf(webAutostart, configReadiness),
+        },
+        {
+          // PO-1B: the NEXT-Split-Host-start ACP preference. A persisted profile
+          // fact independent of the running listener; saving it never binds or
+          // tears down the current socket. FR5-B moved the row to General (same
+          // id, same port); the ACP Server runtime row stays in Tools.
+          id: 'acp-autostart',
+          category: 'general',
+          label: 'Start ACP automatically',
+          summary: acpAutostartSummaryOf(acpAutostart),
+          scope: 'DSH Host profile · next Split Host start',
+          freshness: acpAutostartFreshness,
+          description: 'Automatically binds the local ACP v1 Unix socket listener when a new Split Host starts. '
+            + 'Affects the next Split Host start; the current ACP listener is unchanged. Use the ACP Server row for immediate control.',
+          edit: acpAutostartEditOf(acpAutostart, configReadiness),
+        },
+        ...sessionLogUploadRowOf(sessionLogUpload, configReadiness),
+        {
           // PO-1B: the local ACP listener RUNTIME row. Its value is the LIVE
           // Host listener state read through the `acpAccess` port (async); the
           // row never reports the persisted preference. On Direct it is a
@@ -4016,20 +4263,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           freshness: acpRuntimeFreshnessOf(),
           description: ACP_RUNTIME_DESCRIPTION,
           edit: acpRuntimeEditOf(),
-        },
-        {
-          // PO-1B: the NEXT-Split-Host-start ACP preference. A persisted profile
-          // fact independent of the running listener; saving it never binds or
-          // tears down the current socket.
-          id: 'acp-autostart',
-          category: 'tools',
-          label: 'Auto-enable ACP on Host startup',
-          summary: acpAutostartSummaryOf(acpAutostart),
-          scope: 'DSH Host profile · next Split Host start',
-          freshness: acpAutostartFreshness,
-          description: 'Automatically binds the local ACP v1 Unix socket listener when a new Split Host starts. '
-            + 'Affects the next Split Host start; the current ACP listener is unchanged. Use the ACP Server row for immediate control.',
-          edit: acpAutostartEditOf(acpAutostart, configReadiness),
         },
         {
           // C2-R4: the ONE discoverable entry to the Web provider settings

@@ -297,16 +297,26 @@ export async function runAcpPo1bOptInControl(context) {
       }
       assert(/^> ACP Server(?:\s|$)/mu.test(await frameOf(target)), `${label}: the ACP Server row was never selected`)
     }
+    const enterGeneralRows = async (target, label) => {
+      for (let step = 0; step < 16; step += 1) {
+        if (/^\s*> General\b/mu.test(await frameOf(target))) break
+        target.send('\x1b[A')
+        await sleep(160)
+      }
+      assert(/^\s*> General\b/mu.test(await frameOf(target)), `${label}: the General category was never selected`)
+      target.send('\r')
+      await target.waitForScreen('Backend', `${label}: General rows`, 30_000)
+    }
     const selectAcpAutostartRow = async (target, label) => {
       target.send('\x1b[H')
       await sleep(160)
       for (let step = 0; step < 12; step += 1) {
-        if (/^> Auto-enable ACP on Host startup(?:\s|$)/mu.test(await frameOf(target))) return
+        if (/^> Start ACP automatically(?:\s|$)/mu.test(await frameOf(target))) return
         target.send('\x1b[B')
         await sleep(160)
       }
-      assert(/^> Auto-enable ACP on Host startup(?:\s|$)/mu.test(await frameOf(target)),
-        `${label}: the Auto-enable ACP on Host startup row was never selected`)
+      assert(/^> Start ACP automatically(?:\s|$)/mu.test(await frameOf(target)),
+        `${label}: the Start ACP automatically row was never selected`)
     }
     await seatFree(`\0dsh-pi-tui-c-${String(scopeId).slice(0, 40)}`, 20_000)
     const tuiSettings = new SurfaceEntryProcess(entries.client, { ...base, workDir })
@@ -344,11 +354,18 @@ export async function runAcpPo1bOptInControl(context) {
       'b0: the real TUI Settings Confirm toggle must not replace the Host')
 
     // Plan §4.5: the persisted autoStart preference is ALSO writable from the
-    // REAL TUI keyboard (not only via a Peer settings call). Confirm the
-    // `Auto-enable ACP on Host startup` row On (Verified = Host write + official
-    // authoritative read-back agreed), then restore Off through the SAME path.
+    // REAL TUI keyboard (not only via a Peer settings call). FR5-B moved the
+    // row to General; confirm `Start ACP automatically` On (Verified = Host
+    // write + official authoritative read-back agreed), then restore Off.
     tuiSettings.send('\x1b')
-    await tuiSettings.waitForScreen('Visual tools', 'b0 autostart: back to rows', 30_000)
+    await tuiSettings.waitForScreen('Visual tools', 'b0 autostart: back to Tools rows', 30_000)
+    // The Settings header text varies with the physical width; the rail is
+    // proven by the painted General category instead.
+    for (let step = 0; step < 3 && !/^\s*> General\b/mu.test(await frameOf(tuiSettings)); step += 1) {
+      tuiSettings.send('\x1b')
+      await sleep(300)
+    }
+    await enterGeneralRows(tuiSettings, 'b0 autostart')
     await selectAcpAutostartRow(tuiSettings, 'b0 autostart On')
     tuiSettings.send('\r')
     await tuiSettings.waitForScreen('Choose value', 'b0 autostart: choice', 30_000)
@@ -357,7 +374,7 @@ export async function runAcpPo1bOptInControl(context) {
     tuiSettings.send('\r')
     await tuiSettings.waitForScreen('Verified', 'b0 autostart On: Verified', 60_000)
     tuiSettings.send('\x1b')
-    await tuiSettings.waitForScreen('Visual tools', 'b0 autostart: back to rows 2', 30_000)
+    await tuiSettings.waitForScreen('Backend', 'b0 autostart: back to General rows', 30_000)
     await selectAcpAutostartRow(tuiSettings, 'b0 autostart Off')
     tuiSettings.send('\r')
     await tuiSettings.waitForScreen('Choose value', 'b0 autostart: choice 2', 30_000)

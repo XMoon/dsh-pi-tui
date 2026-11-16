@@ -632,7 +632,7 @@ enable/disable, the next-launch lifetime of the preference and that the page
 opens the Web home where the user chooses a session — there is no TUI→browser
 session navigation or deep-link synthesis.
 
-The `Auto-enable Web on Host startup` row in `/settings → Tools` is a different
+The `Start Web automatically` row in `/settings → General` is a different
 fact with a different lifetime: it persists a PROFILE preference
 (`pi-tui-web-preferences.autoStart`, default Off, options On/Off) for the NEXT
 Split Host launch, read by the Host cold boot before Ready. Saving it never
@@ -646,16 +646,17 @@ the next launch. A non-current configuration backend offers no confirmable
 candidate, and the authoritative re-read confirms only the persisted
 preference.
 
-The local ACP v1 listener is exposed through TWO independent `/settings → Tools`
-rows that share one authoring surface but never one authority. `ACP Server` is
-the RUNTIME row: its value is the LIVE listener state read from the Host's
+The local ACP v1 listener is exposed through TWO independent Settings rows that
+never share one authority. `ACP Server` stays in `/settings → Tools` and is the
+RUNTIME row: its value is the LIVE listener state read from the Host's
 private `piTuiAcpAccess` service (`On`/`Off`; a bind/close in flight is
 `Changing…` and offers no candidate; an unreadable/`unavailable`/non-Split
 Host is `Unavailable`, and a Direct backend states `Unavailable — Split Host
 only`). Confirming On/Off sends exactly ONE `setEnabled`, then re-reads the
 authoritative listener state; only an agreeing re-read is `Verified`, a
 rejected or unreadable outcome is classified from a fresh read and never
-replayed. `Auto-enable ACP on Host startup` is the PERSISTED row
+replayed. `Start ACP automatically` lives in `/settings → General` (the SAME row
+id and preference authority as before the migration) and is the PERSISTED row
 (`pi-tui-acp-preferences.autoStart`, default `Off (default)`, options On/Off,
 revision-checked user patch) that applies to the NEXT Split Host start; saving
 it never changes the current listener, and its Detail states that explicitly.
@@ -849,8 +850,9 @@ specialist-page contract below).
 - The configuration categories (`General`, `Agent`, `Appearance`, `Conversation`,
   `Input & Terminal`, `Tools`, and the conditional `Extensions`) keep their
   three-level browse (L0 categories, L1 rows, L2 detail). `About`, `Models`,
-  `Account` and `Plugins` remain direct content pages. `General` holds the ONE
-  startup backend row.
+  `Account` and `Plugins` remain direct content pages. `General` holds the
+  startup backend, the two next-Split-Host startup preferences and the official
+  session-log upload switch in one frozen order.
 - Configuration rows keep their distinct writer kinds: the configured theme,
   transcript display preset, icon style, mid-turn progress-updates cadence,
   response style, Git attribution, Home/End keys, Mouse wheel lines,
@@ -934,13 +936,15 @@ specialist-page contract below).
     when the readable document carries none, an explicit unknown when it cannot
     be read), and a normalizer's fallback is never presented as the stored
     value.
-- `Agent` owns FOUR rows in this frozen order: `Approval policy (this session)`
+- `Agent` owns FIVE rows in this frozen order: `Approval policy (this session)`
   (only while a live, still-current captured Session exists — the row stays
   visible with its truthful state when the Host policy read is checking,
   unavailable or failed, and offers no confirmable candidate until a proven
   read answers) → `Default permission` (only while the Host advertises a preset
   roster) → `Subagent settings` (always reachable so each official section can
-  state its own readiness) → `User shell sandbox policy` (always painted). The
+  state its own readiness) → `User shell sandbox policy` (always painted) →
+  `Agent loop` (always reachable so its official section can state its own
+  readiness). The
   category stays in the fixed rail even when every row is unavailable, and
   `Agent` has NO transition launcher any more: it has no unmigrated field left.
   - `Approval policy` is scope-pinned and reads the PROVEN Host fact: the
@@ -1030,8 +1034,12 @@ specialist-page contract below).
   `/skill`, `/preset`, `/keybindings conflicts`) open it with their own row
   lists through `TuiApp.openSettings`, which is not a Settings workspace path.
 - `Tools` holds the built-in `Visual tools` row (backed by the Host profile's
-  `pi-tui-visual-tools.enabled` volatile Config, schema default On) plus the
-  `Web Search / Fetch` page entry, in that frozen order.
+  `pi-tui-visual-tools.enabled` volatile Config, schema default On), the
+  `Shell execution` specialist entry, the `ACP Server` runtime row, the
+  `Web Search / Fetch` page entry and, when the official manager is mounted,
+  `MCP servers`, in that frozen order. The next-Split-Host Web/ACP startup
+  preferences are NOT in Tools: they live in `General` under the SAME row ids
+  (`web-autostart`, `acp-autostart`) with no duplicate Tools entry.
   Its stated value is the effective Host form value; `[default]` marks a value
   the USER layer does not declare. Confirm writes that ONE field through the
   official revision-checked settings mutation and re-reads the Host. Off
@@ -1203,10 +1211,53 @@ specialist-page contract below).
 - The screen lease/currentness mechanics are owned by
   [overlay-focus.md](./overlay-focus.md).
 
+### Host numeric pages, Session log upload and General
+
+`/settings → Agent → Agent loop` and `/settings → Tools → Shell execution` are
+two SPECIALIST pages sharing ONE numeric renderer inside the existing Settings
+lease. Each page owns only its per-open draft, focus, scroll and confirmation;
+the Root keeps the physical Action Bar and Esc, and a painted row/field/Reset/
+Apply/Save/Back control delegates to the SAME page/controller path a key press
+uses. Both pages paint the current effective value, its `Inherited`/`Overridden`
+relation to the base, an explicit `[Reset]` per field and `Status: …` feedback.
+Numeric validation is a safe positive integer (`Number.isSafeInteger(n) && n>=1`)
+for every field; an empty field stages the official Reset, invalid text keeps
+the draft and never dispatches. Save sends ONE exact-revision/revision-checked
+Host mutation for the page's namespace and reports `Not saved`, `Unverified` or
+`Outcome unconfirmed` exactly as the Host settlement and same-generation
+readback prove; a stale captured page is read-only until an explicit refresh.
+Reset stages the official field `unset`, then shows the Host's CURRENT readback;
+neither USER-field deletion nor `overridden=false` is a success criterion.
+
+- `Agent loop` edits only `agent-loop.maxParallelToolCalls`. The next Agent step
+  samples the saved budget immediately before executing its next non-empty tool
+  batch; tool calls already dispatched are never rewritten. The other
+  `agent-loop` Config (notably `agents`) is never part of this page's write.
+- `Shell execution` edits the two numeric caps (`timeoutMs`,
+  `maxOutputBytes`) of the ACTIVE Host model-tool executor row in ONE mutation.
+  The executor identity is a Host observation: POSIX Hosts serve
+  `bash-sandbox`, Windows Hosts `pwsh-sandbox`, and the Client OS is never used
+  to guess it. An absent or ambiguous active row is `Unavailable`/`Unreadable`
+  and offers no write; a profile that switches the active row rejects the stale
+  page's write. The caps affect the NEXT shell execution; a running subprocess
+  keeps its current timeout. This is not the `!`/`!!` user-shell sandbox policy.
+- `General` paints `Backend`, `Start Web automatically`, `Start ACP
+  automatically` and `Session log upload` in that frozen order. `Session log
+  upload` is the official `session-log-deepseek.enabled` scalar row and is
+  absent entirely when the current Host does not serve that namespace. Its
+  candidate row offers `On`, `Off` and `Reset` only on a current authority;
+  `On` carries the explicit risk (session-log data, possibly conversation
+  content, is sent with requests to the official DeepSeek API), `Off` is a real
+  saved value, and `Reset` is the official `unset` whose readback MAY be `On`.
+  A stale or disconnected authority keeps the row and its risk text but shows
+  `Current unknown`, offers no candidate and never presents an Off as a safety
+  guarantee.
+
 ### Startup backend (General)
 
-`/settings → General → Backend` is the ONE writable row in the `General`
-category. Its candidates are `Direct` and `Daemon`, persisted to the official
+`/settings → General → Backend` is the FIRST of the four `General` rows; the
+migrated `Start Web automatically`, `Start ACP automatically` and the
+`Session log upload` switch follow it in that order. Its candidates are `Direct` and `Daemon`, persisted to the official
 Profile Config `tui-startup.backend` (`direct`/`daemon`) through the same
 revision-checked Settings mutation the other Host form rows use; an explicit
 `Direct` or `Daemon` choice is the sole persisted authority and the current

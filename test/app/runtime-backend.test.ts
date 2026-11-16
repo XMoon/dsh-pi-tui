@@ -172,6 +172,21 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       refresh: async () => {},
       mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
     },
+    agentLoopSettings: {
+      read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+      refresh: async () => {},
+      mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+    },
+    shellExecutionSettings: {
+      read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+      refresh: async () => {},
+      mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+    },
+    sessionLogUpload: {
+      read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+      refresh: async () => {},
+      mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+    },
     presetDefault: {
       available: () => true,
       get: () => undefined,

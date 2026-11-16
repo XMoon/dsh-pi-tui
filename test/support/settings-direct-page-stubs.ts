@@ -75,6 +75,25 @@ export const SETTINGS_DIRECT_PAGE_STUBS = {
     read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
     setAutoStart: async (_value: boolean, _revision: number) => {},
   },
+  /** FR5-B: the official Agent-loop section is absent in a harness that composes
+   *  no Host settings plane; the row reports Unavailable and invites no write. */
+  agentLoopSettings: {
+    read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+    refresh: async () => {},
+    mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+  },
+  /** FR5-B: the official shell executor row is absent in the same harness. */
+  shellExecutionSettings: {
+    read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+    refresh: async () => {},
+    mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+  },
+  /** FR5-B: no official session-log contributor => the General row is absent. */
+  sessionLogUpload: {
+    read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+    refresh: async () => {},
+    mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+  },
 } as const
 
 /**
@@ -94,5 +113,8 @@ export function settingsDirectPageConfig(config: Record<string, unknown>): Recor
     webStartupPreference: { ...SETTINGS_DIRECT_PAGE_STUBS.webStartupPreference, ...(own.webStartupPreference ?? {}) },
     backendStartupPreference: { ...SETTINGS_DIRECT_PAGE_STUBS.backendStartupPreference, ...(own.backendStartupPreference ?? {}) },
     acpStartupPreference: { ...SETTINGS_DIRECT_PAGE_STUBS.acpStartupPreference, ...(own.acpStartupPreference ?? {}) },
+    agentLoopSettings: { ...SETTINGS_DIRECT_PAGE_STUBS.agentLoopSettings, ...(own.agentLoopSettings ?? {}) },
+    shellExecutionSettings: { ...SETTINGS_DIRECT_PAGE_STUBS.shellExecutionSettings, ...(own.shellExecutionSettings ?? {}) },
+    sessionLogUpload: { ...SETTINGS_DIRECT_PAGE_STUBS.sessionLogUpload, ...(own.sessionLogUpload ?? {}) },
   }
 }

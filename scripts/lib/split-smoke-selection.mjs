@@ -52,6 +52,7 @@ import { runWebRuntimeToggle } from '../smoke/split-process/web-runtime-toggle.m
 import { runMcpServersFr3 } from '../smoke/split-process/mcp-servers-fr3.mjs'
 import { runMcpServersFr4 } from '../smoke/split-process/mcp-servers-fr4.mjs'
 import { runSubagentSettingsFr5A } from '../smoke/split-process/subagent-settings-fr5a.mjs'
+import { runHostNumericSettingsFr5B } from '../smoke/split-process/host-numeric-settings-fr5b.mjs'
 import { runWebStartupPreference } from '../smoke/split-process/web-startup-preference.mjs'
 import { runF2AccountComposition } from '../smoke/split-process/account-composition.mjs'
 import { runF7AProviderAuthorization } from '../smoke/split-process/provider-authorization-f7a.mjs'
@@ -305,6 +306,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'subagent.settings-fr5a',
     title: 'two authenticated Split Clients save the official Subagent settings partial result and refuse the stale Profile revision',
     run: runSubagentSettingsFr5A,
+  }),
+  Object.freeze({
+    suite: 'host-settings',
+    id: 'host-settings.fr5b',
+    title: 'two authenticated Split Clients save the migrated General preferences, the session-log switch, the Agent-loop page and the active-shell caps, and refuse a stale two-Client revision',
+    run: runHostNumericSettingsFr5B,
   }),
   Object.freeze({
     suite: 'web',

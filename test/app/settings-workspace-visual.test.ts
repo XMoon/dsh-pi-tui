@@ -244,6 +244,25 @@ interface HarnessOptions {
       readonly models: readonly { readonly id: string; readonly name?: string }[]
     }[]
   }
+  /** FR5-B: the official Agent-loop section (absent = unavailable). */
+  agentLoop?: { readonly maxParallelToolCalls: number; readonly inherited?: number; readonly unreadable?: boolean }
+  /** Make the Agent-loop mutation reject with this reason. */
+  agentLoopWriteFailure?: string
+  /** FR5-B: the ACTIVE Host shell executor row (absent = unavailable). */
+  shellExecution?: {
+    readonly executor: 'bash' | 'pwsh'
+    readonly timeoutMs: number
+    readonly maxOutputBytes: number
+    readonly inheritedTimeoutMs?: number
+    readonly inheritedMaxOutputBytes?: number
+    readonly unreadable?: boolean
+  }
+  /** Make the shell-execution mutation reject with this reason. */
+  shellExecutionWriteFailure?: string
+  /** FR5-B: the official session-log contributor (absent = row hidden). */
+  sessionLog?: { readonly enabled: boolean; readonly inherited?: boolean; readonly unreadable?: boolean }
+  /** Make the session-log mutation reject with this reason. */
+  sessionLogWriteFailure?: string
   /** The icon style the REAL `TuiApp` starts with (the composition's persisted
    *  read). Omitted = the app's own default. */
   iconStyle?: 'emoji' | 'symbols' | 'minimal'
@@ -374,6 +393,13 @@ class FakeEmbeddedPluginPage implements EmbeddedPluginPage {
   dispose(): void { this.disposed = true }
 }
 
+/** ONE staged field intent the FR5-B fake Host ports observed. */
+type HostSectionWrite = {
+  readonly field: 'maxParallelToolCalls' | 'timeoutMs' | 'maxOutputBytes' | 'enabled'
+  readonly op: 'set' | 'reset'
+  readonly value?: number | boolean
+}
+
 interface Harness {
   readonly vt: VirtualTerminal
   readonly app: TuiApp
@@ -436,6 +462,24 @@ interface Harness {
   readonly subagentWrites: () => readonly { enabled: boolean; allowedModels: readonly { provider: string; model: string }[] }[]
   /** Every official delegation-limits write, in dispatch order. */
   readonly subagentLimitsWrites: () => readonly { maxDepth?: number; maxActiveSubagents?: number }[]
+  /** FR5-B: every Agent-loop field write, in dispatch order. */
+  readonly agentLoopWrites: () => readonly HostSectionWrite[]
+  /** FR5-B: every active-shell field write, in dispatch order. */
+  readonly shellExecutionWrites: () => readonly HostSectionWrite[]
+  /** FR5-B: every session-log field write, in dispatch order. */
+  readonly sessionLogWrites: () => readonly HostSectionWrite[]
+  /** FR5-B: the LIVE fake section values the ports currently serve. */
+  readonly hostSections: () => {
+    readonly agentLoop: { readonly maxParallelToolCalls: number; readonly inherited: number } | undefined
+    readonly shell: {
+      readonly executor: 'bash' | 'pwsh'
+      readonly timeoutMs: number
+      readonly maxOutputBytes: number
+      readonly inheritedTimeoutMs: number
+      readonly inheritedMaxOutputBytes: number
+    } | undefined
+    readonly sessionLog: { readonly enabled: boolean; readonly inherited: boolean } | undefined
+  }
   /** Every Host permission-default write, in dispatch order. */
   readonly permissionWrites: () => readonly string[]
   /** The LIVE official subagent section the harness's seam serves. */
@@ -513,6 +557,44 @@ function setup(options: HarnessOptions = {}): Harness {
   let limitsRevision = 1
   let subagentLimits = { maxDepth: agent.limits?.maxDepth ?? 1, maxActiveSubagents: agent.limits?.maxActiveSubagents ?? 8 }
   const limitsBase = { maxDepth: 1, maxActiveSubagents: 8 }
+  // FR5-B: the official Agent-loop, active-shell and session-log sections. A
+  // section the case does not supply is genuinely absent (no fabricated default).
+  const agentLoopGeneration = {}
+  let agentLoopRevision = 1
+  let agentLoopValue: { maxParallelToolCalls: number; inherited: number; unreadable?: boolean } | undefined =
+    options.agentLoop === undefined ? undefined : {
+      maxParallelToolCalls: options.agentLoop.maxParallelToolCalls,
+      inherited: options.agentLoop.inherited ?? options.agentLoop.maxParallelToolCalls,
+      ...(options.agentLoop.unreadable === true ? { unreadable: true } : {}),
+    }
+  const agentLoopWrites: HostSectionWrite[] = []
+  const shellGeneration = {}
+  let shellRevision = 1
+  let shellValue: {
+    executor: 'bash' | 'pwsh'
+    timeoutMs: number
+    maxOutputBytes: number
+    inheritedTimeoutMs: number
+    inheritedMaxOutputBytes: number
+    unreadable?: boolean
+  } | undefined = options.shellExecution === undefined ? undefined : {
+    executor: options.shellExecution.executor,
+    timeoutMs: options.shellExecution.timeoutMs,
+    maxOutputBytes: options.shellExecution.maxOutputBytes,
+    inheritedTimeoutMs: options.shellExecution.inheritedTimeoutMs ?? options.shellExecution.timeoutMs,
+    inheritedMaxOutputBytes: options.shellExecution.inheritedMaxOutputBytes ?? options.shellExecution.maxOutputBytes,
+    ...(options.shellExecution.unreadable === true ? { unreadable: true } : {}),
+  }
+  const shellExecutionWrites: HostSectionWrite[] = []
+  const sessionLogGeneration = {}
+  let sessionLogRevision = 1
+  let sessionLogValue: { enabled: boolean; inherited: boolean; unreadable?: boolean } | undefined =
+    options.sessionLog === undefined ? undefined : {
+      enabled: options.sessionLog.enabled,
+      inherited: options.sessionLog.inherited ?? options.sessionLog.enabled,
+      ...(options.sessionLog.unreadable === true ? { unreadable: true } : {}),
+    }
+  const sessionLogWrites: HostSectionWrite[] = []
   const permissionWrites: string[] = []
   const approvalState = agent.approval ?? { value: undefined as 'ask' | 'never' | undefined }
   const policyGenerationSlot = agent.generation ?? { value: agent.policyGeneration ?? {} }
@@ -953,6 +1035,147 @@ function setup(options: HarnessOptions = {}): Harness {
           return { kind: 'accepted' }
         },
       },
+      // FR5-B: the official Agent-loop scheduling section. Absent = unavailable;
+      // the page never paints a fabricated budget.
+      agentLoopSettings: {
+        read: () => {
+          if (agentLoopValue === undefined) return { kind: 'unavailable' as const, reason: 'Agent loop is not mounted.' }
+          if (agentLoopValue.unreadable === true) return { kind: 'unreadable' as const, reason: 'Agent loop value is unreadable.' }
+          if (readiness !== 'ready') return { kind: 'unreadable' as const, reason: 'Host settings are not current' }
+          return {
+            kind: 'ready' as const,
+            generation: agentLoopGeneration,
+            revision: agentLoopRevision,
+            effective: { maxParallelToolCalls: agentLoopValue.maxParallelToolCalls },
+            inherited: { maxParallelToolCalls: agentLoopValue.inherited },
+            overridden: { maxParallelToolCalls: agentLoopValue.maxParallelToolCalls !== agentLoopValue.inherited },
+          }
+        },
+        refresh: async () => {},
+        mutate: async (
+          patch: import('../../src/runtime/config-port.ts').SectionPatch<import('../../src/runtime/config-port.ts').AgentLoopSettings>,
+          revision: number,
+          generation: object,
+        ) => {
+          const edit = patch.maxParallelToolCalls
+          if (edit === undefined) return { kind: 'rejected' as const, reason: 'no field was staged' }
+          if (agentLoopValue === undefined) return { kind: 'rejected' as const, reason: 'Agent loop is not mounted.' }
+          if (revision !== agentLoopRevision || generation !== agentLoopGeneration) {
+            return { kind: 'conflict' as const, reason: 'the Agent loop section changed since it was read' }
+          }
+          if (options.agentLoopWriteFailure !== undefined) {
+            return { kind: 'rejected' as const, reason: options.agentLoopWriteFailure }
+          }
+          agentLoopWrites.push(edit.kind === 'reset'
+            ? { field: 'maxParallelToolCalls', op: 'reset' }
+            : { field: 'maxParallelToolCalls', op: 'set', value: edit.value })
+          agentLoopValue = {
+            ...agentLoopValue,
+            maxParallelToolCalls: edit.kind === 'reset' ? agentLoopValue.inherited : edit.value,
+          }
+          agentLoopRevision += 1
+          return { kind: 'accepted' as const }
+        },
+      },
+      // FR5-B: the ACTIVE Host shell executor row. The executor identity is a
+      // Host observation; a mismatch refuses the write instead of guessing.
+      shellExecutionSettings: {
+        read: () => {
+          if (shellValue === undefined) return { kind: 'unavailable' as const, reason: 'No active shell executor row is mounted.' }
+          if (shellValue.unreadable === true) return { kind: 'unreadable' as const, reason: 'Shell execution values are unreadable.' }
+          if (readiness !== 'ready') return { kind: 'unreadable' as const, reason: 'Host settings are not current' }
+          return {
+            kind: 'ready' as const,
+            generation: shellGeneration,
+            revision: shellRevision,
+            effective: {
+              executor: shellValue.executor,
+              timeoutMs: shellValue.timeoutMs,
+              maxOutputBytes: shellValue.maxOutputBytes,
+            },
+            inherited: {
+              executor: shellValue.executor,
+              timeoutMs: shellValue.inheritedTimeoutMs,
+              maxOutputBytes: shellValue.inheritedMaxOutputBytes,
+            },
+            overridden: {
+              executor: false,
+              timeoutMs: shellValue.timeoutMs !== shellValue.inheritedTimeoutMs,
+              maxOutputBytes: shellValue.maxOutputBytes !== shellValue.inheritedMaxOutputBytes,
+            },
+          }
+        },
+        refresh: async () => {},
+        mutate: async (
+          patch: import('../../src/runtime/config-port.ts').SectionPatch<import('../../src/runtime/config-port.ts').ShellExecutionSettings>,
+          revision: number,
+          generation: object,
+          expectedExecutor: 'bash' | 'pwsh',
+        ) => {
+          if (shellValue === undefined) return { kind: 'rejected' as const, reason: 'No active shell executor row is mounted.' }
+          if (expectedExecutor !== shellValue.executor) {
+            return { kind: 'rejected' as const, reason: 'the active Host shell executor changed; refresh before saving' }
+          }
+          if (revision !== shellRevision || generation !== shellGeneration) {
+            return { kind: 'conflict' as const, reason: 'the shell executor section changed since it was read' }
+          }
+          if (options.shellExecutionWriteFailure !== undefined) {
+            return { kind: 'rejected' as const, reason: options.shellExecutionWriteFailure }
+          }
+          for (const field of ['timeoutMs', 'maxOutputBytes'] as const) {
+            const edit = patch[field]
+            if (edit === undefined) continue
+            shellExecutionWrites.push(edit.kind === 'reset'
+              ? { field, op: 'reset' }
+              : { field, op: 'set', value: edit.value })
+            const inherited: number = field === 'timeoutMs' ? shellValue.inheritedTimeoutMs : shellValue.inheritedMaxOutputBytes
+            shellValue = { ...shellValue, [field]: edit.kind === 'reset' ? inherited : edit.value }
+          }
+          shellRevision += 1
+          return { kind: 'accepted' as const }
+        },
+      },
+      // FR5-B: the official session-log contributor. Absent = no General row.
+      sessionLogUpload: {
+        read: () => {
+          if (sessionLogValue === undefined) return { kind: 'unavailable' as const, reason: 'Session log upload is not mounted.' }
+          if (sessionLogValue.unreadable === true) return { kind: 'unreadable' as const, reason: 'Session log upload value is unreadable.' }
+          if (readiness !== 'ready') return { kind: 'unreadable' as const, reason: 'Host settings are not current' }
+          return {
+            kind: 'ready' as const,
+            generation: sessionLogGeneration,
+            revision: sessionLogRevision,
+            effective: { enabled: sessionLogValue.enabled },
+            inherited: { enabled: sessionLogValue.inherited },
+            overridden: { enabled: sessionLogValue.enabled !== sessionLogValue.inherited },
+          }
+        },
+        refresh: async () => {},
+        mutate: async (
+          patch: import('../../src/runtime/config-port.ts').SectionPatch<import('../../src/runtime/config-port.ts').SessionLogUpload>,
+          revision: number,
+          generation: object,
+        ) => {
+          const edit = patch.enabled
+          if (edit === undefined) return { kind: 'rejected' as const, reason: 'no field was staged' }
+          if (sessionLogValue === undefined) return { kind: 'rejected' as const, reason: 'Session log upload is not mounted.' }
+          if (revision !== sessionLogRevision || generation !== sessionLogGeneration) {
+            return { kind: 'conflict' as const, reason: 'the session log section changed since it was read' }
+          }
+          if (options.sessionLogWriteFailure !== undefined) {
+            return { kind: 'rejected' as const, reason: options.sessionLogWriteFailure }
+          }
+          sessionLogWrites.push(edit.kind === 'reset'
+            ? { field: 'enabled', op: 'reset' }
+            : { field: 'enabled', op: 'set', value: edit.value })
+          sessionLogValue = {
+            ...sessionLogValue,
+            enabled: edit.kind === 'reset' ? sessionLogValue.inherited : edit.value,
+          }
+          sessionLogRevision += 1
+          return { kind: 'accepted' as const }
+        },
+      },
       // The Web provider section is Host-only (S2/PR-B): this stub composes no
       // Host settings plane, so the section reports unavailable and offers no write.
       web: { available: () => false },
@@ -1074,6 +1297,26 @@ function setup(options: HarnessOptions = {}): Harness {
     agent,
     subagentWrites: () => subagentWrites,
     subagentLimitsWrites: () => subagentLimitsWrites,
+    agentLoopWrites: () => agentLoopWrites,
+    shellExecutionWrites: () => shellExecutionWrites,
+    sessionLogWrites: () => sessionLogWrites,
+    hostSections: () => ({
+      agentLoop: agentLoopValue === undefined ? undefined : {
+        maxParallelToolCalls: agentLoopValue.maxParallelToolCalls,
+        inherited: agentLoopValue.inherited,
+      },
+      shell: shellValue === undefined ? undefined : {
+        executor: shellValue.executor,
+        timeoutMs: shellValue.timeoutMs,
+        maxOutputBytes: shellValue.maxOutputBytes,
+        inheritedTimeoutMs: shellValue.inheritedTimeoutMs,
+        inheritedMaxOutputBytes: shellValue.inheritedMaxOutputBytes,
+      },
+      sessionLog: sessionLogValue === undefined ? undefined : {
+        enabled: sessionLogValue.enabled,
+        inherited: sessionLogValue.inherited,
+      },
+    }),
     permissionWrites: () => permissionWrites,
     subagentSection: () => subagentSection,
     notices: () => notices,
@@ -1173,6 +1416,28 @@ async function settle(h: Harness, rounds = 6): Promise<void> {
 const key = async (h: Harness, data: string): Promise<void> => {
   h.vt.sendInput(data)
   await h.vt.waitForRender()
+}
+
+/** Move the current Rows cursor onto a row whose label matches. */
+async function highlightRow(h: Harness, label: string): Promise<void> {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  for (let step = 0; step < 10; step += 1) {
+    if (new RegExp(`> ${escaped}(?:\\s|$)`, 'mu').test(h.view())) return
+    await key(h, '\x1b[B')
+  }
+  assert.fail(`the "${label}" row never owned the selection:\n${h.view()}`)
+}
+
+/** One Root-level pointer click on a painted control (press -> repaint -> release). */
+async function clickPainted(h: Harness, text: string, last = false): Promise<void> {
+  const row = last ? h.rowsPlain().length - 1 : rowOf(h, text)
+  const col = cellIndexOf(h, row, text)
+  press(h, row, col)
+  // The Root requests a render after admitting a body press; the page's next
+  // painted frame is what the release must resolve against.
+  await h.vt.waitForRender()
+  release(h, row, col)
+  await settle(h)
 }
 
 const pluginThemes = (): ThemeRegistry => {
@@ -1736,12 +2001,18 @@ test('Agent paints the single Subagent entry among its availability-gated rows a
   await key(h, '\r') // L0 -> L1 (the Agent rows level)
   assert.match(h.rowsPlain()[0]!, /Settings · Agent · Rows/)
   const rows = h.rowsPlain()
-  const order = ['Approval policy (this session)', 'Default permission', 'Subagent settings', 'User shell sandbox policy']
-    .map(label => rows.findIndex(line => line.includes(label)))
+  const order = [
+    'Approval policy (this session)',
+    'Default permission',
+    'Subagent settings',
+    'User shell sandbox policy',
+    'Agent loop',
+  ].map(label => rows.findIndex(line => line.includes(label)))
   for (const [index, row] of order.entries()) {
     assert.ok(row >= 0, `Agent paints ${JSON.stringify(order[index])}:\n${h.view()}`)
   }
   assert.deepEqual([...order].sort((left, right) => left - right), order, 'the Agent rows keep the frozen order')
+  assert.match(h.view(), /Agent loop/u, 'the Agent loop specialist row is painted')
   assert.doesNotMatch(h.view(), /Agent settings…/u, 'the legacy launcher is retired')
   // Browsing the rows (L1 -> L2 back) writes nothing at all.
   assert.equal(h.replacements(), 0, 'reading the Agent rows writes no document')
@@ -2187,6 +2458,191 @@ test('the real Settings Root row and delegated spans complete the Subagent point
   assert.match(h.view(), /Settings · Agent · Rows/u)
   assert.equal(h.subagentWrites().length, 1, 'discard never sends another Host write')
   h.dispose()
+})
+
+
+// ── FR5-B: the numeric specialist pages and the General migration ──────────
+
+test('the real Root numeric Agent-loop page stages, saves, resets and discards through the official section', async () => {
+  const h = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r') // L0 -> L1
+  await clickPainted(h, 'Agent loop')
+  assert.match(h.view(), /Settings · Agent · Agent loop/u)
+  assert.match(h.view(), /Host profile · effective settings · revision 1/u)
+  assert.match(h.view(), /Parallel tool calls\s+10\s+\[Reset\]/u)
+  assert.match(h.view(), /Source: Overridden/u)
+
+  // Root row/field click -> the page's own single-line edit -> painted Apply.
+  await clickPainted(h, 'Parallel tool calls')
+  assert.match(h.view(), /Edit Parallel tool calls/u)
+  await key(h, '\x15') // clear the captured value
+  await key(h, '4')
+  await clickPainted(h, 'Apply [Enter]', true)
+  assert.match(h.view(), /Parallel tool calls\s+4/u)
+  assert.equal(h.agentLoopWrites().length, 0, 'Apply only stages the field draft')
+  await clickPainted(h, 'Save [S]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'set', value: 4 }])
+  assert.deepEqual(h.hostSections().agentLoop, { maxParallelToolCalls: 4, inherited: 2 })
+  assert.match(h.view(), /Status: Verified/u)
+
+  // An explicit painted Reset stages the official unset; Save dispatches it.
+  await clickPainted(h, '[Reset]')
+  assert.match(h.view(), /Reset staged/u)
+  await clickPainted(h, 'Save [S]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites()[1], { field: 'maxParallelToolCalls', op: 'reset' })
+  assert.deepEqual(h.hostSections().agentLoop, { maxParallelToolCalls: 2, inherited: 2 },
+    'the Host readback decides the value; Reset does not promise USER deletion')
+  assert.match(h.view(), /Status: Verified/u)
+
+  // Dirty Back asks the page's own question; Keep returns, Discard leaves.
+  await clickPainted(h, 'Parallel tool calls')
+  await key(h, '\x15')
+  await key(h, '5')
+  await clickPainted(h, 'Apply [Enter]', true)
+  await clickPainted(h, 'Back [Esc]', true)
+  assert.match(h.view(), /Discard unsaved changes\? y\/N/u)
+  await clickPainted(h, 'Keep [Esc]', true)
+  assert.match(h.view(), /Parallel tool calls\s+5/u)
+  await clickPainted(h, 'Back [Esc]', true)
+  assert.match(h.view(), /Discard unsaved changes\? y\/N/u)
+  await clickPainted(h, 'Discard [Y]', true)
+  assert.match(h.view(), /Settings · Agent · Rows/u)
+  assert.equal(h.agentLoopWrites().length, 2, 'discard never sends another Host write')
+  h.dispose()
+})
+
+test('the real Root Shell-execution page saves both caps in ONE official mutation', async () => {
+  const h = setup({
+    columns: 160,
+    rows: 44,
+    shellExecution: {
+      executor: 'bash',
+      timeoutMs: 60_000,
+      maxOutputBytes: 64_000,
+      inheritedTimeoutMs: 60_000,
+      inheritedMaxOutputBytes: 32_000,
+    },
+  })
+  await h.open('Tools')
+  await key(h, '\r')
+  await clickPainted(h, 'Shell execution')
+  assert.match(h.view(), /Settings · Tools · Shell execution/u)
+  assert.match(h.view(), /Host model-tool executor · POSIX Bash/u)
+  assert.match(h.view(), /Command timeout \(ms\)\s+60000/u)
+  assert.match(h.view(), /Output cap per stream \(bytes\)\s+64000/u)
+
+  await clickPainted(h, 'Command timeout (ms)')
+  await key(h, '\x15')
+  for (const character of '45000') await key(h, character)
+  await clickPainted(h, 'Apply [Enter]', true)
+  await clickPainted(h, 'Output cap per stream (bytes)')
+  await key(h, '\x15')
+  for (const character of '128000') await key(h, character)
+  await clickPainted(h, 'Apply [Enter]', true)
+  await clickPainted(h, 'Save [S]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.shellExecutionWrites(), [
+    { field: 'timeoutMs', op: 'set', value: 45_000 },
+    { field: 'maxOutputBytes', op: 'set', value: 128_000 },
+  ])
+  assert.deepEqual(h.hostSections().shell, {
+    executor: 'bash',
+    timeoutMs: 45_000,
+    maxOutputBytes: 128_000,
+    inheritedTimeoutMs: 60_000,
+    inheritedMaxOutputBytes: 32_000,
+  })
+  assert.match(h.view(), /Status: Verified/u)
+  await clickPainted(h, 'Back [Esc]', true)
+  assert.match(h.view(), /Settings · Tools · Rows/u)
+  h.dispose()
+})
+
+test('General owns Backend, both startup preferences and Session log; Tools keeps no duplicate preference row', async () => {
+  const h = setup({ columns: 200, rows: 50, sessionLog: { enabled: true, inherited: true } })
+  await h.open('General')
+  await key(h, '\r')
+  const general = h.rowsPlain()
+  const order = ['Backend', 'Start Web automatically', 'Start ACP automatically', 'Session log upload']
+    .map(label => general.findIndex(line => line.includes(label)))
+  for (const [index, row] of order.entries()) {
+    assert.ok(row >= 0, `General paints ${JSON.stringify(order[index])}:\n${h.view()}`)
+  }
+  assert.deepEqual([...order].sort((left, right) => left - right), order, 'General keeps the FR5-B frozen order')
+  assert.doesNotMatch(h.view(), /Auto-enable Web on Host startup|Auto-enable ACP on Host startup/u,
+    'the old labels are gone, not duplicated')
+
+  await backToRail(h)
+  await railToCategory(h, 'Tools')
+  await key(h, '\r')
+  const tools = h.rowsPlain().join('\n')
+  for (const label of ['Visual tools', 'Shell execution', 'ACP Server', 'Web Search / Fetch', 'MCP servers']) {
+    assert.ok(tools.includes(label), `Tools keeps ${label}`)
+  }
+  assert.doesNotMatch(tools, /Start Web automatically|Start ACP automatically/u,
+    'the migrated preference rows have no Tools duplicate')
+  assert.doesNotMatch(tools, /Session log upload/u, 'the session-log row is General-only')
+  h.dispose()
+})
+
+test('Session log upload paints its upload risk and offers On/Off/Reset; Reset may read back On', async () => {
+  const h = setup({ columns: 200, rows: 44, sessionLog: { enabled: true, inherited: true } })
+  await h.open('General')
+  await key(h, '\r')
+  await highlightRow(h, 'Session log upload')
+  const detail = h.view()
+  assert.match(detail, /Send session log data with requests to the official DeepSeek API/u)
+  assert.match(detail, /Session data can include conversation content/u)
+
+  await key(h, '\r') // L1 -> the scalar candidate choice
+  assert.match(h.view(), /> On/u)
+  await highlightCandidate(h, 'Off')
+  await key(h, '\r')
+  await settle(h, 12)
+  assert.deepEqual(h.sessionLogWrites(), [{ field: 'enabled', op: 'set', value: false }])
+  assert.match(h.view(), /Verified/u)
+
+  // Reopen the same row and stage the OFFICIAL unset. The Host may read On.
+  await key(h, '\x1b') // settled Detail -> Rows
+  await key(h, '\r') // Rows -> the choice again
+  await highlightCandidate(h, 'Reset')
+  await key(h, '\r')
+  await settle(h, 12)
+  assert.deepEqual(h.sessionLogWrites()[1], { field: 'enabled', op: 'reset' })
+  assert.equal(h.hostSections().sessionLog?.enabled, true, 'the official reset readback is On again')
+  const after = h.view()
+  assert.match(after, /Verified/u)
+  assert.match(after, /On/u)
+  assert.doesNotMatch(after, /Off[^\n]*safe|safe[^\n]*Off/iu, 'Reset is never presented as a safety guarantee')
+  h.dispose()
+})
+
+test('an absent session-log namespace paints no row; a stale authority stays visibly current-unknown and read-only', async () => {
+  const absent = setup({ columns: 200, rows: 44 })
+  await absent.open('General')
+  await key(absent, '\r')
+  assert.doesNotMatch(absent.view(), /Session log upload/u, 'no official namespace = no row')
+  absent.dispose()
+
+  const stale = setup({
+    columns: 200,
+    rows: 44,
+    readiness: 'stale',
+    sessionLog: { enabled: true, inherited: true },
+  })
+  await stale.open('General')
+  await key(stale, '\r')
+  await highlightRow(stale, 'Session log upload')
+  const frame = stale.view()
+  assert.match(frame, /Session log upload/u)
+  assert.match(frame, /Current unknown/u, 'a stale snapshot never claims a current Off/On')
+  await key(stale, '\r')
+  assert.doesNotMatch(stale.view(), /Choose value/u, 'no confirmable candidate is offered when not current')
+  assert.equal(stale.sessionLogWrites().length, 0)
+  stale.dispose()
 })
 
 test('the user shell sandbox policy Confirm stores the raw document value only', async () => {
@@ -5698,6 +6154,9 @@ test('a narrow Account deeplink → rail-browse About reads nothing; Enter reads
       permissions: { presetNames: () => [], defaultPreset: () => undefined },
       subagentLimits: { read: () => ({ kind: 'unavailable', reason: 'not mounted' }) },
       subagentModelSelection: { read: () => ({ kind: 'unavailable', reason: 'not mounted' }) },
+      agentLoopSettings: { read: () => ({ kind: 'unavailable', reason: 'not mounted' }) },
+      shellExecutionSettings: { read: () => ({ kind: 'unavailable', reason: 'not mounted' }) },
+      sessionLogUpload: { read: () => ({ kind: 'unavailable', reason: 'not mounted' }) },
       web: { available: () => false },
       credentials: { available: () => false, recordsSupported: () => false },
       providers: { available: () => false },
@@ -9198,9 +9657,8 @@ test('the real /settings route edits rows, choices and pages without ever callin
   // 3. The Web row mounts the embedded page in THIS lease.
   await railToCategory(h, 'Tools')
   await key(h, '\r') // L0 -> L1
-  await key(h, '\x1b[B') // Visual tools -> Auto-enable Web on Host startup
+  await key(h, '\x1b[B') // Visual tools -> Shell execution (FR5-B)
   await key(h, '\x1b[B') // -> ACP Server (PO-1B)
-  await key(h, '\x1b[B') // -> Auto-enable ACP on Host startup (PO-1B)
   await key(h, '\x1b[B') // -> Web Search / Fetch
   await key(h, '\r') // the row's own page
   assert.match(h.rowsPlain()[0]!, /Settings · Tools · Web Search \/ Fetch/u,
@@ -9282,17 +9740,17 @@ test('/keybindings conflicts still paints its conflicts in the independent Setti
 // the Host write that persists it and the authoritative re-read — never a claim
 // about the running Host's Web frontend.
 
-/** Move from the first Tools row (`visual-tools`) onto `web-autostart` and open it. */
+/** Move from the first General row (`startup-backend`) onto `web-autostart` and open it. */
 async function openWebAutostartRow(h: Harness): Promise<void> {
-  await h.open('Tools')
-  await key(h, '\r') // L0 -> L1 (the Rows level, on Visual tools)
-  await key(h, '\x1b[B') // Visual tools -> Auto-enable Web on Host startup
+  await h.open('General')
+  await key(h, '\r') // L0 -> L1 (the Rows level, on Backend)
+  await key(h, '\x1b[B') // Backend -> Start Web automatically (FR5-B General order)
 }
 
 test('the Auto-enable Web row shows the schema default and writes On through its own Host port', async () => {
   const h = setup({ columns: 200, rows: 40 })
   await openWebAutostartRow(h)
-  assert.match(h.view(), /Auto-enable Web on Host startup/, 'the Tools category carries the preference row')
+  assert.match(h.view(), /Start Web automatically/, 'the General category carries the preference row')
   assert.match(h.view(), /Off \(default\)/, 'the default OFF is marked as not user-overridden')
   assert.match(
     h.view(),
@@ -9317,7 +9775,7 @@ test('the Auto-enable Web row shows the schema default and writes On through its
 test('an unreadable Web preference offers no confirmable candidate', async () => {
   const h = setup({ columns: 200, rows: 40, webStartupUnavailable: true })
   await openWebAutostartRow(h)
-  assert.match(h.view(), /Auto-enable Web on Host startup/)
+  assert.match(h.view(), /Start Web automatically/)
   assert.match(h.view(), /Unavailable/, 'an absent section is reported, never the schema default')
   await key(h, '\r')
   assert.doesNotMatch(h.view(), /Choose value/, 'no candidate exists without an authoritative read')
@@ -9490,5 +9948,86 @@ test('the General Backend row is reachable and operable at 108/76/75 columns and
   } finally {
     if (saved === undefined) delete process.env.DSH_PI_TUI_BACKEND
     else process.env.DSH_PI_TUI_BACKEND = saved
+  }
+})
+
+test('the FR5-B numeric pages stay complete and Exit/Save-reachable across the frozen size and theme matrix', async () => {
+  const sizes = [
+    [200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20], [44, 8],
+  ] as const
+  for (const [columns, rows] of sizes) {
+    for (const theme of ['dark', 'light'] as const) {
+      const h = setup({
+        columns,
+        rows,
+        doc: { theme },
+        agentLoop: { maxParallelToolCalls: 4, inherited: 2 },
+        shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000, inheritedTimeoutMs: 60_000 },
+      })
+      await h.open('Agent')
+      await key(h, '\r')
+      await highlightRow(h, 'Agent loop')
+      await key(h, '\r')
+      await settle(h)
+      const openFrame = h.view()
+      assert.match(openFrame, /Settings · Agent · Agent loop/u, `${columns}x${rows} ${theme}: page identity`)
+      assert.match(openFrame, /Parallel tool calls/u, `${columns}x${rows} ${theme}: field`)
+      const bar = h.rowsPlain().at(-1) ?? ''
+      assert.match(bar, /Back \[Esc\]/u, `${columns}x${rows} ${theme}: complete Esc affordance`)
+      // Stage the explicit Reset so the dirty Save is painted, then discard it.
+      await key(h, 'x')
+      await settle(h)
+      const dirtyFrame = h.view()
+      assert.match(dirtyFrame, /Reset staged/u, `${columns}x${rows} ${theme}: staged reset`)
+      assert.match(dirtyFrame, /Save \[S\]/u, `${columns}x${rows} ${theme}: complete Save affordance`)
+      await key(h, '\x1b')
+      await settle(h)
+      await key(h, 'y')
+      await settle(h)
+      for (const [index, line] of h.vt.getViewport().entries()) {
+        assert.ok(visibleWidth(line) <= columns, `${columns}x${rows} ${theme}: row ${index} fits the width`)
+      }
+      h.dispose()
+
+      // The Tools page under the same frozen sizes.
+      const shell = setup({
+        columns,
+        rows,
+        doc: { theme },
+        shellExecution: { executor: 'pwsh', timeoutMs: 120_000, maxOutputBytes: 64_000, inheritedMaxOutputBytes: 32_000 },
+      })
+      await shell.open('Tools')
+      await key(shell, '\r')
+      await highlightRow(shell, 'Shell execution')
+      await key(shell, '\r')
+      await settle(shell)
+      const shellFrame = shell.view()
+      assert.match(shellFrame, /Settings · Tools · Shell execution/u, `${columns}x${rows} ${theme}: shell page identity`)
+      assert.match(shellFrame, /Windows/u, `${columns}x${rows} ${theme}: the Host executor identity`)
+      assert.match(shell.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u, `${columns}x${rows} ${theme}: shell Esc affordance`)
+      await key(shell, 'x')
+      await settle(shell)
+      assert.match(shell.view(), /Save \[S\]/u, `${columns}x${rows} ${theme}: shell Save affordance`)
+      await key(shell, '\x1b')
+      await settle(shell)
+      await key(shell, 'y')
+      await settle(shell)
+      shell.dispose()
+    }
+  }
+
+  // A custom palette and the two icon styles keep the same page chrome.
+  const custom = new ThemeRegistry()
+  custom.register({ id: 'acme', name: 'Acme', palette: { text: '#123456', primary: '#654321' } as never }, 'acme', 'acme')
+  for (const iconStyle of ['symbols', 'minimal'] as const) {
+    const h = setup({ columns: 120, rows: 40, doc: { theme: 'plugin:acme/acme', iconStyle }, themes: custom, agentLoop: { maxParallelToolCalls: 4 } })
+    await h.open('Agent')
+    await key(h, '\r')
+    await highlightRow(h, 'Agent loop')
+    await key(h, '\r')
+    await settle(h)
+    assert.match(h.view(), /Settings · Agent · Agent loop/u, `custom/${iconStyle}: the page chrome stays`)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u)
+    h.dispose()
   }
 })
