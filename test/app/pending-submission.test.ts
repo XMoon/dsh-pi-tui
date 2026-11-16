@@ -245,20 +245,18 @@ test('a same-mutation replacement with the same rpcId is not a cancel', () => {
   assert.deepEqual(pending.snapshot(), [])
 })
 
-test('a requeued same-rpcId occurrence rebinds its receipt and survives the splice', () => {
+test('a requeue after a claim rebinds the receipt and keeps the echo pending', () => {
   const pending = ledger()
   beginEcho(pending, 'r1')
   observe(pending, insertedSplice(70, 'next-turn', 0, ['r1']))
-  // A remove+insert mutation moves the same identity to another position.
-  assert.equal(observe(pending, {
-    type: 'agent/inbox/spliced',
-    seq: 71,
-    data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [userMessage('r1')], outcome: 'canceled' },
-  }), false)
-  assert.equal(observe(pending, { type: 'turn/end', seq: 72, data: { turn: 1, reason: { kind: 'error' } } }), false,
-    'the requeued occurrence is still pending')
-  assert.equal(observe(pending, removedSplice(73, 'next-turn', 0, 1)), false)
-  assert.equal(observe(pending, { type: 'request/context', seq: 74, data: {} }), true)
+  // The Host claims the occurrence (removal without a discard marker)...
+  observe(pending, removedSplice(71, 'next-turn', 0, 1))
+  // ...then requeues the SAME identity in a LATER mutation.
+  assert.equal(observe(pending, insertedSplice(72, 'next-turn', 0, ['r1'])), false)
+  assert.equal(observe(pending, { type: 'turn/end', seq: 73, data: {} }), false,
+    'the requeued occurrence is pending again: a boundary cannot retire it')
+  assert.equal(observe(pending, removedSplice(74, 'next-turn', 0, 1)), false)
+  assert.equal(observe(pending, { type: 'request/context', seq: 75, data: {} }), true)
   assert.deepEqual(pending.snapshot(), [])
 })
 

@@ -459,7 +459,10 @@ test('rc.2 aborted: a cancelled turn settles idle, never a fabricated completion
   }
 })
 
-// FIXTURE MANIFEST for the case below (plan §7 L5):
+// FIXTURE MANIFEST for the case below (the plan's §7 "L5" shorthand for the
+// real pinned AgentLoop producer; canonical host-client.md L5 is the official
+// Client→Gateway→Host wire, which this Direct producer integration does not
+// include and does not claim):
 // - REAL: the published pinned AgentLoop / session / LLM runtime, its own
 //   `agent/inbox/spliced` producer and `turn/end` emission, the actual event
 //   router, the actual Direct pending ledger and the actual terminal sink.
@@ -467,8 +470,8 @@ test('rc.2 aborted: a cancelled turn settles idle, never a fabricated completion
 //   reject with UNSUPPORTED_REASONING_EFFORT before the message is admitted,
 //   the fixture routing source's transcript/stats no-op targets, and the
 //   fixture ledger generation constant.
-// - ABSENT: network/live provider credentials, the official Remote wire and
-//   the physical GUI.
+// - ABSENT: network/live provider credentials, the official Client→Gateway→
+//   Host wire, the official Remote wire and the physical GUI.
 test('a preparation failure after the real Inbox claim retires only that Direct echo', async () => {
   const adapter = new PrepFailingAdapter()
   const probe = await createProbe(adapter, { reasoningEffort: ReasoningEffortId('xhigh') })
@@ -490,6 +493,8 @@ test('a preparation failure after the real Inbox claim retires only that Direct 
       const data = entry.data as { inserted?: readonly { source?: { rpcId?: unknown } }[] }
       return data.inserted?.some(message => message.source?.rpcId === claimedId) === true
     }), 'the real Host Inbox insertion carries the exact request identity')
+    assert.ok(splices.some(entry => (entry.data as { removedCount?: unknown }).removedCount === 1),
+      'the real loop CLAIMED the accepted input before request preparation')
 
     // A second identity queues behind the in-flight turn and must survive the
     // first identity's failure.
@@ -504,10 +509,14 @@ test('a preparation failure after the real Inbox claim retires only that Direct 
 
     assert.ok(!probe.events.some(entry => entry.type === 'user/message'),
       'the preparation failure precedes every durable user/message')
-    assert.ok(probe.events.some(entry => {
+    const errorEnd = probe.events.find(entry => {
       const data = entry.data as { reason?: { kind?: unknown } }
       return entry.type === 'turn/end' && data.reason?.kind === 'error'
-    }), 'the real loop ends the failed turn with an error boundary')
+    })
+    assert.ok(errorEnd, 'the real loop ends the failed turn with an error boundary')
+    assert.equal((errorEnd.data as { reason: { error: { code: string } } }).reason.error.code,
+      'UNSUPPORTED_REASONING_EFFORT',
+      'the failure is the official pre-admission capability rejection class')
     assert.equal(adapter.streamCalls, 0, 'the provider stream is never reached')
     assert.deepEqual(probe.pending.snapshot().map(echo => echo.requestId), [queuedId],
       'the claimed-and-failed echo retires; the queued sibling remains')
@@ -523,11 +532,15 @@ test('a preparation failure after the real Inbox claim retires only that Direct 
     // terminal boundary has crossed it.
     assert.ok(settledFrame.includes('Queue · 1') || settledFrame.includes('sending…'),
       `the still-pending sibling advertises its pending state:\n${settledFrame}`)
-
-    // Release the queued turn so the fixture settles before disposal.
+  } finally {
+    // The held preparation gates are fixture-owned promises the real loop's
+    // teardown cannot cancel. Release them unconditionally on EVERY exit path
+    // (assertion failure, fixture throw, completion) and let the loop settle
+    // before disposing the surface, so a failure never hangs the Context
+    // teardown that awaits the pending turn.
+    adapter.releaseFirst()
     adapter.releaseSecond()
     await probe.quiesce()
-  } finally {
     probe.dispose()
   }
 })

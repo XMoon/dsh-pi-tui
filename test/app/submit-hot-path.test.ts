@@ -1113,15 +1113,6 @@ test('compaction failure and unclaimed turn boundaries never retire a pending ec
   assert.ok(vt.getViewport().join('\n').includes('sending…'),
     'an unrelated turn/end leaves an unclaimed echo pending')
 
-  // A stale event routed for another session never touches this owner's echo.
-  context.emit('session/event', { id: 'other-owner' } as never, event('turn/end', {
-    turn: 2,
-    reason: { kind: 'error', error: { message: 'UNSUPPORTED_REASONING_EFFORT', code: 'UNSUPPORTED_REASONING_EFFORT' } },
-  }, 122) as never)
-  await waitForRenderView(vt)
-  assert.ok(vt.getViewport().join('\n').includes('sending…'),
-    'a cross-owner event is fenced by the routing owner check')
-
   // Control: the SAME echo is genuinely retirable once the exact identity is
   // claimed and a strictly later boundary crosses it.
   context.emit('session/event', harness.session as never, inboxInsert(123, rpcId, 'still pending') as never)
@@ -1133,6 +1124,73 @@ test('compaction failure and unclaimed turn boundaries never retire a pending ec
   await waitForRenderView(vt)
   assert.ok(!vt.getViewport().join('\n').includes('sending…'),
     'the exact claimed identity retires on its terminal boundary')
+})
+
+test('a late event from the previous owner cannot retire the new owner claimed echo', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-owner-a', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-owner-a' })
+  const previousOwnerSession = harness.session
+
+  // The REAL /new transition commits a new owner and ownership generation,
+  // exactly like the production navigation gesture.
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the runner must register the /new transition command')
+  await (newHandler as () => Promise<void>)()
+  await waitForRenderView(vt)
+  const newSessionId = harness.createdSessionIds[0]
+  assert.equal(typeof newSessionId, 'string', 'the switch created the new owner session')
+  const newOwnerSession = (harness.sessions as { get(id: string): { id: string } | undefined }).get(newSessionId)
+  assert.ok(newOwnerSession, 'the new owner session is attached')
+
+  // Build a CLAIMED receipt for a NEW-owner echo: a strictly later boundary
+  // CAN retire it, so a stale event that wrongly passed the fence would be
+  // detectable instead of being vacuously harmless.
+  const rpcId = await submitDelivered(mounted, harness, 'new owner echo')
+  await waitForRenderView(vt)
+  assert.ok(vt.getViewport().join('\n').includes('sending…'))
+  context.emit('session/event', newOwnerSession as never, inboxInsert(200, rpcId, 'new owner echo') as never)
+  context.emit('session/event', newOwnerSession as never, inboxClaim(201) as never)
+  await waitForRenderView(vt)
+  assert.ok(vt.getViewport().join('\n').includes('sending…'),
+    'the claimed new-owner echo re-presents while awaiting its boundary')
+  mounted.app.setDraft('owner draft')
+
+  // A late boundary of the EXACT previous owner Session must be fenced: the
+  // new owner's claimed echo, the draft and the painted frame stay untouched.
+  context.emit('session/event', previousOwnerSession as never, event('turn/end', {
+    turn: 1,
+    reason: { kind: 'error', error: { message: 'UNSUPPORTED_REASONING_EFFORT', code: 'UNSUPPORTED_REASONING_EFFORT' } },
+  }, 900) as never)
+  await waitForRenderView(vt)
+  const afterStale = vt.getViewport().join('\n')
+  assert.ok(afterStale.includes('sending…'),
+    `the stale previous-owner boundary must not retire the new echo:\n${afterStale}`)
+  assert.ok(afterStale.includes('new owner echo'), `the new echo stays visible:\n${afterStale}`)
+  assert.equal(mounted.app.getDraft(), 'owner draft', 'the stale event must not touch the new owner draft')
+
+  // Positive control: the CURRENT owner's own strictly later boundary is the
+  // legitimate terminal proof for this claimed echo.
+  context.emit('session/event', newOwnerSession as never, event('turn/end', {
+    turn: 1,
+    reason: { kind: 'error', error: { message: 'UNSUPPORTED_REASONING_EFFORT', code: 'UNSUPPORTED_REASONING_EFFORT' } },
+  }, 901) as never)
+  await waitForRenderView(vt)
+  const afterOwn = vt.getViewport().join('\n')
+  assert.ok(!afterOwn.includes('sending…'), `the current owner's later boundary retires the echo:\n${afterOwn}`)
+  assert.ok(!afterOwn.includes('new owner echo'), `the retired echo is gone:\n${afterOwn}`)
 })
 
 test('a context `!` submit shows the ack DURING the run and settles on the authoritative event', async (t) => {
