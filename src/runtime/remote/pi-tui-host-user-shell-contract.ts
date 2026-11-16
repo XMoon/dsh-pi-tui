@@ -116,7 +116,6 @@ function stringOf(value: unknown, label: string, options: { readonly empty?: boo
 function boundedStringOf(value: unknown, label: string, maxBytes: number): string {
   const text = stringOf(value, label, { empty: true })
   if (Buffer.byteLength(text, 'utf8') > maxBytes) throw new TypeError(`${label}: exceeds ${maxBytes} bytes`)
-  if (text.includes('\0')) throw new TypeError(`${label}: must not contain NUL`)
   return text
 }
 
@@ -172,6 +171,8 @@ function parseOutput(value: unknown, stream: 'stdout' | 'stderr'): HostUserShell
   const truncated = booleanOf(output.truncated, `${label} truncated`)
   if (output.spillPath === undefined) return { text, truncated }
   const spillPath = boundedStringOf(output.spillPath, `${label} spillPath`, MAX_HOST_USER_SHELL_SPILL_PATH_BYTES)
+  // Stream text may contain NUL; only the Host-local filesystem path forbids it.
+  if (spillPath.includes('\0')) throw new TypeError(`${label} spillPath: must not contain NUL`)
   return { text, truncated, spillPath }
 }
 
