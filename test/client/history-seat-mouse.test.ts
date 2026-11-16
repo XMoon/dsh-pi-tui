@@ -37,6 +37,18 @@ async function flush(rounds = 8): Promise<void> {
   for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
 }
 
+/** Bounded observation loop for an authoritative async fact: the poll keeps
+ * the turn responsive and the deadline is the failure bound (never a blind
+ * fixed sleep). */
+async function waitFor(predicate: () => boolean, label: string, timeoutMs = 2_000): Promise<void> {
+  const start = Date.now()
+  for (;;) {
+    if (predicate()) return
+    assert.ok(Date.now() - start <= timeoutMs, `timed out waiting for ${label}`)
+    await new Promise<void>(resolve => setTimeout(resolve, 2))
+  }
+}
+
 /** One native SGR left-button gesture (1-based terminal cells). */
 const press = (vt: VirtualTerminal, row: number, col: number): void => {
   vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M`)
@@ -69,6 +81,8 @@ interface Harness {
   readonly writes: string[]
   /** Every editor submit (an accept must NEVER submit). */
   readonly submitted: string[]
+  /** How many searches the injected source has been asked to run. */
+  readonly searches: () => number
 }
 
 /** The REAL app with a recording clipboard capability and an owned runner that
@@ -90,6 +104,7 @@ function startApp(rows: HistorySearchResult[], columns = 100, terminalRows = 30)
   const notices: string[] = []
   const submitted: string[] = []
   const page = [...rows]
+  let searchCount = 0
   const app = new TuiApp(vt, {
     onSubmit: (text: string) => { submitted.push(text) },
     onExit: () => {},
@@ -99,7 +114,12 @@ function startApp(rows: HistorySearchResult[], columns = 100, terminalRows = 30)
         .then(result => options.onResult?.(result), error => options.onError?.(error))
     },
   }, {
-    historySearchSource: { search: async () => ({ results: [...page], exhausted: true }) } satisfies HistorySearchSource,
+    historySearchSource: {
+      search: async () => {
+        searchCount += 1
+        return { results: [...page], exhausted: true }
+      },
+    } satisfies HistorySearchSource,
     historySearchCwd: () => '/work/a',
     captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }),
     copySelection: async (text: string) => {
@@ -114,7 +134,7 @@ function startApp(rows: HistorySearchResult[], columns = 100, terminalRows = 30)
     notices.push(text)
     originalNotify(text, kind)
   }
-  return { vt, app, copied, notices, rows: page, writes, submitted }
+  return { vt, app, copied, notices, rows: page, writes, submitted, searches: () => searchCount }
 }
 
 /** Trigger one more debounced search over the CURRENT page (the tests use the
@@ -584,7 +604,7 @@ test('B3: a pure-mouse Scope → result → Use journey replaces the draft and n
   await openFullscreenHistory(h)
   // Scope: the Fullscreen footer's complete span toggles the search scope.
   await clickPainted(h, 'Scope [Tab]')
-  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  await waitFor(() => h.searches() >= 2, 'the scope-triggered search')
   await h.vt.waitForRender()
   assert.ok(h.app.getDraft() === 'keep this draft', 'Scope must never touch the draft')
   // A result row click only selects.
@@ -620,7 +640,7 @@ test('B3: the Footer Cancel closes the empty page and keeps the draft and the ap
   vt.sendInput('\x12')
   await vt.waitForRender()
   await flush(2)
-  const h: Harness = { vt, app, copied: [], notices: [], rows: [], writes: vt.writes, submitted: [] }
+  const h: Harness = { vt, app, copied: [], notices: [], rows: [], writes: vt.writes, submitted: [], searches: () => 0 }
   assert.ok(view(vt).includes('Input History'), `the empty History seat must paint:\n${view(vt)}`)
   await clickPainted(h, 'Cancel [Esc]')
   assert.ok(!view(vt).includes('Input History'), `the Footer Cancel closes the seat:\n${view(vt)}`)
