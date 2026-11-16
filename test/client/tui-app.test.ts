@@ -32,15 +32,16 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { APP_KEYBINDINGS } from '../../src/tui/keybindings/definitions.ts'
 import { buildOsc52Sequence, copyToClipboard, type CopyExecutor } from '../../src/client/clipboard/copy.ts'
 
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
+afterEach(() => {
+  disposeStartedApps()
+})
+
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
  * vendored keybindings are process-global) is held only by LIVE surfaces,
  * so a test that starts an app must not leak the slot into the next test
  * (see src/tui/process-slot.ts). */
-const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
-afterEach(() => {
-  disposeStartedApps()
-})
 
 
 function startApp(): {
@@ -5721,4 +5722,154 @@ test('a client-local queued echo alone never gets the parked-queue explanation',
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('❯ not yet acknowledged'), `the local echo must stay visible:\n${view}`)
   assert.ok(!view.includes('waiting for the next prompt'), `a local-only echo is not Host-acked parked work:\n${view}`)
+})
+
+// ── PR2 composer submission hold (renderer contract) ───────────────────────
+// The fork Editor keeps the exact submitted document until the Host acceptance;
+// the host input ladder, the public disableSubmit contract and the programmatic
+// mutator fences are the ONE freeze. (Owned here with TuiApp: the product lane's
+// Windows argv budget forbids one more test file.)
+
+
+interface HoldMount {
+  readonly vt: VirtualTerminal
+  readonly app: TuiApp
+  readonly submitted: Array<{ text: string; request: string }>
+  readonly steered: string[]
+  readonly admissions: Array<{ text: string; request: string }>
+  /** Answers `beginComposerSubmission`; default `'legacy'`. */
+  admit(text: string, request: string): 'held' | 'legacy' | 'refused'
+}
+
+function startHoldApp(): HoldMount {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: Array<{ text: string; request: string }> = []
+  const steered: string[] = []
+  const admissions: Array<{ text: string; request: string }> = []
+  const mount: HoldMount = {
+    vt,
+    app: undefined as unknown as TuiApp,
+    submitted,
+    steered,
+    admissions,
+    admit: () => 'legacy',
+  }
+  const app = new TuiApp(vt, {
+    onSubmit: (text, request) => { submitted.push({ text, request }) },
+    onSteer: (text) => { steered.push(text) },
+    onExit: () => {},
+    onCancel: () => {},
+    beginComposerSubmission: (text, request) => {
+      admissions.push({ text, request })
+      return mount.admit(text, request)
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  ;(mount as { app: TuiApp }).app = app
+  return mount
+}
+
+async function typeHold(vt: VirtualTerminal, data: string): Promise<void> {
+  vt.sendInput(data)
+  await vt.waitForRender()
+}
+
+test('PR2: a held Enter keeps the document, freezes editing and never fires onSubmit', async () => {
+  const h = startHoldApp()
+  let holds = 0
+  h.admit = (text) => {
+    holds += 1
+    h.app.holdSubmission(`attempt-${holds}`)
+    return 'held'
+  }
+  await typeHold(h.vt, 'held prompt')
+  await typeHold(h.vt, '\r')
+  assert.equal(h.admissions.length, 1, 'the fork submit went through the ONE admission')
+  assert.deepEqual(h.admissions[0]?.text, 'held prompt')
+  assert.deepEqual(h.submitted, [], 'a held line is dispatched by the application, never by onSubmit')
+  assert.equal(h.app.getDraft(), 'held prompt', 'the fork kept the exact submitted document')
+  // Typing into the frozen composer changes nothing.
+  await typeHold(h.vt, 'X')
+  assert.equal(h.app.getDraft(), 'held prompt', 'the held document is read-only')
+  // A repeated Enter is consumed: no second admission, no submission.
+  await typeHold(h.vt, '\r')
+  assert.equal(h.admissions.length, 1, 'a repeated Enter is a no-op while sending')
+  assert.deepEqual(h.submitted, [])
+  // The accepted settlement clears the committed draft exactly once.
+  h.app.settleSubmission('attempt-1', 'accepted')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), '', 'only the Host acceptance clears the draft')
+})
+
+test('PR2: a refusal unlocks the editor with the draft intact and editable', async () => {
+  const h = startHoldApp()
+  h.admit = () => {
+    h.app.holdSubmission('attempt-refuse')
+    return 'held'
+  }
+  await typeHold(h.vt, 'keep me')
+  await typeHold(h.vt, '\r')
+  assert.equal(h.app.getDraft(), 'keep me')
+  h.app.settleSubmission('attempt-refuse', 'not-accepted')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), 'keep me', 'the refused draft is never cleared')
+  await typeHold(h.vt, '!')
+  assert.equal(h.app.getDraft(), 'keep me!', 'the editor is editable again (no restore duplicated the text)')
+})
+
+test('PR2: a programmatic insertion cannot mutate the held document', async () => {
+  const h = startHoldApp()
+  h.admit = () => {
+    h.app.holdSubmission('attempt-insert')
+    return 'held'
+  }
+  await typeHold(h.vt, 'original')
+  await typeHold(h.vt, '\r')
+  assert.equal(h.app.getDraft(), 'original')
+  h.app.insertIntoEditor(' UNSENT')
+  assert.equal(h.app.getDraft(), 'original', 'a held composer refuses programmatic insertion')
+  h.app.setEditorText('replacement')
+  assert.equal(h.app.getDraft(), 'original', 'and programmatic replacement too')
+  h.app.settleSubmission('attempt-insert', 'accepted')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), '', 'the accepted settlement clears the ORIGINAL document only')
+})
+
+test('PR2: a legacy verdict keeps the pre-PR2 clear-then-submit ordering', async () => {
+  const h = startHoldApp()
+  await typeHold(h.vt, '/status')
+  await typeHold(h.vt, '\r')
+  assert.deepEqual(h.submitted, [{ text: '/status', request: 'enter' }],
+    'a legacy line reaches onSubmit exactly as before')
+  assert.equal(h.app.getDraft(), '', 'the legacy path cleared the draft before dispatching')
+})
+
+test('PR2: a refused verdict neither clears nor dispatches', async () => {
+  const h = startHoldApp()
+  h.admit = () => 'refused'
+  await typeHold(h.vt, 'ignored')
+  await typeHold(h.vt, '\r')
+  assert.deepEqual(h.submitted, [])
+  assert.equal(h.app.getDraft(), 'ignored', 'the draft is preserved by a refused gesture')
+})
+
+test('PR2: the Ctrl+S steer gesture shares the admission and the freeze', async () => {
+  const h = startHoldApp()
+  h.admit = (_text, request) => {
+    if (request !== 'steer') return 'legacy'
+    h.app.holdSubmission('attempt-steer')
+    return 'held'
+  }
+  await typeHold(h.vt, 'steer me')
+  const dispatched = (h.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.steer')
+  assert.equal(dispatched, true)
+  assert.equal(h.admissions.at(-1)?.request, 'steer', 'the steer gesture used the ONE admission')
+  assert.deepEqual(h.steered, [], 'a held steer is dispatched by the application, never re-dispatched')
+  assert.equal(h.app.getDraft(), 'steer me', 'the steered draft stays frozen until acceptance')
+  h.app.settleSubmission('attempt-steer', 'accepted')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), '')
 })

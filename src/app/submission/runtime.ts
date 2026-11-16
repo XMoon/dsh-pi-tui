@@ -152,9 +152,9 @@ export interface SubmissionRuntimeSurface {
   /** The semantic session write. PR2: the optional acceptance callback is
    *  fired by the transport when the HOST accepted the message (Direct:
    *  synchronously after the Inbox insertion; Remote: the official
-   *  `beginSubmission.onAccept`). A writer that carries no callback support
-   *  commits without one, and the prompt's own commit is then the acceptance
-   *  proof (the pre-PR2 semantics). */
+   *  `beginSubmission.onAccept`). The write RESULT is never acceptance
+   *  authority: a committed outcome that did not fire the callback leaves a
+   *  held attempt unaccepted (settled unknown with the draft retained). */
   prompt(sessionId: string, message: PreparedMessage, options?: { readonly onAccepted?: () => void }): Promise<WriteOutcome>
 }
 
