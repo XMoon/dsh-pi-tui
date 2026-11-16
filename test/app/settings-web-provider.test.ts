@@ -2189,3 +2189,21 @@ test('two mouse Confirms join the ONE FIFO and never overlap', async t => {
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
   assert.equal(h.store.web.api.count, 20)
 })
+
+test('closing the page mid-write keeps the command-owned write settling without a false Verified', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  h.store.writeDelayMs = 300
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
+  const mark = settledWritesMark(h)
+  await key(h, ENTER) // dispatch the ONE write through the command owner FIFO
+  await settlePainted(h, 'the saving phase', frame => frame.includes('Saving…'))
+  // Close the whole workspace while the Host write is still in flight.
+  await closeWorkspace(h)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', mark)
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api',
+    'the command-owned write still settles after its page was retired')
+  assert.doesNotMatch(h.view(), /Verified/u, 'the closed page never repaints a verdict')
+})
