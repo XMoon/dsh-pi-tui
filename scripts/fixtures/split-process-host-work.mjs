@@ -22,7 +22,7 @@
  *   C1_NON_ANSWERING_PEER_PROBE = absolute barrier path for the negative control
  */
 
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { isAbsolute, join } from 'node:path'
 import { credentialKey } from '@deepseek-ai/dsh-credentials'
@@ -91,6 +91,17 @@ const SCENARIOS = new Set([
   // the configuration surface must classify it Plugin-owned and offer no CRUD.
   'mcp-servers-fr4',
 ])
+
+/**
+ * PO-4B qualification sample: the offline model emits these two Markdown text
+ * blocks verbatim for the marker prompt, and the Host file probe creates the
+ * workspace files the first block links to.
+ */
+const PO4B_MARKER = 'po4b:markdown-host-files:v1'
+const PO4B_BLOCK_1 = '# PO-4B Report\r\n\r\n- [report](./.po4b/report.md)\r\n- [missing](./.po4b/missing.md)\r\n- [private](./.po4b/private.md)\r\n\r\n'
+const PO4B_BLOCK_2 = '```json\n{"path":"./.po4b/report.md","quote":"`literal`"}\n```\n\n**bold**  _italic_  中文🙂\n'
+const PO4B_REPORT = 'PO4B HOST FILE BYTES\nline two: π\n'
+const PO4B_PRIVATE = 'PO4B PRIVATE FILE MUST NOT BE READ\n'
 
 /** Quote one token for the Host shell used by the harmless fixture commands. */
 function shellQuote(value) {
@@ -164,7 +175,7 @@ function recordPromptFacts(options) {
 }
 
 class C1Model extends LlmAdapter {
-  constructor(scenario, proof, root, agentStatusOf, neverSetup, imageProbe) {
+  constructor(scenario, proof, root, agentStatusOf, neverSetup, imageProbe, markdownFileProbe) {
     super()
     this.scenario = scenario
     this.proof = proof
@@ -172,6 +183,7 @@ class C1Model extends LlmAdapter {
     this.agentStatusOf = agentStatusOf
     this.neverSetup = neverSetup
     this.imageProbe = imageProbe
+    this.markdownFileProbe = markdownFileProbe
     this.toolIssued = new Set()
     this.longTurnCount = new Map()
     this.failflowStep = new Map()
@@ -223,6 +235,25 @@ class C1Model extends LlmAdapter {
     const token = `${this.scenario}-${sessionId}`
 
     if (this.scenario === 'acp-po4a') {
+      // The Host appends its OWN user-role context (runtime/time context) after
+      // the author's prompt, so the marker is matched against the newest
+      // AUTHORED user text, never a substring of the whole conversation.
+      const authoredUser = [...(options.messages ?? [])].reverse()
+        .find(message => message?.role === 'user' && message?.source?.kind === 'user')
+      const authoredUserText = (authoredUser?.content ?? [])
+        .map(part => typeof part?.text === 'string' ? part.text : '')
+        .join('')
+      if (authoredUserText === PO4B_MARKER) {
+        await this.markdownFileProbe(sessionId)
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: PO4B_BLOCK_1 }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: PO4B_BLOCK_1 } }
+        yield { type: 'block-start', index: 1, blockType: 'text' }
+        yield { type: 'text-delta', index: 1, text: PO4B_BLOCK_2 }
+        yield { type: 'block-end', index: 1, block: { type: 'text', text: PO4B_BLOCK_2 } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
       const latestUser = [...(options.messages ?? [])].reverse().find(message => message?.role === 'user')
       const latestUserText = (latestUser?.content ?? [])
         .map(part => typeof part?.text === 'string' ? part.text : '')
@@ -761,10 +792,60 @@ export async function apply(ctx) {
       }
     : undefined
 
+  const markdownFileProbe = scenario === 'acp-po4a'
+    ? async sessionId => {
+        // The Host Workspace authority is the official committed directory of
+        // the exact live Agent; neither the Client cwd nor the marker text is a
+        // file root.
+        const expected = process.env.C1_PO4B_EXPECTED_WORKSPACE
+        if (expected === undefined || expected === '') {
+          throw new Error('m4-c1-host-work: the PO-4B file probe requires C1_PO4B_EXPECTED_WORKSPACE')
+        }
+        if (process.platform !== 'linux' || process.geteuid() === 0) {
+          throw new Error(`m4-c1-host-work: the PO-4B permission proof requires a non-root Linux Host (platform=${process.platform}, euid=${String(process.geteuid())})`)
+        }
+        const agent = ctx.agents.get(sessionId)
+        if (agent === undefined) throw new Error('m4-c1-host-work: the PO-4B file probe could not resolve the live Agent')
+        const workspace = realpathSync(ctx.workingDirectory.get(agent.session))
+        if (workspace !== realpathSync(expected)) {
+          throw new Error('m4-c1-host-work: the official Session workingDirectory does not match the expected Host workspace')
+        }
+        const root = join(workspace, '.po4b')
+        mkdirSync(root, { recursive: true, mode: 0o700 })
+        const reportPath = join(root, 'report.md')
+        writeFileSync(reportPath, PO4B_REPORT, { mode: 0o600 })
+        const report = readFileSync(reportPath)
+        if (report.toString('utf8') !== PO4B_REPORT) {
+          throw new Error('m4-c1-host-work: the PO-4B report file did not read back its exact bytes')
+        }
+        const reportSha256 = createHash('sha256').update(report).digest('hex')
+        let missing
+        try {
+          readFileSync(join(root, 'missing.md'))
+          missing = 'READ'
+        } catch (error) {
+          missing = error?.code
+        }
+        if (missing !== 'ENOENT') throw new Error(`m4-c1-host-work: the PO-4B absent file read must fail with ENOENT (got ${String(missing)})`)
+        const privatePath = join(root, 'private.md')
+        writeFileSync(privatePath, PO4B_PRIVATE, { mode: 0o600 })
+        chmodSync(privatePath, 0o000)
+        let unreadable
+        try {
+          readFileSync(privatePath)
+          unreadable = 'READ'
+        } catch (error) {
+          unreadable = error?.code
+        }
+        if (unreadable !== 'EACCES') throw new Error(`m4-c1-host-work: the PO-4B unreadable file read must fail with EACCES (got ${String(unreadable)})`)
+        record('po4b-host-file-proof', { sessionId, workspaceMatched: true, reportSha256, missing, unreadable })
+      }
+    : undefined
+
   const model = new C1Model(scenario, proof, root, sessionId => {
     const agent = ctx.agents.get(sessionId)
     return agent === undefined ? undefined : agent.status
-  }, neverSetup, imageProbe)
+  }, neverSetup, imageProbe, markdownFileProbe)
 
   ctx.effect(() => ctx.llm.registerAdapter(['c1-qualification'], model))
 
