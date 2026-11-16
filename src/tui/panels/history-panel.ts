@@ -678,13 +678,13 @@ export class HistoryPanel implements Component, Focusable {
    * ONLY the region under the pointer.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-    // Intervening pointer input revokes the pending gesture: a wheel scrolls
-    // the list/preview under the pressed cell (the old row/action identity may
-    // still resolve after a repaint), and a non-preview drag moves the pointer
-    // away from the pressed cell. The Preview drag OWNs its drags, so only the
-    // wheel cancels it.
-    if (event.type === 'wheel' || event.type === 'move'
-      || (event.type === 'drag' && this.gesture?.kind !== 'preview')) {
+    // A WHEEL between a press and its release scrolls the list/preview under
+    // the pressed cell while the pointer stays there, so the old row/action
+    // identity may still resolve after the repaint; it revokes the pending
+    // gesture (a Preview drag's highlight is dropped with it). Move/drag is
+    // NOT a revocation here: the alt screen already withholds the synthesized
+    // click when the pointer left the pressed cell.
+    if (event.type === 'wheel') {
       if (this.gesture?.kind === 'preview') this.resetPreviewSelection()
       this.gesture = undefined
     }
