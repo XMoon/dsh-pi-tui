@@ -110,6 +110,15 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
 - id: pi-tui-builtins
   disabled: true
 
+# The Split Host's ONE Host Runtime row. The bundle DECLARES it (disabled by
+# default); this overlay only ENABLES it. Keeping the declaration — and its
+# config — out of this command-line overlay is required: the official
+# ConfigEditor refuses to persist an entry whose config a home patch or
+# command-line overlay overrides, and this row is the Split Host's ONE live TUI
+# settings authority.
+- id: split-host-pi-tui-runtime
+  disabled: false
+
 # Infrastructure lifetime is independent of the mutable tuiStartup provider.
 - id: webserver
   inject: []
@@ -199,11 +208,12 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
     # rows or package subpaths. The sandbox policy/provider are resolved PER
     # CALL by the features that need them (M6-1 F8), so a Host without the
     # sandbox provider still becomes Ready and reports that side truthfully.
-    - id: split-host-pi-tui-runtime
-      name: '@xmoon76/dsh-pi-tui/host-runtime'
-      inject: [typert, agents, fileReferences, workingDirectory, sessions, subprocess, workspaceRegistry, skills, agentPresets]
-      config:
-        sessionId: ''
+    #
+    # The row itself is DECLARED by the bundle patch (disabled by default), so
+    # its config stays USER-profile owned. This overlay only ENABLES it: the
+    # official ConfigEditor refuses to persist an entry whose config a home
+    # patch or command-line overlay overrides, and this row is the Split Host's
+    # ONE live TUI settings authority.
 
 # ── Official Web composition (M5-W PR-A/PR-B/PR-C) ──────────────────────────
 # The official Browser Web rows, declared here ONCE and DISABLED BY DEFAULT.

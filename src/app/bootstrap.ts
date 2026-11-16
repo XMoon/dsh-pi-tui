@@ -580,7 +580,12 @@ export function applyRunnerWithRuntime(
     // the Settings service there is no persistence surface, and a write
     // attempt fails explicitly instead of silently skipping.
     const settingsForms = ctx.get('settings') as SettingsFormsLike | undefined
-    const tuiSettings = new DirectTuiSettings(config, settingsForms)
+    // The split Client adopts the preassembled Remote settings port. It has
+    // no Host Settings service of its own; a Direct writer here would read
+    // schema defaults and reject every preference save.
+    const tuiSettings = override === undefined
+      ? new DirectTuiSettings(config, settingsForms)
+      : override.selected.backend.config.tuiSettings
     // The TUI ships its own /settings surface: keep the Settings service's
     // auto-generated page off this entry (it would also expose the internal
     // legacy-migration marker). The optional-inject child names the tui-app
@@ -1439,7 +1444,7 @@ export function applyRunnerWithRuntime(
     // Migrate legacy/invalid display settings without delaying composition or
     // changing the initial frame. The canonical field always wins at boot;
     // this best-effort write only makes the chosen runtime value durable.
-    if (displayResolution.canonicalize && settingsForms !== undefined) {
+    if (displayResolution.canonicalize && override === undefined && settingsForms !== undefined && tuiSettings !== undefined) {
       runDetached('display preset migration', () => serializeTuiSettingsMutation(
         tuiSettings,
         () => tuiSettings.replace({
@@ -3070,7 +3075,7 @@ export function applyRunnerWithRuntime(
         }),
       }),
       status: { sessionCwd: () => status.sessionCwd() },
-      tuiSettings: backend.config.tuiSettings ?? tuiSettings,
+      tuiSettings,
       shell: userShellPort,
       submission: {
         settleAck: (reason, options) => submission.settleLocalSubmitAck(reason, options),

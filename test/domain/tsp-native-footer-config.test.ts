@@ -127,6 +127,12 @@ test('invalid USER custom items are skipped with ONE notice (only while ready)',
     'not-ready keeps its single not-current notice')
 })
 
+test('an absent settings document stays unavailable even while other configuration is ready', () => {
+  const result = resolveTspNativeFooterConfig({ doc: undefined, readiness: READY, userItems: EMPTY_ITEMS })
+  assert.equal(result.mode, 'default')
+  assert.deepEqual(result.notices, [TSP_FOOTER_NOTICES.notCurrent])
+})
+
 test('whole-footer command falls back to the persisted default with ONE command notice', () => {
   const result = resolveTspNativeFooterConfig({ doc: { footer: 'command' }, readiness: READY, userItems: EMPTY_ITEMS })
   assert.equal(result.mode, 'default')

@@ -235,12 +235,22 @@ const HOST_EXECUTION_INJECT: ReadonlyArray<{ id: string; inject: readonly string
  */
 function assertHostExecutionInject(entries: readonly OverlayEntry[]): void {
   const rows = entries.flatMap(entry => entry.insert ?? [entry])
+  const bundleRows = BUNDLE_ENTRIES.flatMap(entry => entry.insert ?? [entry])
   for (const { id, inject } of HOST_EXECUTION_INJECT) {
-    const matches = rows.filter(candidate => candidate.id === id)
-    assert.equal(matches.length, 1, `the overlay must own exactly one "${id}" row`)
+    // The Host Runtime row is DECLARED by the bundle so the USER profile can own
+    // its config (the official ConfigEditor refuses an overlay-overridden row);
+    // the overlay only enables it. Every other row stays overlay-declared.
+    const isRuntime = id === 'split-host-pi-tui-runtime'
+    const owner = isRuntime ? bundleRows : rows
+    const matches = owner.filter(candidate => candidate.id === id)
+    assert.equal(matches.length, 1, `the ${isRuntime ? 'bundle' : 'overlay'} must own exactly one "${id}" row`)
     assert.deepEqual(matches[0].inject, inject, `the "${id}" row inject mismatch`)
     assert.equal(matches[0].inject?.includes('tuiStartup'), false,
       `the "${id}" row must not depend on the mutable tuiStartup provider`)
+    if (isRuntime) {
+      assert.equal(rows.every(candidate => candidate.id !== id || candidate.name === undefined),
+        true, 'the overlay must only enable the bundle-declared Host Runtime row')
+    }
   }
   // The three existing rows are overridden in place; inserting them again would
   // create a second service owner instead of retuning the production row.
@@ -296,7 +306,7 @@ test('the shared deliverable guidance is inherited by Direct and Split without W
   )
 })
 
-test('the Host-only overlay declares the official Host service rows and ONE built-in Host Runtime row', () => {
+test('the Host-only overlay declares the official Host service rows and only ENABLES the bundle-declared Host Runtime row', () => {
   // B1 rows unchanged.
   assert.equal(row('split-host-connection').name, '@deepseek-ai/dsh-client-connection')
   assert.deepEqual(row('split-host-api-remotes').inject, ['typertGateway', 'connection'])
@@ -304,14 +314,29 @@ test('the Host-only overlay declares the official Host service rows and ONE buil
   for (const id of ['tui-app', 'pi-tui-extension-host', 'pi-tui-builtins']) {
     assert.equal(row(id).disabled, true, `${id} must stay disabled`)
   }
-  // The seven official service rows; the package runtime remains one combined row.
+  // The two B1 rows, six official service rows and the enable-only runtime row.
   assert.equal(OVERLAY_ROWS.filter(candidate => candidate.id.startsWith('split-host-')).length, 9,
-    'the overlay must own the two B1 rows and seven official Host service rows')
+    'the overlay must own the two B1 rows, six official Host service rows and the enable-only runtime row')
   for (const { id, name } of FOUNDATION_ROWS) {
+    if (id === 'split-host-pi-tui-runtime') continue
     assert.equal(row(id).name, name)
   }
-  assert.equal(OVERLAY_ROWS.filter(candidate => candidate.name === '@xmoon76/dsh-pi-tui/host-runtime').length, 1,
-    'one built-in Host Runtime Loader row')
+  // The package runtime stays ONE combined row, but the BUNDLE declares it: the
+  // official ConfigEditor refuses to persist an entry whose config a home patch
+  // or command-line overlay overrides, and this row is the Split Host's ONE live
+  // TUI settings authority. The overlay therefore only flips `disabled`.
+  const bundleRuntime = BUNDLE_ROWS.filter(candidate => candidate.id === 'split-host-pi-tui-runtime')
+  assert.equal(bundleRuntime.length, 1, 'one built-in Host Runtime Loader row, declared by the bundle')
+  assert.equal(bundleRuntime[0].name, '@xmoon76/dsh-pi-tui/host-runtime')
+  assert.deepEqual(bundleRuntime[0].config, { sessionId: '' }, 'the bundle owns the default config')
+  assert.equal(bundleRuntime[0].disabled, true,
+    'declared disabled so Direct and the daemon supervisor never mount a second Host runtime')
+  assert.deepEqual(row('split-host-pi-tui-runtime'), { id: 'split-host-pi-tui-runtime', disabled: false },
+    'the Host-only overlay enables the row without re-declaring it or its config')
+  assert.equal(BUNDLE_ROWS.filter(candidate => candidate.name === '@xmoon76/dsh-pi-tui/host-runtime').length, 1,
+    'one built-in Host Runtime Loader row across the bundle')
+  assert.equal(OVERLAY_ROWS.filter(candidate => candidate.name === '@xmoon76/dsh-pi-tui/host-runtime').length, 0,
+    'the command-line overlay must never declare the Host Runtime row')
   assert.equal(OVERLAY_ROWS.some(candidate => /file-reference-host|terminal-progress-host/u.test(candidate.name ?? '')),
     false, 'the private features must not be independent Loader rows')
   assert.deepEqual(row('split-host-session-controller').config, { nativeOpen: false })
