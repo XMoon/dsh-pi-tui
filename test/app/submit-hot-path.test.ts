@@ -1193,6 +1193,52 @@ test('a late event from the previous owner cannot retire the new owner claimed e
   assert.ok(!afterOwn.includes('new owner echo'), `the retired echo is gone:\n${afterOwn}`)
 })
 
+test('an Alt+Up recall retires the queued local echo it removed', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  // The Direct queue-remove adapter retires the occurrence's upload receipt
+  // through the official file-uploads service; the recall's committed removal
+  // settles as committed through this seam (steering never reaches it).
+  context.provide('fileUploads', { retirePrompt: () => {} } as never)
+  const harness = makeHarness(home, { id: 'submit-session-recall', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-recall' })
+
+  harness.host.status = 'running'
+  const rpcId = await submitDelivered(mounted, harness, 'queued recall text')
+  const delivered = harness.host.followedUp[0] as { id: string }
+  // The accepted occurrence is now owned by the Host inbox projection.
+  harness.host.nextTurn.push(delivered as never)
+  await waitForRenderView(vt)
+
+  const dispatched = (mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.dequeue')
+  assert.equal(dispatched, true, 'the Alt+Up action must be dispatched')
+  assert.equal(await drainUntil(() => harness.host.nextTurn.length === 0, 5_000), true,
+    'the real pull-back must remove the queued occurrence')
+  assert.equal(await drainUntil(() => mounted.app.getDraft().includes('queued recall text'), 5_000), true,
+    'the recalled text must reach the editor')
+
+  // The committed removal is the occurrence's business terminal: its exact
+  // local echo is retired, never re-presented as a local queue row.
+  const queueItems = (mounted.app as unknown as {
+    queueItems: readonly { id: string; text: string }[]
+  }).queueItems
+  assert.ok(!queueItems.some(item => item.id === rpcId || item.text.includes('queued recall text')),
+    `the recalled echo must be dismissed: ${JSON.stringify(queueItems)}`)
+})
+
 test('a context `!` submit shows the ack DURING the run and settles on the authoritative event', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-submit-hot-')

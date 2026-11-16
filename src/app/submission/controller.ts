@@ -45,7 +45,6 @@ import type { ClientCommandRegistry } from '../command/client-command-registry.t
 import { TRANSCRIPT_SAVE_UNAVAILABLE_TEXT, TSP_B2A_RESULT_NOTICE_COMMANDS, tspBuiltinAvailability } from '../command/tsp-capability.ts'
 import type { TuiLocalCommandHandler } from '../../extension/public-types.ts'
 import { PendingSubmissions, type DirectPendingSubmissionEvent, type PendingSubmissionPlacement } from './pending-submission.ts'
-import { queueInboxMessageOf } from './pending-input.ts'
 import type { HostCommandExecution, HostCommandOutcome, HostCommandPort } from '../../runtime/host-command-port.ts'
 import type { HostFilePort } from '../../runtime/host-file-port.ts'
 import type { PendingInputReader } from '../../runtime/pending-input-reader-port.ts'
@@ -2264,7 +2263,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           if (pending === undefined) return undefined
           return pending.items
             .filter(item => item.placement === 'queued')
-            .map(queueInboxMessageOf)
+            .map(item => ({
+              id: item.id,
+              content: item.content,
+              ...(item.rpcId === undefined ? {} : { rpcId: item.rpcId }),
+            }))
         },
         isTransitionPending: () => deps.ownership.transitionPending(),
         withWriter: (scope, task) => deps.submissionRuntime.withWriter(scope, task),
@@ -2288,6 +2291,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           else deps.drafts.files.remove(id)
         },
         pinRecalledDrafts: (text) => pinDraftAttachments(text, deps.drafts.images, deps.drafts.files),
+        dismissLocalSubmission: (rpcId) => settleLocalSubmission(rpcId),
         readDraft: () => deps.app().getDraft(),
         writeDraft: (text) => deps.app().setDraft(text),
         notify: (message, kind) => deps.app().notify(message, kind),

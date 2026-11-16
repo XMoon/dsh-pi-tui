@@ -55,6 +55,7 @@ import { PendingSubmissions, type DirectPendingSubmissionEvent } from '../../src
 import { DirectSubmissionPresentation } from '../../src/app/submission/presentation.ts'
 import { queueTextOf as queueTextOfProduction } from '../../src/app/surface/pending-presentation.ts'
 import { DirectPendingInputReader } from '../../src/runtime/direct/pending-input-reader-direct.ts'
+import { DirectSessionWriter } from '../../src/runtime/direct/session-writer-direct.ts'
 import type { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
@@ -166,6 +167,40 @@ class PrepFailingAdapter extends LlmAdapter {
   releaseSecond(): void { this.second.resolve() }
 }
 
+/**
+ * Queue-steer transfer producer: the first turn holds its provider stream so a
+ * queued message can be promoted to steering while the turn is running; the
+ * promoted message's next request preparation is held and then rejects at
+ * `resolveModel` (preparation, before any durable `user/message`). This is the
+ * exact `remove` → insert next-step → claim → preparation window.
+ */
+class SteerTransferAdapter extends LlmAdapter {
+  private readonly holdStream = Promise.withResolvers<void>()
+  private readonly holdSecondPrep = Promise.withResolvers<void>()
+  readonly streamStarted = Promise.withResolvers<void>()
+  readonly secondResolveStarted = Promise.withResolvers<void>()
+  private resolves = 0
+  private streams = 0
+  override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    this.resolves += 1
+    if (this.resolves >= 2) {
+      this.secondResolveStarted.resolve()
+      await this.holdSecondPrep.promise
+      throw new LlmError('probe preparation failure after the steering claim', 'UNKNOWN')
+    }
+    return { provider, id: model, name: model }
+  }
+  async * stream(): AsyncIterable<StreamChunk> {
+    this.streams += 1
+    if (this.streams > 1) throw new LlmError('only the holding stream is expected', 'UNKNOWN')
+    this.streamStarted.resolve()
+    await this.holdStream.promise
+    for (const chunk of textResponse('holding answer')) yield chunk
+  }
+  releaseHeldStream(): void { this.holdStream.resolve() }
+  releaseSecondPrep(): void { this.holdSecondPrep.resolve() }
+}
+
 const nullPresentation = {
   handleFocusReport: () => {},
   markFocused: () => {},
@@ -187,9 +222,12 @@ interface Probe {
   /** Resolves when the first `turn/end` reaches the routing. */
   readonly firstTurnEnd: Promise<void>
   /** Register one local echo exactly like the production submit path does. */
-  beginEcho(requestId: string, text: string): void
+  beginEcho(requestId: string, text: string, placement?: 'transcript' | 'queued' | 'steering'): void
   /** Deliver one identified user message through the REAL `agent.followup`. */
   followupIdentified(requestId: string, text: string): void
+  /** Promote one queued occurrence through the REAL Direct `updateQueue` steer
+   *  adapter (the production `remove` + `agent.steer` producer sequence). */
+  steerQueued(requestId: string): Promise<{ readonly kind: string }>
   /** Wait for every activity driver to settle (after releasing the fixture). */
   quiesce(): Promise<void>
   run(text: string): Promise<void>
@@ -363,9 +401,21 @@ async function createProbe(
     pending,
     terminal: vt,
     firstTurnEnd: firstTurnEnd.promise,
-    beginEcho: (requestId, text) => {
-      pending.begin({ requestId, placement: 'transcript', text, createdAt: 1, sessionId: MAIN, generation: PENDING_GENERATION })
+    beginEcho: (requestId, text, placement = 'transcript') => {
+      pending.begin({ requestId, placement, text, createdAt: 1, sessionId: MAIN, generation: PENDING_GENERATION })
       surface.refreshPendingInput()
+    },
+    steerQueued: async (requestId) => {
+      const message = agent.inbox.nextTurn.find(candidate =>
+        (candidate.source as { readonly rpcId?: unknown } | undefined)?.rpcId === requestId)
+      if (message === undefined) throw new Error(`no queued occurrence for "${requestId}"`)
+      // The REAL Direct adapter: `inbox.remove` then `agent.steer`, two Host
+      // Inbox mutations — the producer sequence the ledger must survive.
+      const writer = new DirectSessionWriter(
+        { get: () => ({ retirePrompt: () => {} }) } as never,
+        sessionId => sessionId === MAIN ? agent : undefined,
+      )
+      return writer.updateQueue(MAIN, message.id, { kind: 'steer' })
     },
     followupIdentified: (requestId, text) => {
       agent.followup(createUserMessage({
@@ -540,6 +590,84 @@ test('a preparation failure after the real Inbox claim retires only that Direct 
     // teardown that awaits the pending turn.
     adapter.releaseFirst()
     adapter.releaseSecond()
+    await probe.quiesce()
+    probe.dispose()
+  }
+})
+
+// FIXTURE MANIFEST for the case below (the plan's §7 "L5" shorthand for the
+// real pinned producer; canonical host-client.md L5 is the official
+// Client→Gateway→Host wire, which this Direct producer integration does not
+// include and does not claim):
+// - REAL: the pinned AgentLoop / session / LLM runtime, its own Inbox splice
+//   producer, the REAL Direct `SessionWriter.updateQueue` steer adapter
+//   (`inbox.remove` + `agent.steer`), the actual event router, the actual
+//   Direct pending ledger and the actual terminal sink.
+// - STAND-IN: the holding/preparation-failing adapter, the writer's Host
+//   context read (only the queue-remove file-upload retirement seam, which a
+//   steer never reaches), the fixture routing source's no-op transcript
+//   targets and the fixture ledger generation constant.
+// - ABSENT: network/live provider credentials, the Client→Gateway→Host wire,
+//   the official Remote wire and the physical GUI.
+test('a queue steer keeps the promoted echo visible until its claimed boundary', async () => {
+  const adapter = new SteerTransferAdapter()
+  const probe = await createProbe(adapter)
+  try {
+    const promotedId = 'queue-steer-promoted'
+    // Hold a live turn so the occurrence-level steer is legal.
+    probe.followupIdentified('holder', 'hold this turn')
+    await adapter.streamStarted.promise
+
+    probe.beginEcho(promotedId, 'steer me', 'queued')
+    probe.followupIdentified(promotedId, 'steer me')
+    await probe.terminal.waitForRender()
+
+    const outcome = await probe.steerQueued(promotedId)
+    assert.equal(outcome.kind, 'committed', 'the real Direct writer committed the steer')
+
+    // The removal alone must not retire the echo; the promotion follows the
+    // occurrence into the steering lane.
+    const promoted = probe.pending.snapshot().find(echo => echo.requestId === promotedId)
+    assert.ok(promoted, 'the queued echo survives the canceled removal')
+    assert.equal(promoted.placement, 'steering', 'the echo follows the steering placement')
+    assert.ok(probe.events.some(entry => {
+      const data = entry.data as { target?: unknown; inserted?: readonly { source?: { rpcId?: unknown } }[] }
+      return entry.type === 'agent/inbox/spliced' && data.target === 'next-step'
+        && data.inserted?.some(message => message.source?.rpcId === promotedId) === true
+    }), 'the real Agent Inbox produced the next-step insertion for the same identity')
+
+    // Finish the held turn: the loop then claims the promoted occurrence for
+    // its next request preparation, which is HELD.
+    adapter.releaseHeldStream()
+    await adapter.secondResolveStarted.promise
+    await probe.terminal.waitForRender()
+    assert.ok(probe.pending.snapshot().some(echo => echo.requestId === promotedId),
+      'the claimed-but-not-admitted echo is still the only local representation')
+    const claimedFrame = probe.terminal.getViewport().join('\n')
+    assert.ok(claimedFrame.includes('steer me'), `the promoted content stays visible:\n${claimedFrame}`)
+    assert.ok(claimedFrame.includes('steering…'), `the pending row keeps its steering status:\n${claimedFrame}`)
+    assert.ok(probe.events.some(entry => {
+      const data = entry.data as { target?: unknown; removedCount?: unknown }
+      return entry.type === 'agent/inbox/spliced' && data.target === 'next-step' && data.removedCount === 1
+    }), 'the real loop claimed the promoted occurrence')
+
+    // The preparation then fails without a durable user/message: the claimed
+    // echo retires on the strictly later turn boundary.
+    adapter.releaseSecondPrep()
+    await probe.quiesce()
+    await probe.terminal.waitForRender()
+    assert.deepEqual(probe.pending.snapshot(), [])
+    assert.ok(!probe.events.some(entry => {
+      const data = entry.data as { source?: { rpcId?: unknown } }
+      return entry.type === 'user/message' && data.source?.rpcId === promotedId
+    }), 'the promoted input never became a durable user message')
+    const settledFrame = probe.terminal.getViewport().join('\n')
+    assert.ok(!settledFrame.includes('steer me'), `the failed echo no longer renders:\n${settledFrame}`)
+  } finally {
+    // Fixture-owned gates are always released (no hanging teardown on any
+    // failing assertion).
+    adapter.releaseHeldStream()
+    adapter.releaseSecondPrep()
     await probe.quiesce()
     probe.dispose()
   }

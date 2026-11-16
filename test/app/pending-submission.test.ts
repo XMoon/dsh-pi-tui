@@ -104,8 +104,10 @@ test('snapshot is a detached copy: mutation never leaks into the ledger', () => 
 // The official Client retires a local echo once its Inbox occurrence was
 // CLAIMED (receipt index null) and a strictly later `request/context` /
 // `turn/end` crosses that receipt without a durable `user/message`. These
-// cases pin the exact identity/ordering predicates and the producer-aware
-// cancel rule on the Direct ledger.
+// cases pin the exact identity/ordering predicates, and they pin that a
+// canceled Inbox removal — including a queue steer's remove-then-reinsert —
+// proves only that the occurrence left its list: a genuine removal is settled
+// by the application write, never by the splice marker.
 
 const SESSION = 's1'
 const GENERATION = 4
@@ -211,20 +213,44 @@ test('receipt indices follow prior splices, so a second claim retires the shifte
   assert.deepEqual(pending.snapshot(), [], 'both claimed echoes retire; a stale index would leave r2 behind')
 })
 
-test('a genuine canceled removal retires only the exact removed echo', () => {
+test('a canceled removal alone never retires: it only clears the receipt position', () => {
   const pending = ledger()
   beginEcho(pending, 'r1')
   beginEcho(pending, 'r2')
   observe(pending, insertedSplice(50, 'next-turn', 0, ['r1', 'r2']))
-  assert.equal(observe(pending, removedSplice(51, 'next-turn', 0, 1, 'canceled')), true,
-    'the producer-marked cancel of the exact removed occurrence retires it immediately')
-  assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['r2'])
-  // r2 is still an Inbox occurrence; a turn boundary must not retire it.
-  assert.equal(observe(pending, { type: 'turn/end', seq: 52, data: { turn: 1, reason: { kind: 'error' } } }), false)
+  assert.equal(observe(pending, removedSplice(51, 'next-turn', 0, 1, 'canceled')), false,
+    'the producer marker proves only that the occurrence left its list')
+  assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['r1', 'r2'],
+    'a genuine queue removal is settled by the application write, never inferred from the splice')
+  // The claimed r1 has no successor: the strictly later boundary retires it.
+  // r2 is still an Inbox occurrence and must stay.
+  assert.equal(observe(pending, { type: 'turn/end', seq: 52, data: {} }), true)
   assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['r2'])
 })
 
-test('a same-mutation replacement with the same rpcId is not a cancel', () => {
+test('a queued echo promoted to steering survives the removal and follows the placement', () => {
+  const pending = ledger()
+  beginEcho(pending, 'r1', { placement: 'queued' })
+  observe(pending, insertedSplice(55, 'next-turn', 0, ['r1']))
+  // Queue steer = a canceled removal followed by a LATER insertion of the same
+  // identity into next-step (the real Direct writer + Agent Inbox sequence).
+  assert.equal(observe(pending, removedSplice(56, 'next-turn', 0, 1, 'canceled')), false,
+    'the removal is not a business cancel')
+  assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['r1'],
+    'the only local representation of the still-processed message is kept')
+  assert.equal(observe(pending, insertedSplice(57, 'next-step', 0, ['r1'])), true,
+    'the promotion to the steering lane is a visible placement change')
+  assert.equal(pending.snapshot()[0]?.placement, 'steering',
+    'the echo follows the authoritative occurrence into the steering lane')
+  // The occurrence is authoritative in next-step: a boundary cannot retire it.
+  assert.equal(observe(pending, { type: 'turn/end', seq: 58, data: {} }), false)
+  // The Host claims the steering occurrence, then fails before admission.
+  assert.equal(observe(pending, removedSplice(59, 'next-step', 0, 1)), false)
+  assert.equal(observe(pending, { type: 'request/context', seq: 60, data: {} }), true)
+  assert.deepEqual(pending.snapshot(), [])
+})
+
+test('a same-mutation replacement of the same rpcId keeps the echo pending', () => {
   const pending = ledger()
   beginEcho(pending, 'r1')
   observe(pending, insertedSplice(60, 'next-turn', 0, ['r1']))
@@ -308,17 +334,19 @@ test('a same-id begin after admission does not inherit the previous receipt', ()
   assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['r1'])
 })
 
-test('a canceled removal of an unclaimed identity leaves a sibling at a shifted index pending', () => {
+test('a canceled removal never retires siblings or receipt-less echoes', () => {
   const pending = ledger()
   beginEcho(pending, 'r1')
   beginEcho(pending, 'r2')
   beginEcho(pending, 'r3')
   observe(pending, insertedSplice(120, 'next-turn', 0, ['r1', 'r2']))
-  assert.equal(observe(pending, removedSplice(121, 'next-turn', 0, 1, 'canceled')), true)
-  assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['r2', 'r3'])
-  assert.equal(observe(pending, { type: 'turn/end', seq: 122, data: {} }), false)
+  assert.equal(observe(pending, removedSplice(121, 'next-turn', 0, 1, 'canceled')), false)
+  assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['r1', 'r2', 'r3'],
+    'the canceled splice retires nothing')
+  // The removed r1 is claimed; a later boundary retires only it.
+  assert.equal(observe(pending, { type: 'turn/end', seq: 122, data: {} }), true)
   assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['r2', 'r3'],
-    'only the exact canceled identity retires; siblings and receipt-less echoes remain')
+    'only the claimed identity retires; in-Inbox and receipt-less echoes remain')
 })
 
 test('a stale duplicate splice never rolls a receipt back', () => {

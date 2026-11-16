@@ -15,8 +15,9 @@
  *
  * Suppression is RENDER-TIME and one-directional: an echo is hidden only while
  * an authoritative counterpart is actually visible in the same projection, and
- * it is removed only on the durable `user/message`, a known terminal exit, or
- * the official Host terminal reconciliation below. The Host claims a pending
+ * it is removed only on the durable `user/message`, a known terminal exit, the
+ * application-level settlement of a queue mutation this Client itself issued,
+ * or the official Host terminal reconciliation below. The Host claims a pending
  * occurrence — removing it from the inbox — BEFORE its durable `user/message` is
  * emitted (asynchronous pre-step), so an echo that were deleted at first
  * observation would leave the accepted content blank until the transcript
@@ -24,6 +25,15 @@
  * continuously visible; only a strictly later authoritative turn boundary
  * without a durable admission proves that content can no longer arrive, and
  * then the echo retires as failed.
+ *
+ * An Inbox occurrence removal — INCLUDING the producer's `outcome: 'canceled'`
+ * splice marker — proves only that the occurrence left its list, never that the
+ * business submission was cancelled. A queued message promoted to steering is
+ * exactly such a removal followed by a later insertion of the SAME request id
+ * into `next-step`; retiring the echo on the removal would lose the only local
+ * representation of a message the Host is still working on. Genuine queue
+ * removals this Client issued are terminal at their own committed write
+ * (application-level identity settlement), not inferred from the splice.
  *
  * This module is transport-neutral and pure: it never reads a Host inbox and
  * never touches the terminal. The runner owns the refresh scheduling and the
@@ -75,10 +85,10 @@ export interface DirectPendingSubmissionEvent {
 /**
  * The private per-echo projection of the Host Inbox occurrence: the official
  * receipt tuple the Direct adapter mirrors. `index: null` means the occurrence
- * was removed from the inbox (claimed or otherwise) and is no longer visible to
- * the pending-input projection; `seq` is the durable event watermark the tuple
- * was derived from. This is a temporary Client projection of a Host fact — it
- * is never Host Queue authority and never reaches the renderer.
+ * was removed from the inbox (claimed, moved, or cancelled) and is no longer
+ * visible to the pending-input projection; `seq` is the durable event watermark
+ * the tuple was derived from. This is a temporary Client projection of a Host
+ * fact — it is never Host Queue authority and never reaches the renderer.
  */
 interface PendingSubmissionReceipt {
   readonly target: 'next-turn' | 'next-step'
@@ -86,8 +96,13 @@ interface PendingSubmissionReceipt {
   readonly seq: number
 }
 
-/** One ledger record: the presentation echo plus its private Host receipt. */
-type PendingSubmissionRecord = PendingSubmissionEcho & { receipt?: PendingSubmissionReceipt }
+/** One ledger record: the presentation echo plus its private Host receipt.
+ *  The presentation fields are mutable ONLY for the authoritative placement
+ *  transfer (a queued occurrence promoted to steering); identity and text never
+ *  change. */
+type PendingSubmissionRecord =
+  { -readonly [K in keyof PendingSubmissionEcho]: PendingSubmissionEcho[K] }
+  & { receipt?: PendingSubmissionReceipt }
 
 /** Input accepted by {@link PendingSubmissions.begin}. */
 export interface PendingSubmissionBegin {
@@ -152,10 +167,14 @@ export class PendingSubmissions {
    *
    * - `agent/inbox/spliced` maintains the exact receipt index/seq of a matching
    *   Inbox occurrence. A removal marks `index: null`; a same-mutation
-   *   reinsertion of the same `rpcId` rebinds the new index. A producer-marked
-   *   `outcome: 'canceled'` retires ONLY the exact echoes removed by that
-   *   mutation and not reinserted by it — a replacement/requeue is not a
-   *   business cancel.
+   *   reinsertion of the same `rpcId` rebinds the new index. A LATER insertion
+   *   of the same identity (a queued message promoted to steering) rebinds it
+   *   too and follows the occurrence into the steering lane. A producer-marked
+   *   `outcome: 'canceled'` is NOT a business terminal: it proves only that the
+   *   occurrence left its list, so the echo stays pending for the authoritative
+   *   successor (an insertion here, or a claimed boundary below). A genuine
+   *   queue removal this Client issued is retired by its own committed-write
+   *   settlement, never inferred from this splice.
    * - `request/context` / `turn/end` retire the echoes whose receipt was
    *   already removed from the inbox (`index === null`) and whose receipt seq is
    *   STRICTLY earlier than the terminal boundary: the Host claimed the input
@@ -165,8 +184,9 @@ export class PendingSubmissions {
    * Only echoes belonging to the exact session identity and ownership
    * generation are observed: a late event from an old subject never mutates the
    * current one. Returns whether the VISIBLE echo set actually changed (a
-   * receipt-index update returns false — the caller's queue projection refresh
-   * owns that presentation change).
+   * retirement or an authoritative placement transfer); a pure receipt-index
+   * update returns false — the caller's queue projection refresh owns that
+   * presentation change.
    */
   observeDirectHostEvent(input: {
     readonly sessionId: string
@@ -203,8 +223,9 @@ export class PendingSubmissions {
     })
   }
 
-  /** Fold one durable Inbox splice into the matching receipts and retire a
-   *  genuine cancel. */
+  /** Fold one durable Inbox splice into the matching receipts. A removal only
+   *  clears the receipt position — never the echo — and the authoritative
+   *  insertion (same mutation or a later one) rebinds the exact identity. */
   private observeInboxSplice(
     subject: readonly PendingSubmissionRecord[],
     seq: number,
@@ -215,18 +236,9 @@ export class PendingSubmissions {
       readonly start: number
       readonly removedCount?: number
       readonly inserted: readonly { readonly source?: unknown }[]
-      readonly outcome?: 'canceled'
     }
     const removedCount = splice.removedCount ?? 0
     const removedEnd = splice.start + removedCount
-    // The rpc identities THIS SAME mutation reinserted: a replacement or a
-    // requeue keeps the request alive even under an `outcome: 'canceled'`.
-    const reinserted = new Set<string>()
-    for (const message of splice.inserted) {
-      const rpcId = userRpcIdOf(message.source)
-      if (rpcId !== undefined) reinserted.add(rpcId)
-    }
-    const removedIds = new Set<string>()
     for (const record of subject) {
       const receipt = record.receipt
       if (receipt === undefined || receipt.target !== splice.target || receipt.seq >= seq) continue
@@ -234,17 +246,23 @@ export class PendingSubmissions {
         && receipt.index >= splice.start && receipt.index < removedEnd
       // Mirror the official receipt shift: a removal marks the occurrence
       // absent; an unaffected index before the splice point stays; anything at
-      // or after the removal region moves by the net insertion delta.
+      // or after the removal region moves by the net insertion delta. The
+      // producer's `outcome` marker is deliberately NOT read: a `canceled`
+      // splice is a list mutation, not a business terminal (a queue steer is
+      // remove-then-insert of the SAME identity in two splices).
       const index = removed
         ? null
         : receipt.index !== null && receipt.index >= removedEnd
           ? receipt.index + splice.inserted.length - removedCount
           : receipt.index
-      if (removed) removedIds.add(record.requestId)
       record.receipt = { target: receipt.target, index, seq }
     }
-    // The same-mutation insertion wins over the removal: rebind the exact
-    // identity so a replace/requeue remains pending at its new position.
+    // The authoritative insertion wins over any removal: rebind the exact
+    // identity so a replace/requeue/promotion remains pending at its new
+    // position. A queued occurrence promoted to steering follows the
+    // authoritative placement, so the claim→durable window re-presents it in
+    // the lane the Host last had it in — never as a queued row.
+    let transferred = false
     for (const [offset, message] of splice.inserted.entries()) {
       const rpcId = userRpcIdOf(message.source)
       if (rpcId === undefined) continue
@@ -252,15 +270,12 @@ export class PendingSubmissions {
       if (record === undefined) continue
       if (record.receipt !== undefined && record.receipt.seq > seq) continue
       record.receipt = { target: splice.target, index: splice.start + offset, seq }
+      if (splice.target === 'next-step' && record.placement !== 'steering') {
+        record.placement = 'steering'
+        transferred = true
+      }
     }
-    if (splice.outcome !== 'canceled') return false
-    let retired = false
-    for (const record of subject) {
-      if (!removedIds.has(record.requestId) || reinserted.has(record.requestId)) continue
-      this.remove(record.requestId)
-      retired = true
-    }
-    return retired
+    return transferred
   }
 
   /** Retire every echo the Host claimed and then left behind a strictly later

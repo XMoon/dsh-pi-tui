@@ -31,13 +31,17 @@ retirement and requests `appExit` (see
 - A Direct echo is correlated with the authoritative Host Inbox by exact
   `rpcId` only: the matching insertion records that occurrence's target/index
   and durable event seq, later splices move or clear that receipt, and a
-  producer-marked cancel retires the echo only when that same mutation removed
-  it and did not reinsert the same identity. A replacement/requeue keeps the
-  echo pending at the new position.
+  reinsertion of the same identity — in the same mutation (edit/replace) or a
+  later one (a queued message promoted to steering) — rebinds it. An Inbox
+  removal, including the producer's `canceled` splice marker, proves only that
+  the occurrence left its list; it is never a business terminal by itself, and
+  a promoted occurrence follows the authoritative steering placement.
 - A Direct echo whose Inbox occurrence was claimed (removed from the inbox) and
   whose receipt seq is strictly earlier than a later `request/context` or
   `turn/end`, with no durable `user/message` for that identity, retires as
-  failed: the local row stops claiming to send. This is not a generic
+  failed: the local row stops claiming to send. A genuine queue removal this
+  Client issued retires only that exact echo at the committed write settlement
+  (application identity, never the splice marker). This is not a generic
   `turn/end` clear — `compaction/end`, `agent/error`, status changes, unrelated
   turn boundaries, still-queued or claimed-but-not-yet-ended occurrences, and
   same-text different identities never retire an echo, and no timeout ever
