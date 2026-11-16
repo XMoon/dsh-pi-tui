@@ -364,6 +364,10 @@ export interface QuestionMouseGesture {
   action?: QuestionPointerAction
   startCol?: number
   endCol?: number
+  /** The plan-review local step at press time (only for a plan flow): a
+   * release after a step transition may never be re-interpreted against the
+   * newer step's painted state. */
+  planStep?: PlanReviewStep
 }
 
 /**
@@ -566,11 +570,13 @@ export class QuestionFlow implements Component, Focusable {
     if (this.planReview === undefined) return []
     const rows: { action: 'view' | 'keep' | 'approve'; label: string }[] = []
     if (this.planInspection !== undefined) rows.push({ action: 'view', label: 'View plan' })
-    const options = this.planReview.question.options ?? []
-    for (const option of options) {
-      if (option.label === this.planReview.approve) continue
-      rows.push({ action: 'keep', label: `${option.label}…` })
-    }
+    // The official request may offer several non-approve options; the frozen
+    // decision UI is ONE Keep row, so the FIRST non-approve option (the
+    // official option order) is the keep-planning class and the label this
+    // branch answers with. It is never chosen by display text.
+    const keep = (this.planReview.question.options ?? [])
+      .find(option => option.label !== this.planReview!.approve)
+    if (keep !== undefined) rows.push({ action: 'keep', label: `${keep.label}…` })
     rows.push({ action: 'approve', label: `${this.planReview.approve} plan` })
     return rows
   }
@@ -629,6 +635,7 @@ export class QuestionFlow implements Component, Focusable {
     if (plan === undefined) return
     const keep = (plan.question.options ?? []).find(option => option.label !== plan.approve)?.label
     if (keep === undefined) return
+    this.notifyMutation()
     this.onDone([{
       id: plan.question.id,
       selected: [keep],
@@ -640,6 +647,7 @@ export class QuestionFlow implements Component, Focusable {
   private submitPlanApprove(): void {
     const plan = this.planReview
     if (plan === undefined) return
+    this.notifyMutation()
     this.onDone([{ id: plan.question.id, selected: [plan.approve] }])
   }
 
@@ -855,6 +863,7 @@ export class QuestionFlow implements Component, Focusable {
         action: actionHit.action,
         startCol: actionHit.startCol,
         endCol: actionHit.endCol,
+        ...(this.planReview === undefined ? {} : { planStep: this.planStep }),
       }
       this.mousePressGesture = gesture
       return gesture
@@ -865,11 +874,12 @@ export class QuestionFlow implements Component, Focusable {
       flow: this,
       questionIndex: this.tab,
       questionId: question?.id,
-      hitKind: hit === undefined ? 'inert' : hit === OTHER_ROW ? 'other' : hit === MARKER_ROW ? 'marker' : 'option',
+      hitKind: hit === undefined ? 'inert' : hit === OTHER_ROW ? 'other' : hit === MARKER_ROW ? 'marker' : hit === PLAN_FEEDBACK_ROW ? 'other' : 'option',
       hit,
       row,
       editingOther: this.editingOther,
       width: this.lastContentWidth,
+      ...(this.planReview === undefined ? {} : { planStep: this.planStep }),
     }
     this.mousePressGesture = gesture
     return gesture
@@ -896,6 +906,9 @@ export class QuestionFlow implements Component, Focusable {
       || gesture.editingOther !== this.editingOther
       || gesture.width !== this.lastContentWidth) return
     if (gesture.questionId !== question?.id) return
+    // FR7: a plan step transition between press and release makes the old
+    // gesture inert — the same painted cells in another step are another verb.
+    if (gesture.planStep !== undefined && this.planReview !== undefined && gesture.planStep !== this.planStep) return
 
     if (gesture.hitKind === 'action') {
       if (x === undefined || gesture.action === undefined) return
@@ -1649,7 +1662,12 @@ export class QuestionFlow implements Component, Focusable {
         this.planFeedbackInput.handleInput(data)
         return
       }
+      // Every editing key belongs to the shared Input; a REAL value change is
+      // the same answer-mutation fact the generic free-text path reports
+      // (freezes a timed claim and keeps the park/reopen draft live).
+      const before = this.planFeedbackInput.getValue()
       this.planFeedbackInput.handleInput(data)
+      if (this.planFeedbackInput.getValue() !== before) this.notifyMutation()
       return
     }
     if (this.planStep === 'reading') {

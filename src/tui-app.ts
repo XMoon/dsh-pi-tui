@@ -4596,7 +4596,7 @@ export class TuiApp {
   private openWorkOwners: ReadonlySet<TranscriptMessage> = new Set()
   /**
    * The reveal owner memoized for the CURRENT (target, preset, surface,
-   * window) identity. `revealedSearchOwner()` is consulted once per projected
+   * window) identity. `temporaryRevealOwner()` is consulted once per projected
    * row and once per Work span / cluster component, so resolving it freshly
    * each time would re-project the whole transcript per row — an accidental
    * O(n^2) while a search is active. The memo key holds every input the
@@ -5085,6 +5085,11 @@ export class TuiApp {
     // externally supplied store must not retain the dead surface).
     this.statusStoreUnsubscribe = this.statusStore.subscribe(() => {
       this.renderViewerSubjectBar()
+      // The composer's plan-mode hint follows the committed collaboration
+      // fact (the same projection the footer badge reads): event-driven and
+      // hydration commits both land here, so a pending selection from the
+      // official plan projection is never mistaken for a committed mode.
+      this.applyComposerPlanHint()
       // B4-B: the hidden-entry grant preflights the complete Footer with
       // `↓ view` enabled, so the grant does not depend on the Footer's
       // currently committed height. No post-compose convergence is needed.
@@ -10015,7 +10020,7 @@ export class TuiApp {
    * silently reopen on the next rebuild). */
   toggleWorkSpan(owner: TranscriptMessage): void {
     const span = this.eligibleWorkSpans().find(candidate => candidate.owner === owner)
-    const revealed = span !== undefined && this.workSpanRevealedBySearch(span)
+    const revealed = span !== undefined && this.workSpanTemporarilyRevealed(span)
     const revokesReveal = this.searchTargetInsideWork(owner)
     if (this.expandedWorkOwners.has(owner) || revealed) {
       this.mutateTranscriptDisclosure(() => {
@@ -10034,7 +10039,7 @@ export class TuiApp {
    * lives inside this cluster (same ownership rule as Work). */
   toggleContextCluster(owner: TranscriptMessage): void {
     const cluster = this.canonicalStructureIndex().clusterByMember.get(owner)
-    const revealed = cluster !== undefined && this.clusterRevealedBySearch(cluster)
+    const revealed = cluster !== undefined && this.clusterTemporarilyRevealed(cluster)
     const revokesReveal = this.searchTargetInsideCluster(owner)
     if (this.expandedContextClusterOwners.has(owner) || revealed) {
       this.mutateTranscriptDisclosure(() => {
@@ -10258,7 +10263,7 @@ export class TuiApp {
 
     const message = target.message
     let changed = false
-    const messageReveal = this.searchForcesMessageExpanded(message)
+    const messageReveal = this.forcesMessageExpandedTemporarily(message)
     // Long-user disclosure has a real Host owner on either surface when the
     // navigation-time ownership/affordance latch admitted the reveal.
     if (isUserMessageDisclosureCandidate(message) && messageReveal
@@ -10317,7 +10322,7 @@ export class TuiApp {
     if (this.fullscreen !== undefined && target.match.source.kind === 'subcall-field') {
       let subCallChanged = false
       for (const subCallId of target.match.source.subCallIds) {
-        if (!this.searchForcesSubCallExpanded(subCallId) || this.subCallExpanded.has(subCallId)) continue
+        if (!this.forcesSubCallExpandedTemporarily(subCallId) || this.subCallExpanded.has(subCallId)) continue
         this.subCallExpanded.add(subCallId)
         subCallChanged = true
       }
@@ -10591,7 +10596,13 @@ export class TuiApp {
    * compacts at the current width and still offers an expand affordance; the
    * Host-ownership decision is LATCHED at navigation time (see
    * {@link setTranscriptSearchTarget}). */
-  private searchForcesMessageExpanded(message: TranscriptMessage): boolean {
+  private forcesMessageExpandedTemporarily(message: TranscriptMessage): boolean {
+    // The ONE-SHOT plan inspection (FR7 A4) opens its located card for the
+    // reading step: an explicit user collapse of THAT card wins over the
+    // inspection lease (the lease never fights the user's own disclosure).
+    if (this.planInspection?.message === message) {
+      return this.expandedOverride.get(message) !== false
+    }
     if (!this.searchRevealGranted || this.searchTarget?.message !== message) return false
     if (isUserMessageDisclosureCandidate(message)) {
       if (!this.searchRevealHostOwned) return false
@@ -10645,7 +10656,10 @@ export class TuiApp {
   }
 
   /** Whether the current search target's PTC path contains this sub-call. */
-  private searchForcesSubCallExpanded(subCallId: string): boolean {
+  private forcesSubCallExpandedTemporarily(subCallId: string): boolean {
+    // The plan inspection's located PTC child (the plan body lives inside the
+    // nested card) is opened for the reading step only.
+    if (this.planInspection?.subCallId === subCallId) return true
     if (!this.searchRevealGranted) return false
     if (this.searchSuppressedSubCalls.has(subCallId)) return false
     const source = this.searchTarget?.match.source
@@ -10814,7 +10828,7 @@ export class TuiApp {
       // The temporary search reveal counts as a VISIBLE expanded user
       // disclosure so one Ctrl+O press collapses it (instead of expanding
       // Thought roots while the bubble stays open).
-      if (this.expandedOverride.get(message) !== true && !this.searchForcesMessageExpanded(message)) continue
+      if (this.expandedOverride.get(message) !== true && !this.forcesMessageExpandedTemporarily(message)) continue
       if (!this.isHostUserDisclosure(message)) continue
       if (this.userMessageCompactsAtCurrentWidth(message)) return true
     }
@@ -10933,7 +10947,7 @@ export class TuiApp {
     if (target === undefined) return undefined
     if (!isFoldableMessageDisclosure(target) || target.kind === 'thinking') return undefined
     if (this.surfacedInteractionFailsOpen(target)) return undefined
-    if (!this.searchForcesMessageExpanded(target)) return undefined
+    if (!this.forcesMessageExpandedTemporarily(target)) return undefined
     return this.messageRowMaterialized(target, projectionExpanded) ? target : undefined
   }
 
@@ -11003,7 +11017,7 @@ export class TuiApp {
       // it is not already covered by an ancestor full reveal (regular Focus
       // root, plan §21). A latent manual owner changes nothing on screen, so it
       // must not arm the collapse branch.
-      if (this.workSpanRevealedBySearch(span) || this.workManualOwnerContributes(span)) return true
+      if (this.workSpanTemporarilyRevealed(span) || this.workManualOwnerContributes(span)) return true
     }
     if (!this.contextClusterDefaultExpanded()) {
       for (const cluster of new Set(this.canonicalStructureIndex().clusterByMember.values())) {
@@ -11070,7 +11084,7 @@ export class TuiApp {
     }
     const target = this.searchRevealedMessage()
     return target !== undefined && isDeliveredFilesDisclosureCandidate(target)
-      && this.searchForcesMessageExpanded(target)
+      && this.forcesMessageExpandedTemporarily(target)
       && this.messageRowMaterialized(target, projectionExpanded)
   }
 
@@ -11620,7 +11634,7 @@ export class TuiApp {
     const expandedClusters = new Set(this.effectiveExpandedClusterOwners())
     // The temporary search reveal opens exactly the containers that HIDE the
     // target row, resolved through the same path the dismissal promotes.
-    const revealed = this.revealedSearchOwner()
+    const revealed = this.temporaryRevealOwner()
     const expandedWorkOwners = new Set(workOwners)
     for (const owner of revealed ?? []) {
       if (owner.kind === 'work') expandedWorkOwners.add(owner.owner)
@@ -11816,20 +11830,27 @@ export class TuiApp {
 
   /** The GRANTED reveal's container path (undefined when no reveal is active).
    * The stable ancestry is memoized; the current open state is not. */
-  private revealedSearchOwner(): SearchRevealPath | undefined {
+  private temporaryRevealOwner(): SearchRevealPath | undefined {
+    // The plan inspection's one-shot presentation owns its own lease: its
+    // located card's hiding ancestors open exactly like a search navigation
+    // (the SAME reveal path resolution — never a second reveal owner).
+    const planTarget = this.planInspection?.message
+    if (planTarget !== undefined && this.expandedOverride.get(planTarget) !== false) {
+      return this.revealPathFromAncestry(this.searchRevealAncestryFor(planTarget))
+    }
     const target = this.searchRevealedMessage()
     if (target === undefined) return undefined
     return this.revealPathFromAncestry(this.searchRevealAncestry(target))
   }
 
   /** Whether one Work span is opened ONLY by the granted search reveal. */
-  private workSpanRevealedBySearch(span: TranscriptWorkSpan): boolean {
-    return this.revealedSearchOwner()?.some(owner => owner.kind === 'work' && owner.owner === span.owner) === true
+  private workSpanTemporarilyRevealed(span: TranscriptWorkSpan): boolean {
+    return this.temporaryRevealOwner()?.some(owner => owner.kind === 'work' && owner.owner === span.owner) === true
   }
 
   /** Whether one ambient cluster is opened ONLY by the granted search reveal. */
-  private clusterRevealedBySearch(cluster: ContextCluster): boolean {
-    return this.revealedSearchOwner()
+  private clusterTemporarilyRevealed(cluster: ContextCluster): boolean {
+    return this.temporaryRevealOwner()
       ?.some(owner => owner.kind === 'context-cluster' && owner.owner === cluster.owner) === true
   }
 
@@ -11839,7 +11860,7 @@ export class TuiApp {
    * is operable. */
   private contextClusterExpanded(cluster: ContextCluster): boolean {
     return this.expandedContextClusterOwners.has(cluster.owner)
-      || this.clusterRevealedBySearch(cluster)
+      || this.clusterTemporarilyRevealed(cluster)
       || this.regularBulkOwnsTurn(cluster.turn)
       || this.contextClusterDefaultExpanded()
   }
@@ -12161,7 +12182,7 @@ export class TuiApp {
    * recent-turn bulk, or a regular Focus root full-reveal) or to the granted
    * search reveal whose target is one of its members. */
   private workSpanExpanded(span: TranscriptWorkSpan): boolean {
-    return this.openWorkOwners.has(span.owner) || this.workSpanRevealedBySearch(span)
+    return this.openWorkOwners.has(span.owner) || this.workSpanTemporarilyRevealed(span)
   }
 
   /** Whether one turn's contiguous Process run is still OPEN at the transcript
@@ -17062,7 +17083,7 @@ export class TuiApp {
     if (message.kind === 'thinking') {
       if (this.effectiveThinkingExpanded(message)) {
         if (this.thinkingExpanded) this.expandedOverride.set(message, false)
-        else if (this.searchForcesMessageExpanded(message)) this.expandedOverride.set(message, false)
+        else if (this.forcesMessageExpandedTemporarily(message)) this.expandedOverride.set(message, false)
         else this.expandedOverride.delete(message)
         if (revokesSearchReveal) this.suppressSearchReveal()
       } else {
@@ -17085,7 +17106,7 @@ export class TuiApp {
     } else if (this.expandedOverride.get(message) === true) {
       this.expandedOverride.delete(message)
       if (revokesSearchReveal) this.suppressSearchReveal()
-    } else if (this.searchForcesMessageExpanded(message)) {
+    } else if (this.forcesMessageExpandedTemporarily(message)) {
       // The card is open only because of the search reveal: a click must
       // collapse it explicitly (a deleted override would let search re-open).
       this.expandedOverride.set(message, false)
@@ -17324,6 +17345,9 @@ export class TuiApp {
     this.subCallExpanded.clear()
     this.subCallHitsByMessage.clear()
     this.subCallExpandedRevision += 1
+    // The one-shot plan inspection is session-scoped too: a switched-in
+    // session must never inherit the old session's located card or its lease.
+    this.planInspection = undefined
     // The Workflow disclosure state, its seen-snapshots and its render-time
     // hit map are session-scoped too: a switched-in session must never
     // inherit the old session's run/phase choices or retain its messages.
@@ -17379,16 +17403,10 @@ export class TuiApp {
    */
   setPlanMode(active: boolean, pending?: boolean): void {
     this.planMode = active
-    // The composer's plan hint state (presentation-only; the same projection
-    // drives the footer badge — never a second plan authority).
-    this.planHint = active
-      ? pending === true
-        ? 'Plan mode · change pending'
-        : 'Plan mode · describe the task'
-      : pending === true
-        ? 'Plan requested · pending'
-        : undefined
-    // The collaboration projection's store notify re-renders the footer.
+    // The collaboration projection's store notify re-renders the footer AND
+    // re-derives the composer hint from the SAME committed fact (one plan
+    // projection, two presentations — never a second plan authority). An
+    // omitted `pending` keeps the projection's own fact untouched.
     this.projectStatus({
       collaboration: {
         plan: pending === undefined
@@ -17407,6 +17425,23 @@ export class TuiApp {
 
   /** The current plan-mode composer hint (undefined = none). */
   private planHint: string | undefined
+
+  /** Re-derive the composer plan hint from the COMMITTED collaboration fact
+   * (the official plan projection's effective/pending state) and repaint the
+   * placeholder only when it actually changed. */
+  private applyComposerPlanHint(): void {
+    const plan = this.statusStore.snapshot().collaboration.plan
+    const hint = plan.effective
+      ? plan.pending === true
+        ? 'Plan mode · change pending'
+        : 'Plan mode · describe the task'
+      : plan.pending === true
+        ? 'Plan requested · pending'
+        : undefined
+    if (hint === this.planHint) return
+    this.planHint = hint
+    this.refreshComposerPlaceholder()
+  }
 
   /** Refresh the host editor's placeholder: a child viewer's own placeholder
    * wins; the plan hint shows only for the MAIN subject's EMPTY prompt-mode
@@ -20357,7 +20392,7 @@ export class TuiApp {
     // The temporary search reveal wins over a stale explicit override while it
     // is GRANTED (a new navigation re-opens the card); an explicit collapse
     // revokes the grant instead of writing user state.
-    if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
+    if (!ignoreSearch && this.forcesMessageExpandedTemporarily(message)) return true
     const override = this.expandedOverride.get(message)
     if (override !== undefined) return override
     return this.thinkingExpanded
@@ -20407,7 +20442,7 @@ export class TuiApp {
       // Neither an operable Ctrl+O owner NOR the browser command exists: the
       // tail FAILS OPEN rather than hiding files behind a dead entry.
       if (!masterOwned && !commandOwned) return true
-      if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
+      if (!ignoreSearch && this.forcesMessageExpandedTemporarily(message)) return true
       // A per-card override is a MASTER-owned durable choice: on a surface
       // whose Ctrl+O owns something else it has no operator, so it must never
       // silently expand the tail there (that leaves a permanent expansion with
@@ -20443,7 +20478,7 @@ export class TuiApp {
       // The temporary search reveal wins over a stale explicit override while
       // it is GRANTED (a new navigation re-opens the card); an explicit
       // collapse revokes the grant instead of writing user state.
-      if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
+      if (!ignoreSearch && this.forcesMessageExpandedTemporarily(message)) return true
       const override = this.expandedOverride.get(message)
       if (override !== undefined) return override
       if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) return false
@@ -20458,7 +20493,7 @@ export class TuiApp {
     if ('turn' in message && this.openWorkRunMembers.has(message)) {
       if (this.fullscreen !== undefined) {
         return this.expandedOverride.get(message) === true
-          || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+          || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
       }
       return true
     }
@@ -20467,7 +20502,7 @@ export class TuiApp {
         // Fullscreen: explicit secondary disclosure only (plus the temporary
         // search reveal, which never writes the user override).
         return this.expandedOverride.get(message) === true
-          || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+          || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
       }
       // Regular: no mouse, so no compact secondary affordance — ANY
       // expanded Focus root (Ctrl+O-derived OR manually revealed /
@@ -20494,11 +20529,11 @@ export class TuiApp {
       // reveals it.
       if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) {
         return this.expandedOverride.get(message) === true
-          || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+          || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
       }
       return this.transcriptDetailExpanded
         || this.expandedOverride.get(message) === true
-        || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+        || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
     }
     // A COMMAND owns its own standalone disclosure, independent of the
     // Focus root (post-PR166 plan §11): outside fullscreen Focus the
@@ -20510,16 +20545,16 @@ export class TuiApp {
     if (message.kind === 'command') {
       if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) {
         return this.expandedOverride.get(message) === true
-          || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+          || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
       }
       return this.transcriptDetailExpanded
         || this.expandedOverride.get(message) === true
-        || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+        || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
     }
     return (message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
       && (message.turn >= boundary
         || this.expandedOverride.get(message) === true
-        || (!ignoreSearch && this.searchForcesMessageExpanded(message)))
+        || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message)))
   }
 
   /**
@@ -20586,7 +20621,7 @@ export class TuiApp {
     // contract — no mouse, so a capped diff would be unreadable); fullscreen
     // keeps the per-card override semantics.
     const fullReveal = this.expandedOverride.get(message) === true
-      || this.searchForcesMessageExpanded(message)
+      || this.forcesMessageExpandedTemporarily(message)
       || !this.messageFoldDisclosureAvailable()
       || this.surfacedInteractionFailsOpen(message)
       || (this.fullscreen === undefined && (insideFocusSecondary || insideOpenWorkRun))
@@ -22005,7 +22040,7 @@ export class TuiApp {
     // bounded preview while the root stays collapsed.
     const bodyExpanded = this.fullscreen === undefined
       ? rootExpanded
-      : this.subCallExpanded.has(child.subCallId ?? '') || this.searchForcesSubCallExpanded(child.subCallId ?? '')
+      : this.subCallExpanded.has(child.subCallId ?? '') || this.forcesSubCallExpandedTemporarily(child.subCallId ?? '')
     const disclosure = bodyExpanded ? '▼' : '▶'
     const icon = iconPrefix(toolIconSemantic(child.name), this.iconStyle)
     const head = color.textDim(`${disclosure} ${icon}${subTitle}${subSummary === '' ? '' : ` ${subSummary}`}`)
@@ -22037,6 +22072,30 @@ export class TuiApp {
       if (command !== '') {
         card.addChild(new Text(truncateToWidth(`${pad}  ${this.shellPrompt(child.name)}${color.textDim(sanitizedPhysicalLine(command))}`, width, '…'), 0, 0))
         rows += 1
+      }
+      // A sub-call with a PRESENTER generic body (the official plan-review
+      // call among them) shows that content exactly like the top-level card
+      // would: the presenter is the ONE card-presentation authority on both
+      // levels, so a running exit_plan_mode child is readable before it
+      // settles (the plan body lives in the call arguments, not the result).
+      const callView = isVisualToolName(child.name) ? undefined : this.present?.call(child.name, child.args)
+      if (callView !== undefined && callView.card === 'generic' && (callView.content?.length ?? 0) > 0) {
+        const contentStart = row + rows
+        let contentRows = 0
+        for (const block of callView.content ?? []) {
+          const body = block.type === 'text' ? block.text : this.blockDisplayText(block)
+          for (const line of sanitizeDisplayText(body).split('\n')) {
+            card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
+            contentRows += 1
+          }
+        }
+        if (contentRows > 0) {
+          // The presenter body is a projection of the call arguments; anchor
+          // it as the child's args region (never enumerated — the header
+          // summary already owns the enumerable args cells).
+          regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'args' }), anchorRow: contentStart, rowStart: contentStart, rowEnd: contentStart + contentRows, enumerable: false })
+          rows += contentRows
+        }
       }
       if (isVisualToolName(child.name)) {
         const resultStart = row + rows
@@ -22080,7 +22139,7 @@ export class TuiApp {
     // because the user expanded it earlier AND because the search target's
     // path covers it. An explicit collapse must suppress the search force in
     // that case too, or the body reopens immediately.
-    const searchForced = this.searchForcesSubCallExpanded(subCallId)
+    const searchForced = this.forcesSubCallExpandedTemporarily(subCallId)
     if (this.subCallExpanded.has(subCallId)) {
       this.subCallExpanded.delete(subCallId)
       if (searchForced) this.searchSuppressedSubCalls.add(subCallId)
@@ -29083,31 +29142,39 @@ export class TuiApp {
    * The plan-review inspection (FR7 A4): a ONE-SHOT read-only viewport
    * request. It resolves the OFFICIAL `intent.callId` against the CURRENT
    * mounted transcript (native `tool.callId` or a nested PTC `subCallId`),
-   * grants the existing temporary search-reveal machinery for exactly the
-   * hiding ancestors, scrolls the SAME fullscreen ScrollView to the card's
-   * real rendered row, and reports whether the locate succeeded. It never
-   * mutates the question, never creates a second ScrollView, and never
-   * interprets headings/titles as identity.
+   * commits a DEDICATED one-shot presentation (the located card and its
+   * hiding ancestors open exactly like a search navigation, through the SAME
+   * reveal path resolution — no search target, no synthetic match, no second
+   * ScrollView), scrolls the same fullscreen viewport to the card's measured
+   * row, and reports whether the locate was PROVEN. Every failed proof rolls
+   * the presentation back before returning, so the caller's fallback never
+   * inherits a half-applied reveal.
+   *
+   * The locate requires BOTH identities: the official Question's Session and
+   * the current display subject's Session must be known and equal; an unknown
+   * identity is not a proven locate (fail closed to the detail fallback).
    */
   private inspectPlanReview(state: QuestionState, reviewSessionId: string | undefined): boolean {
     const question = state.flow.planReviewQuestionForHost()
     const callId = question?.intent?.callId
     if (question === undefined || callId === undefined || callId === '') return false
-    // Currentness: the flow must still be the live seat owner (the caller
-    // already checked, but the reveal writes projection state).
+    // Currentness: the flow must still be the live seat owner.
     if (this.activeQuestions !== state) return false
-    // Currentness: the OFFICIAL Question's Session must be the CURRENT display
-    // subject. An unknown identity on either side falls back to the callId's
-    // own uniqueness inside the displayed transcript (fail closed: a miss
-    // becomes the detail fallback, never a guessed plan card).
+    // Currentness: the official Question's Session must PROVE it is the
+    // current display subject. An unknown identity on either side fails
+    // closed — the detail fallback is the honest degradation.
     const displaySubject = this.statusStore.snapshot().view.subject
     const displaySessionId = displaySubject.kind === 'main'
       ? this.mainSessionIdText
       : this.displaySubjectPresentation?.sessionId
-    if (reviewSessionId !== undefined && displaySessionId !== undefined && reviewSessionId !== displaySessionId) return false
+    if (reviewSessionId === undefined || displaySessionId === undefined) return false
+    if (reviewSessionId !== displaySessionId) return false
+    // A locate without a fullscreen viewport has nothing to address.
+    const scroll = this.fullscreenScroll
+    if (scroll === undefined) return false
     // Locate the tool card in the CURRENT projection: native callId first,
     // then a recursive PTC sub-call walk (the sub-call renders INSIDE its
-    // root card, so the reveal targets the ROOT and the sub-call id).
+    // root card, so the reveal targets the ROOT message and the child id).
     let ptcSubCallId: string | undefined
     const matchesCard = (tool: Extract<TranscriptMessage, { kind: 'tool' }>): boolean => {
       if (tool.name !== 'exit_plan_mode') return false
@@ -29130,32 +29197,25 @@ export class TuiApp {
     }
     const card = findCard(this.messages)
     if (card === undefined) return false
-    // Grant the temporary reveal for exactly this card (the existing
-    // search-reveal machinery opens hiding ancestors without writing manual
-    // disclosure state) and let the row map re-measure.
-    this.revealSearchMatch(card)
-    // A nested PTC sub-call needs its own forced expansion so the plan body
-    // is visible inside the root card (the same temporary mechanism the
-    // search reveal uses for subcall fields).
-    if (ptcSubCallId !== undefined && !this.subCallExpanded.has(ptcSubCallId)) {
-      this.subCallExpanded.add(ptcSubCallId)
-      this.planInspectedSubCallId = ptcSubCallId
-      this.subCallExpandedRevision += 1
-      this.clearFocusLiveHeightState()
-      this.rebuildMessages('search-presentation')
-    } else {
-      this.refreshMessageRows()
-    }
-    // Resolve the card's document row in the fresh row map.
+    // Commit the one-shot presentation and re-project: the card and the
+    // hiding ancestors open, and (for a PTC target) the nested child opens.
+    this.planInspection = ptcSubCallId === undefined
+      ? { message: card }
+      : { message: card, subCallId: ptcSubCallId }
+    this.clearFocusLiveHeightState()
+    this.rebuildMessages('focus-disclosure')
+    // Prove the target's real rendered row in the fresh row map; a failure
+    // ROLLS THE PRESENTATION BACK so the fallback inherits nothing.
     let docRow = 0
     let found = false
     for (const entry of this.messageRows) {
       if (entry.message === card) { found = true; break }
       docRow += entry.height
     }
-    if (!found) return false
-    const scroll = this.fullscreenScroll
-    if (scroll === undefined) return false
+    if (!found) {
+      this.releasePlanInspectionReveal()
+      return false
+    }
     scroll.updateLayout(this.transcriptContentHeight, scroll.viewportHeight, () => this.requestRender())
     const targetStart = this.transcriptWelcomeHeight + docRow
     scroll.scrollTo(Math.max(0, targetStart - Math.floor(scroll.viewportHeight / 3)), { disableFollow: true })
@@ -29163,27 +29223,23 @@ export class TuiApp {
     return true
   }
 
-  /** Release the plan inspection's temporary reveal grant (reading-step Esc
-   * back, or the question settling): the target keeps any user-opened
-   * disclosure, but the QUESTION never leaves a search-pinned reveal or a
-   * forced PTC sub-call expansion behind. Presentation-only. */
+  /** Release the plan inspection's one-shot presentation (reading-step Esc
+   * back, a failed locate, or the question settling): the located card keeps
+   * any user-opened disclosure, but the QUESTION never leaves a pinned reveal
+   * or a forced PTC expansion behind. Presentation-only. */
   private releasePlanInspectionReveal(): void {
-    // Remove only the plan's OWN forced sub-call expansion — a user-opened
-    // sub-call (already in the set before the inspection) stays open.
-    if (this.planInspectedSubCallId !== undefined) {
-      this.subCallExpanded.delete(this.planInspectedSubCallId)
-      this.subCallExpandedRevision += 1
-      this.planInspectedSubCallId = undefined
-    }
-    this.searchSuppressedSubCalls.clear()
-    const hadTarget = this.searchTarget !== undefined
-    this.setTranscriptSearchPresentation({ matchMessages: this.searchMatchMessages, target: undefined, grantReveal: false })
-    if (hadTarget) this.rebuildMessages('search-presentation')
+    if (this.planInspection === undefined) return
+    this.planInspection = undefined
+    this.clearFocusLiveHeightState()
+    this.rebuildMessages('focus-disclosure')
   }
 
-  /** The PTC sub-call id the CURRENT plan inspection forced open (released
-   * with the inspection; never a user-opened fact). */
-  private planInspectedSubCallId: string | undefined
+  /** The ONE-SHOT plan inspection presentation (FR7 A4): the card the current
+   * reading step is located on, plus the PTC child that must open inside it.
+   * Presentation-only display state; it never enters the question, the wire or
+   * the transcript corpus, and it is released by the reading step / settle /
+   * a failed locate / a session switch. */
+  private planInspection: { readonly message: TranscriptMessage; readonly subCallId?: string } | undefined
 
   /** Mount one flow into the editor seat and make it the active one. Every
    * step below that can run a synchronous callback is followed by an identity

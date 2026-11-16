@@ -61,11 +61,16 @@ const directPlanPresenter = {
   result: () => undefined,
 }
 
+const SESSION = 'session-plan-review'
+
 function scene(
   messages: TranscriptMessage[],
   width = 100,
   height = 24,
   options: TuiAppOptions = {},
+  /** The official Question's session identity; `null` means "unknown" (an
+   * explicit `undefined` argument would re-trigger the default). */
+  reviewSessionId: string | null = SESSION,
 ): Scene {
   const vt = new VirtualTerminal(width, height)
   let cancelledCount = 0
@@ -73,6 +78,9 @@ function scene(
   app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, options)
   app.start()
   startedApps.add(app)
+  // The production identity facts: the live session id on the welcome card and
+  // the official Question's own session id in the caller-owned status.
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
   app.setFullscreen(true)
   app.setTranscript(messages)
   const settle = app.askQuestions([{
@@ -85,7 +93,7 @@ function scene(
       { label: 'Keep planning', description: 'Stay in plan mode.' },
     ],
     intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
-  }])
+  }], undefined, reviewSessionId === null ? {} : { reviewSessionId }, false)
   return { vt, app, settle, cancelled: () => cancelledCount }
 }
 
@@ -167,38 +175,44 @@ test('a missing plan card (no logged call) degrades View to the question-detail 
   app.stop()
 })
 
-test('the fallback page keeps the plan tail reachable by paging (no silent cut)', async () => {
-  const longPlan = `# Long Plan\n${Array.from({ length: 80 }, (_, i) => `## Step ${i}\ndetail line ${i}`).join('\n')}`
+test('a long plan fallback pages to the very tail (no 256-row silent cut)', async () => {
+  // 400 plan lines: far beyond the generic page cap. The fallback must reach
+  // the LAST line by paging, and must never claim the tail is visible early.
+  const lines = Array.from({ length: 400 }, (_, i) => `step line ${i} unique-marker-${i}`)
+  const longPlan = `# Long Plan\n${lines.join('\n')}`
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
   app.setFullscreen(true)
-  app.setTranscript(transcript('call-plan-1'))
+  // No logged call for this question: View CANNOT locate a card.
+  app.setTranscript(transcript())
   const settle = app.askQuestions([{
     id: 'plan-review',
     question: 'Approve this plan and leave plan mode?',
     header: 'Plan review',
     detail: longPlan,
-    options: [
-      { label: 'Approve' },
-      { label: 'Keep planning' },
-    ],
-    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
-  }])
-  // No inspection installed path is exercised through the API directly: the
-  // card exists, but force the fallback by clearing the capability.
-  vt.sendInput('\r') // View → the card locates; but this scene has the card — use the fallback via API instead.
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve' },
+  }], undefined, { reviewSessionId: SESSION }, false)
   await vt.waitForRender()
-  // (The reading step succeeded; go back and verify the fallback page
-  // separately through the flow's degrade path.)
+  vt.sendInput('\r') // View -> fallback (no provable target)
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Full review text'), `the fallback must render:\n${view(vt)}`)
+  assert.ok(!view(vt).includes('unique-marker-399'), 'precondition: the tail starts hidden')
+  // Page down until the LAST line is visible (bounded: a silent cap fails
+  // loudly instead of hanging).
+  for (let page = 0; page < 60 && !view(vt).includes('unique-marker-399'); page += 1) {
+    vt.sendInput('\x1b[6~') // PageDown
+    await vt.waitForRender()
+  }
+  assert.ok(view(vt).includes('unique-marker-399'), `the fallback tail must be reachable:\n${view(vt)}`)
+  // Paging never settles the question: Esc back, then the official dismiss.
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  // Settle the flow (cancel through the official Esc) so no promise leaks
-  // past the test body.
   vt.sendInput('\x1b')
   await settle.then(() => {}, () => {})
-  assert.ok(view(vt).includes('View plan') || view(vt).length >= 0)
   app.stop()
 })
 
@@ -229,14 +243,58 @@ test('settling the plan question releases the temporary reveal and forced sub-ca
   await settle.then(() => {}, () => {})
   await vt.waitForRender()
   assert.equal(app.transcriptSearchPresentationForTest(), undefined,
-    'the settled plan question must leave no pinned reveal')
-  const subCallSet = (app as unknown as { subCallExpanded: Set<string> }).subCallExpanded
-  assert.equal(subCallSet.has('call-plan-1'), false,
-    'the plan-forced sub-call expansion must be released')
+    'the settled plan question must leave no search presentation behind')
+  const internals = app as unknown as { planInspection?: unknown; subCallExpanded: Set<string> }
+  assert.equal(internals.planInspection, undefined,
+    'the one-shot plan inspection presentation must be released on settle')
+  assert.equal(internals.subCallExpanded.has('call-plan-1'), false,
+    'the plan inspection never mints a durable sub-call expansion')
   app.stop()
 })
 
-test('the inspection matches a nested PTC sub-call by its subCallId', async () => {
+test('an identity mismatch fails closed to the detail fallback (no reveal, no scroll)', async () => {
+  const { vt, app, settle } = scene(transcript('call-plan-1'), 100, 24, { present: directPlanPresenter }, 'session-other')
+  await vt.waitForRender()
+  app.scrollToBottom({ disableFollow: true })
+  await vt.waitForRender()
+  const parked = app.fullscreenScrollForTest()?.scrollTop ?? -1
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Full review text'), `the mismatch degrades to the fallback:\n${view(vt)}`)
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
+    'a failed locate commits no inspection presentation')
+  assert.equal(app.fullscreenScrollForTest()?.scrollTop, parked,
+    'a failed locate never moves the transcript viewport')
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined,
+    'a failed locate creates no search presentation')
+  vt.sendInput('\x1b') // back to the decision list
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // official dismiss
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('an unknown Question session identity fails closed (no callId-only locate)', async () => {
+  const { vt, app, settle } = scene(transcript('call-plan-1'), 100, 24, { present: directPlanPresenter }, null)
+  await vt.waitForRender()
+  app.scrollToBottom({ disableFollow: true })
+  await vt.waitForRender()
+  const parked = app.fullscreenScrollForTest()?.scrollTop ?? -1
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Full review text'), `an unknown identity degrades to the fallback:\n${view(vt)}`)
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
+    'an unproven identity commits no inspection presentation')
+  assert.equal(app.fullscreenScrollForTest()?.scrollTop, parked,
+    'an unproven identity never moves the transcript viewport')
+  vt.sendInput('\x1b') // back to the decision list
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // official dismiss
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('the inspection matches a nested PTC sub-call by its subCallId and shows the plan body', async () => {
   // Build a PTC root whose nested sub-call is the exit_plan_mode card.
   const root: Extract<TranscriptMessage, { kind: 'tool' }> = {
     kind: 'tool', turn: 1, name: 'run_code', callId: 'call-root',
@@ -254,7 +312,7 @@ test('the inspection matches a nested PTC sub-call by its subCallId', async () =
       kind: 'user' as const, turn: 2 + i, text: `filler ${i}`,
     })),
   ]
-  const { vt, app, settle } = scene(messages)
+  const { vt, app, settle } = scene(messages, 100, 24, { present: directPlanPresenter })
   await vt.waitForRender()
   app.scrollToBottom({ disableFollow: true })
   await vt.waitForRender()
@@ -262,6 +320,9 @@ test('the inspection matches a nested PTC sub-call by its subCallId', async () =
   await vt.waitForRender()
   const reading = view(vt)
   assert.ok(reading.includes('Reading the submitted plan'), `the nested sub-call locates:\n${reading}`)
+  // The RUNNING nested call's plan body comes from the presenter's generic
+  // view of the call arguments (never from a result that does not exist yet).
+  assert.ok(reading.includes('## Scope'), `the nested card must show the plan body:\n${reading}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
   vt.sendInput('\x1b[B')

@@ -1253,7 +1253,10 @@ Every card renders through the Web parity render intents in
   only after settle). The Remote Client presenter derives the SAME generic
   card presentation-only from the logged call arguments (`plan` a non-empty
   string starting with a `#` heading; anything else keeps the generic tool
-  row), so replay and the Remote branch show the same card. The card is the
+  row), so replay and the Remote branch show the same card. A PTC-dispatched
+  `exit_plan_mode` sub-call renders the presenter's generic body inside its
+  nested card for the same reason (the plan body lives in the call arguments,
+  so a running child is readable before its result exists). The card is the
   read target of the plan-review Question's one-shot inspection (see
   `overlay-focus.md` §6.0); a card-less review degrades to the question's own
   detail text, never a fabricated card.

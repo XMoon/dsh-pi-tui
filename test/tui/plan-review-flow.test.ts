@@ -345,3 +345,74 @@ test('Fullscreen pointer: the fallback Back returns to the decision list without
   assert.ok(lines.join('\n').includes('View plan'), `Back returns to the decision list:\n${lines.join('\n')}`)
   assert.deepEqual(settled, [], 'Back never answers')
 })
+
+test('a plan request with several non-approve options still renders exactly three rows', () => {
+  const flow = makeFlow([planQuestion({
+    options: [
+      { label: 'Approve' },
+      { label: 'Keep planning' },
+      { label: 'Ask something else' },
+    ],
+  })])
+  flow.setMaxRows(24)
+  flow.setPlanInspection(() => true)
+  const lines = stripLines(flow)
+  const joined = lines.join('\n')
+  const decisionRows = lines.filter(line => /^(>| ) (View plan|Keep planning…|Approve plan)$/.test(line))
+  assert.equal(decisionRows.length, 3, `exactly three decision rows:\n${joined}`)
+  assert.ok(joined.includes('Keep planning…'), `the FIRST non-approve option is the keep class:\n${joined}`)
+  assert.ok(!joined.includes('Ask something else'), `extra non-approve options never add rows:\n${joined}`)
+})
+
+test('a real feedback edit fires the answer-mutation hook and keeps the draft snapshot live', () => {
+  let mutations = 0
+  const drafts: unknown[] = []
+  const flow = new QuestionFlow(
+    [planQuestion()],
+    () => {},
+    () => {},
+    () => { mutations += 1 },
+    draft => { drafts.push(draft) },
+  )
+  flow.setMaxRows(24)
+  flow.setPlanInspection(() => true)
+  flow.handleInput('\x1b[B') // Keep planning…
+  flow.handleInput('\r')
+  assert.equal(mutations, 0, 'entering the feedback step is not itself an answer mutation')
+  // Cursor-only keys never mutate.
+  flow.handleInput('\x1b[D')
+  flow.handleInput('\x1b[C')
+  assert.equal(mutations, 0, 'cursor moves never mutate')
+  // The first real character freezes the timed claim and snapshots the draft.
+  flow.handleInput('n')
+  assert.equal(mutations, 1, 'the first edited character is a real answer mutation')
+  assert.equal((drafts.at(-1) as { answers: Array<{ custom: string }> }).answers[0]!.custom, 'n',
+    'the draft snapshot carries the feedback text for park/reopen')
+  flow.handleInput('o')
+  assert.equal(mutations, 2, 'every real edit notifies')
+  assert.equal((drafts.at(-1) as { answers: Array<{ custom: string }> }).answers[0]!.custom, 'no')
+})
+
+test('a stale action-bar press from another plan step is inert after a keyboard transition', () => {
+  const settled: unknown[] = []
+  const flow = makeFlow([planQuestion()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  flow.setMouseActionsEnabled(true)
+  flow.setPlanInspection(() => true)
+  // Enter feedback, then press its `Back [Esc]` span…
+  flow.handleInput('\x1b[B')
+  flow.handleInput('\r')
+  let lines = stripLines(flow)
+  const backRow = lines.length - 1
+  const backCol = lines[backRow]!.indexOf('Back')
+  assert.ok(backCol >= 0, `feedback Back span missing:\n${lines[backRow]}`)
+  const gesture = flow.beginMousePress(backRow, backCol)
+  assert.ok(gesture !== undefined)
+  // …then leave feedback with the KEYBOARD (Esc) and release the old span.
+  flow.handleInput('\x1b')
+  flow.completeMouseClick(gesture, backRow, backCol)
+  assert.ok(!flow.isPlanReading(), 'the stale release never enters reading')
+  assert.deepEqual(settled, [], 'the stale release never answers')
+  lines = stripLines(flow)
+  assert.ok(lines.join('\n').includes('View plan'), `the flow stays on the decision list:\n${lines.join('\n')}`)
+})

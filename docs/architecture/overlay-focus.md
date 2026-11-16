@@ -187,26 +187,43 @@ options, and which offers at least one other option — nothing else, never a
 header or label match) replaces the generic Q1→Review→Submit pages with ONE
 compact decision component in the same editor seat:
 
-- Decision rows are fixed `View plan → Keep planning… → <official approve
-  label> plan`; the default cursor is View (Fullscreen, when the host's
-  read-only inspection is installed) or Keep (otherwise) — never Approve.
-  Answer values are always the OFFICIAL option labels.
-- `View plan` triggers the host's one-shot read-only inspection: it resolves
-  the official `intent.callId` against the CURRENT transcript (a native
-  `tool.callId` or a nested PTC `subCallId`), reveals the card through the
-  existing temporary search-reveal machinery (no second ScrollView, no manual
-  disclosure writes) and scrolls the same fullscreen viewport to the card's
-  measured row. A proven locate enters the READING step; an unprovable target
-  degrades to the question's own `detail` full-text page (paged to the very
-  end) — never a claimed-located reading state.
+- Decision rows are ALWAYS the fixed three `View plan → Keep planning… →
+  <official approve label> plan` (any further official non-approve options
+  never add rows: the FIRST non-approve option in the official order is the
+  keep-planning class and the label this branch answers with). The default
+  cursor is View (Fullscreen, when the host's read-only inspection is
+  installed) or Keep (otherwise) — never Approve. Answer values are always the
+  OFFICIAL option labels.
+- `View plan` triggers the host's one-shot read-only inspection: it requires a
+  PROVEN identity first — the official Question's own Session (the
+  presentation-only `reviewSessionId` the surface controller forwards) and the
+  current display subject's Session must both be known and equal; either one
+  unknown fails closed to the detail fallback, never a callId-only locate. It
+  then resolves the official `intent.callId` against the CURRENT transcript
+  (a native `tool.callId` or a nested PTC `subCallId`), commits a DEDICATED
+  one-shot presentation (the located card plus its hiding ancestors open
+  through the SAME reveal path resolution the search navigation uses — no
+  search target, no synthetic match, no second ScrollView, no manual
+  disclosure write), and scrolls the same fullscreen viewport to the card's
+  measured row. A proven locate enters the READING step; every failed proof
+  ROLLS THE PRESENTATION BACK, and the question degrades to its own `detail`
+  full-text page (paged to the very end) — never a half-applied reveal and
+  never a claimed-located reading state.
+- A PTC sub-call target opens its own disclosure inside the located root card
+  and renders the presenter's generic call body (the same card-presentation
+  authority the top-level card uses), so a RUNNING `exit_plan_mode` plan body
+  is readable from its call arguments before the call settles.
 - Reading: scroll keys drive the transcript viewport through the same
   ScrollView; `Enter` is inert; `Esc` returns to the decision list (never a
-  cancel) and releases the temporary reveal grant plus the plan's own forced
-  PTC sub-call expansion (a user-opened sub-call stays open). Settling the
-  question releases them too.
+  cancel) and releases the one-shot presentation. An explicit user collapse of
+  the located card wins over the inspection lease. Settling the question, a
+  session switch and a failed locate release it too.
 - Keep planning… opens the feedback input (draft survives Esc); Enter answers
   the official keep label with the optional custom text. The generic
   custom-first submit path is never used (it would clear the selected label).
+  A real feedback edit reports the SAME answer-mutation fact the generic
+  free-text path does (it freezes a timed claim and keeps the park/reopen
+  draft live); cursor-only keys never do.
 - `Esc` on the decision list is the OFFICIAL dismiss (`onCancel` →
   `ASK_CANCELLED`); `Ctrl+C` is the official cancel everywhere in the branch.
 - The pointer route follows §6's Question contract: the decision rows are real
@@ -217,6 +234,14 @@ compact decision component in the same editor seat:
   lifecycle own it exactly like any other question. The branch owns only its
   local step state (decision/reading/feedback/fallback) and the feedback
   draft; `draftSnapshot` carries only that draft.
+
+The plan-mode composer hint (`Plan mode · describe the task`, and the pending
+variants `Plan requested · pending` / `Plan mode · change pending`) is a
+presentation of the ONE committed collaboration plan fact: the official `plan`
+projection's `{active, pending}` wire view. The committed `plan/mode` event
+carries only the committed bit, so the event handler must re-derive the official
+projection instead of assuming the event is the whole fact; the composer and
+the footer badge then read the same committed section.
 
 Fullscreen Question pointer handling uses the same semantic boundary:
 
