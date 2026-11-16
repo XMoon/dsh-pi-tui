@@ -244,6 +244,7 @@ test('the saved Shell-execution caps reach the active executor and its next real
 
   const workdir = life.tempDir('host-sections-shell-run-')
   const timed = await ctx.shell.execute(ctx.shell.resolve({
+    // reason: the command must outlive the 120ms configured timeout window.
     command: 'node -e "setTimeout(() => {}, 400)"',
     workdir,
   }))
@@ -251,6 +252,14 @@ test('the saved Shell-execution caps reach the active executor and its next real
   assert.equal(timedResult.timedOut, true, 'the next real command is killed by the configured timeout')
   assert.equal(timedResult.timeoutMs, 120)
 
+  // Give the output-cap observation a normal startup budget; the timeout test
+  // above already proved the configured 120ms deadline classification.
+  const beforeCapRun = port.shellExecutionSettings.read()
+  assert.equal(beforeCapRun.kind, 'ready')
+  if (beforeCapRun.kind !== 'ready') return
+  assert.deepEqual(await port.shellExecutionSettings.mutate(
+    { timeoutMs: { kind: 'set', value: 5_000 } }, beforeCapRun.revision, beforeCapRun.generation, beforeCapRun.effective.executor,
+  ), { kind: 'accepted' })
   const spilled = await ctx.shell.execute(ctx.shell.resolve({
     command: 'node -e "process.stdout.write(\'x\'.repeat(4096))"',
     workdir,
@@ -270,11 +279,11 @@ test('the saved Shell-execution caps reach the active executor and its next real
   const reset = port.shellExecutionSettings.read()
   assert.equal(reset.kind, 'ready')
   if (reset.kind !== 'ready') return
-  assert.equal(reset.effective.timeoutMs, 120, 'the sibling timeout override is preserved')
+  assert.equal(reset.effective.timeoutMs, 5_000, 'the sibling timeout override is preserved')
   assert.equal(reset.effective.maxOutputBytes, 64_000, 'the reset cap reads the inherited bundle value')
   // The official unset may materialize OR remove the USER key; the CURRENT
   // effective value is the authority. Only the sibling override must survive.
-  assert.deepEqual(plane.userConfig('bash-sandbox'), { timeoutMs: 120 },
+  assert.deepEqual(plane.userConfig('bash-sandbox'), { timeoutMs: 5_000 },
     'the reset cap leaves no stale USER override while the sibling timeout stays')
   assert.equal(liveShell().config.maxOutputBytes.get(), 64_000)
 })
