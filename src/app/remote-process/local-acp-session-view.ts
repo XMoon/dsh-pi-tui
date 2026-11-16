@@ -2266,14 +2266,16 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
-   * Commit the MIXED fact of one flight. A turn that also claims another user's
-   * message projects nothing that was committed from this point on. Events that
-   * were already committed BEFORE the mix keep their ordered delivery (the
-   * existing PO-3A contract: the client may see the pre-mix half, then the
-   * request fails closed). No new output IO starts after this fact.
+   * Commit the MIXED fact of one flight: no output committed from now on is
+   * projected, and this flight's own not-yet-finished output IO stops (an
+   * in-flight official image read is abandoned) so a stalled read can never
+   * hold the `turn/end` settlement forever. Already handed-off notifications
+   * stay delivered; queued-but-unsent output is dropped at its send check (the
+   * accepted PO-3A contract). The Host Agent/Session/Writer are untouched.
    */
   private markFlightMixed(flight: InflightPrompt): void {
     flight.mixed = true
+    flight.outputAbort.abort()
   }
 
   /** Fail one flight exactly once and release its slot and correlation state. */

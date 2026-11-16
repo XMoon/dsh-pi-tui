@@ -701,11 +701,12 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
       rejects unobserved: a real content/transport failure fails the one request
       (with `LOCAL_ACP_PROMPT_OUTPUT_FAILED` for delivery), and a closed flight
       drops only output it has not yet handed to the transport. The flight's own
-      AbortSignal stops only ITS output IO on close/disconnect/Off/disposal — it
-      never cancels or disposes the Host Agent. A MIXED turn stops projecting from
-      the moment the foreign claim is proven: notifications already handed to the
-      transport stay delivered, a queued-but-unsent update is dropped, and the
-      request fails closed with `LOCAL_ACP_PROMPT_MIXED_TURN`.
+      AbortSignal stops only ITS output IO on close/disconnect/Off/disposal/MIXED
+      — it never cancels or disposes the Host Agent. A MIXED turn stops projecting
+      from the moment the foreign claim is proven: an in-flight Store read is
+      abandoned, notifications already handed to the transport stay delivered, a
+      queued-but-unsent update is dropped, and the request fails closed with
+      `LOCAL_ACP_PROMPT_MIXED_TURN`.
     - A completed turn needs at least ONE visible assistant output: non-empty
       committed text or a committed assistant image, so an image-only turn
       succeeds. A turn with no visible output keeps the stable
