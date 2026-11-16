@@ -18,16 +18,17 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse as parseYaml } from 'yaml'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { assertSelectedVerdict, runSelectedCase, waitForCondition } from '../../scripts/split-process-smoke.mjs'
 import { PR_A_WEB_ROWS, raceWithAbortableDeadline, redactWebQualificationText } from '../../scripts/smoke/split-process/web-helpers.mjs'
-import { createSmokeDiagnostics, redactErrorForStep } from '../../scripts/lib/split-smoke-diagnostics.mjs'
+import { createSmokeDiagnostics, failureCategoryOf, redactErrorForStep, SplitSmokeAssertionError } from '../../scripts/lib/split-smoke-diagnostics.mjs'
+import { throwSceneFailure, sceneWorkspace } from '../../scripts/smoke/split-process/acp-sdk-content-interoperability.mjs'
 import { statusMatches } from '../../scripts/lib/split-smoke-processes.mjs'
 import {
   listDefaultLaneCases,
@@ -1132,9 +1133,310 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
   assert.equal(typeof entry.run, 'function')
 })
 
+// ── The independent standard ACP SDK client case ────────────────────────────
+
+const SDK_INTEROP_CASE_ID = 'acp.sdk-content-interoperability'
+const SDK_INTEROP_OUTCOMES = Object.freeze([
+  'officialSdkClient',
+  'inputResourceLinkExact',
+  'inputImageStoredVerified',
+  'inputLargeImageViaSdk',
+  'markdownBlocksExact',
+  'workspaceLocalityProven',
+  'negativeAdmissionNoHostMessage',
+  'assistantBlocksOrdered',
+  'outputImageVerified',
+  'imageOnlyAccepted',
+  'toolResultOrdered',
+  'toolFailedStatusVerified',
+  'missingStoreObjectFailedClosed',
+  'healthyAfterFailure',
+  'tuiHostSurvivedClientClose',
+])
+const SDK_INTEROP_INPUT_EVIDENCE = Object.freeze([
+  'hostPid', 'hostInstanceId', 'sessionId', 'imageAttachmentId', 'imageSha256',
+  'largeImageBytes', 'resourceLinkTurn', 'imageTurn', 'markdownTurn',
+  'markdownMessageId', 'hostReportSha256', 'missingPathErrno', 'unreadablePathErrno',
+  'negativeRejectedBeforeMessage',
+])
+const SDK_INTEROP_OUTPUT_EVIDENCE = Object.freeze([
+  'hostPid', 'hostInstanceId', 'sessionId', 'assistantTurn', 'assistantMessageId',
+  'assistantAttachmentId', 'assistantImageSha256', 'assistantImageBytes',
+  'imageOnlyTurn', 'toolTurn', 'toolCallId', 'toolAttachmentId', 'toolStatus',
+  'failedToolTurn', 'failedToolCallId', 'failedStatus', 'missingObjectCode',
+  'acpErrorCode', 'healthyTurn', 'hostIdentityKept',
+])
+
+/** One complete minimum-schema result, built fresh for every mutation. */
+function sdkInteropVerdict() {
+  const inputImage = 'a'.repeat(64)
+  const outputImage = 'c'.repeat(64)
+  return {
+    status: 'PASS',
+    scope: 'REAL_SPLIT_PROCESS_L6',
+    officialSdkClient: true,
+    inputResourceLinkExact: true,
+    inputImageStoredVerified: true,
+    inputLargeImageViaSdk: true,
+    markdownBlocksExact: true,
+    workspaceLocalityProven: true,
+    negativeAdmissionNoHostMessage: true,
+    assistantBlocksOrdered: true,
+    outputImageVerified: true,
+    imageOnlyAccepted: true,
+    toolResultOrdered: true,
+    toolFailedStatusVerified: true,
+    missingStoreObjectFailedClosed: true,
+    healthyAfterFailure: true,
+    tuiHostSurvivedClientClose: true,
+    evidence: {
+      candidateSha256: '1'.repeat(64),
+      sdkVersion: '1.4.0',
+      protocolVersion: 1,
+      input: {
+        hostPid: 4242,
+        hostInstanceId: 'input-host-instance',
+        sessionId: 'input-session',
+        imageAttachmentId: `sha256:${inputImage}`,
+        imageSha256: inputImage,
+        largeImageBytes: 1024 * 1024 + 1,
+        resourceLinkTurn: 3,
+        imageTurn: 4,
+        markdownTurn: 6,
+        markdownMessageId: 'markdown-message',
+        hostReportSha256: 'b'.repeat(64),
+        missingPathErrno: 'ENOENT',
+        unreadablePathErrno: 'EACCES',
+        negativeRejectedBeforeMessage: true,
+      },
+      output: {
+        hostPid: 5252,
+        hostInstanceId: 'output-host-instance',
+        sessionId: 'output-session',
+        assistantTurn: 9,
+        assistantMessageId: 'assistant-message',
+        assistantAttachmentId: `sha256:${outputImage}`,
+        assistantImageSha256: outputImage,
+        assistantImageBytes: 1_400_000,
+        imageOnlyTurn: 10,
+        toolTurn: 11,
+        toolCallId: 'tool-call',
+        toolAttachmentId: `sha256:${'d'.repeat(64)}`,
+        toolStatus: 'completed',
+        failedToolTurn: 12,
+        failedToolCallId: 'tool-call-failed',
+        failedStatus: 'failed',
+        missingObjectCode: 'ATTACHMENT_NOT_FOUND',
+        acpErrorCode: 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED',
+        healthyTurn: 13,
+        hostIdentityKept: true,
+      },
+    },
+  }
+}
+
+function sdkInteropVariant(mutate) {
+  const result = sdkInteropVerdict()
+  mutate(result)
+  return result
+}
+
+function assertSdkInteropRejected(mutate) {
+  assert.throws(() => assertSelectedVerdict(SDK_INTEROP_CASE_ID, sdkInteropVariant(mutate)),
+    /selected acp\.sdk-content-interoperability/u)
+}
+
+test('the ACP SDK content-interoperability verdict rejects every unproved outcome', () => {
+  assert.equal(assertSelectedVerdict(SDK_INTEROP_CASE_ID, sdkInteropVerdict()), undefined)
+  for (const field of SDK_INTEROP_OUTCOMES) {
+    assertSdkInteropRejected(result => { delete result[field] })
+    assertSdkInteropRejected(result => { result[field] = false })
+  }
+  assertSdkInteropRejected(result => { delete result.status })
+  assertSdkInteropRejected(result => { result.status = 'NOT_VERIFIED' })
+  assertSdkInteropRejected(result => { result.status = 'FAIL' })
+  assertSdkInteropRejected(result => { delete result.scope })
+  assertSdkInteropRejected(result => { result.scope = 'SELECTABLE_ONLY' })
+  assertSdkInteropRejected(result => { delete result.evidence })
+  assertSdkInteropRejected(result => { result.evidence = null })
+  assertSdkInteropRejected(result => { result.evidence = 'evidence' })
+})
+
+test('the ACP SDK content-interoperability verdict requires both scenes\' Host and Session attribution', () => {
+  for (const field of SDK_INTEROP_INPUT_EVIDENCE) {
+    assertSdkInteropRejected(result => { delete result.evidence.input[field] })
+  }
+  for (const field of SDK_INTEROP_OUTPUT_EVIDENCE) {
+    assertSdkInteropRejected(result => { delete result.evidence.output[field] })
+  }
+  for (const scene of ['input', 'output']) {
+    for (const value of [0, -1, 1.5, '4242']) {
+      assertSdkInteropRejected(result => { result.evidence[scene].hostPid = value })
+    }
+    for (const field of ['hostInstanceId', 'sessionId']) {
+      for (const value of ['', 42, undefined]) {
+        assertSdkInteropRejected(result => { result.evidence[scene][field] = value })
+      }
+    }
+  }
+  // Two scenes must prove two Host instances and two Sessions: a duplicated
+  // instance or Session means the second scene was never a separate Host.
+  assertSdkInteropRejected(result => {
+    result.evidence.output.hostInstanceId = result.evidence.input.hostInstanceId
+  })
+  assertSdkInteropRejected(result => {
+    result.evidence.output.sessionId = result.evidence.input.sessionId
+  })
+  // Kernel PIDs may legitimately be reused across sequential scenes: equal
+  // Host PIDs alone are not a reason to reject the two distinct instances.
+  assert.equal(assertSelectedVerdict(SDK_INTEROP_CASE_ID, sdkInteropVariant(result => {
+    result.evidence.input.hostPid = 7777
+    result.evidence.output.hostPid = 7777
+  })), undefined)
+})
+
+test('the ACP SDK content-interoperability verdict requires the pinned protocol, exact codes and digest-shaped refs', () => {
+  for (const value of ['1.3.0', '1.4', 1.4, undefined]) {
+    assertSdkInteropRejected(result => { result.evidence.sdkVersion = value })
+  }
+  for (const value of [0, 2, '1', undefined]) {
+    assertSdkInteropRejected(result => { result.evidence.protocolVersion = value })
+  }
+  for (const value of ['A'.repeat(64), '1'.repeat(63), 'not-a-sha256', 42, undefined]) {
+    assertSdkInteropRejected(result => { result.evidence.candidateSha256 = value })
+  }
+  // A durable attachment ref is the standard `sha256:<digest>` shape and must
+  // name the same digest as the separately reported image hash.
+  for (const value of ['a'.repeat(64), `sha256:${'A'.repeat(64)}`, `sha256:${'a'.repeat(63)}`, 'sha256:', 42]) {
+    assertSdkInteropRejected(result => { result.evidence.input.imageAttachmentId = value })
+    assertSdkInteropRejected(result => { result.evidence.output.assistantAttachmentId = value })
+    assertSdkInteropRejected(result => { result.evidence.output.toolAttachmentId = value })
+  }
+  for (const value of ['A'.repeat(64), 'a'.repeat(63), 'not-a-sha256', undefined]) {
+    assertSdkInteropRejected(result => { result.evidence.input.imageSha256 = value })
+    assertSdkInteropRejected(result => { result.evidence.output.assistantImageSha256 = value })
+    assertSdkInteropRejected(result => { result.evidence.input.hostReportSha256 = value })
+  }
+  assertSdkInteropRejected(result => {
+    result.evidence.input.imageSha256 = 'e'.repeat(64)
+  })
+  assertSdkInteropRejected(result => {
+    result.evidence.output.assistantImageSha256 = 'e'.repeat(64)
+  })
+  // The native SDK input must actually carry a source image above 1 MiB, and
+  // the decoded output image must have real bytes.
+  for (const value of [1024 * 1024, 0, 1.5, undefined]) {
+    assertSdkInteropRejected(result => { result.evidence.input.largeImageBytes = value })
+  }
+  for (const value of [0, -1, 1.5, undefined]) {
+    assertSdkInteropRejected(result => { result.evidence.output.assistantImageBytes = value })
+  }
+  for (const field of ['resourceLinkTurn', 'imageTurn', 'markdownTurn']) {
+    for (const value of [-1, 1.5, '3', undefined]) {
+      assertSdkInteropRejected(result => { result.evidence.input[field] = value })
+    }
+  }
+  for (const field of ['assistantTurn', 'imageOnlyTurn', 'toolTurn', 'failedToolTurn', 'healthyTurn']) {
+    for (const value of [-1, 1.5, '9', undefined]) {
+      assertSdkInteropRejected(result => { result.evidence.output[field] = value })
+    }
+  }
+  for (const [scene, field] of [
+    ['input', 'markdownMessageId'],
+    ['output', 'assistantMessageId'],
+    ['output', 'toolCallId'],
+    ['output', 'failedToolCallId'],
+  ]) {
+    assertSdkInteropRejected(result => { result.evidence[scene][field] = '' })
+  }
+  // The Host codes, the standard status projection and the surviving Host
+  // identity are each required, never inferred from a PASS status.
+  assertSdkInteropRejected(result => { result.evidence.input.missingPathErrno = 'EACCES' })
+  assertSdkInteropRejected(result => { result.evidence.input.unreadablePathErrno = 'ENOENT' })
+  assertSdkInteropRejected(result => { result.evidence.input.negativeRejectedBeforeMessage = false })
+  assertSdkInteropRejected(result => { result.evidence.output.toolStatus = 'failed' })
+  assertSdkInteropRejected(result => { result.evidence.output.failedStatus = 'completed' })
+  assertSdkInteropRejected(result => { result.evidence.output.missingObjectCode = 'ATTACHMENT_MISSING' })
+  assertSdkInteropRejected(result => {
+    result.evidence.output.acpErrorCode = 'LOCAL_ACP_PROMPT_HOST_REJECTED'
+  })
+  assertSdkInteropRejected(result => { result.evidence.output.hostIdentityKept = false })
+})
+
+test('the independent ACP SDK case is registered once as selectable-only and stays out of the default lane', () => {
+  const registered = listSelectableCases().filter(entry => entry.id === SDK_INTEROP_CASE_ID)
+  assert.equal(registered.length, 1, 'the independent SDK case must be registered exactly once')
+  const [entry] = registered
+  assert.equal(entry.suite, 'acp')
+  assert.equal(entry.defaultLane, false)
+  assert.equal(typeof entry.run, 'function')
+  assert.equal(typeof entry.title, 'string')
+  assert.ok(entry.title.length > 0)
+  assert.equal(listDefaultLaneCases().some(item => item.id === SDK_INTEROP_CASE_ID), false,
+    'the default lane must not run the independent SDK case')
+  assert.deepEqual(listDefaultLaneCases(), listSelectableCases().filter(item => item.defaultLane !== false))
+  assert.deepEqual(resolveSelection({ mode: 'case', id: SDK_INTEROP_CASE_ID }).cases, [entry])
+  assert.ok(resolveSelection({ mode: 'suite', suite: 'acp' }).cases.includes(entry))
+})
+
 test('a selected result names only the selectable scope', () => {
   const first = listSelectableCases()[0]
   assert.ok(first, 'the registry must expose a case')
   assert.equal(selectedPassLine(first.id),
     `SPLIT_PROCESS_SELECTED_PASS id=${first.id} scope=SELECTABLE_ONLY`)
+})
+
+test('an SDK scene failure keeps its real assertion class, message, stack and cleanup facts', () => {
+  // The failure path attempts every owned teardown and then reports the ORIGINAL
+  // failure. Wrapping it (for example in AggregateError) would reclassify a
+  // qualification assertion as INFRA_FAILURE and drop the real message/stack
+  // from the default one-shot report.
+  const primary = new SplitSmokeAssertionError('the exact Host turn was not correlated')
+  const cleanup = new Error('peer shutdown failed')
+  let caught
+  try {
+    throwSceneFailure('input', primary, [cleanup])
+  } catch (error) {
+    caught = error
+  }
+  assert.equal(caught, primary)
+  assert.equal(failureCategoryOf(caught), 'ASSERTION_FAILED')
+  assert.match(caught.message, /the exact Host turn was not correlated/u)
+  assert.equal(caught.stack, primary.stack)
+  assert.deepEqual(caught.sceneCleanupFailures, [cleanup])
+  // A clean scene returns; a cleanup-only failure still throws its real error.
+  assert.equal(throwSceneFailure('output', undefined, []), undefined)
+  let cleanupFailure
+  try {
+    throwSceneFailure('output', undefined, [cleanup])
+  } catch (error) {
+    cleanupFailure = error
+  }
+  assert.equal(cleanupFailure, cleanup)
+  assert.equal(failureCategoryOf(cleanupFailure), 'INFRA_FAILURE')
+})
+
+test('the independent SDK case owns a workspace a sibling Markdown probe cannot poison', (t) => {
+  // A full `--suite acp` shares ONE lane work dir. The existing PO-4A Markdown
+  // probe leaves `workDir/.po4b/private.md` mode 000, and a later fixture write
+  // to that existing path would keep the old mode and fail. The SDK case must
+  // therefore use its own Host workspace instead of the shared root or another
+  // case's leftovers.
+  const root = testLifecycle(t).tempDir('sdk-workspace-isolation-')
+  const poisonedRoot = join(root, '.po4b')
+  mkdirSync(poisonedRoot, { recursive: true, mode: 0o700 })
+  const poisoned = join(poisonedRoot, 'private.md')
+  writeFileSync(poisoned, 'sibling-private', { mode: 0o600 })
+  chmodSync(poisoned, 0o000)
+  const workspace = sceneWorkspace({ workDir: root }, 'input')
+  const resolvedRoot = realpathSync(root)
+  assert.notEqual(workspace, resolvedRoot, 'the SDK Host workspace is not the shared lane root')
+  assert.ok(workspace.startsWith(`${resolvedRoot}${sep}`), 'the SDK workspace lives under this run\'s work root')
+  const ownProbe = join(workspace, '.po4b')
+  mkdirSync(ownProbe, { mode: 0o700 })
+  writeFileSync(join(ownProbe, 'private.md'), 'own-report', { mode: 0o600 })
+  assert.equal(readFileSync(join(ownProbe, 'private.md'), 'utf8'), 'own-report')
+  assert.equal(statSync(poisoned).mode & 0o777, 0, 'the sibling probe file keeps its unwritable mode')
+  chmodSync(poisoned, 0o600)
+  assert.equal(readFileSync(poisoned, 'utf8'), 'sibling-private', 'the sibling workspace is neither reused nor rewritten')
 })

@@ -725,6 +725,78 @@ export function assertSelectedVerdict(caseId, result) {
     `selected ${caseId}: the ACP committed content-output verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
     return
   }
+  if (caseId === 'acp.sdk-content-interoperability') {
+    const evidence = result?.evidence
+    const input = evidence?.input
+    const output = evidence?.output
+    const isDigest = value => typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value)
+    const isRef = value => typeof value === 'string' && /^sha256:[0-9a-f]{64}$/u.test(value)
+    const isTurn = value => Number.isInteger(value) && value >= 0
+    const isHostPid = value => Number.isInteger(value) && value > 0
+    const isName = value => typeof value === 'string' && value.length > 0
+    assert(result?.status === 'PASS'
+      && result?.scope === 'REAL_SPLIT_PROCESS_L6'
+      && result?.officialSdkClient === true
+      && result?.inputResourceLinkExact === true
+      && result?.inputImageStoredVerified === true
+      && result?.inputLargeImageViaSdk === true
+      && result?.markdownBlocksExact === true
+      && result?.workspaceLocalityProven === true
+      && result?.negativeAdmissionNoHostMessage === true
+      && result?.assistantBlocksOrdered === true
+      && result?.outputImageVerified === true
+      && result?.imageOnlyAccepted === true
+      && result?.toolResultOrdered === true
+      && result?.toolFailedStatusVerified === true
+      && result?.missingStoreObjectFailedClosed === true
+      && result?.healthyAfterFailure === true
+      && result?.tuiHostSurvivedClientClose === true
+      && isDigest(evidence?.candidateSha256)
+      && evidence?.sdkVersion === '1.4.0'
+      && evidence?.protocolVersion === 1
+      && isHostPid(input?.hostPid)
+      && isName(input?.hostInstanceId)
+      && isName(input?.sessionId)
+      && isRef(input?.imageAttachmentId)
+      && isDigest(input?.imageSha256)
+      && input.imageAttachmentId === `sha256:${input.imageSha256}`
+      && Number.isInteger(input?.largeImageBytes)
+      && input.largeImageBytes > 1024 * 1024
+      && isTurn(input?.resourceLinkTurn)
+      && isTurn(input?.imageTurn)
+      && isTurn(input?.markdownTurn)
+      && isName(input?.markdownMessageId)
+      && isDigest(input?.hostReportSha256)
+      && input?.missingPathErrno === 'ENOENT'
+      && input?.unreadablePathErrno === 'EACCES'
+      && input?.negativeRejectedBeforeMessage === true
+      && isHostPid(output?.hostPid)
+      && isName(output?.hostInstanceId)
+      && isName(output?.sessionId)
+      && output.hostInstanceId !== input.hostInstanceId
+      && output.sessionId !== input.sessionId
+      && isTurn(output?.assistantTurn)
+      && isName(output?.assistantMessageId)
+      && isRef(output?.assistantAttachmentId)
+      && isDigest(output?.assistantImageSha256)
+      && output.assistantAttachmentId === `sha256:${output.assistantImageSha256}`
+      && Number.isInteger(output?.assistantImageBytes)
+      && output.assistantImageBytes > 0
+      && isTurn(output?.imageOnlyTurn)
+      && isTurn(output?.toolTurn)
+      && isName(output?.toolCallId)
+      && isRef(output?.toolAttachmentId)
+      && output?.toolStatus === 'completed'
+      && isTurn(output?.failedToolTurn)
+      && isName(output?.failedToolCallId)
+      && output?.failedStatus === 'failed'
+      && output?.missingObjectCode === 'ATTACHMENT_NOT_FOUND'
+      && output?.acpErrorCode === 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED'
+      && isTurn(output?.healthyTurn)
+      && output?.hostIdentityKept === true,
+    `selected ${caseId}: the independent SDK content verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
+    return
+  }
   if (caseId === 'account.official-composition') {
     assert(result?.status === 'PASS'
       && result?.browser === 'PASS'
