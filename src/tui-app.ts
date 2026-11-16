@@ -4866,6 +4866,18 @@ export class TuiApp {
   /** ONE external-editor ownership at a time: set synchronously at launch,
    * cleared in the launch's `finally` (success, failure or cancellation). */
   private externalEditorInFlight = false
+  /**
+   * PR2/F1: set when a submission attempt settles while the external editor
+   * is open. The editor's write-back is then STALE (the attempt settled the
+   * composer) and must be discarded instead of resurrecting content.
+   */
+  private externalEditorStale = false
+  /**
+   * The surface was STOPPED through the public lifecycle (stop/start), as
+   * opposed to the external editor's temporary presentation suspension: only a
+   * real stop makes the renderer inert for good.
+   */
+  private surfaceStopped = false
   /** The live session's auto-generated title, shown in the header when set. */
   private sessionTitleText = ''
   /** The mode-aware subagent viewer: while set, the editor bar shows the
@@ -5848,6 +5860,7 @@ export class TuiApp {
     if (this.disposed) {
       throw new Error('cannot start a disposed TuiApp')
     }
+    this.surfaceStopped = false
     const firstStart = !this.processTuiSlotClaimed
     if (firstStart) {
       claimProcessTuiSlot(`tui-${Date.now().toString(36)}`)
@@ -6028,6 +6041,7 @@ export class TuiApp {
    * keybindings — the slot is held until the FINAL dispose() (see
    * tui/process-slot.ts). */
   stop(): void {
+    this.surfaceStopped = true
     this.temporarySearchReaderReturnToRegular = false
     this.temporarySearchReaderTransitionPermit = false
     this.workspaceLeaseFreezeDepth += 1
@@ -8064,6 +8078,7 @@ export class TuiApp {
         // pending (the latch inside launchExternalEditor is set
         // synchronously), further presses are consumed without starting
         // another editor.
+        if (this.composerHeld() || this.disposed || this.surfaceStopped) return true
         if (this.events.openExternalEditor !== undefined && !this.externalEditorInFlight) {
           this.events.runOwned('external editor', () => this.launchExternalEditor(), {
             onError: (error: unknown) => {
@@ -8079,6 +8094,10 @@ export class TuiApp {
         // an image becomes a draft placeholder and plain text falls back
         // to an editor insert. WITHOUT a handler the key falls through to
         // the editor exactly like the pre-pipeline behavior.
+        // PR2/F2: a held Composer owns its document — the intent is consumed
+        // without probing the clipboard (no orphan DraftImageStore bytes, no
+        // "attached" notice beside a document that refuses the placeholder).
+        if (this.composerHeld() || this.disposed || this.surfaceStopped) return true
         if (this.events.onClipboardPaste === undefined) return false
         this.events.onClipboardPaste()
         return true
@@ -8393,8 +8412,12 @@ export class TuiApp {
    */
   async launchExternalEditor(): Promise<void> {
     const open = this.events.openExternalEditor
-    if (open === undefined || this.externalEditorInFlight || this.disposed) return
+    if (open === undefined || this.externalEditorInFlight || this.disposed || this.surfaceStopped) return
+    // PR2/F1: a held Composer owns its document — an external editing round
+    // trip would replace the exact draft the Host is about to accept.
+    if (this.composerHeld()) return
     this.externalEditorInFlight = true
+    this.externalEditorStale = false
     try {
       // The external editor round-trips the WIRE form: the $EDITOR sees
       // the same document the shell dispatch would (a shell-mode draft
@@ -8426,6 +8449,11 @@ export class TuiApp {
       try {
         const next = await open(draft)
         if (this.disposed) return
+        // PR2/F1: the editor's round trip is only admissible while the SAME
+        // draft still owns the composer. A settlement (or a new hold) during
+        // the flight makes this result stale — discard it instead of
+        // resurrecting or overwriting a document the attempt already settled.
+        if (!this.draftWriteAdmitted() || this.externalEditorStale) return
         // No redundant editor update when the editor saved the draft
         // unchanged (an update would bump history/undo and repaint).
         if (next !== '' && next !== draft) {
@@ -8437,6 +8465,7 @@ export class TuiApp {
       }
     } finally {
       this.externalEditorInFlight = false
+      this.externalEditorStale = false
     }
   }
 
@@ -16512,6 +16541,9 @@ export class TuiApp {
     // removal gesture that the release re-proves against the same snapshot.
     const preview = this.draftPreviewHitAt(y)
     if (preview !== undefined) {
+      // PR2/F3: a held draft's preview band is display-only — a press never
+      // arms a removal gesture against the submitted document.
+      if (!this.draftWriteAdmitted()) return
       if (this.activeQuestions !== undefined || this.approvals.isActive()) return
       if (this.overlayBlocksTranscriptPointer() || this.searchOverlayCoversCell(x, y)) return
       const row = y - preview.top
@@ -17748,12 +17780,7 @@ export class TuiApp {
    */
   setEditorText(text: string): void {
     this.clearExitConfirmation()
-    if (this.isDisposed() || !this.terminalPresentationActive) return
-    // PR2: the held submission owns the document; the application's own
-    // held-aware restore sites already skip their writes, and this fence
-    // covers every other programmatic caller (plugins, external editor,
-    // replacement-editor sync). The accepted settlement clears privately.
-    if (this.composerHeld()) return
+    if (!this.draftWriteAdmitted()) return
     this.invalidateDraftPreviewCaches()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
@@ -17905,10 +17932,7 @@ export class TuiApp {
    */
   insertIntoEditor(text: string): void {
     this.clearExitConfirmation()
-    if (this.isDisposed() || !this.terminalPresentationActive) return
-    // PR2: a held composer owns its document — no programmatic insertion may
-    // mutate it (the same fence as setDraft/setEditorText).
-    if (this.composerHeld()) return
+    if (!this.draftWriteAdmitted()) return
     this.invalidateDraftPreviewCaches()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
@@ -24632,13 +24656,10 @@ export class TuiApp {
    */
   setDraft(text: string): void {
     this.clearExitConfirmation()
-    // A disposed or stopped surface accepts no draft write-back (nothing may
-    // repaint or resurrect content in a component that no longer presents).
-    if (this.isDisposed() || !this.terminalPresentationActive) return
-    // PR2: a live submission attempt owns the document — no programmatic
-    // renderer/plugin write may mutate it (the keyboard lock alone is not the
-    // contract). The accepted settlement clears through its own private path.
-    if (this.composerHeld()) return
+    // The ONE write admission (PR2/F1/F3): a held, disposed or stopped surface
+    // never accepts a programmatic draft write. The accepted settlement clears
+    // through its own private path.
+    if (!this.draftWriteAdmitted()) return
     this.invalidateDraftPreviewCaches()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
@@ -24676,7 +24697,7 @@ export class TuiApp {
    * autocomplete submit) reaches `onMaySubmit`.
    */
   holdSubmission(attemptId: string): void {
-    if (this.isDisposed() || !this.terminalPresentationActive) return
+    if (this.disposed || this.surfaceStopped || this.submissionHold !== undefined) return
     const text = this.getDraft()
     // The recall-eligibility fact belongs to the GESTURE time: at acceptance
     // the staged attachments are already consumed, so re-asking
@@ -24694,13 +24715,19 @@ export class TuiApp {
    * unknown outcomes unlock the editor with the document intact.
    */
   settleSubmission(attemptId: string, result: 'accepted' | 'not-accepted' | 'unknown'): void {
-    // A stopped surface must never paint (or clear) again: the drain settles
-    // the attempt's state silently and the renderer state dies with it.
-    if (this.isDisposed() || !this.terminalPresentationActive) return
+    // A stopped/disposed surface must never paint (or clear) again: the drain
+    // settles the attempt's state silently and the renderer state dies with
+    // it. A TEMPORARY presentation suspension (the external editor) is NOT a
+    // stop: the settlement must still release the hold, or the editor would
+    // stay frozen after the terminal comes back.
+    if (this.disposed || this.surfaceStopped) return
     const hold = this.submissionHold
     if (hold === undefined || hold.attemptId !== attemptId) return
     this.submissionHold = undefined
     this.editor.disableSubmit = false
+    // An external editor that is currently open belongs to a document whose
+    // ownership just changed: its write-back must be discarded (F1).
+    if (this.externalEditorInFlight) this.externalEditorStale = true
     if (result === 'accepted') {
       // The accepted occurrence is what the editor's ↑ recall records. Order:
       // remember FIRST (the text is still available), then the clear.
@@ -24717,6 +24744,18 @@ export class TuiApp {
   /** PR2: the composer document is frozen by a live submission attempt. */
   private composerHeld(): boolean {
     return this.submissionHold !== undefined
+  }
+
+  /**
+   * PR2 (F1/F3): the ONE admission every production writer of the composer
+   * document consults — the draft setters, the external editor's write-back,
+   * the fullscreen preview-removal sink and the media intake. A live
+   * submission attempt owns the document, and a disposed/stopped surface never
+   * mutates it again. The external editor's TEMPORARY presentation suspension
+   * is deliberately not part of this fence.
+   */
+  private draftWriteAdmitted(): boolean {
+    return !this.disposed && !this.surfaceStopped && !this.composerHeld()
   }
 
   /**
@@ -25146,6 +25185,8 @@ export class TuiApp {
     // and (b) retire the Editor's undo snapshots when the bounded retention
     // budget evicts the image. The host Editor exposes both seams; a plugin
     // Replacement Editor exposes neither (preview stays display-only).
+    // PR2/F3: a held Composer never offers a draft mutation control.
+    if (!this.draftWriteAdmitted()) return false
     const seat = this.seatEditor()
     if (seat.retireDraftImageFromUndo === undefined || seat.replaceTextUndoable === undefined) return false
     const decision = this.draftPreviewRemovalDecision()
@@ -25201,6 +25242,11 @@ export class TuiApp {
    * ordinary attach/submit cleanup honors that leased draft.
    */
   private removeDraftPreviewOccurrence(hit: DraftPreviewRemoveHit): void {
+    // PR2/F3: the LAST authority of the preview `×` — a press armed BEFORE the
+    // hold must not delete from the document after it. The paint-side and
+    // press-side gates make the control non-operable; this check closes the
+    // stale-gesture window (press → hold → release).
+    if (!this.draftWriteAdmitted()) return
     if (this.viewerMode !== undefined) return
     if (this.activeQuestions !== undefined || this.approvals.isActive()) return
     const source = this.draftImagePreviewSource

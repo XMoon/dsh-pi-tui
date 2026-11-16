@@ -505,6 +505,11 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
         && deps.lifecycle.generation() === generation
         && deps.lifecycle.currentSessionId() === sessionId
         && deps.surface.composer === composer
+        // PR2/F2: a held Composer owns its document. The clipboard read is
+        // asynchronous, so this is re-read at BOTH the trigger and the commit:
+        // a gesture started before the hold and settling after it must not
+        // create an un-placeholdered image draft or announce one.
+        && !deps.submission.composerHoldActive()
       const work = clipboardPasteTail.then(async () => {
         // A paste whose ownership already moved (or whose surface died) never
         // probes the OS clipboard at all.

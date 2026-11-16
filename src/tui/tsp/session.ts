@@ -5524,6 +5524,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       handlers.cancel()
       return false
     }
+    // PR2/F2: a held submission freezes the composer as an INPUT OWNER — every
+    // remaining composer-destined key (typing, paste, Ctrl+V media, history
+    // browse, visual chords, Enter/Send) is consumed here, BEFORE the visual
+    // chords and the media intent can run. Escape/Ctrl+C and every higher seat
+    // (modal/Reader/pickers/menus/queue/search) already had their own routing
+    // above.
+    if (composerHeld()) {
+      dismissOwedFrame()
+      return false
+    }
     // PR3: the two visual chords are inserted AFTER every existing owner
     // (Reader/modal/Alt+Q/cancel/pickers/Esc) and BEFORE Ctrl+V and the
     // composer, so an older owner always wins. The matcher consumes the SAME

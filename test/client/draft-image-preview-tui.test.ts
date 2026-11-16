@@ -2024,3 +2024,61 @@ test('a failed JPEG draft paints the failure word with the error ink (role 16)',
     'the draft identity stays in the placeholder ink')
   app.stop()
 })
+
+// ── PR2/F3: a held draft's preview `x` never mutates the submitted document ─
+
+test('PR2: a held composer paints no removable preview and a real fullscreen click does nothing', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const store = new DraftImageStore()
+  const { vt, app } = startApp(100, 32, store)
+  const image = addImage(store)
+  const draft = `${image.placeholder} hello`
+  app.setDraft(draft)
+  app.holdSubmission('attempt-preview')
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const labelRow = await rowOf(vt, '#1/1 · 800×100', 'preview identity')
+  // The removal control is not painted/armed while held: the real press +
+  // release at the last painted cell is inert.
+  click(vt, 100, labelRow)
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), draft, 'the held document is unchanged by the preview click')
+  assert.equal(store.size(), 1, 'the held draft keeps its staged image')
+  app.settleSubmission('attempt-preview', 'not-accepted')
+  await vt.waitForRender()
+  click(vt, 100, labelRow)
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'hello', 'the released composer admits the preview removal again')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('PR2: a preview press armed BEFORE the hold cannot delete on release', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const store = new DraftImageStore()
+  const { vt, app } = startApp(100, 32, store)
+  const image = addImage(store)
+  const draft = `${image.placeholder} hello`
+  app.setDraft(draft)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const labelRow = await rowOf(vt, '#1/1 · 800×100', 'preview identity')
+  // Press the `x` cell while the composer is editable (arms the gesture) …
+  vt.sendInput(`\x1b[<0;100;${labelRow}M`)
+  await vt.waitForRender()
+  // … the submission hold starts before the release …
+  app.holdSubmission('attempt-stale-press')
+  await vt.waitForRender()
+  // … and the stale release must not touch the submitted document.
+  vt.sendInput(`\x1b[<0;100;${labelRow}m`)
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), draft, 'a press→hold→release gesture never deletes from the held draft')
+  assert.equal(store.size(), 1, 'the staged image is untouched')
+  app.settleSubmission('attempt-stale-press', 'accepted')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '', 'the accepted settlement clears only the submitted document')
+  app.setFullscreen(false)
+  app.stop()
+})

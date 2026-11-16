@@ -24,18 +24,29 @@ import { TranscriptFolder } from '../../src/transcript.ts'
 import type { TranscriptMessage, TurnActivity } from '../../src/transcript.ts'
 import type { JsonValue } from '../../src/domain/transcript/types.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
-import { TuiApp, ThinkingCompactComponent, TODO_COMPACT_LIMIT, TODO_SHORT_COMPACT_LIMIT, TODO_SHORT_SCREEN_MAX_ROWS, todoCompactLimit } from '../../src/tui-app.ts'
+import { TuiApp, ThinkingCompactComponent, TODO_COMPACT_LIMIT, TODO_SHORT_COMPACT_LIMIT, TODO_SHORT_SCREEN_MAX_ROWS, todoCompactLimit, type OwnedRunner } from '../../src/tui-app.ts'
 import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { ExtensionLedger } from '../../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { APP_KEYBINDINGS } from '../../src/tui/keybindings/definitions.ts'
 import { buildOsc52Sequence, copyToClipboard, type CopyExecutor } from '../../src/client/clipboard/copy.ts'
+import { runOwned } from '../../src/runtime/process/tasks.ts'
+import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
   disposeStartedApps()
 })
+
+/** A `runOwned` entry for tests that open the external editor: the real
+ *  classifier with a silent diag (the owned failure path stays observable). */
+function ownedTaskEntry(): OwnedRunner {
+  const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
+  return (label, task, options) => {
+    runOwned(label, task, { ...options, diag })
+  }
+}
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
@@ -5872,4 +5883,107 @@ test('PR2: the Ctrl+S steer gesture shares the admission and the freeze', async 
   h.app.settleSubmission('attempt-steer', 'accepted')
   await h.vt.waitForRender()
   assert.equal(h.app.getDraft(), '')
+})
+
+// ── PR2/F1/F2: the hold owns every draft/publication entry point ───────────
+
+test('PR2: Ctrl+G during a held submission never starts the external editor', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const launches: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: async (draft) => { launches.push(draft); return draft },
+    runOwned: ownedTaskEntry(),
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('held draft')
+    app.holdSubmission('attempt-editor')
+    await vt.waitForRender()
+    vt.sendInput('\x07') // Ctrl+G
+    await vt.waitForRender()
+    assert.deepEqual(launches, [], 'a held composer never hands its document to $EDITOR')
+    assert.equal(app.getDraft(), 'held draft', 'the submitted document is untouched')
+    // The Host acceptance releases the hold; the editor entry works again.
+    app.settleSubmission('attempt-editor', 'accepted')
+    await vt.waitForRender()
+    app.setDraft('next draft')
+    vt.sendInput('\x07')
+    await vt.waitForRender()
+    assert.deepEqual(launches, ['next draft'], 'after the acceptance the external editor runs normally')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2: a settlement while the external editor is open releases the hold and discards the stale write-back', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let releaseEditor!: () => void
+  const editorGate = new Promise<void>(resolve => { releaseEditor = resolve })
+  let editorOpened!: () => void
+  const opened = new Promise<void>(resolve => { editorOpened = resolve })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: async () => {
+      editorOpened()
+      await editorGate
+      return 'external rewrite'
+    },
+    runOwned: ownedTaskEntry(),
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('draft in editor')
+    vt.sendInput('\x07') // Ctrl+G: the editor opens over a TEMPORARILY suspended surface
+    await opened
+    // The symmetric path: the attempt settles while the editor holds the tty.
+    // The renderer must still release its hold (a temporary suspension is not
+    // a stop) …
+    app.holdSubmission('attempt-during-flight')
+    app.settleSubmission('attempt-during-flight', 'accepted')
+    releaseEditor()
+    await vt.waitForRender()
+    // … and the stale editor result must not be written back into the
+    // settled/cleared composer.
+    assert.equal(app.getDraft(), '', 'the stale external write-back is discarded')
+    // The editor is usable again (no permanent lock): a fresh ordinary
+    // submission works end to end.
+    app.setDraft('after resumption')
+    await vt.waitForRender()
+    vt.sendInput('typed') // editable again — the input lock died with the hold
+    await vt.waitForRender()
+    assert.ok(app.getDraft().includes('typed'), 'the composer accepts typing again after the resumption')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2: Ctrl+V during a held submission never probes the clipboard', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let pastes = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onClipboardPaste: () => { pastes += 1 },
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('held')
+    app.holdSubmission('attempt-paste')
+    await vt.waitForRender()
+    vt.sendInput('\x16') // Ctrl+V
+    await vt.waitForRender()
+    assert.equal(pastes, 0, 'a held composer consumes Ctrl+V without probing the clipboard')
+    app.settleSubmission('attempt-paste', 'not-accepted')
+    vt.sendInput('\x16')
+    await vt.waitForRender()
+    assert.equal(pastes, 1, 'after the release the paste intent runs again')
+  } finally {
+    app.stop()
+  }
 })
