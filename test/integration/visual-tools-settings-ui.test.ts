@@ -996,6 +996,97 @@ test('a stale Subagent editor cannot overwrite a newer official profile revision
   assert.deepEqual(plane.userConfig('subagent'), { maxDepth: 0, maxActiveSubagents: 8 })
 })
 
+test('a stale Limits namespace does not block a current Selection Save from the Root keyboard', async t => {
+  const life = testLifecycle(t)
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
+  await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(Loader)
+  const route = [{ provider: 'alpha', model: 'fast' }]
+  const plane = await mountSubagentSectionPlane(ctx, life.tempDir('subagent-stale-keyboard-plane-'), {
+    enabled: false, allowedModels: route,
+    limits: { maxDepth: 1, maxActiveSubagents: 8 },
+  })
+  const port = new DirectConfigPort(ctx, undefined, () => undefined)
+  const otherEditor = new DirectConfigPort(ctx, undefined, () => undefined)
+  const { calls } = recordOfficialSubagentMutations(ctx, t)
+  const ui = mountSettingsUi(port)
+  life.defer(() => ui.dispose())
+  await openSubagentSettings(ui)
+  const openedSelection = readySection(port.subagentModelSelection.read())
+  await stageSubagentNumber(ui, 'Maximum recursion depth', '2')
+  await selectSubagentField(ui, 'Enabled')
+  await settingsKey(ui, '\r')
+  assert.match(ui.vt.getViewport().join('\n'), /Limits: Unsaved/u)
+  assert.match(ui.vt.getViewport().join('\n'), /Selection: Unsaved/u)
+
+  const newer = readySection(otherEditor.subagentLimits.read())
+  assert.deepEqual(await otherEditor.subagentLimits.mutate({ maxDepth: { kind: 'set', value: 4 } }, newer.revision, newer.generation), { kind: 'accepted' })
+  ui.app.requestRender()
+  await waitForFrame(() => ui.vt.getViewport().join('\n'),
+    frame => /Limits · Last-known · read-only/u.test(frame) && /Selection: Unsaved/u.test(frame) && /Save \[S\]/u.test(frame),
+    () => ui.vt.waitForRender(), 'a stale sibling must keep the current dirty namespace Save reachable')
+  await settingsKey(ui, 's')
+  await waitForFrame(() => ui.vt.getViewport().join('\n'),
+    frame => /Limits: Not saved/u.test(frame) && /Selection: Verified/u.test(frame),
+    () => ui.vt.waitForRender(), 'the current Selection namespace settles independently')
+
+  assert.deepEqual(calls.slice(1), [{
+    ns: 'subagent-model-selection-settings',
+    ops: [{ op: 'set', path: ['enabled'], value: true }],
+    revision: openedSelection.revision,
+  }])
+  assert.deepEqual(readySection(port.subagentLimits.read()).effective, { maxDepth: 4, maxActiveSubagents: 8 })
+  assert.deepEqual(plane.userConfig('subagent'), { maxDepth: 4, maxActiveSubagents: 8 })
+  assert.deepEqual(plane.userConfig('subagent-model-selection-settings'), { enabled: true, allowedModels: route })
+})
+
+test('a stale Limits namespace does not hide the current Selection Save from the Root pointer', async t => {
+  const life = testLifecycle(t)
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
+  await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(Loader)
+  const route = [{ provider: 'alpha', model: 'fast' }]
+  const plane = await mountSubagentSectionPlane(ctx, life.tempDir('subagent-stale-pointer-plane-'), {
+    enabled: false, allowedModels: route,
+    limits: { maxDepth: 1, maxActiveSubagents: 8 },
+  })
+  const port = new DirectConfigPort(ctx, undefined, () => undefined)
+  const otherEditor = new DirectConfigPort(ctx, undefined, () => undefined)
+  const { calls } = recordOfficialSubagentMutations(ctx, t)
+  const ui = mountSettingsUi(port)
+  life.defer(() => ui.dispose())
+  await openSubagentSettings(ui)
+  const openedSelection = readySection(port.subagentModelSelection.read())
+  await stageSubagentNumber(ui, 'Maximum recursion depth', '2')
+  await clickPainted(ui, 'Enabled')
+  assert.match(ui.vt.getViewport().join('\n'), /Limits: Unsaved/u)
+  assert.match(ui.vt.getViewport().join('\n'), /Selection: Unsaved/u)
+
+  const newer = readySection(otherEditor.subagentLimits.read())
+  assert.deepEqual(await otherEditor.subagentLimits.mutate({ maxDepth: { kind: 'set', value: 4 } }, newer.revision, newer.generation), { kind: 'accepted' })
+  ui.app.requestRender()
+  await waitForFrame(() => ui.vt.getViewport().join('\n'),
+    frame => /Limits · Last-known · read-only/u.test(frame) && /Save \[S\]/u.test(frame),
+    () => ui.vt.waitForRender(), 'the Root bar must keep the independently committable Save span')
+  await clickPainted(ui, 'Save [S]')
+  await waitForFrame(() => ui.vt.getViewport().join('\n'),
+    frame => /Limits: Not saved/u.test(frame) && /Selection: Verified/u.test(frame),
+    () => ui.vt.waitForRender(), 'the pointer Save must settle the current Selection namespace')
+
+  assert.deepEqual(calls.slice(1), [{
+    ns: 'subagent-model-selection-settings',
+    ops: [{ op: 'set', path: ['enabled'], value: true }],
+    revision: openedSelection.revision,
+  }])
+  assert.deepEqual(readySection(port.subagentLimits.read()).effective, { maxDepth: 4, maxActiveSubagents: 8 })
+  assert.deepEqual(plane.userConfig('subagent'), { maxDepth: 4, maxActiveSubagents: 8 })
+  assert.deepEqual(plane.userConfig('subagent-model-selection-settings'), { enabled: true, allowedModels: route })
+})
+
 test('a Subagent profile write blocked by a temporary home overlay stays unverified and preserves the document', async t => {
   const life = testLifecycle(t)
   const ctx = new Context()
