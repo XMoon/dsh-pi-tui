@@ -141,7 +141,10 @@ function harness(options: {
         return captured
       },
       running: () => options.running?.() ?? false,
-      plan: () => options.plan?.() ?? false,
+      plan: () => {
+        const active = options.plan?.() ?? false
+        return active === undefined ? undefined : { active, pending: false }
+      },
       // The staleness fence is not this test's subject: every read is current.
       isStillCurrent: () => true,
       captureGeneration: () => generation,

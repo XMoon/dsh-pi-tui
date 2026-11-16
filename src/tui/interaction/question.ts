@@ -15,7 +15,7 @@ import { decodeKittyPrintable, getKeybindings, Input, matchesKey, type KeyId, ty
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
-import { getGraphemeSegmenter, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
+import { getGraphemeSegmenter, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import { Frame } from '../components/frame.ts'
 import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
@@ -58,8 +58,10 @@ export interface QuestionFlowQuestion {
   options?: readonly { label: string; description?: string }[]
   /** Whether more than one option may be selected. */
   multiSelect?: boolean
-  /** Presentation intent: approve names the recommended option label. */
-  intent?: { kind: string; approve?: string }
+  /** Presentation intent: approve names the recommended option label; the
+   * official plan-review intent also carries the reviewed tool call identity
+   * (presentation-only — the answer encoding is identical either way). */
+  intent?: { kind: string; approve?: string; callId?: string }
   /** Mask the free-text row's rendered content (an authorization secret
    *  prompt). The real value stays in the input's memory (the answer
    *  returns it); only the DISPLAY is bullets, and nothing here logs,
@@ -294,6 +296,36 @@ interface Row {
   description?: string
 }
 
+/**
+ * The OFFICIAL plan-review question shape (presentation-only): exactly one
+ * question whose `intent.kind` is `plan-review`, whose `intent.approve` names
+ * one of its own options, and which offers at least one other option (the
+ * keep-planning class). Anything else — multiple questions, a forged intent,
+ * a missing approve option — is NOT a plan review and keeps the generic
+ * QuestionFlow. Labels are read from the official request; nothing here
+ * matches display text or headers.
+ */
+export function planReviewOf(
+  questions: readonly QuestionFlowQuestion[],
+): { question: QuestionFlowQuestion; approve: string } | undefined {
+  if (questions.length !== 1) return undefined
+  const question = questions[0]
+  const intent = question?.intent
+  if (intent === undefined || intent.kind !== 'plan-review') return undefined
+  const approve = intent.approve
+  if (approve === undefined || approve === '') return undefined
+  const options = question.options ?? []
+  const hasApprove = options.some(option => option.label === approve)
+  const hasOther = options.some(option => option.label !== approve)
+  if (!hasApprove || !hasOther) return undefined
+  return { question, approve }
+}
+
+/** The local step of the plan-review branch (one flow, one step at a time):
+ * the decision list, the reading viewport, the keep-planning feedback input,
+ * or the question-detail full-text fallback. */
+type PlanReviewStep = 'decision' | 'reading' | 'feedback' | 'fallback'
+
 type QuestionPointerAction = 'back' | 'progress' | 'edit' | 'leave-edit' | 'cancel' | 'submit'
 
 type QuestionMouseHitKind = 'action' | 'option' | 'other' | 'marker' | 'inert'
@@ -454,6 +486,24 @@ export class QuestionFlow implements Component, Focusable {
    */
   private readonly onAnswerMutation: (() => void) | undefined
   private readonly onDraftChange: ((draft: QuestionFlowDraft) => void) | undefined
+  /**
+   * The OFFICIAL plan-review this flow renders (exact shape only — see
+   * {@link planReviewOf}). While set, the flow replaces its generic
+   * Q1→Review→Submit pages with the plan decision/reading/feedback steps;
+   * the ordinary question machinery above stays untouched for every other
+   * shape.
+   */
+  private readonly planReview: { question: QuestionFlowQuestion; approve: string } | undefined
+  /** The current local plan-review step (the decision list by default). */
+  private planStep: PlanReviewStep = 'decision'
+  /** The highlighted plan decision row: 0 View (when offered), then Keep
+   * planning…, then Approve. Never defaults to Approve. */
+  private planCursor = 0
+  /** The keep-planning feedback Input (Client-local ephemeral text; the draft
+   * survives Esc back to the decision list). */
+  private planFeedbackInput = new Input({ prompt: '' })
+  /** Scroll offset of the plan FALLBACK full-text page (question.detail). */
+  private planFallbackScroll = 0
 
   constructor(
     questions: readonly QuestionFlowQuestion[],
@@ -469,6 +519,7 @@ export class QuestionFlow implements Component, Focusable {
     this.onCancel = onCancel
     this.onAnswerMutation = onAnswerMutation
     this.onDraftChange = onDraftChange
+    this.planReview = planReviewOf(questions)
     this.drafts = questions.map((_question, index) => {
       const seed = initialDraft?.answers[index]
       return {
@@ -479,6 +530,11 @@ export class QuestionFlow implements Component, Focusable {
     })
     if (initialDraft !== undefined) {
       this.tab = Math.min(Math.max(0, initialDraft.tab), questions.length)
+      // The plan branch re-seeds ONLY its feedback draft (its single local
+      // progress fact); a parked decision cursor starts fresh at View/Keep.
+      if (this.planReview !== undefined) {
+        this.planFeedbackInput.setValue(initialDraft.answers[0]?.custom ?? '')
+      }
     }
     // The free-text input keeps the last answer for re-entry.
     this.otherInput.onSubmit = (value) => this.commitOther(value)
@@ -488,8 +544,98 @@ export class QuestionFlow implements Component, Focusable {
     // outer state (handleOtherEscape → exitOther; question.cancel /
     // navigation-state Ctrl+C → onCancel).
     this.otherInput.onEscape = () => this.handleOtherEscape()
+    // The plan-review branch's feedback Input submits/leaves through the plan
+    // step machine, never the generic commitOther path (which would clear the
+    // selected label on custom text).
+    this.planFeedbackInput.onSubmit = (value) => this.submitPlanFeedback(value)
+    this.planFeedbackInput.onEscape = () => { this.planStep = 'decision' }
     // An optionless first question edits text from the start.
     this.syncEditMode()
+  }
+
+  /** The plan decision rows in FIXED order: `View plan` first (Fullscreen
+   * only, offered by the host through {@link beginPlanInspection}), then
+   * `Keep planning…` (feedback), then the official approve label last. The
+   * approve row is never the default cursor. */
+  private planDecisionRows(): { action: 'view' | 'keep' | 'approve'; label: string }[] {
+    if (this.planReview === undefined) return []
+    const rows: { action: 'view' | 'keep' | 'approve'; label: string }[] = []
+    if (this.planInspection !== undefined) rows.push({ action: 'view', label: 'View plan' })
+    const options = this.planReview.question.options ?? []
+    for (const option of options) {
+      if (option.label === this.planReview.approve) continue
+      rows.push({ action: 'keep', label: `${option.label}…` })
+    }
+    rows.push({ action: 'approve', label: `${this.planReview.approve} plan` })
+    return rows
+  }
+
+  /** The host-installed plan inspection capability (A4): a read-only
+   * viewport request the flow triggers from the `View plan` decision row.
+   * The flow itself owns no transcript geometry. */
+  private planInspection: (() => boolean) | undefined
+
+  /** Install the host's plan inspection capability (A4). Called by the
+   * mounting host after the flow exists; `undefined` removes the View row
+   * (Regular keeps the two-row decision list). Returns false when the flow
+   * is not a plan review. */
+  setPlanInspection(inspect: (() => boolean) | undefined): boolean {
+    if (this.planReview === undefined) return false
+    this.planInspection = inspect
+    // Keep the cursor valid: clamp into the (possibly grown) row list.
+    this.planCursor = Math.min(this.planCursor, Math.max(0, this.planDecisionRows().length - 1))
+    return true
+  }
+
+  /** Whether this flow renders the official plan-review branch. */
+  isPlanReviewFlow(): boolean {
+    return this.planReview !== undefined
+  }
+
+  /** The official plan-review question DTO, for the HOST's read-only
+   * inspection (the intent's callId is the reviewed tool invocation). */
+  planReviewQuestionForHost(): QuestionFlowQuestion | undefined {
+    return this.planReview?.question
+  }
+
+  /** Whether the plan branch currently shows its reading step. */
+  isPlanReading(): boolean {
+    return this.planReview !== undefined && this.planStep === 'reading'
+  }
+
+  /** The plan branch's feedback draft (the park/reopen snapshot keeps the
+   * user's in-progress revision text). */
+  private planFeedbackText(): string {
+    return this.planFeedbackInput.getValue()
+  }
+
+  /** Enter the reading step: the host's one-shot inspection already ran (it
+   * returned true); the flow only swaps its local step. */
+  enterPlanReading(): void {
+    if (this.planReview === undefined) return
+    this.planStep = 'reading'
+  }
+
+  /** The keep-planning feedback submit: an empty text answers the OFFICIAL
+   * keep-planning label alone; non-empty text adds it as `custom`. Never
+   * clears `selected` (the generic submit's custom-first behavior would). */
+  private submitPlanFeedback(value: string): void {
+    const plan = this.planReview
+    if (plan === undefined) return
+    const keep = (plan.question.options ?? []).find(option => option.label !== plan.approve)?.label
+    if (keep === undefined) return
+    this.onDone([{
+      id: plan.question.id,
+      selected: [keep],
+      ...value.trim() === '' ? {} : { custom: value },
+    }])
+  }
+
+  /** The plan approve submit: the OFFICIAL approve label, nothing else. */
+  private submitPlanApprove(): void {
+    const plan = this.planReview
+    if (plan === undefined) return
+    this.onDone([{ id: plan.question.id, selected: [plan.approve] }])
   }
 
   /**
@@ -505,6 +651,7 @@ export class QuestionFlow implements Component, Focusable {
   set focused(value: boolean) {
     this._focused = value
     if (this.editingOther) this.otherInput.focused = value
+    if (this.planReview !== undefined && this.planStep === 'feedback') this.planFeedbackInput.focused = value
   }
 
   /**
@@ -522,6 +669,7 @@ export class QuestionFlow implements Component, Focusable {
    *  pointer gesture across a keyboard interaction re-proves it before the
    *  release, so leaving EDIT can never turn the same cell into a flow cancel. */
   interactionIdentity(): string {
+    if (this.planReview !== undefined) return `plan:${this.planStep}`
     return `${this.tab}:${this.editingOther ? 'edit' : 'navigate'}`
   }
 
@@ -544,6 +692,14 @@ export class QuestionFlow implements Component, Focusable {
   /** Snapshot the local progress for a park (addendum §6). Kept separate from
    *  the internal per-question `draft()` accessor. */
   draftSnapshot(): QuestionFlowDraft {
+    if (this.planReview !== undefined) {
+      // The plan branch's local progress is its feedback draft (the decision
+      // itself is never a durable answer until submitted).
+      return {
+        tab: 0,
+        answers: [{ selected: [], custom: this.planFeedbackText(), skipped: false }],
+      }
+    }
     return {
       tab: this.tab,
       answers: this.drafts.map(entry => ({
@@ -569,6 +725,32 @@ export class QuestionFlow implements Component, Focusable {
    * transcript action.
    */
   ownsFixedKey(data: string): boolean {
+    if (this.planReview !== undefined) {
+      if (this.planStep === 'feedback') {
+        return inputOwnsKey(data)
+          || componentKeymap.matches(data, 'question.confirm')
+          || componentKeymap.matches(data, 'question.cancel')
+          || componentKeymap.matches(data, 'question.pageUp')
+          || componentKeymap.matches(data, 'question.pageDown')
+      }
+      if (this.planStep === 'reading') {
+        return componentKeymap.matches(data, 'question.cancel')
+          || componentKeymap.matches(data, 'question.cursorUp')
+          || componentKeymap.matches(data, 'question.cursorDown')
+          || componentKeymap.matches(data, 'question.pageUp')
+          || componentKeymap.matches(data, 'question.pageDown')
+      }
+      if (this.planStep === 'fallback') {
+        return componentKeymap.matches(data, 'question.cancel')
+          || componentKeymap.matches(data, 'question.pageUp')
+          || componentKeymap.matches(data, 'question.pageDown')
+      }
+      // Decision list.
+      return componentKeymap.matches(data, 'question.confirm')
+        || componentKeymap.matches(data, 'question.cancel')
+        || componentKeymap.matches(data, 'question.cursorUp')
+        || componentKeymap.matches(data, 'question.cursorDown')
+    }
     if (this.editingOther) {
       return inputOwnsKey(data)
         || componentKeymap.matches(data, 'question.confirm')
@@ -736,6 +918,10 @@ export class QuestionFlow implements Component, Focusable {
   }
 
   private applyPointerAction(action: QuestionPointerAction): void {
+    if (this.planReview !== undefined) {
+      this.applyPlanPointerAction(action)
+      return
+    }
     switch (action) {
       case 'back':
         this.backToPreviousQuestion()
@@ -759,6 +945,42 @@ export class QuestionFlow implements Component, Focusable {
     }
   }
 
+  /** The plan branch's pointer actions: each painted span names the plan step
+   * verb it really performs; the generic question verbs are never reused
+   * (submit never fires from a reading Back row). */
+  private applyPlanPointerAction(action: QuestionPointerAction): void {
+    if (this.planStep === 'decision') {
+      if (action === 'edit') {
+        this.executePlanRow('keep')
+        return
+      }
+      if (action === 'progress') {
+        this.executePlanRow('view')
+        return
+      }
+      if (action === 'submit') {
+        this.executePlanRow('approve')
+        return
+      }
+      if (action === 'cancel') this.onCancel()
+      return
+    }
+    if (this.planStep === 'feedback') {
+      if (action === 'submit') {
+        this.submitPlanFeedback(this.planFeedbackText())
+        return
+      }
+      if (action === 'back') this.planStep = 'decision'
+      return
+    }
+    // reading + fallback: Back only (never a submit).
+    if (action === 'back') {
+      if (this.planStep === 'reading') this.onPlanReadingEnd?.()
+      this.planStep = 'decision'
+      this.planFallbackScroll = 0
+    }
+  }
+
   /**
    * Primary-click routing (fullscreen): an option row selects it (single-
    * select advances, multi-select toggles, the "Type something." row enters
@@ -769,6 +991,19 @@ export class QuestionFlow implements Component, Focusable {
    * what the user sees.
    */
   clickRow(row: number, x?: number): void {
+    if (this.planReview !== undefined) {
+      // The plan decision rows are real click targets (keyboard Enter
+      // parity); reading/fallback have no list rows (the marker is inert).
+      const key = this.hitMap.get(row)
+      if (this.planStep === 'decision' && key !== undefined && key.startsWith('plan:')) {
+        const action = key.slice('plan:'.length)
+        if (action === 'view' || action === 'keep' || action === 'approve') {
+          this.planCursor = this.planDecisionRows().findIndex(candidate => candidate.action === action)
+          this.executePlanRow(action)
+        }
+      }
+      return
+    }
     if (row < 0 || this.tab >= this.questions.length) return
     const key = this.hitMap.get(row)
     if (key === OTHER_ROW) {
@@ -1356,6 +1591,133 @@ export class QuestionFlow implements Component, Focusable {
     this.onDone(answers)
   }
 
+  /** The plan-review branch's input routing. Esc semantics by step:
+   * decision = the OFFICIAL dismiss (onCancel); reading/feedback/fallback =
+   * back to the decision list, never a dismiss. Enter never submits from
+   * reading or fallback. Ctrl+C is always the official cancel. */
+  private handlePlanInput(data: string): void {
+    const plan = this.planReview
+    if (plan === undefined) return
+    if (this.planStep === 'feedback') {
+      if (componentKeymap.matches(data, 'question.cancel')) {
+        // Esc leaves the feedback edit back to the decision list, keeping
+        // the draft (the Input's own onEscape does the step move).
+        this.planFeedbackInput.handleInput(data)
+        return
+      }
+      if (componentKeymap.matches(data, 'question.pageUp')) {
+        this.planFallbackScroll = Math.max(0, this.planFallbackScroll - 1)
+        return
+      }
+      if (componentKeymap.matches(data, 'question.pageDown')) {
+        this.planFallbackScroll += 1
+        return
+      }
+      if (componentKeymap.matches(data, 'question.confirm')) {
+        // The Input's onSubmit seam drives submitPlanFeedback.
+        this.planFeedbackInput.handleInput(data)
+        return
+      }
+      this.planFeedbackInput.handleInput(data)
+      return
+    }
+    if (this.planStep === 'reading') {
+      // Reading is a HOST-owned viewport (the transcript's own scroll);
+      // the flow only owns the Esc-back verb here. Every other key is a
+      // no-op in the seat (never an approve, never a cancel).
+      if (componentKeymap.matches(data, 'question.cancel')) {
+        this.planStep = 'decision'
+        this.onPlanReadingEnd?.()
+        return
+      }
+      if (componentKeymap.matches(data, 'question.cursorUp')) {
+        this.onPlanReadingScroll?.(-1)
+        return
+      }
+      if (componentKeymap.matches(data, 'question.cursorDown')) {
+        this.onPlanReadingScroll?.(1)
+        return
+      }
+      if (componentKeymap.matches(data, 'question.pageUp')) {
+        this.onPlanReadingScroll?.(-Math.max(1, this.lastRegionHeight))
+        return
+      }
+      if (componentKeymap.matches(data, 'question.pageDown')) {
+        this.onPlanReadingScroll?.(Math.max(1, this.lastRegionHeight))
+        return
+      }
+      return
+    }
+    if (this.planStep === 'fallback') {
+      if (componentKeymap.matches(data, 'question.cancel')) {
+        this.planStep = 'decision'
+        this.planFallbackScroll = 0
+        return
+      }
+      if (componentKeymap.matches(data, 'question.pageUp')) {
+        this.planFallbackScroll = Math.max(0, this.planFallbackScroll - 1)
+        return
+      }
+      if (componentKeymap.matches(data, 'question.pageDown')) {
+        this.planFallbackScroll += 1
+        return
+      }
+      return
+    }
+    // Decision list: ↑↓ move, Enter executes the highlighted row, Esc/Ctrl+C
+    // dismiss through the official cancel.
+    const rows = this.planDecisionRows()
+    if (componentKeymap.matches(data, 'question.cursorUp')) {
+      this.planCursor = (this.planCursor - 1 + rows.length) % rows.length
+      return
+    }
+    if (componentKeymap.matches(data, 'question.cursorDown')) {
+      this.planCursor = (this.planCursor + 1) % rows.length
+      return
+    }
+    if (componentKeymap.matches(data, 'question.cancel')) {
+      this.onCancel()
+      return
+    }
+    if (componentKeymap.matches(data, 'question.confirm')) {
+      this.executePlanRow(rows[this.planCursor]?.action)
+    }
+  }
+
+  /** Execute one plan decision row (keyboard Enter and the pointer route
+   * share this ONE verb; a missing inspection capability degrades View to
+   * the question-detail fallback). */
+  private executePlanRow(action: 'view' | 'keep' | 'approve' | undefined): void {
+    if (action === 'view') {
+      const inspected = this.planInspection?.() === true
+      if (inspected) {
+        this.planStep = 'reading'
+      } else {
+        // No provable transcript target: the official question's OWN detail
+        // is the fallback full text (never a claimed-located reading state).
+        this.planStep = 'fallback'
+        this.planFallbackScroll = 0
+      }
+      return
+    }
+    if (action === 'keep') {
+      this.planStep = 'feedback'
+      this.planFeedbackInput.focused = this.focused
+      return
+    }
+    if (action === 'approve') {
+      this.submitPlanApprove()
+    }
+  }
+
+  /** Host hook fired when the reading step ends (Esc back): the host's
+   * transcript scroll/read lease is released here (Client-local). */
+  onPlanReadingEnd: (() => void) | undefined
+  /** Host hook that scrolls the TRANSCRIPT viewport while the reading step
+   * is active (the flow owns no transcript geometry). Positive lines scroll
+   * down; the host clamps. */
+  onPlanReadingScroll: ((lines: number) => void) | undefined
+
   handleInput(data: string): void {
     if (data === '\u0000') return
     // Any keyboard input terminates an unfinished mouse gesture: the
@@ -1366,6 +1728,12 @@ export class QuestionFlow implements Component, Focusable {
     // must never re-enter the edit when the release lands before the
     // repaint.
     this.mousePressGesture = undefined
+    // The plan-review branch owns its own step machine; the generic
+    // question machinery below is untouched for every other shape.
+    if (this.planReview !== undefined) {
+      this.handlePlanInput(data)
+      return
+    }
     // Text mode: printable/cursor keys go to the real Input; Enter/Esc are
     // the flow's own verbs. PageUp/PageDown scroll the body even while
     // typing ('e' stays a letter here — expand is a list-mode verb).
@@ -1678,6 +2046,172 @@ export class QuestionFlow implements Component, Focusable {
     lines.push(painted.join(color.textMuted(ACTION_BAR_SEPARATOR)) + ' '.repeat(padding))
   }
 
+  /** The plan review's safe single-line title: the official detail's FIRST
+   * markdown heading, single-lined and width-truncated. Display only — never
+   * a permission, state or locator. */
+  private planTitle(width: number): string {
+    const detail = this.planReview?.question.detail ?? ''
+    const heading = /^#{1,6}\s+(.+?)\s*$/m.exec(detail)?.[1] ?? this.planReview?.question.question ?? 'Plan'
+    return truncateToWidth(sanitizedPhysicalLine(heading), Math.max(1, width - 2), '…')
+  }
+
+  /** Render the plan-review branch: a compact decision component in the
+   * editor seat (title + fixed action rows), the reading hint, the feedback
+   * input, or the full-text fallback page. The plan BODY never renders here
+   * — it lives in the transcript Tool Card (Fullscreen) or the fallback page. */
+  private renderPlanReview(width: number): string[] {
+    const plan = this.planReview
+    if (plan === undefined) return []
+    const lines: string[] = []
+    const statusText = this.status?.text
+    if (statusText !== undefined && this.budget > MIN_SUPPORTED_BUDGET + 1) {
+      appendWrappedBudgeted(lines, '', '', color.textDim(sanitizeDisplayText(statusText)), width, 1)
+    }
+    if (this.planStep === 'reading') {
+      lines.push(color.textStrong('Plan review · Reading the submitted plan'))
+      lines.push('')
+      lines.push(color.textDim('↑↓ / PgUp/PgDn scroll the transcript · Esc back'))
+      return lines
+    }
+    if (this.planStep === 'feedback') {
+      lines.push(color.textStrong('Plan review · Request changes'))
+      lines.push('')
+      lines.push(color.textDim('What should be changed? (optional)'))
+      const inputLine = this.planFeedbackInput.render(Math.max(1, width - 2))[0] ?? ''
+      lines.push(`> ${this.planFeedbackText() === '' ? color.textDim('type feedback…') : inputLine}`)
+      return lines
+    }
+    if (this.planStep === 'fallback') {
+      lines.push(color.textStrong(`Plan review · ${this.planTitle(width)}`))
+      lines.push(color.textDim('Full review text (from the question)'))
+      lines.push('')
+      const detail = plan.question.detail ?? ''
+      const wrapped: string[] = []
+      for (const raw of detail.split('\n')) {
+        wrapped.push(...wrapTextWithAnsi(sanitizeDisplayText(raw), Math.max(1, width - 2)))
+      }
+      // The fallback never silently drops the tail: the scroll window is
+      // clamped so the LAST lines stay reachable (no fixed 256-row cap here).
+      const visible = Math.max(1, this.budget - lines.length - 1)
+      const maxScroll = Math.max(0, wrapped.length - visible)
+      this.planFallbackScroll = Math.min(this.planFallbackScroll, maxScroll)
+      const start = this.planFallbackScroll
+      for (let i = start; i < start + visible && i < wrapped.length; i += 1) {
+        lines.push(wrapped[i] ?? '')
+      }
+      if (wrapped.length > visible) {
+        const marker = start > 0 && start + visible < wrapped.length
+          ? `↑ ${start} up · ↓ ${wrapped.length - (start + visible)} more lines`
+          : start > 0 ? `↑ ${start} up` : `↓ ${wrapped.length - visible} more lines`
+        this.lastMarkerRow = lines.length
+        this.hitMap.set(lines.length, MARKER_ROW)
+        lines.push(color.textDim(marker))
+      }
+      return lines
+    }
+    // Decision list (§3.1): title row, blank, fixed rows; the hint/action
+    // bar is painted by the caller below these rows.
+    lines.push(color.textStrong(`Plan review · ${this.planTitle(width)}`))
+    lines.push('')
+    const rows = this.planDecisionRows()
+    this.planCursor = Math.min(this.planCursor, Math.max(0, rows.length - 1))
+    rows.forEach((row, index) => {
+      const pointer = index === this.planCursor ? color.primary('>') : ' '
+      const label = sanitizeDisplayText(row.label)
+      const text = index === this.planCursor ? color.textStrong(label) : label
+      lines.push(`${pointer} ${text}`)
+      this.hitMap.set(lines.length - 1, `plan:${row.action}`)
+    })
+    return lines
+  }
+
+  /** The plan branch's keyboard hint row (non-mouse mode): names the REAL
+   * Esc effect per step (design language D13) and composes from whole
+   * segments that fit. */
+  private planHintRow(width: number): string {
+    if (this.planStep === 'reading') {
+      return '↑↓ scroll · esc back'
+    }
+    if (this.planStep === 'feedback') {
+      const cancel = 'esc back'
+      const parts = ['enter send revision']
+      let hint = ''
+      for (const part of parts) {
+        const next = hint === '' ? part : `${hint} · ${part}`
+        if (visibleWidth(`${next} · ${cancel}`) > width) break
+        hint = next
+      }
+      return hint === '' ? cancel : `${hint} · ${cancel}`
+    }
+    if (this.planStep === 'fallback') {
+      return 'pgup/pgdn scroll · esc back'
+    }
+    const cancel = 'esc discuss'
+    const parts = ['↑↓ select', 'enter choose']
+    let hint = ''
+    for (const part of parts) {
+      const next = hint === '' ? part : `${hint} · ${part}`
+      if (visibleWidth(`${next} · ${cancel}`) > width) break
+      hint = next
+    }
+    return hint === '' ? cancel : `${hint} · ${cancel}`
+  }
+
+  /** The plan branch's Fullscreen action bar: the same verbs as the
+   * keyboard, painted as clickable spans with press/release identity (the
+   * shared paintedActionHits fence). */
+  private appendPlanPointerActionRow(lines: string[], width: number): void {
+    const segments: ActionBarSegment[] = []
+    const actionByIndex = new Map<number, QuestionPointerAction>()
+    const add = (
+      action: QuestionPointerAction,
+      label: string,
+      key: 'question.confirm' | 'question.cancel' | undefined,
+      priority: number,
+    ): void => {
+      const primaryKey = key === undefined ? undefined : componentKeymap.keysFor(key)[0]
+      const keycap = primaryKey === undefined ? '' : formatKeyId(primaryKey)
+      actionByIndex.set(segments.length, action)
+      segments.push({ text: keycap === '' ? label : `${label} [${keycap}]`, short: label, priority })
+    }
+    if (this.planStep === 'decision') {
+      add('edit', 'Keep planning…', undefined, 95)
+      if (this.planDecisionRows().some(row => row.action === 'view')) add('progress', 'View plan', undefined, 94)
+      add('submit', 'Approve', undefined, 50)
+      add('cancel', 'Discuss', 'question.cancel', 1000)
+    } else if (this.planStep === 'feedback') {
+      add('submit', 'Send revision', 'question.confirm', 95)
+      add('back', 'Back', 'question.cancel', 90)
+    } else {
+      // reading + fallback share the Back verb (Esc semantics).
+      add('back', 'Back', 'question.cancel', 95)
+    }
+    const layout = layoutActionBarRow(segments, width)
+    if (layout.truncated || layout.spans.length === 0) {
+      lines.push(color.textMuted(layout.text))
+      return
+    }
+    const painted = layout.spans.map(span => {
+      const action = actionByIndex.get(span.inputIndex)
+      if (action === undefined) return color.textMuted(span.text)
+      this.paintedActionHits.push({
+        row: lines.length,
+        action,
+        startCol: span.startCol,
+        endCol: span.endCol,
+        tab: 0,
+        questionId: this.planReview?.question.id,
+        editingOther: false,
+        width,
+      })
+      return paintActionSpan(span.text, 'primary')
+    })
+    const segmentWidth = layout.spans.reduce((sum, span) => sum + visibleWidth(span.text), 0)
+      + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
+    const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
+    lines.push(painted.join(color.textMuted(ACTION_BAR_SEPARATOR)) + ' '.repeat(padding))
+  }
+
   render(width: number): string[] {
     const safeWidth = Math.max(1, width)
     this.lastContentWidth = safeWidth
@@ -1687,6 +2221,13 @@ export class QuestionFlow implements Component, Focusable {
     this.paintedActionHits = []
     this.lastMarkerRow = -1
     this.pinnedOtherRow = -1
+    if (this.planReview !== undefined) {
+      const planLines = this.renderPlanReview(safeWidth)
+      lines.push(...planLines)
+      if (this.mouseActionsEnabled) this.appendPlanPointerActionRow(lines, safeWidth)
+      else lines.push(color.textDim(this.planHintRow(safeWidth)))
+      return lines
+    }
     // Tab strip: Q1(✓) Q2(○) … Review — answered marks, current highlighted.
     // Tabs carry NO leading/trailing spaces of their own (the box border
     // provides the padding), so every content row starts at the same column.

@@ -1516,8 +1516,10 @@ export interface TuiQuestion {
   options?: readonly { label: string; description?: string }[]
   /** Whether more than one option may be selected. */
   multiSelect?: boolean
-  /** Presentation intent: approve names the recommended option label. */
-  intent?: { kind: string; approve?: string }
+  /** Presentation intent: approve names the recommended option label; the
+ * official plan-review intent also carries the reviewed tool call identity
+ * (presentation-only — the answer encoding is identical either way). */
+  intent?: { kind: string; approve?: string; callId?: string }
   /** Mask the free-text row's rendered content (an authorization secret
    *  prompt). The real value stays in the input's memory and is returned
    *  in the answer; only the DISPLAY is bullets, and nothing is logged,
@@ -17360,17 +17362,55 @@ export class TuiApp {
     this.visualSelection = undefined
   }
 
-  /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
-  setPlanMode(active: boolean): void {
-    this.planMode = active
+  /** Show or clear plan mode: header + footer badges, a warning-tinted editor
+   * border and the empty-draft composer hint (`Plan mode · describe the task`,
+   * or the pending variants while a selection awaits the next accepted step).
+   * The viewer placeholder (a child viewer's `Message <label>…`) keeps its own
+   * priority; the plan hint applies only to the MAIN subject's empty draft. */
+  setPlanMode(active: boolean | { readonly effective: boolean; readonly pending?: boolean }): void {
+    const effective = typeof active === 'boolean' ? active : active.effective
+    const pending = typeof active === 'boolean' ? undefined : active.pending
+    this.planMode = effective
+    // The composer's plan hint state (presentation-only; the same projection
+    // drives the footer badge — never a second plan authority).
+    this.planHint = effective
+      ? pending === true
+        ? 'Plan requested · pending'
+        : pending === false
+          ? 'Plan mode · change pending'
+          : 'Plan mode · describe the task'
+      : undefined
     // The collaboration projection's store notify re-renders the footer.
-    this.projectStatus({ collaboration: { plan: { effective: active } } })
+    this.projectStatus({
+      collaboration: {
+        plan: pending === undefined
+          ? { effective }
+          : { effective, pending },
+      },
+    })
     this.renderHeader()
     const seat = this.seatEditor()
-    seat.borderColor = active ? color.warning : this.editorBorder
+    seat.borderColor = effective ? color.warning : this.editorBorder
     seat.invalidate()
+    this.refreshComposerPlaceholder()
     this.requestRender()
     this.syncExtensionState()
+  }
+
+  /** The current plan-mode composer hint (undefined = none). */
+  private planHint: string | undefined
+
+  /** Refresh the host editor's placeholder: a child viewer's own placeholder
+   * wins; the plan hint shows only for the MAIN subject's EMPTY prompt-mode
+   * draft. Presentation-only — the hint is never part of the draft text. */
+  private refreshComposerPlaceholder(): void {
+    if (this.viewerMode !== undefined) return
+    const hint = this.planHint
+    if (hint === undefined) {
+      this.clearViewerPlaceholder()
+      return
+    }
+    this.editor.setPlaceholder(hint)
   }
 
   /**
@@ -17698,6 +17738,9 @@ export class TuiApp {
       const seat = this.seatEditor()
       seat.borderColor = this.editorBorder
       this.clearViewerPlaceholder()
+      // Back on the MAIN subject: the plan-mode composer hint (if the session
+      // is in plan mode) re-applies beside the restored empty draft.
+      this.refreshComposerPlaceholder()
       this.setSeatSerializedInput(this.mainDraftBeforeViewer ?? '')
       this.mainDraftBeforeViewer = undefined
       seat.invalidate()
@@ -29028,12 +29071,85 @@ export class TuiApp {
     })
   }
 
+  /**
+   * The plan-review inspection (FR7 A4): a ONE-SHOT read-only viewport
+   * request. It resolves the OFFICIAL `intent.callId` against the CURRENT
+   * mounted transcript (native `tool.callId` or a nested PTC `subCallId`),
+   * grants the existing temporary search-reveal machinery for exactly the
+   * hiding ancestors, scrolls the SAME fullscreen ScrollView to the card's
+   * real rendered row, and reports whether the locate succeeded. It never
+   * mutates the question, never creates a second ScrollView, and never
+   * interprets headings/titles as identity.
+   */
+  private inspectPlanReview(state: QuestionState): boolean {
+    const question = state.flow.planReviewQuestionForHost()
+    const callId = question?.intent?.callId
+    if (question === undefined || callId === undefined || callId === '') return false
+    // Currentness: the flow must still be the live seat owner (the caller
+    // already checked, but the reveal writes projection state).
+    if (this.activeQuestions !== state) return false
+    // Locate the tool card in the CURRENT projection: native callId first,
+    // then a recursive PTC sub-call walk (the sub-call renders INSIDE its
+    // root card, so the reveal targets the ROOT and the sub-call id).
+    let ptcSubCallId: string | undefined
+    const matchesCard = (tool: Extract<TranscriptMessage, { kind: 'tool' }>): boolean => {
+      if (tool.name !== 'exit_plan_mode') return false
+      if (tool.callId === callId) return true
+      if (tool.subCallId === callId) {
+        ptcSubCallId = callId
+        return true
+      }
+      return false
+    }
+    const findCard = (messages: readonly TranscriptMessage[]): TranscriptMessage | undefined => {
+      for (const message of messages) {
+        if (message.kind === 'tool') {
+          if (matchesCard(message)) return message
+          const nested = findCard(message.subCalls ?? [])
+          if (nested !== undefined) return message
+        }
+      }
+      return undefined
+    }
+    const card = findCard(this.messages)
+    if (card === undefined) return false
+    // Grant the temporary reveal for exactly this card (the existing
+    // search-reveal machinery opens hiding ancestors without writing manual
+    // disclosure state) and let the row map re-measure.
+    this.revealSearchMatch(card)
+    // A nested PTC sub-call needs its own forced expansion so the plan body
+    // is visible inside the root card (the same temporary mechanism the
+    // search reveal uses for subcall fields).
+    if (ptcSubCallId !== undefined && !this.subCallExpanded.has(ptcSubCallId)) {
+      this.subCallExpanded.add(ptcSubCallId)
+      this.subCallExpandedRevision += 1
+      this.clearFocusLiveHeightState()
+      this.rebuildMessages('search-presentation')
+    } else {
+      this.refreshMessageRows()
+    }
+    // Resolve the card's document row in the fresh row map.
+    let docRow = 0
+    let found = false
+    for (const entry of this.messageRows) {
+      if (entry.message === card) { found = true; break }
+      docRow += entry.height
+    }
+    if (!found) return false
+    const scroll = this.fullscreenScroll
+    if (scroll === undefined) return false
+    scroll.updateLayout(this.transcriptContentHeight, scroll.viewportHeight, () => this.requestRender())
+    const targetStart = this.transcriptWelcomeHeight + docRow
+    scroll.scrollTo(Math.max(0, targetStart - Math.floor(scroll.viewportHeight / 3)), { disableFollow: true })
+    this.requestRender()
+    return true
+  }
+
   /** Mount one flow into the editor seat and make it the active one. Every
    * step below that can run a synchronous callback is followed by an identity
    * fence: a flow that a callback preempted, replaced or cancelled must never
    * mount, focus or publish its frame (Phase 3A / PR-B §B2/§B5). */
-  private presentQuestion(state: QuestionState): void {
-    // Phase 3B / B1-A modal precedence: leave the Job workspace BEFORE the
+  private presentQuestion(state: QuestionState): void {    // Phase 3B / B1-A modal precedence: leave the Job workspace BEFORE the
     // question claims the seat (`activeQuestions` below), so the flow mounts and
     // focuses on the restored surface — never on a screen the workspace still
     // owns, and never with the Job swallowing the user's answer keys. The
@@ -29124,6 +29240,22 @@ export class TuiApp {
     // The suspension hands the keyboard to the seat owner and may fire a plugin
     // focus/blur callback: re-read the identity before building the frame.
     if (this.abandonIfDead(this.questionFlowIsLive(state), state)) return
+    // A plan-review question gets the host's read-only inspection capability
+    // (Fullscreen only — Regular has no app-owned viewport to reveal): the
+    // flow's `View plan` decision row runs it once and enters the reading
+    // step only on a proven locate. The reading step's scroll keys drive the
+    // SAME transcript ScrollView; leaving the step releases the temporary
+    // reveal grant (the transcript stays where the user left it).
+    if (state.flow.isPlanReviewFlow() && this.fullscreen !== undefined) {
+      state.flow.setPlanInspection(() => this.inspectPlanReview(state))
+      state.flow.onPlanReadingScroll = (lines) => {
+        this.fullscreenScroll?.updateLayout(this.transcriptContentHeight, this.fullscreenScroll.viewportHeight, () => this.requestRender())
+        this.fullscreenScroll?.scrollBy(lines)
+        this.requestRender()
+      }
+    } else {
+      state.flow.setPlanInspection(undefined)
+    }
     const frame = new QuestionFrame(state.flow, () => this.terminal.rows, () => this.fullscreen !== undefined)
     state.frame = frame
     // Re-vendor lifecycle follow-up P1: the flow only PROJECTS into the

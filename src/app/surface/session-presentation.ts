@@ -201,9 +201,9 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
     readonly read: (sessionId: string) => Promise<PresentationReadSnapshot | undefined>
     /** The official `running` bit of the exact retained binding. */
     readonly running: (sessionId: string) => boolean | undefined
-    /** The official `plan` projection active bit of the exact retained
-     *  binding (absent capability reads inactive). */
-    readonly plan?: (sessionId: string) => boolean | undefined
+    /** The official `plan` projection wire view (`{active, pending}`) of the
+     *  exact retained binding (absent capability reads inactive). */
+    readonly plan?: (sessionId: string) => { readonly active: boolean; readonly pending: boolean } | undefined
     /** The official CURRENT-VALUE facts (title/goal/todos/cwd) of the exact
      *  retained session: their source events may precede the bounded window,
      *  so the projection — never the window — owns them. On the Remote branch
@@ -523,7 +523,10 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     readonly cwd: string | undefined
     readonly events: readonly Event[]
     readonly liveBaseline: readonly AssistantLiveInput[]
-    readonly planActive: boolean
+    /** The official plan fact. Direct folds the logged state (boolean); the
+     * Remote branch carries the projection's pending state too when the
+     * official source reports it. */
+    readonly planActive: boolean | { readonly effective: boolean; readonly pending?: boolean }
     readonly working: boolean
     /**
      * The official CURRENT-VALUE facts (M3-4 PR2). Present on the Remote
@@ -766,8 +769,15 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   /** The Remote-branch plan fact: the official `plan` projection read is
    *  injected by the bootstrap (status facts bundle); absent deps read
    *  inactive. Kept as a late-bound read so the projection updates between
-   *  hydration and commit are honored. */
-  const planActiveRemote = (sessionId: string): boolean => deps.remote?.plan?.(sessionId) ?? false
+   *  hydration and commit are honored. Carries the projection's `pending`
+   *  when the official view reports it. */
+  const planActiveRemote = (
+    sessionId: string,
+  ): boolean | { readonly effective: boolean; readonly pending?: boolean } => {
+    const plan = deps.remote?.plan?.(sessionId)
+    if (plan === undefined) return false
+    return { effective: plan.active, ...(plan.pending ? { pending: true } : { pending: false }) }
+  }
 
   /**
    * Re-hydrate the main transcript from the CURRENT reader window after an

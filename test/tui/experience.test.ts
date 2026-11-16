@@ -82,6 +82,40 @@ test('plan mode shows badges in header and footer and tints the editor border', 
   assert.ok(!view.includes('[plan]'), `badge still visible:\n${view}`)
 })
 
+test('plan mode hints the EMPTY composer draft and never a non-empty or pending-mislabeled one', async () => {
+  const { vt, app } = startApp()
+  app.setStatus({ model: 'm', cwd: 'c' })
+  // Effective plan mode: the empty draft shows the describe hint.
+  app.setPlanMode(true)
+  await vt.waitForRender()
+  let view = await viewport(vt)
+  assert.ok(view.includes('Plan mode · describe the task'), `empty-draft plan hint missing:\n${view}`)
+  // A NON-empty draft hides the hint (typing replaces it).
+  vt.sendInput('hello')
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(!view.includes('describe the task'), `the hint must hide behind a non-empty draft:\n${view}`)
+  // Clearing the draft brings the hint back.
+  for (let i = 0; i < 5; i += 1) vt.sendInput('\x7f')
+  await vt.waitForRender()
+  // Pending enter (plan off, a selection awaiting the next step): the hint
+  // never claims the mode is already committed.
+  app.setPlanMode({ effective: false, pending: true })
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(!view.includes('Plan mode · describe'), `a pending-enter session must not claim committed plan mode:\n${view}`)
+  // Effective + pending change: the change note, still not silent.
+  app.setPlanMode({ effective: true, pending: false })
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('Plan mode · change pending'), `the pending-change hint missing:\n${view}`)
+  // Leaving plan mode clears the hint entirely.
+  app.setPlanMode(false)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(!view.includes('Plan mode'), `the hint survived plan-off:\n${view}`)
+})
+
 test('the auto session title shows in the header and clears', async () => {
   const { vt, app } = startApp()
   app.setSessionTitle('fix the read card')
