@@ -270,7 +270,7 @@ test('PR2: an indeterminate outcome unlocks with the draft and reports uncertain
   assert.equal(h.controller.composerHoldActive(), false)
 })
 
-test('PR2: an accepted prompt whose write later fails stays accepted (no restore)', async () => {
+test('PR2: an accepted prompt whose write later fails stays accepted and consumes once', async () => {
   const h = mount()
   h.respond({ kind: 'rejected', error: { code: 'session/agent-busy', message: 'busy' } }, true)
   h.composer.text = 'accepted then failed'
@@ -280,6 +280,33 @@ test('PR2: an accepted prompt whose write later fails stays accepted (no restore
   assert.deepEqual(settles.map(call => call.result), ['accepted'], 'the acceptance latch wins over the late error')
   assert.equal(h.composer.text, '', 'the accepted draft is not restored')
   assert.equal(h.historyRows.length, 1, 'the accepted row is persisted')
+  assert.deepEqual(h.consumes, ['accepted then failed'],
+    'an early acceptance still transfers the delivered attachments exactly once')
+})
+
+test('PR2: an early acceptance followed by an indeterminate result still consumes the attachments', async () => {
+  const h = mount()
+  h.respond({ kind: 'indeterminate', error: { code: 'session/write-indeterminate', message: 'carrier lost' } }, true)
+  h.composer.text = 'accepted then unknown'
+  assert.equal(h.controller.beginComposerSubmission('accepted then unknown', 'enter'), 'held')
+  await tick()
+  assert.equal(h.composer.calls.find(call => call.kind === 'settle')?.result, 'accepted')
+  assert.deepEqual(h.consumes, ['accepted then unknown'], 'the acceptance is the ownership handoff')
+  assert.deepEqual(h.historyRows.length, 1)
+})
+
+test('PR2: a committed write WITHOUT an acceptance callback is not an acceptance', async () => {
+  const h = mount()
+  h.respond({ kind: 'committed', value: undefined }, false)
+  h.composer.text = 'no proof'
+  assert.equal(h.controller.beginComposerSubmission('no proof', 'enter'), 'held')
+  await tick()
+  assert.equal(h.composer.calls.find(call => call.kind === 'settle')?.result, 'unknown',
+    'the write result alone never clears the draft')
+  assert.equal(h.composer.text, 'no proof', 'the draft stays editable')
+  assert.deepEqual(h.consumes, [], 'no attachment transfer without Host acceptance')
+  assert.deepEqual(h.historyRows, [], 'no "sent" history row without Host acceptance')
+  assert.ok(h.composer.notices.some(notice => notice.message.includes('acceptance proof')))
 })
 
 test('PR2: a command line, a shell line and an empty draft keep the legacy contract', () => {
@@ -361,4 +388,23 @@ test('PR2: a held image draft keeps its lease on refusal and transfers it on acc
   assert.equal(h.images.values().length, 0, 'the accepted prompt consumes exactly the referenced image')
   assert.deepEqual(h.consumes, [staged.placeholder])
   assert.equal(h.composer.text, '', 'the accepted draft is cleared')
+})
+
+test('PR2: a throwing renderer settlement never turns an accepted write into a refusal', async () => {
+  const h = mount()
+  // The renderer's clear/repaint throwing is a UI bug; the Host write already
+  // committed and the acceptance fact must survive it.
+  const originalSettle = h.composer.settleSubmission.bind(h.composer)
+  h.composer.settleSubmission = (attemptId, result) => {
+    originalSettle(attemptId, result)
+    throw new Error('render IO exploded')
+  }
+  h.composer.text = 'accepted despite ui throw'
+  assert.equal(h.controller.beginComposerSubmission('accepted despite ui throw', 'enter'), 'held')
+  await tick()
+  assert.equal(h.composer.calls.find(call => call.kind === 'settle')?.result, 'accepted',
+    'the acceptance latched before the failing UI work')
+  assert.equal(h.composer.text, '', 'the committed draft was cleared before the throw')
+  assert.equal(h.historyRows.length, 1, 'the accepted history row still completed')
+  assert.deepEqual(h.consumes, ['accepted despite ui throw'], 'the attachment transfer still ran')
 })

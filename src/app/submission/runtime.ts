@@ -345,7 +345,14 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
             if (surface.isDisposed()) return
             // PR2: an ALREADY-ACCEPTED prompt never turns its late execution
             // failure into a Composer problem (no restore, no "unsent" copy).
-            if (attempt?.isAccepted() === true) return
+            // Its delivered attachments still transfer exactly once here:
+            // the acceptance is the ownership handoff, the transport result
+            // only decides what the UI says.
+            if (attempt?.isAccepted() === true) {
+              options?.releaseReservation?.()
+              surface.consumeDraftAttachments(text)
+              return
+            }
             surface.settleLocalSubmission(requestId)
             surface.settleSubmitAck('session write result indeterminate', { token: ackToken, terminal: true })
             surface.notify('session write result is indeterminate — do not retry automatically', 'error')
@@ -361,8 +368,13 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
             // refused outcome's own message is the user copy (the writer-held
             // guidance), never a generic "submission failed" wrapper.
             // PR2: an ALREADY-ACCEPTED prompt never turns its late execution
-            // failure into a Composer problem (no restore, no reopen).
-            if (attempt?.isAccepted() === true) return
+            // failure into a Composer problem (no restore, no reopen); its
+            // delivered attachments still transfer exactly once.
+            if (attempt?.isAccepted() === true) {
+              options?.releaseReservation?.()
+              surface.consumeDraftAttachments(text)
+              return
+            }
             // PR2: a HELD submission's draft is still the live document — the
             // merge would duplicate it; the hold settle below unlocks the
             // editor with the original text intact.
@@ -379,13 +391,20 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
           }
           throw new Error(outcome.reason)
         }
-        // PR2: the writer committed WITHOUT the acceptance callback having
-        // fired. Direct fires it synchronously on success, so reaching here
-        // unsettled means the writer carried no callback (a transport without
-        // the option) — the prompt Promise's own commit is then the best
-        // available acceptance proof for THIS transport, matching the
-        // pre-PR2 semantics of a committed plain prompt.
-        if (attempt !== undefined && !attempt.hasSettled()) attempt.accepted()
+        // PR2: a committed prompt with NO Host-acceptance callback is NOT an
+        // acceptance. The writer's own result is never acceptance authority
+        // (`submitted != accepted`), so the attempt settles as an unknown
+        // outcome: the composer unlocks with its draft intact and the write's
+        // terminal state stays the transport's business. Production writers
+        // always fire the callback (Direct synchronously; Remote from the
+        // official onAccept), so this only guards an adapter that ignored it.
+        if (attempt !== undefined && !attempt.isAccepted()) {
+          if (!attempt.hasSettled()) attempt.unknown()
+          surface.settleLocalSubmission(requestId)
+          surface.settleSubmitAck('session write committed without acceptance proof', { token: ackToken, terminal: true })
+          surface.notify('the session write committed without Host acceptance proof — review the draft before retrying', 'error')
+          return
+        }
         // Consume ONLY the referenced drafts — a concurrent intake's newer
         // attachment survives. Release this gesture's reservation first so a
         // draft shared with another accepted submission is not retired under
@@ -399,8 +418,10 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
         surface.settleLocalSubmission(requestId)
         surface.settleSubmitAck('submit refused by transition fence', { token: ackToken, terminal: true })
         // PR2: a HELD draft is still the live editor document — the fence's
-        // restore would duplicate it; the hold settle unlocks the editor.
+        // restore would duplicate it; the hold settle unlocks the editor and
+        // the refusal keeps its own user-visible notice.
         if (surface.composerHoldActive?.() === true) {
+          surface.notify('a session transition is in progress — try again in a moment', 'error')
           attempt?.rejected()
         } else {
           surface.refuseByTransitionFence(text)
@@ -1000,9 +1021,11 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
   const persistHistory = input.persistHistory
   // PR2: one settle gate for this gesture's attempt (exactly-one hook).
   let attemptSettled = false
+  let attemptWasAccepted = false
   const attemptAccepted = (): void => {
     if (attemptSettled || input.attempt === undefined) return
     attemptSettled = true
+    attemptWasAccepted = true
     input.attempt.onAccepted()
   }
   const attemptRejected = (): void => {
@@ -1287,13 +1310,24 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
           steerRejectionCode === undefined ? `steer ${outcome}` : `steer rejected: ${steerRejectionCode}`,
           { token: steerAckToken, terminal: true },
         )
+        if (attemptWasAccepted) {
+          // PR2: the Host already accepted this draft (an early acceptance),
+          // so a late transport result only ends the presentation — the
+          // delivered attachments still transfer exactly once and nothing is
+          // restored or replayed.
+          releaseReservation()
+          deps.consumeDraftAttachments(text)
+          return
+        }
         if (outcome === 'indeterminate') attemptUnknown()
         else attemptRejected()
       } else if (input.attempt !== undefined && !attemptSettled) {
-        // The writer committed without an acceptance callback (a transport
-        // without the option): its own commit is then the acceptance proof,
-        // matching the plain-prompt fallback in submitPrompt.
-        attemptAccepted()
+        // PR2: a committed steer with NO Host-acceptance callback is NOT an
+        // acceptance (the write result is never acceptance authority): the
+        // attempt settles unknown and the draft stays editable.
+        attemptUnknown()
+        deps.notify('the session write committed without Host acceptance proof — review the draft before retrying', 'error')
+        return
       }
     },
     restore: (t) => {
@@ -1386,6 +1420,13 @@ export interface HostCommandSubmissionDeps {
    * attempt hooks through `submitPrompt`'s options.
    */
   readonly settleComposerHold?: (outcome: 'rejected' | 'unknown') => void
+  /**
+   * PR2: the line the FINAL catalog claims as a command takes over the
+   * composer through the legacy pre-clear (the command's restore-on-failure
+   * contract assumes an emptied editor); this is NOT a prompt acceptance —
+   * no prompt history row, no ledger publication, no attachment transfer.
+   */
+  readonly handComposerHoldToLegacyCommand?: () => void
   readonly commandSessionId: () => string
   readonly markTurnTransferred: () => void
   readonly diag: Diag
@@ -1461,6 +1502,14 @@ export function executeHostCommandSubmission(
     // of dispatch, and a non-invocation stages nothing at all.
     const hostAttachmentsDeclared = submittedClaim?.claimed === true && submittedClaim.attachments === true
     const commandPlaneLine = deps.commandPlaneOwnsLine()
+    // PR2: a held ordinary admission whose FINAL catalog claims the line as a
+    // command is handed over to that command's own contract BEFORE dispatch —
+    // exactly the pre-clear the legacy path performs, never a fake prompt
+    // acceptance. The nested fallback prompt (plane matched nothing) then runs
+    // with the legacy draft disposition.
+    if (commandPlaneLine && input.parsedName !== undefined) {
+      deps.handComposerHoldToLegacyCommand?.()
+    }
     planeAdvertised = commandPlaneLine && input.wasAdvertisedAtSubmit
     const tuiOwnedCommand = deps.isTuiOwnedCommand()
     // The navigation intent starts HERE: after every early refusal window and

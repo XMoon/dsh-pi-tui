@@ -6031,9 +6031,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   // fact in the dock (no derived queue state).
   const composerPort: SubmissionComposerPort = {
     getDraft: () => composer.getDraft(),
-    setDraft: (text) => { composer.setDraft(text) },
-    setEditorText: (text) => { composer.setEditorText(text) },
-    insertIntoEditor: (text) => { composer.insertIntoEditor(text) },
+    // PR2: a held document is frozen against programmatic writes too (the
+    // accepted settlement clears through the composer directly, below).
+    setDraft: (text) => { if (!composerHeld()) composer.setDraft(text) },
+    setEditorText: (text) => { if (!composerHeld()) composer.setEditorText(text) },
+    insertIntoEditor: (text) => { if (!composerHeld()) composer.insertIntoEditor(text) },
     notify: (message, kind) => { composer.notify(message, kind) },
     setSubmitPending: (detail) => { composer.setSubmitPending(detail) },
     // PR2: the ONE renderer-owned hold of this mount. The application opens it

@@ -17748,6 +17748,11 @@ export class TuiApp {
    */
   setEditorText(text: string): void {
     this.clearExitConfirmation()
+    // PR2: the held submission owns the document; the application's own
+    // held-aware restore sites already skip their writes, and this fence
+    // covers every other programmatic caller (plugins, external editor,
+    // replacement-editor sync). The accepted settlement clears privately.
+    if (this.composerHeld()) return
     this.invalidateDraftPreviewCaches()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
@@ -24622,6 +24627,10 @@ export class TuiApp {
    */
   setDraft(text: string): void {
     this.clearExitConfirmation()
+    // PR2: a live submission attempt owns the document — no programmatic
+    // renderer/plugin write may mutate it (the keyboard lock alone is not the
+    // contract). The accepted settlement clears through its own private path.
+    if (this.composerHeld()) return
     this.invalidateDraftPreviewCaches()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
@@ -24751,6 +24760,9 @@ export class TuiApp {
     // on Host acceptance); `'refused'` consumes the gesture silently.
     const admission = this.admitComposerGesture(this.getDraft(), request)
     if (admission === 'held' || admission === 'refused') {
+      // A fresh submission gesture supersedes any transient notice (the same
+      // post-clear rule the legacy path applies a few lines below).
+      this.clearNotify()
       this.requestRender()
       return
     }
