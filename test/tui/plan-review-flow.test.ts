@@ -425,3 +425,53 @@ test('a stale action-bar press from another plan step is inert after a keyboard 
   lines = stripLines(flow)
   assert.ok(lines.join('\n').includes('View plan'), `the flow stays on the decision list:\n${lines.join('\n')}`)
 })
+
+test('the decision cursor keeps its ACTION when the live View capability disappears (never Approve)', () => {
+  const settled: unknown[] = []
+  const flow = makeFlow([planQuestion()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  let fullscreen = true
+  flow.setPlanInspection(inspectionSeam(() => true, () => fullscreen))
+  // Fullscreen: rows [View, Keep, Approve]; move to Keep (index 1).
+  flow.handleInput('\x1b[B')
+  let lines = stripLines(flow)
+  assert.ok(lines.find(l => l.includes('Keep planning…'))?.trimStart().startsWith('>'), 'Keep holds the cursor')
+  // The live capability disappears: the row list becomes [Keep, Approve].
+  fullscreen = false
+  lines = stripLines(flow)
+  assert.ok(!lines.join('\n').includes('View plan'), `the View row is gone:\n${lines.join('\n')}`)
+  const keepRow = lines.findIndex(line => line.includes('Keep planning…'))
+  const approveRow = lines.findIndex(line => line.includes('Approve plan'))
+  assert.ok(lines[keepRow]!.trimStart().startsWith('>'), `Keep (not Approve) keeps the cursor after the capability change:\n${lines.join('\n')}`)
+  assert.ok(!lines[approveRow]!.trimStart().startsWith('>'), 'Approve is never selected by the capability change')
+  // Enter runs the HIGHLIGHTED Keep (feedback), never Approve.
+  flow.handleInput('\r')
+  lines = stripLines(flow)
+  assert.ok(lines.join('\n').includes('What should be changed?'), `Enter opened the feedback input:\n${lines.join('\n')}`)
+  assert.deepEqual(settled, [], 'Enter never approved')
+})
+
+test('the plan step identity in a mouse gesture is discriminative (non-keyboard transition)', () => {
+  let readingEnded = 0
+  const flow = makeFlow([planQuestion()], { onDone: () => {} })
+  flow.setMaxRows(24)
+  flow.setMouseActionsEnabled(true)
+  flow.setPlanInspection(inspectionSeam(() => true))
+  flow.onPlanReadingEnd = () => { readingEnded += 1 }
+  // Enter the feedback step, then press its `Back [Esc]` span.
+  flow.handleInput('\x1b[B')
+  flow.handleInput('\r')
+  let lines = stripLines(flow)
+  const backRow = lines.length - 1
+  const backCol = lines[backRow]!.indexOf('Back')
+  assert.ok(backCol >= 0, `feedback Back span missing:\n${lines[backRow]}`)
+  const gesture = flow.beginMousePress(backRow, backCol)
+  assert.ok(gesture !== undefined)
+  // A NON-keyboard transition into reading (no gesture-clearing input).
+  flow.enterPlanReading()
+  assert.ok(flow.isPlanReading())
+  flow.completeMouseClick(gesture, backRow, backCol)
+  // The pressed feedback-Back must NOT be reinterpreted as the reading Back.
+  assert.ok(flow.isPlanReading(), 'the stale release left the reading step untouched')
+  assert.equal(readingEnded, 0, 'the stale release never ended the reading lease')
+})

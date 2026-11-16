@@ -365,7 +365,20 @@ test('Focus collapsed Thought: View opens the owner Thought and locates the card
   await vt.waitForRender()
   assert.ok(view(vt).includes('Reading the submitted plan'), `the Focus reveal must locate the card:\n${view(vt)}`)
   assert.ok(view(vt).includes('## Scope'), `the plan body must be materialized inside the opened Thought:\n${view(vt)}`)
-  vt.sendInput('\x1b') // back to the decision list (no manual Focus state left behind)
+  // A REAL header click on the (temporarily opened) Thought must COLLAPSE the
+  // temporary reveal, never write a manual expansion.
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  assert.ok(!view(vt).includes('## Scope'), `the Thought click collapsed the temporary reveal:\n${view(vt)}`)
+  assert.equal(app.focusExpandedTurnsForTest().has(1), false,
+    'the user collapse never writes a manual Focus expansion')
+  // Back to the decision list, then a NEW View re-opens the Thought and card.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('## Scope'), `a new View re-opens the Focus card:\n${view(vt)}`)
+  vt.sendInput('\x1b') // back to the decision list
   await vt.waitForRender()
   vt.sendInput('\x1b') // official dismiss
   await settle.then(() => {}, () => {})
@@ -374,23 +387,28 @@ test('Focus collapsed Thought: View opens the owner Thought and locates the card
   app.stop()
 })
 
-test('a collapse DURING reading wins; a NEW View re-opens the card', async () => {
+test('a REAL user collapse during reading wins (both disclosure branches); a NEW View re-opens', async () => {
   const messages = transcript('call-plan-1')
-  const { vt, app, settle } = scene(messages, 100, 24, { present: directPlanPresenter })
-  await vt.waitForRender()
-  // Enter reading: the card body is visible.
-  vt.sendInput('\r')
-  await vt.waitForRender()
-  assert.ok(view(vt).includes('## Scope'), `precondition: the located body is visible:\n${view(vt)}`)
-  // The user collapses the located card (the real per-card disclosure owner).
   const card = messages.find(
     (m): m is Extract<TranscriptMessage, { kind: 'tool' }> => m.kind === 'tool' && m.name === 'exit_plan_mode',
   )!
-  const internals = app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }
-  internals.expandedOverride.set(card, false)
-  app.setTranscript(messages) // a projection commit re-renders the mounted batch
+  const { vt, app, settle } = scene(messages, 100, 24, { present: directPlanPresenter })
   await vt.waitForRender()
-  assert.ok(!view(vt).includes('## Scope'), `an explicit collapse during reading wins:\n${view(vt)}`)
+  const toggle = (): void => {
+    ;(app as unknown as { toggleMessageExpanded(message: TranscriptMessage): void }).toggleMessageExpanded(card)
+  }
+  // Branch 1: the user OPENS the card before View (a durable `true` override),
+  // then View, then the SAME disclosure route collapses it during reading.
+  toggle()
+  await vt.waitForRender()
+  assert.equal((app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride.get(card), true,
+    'the user opened the card before View (durable disclosure owner)')
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Reading the submitted plan'), `the located reading step:\n${view(vt)}`)
+  toggle() // first click during reading must collapse, not be re-opened by the lease
+  await vt.waitForRender()
+  assert.ok(!view(vt).includes('## Scope'), `the first real collapse click wins over the plan lease:\n${view(vt)}`)
   assert.ok(view(vt).includes('Reading the submitted plan'), 'the reading step itself survives the collapse')
   // Esc back, then a NEW explicit View re-opens the card.
   vt.sendInput('\x1b')
@@ -536,6 +554,80 @@ test('a long PTC plan line wraps and its tail is reachable by scrolling (80 colu
     await vt.waitForRender()
   }
   assert.ok(view(vt).includes('tail-marker-xyz'), `the wrapped tail must be readable at 80 columns:\n${view(vt)}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('a PTC target located below many earlier siblings scrolls to the CHILD row, not the root top', async () => {
+  // 40 collapsed sibling sub-calls render one header row each before the
+  // target: measuring only the ROOT card's top would leave the plan body far
+  // below the viewport while still claiming "located".
+  const filler = Array.from({ length: 40 }, (_, i) => ({
+    kind: 'tool' as const, turn: 1, name: 'read', subCallId: `filler-${i}`,
+    parentCallId: 'call-root', rootCallId: 'call-root',
+    args: JSON.stringify({ path: `src/f${i}.ts` }), result: '', status: 'ok' as const,
+  }))
+  const root: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 1, name: 'run_code', callId: 'call-root',
+    args: '{}', result: '', status: 'running',
+    subCalls: [
+      ...filler,
+      {
+        kind: 'tool', turn: 1, name: 'exit_plan_mode', subCallId: 'call-plan-1',
+        parentCallId: 'call-root', rootCallId: 'call-root',
+        args: JSON.stringify({ plan: PLAN_MD }), result: '', status: 'running',
+      },
+    ],
+  }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 0, text: 'plan via run_code with many siblings' },
+    root,
+  ]
+  const { vt, app, settle } = scene(messages, 100, 24, { present: directPlanPresenter })
+  await vt.waitForRender()
+  assert.ok(!view(vt).includes('## Scope'), 'precondition: the target body is out of view')
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Reading the submitted plan'), `the reading step renders:\n${view(vt)}`)
+  assert.ok(view(vt).includes('## Scope'), `the ONE locate lands on the child row (not the root top):\n${view(vt)}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('Compact Work sibling: the plan reveal opens the Work span and a real header click collapses it', async () => {
+  const messages = transcript('call-plan-1')
+  const card = messages.find(
+    (m): m is Extract<TranscriptMessage, { kind: 'tool' }> => m.kind === 'tool' && m.name === 'exit_plan_mode',
+  )!
+  const { vt, app, settle } = scene(messages, 100, 24, { present: directPlanPresenter })
+  app.setDisplayPreset('compact')
+  await vt.waitForRender()
+  assert.ok(!view(vt).includes('## Scope'), `precondition: the collapsed Work span hides the card:\n${view(vt)}`)
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('## Scope'), `the plan reveal opens the Work span:\n${view(vt)}`)
+  // A REAL Work header click collapses the temporary reveal.
+  const owner = (app as unknown as {
+    canonicalStructureIndex(): { workByMember: Map<TranscriptMessage, { owner: TranscriptMessage }> }
+  }).canonicalStructureIndex().workByMember.get(card)?.owner
+  assert.ok(owner !== undefined, 'fixture: the card belongs to a Work span')
+  app.toggleWorkSpan(owner)
+  await vt.waitForRender()
+  assert.ok(!view(vt).includes('## Scope'), `the Work header click collapsed the reveal:\n${view(vt)}`)
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
+    'the Work collapse revoked the plan lease')
+  // A new View re-opens the Work span and the card.
+  vt.sendInput('\x1b') // back to the decision list
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('## Scope'), `a new View re-opens the Compact card:\n${view(vt)}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
   vt.sendInput('\x1b')

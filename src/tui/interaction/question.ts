@@ -503,8 +503,13 @@ export class QuestionFlow implements Component, Focusable {
   private readonly planReview: { question: QuestionFlowQuestion; approve: string } | undefined
   /** The current local plan-review step (the decision list by default). */
   private planStep: PlanReviewStep = 'decision'
-  /** The highlighted plan decision row: 0 View (when offered), then Keep
-   * planning…, then Approve. Never defaults to Approve. */
+  /** The highlighted plan decision row as an ACTION identity (never a row
+   * index): the View row can appear/disappear when the host's live inspection
+   * capability changes, and a remembered index would silently reinterpret
+   * Keep as Approve. */
+  private planCursorAction: 'view' | 'keep' | 'approve' = 'view'
+  /** The current row list's highlighted index (derived from
+   * {@link planCursorAction}; recomputed on every use). */
   private planCursor = 0
   /** The keep-planning feedback Input (Client-local ephemeral text; the draft
    * survives Esc back to the decision list). */
@@ -594,9 +599,18 @@ export class QuestionFlow implements Component, Focusable {
   setPlanInspection(seam: { canInspect: () => boolean; inspect: () => boolean } | undefined): boolean {
     if (this.planReview === undefined) return false
     this.planInspection = seam
-    // Keep the cursor valid: clamp into the (possibly grown) row list.
-    this.planCursor = Math.min(this.planCursor, Math.max(0, this.planDecisionRows().length - 1))
     return true
+  }
+
+  /** Resolve the highlighted row index from the remembered ACTION: a row that
+   * no longer exists (the View row lost its live capability) falls back to the
+   * FIRST row (Keep) — never to Approve, and never silently. */
+  private planCursorIndex(rows: readonly { action: 'view' | 'keep' | 'approve' }[]): number {
+    const index = rows.findIndex(row => row.action === this.planCursorAction)
+    if (index >= 0) return index
+    const fallback = rows[0]
+    this.planCursorAction = fallback?.action ?? 'keep'
+    return 0
   }
 
   /** Whether this flow renders the official plan-review branch. */
@@ -1042,7 +1056,8 @@ export class QuestionFlow implements Component, Focusable {
       if (this.planStep === 'decision' && key !== undefined && key.startsWith('plan:')) {
         const action = key.slice('plan:'.length)
         if (action === 'view' || action === 'keep' || action === 'approve') {
-          this.planCursor = this.planDecisionRows().findIndex(candidate => candidate.action === action)
+          this.planCursorAction = action
+          this.planCursor = this.planCursorIndex(this.planDecisionRows())
           this.executePlanRow(action)
         }
       }
@@ -1717,12 +1732,17 @@ export class QuestionFlow implements Component, Focusable {
     // Decision list: ↑↓ move, Enter executes the highlighted row, Esc/Ctrl+C
     // dismiss through the official cancel.
     const rows = this.planDecisionRows()
+    const cursor = this.planCursorIndex(rows)
     if (componentKeymap.matches(data, 'question.cursorUp')) {
-      this.planCursor = (this.planCursor - 1 + rows.length) % rows.length
+      const next = (cursor - 1 + rows.length) % rows.length
+      this.planCursorAction = rows[next]!.action
+      this.planCursor = next
       return
     }
     if (componentKeymap.matches(data, 'question.cursorDown')) {
-      this.planCursor = (this.planCursor + 1) % rows.length
+      const next = (cursor + 1) % rows.length
+      this.planCursorAction = rows[next]!.action
+      this.planCursor = next
       return
     }
     if (componentKeymap.matches(data, 'question.cancel')) {
@@ -1730,7 +1750,7 @@ export class QuestionFlow implements Component, Focusable {
       return
     }
     if (componentKeymap.matches(data, 'question.confirm')) {
-      this.executePlanRow(rows[this.planCursor]?.action)
+      this.executePlanRow(rows[cursor]?.action)
     }
   }
 
@@ -2178,7 +2198,7 @@ export class QuestionFlow implements Component, Focusable {
       : color.textStrong(title))
     lines.push('')
     const rows = this.planDecisionRows()
-    this.planCursor = Math.min(this.planCursor, Math.max(0, rows.length - 1))
+    this.planCursor = this.planCursorIndex(rows)
     rows.forEach((row, index) => {
       const pointer = index === this.planCursor ? color.primary('>') : ' '
       const label = sanitizeDisplayText(row.label)

@@ -9980,7 +9980,9 @@ export class TuiApp {
     // not written into `focusExpandedTurns`: the first explicit click on a
     // search-opened Thought must collapse it (and revoke the reveal), never
     // re-expand as a no-op.
-    if (this.focusExpandedTurns.has(turn) || this.searchTargetTurn() === turn) {
+    if (this.focusExpandedTurns.has(turn)
+      || this.searchTargetTurn() === turn
+      || this.planInspectionOpensTurn(turn)) {
       this.collapseFocusTurn(turn, { fullscreenViewport: 'anchor-turn' })
       return
     }
@@ -10022,10 +10024,12 @@ export class TuiApp {
     const span = this.eligibleWorkSpans().find(candidate => candidate.owner === owner)
     const revealed = span !== undefined && this.workSpanTemporarilyRevealed(span)
     const revokesReveal = this.searchTargetInsideWork(owner)
+    const revokesPlan = this.planTargetInsideWork(owner)
     if (this.expandedWorkOwners.has(owner) || revealed) {
       this.mutateTranscriptDisclosure(() => {
         this.expandedWorkOwners.delete(owner)
         if (revealed || revokesReveal) this.suppressSearchReveal()
+        if (revealed || revokesPlan) this.revokePlanInspectionLease()
       })
       return
     }
@@ -10041,16 +10045,42 @@ export class TuiApp {
     const cluster = this.canonicalStructureIndex().clusterByMember.get(owner)
     const revealed = cluster !== undefined && this.clusterTemporarilyRevealed(cluster)
     const revokesReveal = this.searchTargetInsideCluster(owner)
+    const revokesPlan = this.planTargetInsideCluster(owner)
     if (this.expandedContextClusterOwners.has(owner) || revealed) {
       this.mutateTranscriptDisclosure(() => {
         this.expandedContextClusterOwners.delete(owner)
         if (revealed || revokesReveal) this.suppressSearchReveal()
+        if (revealed || revokesPlan) this.revokePlanInspectionLease()
       })
       return
     }
     this.mutateTranscriptDisclosure(() => {
       this.expandedContextClusterOwners.add(owner)
     })
+  }
+
+  /** Whether the one-shot PLAN inspection's located row is a member of this
+   * Work span / cluster / Focus turn (the explicit-collapse ownership
+   * question — the SAME rule the search reveal uses). */
+  private planTargetInsideWork(owner: TranscriptMessage): boolean {
+    const target = this.planInspection?.message
+    return target !== undefined && this.canonicalStructureIndex().workByMember.get(target)?.owner === owner
+  }
+
+  private planTargetInsideCluster(owner: TranscriptMessage): boolean {
+    const target = this.planInspection?.message
+    return target !== undefined && this.canonicalStructureIndex().clusterByMember.get(target)?.owner === owner
+  }
+
+  private planTargetInsideTurn(turn: number): boolean {
+    const target = this.planInspection?.message
+    return target !== undefined && 'turn' in target && target.turn === turn
+  }
+
+  /** Whether the one-shot plan inspection currently FORCES this Focus turn
+   * open (a temporary reveal, not a manual expansion). */
+  private planInspectionOpensTurn(turn: number): boolean {
+    return this.planInspection !== undefined && this.planInspectionTurn() === turn
   }
 
   /** Whether the GRANTED search target is a member of this Work span (the
@@ -10787,8 +10817,9 @@ export class TuiApp {
    * §22: "any expanded Thought" = an expanded Thought in view). */
   private hasVisibleExpandedFocusRoots(): boolean {
     const searchTurn = this.searchTargetTurn()
+    const planTurn = this.planInspectionTurn()
     for (const turn of this.eligibleFocusRootTurns()) {
-      if (this.focusExpandedTurns.has(turn) || turn === searchTurn) return true
+      if (this.focusExpandedTurns.has(turn) || turn === searchTurn || turn === planTurn) return true
     }
     return false
   }
@@ -11319,14 +11350,17 @@ export class TuiApp {
     // collapse request on it would otherwise early-return without revoking the
     // reveal (the Thought would stay open).
     const searchCollapse = !expanded && this.searchTargetTurn() === turn
-    if (!manualChanged && !searchCollapse) return
+    const planCollapse = !expanded && this.planInspectionOpensTurn(turn)
+    if (!manualChanged && !searchCollapse && !planCollapse) return
     if (manualChanged) {
       if (expanded) this.focusExpandedTurns.add(turn)
       else this.focusExpandedTurns.delete(turn)
     }
     // Closing a Thought is an explicit user collapse: revoke a search reveal
-    // whose target lives in that turn (the semantic match/highlight stays).
+    // whose target lives in that turn (the semantic match/highlight stays) AND
+    // the equivalent one-shot plan inspection lease.
     if (searchCollapse) this.suppressSearchReveal()
+    if (planCollapse) this.revokePlanInspectionLease()
     // 1. flip the set → 2. rebuild the projection (rebuildMessages already
     // requests a render) → 3. re-measure the row map at the current width
     // (a thumbnail that just finished loading must not shift the anchor).
@@ -17124,11 +17158,17 @@ export class TuiApp {
     } else if (this.expandedOverride.get(message) === true) {
       this.expandedOverride.delete(message)
       if (revokesSearchReveal) this.suppressSearchReveal()
+      // A user-opened card that the one-shot plan inspection is ALSO forcing
+      // open: deleting the override alone would let the lease re-open it, so
+      // the explicit collapse revokes the lease too (first click collapses).
+      if (this.planInspection?.message === message) this.revokePlanInspectionLease()
     } else if (this.forcesMessageExpandedTemporarily(message)) {
-      // The card is open only because of the search reveal: a click must
-      // collapse it explicitly (a deleted override would let search re-open).
+      // The card is open only because of a temporary reveal (search navigation
+      // or the plan inspection): a click must collapse it explicitly (a
+      // deleted override would let the reveal re-open).
       this.expandedOverride.set(message, false)
       this.suppressSearchReveal()
+      if (this.planInspection?.message === message) this.revokePlanInspectionLease()
     } else {
       this.expandedOverride.set(message, true)
     }
@@ -29240,14 +29280,26 @@ export class TuiApp {
     // Prove the target's real rendered row in the fresh row map; a failure
     // ROLLS THE PRESENTATION BACK so the fallback inherits nothing.
     let docRow = 0
-    let found = false
+    let cardEntry: (typeof this.messageRows)[number] | undefined
     for (const entry of this.messageRows) {
-      if (entry.message === card) { found = true; break }
+      if (entry.message === card) { cardEntry = entry; break }
       docRow += entry.height
     }
-    if (!found) {
+    if (cardEntry === undefined) {
       this.releasePlanInspectionReveal()
       return false
+    }
+    // A PTC target is located INSIDE the root card: scroll to the CHILD's own
+    // measured row (the root's program body / earlier siblings may be long),
+    // never merely to the root card's top. The child's hit is the same
+    // geometry the disclosure/hit map uses; an unproven child fails closed.
+    if (ptcSubCallId !== undefined) {
+      const hit = cardEntry.subCallHits?.find(candidate => candidate.subCallId === ptcSubCallId)
+      if (hit === undefined) {
+        this.releasePlanInspectionReveal()
+        return false
+      }
+      docRow += hit.top
     }
     scroll.updateLayout(this.transcriptContentHeight, scroll.viewportHeight, () => this.requestRender())
     const targetStart = this.transcriptWelcomeHeight + docRow
@@ -29262,12 +29314,20 @@ export class TuiApp {
    * or a forced PTC expansion behind. Presentation-only. */
   private releasePlanInspectionReveal(): void {
     if (this.planInspection === undefined) return
+    this.revokePlanInspectionLease()
+    this.rebuildMessages('focus-disclosure')
+  }
+
+  /** Drop the one-shot plan inspection lease WITHOUT rebuilding: callers that
+   * already batch a disclosure transaction (Focus/Work/cluster/message
+   * toggles) rebuild once themselves. */
+  private revokePlanInspectionLease(): void {
+    if (this.planInspection === undefined) return
     this.planInspection = undefined
-    // The suppression set is the shared temporary-collapse record; a release
+    // The suppression set is the shared temporary-collapse record; a lease
     // never leaves an inspection-scoped entry behind.
     this.searchSuppressedSubCalls.clear()
     this.clearFocusLiveHeightState()
-    this.rebuildMessages('focus-disclosure')
   }
 
   /** The ONE-SHOT plan inspection presentation (FR7 A4): the card the current

@@ -215,9 +215,13 @@ compact decision component in the same editor seat:
   is readable from its call arguments before the call settles.
 - Reading: scroll keys drive the transcript viewport through the same
   ScrollView; `Enter` is inert; `Esc` returns to the decision list (never a
-  cancel) and releases the one-shot presentation. An explicit user collapse of
-  the located card wins over the inspection lease. Settling the question, a
-  session switch and a failed locate release it too.
+  cancel) and releases the one-shot presentation. Every EXPLICIT user collapse
+  of a container the lease opened — the located card's own disclosure, its PTC
+  child, its Compact Work span, its Context cluster or its Focus Thought —
+  revokes the lease for the rest of that reading step (and never writes a
+  manual expansion for a temporary one); a NEW explicit `View plan` re-opens
+  it. Settling the question, a session switch and a failed locate release the
+  lease too.
 - Keep planning… opens the feedback input (draft survives Esc); Enter answers
   the official keep label with the optional custom text. The generic
   custom-first submit path is never used (it would clear the selected label).
