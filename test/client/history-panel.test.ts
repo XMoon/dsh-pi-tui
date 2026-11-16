@@ -1285,3 +1285,184 @@ test('boundary rules: they may compress Results/Preview but never to zero rows',
   assert.equal(message.bottomRule, true)
   assert.ok(message.resultsRows >= 1)
 })
+
+// ── PR-B B3: the Fullscreen Footer's complete pointer spans ──────────────────
+
+/** One minimal pointer event at a frame's exact grant. */
+function historyPointer(
+  type: 'press' | 'click',
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): import('@xmoon76/pi-tui').TuiMouseEvent {
+  return {
+    type, button: 'left', x, y, screenX: x, screenY: y, width, height,
+    shift: false, alt: false, ctrl: false,
+  }
+}
+
+/** The footer row of the last painted frame, or -1. */
+function footerRowOf(lines: readonly string[]): number {
+  return lines.findLastIndex(line => line.includes('Cancel [Esc]'))
+}
+
+test('B3: the Fullscreen footer Scope/Expand/Cancel spans run the ORIGINAL seat transitions', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  const { panel, closed } = makePanel(source, {
+    geometry: seatGeometry(120, 40, 2),
+    pointerEnabled: () => true,
+  })
+  panel.start()
+  await settle()
+  const lines = plain(panel.render(120))
+  const footerRow = footerRowOf(lines)
+  assert.ok(footerRow >= 0, `the fullscreen footer paints its actions:\n${lines.join('\n')}`)
+  const footer = lines[footerRow]!
+  assert.ok(footer.includes('Scope [Tab]') && footer.includes('Expand [F2]'), footer)
+  assert.ok(!footer.includes('Use [Enter]') && !footer.includes('Copy All [Alt+C]'),
+    `the painted heading owns Use/Copy, so the footer adds no duplicate sink:\n${footer}`)
+  const clickFooter = (text: string): boolean => {
+    const painted = panel.render(120)
+    const frame = plain(painted)
+    const height = painted.length
+    const row = footerRowOf(frame)
+    const col = frame[row]!.indexOf(text)
+    assert.ok(row >= 0 && col >= 0, `'${text}' must be painted:\n${frame.join('\n')}`)
+    const press = panel.handleMouse(historyPointer('press', col, row, 120, height))
+    if (press === undefined) return false
+    return panel.handleMouse(historyPointer('click', col, row, 120, height)) !== undefined
+  }
+  // Scope: changes the seat-local query range, never writes.
+  assert.equal(clickFooter('Scope [Tab]'), true)
+  assert.ok(plain(panel.render(120)).some(line => line.includes('Scope: all')), 'the scope really changed')
+  // Expand: the LOCAL F2 presentation preference only.
+  assert.equal(panel.isExpanded(), false)
+  assert.equal(clickFooter('Expand [F2]'), true)
+  assert.equal(panel.isExpanded(), true)
+  assert.equal(clickFooter('Collapse [F2]'), true)
+  assert.equal(panel.isExpanded(), false)
+  assert.equal(closed(), 0, 'seat-local actions never close the seat')
+  // Cancel: the ONE existing close route.
+  assert.equal(clickFooter('Cancel [Esc]'), true)
+  assert.equal(closed(), 1)
+  panel.dispose()
+})
+
+test('B3: the narrow footer carries the Use fallback only while the heading dropped it', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  const narrow = makePanel(source, {
+    geometry: seatGeometry(44, 20, 2),
+    pointerEnabled: () => true,
+  })
+  narrow.panel.start()
+  await settle()
+  const lines = plain(narrow.panel.render(44))
+  const heading = lines.find(line => line.includes('Preview'))!
+  assert.ok(heading.includes('Copy All [Alt+C]'), `the heading keeps Copy at 44:\n${heading}`)
+  assert.ok(!heading.includes('Use Selected [Enter]'), `the heading had to drop Use at 44:\n${heading}`)
+  const footer = lines[footerRowOf(lines)]!
+  assert.ok(footer.includes('Use [Enter]'), `the footer carries the same-semantics Use fallback:\n${footer}`)
+  assert.ok(!footer.includes('Copy All [Alt+C]'), `the painted heading Copy is not duplicated:\n${footer}`)
+  // The fallback accepts through the ONE acceptSelected path.
+  const height = narrow.panel.render(44).length
+  const col = footer.indexOf('Use [Enter]')
+  assert.ok(narrow.panel.handleMouse(historyPointer('press', col, footerRowOf(lines), 44, height)) !== undefined)
+  assert.ok(narrow.panel.handleMouse(historyPointer('click', col, footerRowOf(lines), 44, height)) !== undefined)
+  assert.deepEqual(narrow.accepted(), { id: 'id-a', content: 'alpha prompt' })
+  narrow.panel.dispose()
+})
+
+test('B3: a Footer Use pressed before an async page replacement never accepts the replacement', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  const { panel, accepted } = makePanel(source, {
+    geometry: seatGeometry(44, 20, 2),
+    pointerEnabled: () => true,
+  })
+  panel.start()
+  await settle()
+  const frame = plain(panel.render(44))
+  const footerRow = footerRowOf(frame)
+  const col = frame[footerRow]!.indexOf('Use [Enter]')
+  assert.ok(footerRow >= 0 && col >= 0, `the Use fallback is painted:\n${frame.join('\n')}`)
+  const height = panel.render(44).length
+  assert.ok(panel.handleMouse(historyPointer('press', col, footerRow, 44, height)) !== undefined)
+  // The page is replaced under the SAME painted cells before the release.
+  source.rows = [row('BETA prompt', 2, '/a', 'id-b')]
+  panel.handleInput('x')
+  await settle()
+  panel.render(44)
+  panel.handleMouse(historyPointer('click', col, footerRow, 44, height))
+  assert.equal(accepted(), undefined, 'a fallback pressed for A must never accept B')
+  panel.dispose()
+})
+
+test('B3: a Footer Scope press does not replay across a scope change', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  const { panel } = makePanel(source, {
+    geometry: seatGeometry(120, 40, 2),
+    pointerEnabled: () => true,
+    sessionId: 'ses_a',
+  })
+  panel.start()
+  await settle()
+  const frame = plain(panel.render(120))
+  const footerRow = footerRowOf(frame)
+  const col = frame[footerRow]!.indexOf('Scope [Tab]')
+  const height = panel.render(120).length
+  assert.ok(panel.handleMouse(historyPointer('press', col, footerRow, 120, height)) !== undefined)
+  // The keyboard changes the scope (and the generation) before the release.
+  panel.handleInput('\t')
+  await settle()
+  const afterKeyboard = plain(panel.render(120)).find(line => line.includes('Scope: '))
+  assert.ok(afterKeyboard !== undefined, 'the metadata scope is painted')
+  panel.handleMouse(historyPointer('click', col, footerRow, 120, height))
+  const afterClick = plain(panel.render(120)).find(line => line.includes('Scope: '))
+  assert.equal(afterClick, afterKeyboard,
+    `exactly ONE toggle happened (keyboard); the stale click did nothing: ${afterClick}`)
+  panel.dispose()
+})
+
+test('B3: a Footer Cancel closes the empty and error pages without touching the editor seat', async () => {
+  // Empty page.
+  const emptySource = new FakeSource()
+  emptySource.rows = []
+  const empty = makePanel(emptySource, {
+    geometry: seatGeometry(100, 30, 2),
+    pointerEnabled: () => true,
+  })
+  empty.panel.start()
+  await settle()
+  const emptyLines = plain(empty.panel.render(100))
+  const emptyRow = footerRowOf(emptyLines)
+  assert.ok(emptyRow >= 0, `the empty page still paints Cancel:\n${emptyLines.join('\n')}`)
+  const emptyCol = emptyLines[emptyRow]!.indexOf('Cancel [Esc]')
+  const emptyHeight = empty.panel.render(100).length
+  empty.panel.handleMouse(historyPointer('press', emptyCol, emptyRow, 100, emptyHeight))
+  empty.panel.handleMouse(historyPointer('click', emptyCol, emptyRow, 100, emptyHeight))
+  assert.equal(empty.closed(), 1)
+  empty.panel.dispose()
+
+  // Error page.
+  const failSource = new FakeSource()
+  failSource.fail = true
+  const failed = makePanel(failSource, {
+    geometry: seatGeometry(100, 30, 2),
+    pointerEnabled: () => true,
+  })
+  failed.panel.start()
+  await settle()
+  const failLines = plain(failed.panel.render(100))
+  const failRow = footerRowOf(failLines)
+  assert.ok(failRow >= 0, `the error page still paints Cancel:\n${failLines.join('\n')}`)
+  const failCol = failLines[failRow]!.indexOf('Cancel [Esc]')
+  const failHeight = failed.panel.render(100).length
+  failed.panel.handleMouse(historyPointer('press', failCol, failRow, 100, failHeight))
+  failed.panel.handleMouse(historyPointer('click', failCol, failRow, 100, failHeight))
+  assert.equal(failed.closed(), 1)
+  failed.panel.dispose()
+})

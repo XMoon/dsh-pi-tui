@@ -67,6 +67,8 @@ interface Harness {
   readonly rows: HistorySearchResult[]
   /** EVERY terminal write chunk, in order (the mode-sequence witness). */
   readonly writes: string[]
+  /** Every editor submit (an accept must NEVER submit). */
+  readonly submitted: string[]
 }
 
 /** The REAL app with a recording clipboard capability and an owned runner that
@@ -86,9 +88,10 @@ function startApp(rows: HistorySearchResult[], columns = 100, terminalRows = 30)
   }
   const copied: string[] = []
   const notices: string[] = []
+  const submitted: string[] = []
   const page = [...rows]
   const app = new TuiApp(vt, {
-    onSubmit: () => {},
+    onSubmit: (text: string) => { submitted.push(text) },
     onExit: () => {},
     runOwned: (_label, task, options) => {
       void Promise.resolve()
@@ -111,7 +114,7 @@ function startApp(rows: HistorySearchResult[], columns = 100, terminalRows = 30)
     notices.push(text)
     originalNotify(text, kind)
   }
-  return { vt, app, copied, notices, rows: page, writes }
+  return { vt, app, copied, notices, rows: page, writes, submitted }
 }
 
 /** Trigger one more debounced search over the CURRENT page (the tests use the
@@ -551,4 +554,131 @@ test('fullscreen actions: the LAST painted cell of each item is inside its hit r
   await flush(2)
   assert.equal(h.app.getDraft(), 'alpha prompt', 'the last painted cell of Use Selected accepts the entry')
   assert.ok(rowOf(h.vt, 'Input History') < 0, 'accepting closes the History seat')
+})
+
+// ── PR-B B3: the Fullscreen Footer pointer journey ──────────────────────────
+
+/** 0-based row of the first occurrence of `needle`. */
+const rowOfText = (vt: VirtualTerminal, needle: string): number =>
+  rawView(vt).findIndex(line => line.includes(needle))
+
+/** One real SGR press+release on the FIRST painted cell of `text`. */
+async function clickPainted(h: Harness, text: string): Promise<void> {
+  const row = rowOfText(h.vt, text)
+  assert.ok(row >= 0, `the frame must paint '${text}':\n${view(h.vt)}`)
+  const col = rawView(h.vt)[row]!.indexOf(text)
+  assert.ok(col >= 0)
+  press(h.vt, row, col)
+  release(h.vt, row, col)
+  await h.vt.waitForRender()
+  await flush(2)
+}
+
+test('B3: a pure-mouse Scope → result → Use journey replaces the draft and never submits', async () => {
+  const h = startApp([
+    row('alpha prompt', 3, '/work/a', 'id-a'),
+    row('beta prompt', 2, '/work/a', 'id-b'),
+  ])
+  h.app.setDraft('keep this draft')
+  await h.vt.waitForRender()
+  await openFullscreenHistory(h)
+  // Scope: the Fullscreen footer's complete span toggles the search scope.
+  await clickPainted(h, 'Scope [Tab]')
+  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  await h.vt.waitForRender()
+  assert.ok(h.app.getDraft() === 'keep this draft', 'Scope must never touch the draft')
+  // A result row click only selects.
+  const betaRow = rowOf(h.vt, 'beta prompt')
+  assert.ok(betaRow >= 0, `the results must paint after the scope change:\n${view(h.vt)}`)
+  const betaCol = rawView(h.vt)[betaRow]!.indexOf('beta prompt')
+  press(h.vt, betaRow, betaCol)
+  release(h.vt, betaRow, betaCol)
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.equal(h.app.getDraft(), 'keep this draft', 'a result click never accepts')
+  // The heading's Use action accepts into the EDITOR without submitting.
+  await clickPainted(h, 'Use Selected [Enter]')
+  assert.equal(h.app.getDraft(), 'beta prompt', 'the pointer Use replaces the draft with the pressed entry')
+  assert.deepEqual(h.submitted, [], 'Use must never submit the editor')
+  assert.ok(rowOf(h.vt, 'Input History') < 0, 'accepting closes the History seat')
+  await flush(2)
+})
+
+test('B3: the Footer Cancel closes the empty page and keeps the draft and the app alive', async () => {
+  let exits = 0
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => { exits += 1 } }, {
+    historySearchSource: { search: async () => ({ results: [], exhausted: true }) },
+    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }),
+  })
+  app.start()
+  startedApps.add(app)
+  app.setDraft('my draft')
+  await vt.waitForRender()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  vt.sendInput('\x12')
+  await vt.waitForRender()
+  await flush(2)
+  const h: Harness = { vt, app, copied: [], notices: [], rows: [], writes: vt.writes, submitted: [] }
+  assert.ok(view(vt).includes('Input History'), `the empty History seat must paint:\n${view(vt)}`)
+  await clickPainted(h, 'Cancel [Esc]')
+  assert.ok(!view(vt).includes('Input History'), `the Footer Cancel closes the seat:\n${view(vt)}`)
+  assert.equal(app.getDraft(), 'my draft', 'closing must leave the draft untouched')
+  assert.equal(exits, 0, 'closing History must never exit the TUI')
+  await flush(2)
+})
+
+test('B3: the narrow Footer Use fallback accepts when the heading dropped its button', async () => {
+  const h = startApp([row('narrow prompt', 1, '/work/a', 'id-n')], 44, 20)
+  await openFullscreenHistory(h)
+  const heading = rawView(h.vt).find(line => line.includes('Preview')) ?? ''
+  assert.ok(!heading.includes('Use Selected [Enter]'), `the 44-column heading drops Use:\n${heading}`)
+  const footer = rawView(h.vt).find(line => line.includes('Cancel [Esc]')) ?? ''
+  assert.ok(footer.includes('Use [Enter]'), `the Footer carries the same-semantics fallback:\n${footer}`)
+  await clickPainted(h, 'Use [Enter]')
+  assert.equal(h.app.getDraft(), 'narrow prompt', 'the fallback enters the editor through the SAME accept path')
+  assert.deepEqual(h.submitted, [], 'the fallback never submits')
+  await flush(2)
+})
+
+test('B3: Expand [F2] changes only the seat presentation and the Footer verb follows', async () => {
+  const h = startApp([row('alpha prompt', 1, '/work/a', 'id-a')])
+  await openFullscreenHistory(h)
+  const before = rowOf(h.vt, 'Input History')
+  assert.ok(before >= 0)
+  const expand = rawView(h.vt).find(line => line.includes('Expand [F2]'))
+  assert.ok(expand !== undefined, `the Footer offers the F2 expand span:\n${view(h.vt)}`)
+  await clickPainted(h, 'Expand [F2]')
+  const after = rowOf(h.vt, 'Input History')
+  assert.ok(after >= 0 && after < before, `expanding grows the seat upward (${before} → ${after}):\n${view(h.vt)}`)
+  assert.ok(rawView(h.vt).some(line => line.includes('Collapse [F2]')), 'the verb names the REAL next effect')
+  assert.equal(h.app.getDraft(), '', 'a presentation toggle never writes the editor')
+  await clickPainted(h, 'Collapse [F2]')
+  assert.equal(rowOf(h.vt, 'Input History'), before, 'collapsing restores the normal share')
+  await flush(2)
+})
+
+test('B3: a Footer Cancel pressed before a Question park never acts after the restore', async () => {
+  const h = startApp([row('alpha prompt', 1, '/work/a', 'id-a')])
+  await openFullscreenHistory(h)
+  const footerRow = rowOf(h.vt, 'Cancel [Esc]')
+  const footerCol = rawView(h.vt)[footerRow]!.indexOf('Cancel [Esc]')
+  assert.ok(footerRow >= 0 && footerCol >= 0)
+  press(h.vt, footerRow, footerCol)
+  await h.vt.waitForRender()
+  const question = h.app.askQuestions([{ id: 'q1', question: 'park the footer gesture?', options: [{ label: 'Yes' }] }])
+  await h.vt.waitForRender()
+  assert.ok(!view(h.vt).includes('Input History'), 'the Question parks the History seat')
+  h.vt.sendInput('\r')
+  h.vt.sendInput('\r')
+  await question
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.ok(view(h.vt).includes('Input History'), 'the SAME History seat returns')
+  release(h.vt, footerRow, footerCol)
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.ok(view(h.vt).includes('Input History'), 'the stale footer release must not close the restored seat')
+  assert.equal(h.app.getDraft(), '', 'the stale release never accepts')
 })
