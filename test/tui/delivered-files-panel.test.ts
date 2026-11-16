@@ -1229,7 +1229,9 @@ test('a changed version restarts the preview instead of splicing pages', async (
   await h.waitForPreviewState('loading-page')
   h.resolveRead({ stat: { version: 'v1', bytes: 10 }, offset: 1, limit: 120, text: 'one', lines: 1, eof: false })
   await h.waitForPreviewState('text-page')
-  // Ask for the next page; the Host reports a NEW version for it.
+  // The user SEES page 1 (a host reply alone is not a paging authority); then
+  // ask for the next page; the Host reports a NEW version for it.
+  h.rows()
   h.type('pageDown')
   h.type('pageDown')
   assert.deepEqual(h.readCalls().at(-1), { offset: 121, limit: 120 })
@@ -1873,6 +1875,75 @@ test('a Details wheel reads the previous page only from the very top; the first 
   // A pending read is not duplicated.
   wheelAt(h.panel, wheelCell(4, 5), -1)
   assert.equal(h.readCalls().length, 2, 'no duplicate while pending')
+})
+
+test('a settled-but-unpainted Details page never authorizes the next wheel read', async () => {
+  const h = previewHarness(ONE_TURN, { pointerActions: true })
+  h.setSize(100, 30)
+  h.type('enter')
+  h.resolveStat({ version: 'v1' })
+  await h.waitForPreviewState('loading-page')
+  // Paint the Loading frame, then settle a SHORT first page without a paint.
+  h.rows()
+  h.resolveRead({ stat: { version: 'v1' }, offset: 1, limit: DELIVERED_FILE_PAGE_LINES, text: 'short page', lines: 1, eof: false })
+  await h.waitForPreviewState('text-page')
+  const settled = h.readCalls().length
+  wheelAt(h.panel, wheelCell(4, 3), 6)
+  assert.equal(h.readCalls().length, settled, 'the unpainted settlement cannot page a window the user never saw')
+  // Once the new page is really painted, its confirmed bottom reads legitimately.
+  h.rows()
+  wheelAt(h.panel, wheelCell(4, 3), 6)
+  assert.deepEqual(h.readCalls().slice(1), [{ offset: 1 + DELIVERED_FILE_PAGE_LINES, limit: DELIVERED_FILE_PAGE_LINES }])
+})
+
+test('consecutive full 120-line pages never skip an unpainted window', async () => {
+  const h = previewHarness(ONE_TURN, { pointerActions: true })
+  h.setSize(100, 30)
+  h.type('enter')
+  h.resolveStat({ version: 'v1' })
+  await h.waitForPreviewState('loading-page')
+  h.resolveRead({ stat: { version: 'v1' }, offset: 1, limit: DELIVERED_FILE_PAGE_LINES, text: PAGED_TEXT(120, 'first'), lines: 120, eof: false })
+  await h.waitForPreviewState('text-page')
+  h.rows()
+  for (let notch = 0; notch < 17; notch += 1) wheelAt(h.panel, wheelCell(4, 3), 6)
+  wheelAt(h.panel, wheelCell(4, 3), 6)
+  assert.deepEqual(h.readCalls().slice(1), [{ offset: 121, limit: DELIVERED_FILE_PAGE_LINES }])
+  // Page 2 settles while page 1 is still the painted frame: its identical
+  // physical height must not be mistaken for page 1's confirmed bottom.
+  h.resolveRead({ stat: { version: 'v1' }, offset: 121, limit: DELIVERED_FILE_PAGE_LINES, text: PAGED_TEXT(120, 'second'), lines: 120, eof: false })
+  await h.waitForPreviewState('text-page')
+  const settled = h.readCalls().length
+  wheelAt(h.panel, wheelCell(4, 3), 6)
+  assert.equal(h.readCalls().length, settled, 'the unpainted page 2 cannot authorize page 3')
+  // Paint page 2, walk to its real bottom, then one more wheel reads page 3.
+  h.rows()
+  for (let notch = 0; notch < 17; notch += 1) wheelAt(h.panel, wheelCell(4, 3), 6)
+  wheelAt(h.panel, wheelCell(4, 3), 6)
+  assert.deepEqual(h.readCalls().slice(2), [{ offset: 241, limit: DELIVERED_FILE_PAGE_LINES }])
+})
+
+test('the keyboard PgUp/PgDn page edge shares the painted-page gate', async () => {
+  const h = previewHarness(ONE_TURN, { pointerActions: true })
+  h.setSize(100, 30)
+  h.type('enter')
+  h.resolveStat({ version: 'v1' })
+  await h.waitForPreviewState('loading-page')
+  h.resolveRead({ stat: { version: 'v1' }, offset: 1, limit: DELIVERED_FILE_PAGE_LINES, text: 'short one', lines: 1, eof: false })
+  await h.waitForPreviewState('text-page')
+  h.rows()
+  // The short page's confirmed bottom is a legitimate PgDn edge read.
+  h.type('pageDown')
+  assert.deepEqual(h.readCalls().slice(1), [{ offset: 121, limit: DELIVERED_FILE_PAGE_LINES }])
+  // A settlement that has not painted yet can never page again.
+  h.resolveRead({ stat: { version: 'v1' }, offset: 121, limit: DELIVERED_FILE_PAGE_LINES, text: 'short two', lines: 1, eof: false })
+  await h.waitForPreviewState('text-page')
+  const settled = h.readCalls().length
+  h.type('pageDown')
+  assert.equal(h.readCalls().length, settled, 'PgDn never pages an unpainted settlement')
+  // Once painted, the same key reads the next window.
+  h.rows()
+  h.type('pageDown')
+  assert.deepEqual(h.readCalls().slice(2), [{ offset: 241, limit: DELIVERED_FILE_PAGE_LINES }])
 })
 
 test('a next page that changed version restarts at the first window through the wheel', async () => {

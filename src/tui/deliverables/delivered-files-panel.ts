@@ -564,6 +564,20 @@ export class DeliveredFilesPanel implements Component {
     if (matchesKey(data, 'escape')) return this.backFromTurns()
   }
 
+  /**
+   * The text page the USER CAN SEE: a settlement that has already been painted.
+   * A Host reply updates `preview` BEFORE the frame paints (the pending
+   * `previewScrollToContent` flag is consumed by the next render), so content
+   * the user has not seen yet must never authorize another Host read —
+   * otherwise a wheel or PgDown right after settlement could paginate past an
+   * unpainted window. The page is undefined while a request is pending and for
+   * metadata/failure/idle bodies.
+   */
+  private paintedPreviewPage(): DeliveredFilePage | undefined {
+    if (this.previewScrollToContent || this.preview.kind !== 'text-page') return undefined
+    return this.preview.page
+  }
+
   private handleDetailsInput(data: string): void {
     if (matchesKey(data, 'escape')) return this.backFromDetails()
     if (DELIVERED_FILES_CHORDS.copyPath.keys.some(key => matchesKey(data, key))) return this.copySelectedPath()
@@ -591,7 +605,7 @@ export class DeliveredFilesPanel implements Component {
         return
       }
       // At the top of the page: the previous 120-line window, when one exists.
-      const page = this.preview.kind === 'text-page' ? this.preview.page : undefined
+      const page = this.paintedPreviewPage()
       if (page !== undefined && page.offset > 1) this.requestPreviewPage(Math.max(1, page.offset - DELIVERED_FILE_PAGE_LINES))
       return
     }
@@ -602,7 +616,7 @@ export class DeliveredFilesPanel implements Component {
         return
       }
       // At the bottom of the page: the next 120-line window, never past EOF.
-      const page = this.preview.kind === 'text-page' ? this.preview.page : undefined
+      const page = this.paintedPreviewPage()
       if (page !== undefined && !page.eof) this.requestPreviewPage(page.offset + DELIVERED_FILE_PAGE_LINES)
     }
   }
@@ -1051,8 +1065,11 @@ export class DeliveredFilesPanel implements Component {
       if (this.detailsTop > 0) {
         this.detailsTop = Math.max(0, this.detailsTop + step)
         this.requestRender()
-      } else if (this.preview.kind === 'text-page' && this.preview.page.offset > 1) {
-        this.requestPreviewPage(Math.max(1, this.preview.page.offset - DELIVERED_FILE_PAGE_LINES))
+      } else {
+        // The previous 120-line window, like PgUp — only from a page the user
+        // can actually see; an unpainted settlement never authorizes a read.
+        const page = this.paintedPreviewPage()
+        if (page !== undefined && page.offset > 1) this.requestPreviewPage(Math.max(1, page.offset - DELIVERED_FILE_PAGE_LINES))
       }
     } else {
       const beforeTop = this.detailsTop
@@ -1062,8 +1079,13 @@ export class DeliveredFilesPanel implements Component {
       const layout = this.detailsLayout(this.paintedWidth, desired + bodyRows + 1)
       const nextTop = Math.min(desired, Math.max(0, layout.lines.length - bodyRows))
       this.detailsTop = nextTop
-      if (nextTop === beforeTop && this.preview.kind === 'text-page' && !this.preview.page.eof) {
-        this.requestPreviewPage(this.preview.page.offset + DELIVERED_FILE_PAGE_LINES)
+      // A CONFIRMED bottom — this wheel could not move the window AT ALL —
+      // is the page edge exactly like PgDn's; landing on it only moves. The
+      // read needs a PAINTED page, so a Host reply that has not reached the
+      // screen yet can never page past a window the user has not seen.
+      const page = this.paintedPreviewPage()
+      if (nextTop === beforeTop && page !== undefined && !page.eof) {
+        this.requestPreviewPage(page.offset + DELIVERED_FILE_PAGE_LINES)
       } else {
         this.requestRender()
       }

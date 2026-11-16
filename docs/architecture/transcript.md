@@ -849,8 +849,10 @@ navigates the page under it and is never a press:
   rows; header/footer are inert. At most ONE adjacent 120-source-line window is
   requested per wheel through the existing Preview owner: next only at a proven
   page bottom with `eof=false`, previous only from the first row with `offset>1`.
-  A pending read never re-requests (next is EOF-bounded, previous is bounded by
-  `offset=1`), and metadata/failure/idle/loading scrolls start no read.
+  Both directions require the page the user can actually SEE: a Host reply that
+  has settled but not yet painted never authorizes a hop (the keyboard
+  PgUp/PgDn edge shares that gate). A pending read never re-requests, and
+  metadata/failure/idle/loading scrolls start no read.
 - **Held press.** ANY finite non-zero wheel — chrome, stale frame, boundary or
   non-scrollable state — revokes the held press first (a fresh press still
   works), so its release cannot run an old button or Turn row; a zero wheel is a
