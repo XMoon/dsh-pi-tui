@@ -339,6 +339,36 @@ test('an unavailable Limits section leaves independently dirty Selection writabl
   assert.equal(h.controller.snapshot().selection.status?.kind, 'verified')
 })
 
+test('a Limits section lost during editing still dispatches the current Selection', async () => {
+  const h = await harness()
+  stageBoth(h)
+  h.limits.state = { kind: 'unavailable', reason: 'Limits row removed while editing' }
+  h.controller.save()
+  await latest(h)
+  assert.equal(h.limits.calls.length, 0, 'the removed Limits descriptor dispatches nothing')
+  assert.equal(h.selection.calls.length, 1, 'the still-current Selection keeps its own dispatch')
+  assert.equal(h.controller.snapshot().limits.status?.kind, 'not-saved')
+  assert.equal(h.controller.snapshot().selection.status?.kind, 'verified')
+  assert.equal(h.controller.snapshot().limits.dirty, true)
+  assert.equal(h.controller.snapshot().selection.dirty, false)
+  assert.deepEqual(h.errors, [])
+})
+
+test('a Selection section lost during editing still dispatches the current Limits', async () => {
+  const h = await harness()
+  stageBoth(h)
+  h.selection.state = { kind: 'unavailable', reason: 'Selection row removed while editing' }
+  h.controller.save()
+  await latest(h)
+  assert.equal(h.limits.calls.length, 1, 'the still-current Limits keeps its own dispatch')
+  assert.equal(h.selection.calls.length, 0, 'the removed Selection descriptor dispatches nothing')
+  assert.equal(h.controller.snapshot().limits.status?.kind, 'verified')
+  assert.equal(h.controller.snapshot().selection.status?.kind, 'not-saved')
+  assert.equal(h.controller.snapshot().limits.dirty, false)
+  assert.equal(h.controller.snapshot().selection.dirty, true)
+  assert.deepEqual(h.errors, [])
+})
+
 test('a stale Limits revision retains its draft while independent Selection saves at its own revision', async () => {
   const h = await harness()
   stageBoth(h)
