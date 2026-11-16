@@ -528,6 +528,47 @@ test('a query keystroke between a Done press and its release refuses the stale c
   assert.doesNotMatch(render(page, 100, 14).join('\n'), /search: \//u)
 })
 
+test('a raw query edit that keeps the same filter still revokes the held Done', () => {
+  const { page } = makePage(snapshot())
+  render(page, 100, 14)
+  clickBarSpan(page, 'bar:start-search', 100, 14)
+  page.handleInput('b')
+  render(page, 100, 14)
+  const span = page.paintedBarSpans().find(candidate => candidate.id === 'bar:finish-search')
+  assert.ok(span !== undefined)
+  const base = mouseBase(100, 14)
+  page.handleMouse({ ...base, type: 'press', x: span.startCol, y: 13 })
+  // A trailing space changes the RAW painted query while the normalized filter
+  // ('b') is unchanged: the held Done must still be revoked.
+  page.handleInput(' ')
+  page.handleMouse({ ...base, type: 'click', x: span.startCol, y: 13 })
+  assert.match(render(page, 100, 14).join('\n'), /search: \/ b /u, 'the stale Done never completes')
+  // A fresh complete click finishes the search exactly once.
+  clickBarSpan(page, 'bar:finish-search', 100, 14)
+  assert.doesNotMatch(render(page, 100, 14).join('\n'), /search: \//u)
+})
+
+test('removing the last draft row re-centers the row that becomes focused', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({
+      args: [],
+      env: [{ key: 'E', value: '${credential:E}' }],
+      dirty: true,
+    }),
+  }))
+  openEditor(page, 'e', 44, 8)
+  wheelFocusUntil(page, 44, 8, frame => /▸ Env key: E/u.test(frame))
+  // The draft loses the whole env entry (key + value + form rows) with no
+  // repaint: the focused index now points past the form.
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    editor: editorSnapshot({ args: [], env: [], dirty: true }),
+  }
+  const frame = render(page, 44, 8).join('\n')
+  assert.match(frame, /▸ [^:\n]+:/u, `a focused field stays painted after the removal: ${frame}`)
+})
+
 test('a restarted refresh/grant change invalidates the previous pointer gesture', () => {
   const { page, controller } = makePage(snapshot())
   const lines = render(page, 120, 20)
@@ -1694,7 +1735,7 @@ test('a wheel between the Remove press and its release never removes', () => {
   assert.deepEqual(controller.calls.filter(call => call.startsWith('removeArg')), ['removeArg:0'])
 })
 
-test('44 columns still paints s Save, Remove and Back [Esc] whole for a removable row', () => {
+test('44 columns keeps the COMPLETE Remove [Backspace] beside Save and Back for a removable row', () => {
   const { page } = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
     editor: editorSnapshot({ args: ['--flag'], dirty: true }),
@@ -1702,10 +1743,12 @@ test('44 columns still paints s Save, Remove and Back [Esc] whole for a removabl
   openEditor(page, 'e', 44, 20)
   wheelFocusUntil(page, 44, 20, frame => /▸ Arg 1:/u.test(frame))
   const bar = render(page, 44, 20).at(-1) ?? ''
+  // The layout drops the BROWING hints first and keeps the three actions whole.
   assert.match(bar, /s Save/u)
-  assert.match(bar, /Remove/u)
+  assert.match(bar, /Remove \[Backspace\]/u, `the full Remove literal must survive: ${bar}`)
   assert.match(bar, /Back \[Esc\]/u)
+  assert.doesNotMatch(bar, /Enter edit|Tab next|↑\/↓ field/u, 'the browsing hints yield first')
   assert.ok(visibleWidth(bar) <= 44, `no overflow at 44 columns: ${bar}`)
   assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:remove-form-row'),
-    'the compacted Remove is still a real target')
+    'the complete Remove is a real target')
 })

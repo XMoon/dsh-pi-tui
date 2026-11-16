@@ -668,6 +668,12 @@ export interface EmbeddedSpecialistPage extends Component {
   /** The page's own SEMANTIC identity for a pointer gesture (view + the
    *  transient phases its Esc really acts on), re-proved at the release. */
   gestureIdentity?(): string
+  /** PR-D: whether a pointer press may arm against the CURRENT painted frame.
+   *  A Host/configuration observation change that has landed without repainting
+   *  makes the previous frame's bar cells stale even though no paint is
+   *  pending; such a press must not be recorded. Pages without this admission
+   *  keep their previous behavior. */
+  pointerFrameCurrent?(): boolean
   /**
    * The NON-Esc last-row spans the page's own Action Bar really painted, with
    * an opaque page-owned intent id. The Root owns the physical row (it paints
@@ -5180,6 +5186,23 @@ export class SettingsWorkspacePanel implements Component {
    *  through to the alt screen's `onCellPress`/`onCellClick` identity path. */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
+    // PR-D (Owner-approved scope amendment): a pending press recorded on the
+    // physical Action Bar is retired by ANY effective wheel. That row is
+    // outside the hosted body box, so the child never sees this wheel and could
+    // not revoke its own delegated target; an immaterial wheel therefore used
+    // to leave a bar press (search Done, Remove, a dangerous Y) alive to
+    // complete on release. Rail/content presses keep their own RFL-012 rule
+    // (an immaterial wheel does not cancel them).
+    if (event.type === 'wheel' && (event.wheelDelta ?? 0) !== 0) {
+      if (this.pressedGesture?.target.kind === 'bar-escape' || this.pressedGesture?.target.kind === 'bar-span') {
+        this.pressedGesture = undefined
+      }
+      // A hosted page's BODY press is revoked too: the child only receives
+      // wheels inside its own body box, so a wheel on the shared last row (or
+      // anywhere outside the box) would otherwise leave the press alive and its
+      // release would complete against the newer frame.
+      this.specialistPressed = undefined
+    }
     // The extension-settings DIRECTORY is re-proved before a wheel may resolve
     // against any painted box: a registry membership change revokes every grant
     // of the previous frame (independently of whether a cell happens to match).
@@ -5364,6 +5387,14 @@ export class SettingsWorkspacePanel implements Component {
     // content/body owner (no second owner for one release).
     const barTarget = this.barTargetAt(x, y)
     if (barTarget !== undefined) {
+      // A bar press may only arm against a body whose CURRENT frame painted —
+      // exactly like the body press below. Refuse both windows: a grant that
+      // awaits its paint (a keyboard field move that has not repainted) AND a
+      // painted frame whose semantic identity is already stale (a Host or
+      // configuration observation change that landed without repainting). The
+      // release may never carry such a press onto the newer frame.
+      if (this.specialistPage?.grantAwaitingPaint?.() === true) return
+      if (this.specialistPage?.pointerFrameCurrent?.() === false) return
       this.recordGesture(barTarget)
       return
     }

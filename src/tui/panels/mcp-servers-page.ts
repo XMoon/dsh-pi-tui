@@ -332,11 +332,11 @@ const EDITOR_HINTS: readonly McpBarSegment[] = [
   { text: 'Back [Esc]', priority: 1000, action: 'back' },
 ]
 /** PR-D: the per-field Remove affordance, inserted after `s Save` in display
- *  order. Its priority outlives the browsing hints and drops before Save, so a
- *  tight row keeps `s Save · Remove · Back [Esc]` whole. */
+ *  order. It has NO compact form: its priority outlives the browsing hints, so
+ *  a tight row drops those hints FIRST and keeps the complete
+ *  `s Save · Remove [Backspace] · Back [Esc]` at the 44-column floor. */
 const REMOVE_FORM_HINT: McpBarSegment = {
   text: 'Remove [Backspace]',
-  short: 'Remove',
   priority: 35,
   action: 'remove-form-row',
   ink: 'secondary',
@@ -453,6 +453,16 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   /** Whether a grant/sub-view transition still awaits its paint. */
   grantAwaitingPaint(): boolean {
     return this.grantAwaitingPaintValue
+  }
+
+  /**
+   * PR-D: whether a pointer press may arm against the CURRENT painted frame.
+   * A Host roster / configuration read that landed after the last paint leaves
+   * the painted bar cells stale with no paint pending; the Settings Root asks
+   * this before it records a delegated bar press.
+   */
+  pointerFrameCurrent(): boolean {
+    return this.paint !== undefined && this.paint.identity === this.gestureIdentity()
   }
 
   /** The complete visible Esc affordance of the LAST painted frame. */
@@ -587,14 +597,16 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       }
       // Every other key (including p/x/r/y) is QUERY TEXT here, never an
       // action with side effects.
-      const before = this.query()
+      const before = this.searchInput.getValue() ?? ''
       this.searchInput.handleInput(data)
-      const after = this.query()
+      const after = this.searchInput.getValue() ?? ''
       this.reconcileSelection(snapshot)
       if (after !== before) {
-        // The filtered list the previous frame painted is gone: a press held
-        // across the query edit can never complete against it.
-        this.bumpRevision()
+        // The RAW query text the frame paints changed: a press held across the
+        // edit can never complete against it. The revocation must NOT set the
+        // paint-waiting gate — consecutive characters have to keep flowing
+        // before the next frame paints.
+        this.revokePointerGesture()
       } else {
         this.requestRender()
       }
@@ -1645,13 +1657,16 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     // PHYSICAL content rows (group headers occupy rows too), never in field
     // indices: a short grant would otherwise let the focused field scroll out
     // of view while the user believes they are editing it.
-    const probe = renderMcpConfigForm(editor, width, bodyRows, this.formFocus, 0,
-      (field, key) => this.controller.dictValueForm(field, key),
-      (field, key) => this.controller.canRemoveDictKey(field, key))
+    // The focus may point past the form after its last row was removed: clamp
+    // it BEFORE probing, so the physical-row scroller below follows the row
+    // that will really be focused instead of resetting to the top.
     const formRowCount = mcpFormRows(editor,
       (field, key) => this.controller.dictValueForm(field, key),
       (field, key) => this.controller.canRemoveDictKey(field, key)).length
     if (this.formFocus >= formRowCount) this.formFocus = Math.max(0, formRowCount - 1)
+    const probe = renderMcpConfigForm(editor, width, bodyRows, this.formFocus, 0,
+      (field, key) => this.controller.dictValueForm(field, key),
+      (field, key) => this.controller.canRemoveDictKey(field, key))
     const focusedRow = probe.focusedContentRow >= 0 ? probe.focusedContentRow : 0
     if (focusedRow < this.formOffset) this.formOffset = focusedRow
     if (focusedRow >= this.formOffset + bodyRows) this.formOffset = focusedRow - bodyRows + 1
