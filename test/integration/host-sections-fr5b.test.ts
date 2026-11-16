@@ -233,7 +233,7 @@ test('the saved Shell-execution caps reach the active executor and its next real
   assert.deepEqual(await port.shellExecutionSettings.mutate({
     timeoutMs: { kind: 'set', value: 120 },
     maxOutputBytes: { kind: 'set', value: 64 },
-  }, opened.revision, opened.generation, opened.effective.executor), { kind: 'accepted' })
+  }, opened.revision, opened.generation), { kind: 'accepted' })
   const saved = port.shellExecutionSettings.read()
   assert.equal(saved.kind, 'ready')
   if (saved.kind !== 'ready') return
@@ -258,7 +258,7 @@ test('the saved Shell-execution caps reach the active executor and its next real
   assert.equal(beforeCapRun.kind, 'ready')
   if (beforeCapRun.kind !== 'ready') return
   assert.deepEqual(await port.shellExecutionSettings.mutate(
-    { timeoutMs: { kind: 'set', value: 5_000 } }, beforeCapRun.revision, beforeCapRun.generation, beforeCapRun.effective.executor,
+    { timeoutMs: { kind: 'set', value: 5_000 } }, beforeCapRun.revision, beforeCapRun.generation,
   ), { kind: 'accepted' })
   const spilled = await ctx.shell.execute(ctx.shell.resolve({
     command: 'node -e "process.stdout.write(\'x\'.repeat(4096))"',
@@ -275,7 +275,7 @@ test('the saved Shell-execution caps reach the active executor and its next real
   if (beforeReset.kind !== 'ready') return
   assert.deepEqual(await port.shellExecutionSettings.mutate({
     maxOutputBytes: { kind: 'reset' },
-  }, beforeReset.revision, beforeReset.generation, beforeReset.effective.executor), { kind: 'accepted' })
+  }, beforeReset.revision, beforeReset.generation), { kind: 'accepted' })
   const reset = port.shellExecutionSettings.read()
   assert.equal(reset.kind, 'ready')
   if (reset.kind !== 'ready') return

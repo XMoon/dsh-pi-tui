@@ -3639,7 +3639,7 @@ test('a replaced Host generation with the SAME revision refuses Confirm with zer
   assert.match(plain(h), /Not saved/u)
 })
 
-test('the confirmation warning is painted in L2 and a short frame without it cannot Confirm', () => {
+test('the confirmation warning is scrollable in L2 and must be read before Confirm', () => {
   const warning = 'Risk: May send chat content to DeepSeek API'
   const h = setup({
     columns: 120,
@@ -3657,10 +3657,10 @@ test('the confirmation warning is painted in L2 and a short frame without it can
   h.panel.onCellClick(confirmColumn, confirmRow)
   assert.equal(h.commits(), 1, 'a fully painted warning admits the pointer Confirm')
 
-  const longWarning = `Risk: ${'sensitive-session-content '.repeat(80)}`
+  const longWarning = `Risk: ${'sensitive-session-content '.repeat(30)}`
   const short = setup({
     columns: 120,
-    rows: 8,
+    rows: 10,
     snapshot: () => scalarSnapshot({ revision: 1, generation: {}, warning: longWarning }),
   })
   plain(short)
@@ -3668,7 +3668,15 @@ test('the confirmation warning is painted in L2 and a short frame without it can
   short.panel.handleInput('\r') // categories -> rows
   short.panel.handleInput('\r') // rows -> the L2 choice
   assert.match(plain(short), /Risk:/u, 'the warning starts painting')
-  assert.doesNotMatch(plain(short), /\bConfirm\b/u, 'no pointer Confirm is painted without the full warning')
   short.panel.handleInput('\r')
-  assert.equal(short.commits(), 0, 'a warning that cannot be painted in full refuses the Confirm')
+  assert.equal(short.commits(), 0, 'Confirm before the warning is read never writes')
+  // PageDown reveals the scrollable warning; once read, the SAME Confirm can
+  // settle even though warning/candidate/Confirm are not in one frame.
+  for (let page = 0; page < 40 && short.commits() === 0; page += 1) {
+    short.panel.handleInput('\x1b[6~')
+    plain(short)
+    short.panel.handleInput('\r')
+    plain(short)
+  }
+  assert.equal(short.commits(), 1, 'a scrolled/read warning admits the keyboard Confirm')
 })

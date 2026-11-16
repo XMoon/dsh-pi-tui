@@ -613,7 +613,7 @@ export interface AgentLoopSettingsConfig {
  * Hosts mount `pwsh-sandbox`, and exactly one of them is current. */
 export type HostShellExecutor = 'bash' | 'pwsh'
 
-/** The two official numeric caps of the ACTIVE shell executor row. The
+/** The two official numeric caps of the Host-served shell executor row. The
  * executor is a Host observation for display/fencing, not an editable field. */
 export interface ShellExecutionSettings {
   readonly executor: HostShellExecutor
@@ -622,21 +622,20 @@ export interface ShellExecutionSettings {
 }
 
 /** The official model-tool shell execution caps (FR5-B). Both fields live in
- * the SAME active Host row and are dispatched as ONE revision-checked mutation.
+ * the SAME Host-served row and are dispatched as ONE revision-checked mutation.
  * These are NOT the `!` / `!!` user-shell policy. */
 export interface ShellExecutionSettingsConfig {
   read(): SectionRead<ShellExecutionSettings>
   /** Direct already reads the Host; Remote refreshes the existing shared mirror. */
   refresh(): Promise<void>
   /**
-   * Dispatches one operation batch against the exact ACTIVE row the caller
-   * read: the adapter refuses when the Host's active executor changed since.
+   * Dispatches one operation batch against the exact served row the caller
+   * read: the adapter refuses when the Host served namespace changed since.
    */
   mutate(
     patch: SectionPatch<ShellExecutionSettings>,
     expectedRevision: number,
     generation: object,
-    expectedExecutor: HostShellExecutor,
   ): Promise<SectionMutationOutcome>
 }
 
@@ -1265,7 +1264,7 @@ export interface ConfigPort {
   readonly subagentModelSelection: SubagentModelSelectionConfig
   /** The official Agent-loop parallel-tool-call budget. */
   readonly agentLoopSettings: AgentLoopSettingsConfig
-  /** The two numeric caps of the ACTIVE Host model-tool shell executor. */
+  /** The two numeric caps of the Host-served model-tool shell executor. */
   readonly shellExecutionSettings: ShellExecutionSettingsConfig
   /** The official DeepSeek session-log upload switch. */
   readonly sessionLogUpload: SessionLogUploadConfig

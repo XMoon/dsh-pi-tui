@@ -1311,23 +1311,27 @@ typed semantic sub-domains. A consumer never names a namespace or a JSON path:
 each read projects ONE current Host descriptor into detached
 `effective`/`inherited`/`overridden` facts with its exact revision and opaque
 Host generation, and reports `unavailable`/`unreadable` — never a fabricated
-schema default. The subagent Reset rule applies unchanged: Reset is the official
+schema default. The `overridden` port fact is the effective/inherited
+difference; the TUI labels it `Differs from base` / `Matches base`, not USER
+override presence. The subagent Reset rule applies unchanged: Reset is the official
 field `unset`, and the Host readback decides the effective value; USER-field
 deletion is not a success criterion.
 
 The shell sub-domain treats the executor identity as a HOST observation. The
 adapter selects the namespace from the Host's served Settings descriptors
-(`bash-sandbox` on POSIX, `pwsh-sandbox` on Windows), never from the Client OS;
-no served row is `unavailable`, both served rows are ambiguous and fail closed,
-and a write re-proves the same ACTIVE row before dispatch (a profile switch
-refuses the stale page). Direct uses the in-process Settings authority; Remote
+following official dsh-web: prefer `pwsh-sandbox` when both are served, otherwise
+use the single served row, and report `unavailable` when none is served; the
+Client OS is never consulted. Two served namespaces are not an ambiguity.
+A write re-proves the same current served row and generation/revision before
+dispatch. Direct uses the in-process Settings authority; Remote
 uses the ONE existing settings mirror and its Connection generation, pins the
 caller's captured revision, keeps the existing accepted-write lifetime across
 the settlement and post-write refresh, and refuses a replaced generation. Both
-shell caps are dispatched as ONE path-op batch in that one namespace. A stale
-Remote mirror reports the Session-log row as current-unknown and offers no
-write; `false` is a real value and the row is absent when the Host does not serve
-the namespace. Page drafts, dirty state and pointer state remain Client-local.
+shell caps are dispatched as ONE path-op batch in that one namespace. Remote
+does not write from a stale mirror and does not claim a last-known Session-log
+value as current; `false` is a real value and the row is absent when the Host
+does not serve the namespace. Page drafts, dirty state and pointer state remain
+Client-local.
 
 ### MCP server management (ONE Host manager)
 

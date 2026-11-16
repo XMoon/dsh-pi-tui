@@ -366,7 +366,7 @@ test('one descriptor read projects Agent loop, session log and the ACTIVE shell 
   assert.deepEqual(shell.overridden, { executor: false, timeoutMs: true, maxOutputBytes: false })
 })
 
-test('the shell read follows the Host ACTIVE row and fails closed when absent or ambiguous', () => {
+test('the shell read follows Host served-bound namespaces and pwsh precedence', () => {
   const windows = new DirectShellExecutionSettingsConfig(hostSectionsContext(makeHostSectionsSettings({ shell: 'pwsh' })))
   const pwsh = windows.read()
   assert.equal(pwsh.kind, 'ready')
@@ -376,9 +376,12 @@ test('the shell read follows the Host ACTIVE row and fails closed when absent or
   assert.equal(none.read().kind, 'unavailable')
 
   const both = new DirectShellExecutionSettingsConfig(hostSectionsContext(makeHostSectionsSettings({ shell: 'both' })))
-  const ambiguous = both.read()
-  assert.equal(ambiguous.kind, 'unreadable')
-  if (ambiguous.kind === 'unreadable') assert.match(ambiguous.reason, /ambiguous/u)
+  const preferred = both.read()
+  assert.equal(preferred.kind, 'ready')
+  if (preferred.kind === 'ready') {
+    assert.equal(preferred.effective.executor, 'pwsh')
+    assert.equal(preferred.effective.timeoutMs, 120_000)
+  }
 
   const malformed = new HostSectionsSettingsFixture([{
     ns: 'bash-sandbox',
@@ -432,7 +435,7 @@ test('two shell caps dispatch as ONE mutation on the captured ACTIVE row and nev
   const result = await shell.mutate({
     timeoutMs: { kind: 'set', value: 45_000 },
     maxOutputBytes: { kind: 'reset' },
-  }, opened.revision, opened.generation, opened.effective.executor)
+  }, opened.revision, opened.generation)
   assert.deepEqual(result, { kind: 'accepted' })
   assert.equal(settings.mutations.length, 1, 'both caps are one official mutate call')
   assert.deepEqual(settings.mutations[0], {
@@ -448,15 +451,7 @@ test('two shell caps dispatch as ONE mutation on the captured ACTIVE row and nev
     maxOutputBytes: 64_000,
   }, 'the reset cap reads back the inherited 64000 while the sibling set stays')
   // The executor identity is a Host observation, never an editable field.
-  assert.equal((await shell.mutate({ executor: { kind: 'set', value: 'pwsh' } } as never, opened.revision, opened.generation, 'bash')).kind, 'rejected')
-  // A profile that switched the active row refuses the stale page's write.
-  const switched = makeHostSectionsSettings({ shell: 'pwsh' })
-  const stale = new DirectShellExecutionSettingsConfig(hostSectionsContext(switched))
-  const staleRead = stale.read()
-  assert.equal(staleRead.kind, 'ready')
-  if (staleRead.kind !== 'ready') return
-  assert.equal((await stale.mutate({ timeoutMs: { kind: 'set', value: 1 } }, staleRead.revision, staleRead.generation, 'bash')).kind, 'rejected')
-  assert.equal(switched.mutations.length, 0)
+  assert.equal((await shell.mutate({ executor: { kind: 'set', value: 'pwsh' } } as never, opened.revision, opened.generation)).kind, 'rejected')
 })
 
 test('the session-log switch accepts false, and Reset may read back On without requiring USER deletion', async () => {

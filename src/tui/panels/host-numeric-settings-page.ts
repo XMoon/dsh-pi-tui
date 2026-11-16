@@ -475,10 +475,10 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
         }
       }
       lines.push({ text, field: field.key, targets: rowTargets })
-      const overridden = source.kind === 'ready' ? source.overridden[field.key] === true : undefined
-      const provenance = overridden === undefined ? 'Unknown' : overridden ? 'Overridden' : 'Inherited'
+      const differs = source.kind === 'ready' ? source.overridden[field.key] === true : undefined
+      const comparison = differs === undefined ? 'Unknown' : differs ? 'Differs from base' : 'Matches base'
       lines.push({
-        text: color.textDim(`  Source: ${provenance}${stagedReset ? ' · Reset staged' : ''}${source.kind === 'ready' && !snapshot.current ? ' · Last-known · read-only' : ''}`),
+        text: color.textDim(`  Comparison: ${comparison}${stagedReset ? ' · Reset staged' : ''}${source.kind === 'ready' && !snapshot.current ? ' · Last-known · read-only' : ''}`),
       })
       const issue = snapshot.issues[field.key]
       if (issue !== undefined) lines.push(...this.explanation(issue, width, true))

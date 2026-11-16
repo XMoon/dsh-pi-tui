@@ -204,6 +204,9 @@ export interface SettingsWorkspaceEdit {
   /** Whether a non-verified settlement offers `Retry save` (default true).
    *  A dispatched-unknown write that requires a fresh current read sets false. */
   readonly retryable?: boolean
+  /** Restrict manual Retry to a definite `Not saved` settlement (unknown or
+   *  unverified outcomes remain read-only until an explicit re-read). */
+  readonly retryOnlyWhenDefinite?: boolean
 }
 
 /**
@@ -738,8 +741,6 @@ interface DetailProjection {
   readonly optionRegion?: DetailRegionProjection
   /** Whether this frame paints the selected candidate's identity-bearing head. */
   readonly confirmCandidateVisible: boolean
-  /** Whether the row's confirmation warning is FULLY visible in this frame. */
-  readonly confirmationWarningVisible: boolean
 }
 
 /** The TEN category ids that always exist, in their visible order. `extensions`
@@ -1137,7 +1138,7 @@ export class SettingsWorkspacePanel implements Component {
   /** Facts from the current painted projection, used to grant choice actions. */
   private paintedChoiceCandidateVisible = false
   private paintedEnterConfirm = false
-  private paintedConfirmationWarning = false
+  private confirmationWarningRead = false
   private paintedChoiceNavigation = false
   private paintedChoiceFactScroll = false
   private paintedRevision = -1
@@ -1744,7 +1745,6 @@ export class SettingsWorkspacePanel implements Component {
     this.paintedFocus = this.focus
     this.paintedChoiceCandidateVisible = false
     this.paintedEnterConfirm = false
-    this.paintedConfirmationWarning = false
     this.paintedChoiceNavigation = false
     this.paintedChoiceFactScroll = false
     // C2-R5: the typed deeplink is consumed on THIS first real frame, BEFORE the
@@ -2743,7 +2743,6 @@ export class SettingsWorkspacePanel implements Component {
       const detail = this.detailLines(pane.width, contentRows)
       detailProjection = detail
       this.paintedChoiceCandidateVisible = detail.confirmCandidateVisible
-      this.paintedConfirmationWarning = detail.confirmationWarningVisible
       const buttonRow = contentTop + Math.max(0, contentRows - 1)
       for (const painted of detail.buttons) {
         itemHits.push({
@@ -2864,7 +2863,6 @@ export class SettingsWorkspacePanel implements Component {
     }
     const detail = this.detailLines(width, viewport)
     this.paintedChoiceCandidateVisible = detail.confirmCandidateVisible
-    this.paintedConfirmationWarning = detail.confirmationWarningVisible
     panes.detail = {
       x: 0,
       width,
@@ -3032,7 +3030,7 @@ export class SettingsWorkspacePanel implements Component {
       const decorated = painted.text === '' ? noteInk : noteInk === '' ? painted.text : `${painted.text}  ${noteInk}`
       lines.push(fit(visibleWidth(decorated) <= width ? decorated : painted.text, width))
     }
-    return { lines, content, viewport: scrollViewport, buttons: painted.painted, optionRows: [], confirmCandidateVisible: false, confirmationWarningVisible: false }
+    return { lines, content, viewport: scrollViewport, buttons: painted.painted, optionRows: [], confirmCandidateVisible: false }
   }
 
   /** Compose facts, optional heading, candidate viewport and pinned buttons.
@@ -3041,16 +3039,14 @@ export class SettingsWorkspacePanel implements Component {
     const actionRows = viewport >= 2 ? 1 : 0
     const scrollableRows = Math.max(0, viewport - actionRows)
     const options = row.edit?.options ?? []
-    // The row's own risk statement is a FIRST-CLASS confirmation fact, not a
-    // Detail-only sentence: it is reserved above the facts/candidates and only
-    // a completely painted warning admits Confirm.
+    // The row's own risk statement is a scrollable confirmation fact. It need
+    // not share one frame with the candidate/Confirm on a short terminal, but
+    // it must have been fully painted before Confirm settles.
     const warning = row.edit?.confirmationWarning
     const warningLines = warning === undefined
       ? []
       : wrapTextWithAnsi(color.warning(escapedPhysicalLine(warning)), Math.max(1, width))
-    const visibleWarning = warningLines.slice(0, scrollableRows)
-    const warningVisible = warning === undefined || warningLines.length <= scrollableRows
-    const contentRows = Math.max(0, scrollableRows - visibleWarning.length)
+    const contentRows = scrollableRows
     const blocks = this.choiceBlocks(row, width)
     const flattened = blocks.flat()
     const phase = this.editPhase
@@ -3075,14 +3071,17 @@ export class SettingsWorkspacePanel implements Component {
       }
       if (previousFactRows !== factRows || previousOptionRows !== optionViewport) this.detailOffset = 0
     }
-    const factContent = this.detailContent(row, width, false, true)
+    const factContent = [...warningLines, ...this.detailContent(row, width, false, true)]
     const factMaxOffset = Math.max(0, factContent.length - factRows)
     this.detailOffset = Math.min(Math.max(0, this.detailOffset), factMaxOffset)
+    if (warning === undefined || this.detailOffset + factRows >= warningLines.length) {
+      this.confirmationWarningRead = true
+    }
     const visibleFacts: string[] = []
     for (let i = 0; i < factRows; i += 1) visibleFacts.push(factContent[this.detailOffset + i] ?? '')
 
     const optionOffset = this.rebaseChoice(blocks, optionViewport, width)
-    const lines = [...visibleWarning, ...visibleFacts]
+    const lines = [...visibleFacts]
     if (headingRows === 1) lines.push(color.textStrong('Choose value'))
     for (let i = 0; i < optionViewport; i += 1) lines.push(flattened[optionOffset + i] ?? '')
 
@@ -3096,7 +3095,6 @@ export class SettingsWorkspacePanel implements Component {
       && selectedStart >= optionOffset
       && selectedStart + identityRows <= optionOffset + optionViewport
     const confirmActionVisible = confirmCandidateVisible
-      && warningVisible
       && this.paintedViewport >= 3
       && renderActionBarRow(
         [CHOICE_CONFIRM_HINT, CHOICE_BACK_HINT],
@@ -3115,7 +3113,7 @@ export class SettingsWorkspacePanel implements Component {
       const option = options[index]
       if (option !== undefined) {
         for (let line = Math.max(start, optionOffset); line < Math.min(end, optionOffset + optionViewport); line += 1) {
-          optionRows.push({ value: option.value, line: visibleWarning.length + factRows + headingRows + line - optionOffset, endCol: width })
+          optionRows.push({ value: option.value, line: factRows + headingRows + line - optionOffset, endCol: width })
         }
       }
       start = end
@@ -3127,17 +3125,16 @@ export class SettingsWorkspacePanel implements Component {
       buttons: painted.painted,
       optionRows,
       ...(factRows === 0 ? {} : {
-        factRegion: { lineStart: visibleWarning.length, rows: factRows, maxOffset: factMaxOffset },
+        factRegion: { lineStart: 0, rows: factRows, maxOffset: factMaxOffset },
       }),
       ...(optionViewport === 0 ? {} : {
         optionRegion: {
-          lineStart: visibleWarning.length + factRows + headingRows,
+          lineStart: factRows + headingRows,
           rows: optionViewport,
           maxOffset: Math.max(0, flattened.length - optionViewport),
         },
       }),
       confirmCandidateVisible,
-      confirmationWarningVisible: warningVisible,
     }
   }
 
@@ -3239,8 +3236,11 @@ export class SettingsWorkspacePanel implements Component {
     const edit = row.edit
     if (edit !== undefined && edit.options.length > 0 && phase.kind !== 'pending') {
       buttons.push({ verb: 'change', text: 'Change…', id: row.id })
+      const retryAllowed = edit.retryOnlyWhenDefinite === true
+        ? phase.kind === 'settled' && phase.outcome === 'not-saved'
+        : true
       if (phase.kind === 'settled' && phase.field === edit.field && phase.outcome !== 'verified'
-        && edit.retryable !== false) {
+        && edit.retryable !== false && retryAllowed) {
         buttons.push({ verb: 'retry', text: 'Retry save', id: phase.attempted })
       }
     }
@@ -4989,6 +4989,7 @@ export class SettingsWorkspacePanel implements Component {
     this.lastChoiceIndex = -1
     this.lastChoiceViewport = -1
     this.lastChoiceWidth = -1
+    this.confirmationWarningRead = false
     this.bumpRevision()
     this.intents.requestRender()
   }
@@ -5019,7 +5020,13 @@ export class SettingsWorkspacePanel implements Component {
       return
     }
     if (!this.paintedEnterConfirm) return
-    if (edit.confirmationWarning !== undefined && !this.paintedConfirmationWarning) return
+    if (edit.confirmationWarning !== undefined && !this.confirmationWarningRead) {
+      // Keep the current fact offset so PgUp/PgDn can reveal the warning; a
+      // Confirm before it was read never settles a write.
+      this.bumpRevision()
+      this.intents.requestRender()
+      return
+    }
     // The L2 capture is the decision fence. A refresh that changed the row while
     // the SAME painted choice stays open must not silently rebase the CAS.
     if (phase.fence.revision !== undefined || phase.fence.generation !== undefined) {

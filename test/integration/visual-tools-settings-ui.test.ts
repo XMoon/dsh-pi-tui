@@ -1368,7 +1368,7 @@ test('Root-level Reset on the real Agent-loop page sends the official unset and 
   await clickUiPainted(ui, 'Agent loop')
   await waitForFrame(
     () => ui.vt.getViewport().join('\n'),
-    frame => /Parallel tool calls\s+5/u.test(frame) && /Source: Overridden/u.test(frame),
+    frame => /Parallel tool calls\s+5/u.test(frame) && /Comparison: Differs from base/u.test(frame),
     () => ui.vt.waitForRender(), 'the USER override is the current Agent-loop value',
   )
   await clickUiPainted(ui, '[Reset]')

@@ -29,6 +29,10 @@ function positiveSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1
 }
 
+function positiveFinite(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+}
+
 export function projectAgentLoopSettings(
   effectiveValue: unknown,
   inheritedValue: unknown,
@@ -57,8 +61,8 @@ export function projectShellExecutionSettings(
     const maxOutputBytes = effectiveRecord.maxOutputBytes
     const inheritedTimeoutMs = inheritedRecord.timeoutMs
     const inheritedMaxOutputBytes = inheritedRecord.maxOutputBytes
-    if (!positiveSafeInteger(timeoutMs) || !positiveSafeInteger(maxOutputBytes)
-      || !positiveSafeInteger(inheritedTimeoutMs) || !positiveSafeInteger(inheritedMaxOutputBytes)) return undefined
+    if (!positiveFinite(timeoutMs) || !positiveFinite(maxOutputBytes)
+      || !positiveFinite(inheritedTimeoutMs) || !positiveFinite(inheritedMaxOutputBytes)) return undefined
     return Object.freeze({
       effective: Object.freeze({ executor, timeoutMs, maxOutputBytes }),
       inherited: Object.freeze({ executor, timeoutMs: inheritedTimeoutMs, maxOutputBytes: inheritedMaxOutputBytes }),

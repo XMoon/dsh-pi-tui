@@ -1257,7 +1257,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                   ? `Host profile · effective settings · revision ${source.revision}`
                   : `Host profile · ${source.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`,
                 help: [
-                  'The effective value is the current official agent-loop setting; Overridden compares it with the inherited base.',
+                  'The effective value is the current official agent-loop setting; Differs from base compares it with the inherited base.',
                   'The next Agent step samples the new parallel cap. Tool calls already dispatched are never rewritten.',
                   'Reset stages the official unset operation and then shows the Host readback; the USER patch may keep the inherited value.',
                 ],
@@ -1267,23 +1267,35 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             })
           }
           const shell = runner.config.shellExecutionSettings
+          const positiveFiniteText = (text: string): boolean => {
+            if (text.trim() === '') return false
+            const value = Number(text)
+            return Number.isFinite(value) && value > 0
+          }
           const fields = [
-            { key: 'timeoutMs' as const, label: 'Command timeout (ms)' },
-            { key: 'maxOutputBytes' as const, label: 'Output cap per stream (bytes)' },
+            {
+              key: 'timeoutMs' as const,
+              label: 'Command timeout (ms)',
+              validate: positiveFiniteText,
+              invalidHint: 'Enter a positive finite number.',
+            },
+            {
+              key: 'maxOutputBytes' as const,
+              label: 'Output cap per stream (bytes)',
+              validate: positiveFiniteText,
+              invalidHint: 'Enter a positive finite number.',
+            },
           ]
-          // The typed port needs the ACTIVE executor identity the page read;
-          // the controller hands the captured read back at Save.
+          // The port re-resolves the Host-served row at dispatch; the
+          // controller's captured revision/generation remain the CAS fence.
           const port: HostNumericSettingsPort<ShellExecutionSettings> = {
             read: () => shell.read(),
             refresh: () => shell.refresh(),
-            mutate: (patch, revision, generation, base) => shell.mutate(patch, revision, generation, base.effective.executor),
+            mutate: (patch, revision, generation) => shell.mutate(patch, revision, generation),
           }
           const controller = new HostNumericSettingsController<ShellExecutionSettings>({
             port,
             fields,
-            // The served executor row is part of the captured read's identity:
-            // two namespaces can carry the same revision number.
-            valueIdentity: value => value.executor,
             requestRender,
             onAuthoritativeChange,
             runOwned: runOwnedTask,
@@ -1297,7 +1309,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                 ? `Host model-tool executor · ${source.effective.executor === 'bash' ? 'POSIX Bash' : 'Windows PowerShell'}`
                 : 'Host model-tool executor · unavailable',
               help: [
-                'These are the official model-tool shell caps of the ACTIVE Host executor. Both fields save as one revision-checked Host mutation.',
+                'These are the official model-tool shell caps of the Host-served executor. Both fields save as one revision-checked Host mutation.',
                 'New shell executions use the caps; a running subprocess keeps its current timeout. The ! / !! user-shell policy is separate.',
                 'Reset stages the official unset operation and then shows the Host readback; the USER patch may keep the inherited value.',
               ],
@@ -2130,12 +2142,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       edit: {
         field: 'session-log-upload',
         primary: 'persisted',
-        // The L2 confirmation frame must paint this warning in full; the panel
-        // refuses both keyboard and pointer Confirm otherwise.
+        // The L2 confirmation flow paints this risk as a scrollable fact and
+        // requires it to have been fully read before Confirm settles.
         confirmationWarning: 'Risk: May send chat content to DeepSeek API',
-        // A dispatched write with a lost/unknown settlement needs a fresh
-        // current read, never a blind replay.
-        retryable: false,
+        // Only a definite refusal may offer a manual Retry; a lost ACK or a
+        // mismatched readback must not be blindly replayed.
+        retryOnlyWhenDefinite: true,
         ...(ready ? { revision: read.revision, generation: read.generation } : {}),
         options: editable
           ? [
@@ -2148,7 +2160,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           : [],
         runtime: 'Applies to future requests that meet the official contribution conditions; already-sent data is not retracted',
         persisted: ready
-          ? `${read.effective.enabled ? 'On' : 'Off'} · ${read.overridden.enabled ? 'Overridden' : 'Inherited'}${read.effective.enabled ? ' · may upload conversation content' : ''}`
+          ? `${read.effective.enabled ? 'On' : 'Off'} · ${read.overridden.enabled ? 'Differs from base' : 'Matches base'}${read.effective.enabled ? ' · may upload conversation content' : ''}`
           : 'Current unknown',
       },
     }]
@@ -4197,7 +4209,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         },
         {
           // FR5-B: the ONE Shell-execution numeric specialist entry. It edits
-          // the ACTIVE Host model-tool executor row (POSIX Bash or Windows
+          // the Host-served model-tool executor row (POSIX Bash or Windows
           // PowerShell) — never the `!`/`!!` user-shell policy.
           id: 'shell-execution',
           category: 'tools',
@@ -4205,11 +4217,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           summary: shellExecutionSettings.kind === 'ready'
             ? `Timeout ${shellExecutionSettings.effective.timeoutMs} ms · Output cap ${shellExecutionSettings.effective.maxOutputBytes} bytes · ${shellExecutionSettings.effective.executor === 'bash' ? 'POSIX Bash' : 'Windows PowerShell'}`
             : `Active executor: ${shellExecutionSettings.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`,
-          scope: 'DSH Host profile · active model-tool shell executor',
+          scope: 'DSH Host profile · Host-served model-tool shell executor',
           freshness: shellExecutionSettings.kind === 'ready'
             ? configReadiness === 'ready' ? 'ready' : 'last-known'
             : shellExecutionSettings.kind === 'unavailable' ? 'unavailable' : 'read-error',
-          description: 'Stage the command timeout and per-stream output cap of the ACTIVE Host model-tool shell executor, then Save. '
+          description: 'Stage the command timeout and per-stream output cap of the Host-served model-tool shell executor, then Save. '
             + 'Both fields are one revision-checked Host mutation. New shell executions use them; a running subprocess keeps its current timeout. '
             + 'The executor row is chosen by the Host, not this client. This is not the ! / !! user-shell sandbox policy.',
           specialist: 'shell-execution-settings',

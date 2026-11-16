@@ -568,7 +568,7 @@ test('one mirror snapshot projects the Agent loop, active shell row and session 
   assert.deepEqual(sessionLog.inherited, { enabled: true })
 })
 
-test('a Windows Host mirror selects pwsh while the Client OS is never consulted; ambiguity fails closed', async () => {
+test('the Remote shell read follows served-bound namespaces with pwsh precedence', async () => {
   const windows = makeHostPort({
     namespaces: [
       { ns: 'agent-loop', base: { maxParallelToolCalls: 10 }, value: { maxParallelToolCalls: 10 }, revision: 1 },
@@ -587,9 +587,12 @@ test('a Windows Host mirror selects pwsh while the Client OS is never consulted;
     ],
   })
   await both.port.describe()
-  const ambiguous = both.port.shellExecutionSettings.read()
-  assert.equal(ambiguous.kind, 'unreadable')
-  if (ambiguous.kind === 'unreadable') assert.match(ambiguous.reason, /ambiguous/u)
+  const preferred = both.port.shellExecutionSettings.read()
+  assert.equal(preferred.kind, 'ready')
+  if (preferred.kind === 'ready') {
+    assert.equal(preferred.effective.executor, 'pwsh')
+    assert.equal(preferred.effective.timeoutMs, 120_000)
+  }
 
   const none = makeHostPort({ namespaces: [] })
   await none.port.describe()
@@ -606,7 +609,7 @@ test('the two shell caps dispatch as ONE exact-revision mutation and Reset prese
   const result = await fixture.port.shellExecutionSettings.mutate({
     timeoutMs: { kind: 'set', value: 30_000 },
     maxOutputBytes: { kind: 'reset' },
-  }, opened.revision, opened.generation, opened.effective.executor)
+  }, opened.revision, opened.generation)
   assert.deepEqual(result, { kind: 'accepted' })
   assert.ok(fixture.calls.length === 1)
   assert.deepEqual(fixture.calls[0], {
@@ -621,16 +624,6 @@ test('the two shell caps dispatch as ONE exact-revision mutation and Reset prese
   assert.equal(readback.kind, 'ready')
   if (readback.kind !== 'ready') return
   assert.deepEqual(readback.effective, { executor: 'bash', timeoutMs: 30_000, maxOutputBytes: 64_000 })
-  // A stale page cannot write the other executor's row or its own old revision.
-  const switched = makeHostPort({ namespaces: [
-    { ns: 'pwsh-sandbox', base: { timeoutMs: 120_000, maxOutputBytes: 64_000 }, value: { timeoutMs: 120_000, maxOutputBytes: 64_000 }, revision: 11 },
-  ] })
-  await switched.port.describe()
-  const switchedRead = switched.port.shellExecutionSettings.read()
-  assert.equal(switchedRead.kind, 'ready')
-  if (switchedRead.kind !== 'ready') return
-  assert.equal((await switched.port.shellExecutionSettings.mutate({ timeoutMs: { kind: 'set', value: 1 } }, opened.revision, opened.generation, 'bash')).kind, 'rejected')
-  assert.equal(switched.calls.length, 0)
 })
 
 test('session log false is a real value; Reset sends the official unset and may read back On', async () => {
