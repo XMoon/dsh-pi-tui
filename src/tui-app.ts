@@ -29122,6 +29122,7 @@ export class TuiApp {
     // search reveal uses for subcall fields).
     if (ptcSubCallId !== undefined && !this.subCallExpanded.has(ptcSubCallId)) {
       this.subCallExpanded.add(ptcSubCallId)
+      this.planInspectedSubCallId = ptcSubCallId
       this.subCallExpandedRevision += 1
       this.clearFocusLiveHeightState()
       this.rebuildMessages('search-presentation')
@@ -29144,6 +29145,28 @@ export class TuiApp {
     this.requestRender()
     return true
   }
+
+  /** Release the plan inspection's temporary reveal grant (reading-step Esc
+   * back, or the question settling): the target keeps any user-opened
+   * disclosure, but the QUESTION never leaves a search-pinned reveal or a
+   * forced PTC sub-call expansion behind. Presentation-only. */
+  private releasePlanInspectionReveal(): void {
+    // Remove only the plan's OWN forced sub-call expansion — a user-opened
+    // sub-call (already in the set before the inspection) stays open.
+    if (this.planInspectedSubCallId !== undefined) {
+      this.subCallExpanded.delete(this.planInspectedSubCallId)
+      this.subCallExpandedRevision += 1
+      this.planInspectedSubCallId = undefined
+    }
+    this.searchSuppressedSubCalls.clear()
+    const hadTarget = this.searchTarget !== undefined
+    this.setTranscriptSearchPresentation({ matchMessages: this.searchMatchMessages, target: undefined, grantReveal: false })
+    if (hadTarget) this.rebuildMessages('search-presentation')
+  }
+
+  /** The PTC sub-call id the CURRENT plan inspection forced open (released
+   * with the inspection; never a user-opened fact). */
+  private planInspectedSubCallId: string | undefined
 
   /** Mount one flow into the editor seat and make it the active one. Every
    * step below that can run a synchronous callback is followed by an identity
@@ -29244,8 +29267,9 @@ export class TuiApp {
     // (Fullscreen only — Regular has no app-owned viewport to reveal): the
     // flow's `View plan` decision row runs it once and enters the reading
     // step only on a proven locate. The reading step's scroll keys drive the
-    // SAME transcript ScrollView; leaving the step releases the temporary
-    // reveal grant (the transcript stays where the user left it).
+    // SAME transcript ScrollView; leaving the step (or settling the question)
+    // releases the temporary reveal grant — the plan card keeps its
+    // user-opened state but the QUESTION never leaves a pinned reveal behind.
     if (state.flow.isPlanReviewFlow() && this.fullscreen !== undefined) {
       state.flow.setPlanInspection(() => this.inspectPlanReview(state))
       state.flow.onPlanReadingScroll = (lines) => {
@@ -29253,6 +29277,7 @@ export class TuiApp {
         this.fullscreenScroll?.scrollBy(lines)
         this.requestRender()
       }
+      state.flow.onPlanReadingEnd = () => this.releasePlanInspectionReveal()
     } else {
       state.flow.setPlanInspection(undefined)
     }
@@ -29417,6 +29442,10 @@ export class TuiApp {
     // is a final OBLIGATION step of the SAME batch.
     runSyncDisposalSteps('question settlement', [
       () => this.keybindings.cancelLeader(),
+      // FR7: a settling plan-review releases its temporary reveal grant and
+      // forced PTC expansion (the question must never leave a pinned reveal
+      // behind; user-opened disclosures are untouched by this).
+      () => { if (state.flow.isPlanReviewFlow()) this.releasePlanInspectionReveal() },
       // M3-3B park/reopen: the owner receives the flow's FINAL local progress
       // before the seat is torn down, so parking a continued Question keeps the
       // user's answers, free text and current question exactly as they left them

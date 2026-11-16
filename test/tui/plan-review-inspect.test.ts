@@ -159,13 +159,47 @@ test('the fallback page keeps the plan tail reachable by paging (no silent cut)'
   app.stop()
 })
 
-test('the inspection matches a nested PTC sub-call by its subCallId', async () => {
-  // Build a PTC root whose nested sub-call is the exit_plan_mode card.
-  const root = {
-    kind: 'tool' as const, turn: 1, name: 'run_code', callId: 'call-root',
+test('settling the plan question releases the temporary reveal and forced sub-call', async () => {
+  const root: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 1, name: 'run_code', callId: 'call-root',
     args: '{}', result: '', status: 'running',
     subCalls: [{
-      kind: 'tool' as const, turn: 1, name: 'exit_plan_mode', subCallId: 'call-plan-1',
+      kind: 'tool', turn: 1, name: 'exit_plan_mode', subCallId: 'call-plan-1',
+      parentCallId: 'call-root', rootCallId: 'call-root',
+      args: JSON.stringify({ plan: PLAN_MD }), result: '', status: 'running',
+    }],
+  }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 0, text: 'plan via run_code' },
+    root,
+  ]
+  const { vt, app, settle } = scene(messages)
+  await vt.waitForRender()
+  // Enter View (inspection + reading), then Esc back, then Esc dismiss — the
+  // question settles and the reveal must be gone.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Reading the submitted plan'))
+  vt.sendInput('\x1b') // reading → decision
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // decision → official dismiss
+  await settle.then(() => {}, () => {})
+  await vt.waitForRender()
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined,
+    'the settled plan question must leave no pinned reveal')
+  const subCallSet = (app as unknown as { subCallExpanded: Set<string> }).subCallExpanded
+  assert.equal(subCallSet.has('call-plan-1'), false,
+    'the plan-forced sub-call expansion must be released')
+  app.stop()
+})
+
+test('the inspection matches a nested PTC sub-call by its subCallId', async () => {
+  // Build a PTC root whose nested sub-call is the exit_plan_mode card.
+  const root: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 1, name: 'run_code', callId: 'call-root',
+    args: '{}', result: '', status: 'running',
+    subCalls: [{
+      kind: 'tool', turn: 1, name: 'exit_plan_mode', subCallId: 'call-plan-1',
       parentCallId: 'call-root', rootCallId: 'call-root',
       args: JSON.stringify({ plan: PLAN_MD }), result: '', status: 'running',
     }],
