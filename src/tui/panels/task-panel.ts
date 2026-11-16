@@ -1678,6 +1678,14 @@ export class TaskBrowserPanel implements Component, Focusable {
   }
 
   invalidate(): void {
+    // An invalidation revokes the last-painted pointer frame: an armed press or
+    // hit map from the invalidated frame must not complete before the next
+    // render rebuilds them. (The keyboard/search state stays untouched.)
+    this.mousePressedValue = undefined
+    this.mousePressedSelectionOnly = false
+    this.mousePressedAction = undefined
+    this.fr2Pressed = undefined
+    this.hitMap = []
     this.searchInput.invalidate()
     this.teamSearchInput.invalidate()
   }

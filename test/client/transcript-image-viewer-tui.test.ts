@@ -919,6 +919,83 @@ test('an unbound confirm key paints a complete pointer-only View action', () => 
   }
 })
 
+test('workspace invalidation drops the armed bar gesture until the next paint', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    let opens = 0
+    const workspace = new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [{ value: '1', label: '#1 · shot.png' }],
+      resolve: () => { opens += 1; return { ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} } },
+      onStale: () => {},
+      onClose: () => {},
+      initial: { kind: 'list' },
+    })
+    const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+    const lines = workspace.render(80)
+    const bar = strip(lines[lines.length - 1] ?? '')
+    const col = bar.indexOf('View [Enter]')
+    const event = (type: 'press' | 'click'): import('@xmoon76/pi-tui').TuiMouseEvent => ({
+      type, button: 'left', x: col, y: lines.length - 1, screenX: col, screenY: lines.length - 1,
+      width: 80, height: lines.length, shift: false, alt: false, ctrl: false,
+    })
+    assert.ok(workspace.handleMouse(event('press'))?.handled)
+    workspace.invalidate()
+    assert.equal(workspace.handleMouse(event('click')), undefined,
+      'a press from the invalidated frame can never complete before the next paint')
+    assert.equal(opens, 0)
+    // The NEXT paint republishes the target; a fresh independent click works.
+    const repainted = workspace.render(80)
+    const repaintedBar = strip(repainted[repainted.length - 1] ?? '')
+    const repaintedCol = repaintedBar.indexOf('View [Enter]')
+    const fresh = (type: 'press' | 'click'): import('@xmoon76/pi-tui').TuiMouseEvent => ({
+      type, button: 'left', x: repaintedCol, y: repainted.length - 1, screenX: repaintedCol,
+      screenY: repainted.length - 1, width: 80, height: repainted.length, shift: false, alt: false, ctrl: false,
+    })
+    assert.ok(workspace.handleMouse(fresh('press'))?.handled)
+    assert.ok(workspace.handleMouse(fresh('click'))?.handled)
+    assert.equal(opens, 1, 'a new independent press completes normally after the repaint')
+    workspace.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('workspace teardown drops the armed bar gesture', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    let opens = 0
+    const workspace = new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [{ value: '1', label: '#1 · shot.png' }],
+      resolve: () => { opens += 1; return { ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} } },
+      onStale: () => {},
+      onClose: () => {},
+      initial: { kind: 'list' },
+    })
+    const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+    const lines = workspace.render(80)
+    const bar = strip(lines[lines.length - 1] ?? '')
+    const col = bar.indexOf('View [Enter]')
+    const event = (type: 'press' | 'click'): import('@xmoon76/pi-tui').TuiMouseEvent => ({
+      type, button: 'left', x: col, y: lines.length - 1, screenX: col, screenY: lines.length - 1,
+      width: 80, height: lines.length, shift: false, alt: false, ctrl: false,
+    })
+    assert.ok(workspace.handleMouse(event('press'))?.handled)
+    workspace.dispose()
+    assert.equal(workspace.handleMouse(event('click')), undefined, 'a press armed before dispose can never complete')
+    assert.equal(opens, 0)
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
 test('a hostile attachment name cannot emit terminal controls through the /view-image list', async () => {
   // The attachment name is untrusted and the list renders it on a terminal row.
   // `SearchablePicker` folds line breaks only — it is NOT a control filter — so
