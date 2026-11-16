@@ -360,9 +360,16 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
             return
           }
           if (outcome.kind === 'cancelled') {
+            // PR2: an accepted prompt's cancellation is execution-level: the
+            // committed draft stays gone and its attachments transfer exactly
+            // once here (returning avoids the reserved-submit restore and the
+            // catch path's second consume).
             if (attempt?.isAccepted() === true) {
               options?.releaseReservation?.()
               surface.consumeDraftAttachments(text)
+              surface.settleLocalSubmission(requestId)
+              surface.settleSubmitAck('session write cancelled after acceptance', { token: ackToken, terminal: true })
+              return
             }
             throw cancellationError('session write cancelled')
           }
@@ -1523,6 +1530,9 @@ export function executeHostCommandSubmission(
     deps.notify(lateRefusal, 'error')
     deps.settleLocalSubmission(submitRequestId)
     deps.settleSubmitAck('attachments refused by the command declaration', { token: submitAckToken, terminal: true })
+    // PR2: the gesture is refused (the draft stays editable for the retry) —
+    // a held composer must be unlocked or it would stay frozen forever.
+    deps.settleComposerHold?.('rejected')
     return
   }
   // The session-transition write fence is the WRITER ADMISSION itself
@@ -1626,16 +1636,20 @@ export function executeHostCommandSubmission(
       const execution = outcome.matched
         ? outcome.execution as unknown as HostCommandExecutionLike
         : undefined
-      // PR2: a held ordinary admission whose line ACTUALLY ran as a command is
-      // handed over to the command's legacy pre-clear contract now — before its
-      // disposition handling, so a failure restore merges into an emptied
-      // editor. A plane-owned line that matched NOTHING (an unknown slash
-      // name) is an ordinary prompt and keeps its hold for the acceptance
-      // handoff.
-      if (execution !== undefined) deps.handComposerHoldToLegacyCommand?.()
       const draftDisposition = execution === undefined
         ? undefined
         : deps.readCommandDraftDisposition(execution.commandId)
+      // PR2: a held ordinary admission whose line ACTUALLY ran as a command is
+      // handed over to the command's legacy pre-clear contract. The command's
+      // OWN draft disposition is authoritative: a `restored` disposition means
+      // the handler already wrote the authoritative retry text, so the hold is
+      // merely unlocked and that text is kept. A plane-owned line that matched
+      // NOTHING (an unknown slash name) is an ordinary prompt and keeps its
+      // hold for the acceptance handoff.
+      if (execution !== undefined) {
+        if (draftDisposition === 'restored') deps.settleComposerHold?.('rejected')
+        else deps.handComposerHoldToLegacyCommand?.()
+      }
       const resultKind = execution?.result.kind
       // The official settlement is exactly `success` or `error`. An illegal
       // kind must fail BEFORE any committed-success side effect (health clear,
@@ -1658,10 +1672,6 @@ export function executeHostCommandSubmission(
       if (execution !== undefined) {
         deps.settleLocalSubmission(submitRequestId)
         deps.settleSubmitAck('submit consumed by a command', { token: submitAckToken, terminal: true })
-        // PR2: the command consumed the line through its own contract — the
-        // composer hold settles not-accepted (its draft disposition is the
-        // command outcome's business).
-        deps.settleComposerHold?.('rejected')
       }
       // An advertised command the real session's catalog lacks: consume the
       // slash input with an explicit error — never a plain model message. The

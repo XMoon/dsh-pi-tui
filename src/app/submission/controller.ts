@@ -574,10 +574,16 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
 
   const restoreSubmissionDraft = (draft: string): void => {
     if (deps.signal.aborted) return
-    // PR2: a held attempt's draft is still the live document; restoring it
-    // would duplicate the text.
     if (composerHold !== undefined && composerHold.phase === 'sending'
-      && composerHold.text === draft && deps.captureMatches(composerHold.subject)) return
+      && (composerHold.subject === undefined || deps.captureMatches(composerHold.subject))) {
+      // The held text needs no restore; a DIFFERENT value is an authoritative
+      // replacement (a claimed command's restored retry) and replaces it.
+      if (composerHold.text !== draft) {
+        deps.app().setEditorText(draft)
+        ;(composerHold as { text: string }).text = draft
+      }
+      return
+    }
     deps.app().setEditorText(mergeDraft(deps.app().getDraft(), draft))
   }
 
@@ -868,7 +874,14 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    */
   const restoreStaleDraft = (value: string, capturedSubject: SessionSubject | undefined): 'merged-verbatim' | 'merged' | 'dropped' => {
     if (composerHold !== undefined && composerHold.phase === 'sending'
-      && composerHold.text === value && deps.captureMatches(composerHold.subject)) {
+      && (composerHold.subject === undefined || deps.captureMatches(composerHold.subject))) {
+      // The held text needs no restore (it never left). A DIFFERENT value is an
+      // authoritative draft another owner (a claimed command) dictated: it
+      // REPLACES the held document — merging would duplicate the stale text.
+      if (composerHold.text !== value) {
+        deps.app().setEditorText(value)
+        ;(composerHold as { text: string }).text = value
+      }
       return 'merged-verbatim'
     }
     if (!deps.retainsStaleDraftRestore && deps.ownerWasReplaced(capturedSubject)) {

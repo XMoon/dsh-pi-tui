@@ -59,6 +59,10 @@ interface Mount {
   readonly images: DraftImageStore
   /** Configures the next writer outcome; `onAccepted` fires first when asked. */
   respond(outcome: WriteOutcome | 'throw', acceptedFirst: boolean): void
+  /** Configures the final command plane: unmatched, an executed command that
+   *  writes the corrected draft and records `restored`, or a late genuine
+   *  claim that refuses the attachments. */
+  setCommandBehavior(behavior: 'unmatched' | 'executed-error-restored' | 'late-claim-attachments-refused'): void
 }
 
 function mount(): Mount {
@@ -72,6 +76,8 @@ function mount(): Mount {
     outcome: { kind: 'committed', value: undefined },
     acceptedFirst: true,
   }
+  let commandBehavior: 'unmatched' | 'executed-error-restored' | 'late-claim-attachments-refused' = 'unmatched'
+  let claimReads = 0
   const scope = { sessionId: 's1' }
   const surface: SubmissionRuntimeSurface = {
     withWriter: async (_scope, task) => task(),
@@ -138,13 +144,26 @@ function mount(): Mount {
     command: {
       wasAdvertisedClaim: () => false,
       hostClaimOf: () => undefined,
-      hostOriginClaimOf: (parsed: { name: string }) => parsed.name === 'compact' ? { claimed: true } : undefined,
+      hostOriginClaimOf: (parsed: { name: string }) => {
+        if (parsed.name === 'compact') return { claimed: true }
+        // The late-claim behaviour: the standing view cannot classify the name
+        // (the admission is an ordinary held prompt), the FINAL catalog does
+        // (the invocation-time re-read refuses the attachments).
+        if (parsed.name === 'late-command' && commandBehavior === 'late-claim-attachments-refused') {
+          claimReads += 1
+          // The standing view (admission + submit-time capture) cannot classify
+          // the name; the LATE re-read after ensureSession does.
+          return claimReads > 2 ? { claimed: true, attachments: false } : undefined
+        }
+        return undefined
+      },
       hostCatalogResolves: () => false,
       clientClaimsLine: () => false,
       isSkillWrapperName: () => false,
       isSkillInvocation: () => false,
       withCommandDelivery: (_delivery: unknown, run: () => unknown) => run(),
-      takeCommandDraftDisposition: () => undefined,
+      takeCommandDraftDisposition: () =>
+        commandBehavior === 'executed-error-restored' ? 'restored' : undefined,
       clientCommands: { get: () => undefined, execute: async () => undefined },
     },
     commandPlane: { available: () => false, execute: async () => undefined },
@@ -156,14 +175,25 @@ function mount(): Mount {
         prompt: async (_sessionId: string, _message: unknown, _mode: 'queue' | 'steer', options?: { onAccepted?: () => void }) => {
           writerCalls.push({ mode: 'queue', onAccepted: options?.onAccepted })
           if (next.acceptedFirst) options?.onAccepted?.()
-          return { kind: 'committed', value: undefined } as WriteOutcome
+          if (next.outcome === 'throw') throw new Error('writer exploded')
+          return next.outcome
         },
         updateQueue: async () => ({ kind: 'committed', value: undefined }),
       },
       hostCommand: {
-        // A plane-owned line that matches NO command: the Host executor
-        // reports the unmatched outcome, so the fallback ordinary prompt runs.
-        execute: async () => ({ kind: 'committed', matched: false }),
+        execute: async () => {
+          if (commandBehavior === 'executed-error-restored') {
+            // The handler wrote its own authoritative retry draft before
+            // settling an error (commands.ts' restored producer).
+            composer.setEditorText('corrected retry')
+            return {
+              kind: 'committed',
+              matched: true,
+              execution: { commandId: 'cmd-restored', result: { kind: 'error' } },
+            }
+          }
+          return { kind: 'committed', matched: false }
+        },
       },
     },
     history: {
@@ -214,6 +244,10 @@ function mount(): Mount {
     consumes,
     images,
     respond: (outcome, acceptedFirst) => { next = { outcome, acceptedFirst } },
+    setCommandBehavior: (behavior) => {
+      commandBehavior = behavior
+      claimReads = 0
+    },
   }
 }
 
@@ -465,4 +499,49 @@ test('PR2: an unknown slash line keeps its hold; no fabricate acceptance without
     'no command executed, so only the acceptance callback could accept it')
   assert.equal(h.composer.text, '/unknown explain this', 'the draft is kept')
   assert.deepEqual(h.historyRows, [], 'no history row without acceptance')
+})
+
+test('PR2: a held line the final catalog runs as a command keeps the command-restored draft', async () => {
+  const h = mount()
+  h.setCommandBehavior('executed-error-restored')
+  h.composer.text = '/late-command original'
+  assert.equal(h.controller.beginComposerSubmission('/late-command original', 'enter'), 'held')
+  await tick()
+  assert.equal(h.composer.text, 'corrected retry',
+    'the command handler’s authoritative restored draft is preserved (never cleared by the handover)')
+  assert.equal(h.composer.calls.find(call => call.kind === 'settle')?.result, 'not-accepted',
+    'the held attempt unlocks for the command-owned draft')
+  assert.equal(h.controller.composerHoldActive(), false)
+  // The editor is editable again for the retry.
+  h.composer.setEditorText('corrected retry + edit')
+  assert.equal(h.composer.getDraft(), 'corrected retry + edit')
+})
+
+test('PR2: a held line whose FINAL command claim refuses the attachments unlocks again', async () => {
+  const h = mount()
+  h.setCommandBehavior('late-claim-attachments-refused')
+  const staged = h.images.add({
+    bytes: new Uint8Array([9, 9, 9]),
+    mediaType: 'image/png',
+    width: 2,
+    height: 2,
+  })
+  h.composer.text = `/late-command ${staged.placeholder}`
+  assert.equal(h.controller.beginComposerSubmission(h.composer.text, 'enter'), 'held')
+  await tick()
+  assert.equal(h.controller.composerHoldActive(), false,
+    'the proven pre-dispatch command refusal must unlock the composer')
+  assert.equal(h.composer.text, `/late-command ${staged.placeholder}`,
+    'the draft and its attachment placeholder stay editable for the retry')
+  assert.equal(h.images.values().length, 1, 'the refused attachment is not consumed')
+  assert.ok(h.composer.notices.some(notice => notice.message.includes('does not accept attachments')))
+  // The lock is really gone: the user edits the draft and a fresh ordinary
+  // prompt is admitted again (the claimed command line itself is now LEGACY —
+  // the catalog owns it, so it would be refused again until the attachment is
+  // removed).
+  h.composer.setEditorText('ordinary retry without the attachment')
+  h.respond({ kind: 'committed', value: undefined }, true)
+  assert.equal(h.controller.beginComposerSubmission('ordinary retry without the attachment', 'enter'), 'held')
+  await tick()
+  assert.equal(h.composer.text, '', 'the retry reaches the ordinary acceptance path')
 })
