@@ -24,7 +24,7 @@
 
 import assertStrict from 'node:assert/strict'
 import { createHash, randomBytes } from 'node:crypto'
-import { chmodSync, closeSync, mkdirSync, openSync, realpathSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, mkdirSync, openSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { join } from 'node:path'
 import sharp from 'sharp'
@@ -286,6 +286,8 @@ export async function runAcpPo4cContentOutput(context) {
   try {
     const started = await scene.startC1Host('acp-po4c', 'po4c Host', {
       C1_PO4C_IMAGE_DIR: pngDir,
+      C1_PO4C_READ_ARM: join(workDir, 'po4c-read.arm'),
+      C1_PO4C_READ_RELEASE: join(workDir, 'po4c-read.release'),
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8',
     }, workRoot)
     host = started.host
@@ -453,6 +455,11 @@ export async function runAcpPo4cContentOutput(context) {
       .map(event => authoredText({ content: event.data.message.content }))
       .join('')
     assert(tuiAnswer.includes('po4c answer'), 'PO-4C: the real TUI completes its own turn on the same Host')
+    // The TUI-owned turn shares the ACP View's Session: its committed output
+    // must never be attributed to the ACP flight.
+    const strayTui = acp.entries.filter(entry => entry.message?.method === 'session/update')
+    assert(strayTui.length === 0,
+      `PO-4C: a foreign TUI turn never projects onto the ACP View (got ${String(strayTui.length)} stray update(s))`)
 
     // The bounded drain (30s) is the ONLY way this stalled large frame ends:
     // the Host records the backpressure class and closes that ONE connection.
@@ -486,6 +493,44 @@ export async function runAcpPo4cContentOutput(context) {
     assertStrict.equal(clean.settled.updates.length, 1,
       'PO-4C: the new View receives exactly its own output, never a late read of the closed one')
     assertStrict.equal(clean.settled.updates[0].message.params.update.content.type, 'text')
+
+    // L6-C06 (late read): the official Store read completes AFTER the ACP
+    // connection was destroyed. The new View of that Session must never see
+    // the late image.
+    const armPath = join(workDir, 'po4c-read.arm')
+    const releasePath = join(workDir, 'po4c-read.release')
+    writeFileSync(armPath, '', { mode: 0o600 })
+    const latePromptId = ++caseId
+    acp.send({ jsonrpc: '2.0', id: latePromptId, method: 'session/prompt',
+      params: { sessionId, prompt: [{ type: 'text', text: MARKERS.assistantMixed }] } })
+    const readHeld = await waitForC1WorkEvent(workRoot,
+      event => event.kind === 'po4c-read-held' && event.attachmentId === mixedRef.attachmentId,
+      'PO-4C held official Store read', 120_000)
+    assert(readHeld.attachmentId === mixedRef.attachmentId)
+    acp.close()
+    writeFileSync(releasePath, 'release\n', { mode: 0o600 })
+    await waitForC1WorkEvent(workRoot,
+      event => event.kind === 'po4c-read-released' && event.attachmentId === mixedRef.attachmentId,
+      'PO-4C late official Store read completion', 120_000)
+    rmSync(armPath, { force: true })
+    let lateView
+    let lateAttempts = 0
+    for (;;) {
+      lateAttempts += 1
+      const candidate = await openConnection(scopeDir, `PO-4C late-read reattach attempt ${String(lateAttempts)}`)
+      const resumed = await resume(candidate, sessionId, 'PO-4C late-read reattach')
+      if (resumed.error === undefined) { lateView = candidate; break }
+      assert(resumed.error?.data?.code === 'LOCAL_ACP_VIEW_ALREADY_ATTACHED',
+        `PO-4C: unexpected late-read reattach rejection ${JSON.stringify(resumed.error)}`)
+      candidate.close()
+      await new Promise(resolveTick => setTimeout(resolveTick, 50))
+      assert(lateAttempts < 200, 'PO-4C: the disconnected View never released its Session claim')
+    }
+    const lateClean = await runPrompt(lateView, sessionId, MARKERS.health, 'PO-4C clean prompt after the late read')
+    assertEndTurn(lateClean.settled, 'PO-4C clean prompt after the late read')
+    assertStrict.equal(lateClean.settled.updates.length, 1,
+      'PO-4C: the new View receives only its own output after a late Store read completion')
+    assertStrict.equal(lateClean.settled.updates[0].message.params.update.content.type, 'text')
 
     const identityAfter = await scene.hostIdentityFacts(host)
     assert(identityAfter.hostPid === hostIdentity.hostPid && identityAfter.instanceId === hostIdentity.instanceId,
@@ -528,6 +573,7 @@ export async function runAcpPo4cContentOutput(context) {
         siblingSessionId: siblingSession,
         tuiTurn,
         reattachAttempts,
+        lateRead: { attachmentId: mixedRef.attachmentId, releasedAfterDisconnect: true, lateAttempts },
       },
       imageProbes,
     }
@@ -544,6 +590,7 @@ export async function runAcpPo4cContentOutput(context) {
       slowPeerIsolated: true,
       siblingAcpAndTuiUnaffected: true,
       reattachAfterFailureClean: true,
+      lateReadAfterCloseInert: true,
       noForeignTurnProjected: true,
       hostIdentityKept: true,
       readImageVerified: true,
