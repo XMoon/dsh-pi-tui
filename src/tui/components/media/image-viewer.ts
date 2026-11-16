@@ -6,10 +6,10 @@
  * terminal geometry changes; `render(width)` therefore receives the frame's
  * INNER width and must never paint more rows than the current grant.
  *
- * Layout priority is frozen: the `Esc close` chrome is mandatory and must
- * never be lost while it fits, the identity title is row 1, the metadata and
- * `Esc close` share the bottom row, and the image/status body absorbs the
- * remainder (`maxRows - 2`, possibly zero).
+ * Layout priority is frozen: the exit affordance (`Back [Esc]` / `Close [Esc]`)
+ * is mandatory and must never be lost while it fits, the identity title is row
+ * 1, the metadata and the exit affordance share the bottom row, and the
+ * image/status body absorbs the remainder (`maxRows - 2`, possibly zero).
  *
  * The panel never awaits: it consults the shared {@link ImageLoader}
  * synchronously, asks it to start the async read on the first render, and the
@@ -46,10 +46,22 @@ import { color } from '../../theme/runtime.ts'
 
 /** A safe finite row budget before the owning frame grants the real one. */
 const DEFAULT_MAX_ROWS = 22
-/** The mandatory close hint; right-aligned on the bottom row. `back` is used
- * when the Viewer is stacked over the `/view-image` list (Esc returns there),
- * `close` when it was opened directly from the transcript (Esc leaves). */
+/** The mandatory close affordance; right-aligned on the bottom row. `Back`
+ * is used when the Viewer is stacked over the `/view-image` list (Esc returns
+ * there), `Close` when it was opened directly from the transcript (Esc
+ * leaves). The `[Esc]` cap is the complete painted pointer span the owning
+ * `ImageWorkspacePanel` may activate. */
 type ImageViewerCloseHint = 'back' | 'close'
+
+/** The complete painted exit affordance of the LAST render: the workspace's
+ * screen gesture resolves a click against exactly these cells and this frame. */
+export interface ImageViewerExitHit {
+  readonly row: number
+  readonly startCol: number
+  readonly endCol: number
+  readonly width: number
+  readonly rows: number
+}
 
 /** One resolved pixel payload the body can place: a raw read (PNG only) or
  * the loader's scoped JPEG/WebP derivative. Both arrive as PNG base64; the
@@ -92,11 +104,15 @@ export class ImageViewerPanel implements Component {
   private readonly theme: { fallbackColor(text: string): string }
   private readonly requestRender: () => void
   private readonly onClose: () => void
-  /** `Esc back` / `Esc close` — names the REAL effect of Esc (D13). */
+  /** `Back [Esc]` / `Close [Esc]` — names the REAL effect of Esc (D13) and is
+   * the complete painted pointer affordance of the bottom/short row. */
   private readonly closeHint: string
   private unsubscribe: (() => void) | undefined
   /** The granted CONTENT row budget (overlay maxHeight minus border rows). */
   private maxRows = DEFAULT_MAX_ROWS
+  /** The complete exit span painted by the LAST render (no hit while a tight
+   * row cannot hold the whole affordance). */
+  private exitHit: ImageViewerExitHit | undefined
   /** The local placement instance; never a cache of loaded bytes. */
   private instance: PixelBody | undefined
   /** Whether `instance` is a managed component (it owns a Core handle). */
@@ -122,7 +138,7 @@ export class ImageViewerPanel implements Component {
     this.theme = input.theme
     this.requestRender = input.requestRender
     this.onClose = input.onClose
-    this.closeHint = input.closeHint === 'back' ? 'Esc back' : 'Esc close'
+    this.closeHint = input.closeHint === 'back' ? 'Back [Esc]' : 'Close [Esc]'
     this.graphics = input.graphics
     this.imageProtocolPreference = input.imageProtocolPreference
     // Subscribe ONCE to THIS (scope, attachment)'s settles only: another
@@ -143,13 +159,26 @@ export class ImageViewerPanel implements Component {
 
   /** Esc closes; every other key is consumed locally and never forwarded. */
   handleInput(data: string): void {
-    if (matchesKey(data, 'escape')) this.onClose()
+    if (matchesKey(data, 'escape')) this.requestClose()
+  }
+
+  /** The ONE close route of this panel: the keyboard Esc and the workspace's
+   * painted exit span both re-enter the immutable `onClose` callback. */
+  requestClose(): void {
+    this.onClose()
+  }
+
+  /** The complete painted exit affordance of the LAST render, or undefined
+   * when the row truncated it (a partial `Close [Es` is never a target). */
+  paintedExitHit(): ImageViewerExitHit | undefined {
+    return this.exitHit
   }
 
   /** Drop the local placement so the next paint rebuilds from current state.
    *  A managed placement's Core handle is released with it (the Core then owns
    *  the hard delete at its next write). */
   invalidate(): void {
+    this.exitHit = undefined
     this.instance?.dispose?.()
     this.instance = undefined
     this.instanceManaged = false
@@ -176,6 +205,19 @@ export class ImageViewerPanel implements Component {
   render(width: number): string[] {
     const safeWidth = Math.max(0, Math.floor(width))
     const titleText = this.titleText()
+    // The complete painted exit span of THIS frame: right-aligned on the last
+    // granted row. A row narrower than the literal hint paints only a prefix,
+    // so it publishes no target (a partial affordance is never clickable).
+    const hintWidth = visibleWidth(this.closeHint)
+    this.exitHit = safeWidth < hintWidth
+      ? undefined
+      : {
+          row: this.maxRows - 1,
+          startCol: safeWidth - hintWidth,
+          endCol: safeWidth,
+          width: safeWidth,
+          rows: this.maxRows,
+        }
     if (this.maxRows === 1) {
       // Short-window priority: one row keeps the identity title on the left
       // and the mandatory close hint right-aligned; metadata is dropped.
@@ -185,10 +227,10 @@ export class ImageViewerPanel implements Component {
     const bottom = this.withCloseHint(this.metadataText(), safeWidth)
     if (this.maxRows === 2) return [title, bottom]
     const bodyRows = this.maxRows - 2
-    // The pane FILLS its grant: title on row 1, the metadata + `Esc close` bar
-    // pinned to the LAST granted row, and the body absorbing every row between
-    // (blank rows are the image's surrounding space, never trailing dead space
-    // that would leave the bar floating under a short image).
+    // The pane FILLS its grant: title on row 1, the metadata + exit affordance
+    // bar pinned to the LAST granted row, and the body absorbing every row
+    // between (blank rows are the image's surrounding space, never trailing dead
+    // space that would leave the bar floating under a short image).
     const body = this.bodyLines(safeWidth, bodyRows)
     const padded = body.length >= bodyRows
       ? body.slice(0, bodyRows)
@@ -208,9 +250,9 @@ export class ImageViewerPanel implements Component {
 
   /**
    * Compose the bottom/short row: the left fact text is truncated first, so
-   * the right-aligned `Esc close` always survives while the row can hold it.
-   * A row narrower than the literal hint paints only the widest prefix that
-   * fits instead of overflowing.
+   * the right-aligned exit affordance always survives while the row can hold
+   * it. A row narrower than the literal hint paints only the widest prefix that
+   * fits instead of overflowing — and publishes no pointer target.
    */
   private withCloseHint(left: string, width: number): string {
     const hint = this.closeHint

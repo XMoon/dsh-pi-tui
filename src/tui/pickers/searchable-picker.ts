@@ -1137,4 +1137,20 @@ export class SearchablePicker implements Component, Focusable {
     const item = this.filteredItems[this.selectedIndex]
     return item || null
   }
+
+  /**
+   * The selected item ONLY while the LAST painted frame really drew a row for
+   * it (a read-only presentation fact, never a second selection authority).
+   *
+   * The `/view-image` list offers its `View` action from the pinned bar; that
+   * action must not point at an item the tiny-grant fit dropped from the paint
+   * (a hidden selection is not a visible target). The answer is derived from
+   * the SAME hit map pointer events use, so the bar and the rows can never
+   * disagree about what was painted.
+   */
+  paintedSelectedItem(): SearchablePickerItem | null {
+    const selected = this.filteredItems[this.selectedIndex]
+    if (selected === undefined) return null
+    return this.hitMap.some(hit => hit.kind === 'item' && hit.value === selected.value) ? selected : null
+  }
 }

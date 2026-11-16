@@ -16,10 +16,10 @@
  * The screen is full-width and vertical; it never re-composites an image row
  * through a horizontal overlay compositor.
  *
- * Esc is a two-level journey: `Esc back` in the Viewer returns to the SAME
- * list instance (selection preserved), `Esc close` on the list closes the
+ * Esc is a two-level journey: `Back [Esc]` in the Viewer returns to the SAME
+ * list instance (selection preserved), `Close [Esc]` on the list closes the
  * workspace. A Viewer opened directly from a transcript click has no list
- * below and advertises `Esc close`.
+ * below and advertises `Close [Esc]`. Both painted spans are pointer targets.
  *
  * iTerm2 is deliberately scoped down in this PR2 (Owner decision): the
  * pinned AltScreen disables the iTerm2 image capability and its cursor-up
@@ -29,12 +29,13 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/media/image-workspace
  */
 
-import { Key, getKeybindings, matchesKey } from '@xmoon76/pi-tui'
-import type { Component } from '@xmoon76/pi-tui'
+import { Key, getKeybindings, matchesKey, visibleWidth } from '@xmoon76/pi-tui'
+import type { Component, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { SearchablePicker } from '../../pickers/searchable-picker.ts'
 import { color, selectListTheme } from '../../theme/runtime.ts'
 import { formatKeyId } from '../../keybindings/hints.ts'
-import { renderActionBarRow, type ActionBarSegment } from '../../presentation/action-bar.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../../presentation/action-bar.ts'
+import { paintActionSpan } from '../../presentation/action-ink.ts'
 import type { ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import type { ImageLoader } from '../../../client/media/image/loader.ts'
 import type { SvgRasterLoader } from '../../../client/media/svg/raster-loader.ts'
@@ -91,6 +92,45 @@ export interface ImageWorkspaceInput {
     | { readonly kind: 'svg-viewer'; readonly source: SvgViewerSource }
 }
 
+/** The complete painted LIST-bar action of the LAST frame. `value` is the
+ *  selected picker identity the `View` action was painted for. */
+type ImageListBarAction = 'view' | 'close'
+
+interface ImageListBarHit {
+  readonly action: ImageListBarAction
+  readonly value: string | null
+  readonly row: number
+  readonly startCol: number
+  readonly endCol: number
+}
+
+/** The ONE pointer gesture this screen root may still complete. A click is
+ *  accepted only while the LAST-painted frame re-resolves the SAME target on
+ *  the SAME cells/grant: a View↔Viewer transition, a resize, a repaint that
+ *  moves or drops the segment, or a selection change revokes it. */
+type ImageWorkspaceGesture =
+  | {
+      readonly kind: 'list-bar'
+      readonly action: ImageListBarAction
+      readonly value: string | null
+      readonly row: number
+      readonly startCol: number
+      readonly endCol: number
+      readonly width: number
+      readonly height: number
+    }
+  | {
+      readonly kind: 'viewer-exit'
+      /** The exact Viewer instance that painted the span (a replaced Viewer
+       *  can never inherit the old press). */
+      readonly viewer: ImageViewerPanel
+      readonly row: number
+      readonly startCol: number
+      readonly endCol: number
+      readonly width: number
+      readonly height: number
+    }
+
 /** The leased screen root: list state OR viewer state, never both rendered. */
 export class ImageWorkspacePanel implements Component {
   private readonly input: ImageWorkspaceInput
@@ -101,6 +141,15 @@ export class ImageWorkspacePanel implements Component {
   private mode: 'list' | 'viewer'
   /** The width the last paint granted (the Viewer's fallback column read). */
   private lastWidth = 1
+  /** The height the last paint returned (last-painted geometry fence). */
+  private lastRows = 1
+  /** The clickable LIST-bar cells of the LAST paint. */
+  private listBarHits: readonly ImageListBarHit[] = []
+  /** Whether the LAST paint really granted the picker any rows (a 1-row
+   *  screen paints only the bar: its keys must not act on an invisible row). */
+  private listGridPainted = false
+  /** The one press this root is still allowed to complete. */
+  private gesture: ImageWorkspaceGesture | undefined
 
   constructor(input: ImageWorkspaceInput) {
     this.input = input
@@ -129,6 +178,10 @@ export class ImageWorkspacePanel implements Component {
         this.showViewer(source, true)
       }
       this.picker.onCancel = (): void => input.onClose()
+      // The list's selection is painted state: keyboard navigation must
+      // repaint it (the host ladder consumes the key and calls this panel
+      // directly, so the fork's own post-input repaint never runs).
+      this.picker.onSelectionChange = (): void => input.requestRender()
     } else if (input.initial.kind === 'svg-viewer') {
       this.mode = 'viewer'
       this.picker = undefined
@@ -140,16 +193,123 @@ export class ImageWorkspacePanel implements Component {
     }
   }
 
-  /** Forward one pointer press to the active Viewer (SVG has local controls). */
+  /**
+   * The screen root's ONE pointer entry. LIST delegates row events to the
+   * picker it owns (so the picker's last-painted hit map and pressed-value
+   * latch stay the single row authority) and resolves the pinned bar's
+   * complete action spans itself; the raster Viewer resolves only its complete
+   * painted exit span. The SVG Viewer keeps its historical
+   * `onCellPress`/`onCellClick` route: this handler stays out of its way so a
+   * press is never dispatched twice.
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // Every left press starts a fresh gesture, and a click consumes the one
+    // the press armed — captured BEFORE the latch is cleared, so the click
+    // can still prove its press. A rejected event also ends the old gesture.
+    const clicked = event.type === 'click' ? this.gesture : undefined
+    if (event.type === 'click' || (event.type === 'press' && event.button === 'left')) {
+      this.gesture = undefined
+    }
+    if (this.mode === 'list') {
+      const pickerResult = this.listGridPainted ? this.picker?.handleMouse(event) : undefined
+      if (pickerResult !== undefined) return pickerResult
+      return this.handleListBarMouse(event, clicked)
+    }
+    const panel = this.viewPanel
+    if (!(panel instanceof ImageViewerPanel)) return undefined
+    return this.handleViewerMouse(event, panel, clicked)
+  }
+
+  /** Forward one pointer press to the active SVG Viewer (its legacy entry). */
   onCellPress(x: number, y: number): void {
     if (this.mode !== 'viewer') return
     if (this.viewPanel instanceof SvgViewerPanel) this.viewPanel.onCellPress(x, y)
   }
 
-  /** Forward one pointer release to the active Viewer. */
+  /** Forward one pointer release to the active SVG Viewer (its legacy entry). */
   onCellClick(x: number, y: number): void {
     if (this.mode !== 'viewer') return
     if (this.viewPanel instanceof SvgViewerPanel) this.viewPanel.onCellClick(x, y)
+  }
+
+  private handleListBarMouse(
+    event: TuiMouseEvent,
+    pressed: ImageWorkspaceGesture | undefined,
+  ): TuiMouseEventResult | undefined {
+    if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
+    if (event.width !== this.lastWidth || event.height !== this.lastRows) return undefined
+    const hit = this.listBarHits.find(candidate =>
+      candidate.row === event.y && event.x >= candidate.startCol && event.x < candidate.endCol)
+    if (hit === undefined) return undefined
+    if (event.type === 'press') {
+      if (hit.action === 'view' && hit.value === null) return undefined
+      this.gesture = {
+        kind: 'list-bar',
+        action: hit.action,
+        value: hit.value,
+        row: hit.row,
+        startCol: hit.startCol,
+        endCol: hit.endCol,
+        width: event.width,
+        height: event.height,
+      }
+      return { handled: true }
+    }
+    if (pressed?.kind !== 'list-bar') return undefined
+    // Re-resolve the action against the LAST paint, never the pressed object:
+    // a repaint that moved/removed the segment or changed the selection makes
+    // the release inert.
+    if (pressed.action !== hit.action
+      || pressed.value !== hit.value
+      || pressed.row !== event.y
+      || pressed.startCol !== hit.startCol
+      || pressed.endCol !== hit.endCol
+      || pressed.width !== event.width
+      || pressed.height !== event.height) return undefined
+    if (hit.action === 'close') {
+      this.input.onClose()
+      return { handled: true }
+    }
+    const selected = this.picker?.paintedSelectedItem()
+    if (selected === null || selected === undefined || selected.value !== hit.value) return undefined
+    // Delegate to the SAME picker selection entry (`input.resolve` still proves
+    // the live occurrence), never a second viewer lifecycle.
+    this.picker?.onSelect?.(selected)
+    return { handled: true }
+  }
+
+  private handleViewerMouse(
+    event: TuiMouseEvent,
+    panel: ImageViewerPanel,
+    pressed: ImageWorkspaceGesture | undefined,
+  ): TuiMouseEventResult | undefined {
+    if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
+    if (event.width !== this.lastWidth || event.height !== this.lastRows) return undefined
+    const hit = panel.paintedExitHit()
+    if (hit === undefined || hit.width !== event.width || hit.rows !== event.height) return undefined
+    if (event.y !== hit.row || event.x < hit.startCol || event.x >= hit.endCol) return undefined
+    if (event.type === 'press') {
+      this.gesture = {
+        kind: 'viewer-exit',
+        viewer: panel,
+        row: hit.row,
+        startCol: hit.startCol,
+        endCol: hit.endCol,
+        width: event.width,
+        height: event.height,
+      }
+      return { handled: true }
+    }
+    if (pressed?.kind !== 'viewer-exit' || pressed.viewer !== panel) return undefined
+    // The same Viewer instance must still paint the SAME complete exit span of
+    // the SAME grant; the Back/Close span keeps its one immutable callback.
+    if (pressed.row !== hit.row
+      || pressed.startCol !== hit.startCol
+      || pressed.endCol !== hit.endCol
+      || pressed.width !== event.width
+      || pressed.height !== event.height) return undefined
+    panel.requestClose()
+    return { handled: true }
   }
 
   invalidate(): void {
@@ -183,19 +343,28 @@ export class ImageWorkspacePanel implements Component {
   render(width: number): string[] {
     this.lastWidth = Math.max(1, Math.floor(width))
     const rows = Math.max(1, Math.floor(this.input.rows()))
+    this.lastRows = rows
     if (this.mode === 'list' && this.picker !== undefined) {
       // The bar is ALWAYS the last physical row: grant the grid everything
       // above it, then pad the grid so a short candidate list cannot leave the
-      // bar floating in the middle of the screen.
-      const bar = this.listBar(width)
+      // bar floating in the middle of the screen. The grid is painted BEFORE
+      // the bar is laid out, so the bar's View target resolves against THIS
+      // frame's picker hit map (never a previous frame's selection).
       const gridRows = Math.max(0, rows - 1)
-      this.picker.setMaxRows(gridRows)
-      const grid = this.picker.render(width).slice(0, gridRows)
+      this.listGridPainted = gridRows > 0
+      let grid: string[] = []
+      if (gridRows > 0) {
+        this.picker.setMaxRows(gridRows)
+        grid = this.picker.render(width).slice(0, gridRows)
+      }
+      const bar = this.listBar(width, this.listGridPainted)
+      this.listBarHits = bar.hits
       const padded = grid.length >= gridRows
         ? grid
         : [...grid, ...Array.from({ length: gridRows - grid.length }, () => '')]
-      return rows === 1 ? [bar] : [...padded, bar]
+      return rows === 1 ? [bar.line] : [...padded, bar.line]
     }
+    this.listBarHits = []
     const panel = this.viewPanel
     if (panel === undefined) return []
     panel.setMaxRows(rows)
@@ -219,12 +388,18 @@ export class ImageWorkspacePanel implements Component {
    *   `tui.select.*` through `getKeybindings()`, so the bar reads the SAME
    *   binding source. A hard-coded `Enter`/`Esc` would start lying the moment a
    *   user remaps the action.
-   * - **Degradation is whole-segment** (§7.2). `renderActionBarRow` compacts a
+   * - **Degradation is whole-segment** (§7.2). `layoutActionBarRow` compacts a
    *   segment that declares a `short` form, then drops whole segments by
    *   ascending priority — never a mid-word cut. `Esc` closes the workspace, so
    *   it carries the highest priority and survives to the narrowest width.
+   *
+   * The complete `View`/`Close` spans are the list's only pointer targets. The
+   * `View` target exists only while the LAST picker paint really drew the
+   * selected row (a hidden selection is not a visible action), and a segment
+   * the layout had to COMPACT is a truthful hint but no longer a complete span,
+   * so it publishes no hit either.
    */
-  private listBar(width: number): string {
+  private listBar(width: number, listPainted: boolean): { line: string; hits: readonly ImageListBarHit[] } {
     const keybindings = getKeybindings()
     const primary = (action: 'tui.select.up' | 'tui.select.down' | 'tui.select.confirm' | 'tui.select.cancel'): string => {
       const key = keybindings.getKeys(action)[0]
@@ -239,20 +414,56 @@ export class ImageWorkspacePanel implements Component {
     // advertises. Both sides read `cancelBound()`, so the hint cannot promise a
     // key that does nothing (and cannot hide a route that does work).
     const cancel = this.cancelBound() ? primary('tui.select.cancel') : ''
+    const selected = listPainted ? this.picker?.paintedSelectedItem() ?? null : null
     const segments: ActionBarSegment[] = []
+    const actions = new Map<number, { action: ImageListBarAction; value: string | null; fullText: string }>()
     if (navigate !== '') segments.push({ text: `${navigate} navigate`, short: navigate, priority: 4 })
-    if (confirm !== '') segments.push({ text: `${confirm} view`, short: confirm, priority: 6 })
-    segments.push({
-      text: cancel === '' ? 'Esc close' : `${cancel} close`,
-      short: cancel === '' ? 'Esc' : cancel,
-      priority: 8,
+    if (selected !== null) {
+      const text = confirm === '' ? 'View' : `View [${confirm}]`
+      actions.set(segments.length, { action: 'view', value: selected.value, fullText: text })
+      segments.push({ text, short: 'View', priority: 6 })
+    } else if (confirm !== '') {
+      // No painted selection: keep the historical keyboard hint, but it is
+      // chrome, never a target.
+      segments.push({ text: `${confirm} view`, short: confirm, priority: 6 })
+    }
+    const closeText = cancel === '' ? 'Close [Esc]' : `Close [${cancel}]`
+    actions.set(segments.length, { action: 'close', value: null, fullText: closeText })
+    segments.push({ text: closeText, short: 'Close', priority: 8 })
+
+    const layout = layoutActionBarRow(segments, Math.max(1, width))
+    if (layout.truncated || layout.spans.length === 0) {
+      return { line: color.textDim(layout.text), hits: [] }
+    }
+    const hits: ImageListBarHit[] = []
+    const painted = layout.spans.map(span => {
+      const target = actions.get(span.inputIndex)
+      if (target === undefined) return color.textMuted(span.text)
+      if (span.text === target.fullText) {
+        hits.push({
+          action: target.action,
+          value: target.value,
+          row: this.lastRows - 1,
+          startCol: span.startCol,
+          endCol: span.endCol,
+        })
+      }
+      return paintActionSpan(span.text, 'secondary')
     })
-    return color.textDim(renderActionBarRow(segments, Math.max(1, width)))
+    const segmentWidth = layout.spans.reduce((sum, span) => sum + visibleWidth(span.text), 0)
+      + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
+    const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
+    const line = painted.join(color.textMuted(ACTION_BAR_SEPARATOR)) + ' '.repeat(padding)
+    return { line, hits }
   }
 
   /** Create the Viewer state. `fromList` keeps the list (and its selection)
-   * alive below, so Esc returns there; a direct open advertises `Esc close`. */
+   * alive below, so Esc returns there; a direct open advertises `Close [Esc]`. */
   private showViewer(source: ImageWorkspaceSource, fromList: boolean): void {
+    // A View/Close press belongs to the state that painted it: the new Viewer
+    // must never inherit a release from the list bar.
+    this.gesture = undefined
+    this.listBarHits = []
     this.viewPanel?.dispose()
     this.viewPanel = new ImageViewerPanel({
       ref: source.ref,
@@ -273,6 +484,8 @@ export class ImageWorkspacePanel implements Component {
 
   /** Create the read-only SVG Viewer inside THIS workspace lease. */
   private showSvgViewer(source: SvgViewerSource): void {
+    this.gesture = undefined
+    this.listBarHits = []
     this.viewPanel?.dispose()
     this.viewPanel = new SvgViewerPanel({
       source,
@@ -297,6 +510,9 @@ export class ImageWorkspacePanel implements Component {
       this.input.onClose()
       return
     }
+    // A Viewer exit press is dead the moment the list is back: its old cell
+    // must never complete against the restored list.
+    this.gesture = undefined
     this.viewPanel?.dispose()
     this.viewPanel = undefined
     this.mode = 'list'
