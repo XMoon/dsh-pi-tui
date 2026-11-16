@@ -1047,3 +1047,30 @@ test('a refused conversion during a Save cannot downgrade the saving state', asy
   release({ kind: 'saved', revision: 9 })
   await h.flush()
 })
+
+test('the snapshot projects the roster observation and configuration read epochs from their real lifecycles', async () => {
+  const h = harness()
+  assert.equal(snapshot(h).observationEpoch, 0, 'no observation accepted yet')
+  assert.equal(snapshot(h).configurationReadEpoch, 0, 'no configuration read issued yet')
+  h.sources.value = { kind: 'ready', configuredNames: ['mine'], generation: GENERATION_1 }
+  h.port.roster([view('mine')], GENERATION_1)
+  await h.flush()
+  assert.equal(snapshot(h).observationEpoch, 1, 'an accepted roster frame advances the observation epoch')
+  assert.ok(snapshot(h).configurationReadEpoch >= 1, 'the roster frame issued a configuration read')
+  // A SAME-generation frame is still a fresh observation input.
+  h.port.roster([view('mine')], GENERATION_1)
+  await h.flush()
+  assert.equal(snapshot(h).observationEpoch, 2)
+  // A pure configuration re-read (the write-settlement readback) advances the
+  // read epoch while the roster observation stays put.
+  const ready = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  const before = snapshot(ready)
+  ready.controller.beginAdd()
+  ready.controller.setEditorField('name', 'added')
+  ready.controller.setEditorField('command', '/bin/true')
+  await saveAcknowledging(ready)
+  const after = snapshot(ready)
+  assert.equal(after.observationEpoch, before.observationEpoch, 'a write readback changes no roster observation')
+  assert.ok(after.configurationReadEpoch > before.configurationReadEpoch,
+    'the readback advances the configuration read epoch')
+})

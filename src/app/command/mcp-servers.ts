@@ -114,6 +114,20 @@ export interface McpServersSnapshot {
   readonly configStatus?: McpConfigStatus
   /** FR4: the current configuration snapshot (for source/provenance display). */
   readonly config?: McpServerConfiguration
+  /**
+   * PR-D: how many roster observation frames this open has accepted. It is a
+   * READ-ONLY projection of {@link McpServersController.rosterEpoch} for the
+   * page's pointer currency (a Host replacement gets a different number even
+   * when every painted name/status/count is identical). It is NEVER a
+   * write/CAS/terminal-outcome authority.
+   */
+  readonly observationEpoch: number
+  /**
+   * PR-D: how many configuration reads this open has issued. A READ-ONLY
+   * projection of {@link McpServersController.configReadToken} for the page's
+   * pointer currency; never a business authority.
+   */
+  readonly configurationReadEpoch: number
 }
 
 /** FR4: what may be done with the currently selected server. */
@@ -473,6 +487,10 @@ export class McpServersController {
       ...this.configConfirm === undefined ? {} : { configConfirm: this.configConfirm },
       ...this.configStatus === undefined ? {} : { configStatus: this.configStatus },
       config: this.configuration,
+      // PR-D: the existing epochs projected read-only for page pointer
+      // currency. No new counter and no new Host identity is introduced.
+      observationEpoch: this.rosterEpoch,
+      configurationReadEpoch: this.configReadToken,
     }
   }
 

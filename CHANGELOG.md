@@ -40,6 +40,7 @@
 - **Fullscreen 的图片、任务与历史页面补齐鼠标查看、返回与关闭入口。** `/view-image` 的列表行、底栏 `View`/`Close` 与查看器的 `Back`/`Close` 可直接点击；Fullscreen Task Center 的 Work/Team `Close`、搜索 `Back` 与类型筛选 `Cancel` 可点击（Stop 确认与其余键盘提示保持原样）；Fullscreen History 底栏的 `Scope`/`Expand`/`Cancel` 可点击，并在窄屏 Use/Copy 按钮被整体降级时提供同语义的底栏后备。所有点击只作用于最后绘制且当前仍有效的完整片段，Regular/Main 仍不启用应用鼠标。
 - **Fullscreen `/model` 的操作栏支持直接点击。** 可点击进入 Effort、选择、返回、关闭及 Team 的重试/只读复查；Effort 候选仍只改草稿，目标未绘制、短行预算、旧按压或目录刷新退出当前模型时只保留安全退出，不会提交隐藏目标。
 
+- **PiTui 的 MCP servers 页补齐搜索与表单的纯鼠标路径，并拒绝跨事件的旧点击。** 列表上真正绘制的 `Search [/]` 可直接点击进入原有 `/` 搜索输入，搜索结果行可点击选中，`Done [Enter]` 完成搜索并返回列表，唯一的 `Cancel [Esc]` 仍只取消搜索。表单现在可用滚轮只移动当前字段焦点（不会再动到背后的服务器选择或隐藏的详情），当前聚焦的合法可删行会在底栏绘制完整的 `Remove [Backspace]`，点击即执行原 Backspace 的删除；继承 key、非可删行、输入中、确认中与保存中都不出现该入口。所有点击仍只作用于最后绘制且当前有效的完整片段：非零滚轮（即使到边界或正处模态）、输入查询、Host 管理器被同形替换或配置被重新读取后，之前按下的点击会在松手时失效，不会对新的 Host/配置完成 Probe、Restart、删除或保存；写入权威仍是唯一的官方 MCP 管理器与带版本校验的 SettingsForms 提交。
 - **TSP Focus 阅读模式下打开 Session Search 不再导致渲染器崩溃。** Focus 顶层的用户行与最终回答行现在与其他顶层行一样携带 presentation scope 前缀；替换来源或新 scope 后，旧 scope 的 `main.msg-N` 不会再与新 scope 的同名行冲突，Search 卡可正常打开、关闭并保留原 Composer 与草稿。
 
 - **在已打开的会话中执行 `/new` 不再丢失命令结算记录。** 旧会话会在新会话就绪后、命令执行器写回本次 `/new` 的完成记录时才被关闭，因此该记录能正常保存，不会再出现 `cannot append outside a SessionStore`；新会话的可见与可恢复行为不变。

@@ -112,6 +112,10 @@ function snapshot(overrides: Partial<McpServersSnapshot> = {}): McpServersSnapsh
     phase: 'ready',
     rows: [connected('alpha'), { name: 'beta', configured: true, status: { state: 'disabled' }, source: 'Plugin-owned' }],
     selectedName: 'alpha',
+    // The controller's read-only pointer-currentness projections: a controlled
+    // snapshot starts at the first observation and read.
+    observationEpoch: 0,
+    configurationReadEpoch: 0,
     ...overrides,
   }
 }
@@ -133,6 +137,45 @@ function makePage(state: McpServersSnapshot, done: () => void = () => {}): {
 function render(page: McpServersPage, width: number, rows: number): string[] {
   page.setMaxRows(rows)
   return page.render(width).map(line => stripTerminalSequences(line))
+}
+
+/** The page-local mouse event base of one frame. */
+function mouseBase(width: number, rows: number): {
+  readonly button: 'left'
+  readonly screenX: number
+  readonly screenY: number
+  readonly shift: boolean
+  readonly alt: boolean
+  readonly ctrl: boolean
+  readonly width: number
+  readonly height: number
+} {
+  return {
+    button: 'left' as const,
+    screenX: 1,
+    screenY: 1,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    width,
+    height: Math.max(0, rows - 1),
+  }
+}
+
+/** Press+release one PAINTED bar span through the page's own hit map. */
+function clickBarSpan(page: McpServersPage, id: string, width: number, rows: number): void {
+  const span = page.paintedBarSpans().find(candidate => candidate.id === id)
+  assert.ok(span !== undefined, `the ${id} span must be published`)
+  const base = mouseBase(width, rows)
+  page.handleMouse({ ...base, type: 'press', x: span.startCol, y: rows - 1 })
+  page.handleMouse({ ...base, type: 'click', x: span.startCol, y: rows - 1 })
+}
+
+/** Press+release one painted body row cell. */
+function clickBodyCell(page: McpServersPage, width: number, rows: number, y: number): void {
+  const base = mouseBase(width, rows)
+  page.handleMouse({ ...base, type: 'press', x: 1, y })
+  page.handleMouse({ ...base, type: 'click', x: 1, y })
 }
 
 /** Reach the editor at the compact (100-column) layout: list -> detail -> editor. */
@@ -297,6 +340,233 @@ test('search filters by name only and p/x/r are query text while searching', () 
   const restored = render(page, 88, 12).join('\n')
   assert.match(restored, /alpha/u)
   assert.match(restored, /beta/u)
+})
+
+test('the list paints a clickable Search and the search bar a clickable Done; Cancel stays the ONE Root Esc', () => {
+  const { page, controller } = makePage(snapshot())
+  render(page, 100, 14)
+  const listBar = render(page, 100, 14).at(-1) ?? ''
+  assert.match(listBar, /Search \[\/\]/u, 'the list advertises the search entry')
+  assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:start-search'),
+    'the Search entry is a real delegated span')
+  clickBarSpan(page, 'bar:start-search', 100, 14)
+  const searchFrame = render(page, 100, 14).join('\n')
+  assert.match(searchFrame, /search: \//u, 'the same `/` search sink opened the input')
+  const searchBar = render(page, 100, 14).at(-1) ?? ''
+  assert.match(searchBar, /Done \[Enter\]/u)
+  assert.match(searchBar, /Cancel \[Esc\]/u)
+  const spans = page.paintedBarSpans()
+  assert.ok(spans.some(span => span.id === 'bar:finish-search'), 'Done is a real delegated span')
+  assert.equal(spans.some(span => span.id === 'bar:cancel' || span.id === 'bar:search-cancel'), false,
+    'the search cancel is the ONE physical Root Esc, never a second span')
+  assert.ok(page.paintedEscapeSpan() !== undefined, 'Cancel [Esc] publishes the Root escape span')
+  assert.deepEqual(controller.calls, [], 'entering search is Client-local presentation')
+  clickBarSpan(page, 'bar:finish-search', 100, 14)
+  const list = render(page, 100, 14)
+  assert.doesNotMatch(list.join('\n'), /search: \//u, 'Done returns to the list')
+  assert.match(list.at(-1) ?? '', /Search \[\/\]/u, 'the list advertises Search again')
+})
+
+test('Search stays a Client filter while the Host observation is not ready; Add does not', () => {
+  const loading = makePage(snapshot({ phase: 'loading', rows: [], selectedName: undefined }))
+  loading.controller.addable = false
+  render(loading.page, 100, 14)
+  const spans = loading.page.paintedBarSpans().map(span => span.id)
+  assert.ok(spans.includes('bar:start-search'), 'Search only filters the Client view')
+  assert.equal(spans.includes('bar:add'), false, 'Add needs a current descriptor')
+  clickBarSpan(loading.page, 'bar:start-search', 100, 14)
+  assert.match(render(loading.page, 100, 14).join('\n'), /search: \//u)
+  assert.doesNotMatch(render(loading.page, 100, 14).at(-1) ?? '', /a Add/u)
+})
+
+test('a search-result row click only selects; the query and the search stay', () => {
+  const { page, controller } = makePage(snapshot())
+  render(page, 100, 14)
+  clickBarSpan(page, 'bar:start-search', 100, 14)
+  page.handleInput('b')
+  const lines = render(page, 100, 14)
+  const betaRow = lines.findIndex(line => line.includes('beta'))
+  assert.ok(betaRow >= 0, `the filtered result must be painted: ${lines.join('\n')}`)
+  // The query edit reconciled the selection onto the only match; the CLICK is
+  // the gesture under test.
+  controller.calls.length = 0
+  clickBodyCell(page, 100, 14, betaRow)
+  assert.deepEqual(controller.calls, ['select:beta'], 'a result click is a selection, nothing else')
+  const after = render(page, 100, 14).join('\n')
+  assert.match(after, /search: \/ b/u, 'the query stays')
+  assert.deepEqual(
+    controller.calls.filter(call => ['probe', 'beginRestart', 'beginAdd', 'beginEdit', 'beginToggle', 'beginDelete', 'beginReset', 'saveEditor'].includes(call)),
+    [],
+    'a result row click never runs a Host intent',
+  )
+})
+
+test('a wheel while searching moves the filtered selection and scrolls no hidden region', () => {
+  const { page, controller } = makePage(snapshot())
+  render(page, 100, 14)
+  clickBarSpan(page, 'bar:start-search', 100, 14)
+  render(page, 100, 14)
+  const base = mouseBase(100, 14)
+  page.handleMouse({ ...base, type: 'wheel', wheelDelta: 1, x: 2, y: 2 })
+  assert.deepEqual(controller.calls, ['move:1'], 'the search wheel moves the filtered selection')
+  assert.match(render(page, 100, 14).join('\n'), /search: \//u, 'the search stays open')
+})
+
+test('a non-zero wheel revokes a pending press even when it scrolls nothing or a modal ignores it', () => {
+  // (a) A boundary wheel in a one-result search cannot move the selection, but
+  // it is still a gesture boundary: the held row press never selects.
+  const single = makePage(snapshot())
+  render(single.page, 100, 14)
+  single.page.handleInput('/')
+  single.page.handleInput('b')
+  const lines = render(single.page, 100, 14)
+  const row = lines.findIndex(line => line.includes('beta'))
+  assert.ok(row >= 0)
+  single.controller.calls.length = 0
+  const base = mouseBase(100, 14)
+  single.page.handleMouse({ ...base, type: 'press', x: 1, y: row })
+  single.page.handleMouse({ ...base, type: 'wheel', wheelDelta: -1, x: 1, y: row })
+  single.page.handleMouse({ ...base, type: 'click', x: 1, y: row })
+  assert.deepEqual(single.controller.calls.filter(call => call.startsWith('select:')), [],
+    'a wheel-revoked press never selects')
+
+  // (b) A modal ignores the wheel, but the pending decision press is revoked.
+  const modal = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 1 },
+  }))
+  const modalLines = render(modal.page, 100, 14)
+  const barRow = modalLines.length - 1
+  const col = (modalLines[barRow] ?? '').indexOf('Y confirm') + 1
+  assert.ok(col > 0, `the confirm affordance must paint: ${modalLines[barRow]}`)
+  modal.page.handleMouse({ ...base, type: 'press', x: col, y: barRow })
+  modal.page.handleMouse({ ...base, type: 'wheel', wheelDelta: 1, x: 2, y: 2 })
+  modal.page.handleMouse({ ...base, type: 'click', x: col, y: barRow })
+  assert.deepEqual(modal.controller.calls.filter(call => call.startsWith('answerConfigConfirm')), [],
+    'a modal wheel revokes its pending decision press')
+
+  // (c) A zero-delta wheel is no input at all: the press survives.
+  const zero = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 1 },
+  }))
+  const zeroLines = render(zero.page, 100, 14)
+  const zeroBar = zeroLines.length - 1
+  const zeroCol = (zeroLines[zeroBar] ?? '').indexOf('Y confirm') + 1
+  zero.page.handleMouse({ ...base, type: 'press', x: zeroCol, y: zeroBar })
+  zero.page.handleMouse({ ...base, type: 'wheel', wheelDelta: 0, x: 2, y: 2 })
+  zero.page.handleMouse({ ...base, type: 'click', x: zeroCol, y: zeroBar })
+  assert.deepEqual(zero.controller.calls, ['answerConfigConfirm:true'],
+    'a zero-delta wheel changes nothing')
+})
+
+test('a Host observation rebuild between press and release refuses the identical-looking gesture', () => {
+  const { page, controller } = makePage(snapshot())
+  render(page, 100, 14)
+  const lines = render(page, 100, 14)
+  const row = lines.findIndex(line => line.includes('beta'))
+  assert.ok(row >= 0)
+  const base = mouseBase(100, 14)
+  page.handleMouse({ ...base, type: 'press', x: 1, y: row })
+  // Host B replaces Host A with the SAME names, statuses, count and selection:
+  // only the observation epoch moved, and no frame has painted it yet.
+  controller.snapshotValue = { ...controller.snapshotValue, observationEpoch: 1 }
+  page.handleMouse({ ...base, type: 'click', x: 1, y: row })
+  assert.deepEqual(controller.calls, [], 'a press from the previous observation never completes')
+  // A fresh press on the repainted B frame selects normally.
+  const fresh = render(page, 100, 14)
+  const freshRow = fresh.findIndex(line => line.includes('beta'))
+  clickBodyCell(page, 100, 14, freshRow)
+  assert.deepEqual(controller.calls, ['select:beta'], 'a fresh gesture on B is admitted')
+})
+
+test('a configuration read result between press and release refuses the old draft intent', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    config: { kind: 'ready', generation: {}, revision: 1, entries: [] },
+  }))
+  render(page, 100, 14)
+  page.handleInput('\r')
+  const lines = render(page, 100, 14)
+  const barRow = lines.length - 1
+  const col = (lines[barRow] ?? '').indexOf('e edit') + 1
+  assert.ok(col > 0, `the Edit affordance must paint: ${lines[barRow]}`)
+  const base = mouseBase(100, 14)
+  page.handleMouse({ ...base, type: 'press', x: col, y: barRow })
+  // The same roster re-read the configuration: the revision moved before any
+  // frame painted it.
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    configurationReadEpoch: 1,
+    config: { kind: 'ready', generation: {}, revision: 2, entries: [] },
+  }
+  page.handleMouse({ ...base, type: 'click', x: col, y: barRow })
+  assert.deepEqual(controller.calls, [], 'the old Edit intent never runs against the new revision')
+  // A fresh press on the repainted frame opens the draft.
+  const fresh = render(page, 100, 14)
+  const freshBar = fresh.length - 1
+  const freshCol = (fresh[freshBar] ?? '').indexOf('e edit') + 1
+  page.handleMouse({ ...base, type: 'press', x: freshCol, y: freshBar })
+  page.handleMouse({ ...base, type: 'click', x: freshCol, y: freshBar })
+  assert.deepEqual(controller.calls, ['beginEdit'], 'a fresh gesture reads the current revision')
+})
+
+test('a query keystroke between a Done press and its release refuses the stale completion', () => {
+  const { page } = makePage(snapshot())
+  render(page, 100, 14)
+  clickBarSpan(page, 'bar:start-search', 100, 14)
+  render(page, 100, 14)
+  const span = page.paintedBarSpans().find(candidate => candidate.id === 'bar:finish-search')
+  assert.ok(span !== undefined)
+  const base = mouseBase(100, 14)
+  page.handleMouse({ ...base, type: 'press', x: span.startCol, y: 13 })
+  page.handleInput('x') // the query text changed under the held Done press
+  page.handleMouse({ ...base, type: 'click', x: span.startCol, y: 13 })
+  assert.match(render(page, 100, 14).join('\n'), /search: \/ x/u, 'the stale Done never completes')
+  // A fresh complete Done click finishes the search exactly once.
+  clickBarSpan(page, 'bar:finish-search', 100, 14)
+  assert.doesNotMatch(render(page, 100, 14).join('\n'), /search: \//u)
+})
+
+test('a raw query edit that keeps the same filter still revokes the held Done', () => {
+  const { page } = makePage(snapshot())
+  render(page, 100, 14)
+  clickBarSpan(page, 'bar:start-search', 100, 14)
+  page.handleInput('b')
+  render(page, 100, 14)
+  const span = page.paintedBarSpans().find(candidate => candidate.id === 'bar:finish-search')
+  assert.ok(span !== undefined)
+  const base = mouseBase(100, 14)
+  page.handleMouse({ ...base, type: 'press', x: span.startCol, y: 13 })
+  // A trailing space changes the RAW painted query while the normalized filter
+  // ('b') is unchanged: the held Done must still be revoked.
+  page.handleInput(' ')
+  page.handleMouse({ ...base, type: 'click', x: span.startCol, y: 13 })
+  assert.match(render(page, 100, 14).join('\n'), /search: \/ b /u, 'the stale Done never completes')
+  // A fresh complete click finishes the search exactly once.
+  clickBarSpan(page, 'bar:finish-search', 100, 14)
+  assert.doesNotMatch(render(page, 100, 14).join('\n'), /search: \//u)
+})
+
+test('removing the last draft row re-centers the row that becomes focused', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({
+      args: [],
+      env: [{ key: 'E', value: '${credential:E}' }],
+      dirty: true,
+    }),
+  }))
+  openEditor(page, 'e', 44, 8)
+  wheelFocusUntil(page, 44, 8, frame => /▸ Env key: E/u.test(frame))
+  // The draft loses the whole env entry (key + value + form rows) with no
+  // repaint: the focused index now points past the form.
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    editor: editorSnapshot({ args: [], env: [], dirty: true }),
+  }
+  const frame = render(page, 44, 8).join('\n')
+  assert.match(frame, /▸ [^:\n]+:/u, `a focused field stays painted after the removal: ${frame}`)
 })
 
 test('a restarted refresh/grant change invalidates the previous pointer gesture', () => {
@@ -1285,4 +1555,200 @@ test('a reopened discard needs a new painted admission for both keyboard and poi
   render(page, 100, 16)
   page.handleInput('d')
   assert.equal(controller.calls.includes('discardEditor'), true)
+})
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * PR-D D2: the editor wheel and the per-field Remove affordance.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/** Walk the form focus with the keyboard Down until the frame matches. */
+function focusUntil(page: McpServersPage, width: number, rows: number, predicate: (frame: string) => boolean): void {
+  for (let step = 0; step < 40; step += 1) {
+    if (predicate(render(page, width, rows).join('\n'))) return
+    page.handleInput('\x1b[B')
+  }
+  assert.fail(`the form focus never reached the expected row:\n${render(page, width, rows).join('\n')}`)
+}
+
+/** Walk the form focus with the WHEEL until the frame matches. */
+function wheelFocusUntil(page: McpServersPage, width: number, rows: number, predicate: (frame: string) => boolean): void {
+  for (let step = 0; step < 40; step += 1) {
+    if (predicate(render(page, width, rows).join('\n'))) return
+    page.handleMouse({ ...mouseBase(width, rows), type: 'wheel', wheelDelta: 1, x: 2, y: 2 })
+  }
+  assert.fail(`the wheel never reached the expected form row:\n${render(page, width, rows).join('\n')}`)
+}
+
+test('the editor wheel moves only the current form focus, never the hidden list selection or detail', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ args: ['--one'], dirty: true }),
+  }))
+  // The WIDE layout still holds the list model behind the whole-page form.
+  openEditor(page, 'e', 120, 24)
+  const base = mouseBase(120, 24)
+  assert.match(render(page, 120, 24).join('\n'), /▸ Name:/u, 'the focus starts on the first field')
+  // The LEFT region (where the hidden list would live) moves the FORM focus.
+  page.handleMouse({ ...base, type: 'wheel', wheelDelta: 1, x: 4, y: 5 })
+  assert.match(render(page, 120, 24).join('\n'), /▸ Transport:/u,
+    'the left-region wheel advances the form field')
+  // The RIGHT region (where the hidden Detail would live) moves the FORM focus.
+  page.handleMouse({ ...base, type: 'wheel', wheelDelta: 1, x: 100, y: 5 })
+  assert.match(render(page, 120, 24).join('\n'), /▸ Enabled:/u,
+    'the right-region wheel advances the form field')
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('move:') || call.startsWith('select:')), [],
+    'the wheel never moves the hidden list selection')
+  assert.equal(controller.snapshotValue.selectedName, 'alpha', 'the hidden selection is untouched')
+})
+
+test('the short editor wheel reaches a field that was not painted, and clicking it opens its Enter intent', () => {
+  for (const [width, rows] of [[44, 20], [44, 8]] as const) {
+    const { page, controller } = makePage(snapshot({
+      selectedConfig: CONFIG_FACET,
+      editor: editorSnapshot({ args: ['--one', '--two', '--three'], dirty: true }),
+    }))
+    openEditor(page, 'e', width, rows)
+    wheelFocusUntil(page, width, rows, frame => /▸ Arg 2:/u.test(frame))
+    const lines = render(page, width, rows)
+    const focusRow = lines.findIndex(line => line.includes('▸ Arg 2'))
+    assert.ok(focusRow >= 0, `${width}x${rows}: the wheeled-to field must be painted`)
+    controller.calls.length = 0
+    clickBodyCell(page, width, rows, focusRow)
+    assert.match(render(page, width, rows).join('\n'), /edit: >/u,
+      `${width}x${rows}: the pointer opened the field's own input`)
+    page.handleInput('Z')
+    page.handleInput('\r')
+    assert.deepEqual(controller.calls.filter(call => call.startsWith('setArg')), [`setArg:1=--twoZ`],
+      `${width}x${rows}: the input commit ran the row's own sink exactly once`)
+  }
+})
+
+test('a painted Remove deletes exactly the focused removable row and writes nothing', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ args: ['--flag'], env: [{ key: 'E', value: '${credential:E}' }], dirty: true }),
+  }))
+  openEditor(page, 'e', 100, 20)
+  focusUntil(page, 100, 20, frame => /▸ Arg 1:/u.test(frame))
+  const bar = render(page, 100, 20).at(-1) ?? ''
+  assert.match(bar, /Remove \[Backspace\]/u, 'the removable row advertises Remove')
+  assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:remove-form-row'))
+  controller.calls.length = 0
+  clickBarSpan(page, 'bar:remove-form-row', 100, 20)
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('removeArg')), ['removeArg:0'],
+    'only the focused argument row is removed')
+  assert.deepEqual(
+    controller.calls.filter(call => call.startsWith('set') || call === 'saveEditor' || call.startsWith('removeDict')),
+    [],
+    'nothing else is touched and no Host write runs',
+  )
+  // The original keyboard Backspace stays the same sink on the same row.
+  page.handleInput('\x7f')
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('removeArg')), ['removeArg:0', 'removeArg:0'],
+    'the keyboard Backspace removes the same focused row through the same intent')
+})
+
+test('an inherited key never paints or runs Remove, while a user-added key right beside it does', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({
+      env: [{ key: 'BASE', value: 'base' }, { key: 'USER', value: '${credential:U}' }],
+      dirty: true,
+    }),
+  }))
+  // The real controller refuses removal of exactly the base-owned key.
+  controller.canRemoveDictKey = (_field: string, key: string) => key !== 'BASE'
+  openEditor(page, 'e', 100, 32)
+  focusUntil(page, 100, 32, frame => /▸ Env key: BASE · Inherited/u.test(frame))
+  const inheritedBar = render(page, 100, 32).at(-1) ?? ''
+  assert.doesNotMatch(inheritedBar, /Remove/u, 'an inherited key offers no Remove affordance')
+  assert.equal(page.paintedBarSpans().some(span => span.id === 'bar:remove-form-row'), false)
+  controller.calls.length = 0
+  // Even a forged activation of the absent span runs nothing.
+  page.activateBarSpan('bar:remove-form-row')
+  page.handleInput('\x7f')
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('removeDict')), [],
+    'the inherited key is never removed')
+  // The user-added key beside it paints Remove and removes ONLY that key.
+  focusUntil(page, 100, 32, frame => /▸ Env key: USER/u.test(frame))
+  const userBar = render(page, 100, 32).at(-1) ?? ''
+  assert.match(userBar, /Remove/u)
+  controller.calls.length = 0
+  clickBarSpan(page, 'bar:remove-form-row', 100, 32)
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('removeDict')), ['removeDict:env:USER'])
+})
+
+test('Remove is absent while an input, a discard prompt or a save owns the editor', () => {
+  // (a) the active input bar is the input's own decision surface.
+  const input = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ args: ['--flag'], dirty: true }),
+  }))
+  openEditor(input.page, 'e', 100, 20)
+  focusUntil(input.page, 100, 20, frame => /▸ Arg 1:/u.test(frame))
+  input.page.handleInput('\r')
+  const inputBar = render(input.page, 100, 20).at(-1) ?? ''
+  assert.match(inputBar, /Enter apply/u)
+  assert.doesNotMatch(inputBar, /Remove/u)
+  // (b) an unsettled Save freezes the draft and offers no Remove.
+  const saving = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ args: ['--flag'], dirty: true }),
+    configStatus: { kind: 'saving', text: 'Saving configuration…' },
+  }))
+  openEditor(saving.page, 'e', 100, 20)
+  const savingBar = render(saving.page, 100, 20).at(-1) ?? ''
+  assert.match(savingBar, /Saving configuration/u)
+  assert.doesNotMatch(savingBar, /Remove/u)
+  // (c) the discard question owns the decision surface.
+  const discard = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ args: ['--flag'], dirty: true }),
+  }))
+  openEditor(discard.page, 'e', 100, 20)
+  discard.page.handleInput('\x1b')
+  const discardBar = render(discard.page, 100, 20).at(-1) ?? ''
+  assert.match(discardBar, /Discard/u)
+  assert.doesNotMatch(discardBar, /Remove/u)
+})
+
+test('a wheel between the Remove press and its release never removes', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ args: ['--flag'], dirty: true }),
+  }))
+  openEditor(page, 'e', 100, 20)
+  focusUntil(page, 100, 20, frame => /▸ Arg 1:/u.test(frame))
+  const span = page.paintedBarSpans().find(candidate => candidate.id === 'bar:remove-form-row')
+  assert.ok(span !== undefined)
+  const base = mouseBase(100, 20)
+  page.handleMouse({ ...base, type: 'press', x: span.startCol, y: 19 })
+  page.handleMouse({ ...base, type: 'wheel', wheelDelta: 1, x: 2, y: 3 })
+  render(page, 100, 20)
+  page.handleMouse({ ...base, type: 'click', x: span.startCol, y: 19 })
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('removeArg')), [],
+    'a wheel-revoked Remove press never removes')
+  // A fresh complete click is the positive control and removes once.
+  page.handleInput('\x1b[A') // back to the Arg 1 row the wheel moved off
+  render(page, 100, 20)
+  clickBarSpan(page, 'bar:remove-form-row', 100, 20)
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('removeArg')), ['removeArg:0'])
+})
+
+test('44 columns keeps the COMPLETE Remove [Backspace] beside Save and Back for a removable row', () => {
+  const { page } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ args: ['--flag'], dirty: true }),
+  }))
+  openEditor(page, 'e', 44, 20)
+  wheelFocusUntil(page, 44, 20, frame => /▸ Arg 1:/u.test(frame))
+  const bar = render(page, 44, 20).at(-1) ?? ''
+  // The layout drops the BROWING hints first and keeps the three actions whole.
+  assert.match(bar, /s Save/u)
+  assert.match(bar, /Remove \[Backspace\]/u, `the full Remove literal must survive: ${bar}`)
+  assert.match(bar, /Back \[Esc\]/u)
+  assert.doesNotMatch(bar, /Enter edit|Tab next|↑\/↓ field/u, 'the browsing hints yield first')
+  assert.ok(visibleWidth(bar) <= 44, `no overflow at 44 columns: ${bar}`)
+  assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:remove-form-row'),
+    'the complete Remove is a real target')
 })

@@ -143,6 +143,12 @@ type McpBarAction =
   | 'discard'
   | 'keep-editing'
   | 'refresh'
+  /** PR-D: enter the EXISTING `/` search input from the painted List bar. */
+  | 'start-search'
+  /** PR-D: finish the search with the EXISTING Enter commit. */
+  | 'finish-search'
+  /** PR-D: remove the currently FOCUSED removable form row via Backspace. */
+  | 'remove-form-row'
 
 /** One painted hit target of the LAST frame, in page-local cells. A form row
  *  carries the FIELD identity so a click activates exactly the row that was
@@ -201,9 +207,11 @@ function paintBar(segments: readonly McpBarSegment[], width: number, lastIsEscap
   for (const span of layout.spans) {
     if (painted !== '') painted += ACTION_BAR_SEPARATOR
     const isLast = span.inputIndex === segments.length - 1
-    painted += isLast && lastIsEscape ? paintActionSpan(span.text, 'secondary') : color.textMuted(span.text)
+    const segment = segments[span.inputIndex]
+    const ink = isLast && lastIsEscape ? 'secondary' : segment?.ink
+    painted += ink === undefined ? color.textMuted(span.text) : paintActionSpan(span.text, ink)
     if (isLast && lastIsEscape) escape = { startCol: span.startCol, endCol: span.endCol }
-    spans.push({ action: segments[span.inputIndex]?.action, startCol: span.startCol, endCol: span.endCol })
+    spans.push({ action: segment?.action, startCol: span.startCol, endCol: span.endCol })
   }
   return { line: painted, ...escape === undefined ? {} : { escape }, spans }
 }
@@ -231,8 +239,13 @@ function wrapCells(text: string, width: number, maxLines: number): string[] {
   return lines
 }
 
-/** A bar segment that may advertise a pointer intent. */
-type McpBarSegment = ActionBarSegment & { readonly action?: McpBarAction }
+/** A bar segment that may advertise a pointer intent. `ink` is the MINIMAL
+ *  button ink of the design language for a NEW pointer-first action (§7.1);
+ *  established hint segments keep their muted ink. */
+type McpBarSegment = ActionBarSegment & {
+  readonly action?: McpBarAction
+  readonly ink?: 'primary' | 'secondary'
+}
 
 /** The body line budget one confirmation may consume. */
 const MCP_CONFIRM_BODY_MAX_LINES = 5
@@ -302,7 +315,9 @@ const LIST_HINTS: readonly McpBarSegment[] = [
   { text: '↑/↓ move', short: '↑/↓', priority: 30 },
   { text: 'Enter details', short: 'Enter', priority: 20, action: 'enter-detail' },
   { text: 'a Add', priority: 18, action: 'add' },
-  { text: '/ search', priority: 15 },
+  // PR-D: the search ENTRY is a pointer-first list action; it runs the same
+  // `/` sink the keyboard uses.
+  { text: 'Search [/]', short: '/', priority: 15, action: 'start-search', ink: 'secondary' },
   { text: 'r refresh', priority: 10, action: 'refresh' },
   // The Esc affordance is the ONE required segment at every width: it is never
   // compacted away from `Verb [Esc]` (only a frame too narrow for even that
@@ -316,6 +331,16 @@ const EDITOR_HINTS: readonly McpBarSegment[] = [
   { text: 's Save', priority: 40, action: 'save' },
   { text: 'Back [Esc]', priority: 1000, action: 'back' },
 ]
+/** PR-D: the per-field Remove affordance, inserted after `s Save` in display
+ *  order. It has NO compact form: its priority outlives the browsing hints, so
+ *  a tight row drops those hints FIRST and keeps the complete
+ *  `s Save · Remove [Backspace] · Back [Esc]` at the 44-column floor. */
+const REMOVE_FORM_HINT: McpBarSegment = {
+  text: 'Remove [Backspace]',
+  priority: 35,
+  action: 'remove-form-row',
+  ink: 'secondary',
+}
 const EDITOR_INPUT_HINTS: readonly McpBarSegment[] = [
   { text: 'Enter apply', short: 'Enter', priority: 30, action: 'apply-input' },
   { text: 'Esc cancel', short: 'Esc', priority: 1000, action: 'cancel' },
@@ -334,10 +359,14 @@ const CONFIRM_HINTS: readonly McpBarSegment[] = [
   { text: 'Y confirm', short: 'y', priority: 900, action: 'confirm' },
   { text: 'Esc cancel', short: 'Esc', priority: 999, action: 'cancel' },
 ]
-const SEARCH_HINTS: readonly ActionBarSegment[] = [
+/** The search session's own bar. `Done [Enter]` finishes through the SAME
+ *  Enter commit the keyboard runs; the LAST segment is the Root's ONE physical
+ *  escape (`bar-escape`), so it carries NO action — a second `bar-span` over
+ *  the same cells would double-fire. */
+const SEARCH_HINTS: readonly McpBarSegment[] = [
   { text: 'type to filter', priority: 20 },
-  { text: 'Enter done', priority: 10 },
-  { text: 'Esc cancel', short: 'Esc', priority: 1000 },
+  { text: 'Done [Enter]', short: 'Done', priority: 10, action: 'finish-search', ink: 'primary' },
+  { text: 'Cancel [Esc]', short: 'Esc', priority: 1000 },
 ]
 
 /** The page itself. */
@@ -426,6 +455,16 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     return this.grantAwaitingPaintValue
   }
 
+  /**
+   * PR-D: whether a pointer press may arm against the CURRENT painted frame.
+   * A Host roster / configuration read that landed after the last paint leaves
+   * the painted bar cells stale with no paint pending; the Settings Root asks
+   * this before it records a delegated bar press.
+   */
+  pointerFrameCurrent(): boolean {
+    return this.paint !== undefined && this.paint.identity === this.gestureIdentity()
+  }
+
   /** The complete visible Esc affordance of the LAST painted frame. */
   paintedEscapeSpan(): { readonly startCol: number; readonly endCol: number } | undefined {
     return this.paintedEscapeSpanValue
@@ -436,9 +475,18 @@ export class McpServersPage implements EmbeddedSpecialistPage {
    * selected row, the transient action states and the painted business rows.
    * The Settings root re-proves the painted frame too; this identity is the
    * page-side half of the same rule.
+   *
+   * PR-D currentness: the page revision and the Controller's READ-ONLY
+   * observation epochs are part of the identity, so a Host roster frame, a
+   * configuration read, or a local state change that has not repainted yet
+   * refuses a press recorded on the previous frame — including the Root's
+   * delegated bar gesture, which is fenced by this same string. These numbers
+   * are pointer currency only; never a write/CAS/terminal authority.
    */
   gestureIdentity(): string {
     const snapshot = this.controller.snapshot()
+    const config = snapshot.config
+    const facet = snapshot.selectedConfig
     return [
       this.view,
       this.wideFocus,
@@ -451,6 +499,14 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       snapshot.editor === undefined ? '' : `editor:${snapshot.editor.mode}:${String(this.formFocus)}:${snapshot.editor.dirty ? 'dirty' : 'clean'}`,
       this.confirmationIdentity(snapshot) ?? '',
       this.configSavingNotice ? 'saving-notice' : '',
+      `rev:${String(this.revision)}`,
+      `obs:${String(snapshot.observationEpoch)}`,
+      `cfg-read:${String(snapshot.configurationReadEpoch)}`,
+      config === undefined ? 'config:none' : config.kind === 'ready' ? `config:ready:${String(config.revision)}` : `config:${config.kind}`,
+      `cfg-status:${snapshot.configStatus?.kind ?? 'none'}`,
+      facet === undefined
+        ? ''
+        : `facet:${facet.provenance}:${String(facet.canDelete)}:${String(facet.canReset)}`,
     ].join(':')
   }
 
@@ -541,9 +597,19 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       }
       // Every other key (including p/x/r/y) is QUERY TEXT here, never an
       // action with side effects.
+      const before = this.searchInput.getValue() ?? ''
       this.searchInput.handleInput(data)
+      const after = this.searchInput.getValue() ?? ''
       this.reconcileSelection(snapshot)
-      this.requestRender()
+      if (after !== before) {
+        // The RAW query text the frame paints changed: a press held across the
+        // edit can never complete against it. The revocation must NOT set the
+        // paint-waiting gate — consecutive characters have to keep flowing
+        // before the next frame paints.
+        this.revokePointerGesture()
+      } else {
+        this.requestRender()
+      }
       return
     }
     if (this.view === 'editor') {
@@ -566,9 +632,8 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     if (data === '/') {
       this.searching = true
       this.searchInput.focused = this.focused
-      this.grantAwaitingPaintValue = true
-      this.paintedEscapeSpanValue = undefined
-      this.requestRender()
+      // A new visible owner: the frame that painted the list is spent.
+      this.bumpRevision()
       return
     }
     if (data === 'r' || data === 'R') {
@@ -873,23 +938,58 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     }
   }
 
+  /**
+   * PR-D: the focused form row when it is a REMOVABLE one. The capability comes
+   * from {@link mcpFormRows}'s `removable` (itself derived from the controller's
+   * per-key provenance), never from the painted text, and never while an input,
+   * a question or an unsettled save owns the draft.
+   */
+  private focusedRemovableRow(snapshot: McpServersSnapshot): McpFormRow | undefined {
+    const editor = snapshot.editor
+    if (this.view !== 'editor' || editor === undefined) return undefined
+    if (this.formInput !== undefined || this.discardConfirm) return undefined
+    if (snapshot.configConfirm !== undefined || snapshot.confirmingName !== undefined) return undefined
+    if (snapshot.configStatus?.kind === 'saving') return undefined
+    const row = mcpFormRows(editor,
+      (field, key) => this.controller.dictValueForm(field, key),
+      (field, key) => this.controller.canRemoveDictKey(field, key))[this.formFocus]
+    return row?.removable === true ? row : undefined
+  }
+
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
     const paint = this.paint
     if (paint === undefined || event.width !== paint.width) return undefined
-    // A MODAL decision owns the BODY exactly like it owns the keyboard: a
-    // pointer must not change the draft or the selection the question is
-    // about. Its OWN decision actions (confirm/cancel/keep/discard) stay
-    // reachable — otherwise a mouse user could be trapped in a question the
-    // keyboard can answer. Body targets are refused; the modal's action
-    // segments are resolved below against the same painted spans.
-    const modal = this.modalOwned()
-    if (modal && event.type === 'wheel') return undefined
     const bodyRows = Math.max(0, paint.rows - 1)
-    if (event.height !== bodyRows && event.height !== paint.rows) return undefined
     if (event.type === 'wheel') {
       if (event.wheelDelta === undefined || event.wheelDelta === 0) return undefined
+      // A wheel is delivered against the CONTENT rows the Root grants this
+      // page, so its row coordinate is bounded by the painted body (the
+      // physical frame height is the Root's, never the page's grant).
+      if (event.y < 0 || event.y >= bodyRows) return undefined
+      // ANY effective wheel input starts a new semantic frame — even when it
+      // scrolls nothing (a boundary), or a modal ignores it: a press recorded
+      // before it can never complete against the newer frame. The revision
+      // advance also refuses the Root's delegated bar press, whose recorded
+      // child identity is this same string.
+      this.revokePointerGesture()
       const delta = event.wheelDelta < 0 ? -1 : 1
+      if (this.modalOwned()) {
+        // The search owns its filtered RESULT LIST: a wheel there moves that
+        // selection only. Every other modal owns the whole body and the wheel
+        // changes nothing behind it.
+        if (this.searching && this.view === 'list' && !this.inDetailAt(event.x)) {
+          this.moveSelection(delta, this.controller.snapshot())
+        }
+        return { handled: true }
+      }
+      if (this.view === 'editor') {
+        // PR-D: the Editor wheel moves ONLY the current form field focus (the
+        // same Up/Down the keyboard runs); the hidden list selection and the
+        // hidden detail offset never move.
+        this.handleEditorInput(delta < 0 ? '\x1b[A' : '\x1b[B', this.controller.snapshot())
+        return { handled: true }
+      }
       if (this.inDetailAt(event.x)) {
         this.scrollDetail(delta)
       } else if (this.layoutClass() === 'wide' || this.view === 'list') {
@@ -897,13 +997,31 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       }
       return { handled: true }
     }
+    if (event.height !== bodyRows && event.height !== paint.rows) return undefined
+    // The painted frame must still describe the CURRENT page state: a roster
+    // frame, a configuration read or a local state change that landed after the
+    // paint leaves the previous geometry uncurrent — press and release are
+    // refused until the next frame paints.
+    const current = paint.identity === this.gestureIdentity()
+    // A MODAL decision owns the BODY exactly like it owns the keyboard: a
+    // pointer must not change the draft or the selection the question is
+    // about. Its OWN decision actions (confirm/cancel/keep/discard) stay
+    // reachable — otherwise a mouse user could be trapped in a question the
+    // keyboard can answer. Body targets are refused; the modal's action
+    // segments are resolved below against the same painted spans. A SEARCH is
+    // the one modal whose filtered RESULT ROWS stay selectable: they are the
+    // search's own output and selecting one runs no Host intent.
+    const modal = this.modalOwned()
     const hit = paint.targets.find(candidate => candidate.row === event.y
       && event.x >= candidate.startCol && event.x < candidate.endCol)
     const target = modal
-      ? hit !== undefined && hit.kind === 'action' && this.isModalAction(hit.action) ? hit : undefined
+      ? hit !== undefined && (
+        (hit.kind === 'action' && this.isModalAction(hit.action))
+        || (this.searching && hit.kind === 'server-row')
+      ) ? hit : undefined
       : hit
     if (event.type === 'press') {
-      if (target === undefined || event.button !== 'left') {
+      if (target === undefined || event.button !== 'left' || !current) {
         this.pressed = undefined
         return undefined
       }
@@ -922,7 +1040,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     if (event.type === 'click') {
       const pressed = this.pressed
       this.pressed = undefined
-      if (pressed === undefined || target === undefined) return undefined
+      if (pressed === undefined || target === undefined || !current) return undefined
       // The release must resolve against the SAME painted cell and state: a
       // repaint between press and release refuses the gesture.
       if (pressed.revision !== this.revision
@@ -960,12 +1078,27 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         this.bumpRevision()
         return { handled: true }
       }
+      // A server-row click is ALWAYS a selection — during a search it selects
+      // the result without leaving the search or running a Host intent.
       this.controller.select(target.name, this.visibleNames(snapshot))
       if (this.layoutClass() === 'wide') this.wideFocus = 'list'
       this.bumpRevision()
       return { handled: true }
     }
     return undefined
+  }
+
+  /**
+   * A new effective wheel input retires this page's pending press and advances
+   * the revision (which also invalidates the Root's recorded delegated bar
+   * gesture through {@link gestureIdentity}). It deliberately does NOT set the
+   * paint-waiting gate: a wheel burst keeps scrolling against the last painted
+   * grant, while every PRESS still requires a frame painted after the wheel.
+   */
+  private revokePointerGesture(): void {
+    this.pressed = undefined
+    this.revision += 1
+    this.requestRender()
   }
 
   /**
@@ -1058,6 +1191,21 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       case 'save':
         if (this.view === 'editor') this.handleInput('s')
         return
+      case 'start-search':
+        // The List bar's `Search [/]` IS the keyboard `/`: the same sink, the
+        // same client-local search state — never a second input path.
+        if (!this.searching && !this.inDetail() && this.view === 'list') this.handleInput('/')
+        return
+      case 'finish-search':
+        // The search bar's `Done [Enter]` IS the keyboard Enter commit.
+        if (this.searching) this.handleInput('\r')
+        return
+      case 'remove-form-row':
+        // The bar's `Remove [Backspace]` IS the keyboard Backspace on the
+        // CURRENT focused row: the same admission and the same controller
+        // intent, never a direct draft write.
+        if (this.focusedRemovableRow(snapshot) !== undefined) this.handleInput('\x7f')
+        return
     }
   }
 
@@ -1078,8 +1226,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private isModalAction(action: McpBarAction): boolean {
     // The input-mode bar is the input's OWN decision surface: apply/cancel are
     // reachable in that modal exactly like confirm/cancel are in a question.
+    // A search admits its OWN done action; no CRUD action ever becomes modal.
     return action === 'confirm' || action === 'cancel' || action === 'keep-editing'
       || action === 'discard' || action === 'apply-input'
+      || (action === 'finish-search' && this.searching)
   }
 
   /** The exact confirmation the CURRENT state asks, or undefined when none is
@@ -1507,13 +1657,16 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     // PHYSICAL content rows (group headers occupy rows too), never in field
     // indices: a short grant would otherwise let the focused field scroll out
     // of view while the user believes they are editing it.
-    const probe = renderMcpConfigForm(editor, width, bodyRows, this.formFocus, 0,
-      (field, key) => this.controller.dictValueForm(field, key),
-      (field, key) => this.controller.canRemoveDictKey(field, key))
+    // The focus may point past the form after its last row was removed: clamp
+    // it BEFORE probing, so the physical-row scroller below follows the row
+    // that will really be focused instead of resetting to the top.
     const formRowCount = mcpFormRows(editor,
       (field, key) => this.controller.dictValueForm(field, key),
       (field, key) => this.controller.canRemoveDictKey(field, key)).length
     if (this.formFocus >= formRowCount) this.formFocus = Math.max(0, formRowCount - 1)
+    const probe = renderMcpConfigForm(editor, width, bodyRows, this.formFocus, 0,
+      (field, key) => this.controller.dictValueForm(field, key),
+      (field, key) => this.controller.canRemoveDictKey(field, key))
     const focusedRow = probe.focusedContentRow >= 0 ? probe.focusedContentRow : 0
     if (focusedRow < this.formOffset) this.formOffset = focusedRow
     if (focusedRow >= this.formOffset + bodyRows) this.formOffset = focusedRow - bodyRows + 1
@@ -1848,7 +2001,15 @@ export class McpServersPage implements EmbeddedSpecialistPage {
           { text: 'Esc', priority: 999 },
         ], width, true)
       }
-      return paintBar(EDITOR_HINTS, width, true)
+      if (this.focusedRemovableRow(snapshot) === undefined) return paintBar(EDITOR_HINTS, width, true)
+      // The per-field Remove sits after `s Save`; the layout drops browsing
+      // hints first, so a tight row keeps Save · Remove · Back whole.
+      const saveIndex = EDITOR_HINTS.findIndex(segment => segment.action === 'save')
+      return paintBar([
+        ...EDITOR_HINTS.slice(0, saveIndex + 1),
+        REMOVE_FORM_HINT,
+        ...EDITOR_HINTS.slice(saveIndex + 1),
+      ], width, true)
     }
     if (snapshot.confirmingName !== undefined) {
       return paintBar(
