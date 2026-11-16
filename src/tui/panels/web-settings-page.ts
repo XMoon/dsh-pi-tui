@@ -649,7 +649,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private scrollDetail(delta: number): void {
     const width = this.liveWidth()
     const viewport = this.detailViewport(width, this.liveBodyRows())
-    const projection = this.detailProjection(width, viewport)
+    const projection = this.detailProjection(this.detailWidth(width, this.liveBodyRows()), viewport)
     const next = Math.min(Math.max(0, this.detailOffset + delta), projection.maxOffset)
     if (next === this.detailOffset) return
     this.commitPresentation(() => { this.detailOffset = next })
@@ -966,8 +966,11 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return Math.min(34, Math.max(1, width))
   }
 
-  private detailWidth(width: number): number {
-    if (!this.paintsBothRegions(width, this.bodyRows())) return width
+  /** The REAL detail content width for the current projection (the wide
+   *  layout paints the Detail in its own column; the stacked and single-region
+   *  projections use the whole page width). */
+  private detailWidth(width: number, bodyRows: number): number {
+    if (!this.paintsBothRegions(width, bodyRows)) return width
     if (layoutForWidth(width) !== 'wide') return width
     return Math.max(1, width - this.listColumnWidth(width) - 2)
   }
@@ -985,7 +988,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private rebaseDetailForChoice(choiceIndex: number): void {
     const width = this.liveWidth()
     const viewport = this.detailViewport(width, this.liveBodyRows())
-    const projection = this.detailProjection(width, viewport)
+    const projection = this.detailProjection(this.detailWidth(width, this.liveBodyRows()), viewport)
     const requested = this.choiceValues()[choiceIndex]
     if (requested === undefined) return
     const entry = projection.optionLines.find(line => line.value === requested)
@@ -1001,7 +1004,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private rebaseDetailForAction(actionIndex: number): void {
     const width = this.liveWidth()
     const viewport = this.detailViewport(width, this.liveBodyRows())
-    const projection = this.detailProjection(width, viewport)
+    const projection = this.detailProjection(this.detailWidth(width, this.liveBodyRows()), viewport)
     const action = this.selectableCredentialActions()[actionIndex]?.action
     if (action === undefined) return
     const entry = projection.actionLines.find(line => line.value === action)
@@ -1021,7 +1024,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (paintedTarget !== true) return false
     const width = this.liveWidth()
     const viewport = this.detailViewport(width, this.liveBodyRows())
-    const projection = this.detailProjection(width, viewport)
+    const projection = this.detailProjection(this.detailWidth(width, this.liveBodyRows()), viewport)
     const entry = projection.actionLines.find(line => line.value === action)
     if (entry === undefined) return false
     const offset = Math.min(Math.max(0, this.detailOffset), projection.maxOffset)
@@ -1038,7 +1041,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (paintedTarget !== true) return false
     const width = this.liveWidth()
     const viewport = this.detailViewport(width, this.liveBodyRows())
-    const projection = this.detailProjection(width, viewport)
+    const projection = this.detailProjection(this.detailWidth(width, this.liveBodyRows()), viewport)
     const entry = projection.optionLines.find(line => line.value === value)
     if (entry === undefined) return false
     const offset = Math.min(Math.max(0, this.detailOffset), projection.maxOffset)
@@ -1079,7 +1082,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const both = this.paintsBothRegions(width, bodyRows)
     if (both && layoutForWidth(width) === 'wide') {
       const listWidth = this.listColumnWidth(width)
-      const detailWidth = this.detailWidth(width)
+      const detailWidth = this.detailWidth(width, bodyRows)
       const list = this.renderList(facts, listWidth, bodyRows)
       const detail = this.renderDetail(facts, detailWidth, bodyRows)
       for (let index = 0; index < bodyRows; index += 1) {
@@ -1171,7 +1174,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     // the visibility proof must wrap the SAME width the actual render used, or
     // a long fact/verdict can crop the candidate under the bar's projection
     // while the real frame no longer paints it.
-    const projection = this.detailProjection(this.detailWidth(width), viewport)
+    const projection = this.detailProjection(this.detailWidth(width, bodyRows), viewport)
     const entry = projection.optionLines.find(line => line.value === requested)
     const offset = Math.min(Math.max(0, this.detailOffset), projection.maxOffset)
     const visible = entry !== undefined && entry.line >= offset && entry.line < offset + viewport
@@ -1193,7 +1196,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const active = this.selectableCredentialActions()[this.reconcileCredentialCursor()]
     if (active === undefined) return wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
     const viewport = this.detailViewport(width, bodyRows)
-    const projection = this.detailProjection(width, viewport)
+    const projection = this.detailProjection(this.detailWidth(width, bodyRows), viewport)
     const entry = projection.actionLines.find(line => line.value === active.action)
     const offset = Math.min(Math.max(0, this.detailOffset), projection.maxOffset)
     const visible = entry !== undefined && entry.line >= offset && entry.line < offset + viewport
