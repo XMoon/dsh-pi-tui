@@ -2,7 +2,8 @@
  * FR2 real Fullscreen pointer route: the mounted `TuiApp` + `VirtualTerminal`
  * SGR mouse path through the REAL Task Center overlay and `TaskBrowserPanel`.
  * Proves a press→repaint→release sequence still commits the pressed Team task
- * (the last-painted gesture identity survives the press-triggered repaint).
+ * (the last-painted gesture identity survives the press-triggered repaint), and
+ * the PR-B Owner-approved exits close through the painted `Close [Esc]` spans.
  *
  * @module @xmoon76/dsh-pi-tui/task-center-pointer.test
  */
@@ -25,13 +26,8 @@ async function flush(rounds = 8): Promise<void> {
   for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
 }
 
-test('real Fullscreen SGR press → repaint → release expands the pressed Team task', async () => {
-  const vt = new VirtualTerminal(100, 30)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {})
-  app.start()
-  startedApps.add(app)
-  const subject = {} as SessionSubject
-  const source: TaskSurfaceSource = {
+function taskSource(subject: SessionSubject): TaskSurfaceSource {
+  return {
     sessionId: () => 'sess-main',
     captureSubject: () => subject,
     subjectMatches: candidate => candidate === subject,
@@ -63,6 +59,19 @@ test('real Fullscreen SGR press → repaint → release expands the pressed Team
       subscribe: () => () => {},
     },
   }
+}
+
+/** The REAL fullscreen Task Center over a real TuiApp + VirtualTerminal. */
+async function startTasks(): Promise<{
+  vt: VirtualTerminal
+  app: TuiApp
+  tasks: ReturnType<typeof createTaskRuntime>
+}> {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {})
+  app.start()
+  startedApps.add(app)
+  const subject = {} as SessionSubject
   const tasks = createTaskRuntime({
     mounted: () => app,
     display: () => pituiDisplaySeam(app),
@@ -71,13 +80,31 @@ test('real Fullscreen SGR press → repaint → release expands the pressed Team
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
     publishActivity: () => {},
   })
-  tasks.attachTasks(source, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
+  tasks.attachTasks(taskSource(subject), { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
   await flush()
-
   app.setFullscreen(true)
   await vt.waitForRender()
   tasks.openTasksBrowser('full')
   await vt.waitForRender()
+  return { vt, app, tasks }
+}
+
+/** One real SGR press+release on the first painted occurrence of `text`. */
+async function clickText(vt: VirtualTerminal, text: string): Promise<void> {
+  const viewport = vt.getViewport()
+  const row = viewport.findIndex(line => line.includes(text))
+  assert.ok(row >= 0, `the frame must paint '${text}':\n${viewport.join('\n')}`)
+  const col = viewport[row]!.indexOf(text)
+  assert.ok(col >= 0)
+  vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M`)
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;${col + 1};${row + 1}m`)
+  await vt.waitForRender()
+  await flush(2)
+}
+
+test('real Fullscreen SGR press → repaint → release expands the pressed Team task', async () => {
+  const { vt, app } = await startTasks()
   vt.sendInput('\t') // Work → Team
   await vt.waitForRender()
   const viewport = vt.getViewport()
@@ -92,5 +119,28 @@ test('real Fullscreen SGR press → repaint → release expands the pressed Team
   await vt.waitForRender()
   const after = vt.getViewport().join('\n')
   assert.ok(after.includes('desc-pointer'), `the release must expand the pressed Team task:\n${after}`)
+  app.stop()
+})
+
+test('real Fullscreen SGR clicks close the Work and Team Task Center through Close [Esc]', async () => {
+  const { vt, app, tasks } = await startTasks()
+  const work = vt.getViewport().join('\n')
+  assert.ok(work.includes('Close [Esc]'), `the Work bar paints its close span:\n${work}`)
+  await clickText(vt, 'Close [Esc]')
+  const closedWork = vt.getViewport().join('\n')
+  assert.ok(!closedWork.includes('Ship it') && !closedWork.includes('[Work]'),
+    `the Work close span dismisses the Task Center:\n${closedWork}`)
+  // Reopen through the real runtime entry, switch to Team, and close it through
+  // the SAME painted span.
+  tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  const team = vt.getViewport().join('\n')
+  assert.ok(team.includes('Members') && team.includes('Close [Esc]'), `the Team bar paints its close span:\n${team}`)
+  await clickText(vt, 'Close [Esc]')
+  const closedTeam = vt.getViewport().join('\n')
+  assert.ok(!closedTeam.includes('Ship it') && !closedTeam.includes('Members') && !closedTeam.includes('[Team]'),
+    `the Team close span dismisses the Task Center:\n${closedTeam}`)
   app.stop()
 })

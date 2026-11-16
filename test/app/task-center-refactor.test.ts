@@ -344,7 +344,7 @@ test('Full Task Center hint advertises the management verbs without N/T/R', () =
   const panel = new TaskBrowserPanel([job('job:a')], 10,
     { mode: 'full', enableSearch: true, header: 'Tasks', mouseActionsEnabled: () => true }, () => {}, () => {}, () => {})
   const view = panel.render(100).map(stripTerminalSequences).join('\n')
-  for (const verb of ['/ search', 'a scope', 'Stop [', 'Esc close']) {
+  for (const verb of ['/ search', 'a scope', 'Stop [', 'Close [Esc]']) {
     assert.ok(view.includes(verb), `Full hint must advertise '${verb}':\n${view}`)
   }
   for (const stale of ['N next running', 'T Task Center', 'R refresh']) {

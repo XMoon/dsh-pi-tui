@@ -159,8 +159,17 @@ Full:
   confirmation and selects that row, but its matching release cannot open it;
   opening requires a second independent click. Stale row/capability, resized or
   reprojected action geometry and a retired Browser cannot consume an old action
-  release. Only complete painted action spans are pointer targets; other Action
-  Bar hints remain inert.
+  release. Only the complete painted spans of the contracted exits are pointer
+  targets: `Close [Esc]` on Work/Team enters the browser's existing `onCancel`,
+  `Back [Esc]` while Work/Team search is being edited exits that page's search
+  mode (keeping the query and the browser), and `Cancel [Esc]` in the Work type
+  filter closes only the filter list without changing the active type. The Stop
+  pending Action Bar keeps its existing `Confirm stop [Y]` / `Cancel [Esc]`
+  targets and offers no close. Every other Action Bar hint remains inert: a row
+  click already opens Work items and expands narrow Team tasks, so `Enter open` /
+  `Enter details` are not duplicated as buttons, and the scope, refresh, tree,
+  search, type and paging hints stay keyboard-only. Regular/Main has no
+  application mouse route at all.
 - This pointer path is Fullscreen-only. Regular/Main retains terminal-native
   selection and scrolling behavior and has no application Task pointer routing.
 - Reading Job output belongs to the Job Workspace, not the Task Browser.
