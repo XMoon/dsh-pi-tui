@@ -266,7 +266,7 @@ test('staged JPEG/WebP → REAL submit sink → transcript → /view-image paint
   assert.ok(jpegViewer.includes('Image · photo.jpg'), `the JPEG Viewer opened:\n${jpegViewer}`)
   assert.ok(jpegViewer.includes('120×80 · image/jpeg'), `the original JPEG metadata:\n${jpegViewer}`)
   assert.ok(!jpegViewer.includes('Preview unavailable'), `the JPEG Viewer paints pixels:\n${jpegViewer}`)
-  assert.ok(jpegViewer.includes('Esc back'), 'the list-opened Viewer advertises Esc back')
+  assert.ok(jpegViewer.includes('Back [Esc]'), 'the list-opened Viewer advertises Back [Esc]')
   assert.ok(writtenKittyImageIds(vt).length > transcriptIds, 'the Viewer wrote its own PNG placement')
   assert.equal(conversions, conversionsAfterThumbnails, 'the Viewer added no conversion')
   assert.equal(reads.get(jpegRef.attachmentId), 1, 'the Viewer re-read no raw bytes')

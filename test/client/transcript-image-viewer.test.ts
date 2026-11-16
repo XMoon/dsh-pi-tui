@@ -174,7 +174,7 @@ function sixelGraphics(calls: SixelCall[] = []): { graphics: ImageGraphics; disp
   return { graphics, disposals: () => disposals }
 }
 
-test('a ready PNG on kitty paints title, metadata and Esc close within the grant', async () => {
+test('a ready PNG on kitty paints title, metadata and Close [Esc] within the grant', async () => {
   capabilities('kitty')
   const panel = panelOf(loaderOf(PNG_BYTES))
   panel.setMaxRows(14)
@@ -186,7 +186,7 @@ test('a ready PNG on kitty paints title, metadata and Esc close within the grant
   assert.equal(stripSgr(lines[0]!), 'Image · shot.png')
   const bottom = lines[lines.length - 1]!
   assert.ok(stripSgr(bottom).includes('800×600 · image/png · 16 B'), `metadata row: ${stripSgr(bottom)}`)
-  assert.ok(stripSgr(bottom).endsWith('Esc close'), `right-aligned Esc close: ${stripSgr(bottom)}`)
+  assert.ok(stripSgr(bottom).endsWith('Close [Esc]'), `right-aligned Close [Esc]: ${stripSgr(bottom)}`)
   assert.ok(lines.join('\n').includes('\x1b_G'), 'the kitty inline sequence is painted')
   assert.ok(lines.length - 2 <= 14 - 2, `body rows stay inside maxRows - 2 (${lines.length - 2})`)
 })
@@ -199,7 +199,7 @@ test('maxRows 1 and 2 keep the mandatory chrome and never paint a body', () => {
   const short = one.render(60)
   assert.equal(short.length, 1, 'one granted row is one painted row')
   assert.ok(short[0]!.includes('Image · shot.png'), `identity title on the short row: ${short[0]}`)
-  assert.ok(short[0]!.endsWith('Esc close'), 'Esc close survives right-aligned')
+  assert.ok(short[0]!.endsWith('Close [Esc]'), 'Close [Esc] survives right-aligned')
   assert.ok(!short[0]!.includes('800×600'), 'metadata is dropped on the one-row layout')
 
   const two = panelOf(loaderOf(PNG_BYTES))
@@ -207,20 +207,20 @@ test('maxRows 1 and 2 keep the mandatory chrome and never paint a body', () => {
   const lines = two.render(60)
   assert.equal(lines.length, 2, 'two granted rows: title + bottom row')
   assert.equal(stripSgr(lines[0]!), 'Image · shot.png')
-  assert.ok(stripSgr(lines[1]!).endsWith('Esc close'))
+  assert.ok(stripSgr(lines[1]!).endsWith('Close [Esc]'))
   assert.ok(!lines.join('\n').includes('\x1b_G'), 'zero body rows on the two-row layout')
 })
 
-test('a row narrower than Esc close paints the widest hint prefix, never an overflow', () => {
+test('a row narrower than Close [Esc] paints the widest hint prefix, never an overflow', () => {
   capabilities('kitty')
   const panel = panelOf(loaderOf(PNG_BYTES))
   panel.setMaxRows(1)
-  assert.equal(stripSgr(panel.render(5)[0]!), 'Esc c')
-  assert.equal(stripSgr(panel.render(3)[0]!), 'Esc')
+  assert.equal(stripSgr(panel.render(5)[0]!), 'Close')
+  assert.equal(stripSgr(panel.render(3)[0]!), 'Clo')
   const bottom = panelOf(loaderOf(PNG_BYTES))
   bottom.setMaxRows(4)
   const lines = bottom.render(4)
-  assert.equal(stripSgr(lines[lines.length - 1]!), 'Esc ')
+  assert.equal(stripSgr(lines[lines.length - 1]!), 'Clos')
   for (const line of lines) assert.ok(visibleWidth(line) <= 4)
 })
 
@@ -276,7 +276,7 @@ test('a rejected read paints Read failed and folds hostile whitespace into one r
   for (let index = 2; index < lines.length - 1; index += 1) {
     assert.equal(stripSgr(lines[index]!).trim(), '', `body row ${index} is blank: a single status row`)
   }
-  assert.ok(stripSgr(lines[lines.length - 1]!).endsWith('Esc close'), 'the bar is pinned to the LAST row')
+  assert.ok(stripSgr(lines[lines.length - 1]!).endsWith('Close [Esc]'), 'the bar is pinned to the LAST row')
   assert.ok(visibleWidth(body) <= 60)
 })
 
@@ -317,7 +317,7 @@ test('a real JPEG reads once, derives the scoped PNG and paints it with ORIGINAL
   const bottom = stripSgr(lines[lines.length - 1]!)
   assert.ok(bottom.includes('120×80 · image/jpeg'), `the ORIGINAL dimensions/MIME stay in metadata: ${bottom}`)
   assert.ok(bottom.includes(`${SAMPLE_JPEG.byteLength} B`), `the ORIGINAL byte count stays: ${bottom}`)
-  assert.ok(bottom.endsWith('Esc close'), 'the close route is unchanged')
+  assert.ok(bottom.endsWith('Close [Esc]'), 'the close route is unchanged')
 })
 
 test('the derived payload drives placement while the ORIGINAL metadata is untouched', async () => {
@@ -475,7 +475,7 @@ test('one and two granted rows start no read for a JPEG and keep the close chrom
   const short = one.render(60)
   assert.equal(short.length, 1)
   assert.ok(short[0]!.includes('Image · photo.jpg'))
-  assert.ok(short[0]!.endsWith('Esc close'))
+  assert.ok(short[0]!.endsWith('Close [Esc]'))
   const two = panelOf(loader, { ref: REAL_JPEG_REF })
   two.setMaxRows(2)
   const twoLines = two.render(60)
@@ -552,7 +552,7 @@ test('a panel without a loader paints Preview unavailable and subscribes to noth
   for (let index = 2; index < lines.length - 1; index += 1) {
     assert.equal(stripSgr(lines[index]!).trim(), '', `body row ${index} is blank: a single status row`)
   }
-  assert.ok(stripSgr(lines[lines.length - 1]!).endsWith('Esc close'), 'the bar is pinned to the LAST row')
+  assert.ok(stripSgr(lines[lines.length - 1]!).endsWith('Close [Esc]'), 'the bar is pinned to the LAST row')
   panel.dispose()
 })
 
@@ -614,7 +614,7 @@ test('dispose is idempotent and a late settle never touches the disposed panel',
   assert.doesNotThrow(() => panel.render(60))
 })
 
-test('every row stays inside the width at 40 and 70 while Esc close survives', async () => {
+test('every row stays inside the width at 40 and 70 while Close [Esc] survives', async () => {
   capabilities('kitty')
   const panel = panelOf(loaderOf(PNG_BYTES))
   panel.setMaxRows(20)
@@ -626,7 +626,7 @@ test('every row stays inside the width at 40 and 70 while Esc close survives', a
       assert.ok(visibleWidth(line) <= width, `row width ${visibleWidth(line)} <= ${width}: ${JSON.stringify(line)}`)
     }
     assert.ok(stripSgr(lines[lines.length - 1]!).includes('800×600 · image/png · 16 B'))
-    assert.ok(stripSgr(lines[lines.length - 1]!).endsWith('Esc close'), 'the close hint is right-aligned')
+    assert.ok(stripSgr(lines[lines.length - 1]!).endsWith('Close [Esc]'), 'the close hint is right-aligned')
     assert.ok(stripSgr(lines[0]!).includes('Image · shot.png'))
   }
 })
@@ -694,7 +694,7 @@ test('the panel paints the frame inner width and the close hint survives Frame',
     assert.ok(visibleWidth(line) <= 44, `framed row ${visibleWidth(line)} <= 44`)
   }
   assert.ok(framed.join('\n').includes('\x1b_G'), 'the inline sequence survives the frame')
-  assert.ok(stripSgr(framed[framed.length - 2]!).includes('Esc close'), 'the hint row survives the frame padding')
+  assert.ok(stripSgr(framed[framed.length - 2]!).includes('Close [Esc]'), 'the hint row survives the frame padding')
 })
 
 test('Esc closes; every other key is consumed locally and never forwarded', () => {
@@ -778,7 +778,7 @@ test('the row-grant matrix stays I/O-free below three rows and clips the body to
       for (const line of lines) {
         assert.ok(visibleWidth(line) <= width, `row ${granted} × width ${width}: ${JSON.stringify(line)}`)
       }
-      assert.ok(stripSgr(lines[lines.length - 1]!).endsWith('Esc close'), 'the close hint is pinned to the last granted row')
+      assert.ok(stripSgr(lines[lines.length - 1]!).endsWith('Close [Esc]'), 'the close hint is pinned to the last granted row')
       if (granted <= 2) {
         assert.ok(!lines.join('\n').includes('\x1b_G'), `${granted} rows must not paint a body`)
       } else {
@@ -845,7 +845,7 @@ test('a ready PNG on Direct SIXEL paints through the managed owner with the orig
   assert.equal(stripSgr(lines[0]!), 'Image · shot.png')
   const bottom = stripSgr(lines[lines.length - 1]!)
   assert.ok(bottom.includes('800×600 · image/png · 16 B'), bottom)
-  assert.ok(bottom.endsWith('Esc close'), bottom)
+  assert.ok(bottom.endsWith('Close [Esc]'), bottom)
   assert.equal((panel as unknown as { instanceProtocol?: string }).instanceProtocol, 'sixel')
   panel.dispose()
   assert.ok(disposals() > 0, 'dispose releases the managed occurrence')
@@ -905,7 +905,7 @@ test('SIXEL row grants 1 and 2 keep the chrome and start no read or encode', () 
   const short = one.render(60)
   assert.equal(short.length, 1)
   assert.ok(short[0]!.includes('Image · shot.png'))
-  assert.ok(short[0]!.endsWith('Esc close'))
+  assert.ok(short[0]!.endsWith('Close [Esc]'))
   const two = panelOf(loader, { graphics })
   two.setMaxRows(2)
   const twoLines = two.render(60)

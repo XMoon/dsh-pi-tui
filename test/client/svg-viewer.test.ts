@@ -485,6 +485,50 @@ test('the leased workspace hosts the svg-viewer as its Viewer state and Esc clos
   }
 })
 
+test('the leased workspace never double-dispatches an SVG pointer cell', () => {
+  capabilities(null)
+  try {
+    const workspace = new ImageWorkspacePanel({
+      rows: () => 20,
+      columns: () => 100,
+      requestRender: () => {},
+      theme: { fallbackColor: text => text },
+      candidates: [],
+      resolve: () => undefined,
+      onStale: () => {},
+      onClose: () => {},
+      initial: { kind: 'svg-viewer', source: sourceOf() },
+    })
+    const lines = workspace.render(100).map(stripSgr)
+    const title = lines[0]!
+    const sourceCol = title.indexOf('Source')
+    assert.ok(sourceCol >= 0, `the page device is painted: ${title}`)
+    const event = (type: 'press' | 'click'): import('@xmoon76/pi-tui').TuiMouseEvent => ({
+      type, button: 'left', x: sourceCol, y: 0, screenX: sourceCol, screenY: 0,
+      width: 100, height: 20, shift: false, alt: false, ctrl: false,
+    })
+    // The component entry refuses the SVG cell; the historical onCell* route
+    // is the ONLY dispatch (a second one would double-toggle the page).
+    const viewer = (workspace as unknown as { viewPanel: SvgViewerPanel }).viewPanel
+    const originalPress = viewer.onCellPress
+    let presses = 0
+    viewer.onCellPress = (x: number, y: number): void => {
+      presses += 1
+      originalPress.call(viewer, x, y)
+    }
+    assert.equal(workspace.handleMouse(event('press')), undefined, 'the workspace does not claim SVG cells')
+    assert.equal(workspace.handleMouse(event('click')), undefined)
+    assert.equal(presses, 0, 'the component entry never forwards an SVG press')
+    workspace.onCellPress(sourceCol, 0)
+    workspace.onCellClick(sourceCol, 0)
+    assert.equal(presses, 1, 'the legacy route dispatches exactly once')
+    assert.ok(stripSgr(workspace.render(100)[0]!).includes('[Source]'), 'the page really switched')
+    workspace.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
 test('the admitted test sources are valid inputs for the preview path', () => {
   assert.equal(admitSvg(WIDE_SVG).ok, true)
   assert.equal(admitSvg(LONG_SVG).ok, true)

@@ -700,6 +700,37 @@ test('tiny-budget sliced rows keep hit-map alignment (mouse parity)', () => {
   }
 })
 
+test('paintedSelectedItem is the read-only LAST-PAINT answer (Image View bar)', () => {
+  const picker = new SearchablePicker(
+    [{ value: 'v0', label: 'item 0' }, { value: 'v1', label: 'item 1' }],
+    2,
+    testTheme,
+    {},
+    { header: 'Images' },
+  )
+  picker.render(40)
+  assert.equal(picker.paintedSelectedItem()?.value, 'v0', 'the selected painted row is answered')
+  // The logical selection may move before the next paint; its OWN row is still
+  // painted, so the answer follows the live selection (the workspace's bar
+  // identity check separately rejects an old bar value).
+  picker.setSelectedIndex(1)
+  assert.equal(picker.paintedSelectedItem()?.value, 'v1')
+  picker.render(40)
+  // A selection that is in the CURRENT model but absent from the LAST paint
+  // (setItems without a repaint) is never a visible target.
+  picker.setItems([{ value: 'v9', label: 'item 9' }])
+  assert.equal(picker.paintedSelectedItem(), null, 'an unpainted selection is never a target')
+  picker.render(40)
+  assert.equal(picker.paintedSelectedItem()?.value, 'v9', 'the repainted selection is answered')
+  // No cursor (the owner cleared it): no row is the current action target even
+  // though rows stay painted and selectable.
+  picker.clearSelection()
+  assert.equal(picker.paintedSelectedItem(), null)
+  picker.setFilter('no-such-row')
+  picker.render(40)
+  assert.equal(picker.paintedSelectedItem(), null, 'a zero-match frame has no selected row')
+})
+
 test('delegated search press replaces the stale pressed value (mouse parity)', () => {
   const items = Array.from({ length: 6 }, (_, index) => ({ value: `v${index}`, label: `item ${index}` }))
   const activated: string[] = []
