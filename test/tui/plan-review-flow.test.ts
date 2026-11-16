@@ -44,6 +44,15 @@ function makeFlow(
   )
 }
 
+/** The Fullscreen-capable host seam the app installs (capability + one-shot
+ * inspect), with an optional inspection outcome for the failure path. */
+function inspectionSeam(
+  inspect: () => boolean,
+  canInspect: () => boolean = () => true,
+): { canInspect: () => boolean; inspect: () => boolean } {
+  return { canInspect, inspect }
+}
+
 function render(flow: QuestionFlow, width = 80): string[] {
   return flow.render(width).map(line => stripTerminalSequences(line))
 }
@@ -68,7 +77,7 @@ test('planReviewOf accepts exactly the official shape and rejects lookalikes', (
 test('the plan decision component defaults to View (with inspection) and never to Approve', () => {
   const flow = makeFlow([planQuestion()])
   flow.setMaxRows(24)
-  assert.ok(flow.setPlanInspection(() => true), 'the plan flow accepts the inspection capability')
+  assert.ok(flow.setPlanInspection(inspectionSeam(() => true)), 'the plan flow accepts the inspection capability')
   const lines = render(flow)
   const joined = lines.join('\n')
   assert.ok(joined.includes('Plan review · Upgrade 0.5.7'), `title row missing:\n${joined}`)
@@ -102,7 +111,7 @@ test('Enter on Approve answers the OFFICIAL approve label through the flow settl
   const settled: unknown[] = []
   const flow = makeFlow([planQuestion()], { onDone: answers => settled.push(answers) })
   flow.setMaxRows(24)
-  flow.setPlanInspection(() => true)
+  flow.setPlanInspection(inspectionSeam(() => true))
   // ↓↓ moves to Approve (View=0, Keep=1, Approve=2).
   flow.handleInput('\x1b[B')
   flow.handleInput('\x1b[B')
@@ -115,7 +124,7 @@ test('Enter on View runs the host inspection once and enters reading; Esc return
   const inspections: number[] = []
   const flow = makeFlow([planQuestion()])
   flow.setMaxRows(24)
-  flow.setPlanInspection(() => { inspections.push(1); return true })
+  flow.setPlanInspection(inspectionSeam(() => { inspections.push(1); return true }))
   flow.handleInput('\r') // Enter on View (default cursor)
   assert.equal(inspections.length, 1, 'the host inspection runs exactly once')
   let lines = render(flow)
@@ -134,7 +143,7 @@ test('Enter on View runs the host inspection once and enters reading; Esc return
 test('a failed inspection degrades to the question-detail fallback, never a claimed reading state', () => {
   const flow = makeFlow([planQuestion()])
   flow.setMaxRows(24)
-  flow.setPlanInspection(() => false)
+  flow.setPlanInspection(inspectionSeam(() => false))
   flow.handleInput('\r') // Enter on View
   const lines = render(flow)
   const joined = lines.join('\n')
@@ -149,7 +158,7 @@ test('Keep planning… opens the feedback input; Enter sends the official label 
   const settled: unknown[] = []
   const flow = makeFlow([planQuestion()], { onDone: answers => settled.push(answers) })
   flow.setMaxRows(24)
-  flow.setPlanInspection(() => true)
+  flow.setPlanInspection(inspectionSeam(() => true))
   flow.handleInput('\x1b[B') // ↓ to Keep planning…
   flow.handleInput('\r')
   let lines = render(flow)
@@ -175,7 +184,7 @@ test('an empty feedback answers the keep label alone (no custom field)', () => {
   const settled: unknown[] = []
   const flow = makeFlow([planQuestion()], { onDone: answers => settled.push(answers) })
   flow.setMaxRows(24)
-  flow.setPlanInspection(() => true)
+  flow.setPlanInspection(inspectionSeam(() => true))
   flow.handleInput('\x1b[B') // Keep planning…
   flow.handleInput('\r') // enter feedback
   flow.handleInput('\r') // submit empty
@@ -187,7 +196,7 @@ test('Esc on the decision list is the OFFICIAL dismiss (onCancel)', () => {
   let cancelled = 0
   const flow = makeFlow([planQuestion()], { onCancel: () => { cancelled += 1 } })
   flow.setMaxRows(24)
-  flow.setPlanInspection(() => true)
+  flow.setPlanInspection(inspectionSeam(() => true))
   flow.handleInput('\x1b')
   assert.equal(cancelled, 1, 'Esc on the decision list cancels the flow')
 })
@@ -197,7 +206,7 @@ test('Ctrl+C is the official cancel in every plan step (no orphaned reading stat
   let cancelled = 0
   const decision = makeFlow([planQuestion()], { onCancel: () => { cancelled += 1 } })
   decision.setMaxRows(24)
-  decision.setPlanInspection(() => true)
+  decision.setPlanInspection(inspectionSeam(() => true))
   decision.handleInput('\x03')
   assert.equal(cancelled, 1, 'Ctrl+C cancels from the decision list')
   // Reading: the host reading lease is released and the flow cancels.
@@ -205,7 +214,7 @@ test('Ctrl+C is the official cancel in every plan step (no orphaned reading stat
   let readingCancelled = 0
   const reading = makeFlow([planQuestion()], { onCancel: () => { readingCancelled += 1 } })
   reading.setMaxRows(24)
-  reading.setPlanInspection(() => true)
+  reading.setPlanInspection(inspectionSeam(() => true))
   reading.onPlanReadingEnd = () => { readingEnded += 1 }
   reading.handleInput('\r')
   assert.ok(reading.isPlanReading())
@@ -216,7 +225,7 @@ test('Ctrl+C is the official cancel in every plan step (no orphaned reading stat
   let feedbackCancelled = 0
   const feedback = makeFlow([planQuestion()], { onCancel: () => { feedbackCancelled += 1 } })
   feedback.setMaxRows(24)
-  feedback.setPlanInspection(() => true)
+  feedback.setPlanInspection(inspectionSeam(() => true))
   feedback.handleInput('\x1b[B')
   feedback.handleInput('\r')
   feedback.handleInput('\x03')
@@ -255,7 +264,7 @@ test('Fullscreen pointer: clicking a decision row is keyboard-Enter parity (neve
   const flow = makeFlow([planQuestion()], { onDone: answers => settled.push(answers) })
   flow.setMaxRows(24)
   flow.setMouseActionsEnabled(true)
-  flow.setPlanInspection(() => true)
+  flow.setPlanInspection(inspectionSeam(() => true))
   const lines = stripLines(flow)
   const joined = lines.join('\n')
   // The action bar is the frozen hint row, not a second list of verbs.
@@ -274,7 +283,7 @@ test('Fullscreen pointer: clicking View runs the inspection (a click is never a 
   const flow = makeFlow([planQuestion()], { onDone: answers => settled.push(answers) })
   flow.setMaxRows(24)
   flow.setMouseActionsEnabled(true)
-  flow.setPlanInspection(() => { inspections.push(1); return true })
+  flow.setPlanInspection(inspectionSeam(() => { inspections.push(1); return true }))
   clickPlanRow(flow, 'View plan')
   assert.equal(inspections.length, 1, 'the click runs the inspection once')
   assert.deepEqual(settled, [], 'View never submits')
@@ -286,7 +295,7 @@ test('Fullscreen pointer: clicking Keep opens the feedback input, and the Send v
   const flow = makeFlow([planQuestion()], { onDone: answers => settled.push(answers) })
   flow.setMaxRows(24)
   flow.setMouseActionsEnabled(true)
-  flow.setPlanInspection(() => true)
+  flow.setPlanInspection(inspectionSeam(() => true))
   clickPlanRow(flow, 'Keep planning…')
   let lines = stripLines(flow)
   assert.ok(lines.join('\n').includes('What should be changed?'), `feedback step missing:\n${lines.join('\n')}`)
@@ -312,7 +321,7 @@ test('Fullscreen pointer: a stale gesture cannot act on a repainted plan step', 
   const flow = makeFlow([planQuestion()], { onDone: answers => settled.push(answers) })
   flow.setMaxRows(24)
   flow.setMouseActionsEnabled(true)
-  flow.setPlanInspection(() => true)
+  flow.setPlanInspection(inspectionSeam(() => true))
   const lines = stripLines(flow)
   const viewRow = lines.findIndex(line => line.includes('View plan'))
   assert.ok(viewRow >= 0)
@@ -331,7 +340,7 @@ test('Fullscreen pointer: the fallback Back returns to the decision list without
   const flow = makeFlow([planQuestion()], { onDone: answers => settled.push(answers) })
   flow.setMaxRows(24)
   flow.setMouseActionsEnabled(true)
-  flow.setPlanInspection(() => false)
+  flow.setPlanInspection(inspectionSeam(() => false))
   flow.handleInput('\r') // View → fallback (no provable target)
   let lines = stripLines(flow)
   assert.ok(lines.join('\n').includes('Full review text'), `fallback missing:\n${lines.join('\n')}`)
@@ -355,7 +364,7 @@ test('a plan request with several non-approve options still renders exactly thre
     ],
   })])
   flow.setMaxRows(24)
-  flow.setPlanInspection(() => true)
+  flow.setPlanInspection(inspectionSeam(() => true))
   const lines = stripLines(flow)
   const joined = lines.join('\n')
   const decisionRows = lines.filter(line => /^(>| ) (View plan|Keep planning…|Approve plan)$/.test(line))
@@ -375,7 +384,7 @@ test('a real feedback edit fires the answer-mutation hook and keeps the draft sn
     draft => { drafts.push(draft) },
   )
   flow.setMaxRows(24)
-  flow.setPlanInspection(() => true)
+  flow.setPlanInspection(inspectionSeam(() => true))
   flow.handleInput('\x1b[B') // Keep planning…
   flow.handleInput('\r')
   assert.equal(mutations, 0, 'entering the feedback step is not itself an answer mutation')
@@ -398,7 +407,7 @@ test('a stale action-bar press from another plan step is inert after a keyboard 
   const flow = makeFlow([planQuestion()], { onDone: answers => settled.push(answers) })
   flow.setMaxRows(24)
   flow.setMouseActionsEnabled(true)
-  flow.setPlanInspection(() => true)
+  flow.setPlanInspection(inspectionSeam(() => true))
   // Enter feedback, then press its `Back [Esc]` span…
   flow.handleInput('\x1b[B')
   flow.handleInput('\r')

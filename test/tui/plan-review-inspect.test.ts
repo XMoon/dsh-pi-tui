@@ -332,3 +332,213 @@ test('the inspection matches a nested PTC sub-call by its subCallId and shows th
   assert.deepEqual(answers, [{ id: 'plan-review', selected: ['Approve'] }])
   app.stop()
 })
+
+test('Focus collapsed Thought: View opens the owner Thought and locates the card', async () => {
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 0, text: 'plan the upgrade' },
+    { kind: 'thinking', turn: 1, text: 'planning the upgrade carefully' },
+    {
+      kind: 'tool', turn: 1, name: 'exit_plan_mode', callId: 'call-plan-1',
+      args: JSON.stringify({ plan: PLAN_MD }), result: '', status: 'running',
+    },
+    ...Array.from({ length: 8 }, (_, i) => ({
+      kind: 'user' as const, turn: 2 + i, text: `filler turn ${i} ${'x'.repeat(60)}`,
+    })),
+  ]
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: directPlanPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setFocusMode(true)
+  app.setFullscreen(true)
+  const activities = new Map([[1, { turn: 1, completed: false, think: { text: 'planning the upgrade carefully', running: true } }]])
+  app.setTranscript(messages, activities as never)
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: PLAN_MD,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  assert.ok(!view(vt).includes('## Scope'), 'precondition: the collapsed Thought hides the plan card')
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Reading the submitted plan'), `the Focus reveal must locate the card:\n${view(vt)}`)
+  assert.ok(view(vt).includes('## Scope'), `the plan body must be materialized inside the opened Thought:\n${view(vt)}`)
+  vt.sendInput('\x1b') // back to the decision list (no manual Focus state left behind)
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // official dismiss
+  await settle.then(() => {}, () => {})
+  assert.equal(app.focusExpandedTurnsForTest().size, 0,
+    'the inspection never writes a manual Focus expansion')
+  app.stop()
+})
+
+test('a collapse DURING reading wins; a NEW View re-opens the card', async () => {
+  const messages = transcript('call-plan-1')
+  const { vt, app, settle } = scene(messages, 100, 24, { present: directPlanPresenter })
+  await vt.waitForRender()
+  // Enter reading: the card body is visible.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('## Scope'), `precondition: the located body is visible:\n${view(vt)}`)
+  // The user collapses the located card (the real per-card disclosure owner).
+  const card = messages.find(
+    (m): m is Extract<TranscriptMessage, { kind: 'tool' }> => m.kind === 'tool' && m.name === 'exit_plan_mode',
+  )!
+  const internals = app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }
+  internals.expandedOverride.set(card, false)
+  app.setTranscript(messages) // a projection commit re-renders the mounted batch
+  await vt.waitForRender()
+  assert.ok(!view(vt).includes('## Scope'), `an explicit collapse during reading wins:\n${view(vt)}`)
+  assert.ok(view(vt).includes('Reading the submitted plan'), 'the reading step itself survives the collapse')
+  // Esc back, then a NEW explicit View re-opens the card.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('## Scope'), `a new View re-opens the card:\n${view(vt)}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('a PTC child collapsed during reading stays folded; a new View re-opens it', async () => {
+  const root: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 1, name: 'run_code', callId: 'call-root',
+    args: '{}', result: '', status: 'running',
+    subCalls: [{
+      kind: 'tool', turn: 1, name: 'exit_plan_mode', subCallId: 'call-plan-1',
+      parentCallId: 'call-root', rootCallId: 'call-root',
+      args: JSON.stringify({ plan: PLAN_MD }), result: '', status: 'running',
+    }],
+  }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 0, text: 'plan via run_code' },
+    root,
+  ]
+  const { vt, app, settle } = scene(messages, 100, 24, { present: directPlanPresenter })
+  await vt.waitForRender()
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('## Scope'), `precondition: the nested body is visible:\n${view(vt)}`)
+  // The user collapses the nested child through the REAL disclosure owner
+  // (clicking the child header): the temporary reveal is suppressed and the
+  // mounted batch rebuilds.
+  ;(app as unknown as { toggleSubCallExpanded(subCallId: string): void }).toggleSubCallExpanded('call-plan-1')
+  await vt.waitForRender()
+  assert.ok(!view(vt).includes('## Scope'), `an explicit child collapse during reading wins:\n${view(vt)}`)
+  assert.equal((app as unknown as { subCallExpanded: Set<string> }).subCallExpanded.has('call-plan-1'), false,
+    'the inspection never mints a durable sub-call expansion')
+  // A new explicit View re-opens it.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('## Scope'), `a new View re-opens the nested card:\n${view(vt)}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('a QUEUED plan-review question mounts with the live View capability (FIFO handover)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: directPlanPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setFullscreen(true)
+  app.setTranscript(transcript('call-plan-1'))
+  await vt.waitForRender()
+  // A normal question owns the seat first; the plan review is queued behind it.
+  const first = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick one',
+    options: [{ label: 'A' }, { label: 'B' }],
+  }])
+  await vt.waitForRender()
+  const plan = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: PLAN_MD,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  // Settle the first question: select A, then submit on the review page.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  const firstAnswers = await first
+  assert.deepEqual(firstAnswers, [{ id: 'q1', selected: ['A'] }])
+  await vt.waitForRender()
+  // The handed-over plan review must render the FULL decision list (View first).
+  const handed = view(vt)
+  assert.ok(handed.includes('View plan'), `a queued plan review must offer View plan:\n${handed}`)
+  const rows = stripTerminalSequences(vt.getViewport().join('\n')).split('\n')
+  const viewRow = rows.findIndex(row => row.includes('> View plan'))
+  assert.ok(viewRow >= 0, `View plan holds the default cursor after the handover:\n${handed}`)
+  // And it really locates the card.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Reading the submitted plan'), `the handed-over flow reads:\n${view(vt)}`)
+  assert.ok(view(vt).includes('## Scope'), `the handed-over flow locates the body:\n${view(vt)}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\r')
+  const planAnswers = await plan
+  assert.deepEqual(planAnswers, [{ id: 'plan-review', selected: ['Approve'] }])
+  app.stop()
+})
+
+test('a long PTC plan line wraps and its tail is reachable by scrolling (80 columns)', async () => {
+  // One LONG paragraph line: a per-line truncation would permanently lose the
+  // tail, so the only readable proof is the unique marker at its end.
+  const longLine = `${'scope item '.repeat(18)}tail-marker-xyz`
+  const longPlan = `# Long Plan\n${longLine}`
+  const root: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 1, name: 'run_code', callId: 'call-root',
+    args: '{}', result: '', status: 'running',
+    subCalls: [{
+      kind: 'tool', turn: 1, name: 'exit_plan_mode', subCallId: 'call-plan-1',
+      parentCallId: 'call-root', rootCallId: 'call-root',
+      args: JSON.stringify({ plan: longPlan }), result: '', status: 'running',
+    }],
+  }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 0, text: 'plan via run_code' },
+    root,
+  ]
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: directPlanPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: longPlan,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Reading the submitted plan'), `the nested card locates:\n${view(vt)}`)
+  // The wrapped tail starts below the viewport; the reading step's own page
+  // keys scroll the transcript until the marker becomes readable.
+  for (let page = 0; page < 12 && !view(vt).includes('tail-marker-xyz'); page += 1) {
+    vt.sendInput('\x1b[6~') // PageDown (reading step → transcript viewport)
+    await vt.waitForRender()
+  }
+  assert.ok(view(vt).includes('tail-marker-xyz'), `the wrapped tail must be readable at 80 columns:\n${view(vt)}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})

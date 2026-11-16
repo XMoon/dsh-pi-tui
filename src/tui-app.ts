@@ -10565,6 +10565,18 @@ export class TuiApp {
     return message.turn
   }
 
+  /** The plan inspection's owner turn, but ONLY when collapsed Focus actually
+   * hides the located card: the ONE-SHOT presentation opens the Thought root
+   * the same way a search navigation does (the plan's card may live inside a
+   * collapsed Thought, and the row proof needs it materialized). */
+  private planInspectionTurn(): number | undefined {
+    const message = this.planInspection?.message
+    if (message === undefined || !('turn' in message)) return undefined
+    if (!isFocusDisplayPreset(this.displayState.preset)) return undefined
+    if (!this.focusRootHidesSearchTarget(message)) return undefined
+    return message.turn
+  }
+
   /** Whether the COLLAPSED Focus projection hides one row (so the search target
    * needs the Focus-root reveal). Computed from the real `projectFocus`
    * collapsed output — never from "the row has a turn" — and memoized per
@@ -10658,8 +10670,11 @@ export class TuiApp {
   /** Whether the current search target's PTC path contains this sub-call. */
   private forcesSubCallExpandedTemporarily(subCallId: string): boolean {
     // The plan inspection's located PTC child (the plan body lives inside the
-    // nested card) is opened for the reading step only.
-    if (this.planInspection?.subCallId === subCallId) return true
+    // nested card) is opened for the reading step only — an explicit user
+    // collapse of that child (the shared temporary-suppression set) wins.
+    if (this.planInspection?.subCallId === subCallId) {
+      return !this.searchSuppressedSubCalls.has(subCallId)
+    }
     if (!this.searchRevealGranted) return false
     if (this.searchSuppressedSubCalls.has(subCallId)) return false
     const source = this.searchTarget?.match.source
@@ -11578,9 +11593,12 @@ export class TuiApp {
   private focusProjectionExpandedTurns(): ReadonlySet<number> {
     const base = this.focusProjectionExpandedTurnsBase()
     const targetTurn = this.searchTargetTurn()
-    if (targetTurn === undefined) return base
+    const planTurn = this.planInspectionTurn()
+    const reveal = targetTurn ?? planTurn
+    if (reveal === undefined) return base
     const union = new Set(base)
-    union.add(targetTurn)
+    union.add(reveal)
+    if (targetTurn !== undefined && planTurn !== undefined) union.add(planTurn)
     return union
   }
 
@@ -22082,11 +22100,18 @@ export class TuiApp {
       if (callView !== undefined && callView.card === 'generic' && (callView.content?.length ?? 0) > 0) {
         const contentStart = row + rows
         let contentRows = 0
+        // The body WRAPS at the nested content width (the top-level generic
+        // card's `Text` does the same): a long plan paragraph must never lose
+        // its tail to a one-line truncation — the reading step has to reach the
+        // complete plan, including its last words.
+        const contentWidth = Math.max(1, width - visibleWidth(pad) - 2)
         for (const block of callView.content ?? []) {
           const body = block.type === 'text' ? block.text : this.blockDisplayText(block)
           for (const line of sanitizeDisplayText(body).split('\n')) {
-            card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
-            contentRows += 1
+            for (const wrappedLine of wrapTextWithAnsi(line, contentWidth)) {
+              card.addChild(new Text(`${pad}  ${color.textDim(wrappedLine)}`, 0, 0))
+              contentRows += 1
+            }
           }
         }
         if (contentRows > 0) {
@@ -29197,6 +29222,14 @@ export class TuiApp {
     }
     const card = findCard(this.messages)
     if (card === undefined) return false
+    // An EXPLICIT new View supersedes an earlier user collapse of this card
+    // (the user is asking to see the plan again). The collapse marker is
+    // dropped here; a collapse made DURING the new reading lease still wins
+    // (the reveal predicates honor it), so a repaint never fights the user.
+    if (this.expandedOverride.get(card) === false) this.expandedOverride.delete(card)
+    if (ptcSubCallId !== undefined && this.searchSuppressedSubCalls.has(ptcSubCallId)) {
+      this.searchSuppressedSubCalls.delete(ptcSubCallId)
+    }
     // Commit the one-shot presentation and re-project: the card and the
     // hiding ancestors open, and (for a PTC target) the nested child opens.
     this.planInspection = ptcSubCallId === undefined
@@ -29230,6 +29263,9 @@ export class TuiApp {
   private releasePlanInspectionReveal(): void {
     if (this.planInspection === undefined) return
     this.planInspection = undefined
+    // The suppression set is the shared temporary-collapse record; a release
+    // never leaves an inspection-scoped entry behind.
+    this.searchSuppressedSubCalls.clear()
     this.clearFocusLiveHeightState()
     this.rebuildMessages('focus-disclosure')
   }
@@ -29336,26 +29372,7 @@ export class TuiApp {
     // The suspension hands the keyboard to the seat owner and may fire a plugin
     // focus/blur callback: re-read the identity before building the frame.
     if (this.abandonIfDead(this.questionFlowIsLive(state), state)) return
-    // A plan-review question gets the host's read-only inspection capability
-    // (Fullscreen only — Regular has no app-owned viewport to reveal): the
-    // flow's `View plan` decision row runs it once and enters the reading
-    // step only on a proven locate. The reading step's scroll keys drive the
-    // SAME transcript ScrollView; leaving the step (or settling the question)
-    // releases the temporary reveal grant — the plan card keeps its
-    // user-opened state but the QUESTION never leaves a pinned reveal behind.
-    if (state.flow.isPlanReviewFlow() && this.fullscreen !== undefined) {
-      state.flow.setPlanInspection(() => this.inspectPlanReview(state, state.status?.reviewSessionId))
-      state.flow.onPlanReadingScroll = (direction, page) => {
-        const scroll = this.fullscreenScroll
-        if (scroll === undefined) return
-        scroll.updateLayout(this.transcriptContentHeight, scroll.viewportHeight, () => this.requestRender())
-        scroll.scrollBy(direction * (page ? Math.max(1, scroll.viewportHeight - 1) : 1))
-        this.requestRender()
-      }
-      state.flow.onPlanReadingEnd = () => this.releasePlanInspectionReveal()
-    } else {
-      state.flow.setPlanInspection(undefined)
-    }
+    this.installPlanReviewSeam(state)
     const frame = new QuestionFrame(state.flow, () => this.terminal.rows, () => this.fullscreen !== undefined)
     state.frame = frame
     // Re-vendor lifecycle follow-up P1: the flow only PROJECTS into the
@@ -29378,6 +29395,31 @@ export class TuiApp {
     // setFocusSeat('overlay') above is a no-op and this is the ONLY budget
     // sync the replacement gets.
     this.requestRender()
+  }
+
+  /** Install (or clear) the plan-review host seam on ONE flow. Every mount
+   * path uses this: a directly presented question AND a queued successor handed
+   * over after a settle. The capability is a LIVE probe (the View row reflects
+   * the current Fullscreen executability) and the reading step drives the SAME
+   * transcript ScrollView; leaving the step (or settling) releases the
+   * one-shot presentation. */
+  private installPlanReviewSeam(state: QuestionState): void {
+    if (!state.flow.isPlanReviewFlow()) {
+      state.flow.setPlanInspection(undefined)
+      return
+    }
+    state.flow.setPlanInspection({
+      canInspect: () => this.fullscreen !== undefined,
+      inspect: () => this.inspectPlanReview(state, state.status?.reviewSessionId),
+    })
+    state.flow.onPlanReadingScroll = (direction, page) => {
+      const scroll = this.fullscreenScroll
+      if (scroll === undefined) return
+      scroll.updateLayout(this.transcriptContentHeight, scroll.viewportHeight, () => this.requestRender())
+      scroll.scrollBy(direction * (page ? Math.max(1, scroll.viewportHeight - 1) : 1))
+      this.requestRender()
+    }
+    state.flow.onPlanReadingEnd = () => this.releasePlanInspectionReveal()
   }
 
   /** Abort one flow (its signal fired). The ACTIVE flow settles rejected
@@ -29464,6 +29506,10 @@ export class TuiApp {
         settled.suspendedOverlays = new Set()
       },
       () => { target.flow.setStatus(target.status) },
+      // A QUEUED successor gets its own plan-review host seam: without this a
+      // queued plan-review question would mount with no live View capability
+      // (the decision list would silently drop to Keep/Approve).
+      () => this.installPlanReviewSeam(target),
       () => {
         const frame = new QuestionFrame(target.flow, () => this.terminal.rows, () => this.fullscreen !== undefined)
         target.frame = frame

@@ -569,7 +569,7 @@ export class QuestionFlow implements Component, Focusable {
   private planDecisionRows(): { action: 'view' | 'keep' | 'approve'; label: string }[] {
     if (this.planReview === undefined) return []
     const rows: { action: 'view' | 'keep' | 'approve'; label: string }[] = []
-    if (this.planInspection !== undefined) rows.push({ action: 'view', label: 'View plan' })
+    if (this.planInspection?.canInspect() === true) rows.push({ action: 'view', label: 'View plan' })
     // The official request may offer several non-approve options; the frozen
     // decision UI is ONE Keep row, so the FIRST non-approve option (the
     // official option order) is the keep-planning class and the label this
@@ -582,17 +582,18 @@ export class QuestionFlow implements Component, Focusable {
   }
 
   /** The host-installed plan inspection capability (A4): a read-only
-   * viewport request the flow triggers from the `View plan` decision row.
-   * The flow itself owns no transcript geometry. */
-  private planInspection: (() => boolean) | undefined
+   * viewport request the flow triggers from the `View plan` decision row, plus
+   * the LIVE executability probe (Fullscreen can toggle while this flow stays
+   * parked in the seat). The flow itself owns no transcript geometry. */
+  private planInspection: { canInspect: () => boolean; inspect: () => boolean } | undefined
 
   /** Install the host's plan inspection capability (A4). Called by the
-   * mounting host after the flow exists; `undefined` removes the View row
-   * (Regular keeps the two-row decision list). Returns false when the flow
-   * is not a plan review. */
-  setPlanInspection(inspect: (() => boolean) | undefined): boolean {
+   * mounting host after the flow exists AND on every queued handover;
+   * `undefined` removes the capability (the decision list then has no View
+   * row). Returns false when the flow is not a plan review. */
+  setPlanInspection(seam: { canInspect: () => boolean; inspect: () => boolean } | undefined): boolean {
     if (this.planReview === undefined) return false
-    this.planInspection = inspect
+    this.planInspection = seam
     // Keep the cursor valid: clamp into the (possibly grown) row list.
     this.planCursor = Math.min(this.planCursor, Math.max(0, this.planDecisionRows().length - 1))
     return true
@@ -1738,7 +1739,8 @@ export class QuestionFlow implements Component, Focusable {
    * the question-detail fallback). */
   private executePlanRow(action: 'view' | 'keep' | 'approve' | undefined): void {
     if (action === 'view') {
-      const inspected = this.planInspection?.() === true
+      if (this.planInspection?.canInspect() !== true) return
+      const inspected = this.planInspection.inspect() === true
       if (inspected) {
         this.planStep = 'reading'
       } else {
