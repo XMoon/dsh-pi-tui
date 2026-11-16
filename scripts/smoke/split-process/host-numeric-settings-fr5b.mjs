@@ -113,6 +113,7 @@ export async function runHostNumericSettingsFr5B(context) {
     // read their ORIGINAL ids and values after moving to General (and remain
     // writable through the same official profile patch).
     const profilePatch = join(installation.profileDir, 'cordis.patch.yml')
+    const originalPatch = existsSync(profilePatch) ? readFileSync(profilePatch, 'utf8') : ''
     const existingRows = existsSync(profilePatch) ? (parseYaml(readFileSync(profilePatch, 'utf8')) ?? []) : []
     assert(Array.isArray(existingRows), 'the isolated profile patch must be a row list')
     writeFileSync(profilePatch, `${JSON.stringify([
@@ -342,5 +343,14 @@ export async function runHostNumericSettingsFr5B(context) {
     if (clientA !== undefined) await clientA.dispose().catch(() => {})
     if (host !== undefined) await scene.stopC1Host(host)
     await scene.dispose()
+    // The full lane shares ONE installed profile across its cases. The seeded
+    // USER rows (and the real UI saves this case makes over them) are THIS
+    // case's own preconditions, not lane-wide facts: without this restore the
+    // later `web.startup-preference` case reads `userOverridden: true` on its
+    // first read and its default-state phase fails. Restoring the exact
+    // original bytes leaves every later case the profile this case found.
+    try {
+      writeFileSync(profilePatch, originalPatch, { mode: 0o600 })
+    } catch { /* best-effort restore; the lane's own cleanup owns the root */ }
   }
 }
