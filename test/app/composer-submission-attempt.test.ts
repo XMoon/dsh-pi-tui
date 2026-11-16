@@ -160,7 +160,11 @@ function mount(): Mount {
         },
         updateQueue: async () => ({ kind: 'committed', value: undefined }),
       },
-      hostCommand: inert,
+      hostCommand: {
+        // A plane-owned line that matches NO command: the Host executor
+        // reports the unmatched outcome, so the fallback ordinary prompt runs.
+        execute: async () => ({ kind: 'committed', matched: false }),
+      },
     },
     history: {
       persist: (record: { text: string; sessionId: string | undefined }) => {
@@ -178,7 +182,14 @@ function mount(): Mount {
     requestExit: () => {},
     viewer: { isViewing: () => false },
     artifacts: { start: () => {} },
-    extensions: { findContribution: () => undefined, clearError: () => {}, recordError: () => {} },
+    extensions: {
+      findContribution: () => undefined,
+      handlerFor: () => undefined,
+      commandIdFor: () => undefined,
+      recordHealthRef: () => undefined,
+      clearError: () => {},
+      recordError: () => {},
+    },
     status: { sessionCwd: () => '/tmp' },
     surface: { refreshPendingInput: () => {} },
     supportsLocalShellCards: true,
@@ -407,4 +418,51 @@ test('PR2: a throwing renderer settlement never turns an accepted write into a r
   assert.equal(h.composer.text, '', 'the committed draft was cleared before the throw')
   assert.equal(h.historyRows.length, 1, 'the accepted history row still completed')
   assert.deepEqual(h.consumes, ['accepted despite ui throw'], 'the attachment transfer still ran')
+})
+
+test('PR2: a committed steer WITHOUT an acceptance callback is not an acceptance', async () => {
+  const h = mount()
+  h.respond({ kind: 'committed', value: undefined }, false)
+  h.composer.text = 'steer without proof'
+  assert.equal(h.controller.beginComposerSubmission('steer without proof', 'steer'), 'held')
+  await tick()
+  assert.equal(h.composer.calls.find(call => call.kind === 'settle')?.result, 'unknown')
+  assert.equal(h.composer.text, 'steer without proof', 'the draft stays live')
+  assert.deepEqual(h.consumes, [], 'the committed result alone never transfers the drafts')
+})
+
+test('PR2: an accepted steer whose write later rejects keeps the draft cleared and consumes once', async () => {
+  const h = mount()
+  const staged = h.images.add({
+    bytes: new Uint8Array([1, 2, 3]),
+    mediaType: 'image/png',
+    width: 4,
+    height: 4,
+  })
+  h.respond({ kind: 'rejected', error: { code: 'session/agent-busy', message: 'busy' } }, true)
+  h.composer.text = staged.placeholder
+  assert.equal(h.controller.beginComposerSubmission(staged.placeholder, 'steer'), 'held')
+  await tick()
+  assert.equal(h.composer.calls.find(call => call.kind === 'settle')?.result, 'accepted')
+  assert.equal(h.composer.text, '', 'an accepted steer is never resurrected by the late refusal')
+  assert.equal(h.images.values().length, 0, 'the accepted steer transfers its attachments exactly once')
+})
+
+test('PR2: an unknown slash line keeps its hold; no fabricate acceptance without the callback', async () => {
+  const h = mount()
+  // `/unknown ...` is plane-owned at the final catalog but matches NO command:
+  // it must fall back to an ordinary prompt with the composer still held — the
+  // handover belongs to an ACTUAL command execution, never to a pre-dispatch
+  // prediction. A committed write WITHOUT the acceptance callback therefore
+  // stays unknown (the draft is retained).
+  h.respond({ kind: 'committed', value: undefined }, false)
+  h.composer.text = '/unknown explain this'
+  assert.equal(h.controller.beginComposerSubmission('/unknown explain this', 'enter'), 'held')
+  assert.equal(h.composer.calls.find(call => call.kind === 'hold')?.attemptId !== undefined, true,
+    'the ordinary slash line was admitted as an attempt')
+  await tick()
+  assert.equal(h.composer.calls.find(call => call.kind === 'settle')?.result, 'unknown',
+    'no command executed, so only the acceptance callback could accept it')
+  assert.equal(h.composer.text, '/unknown explain this', 'the draft is kept')
+  assert.deepEqual(h.historyRows, [], 'no history row without acceptance')
 })

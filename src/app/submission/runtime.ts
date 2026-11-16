@@ -359,7 +359,13 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
             attempt?.unknown()
             return
           }
-          if (outcome.kind === 'cancelled') throw cancellationError('session write cancelled')
+          if (outcome.kind === 'cancelled') {
+            if (attempt?.isAccepted() === true) {
+              options?.releaseReservation?.()
+              surface.consumeDraftAttachments(text)
+            }
+            throw cancellationError('session write cancelled')
+          }
           if (outcome.kind === 'rejected') {
             // A PROVEN pre-commit refusal (e.g. `session/writer-held`): the
             // submission owner settles it HERE as a normal terminal return, so
@@ -414,6 +420,17 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
       }))
     } catch (error) {
       if (surface.isDisposed()) return
+      // PR2: once the Host accepted the prompt, a late execution/transport
+      // error is NOT a submission failure — it must never reach the
+      // reserved-submit restore (which would put the committed text back or
+      // duplicate it). The accepted-terminal branches above already settled
+      // the ack/echo/attachments where they could; here only the throw path
+      // remains (e.g. a cancellation raised by the writer).
+      if (attempt?.isAccepted() === true) {
+        options?.releaseReservation?.()
+        surface.consumeDraftAttachments(text)
+        return
+      }
       if (error instanceof TransitionInProgressError) {
         surface.settleLocalSubmission(requestId)
         surface.settleSubmitAck('submit refused by transition fence', { token: ackToken, terminal: true })
@@ -1233,7 +1250,9 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
           }
           // T1 BEFORE the dispatch.
           deps.markDispatch(agentForSteer.session.id)
-          const outcome = await steerAll({
+          let outcome: Awaited<ReturnType<typeof steerAll>>
+          try {
+          outcome = await steerAll({
             currentSubject: () => deps.isDisposed() ? undefined : agentForSteer,
             currentGeneration: () => generationForSteer,
             notify: (message, kind) => {
@@ -1266,6 +1285,13 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
             // surfaces the refusal's OWN message/guidance — never "try again".
             onRejected: (error, steeredCount) => {
               if (deps.isDisposed()) return
+              // PR2: an ALREADY-ACCEPTED draft must never come back into the
+              // editor (the Host took it; the late refusal is execution-level).
+              if (attemptWasAccepted) {
+                steerRestored = true
+                steerRejectionCode = error.code
+                return
+              }
               // PR2: a HELD draft is still the live document — the merge
               // would duplicate it; the attempt settle below unlocks it.
               if (deps.composerHeld?.() !== true) deps.mergeDraftIntoEditor(text)
@@ -1288,6 +1314,13 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
             ? { onlyDraft: true, draftHasPayload, draftDelivery: steerDelivery }
             : { draftHasPayload, draftDelivery: steerDelivery },
           )
+          } catch (error) {
+            // PR2: an ACCEPTED steer's late throw (cancellation) must not reach
+            // the reserved-submit restore — the committed text is never put
+            // back. The outer terminal sinks transfer the attachments.
+            if (attemptWasAccepted) steerRestored = true
+            throw error
+          }
           return { kind: 'delivered', outcome }
         },
       )
@@ -1299,6 +1332,14 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
       // must not be retired under that sibling (its failure still needs the
       // editor line to resolve). `consume` is pin-aware.
       if (outcome === 'ok') {
+        // PR2: a committed steer with NO Host-acceptance callback is NOT an
+        // acceptance — it must not transfer the drafts. The attempt settles
+        // unknown and the draft/attachments stay live.
+        if (input.attempt !== undefined && !attemptSettled) {
+          attemptUnknown()
+          deps.notify('the session write committed without Host acceptance proof — review the draft before retrying', 'error')
+          return
+        }
         releaseReservation()
         deps.consumeDraftAttachments(text)
       }
@@ -1341,12 +1382,16 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
       deps.settleLocalSubmission(steerRequestId)
       deps.settleSubmitAck('failure', { token: steerAckToken, terminal: true })
       deps.notifySubmissionFailure(error)
+      // PR2: an accepted draft's late failure still transfers its attachments
+      // exactly once (the flow's reservation release already ran).
+      if (attemptWasAccepted) deps.consumeDraftAttachments(text)
       attemptRejected()
     },
     onCancel: () => {
       if (deps.isDisposed()) return
       deps.settleLocalSubmission(steerRequestId)
       deps.settleSubmitAck('steer cancelled', { token: steerAckToken, terminal: true })
+      if (attemptWasAccepted) deps.consumeDraftAttachments(text)
       attemptRejected()
     },
   })
@@ -1502,14 +1547,6 @@ export function executeHostCommandSubmission(
     // of dispatch, and a non-invocation stages nothing at all.
     const hostAttachmentsDeclared = submittedClaim?.claimed === true && submittedClaim.attachments === true
     const commandPlaneLine = deps.commandPlaneOwnsLine()
-    // PR2: a held ordinary admission whose FINAL catalog claims the line as a
-    // command is handed over to that command's own contract BEFORE dispatch —
-    // exactly the pre-clear the legacy path performs, never a fake prompt
-    // acceptance. The nested fallback prompt (plane matched nothing) then runs
-    // with the legacy draft disposition.
-    if (commandPlaneLine && input.parsedName !== undefined) {
-      deps.handComposerHoldToLegacyCommand?.()
-    }
     planeAdvertised = commandPlaneLine && input.wasAdvertisedAtSubmit
     const tuiOwnedCommand = deps.isTuiOwnedCommand()
     // The navigation intent starts HERE: after every early refusal window and
@@ -1589,6 +1626,13 @@ export function executeHostCommandSubmission(
       const execution = outcome.matched
         ? outcome.execution as unknown as HostCommandExecutionLike
         : undefined
+      // PR2: a held ordinary admission whose line ACTUALLY ran as a command is
+      // handed over to the command's legacy pre-clear contract now — before its
+      // disposition handling, so a failure restore merges into an emptied
+      // editor. A plane-owned line that matched NOTHING (an unknown slash
+      // name) is an ordinary prompt and keeps its hold for the acceptance
+      // handoff.
+      if (execution !== undefined) deps.handComposerHoldToLegacyCommand?.()
       const draftDisposition = execution === undefined
         ? undefined
         : deps.readCommandDraftDisposition(execution.commandId)

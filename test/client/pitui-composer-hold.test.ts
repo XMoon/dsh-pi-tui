@@ -105,6 +105,24 @@ test('PR2: a refusal unlocks the editor with the draft intact and editable', asy
   assert.equal(h.app.getDraft(), 'keep me!', 'the editor is editable again (no restore duplicated the text)')
 })
 
+test('PR2: a programmatic insertion cannot mutate the held document', async () => {
+  const h = startApp()
+  h.admit = () => {
+    h.app.holdSubmission('attempt-insert')
+    return 'held'
+  }
+  await type(h.vt, 'original')
+  await type(h.vt, '\r')
+  assert.equal(h.app.getDraft(), 'original')
+  h.app.insertIntoEditor(' UNSENT')
+  assert.equal(h.app.getDraft(), 'original', 'a held composer refuses programmatic insertion')
+  h.app.setEditorText('replacement')
+  assert.equal(h.app.getDraft(), 'original', 'and programmatic replacement too')
+  h.app.settleSubmission('attempt-insert', 'accepted')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), '', 'the accepted settlement clears the ORIGINAL document only')
+})
+
 test('PR2: a legacy verdict keeps the pre-PR2 clear-then-submit ordering', async () => {
   const h = startApp()
   await type(h.vt, '/status')

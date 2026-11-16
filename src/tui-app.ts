@@ -17748,6 +17748,7 @@ export class TuiApp {
    */
   setEditorText(text: string): void {
     this.clearExitConfirmation()
+    if (this.isDisposed() || !this.terminalPresentationActive) return
     // PR2: the held submission owns the document; the application's own
     // held-aware restore sites already skip their writes, and this fence
     // covers every other programmatic caller (plugins, external editor,
@@ -17904,6 +17905,10 @@ export class TuiApp {
    */
   insertIntoEditor(text: string): void {
     this.clearExitConfirmation()
+    if (this.isDisposed() || !this.terminalPresentationActive) return
+    // PR2: a held composer owns its document — no programmatic insertion may
+    // mutate it (the same fence as setDraft/setEditorText).
+    if (this.composerHeld()) return
     this.invalidateDraftPreviewCaches()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
@@ -24627,6 +24632,9 @@ export class TuiApp {
    */
   setDraft(text: string): void {
     this.clearExitConfirmation()
+    // A disposed or stopped surface accepts no draft write-back (nothing may
+    // repaint or resurrect content in a component that no longer presents).
+    if (this.isDisposed() || !this.terminalPresentationActive) return
     // PR2: a live submission attempt owns the document — no programmatic
     // renderer/plugin write may mutate it (the keyboard lock alone is not the
     // contract). The accepted settlement clears through its own private path.
@@ -24668,6 +24676,7 @@ export class TuiApp {
    * autocomplete submit) reaches `onMaySubmit`.
    */
   holdSubmission(attemptId: string): void {
+    if (this.isDisposed() || !this.terminalPresentationActive) return
     const text = this.getDraft()
     // The recall-eligibility fact belongs to the GESTURE time: at acceptance
     // the staged attachments are already consumed, so re-asking
@@ -24685,6 +24694,9 @@ export class TuiApp {
    * unknown outcomes unlock the editor with the document intact.
    */
   settleSubmission(attemptId: string, result: 'accepted' | 'not-accepted' | 'unknown'): void {
+    // A stopped surface must never paint (or clear) again: the drain settles
+    // the attempt's state silently and the renderer state dies with it.
+    if (this.isDisposed() || !this.terminalPresentationActive) return
     const hold = this.submissionHold
     if (hold === undefined || hold.attemptId !== attemptId) return
     this.submissionHold = undefined

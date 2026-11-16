@@ -1905,8 +1905,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     composerHold = undefined
     // The renderer must be unlocked: a surface cleared under a live attempt
     // would otherwise keep its composer frozen forever. No clear happens —
-    // the outcome is not an acceptance.
-    deps.app().settleSubmission?.(hold.id, 'not-accepted')
+    // the outcome is not an acceptance. A cleaned-up surface is not
+    // repainted at all.
+    if (!deps.isCleanedUp()) deps.app().settleSubmission?.(hold.id, 'not-accepted')
     deps.diag.debug('composer hold retired', { reason })
   }
 
