@@ -392,10 +392,18 @@ async function inputScene(context) {
       return true
     })
     requireFact(sdk.finishWindow(from, sdk.updates.length, sessionId).length === 0, 'rejected admission emits no content')
-    requireFact(hostSessionEvents(context.dshHome, sessionId).slice(negativeStart).every(event => event.type !== 'user/message'), 'Host rejection precedes every durable user/message')
     const healthMarker = `sdk-input-health-${hash(randomBytes(16))}`
     const healthy = await prompt(session, [{ type: 'text', text: healthMarker }], value => authoredText(value) === healthMarker, 'input healthy after rejection')
     assertTextChunks(healthy.updates, assistantMessage(healthy), sessionId)
+    // The rejected attempt must leave no durable authored message. The healthy
+    // prompt has already supplied the durable user/message + turn/end fence, so
+    // this no longer races the official JSONL write-behind buffer: any earlier
+    // append on the same Session stream is ordered before that fence.
+    const negativeAuthored = (hostSessionEvents(context.dshHome, sessionId) ?? [])
+      .slice(negativeStart)
+      .filter(event => event.type === 'user/message' && event.data.source?.kind === 'user')
+    requireFact(negativeAuthored.length === 1 && negativeAuthored[0].data.id === healthy.user.id,
+      `the rejected admission left no durable authored user/message (got ${String(negativeAuthored.length)} authored message(s) in the negative window)`)
     return {
       imageAttachmentId: images[0].ref.attachmentId, imageSha256: images[0].digest, largeImageBytes: large.length,
       resourceLinkTurn: link.turn, imageTurn: images[0].turn, largeImageTurn: images[1].turn,
