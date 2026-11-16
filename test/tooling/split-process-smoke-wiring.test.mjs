@@ -1027,7 +1027,13 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
         siblingSessionId: 'S-sibling',
         tuiTurn: 15,
         reattachAttempts: 2,
-        lateRead: { attachmentId: `sha256:${'a'.repeat(64)}`, releasedAfterDisconnect: true, lateAttempts: 1 },
+        lateRead: {
+          attachmentId: `sha256:${'a'.repeat(64)}`,
+          hostCloseConnections: 2,
+          claimHeldBeforeRelease: true,
+          releasedAfterDisconnect: true,
+          lateAttempts: 1,
+        },
       },
       imageProbes: [{ kind: 'po4c-image-stored' }, { kind: 'po4c-image-stored' }],
     },
@@ -1059,9 +1065,17 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
   assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
     ...complete, evidence: { ...complete.evidence, slowPeer: { ...complete.evidence.slowPeer, siblingSessionId: 'S-po4c' } },
   }), /selected acp\.po4c-content-output/u)
-  // The late Store read must be proven to have completed AFTER the disconnect.
+  // The late Store read must be proven to have completed AFTER the Host
+  // processed the disconnect AND while the dead connection still held the
+  // Session claim.
   assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
     ...complete, evidence: { ...complete.evidence, slowPeer: { ...complete.evidence.slowPeer, lateRead: { ...complete.evidence.slowPeer.lateRead, releasedAfterDisconnect: false } } },
+  }), /selected acp\.po4c-content-output/u)
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
+    ...complete, evidence: { ...complete.evidence, slowPeer: { ...complete.evidence.slowPeer, lateRead: { ...complete.evidence.slowPeer.lateRead, claimHeldBeforeRelease: false } } },
+  }), /selected acp\.po4c-content-output/u)
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
+    ...complete, evidence: { ...complete.evidence, slowPeer: { ...complete.evidence.slowPeer, lateRead: { ...complete.evidence.slowPeer.lateRead, hostCloseConnections: 0 } } },
   }), /selected acp\.po4c-content-output/u)
   // A NOT_VERIFIED status never becomes a selected PASS.
   assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', { ...complete, status: 'NOT_VERIFIED' }),

@@ -3147,6 +3147,46 @@ test('PO-4C C-L1-05: a request abort during a held read abandons the output inst
   assert.deepEqual(await attempt, { stopReason: 'cancelled' })
 })
 
+test('PO-4C F2: a session/cancel abandons a held image read and settles on the real cancelled turn/end', async () => {
+  const view = promptView()
+  await view.attach()
+  const readStarted = deferred<void>()
+  // A signal-respecting official Store read: without the cancellation aborting
+  // this flight's output IO it would never settle, so the cancelled answer
+  // could not be produced.
+  view.access.imageReadImpl = async (_ref, signal) => {
+    readStarted.resolve()
+    return await new Promise<AcpStoredImage>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+    })
+  }
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-cancel')
+  view.access.turnFence = { openTurnStartSeq: 100, lastTurn: 1 }
+  view.access.agentStatus = 'running'
+  view.claim('m-cancel', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-cancel', [
+    { type: 'text', text: 'before' },
+    imageBlock('sha256:cancel'),
+  ]))
+  await readStarted.promise
+  view.registry.cancelSession(view.conn, view.access, 'P1')
+  // The real user-aborted terminal of the owned turn settles the request; the
+  // abandoned read must not hang it nor become a content failure.
+  view.commit('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } })
+  const settled = await Promise.race([
+    attempt.then(value => ({ kind: 'settled' as const, value }), (error: unknown) => ({ kind: 'failed' as const, error })),
+    // A bounded deadline turns a missing settlement into a clean test failure
+    // instead of a hung suite; the authoritative fact is the real cancelled
+    // turn/end above, not this window.
+    new Promise<{ kind: 'timeout' }>(resolveTimeout => setTimeout(() => resolveTimeout({ kind: 'timeout' }), 2_000)),
+  ])
+  assert.equal(settled.kind, 'settled', 'a session/cancel must not wait for the held Store read')
+  assert.deepEqual(settled.kind === 'settled' ? settled.value : undefined, { stopReason: 'cancelled' })
+  assert.deepEqual(view.notifications, [], 'the not-yet-converted event is dropped; no partial chunk is sent')
+})
+
 test('PO-4C C-L1-05: an Agent disposal during a read fails the request once and a late read never reaches the wire', async () => {
   const view = promptView()
   await view.attach()
