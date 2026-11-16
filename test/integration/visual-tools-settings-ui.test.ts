@@ -83,6 +83,10 @@ import { bindScopeParent, createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import * as tool from '@deepseek-ai/dsh-tool-subagent'
+import SubprocessLocal from '@deepseek-ai/dsh-subprocess-local'
+import SandboxLocal from '@deepseek-ai/dsh-sandbox-local'
+import SandboxPolicy from '@deepseek-ai/dsh-sandbox-policy'
+import { mountHostSectionsPlane } from '../support/host-sections-fixture.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 /** The PTC SDK rendering of the current Host registry (the same definitions a
@@ -1210,4 +1214,174 @@ test('a real Settings Confirm drives the Host registry and the next model reques
   assert.equal(afterOn.filter(name => name === CHART_TOOL_NAME).length, 1)
   assert.equal(afterOn.filter(name => name === SVG_TOOL_NAME).length, 1)
   assert.equal(afterOn.filter(name => name === PRESENT_VISUAL_TOOL_NAME).length, 1)
+})
+
+/** Mount the real FR5-B rows (agent-loop + bash-sandbox + session log) over a
+ *  real profile/bundle. The sandbox services are the official local ones. */
+async function bootHostSectionsUi(
+  ctx: Context,
+  workRoot: string,
+  initial: Parameters<typeof mountHostSectionsPlane>[2] = {},
+): Promise<DirectConfigPort> {
+  await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
+  await ctx.plugin(SubprocessLocal)
+  await ctx.plugin(SandboxLocal)
+  await ctx.plugin(SandboxPolicy)
+  await ctx.plugin(Loader)
+  await mountHostSectionsPlane(ctx, workRoot, initial)
+  return new DirectConfigPort(ctx, undefined, () => undefined)
+}
+
+/** Click one painted control through the real Root hit map (press -> repaint -> release). */
+async function clickUiPainted(ui: UiHarness, text: string, rowHint?: number): Promise<void> {
+  await clickPainted(ui, text, rowHint)
+}
+
+test('Root pointer journeys save the real Agent-loop and Shell-execution pages through the official plane', async t => {
+  const life = testLifecycle(t)
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  const port = await bootHostSectionsUi(ctx, life.tempDir('fr5b-ui-plane-'), {
+    agentLoop: { maxParallelToolCalls: 1 },
+    bashSandbox: { timeoutMs: 60_000 },
+  })
+  const recorder = recordOfficialSubagentMutations(ctx, t)
+  const ui = mountSettingsUi(port)
+  life.defer(() => ui.dispose())
+
+  // ── Agent loop: Root row click -> field click -> painted Apply -> Save ────
+  ui.invoke('settings')
+  await ui.vt.waitForRender()
+  await selectSettingsCategory(ui.vt, 'Agent')
+  await settingsKey(ui, '\r')
+  for (let step = 0; step < 8 && !/> Agent loop/u.test(ui.vt.getViewport().join('\n')); step += 1) {
+    await settingsKey(ui, '\x1b[B')
+  }
+  await clickUiPainted(ui, 'Agent loop')
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Settings · Agent · Agent loop/u.test(frame) && /Parallel tool calls\s+1/u.test(frame),
+    () => ui.vt.waitForRender(), 'the real Root opens the Agent-loop page',
+  )
+  const loopOpened = readySection(port.agentLoopSettings.read())
+  await clickUiPainted(ui, 'Parallel tool calls')
+  assert.match(ui.vt.getViewport().join('\n'), /Edit Parallel tool calls/u)
+  await settingsKey(ui, '\x15')
+  await settingsKey(ui, '3')
+  await clickUiPainted(ui, 'Apply [Enter]')
+  assert.match(ui.vt.getViewport().join('\n'), /Parallel tool calls\s+3/u)
+  assert.equal(recorder.calls.length, 0, 'staging through the Root writes nothing')
+  await clickUiPainted(ui, 'Save [S]')
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Status: Verified/u.test(frame),
+    () => ui.vt.waitForRender(), 'the real Host write verifies',
+  )
+  assert.deepEqual(recorder.calls.at(-1), {
+    ns: 'agent-loop',
+    ops: [{ op: 'set', path: ['maxParallelToolCalls'], value: 3 }],
+    revision: loopOpened.revision,
+  })
+  assert.equal(readySection(port.agentLoopSettings.read()).effective.maxParallelToolCalls, 3)
+  assert.equal(ctx.agentLoop.config.maxParallelToolCalls.get(), 3,
+    'the official Host the next Agent step reads is the saved value')
+
+  // Dirty Discard: the Root's visible question answers from the SAME page.
+  await clickUiPainted(ui, 'Parallel tool calls')
+  await settingsKey(ui, '\x15')
+  await settingsKey(ui, '4')
+  await clickUiPainted(ui, 'Apply [Enter]')
+  await clickUiPainted(ui, 'Back [Esc]')
+  assert.match(ui.vt.getViewport().join('\n'), /Discard unsaved changes\? y\/N/u)
+  await clickUiPainted(ui, 'Keep [Esc]')
+  assert.match(ui.vt.getViewport().join('\n'), /Parallel tool calls\s+4/u)
+  await clickUiPainted(ui, 'Back [Esc]')
+  await clickUiPainted(ui, 'Discard [Y]')
+  assert.match(ui.vt.getViewport().join('\n'), /Settings · Agent · Rows/u)
+  assert.equal(recorder.calls.length, 1, 'the discarded draft never reached the Host')
+
+  // ── Shell execution: both caps in ONE official mutation ───────────────────
+  await ui.vt.sendInput('\x1b') // Agent rows -> the category rail
+  await ui.vt.waitForRender()
+  await ui.vt.sendInput('\x1b[H') // the rail walk is absolute from About
+  await ui.vt.waitForRender()
+  await selectSettingsCategory(ui.vt, 'Tools')
+  await settingsKey(ui, '\r')
+  for (let step = 0; step < 8 && !/> Shell execution/u.test(ui.vt.getViewport().join('\n')); step += 1) {
+    await settingsKey(ui, '\x1b[B')
+  }
+  await clickUiPainted(ui, 'Shell execution')
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Settings · Tools · Shell execution/u.test(frame) && /Command timeout \(ms\)\s+60000/u.test(frame),
+    () => ui.vt.waitForRender(), 'the real Root opens the Shell-execution page',
+  )
+  const shellOpened = readySection(port.shellExecutionSettings.read())
+  await clickUiPainted(ui, 'Command timeout (ms)')
+  await settingsKey(ui, '\x15')
+  await settingsKey(ui, '45000')
+  await clickUiPainted(ui, 'Apply [Enter]')
+  await clickUiPainted(ui, 'Output cap per stream (bytes)')
+  await settingsKey(ui, '\x15')
+  await settingsKey(ui, '128000')
+  await clickUiPainted(ui, 'Apply [Enter]')
+  await clickUiPainted(ui, 'Save [S]')
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Status: Verified/u.test(frame),
+    () => ui.vt.waitForRender(), 'the two-cap official write verifies',
+  )
+  assert.deepEqual(recorder.calls.at(-1), {
+    ns: 'bash-sandbox',
+    ops: [
+      { op: 'set', path: ['timeoutMs'], value: 45_000 },
+      { op: 'set', path: ['maxOutputBytes'], value: 128_000 },
+    ],
+    revision: shellOpened.revision,
+  })
+  assert.deepEqual(readySection(port.shellExecutionSettings.read()).effective, {
+    executor: 'bash', timeoutMs: 45_000, maxOutputBytes: 128_000,
+  })
+  const liveShell = ctx.shell as unknown as { config: { timeoutMs: { get(): number }; maxOutputBytes: { get(): number } } }
+  assert.equal(liveShell.config.timeoutMs.get(), 45_000)
+  assert.equal(liveShell.config.maxOutputBytes.get(), 128_000)
+})
+
+test('Root-level Reset on the real Agent-loop page sends the official unset and reads the Host back', async t => {
+  const life = testLifecycle(t)
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  const port = await bootHostSectionsUi(ctx, life.tempDir('fr5b-ui-reset-plane-'), {
+    agentLoop: { maxParallelToolCalls: 1 },
+    user: { 'agent-loop': { maxParallelToolCalls: 5 } },
+  })
+  const recorder = recordOfficialSubagentMutations(ctx, t)
+  const ui = mountSettingsUi(port)
+  life.defer(() => ui.dispose())
+  ui.invoke('settings')
+  await ui.vt.waitForRender()
+  await selectSettingsCategory(ui.vt, 'Agent')
+  await settingsKey(ui, '\r')
+  for (let step = 0; step < 8 && !/> Agent loop/u.test(ui.vt.getViewport().join('\n')); step += 1) {
+    await settingsKey(ui, '\x1b[B')
+  }
+  await clickUiPainted(ui, 'Agent loop')
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Parallel tool calls\s+5/u.test(frame) && /Source: Overridden/u.test(frame),
+    () => ui.vt.waitForRender(), 'the USER override is the current Agent-loop value',
+  )
+  await clickUiPainted(ui, '[Reset]')
+  assert.match(ui.vt.getViewport().join('\n'), /Reset staged/u)
+  await clickUiPainted(ui, 'Save [S]')
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Status: Verified/u.test(frame) && /Parallel tool calls\s+1/u.test(frame),
+    () => ui.vt.waitForRender(), 'Reset reads back the inherited bundle value',
+  )
+  assert.deepEqual(recorder.calls.at(-1)?.ops, [{ op: 'unset', path: ['maxParallelToolCalls'] }],
+    'Reset is the official unset, never set(inherited)')
+  const readback = readySection(port.agentLoopSettings.read())
+  assert.equal(readback.effective.maxParallelToolCalls, 1)
+  assert.equal(ctx.agentLoop.config.maxParallelToolCalls.get(), 1)
 })

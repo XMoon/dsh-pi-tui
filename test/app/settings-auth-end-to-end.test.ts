@@ -205,6 +205,21 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
         refresh: async () => {},
         mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
       },
+      agentLoopSettings: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      shellExecutionSettings: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      sessionLogUpload: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
       // C2-R4: the Tools Web page is mountable for the credential deeplink case.
       web: {
         available: () => true,

@@ -90,6 +90,13 @@ import type {
   SubagentLimitsConfig,
   SubagentModelSelection,
   SubagentModelSelectionConfig,
+  AgentLoopSettings,
+  AgentLoopSettingsConfig,
+  HostShellExecutor,
+  ShellExecutionSettings,
+  ShellExecutionSettingsConfig,
+  SessionLogUpload,
+  SessionLogUploadConfig,
   SectionPatch,
   SectionRead,
   SectionMutationOutcome,
@@ -119,7 +126,13 @@ import {
   projectMcpServerEntry,
   type McpClassifiedServerEntry,
 } from '../../domain/mcp/server-config.ts'
-import { projectSubagentLimits, projectSubagentModelSelection, type SubagentSectionProjection } from '../subagent-settings.ts'
+import { projectSubagentLimits, projectSubagentModelSelection } from '../subagent-settings.ts'
+import {
+  projectAgentLoopSettings,
+  projectSessionLogUpload,
+  projectShellExecutionSettings,
+  type SectionFacts,
+} from '../host-settings-sections.ts'
 import { SupersededReadError } from '../read-error.ts'
 import { RemoteConfigWriteLifetime } from './config-write-lifetime.ts'
 import { RemoteAuthorizationConfig } from './authorization-remote.ts'
@@ -291,6 +304,8 @@ const PERMISSION_SETTINGS_NS = 'permission'
 const PRESET_REGISTRY_NS = 'agent-preset-registry'
 const SUBAGENT_LIMITS_NS = 'subagent'
 const SUBAGENT_SETTINGS_NS = 'subagent-model-selection-settings'
+const AGENT_LOOP_NS = 'agent-loop'
+const SESSION_LOG_UPLOAD_NS = 'session-log-deepseek'
 const VISUAL_TOOLS_NS = 'pi-tui-visual-tools'
 
 /** The provider route grammar the adapter-owned profile-slot rule enforces
@@ -1678,11 +1693,13 @@ class RemotePresetDefaultConfig implements PresetDefaultConfig {
   }
 }
 
-function readRemoteSubagentSection<T extends object>(
-  mirror: RemoteConfigMirror,
-  namespace: string,
-  project: (effective: unknown, inherited: unknown) => SubagentSectionProjection<T> | undefined,
-): SectionRead<T> {
+type RemoteSnapshotRead =
+  | { readonly kind: 'ready'; readonly generation: object }
+  | { readonly kind: 'unavailable' | 'unreadable'; readonly reason: string }
+
+/** ONE currentness proof of the shared mirror, shared by every typed section
+ *  read so a snapshot never mixes generations. */
+function readRemoteSnapshot(mirror: RemoteConfigMirror): RemoteSnapshotRead {
   const readiness = mirror.readiness()
   if (readiness === 'unavailable') {
     const failure = mirror.lastRefreshFailure()
@@ -1698,27 +1715,67 @@ function readRemoteSubagentSection<T extends object>(
   if (generation === undefined) {
     return { kind: 'unreadable', reason: 'the Host settings snapshot is not current' }
   }
-  const descriptor = mirror.namespace(namespace)
-  if (descriptor === undefined) {
-    return { kind: 'unavailable', reason: 'the official Host settings section is not mounted' }
-  }
-  if (typeof descriptor.revision !== 'number' || !Number.isSafeInteger(descriptor.revision) || descriptor.revision < 0) {
+  return { kind: 'ready', generation }
+}
+
+function projectRemoteView<T extends object>(
+  generation: object,
+  view: RemoteSettingsNamespaceView,
+  project: (effective: unknown, inherited: unknown) => SectionFacts<T> | undefined,
+): SectionRead<T> {
+  if (typeof view.revision !== 'number' || !Number.isSafeInteger(view.revision) || view.revision < 0) {
     return { kind: 'unreadable', reason: 'the official Host settings revision is not readable' }
   }
-  const projected = project(descriptor.value, descriptor.base)
+  const projected = project(view.value, view.base)
   if (projected === undefined) {
     return { kind: 'unreadable', reason: 'the official Host settings value or inherited base is not readable' }
   }
-  return { kind: 'ready', generation, revision: descriptor.revision, ...projected }
+  return { kind: 'ready', generation, revision: view.revision, ...projected }
 }
 
-async function mutateRemoteSubagentSection(
+function readRemoteSection<T extends object>(
+  mirror: RemoteConfigMirror,
+  namespace: string,
+  project: (effective: unknown, inherited: unknown) => SectionFacts<T> | undefined,
+): SectionRead<T> {
+  const snapshot = readRemoteSnapshot(mirror)
+  if (snapshot.kind !== 'ready') return snapshot
+  const view = mirror.namespace(namespace)
+  if (view === undefined) {
+    return { kind: 'unavailable', reason: 'the official Host settings section is not mounted' }
+  }
+  return projectRemoteView(snapshot.generation, view, project)
+}
+
+/** The official model-tool shell executor rows. The HOST's served Settings
+ *  namespaces decide which one is active — never the Client OS. */
+const SHELL_EXECUTOR_ROWS: readonly { readonly executor: HostShellExecutor; readonly namespace: string }[] = [
+  { executor: 'bash', namespace: 'bash-sandbox' },
+  { executor: 'pwsh', namespace: 'pwsh-sandbox' },
+]
+
+function readRemoteShellExecutionSection(mirror: RemoteConfigMirror): SectionRead<ShellExecutionSettings> {
+  const snapshot = readRemoteSnapshot(mirror)
+  if (snapshot.kind !== 'ready') return snapshot
+  const mounted = SHELL_EXECUTOR_ROWS.filter(row => mirror.namespace(row.namespace) !== undefined)
+  if (mounted.length === 0) {
+    return { kind: 'unavailable', reason: 'no active Host shell executor settings row is mounted' }
+  }
+  if (mounted.length !== 1) {
+    return { kind: 'unreadable', reason: 'both Host shell executor settings rows are mounted; the active executor is ambiguous' }
+  }
+  const active = mounted[0]!
+  return projectRemoteView(snapshot.generation, mirror.namespace(active.namespace)!, projectShellExecutionSettings(active.executor))
+}
+
+async function mutateRemoteSection(
   mirror: RemoteConfigMirror,
   namespace: string,
   ops: readonly RemoteSettingsPathOp[],
   expectedRevision: number,
   generation: object,
 ): Promise<SectionMutationOutcome> {
+
   const currentGeneration = mirror.readyGeneration()
   if (currentGeneration === undefined || !Object.is(currentGeneration, generation)) {
     return { kind: 'rejected', reason: 'the Host authority changed; refresh before saving' }
@@ -1772,7 +1829,7 @@ class RemoteSubagentLimitsConfig implements SubagentLimitsConfig {
   }
 
   read(): SectionRead<SubagentLimits> {
-    return readRemoteSubagentSection(this.mirror, SUBAGENT_LIMITS_NS, projectSubagentLimits)
+    return readRemoteSection(this.mirror, SUBAGENT_LIMITS_NS, projectSubagentLimits)
   }
 
   async refresh(): Promise<void> {
@@ -1792,7 +1849,7 @@ class RemoteSubagentLimitsConfig implements SubagentLimitsConfig {
         ? { op: 'unset', path: [field] }
         : { op: 'set', path: [field], value: edit.value })
     }
-    return mutateRemoteSubagentSection(this.mirror, SUBAGENT_LIMITS_NS, ops, expectedRevision, generation)
+    return mutateRemoteSection(this.mirror, SUBAGENT_LIMITS_NS, ops, expectedRevision, generation)
   }
 }
 
@@ -1806,7 +1863,7 @@ class RemoteSubagentModelSelectionConfig implements SubagentModelSelectionConfig
   }
 
   read(): SectionRead<SubagentModelSelection> {
-    return readRemoteSubagentSection(this.mirror, SUBAGENT_SETTINGS_NS, projectSubagentModelSelection)
+    return readRemoteSection(this.mirror, SUBAGENT_SETTINGS_NS, projectSubagentModelSelection)
   }
 
   async refresh(): Promise<void> {
@@ -1829,7 +1886,127 @@ class RemoteSubagentModelSelectionConfig implements SubagentModelSelectionConfig
         ? { op: 'unset', path: ['allowedModels'] }
         : { op: 'set', path: ['allowedModels'], value: patch.allowedModels.value.map(route => ({ ...route })) })
     }
-    return mutateRemoteSubagentSection(this.mirror, SUBAGENT_SETTINGS_NS, ops, expectedRevision, generation)
+    return mutateRemoteSection(this.mirror, SUBAGENT_SETTINGS_NS, ops, expectedRevision, generation)
+  }
+}
+
+class RemoteAgentLoopSettingsConfig implements AgentLoopSettingsConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly refreshRead: () => Promise<void>
+
+  constructor(mirror: RemoteConfigMirror, refreshRead: () => Promise<void>) {
+    this.mirror = mirror
+    this.refreshRead = refreshRead
+  }
+
+  read(): SectionRead<AgentLoopSettings> {
+    return readRemoteSection(this.mirror, AGENT_LOOP_NS, projectAgentLoopSettings)
+  }
+
+  async refresh(): Promise<void> {
+    await this.refreshRead()
+  }
+
+  async mutate(
+    patch: SectionPatch<AgentLoopSettings>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome> {
+    const ops: RemoteSettingsPathOp[] = []
+    if (patch.maxParallelToolCalls !== undefined) {
+      ops.push(patch.maxParallelToolCalls.kind === 'reset'
+        ? { op: 'unset', path: ['maxParallelToolCalls'] }
+        : { op: 'set', path: ['maxParallelToolCalls'], value: patch.maxParallelToolCalls.value })
+    }
+    return mutateRemoteSection(this.mirror, AGENT_LOOP_NS, ops, expectedRevision, generation)
+  }
+}
+
+/** The two numeric caps of the Host's ACTIVE shell executor row. The row is
+ *  chosen from the mirrored Host namespaces; the Client OS is never consulted. */
+class RemoteShellExecutionSettingsConfig implements ShellExecutionSettingsConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly refreshRead: () => Promise<void>
+
+  constructor(mirror: RemoteConfigMirror, refreshRead: () => Promise<void>) {
+    this.mirror = mirror
+    this.refreshRead = refreshRead
+  }
+
+  read(): SectionRead<ShellExecutionSettings> {
+    return readRemoteShellExecutionSection(this.mirror)
+  }
+
+  async refresh(): Promise<void> {
+    await this.refreshRead()
+  }
+
+  async mutate(
+    patch: SectionPatch<ShellExecutionSettings>,
+    expectedRevision: number,
+    generation: object,
+    expectedExecutor: HostShellExecutor,
+  ): Promise<SectionMutationOutcome> {
+    if (patch.executor !== undefined) {
+      return { kind: 'rejected', reason: 'the Host shell executor identity is a Host observation, not an editable setting' }
+    }
+    // Re-prove the ACTIVE Host row before dispatch: never write the other
+    // platform's row from a Client-side guess.
+    const current = readRemoteShellExecutionSection(this.mirror)
+    if (current.kind !== 'ready') {
+      return { kind: 'rejected', reason: current.reason }
+    }
+    if (current.effective.executor !== expectedExecutor || !Object.is(current.generation, generation)) {
+      return { kind: 'rejected', reason: 'the active Host shell executor changed; refresh before saving' }
+    }
+    const ops: RemoteSettingsPathOp[] = []
+    for (const field of ['timeoutMs', 'maxOutputBytes'] as const) {
+      const edit = patch[field]
+      if (edit === undefined) continue
+      ops.push(edit.kind === 'reset'
+        ? { op: 'unset', path: [field] }
+        : { op: 'set', path: [field], value: edit.value })
+    }
+    const namespace = expectedExecutor === 'bash' ? 'bash-sandbox' : 'pwsh-sandbox'
+    return mutateRemoteSection(this.mirror, namespace, ops, expectedRevision, generation)
+  }
+}
+
+class RemoteSessionLogUploadConfig implements SessionLogUploadConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly refreshRead: () => Promise<void>
+
+  constructor(mirror: RemoteConfigMirror, refreshRead: () => Promise<void>) {
+    this.mirror = mirror
+    this.refreshRead = refreshRead
+  }
+
+  read(): SectionRead<SessionLogUpload> {
+    // An absent namespace hides the General row even on a stale mirror. A
+    // last-known namespace stays visible as an explicit non-current fact;
+    // `readRemoteSection` then reports it unreadable, never as a current Off.
+    if (this.mirror.namespace(SESSION_LOG_UPLOAD_NS) === undefined) {
+      return { kind: 'unavailable', reason: 'the official Host settings section is not mounted' }
+    }
+    return readRemoteSection(this.mirror, SESSION_LOG_UPLOAD_NS, projectSessionLogUpload)
+  }
+
+  async refresh(): Promise<void> {
+    await this.refreshRead()
+  }
+
+  async mutate(
+    patch: SectionPatch<SessionLogUpload>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome> {
+    const ops: RemoteSettingsPathOp[] = []
+    if (patch.enabled !== undefined) {
+      ops.push(patch.enabled.kind === 'reset'
+        ? { op: 'unset', path: ['enabled'] }
+        : { op: 'set', path: ['enabled'], value: patch.enabled.value })
+    }
+    return mutateRemoteSection(this.mirror, SESSION_LOG_UPLOAD_NS, ops, expectedRevision, generation)
   }
 }
 
@@ -2080,6 +2257,9 @@ export class RemoteConfigPort implements ConfigPort {
   readonly presetDefault: PresetDefaultConfig
   readonly subagentLimits: SubagentLimitsConfig
   readonly subagentModelSelection: SubagentModelSelectionConfig
+  readonly agentLoopSettings: AgentLoopSettingsConfig
+  readonly shellExecutionSettings: ShellExecutionSettingsConfig
+  readonly sessionLogUpload: SessionLogUploadConfig
   readonly web: WebProviderConfig
   readonly visualTools: VisualToolsConfig
   readonly webStartupPreference: WebStartupPreferenceConfig
@@ -2137,6 +2317,9 @@ export class RemoteConfigPort implements ConfigPort {
     this.presetDefault = new RemotePresetDefaultConfig(this.mirror)
     this.subagentLimits = new RemoteSubagentLimitsConfig(this.mirror, () => this.describe())
     this.subagentModelSelection = new RemoteSubagentModelSelectionConfig(this.mirror, () => this.describe())
+    this.agentLoopSettings = new RemoteAgentLoopSettingsConfig(this.mirror, () => this.describe())
+    this.shellExecutionSettings = new RemoteShellExecutionSettingsConfig(this.mirror, () => this.describe())
+    this.sessionLogUpload = new RemoteSessionLogUploadConfig(this.mirror, () => this.describe())
     this.visualTools = new RemoteVisualToolsConfig(this.mirror)
     this.webStartupPreference = new RemoteWebStartupPreferenceConfig(this.mirror)
     this.backendStartupPreference = new RemoteBackendStartupPreferenceConfig(this.mirror)

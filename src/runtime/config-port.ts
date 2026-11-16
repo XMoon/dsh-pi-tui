@@ -587,6 +587,79 @@ export interface SubagentModelSelectionConfig {
   ): Promise<SectionMutationOutcome>
 }
 
+/** Official `agent-loop.maxParallelToolCalls`: the per-step budget of
+ * concurrently executed tool calls. A volatile Host setting sampled by the
+ * next Agent step; already-dispatched tool calls are never rewritten. */
+export interface AgentLoopSettings {
+  readonly maxParallelToolCalls: number
+}
+
+/** The official Agent-loop scheduling budget (FR5-B). Reset is the official
+ * field `unset`; the next step's budget is whatever the Host then computes. */
+export interface AgentLoopSettingsConfig {
+  read(): SectionRead<AgentLoopSettings>
+  /** Direct already reads the Host; Remote refreshes the existing shared mirror. */
+  refresh(): Promise<void>
+  /** Dispatches one operation batch at the user's exact revision and generation. */
+  mutate(
+    patch: SectionPatch<AgentLoopSettings>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome>
+}
+
+/** The Host-observed identity of the ACTIVE model-tool shell executor row. It
+ * is never a Client-side choice: POSIX Hosts mount `bash-sandbox`, Windows
+ * Hosts mount `pwsh-sandbox`, and exactly one of them is current. */
+export type HostShellExecutor = 'bash' | 'pwsh'
+
+/** The two official numeric caps of the ACTIVE shell executor row. The
+ * executor is a Host observation for display/fencing, not an editable field. */
+export interface ShellExecutionSettings {
+  readonly executor: HostShellExecutor
+  readonly timeoutMs: number
+  readonly maxOutputBytes: number
+}
+
+/** The official model-tool shell execution caps (FR5-B). Both fields live in
+ * the SAME active Host row and are dispatched as ONE revision-checked mutation.
+ * These are NOT the `!` / `!!` user-shell policy. */
+export interface ShellExecutionSettingsConfig {
+  read(): SectionRead<ShellExecutionSettings>
+  /** Direct already reads the Host; Remote refreshes the existing shared mirror. */
+  refresh(): Promise<void>
+  /**
+   * Dispatches one operation batch against the exact ACTIVE row the caller
+   * read: the adapter refuses when the Host's active executor changed since.
+   */
+  mutate(
+    patch: SectionPatch<ShellExecutionSettings>,
+    expectedRevision: number,
+    generation: object,
+    expectedExecutor: HostShellExecutor,
+  ): Promise<SectionMutationOutcome>
+}
+
+/** Official `session-log-deepseek.enabled`: whether the official plugin
+ * contributes this session's log to DeepSeek API requests. */
+export interface SessionLogUpload {
+  readonly enabled: boolean
+}
+
+/** The official session-log upload switch (FR5-B). `false` is a real USER
+ * value; Reset is the official `unset` and may read back `true`. */
+export interface SessionLogUploadConfig {
+  read(): SectionRead<SessionLogUpload>
+  /** Direct already reads the Host; Remote refreshes the existing shared mirror. */
+  refresh(): Promise<void>
+  /** Dispatches one operation batch at the user's exact revision and generation. */
+  mutate(
+    patch: SectionPatch<SessionLogUpload>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome>
+}
+
 /** The saved agent-preset default sub-domain (`/preset default`): the
  * persisted default (settings `agent-preset-registry.selectedDefault`),
  * falling back to the roster's own default. */
@@ -1190,6 +1263,12 @@ export interface ConfigPort {
   readonly subagentLimits: SubagentLimitsConfig
   /** The official next-session subagent model-selection preference. */
   readonly subagentModelSelection: SubagentModelSelectionConfig
+  /** The official Agent-loop parallel-tool-call budget. */
+  readonly agentLoopSettings: AgentLoopSettingsConfig
+  /** The two numeric caps of the ACTIVE Host model-tool shell executor. */
+  readonly shellExecutionSettings: ShellExecutionSettingsConfig
+  /** The official DeepSeek session-log upload switch. */
+  readonly sessionLogUpload: SessionLogUploadConfig
   /** The official Web provider selection + Search/Fetch API options. */
   readonly web: WebProviderConfig
   /** The profile-wide built-in visual tools (Chart + SVG) availability switch. */

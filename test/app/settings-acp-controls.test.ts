@@ -2,9 +2,9 @@
  * PO-1B — the two `/settings → Tools` ACP rows through the REAL `/settings`
  * composition on a `VirtualTerminal`.
  *
- * `ACP Server` is the RUNTIME row (live listener state via the `acpAccess`
- * port); `Auto-enable ACP on Host startup` is the PERSISTED next-launch
- * preference (via `config.acpStartupPreference`). The cases prove: the row
+ * `ACP Server` is the RUNTIME row in Tools (live listener state via the
+ * `acpAccess` port); `Start ACP automatically` is the PERSISTED next-launch
+ * preference in General (via `config.acpStartupPreference`). The cases prove: the row
  * values come from the authorities; only a settled enabled/disabled offers a
  * confirmable candidate; a Confirm routes exactly ONE Host mutation and paints
  * Verified only after an agreeing authoritative re-read; Direct shows a
@@ -279,7 +279,15 @@ async function openTools(h: Harness): Promise<void> {
   await settle(h, 'the ACP runtime row to settle', frame => frame.includes('ACP Server') && !frame.includes('Loading…'))
 }
 
-/** Move the Tools cursor onto a row whose label matches, then assert it is selected. */
+/** Open the General rows level (FR5-B: the next-Split-Host preferences live there). */
+async function openGeneral(h: Harness): Promise<void> {
+  h.invoke()
+  await settle(h, 'the Settings rail', frame => frame.includes('Settings ·'))
+  await selectSettingsCategory(h.vt, 'General')
+  await key(h, ENTER)
+}
+
+/** Move the current rows cursor onto a row whose label matches, then assert it is selected. */
 async function highlightRow(h: Harness, label: string): Promise<void> {
   for (let step = 0; step < 8; step += 1) {
     if (new RegExp(`> ${label}`, 'u').test(h.view())) return
@@ -340,11 +348,11 @@ test('a Direct backend paints the runtime row Unavailable — Split Host only wi
   }
 })
 
-test('the Auto-enable ACP row shows the schema default and writes On through the ConfigPort', async () => {
+test('the Start ACP automatically row shows the schema default and writes On through the ConfigPort', async () => {
   const h = setup()
   try {
-    await openTools(h)
-    await highlightRow(h, 'Auto-enable ACP on Host startup')
+    await openGeneral(h)
+    await highlightRow(h, 'Start ACP automatically')
     assert.match(h.view(), /Off \(default\)/u, 'the default OFF is marked as not user-overridden')
     assert.match(h.view(), /the current ACP listener is unchanged/u,
       'the row states the next-launch lifetime')
@@ -538,8 +546,8 @@ test('a pending ACP write that settles after a generation change leaves no cross
 test('an unreadable ACP preference offers no confirmable candidate', async () => {
   const h = setup({ pref: undefined })
   try {
-    await openTools(h)
-    await highlightRow(h, 'Auto-enable ACP on Host startup')
+    await openGeneral(h)
+    await highlightRow(h, 'Start ACP automatically')
     assert.match(h.view(), /Unavailable/u, 'an absent section is reported, never the schema default')
     await key(h, ENTER)
     assert.doesNotMatch(h.view(), /Choose value/u)

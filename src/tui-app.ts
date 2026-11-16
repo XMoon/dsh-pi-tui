@@ -1969,6 +1969,13 @@ export interface SettingsWorkspaceOpenOptions {
     done: () => void,
     onAuthoritativeChange: () => void,
   ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
+  /** FR5-B: the one numeric page shared by the Agent-loop and Shell-execution
+   *  Settings rows, in the SAME Settings lease. */
+  readonly createHostNumericSettingsPage?: (
+    kind: 'agent-loop' | 'shell-execution',
+    done: () => void,
+    onAuthoritativeChange: () => void,
+  ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
   /**
    * C2-R4: the ONE embedded Web Search / Fetch settings page factory. It is
    * mounted in the SAME Settings lease/body when the user activates the Tools
@@ -27303,6 +27310,9 @@ export class TuiApp {
       ...(options.createSubagentSettingsPage === undefined
         ? {}
         : { createSubagentSettingsPage: options.createSubagentSettingsPage }),
+      ...(options.createHostNumericSettingsPage === undefined
+        ? {}
+        : { createHostNumericSettingsPage: options.createHostNumericSettingsPage }),
       ...(options.createWebSettingsPage === undefined
         ? {}
         : { createWebSettingsPage: options.createWebSettingsPage }),

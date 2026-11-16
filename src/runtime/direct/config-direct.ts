@@ -41,7 +41,13 @@ import {
 import { cancellationError } from '../process/tasks.ts'
 import { SupersededReadError } from '../read-error.ts'
 import { safeErrorMessage } from '../process/errors.ts'
-import { projectSubagentLimits, projectSubagentModelSelection, type SubagentSectionProjection } from '../subagent-settings.ts'
+import { projectSubagentLimits, projectSubagentModelSelection } from '../subagent-settings.ts'
+import {
+  projectAgentLoopSettings,
+  projectSessionLogUpload,
+  projectShellExecutionSettings,
+  type SectionFacts,
+} from '../host-settings-sections.ts'
 import {
   resolveTrustedFooterCommand,
   resolveUserCommandItemActivationIds,
@@ -89,6 +95,13 @@ import type {
   SubagentLimitsConfig,
   SubagentModelSelection,
   SubagentModelSelectionConfig,
+  AgentLoopSettings,
+  AgentLoopSettingsConfig,
+  HostShellExecutor,
+  ShellExecutionSettings,
+  ShellExecutionSettingsConfig,
+  SessionLogUpload,
+  SessionLogUploadConfig,
   SectionPatch,
   SectionRead,
   SectionMutationOutcome,
@@ -206,6 +219,9 @@ export class DirectConfigPort implements ConfigPort {
   readonly presetDefault: PresetDefaultConfig
   readonly subagentLimits: SubagentLimitsConfig
   readonly subagentModelSelection: SubagentModelSelectionConfig
+  readonly agentLoopSettings: AgentLoopSettingsConfig
+  readonly shellExecutionSettings: ShellExecutionSettingsConfig
+  readonly sessionLogUpload: SessionLogUploadConfig
   readonly web: WebProviderConfig
   readonly visualTools: VisualToolsConfig
   readonly webStartupPreference: WebStartupPreferenceConfig
@@ -234,6 +250,9 @@ export class DirectConfigPort implements ConfigPort {
     this.presetDefault = new DirectPresetDefaultConfig(ctx)
     this.subagentLimits = new DirectSubagentLimitsConfig(ctx)
     this.subagentModelSelection = new DirectSubagentModelSelectionConfig(ctx)
+    this.agentLoopSettings = new DirectAgentLoopSettingsConfig(ctx)
+    this.shellExecutionSettings = new DirectShellExecutionSettingsConfig(ctx)
+    this.sessionLogUpload = new DirectSessionLogUploadConfig(ctx)
     this.web = new DirectWebProviderConfig(ctx)
     this.visualTools = new DirectVisualToolsConfig(ctx)
     this.webStartupPreference = new DirectWebStartupPreferenceConfig(ctx)
@@ -274,11 +293,17 @@ function settingsAuthorityOf(settings: SettingsServiceLike): object {
   return cordisService[symbols.original] ?? settings
 }
 
-function readDirectSubagentSection<T extends object>(
-  ctx: HostContextLike,
-  namespace: string,
-  project: (effective: unknown, inherited: unknown) => SubagentSectionProjection<T> | undefined,
-): SectionRead<T> {
+type DirectDescriptorRead =
+  | {
+      readonly kind: 'ready'
+      readonly settings: SettingsServiceLike
+      readonly descriptors: readonly SettingsDescriptorLike[]
+    }
+  | { readonly kind: 'unavailable' | 'unreadable'; readonly reason: string }
+
+/** ONE `describe()` read of the current Host settings service, shared by
+ *  every typed section read so a single snapshot never mixes revisions. */
+function readDirectDescriptors(ctx: HostContextLike): DirectDescriptorRead {
   const settings = ctx.get('settings') as SettingsServiceLike | undefined
   if (settings === undefined) return { kind: 'unavailable', reason: 'the Host settings service is unavailable' }
 
@@ -291,14 +316,18 @@ function readDirectSubagentSection<T extends object>(
   if (!Array.isArray(descriptors)) {
     return { kind: 'unreadable', reason: 'the Host settings descriptor list is not readable' }
   }
-  const descriptor = descriptors.find(entry => entry.ns === namespace)
-  if (descriptor === undefined) {
-    return { kind: 'unavailable', reason: 'the official Host settings section is not mounted' }
-  }
+  return { kind: 'ready', settings, descriptors }
+}
+
+function projectDirectDescriptor<T extends object>(
+  settings: SettingsServiceLike,
+  descriptor: SettingsDescriptorLike,
+  project: (effective: unknown, inherited: unknown) => SectionFacts<T> | undefined,
+): SectionRead<T> {
   if (typeof descriptor.revision !== 'number' || !Number.isSafeInteger(descriptor.revision) || descriptor.revision < 0) {
     return { kind: 'unreadable', reason: 'the official Host settings revision is not readable' }
   }
-  let projected: SubagentSectionProjection<T> | undefined
+  let projected: SectionFacts<T> | undefined
   try {
     projected = project(descriptor.value, descriptor.base)
   } catch (error) {
@@ -313,6 +342,43 @@ function readDirectSubagentSection<T extends object>(
     revision: descriptor.revision,
     ...projected,
   }
+}
+
+function readDirectSection<T extends object>(
+  ctx: HostContextLike,
+  namespace: string,
+  project: (effective: unknown, inherited: unknown) => SectionFacts<T> | undefined,
+): SectionRead<T> {
+  const read = readDirectDescriptors(ctx)
+  if (read.kind !== 'ready') return read
+  const descriptor = read.descriptors.find(entry => entry.ns === namespace)
+  if (descriptor === undefined) {
+    return { kind: 'unavailable', reason: 'the official Host settings section is not mounted' }
+  }
+  return projectDirectDescriptor(read.settings, descriptor, project)
+}
+
+/** The official model-tool shell executor rows. The base composition mounts
+ *  exactly one of them at a time (POSIX Bash / Windows PowerShell); the
+ *  Settings descriptor list is the Host's own ACTIVE-row evidence. */
+const SHELL_EXECUTOR_ROWS: readonly { readonly executor: HostShellExecutor; readonly namespace: string }[] = [
+  { executor: 'bash', namespace: 'bash-sandbox' },
+  { executor: 'pwsh', namespace: 'pwsh-sandbox' },
+]
+
+function readDirectShellExecutionSection(ctx: HostContextLike): SectionRead<ShellExecutionSettings> {
+  const read = readDirectDescriptors(ctx)
+  if (read.kind !== 'ready') return read
+  const mounted = SHELL_EXECUTOR_ROWS.filter(row => read.descriptors.some(entry => entry.ns === row.namespace))
+  if (mounted.length === 0) {
+    return { kind: 'unavailable', reason: 'no active Host shell executor settings row is mounted' }
+  }
+  if (mounted.length !== 1) {
+    return { kind: 'unreadable', reason: 'both Host shell executor settings rows are mounted; the active executor is ambiguous' }
+  }
+  const active = mounted[0]!
+  const descriptor = read.descriptors.find(entry => entry.ns === active.namespace)!
+  return projectDirectDescriptor(read.settings, descriptor, projectShellExecutionSettings(active.executor))
 }
 
 /** The Direct M5 footer-command trust read: the USER layer of the `tui-app`
@@ -1755,8 +1821,8 @@ export class DirectPresetDefaultConfig implements PresetDefaultConfig {
   }
 }
 
-/** Official subagent settings use the caller's captured Settings authority and CAS revision. */
-async function mutateDirectSubagentSection(
+/** Official typed sections use the caller's captured Settings authority and CAS revision. */
+async function mutateDirectSection(
   ctx: HostContextLike,
   namespace: string,
   ops: readonly SettingsMutationOp[],
@@ -1790,7 +1856,7 @@ export class DirectSubagentLimitsConfig implements SubagentLimitsConfig {
   }
 
   read(): SectionRead<SubagentLimits> {
-    return readDirectSubagentSection(this.ctx, 'subagent', projectSubagentLimits)
+    return readDirectSection(this.ctx, 'subagent', projectSubagentLimits)
   }
 
   async refresh(): Promise<void> {}
@@ -1808,7 +1874,7 @@ export class DirectSubagentLimitsConfig implements SubagentLimitsConfig {
         ? { op: 'unset', path: [field] }
         : { op: 'set', path: [field], value: edit.value })
     }
-    return mutateDirectSubagentSection(this.ctx, 'subagent', ops, expectedRevision, generation)
+    return mutateDirectSection(this.ctx, 'subagent', ops, expectedRevision, generation)
   }
 }
 
@@ -1821,7 +1887,7 @@ export class DirectSubagentModelSelectionConfig implements SubagentModelSelectio
   }
 
   read(): SectionRead<SubagentModelSelection> {
-    return readDirectSubagentSection(this.ctx, 'subagent-model-selection-settings', projectSubagentModelSelection)
+    return readDirectSection(this.ctx, 'subagent-model-selection-settings', projectSubagentModelSelection)
   }
 
   async refresh(): Promise<void> {}
@@ -1842,7 +1908,115 @@ export class DirectSubagentModelSelectionConfig implements SubagentModelSelectio
         ? { op: 'unset', path: ['allowedModels'] }
         : { op: 'set', path: ['allowedModels'], value: patch.allowedModels.value.map(route => ({ ...route })) })
     }
-    return mutateDirectSubagentSection(this.ctx, 'subagent-model-selection-settings', ops, expectedRevision, generation)
+    return mutateDirectSection(this.ctx, 'subagent-model-selection-settings', ops, expectedRevision, generation)
+  }
+}
+
+/** The official Agent-loop scheduling section (`agent-loop`). */
+const AGENT_LOOP_NS = 'agent-loop'
+/** The official DeepSeek session-log contribution section. */
+const SESSION_LOG_UPLOAD_NS = 'session-log-deepseek'
+
+export class DirectAgentLoopSettingsConfig implements AgentLoopSettingsConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): SectionRead<AgentLoopSettings> {
+    return readDirectSection(this.ctx, AGENT_LOOP_NS, projectAgentLoopSettings)
+  }
+
+  async refresh(): Promise<void> {}
+
+  async mutate(
+    patch: SectionPatch<AgentLoopSettings>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome> {
+    const ops: SettingsMutationOp[] = []
+    if (patch.maxParallelToolCalls !== undefined) {
+      ops.push(patch.maxParallelToolCalls.kind === 'reset'
+        ? { op: 'unset', path: ['maxParallelToolCalls'] }
+        : { op: 'set', path: ['maxParallelToolCalls'], value: patch.maxParallelToolCalls.value })
+    }
+    return mutateDirectSection(this.ctx, AGENT_LOOP_NS, ops, expectedRevision, generation)
+  }
+}
+
+/** The two numeric caps of the ACTIVE Host model-tool shell executor. The
+ *  namespace is chosen from the Host's own ACTIVE Settings descriptors, never
+ *  from the Client OS; an absent or ambiguous executor row fails closed. */
+export class DirectShellExecutionSettingsConfig implements ShellExecutionSettingsConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): SectionRead<ShellExecutionSettings> {
+    return readDirectShellExecutionSection(this.ctx)
+  }
+
+  async refresh(): Promise<void> {}
+
+  async mutate(
+    patch: SectionPatch<ShellExecutionSettings>,
+    expectedRevision: number,
+    generation: object,
+    expectedExecutor: HostShellExecutor,
+  ): Promise<SectionMutationOutcome> {
+    if (patch.executor !== undefined) {
+      return { kind: 'rejected', reason: 'the Host shell executor identity is a Host observation, not an editable setting' }
+    }
+    // Re-resolve the ACTIVE row at dispatch: a profile change between the
+    // page's read and Save must not write the other executor's row.
+    const current = readDirectShellExecutionSection(this.ctx)
+    if (current.kind !== 'ready') {
+      return { kind: 'rejected', reason: current.reason }
+    }
+    if (current.effective.executor !== expectedExecutor) {
+      return { kind: 'rejected', reason: 'the active Host shell executor changed; refresh before saving' }
+    }
+    const ops: SettingsMutationOp[] = []
+    for (const field of ['timeoutMs', 'maxOutputBytes'] as const) {
+      const edit = patch[field]
+      if (edit === undefined) continue
+      ops.push(edit.kind === 'reset'
+        ? { op: 'unset', path: [field] }
+        : { op: 'set', path: [field], value: edit.value })
+    }
+    const namespace = expectedExecutor === 'bash' ? 'bash-sandbox' : 'pwsh-sandbox'
+    return mutateDirectSection(this.ctx, namespace, ops, expectedRevision, generation)
+  }
+}
+
+export class DirectSessionLogUploadConfig implements SessionLogUploadConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): SectionRead<SessionLogUpload> {
+    return readDirectSection(this.ctx, SESSION_LOG_UPLOAD_NS, projectSessionLogUpload)
+  }
+
+  async refresh(): Promise<void> {}
+
+  async mutate(
+    patch: SectionPatch<SessionLogUpload>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome> {
+    const ops: SettingsMutationOp[] = []
+    if (patch.enabled !== undefined) {
+      ops.push(patch.enabled.kind === 'reset'
+        ? { op: 'unset', path: ['enabled'] }
+        : { op: 'set', path: ['enabled'], value: patch.enabled.value })
+    }
+    return mutateDirectSection(this.ctx, SESSION_LOG_UPLOAD_NS, ops, expectedRevision, generation)
   }
 }
 

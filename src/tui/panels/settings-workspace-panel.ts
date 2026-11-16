@@ -104,6 +104,9 @@ export type SettingsWorkspaceRowId =
   | 'approval'
   | 'default-permission'
   | 'subagent-settings'
+  | 'agent-loop'
+  | 'shell-execution'
+  | 'session-log-upload'
   | 'local-shell-sandbox'
   | 'footer-mode'
   | 'footer-configurator'
@@ -140,6 +143,7 @@ export type SettingsWorkspaceWritableField =
   | 'home-end-keys' | 'fullscreen' | 'wheel-scroll-lines'
   | 'notification-mode' | 'notification-method' | 'terminal-progress'
   | 'approval' | 'default-permission' | 'local-shell-sandbox'
+  | 'session-log-upload'
   | 'footer-mode'
   // C2-R6: a live extension registration's own field identity. The command
   // layer routes it to the extension settings registry; it never reaches a
@@ -191,6 +195,9 @@ export interface SettingsWorkspaceEdit {
    *  the read and the Confirm can never be silently overwritten. Rows whose
    *  writer is not revision-addressed omit it. */
   readonly revision?: number
+  /** The opaque Host generation this candidate source was read at, for writers
+   *  that must also refuse a REPLACED Host authority (Session log upload). */
+  readonly generation?: object
 }
 
 /**
@@ -217,7 +224,9 @@ export interface SettingsWorkspaceRow {
    *  Search / Fetch settings page). It is a presentation seam only — no
    *  document field, no writer, no second lease. A row without it never has a
    *  specialist page. */
-  readonly specialist?: 'subagent-settings' | 'web-settings' | 'footer-configurator' | 'keybindings' | 'mcp-servers'
+  readonly specialist?:
+    | 'subagent-settings' | 'web-settings' | 'footer-configurator' | 'keybindings' | 'mcp-servers'
+    | 'agent-loop-settings' | 'shell-execution-settings'
   /** Whether the row's specialist page may be opened RIGHT NOW. Absent = yes.
    *  A non-current authority (a stale/unavailable backend) paints the row and
    *  its last-known facts but offers no Manage action, because the page could
@@ -256,6 +265,9 @@ export interface SettingsWorkspaceCommitRequest {
   /** The revision the confirmed candidate was read at (revision-checked rows
    *  only): the writer submits it as its expected revision. */
   readonly revision?: number
+  /** The opaque Host generation the candidate was read at, when the writer
+   *  must refuse a replaced Host authority. */
+  readonly generation?: object
   /** C2-R6: the extension registration the confirmed candidate belongs to.
    *  Present ONLY for `ext-setting:` fields: the command layer forwards it to
    *  `SettingsRegistry.applyDetailed`, which refuses a stale registration
@@ -374,6 +386,13 @@ export interface SettingsWorkspacePanelIntents {
   /** FR5-A: one staged page for both official subagent Settings sections,
    * mounted in this workspace body under the SAME screen lease. */
   readonly createSubagentSettingsPage?: (
+    done: () => void,
+    onAuthoritativeChange: () => void,
+  ) => EmbeddedSpecialistPage | undefined
+  /** FR5-B: the ONE numeric page shared by the Agent-loop and Shell-execution
+   *  rows, mounted in this workspace body under the SAME screen lease. */
+  readonly createHostNumericSettingsPage?: (
+    kind: 'agent-loop' | 'shell-execution',
     done: () => void,
     onAuthoritativeChange: () => void,
   ) => EmbeddedSpecialistPage | undefined
@@ -779,6 +798,11 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
     || id === 'approval'
     || id === 'default-permission'
     || id === 'subagent-settings'
+    || id === 'agent-loop'
+    || id === 'shell-execution'
+    || id === 'session-log-upload'
+    || id === 'acp-runtime'
+    || id === 'acp-autostart'
     || id === 'local-shell-sandbox'
     || id === 'footer-mode'
     || id === 'footer-configurator'
@@ -3223,6 +3247,10 @@ export class SettingsWorkspacePanel implements Component {
         return this.intents.createKeybindingsPage === undefined ? undefined : { label: 'Configure shortcuts…' }
       case 'mcp-servers':
         return this.intents.createMcpServersPage === undefined ? undefined : { label: 'Manage MCP servers…' }
+      case 'agent-loop-settings':
+        return this.intents.createHostNumericSettingsPage === undefined ? undefined : { label: 'Configure Agent loop…' }
+      case 'shell-execution-settings':
+        return this.intents.createHostNumericSettingsPage === undefined ? undefined : { label: 'Configure Shell execution…' }
     }
   }
 
@@ -3710,6 +3738,8 @@ export class SettingsWorkspacePanel implements Component {
     // may be mounted with ZERO content rows (bar-only) because a command
     // deeplink must still land on them and their own bar keeps Esc reachable.
     const floor = row.specialist === 'subagent-settings'
+      || row.specialist === 'agent-loop-settings'
+      || row.specialist === 'shell-execution-settings'
       ? 1
       : row.specialist === 'web-settings' || row.specialist === 'mcp-servers'
         ? 1
@@ -3726,7 +3756,8 @@ export class SettingsWorkspacePanel implements Component {
       // category rail like every other Settings level, instead of first landing
       // on a Detail summary the user never asked for. The other embedded pages
       // keep their documented `Detail → row` ladder.
-      if ((row.specialist === 'footer-configurator' || row.specialist === 'keybindings' || row.specialist === 'subagent-settings')
+      if ((row.specialist === 'footer-configurator' || row.specialist === 'keybindings' || row.specialist === 'subagent-settings'
+        || row.specialist === 'agent-loop-settings' || row.specialist === 'shell-execution-settings')
         && this.focus === 'detail') {
         this.leaveDetailTo('rows')
       }
@@ -3749,6 +3780,12 @@ export class SettingsWorkspacePanel implements Component {
         break
       case 'mcp-servers':
         page = this.intents.createMcpServersPage?.(done)
+        break
+      case 'agent-loop-settings':
+        page = this.intents.createHostNumericSettingsPage?.('agent-loop', done, changed)
+        break
+      case 'shell-execution-settings':
+        page = this.intents.createHostNumericSettingsPage?.('shell-execution', done, changed)
         break
     }
     if (page === undefined) return
@@ -4964,7 +5001,7 @@ export class SettingsWorkspacePanel implements Component {
       }, phase.registrationToken)
       return
     }
-    this.dispatch(phase.field, phase.candidate, edit.revision, phase.registrationToken)
+    this.dispatch(phase.field, phase.candidate, edit.revision, edit.generation, phase.registrationToken)
   }
 
   /** `[Retry save]`: re-dispatch the FAILED attempt's value, re-proving that its
@@ -4987,7 +5024,7 @@ export class SettingsWorkspacePanel implements Component {
       }, phase.registrationToken)
       return
     }
-    this.dispatch(phase.field, value, edit.revision, phase.registrationToken)
+    this.dispatch(phase.field, value, edit.revision, edit.generation, phase.registrationToken)
   }
 
   /** The ONE dispatch: commit the pending phase, then hand the request to the
@@ -5000,6 +5037,7 @@ export class SettingsWorkspacePanel implements Component {
     field: SettingsWorkspaceWritableField,
     value: string,
     revision?: number,
+    generation?: object,
     registrationToken?: number,
   ): void {
     const onCommit = this.intents.onCommit
@@ -5027,6 +5065,7 @@ export class SettingsWorkspacePanel implements Component {
         field,
         value,
         ...revision === undefined ? {} : { revision },
+        ...generation === undefined ? {} : { generation },
         ...registrationToken === undefined ? {} : { registrationToken },
       },
       outcome => this.settlePending(requestId, outcome),
@@ -5565,9 +5604,11 @@ export class SettingsWorkspacePanel implements Component {
         // (Enter/Right then decide between the Detail, the choice and the
         // row's specialist page).
         this.selectRow(target.id, 'rows')
-        if (target.id === 'subagent-settings') {
+        if (target.id === 'subagent-settings' || target.id === 'agent-loop' || target.id === 'shell-execution') {
           const row = this.selectedRow()
-          if (row?.specialist === 'subagent-settings') this.openSpecialist(row)
+          const specialist = row?.specialist
+          if (row !== undefined
+            && (specialist === 'subagent-settings' || specialist === 'agent-loop-settings' || specialist === 'shell-execution-settings')) this.openSpecialist(row)
         }
         return
       }
