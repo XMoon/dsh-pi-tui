@@ -31,12 +31,17 @@ export function foldGoal(events: readonly { readonly type: string; readonly data
  * current goal and a log `goal/change` payload render IDENTICALLY (a
  * projection-backed session must not get a second, competing presentation
  * rule). A completed goal hides the badge.
+ *
+ * The objective is kept WHOLE here: the raw objective never gets a
+ * code-point or character-count cut in the domain (the old 24-char slice
+ * discarded display data before any width was known). The single-line
+ * projection and the final width-aware truncation happen at the terminal
+ * sink (TuiApp's goal line).
  * @param goal - the fact's `{phase, objective}`.
  * @returns e.g. `goal ● fix the build`, or undefined.
  */
 export function goalTextOf(goal: { readonly phase: string; readonly objective: string }): string | undefined {
   if (goal.phase === 'complete') return undefined
   const mark = goal.phase === 'active' ? '●' : goal.phase === 'paused' ? '‖' : '◌'
-  const objective = goal.objective.length > 24 ? `${goal.objective.slice(0, 24)}…` : goal.objective
-  return `goal ${mark} ${objective}`
+  return `goal ${mark} ${goal.objective}`
 }

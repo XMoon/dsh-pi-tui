@@ -23250,6 +23250,10 @@ export class TuiApp {
         // components. Rebuild from their raw state before chrome measurement
         // so fullscreen hit-testing and footer budgets see the new geometry.
         this.rebuildQueuePane(width)
+        // The goal line bakes its width-aware truncation at setText time too
+        // (the dock row budget is one physical line); re-project it at the
+        // new width on the same geometry pass.
+        this.renderGoalLine()
       }
       if (widthChanged || heightChanged) {
         // The todo panel is width-baked AND height-sensitive: its compact cap
@@ -24484,10 +24488,21 @@ export class TuiApp {
   }
 
   /** Rebuild the goal line: `goal ● <objective>` while a goal is set, hidden
-   * otherwise (display-only — no verbs yet). */
+   * otherwise (display-only — no verbs yet). The domain keeps the objective
+   * whole; the ONE width-aware truncation happens here at the terminal sink,
+   * against the goal row's real cell budget (the full terminal width — the
+   * goal line is dock chrome, not transcript content, so no transcript
+   * gutter applies). */
   private renderGoalLine(): void {
     const goal = this.displayGoal()
-    this.goalLine.setText(goal === undefined || goal === '' ? '' : color.primary(sanitizedPhysicalLine(goal)))
+    if (goal === undefined || goal === '') {
+      this.goalLine.setText('')
+      this.requestRender()
+      return
+    }
+    const single = sanitizedPhysicalLine(goal)
+    const line = truncateToWidth(single, this.terminal.columns, '…')
+    this.goalLine.setText(color.primary(line))
     this.requestRender()
   }
 

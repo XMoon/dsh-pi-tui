@@ -501,6 +501,38 @@ test('shift+tab with no overlay cycles the permission through the host', async (
   app.stop()
 })
 
+test('the goal line keeps the full objective up to the real terminal width and truncates at the cell budget', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  // A long objective (the old 24-char domain cut used to discard everything
+  // past 24 chars BEFORE any width was known). The 80-column terminal minus
+  // the shared 2-cell right gutter budgets 78 cells.
+  const objective = 'ship the 0.5.7 goal dock with full width aware truncation behavior for the dock row'
+  app.setStatus({ goal: `goal ● ${objective}` })
+  await vt.waitForRender()
+  const line = vt.getViewport().find(row => row.includes('goal ●'))
+  assert.ok(line !== undefined, `goal line missing:\n${vt.getViewport().join('\n')}`)
+  assert.ok(line.includes('width aware'), `long objective truncated before the terminal width:\n${line}`)
+  assert.ok(line.trimEnd().endsWith('…'), `an overflowing goal line must end in the visible ellipsis:\n${line}`)
+  assert.ok(visibleWidth(line.trimEnd()) <= 80, `goal line exceeded the terminal width:\n${line}`)
+  // A resize re-derives the baked truncation at the new width: growing the
+  // terminal reveals strictly more of the objective.
+  vt.resize(120, 24)
+  await vt.waitForRender()
+  const wider = vt.getViewport().find(row => row.includes('goal ●'))
+  assert.ok(wider !== undefined, `goal line missing after resize:\n${vt.getViewport().join('\n')}`)
+  assert.ok(wider.includes('truncation behavior for'), `a wider terminal must reveal more objective:\n${wider}`)
+  assert.ok(visibleWidth(wider.trimEnd()) <= 120, `goal line exceeded the terminal width:\n${wider}`)
+  // The single-line contract: newlines and tabs in the raw objective collapse
+  // to one physical row, never a second dock line.
+  app.setStatus({ goal: 'goal ● multi\r\nline\tobjective' })
+  await vt.waitForRender()
+  const rows = vt.getViewport().filter(row => row.includes('goal ●'))
+  assert.equal(rows.length, 1, `a multiline objective must single-line the goal dock:\n${vt.getViewport().join('\n')}`)
+  assert.ok(rows[0]!.includes('multi'), `single-lined objective text missing:\n${rows[0]}`)
+  app.stop()
+})
+
 test('the dock strip shows the todo summary only while non-empty; tasks live in the footer badge and goal on its own line', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
