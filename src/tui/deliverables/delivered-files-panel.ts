@@ -544,20 +544,38 @@ export class DeliveredFilesPanel implements Component {
     }
   }
 
+  /** Move the UNCOMMITTED Turn cursor by one clamped step (keyboard ↑/↓ and
+   *  the Turns wheel share it); committing stays `openFilesForTurn`'s job. */
+  private moveTurnCursor(delta: number): void {
+    const turns = this.snapshot.turns
+    const current = Math.max(0, turns.findIndex(candidate => candidate.turn === this.turnCursor))
+    const next = Math.max(0, Math.min(turns.length - 1, current + delta))
+    this.turnCursor = turns[next]!.turn
+    this.requestRender()
+  }
+
   private handleTurnsInput(data: string): void {
-    if (matchesKey(data, 'up') || matchesKey(data, 'down')) {
-      const turns = this.snapshot.turns
-      const current = Math.max(0, turns.findIndex(candidate => candidate.turn === this.turnCursor))
-      const next = Math.max(0, Math.min(turns.length - 1, current + (matchesKey(data, 'up') ? -1 : 1)))
-      this.turnCursor = turns[next]!.turn
-      this.requestRender()
-      return
-    }
+    if (matchesKey(data, 'up')) return this.moveTurnCursor(-1)
+    if (matchesKey(data, 'down')) return this.moveTurnCursor(1)
     if (matchesKey(data, 'enter')) {
       this.openFilesForTurn(this.turnCursor)
       return
     }
     if (matchesKey(data, 'escape')) return this.backFromTurns()
+  }
+
+  /**
+   * The text page the USER CAN SEE: a settlement that has already been painted.
+   * A Host reply updates `preview` BEFORE the frame paints (the pending
+   * `previewScrollToContent` flag is consumed by the next render), so content
+   * the user has not seen yet must never authorize another Host read —
+   * otherwise a wheel or PgDown right after settlement could paginate past an
+   * unpainted window. The page is undefined while a request is pending and for
+   * metadata/failure/idle bodies.
+   */
+  private paintedPreviewPage(): DeliveredFilePage | undefined {
+    if (this.previewScrollToContent || this.preview.kind !== 'text-page') return undefined
+    return this.preview.page
   }
 
   private handleDetailsInput(data: string): void {
@@ -587,7 +605,7 @@ export class DeliveredFilesPanel implements Component {
         return
       }
       // At the top of the page: the previous 120-line window, when one exists.
-      const page = this.preview.kind === 'text-page' ? this.preview.page : undefined
+      const page = this.paintedPreviewPage()
       if (page !== undefined && page.offset > 1) this.requestPreviewPage(Math.max(1, page.offset - DELIVERED_FILE_PAGE_LINES))
       return
     }
@@ -598,7 +616,7 @@ export class DeliveredFilesPanel implements Component {
         return
       }
       // At the bottom of the page: the next 120-line window, never past EOF.
-      const page = this.preview.kind === 'text-page' ? this.preview.page : undefined
+      const page = this.paintedPreviewPage()
       if (page !== undefined && !page.eof) this.requestPreviewPage(page.offset + DELIVERED_FILE_PAGE_LINES)
     }
   }
@@ -934,6 +952,10 @@ export class DeliveredFilesPanel implements Component {
       this.pressedCell = undefined
       return undefined
     }
+    // A wheel is a fork event with `button: 'none'`, so it must be recognized
+    // BEFORE any left-button filter — it can never run through the
+    // press/click gesture path below.
+    if (event.type === 'wheel') return this.handleWheel(event)
     if (event.type !== 'press' && event.type !== 'click') return undefined
     if (event.button !== 'left') {
       this.pressedCell = undefined
@@ -1014,6 +1036,61 @@ export class DeliveredFilesPanel implements Component {
       return { handled: true, render: true }
     }
     return undefined
+  }
+
+  /** A real wheel cancels the held click even on chrome or an obsolete paint.
+   *  Scroll only current painted content, using the fork's already-scaled delta. */
+  private handleWheel(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    const delta = event.wheelDelta ?? 0
+    if (!Number.isFinite(delta) || delta === 0) return undefined
+    this.pressedCell = undefined
+    if (Math.floor(event.width) !== this.paintedWidth || Math.floor(event.height) !== this.paintedRows) return undefined
+    if (this.paintedPage !== this.page || this.paintedSeat !== (this.page === 'files' ? this.seat : 'list')) return undefined
+    if (event.x < 0 || event.x >= this.paintedWidth || event.y < 0 || event.y >= this.paintedRows) return undefined
+    const bodyRows = this.page === 'details' ? this.detailsBodyRows() : this.listRows()
+    const step = Math.sign(delta) * Math.min(Math.ceil(Math.abs(delta)), Math.max(1, bodyRows))
+    if (this.page === 'files') {
+      const listWidth = this.twoColumn(this.paintedWidth)
+        ? Math.max(24, Math.floor((this.paintedWidth - 3) * 0.58))
+        : this.paintedWidth
+      if (event.x < listWidth && this.paintedListRows.has(event.y)) this.moveSelection(step)
+      return { handled: true, render: false }
+    }
+    if (this.page === 'turns') {
+      if (this.paintedTurnRows.has(event.y)) this.moveTurnCursor(step)
+      return { handled: true, render: false }
+    }
+    if (event.y < 1 || event.y >= this.paintedFooterRow) return { handled: true, render: false }
+    if (step < 0) {
+      if (this.detailsTop > 0) {
+        this.detailsTop = Math.max(0, this.detailsTop + step)
+        this.requestRender()
+      } else {
+        // The previous 120-line window, like PgUp — only from a page the user
+        // can actually see; an unpainted settlement never authorizes a read.
+        const page = this.paintedPreviewPage()
+        if (page !== undefined && page.offset > 1) this.requestPreviewPage(Math.max(1, page.offset - DELIVERED_FILE_PAGE_LINES))
+      }
+    } else {
+      const beforeTop = this.detailsTop
+      const desired = beforeTop + step
+      // One extra physical row witnesses whether this window has more text.
+      // A long source line is extended only as far as this wheel needs.
+      const layout = this.detailsLayout(this.paintedWidth, desired + bodyRows + 1)
+      const nextTop = Math.min(desired, Math.max(0, layout.lines.length - bodyRows))
+      this.detailsTop = nextTop
+      // A CONFIRMED bottom — this wheel could not move the window AT ALL —
+      // is the page edge exactly like PgDn's; landing on it only moves. The
+      // read needs a PAINTED page, so a Host reply that has not reached the
+      // screen yet can never page past a window the user has not seen.
+      const page = this.paintedPreviewPage()
+      if (nextTop === beforeTop && page !== undefined && !page.eof) {
+        this.requestPreviewPage(page.offset + DELIVERED_FILE_PAGE_LINES)
+      } else {
+        this.requestRender()
+      }
+    }
+    return { handled: true, render: false }
   }
 
   /** Resolve the ONE painted semantic target under a cell, or undefined. The

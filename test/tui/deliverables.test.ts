@@ -1840,6 +1840,12 @@ function previewApp(
     path?: string
     preset?: 'full' | 'compact' | 'focus'
     page?: 'files' | 'details'
+    /** Offset-aware page source for the wheel paging journeys (records the
+     *  requested offset into `reads` itself). Absent keeps the historical
+     *  single-text stub with `eof: true`. */
+    pager?: (offset: number) =>
+      | { text: string; lines: number; eof: boolean; version?: string }
+      | Promise<{ text: string; lines: number; eof: boolean; version?: string }>
   } = {},
 ) {
   const vt = new VirtualTerminal(options.columns ?? 100, options.rows ?? 30)
@@ -1851,7 +1857,13 @@ function previewApp(
     turns: [{ turn: 1, files: [{ path, description: 'Exported final report' }] }],
   }
   const text = options.text ?? 'Summary\n  indented code line\n\tTAB line\nResult line 1'
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    runOwned: (_label, task, hooks) => {
+      Promise.resolve(task()).then(value => hooks?.onResult?.(value), error => hooks?.onError?.(error))
+    },
+  }, {
     displayState: { preset: options.preset ?? 'full' },
     copySelection: async (value) => {
       copied.push(value)
@@ -1860,9 +1872,16 @@ function previewApp(
     deliveredFiles: { snapshot: () => snapshot, isCurrent: () => true },
     deliveredFilePreview: () => ({
       stat: async () => ({ version: 'v1', bytes: text.length }),
-      read: async () => {
-        reads.push(1)
-        return { stat: { version: 'v1', bytes: text.length }, offset: 1, limit: 120, text, lines: text.split('\n').length, eof: true }
+      read: async (_path: string, offset: number) => {
+        reads.push(offset)
+        if (options.pager !== undefined) {
+          const page = await options.pager(offset)
+          return {
+            stat: { version: page.version ?? 'v1', bytes: text.length },
+            offset, limit: 120, text: page.text, lines: page.lines, eof: page.eof,
+          }
+        }
+        return { stat: { version: 'v1', bytes: text.length }, offset, limit: 120, text, lines: text.split('\n').length, eof: true }
       },
     }),
   })
@@ -2786,4 +2805,215 @@ test('a REAL subject identity switch retires an overlay-origin selection that wa
   } finally {
     surface.dispose()
   }
+})
+
+// ── real SGR wheel navigation (delivered-files wheel scroll follow-up) ──────
+
+/** One REAL SGR wheel notch at a 0-based viewport cell: 65 scrolls down,
+ *  64 scrolls up (both 1-based in the SGR sequence). */
+function wheelCell(vt: VirtualTerminal, x: number, y: number, direction: 1 | -1): void {
+  vt.sendInput(`\x1b[<${direction > 0 ? 65 : 64};${x + 1};${y + 1}M`)
+}
+
+test('a real SGR wheel scrolls the Details body without a second Host read', async () => {
+  const copied: string[] = []
+  const reads: number[] = []
+  const text = Array.from({ length: 25 }, (_, index) => `page row ${index}`).join('\n')
+  const { vt, app } = previewApp(copied, reads, {
+    text,
+    pager: () => ({ text, lines: 25, eof: false }),
+  })
+  let view = ''
+  for (let attempt = 0; attempt < 40 && !view.includes('page row 0'); attempt += 1) {
+    await vt.waitForRender()
+    view = vt.getViewport().join('\n')
+  }
+  const lines = view.split('\n')
+  const frame = modalFrame(lines)
+  const bodyRow = lines.findIndex((line, index) => index > frame.top && line.includes('page row 0'))
+  assert.ok(bodyRow > frame.top, `fixture: the preview body is painted:\n${view}`)
+  assert.deepEqual(reads, [1])
+
+  // ONE isolated wheel notch is one logical line: the visible window moves
+  // exactly one physical row and the Host sees NO new read.
+  wheelCell(vt, frame.left + 4, bodyRow, 1)
+  let after = ''
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await vt.waitForRender()
+    after = vt.getViewport().join('\n')
+    if (after.split('\n')[bodyRow]?.includes('page row 1')) break
+  }
+  assert.ok(after.split('\n')[bodyRow]!.includes('page row 1'),
+    `the wheel advanced the first visible physical row:\n${after}`)
+  assert.equal(reads.length, 1, 'an in-window wheel never re-reads the Host')
+  app.stop()
+})
+
+test('a real SGR wheel pages the Details preview once per confirmed edge', async (t) => {
+  const copied: string[] = []
+  const reads: number[] = []
+  let releaseTail: ((page: { text: string; lines: number; eof: boolean }) => void) | undefined
+  t.after(() => releaseTail?.({ text: '', lines: 0, eof: true }))
+  const pageText = Array.from({ length: 120 }, (_, index) => `document row ${index + 1}`).join('\n')
+  const { vt, app } = previewApp(copied, reads, {
+    pager: (offset) => {
+      if (offset === 1) return { text: pageText, lines: 120, eof: false }
+      // The next page stays PENDING until the test releases it.
+      return new Promise(resolve => { releaseTail = resolve })
+    },
+  })
+  let view = ''
+  for (let attempt = 0; attempt < 40 && !view.includes('document row 1'); attempt += 1) {
+    await vt.waitForRender()
+    view = vt.getViewport().join('\n')
+  }
+  assert.ok(view.includes('document row 1'), `fixture: the first page is painted:\n${view}`)
+  assert.deepEqual(reads, [1])
+  const lines = view.split('\n')
+  const frame = modalFrame(lines)
+  const bodyRow = lines.findIndex((line, index) => index > frame.top && line.includes('document row 1'))
+  assert.ok(bodyRow > frame.top, `fixture: the body row is painted:\n${view}`)
+  const wheelX = frame.left + 4
+
+  // Traverse the actual 120-source-line window. Each input is routed through
+  // the mounted listener; stop as soon as its one adjacent read starts.
+  for (let notch = 0; notch < 140 && reads.length === 1; notch += 1) {
+    wheelCell(vt, wheelX, bodyRow, 1)
+  }
+  let loading = ''
+  for (let attempt = 0; attempt < 40 && !loading.includes('Loading lines 121'); attempt += 1) {
+    await vt.waitForRender()
+    loading = vt.getViewport().join('\n')
+  }
+  assert.ok(loading.includes('Loading lines 121'), `the edge wheel started the next page:\n${loading}`)
+  assert.deepEqual(reads, [1, 121], 'one confirmed bottom, one read')
+
+  // While the request is PENDING, further wheels never duplicate it.
+  wheelCell(vt, wheelX, bodyRow, 1)
+  wheelCell(vt, wheelX, bodyRow, 1)
+  await vt.waitForRender()
+  assert.deepEqual(reads, [1, 121], 'a pending read is never duplicated')
+
+  // An EOF page is a definite end: its bottom stays silent.
+  releaseTail?.({ text: 'tail', lines: 1, eof: true })
+  let tail = ''
+  for (let attempt = 0; attempt < 40 && !tail.includes('tail'); attempt += 1) {
+    await vt.waitForRender()
+    tail = vt.getViewport().join('\n')
+  }
+  assert.ok(tail.includes('tail'), `the EOF page is painted:\n${tail}`)
+  wheelCell(vt, wheelX, bodyRow, 1)
+  await vt.waitForRender()
+  assert.deepEqual(reads, [1, 121], 'EOF wheels never re-read')
+
+  // From the top of the offset-121 window, a wheel UP asks for offset 1.
+  wheelCell(vt, wheelX, bodyRow, -1)
+  for (let attempt = 0; attempt < 40 && reads.length < 3; attempt += 1) {
+    await vt.waitForRender()
+  }
+  assert.deepEqual(reads, [1, 121, 1], 'the confirmed top reads the previous page')
+
+  // The real [Copy path] and [Back] targets survive the whole journey.
+  let restored = ''
+  for (let attempt = 0; attempt < 40 && !restored.includes('document row 1'); attempt += 1) {
+    await vt.waitForRender()
+    restored = vt.getViewport().join('\n')
+  }
+  const barLines = restored.split('\n')
+  const barRow = barLines.findIndex((line, index) => index >= frame.top && line.includes('[Copy path]'))
+  assert.ok(barRow > frame.top, `fixture: the action bar paints \`[Copy path]\`:\n${restored}`)
+  const copyColumn = columnOf(barLines, barRow, '[Copy path]') + 2
+  vt.sendInput(`\x1b[<0;${copyColumn + 1};${barRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${copyColumn + 1};${barRow + 1}m`)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Path copied'), 'the copy button still settles')
+  assert.deepEqual(copied, ['/ws/reports/2026/report.md'], 'the raw path reached the clipboard sink')
+  const settledLines = (await viewport(vt)).split('\n')
+  const backColumn = columnOf(settledLines, barRow, '[Back]') + 2
+  vt.sendInput(`\x1b[<0;${backColumn + 1};${barRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${backColumn + 1};${barRow + 1}m`)
+  const filesPage = await viewport(vt)
+  assert.ok(filesPage.includes('Delivered files · Turn 1'), `[Back] still returns to Files:\n${filesPage}`)
+  app.stop()
+})
+
+test('a wheel between press and release never completes the old mounted gesture', async () => {
+  const copied: string[] = []
+  const reads: number[] = []
+  const { vt, app } = previewApp(copied, reads, { text: 'wheel journey\nsecond line' })
+  let view = ''
+  for (let attempt = 0; attempt < 40 && !view.includes('second line'); attempt += 1) {
+    await vt.waitForRender()
+    view = vt.getViewport().join('\n')
+  }
+  const lines = view.split('\n')
+  const frame = modalFrame(lines)
+  const barRow = lines.findIndex((line, index) => index >= frame.top && line.includes('[Back]'))
+  assert.ok(barRow > frame.top, `fixture: the action bar paints \`[Back]\`:\n${view}`)
+  const backColumn = columnOf(lines, barRow, '[Back]') + 2
+  const bodyRow = lines.findIndex((line, index) => index > frame.top && line.includes('second line'))
+
+  // Press [Back], wheel over the body, release: the OLD gesture is dead.
+  vt.sendInput(`\x1b[<0;${backColumn + 1};${barRow + 1}M`)
+  wheelCell(vt, frame.left + 4, bodyRow, 1)
+  vt.sendInput(`\x1b[<0;${backColumn + 1};${barRow + 1}m`)
+  const afterWheel = await viewport(vt)
+  assert.ok(afterWheel.includes('Host: '), `a revoked [Back] press never left the Details page:\n${afterWheel}`)
+
+  // A FRESH press/release still works.
+  vt.sendInput(`\x1b[<0;${backColumn + 1};${barRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${backColumn + 1};${barRow + 1}m`)
+  const filesPage = await viewport(vt)
+  assert.ok(filesPage.includes('Delivered files · Turn 1'), `a fresh [Back] click works:\n${filesPage}`)
+
+  // Same fence on the Files page: a held `Details` verb cannot survive a wheel.
+  const filesLines = filesPage.split('\n')
+  const filesFrame = modalFrame(filesLines)
+  const verbRow = filesLines.findIndex((line, index) => index > filesFrame.top && line.includes('Details'))
+  assert.ok(verbRow > filesFrame.top, `fixture: a verb row is painted:\n${filesPage}`)
+  const verbColumn = columnOf(filesLines, verbRow, 'Details') + 2
+  vt.sendInput(`\x1b[<0;${verbColumn + 1};${verbRow + 1}M`)
+  wheelCell(vt, filesFrame.left + 4, verbRow, 1)
+  vt.sendInput(`\x1b[<0;${verbColumn + 1};${verbRow + 1}m`)
+  const stayed = await viewport(vt)
+  assert.ok(stayed.includes('Delivered files · Turn 1') && !stayed.includes('Host: '),
+    `a revoked verb press never opened the page:\n${stayed}`)
+  app.stop()
+})
+
+test('after wheeling, a drag still copies only the currently visible rows', async () => {
+  const copied: string[] = []
+  const reads: number[] = []
+  const text = Array.from({ length: 25 }, (_, index) => `visible row ${index}`).join('\n')
+  const { vt, app } = previewApp(copied, reads, { text })
+  let view = ''
+  for (let attempt = 0; attempt < 40 && !view.includes('visible row 0'); attempt += 1) {
+    await vt.waitForRender()
+    view = vt.getViewport().join('\n')
+  }
+  const lines = view.split('\n')
+  const frame = modalFrame(lines)
+  const bodyRow = lines.findIndex((line, index) => index > frame.top && line.includes('visible row 0'))
+  assert.ok(bodyRow > frame.top, `fixture: the preview body is painted:\n${view}`)
+
+  // One wheel notch first: the selection must come from what is on screen NOW.
+  wheelCell(vt, frame.left + 4, bodyRow, 1)
+  const scrolled = (await viewport(vt)).split('\n')
+  assert.ok(scrolled[bodyRow]!.includes('visible row 1'), 'the wheel changed the painted selection source')
+  const column = columnOf(scrolled, bodyRow, 'visible row 1')
+  // The range is exactly the 20 painted cells from the new row's first cell.
+  const expected = sliceCells(stripTerminalSequences(scrolled[bodyRow]!), column, 20)
+  vt.sendInput(`\x1b[<0;${column + 1};${bodyRow + 1}M`)
+  vt.sendInput(`\x1b[<32;${column + 20};${bodyRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${column + 20};${bodyRow + 1}m`)
+  const after = await viewport(vt)
+
+  assert.equal(copied.length, 1, `one drag copies once (saw ${JSON.stringify(copied)})`)
+  assert.equal(copied[0], expected,
+    `the copy is exactly the CURRENTLY painted cells: ${JSON.stringify(copied[0])} vs ${JSON.stringify(expected)}`)
+  assert.ok(copied[0]!.includes('visible row 1'), `the scrolled-TO row is the copied identity: ${JSON.stringify(copied)}`)
+  assert.ok(!copied[0]!.includes('visible row 0'), `the pre-wheel row can never satisfy the copy: ${JSON.stringify(copied)}`)
+  assert.ok(after.includes('Copied!'), `the copy really settled:\n${after}`)
+  assert.equal(reads.length, 1, 'the drag and the wheel never re-read the Host')
+  app.stop()
 })

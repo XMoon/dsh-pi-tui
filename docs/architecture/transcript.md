@@ -835,6 +835,30 @@ never completes a button. Both halves of that split belong to ONE contract: a
 row that consumed the press without providing text selection would break the
 browser, and a button that released its press would lose its own gesture.
 
+**Wheel navigation.** While this modal holds the pointer, the AltScreen wheel
+navigates the page under it and is never a press:
+
+- **Files.** A wheel on a CURRENTLY painted list row, inside the list column,
+  moves the selection through the CURRENT filtered results and keeps it visible;
+  the `filter` seat/query, wide side pane and non-list rows stay untouched, and
+  no wheel reads the Host or opens Details.
+- **Turns.** A wheel on a CURRENTLY painted Turns row moves only the
+  UNCOMMITTED cursor; a complete click/`Enter` still commits. A wheel elsewhere
+  changes nothing.
+- **Details.** A wheel over the body scrolls the held page by WRAPPED PHYSICAL
+  rows; header/footer are inert. At most ONE adjacent 120-source-line window is
+  requested per wheel through the existing Preview owner: next only at a proven
+  page bottom with `eof=false`, previous only from the first row with `offset>1`.
+  Both directions require the page the user can actually SEE: a Host reply that
+  has settled but not yet painted never authorizes a hop (the keyboard
+  PgUp/PgDn edge shares that gate). A pending read never re-requests, and
+  metadata/failure/idle/loading scrolls start no read.
+- **Held press.** ANY finite non-zero wheel — chrome, stale frame, boundary or
+  non-scrollable state — revokes the held press first (a fresh press still
+  works), so its release cannot run an old button or Turn row; a zero wheel is a
+  no-op. The opt-in selection in [overlay-focus.md](./overlay-focus.md) §6.1
+  (divergence X068) is unchanged.
+
 **Selecting the panel's own text.** Inside this ONE modal the painted cells of
 its content area are a text-selection source: drag selects them, double-click
 selects the word under the pointer, and triple-click the visible line of the

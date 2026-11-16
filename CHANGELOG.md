@@ -36,6 +36,7 @@
 
 ### 修复
 
+- **`/deliverables` 的文件列表、Turn 列表和文本预览支持滚轮；长文件翻阅不会重复读取或误触发按钮，文本拖选复制照常。**
 - **Fullscreen 的 Save Location 与 Web Search / Fetch 详情支持直接点击保存与确认。** `/export`、`/transcript` 的保存位置提示现在可直接点击完整的 `Save [Enter]`、`Cancel [Esc]`、建议可见时的 `Dismiss suggestions [Esc]`，以及撞名时的 `Yes [Y]` / `No [N]`，语义与原键盘一致：建议入口只收起建议、下一帧才显示 Cancel，No 返回目录编辑，Yes 只对本次已确认目标覆盖；旧按压、滚轮、改窗、异步刷新或已结算的提示不会再次提交。Web Search / Fetch 的详情把真正绘制的 `Confirm [Enter]` 作为唯一可点击确认入口，确认后按实际保存结果显示成功、未保存或结果未知；选项行点击只改草稿、不产生写入，候选不可见或当前不可写时不出现可点击确认。
 - **Fullscreen 的图片、任务与历史页面补齐鼠标查看、返回与关闭入口。** `/view-image` 的列表行、底栏 `View`/`Close` 与查看器的 `Back`/`Close` 可直接点击；Fullscreen Task Center 的 Work/Team `Close`、搜索 `Back` 与类型筛选 `Cancel` 可点击（Stop 确认与其余键盘提示保持原样）；Fullscreen History 底栏的 `Scope`/`Expand`/`Cancel` 可点击，并在窄屏 Use/Copy 按钮被整体降级时提供同语义的底栏后备。所有点击只作用于最后绘制且当前仍有效的完整片段，Regular/Main 仍不启用应用鼠标。
 - **Fullscreen `/model` 的操作栏支持直接点击。** 可点击进入 Effort、选择、返回、关闭及 Team 的重试/只读复查；Effort 候选仍只改草稿，目标未绘制、短行预算、旧按压或目录刷新退出当前模型时只保留安全退出，不会提交隐藏目标。

@@ -1193,3 +1193,122 @@ test('a Settings workspace lease keeps the delivered overlay on the stopped retu
   assert.ok((await viewport(vt)).includes('Delivered files · 1 Turns'),
     'the restored footer button works at the live geometry')
 })
+
+// ── real SGR wheel journeys (delivered-files wheel scroll follow-up) ────────
+
+/** One REAL SGR wheel notch at a 0-based viewport cell: 65 scrolls down,
+ *  64 scrolls up (both 1-based in the SGR sequence). */
+function wheelCell(vt: VirtualTerminal, x: number, y: number, direction: 1 | -1): void {
+  vt.sendInput(`\x1b[<${direction > 0 ? 65 : 64};${x + 1};${y + 1}M`)
+}
+
+for (const [columns, height] of [[80, 24], [44, 20]] as const) {
+  test(`SGR wheel at ${columns}x${height} selects files and Turn candidates without reading or committing`, async () => {
+    const vt = new VirtualTerminal(columns, height)
+    const snap = snapshot(Array.from({ length: 30 }, (_, index) => ({
+      turn: 100 - index,
+      files: index === 0
+        ? Array.from({ length: 200 }, (_, file) => `/ws/file-${String(file).padStart(3, '0')}.txt`)
+        : [`/ws/turn-${100 - index}.md`],
+    })))
+    let stats = 0
+    let reads = 0
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+      displayState: { preset: 'full' },
+      deliveredFiles: capability(snap),
+      deliveredFilePreview: () => ({
+        stat: async () => { stats += 1; return { version: 'v1' } },
+        read: async (_path, offset) => {
+          reads += 1
+          return { stat: { version: 'v1' }, offset, limit: 120, text: '', lines: 0, eof: true }
+        },
+      }),
+    })
+    app.start()
+    startedApps.add(app)
+    app.setTranscript([deliveredAssistant(100, 'background transcript stays put', snap.turns[0]!.files)], new Map())
+    app.setFullscreen(true)
+    const background = await viewport(vt)
+    assert.deepEqual(deliverablesCommand(app, () => snap).result(), { kind: 'success' })
+    let view = await viewport(vt)
+    const fileRow = view.split('\n').findIndex(line => line.includes('file-001.txt'))
+    assert.ok(fileRow >= 0, view)
+    const fileX = view.split('\n')[fileRow]!.indexOf('file-001')
+    wheelCell(vt, fileX, fileRow, 1)
+    view = await viewport(vt)
+    assert.ok(view.includes('> file-001'), view)
+    assert.ok(!view.includes('Host: '), 'selection never enters Preview')
+    wheelCell(vt, fileX, fileRow, -1)
+    view = await viewport(vt)
+    assert.ok(view.includes('> file-000'), view)
+
+    // Chrome cannot scroll the selection or activate an action.
+    const header = view.split('\n').findIndex(line => line.includes('Delivered files · Turn 100'))
+    const footer = view.split('\n').findLastIndex(line => line.includes('[Close]'))
+    wheelCell(vt, fileX, header, 1)
+    wheelCell(vt, fileX, footer, 1)
+    view = await viewport(vt)
+    assert.ok(view.includes('> file-000'), view)
+    clickCell(vt, view.split('\n')[footer]!.indexOf('[Turns]') + 2, footer)
+    view = await viewport(vt)
+    assert.ok(view.includes('Delivered files · 30 Turns'), view)
+    const turnRow = view.split('\n').findIndex(line => line.includes('Turn 99 ·'))
+    assert.ok(turnRow >= 0, view)
+    const turnX = view.split('\n')[turnRow]!.indexOf('Turn 99')
+    wheelCell(vt, turnX, turnRow, 1)
+    view = await viewport(vt)
+    assert.ok(view.includes('> Turn 99 ·'), view)
+    assert.ok(view.includes('Delivered files · 30 Turns'), 'a wheel keeps the Turn uncommitted')
+    const selectedRow = view.split('\n').findIndex(line => line.includes('> Turn 99 ·'))
+    clickCell(vt, turnX, selectedRow)
+    view = await viewport(vt)
+    assert.ok(view.includes('Delivered files · Turn 99'), view)
+    assert.ok(view.includes('> turn-99.md'), view)
+    assert.equal(stats, 0, 'Files/Turns never stat the Host')
+    assert.equal(reads, 0, 'Files/Turns never read the Host')
+    const closeRow = view.split('\n').findLastIndex(line => line.includes('[Close]'))
+    clickCell(vt, view.split('\n')[closeRow]!.indexOf('[Close]') + 2, closeRow)
+    view = await viewport(vt)
+    assert.equal(view, background, 'closing the one lease restores the unchanged transcript viewport')
+  })
+}
+
+test('the wide 160x50 mounted side pane stays inert while the painted list column wheels', async () => {
+  const vt = new VirtualTerminal(160, 50)
+  const snap = snapshot([{
+    turn: 6,
+    files: Array.from({ length: 40 }, (_, index) => ({ path: `/ws/wide/file-${String(index).padStart(2, '0')}.md` })),
+  }])
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: capability(snap),
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([deliveredAssistant(6, 'wide answer', snap.turns[0]!.files)], new Map())
+  app.setFullscreen(true)
+  app.openDeliveredFiles(snap)
+  let view = await viewport(vt)
+  assert.ok(view.includes('> file-00'), `fixture: the first file is selected:\n${view}`)
+  assert.ok(view.includes('Enter for Preview'), `fixture: the two-column side pane is painted:\n${view}`)
+  const lines = view.split('\n')
+  // The background transcript also paints the declared paths, so anchor on the
+  // modal's OWN selection marker for the first row, then take the next row.
+  const selectedRow = lines.findIndex(line => line.includes('> file-00.md'))
+  assert.ok(selectedRow > 1, `fixture: the modal's first list row is painted:\n${view}`)
+  const row = selectedRow + 1
+  assert.ok(lines[row]!.includes('file-01.md'), `fixture: the second modal list row is painted:\n${view}`)
+  // 160x50 grants a 120x37 frame -> 116 content cells, so the list column ends
+  // at 65 and the wide metadata side pane starts at 68. The wheel over the side
+  // pane must never move the file selection.
+  wheelCell(vt, 100, row, 1)
+  view = await viewport(vt)
+  assert.ok(view.includes('> file-00') && !view.includes('> file-01'), `the side pane is inert:\n${view}`)
+  // The same row's painted LIST column really wheels.
+  wheelCell(vt, view.split('\n')[row]!.indexOf('file-01') + 2, row, 1)
+  view = await viewport(vt)
+  assert.ok(view.includes('> file-01.md'), `the list column wheels:\n${view}`)
+  assert.ok(view.includes('Delivered files · Turn 6'), 'the overlay is still the Files page')
+  app.closeDeliveredFiles()
+  await viewport(vt)
+})
