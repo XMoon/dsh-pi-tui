@@ -26,7 +26,6 @@ import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import type { TuiAppEvents } from '../../src/tui-app.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
 import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
-import { rasterizeSvg } from '../../src/client/media/svg/rasterize.ts'
 import { setAssistantVisualPresentation, type VisualPresentationKey } from '../../src/domain/visual/presentation.ts'
 import { svgFactFromArgs } from '../../src/domain/visual/svg.ts'
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
@@ -429,7 +428,6 @@ test('Draft JPEG/WebP and the transcript image Viewer keep their product paths',
       return { ref: {}, data: webpBytes }
     }),
     imageTheme: { fallbackColor: (text: string) => text },
-    svgLoader: new SvgRasterLoader(async (source, options) => rasterizeSvg(source, options)),
   })
 
   const jpeg = store.add({ bytes: jpegBytes, mediaType: 'image/jpeg', width: 120, height: 80, name: 'photo.jpg' })
@@ -459,10 +457,30 @@ test('Draft JPEG/WebP and the transcript image Viewer keep their product paths',
   assert.ok(decodeSixel(paintedRasters(terminal).at(-1)!).width > 0)
 })
 
-test('the Assistant SVG thumbnail keeps the existing raster loader on native tmux SIXEL', async (t) => {
+test('the Assistant SVG thumbnail paints through native tmux SIXEL with a controlled raster', async (t) => {
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/></svg>'
+  const requestedWidths: number[] = []
+
+  // E04 owns the real Assistant publication -> SvgRasterLoader -> native tmux
+  // SIXEL sink. Native resvg child lifecycle/timeout is qualified separately
+  // by test/client/svg-raster.test.ts, not by this load-sensitive CI integration.
+  const svgLoader = new SvgRasterLoader(async (source, options) => {
+    assert.equal(source, svg, 'the Assistant publication reached the real SVG loader')
+    if (options.signal.aborted) throw new Error('cancelled')
+    const width = options.targetWidth
+    const height = Math.max(1, Math.ceil(width / 2))
+    const png = await pngFromRgba(fill(width, height, () => [59, 130, 246, 255]), width, height)
+    if (options.signal.aborted) throw new Error('cancelled')
+    requestedWidths.push(width)
+    return {
+      png,
+      base64: Buffer.from(png).toString('base64'),
+      widthPx: width,
+      heightPx: height,
+    }
+  })
   const { terminal, app } = await startTmuxSixelApp(t, {
-    svgLoader: new SvgRasterLoader(async (source, options) => rasterizeSvg(source, options)),
+    svgLoader,
     imageTheme: { fallbackColor: (text: string) => text },
   })
   app.setFullscreen(true)
@@ -471,6 +489,7 @@ test('the Assistant SVG thumbnail keeps the existing raster loader on native tmu
   app.requestRender()
   await until(() => terminal.getViewport().join('\n').includes('Service topology'), 'the Assistant SVG card')
   await until(() => paintedRasters(terminal).length > 0, 'the SVG thumbnail raster')
+  assert.ok(requestedWidths.length > 0, 'the Assistant SVG used the loader and a raster width')
   const svgDecoded = decodeSixel(paintedRasters(terminal).at(-1)!)
   assert.ok(svgDecoded.width > 0 && svgDecoded.height > 0, 'the existing SVG loader produced real pixels')
 })
