@@ -1485,7 +1485,11 @@ test('B3: a Footer Cancel closes the empty and error pages without touching the 
     pointerEnabled: () => true,
   })
   empty.panel.start()
-  const emptyLines = plain(empty.panel.render(100))
+  const emptyLines = plain(await waitForHistoryRender(
+    empty.panel,
+    rows => rows.some(line => line.includes('No history yet')),
+    'the settled empty page',
+  ))
   const emptyRow = footerRowOf(emptyLines)
   assert.ok(emptyRow >= 0, `the empty page still paints Cancel:\n${emptyLines.join('\n')}`)
   const emptyCol = emptyLines[emptyRow]!.indexOf('Cancel [Esc]')
@@ -1503,7 +1507,11 @@ test('B3: a Footer Cancel closes the empty and error pages without touching the 
     pointerEnabled: () => true,
   })
   failed.panel.start()
-  const failLines = plain(failed.panel.render(100))
+  const failLines = plain(await waitForHistoryRender(
+    failed.panel,
+    rows => rows.some(line => line.includes('History unavailable')),
+    'the settled error page',
+  ))
   const failRow = footerRowOf(failLines)
   assert.ok(failRow >= 0, `the error page still paints Cancel:\n${failLines.join('\n')}`)
   const failCol = failLines[failRow]!.indexOf('Cancel [Esc]')
