@@ -661,6 +661,7 @@ const LANE_SOURCE_LIST = Object.freeze([
   'cross-build-compatibility.mjs',
   'manual-client-reload.mjs',
   'reload-source-isolation.mjs',
+  'managed-daemon-upgrade.mjs',
   'split-upgrade-support.mjs',
   'host-runtime-disabled.mjs',
   'entry-admission.mjs',

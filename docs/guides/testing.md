@@ -374,19 +374,28 @@ pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --case upgrade.cross
 
 `--list` prints `SPLIT_UPGRADE_SELECTABLE_CASES scope=SELECTABLE_ONLY` followed
 by one `suite=<suite> case=<id> title=<title>` line per registry entry in
-execution order, without reading a tarball, creating a work root or installing
-DSH. `--case` and `--suite` run only the registered cases of that id/suite in
-their own work root and print one `SPLIT_UPGRADE_SELECTED_PASS id=<id>
-scope=SELECTABLE_ONLY` per executed case; their stdout and `--evidence` document
-are the partial `scope: SELECTABLE_ONLY` JSON carrying `selectedCases` and only
-the executed cases' facts. A selected run never emits
-`SPLIT_UPGRADE_SMOKE_PASS (cross-build-compatible)`, `status: PASS` or
-`verdict: cross-build-compatible`. Only the complete form (no selector) runs all
-three registered cases and may emit the historical full marker and
+execution order (including the opt-in native
+`managed-daemon.cross-build-upgrade-rollback` case), without reading a tarball,
+creating a work root or installing DSH. `--case` and `--suite` run only the
+registered cases of that id/suite in their own work root and print one
+`SPLIT_UPGRADE_SELECTED_PASS id=<id> scope=SELECTABLE_ONLY` per executed case;
+their stdout and `--evidence` document are the partial `scope: SELECTABLE_ONLY`
+JSON carrying `selectedCases` and only the executed cases' facts. The opt-in
+native case only earns that line with a real
+`{status: PASS, scope: REAL_SYSTEMD_USER_L6}` verdict: a missing isolated
+systemd user-manager environment returns an honest `NOT_VERIFIED`, prints
+`SPLIT_UPGRADE_SELECTED_NOT_VERIFIED` instead and makes the lane exit nonzero.
+A selected run never emits `SPLIT_UPGRADE_SMOKE_PASS (cross-build-compatible)`,
+`status: PASS` or `verdict: cross-build-compatible`. Only the complete form (no
+selector) runs all three DEFAULT-lane registered cases; the opt-in native case
+never joins it, and the complete form may emit the historical full marker and
 `status: PASS`/`verdict: cross-build-compatible`. Unknown, repeated or combined
-selectors, a missing `--old`/`--new`, and a same-path/SHA/version/differently
+selectors, a missing `--old`/`--new`, and a same-path, same-SHA or differently
 pinned pairing all fail closed before any work root, profile or DSH installation
-exists. `SPLIT_UPGRADE_SMOKE_FAIL_AFTER` accepts only the three fixed
+exists. The same-package-version rule still binds the complete form and every
+default-lane selection; only an exclusively opt-in native selection may pair
+two builds of one version, and their real difference is the production
+`computeBuildId`, never the SemVer string. `SPLIT_UPGRADE_SMOKE_FAIL_AFTER` accepts only the three fixed
 `<case-id>.after-…-host-spawn` values used by the cases; any other value has no
 effect.
 

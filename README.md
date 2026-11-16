@@ -128,6 +128,36 @@ dsh --profile pi-tui --continue            # 继续当前 Host Workspace 中最�
 
 `--session` 不带值或只含空白时进入 Browse All。**只有规范完整 ID**（`session-`/`session_` 加 32 位十六进制）在挂载前直接恢复，且不需要读取列表。其他非空值都会立即打开同一个 Browser：等官方列表到位后，先精确匹配已列出 ID，再按至少 4 位十六进制唯一前缀匹配，并走现有受保护 Resume；关键词、歧义或未命中只进入同一个全局搜索。搜索态先按一次 `Esc` 回到浏览列表，再按一次回到 sessionless Welcome。列表加载中 Browser 始终可输入、可 `Esc`，不会因 Host 列表挂起而卡住启动；加载期间手动修改查询会取消原 CLI 自动匹配。`-c, --continue` 只在 Host 已确认的 Workspace 内、按官方成员关系与主 Session 列表的交集选择最近一条（baseline 与列表必须来自同一 Host/Connection generation）；未确认 Workspace 或无历史时保持 sessionless 并提示一次，不会猜选其他 Workspace，也不会创建 Session。`--session` 与 `-c` 互斥；`--preset` 仍按原规则只对空白 Session 生效。
 
+### Daemon（Linux，可选）
+
+候选版提供 Linux 本地 daemon 后端，**默认仍是 Direct**（进程内 TUI）。它不改变现有安装，只有显式选择后才生效：
+
+- **选择**：本次启动设置 `DSH_PI_TUI_BACKEND=daemon`，或在 `/settings → General → Backend` 保存 `Daemon`（官方 Profile 配置项 `tui-startup.backend`）。优先级为 `DSH_PI_TUI_BACKEND` > 已保存 Profile 配置 > `direct`；非法值、空串与非 Linux 平台会非零退出，不会静默回退 Direct。选择只影响下一次冷启动，不会热切换当前进程，也不会重启任何 Host。
+- **管理命令**（只操作当前 `--profile`；需要本机 systemd user manager，严格缺失时使用独立本地进程）：
+
+  ```sh
+  dsh --profile pi-tui daemon status
+  dsh --profile pi-tui daemon start
+  dsh --profile pi-tui daemon stop
+  dsh --profile pi-tui daemon restart
+  dsh --profile pi-tui daemon logs --lines 200
+  dsh --profile pi-tui daemon uninstall
+  ```
+
+Host 优先由用户自己的 systemd `--user` unit 托管；unit 的 `ExecStart`、`Environment`、`Restart`、`ExecStartPre`、symlink 源与 drop-in 归用户和 systemd 所有。严格没有 user manager 时使用独立本地进程，并在当前 Profile 的 scope 目录写入 `0600` 日志。`status` 是纯只读：不创建 Host/unit，不启动或停止任何服务；`ActiveState=active` 与 `MainPID` 都不等于 Ready，Ready 仍以认证 Cookie、Host 身份回显和进程 starttime 为准。管理命令不会自动重启、停止或“抢救”Host，不会把 manager 故障当成“未安装”，也不会改写或删除用户 unit 内容。`stop`/`restart` 会中断当前 Session/Turn 的进行中工作，未结算写入不会自动重放。
+
+**不同 install build 的显式升级**（同一 DSH 运行时、同一 Profile）：
+
+1. 结束所有进行中的 Turn，退出除管理命令外的 TUI Client，并备份 `DSH_HOME` 与 Profile（回滚与数据安全由用户负责）。
+2. `dsh --profile pi-tui daemon stop`，确认 `status` 为 `host=stopped` 且旧 Host 的 PID/starttime 已消失；不要跳过此步。
+3. 用官方 Profile 命令换包，不要在 Host 运行中覆写安装：`dsh plugin --profile pi-tui -- add <新包路径或版本>`。
+4. 旧 unit 仍在时，新安装的 `daemon start`/`restart` 会以非零状态拒绝，unit 字节与用户配置保持不变；确认不再需要旧 unit 后，由用户显式执行 `dsh --profile pi-tui daemon uninstall`（只移除该 Profile 的 unit 路径，保留 symlink 源文件、drop-in、Profile 与数据）。
+5. `dsh --profile pi-tui daemon start`，等待新的认证 Ready Host 与新的 `instance`/PID；`status` 的 `compatibility` 应为 `compatible`。
+
+**回滚**（同一 DSH 运行时、同一 Profile）：① 保留新包/旧包与校验和，结束新 Host 上的 Turn；② `daemon stop` 并确认新 Host 已退出；③ 用官方 Profile 命令恢复可信旧包；④ 残留的新 build unit 会让 `start`/`restart` 非零拒绝，用户显式 `daemon uninstall` 后再 `start`；⑤ 确认旧 build 的 Ready Host 与 Session/凭据仍可读。回滚只承诺同一 DSH 运行时的包级恢复，不承诺跨 DSH 数据 schema 的原地降级；跨版本请使用独立备份目录并自行确认配对。
+
+自己编辑过 unit/symlink/drop-in 的用户：产品只保留这些字节，不会自动改写成新 build 的默认配置；如果旧 `ExecStart` 或 drop-in 让新 Host 无法认证，命令会如实失败，请按正常 systemd 操作自行修改。不要把本流程理解为零中断、自动回滚或任意数据原地降级。
+
 ## 功能
 
 ### 对话与工具

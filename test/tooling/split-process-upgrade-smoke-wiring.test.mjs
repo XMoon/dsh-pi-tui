@@ -13,15 +13,20 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readFileSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import ts from 'typescript'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
-import { parseUpgradeArguments } from '../../scripts/split-process-upgrade-smoke.mjs'
 import {
+  allowsSameArtifactVersion,
+  parseUpgradeArguments,
+  projectSelectedUpgradeVerdicts,
+} from '../../scripts/split-process-upgrade-smoke.mjs'
+import {
+  listDefaultUpgradeCases,
   listSelectableUpgradeCases,
   selectedUpgradePassLine,
 } from '../../scripts/lib/split-upgrade-selection.mjs'
@@ -33,6 +38,7 @@ const CASE_NAMES = Object.freeze([
   'cross-build-compatibility.mjs',
   'manual-client-reload.mjs',
   'reload-source-isolation.mjs',
+  'managed-daemon-upgrade.mjs',
 ])
 
 function readCase(name) {
@@ -59,22 +65,32 @@ test('the upgrade smoke is a package script and parses as ESM', () => {
   assert.equal(result.status, 0, result.stderr)
 })
 
-test('the upgrade registry is the ONE frozen 3-case / 2-suite fact list in execution order', () => {
+test('the upgrade registry is the ONE frozen 4-case / 3-suite fact list in execution order', () => {
   const registry = listSelectableUpgradeCases()
   assert.ok(Object.isFrozen(registry), 'the registry must be frozen')
   assert.deepEqual(registry.map(entry => [entry.suite, entry.id]), [
     ['upgrade', 'upgrade.cross-build-compatibility'],
     ['client-reload', 'client-reload.production-command'],
     ['client-reload', 'client-reload.target-source-isolation'],
+    ['managed-daemon', 'managed-daemon.cross-build-upgrade-rollback'],
   ])
-  assert.equal(new Set(registry.map(entry => entry.id)).size, 3, 'case ids must be unique')
+  assert.equal(new Set(registry.map(entry => entry.id)).size, 4, 'case ids must be unique')
   for (const entry of registry) {
     assert.ok(Object.isFrozen(entry), `the registry entry ${entry.id} must be frozen`)
-    assert.deepEqual(Object.keys(entry).sort(), ['id', 'run', 'suite', 'title'])
+    assert.deepEqual(Object.keys(entry).sort(),
+      entry.defaultLane === false ? ['defaultLane', 'id', 'run', 'suite', 'title'] : ['id', 'run', 'suite', 'title'])
     assert.equal(typeof entry.run, 'function', `the registry entry ${entry.id} must name its real run`)
     assert.ok(entry.title.length > 0 && !/\bU0[1-9]\b/u.test(entry.title),
       'titles state a condition and observable behavior, never an internal Uxx code')
   }
+  // The default lane keeps its historical U01-U09 meaning: the native case is
+  // opt-in only and is never silently skipped or counted as covered.
+  assert.deepEqual(listDefaultUpgradeCases().map(entry => entry.id), [
+    'upgrade.cross-build-compatibility',
+    'client-reload.production-command',
+    'client-reload.target-source-isolation',
+  ])
+  assert.equal(listSelectableUpgradeCases().find(entry => entry.id === 'managed-daemon.cross-build-upgrade-rollback').defaultLane, false)
   assert.equal(selectedUpgradePassLine('upgrade.cross-build-compatibility'),
     'SPLIT_UPGRADE_SELECTED_PASS id=upgrade.cross-build-compatibility scope=SELECTABLE_ONLY')
 })
@@ -135,6 +151,104 @@ test('the selector grammar accepts the fixed forms and rejects every ambiguous o
   inputError(['--', '--', '--old', 'old.tgz', '--new', 'new.tgz'], /unknown option/u)
 })
 
+test('only an exclusively opt-in native selection may pair one package version', () => {
+  const pairing = (...selector) => parseUpgradeArguments(['--old', 'old.tgz', '--new', 'new.tgz', ...selector])
+  assert.equal(allowsSameArtifactVersion(pairing()), false, 'the full lane keeps the different-version input rule')
+  assert.equal(allowsSameArtifactVersion(pairing('--case', 'upgrade.cross-build-compatibility')), false)
+  assert.equal(allowsSameArtifactVersion(pairing('--suite', 'client-reload')), false)
+  assert.equal(allowsSameArtifactVersion(pairing('--case', 'managed-daemon.cross-build-upgrade-rollback')), true)
+  assert.equal(allowsSameArtifactVersion(pairing('--suite', 'managed-daemon')), true)
+  assert.equal(allowsSameArtifactVersion(parseUpgradeArguments(['--list'])), false)
+})
+
+test('a selected native verdict never becomes a pass unless it really qualified', () => {
+  const native = 'managed-daemon.cross-build-upgrade-rollback'
+  const notVerified = projectSelectedUpgradeVerdicts([{
+    id: native,
+    defaultLane: false,
+    status: 'NOT_VERIFIED',
+    reason: 'NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: no isolated user manager',
+  }])
+  assert.equal(notVerified.failed, true)
+  assert.deepEqual(notVerified.lines, [
+    `SPLIT_UPGRADE_SELECTED_NOT_VERIFIED id=${native} scope=SELECTABLE_ONLY reason=NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: no isolated user manager`,
+  ])
+  assert.ok(!notVerified.lines.some(line => line.startsWith('SPLIT_UPGRADE_SELECTED_PASS')))
+
+  const wrongScope = projectSelectedUpgradeVerdicts([{ id: native, defaultLane: false, status: 'PASS', scope: 'SELECTABLE_ONLY' }])
+  assert.equal(wrongScope.failed, true)
+  assert.ok(!wrongScope.lines.some(line => line.startsWith('SPLIT_UPGRADE_SELECTED_PASS')))
+
+  const qualified = projectSelectedUpgradeVerdicts([{ id: native, defaultLane: false, status: 'PASS', scope: 'REAL_SYSTEMD_USER_L6' }])
+  assert.equal(qualified.failed, false)
+  assert.deepEqual(qualified.lines, [selectedUpgradePassLine(native)])
+
+  // The historical default-lane cases keep their historical successful line.
+  const historical = projectSelectedUpgradeVerdicts([{ id: 'upgrade.cross-build-compatibility', defaultLane: true, status: 'PASS' }])
+  assert.equal(historical.failed, false)
+  assert.deepEqual(historical.lines, [selectedUpgradePassLine('upgrade.cross-build-compatibility')])
+})
+
+test('both artifacts are pin-qualified and the default-lane version rule runs before any work root', (t) => {
+  const dir = withTempDir(t)
+  const targetPin = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).devDependencies['@deepseek-ai/dsh-agent']
+  const writeArtifact = (name, version, dshPin) => {
+    const source = join(dir, `source-${name}`)
+    mkdirSync(join(source, 'package'), { recursive: true })
+    writeFileSync(join(source, 'package', 'package.json'), JSON.stringify({
+      name: '@xmoon76/dsh-pi-tui',
+      version,
+      // Distinguishes the fixture artifacts so same-version candidates still
+      // carry different packaged bytes, exactly like two real builds.
+      description: `fixture artifact ${name}`,
+      devDependencies: { '@deepseek-ai/dsh-agent': dshPin },
+    }))
+    const artifact = join(dir, `${name}.tgz`)
+    const tar = spawnSync('tar', ['-czf', artifact, '-C', source, 'package'], { encoding: 'utf8' })
+    assert.equal(tar.status, 0, tar.stderr)
+    rmSync(source, { recursive: true, force: true })
+    return artifact
+  }
+  const run = (args) => spawnSync(process.execPath, [SCRIPT, ...args], {
+    encoding: 'utf8',
+    cwd: dir,
+    timeout: 30_000,
+    env: { ...process.env, TMPDIR: dir },
+  })
+  // The failure report is the ONE allowed artifact (a private directory under
+  // TMPDIR); no work root, harness install or profile may appear.
+  const workEntries = () => readdirSync(dir)
+    .filter(name => !name.endsWith('.tgz') && !name.startsWith('dsh-pi-tui-smoke-failure-'))
+
+  const pinnedNew = writeArtifact('new', '0.5.7', targetPin)
+  const wrongPinOld = writeArtifact('wrong-old', '0.5.6', '0.2.2-rc.2')
+  const sameVersionOld = writeArtifact('same-old', '0.5.7', targetPin)
+  const sameVersionWrongPinNew = writeArtifact('same-wrong-new', '0.5.7', '0.2.2-rc.2')
+
+  const wrongPin = run(['--old', wrongPinOld, '--new', pinnedNew])
+  assert.notEqual(wrongPin.status, 0, 'a differently pinned artifact must be refused')
+  assert.match(wrongPin.stderr, /INPUT_DSH_PIN_MISMATCH/u)
+  assert.deepEqual(workEntries(), [], 'pin qualification must happen before any work root or installation')
+
+  const sameVersionFull = run(['--old', sameVersionOld, '--new', pinnedNew])
+  assert.notEqual(sameVersionFull.status, 0, 'the full lane must keep the different-version rule')
+  assert.match(sameVersionFull.stderr, /must carry different package versions/u)
+  assert.deepEqual(workEntries(), [], 'the default-lane version rule must run before any work root or installation')
+
+  // The opt-in native selection is the only one that skips the version rule;
+  // its artifacts are still pin-qualified before any profile work.
+  const nativeWrongPin = run([
+    '--old', sameVersionOld, '--new', sameVersionWrongPinNew,
+    '--case', 'managed-daemon.cross-build-upgrade-rollback',
+  ])
+  assert.notEqual(nativeWrongPin.status, 0, 'the native selection must still refuse a differently pinned artifact')
+  assert.match(nativeWrongPin.stderr, /INPUT_DSH_PIN_MISMATCH/u)
+  assert.deepEqual(workEntries(), [], 'the native selection must pin-qualify before any profile work')
+  for (const artifact of [pinnedNew, wrongPinOld, sameVersionOld, sameVersionWrongPinNew]) {
+    assert.ok(existsSync(artifact), 'the preflight must not remove its input artifacts')
+  }
+})
+
 test('--list and --help are side-effect free and never announce a qualification', (t) => {
   const dir = withTempDir(t)
   const listed = runCli(['--list'], dir)
@@ -145,7 +259,10 @@ test('--list and --help are side-effect free and never announce a qualification'
   assert.deepEqual(lines.slice(1), listSelectableUpgradeCases().map(
     entry => `suite=${entry.suite} case=${entry.id} title=${entry.title}`,
   ))
+  assert.ok(lines.some(line => line.includes('case=managed-daemon.cross-build-upgrade-rollback')),
+    '--list must name the opt-in native case')
   assert.ok(!listed.stdout.includes('SPLIT_UPGRADE_SMOKE_PASS'))
+  assert.ok(!listed.stdout.includes('SPLIT_UPGRADE_SELECTED_PASS'))
   assert.ok(!listed.stdout.includes('IDENTITY') && !listed.stdout.includes('qualified=true'))
   assert.deepEqual(readdirSync(dir), [], '--list may not create a work root or failure report')
 
@@ -268,6 +385,7 @@ test('the extracted upgrade modules resolve every free identifier', () => {
     'scripts/smoke/split-upgrade/cross-build-compatibility.mjs',
     'scripts/smoke/split-upgrade/manual-client-reload.mjs',
     'scripts/smoke/split-upgrade/reload-source-isolation.mjs',
+    'scripts/smoke/split-upgrade/managed-daemon-upgrade.mjs',
   ].map(file => join(ROOT, file))
   const program = ts.createProgram({
     rootNames: files,
