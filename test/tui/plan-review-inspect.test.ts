@@ -452,18 +452,21 @@ test('a PTC child collapsed during reading stays folded; a new View re-opens it'
     root,
   ]
   const { vt, app, settle } = scene(messages, 100, 24, { present: directPlanPresenter })
+  // The user MANUALLY expands the child BEFORE View: the durable branch of the
+  // disclosure toggle must also revoke the lease when it collapses the child.
+  ;(app as unknown as { toggleSubCallExpanded(subCallId: string): void }).toggleSubCallExpanded('call-plan-1')
   await vt.waitForRender()
+  assert.equal((app as unknown as { subCallExpanded: Set<string> }).subCallExpanded.has('call-plan-1'), true,
+    'precondition: the child is manually expanded before View')
   vt.sendInput('\r') // View
   await vt.waitForRender()
   assert.ok(view(vt).includes('## Scope'), `precondition: the nested body is visible:\n${view(vt)}`)
-  // The user collapses the nested child through the REAL disclosure owner
-  // (clicking the child header): the temporary reveal is suppressed and the
-  // mounted batch rebuilds.
+  // The same disclosure route collapses it during reading.
   ;(app as unknown as { toggleSubCallExpanded(subCallId: string): void }).toggleSubCallExpanded('call-plan-1')
   await vt.waitForRender()
   assert.ok(!view(vt).includes('## Scope'), `an explicit child collapse during reading wins:\n${view(vt)}`)
   assert.equal((app as unknown as { subCallExpanded: Set<string> }).subCallExpanded.has('call-plan-1'), false,
-    'the inspection never mints a durable sub-call expansion')
+    'the durable manual expansion is removed by the collapse')
   assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
     'an explicit child collapse revokes the one-shot lease for the rest of the reading step')
   // A new explicit View re-opens it.
@@ -644,6 +647,19 @@ test('Compact Work sibling: the plan reveal opens the Work span and a real heade
   vt.sendInput('\r')
   await vt.waitForRender()
   assert.ok(view(vt).includes('## Scope'), `a new View re-opens the Compact card:\n${view(vt)}`)
+  // The Ctrl+O BULK sibling (the real modal-safe transcript disclosure) must
+  // revoke the plan lease in the SAME transaction.
+  vt.sendInput('\x0f') // Ctrl+O → collapse all open Work spans
+  await vt.waitForRender()
+  assert.ok(!view(vt).includes('## Scope'), `the Ctrl+O bulk collapse revokes the plan lease:\n${view(vt)}`)
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
+    'the bulk collapse revoked the one-shot lease')
+  // A new View re-opens it again.
+  vt.sendInput('\x1b') // back to the decision list
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('## Scope'), `a new View re-opens after the bulk collapse:\n${view(vt)}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
   vt.sendInput('\x1b')

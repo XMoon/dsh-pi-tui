@@ -10143,10 +10143,15 @@ export class TuiApp {
     if (open.length > 0) {
       this.mutateTranscriptDisclosure(() => {
         for (const span of open) this.expandedWorkOwners.delete(span.owner)
-        // A span open ONLY by the granted reveal must actually close: revoke
-        // the reveal with the manual owners in the SAME rebuild.
+        // A span open ONLY by a temporary reveal must actually close: revoke
+        // the reveal with the manual owners in the SAME rebuild — the search
+        // navigation and the one-shot plan inspection are both such grants.
         const target = this.searchRevealedMessage()
         if (target !== undefined && open.some(span => span.members.includes(target))) this.suppressSearchReveal()
+        const planTarget = this.planInspection?.message
+        if (planTarget !== undefined && open.some(span => span.members.includes(planTarget))) {
+          this.revokePlanInspectionLease()
+        }
       })
       return
     }
@@ -22216,6 +22221,10 @@ export class TuiApp {
     if (this.subCallExpanded.has(subCallId)) {
       this.subCallExpanded.delete(subCallId)
       if (searchForced) this.searchSuppressedSubCalls.add(subCallId)
+      // The durable manual expansion is gone; if the one-shot plan inspection
+      // is ALSO forcing this child open, the explicit collapse revokes the
+      // whole lease (every collapse branch follows the same rule).
+      if (this.planInspection?.subCallId === subCallId) this.revokePlanInspectionLease()
     } else if (searchForced) {
       // The body is open only because of a temporary reveal: an explicit click
       // collapses just that sub-call. The one-shot PLAN inspection lease is
