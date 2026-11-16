@@ -229,11 +229,14 @@ export class SaveLocationPrompt implements Component, Focusable {
    * identity and the previous frame's action hit map die with it (the next
    * render publishes the new one). The prompt's business state is untouched;
    * this only makes a pre-change press unable to complete after the change.
+   * BOTH latches die: a held suggestion row must not accept the same value
+   * after a key, a wheel or an async completion refresh.
    */
   private markSemanticChange(): void {
     this.revision += 1
     this.actionHits = []
     this.armedAction = undefined
+    this.mousePressedValue = undefined
   }
 
   /** Refresh the directory suggestions for the current field value. Each
