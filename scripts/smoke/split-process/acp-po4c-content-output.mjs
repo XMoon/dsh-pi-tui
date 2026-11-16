@@ -456,8 +456,17 @@ export async function runAcpPo4cContentOutput(context) {
       .join('')
     assert(tuiAnswer.includes('po4c answer'), 'PO-4C: the real TUI completes its own turn on the same Host')
     // The TUI-owned turn shares the ACP View's Session: its committed output
-    // must never be attributed to the ACP flight.
-    const strayTui = acp.entries.filter(entry => entry.message?.method === 'session/update')
+    // must never be attributed to the ACP flight. The fence is the connection's
+    // OWN serialized write order: the SDK writes this connection's frames one at
+    // a time, so any stray projection would arrive BEFORE this response.
+    const fenceId = ++caseId
+    acp.send({ jsonrpc: '2.0', id: fenceId, method: 'session/list', params: {} })
+    const strayTui = []
+    for (;;) {
+      const entry = await acp.next(message => message?.id === fenceId || message?.method === 'session/update')
+      if (entry.message?.id === fenceId) break
+      strayTui.push(entry)
+    }
     assert(strayTui.length === 0,
       `PO-4C: a foreign TUI turn never projects onto the ACP View (got ${String(strayTui.length)} stray update(s))`)
 
