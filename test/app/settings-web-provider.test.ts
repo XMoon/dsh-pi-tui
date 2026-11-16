@@ -108,6 +108,10 @@ interface Harness {
   /** Hold EVERY authority read issued until the returned release is called
    *  (a page entry starts its own fresh read; a one-shot gate would miss it). */
   readonly holdAllReads: () => () => void
+  /** Hold the NEXT official setter call AFTER it has really started (its
+   *  `begin:` record is in {@link log} until the returned release is called:
+   *  the causal FIFO witness (a queued second write cannot start). */
+  readonly holdNextWrite: () => () => void
   /** Move the LIVE backend readiness (the page must gate on it). */
   readonly setReadiness: (next: 'ready' | 'stale' | 'unavailable') => void
   readonly view: () => string
@@ -140,6 +144,7 @@ function setup(options: {
   const settledWrites: string[] = []
   let readGate: { readonly promise: Promise<void>; readonly release: () => void } | undefined
   let readHoldAll: { readonly promise: Promise<void>; readonly release: () => void } | undefined
+  let writeGate: { readonly promise: Promise<void>; readonly release: () => void } | undefined
   let readsIssued = 0
   let readsSettled = 0
   let readiness: 'ready' | 'stale' | 'unavailable' = 'ready'
@@ -185,6 +190,13 @@ function setup(options: {
     log.push(`begin:${label}`)
     try {
       if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs))
+      // The causal FIFO gate: the setter has STARTED (its `begin:` record is
+      // already in the log) and stays in flight until the test releases it.
+      const gate = writeGate
+      if (gate !== undefined) {
+        writeGate = undefined
+        await gate.promise
+      }
       if (store.failNext !== undefined) {
         const reason = store.failNext
         store.failNext = undefined
@@ -348,6 +360,19 @@ function setup(options: {
         },
       }
       readHoldAll = record
+      return record.release
+    },
+    holdNextWrite: () => {
+      let release = (): void => {}
+      const promise = new Promise<void>(resolve => { release = () => resolve() })
+      const record = {
+        promise,
+        release: () => {
+          if (writeGate === record) writeGate = undefined
+          release()
+        },
+      }
+      writeGate = record
       return record.release
     },
     view,
@@ -1978,6 +2003,71 @@ test('the delegated Confirm re-proves the LIVE authority and revokes a stale ges
   assert.equal(commits.length, 1, 'a disposed page dispatches nothing')
 })
 
+test('a wide Detail whose candidate is cropped by a long verdict publishes no Confirm target', async () => {
+  // width 100 = wide layout: the Detail column is 64 cells while the bar's
+  // projection used to wrap at the full 100. A 200-cell verdict therefore
+  // cropped the highlighted candidate in the REAL Detail pane while the
+  // full-width projection still called it visible.
+  const longReason = 'x'.repeat(200)
+  const facts: WebSettingsFacts = {
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-official',
+      fetchProvider: 'http',
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {},
+      credential: { configured: true, source: 'file' },
+    },
+  }
+  const commits: string[] = []
+  const page = new WebSettingsPage({
+    readFacts: () => facts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => true,
+    commit: async (id, requested) => {
+      commits.push(`${id}:${requested}`)
+      return { kind: 'not-saved', reason: longReason }
+    },
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: (_label, task) => { void task() },
+    done: () => {},
+  })
+  const drainVerdict = async (): Promise<void> => {
+    for (let index = 0; index < 40; index += 1) await Promise.resolve()
+  }
+  try {
+    page.setMaxRows(8)
+    page.render(100)
+    page.handleInput('\r') // the provider Detail
+    page.handleInput('\x1b[B') // highlight DeepSeek Search API
+    page.handleInput('\r') // one dispatched write returns the long not-saved verdict
+    await drainVerdict()
+    const cropped = stripTerminalSequences(page.render(100).join('\n'))
+    assert.match(cropped, /Not saved/u)
+    assert.doesNotMatch(cropped, /Confirm \[Enter\]/u,
+      'a candidate the REAL Detail pane cropped must not advertise a Confirm')
+    assert.deepEqual(page.paintedBarSpans(), [], 'a cropped candidate publishes no delegated span')
+    page.activateBarSpan('web:confirm')
+    await drainVerdict()
+    assert.deepEqual(commits, ['web-search-provider:deepseek-search-api'],
+      'only the keyboard dispatch is a commit; the absent span dispatches nothing')
+    // The same state at a roomy grant really paints the candidate and restores
+    // the delegated target; the positive control proves the probe was not
+    // vacuous.
+    page.setMaxRows(20)
+    const roomy = stripTerminalSequences(page.render(100).join('\n'))
+    assert.match(roomy, /Confirm \[Enter\]/u)
+    assert.equal(page.paintedBarSpans().length, 1)
+    page.activateBarSpan('web:confirm')
+    await drainVerdict()
+    assert.equal(commits.length, 2, 'the roomy frame publishes an executable delegated target')
+  } finally {
+    page.dispose()
+  }
+})
+
 test('Billing rows are Not selected and inert when their API provider is not the current route', async () => {
   const facts = (): WebSettingsFacts => ({
     kind: 'ready',
@@ -2157,28 +2247,34 @@ test('a Host read between the Confirm press and release writes nothing', async t
 test('two mouse Confirms join the ONE FIFO and never overlap', async t => {
   const h = setup()
   t.after(h.dispose)
-  // Long enough that intent B really arrives while A is still in flight, even
-  // with the deliberate pacing past the alt screen's double-click window.
-  h.store.writeDelayMs = 1_000
   await openWebPage(h)
-  // Intent A (search provider): clicked, deliberately slow.
+  // Intent A (search provider): its Host setter STARTS and is held in flight.
+  const releaseA = h.holdNextWrite()
   await openWebRow(h, 0)
   await chooseCandidate(h, 1)
   const first = paintedWordCell(h, 'Confirm [Enter]')
   pointerClick(h, first.row, first.column + 1)
-  // Intent B (count 10 -> 20) while A is still in flight: it joins the SAME
-  // single FIFO, so it can only START after A settled.
+  await waitForFrame(() => h.view(), () => h.log.includes('begin:search:deepseek-search-api'),
+    () => h.vt.waitForRender(), 'the first Host write to start')
+  // Intent B (count 10 -> 20) is dispatched while A is still held. It joins the
+  // SAME single FIFO, so its Host setter cannot START until A settles; the
+  // painted saving phase below proves the second confirm really enqueued an
+  // intent (a missing FIFO would start B's setter immediately).
   await webListTop(h)
   await openWebRow(h, 2)
   await chooseCandidate(h, 2) // 5,10,20,50 -> 20
   await settlePainted(h, 'the second row Detail with Confirm', frame => frame.includes('Confirm [Enter]'))
   // The bar cell is unchanged between the two Details: pace the second click
-  // past the alt screen's double-click word selection (it still lands while
-  // intent A's slow Host write is in flight).
+  // past the alt screen's double-click word selection.
   await settlePointerClick(h)
   const markB = settledWritesMark(h)
   const second = paintedWordCell(h, 'Confirm [Enter]')
   pointerClick(h, second.row, second.column + 1)
+  await settlePainted(h, 'the queued second intent saving', frame => frame.includes('Saving… · Back [Esc]'))
+  assert.deepEqual(h.log, ['begin:search:deepseek-search-api'],
+    'the second intent was dispatched by its page but its setter did not start while A was in flight')
+  assert.equal(h.settledWrites().length, 0, 'nothing settled while A is held')
+  releaseA()
   await awaitWriteSettlement(h, 'count:20', markB)
   assert.deepEqual(h.log, [
     'begin:search:deepseek-search-api',
