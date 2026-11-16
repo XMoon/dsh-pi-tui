@@ -832,3 +832,87 @@ test('the same page renders and saves the single-field Agent-loop shape', async 
   assert.deepEqual(writes, [{ maxParallelToolCalls: { kind: 'set', value: 4 } }])
   page.dispose()
 })
+
+test('the numeric page status distinguishes Ready, Unavailable, Unreadable and Last-known', async () => {
+  interface SectionSettings {
+    readonly timeoutMs: number
+  }
+  const fields: readonly HostNumericSettingsField<SectionSettings>[] = [{ key: 'timeoutMs', label: 'Command timeout (ms)' }]
+  const renderWith = async (read: () => SectionRead<SectionSettings>): Promise<{ text: string; dispose: () => void }> => {
+    const controller = new HostNumericSettingsController<SectionSettings>({
+      port: { read, refresh: async () => {}, mutate: async () => ({ kind: 'rejected', reason: 'n/a' }) },
+      fields,
+      requestRender: () => {},
+      runOwned: (_label, task) => { void task() },
+    })
+    const page = new HostNumericSettingsPage<SectionSettings>({
+      controller,
+      fields,
+      spec: { title: 'Test', sourceHeading: () => 'Host profile', help: [] },
+      requestRender: () => {},
+      done: () => {},
+    })
+    page.setMaxRows(8)
+    // Let the controller's initial authoritative refresh settle.
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+    const text = page.render(80).map(strip).join('\n')
+    void controller
+    return { text, dispose: () => page.dispose() }
+  }
+
+  const unavailable = await renderWith(() => ({ kind: 'unavailable', reason: 'not mounted' }))
+  assert.match(unavailable.text, /Status: Unavailable/u, 'a missing namespace is never Ready')
+  unavailable.dispose()
+
+  const unreadable = await renderWith(() => ({ kind: 'unreadable', reason: 'value is not readable' }))
+  assert.match(unreadable.text, /Status: Unreadable/u)
+  unreadable.dispose()
+
+  const generation = {}
+  let revision = 1
+  const live = (): SectionRead<SectionSettings> => ({
+    kind: 'ready', generation, revision,
+    effective: { timeoutMs: 60_000 }, inherited: { timeoutMs: 60_000 },
+    overridden: { timeoutMs: false },
+  })
+  const controller = new HostNumericSettingsController<SectionSettings>({
+    port: { read: live, refresh: async () => {}, mutate: async () => ({ kind: 'rejected', reason: 'n/a' }) },
+    fields,
+    requestRender: () => {},
+    runOwned: (_label, task) => { void task() },
+  })
+  const page = new HostNumericSettingsPage<SectionSettings>({
+    controller,
+    fields,
+    spec: { title: 'Test', sourceHeading: () => 'Host profile', help: [] },
+    requestRender: () => {},
+    done: () => {},
+  })
+  page.setMaxRows(8)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.match(page.render(80).map(strip).join('\n'), /Status: Ready/u)
+  revision = 2
+  assert.match(page.render(80).map(strip).join('\n'), /Status: Last-known · read-only/u,
+    'an external edit never leaves the fixed status claiming Ready')
+  page.dispose()
+})
+
+test('44x8 paints the SECOND field Reset whole and its pointer target stages that field', async () => {
+  const h = await startedNumeric()
+  h.page.setMaxRows(4) // the 44x8 body grant
+  let frame = h.page.render(44)
+  // Move the field focus to the second field; the short grant scrolls it in.
+  h.page.handleInput(DOWN)
+  frame = h.page.render(44)
+  const capRow = numericRowIndex(frame, 'Output cap per stream')
+  assert.ok(capRow >= 0, `the second field is reachable at 44x8:\n${frame.join('\n')}`)
+  const capLine = strip(frame[capRow] ?? '')
+  assert.match(capLine, /\[Reset\]$/u, `the complete Reset is painted at the right edge: ${JSON.stringify(capLine)}`)
+  clickNumericRow(h.page, frame, capRow, 44, '[Reset]')
+  frame = h.page.render(44)
+  assert.match(frame.map(strip).join('\n'), /Output cap per stre\S*\s+Reset staged/u,
+    'the painted second-field Reset target stages THAT field')
+  assert.match(frame.map(strip).join('\n'), /Status: Unsaved/u)
+  h.page.dispose()
+})

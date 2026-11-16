@@ -68,14 +68,20 @@ function fit(text: string, width: number): string {
   return line + ' '.repeat(Math.max(0, width - visibleWidth(line)))
 }
 
-function statusWord(kind: string | undefined, snapshot: { readonly dirty: boolean; readonly loading: boolean }): string {
+function statusWord<T extends object>(kind: string | undefined, snapshot: HostNumericSettingsSnapshot<T>): string {
   switch (kind) {
     case 'verified': return 'Verified'
     case 'not-saved': return 'Not saved'
     case 'unverified': return 'Unverified'
     case 'outcome-unconfirmed': return 'Outcome unconfirmed'
     case 'saving': return 'Saving…'
-    default: return snapshot.loading ? 'Loading Host settings…' : snapshot.dirty ? 'Unsaved' : 'Ready'
+    default:
+      if (snapshot.loading) return 'Loading Host settings…'
+      if (snapshot.source.kind === 'unavailable') return 'Unavailable'
+      if (snapshot.source.kind === 'unreadable') return 'Unreadable'
+      if (!snapshot.current) return 'Last-known · read-only'
+      if (snapshot.dirty) return 'Unsaved'
+      return 'Ready'
   }
 }
 
@@ -428,17 +434,45 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
         ? 'Unknown'
         : stagedReset ? 'Reset staged' : draft ?? String(source.effective[field.key])
       const marker = selected ? color.primary('> ') : '  '
-      const labelWidth = Math.max(1, width - visibleWidth(marker) - visibleWidth(RESET_WORD) - 4)
-      const paintedLabel = truncateToWidth(field.label, labelWidth, '…', false)
-      const valueRoom = Math.max(1, Math.floor(width / 3))
+      const markerPlain = selected ? '> ' : '  '
+      const resetWidth = visibleWidth(RESET_WORD)
+      const minGap = 2
+      const minLabel = 6
+      // The painted Reset must be a COMPLETE segment whose hit span is derived
+      // from the final line, never from a pre-fit composition. When the width
+      // cannot host a real label + value + the whole word, the Reset action is
+      // removed entirely (the field target still covers the row).
+      const resetFits = width >= visibleWidth(markerPlain) + minLabel + minGap + 1 + resetWidth + 1
+      const maxValueRoom = Math.max(1, width - visibleWidth(markerPlain) - minLabel - minGap - (resetFits ? resetWidth + 1 : 0))
+      const valueRoom = Math.max(1, Math.min(Math.max(1, Math.floor(width / 3)), maxValueRoom))
       const paintedValue = truncateToWidth(sanitizedPhysicalLine(value), valueRoom, '…', false)
-      const room = Math.max(2, width - visibleWidth(marker) - visibleWidth(paintedLabel) - visibleWidth(paintedValue) - visibleWidth(RESET_WORD) - 1)
-      const text = `${marker}${selected ? color.textStrong(paintedLabel) : color.text(paintedLabel)}${' '.repeat(room)}${color.text(paintedValue)} ${color.primary(RESET_WORD)}`
-      const resetStart = Math.max(0, visibleWidth(text) - visibleWidth(RESET_WORD))
+      const valueWidth = visibleWidth(paintedValue)
+      const labelRoom = resetFits
+        ? Math.max(0, width - visibleWidth(markerPlain) - valueWidth - resetWidth - minGap - 1)
+        : Math.max(0, width - visibleWidth(markerPlain) - valueWidth - minGap)
+      const paintedLabel = truncateToWidth(field.label, labelRoom, '…', false)
+      const labelWidth = visibleWidth(paintedLabel)
+      const used = visibleWidth(markerPlain) + labelWidth + valueWidth + (resetFits ? resetWidth + 1 : 0)
+      const pad = Math.max(1, width - used)
+      const suffix = resetFits ? ` ${color.primary(RESET_WORD)}` : ''
+      const text = `${marker}${selected ? color.textStrong(paintedLabel) : color.text(paintedLabel)}${' '.repeat(pad)}${color.text(paintedValue)}${suffix}`
+      const resetStart = resetFits ? width - resetWidth : undefined
       const rowTargets: Omit<Target, 'row'>[] = []
       if (editable) {
-        rowTargets.push({ id: `field:${field.key}`, action: { kind: 'field', field: field.key }, startCol: 0, endCol: Math.max(0, resetStart - 2) })
-        rowTargets.push({ id: `reset:${field.key}`, action: { kind: 'reset', field: field.key }, startCol: resetStart, endCol: width })
+        rowTargets.push({
+          id: `field:${field.key}`,
+          action: { kind: 'field', field: field.key },
+          startCol: 0,
+          endCol: resetStart === undefined ? width : Math.max(0, resetStart - minGap),
+        })
+        if (resetStart !== undefined) {
+          rowTargets.push({
+            id: `reset:${field.key}`,
+            action: { kind: 'reset', field: field.key },
+            startCol: resetStart,
+            endCol: resetStart + resetWidth,
+          })
+        }
       }
       lines.push({ text, field: field.key, targets: rowTargets })
       const overridden = source.kind === 'ready' ? source.overridden[field.key] === true : undefined

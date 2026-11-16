@@ -183,6 +183,21 @@ function proxyRunner(
         refresh: async () => {},
         mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
       },
+      agentLoopSettings: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      shellExecutionSettings: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      sessionLogUpload: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
       // The Web provider section is Host-only (S2/PR-B): this stub composes no
       // Host settings plane, so the section reports unavailable and offers no write.
       web: { available: () => false },
