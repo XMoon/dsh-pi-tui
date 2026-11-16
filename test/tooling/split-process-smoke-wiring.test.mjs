@@ -995,6 +995,7 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
     slowPeerIsolated: true,
     siblingAcpAndTuiUnaffected: true,
     reattachAfterFailureClean: true,
+    lateReadAfterCloseInert: true,
     noForeignTurnProjected: true,
     hostIdentityKept: true,
     readImageVerified: true,
@@ -1021,7 +1022,13 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
       },
       failedTool: { turn: 13, callId: 'po4c-tool-failed', isError: true },
       missingImage: { turn: 14, attachmentId: `sha256:${'f'.repeat(64)}`, hostCode: 'ATTACHMENT_NOT_FOUND', acpCode: 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED' },
-      slowPeer: { backpressureCode: 'LOCAL_ACP_OUTPUT_BACKPRESSURE', siblingSessionId: 'S-sibling', tuiTurn: 15, reattachAttempts: 2 },
+      slowPeer: {
+        backpressureCode: 'LOCAL_ACP_OUTPUT_BACKPRESSURE',
+        siblingSessionId: 'S-sibling',
+        tuiTurn: 15,
+        reattachAttempts: 2,
+        lateRead: { attachmentId: `sha256:${'a'.repeat(64)}`, releasedAfterDisconnect: true, lateAttempts: 1 },
+      },
       imageProbes: [{ kind: 'po4c-image-stored' }, { kind: 'po4c-image-stored' }],
     },
   }
@@ -1031,7 +1038,7 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
   for (const field of [
     'assistantTextImageTextOrdered', 'assistantImageOnlyAccepted', 'toolResultOrderedContent',
     'toolFailedStatus', 'missingImageRejected', 'largeImageFrameAboveLegacyCap', 'slowPeerIsolated',
-    'siblingAcpAndTuiUnaffected', 'reattachAfterFailureClean', 'noForeignTurnProjected', 'readImageVerified',
+    'siblingAcpAndTuiUnaffected', 'reattachAfterFailureClean', 'lateReadAfterCloseInert', 'noForeignTurnProjected', 'readImageVerified',
   ]) {
     const missing = { ...complete }
     delete missing[field]
@@ -1051,6 +1058,10 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
   // The slow-reader and the sibling session must be the real distinct facts.
   assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
     ...complete, evidence: { ...complete.evidence, slowPeer: { ...complete.evidence.slowPeer, siblingSessionId: 'S-po4c' } },
+  }), /selected acp\.po4c-content-output/u)
+  // The late Store read must be proven to have completed AFTER the disconnect.
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
+    ...complete, evidence: { ...complete.evidence, slowPeer: { ...complete.evidence.slowPeer, lateRead: { ...complete.evidence.slowPeer.lateRead, releasedAfterDisconnect: false } } },
   }), /selected acp\.po4c-content-output/u)
   // A NOT_VERIFIED status never becomes a selected PASS.
   assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', { ...complete, status: 'NOT_VERIFIED' }),

@@ -1024,9 +1024,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     access: HostAcpSessionAccess,
     reason: 'cancel' | 'closing' | 'disconnect',
   ): Promise<void> {
-    // A disconnect cannot deliver any further output; close delivery first and
-    // stop this flight's own output IO (never the Host Agent/Session).
-    if (reason === 'disconnect') {
+    // A closing or disconnected View cannot deliver any further output: close
+    // delivery FIRST, then stop this flight's own output IO (never the Host
+    // Agent/Session/Writer). A held image read is therefore abandoned here and
+    // the flight still settles on the real Host terminal facts below.
+    if (reason === 'disconnect' || reason === 'closing') {
       flight.deliveryClosed = true
       flight.outputAbort.abort()
     }

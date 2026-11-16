@@ -3080,6 +3080,66 @@ test('PO-4C C-L1-05: a mixed turn aborts the pending image read and never sends 
   assert.deepEqual(view.notifications, [])
 })
 
+test('PO-4C C-L1-05: session/close abandons a held image read and hands no further output to the closing View', async () => {
+  const view = promptView()
+  await view.attach()
+  const readStarted = deferred<void>()
+  view.access.imageReadImpl = async (_ref, signal) => {
+    readStarted.resolve()
+    return await new Promise<AcpStoredImage>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+    })
+  }
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-closing')
+  view.access.turnFence = { openTurnStartSeq: 100, lastTurn: 1 }
+  view.access.agentStatus = 'running'
+  view.claim('m-closing', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-closing', [
+    { type: 'text', text: 'before' },
+    imageBlock('sha256:closing'),
+  ]))
+  await readStarted.promise
+  const closing = view.registry.closeSession(view.conn, view.access, 'P1')
+  await flushOutput()
+  assert.deepEqual(view.notifications, [], 'the closing View receives no further output, not even the pending text')
+  // The real owned-turn terminal still settles both the prompt and the close.
+  view.commit('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } })
+  assert.deepEqual(await closing, {})
+  assert.deepEqual(await attempt, { stopReason: 'cancelled' })
+  assert.equal(view.registry.hasClaim('P1'), false)
+})
+
+test('PO-4C C-L1-05: a request abort during a held read abandons the output instead of failing it as content', async () => {
+  const view = promptView()
+  await view.attach()
+  const controller = new AbortController()
+  const readStarted = deferred<void>()
+  view.access.imageReadImpl = async (_ref, signal) => {
+    readStarted.resolve()
+    return await new Promise<AcpStoredImage>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+    })
+  }
+  const attempt = view.start('hello', controller.signal)
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-abort')
+  view.access.turnFence = { openTurnStartSeq: 100, lastTurn: 1 }
+  view.access.agentStatus = 'running'
+  view.claim('m-abort', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-abort', [
+    { type: 'text', text: 'before' },
+    imageBlock('sha256:abort'),
+  ]))
+  await readStarted.promise
+  controller.abort()
+  await flushOutput()
+  assert.deepEqual(view.notifications, [], 'the aborted channel receives nothing, and the abort is not a content failure')
+  view.commit('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } })
+  assert.deepEqual(await attempt, { stopReason: 'cancelled' })
+})
+
 test('PO-4C C-L1-05: an Agent disposal during a read fails the request once and a late read never reaches the wire', async () => {
   const view = promptView()
   await view.attach()

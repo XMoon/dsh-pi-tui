@@ -649,6 +649,7 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.slowPeerIsolated === true
       && result?.siblingAcpAndTuiUnaffected === true
       && result?.reattachAfterFailureClean === true
+      && result?.lateReadAfterCloseInert === true
       && result?.noForeignTurnProjected === true
       && result?.hostIdentityKept === true
       && result?.readImageVerified === true
@@ -688,6 +689,10 @@ export function assertSelectedVerdict(caseId, result) {
       && Number.isInteger(result?.evidence?.slowPeer?.tuiTurn)
       && Number.isInteger(result?.evidence?.slowPeer?.reattachAttempts)
       && result.evidence.slowPeer.reattachAttempts >= 1
+      && result?.evidence?.slowPeer?.lateRead?.releasedAfterDisconnect === true
+      && result.evidence.slowPeer.lateRead.attachmentId === result.evidence.assistant.attachmentId
+      && Number.isInteger(result?.evidence?.slowPeer?.lateRead?.lateAttempts)
+      && result.evidence.slowPeer.lateRead.lateAttempts >= 1
       && Array.isArray(result?.evidence?.imageProbes)
       && result.evidence.imageProbes.length === 2,
     `selected ${caseId}: the ACP committed content-output verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)

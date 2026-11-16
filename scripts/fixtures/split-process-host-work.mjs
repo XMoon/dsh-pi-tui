@@ -1008,6 +1008,22 @@ export async function apply(ctx) {
         message: String(payload?.error?.message ?? payload?.error).slice(0, 500),
       })
     }), 'po4c-agent-error-probe')
+    // PO-4C late-read race: when the smoke arms this barrier, ONE read of the
+    // mixed image is held and then completes even though the caller already
+    // aborted (a real backend read can finish concurrently with an abort). The
+    // View must drop those late bytes, never project them into a new View.
+    const attachments = ctx.attachments
+    const readImage = attachments.readImage
+    attachments.readImage = async function (ref, signal) {
+      const arm = process.env.C1_PO4C_READ_ARM
+      if (typeof arm === 'string' && arm !== '' && existsSync(arm) && ref?.attachmentId === po4c.mixed.attachmentId) {
+        record('po4c-read-held', { attachmentId: ref.attachmentId })
+        await waitForBarrier(process.env.C1_PO4C_READ_RELEASE, new AbortController().signal)
+        record('po4c-read-released', { attachmentId: ref.attachmentId })
+        return await readImage.call(this, ref)
+      }
+      return await readImage.call(this, ref, signal)
+    }
     // One real Host tool whose rendered model-facing content is the ordered
     // [text, verified image, text] batch the Host commits to `tool/result`.
     ctx.effect(() => ctx.tools.register(defineTool({
