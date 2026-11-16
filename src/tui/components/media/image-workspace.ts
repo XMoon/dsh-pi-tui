@@ -206,10 +206,13 @@ export class ImageWorkspacePanel implements Component {
    * press is never dispatched twice.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-    // WHEEL/DRAG/MOVE between a press and its release is intervening input:
-    // the old press must never complete a row View, a bar Close or a Viewer
-    // exit. Keyboard input and invalidation revoke it in their own entries.
-    if (event.type === 'wheel' || event.type === 'drag' || event.type === 'move') {
+    // A WHEEL between a press and its release is intervening input: the old
+    // press must never complete a row View, a bar Close or a Viewer exit.
+    // Keyboard input and invalidation revoke it in their own entries. A
+    // move/drag is NOT used here: the alt screen already withholds the
+    // synthesized click when the pointer left the pressed cell, and a
+    // same-cell motion event must not cancel a real click.
+    if (event.type === 'wheel') {
       this.gesture = undefined
       this.pickerPress = undefined
     }
@@ -255,7 +258,7 @@ export class ImageWorkspacePanel implements Component {
       }
       return undefined
     }
-    if (event.type === 'wheel' || event.type === 'drag' || event.type === 'move') return undefined
+    if (event.type === 'wheel') return undefined
     const panel = this.viewPanel
     if (!(panel instanceof ImageViewerPanel)) return undefined
     return this.handleViewerMouse(event, panel, clicked)
