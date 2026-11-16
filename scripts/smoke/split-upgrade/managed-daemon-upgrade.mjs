@@ -48,14 +48,16 @@ import { hostSessionEvents } from '../../lib/split-smoke-sessions.mjs'
 import {
   EXPECTED_PACKAGE_NAME,
   assert,
+  assertDeepEqual,
   assertEqual,
   assertNotEqual,
   assertProfileClientPeers,
   installedPayloadHash,
+  safeIdentity,
   scopeDirOf,
   sessionLogFiles,
   sha256,
-  stopRecordedHostForCleanup,
+  stopHostForCleanup,
 } from '../../lib/split-upgrade-support.mjs'
 import {
   cleanupOutcomeError,
@@ -77,6 +79,15 @@ const CREDENTIAL_KEY = 'm6-2d-qualification/upgrade-probe'
 const CREDENTIAL_SENTINEL = 'm6-2d-credential-sentinel-20261116'
 /** The one prompt of the durable Session created before the upgrade. */
 const SESSION_PROMPT = 'm6-2d managed upgrade session probe'
+/** The exact seeded official credential record block; every stage must keep it. */
+const CREDENTIAL_RECORD_BLOCK = [
+  `  ${CREDENTIAL_KEY}:`,
+  '    kind: grant',
+  '    payload:',
+  `      token: ${CREDENTIAL_SENTINEL}`,
+].join('\n')
+/** The addressable record keys in the official credentials document. */
+const CREDENTIAL_RECORD_KEY_PATTERN = /^ {2}([a-z][a-z0-9-]*\/[a-z][a-z0-9-]*):$/gmu
 
 function assertMatch(actual, pattern, message) {
   assert(typeof actual === 'string' && pattern.test(actual), message)
@@ -266,6 +277,20 @@ async function waitForDurableEvent(dshHome, sessionId, predicate, label, timeout
   return events
 }
 
+/** The event types appended after the pre-upgrade seed facts (bounded names). */
+function appendedEventTypes(events, prefixLength) {
+  return events.slice(prefixLength).map(event => String(event.type ?? 'unknown')).slice(0, 24)
+}
+
+/** A resume may append session-format markers, never Session history events. */
+const HISTORY_EVENT_TYPES = Object.freeze(['user/message', 'assistant/message', 'turn/start', 'turn/end'])
+
+function assertNoHistoryAppended(events, prefixLength, label) {
+  for (const type of appendedEventTypes(events, prefixLength)) {
+    assert(!HISTORY_EVENT_TYPES.includes(type), `${label}: the readback appended a ${type} event`)
+  }
+}
+
 /** The exact human-authored prompt count in one durable Session. */
 function userPromptCount(events) {
   return events.filter(event => event.type === 'user/message'
@@ -287,6 +312,31 @@ function writeSeededCredentialsStore(dshHome) {
     '',
   ].join('\n'), { mode: 0o600 })
   return path
+}
+
+/** One official credential-store snapshot: bytes, keys and the seeded record block. */
+function credentialStoreFacts(path) {
+  const text = readFileSync(path, 'utf8')
+  return {
+    sha256: createHash('sha256').update(text).digest('hex'),
+    recordKeys: [...text.matchAll(CREDENTIAL_RECORD_KEY_PATTERN)].map(match => match[1]).sort(),
+    seededBlockPreserved: text.includes(CREDENTIAL_RECORD_BLOCK),
+  }
+}
+
+/**
+ * The seeded record must survive byte-for-byte. The product owns its OWN
+ * records (the local Host writes its connection grant), so the whole document
+ * is not expected to stay byte-identical; the user-seeded entry's block and the
+ * record key set are the durable facts this scene protects.
+ */
+function assertCredentialStorePreserved(path, expectedRecordKeys, label) {
+  const facts = credentialStoreFacts(path)
+  assert(facts.seededBlockPreserved, `${label}: the seeded official credential record block changed`)
+  if (expectedRecordKeys !== undefined) {
+    assertDeepEqual(facts.recordKeys, expectedRecordKeys, `${label}: the official credential record key set changed`)
+  }
+  return facts
 }
 
 /** Leave the stored-credentials page and prove the main editor regained its seat. */
@@ -337,12 +387,6 @@ async function assertCredentialReadback(client, label) {
   await leaveCredentialList(client, label)
 }
 
-/** Stop one recorded Host through its kernel starttime fence, then verify it. */
-async function stopVerifiedHost(identity, label) {
-  await stopRecordedHostForCleanup({ pid: identity.pid, starttime: identity.starttime })
-  assert(await waitGone(identity.pid, 30_000), `${label}: the Host process did not exit`)
-}
-
 /**
  * Run the complete dual-build migration in its own profile/unit ownership
  * boundary. Returns an evidence fragment on PASS; throws on a real product
@@ -377,8 +421,8 @@ export async function runManagedDaemonUpgrade(context) {
   const scratch = join(workRoot, 'scratch')
   const fragment = { status: 'PASS', scope: 'REAL_SYSTEMD_USER_L6', old: {}, new: {} }
   const clients = []
+  const hosts = []
   let installation
-  let directHost
   let stubPath
   let unitName
   let failure
@@ -410,24 +454,36 @@ export async function runManagedDaemonUpgrade(context) {
     }
 
     // ── Seed the official durable Session and credential record ─────────────
-    // The Session is a REAL product turn through the old build's real Host and
-    // Client entry; the official credential store gets one non-secret record.
+    // The Session is a REAL product Turn written by the old build's real Host.
+    // The Host is started explicitly with the qualification-only offline LLM
+    // overlay (a Client cold start would strip that internal test channel), and
+    // a real PTY Client attaches to it exactly like the cross-build case does.
     checkpoint('C09/durable-data-seed')
     const surfaceLlm = writeSurfaceLlmFixture(profileDir, workRoot)
     stubPath = surfaceLlm.stubPath
     const base = { cwd: profileDir, env: { ...env }, anchor, profile: 'pi-tui', scratch }
-    const seeder = startClient(context, installation, base, workRoot, { SPLIT_PROCESS_EXTRA_PATCH: surfaceLlm.patchPath })
+    const seedHost = new context.EntryProcess('host', join(oldPackageRoot, 'dist', 'local-host.mjs'), {
+      ...base,
+      env: { ...base.env, SPLIT_PROCESS_EXTRA_PATCH: surfaceLlm.patchPath },
+    })
+    hosts.push(seedHost)
+    const seedHostReady = await seedHost.waitFor(record => record.m4a0 === 'ready', 'seed Host ready', 240_000)
+    const directHost = safeIdentity(seedHostReady.localHost)
+    assertEqual(directHost.buildId, oldBuildId, 'the seed Host published another buildId')
+    const seeder = startClient(context, installation, base, workRoot)
     clients.push(seeder)
     const seeded = await waitForAuthenticatedClient(seeder, 'seed Client')
-    assertEqual(seeded.auth.buildId, oldBuildId, 'the seed Client authenticated a Host of another build')
-    directHost = { pid: seeded.auth.hostPid, starttime: seeded.auth.hostStarttime, scopeId: seeded.auth.scopeId }
+    assertEqual(seeded.auth.instanceId, directHost.instanceId, 'the seed Client authenticated another Host instance')
+    // The first REAL prompt is what opens the product Session; wait for that
+    // submission before demanding a Session identity.
+    seeder.send(`${SESSION_PROMPT}\r`)
+    await seeder.waitForScreen(SESSION_PROMPT, 'seed Client painted the submitted prompt', 120_000)
     const seededSession = await seeder.waitFor(
       record => record.m4b2s === 'surface-status' && record.sessionOpen === true && typeof record.openSessionId === 'string',
       'seed Client opened its Session',
       120_000,
     )
     const sessionId = seededSession.openSessionId
-    seeder.send(`${SESSION_PROMPT}\r`)
     await seeder.waitForScreen('stub answer', 'seed Client painted the offline answer', 120_000)
     const seededEvents = await waitForDurableEvent(dshHome, sessionId, event => event.type === 'turn/end', 'seed Turn settled durably')
     assertEqual(userPromptCount(seededEvents), 1, 'the seed Session did not persist exactly one human prompt')
@@ -437,15 +493,17 @@ export async function runManagedDaemonUpgrade(context) {
     const seederExit = await seeder.waitForExit(120_000)
     assertEqual(seederExit.code, 0, `the seed Client /exit was ${JSON.stringify(seederExit)}`)
     await seeder.dispose()
-    await stopVerifiedHost(directHost, 'the seed Host')
+    await stopHostForCleanup(seedHost)
+    assert(await waitGone(directHost.hostPid, 30_000), 'the seed Host process did not exit')
     assert(!existsSync(join(scopeDirOf(dshHome, directHost.scopeId), 'instance.json')),
       'the seed Host left its instance.json behind')
-    directHost = undefined
     unlinkSync(stubPath)
     stubPath = undefined
 
     const credentialsPath = writeSeededCredentialsStore(dshHome)
-    const credentialsSha256Before = sha256(credentialsPath)
+    const seededCredentials = credentialStoreFacts(credentialsPath)
+    assert(seededCredentials.seededBlockPreserved, 'the seeded official credential record block is not readable')
+    assertDeepEqual(seededCredentials.recordKeys, [CREDENTIAL_KEY], 'the seeded store carries unexpected records')
     const sessionPath = sessionLogPath(dshHome, sessionId)
     const sessionSha256Before = sha256(sessionPath)
     fragment.session = {
@@ -457,7 +515,8 @@ export async function runManagedDaemonUpgrade(context) {
     fragment.credentials = {
       key: CREDENTIAL_KEY,
       kind: 'grant',
-      storeSha256BeforeUpgrade: credentialsSha256Before,
+      storeSha256BeforeUpgrade: seededCredentials.sha256,
+      recordKeysBeforeUpgrade: seededCredentials.recordKeys,
     }
 
     // ── OLD build managed Host: real unit, real identity ────────────────────
@@ -489,7 +548,7 @@ export async function runManagedDaemonUpgrade(context) {
     assertEqual(Number(oldManager.MainPID), Number(oldStatus.pid), 'the manager MainPID is not the authenticated Host PID')
     assertEqual(realpathSync(oldManager.FragmentPath), realpathSync(unitPath), 'the manager FragmentPath is not the installed profile unit')
 
-    const oldClient = startClient(context, installation, base, workRoot)
+    const oldClient = startClient(context, installation, base, workRoot, { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
     clients.push(oldClient)
     const oldAttached = await waitForAuthenticatedClient(oldClient, 'old managed Client')
     assertEqual(oldAttached.auth.buildId, oldBuildId, 'the old managed Host published another buildId')
@@ -530,9 +589,25 @@ export async function runManagedDaemonUpgrade(context) {
       'the old managed Host left its instance.json behind')
     assert(!existsSync(join(scopeDirOf(dshHome, oldAttached.auth.scopeId), 'launch.json')),
       'the old managed Host left its launch material behind')
+    const oldReadEvents = durableEvents(dshHome, sessionId)
+    assertEqual(userPromptCount(oldReadEvents), 1, 'the old managed readback replayed or duplicated the durable prompt')
+    assertEqual(oldReadEvents.slice(0, seededEvents.length).map(event => JSON.stringify(event)).join('\n'),
+      seededEvents.map(event => JSON.stringify(event)).join('\n'),
+      'the durable Session event prefix changed on the old managed readback')
+    assertNoHistoryAppended(oldReadEvents, seededEvents.length, 'the old managed readback')
     const oldSessionAfterStop = sha256(sessionLogPath(dshHome, sessionId))
-    assertEqual(oldSessionAfterStop, sessionSha256Before, 'the old managed read/write changed the durable Session bytes')
-    assertEqual(sha256(credentialsPath), credentialsSha256Before, 'the old managed read changed the credential store bytes')
+    const credentialFactsAfterOldRead = assertCredentialStorePreserved(credentialsPath, undefined, 'the old managed readback')
+    const credentialKeysAfterOldRead = credentialFactsAfterOldRead.recordKeys
+    assert(credentialKeysAfterOldRead.includes(CREDENTIAL_KEY), 'the old managed readback lost the seeded credential record')
+    fragment.session.readbackOnOld = {
+      changedBytes: oldSessionAfterStop !== sessionSha256Before,
+      appendedEvents: appendedEventTypes(oldReadEvents, seededEvents.length),
+    }
+    fragment.credentials.readbackOnOld = {
+      recordKeys: credentialKeysAfterOldRead,
+      changedBytes: credentialFactsAfterOldRead.sha256 !== seededCredentials.sha256,
+      seededRecordPreserved: true,
+    }
     fragment.managedOld.unit = {
       name: unitName,
       path: join('.config', 'systemd', 'user', unitName),
@@ -558,7 +633,7 @@ export async function runManagedDaemonUpgrade(context) {
       payloadSha256: newPayloadHash,
     }
     assertEqual(unitSnapshot(unitPath).sha256, oldUnit.sha256, 'the new profile install rewrote the old managed unit')
-    assertEqual(sha256(credentialsPath), credentialsSha256Before, 'the new profile install changed the credential store bytes')
+    assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the new profile install')
     assertEqual(sha256(sessionLogPath(dshHome, sessionId)), oldSessionAfterStop,
       'the new profile install changed the durable Session bytes')
 
@@ -582,7 +657,7 @@ export async function runManagedDaemonUpgrade(context) {
     assertEqual(unitSnapshot(unitPath).sha256, oldUnit.sha256, 'the refused new-build restart rewrote the old unit')
     assertEqual(showUnit(unitName).ActiveState, 'inactive', 'the refused new-build restart started the old unit')
     assertEqual(processCounts(dshHome).host, 0, 'the refused new-build restart created a Host')
-    assertEqual(sha256(credentialsPath), credentialsSha256Before, 'the wrong-build refusals changed the credential store bytes')
+    assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the wrong-build refusals')
     assertEqual(sha256(sessionLogPath(dshHome, sessionId)), oldSessionAfterStop,
       'the wrong-build refusals changed the durable Session bytes')
     fragment.wrongBuild = {
@@ -601,7 +676,7 @@ export async function runManagedDaemonUpgrade(context) {
     assertDaemon(uninstalled, { host: 'stopped', unit: 'none', 'unit-state': 'not-found' }, 'the explicit old-unit uninstall')
     assert(!existsSync(unitPath), 'the explicit uninstall did not remove the Profile unit path')
     assertEqual(showUnit(unitName).LoadState, 'not-found', 'the manager still loads the removed unit')
-    assertEqual(sha256(credentialsPath), credentialsSha256Before, 'the explicit uninstall changed the credential store bytes')
+    assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the explicit old-unit uninstall')
     assertEqual(sha256(sessionLogPath(dshHome, sessionId)), oldSessionAfterStop,
       'the explicit uninstall changed the durable Session bytes')
     assert(readFileSync(profileManifestPath).length > 0, 'the explicit uninstall removed the Profile manifest')
@@ -649,11 +724,15 @@ export async function runManagedDaemonUpgrade(context) {
       seededEvents.map(event => JSON.stringify(event)).join('\n'),
       'the durable Session event prefix changed across the upgrade')
     await assertCredentialReadback(newClientA, 'new managed Client A')
-    assertEqual(sha256(credentialsPath), credentialsSha256Before,
-      'the read-only credential list on the new Host changed the store bytes')
+    assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the new managed readback')
+    assertNoHistoryAppended(readbackEvents, seededEvents.length, 'the new managed readback')
     const newSessionSha256 = sha256(sessionLogPath(dshHome, sessionId))
     assertEqual(newSessionSha256, oldSessionAfterStop,
-      'the upgraded Host readback changed the durable Session bytes')
+      'the upgraded Host readback changed the durable Session bytes after the first managed resume')
+    fragment.session.readbackOnNew = {
+      stableAfterFirstResume: true,
+      appendedEvents: appendedEventTypes(readbackEvents, seededEvents.length),
+    }
     assertEqual(processCounts(dshHome).host, 1, 'the new managed stage did not keep exactly one Host')
 
     newClientA.send('/exit\r')
@@ -676,7 +755,7 @@ export async function runManagedDaemonUpgrade(context) {
       clientPids: [newA.ready.pid, newB.ready.pid],
       sessionReadback: true,
       credentialReadback: true,
-      durableSessionBytesUnchanged: true,
+      durableSessionStableAfterFirstResume: true,
     }
 
     checkpoint('C09/new-managed-stop')
@@ -697,7 +776,7 @@ export async function runManagedDaemonUpgrade(context) {
     assertEqual(rollbackPayloadHash, oldPayloadHash, 'the rollback profile installed different old payload bytes')
     installation.profilePackage = rollbackPackageRoot
     assertEqual(unitSnapshot(unitPath).sha256, newUnit.sha256, 'the rollback install rewrote the new managed unit')
-    assertEqual(sha256(credentialsPath), credentialsSha256Before, 'the rollback install changed the credential store bytes')
+    assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the rollback profile install')
     assertEqual(sha256(sessionLogPath(dshHome, sessionId)), newSessionSha256,
       'the rollback install changed the durable Session bytes')
     const rollbackStatus = assertDaemon(runDaemon(installation, ['status']),
@@ -718,7 +797,7 @@ export async function runManagedDaemonUpgrade(context) {
     assertDaemon(runDaemon(installation, ['uninstall']), { host: 'stopped', unit: 'none', 'unit-state': 'not-found' },
       'the explicit new-unit uninstall')
     assert(!existsSync(unitPath), 'the explicit rollback uninstall did not remove the new-build unit')
-    assertEqual(sha256(credentialsPath), credentialsSha256Before, 'the rollback uninstall changed the credential store bytes')
+    assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the rollback uninstall')
 
     checkpoint('C09/rollback-start')
     const startedRollback = runDaemon(installation, ['start'])
@@ -753,9 +832,15 @@ export async function runManagedDaemonUpgrade(context) {
     assertEqual(rollbackEvents.slice(0, seededEvents.length).map(event => JSON.stringify(event)).join('\n'),
       seededEvents.map(event => JSON.stringify(event)).join('\n'),
       'the durable Session event prefix changed across the rollback')
-    assertEqual(sha256(credentialsPath), credentialsSha256Before, 'the rollback read changed the credential store bytes')
-    assertEqual(sha256(sessionLogPath(dshHome, sessionId)), newSessionSha256,
-      'the rollback read changed the durable Session bytes')
+    assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the rollback readback')
+    assertNoHistoryAppended(rollbackEvents, seededEvents.length, 'the rollback readback')
+    const rollbackSessionSha256 = sha256(sessionLogPath(dshHome, sessionId))
+    assertEqual(rollbackSessionSha256, oldSessionAfterStop,
+      'the rollback readback changed the durable Session bytes after the first managed resume')
+    fragment.session.readbackOnRollback = {
+      stableAfterFirstResume: true,
+      appendedEvents: appendedEventTypes(rollbackEvents, seededEvents.length),
+    }
     rollbackClient.send('/exit\r')
     const rollbackExit = await rollbackClient.waitForExit(120_000)
     assertEqual(rollbackExit.code, 0, `the rollback Client /exit was ${JSON.stringify(rollbackExit)}`)
@@ -782,8 +867,8 @@ export async function runManagedDaemonUpgrade(context) {
     assertDaemon(runDaemon(installation, ['uninstall']), { host: 'stopped', unit: 'none', 'unit-state': 'not-found' },
       'the closing rollback uninstall')
     assert(!existsSync(unitPath), 'the closing uninstall did not remove the rollback unit')
-    assertEqual(sha256(credentialsPath), credentialsSha256Before, 'the closing uninstall changed the credential store bytes')
-    assertEqual(sha256(sessionLogPath(dshHome, sessionId)), newSessionSha256,
+    assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the closing uninstall')
+    assertEqual(sha256(sessionLogPath(dshHome, sessionId)), rollbackSessionSha256,
       'the closing uninstall changed the durable Session bytes')
     assertEqual(realpathSync(installation.profilePackage), rollbackPackageRoot, 'the closing uninstall moved the installed profile')
     fragment.cleanup = {
@@ -811,7 +896,7 @@ export async function runManagedDaemonUpgrade(context) {
     for (const client of clients) {
       try { await client.dispose?.() } catch { /* best effort */ }
     }
-    if (directHost !== undefined) await stopRecordedHostForCleanup(directHost).catch(() => undefined)
+    for (const host of hosts) await stopHostForCleanup(host).catch(() => undefined)
     if (stubPath !== undefined) {
       try { unlinkSync(stubPath) } catch { /* best effort */ }
     }
