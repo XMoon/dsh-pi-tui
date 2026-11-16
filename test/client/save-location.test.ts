@@ -635,7 +635,9 @@ test('mouse parity: a key between a suggestion press and release revokes the acc
     deps,
     () => {},
   )
-  await new Promise<void>(resolve => setTimeout(resolve, 10))
+  // The prompt's OWN applied-suggestions callback is the authoritative signal.
+  const suggestionsLanded = new Promise<void>(resolve => { prompt.onChange = resolve })
+  await suggestionsLanded
   const rendered = prompt.render(60)
   const srcRow = rendered.findIndex(line => line.includes('src/'))
   assert.ok(srcRow >= 0, `suggestion row missing:\n${rendered.join('\n')}`)
@@ -665,7 +667,9 @@ test('mouse parity: a cursor move between a suggestion press and release revokes
     deps,
     () => {},
   )
-  await new Promise<void>(resolve => setTimeout(resolve, 10))
+  // The prompt's OWN applied-suggestions callback is the authoritative signal.
+  const suggestionsLanded = new Promise<void>(resolve => { prompt.onChange = resolve })
+  await suggestionsLanded
   const rendered = prompt.render(60)
   const srcRow = rendered.findIndex(line => line.includes('src/'))
   assert.ok(srcRow >= 0, `suggestion row missing:\n${rendered.join('\n')}`)
@@ -730,7 +734,9 @@ test('action row: Dismiss suggestions only closes the list and the next frame of
     deps,
     (value) => { results.push(value) },
   )
-  await new Promise<void>(resolve => setTimeout(resolve, 10)) // the initial suggestion lands
+  // The prompt's OWN applied-suggestions callback is the authoritative signal.
+  const suggestionsLanded = new Promise<void>(resolve => { prompt.onChange = resolve })
+  await suggestionsLanded
   assert.equal(prompt.getSuggestions().length, 1, 'precondition — suggestion visible')
   let rendered = prompt.render(60)
   assert.match(paintedText(rendered.at(-1) ?? ''), /Save \[Enter\] · Dismiss suggestions \[Esc\]/u)
@@ -852,8 +858,11 @@ test('action row: a settled suggestion refresh refuses the pre-refresh press', a
   const point = actionPoint(rendered, 'Save [Enter]')
   const geometry = { width: 60, height: rendered.length }
   prompt.handleMouse(pointerEvent(point, 'press', geometry))
+  // The prompt's OWN applied-suggestions callback proves the controlled
+  // completion really landed before the release.
+  const completionApplied = new Promise<void>(resolve => { prompt.onChange = resolve })
   resolveCompletion?.([{ value: 'src/', displayPath: 'src' }])
-  await new Promise<void>(resolve => setTimeout(resolve, 10))
+  await completionApplied
   prompt.handleMouse(pointerEvent(point, 'click', geometry))
   assert.deepEqual(results, [], 'the async completion must refuse the old press')
   const next = prompt.render(60)
@@ -1128,7 +1137,9 @@ test('mouse parity: a click on an inert row releases the pressed identity (no st
     deps,
     () => {},
   )
-  await new Promise<void>(resolve => setTimeout(resolve, 10))
+  // The prompt's OWN applied-suggestions callback is the authoritative signal.
+  const suggestionsLanded = new Promise<void>(resolve => { prompt.onChange = resolve })
+  await suggestionsLanded
   const rendered = prompt.render(60)
   const srcRow = rendered.findIndex(line => line.includes('src/'))
   assert.ok(srcRow >= 0, `suggestion row missing:\n${rendered.join('\n')}`)
