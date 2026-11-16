@@ -509,11 +509,15 @@ stdout/stderr.
   identity, wrong scope, wrong `FragmentPath`, a mismatched `MainPID` and a
   strict-absence Host without a fresh authenticated identity remain refusals.
   A restart still stops the old instance and proves a new authenticated Ready
-  instance; a failed recovery reports the real failure. A surface startup
-  failure prints the controlled code, states that the Host was not stopped,
-  and points at `daemon status`, `daemon logs` and an explicitly user-chosen
-  `daemon restart` for the ACTIVE profile; it never tells the user to signal a
-  PID and never promises that recovery will succeed.
+  instance; a failed recovery reports the real failure. An ordinary surface
+  startup failure prints the controlled code, states that the Host was not
+  stopped, and points at `daemon status`, `daemon logs` and an explicitly
+  user-chosen `daemon restart` for the ACTIVE profile; it never tells the user
+  to signal a PID and never promises that recovery will succeed. A
+  Client-handoff/reexec failure keeps its dedicated expected-Host restore line
+  instead: the Host was not stopped or replaced, and the user starts a
+  compatible Client manually, because restarting the Host is not the recovery
+  for a replaced expected Client instance.
 - **restart and uninstall are ONE explicit transition.** `restart` stops, awaits
   a confirmed old-instance exit, and only then starts a new instance; a stop
   that is unknown, failed or still running forbids the start. An owned unit

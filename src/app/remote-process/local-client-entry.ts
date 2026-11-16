@@ -2492,7 +2492,9 @@ export function sanitizeSurfaceText(text: string): string {
  * replacement package, or Session history open) and says how to recover
  * manually. Only fixed entry-owned messages are surfaced: an arbitrary
  * startup/spawn error may carry a private path or PID and is replaced with a
- * generic reason. No Cookie/token/launch URL ever enters this line.
+ * generic reason. No Cookie/token/launch URL ever enters this line. This is
+ * intentionally NOT the daemon-restart guidance: a handoff failure is about a
+ * replaced expected Client instance, not a Host that should be restarted.
  */
 export function handoffStartupFailureLine(error: unknown): string {
   let reason: string
