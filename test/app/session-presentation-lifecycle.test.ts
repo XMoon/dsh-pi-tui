@@ -18,6 +18,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createSessionPresentation, type SessionPresentationEvent } from '../../src/app/surface/session-presentation.ts'
 import { displaySeamStub } from '../support/display-seam-stub.ts'
+import { createEventRouting } from '../../src/app/surface/event-routing.ts'
 import { toolSummaryKeys } from '../../src/tui/transcript/tool-presentation.ts'
 import { createOpeningJournal } from '../../src/app/surface/opening-journal.ts'
 import type { PresentationReadSnapshot } from '../../src/runtime/presentation-read-port.ts'
@@ -683,4 +684,61 @@ test('the generation reset NEVER drops the active draft (the drop moved to the c
     'the generation reset alone NEVER drops the draft (an invalidation, not a confirmed switch — the first-session shape bumps it too)')
   h.resetForGeneration()
   assert.equal(h.draftClears(), 0, 'repeated invalidations keep the draft')
+})
+
+// ── The plan/mode event re-derives the official plan projection ──────────
+
+/** The narrow routed-event shape the real event router consumes here. */
+interface RoutedEvent {
+  readonly type: string
+  readonly data: unknown
+}
+
+test('a plan/mode event commits the bit AND re-derives the official plan projection', () => {
+  const facts: Array<{ planMode?: boolean; planPending?: boolean }> = []
+  let refreshes = 0
+  const noop = () => {}
+  const folder = { apply: noop } as never
+  const source = {
+    isCleanedUp: () => false,
+    isAttachedSession: () => true,
+    currentSessionId: () => 'main-session',
+    hasLiveAgent: () => true,
+    observeMainEvent: () => ({ refreshAgents: false }),
+    appendOpeningViewerEvent: () => false,
+    main: () => ({
+      setTranscript: noop, setStreamingToolPreviews: noop, setTurnActivity: noop,
+      applyToolPreview: noop, applyTurnActivity: noop, setStats: noop,
+      folder, stats: folder,
+    }),
+    viewedChildId: () => undefined,
+    mainFolder: () => folder,
+    viewedChildFolder: () => folder,
+    applyGoalChange: noop,
+    refreshStatusCheap: () => { refreshes += 1 },
+  }
+  const routing = createEventRouting<RoutedEvent>({
+    source: () => source as never,
+    mounted: () => ({
+      commitStatusFacts: (next: { planMode?: boolean; planPending?: boolean }) => { facts.push(next) },
+    }) as never,
+    openingJournal: createOpeningJournal<RoutedEvent>(),
+    reconcileQuestions: noop,
+    refreshAgents: noop,
+    refreshAgentRuntimeOnly: noop,
+    hasTaskChild: () => false,
+    feedCompletionStatus: noop,
+    setMainAgentProgress: noop,
+    observeMainTurnStart: noop,
+    observeMainTurnEnd: noop,
+    mainProgressAuthority: 'local-events',
+    refreshPendingInput: noop,
+    schedulePaint: noop,
+    paintNow: noop,
+  })
+  routing.routeSessionEvent({ id: 'main-session' }, { type: 'plan/mode', data: { active: true } })
+  assert.deepEqual(facts, [{ planMode: true }],
+    'the durable event bit is published immediately (the badge never waits)')
+  assert.equal(refreshes, 1,
+    'the official plan projection is re-read for the pending selection the event cannot carry')
 })

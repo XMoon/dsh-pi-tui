@@ -11,6 +11,7 @@ import test from 'node:test'
 import { deriveAccessStatus, type PermissionPresetsLike } from '../../src/domain/status/derive-access.ts'
 import { deriveActivityPhase, deriveActivityStatus } from '../../src/domain/status/derive-activity.ts'
 import { derivePlanStatus } from '../../src/domain/status/derive-plan.ts'
+import { foldGoal, goalTextOf } from '../../src/domain/status/derive-goal.ts'
 import { usageFromStats } from '../../src/domain/status/derive-usage.ts'
 import type { SessionStats } from '../../src/domain/status/stats.ts'
 
@@ -220,4 +221,30 @@ test('usage PR-2: usageFromStats contributes ONLY the lifetime llmMs, never a fo
   const official = { tokens: { uncachedInputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 } }
   assert.deepEqual(usageFromStats(STATS, undefined, official).performance, { llmMs: 120000 },
     'the Remote projection-override branch keeps the same rule')
+})
+
+// ── Goal badge (FR6: the domain keeps the objective whole) ───────────────
+
+test('goalTextOf keeps a long objective whole instead of the fixed 24-character cut', () => {
+  const objective = 'ship the 0.5.7 goal dock with full width aware truncation behavior'
+  assert.equal(goalTextOf({ phase: 'active', objective }), `goal ● ${objective}`)
+})
+
+test('goalTextOf maps every non-complete phase to its mark and hides completion', () => {
+  assert.equal(goalTextOf({ phase: 'active', objective: 'fix the build' }), 'goal ● fix the build')
+  assert.equal(goalTextOf({ phase: 'paused', objective: 'fix the build' }), 'goal ‖ fix the build')
+  assert.equal(goalTextOf({ phase: 'blocked', objective: 'fix the build' }), 'goal ◌ fix the build')
+  assert.equal(goalTextOf({ phase: 'complete', objective: 'fix the build' }), undefined)
+})
+
+test('the log fold and the projection render IDENTICALLY for the same goal fact', () => {
+  const goal = { phase: 'active', objective: 'same objective' }
+  const fromLog = foldGoal([{ type: 'goal/change', data: { operation: 'create', goal } }])
+  assert.equal(fromLog, goalTextOf(goal))
+  // The latest goal/change wins; a clear hides the badge.
+  const cleared = foldGoal([
+    { type: 'goal/change', data: { operation: 'create', goal } },
+    { type: 'goal/change', data: { operation: 'clear', goal } },
+  ])
+  assert.equal(cleared, undefined)
 })
