@@ -2142,6 +2142,26 @@ test('FR2-r5-P3: the Team hint advertises Enter details only where it has a visi
   panel.dispose()
 })
 
+test('B2: an invalidation revokes an armed Action Bar press until the next paint', () => {
+  const { panel, closes } = makeExitPanel([runningJob()])
+  const frame = panel.render(100).map(strip)
+  const hintRow = frame.findLastIndex(line => line.includes('Close [Esc]'))
+  const closeCol = frame[hintRow]!.indexOf('Close [Esc]')
+  assert.ok(panel.handleMouse(mouse('press', closeCol, hintRow, 100, 24))?.handled)
+  panel.invalidate()
+  assert.equal(panel.handleMouse(mouse('click', closeCol, hintRow, 100, 24)), undefined,
+    'a press from the invalidated frame can never complete before the next paint')
+  assert.equal(closes.length, 0, 'the invalidated gesture never closes the browser')
+  // The next paint republishes the span; a fresh independent click works.
+  const repainted = panel.render(100).map(strip)
+  const nextRow = repainted.findLastIndex(line => line.includes('Close [Esc]'))
+  const nextCol = repainted[nextRow]!.indexOf('Close [Esc]')
+  assert.ok(panel.handleMouse(mouse('press', nextCol, nextRow, 100, 24))?.handled)
+  assert.ok(panel.handleMouse(mouse('click', nextCol, nextRow, 100, 24))?.handled)
+  assert.equal(closes.length, 1)
+  panel.dispose()
+})
+
 // ── PR-B B2: the Owner-approved Fullscreen exit whitelist ───────────────────
 
 /** A Full Task Center panel with a recording onCancel; `interactionCurrent`

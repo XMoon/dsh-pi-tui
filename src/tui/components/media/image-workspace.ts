@@ -313,11 +313,22 @@ export class ImageWorkspacePanel implements Component {
   }
 
   invalidate(): void {
+    // An invalidation revokes the frame-bound pointer authority: the cached
+    // paint is no longer the frame the next event may act on, so an armed press
+    // or a stale bar hit must not complete before the next render rebuilds
+    // them. (The Viewer's own `invalidate` drops its painted exit span.)
+    this.gesture = undefined
+    this.listBarHits = []
+    this.listGridPainted = false
     this.picker?.invalidate()
     this.viewPanel?.invalidate()
   }
 
   dispose(): void {
+    // Teardown owns the screen gesture: no press may survive the lease.
+    this.gesture = undefined
+    this.listBarHits = []
+    this.listGridPainted = false
     this.viewPanel?.dispose()
     this.viewPanel = undefined
   }
