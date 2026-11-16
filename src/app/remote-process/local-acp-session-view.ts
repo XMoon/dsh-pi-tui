@@ -554,6 +554,17 @@ interface InflightPrompt {
    */
   outputStopped: boolean
   /**
+   * PO-3B/PO-4C handoff fence: number of output tasks enqueued so far. A
+   * committed cancellation snapshots this count; every task already queued at
+   * that point is ours to drop (no longer safe to hand to the client), while
+   * output of the SAME turn committed afterwards still drains under the
+   * accepted PO-3B "cancelled answer waits for the ordered notification drain"
+   * contract.
+   */
+  outputTasksQueued: number
+  /** The task count frozen by a committed cancellation, if any. */
+  outputStoppedAtTask?: number
+  /**
    * PO-3B F2: this flight's Host work is provably TERMINAL — the owned turn
    * reached its durable `turn/end`, or the exact Agent was disposed (nothing
    * can ever run that turn again). A prompt failure after this fact says
@@ -1263,6 +1274,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       outputAbort,
       outputSignal: outputAbort.signal,
       outputStopped: false,
+      outputTasksQueued: 0,
       ownTurnEnded: false,
       permissionRequests: new Map(),
     }
@@ -2178,6 +2190,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     build: () => readonly SessionUpdate[] | Promise<readonly SessionUpdate[]>,
   ): void {
     if (reserve === 0 || flight.settledDone) return
+    const taskIndex = flight.outputTasksQueued
+    flight.outputTasksQueued += 1
     flight.pendingUpdates += reserve
     if (flight.pendingUpdates > MAX_PENDING_OUTPUT_UPDATES) {
       this.failPrompt(claim, flight, promptError(
@@ -2192,13 +2206,18 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         // A mixed turn, a settled flight or a closed delivery stops ALL output
         // that has not yet been handed to the transport. Notifications already
         // sent cannot be retracted, but a queued event is still ours to drop.
-        if (flight.settledDone || flight.mixed || flight.deliveryClosed) return
+        if (flight.settledDone || flight.mixed || flight.deliveryClosed
+          || (flight.outputStoppedAtTask !== undefined && taskIndex < flight.outputStoppedAtTask)) return
         const built = build()
         // A synchronously converted event is handed to the transport without an
         // extra microtask, preserving the pre-PO-4C delivery timing for text.
         const updates = Array.isArray(built) ? built : await built
         for (const update of updates) {
-          if (flight.settledDone || flight.mixed || flight.deliveryClosed) return
+          // The same enqueue-time fence applies here: a task that was already
+          // queued when output was stopped must not hand a late image (or its
+          // sibling text) to the transport after its read finally settles.
+          if (flight.settledDone || flight.mixed || flight.deliveryClosed
+            || (flight.outputStoppedAtTask !== undefined && taskIndex < flight.outputStoppedAtTask)) return
           try {
             await flight.sendUpdate(update)
           } catch {
@@ -2288,6 +2307,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    */
   private stopFlightOutput(flight: InflightPrompt): void {
     flight.outputStopped = true
+    flight.outputStoppedAtTask ??= flight.outputTasksQueued
     flight.outputAbort.abort()
   }
 
