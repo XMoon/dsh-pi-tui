@@ -2465,9 +2465,9 @@ function controlledSurfaceReason(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error)
   const entryPrefix = 'local client entry: '
   if (raw.startsWith(entryPrefix)) {
-    return `${sanitizeSurfaceText(raw.slice(entryPrefix.length))} Inspect with: dsh --profile pi-tui daemon status and dsh --profile pi-tui daemon logs; if you choose to recover, run dsh --profile pi-tui daemon restart (not guaranteed).`
+    return `${sanitizeSurfaceText(raw.slice(entryPrefix.length))} The Host was not stopped. Inspect with: dsh --profile pi-tui daemon status and dsh --profile pi-tui daemon logs; if you choose to recover, run dsh --profile pi-tui daemon restart (not guaranteed).`
   }
-  return 'startup failed before the TUI mounted; see the Host log for detail. Inspect with: dsh --profile pi-tui daemon status and dsh --profile pi-tui daemon logs; if you choose to recover, run dsh --profile pi-tui daemon restart (not guaranteed).'
+  return 'startup failed before the TUI mounted; see the Host log for detail. The Host was not stopped. Inspect with: dsh --profile pi-tui daemon status and dsh --profile pi-tui daemon logs; if you choose to recover, run dsh --profile pi-tui daemon restart (not guaranteed).'
 }
 
 /** Strip control characters, URLs and absolute paths; bound the length. */

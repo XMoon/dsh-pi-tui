@@ -165,6 +165,7 @@ test('surface failure line strips paths, URLs and control characters from an ent
 test('a self-authored entry failure keeps its sanitized reason and daemon recovery guidance', () => {
   const line = surfaceStartupFailureLine(new Error('local client entry: context gate missing at /home/user/.dsh/profile'))
   assert.match(line, /context gate missing/u)
+  assert.match(line, /The Host was not stopped/u)
   assert.match(line, /dsh --profile pi-tui daemon status/u)
   assert.match(line, /dsh --profile pi-tui daemon logs/u)
   assert.match(line, /dsh --profile pi-tui daemon restart/u)
@@ -175,6 +176,7 @@ test('a self-authored entry failure keeps its sanitized reason and daemon recove
 test('an unknown surface failure is a fixed concise reason, never the raw message', () => {
   const line = surfaceStartupFailureLine(new Error('boom at /etc/passwd http://host/x'))
   assert.match(line, /startup failed before the TUI mounted/u)
+  assert.match(line, /The Host was not stopped/u)
   assert.match(line, /dsh --profile pi-tui daemon status/u)
   assert.match(line, /dsh --profile pi-tui daemon logs/u)
   assert.match(line, /dsh --profile pi-tui daemon restart/u)
