@@ -19,9 +19,12 @@
 import type { SubmitPendingDetail } from './ack.ts'
 
 /**
- * The composer capabilities the submission owner consumes. Semantics of each
- * member mirror the same-named `TuiApp` method exactly (the PiTui behavior is
- * the contract, not an approximation).
+ * The composer capabilities the submission owner consumes. Each member's
+ * semantics follow the OFFICIAL Client composer contract (the DSH
+ * ui-conversation SubmitMachine): a sending submission keeps the editor
+ * read-only with its draft retained, and only the Host acceptance commits
+ * (clears) the draft — a refusal or an unknown outcome returns the editor to
+ * editing with the draft intact.
  */
 export interface SubmissionComposerPort {
   /** The editor's current draft in its WIRE form (`TuiApp.getDraft`). */
@@ -37,4 +40,21 @@ export interface SubmissionComposerPort {
   notify(message: string, kind?: 'info' | 'error'): void
   /** Show/clear the local submit-ack row (`TuiApp.setSubmitPending`). */
   setSubmitPending(detail: SubmitPendingDetail | undefined): void
+  /**
+   * PR2: freeze the composer for one submission attempt — the document
+   * stays exactly as submitted (read-only, no second submit) until the
+   * matching {@link settleSubmission}. The renderer owns the freeze
+   * mechanism (its input ladder / SDK `readonly`); the attempt id is opaque
+   * correlation only. ABSENT means this composition cannot present a held
+   * submission: the application then keeps the pre-PR2 (renderer-clears
+   * first) admission for every line.
+   */
+  holdSubmission?(attemptId: string): void
+  /**
+   * PR2: end one submission attempt's hold. `'accepted'` clears the
+   * committed draft (the renderer's own undo-retiring clear) and releases
+   * the freeze; `'not-accepted'` and `'unknown'` release the freeze with
+   * the draft intact. Settling an unknown attempt id is a no-op.
+   */
+  settleSubmission?(attemptId: string, result: 'accepted' | 'not-accepted' | 'unknown'): void
 }

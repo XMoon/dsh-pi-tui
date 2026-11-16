@@ -15,7 +15,7 @@
 
 import { safeErrorMessage, safeErrorString } from '../process/errors.ts'
 import { isCancellation } from '../process/tasks.ts'
-import type { QueueAction, SessionWriter, WriteOutcome } from '../session-writer-port.ts'
+import type { PromptOptions, QueueAction, SessionWriter, WriteOutcome } from '../session-writer-port.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the services resolve from the dsh installation). */
@@ -111,7 +111,12 @@ export class DirectSessionWriter implements SessionWriter {
     this.queueAgentFor = queueAgentFor
   }
 
-  async prompt(sessionId: string, message: unknown, mode: 'queue' | 'steer'): Promise<WriteOutcome> {
+  async prompt(
+    sessionId: string,
+    message: unknown,
+    mode: 'queue' | 'steer',
+    options?: PromptOptions,
+  ): Promise<WriteOutcome> {
     const agent = this.agentFor(sessionId)
     if (agent === undefined) return sessionNotFound(sessionId)
     try {
@@ -127,6 +132,13 @@ export class DirectSessionWriter implements SessionWriter {
         },
       }
     }
+    // PR2 Host acceptance: `followup`/`steer` inserted the message into the
+    // Agent Inbox synchronously and returned without throwing — this call is
+    // the ONE acceptance proof for the Composer handoff. A synchronously
+    // emitted `agent/inbox/spliced` may have arrived earlier (the caller
+    // registered its echo before dispatch); firing here, exactly once after
+    // the insertion committed, keeps that receipt and the acceptance coherent.
+    options?.onAccepted?.()
     return { kind: 'committed', value: undefined }
   }
 

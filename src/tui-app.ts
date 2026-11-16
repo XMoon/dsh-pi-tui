@@ -1292,6 +1292,17 @@ export interface TuiAppEventsBase {
    *  exactly that occurrence; absent when no scope occurrence was recorded. */
   onSubmit: (text: string, request: ComposerSubmitRequest, scopeToken?: number) => void
   /**
+   * PR2: the SYNCHRONOUS submit admission of the live composer. The renderer
+   * calls it BEFORE any draft/undo mutation and honors the verdict:
+   * `'held'` means the application already started the submission and the
+   * composer stays frozen with its document intact (the caller must NOT run
+   * its legacy submit path); `'legacy'` lets the caller run its existing
+   * pre-clear contract; `'refused'` consumes the gesture silently. Absent
+   * keeps the pre-PR2 (clear-first) behavior for compositions that do not
+   * provide the admission.
+   */
+  beginComposerSubmission?: (text: string, request: ComposerSubmitRequest | 'steer', scopeToken?: number) => 'held' | 'legacy' | 'refused'
+  /**
    * Clipboard paste with image intake (the paste-media action, plan M3):
    * the host consumed the key and asks the runner to probe the clipboard — an image lands as a draft
    * placeholder, plain text as an editor insert. Optional; absent keeps
@@ -5354,9 +5365,28 @@ export class TuiApp {
       // path whose attachment read is still in flight. No clear, no Undo
       // retirement, no history/ack/writer; the draft stays editable and the
       // user retries after the read settles.
-      if (this.terminalPastedPath?.blocksDelivery(text) !== true) return true
-      this.notify(PASTE_PENDING_NOTICE, 'info')
-      return false
+      if (this.terminalPastedPath?.blocksDelivery(text) === true) {
+        this.notify(PASTE_PENDING_NOTICE, 'info')
+        return false
+      }
+      // PR2: the SYNCHRONOUS admission runs while the fork still holds the
+      // document. A `'held'` verdict proves the application registered the
+      // attempt and started the delivery itself — returning false keeps the
+      // fork from clearing the draft (its Undo history and paste registry
+      // stay usable until the accepted settlement). `'legacy'` proceeds to
+      // the fork's own pre-clear submit exactly as before; `'refused'`
+      // consumes the gesture silently.
+      const serialized = serializeEditorInput(this.editor.getInputMode(), text)
+      const admission = this.admitComposerGesture(serialized, 'enter')
+      if (admission === 'held') {
+        // Fresh input supersedes any transient notice, exactly like the
+        // legacy onSubmit path (whose post-clear ordering this branch skips).
+        this.clearNotify()
+        this.requestRender()
+        return false
+      }
+      if (admission === 'refused') return false
+      return true
     }
     this.editor.onBracketedPasteCommitted = (commit) => { this.acceptHostPastedText(commit) }
     this.editor.onInputStart = (state) => { this.pasteEditAnchor = { text: state.text, cursor: state.cursor } }
@@ -5587,6 +5617,14 @@ export class TuiApp {
             const serialized = this.expandedSeatWireDraft()
             // A pending pasted image path refuses the steer BEFORE its clear.
             if (this.blocksPastedPathDelivery(serialized)) return true
+            // PR2: the same composer admission as the submit gestures. A
+            // held/refused verdict means the application owns the gesture —
+            // the draft stays and no second dispatch runs.
+            const steerAdmission = this.admitComposerGesture(serialized, 'steer')
+            if (steerAdmission === 'held' || steerAdmission === 'refused') {
+              this.requestRender()
+              return true
+            }
             // Same scoped bridge as the Ctrl+S action: the clear's retention
             // reconcile must not evict an image the steer dispatch needs.
             const bridgeRelease = this.draftImagePreviewReserve?.(serialized)
@@ -7483,6 +7521,15 @@ export class TuiApp {
     }
     if ((route.kind === 'editor' || route.kind === 'viewer-editor') && replacement === undefined) {
       this.clearExitConfirmation()
+      // PR2: a live submission attempt FREEZES the main composer. The key is
+      // consumed without reaching the fork editor — typing, paste/IME,
+      // autocomplete, history recall and a repeated Enter cannot mutate or
+      // re-submit the held document. The reserved lifecycle paths above
+      // (physical Escape / the cancel-activity action / exit) keep their own
+      // routing; an interactive child viewer owns its own seat contract.
+      if (this.composerHeld() && this.seatEditor().id === 'host') {
+        return { consume: true }
+      }
       // P2-R5: only the HOST seat may forward to the hidden host editor. A
       // display-only replacement editor (no handleInput hook) owns the seat
       // too: the public contract (public-types.ts) says ordinary typing is
@@ -7850,6 +7897,15 @@ export class TuiApp {
         // the draft.
         const serialized = this.expandedSeatWireDraft()
         if (this.blocksPastedPathDelivery(serialized)) return true
+        // PR2: the Ctrl+S steer gesture shares the ONE composer admission.
+        // A held/refused verdict means the application already owns the
+        // gesture (the draft stays frozen until the Host acceptance); the
+        // renderer must not clear or dispatch it again.
+        const steerAdmission = this.admitComposerGesture(serialized, 'steer')
+        if (steerAdmission === 'held' || steerAdmission === 'refused') {
+          this.requestRender()
+          return true
+        }
         // The SCOPED bridge: the clear below pushes an undo snapshot and fires
         // onChange, whose retention reconcile must never evict an image the
         // steer dispatch is about to hand to the business owner. Released after
@@ -24585,6 +24641,73 @@ export class TuiApp {
     this.requestRender()
   }
 
+  /**
+   * PR2: the live submission attempt freezing this composer, or undefined.
+   * Set by the application's `holdSubmission` and cleared by
+   * `settleSubmission` — the renderer never invents one. While present the
+   * editor document is read-only, a second submit is a no-op, and the ONLY
+   * draft removal is the accepted settlement (the fork's undo-retiring
+   * clear).
+   */
+  private submissionHold: { attemptId: string; text: string; remember: boolean } | undefined
+
+  /**
+   * PR2 — SubmissionComposerPort: freeze the composer for one attempt. The
+   * document stays exactly as submitted; ordinary editing, paste/IME,
+   * autocomplete and a repeated submit are consumed by the input ladder, and
+   * the fork's submit gesture is disabled so no path (including a mouse
+   * autocomplete submit) reaches `onMaySubmit`.
+   */
+  holdSubmission(attemptId: string): void {
+    const text = this.getDraft()
+    // The recall-eligibility fact belongs to the GESTURE time: at acceptance
+    // the staged attachments are already consumed, so re-asking
+    // `shouldRememberInput` then would wrongly accept a multimodal line.
+    const remember = text.trim() !== '' && this.events.shouldRememberInput?.(text) !== false
+    this.submissionHold = { attemptId, text, remember }
+    this.editor.disableSubmit = true
+    this.requestRender()
+  }
+
+  /**
+   * PR2 — SubmissionComposerPort: end one attempt's hold. Only `'accepted'`
+   * removes the committed draft (through the SAME undo-retiring clear a
+   * normal submit uses) and lands its recall occurrence; the refusal and
+   * unknown outcomes unlock the editor with the document intact.
+   */
+  settleSubmission(attemptId: string, result: 'accepted' | 'not-accepted' | 'unknown'): void {
+    const hold = this.submissionHold
+    if (hold === undefined || hold.attemptId !== attemptId) return
+    this.submissionHold = undefined
+    this.editor.disableSubmit = false
+    if (result === 'accepted') {
+      // The accepted occurrence is what the editor's ↑ recall records. Order:
+      // remember FIRST (the text is still available), then the clear.
+      if (hold.remember) {
+        this.editor.addToHistory(hold.text.trim())
+        this.historyRecall.rememberAccepted(hold.text)
+      }
+      this.clearSubmittedDraft()
+      this.resetEditorMode()
+    }
+    this.requestRender()
+  }
+
+  /** PR2: the composer document is frozen by a live submission attempt. */
+  private composerHeld(): boolean {
+    return this.submissionHold !== undefined
+  }
+
+  /**
+   * PR2: the synchronous submit admission. Absent application wiring keeps
+   * the pre-PR2 (renderer-clears-first) behavior.
+   */
+  private admitComposerGesture(text: string, request: ComposerSubmitRequest | 'steer'): 'held' | 'legacy' | 'refused' {
+    const admit = this.events.beginComposerSubmission
+    if (admit === undefined) return 'legacy'
+    return admit(text, request)
+  }
+
   /** The editor's current draft in its WIRE form (mode + body serialized
    * — the symmetric counterpart of {@link setDraft}, which decodes).
    * Callers that read, merge and restore drafts (the runner's restore
@@ -24622,6 +24745,15 @@ export class TuiApp {
     // Submission is an explicit intervening action even when the draft is
     // empty or a viewer guard rejects it.
     this.clearExitConfirmation()
+    // PR2: the synchronous admission runs BEFORE any clear. `'held'` proves
+    // the application already registered the attempt and started the
+    // delivery — the composer keeps its document (the application settles it
+    // on Host acceptance); `'refused'` consumes the gesture silently.
+    const admission = this.admitComposerGesture(this.getDraft(), request)
+    if (admission === 'held' || admission === 'refused') {
+      this.requestRender()
+      return
+    }
     // P1-12: a finally-disposed surface never submits — a late plugin
     // callback (or a stale host dispatch) must not produce a real
     // session-side effect after teardown.

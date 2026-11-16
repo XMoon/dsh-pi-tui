@@ -83,6 +83,19 @@ Host service resolution belongs to:
 - the Direct runtime policy/facades in `src/app/direct/**`;
 - the application composition root `src/app/bootstrap.ts`.
 
+`SessionWriter.prompt` carries one OPTIONAL acceptance notification
+(`options.onAccepted`) beside its `WriteOutcome` result. It proves the HOST
+accepted the message — Direct after the live Agent's synchronous Inbox
+insertion committed, Remote through the official
+`beginSubmission.onAccept` (re-checked against the captured connection
+generation and the exact pinned binding) — and it is not the write's terminal
+state: an accepted prompt can still fail during execution, and a transport
+without the callback keeps the prompt Promise's own commit as its acceptance
+proof. The port's outcome taxonomy is unchanged; `updateQueue` never carries
+the notification, and the Composer-side meaning of the accepted/refused/unknown
+split is owned by
+[surface-behavior.md](./surface-behavior.md#composer-submission-policy).
+
 `HostCommandPort` has ONE official-receipt seam beside `execute`:
 `stageFileReceipt`. It stores ONE Client file snapshot under the receiving
 Session and returns the Host-minted `receiptId` the command wire cites — Direct

@@ -17,8 +17,11 @@ function ledger(): PendingSubmissions {
 test('begin records transcript/queued/steering echoes in insertion order', () => {
   const pending = ledger()
   pending.begin({ requestId: 'r1', placement: 'transcript', text: 'idle', createdAt: 1, sessionId: 's', generation: 3 })
+  pending.accept('r1')
   pending.begin({ requestId: 'r2', placement: 'queued', text: 'queued', createdAt: 2, sessionId: 's', generation: 3 })
+  pending.accept('r2')
   pending.begin({ requestId: 'r3', placement: 'steering', text: 'steer', createdAt: 3, sessionId: 's', generation: 3 })
+  pending.accept('r3')
   assert.deepEqual(pending.snapshot().map(echo => [echo.requestId, echo.placement]), [
     ['r1', 'transcript'],
     ['r2', 'queued'],
@@ -29,14 +32,18 @@ test('begin records transcript/queued/steering echoes in insertion order', () =>
 test('two same-text submissions stay distinct by request id', () => {
   const pending = ledger()
   pending.begin({ requestId: 'a', placement: 'steering', text: 'same', createdAt: 1 })
+  pending.accept('a')
   pending.begin({ requestId: 'b', placement: 'steering', text: 'same', createdAt: 2 })
+  pending.accept('b')
   assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['a', 'b'])
 })
 
 test('an authoritative rpc id suppresses only the matching echo (identity, never text)', () => {
   const pending = ledger()
   pending.begin({ requestId: 'a', placement: 'steering', text: 'same', createdAt: 1 })
+  pending.accept('a')
   pending.begin({ requestId: 'b', placement: 'steering', text: 'same', createdAt: 2 })
+  pending.accept('b')
   const visible = pendingSubmissionsNotReplaced(pending.snapshot(), new Set(['a']))
   assert.deepEqual(visible.map(echo => echo.requestId), ['b'])
 })
@@ -44,6 +51,7 @@ test('an authoritative rpc id suppresses only the matching echo (identity, never
 test('an echo re-appears when its authoritative counterpart is no longer visible', () => {
   const pending = ledger()
   pending.begin({ requestId: 'a', placement: 'steering', text: 'A', createdAt: 1 })
+  pending.accept('a')
   assert.deepEqual(pendingSubmissionsNotReplaced(pending.snapshot(), new Set(['a'])), [])
   // The Host claimed the occurrence (removed it from the inbox) before the
   // durable message landed: the echo is retained, not deleted, so the content
@@ -55,7 +63,9 @@ test('an echo re-appears when its authoritative counterpart is no longer visible
 test('observeDurable removes exactly the durable identity (never text)', () => {
   const pending = ledger()
   pending.begin({ requestId: 'a', placement: 'transcript', text: 'same', createdAt: 1 })
+  pending.accept('a')
   pending.begin({ requestId: 'b', placement: 'transcript', text: 'same', createdAt: 2 })
+  pending.accept('b')
   pending.observeDurable('a')
   assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['b'])
 })
@@ -63,6 +73,7 @@ test('observeDurable removes exactly the durable identity (never text)', () => {
 test('settle removes a failed/cancelled/indeterminate echo', () => {
   const pending = ledger()
   pending.begin({ requestId: 'a', placement: 'queued', text: 'A', createdAt: 1 })
+  pending.accept('a')
   pending.settle('a')
   pending.settle('a')
   assert.deepEqual(pending.snapshot(), [])
@@ -71,7 +82,9 @@ test('settle removes a failed/cancelled/indeterminate echo', () => {
 test('a late settlement of one identity never clears a newer unrelated echo', () => {
   const pending = ledger()
   pending.begin({ requestId: 'old', placement: 'queued', text: 'old', createdAt: 1 })
+  pending.accept('old')
   pending.begin({ requestId: 'new', placement: 'queued', text: 'new', createdAt: 2 })
+  pending.accept('new')
   pending.settle('old')
   assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['new'])
 })
@@ -79,7 +92,9 @@ test('a late settlement of one identity never clears a newer unrelated echo', ()
 test('clearForSubject drops echoes from another session or generation', () => {
   const pending = ledger()
   pending.begin({ requestId: 'a', placement: 'queued', text: 'A', createdAt: 1, sessionId: 's1', generation: 1 })
+  pending.accept('a')
   pending.begin({ requestId: 'b', placement: 'queued', text: 'B', createdAt: 2, sessionId: 's2', generation: 2 })
+  pending.accept('b')
   pending.clearForSubject('s1', 1)
   assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['a'])
 })
@@ -87,7 +102,9 @@ test('clearForSubject drops echoes from another session or generation', () => {
 test('clear removes every echo', () => {
   const pending = ledger()
   pending.begin({ requestId: 'a', placement: 'steering', text: 'A', createdAt: 1 })
+  pending.accept('a')
   pending.begin({ requestId: 'b', placement: 'steering', text: 'B', createdAt: 2 })
+  pending.accept('b')
   pending.clear()
   assert.deepEqual(pending.snapshot(), [])
 })
@@ -95,6 +112,7 @@ test('clear removes every echo', () => {
 test('snapshot is a detached copy: mutation never leaks into the ledger', () => {
   const pending = ledger()
   pending.begin({ requestId: 'a', placement: 'queued', text: 'A', createdAt: 1 })
+  pending.accept('a')
   const snapshot = pending.snapshot()
   ;(snapshot[0] as { text: string }).text = 'mutated'
   assert.equal(pending.snapshot()[0]?.text, 'A')
@@ -116,6 +134,8 @@ function beginEcho(pending: PendingSubmissions, requestId: string, overrides: {
   sessionId?: string
   generation?: number
   placement?: 'transcript' | 'queued' | 'steering'
+  /** PR2: register a held attempt's echo hidden (published by acceptance). */
+  hidden?: boolean
 } = {}): void {
   pending.begin({
     requestId,
@@ -124,6 +144,7 @@ function beginEcho(pending: PendingSubmissions, requestId: string, overrides: {
     createdAt: 1,
     sessionId: overrides.sessionId ?? SESSION,
     generation: overrides.generation ?? GENERATION,
+    ...(overrides.hidden === true ? { hidden: true } : {}),
   })
 }
 
@@ -359,4 +380,63 @@ test('a stale duplicate splice never rolls a receipt back', () => {
   assert.equal(observe(pending, insertedSplice(130, 'next-turn', 0, ['r1'])), false)
   assert.equal(observe(pending, { type: 'turn/end', seq: 132, data: {} }), true,
     'the claim watermark survives the stale replay')
+})
+
+// ── PR2: hidden registration → Host acceptance publishes ───────────────────
+// The official Client's `beginSubmission` echo enters `pendingSubmissions`
+// only once the Host accepted the prompt. The Direct ledger mirrors that
+// shape: `begin` REGISTERS (so synchronously-emitted Inbox events can still
+// record receipts — Trap A), `accept` publishes exactly once, and the live
+// editor draft carries pre-acceptance presentation instead.
+
+test('PR2: a hidden begin stays invisible; accept publishes exactly once', () => {
+  const pending = ledger()
+  pending.begin({ requestId: 'r1', placement: 'transcript', text: 'A', createdAt: 1, sessionId: SESSION, generation: GENERATION, hidden: true })
+  assert.deepEqual(pending.snapshot(), [], 'a registered-but-unaccepted record is NOT visible')
+  assert.equal(pending.accept('r1'), true)
+  assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['r1'])
+  assert.equal(pending.accept('r1'), false, 'accept is exactly-once per record')
+})
+
+test('PR2: pre-acceptance receipts still fold; the record stays hidden', () => {
+  const pending = ledger()
+  beginEcho(pending, 'r1', { hidden: true })
+  // The synchronous Direct Inbox splice arrives BEFORE the writer returns:
+  // the receipt is recorded while the echo remains invisible.
+  assert.equal(observe(pending, insertedSplice(10, 'next-turn', 0, ['r1'])), false)
+  assert.deepEqual(pending.snapshot(), [])
+  pending.accept('r1')
+  assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['r1'],
+    'the acceptance publishes the record whose receipt was already tracked')
+})
+
+test('PR2: a retired record is not resurrected by a late accept', () => {
+  const pending = ledger()
+  beginEcho(pending, 'r1', { hidden: true })
+  observe(pending, insertedSplice(10, 'next-turn', 0, ['r1']))
+  observe(pending, removedSplice(11, 'next-turn', 0, 1))
+  // A durable admission removed the record already.
+  pending.observeDurable('r1')
+  assert.equal(pending.accept('r1'), false)
+  assert.deepEqual(pending.snapshot(), [])
+})
+
+test('PR2: a claim boundary retiring an invisible record is not a visible change', () => {
+  const pending = ledger()
+  beginEcho(pending, 'r1', { hidden: true })
+  beginEcho(pending, 'r2')
+  observe(pending, insertedSplice(20, 'next-turn', 0, ['r1', 'r2']))
+  observe(pending, removedSplice(21, 'next-turn', 0, 1))
+  assert.equal(observe(pending, { type: 'turn/end', seq: 22, data: {} }), false,
+    'the retired record was never visible: the visible set did not change')
+  assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['r2'])
+})
+
+test('PR2: a same-id re-begin after acceptance starts invisible again', () => {
+  const pending = ledger()
+  beginEcho(pending, 'r1')
+  beginEcho(pending, 'r1', { hidden: true })
+  assert.deepEqual(pending.snapshot(), [], 'the replacement record is a NEW invisible registration')
+  pending.accept('r1')
+  assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['r1'])
 })

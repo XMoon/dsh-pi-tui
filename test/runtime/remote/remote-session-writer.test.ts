@@ -18,6 +18,7 @@ import { probeAttachment } from '../../../src/client/media/attachment/intake.ts'
 import { RemotePromptSerializerProduction } from '../../../src/runtime/remote/prompt-serializer-remote.ts'
 import {
   RemoteSessionWriter,
+  type RemoteBeginSubmissionInput,
   type RemotePromptSerializer,
   type RemoteSerializeResult,
   type RemoteWriteBinding,
@@ -31,7 +32,7 @@ import { createObservableGenerationHarness, type GenerationHarness } from '../..
 import { testLifecycle } from '../../support/temp-lifecycle.ts'
 
 interface SessionCalls {
-  beginInputs: unknown[]
+  beginInputs: RemoteBeginSubmissionInput[]
   promptCalls: { content: unknown; mode: string; requestId: string | undefined }[]
   /** The real number of arguments each `session.prompt` call receives (the official four: content, mode, signal, requestId). */
   promptArgCounts: number[]
@@ -910,4 +911,57 @@ test('a write targets the generation that is live when it resolves, before and a
   assert.notEqual(harness.references.live('session-a'), first, 'a re-retained id is a NEW generation')
   assert.deepEqual(await writer.prompt('session-a', {}, 'queue'), { kind: 'committed', value: undefined })
   assert.equal(dispatched[1], second, 'the next write must target the new generation, never a cached one')
+})
+
+// ── PR2: the official onAccept callback reaches the semantic port ───────────
+
+test('PR2: an ordinary prompt forwards onAccepted into the official beginSubmission', async () => {
+  const harness = writerHarness()
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer({ text: 'hi' }))
+  let accepted = 0
+  const outcome = await writer.prompt('session-a', { text: 'hi' }, 'queue', {
+    onAccepted: () => { accepted += 1 },
+  })
+  assert.equal(outcome.kind, 'committed')
+  assert.equal(accepted, 0, 'the official face here never fires onAccept')
+  const input = harness.calls.beginInputs[0]!
+  assert.equal(typeof input.onAccept, 'function', 'the callback is carried on the official echo input')
+  input.onAccept?.()
+  assert.equal(accepted, 1)
+  input.onAccept?.()
+  assert.equal(accepted, 1, 'a hostile double-fire from the official face is deduped by the adapter latch')
+})
+
+test('PR2: without options, beginSubmission carries no onAccept field', async () => {
+  const harness = writerHarness()
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer({ text: 'hi' }))
+  await writer.prompt('session-a', { text: 'hi' }, 'queue')
+  assert.equal(harness.calls.beginInputs[0]!.onAccept, undefined)
+})
+
+test('PR2: the writer latches acceptance once even if the official face double-fires', async () => {
+  const harness = writerHarness()
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer({ text: 'hi' }))
+  let accepted = 0
+  await writer.prompt('session-a', { text: 'hi' }, 'queue', {
+    onAccepted: () => { accepted += 1 },
+  })
+  const input = harness.calls.beginInputs[0]!
+  input.onAccept?.()
+  input.onAccept?.()
+  assert.equal(accepted, 1, 'the adapter-side latch keeps the Composer settle exactly-once')
+})
+
+test('PR2: a late official acceptance after a carrier failure still wins as accepted', async () => {
+  const harness = writerHarness()
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer({ text: 'hi' }))
+  harness.setPromptResult({ ok: false, error: new Error('carrier died') })
+  let accepted = 0
+  const outcome = await writer.prompt('session-a', { text: 'hi' }, 'queue', {
+    onAccepted: () => { accepted += 1 },
+  })
+  assert.equal(outcome.kind, 'indeterminate')
+  // The official face fires acceptance AFTER the prompt already settled.
+  harness.calls.beginInputs[0]!.onAccept?.()
+  assert.equal(accepted, 1, 'the acceptance latch proves Host acceptance even after a late transport error')
 })

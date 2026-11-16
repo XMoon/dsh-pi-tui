@@ -97,6 +97,8 @@ async function mountPane(
     admitPastedPathDelivery?: () => boolean
     /** The HISTORY-eligibility policy (default: remember). */
     shouldRememberInput?: () => boolean
+    /** PR2: the synchronous submit admission. Absent keeps the legacy clear. */
+    beginComposerSubmission?: (text: string, request: string) => 'held' | 'legacy' | 'refused'
   } = {},
 ): Promise<Harness> {
   const input = new FakeInput()
@@ -134,7 +136,10 @@ async function mountPane(
       pastedPath: () => {},
       admitPastedPathDelivery: () => options.admitPastedPathDelivery?.() ?? true,
       shouldRememberInput: () => options.shouldRememberInput?.() ?? true,
-      noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true
+      noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
+      ...(options.beginComposerSubmission === undefined
+        ? {}
+        : { beginComposerSubmission: (text: string, request: 'enter' | 'accelerated' | 'steer' | 'explicit-queue') => options.beginComposerSubmission!(text, request) }),
     })
   }
   return {
@@ -1120,6 +1125,107 @@ test('a Welcome or hydration display commit never closes the open TSP recall sco
     await awaitFact(() => sent.length === 1, 'the Enter after the lifecycle commits')
     assert.equal(typeof sent[0]!.scopeToken, 'number',
       'no lifecycle commit other than the owner\'s reseed closed the scope')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── PR2: the held submission (composer-freezing admission) ──────────────────
+// The application opens the attempt through the composer port and the renderer
+// freezes the document: Enter/Send/paste/typing never mutate or re-submit it,
+// the SDK editor is painted `readonly`, and only the `'accepted'` settlement
+// clears the draft.
+
+async function lastComposerProps(output: string): Promise<{ readonly?: boolean; sendable?: boolean }> {
+  let props: { readonly?: boolean; sendable?: boolean } = {}
+  for (const match of output.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)) {
+    const frame = JSON.parse(match[1]!) as { ops: unknown[][] }
+    for (const op of frame.ops) {
+      if (op[0] === 'add') {
+        const node = op[4] as { c?: Array<{ id?: string; p?: Record<string, unknown> }> } | undefined
+        for (const child of node?.c ?? []) {
+          if (child.id === 'dock.composer') {
+            props = {
+              ...(typeof child.p?.readonly === 'boolean' ? { readonly: child.p.readonly } : {}),
+              ...(typeof child.p?.sendable === 'boolean' ? { sendable: child.p.sendable } : {}),
+            }
+          }
+        }
+      } else if (op[0] === 'set' && (op[1] === 'dock.composer' || op[1] === 'dock.composer-editor')) {
+        const next = op[2] as { readonly?: unknown; sendable?: unknown }
+        if (typeof next.readonly === 'boolean') props.readonly = next.readonly
+        if (typeof next.sendable === 'boolean') props.sendable = next.sendable
+      }
+    }
+  }
+  return props
+}
+
+test('PR2: a held submit keeps the draft, freezes editing, and only acceptance clears it', async () => {
+  const submissions: string[] = []
+  let heldId: string | undefined
+  const harness = await mountPane(
+    (text) => { submissions.push(text) },
+    {
+      beginComposerSubmission: (text) => {
+        heldId = 'attempt-1'
+        harness.renderer.composer.holdSubmission?.(heldId)
+        // The application starts the dispatch itself; the renderer must NOT.
+        return 'held'
+      },
+    },
+  )
+  try {
+    harness.input.type('held text')
+    await awaitTyped(harness, 'held text')
+    harness.input.type('\r')
+    await awaitFact(() => heldId !== undefined, 'the admission to open the attempt')
+    assert.equal(harness.renderer.composer.getDraft(), 'held text',
+      'the held document stays exactly as submitted')
+    assert.deepEqual(submissions, [], 'the renderer never submits a held line itself')
+    await settle(60)
+    const heldProps = await lastComposerProps(harness.output.text())
+    assert.equal(heldProps.readonly, true, 'the held frame paints the composer read-only')
+    // Typing and a second Enter are consumed: the document never changes.
+    harness.input.type('more')
+    harness.input.type('\r')
+    await settle(120)
+    assert.equal(harness.renderer.composer.getDraft(), 'held text',
+      'typing and a repeated submit cannot mutate or re-send the held document')
+    assert.deepEqual(submissions, [], 'no second submission path ran')
+    // The refusal settlement unlocks the editor with the draft intact.
+    harness.renderer.composer.settleSubmission?.('attempt-1', 'not-accepted')
+    await settle(60)
+    harness.input.type('!')
+    await awaitFact(() => harness.renderer.composer.getDraft() === 'held text!', 'the unlocked editor to accept typing')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('PR2: the accepted settlement clears the held draft and the recall records it', async () => {
+  const submissions: string[] = []
+  let hold = false
+  const harness = await mountPane(
+    (text) => { submissions.push(text) },
+    {
+      beginComposerSubmission: () => {
+        hold = true
+        harness.renderer.composer.holdSubmission?.('attempt-accept')
+        return 'held'
+      },
+    },
+  )
+  try {
+    harness.input.type('accepted text')
+    await awaitTyped(harness, 'accepted text')
+    harness.input.type('\r')
+    await awaitFact(() => hold, 'the admit')
+    assert.equal(harness.renderer.composer.getDraft(), 'accepted text')
+    harness.renderer.composer.settleSubmission?.('attempt-accept', 'accepted')
+    await awaitFact(() => harness.renderer.composer.getDraft() === '', 'the acceptance clear')
+    assert.equal(lastComposerText(harness.output.text()), '', 'the cleared composer is on the wire')
+    assert.deepEqual(submissions, [], 'the acceptance never re-dispatches the prompt')
   } finally {
     await harness.dispose()
   }

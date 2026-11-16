@@ -4403,6 +4403,9 @@ export function applyRunnerWithRuntime(
           command.runner().withPromptAdmission(scope, line, task),
         isDisposed: () => cleanedUp,
         isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
+        // PR2: the live composer hold — every restore/merge of the hold's
+        // own text is a no-op (the draft never left the editor).
+        composerHoldActive: () => submission.composerHoldActive(),
         // PR3-B B2: the submission runtime's editor hooks are reachable on
         // BOTH renderers now that the TSP pane submits. They must go through the
         // renderer-neutral composer projection — the PiTui-only `app` binding is
@@ -4469,7 +4472,8 @@ export function applyRunnerWithRuntime(
           // Client contract. Both branches share canonicalization + strict
           // placeholder semantics, not one preparation authority.
           : prepareRemotePrompt(text, requestId),
-        prompt: (sessionId, message) => backend.sessionWriter.prompt(sessionId, message, 'queue'),
+        prompt: (sessionId, message, options) =>
+          backend.sessionWriter.prompt(sessionId, message, 'queue', options),
       },
     })
     // The startup surface: a resumed session initializes everything; the

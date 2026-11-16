@@ -138,6 +138,71 @@ Public queue-draft/submit-draft extension actions and a replacement editor's
 `queue-submit` are explicit commands, never gestures. Resolve the mode once per
 submission (`src/domain/command/policy.ts` + the submission controller).
 
+### Submission attempt and the acceptance handoff
+
+`submitted != accepted != durable != execution_success`. An ordinary prompt
+(single Enter/Send, explicit queue action, the accelerated steer gesture) goes
+through ONE Client-local submission attempt owned by `src/app/submission/**`:
+
+- The renderer asks the synchronous admission before it mutates the document.
+  A normal prompt is HELD: the attempt is registered, the dispatch starts, and
+  the composer stays read-only with exactly the submitted draft (its Undo
+  history, paste registry and attachment references intact) — typing, paste,
+  history recall, an interactive completion and a repeated submit are consumed,
+  while Escape/Ctrl+C, overlays, Questions/Approvals, pickers and Session
+  navigation keep their own seats. A command, `!`/`!!` shell line, skill
+  delivery or viewer submit keeps its pre-existing clear-first contract: this
+  transaction covers ordinary prompts only.
+- The ONLY normal authority that clears the committed draft is the Host
+  accepting the message: Direct's successful synchronous inbox insertion, or
+  the official Remote `beginSubmission.onAccept` (either the receipt or the
+  Inbox row may prove it first). The accepted handoff clears the draft through
+  the renderer's own undo-retiring clear, retires nothing of a sibling's
+  attachment leases, records the accepted input into that renderer's recall
+  history and publishes the local pending echo, whose presentation stays hidden
+  until this moment (the live draft was the pre-acceptance presentation).
+  Acceptance is one-way: an accepted prompt that later errors is an EXECUTION
+  failure — the draft is not restored and nothing is re-sent.
+- A proven pre-acceptance refusal (`WriteOutcome.rejected` before dispatch,
+  a transition-fence refusal, a session/owner replacement) releases the lock
+  and keeps the draft, Undo history and attachments editable. An indeterminate
+  outcome does the same with an explicit "result unknown, inspect first"
+  notice and no automatic retry; a LATE acceptance may still reconcile the
+  Host-side pending/durable projection but never clears the editor the user
+  may already be editing again.
+- The attempt is single-flight per live composer: while one is sending, a
+  second submit gesture is a no-op (no request identity, no history row, no
+  second writer). Empty-input gestures never create an attempt, and the empty
+  Ctrl+S queue sweep keeps its existing per-occurrence steer behavior.
+- The history row (and the renderer's recall occurrence) completes at the
+  acceptance boundary: the original submit timestamp and the FINAL session id
+  are preserved, and a proven-unreceived prompt leaves no "sent" row. A late
+  acceptance never writes into another Session's history.
+- A line the final command catalog claims after an ordinary admission is
+  handed to that command's own contract (its draft disposition and terminal
+  settlement stay authoritative); it never fabricates a prompt acceptance.
+
+The Host-owned side of the same handoff — writer ownership, the pending echo
+ledger and the Host pending projection — is documented in
+`docs/architecture/host-client.md`; the process-local ownership and generation
+fences are in `docs/architecture/concurrency.md`.
+
+Authority: `src/app/submission/controller.ts` (`beginComposerSubmission`, the
+composer attempt), `src/app/submission/runtime.ts` (`submitPrompt` /
+`steerSubmission` acceptance settlement), `src/runtime/session-writer-port.ts`
+(`prompt({onAccepted})`) with `src/runtime/direct/session-writer-direct.ts` and
+`src/runtime/remote/session-writer-remote.ts`, `src/app/submission/pending-submission.ts`
+(hidden registration → `accept`), and the renderer ports
+`src/app/submission/composer-port.ts` (`holdSubmission`/`settleSubmission`)
+implemented by `src/tui-app.ts` and `src/tui/tsp/session.ts`.
+
+Must-not: treat the prompt Promise, `turn/start`, `request/context`,
+`compaction/end`, the working row, the agent status or equal text as Host
+acceptance; clear the draft before the Host accepted; consume or drop the
+attachments/Undo of a refused draft; replay an unknown outcome; clear a
+successor Session's editor with an old attempt's acceptance; or add a second
+draft copy/queue/ledger for the attempt.
+
 ## Subagent viewer
 
 Interactivity is keyed only to the catalog mode (`continuable` = interactive,

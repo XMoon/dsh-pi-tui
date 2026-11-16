@@ -61,7 +61,7 @@ import type { SubmissionComposerPort } from './composer-port.ts'
 import { PASTE_PENDING_NOTICE } from '../surface/pasted-image-intake.ts'
 import { SessionScopeSupersededError, type LiveSessionScope } from '../session/scope.ts'
 import type { SessionSubject } from '../session/subject.ts'
-import { deliverBusy, executeHostCommandSubmission, pullBackQueue, steer, type PendingQueueRecall, type PromptSubmission, type SteerSubmissionAgent, type SteerSubmissionDeps } from '../submission/runtime.ts'
+import { deliverBusy, executeHostCommandSubmission, pullBackQueue, steer, type PendingQueueRecall, type PromptAttemptHooks, type PromptSubmission, type SteerSubmissionAgent, type SteerSubmissionDeps } from '../submission/runtime.ts'
 
 /** The minimal exact-Agent surface the submission path reads. */
 export interface SubmissionAgentLike {
@@ -340,6 +340,20 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
 export interface SubmissionController {
   /** Submit one user input end to end. */
   submit(text: string, request?: ComposerSubmitRequest, scopeToken?: number): void
+  /**
+   * PR2: the renderers' synchronous submit admission (see the implementation
+   * doc). `'held'` has ALREADY started the dispatch — the caller must not
+   * run its legacy submit path; `'legacy'` keeps the caller's own pre-clear
+   * contract; `'refused'` is a silent no-op.
+   */
+  beginComposerSubmission(
+    text: string,
+    request?: ComposerSubmitRequest | 'steer',
+    scopeToken?: number,
+  ): 'held' | 'legacy' | 'refused'
+  /** PR2: whether the live composer is held by a sending attempt (the
+   *  renderers' input-lock read). */
+  composerHoldActive(): boolean
   /** Steer one draft into the running turn.
    *  `consumeDraft: true` makes THIS owner clear the editor after snapshotting
    *  the persist facts; the caller leaves it unset when it already consumed the
@@ -536,7 +550,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // cleared before submit) — the error text is best-effort afterwards,
     // so a hostile value can never prevent the user's input from coming
     // back. (The classification diagnostics are owned by runOwned.)
-    deps.app().setEditorText(mergeDraft(deps.app().getDraft(), draft))
+    // PR2: a held attempt's draft is still the live document; restoring it
+    // would duplicate the text.
+    const held = composerHold !== undefined && composerHold.phase === 'sending'
+      && composerHold.text === draft && deps.captureMatches(composerHold.subject)
+    if (!held) deps.app().setEditorText(mergeDraft(deps.app().getDraft(), draft))
     const message = safeErrorMessage(error)
     // Image intake/admission/capability failures are THEIR OWN actionable
     // errors ("Current model ... does not support image input") — wrapping
@@ -556,6 +574,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
 
   const restoreSubmissionDraft = (draft: string): void => {
     if (deps.signal.aborted) return
+    // PR2: a held attempt's draft is still the live document; restoring it
+    // would duplicate the text.
+    if (composerHold !== undefined && composerHold.phase === 'sending'
+      && composerHold.text === draft && deps.captureMatches(composerHold.subject)) return
     deps.app().setEditorText(mergeDraft(deps.app().getDraft(), draft))
   }
 
@@ -663,6 +685,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     ackToken: number,
   ): void => {
     const echo = localEcho(text)
+    // PR2: a held attempt's draft is still the live document — its echo stays
+    // hidden until the Host acceptance publishes it (no second "sent" object
+    // pre-acceptance).
+    const hidden = composerHold !== undefined && composerHold.phase === 'sending'
+      && composerHold.submissionRequestId === requestId
     pendingSubmissions.begin({
       requestId,
       placement,
@@ -671,6 +698,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       createdAt: Date.now(),
       ...(sessionId === undefined ? {} : { sessionId }),
       generation,
+      ...(hidden ? { hidden: true } : {}),
     })
     deps.surface.refreshPendingInput()
     if (placement !== 'transcript') settleLocalSubmitAck('local pending echo', { token: ackToken })
@@ -833,8 +861,16 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    * This policy answers WHICH draft may land in the CURRENT editor; it never
    * answers whether this controller still owns one — that is the LIFETIME
    * fence below, and every async-reachable caller applies it first.
+   *
+   * PR2: while a submission attempt HOLDS the composer, the submitted text is
+   * still the live document — every restore of THAT text is a no-op
+   * ('merged-verbatim'), because merging would duplicate it.
    */
   const restoreStaleDraft = (value: string, capturedSubject: SessionSubject | undefined): 'merged-verbatim' | 'merged' | 'dropped' => {
+    if (composerHold !== undefined && composerHold.phase === 'sending'
+      && composerHold.text === value && deps.captureMatches(composerHold.subject)) {
+      return 'merged-verbatim'
+    }
     if (!deps.retainsStaleDraftRestore && deps.ownerWasReplaced(capturedSubject)) {
       return 'dropped'
     }
@@ -884,7 +920,22 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     release()
   }
 
-  const dispatchViaSession = (text: string, persistHistory: (sessionId: string | undefined) => void, delivery: SubmitDelivery): void => {
+  const dispatchViaSession = (
+    text: string,
+    persistHistory: (sessionId: string | undefined) => void,
+    delivery: SubmitDelivery,
+    // PR2: the live composer submission attempt this dispatch was opened for.
+    // Present ONLY when beginComposerSubmission admitted the line as an
+    // ordinary prompt; the acceptance hooks ride into the plain-prompt write,
+    // and the command routes settle the hold as not-accepted (their own draft
+    // disposition contract takes over).
+    activeHold?: {
+      readonly accept: () => void
+      readonly reject: () => void
+      readonly markUnknown: () => void
+      deferAccepted: (effect: () => void) => void
+    },
+  ): void => {
     // Admission identity is captured synchronously, before this gesture
     // waits behind an earlier submit. A later session must never inherit
     // an old submission merely because the FIFO turn became available.
@@ -903,6 +954,15 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // (as the Direct user-message `source.rpcId`) when this line becomes an
     // ordinary human prompt — never for a Host command that consumes it.
     const submitRequestId = randomUUID()
+    // PR2: bind the gesture's echo identity to its attempt. The acceptance
+    // publishes THIS ledger record and runs the deferred history/consumption
+    // effects; nothing before the Host acceptance touches them.
+    if (activeHold !== undefined) {
+      const hold = composerHold
+      if (hold !== undefined && hold.phase === 'sending' && hold.text === text) {
+        hold.submissionRequestId = submitRequestId
+      }
+    }
     const parsedAtSubmit = parseCommand(text)
     // The advertised NAME claim, captured BEFORE any session creation: a
     // refresh may have revoked it since (the completion generation the user
@@ -1135,7 +1195,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           (sessionId) => {
             if (deps.isCleanedUp()) return
             if (submittedAgent !== undefined && !deps.captureMatches(submittedSubject)) return
-            persistHistory(sessionId)
+            // PR2: the history row's completion boundary is the Host
+            // acceptance, never the submission attempt: a proven-unreceived
+            // prompt leaves no "sent" row. The row keeps the original submit
+            // timestamp and the FINAL session id.
+            if (activeHold !== undefined) activeHold.deferAccepted(() => persistHistory(sessionId))
+            else persistHistory(sessionId)
           },
         )
         if (deps.isCleanedUp()) return
@@ -1426,9 +1491,32 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           shouldConsumeAdvertisedMiss,
           isIndeterminateSkillWrite: (error) => isIndeterminateSkillWrite(error),
           startArtifactSave: (name) => deps.artifacts.start(name, agent),
-          submitPrompt: (submission, options) => deps.submissionRuntime.submitPrompt(submission, options),
+          submitPrompt: (submission, options) => deps.submissionRuntime.submitPrompt(
+            submission,
+            {
+              ...options,
+              // PR2: an attempt-bound ordinary prompt carries the Host
+              // acceptance hooks. The command fallback's nested prompt is
+              // the SAME gesture's ordinary delivery, so it inherits them;
+              // the hooks themselves are idempotent and fenced to the exact
+              // hold.
+              ...(activeHold !== undefined
+                ? {
+                  attempt: {
+                    onAccepted: activeHold.accept,
+                    onRejected: activeHold.reject,
+                    onUnknown: activeHold.markUnknown,
+                  } as PromptAttemptHooks,
+                }
+                : {}),
+            },
+          ),
           commandSessionId: () => agent.session.id,
           markTurnTransferred: () => { submitTurnTransferred = true },
+          settleComposerHold: activeHold === undefined ? undefined : (outcome) => {
+            if (outcome === 'unknown') activeHold.markUnknown()
+            else activeHold.reject()
+          },
           diag: deps.diag,
         }, {
           text,
@@ -1466,6 +1554,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         settleLocalSubmission(submitRequestId)
         settleLocalSubmitAck('failure', { token: submitAckToken, terminal: true })
         notifySubmissionFailure(error)
+        // PR2: the gesture failed before any acceptance — unlock the editor
+        // with the draft intact (the hold-aware restores above already
+        // skipped the duplicate merge for the held text).
+        activeHold?.reject()
         const recovery = recoverableWorkspaceSelection(error)
         const restored = restoredDraft
         if (recovery.kind === 'select-workspace'
@@ -1489,6 +1581,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       onCancel: () => {
         settleLocalSubmission(submitRequestId)
         settleLocalSubmitAck('submit cancelled', { token: submitAckToken, terminal: true })
+        // PR2: the gesture died before any acceptance — unlock the editor
+        // with the draft intact (the hold's no-merge rule already applied
+        // everywhere above).
+        activeHold?.reject()
       },
     })
   }
@@ -1645,12 +1741,27 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   // admission must take the shared FIFO turn rather than letting a later
   // gesture deliver first.
   
-  const steerNow = (text: string, onlyDraft = false, persistHistory?: (sessionId: string | undefined) => void): void => {
+  const steerNow = (
+    text: string,
+    onlyDraft = false,
+    persistHistory?: (sessionId: string | undefined) => void,
+    // PR2: the composer hold an admitted busy-steer gesture opened. The
+    // acceptance hooks ride into the draft's own prompt write; the queue
+    // sweep occurrences (updateQueue) never fire them.
+    activeHold?: {
+      readonly accept: () => void
+      readonly reject: () => void
+      readonly markUnknown: () => void
+      deferAccepted: (effect: () => void) => void
+      bindRequestId: (requestId: string) => void
+    },
+  ): void => {
     // The submission runtime owns the gesture's pre-flight gate, FIFO turn,
     // deferred-start persist, admission window and terminal ack/echo/consume
     // settlement; the runner supplies the narrow TUI hooks.
     const steerDeps: SteerSubmissionDeps = {
       isDisposed: () => deps.isCleanedUp(),
+      composerHeld: () => composerHoldActive(),
       isViewing: () => deps.viewer.isViewing(),
       currentAgent: () => deps.liveAgent() as unknown as SteerSubmissionAgent | undefined,
       currentGeneration: () => deps.ownership.generation(),
@@ -1703,8 +1814,20 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       writer: deps.backend.sessionWriter,
       diag: deps.diag,
     }
-    if (onlyDraft) deliverBusy(steerDeps, { text, persistHistory })
-    else steer(steerDeps, { text, persistHistory })
+    const attempt = activeHold === undefined ? undefined : {
+      onAccepted: activeHold.accept,
+      onRejected: activeHold.reject,
+      onUnknown: activeHold.markUnknown,
+    } satisfies PromptAttemptHooks
+    const deferred = attempt === undefined
+      ? {}
+      : {
+        attempt,
+        deferAccepted: (effect: () => void) => activeHold!.deferAccepted(effect),
+        onRequestIdentity: (requestId: string) => activeHold!.bindRequestId(requestId),
+      }
+    if (onlyDraft) deliverBusy(steerDeps, { text, persistHistory, ...deferred })
+    else steer(steerDeps, { text, persistHistory, ...deferred })
   }
 
   /**
@@ -1729,6 +1852,167 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     }
   }
 
+  // ── PR2: the Client-local composer submission attempt ─────────────────────
+  //
+  // One attempt owns the SINGLE-FLIGHT submission gate of the live Composer:
+  // from the submit gesture until the Host acceptance (or a proven
+  // pre-acceptance refusal / an unknown outcome), the editor keeps the
+  // submitted draft and is FROZEN (no second submit, no edits). It is a
+  // Client-local gate only — never a second queue, a Host message record or a
+  // persistent draft copy; it holds the frozen per-gesture value until its
+  // terminal settlement and nothing else.
+  //
+  // Settlement is strictly one-way and mutually exclusive:
+  //   accepted  — the Host accepted the prompt (the ONLY authority that may
+  //               clear the composer draft + its attachment consumption);
+  //   rejected  — a proven pre-acceptance refusal (the draft stays editable);
+  //   unknown   — an indeterminate result (the draft stays, with an explicit
+  //               uncertainty notice; a LATE acceptance may still reconcile
+  //               the Host echo but must NOT clear the current editor).
+  //   disposed/subject-replaced — the surface went away; only the attempt's
+  //               own resources settle, never a successor subject's editor.
+
+  interface ComposerHold {
+    readonly id: string
+    readonly text: string
+    readonly subject: SessionSubject | undefined
+    readonly generation: number
+    phase: 'sending' | 'settled'
+    outcome: 'unset' | 'accepted' | 'rejected' | 'unknown'
+    /** The gesture's local-submission identity (the Direct `rpcId`), bound by
+     *  the dispatch the moment it is minted: the acceptance publishes THAT
+     *  ledger record and settles THIS renderer hold. */
+    submissionRequestId: string | undefined
+    /** Effects that belong to the ACCEPTANCE boundary (the history row write
+     *  and the attachment consumption): registered by the gesture's dispatch
+     *  before the write and run exactly once when the Host accepted it. */
+    readonly acceptedEffects: (() => void)[]
+  }
+
+  let composerHold: ComposerHold | undefined
+  let composerHoldSerial = 0
+
+  /** Retire the current hold WITHOUT touching the renderer: the internal
+   *  terminal path for disposed/replaced subjects whose editor is gone. */
+  const retireComposerHold = (reason: 'disposed'): void => {
+    const hold = composerHold
+    if (hold === undefined) return
+    hold.phase = 'settled'
+    hold.acceptedEffects.length = 0
+    composerHold = undefined
+    // The renderer must be unlocked: a surface cleared under a live attempt
+    // would otherwise keep its composer frozen forever. No clear happens —
+    // the outcome is not an acceptance.
+    deps.app().settleSubmission?.(hold.id, 'not-accepted')
+    deps.diag.debug('composer hold retired', { reason })
+  }
+
+  /** Begin ONE attempt: refuses a second submit while an attempt is live and
+   *  freezes the exact submitted value + subject/generation synchronously. */
+  const openComposerHold = (text: string): ComposerHold | undefined => {
+    if (composerHold !== undefined && composerHold.phase === 'sending') return undefined
+    composerHoldSerial += 1
+    const hold: ComposerHold = {
+      id: `composer-${composerHoldSerial}-${randomUUID()}`,
+      text,
+      subject: deps.ownership.captureSubject(),
+      generation: deps.ownership.generation(),
+      phase: 'sending',
+      outcome: 'unset',
+      submissionRequestId: undefined,
+      acceptedEffects: [],
+    }
+    composerHold = hold
+    return hold
+  }
+
+  /** Whether the CURRENT composer is held by a sending attempt (the
+   *  renderers' input-lock read; a settled hold is not a lock). */
+  const composerHoldActive = (): boolean => composerHold !== undefined && composerHold.phase === 'sending'
+
+  /** The acceptance settlement: exactly once, ONLY for the exact live hold,
+   *  and only while the pinned subject is still current. On acceptance the
+   *  composer clears its draft and consumes exactly this attempt's frozen
+   *  attachments — never before. */
+  const acceptComposerHold = (hold: ComposerHold): void => {
+    if (composerHold !== hold || hold.phase !== 'sending') return
+    hold.phase = 'settled'
+    hold.outcome = 'accepted'
+    // The subject fence: a replaced owner never receives the old clear. The
+    // renderer-side settle re-checks too; this is the application gate.
+    if (deps.captureMatches(hold.subject)) {
+      if (hold.submissionRequestId !== undefined) {
+        pendingSubmissions.accept(hold.submissionRequestId)
+        deps.surface.refreshPendingInput()
+      }
+      deps.app().settleSubmission?.(hold.id, 'accepted')
+      for (const effect of hold.acceptedEffects.splice(0)) effect()
+    } else {
+      // The old owner is gone: settle only the attempt's own bookkeeping. The
+      // current composer must keep whatever draft its own subject left.
+      deps.app().settleSubmission?.(hold.id, 'not-accepted')
+      deps.diag.debug('composer acceptance fenced by subject replacement', {})
+    }
+    if (composerHold === hold) composerHold = undefined
+  }
+
+  /** A proven pre-acceptance failure: retire the hold, keep the draft and
+   *  its attachments editable, and let the caller's own failure notice run
+   *  (this path never duplicates a restore — the draft never left). */
+  const rejectComposerHold = (hold: ComposerHold): void => {
+    if (composerHold !== hold || hold.phase !== 'sending') return
+    hold.phase = 'settled'
+    hold.outcome = 'rejected'
+    hold.acceptedEffects.length = 0
+    deps.app().settleSubmission?.(hold.id, 'not-accepted')
+    if (composerHold === hold) composerHold = undefined
+  }
+
+  /** An indeterminate result: release the input lock but keep the draft and
+   *  attachments; a late acceptance may reconcile the Host-side echo but can
+   *  never clear the CURRENT editor (the user may have started editing). */
+  const unknownComposerHold = (hold: ComposerHold): void => {
+    if (composerHold !== hold || hold.phase !== 'sending') return
+    hold.phase = 'settled'
+    hold.outcome = 'unknown'
+    hold.acceptedEffects.length = 0
+    deps.app().settleSubmission?.(hold.id, 'unknown')
+    if (composerHold === hold) composerHold = undefined
+  }
+
+  /** The writer-facing acceptance hook for an attempt's write: idempotent,
+   *  fenced to the exact hold, and synchronous (Direct fires it while the
+   *  writer call is still on the stack). */
+  const composerAcceptedCallback = (hold: ComposerHold): (() => void) | undefined => {
+    return () => { acceptComposerHold(hold) }
+  }
+
+  /** Adapt the controller's ComposerHold into the write-site hooks the
+   *  dispatch/steer paths consume (PR2). The hooks route back into the exact
+   *  hold's settlement and are idempotent on both sides. */
+  const holdOf = (hold: ComposerHold | undefined): {
+    readonly accept: () => void
+    readonly reject: () => void
+    readonly markUnknown: () => void
+    deferAccepted: (effect: () => void) => void
+    bindRequestId: (requestId: string) => void
+  } | undefined => hold === undefined ? undefined : {
+    bindRequestId: (requestId: string) => {
+      if (hold.phase === 'sending') hold.submissionRequestId = requestId
+    },
+    accept: () => { acceptComposerHold(hold) },
+    reject: () => { rejectComposerHold(hold) },
+    markUnknown: () => { unknownComposerHold(hold) },
+    deferAccepted: (effect: () => void) => {
+      if (hold.phase !== 'sending') {
+        // The attempt already settled (rejected/unknown): an acceptance-side
+        // effect must NOT run later.
+        return
+      }
+      hold.acceptedEffects.push(effect)
+    },
+  }
+
   /**
    * Dispatch one user submission end to end: the viewer guard, the input-
    * history persistence, `!` local shells, sessionless commands, the
@@ -1744,12 +2028,43 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     text: string,
     request: ComposerSubmitRequest = 'enter',
     scopeToken?: number,
+    // PR2: the composer hold `beginComposerSubmission` opened for this
+    // gesture. Present only when the admission predicted an ordinary prompt;
+    // every command/shell/local route below that takes the draft AWAY from
+    // the composer settles it not-accepted first (the draft is cleared by
+    // that route's own legacy contract), and the ordinary-prompt landing
+    // sites carry it into the write for the acceptance settlement.
+    openedHold?: ComposerHold,
   ): void => {
+    // The routes that consume the draft through their OWN legacy contract
+    // (the fork's clear, a command disposition, the shell flow) must first
+    // retire a hold opened for this gesture: its lock would otherwise freeze
+    // a composer whose draft a command path already removed.
+    const settleHoldForLegacyRoute = (): void => {
+      if (openedHold === undefined) return
+      if (composerHold === openedHold && openedHold.phase === 'sending') {
+        // The draft stays physically in the editor only on the refusal
+        // branches that keep it; the legacy clear paths removed it already.
+        // Either way the composer must unlock: settle not-accepted WITHOUT a
+        // renderer clear (the legacy path owns the draft's fate).
+        openedHold.phase = 'settled'
+        openedHold.outcome = 'rejected'
+        deps.app().settleSubmission?.(openedHold.id, 'not-accepted')
+        composerHold = undefined
+      }
+    }
     // Fail-closed pasted-image gate: a caller that bypassed the editor's
     // pre-clear admission must still not deliver a path whose image is being
     // attached. Refuse BEFORE any history/session/command/shell/writer work
     // and hand the user's draft back for a retry.
     if (deps.pendingPastedPath?.(text) === true) {
+      // The draft is kept: settle the hold so the editor unlocks for the
+      // retry, and skip the merge (the text never left the editor).
+      if (openedHold !== undefined) {
+        rejectComposerHold(openedHold)
+        deps.app().notify(PASTE_PENDING_NOTICE, 'info')
+        return
+      }
       deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
       deps.app().notify(PASTE_PENDING_NOTICE, 'info')
       return
@@ -1764,18 +2079,27 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // (handle below at the shell branches), and an attachment-bearing draft
     // is non-empty too (the placeholder markers are part of the text —
     // draftHasAttachments).
-    if (text.trim() === '' && !draftHasAttachments(text, deps.drafts.images, deps.drafts.files)) return
+    if (text.trim() === '' && !draftHasAttachments(text, deps.drafts.images, deps.drafts.files)) {
+      settleHoldForLegacyRoute()
+      return
+    }
     // Plain `exit` quits (shell muscle memory): the exact trimmed word
     // intercepts BEFORE any session creation or submission, so typing
     // `exit` with a deferred start never births a session. `/exit` remains
     // the command form; any other prompt still goes to the model.
     if (isPlainExitPrompt(text)) {
+      settleHoldForLegacyRoute()
       deps.requestExit()
       return
     }
     // The subagent viewer is READ-ONLY: submitting while viewing would
     // silently send to the PARENT session. Refuse with a notice instead.
     if (deps.viewer.isViewing()) {
+      if (openedHold !== undefined) {
+        rejectComposerHold(openedHold)
+        deps.app().notify('viewing a subagent — Esc returns before submitting', 'info')
+        return
+      }
       deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
       deps.app().notify('viewing a subagent — Esc returns before submitting', 'info')
       return
@@ -1830,6 +2154,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // gesture ensures one first and executes in that Session's Host
     // workspace, persisting the history row under that Session identity.
     if (text.startsWith('!')) {
+      // The shell family owns its own draft lifecycle (cards / restore /
+      // legacy clear): a hold opened for this gesture settles here. The
+      // admission's `!` prediction never opens one, but a mis-prediction
+      // must still unlock the composer.
+      settleHoldForLegacyRoute()
       // PR3-B B2 (§4 B2-5): the TSP renderer presents no shell cards, so a
       // `!`/`!!` line is refused HERE — the ORIGINAL shell-branch admission,
       // before any persistHistory / ensureSession / acceptLocalSubmitAck /
@@ -1970,6 +2299,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         classification,
       )
       if (refusal !== undefined) {
+        // PR2: the refused line keeps its draft — settle the hold (no merge:
+        // the text never left the editor) and surface the refusal.
+        if (openedHold !== undefined) {
+          rejectComposerHold(openedHold)
+          deps.app().notify(refusal, 'error')
+          return
+        }
         deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
         deps.app().notify(refusal, 'error')
         return
@@ -1996,6 +2332,17 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // from the predicate's result, never from a guard the caller may forget
       // (the B2 review's F1).
       if (availability.kind === 'unsupported' && !deps.supportsTuiBuiltinUi) {
+        // PR2: same as the attachment refusal — the draft stays; settle the
+        // hold without a merge and surface the refusal.
+        if (openedHold !== undefined) {
+          rejectComposerHold(openedHold)
+          const transcriptName = parsed.name === 'transcript'
+          deps.app().notify(
+            transcriptName ? TRANSCRIPT_SAVE_UNAVAILABLE_TEXT : "This command's UI is not available in TSP yet",
+            transcriptName ? 'error' : 'info',
+          )
+          return
+        }
         deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
         // `/transcript` has a dedicated fixed copy: its typed handler can never
         // run here (no mounted save dialog), so the pre-admission is the ONLY
@@ -2057,6 +2404,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // then lacks is consumed by the advertised-miss gate inside
     // dispatchViaSession — never a plain model message.
     if (classification.kind === 'host-command') {
+      // A genuine Host command runs through the command plane: its draft
+      // disposition (restored/suppressed/consumed) is the command outcome's
+      // own contract — the hold never applies.
+      settleHoldForLegacyRoute()
       dispatchViaSession(text, persistHistory, delivery)
       return
     }
@@ -2085,6 +2436,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       ? undefined
       : deps.extensions.findContribution(parsed.name)
     if (parsed !== undefined && contribution !== undefined) {
+      // A client contribution executes its own local handler: the command
+      // contract owns the draft. (The deferred re-dispatch below may still
+      // land in `dispatchViaSession` as an ordinary queue prompt, but that
+      // decision happens after `ensureSession` against the FINAL catalog —
+      // the hold cannot survive there, so it settles as a command here.)
+      settleHoldForLegacyRoute()
       if (contribution.sessionless) {
         runLocalCommand(parsed, text, persistHistory, delivery, undefined)
         return
@@ -2169,6 +2526,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // sessionless name set). Its delivery stays `queue`, so falling through can
     // never steer it.
     if (parsed !== undefined && isSessionless) {
+      // The sessionless TUI command family runs its own local surface.
+      settleHoldForLegacyRoute()
       const routeSessionless = (): void => {
         if (deps.liveAgent() === undefined) {
           runLocalCommand(parsed, text, persistHistory, delivery, undefined)
@@ -2235,13 +2594,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       const skillLine = deps.command.isSkillInvocation(parsed, text)
         && (parsed === undefined || deps.command.hostCatalogResolves(parsed.name) === false)
       if (skillLine) {
-        dispatchViaSession(text, persistHistory, delivery)
+        dispatchViaSession(text, persistHistory, delivery, holdOf(openedHold))
         return
       }
-      steerNow(text, true, persistHistory)
+      steerNow(text, true, persistHistory, holdOf(openedHold))
       return
     }
-    dispatchViaSession(text, persistHistory, delivery)
+    dispatchViaSession(text, persistHistory, delivery, holdOf(openedHold))
   }
 
   const dequeue = (): void => {
@@ -2304,6 +2663,103 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
 
   const submit = (text: string, request: ComposerSubmitRequest = 'enter', scopeToken?: number): void =>
     dispatchUserInput(text, request, scopeToken)
+
+  /**
+   * PR2: the renderers' SYNCHRONOUS submit admission. The caller (PiTui's
+   * `onMaySubmit`, TSP's `submitComposerDraft`) invokes this BEFORE any
+   * draft/undo mutation and MUST honor the verdict:
+   *
+   * - `'held'` — the line is an ordinary prompt of the live composer. The
+   *   attempt is registered, the submission dispatch has STARTED inside this
+   *   call, and the renderer keeps its document frozen (the `holdSubmission`
+   *   renderer seam fires below) until the application settles the attempt.
+   *   The caller must NOT run its legacy submit path.
+   * - `'legacy'` — the line belongs to a command/shell/local route. The
+   *   caller runs its EXISTING pre-clear path unchanged; the application
+   *   never opened an attempt.
+   * - `'refused'` — the gesture is a no-op (empty wire form, or a submission
+   *   attempt is already sending). Nothing was persisted, cleared or
+   *   dispatched; the caller consumes the gesture silently.
+   *
+   * The prediction below is the SAME classification family the dispatch runs
+   * (a plain line, an argued non-invocation, a skill-delivery steer); a
+   * mis-prediction self-corrects inside `dispatchUserInput`, which settles a
+   * stray hold at every command/shell/local landing before the draft changes
+   * hands.
+   */
+  const beginComposerSubmission = (
+    text: string,
+    request: ComposerSubmitRequest | 'steer' = 'enter',
+    scopeToken?: number,
+  ): 'held' | 'legacy' | 'refused' => {
+    // A live attempt owns the composer: a second submit gesture is refused
+    // (no re-dispatch, no history, no echo). This is the single-flight gate
+    // of the live editor — the queue itself is untouched.
+    if (deps.isCleanedUp()) return 'refused'
+    if (composerHoldActive()) return 'refused'
+    // A composition whose renderer cannot present a held submission (no
+    // hold/settle on the composer port) keeps the pre-PR2 clear-first path.
+    if (deps.app().holdSubmission === undefined || deps.app().settleSubmission === undefined) return 'legacy'
+    // The empty wire form is the dispatch's own silent no-op.
+    if (text.trim() === '' && !draftHasAttachments(text, deps.drafts.images, deps.drafts.files)) {
+      return 'refused'
+    }
+    // The routes whose draft lifecycle is NOT the composer's (plain `exit`,
+    // the read-only viewer guard, `!`/`!!` shells) keep their legacy
+    // pre-clear contract.
+    if (isPlainExitPrompt(text) || deps.viewer.isViewing() || text.startsWith('!')) {
+      return 'legacy'
+    }
+    // The command families: a genuine Host command line, a Client command
+    // (TUI builtin, extension contribution), and the sessionless local
+    // route. The classification mirrors `dispatchUserInput`'s own inputs
+    // (the live catalog claims, the skill-first rule, the wrapper
+    // precedence); an ordinary slash NON-invocation (`/export foo`) and a
+    // skill-delivery steer predict as ordinary prompts.
+    const parsed = parseCommand(text)
+    if (parsed !== undefined) {
+      const skillInvocation = deps.command.isSkillInvocation(parsed, text)
+      const classification = classifyCommandLine({
+        hostOriginClaim: deps.command.hostOriginClaimOf(parsed),
+        tuiCommand: parsed !== undefined && !skillInvocation && deps.command.clientClaimsLine(parsed),
+        extensionCommand: parsed !== undefined
+          && !skillInvocation
+          && isBareCommandLine(parsed)
+          && deps.command.isSkillWrapperName(parsed.name) !== true
+          && deps.extensions.findContribution(parsed.name) !== undefined,
+        skillInvocation,
+      })
+      // Skills are agent-facing INPUT, but their delivery belongs to
+      // loadSkill's own command contract (§5: slash/skill keep their own
+      // permission and delivery boundary) — never the Composer acceptance
+      // transaction.
+      if (classification.kind === 'host-command'
+        || classification.kind === 'client-command'
+        || classification.kind === 'skill-invocation'
+        || skillInvocation) {
+        return 'legacy'
+      }
+    }
+    // An ordinary prompt: register the attempt, freeze the renderer, and
+    // start the dispatch INSIDE this call (the renderers must never re-run
+    // their legacy submit for a held line).
+    const hold = openComposerHold(text)
+    if (hold === undefined) return 'refused'
+    deps.app().holdSubmission?.(hold.id)
+    if (request === 'steer') {
+      // The Ctrl+S / steer-draft gesture: the SAME attempt gate, delivered
+      // through the draft-steer path (the queue sweep occurrences never
+      // settle the composer). The draft stays; the renderer already
+      // consumed nothing.
+      steerNow(text, false, makeSteerPersist(text), holdOf(hold))
+      return 'held'
+    }
+    dispatchUserInput(text, request, scopeToken, hold)
+    // A route inside the dispatch may have consumed the line through its own
+    // contract and settled the hold already (command fallbacks, refusals);
+    // a still-sending hold is the expected ordinary-prompt outcome.
+    return 'held'
+  }
   /**
    * The surface steer entry (Ctrl+S / steer-draft): snapshot the persist facts
    * BEFORE the draft is consumed, then steer the draft only (explicitly queued
@@ -2345,6 +2801,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
 
   return {
     submit,
+    beginComposerSubmission,
+    composerHoldActive: () => composerHold !== undefined && composerHold.phase === 'sending',
     steer: steerDraft,
     dequeue,
     abortLocalShell,
@@ -2353,7 +2811,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     withWriterSection,
     settleLocalSubmitAck: (reason, options) => settleLocalSubmitAck(reason, options),
     resetSubmitLatency: () => submitLatencyTracker.reset(),
-    clearPending: () => pendingSubmissions.clear(),
+    clearPending: () => {
+      pendingSubmissions.clear()
+      // A cleared surface (session switch / teardown) retires any live hold:
+      // its attempt can only settle its own resources from here on.
+      retireComposerHold('disposed')
+    },
     markLatency: (sessionId, phase) => { submitLatencyTracker.mark(sessionId, phase) },
     observeDurable: (rpcId) => pendingSubmissions.observeDurable(rpcId),
     snapshotEchoes: (sessionId) => submissionPresentation.snapshot(sessionId),

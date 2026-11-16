@@ -461,6 +461,11 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
     // chord, or the explicit queue action) rides along — the boundary resolves
     // its delivery mode.
     onSubmit: (text, request, scopeToken) => deps.submission.submit(text, request, scopeToken),
+    // PR2: the renderer's synchronous submit admission — ONE classification
+    // shared with the dispatch. `'held'` proves the attempt was registered
+    // and its delivery started; the renderer must not clear/submit itself.
+    beginComposerSubmission: (text, request, scopeToken) =>
+      deps.submission.beginComposerSubmission(text, request, scopeToken),
     // The image-only submit gate (plan §11.1): an empty-text draft with staged
     // images is a real submission.
     isImageDraft: () => draftHasImages(deps.surface.composer.getDraft(), deps.drafts.images),
