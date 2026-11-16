@@ -356,6 +356,7 @@ async function mountTspHarness(options: {
     settleLocalSubmitAck: () => {},
     markSubmitLatency: () => {},
     observeDurableSubmission: () => {},
+    observeDirectPendingSubmissionEvent: () => false,
     markContextDirty: () => {},
     refreshContextMeasurement: () => {},
     currentWorkingFromLog: () => false,

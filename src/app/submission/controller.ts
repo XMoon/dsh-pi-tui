@@ -44,7 +44,7 @@ import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery }
 import type { ClientCommandRegistry } from '../command/client-command-registry.ts'
 import { TRANSCRIPT_SAVE_UNAVAILABLE_TEXT, TSP_B2A_RESULT_NOTICE_COMMANDS, tspBuiltinAvailability } from '../command/tsp-capability.ts'
 import type { TuiLocalCommandHandler } from '../../extension/public-types.ts'
-import { PendingSubmissions, type PendingSubmissionPlacement } from './pending-submission.ts'
+import { PendingSubmissions, type DirectPendingSubmissionEvent, type PendingSubmissionPlacement } from './pending-submission.ts'
 import { queueInboxMessageOf } from './pending-input.ts'
 import type { HostCommandExecution, HostCommandOutcome, HostCommandPort } from '../../runtime/host-command-port.ts'
 import type { HostFilePort } from '../../runtime/host-file-port.ts'
@@ -390,6 +390,17 @@ export interface SubmissionController {
   }): void
   /** Remove one local submission echo on a known terminal exit. */
   settleLocalSubmission(requestId: string | undefined): void
+  /**
+   * Fold ONE Direct Host event into the client-local pending-echo lifecycle
+   * (PR1): the official Client receipt/index/seq terminal reconciliation,
+   * mapped onto this ledger. Only the CURRENT live owner session/generation is
+   * observed, and the method never touches the Remote submission source (the
+   * official Client snapshot stays its single echo owner). Returns whether the
+   * visible echo set changed, so the ONE surface router can refresh the shared
+   * pending presentation. This is an internal seam between the composition
+   * root and the submission owner — never a public port.
+   */
+  observeDirectHostEvent(event: DirectPendingSubmissionEvent, sessionId: string): boolean
   /** Start the latency dispatch mark for one session. */
   markDispatch(sessionId: string | undefined): void
   /** Prepare the outgoing message (image/file admission + canonicalization). */
@@ -672,6 +683,24 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     if (requestId === undefined) return
     pendingSubmissions.settle(requestId)
     deps.surface.refreshPendingInput()
+  }
+
+  /**
+   * Fold one Direct Host event into the client-local pending-echo lifecycle.
+   * The ownership generation is read from the ownership core AT OBSERVATION
+   * TIME (never captured at submit): the ledger record already pins its own
+   * submit-time generation, so a late event of an old subject can only match
+   * records of that same generation and can never touch the current one. The
+   * live-agent session check is the Direct currentness fence — a Remote
+   * composition never installs this callback at all.
+   */
+  const observeDirectHostEvent = (event: DirectPendingSubmissionEvent, sessionId: string): boolean => {
+    if (deps.liveAgent()?.session.id !== sessionId) return false
+    return pendingSubmissions.observeDirectHostEvent({
+      sessionId,
+      generation: deps.ownership.generation(),
+      event,
+    })
   }
 
   /**
@@ -2328,6 +2357,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     beginLocalSubmission: ({ requestId, text, mode, running, sessionId, generation, ackToken }) =>
       installLocalEcho(requestId, text, submissionPlacement(mode, running), sessionId, generation, ackToken),
     settleLocalSubmission: (requestId) => settleLocalSubmission(requestId),
+    observeDirectHostEvent: (event, sessionId) => observeDirectHostEvent(event, sessionId),
     markDispatch: (sessionId) => { submitLatencyTracker.mark(sessionId, 'dispatch') },
     prepareMessage,
     hasUnsettledClientWrite: () => unsettledClientWrites > 0 || deps.submissionRuntime.hasUnsettledClientWrite(),

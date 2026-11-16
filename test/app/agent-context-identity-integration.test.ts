@@ -247,6 +247,7 @@ function mount(options: { mainFolder: TranscriptFolder; statusTitles?: Record<st
     settleLocalSubmitAck: () => {},
     markSubmitLatency: () => {},
     observeDurableSubmission: () => {},
+    observeDirectPendingSubmissionEvent: () => false,
     markContextDirty: () => {},
     refreshContextMeasurement: () => {},
     currentWorkingFromLog: () => false,

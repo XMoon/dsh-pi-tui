@@ -233,6 +233,7 @@ async function mountChain(
     settleLocalSubmitAck: () => {},
     markSubmitLatency: () => {},
     observeDurableSubmission: () => {},
+    observeDirectPendingSubmissionEvent: () => false,
     markContextDirty: () => {},
     refreshContextMeasurement: () => {},
     currentWorkingFromLog: () => false,

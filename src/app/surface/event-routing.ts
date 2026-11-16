@@ -204,6 +204,16 @@ export interface SurfaceEventRoutingSource<Event extends RoutedSessionEvent> {
   settleLocalSubmitAck(reason: string): void
   markSubmitLatency(sessionId: string | undefined, phase: SubmitLatencyPhase): void
   observeDurableSubmission(rpcId: string): void
+  /**
+   * PR1: fold ONE Direct Host event into the client-local pending-echo
+   * terminal reconciliation (the official Client receipt/index/seq rule mapped
+   * onto the Direct ledger). Only the three durable event types the rule needs
+   * are forwarded; the composition binds the callback on the Direct branch
+   * alone and returns false elsewhere. Returns whether the VISIBLE echo set
+   * changed — a receipt-index update alone returns false and the existing
+   * authoritative pending-input refresh owns that presentation change.
+   */
+  observeDirectPendingSubmissionEvent(event: Event, sessionId: string): boolean
   markContextDirty(): void
   refreshContextMeasurement(reason: ContextMeasureReason): void
   /** Whether the CURRENT live agent's log ends mid-turn (the compaction
@@ -461,6 +471,20 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     }
     main.folder.apply([event])
     main.stats.apply([event])
+    // PR1: Direct pending-echo terminal reconciliation. The Host claimed a
+    // previously accepted Inbox occurrence and then crossed a durable turn
+    // boundary without the matching `user/message`, so the accepted content
+    // can no longer become visible and its local echo must stop claiming to
+    // send. The callback decides from the durable event alone (identity +
+    // receipt index + strictly later seq); `compaction/*`, `agent/error`,
+    // status changes and unrelated events are NEVER routed here — there is no
+    // generic "turn ended, clear the echoes" rule. A changed visible set needs
+    // the shared presentation refresh; the existing `agent/inbox/spliced`
+    // microtask refresh below stays (the Host projection mutates after this
+    // notification).
+    if (event.type === 'agent/inbox/spliced' || event.type === 'request/context' || event.type === 'turn/end') {
+      if (source.observeDirectPendingSubmissionEvent(event, session.id)) options.refreshPendingInput()
+    }
     // The goal badge folds incrementally: the newest goal/change event
     // decides, so one event is enough (clear/completed hide the badge).
     if (event.type === 'goal/change') source.applyGoalChange(event)

@@ -40,6 +40,7 @@ import LlmRuntime, {
   createUserMessage,
   LlmAdapter,
   LlmError,
+  ReasoningEffortId,
   type GenerateOptions,
   type LlmResolvedModelInfo,
   type StreamChunk,
@@ -50,6 +51,10 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { createSurfaceRuntime } from '../../src/app/surface/runtime.ts'
 import type { SurfaceEventRoutingSource } from '../../src/app/surface/event-routing.ts'
+import { PendingSubmissions, type DirectPendingSubmissionEvent } from '../../src/app/submission/pending-submission.ts'
+import { DirectSubmissionPresentation } from '../../src/app/submission/presentation.ts'
+import { queueTextOf as queueTextOfProduction } from '../../src/app/surface/pending-presentation.ts'
+import { DirectPendingInputReader } from '../../src/runtime/direct/pending-input-reader-direct.ts'
 import type { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
@@ -128,6 +133,39 @@ class AbortableAdapter extends LlmAdapter {
   }
 }
 
+/**
+ * Deterministic PREPARATION-failing adapter: the first turn's `resolveModel`
+ * resolves only when the test releases it, after which the PINNED
+ * `prepareCall` rejects with the official UNSUPPORTED_REASONING_EFFORT class
+ * (the model advertises no reasoning-effort capability). The second turn's
+ * preparation is held until released too, so a queued identity can be observed
+ * as still pending across the failed turn. The provider stream is never
+ * reached — the failure precedes the durable `user/message`.
+ */
+class PrepFailingAdapter extends LlmAdapter {
+  private readonly first = Promise.withResolvers<void>()
+  private readonly second = Promise.withResolvers<void>()
+  readonly firstResolveStarted = Promise.withResolvers<void>()
+  private calls = 0
+  streamCalls = 0
+  override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    this.calls += 1
+    if (this.calls === 1) {
+      this.firstResolveStarted.resolve()
+      await this.first.promise
+    } else {
+      await this.second.promise
+    }
+    return { provider, id: model, name: model }
+  }
+  async * stream(): AsyncIterable<StreamChunk> {
+    this.streamCalls += 1
+    throw new LlmError('the preparation failure must reject before the provider stream', 'UNKNOWN')
+  }
+  releaseFirst(): void { this.first.resolve() }
+  releaseSecond(): void { this.second.resolve() }
+}
+
 const nullPresentation = {
   handleFocusReport: () => {},
   markFocused: () => {},
@@ -140,17 +178,39 @@ const nullPresentation = {
 interface Probe {
   readonly order: string[]
   readonly programWrites: string[]
+  /** Every REAL durable Session event the loop produced, in emission order. */
+  readonly events: readonly { readonly type: string; readonly seq: number; readonly data: unknown }[]
+  /** The Direct pending ledger wired into the REAL event routing. */
+  readonly pending: PendingSubmissions
+  /** The REAL mounted terminal sink. */
+  readonly terminal: VirtualTerminal
+  /** Resolves when the first `turn/end` reaches the routing. */
+  readonly firstTurnEnd: Promise<void>
+  /** Register one local echo exactly like the production submit path does. */
+  beginEcho(requestId: string, text: string): void
+  /** Deliver one identified user message through the REAL `agent.followup`. */
+  followupIdentified(requestId: string, text: string): void
+  /** Wait for every activity driver to settle (after releasing the fixture). */
+  quiesce(): Promise<void>
   run(text: string): Promise<void>
   abortRun(text: string, adapter: AbortableAdapter): Promise<void>
   dispose(): void
 }
+
+/** The generation the fixture's ledger records pin (a stand-in for the
+ *  production ownership generation; the reconciliation itself only requires
+ *  the routing fence and the record to agree). */
+const PENDING_GENERATION = 0
 
 /**
  * Mount the REAL rc.2 AgentLoop + the REAL surface routing over a recording
  * terminal, and subscribe the surface to the loop's OWN events (the same
  * delegation the production composition installs).
  */
-async function createProbe(adapter: LlmAdapter): Promise<Probe> {
+async function createProbe(
+  adapter: LlmAdapter,
+  agentOptions: { readonly reasoningEffort?: ReturnType<typeof ReasoningEffortId> } = {},
+): Promise<Probe> {
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(LlmRuntime)
@@ -164,7 +224,17 @@ async function createProbe(adapter: LlmAdapter): Promise<Probe> {
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   ctx.llm.registerAdapter(['probe'], adapter)
-  const agent = await ctx.agentLoop.create(SessionId(MAIN), { provider: 'probe', model: 'probe-model' })
+  const agent = await ctx.agentLoop.create(SessionId(MAIN), {
+    provider: 'probe',
+    model: 'probe-model',
+    ...agentOptions,
+  })
+  // The Direct pending echo lifecycle: the REAL ledger, the REAL Direct
+  // pending-input reader over the live Agent inbox, and the REAL submission
+  // presentation source — the same composition production mounts.
+  const pending = new PendingSubmissions()
+  const submissionPresentation = new DirectSubmissionPresentation(pending)
+  const pendingReader = new DirectPendingInputReader(() => agent)
 
   const vt = new VirtualTerminal(100, 30)
   const programWrites: string[] = []
@@ -200,10 +270,10 @@ async function createProbe(adapter: LlmAdapter): Promise<Probe> {
     viewedChild: () => { throw new Error('no viewed child in this probe') },
     mainFolder: () => emptyFolder,
     viewedChildFolder: () => emptyFolder,
-    pendingSubjectId: () => undefined,
-    pendingSnapshot: () => undefined,
-    submissionEchoes: () => undefined,
-    queueTextOf: () => '',
+    pendingSubjectId: (): string => MAIN,
+    pendingSnapshot: (sessionId: string) => pendingReader.snapshot(sessionId),
+    submissionEchoes: (sessionId: string | undefined) => submissionPresentation.snapshot(sessionId),
+    queueTextOf: (content: readonly unknown[]) => queueTextOfProduction(content as never),
     exitView: () => {},
     refreshStatusCheap: () => {},
     refreshStatusAndWelcome: () => {},
@@ -213,6 +283,11 @@ async function createProbe(adapter: LlmAdapter): Promise<Probe> {
     settleLocalSubmitAck: () => {},
     markSubmitLatency: () => {},
     observeDurableSubmission: () => {},
+    // PR1: the Direct terminal reconciliation, wired exactly like the Direct
+    // composition binds it — the REAL ledger folds the REAL Host events the
+    // routing forwards.
+    observeDirectPendingSubmissionEvent: (event: DirectPendingSubmissionEvent, sessionId: string) =>
+      pending.observeDirectHostEvent({ sessionId, generation: PENDING_GENERATION, event }),
     markContextDirty: () => {},
     refreshContextMeasurement: () => {},
     currentWorkingFromLog: () => false,
@@ -260,10 +335,18 @@ async function createProbe(adapter: LlmAdapter): Promise<Probe> {
   // The production delegation, installed AFTER the mount exactly as the
   // composition root does: the surface consumes the loop's own events.
   const order: string[] = []
+  const events: Array<{ type: string; seq: number; data: unknown }> = []
+  const firstTurnEnd = Promise.withResolvers<void>()
+  let firstTurnEndSeen = false
   ctx.on('session/event', (session, event) => {
     assert.equal(session.id, MAIN, 'every routed session event belongs to the main session')
+    events.push({ type: event.type, seq: Number(event.seq), data: event.data })
     if (event.type === 'turn/start') order.push('turn/start')
     else if (event.type === 'turn/end') order.push(`turn/end:${(event.data as { reason: { kind: string } }).reason.kind}`)
+    if (event.type === 'turn/end' && !firstTurnEndSeen) {
+      firstTurnEndSeen = true
+      firstTurnEnd.resolve()
+    }
     surface.routeSessionEvent(session, event)
   })
   ctx.on('agent/status', ({ agent: subject, status }) => {
@@ -276,6 +359,21 @@ async function createProbe(adapter: LlmAdapter): Promise<Probe> {
   return {
     order,
     programWrites,
+    events,
+    pending,
+    terminal: vt,
+    firstTurnEnd: firstTurnEnd.promise,
+    beginEcho: (requestId, text) => {
+      pending.begin({ requestId, placement: 'transcript', text, createdAt: 1, sessionId: MAIN, generation: PENDING_GENERATION })
+      surface.refreshPendingInput()
+    },
+    followupIdentified: (requestId, text) => {
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text }],
+        source: { kind: 'user', rpcId: requestId } as never,
+      }))
+    },
+    quiesce: () => agent.whenIdle(),
     run: async (text) => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
       await agent.whenIdle()
@@ -356,6 +454,79 @@ test('rc.2 aborted: a cancelled turn settles idle, never a fabricated completion
     assert.ok(idle > end, 'the idle status arrives after the aborted turn/end')
     assert.deepEqual(probe.programWrites, [IDLE, WORKING, IDLE],
       'an aborted turn is honestly idle — not done')
+  } finally {
+    probe.dispose()
+  }
+})
+
+// FIXTURE MANIFEST for the case below (plan §7 L5):
+// - REAL: the published pinned AgentLoop / session / LLM runtime, its own
+//   `agent/inbox/spliced` producer and `turn/end` emission, the actual event
+//   router, the actual Direct pending ledger and the actual terminal sink.
+// - STAND-IN: a deterministic adapter that makes the pinned `prepareCall`
+//   reject with UNSUPPORTED_REASONING_EFFORT before the message is admitted,
+//   the fixture routing source's transcript/stats no-op targets, and the
+//   fixture ledger generation constant.
+// - ABSENT: network/live provider credentials, the official Remote wire and
+//   the physical GUI.
+test('a preparation failure after the real Inbox claim retires only that Direct echo', async () => {
+  const adapter = new PrepFailingAdapter()
+  const probe = await createProbe(adapter, { reasoningEffort: ReasoningEffortId('xhigh') })
+  try {
+    const claimedId = 'real-input-claimed'
+    const queuedId = 'real-input-queued'
+    probe.beginEcho(claimedId, '再看看')
+    await probe.terminal.waitForRender()
+    const pendingFrame = probe.terminal.getViewport().join('\n')
+    assert.ok(pendingFrame.includes('再看看'), `the local echo renders while pending:\n${pendingFrame}`)
+    assert.ok(pendingFrame.includes('sending…'), `the pending row advertises sending:\n${pendingFrame}`)
+
+    // The REAL Host accepts the prompt through agent.followup; the REAL loop
+    // then claims it and enters request preparation.
+    probe.followupIdentified(claimedId, '再看看')
+    await adapter.firstResolveStarted.promise
+    const splices = probe.events.filter(entry => entry.type === 'agent/inbox/spliced')
+    assert.ok(splices.some(entry => {
+      const data = entry.data as { inserted?: readonly { source?: { rpcId?: unknown } }[] }
+      return data.inserted?.some(message => message.source?.rpcId === claimedId) === true
+    }), 'the real Host Inbox insertion carries the exact request identity')
+
+    // A second identity queues behind the in-flight turn and must survive the
+    // first identity's failure.
+    probe.beginEcho(queuedId, 'kept queued')
+    probe.followupIdentified(queuedId, 'kept queued')
+
+    // Release the preparation: the pinned capability validation rejects, so
+    // the turn ends with error and NO durable user/message is ever appended.
+    adapter.releaseFirst()
+    await probe.firstTurnEnd
+    await probe.terminal.waitForRender()
+
+    assert.ok(!probe.events.some(entry => entry.type === 'user/message'),
+      'the preparation failure precedes every durable user/message')
+    assert.ok(probe.events.some(entry => {
+      const data = entry.data as { reason?: { kind?: unknown } }
+      return entry.type === 'turn/end' && data.reason?.kind === 'error'
+    }), 'the real loop ends the failed turn with an error boundary')
+    assert.equal(adapter.streamCalls, 0, 'the provider stream is never reached')
+    assert.deepEqual(probe.pending.snapshot().map(echo => echo.requestId), [queuedId],
+      'the claimed-and-failed echo retires; the queued sibling remains')
+
+    const settledFrame = probe.terminal.getViewport().join('\n')
+    assert.ok(!settledFrame.includes('再看看'),
+      `the failed echo no longer renders as pending:\n${settledFrame}`)
+    assert.ok(settledFrame.includes('kept queued'),
+      `the queued sibling stays visible:\n${settledFrame}`)
+    // The sibling is the SAME pending identity in whichever presentation its
+    // exact Host state implies: the authoritative queue row while it is still
+    // in the Inbox, or its local sending echo once that row was claimed but no
+    // terminal boundary has crossed it.
+    assert.ok(settledFrame.includes('Queue · 1') || settledFrame.includes('sending…'),
+      `the still-pending sibling advertises its pending state:\n${settledFrame}`)
+
+    // Release the queued turn so the fixture settles before disposal.
+    adapter.releaseSecond()
+    await probe.quiesce()
   } finally {
     probe.dispose()
   }
