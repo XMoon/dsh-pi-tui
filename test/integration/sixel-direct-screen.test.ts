@@ -859,7 +859,7 @@ test('24 distinct transcript images: the newest visible paints, and scrolling ba
 
 // ── Image-8 / I8-2B: the four Direct SIXEL product journeys ───────────────
 
-test('/view-image LIST→Viewer→Esc back→same list→Esc close restores the main screen', async (t) => {
+test('/view-image LIST→Viewer→Back [Esc]→same list→Close [Esc] restores the main screen', async (t) => {
   const png = await pngFromRgba(fill(80, 40, (_x, y) => (y < 20 ? [255, 0, 0, 255] : [0, 0, 255, 255])), 80, 40)
   const bytesById = new Map<string, Uint8Array>([
     ['att-e2-01-png', png],
@@ -901,7 +901,7 @@ test('/view-image LIST→Viewer→Esc back→same list→Esc close restores the 
   assert.ok(!terminal.writes.join('').includes('\x1b_G'), 'no Kitty APC on the SIXEL Viewer')
   const viewer = await waitViewport(terminal, 'Image · bands.png', 'the Viewer identity row')
   assert.ok(viewer.includes('80×40 · image/png'), `the ORIGINAL metadata is painted:\n${viewer}`)
-  assert.ok(stripSgr(viewer).includes('Esc back'), 'the stacked Viewer advertises Esc back')
+  assert.ok(stripSgr(viewer).includes('Back [Esc]'), 'the stacked Viewer advertises Back [Esc]')
 
   // Esc #1: back to the SAME list, selection preserved.
   terminal.sendInput('\x1b')
@@ -952,7 +952,7 @@ test('a fullscreen transcript body click opens the direct Viewer; text/blank cel
   assert.equal(directDecoded.width, 80, 'the direct Viewer paints the source width')
   assert.ok(pixelAt(directDecoded, 4, 4)[0] > 180, 'the direct Viewer paints the real red band')
   const viewer = await waitViewport(terminal, 'Image · bands.png', 'the direct Viewer')
-  assert.ok(stripSgr(viewer).includes('Esc close'), 'a direct open advertises Esc close, never Esc back')
+  assert.ok(stripSgr(viewer).includes('Close [Esc]'), 'a direct open advertises Close [Esc], never Back [Esc]')
   assert.ok(!viewer.includes('Images · current transcript'), 'escapes directly, no hidden list')
   // Esc closes the Viewer and never opens a list.
   terminal.writes.length = 0
@@ -1006,7 +1006,7 @@ test('JPEG and WebP refs paint their derived PNG while keeping the ORIGINAL meta
   assert.ok(jpegView.includes('120×80 · image/jpeg'), `original JPEG metadata stays: ${jpegView}`)
   assert.ok(jpegView.includes(`${SAMPLE_JPEG.byteLength} B`), jpegView)
 
-  // Esc back, move to the WebP and open it: the SAME loader derives its own PNG.
+  // Back [Esc], move to the WebP and open it: the SAME loader derives its own PNG.
   terminal.sendInput('\x1b')
   await waitViewport(terminal, 'Images · current transcript', 'the list after Esc')
   terminal.sendInput('\x1b[B')
@@ -1107,7 +1107,7 @@ test('the Viewer grant survives the frozen resize matrix and a Main↔Alt round 
   const beforeAltViewer = paintedRasters(terminal).length
   terminal.sendInput('\r')
   await nextRaster(terminal, beforeAltViewer, 'the fullscreen workspace Viewer raster')
-  assert.ok((await waitViewport(terminal, 'Image · bands.png', 'the fullscreen workspace Viewer')).includes('Esc back'))
+  assert.ok((await waitViewport(terminal, 'Image · bands.png', 'the fullscreen workspace Viewer')).includes('Back [Esc]'))
   terminal.writes.length = 0
   terminal.sendInput('\x1b')
   await waitViewport(terminal, 'Images · current transcript', 'the list after the fullscreen Viewer')
@@ -2233,7 +2233,7 @@ test('a real top-cropped transcript image maps the visible rows and opens the di
   terminal.sendInput(`\x1b[<0;1;${clickRow}m`)
   const viewerDcs = await nextRaster(terminal, beforeViewer, 'the direct Viewer raster from the cropped pixel')
   const viewer = await waitViewport(terminal, 'Image · bands12.png', 'the direct Viewer')
-  assert.ok(stripSgr(viewer).includes('Esc close'), 'the direct open advertises Esc close')
+  assert.ok(stripSgr(viewer).includes('Close [Esc]'), 'the direct open advertises Close [Esc]')
   const viewerDecoded = decodeSixel(viewerDcs)
   assert.equal(viewerDecoded.width, 200, 'the Viewer paints the source width')
   const [fullR, fullG] = pixelAt(viewerDecoded, 4, 4)
@@ -3058,7 +3058,7 @@ test('an image occurrence folds and unfolds in Full, Compact and Focus while its
     terminal.sendInput(`\x1b[<0;1;${body.bodyRow}m`)
     await nextRaster(terminal, beforeViewer, `${preset}: the Viewer raster from the committed body`)
     const viewer = await waitViewport(terminal, 'Image · bands.png', `${preset}: the direct Viewer`)
-    assert.ok(stripSgr(viewer).includes('Esc close'), `${preset}: the body hit is the direct Viewer target`)
+    assert.ok(stripSgr(viewer).includes('Close [Esc]'), `${preset}: the body hit is the direct Viewer target`)
     terminal.sendInput('\x1b')
     await waitViewportGone(terminal, 'Image · bands.png', `${preset}: the Viewer to close`)
     assert.equal(projection.fullscreenPaintSnapshot.scrollTop, scrollTopBefore, `${preset}: the Viewer round trip keeps the anchor`)
@@ -3180,7 +3180,7 @@ test('a press released after a real scroll or resize never transfers the image V
   terminal.sendInput(`\x1b[<0;1;${greenBody}M`)
   terminal.sendInput(`\x1b[<0;1;${greenBody}m`)
   const greenViewer = await waitViewport(terminal, 'Image · green.png', 'the Viewer for the green source')
-  assert.ok(stripSgr(greenViewer).includes('Esc close'), 'the green body opens its OWN direct Viewer')
+  assert.ok(stripSgr(greenViewer).includes('Close [Esc]'), 'the green body opens its OWN direct Viewer')
   terminal.sendInput('\x1b')
   await waitViewportGone(terminal, 'Image · green.png', 'the green Viewer to close')
 })
