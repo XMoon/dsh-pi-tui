@@ -1248,7 +1248,8 @@ neither USER-field deletion nor `overridden=false` is a success criterion.
   The bound row follows official dsh-web: `pwsh-sandbox` is preferred when both
   `bash-sandbox` and `pwsh-sandbox` are served, otherwise the single served row
   is used, and no served row is `Unavailable`; the Client OS is never used to
-  guess it. A stale captured generation/revision refuses the write. The caps
+  guess it. A stale captured generation/revision or a same-revision switch to
+  the other served row refuses the write. The caps
   affect the NEXT shell execution; a running subprocess keeps its current
   timeout. This is not the `!`/`!!` user-shell sandbox policy.
 - `General` paints `Backend`, `Start Web automatically`, `Start ACP

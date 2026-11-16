@@ -1323,7 +1323,8 @@ following official dsh-web: prefer `pwsh-sandbox` when both are served, otherwis
 use the single served row, and report `unavailable` when none is served; the
 Client OS is never consulted. Two served namespaces are not an ambiguity.
 A write re-proves the same current served row and generation/revision before
-dispatch. Direct uses the in-process Settings authority; Remote
+dispatch; the served-row identity is part of the page's currentness, so a
+same-revision switch to the other namespace is read-only. Direct uses the in-process Settings authority; Remote
 uses the ONE existing settings mirror and its Connection generation, pins the
 caller's captured revision, keeps the existing accepted-write lifetime across
 the settlement and post-write refresh, and refuses a replaced generation. Both

@@ -609,7 +609,7 @@ test('the two shell caps dispatch as ONE exact-revision mutation and Reset prese
   const result = await fixture.port.shellExecutionSettings.mutate({
     timeoutMs: { kind: 'set', value: 30_000 },
     maxOutputBytes: { kind: 'reset' },
-  }, opened.revision, opened.generation)
+  }, opened.revision, opened.generation, opened.effective.executor)
   assert.deepEqual(result, { kind: 'accepted' })
   assert.ok(fixture.calls.length === 1)
   assert.deepEqual(fixture.calls[0], {
@@ -624,6 +624,32 @@ test('the two shell caps dispatch as ONE exact-revision mutation and Reset prese
   assert.equal(readback.kind, 'ready')
   if (readback.kind !== 'ready') return
   assert.deepEqual(readback.effective, { executor: 'bash', timeoutMs: 30_000, maxOutputBytes: 64_000 })
+})
+
+test('a same-generation/same-revision served-row switch rejects the stale remote shell page', async () => {
+  const fixture = makeHostPort({ namespaces: [
+    { ns: 'bash-sandbox', base: { timeoutMs: 60_000, maxOutputBytes: 64_000 }, value: { timeoutMs: 90_000, maxOutputBytes: 64_000 }, revision: 7 },
+  ] })
+  await fixture.port.describe()
+  const opened = fixture.port.shellExecutionSettings.read()
+  assert.equal(opened.kind, 'ready')
+  if (opened.kind !== 'ready') return
+  fixture.namespaces.length = 0
+  fixture.namespaces.push({
+    ns: 'pwsh-sandbox', base: { timeoutMs: 120_000, maxOutputBytes: 64_000 },
+    value: { timeoutMs: 120_000, maxOutputBytes: 64_000 }, revision: opened.revision,
+  })
+  await fixture.port.describe()
+  const switched = fixture.port.shellExecutionSettings.read()
+  assert.equal(switched.kind, 'ready')
+  if (switched.kind !== 'ready') return
+  assert.equal(switched.effective.executor, 'pwsh')
+  assert.equal(switched.generation, opened.generation)
+  const result = await fixture.port.shellExecutionSettings.mutate(
+    { timeoutMs: { kind: 'set', value: 1 } }, opened.revision, opened.generation, opened.effective.executor,
+  )
+  assert.equal(result.kind, 'rejected')
+  assert.equal(fixture.calls.length, 0, 'the stale bash page never dispatches to pwsh')
 })
 
 test('session log false is a real value; Reset sends the official unset and may read back On', async () => {

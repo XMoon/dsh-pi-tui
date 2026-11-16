@@ -1286,12 +1286,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
               invalidHint: 'Enter a positive finite number.',
             },
           ]
-          // The port re-resolves the Host-served row at dispatch; the
-          // controller's captured revision/generation remain the CAS fence.
+          // The controller's captured revision/generation and served-row
+          // identity stay current; the port re-resolves that row at dispatch.
           const port: HostNumericSettingsPort<ShellExecutionSettings> = {
             read: () => shell.read(),
             refresh: () => shell.refresh(),
-            mutate: (patch, revision, generation) => shell.mutate(patch, revision, generation),
+            mutate: (patch, revision, generation, base) => shell.mutate(patch, revision, generation, base.effective.executor),
           }
           const controller = new HostNumericSettingsController<ShellExecutionSettings>({
             port,
@@ -1299,6 +1299,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             requestRender,
             onAuthoritativeChange,
             runOwned: runOwnedTask,
+            valueIdentity: value => value.executor,
           })
           return new HostNumericSettingsPage<ShellExecutionSettings>({
             controller,

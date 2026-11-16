@@ -695,3 +695,51 @@ test('a disposed page never publishes a late settlement', async () => {
   assert.equal(renders(), rendersBeforeDispose, 'no repaint is published after dispose')
   controller.dispose()
 })
+
+test('the numeric controller treats the served Shell executor identity as currentness', async () => {
+  interface ExecutorSection {
+    readonly executor: 'bash' | 'pwsh'
+    readonly timeoutMs: number
+  }
+  const generation = {}
+  let revision = 1
+  let effective: ExecutorSection = { executor: 'bash', timeoutMs: 60_000 }
+  const mutations: Array<{ readonly patch: SectionPatch<ExecutorSection> }> = []
+  const port: HostNumericSettingsPort<ExecutorSection> = {
+    read: () => ({
+      kind: 'ready', generation, revision,
+      effective: { ...effective },
+      inherited: { executor: 'bash', timeoutMs: 60_000 },
+      overridden: { executor: false, timeoutMs: effective.timeoutMs !== 60_000 },
+    }),
+    refresh: async () => {},
+    mutate: async (patch) => {
+      mutations.push({ patch })
+      return { kind: 'accepted' }
+    },
+  }
+  const fields: readonly HostNumericSettingsField<ExecutorSection>[] = [
+    { key: 'timeoutMs', label: 'Command timeout (ms)' },
+  ]
+  const controller = new HostNumericSettingsController<ExecutorSection>({
+    port,
+    fields,
+    valueIdentity: value => value.executor,
+    requestRender: () => {},
+    runOwned: (_label, task) => { void task() },
+  })
+  controller.start()
+  await drainMicrotasks()
+  assert.equal(controller.snapshot().current, true)
+
+  // The same Host generation/revision now serves the OTHER executor row. A
+  // revision-only fence would let the stale bash page write pwsh's row.
+  effective = { executor: 'pwsh', timeoutMs: 60_000 }
+  assert.equal(controller.snapshot().current, false, 'the served row identity is part of the fence')
+  controller.setNumber('timeoutMs', '2')
+  assert.match(controller.snapshot().notice ?? '', /refresh before editing/u)
+  controller.save()
+  await drainMicrotasks()
+  assert.equal(mutations.length, 0, 'the stale executor page never dispatches')
+  controller.dispose()
+})
