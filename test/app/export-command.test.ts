@@ -1422,10 +1422,14 @@ test('SGR Save / No / Yes in the fullscreen editor seat writes the official tran
   // Type the absolute Client directory, replacing the initial './'.
   vt.sendInput('\x15') // Ctrl+U: delete to line start (the shared Input binding)
   vt.sendInput(outDir)
+  // Flush the input's own frame before accepting the settled action row; the
+  // previous './' suggestion frame carries the same Save/Dismiss wording.
+  await vt.waitForRender()
   const ready = await waitForScreen(vt, 'the settled directory suggestion', frame =>
-    frame.includes('Save [Enter]') && frame.includes(`→ ${outDir}/`))
-  // The painted suggestion row proves the async refresh settled; this frame's
-  // action row is now the current one.
+    frame.includes('Save [Enter]') && frame.includes('Dismiss suggestions [Esc]') && frame.includes('→ '))
+  // The painted suggestion/action rows prove the async refresh settled even
+  // when a long absolute directory label is clipped to this 100-column seat.
+  // The actual target bytes and one official read are asserted after consent.
   clickScreenWord(vt, ready, 'Save [Enter]')
   const collision = await waitForScreen(vt, 'the collision confirmation', frame =>
     frame.includes('Replace existing file?'))
@@ -1435,7 +1439,8 @@ test('SGR Save / No / Yes in the fullscreen editor seat writes the official tran
   // No returns to editing and re-runs the suggestion refresh; wait for THAT
   // settled frame before the next Save gesture.
   const back = await waitForScreen(vt, 'the directory editing state', frame =>
-    frame.includes('Save [Enter]') && !frame.includes('Replace existing file?') && frame.includes(`→ ${outDir}/`))
+    frame.includes('Save [Enter]') && !frame.includes('Replace existing file?')
+      && frame.includes('Dismiss suggestions [Esc]') && frame.includes('→ '))
   clickScreenWord(vt, back, 'Save [Enter]')
   const again = await waitForScreen(vt, 'the collision confirmation again', frame =>
     frame.includes('Replace existing file?'))
