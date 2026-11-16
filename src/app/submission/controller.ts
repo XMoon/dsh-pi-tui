@@ -583,12 +583,15 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    * attempt's text is never dropped and the live hold's frozen snapshot is
    * never rewritten.
    */
-  const deferredDraftRestores: string[] = []
+  const deferredDraftRestores: Array<{ readonly text: string; readonly subject: SessionSubject | undefined }> = []
   const flushDeferredDraftRestores = (): void => {
     if (deferredDraftRestores.length === 0 || composerHoldActive()) return
     const pending = deferredDraftRestores.splice(0)
-    for (const draft of pending) {
-      deps.app().setEditorText?.(mergeDraft(deps.app().getDraft(), draft))
+    for (const entry of pending) {
+      // RFL014: a restore captured for a REPLACED owner never lands in the new
+      // owner's composer — the exact owner fact decides, never a global hold.
+      if (entry.subject !== undefined && !deps.captureMatches(entry.subject)) continue
+      deps.app().setEditorText?.(mergeDraft(deps.app().getDraft(), entry.text))
     }
   }
   /** Restore one submission's draft. `ownerRequestId` names the attempt that
@@ -602,7 +605,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         // The attempt's own frozen document is the live authority. The same
         // text needs no restore; a DIFFERENT text belongs to the acceptance
         // boundary and is replayed after this hold settles.
-        if (composerHold.text !== draft) deferredDraftRestores.push(draft)
+        if (composerHold.text !== draft) {
+          deferredDraftRestores.push({ text: draft, subject: deps.ownership.captureSubject() })
+        }
         return
       }
       if (composerHold.submissionRequestId === undefined
@@ -612,7 +617,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       }
       // ANOTHER attempt owns the editor: never mutate it (its renderer would
       // refuse the write) and never rewrite that hold's record.
-      deferredDraftRestores.push(draft)
+      deferredDraftRestores.push({ text: draft, subject: deps.ownership.captureSubject() })
       return
     }
     deps.app().setEditorText(mergeDraft(deps.app().getDraft(), draft))
@@ -1256,6 +1261,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           // row must not outlive the submission.
           settleLocalSubmission(submitRequestId)
           settleLocalSubmitAck('submit resolved without an agent', { token: submitAckToken, terminal: true })
+          // RFL013: the attempt must reach a terminal state (the composer would
+          // otherwise stay frozen with no write ever coming).
+          activeHold?.reject()
           return
         }
         // PR4 §1.3: the REAL-Direct-Agent discriminator for the TUI_BUILTIN
@@ -1278,6 +1286,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           const restored = restoreStaleDraft(text, submittedSubject)
           settleLocalSubmission(submitRequestId)
           settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
+          // RFL013: settle THIS attempt (its exact hold only).
+          activeHold?.reject()
           deps.app().notify(restored === 'merged-verbatim'
             ? 'the session changed while waiting for submission — try again'
             : restored === 'merged'
@@ -1305,6 +1315,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         const restored = restoreStaleDraft(text, submittedSubject)
         settleLocalSubmission(submitRequestId)
         settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
+        // RFL013: settle THIS attempt (its exact hold only).
+        activeHold?.reject()
         deps.app().notify(restored === 'merged-verbatim'
           ? 'the session changed while sending — try again'
           : restored === 'merged'
@@ -1954,6 +1966,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // the outcome is not an acceptance. A cleaned-up surface is not
     // repainted at all.
     if (!deps.isCleanedUp()) deps.app().settleSubmission?.(hold.id, 'not-accepted')
+    // RFL014: the attempt's owner is gone; its deferred restores must not
+    // resurface on the replacement's composer.
+    deferredDraftRestores.length = 0
     deps.diag.debug('composer hold retired', { reason })
   }
 
@@ -2042,6 +2057,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     hold.acceptedEffects.length = 0
     deps.app().settleSubmission?.(hold.id, 'not-accepted')
     if (composerHold === hold) composerHold = undefined
+    flushDeferredDraftRestores()
   }
 
   /** An indeterminate result: release the input lock but keep the draft and

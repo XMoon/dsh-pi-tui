@@ -497,9 +497,14 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
         if (surface.ownsComposerHold?.(requestId) === true) {
           surface.notify('a session transition is in progress — try again in a moment', 'error')
           attempt?.rejected()
-        } else {
+        } else if (surface.composerHoldActive?.() === true) {
+          // ANOTHER attempt owns the editor: defer this refusal's restore to
+          // that hold's settlement instead of writing into its document.
           restoreDraft(text, requestId)
           surface.notify('a session transition is in progress — try again in a moment', 'error')
+          attempt?.rejected()
+        } else {
+          surface.refuseByTransitionFence(text)
           attempt?.rejected()
         }
         return

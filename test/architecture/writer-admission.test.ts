@@ -842,16 +842,19 @@ test('a session/writer-held steer rejection is settled by the submission owner',
   deliverBusy(deps as unknown as SteerSubmissionDeps, { text: 'held draft' })
   assert.equal(await drainUntil(() => calls.some(call => call.startsWith('ack:'))), true,
     'the steer gesture must settle its ack')
-  assert.ok(calls.includes('merge:held draft'),
-    'the submission owner restores the draft')
+  // PR2/F3: the owner-aware restore is the ONE restore seam — the runtime asks
+  // it (which merges when no hold owns the editor) and never ALSO merges.
+  assert.deepEqual(calls.filter(call => call.startsWith('restore:')), ['restore:held draft'],
+    'the submission owner restores the draft exactly once')
+  assert.equal(calls.some(call => call.startsWith('merge:')), false,
+    'the helper never merges behind the owner (no double restore)')
   assert.ok(calls.some(call => call.includes(SESSION_WRITER_HELD_GUIDANCE)),
     'the writer-held guidance is surfaced')
   assert.ok(calls.some(call => call.startsWith('ack:steer rejected: session/writer-held')),
     'the owner reads the rejection code')
   assert.ok(calls.every(call => !call.includes('try again')),
     'a proven refusal never tells the user to try again')
-  assert.deepEqual(calls.filter(call => call.startsWith('restore:')), [],
-    'the helper never restores behind the owner (no double restore)')
+
 })
 
 test('a steer gone stale across a REPLACED owner does not reseed a switch-dropping renderer', async () => {

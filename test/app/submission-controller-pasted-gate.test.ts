@@ -225,6 +225,8 @@ interface AttemptMount {
   setAgentRunning(running: boolean): void
   /** Flip the captured scope's currentness (the stale-settlement window). */
   setScopeCurrent(current: boolean): void
+  /** Simulate a COMMITTED owner replacement (the subject authority read). */
+  setOwnerReplaced(replaced: boolean): void
   /** Hold the NEXT writer call and settle it later (the FIFO window). */
   holdNextWriter(): void
   releaseHeldWriter(): void
@@ -249,6 +251,7 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
   let releaseCommand: ((outcome: unknown) => void) | undefined
   let agentRunning = false
   let scopeCurrent = true
+  let ownerReplaced = false
   let releaseWriter: (() => void) | undefined
   let heldWriter = false
   const settleWriter = async (): Promise<WriteOutcome> => {
@@ -303,7 +306,7 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
       beginNavigationIntent: () => () => {},
       soleNavigationIntentPending: () => false,
     },
-    scope: { captureLive: () => scope, isCurrent: () => true, requireLive: () => scope },
+    scope: { captureLive: () => scope, isCurrent: () => scopeCurrent, requireLive: () => scope },
     session: {
       ensureSession: async () => {},
       beginCommandSettlement: () => {},
@@ -420,8 +423,8 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
     supportsLocalShellCards: true,
     supportsTuiBuiltinUi: true,
     retainsStaleDraftRestore: true,
-    ownerWasReplaced: () => false,
-    captureMatches: () => true,
+    ownerWasReplaced: () => ownerReplaced,
+    captureMatches: () => !ownerReplaced,
     model: { selected: { get current() { return undefined } } },
     image: { attachments: () => undefined, llm: () => undefined },
     tuiSettings: undefined,
@@ -448,6 +451,7 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
     resolveCommand: (outcome) => { releaseCommand?.(outcome) },
     setAgentRunning: (running) => { agentRunning = running; },
     setScopeCurrent: (current) => { scopeCurrent = current; },
+    setOwnerReplaced: (replaced) => { ownerReplaced = replaced; },
     holdNextWriter: () => { heldWriter = true; },
     releaseHeldWriter: () => { heldWriter = false; releaseWriter?.() },
   }
@@ -917,4 +921,84 @@ test('PR2/F5: a stale settlement releases the exact hold and the next gesture is
     'a new gesture opens a new attempt after the stale one settled')
   h.releaseHeldWriter()
   await attemptTick()
+})
+
+test('PR2/RFL012: a rejected held B flushes the deferred legacy A restore immediately', async () => {
+  const h = mountAttempt()
+  h.setCommandBehavior('legacy-command-pending')
+  assert.equal(h.controller.beginComposerSubmission('/deploy now', 'enter'), 'legacy')
+  h.controller.submit('/deploy now', 'enter')
+  await attemptTick()
+  h.composer.text = 'B held behind FIFO'
+  h.holdNextWriter()
+  assert.equal(h.controller.beginComposerSubmission('B held behind FIFO', 'enter'), 'held')
+  await attemptTick()
+  h.resolveCommand({
+    kind: 'committed',
+    matched: true,
+    execution: { commandId: 'cmd-a', result: { kind: 'error' } },
+  })
+  await attemptTick()
+  assert.equal(h.composer.text, 'B held behind FIFO', 'A is deferred behind the live hold')
+  // B is REJECTED (a proven pre-acceptance refusal, no acceptance callback).
+  h.respond({ kind: 'rejected', error: { code: 'session/agent-busy', message: 'busy' } }, false)
+  h.releaseHeldWriter()
+  await attemptTick()
+  assert.equal(h.controller.composerHoldActive(), false, 'B is settled')
+  assert.equal(h.composer.text, 'B held behind FIFO\n\n/deploy now',
+    'A is restored IMMEDIATELY by B’s rejection settlement (never hidden until an unrelated C)')
+})
+
+test('PR2/RFL013: a controller-level stale scope settles the exact hold', async () => {
+  const h = mountAttempt()
+  h.composer.text = 'controller stale witness'
+  // The controller's OWN scope recheck (not the runtime surface's) is stale.
+  h.setScopeCurrent(false)
+  assert.equal(h.controller.beginComposerSubmission('controller stale witness', 'enter'), 'held')
+  await attemptTick()
+  assert.equal(h.writerCalls.length, 0, 'no Host write after the controller-level stale exit')
+  assert.equal(h.controller.composerHoldActive(), false, 'the controller settles the exact attempt')
+  assert.equal(h.composer.calls.find(call => call.kind === 'settle')?.result, 'not-accepted',
+    'the renderer hold is released')
+  h.setScopeCurrent(true)
+  h.holdNextWriter()
+  assert.equal(h.controller.beginComposerSubmission('controller stale witness', 'enter'), 'held',
+    'the next gesture is admitted again')
+  h.releaseHeldWriter()
+  await attemptTick()
+})
+
+test('PR2/RFL014: a deferred restore for a REPLACED owner never lands after a later acceptance', async () => {
+  const h = mountAttempt()
+  h.setCommandBehavior('legacy-command-pending')
+  assert.equal(h.controller.beginComposerSubmission('/deploy now', 'enter'), 'legacy')
+  h.controller.submit('/deploy now', 'enter')
+  await attemptTick()
+  h.composer.text = 'B held behind FIFO'
+  h.holdNextWriter()
+  assert.equal(h.controller.beginComposerSubmission('B held behind FIFO', 'enter'), 'held')
+  await attemptTick()
+  h.resolveCommand({
+    kind: 'committed',
+    matched: true,
+    execution: { commandId: 'cmd-a', result: { kind: 'error' } },
+  })
+  await attemptTick()
+  assert.equal(h.composer.text, 'B held behind FIFO')
+  // A COMMITTED owner replacement retires the attempt and drops its deferred
+  // restore — the replacement's composer is never seeded with the old text.
+  h.setOwnerReplaced(true)
+  h.controller.clearPending()
+  assert.equal(h.controller.composerHoldActive(), false, 'the replaced owner retires the hold')
+  h.setOwnerReplaced(false)
+  h.setScopeCurrent(true)
+  h.composer.text = 'C of the new owner'
+  h.holdNextWriter()
+  assert.equal(h.controller.beginComposerSubmission('C of the new owner', 'enter'), 'held')
+  h.respond({ kind: 'committed', value: undefined }, true)
+  h.releaseHeldWriter()
+  await attemptTick()
+  assert.equal(h.composer.text, '', 'the new owner’s acceptance clears only its own document')
+  assert.equal(h.composer.text.includes('/deploy now'), false,
+    'the replaced owner’s deferred restore never resurfaced')
 })
