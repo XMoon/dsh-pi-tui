@@ -1576,3 +1576,31 @@ test('the LEADING /attach route still reports a real FileInputError and leaves z
   assert.equal(app.seatTextForTest(), '[file #1 (11 B)] ', 'only the control token is in the draft')
   assert.equal(h.submissions(), 0, 'never submits')
 })
+
+test('PR2/F4: a submission hold started after the read refuses the late placeholder', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  type(vt, 'c /image ')
+  await vt.waitForRender()
+  type(vt, 'shot')
+  await waitForDraft(app, draft => draft === 'c /image shot', 'the filter lands in the draft')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the single filtered image candidate')
+  // HOLD THE REAL READ, then open the composer hold while the IO is in
+  // flight. The draft bytes, seat and caret are ALL unchanged — only the
+  // ownership moved — so the identity fence alone would still accept it.
+  const hold = h.holdImageRead()
+  vt.sendInput('\r')
+  await hold.entered
+  app.holdSubmission('attempt-inline')
+  hold.release()
+  await h.postRead()
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'c /image shot.png ',
+    'the held draft keeps the accepted fragment — no placeholder write')
+  assert.equal(h.imageStore.size(), 0, 'the refused intake kept no bytes')
+  app.settleSubmission('attempt-inline', 'not-accepted')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'c /image shot.png ', 'the release changes nothing by itself')
+})

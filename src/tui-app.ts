@@ -5931,6 +5931,11 @@ export class TuiApp {
       // The right-click target must still be the focused component on the
       // SAME screen — otherwise the paste is dropped (never misdirected).
       if (this.disposed || this.activeScreen !== screen || screen.getFocusedComponent() !== target) return
+      // PR2/F4: the paste is also dropped while a submission attempt owns the
+      // composer document — the read may settle after the hold began, and the
+      // synthetic handleInput feed deliberately bypasses the key ladder's
+      // freeze. The ONE write admission is re-read HERE, at the write.
+      if (!this.draftWriteAdmitted()) return
       // Call THROUGH the target — never cache the method: handleInput is a
       // prototype method (TuiEditor/Input/FocusForwardingFrame) that reads
       // `this`; a bare extracted call would run with this === undefined in
@@ -18917,7 +18922,9 @@ export class TuiApp {
     return {
       getEditorState: () => app.editorSeatHolder.snapshot(),
       setEditorText: (text) => {
-        if (app.disposed) return
+        // PR2/F4: an extension write obeys the ONE composer admission — a
+        // held attempt owns the document (the accepted settlement clears it).
+        if (!app.draftWriteAdmitted()) return
         // The shell-editor-mode boundary: the host editor decodes a
         // SERIALIZED draft (`!pwd` → shell mode + body) — a raw write
         // would leave the previous shell mode active and submit the
@@ -18932,7 +18939,7 @@ export class TuiApp {
         app.editorSeatHolder.notifyChanged()
       },
       insertEditorText: (text, at) => {
-        if (app.disposed) return
+        if (!app.draftWriteAdmitted()) return
         const current = app.seatEditor()
         const offset = at ?? current.getCursor()
         const draft = current.getText()
@@ -18942,7 +18949,7 @@ export class TuiApp {
         app.editorSeatHolder.notifyChanged()
       },
       pasteToEditor: (text) => {
-        if (app.disposed) return
+        if (!app.draftWriteAdmitted()) return
         const current = app.seatEditor()
         const offset = current.getCursor()
         const draft = current.getText()
@@ -24715,12 +24722,15 @@ export class TuiApp {
    * unknown outcomes unlock the editor with the document intact.
    */
   settleSubmission(attemptId: string, result: 'accepted' | 'not-accepted' | 'unknown'): void {
-    // A stopped/disposed surface must never paint (or clear) again: the drain
-    // settles the attempt's state silently and the renderer state dies with
-    // it. A TEMPORARY presentation suspension (the external editor) is NOT a
-    // stop: the settlement must still release the hold, or the editor would
-    // stay frozen after the terminal comes back.
-    if (this.disposed || this.surfaceStopped) return
+    // A disposed surface never settles again. A STOPPED surface (a real
+    // stop(), not the external editor's temporary suspension) still completes
+    // the LOGICAL settlement — the hold is released and the submit input
+    // re-enabled — because stop()/start() is a supported round trip on the
+    // SAME instance and a stranded hold would keep the restarted editor
+    // frozen forever. Only the PHYSICAL effects are withheld: a stopped
+    // screen is never cleared or repainted, so the pre-acceptance document
+    // stays as inert state exactly like the remote-teardown contract.
+    if (this.disposed) return
     const hold = this.submissionHold
     if (hold === undefined || hold.attemptId !== attemptId) return
     this.submissionHold = undefined
@@ -24728,6 +24738,7 @@ export class TuiApp {
     // An external editor that is currently open belongs to a document whose
     // ownership just changed: its write-back must be discarded (F1).
     if (this.externalEditorInFlight) this.externalEditorStale = true
+    if (this.surfaceStopped) return
     if (result === 'accepted') {
       // The accepted occurrence is what the editor's ↑ recall records. Order:
       // remember FIRST (the text is still available), then the clear.
@@ -26077,6 +26088,11 @@ export class TuiApp {
        *  "edit → Undo" (ABA). */
       const sourceCurrent = (): boolean => {
         if (this.disposed || this.generation !== generation) return false
+        // PR2/F4: a submission attempt that took the composer while the async
+        // intake ran owns the document — the staged placeholder is not
+        // committed into it. (The hold leaves the draft bytes unchanged, so
+        // the identity checks below alone would still pass.)
+        if (this.composerHeld()) return false
         const live = this.seatEditor()
         if (live !== source.seat || live.getText() !== source.raw) return false
         if (this.editorEditEpoch !== acceptanceEpoch) return false
@@ -26127,6 +26143,9 @@ export class TuiApp {
     sourceCurrent: () => boolean,
   ): boolean {
     if (!sourceCurrent()) return false
+    // PR2/F4: the LAST fence, re-read at the write itself (the sourceCurrent
+    // closure may be evaluated a tick earlier by the stager).
+    if (this.composerHeld()) return false
     if (this.seatEditor() !== seat) return false
     const raw = seat.getText()
     if (raw !== expectedRaw) return false

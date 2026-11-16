@@ -5987,3 +5987,120 @@ test('PR2: Ctrl+V during a held submission never probes the clipboard', async ()
     app.stop()
   }
 })
+
+// ── PR2/F4: every remaining draft writer shares the ONE admission ──────────
+
+test('PR2: a fullscreen right-click paste is dropped while the composer is held', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let releaseRead!: () => void
+  const gate = new Promise<void>(resolve => { releaseRead = resolve })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+  }, {
+    readClipboardText: () => gate.then(() => 'pasted text'),
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    app.setDraft('held right-click target')
+    // The right-click paste intent starts while the composer is editable …
+    vt.sendInput('\x1b[<2;10;10M')
+    vt.sendInput('\x1b[<2;10;10m')
+    await vt.waitForRender()
+    // … the submission hold begins before the clipboard read settles …
+    app.holdSubmission('attempt-rightclick')
+    releaseRead()
+    await vt.waitForRender()
+    await new Promise(resolve => setImmediate(resolve))
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'held right-click target',
+      'the synthetic bracketed paste never reaches the held document')
+    // After the release the same paste path works again (the gate is one-shot:
+    // assert through a fresh read).
+    app.settleSubmission('attempt-rightclick', 'not-accepted')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'held right-click target')
+  } finally {
+    app.stop()
+    app.setFullscreen(false)
+  }
+})
+
+test('PR2: the advanced extension editor controls refuse writes while held', () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('extension base draft')
+    const controls = app.advancedEditorControlsForTest()
+    app.holdSubmission('attempt-extension')
+    controls.setEditorText('extension rewrite')
+    controls.insertEditorText(' inserted')
+    controls.pasteToEditor(' pasted')
+    assert.equal(app.getDraft(), 'extension base draft',
+      'no advanced editor control may mutate a held composer')
+    app.settleSubmission('attempt-extension', 'accepted')
+    assert.equal(app.getDraft(), '', 'the accepted settlement clears the submitted document')
+    controls.setEditorText('after acceptance')
+    assert.equal(app.getDraft(), 'after acceptance', 'the controls work again once released')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/F5: a settlement while stopped completes the hold; start() leaves no stranded lock', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('settle while stopped')
+    app.holdSubmission('attempt-stopped')
+    app.stop()
+    // The Host acceptance lands while the surface is stopped: the LOGICAL
+    // settlement must complete (hold released) even though the stopped screen
+    // is never cleared or repainted — the document stays as inert state,
+    // exactly like the remote teardown contract.
+    app.settleSubmission('attempt-stopped', 'accepted')
+    app.start()
+    await vt.waitForRender()
+    // The hold is GONE (not stranded across the round trip): the editor
+    // accepts fresh input and the write admission is live again.
+    app.setDraft('')
+    vt.sendInput('fresh after restart')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'fresh after restart',
+      'the restarted editor accepts input and programmatic writes — no stale submit lock')
+    app.holdSubmission('attempt-after-restart')
+    app.settleSubmission('attempt-after-restart', 'not-accepted')
+    assert.equal(app.getDraft(), 'fresh after restart',
+      'a rejection after the restart keeps the live draft')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/F5: a rejection while stopped unlocks the composer on start()', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('refused while stopped')
+    app.holdSubmission('attempt-refused-stopped')
+    app.stop()
+    app.settleSubmission('attempt-refused-stopped', 'not-accepted')
+    app.start()
+    await vt.waitForRender()
+    vt.sendInput('+refused')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'refused while stopped+refused',
+      'a refusal settled while stopped still unlocks the editor for the restart')
+  } finally {
+    app.stop()
+  }
+})
