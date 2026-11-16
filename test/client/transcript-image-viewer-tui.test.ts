@@ -880,6 +880,45 @@ test('the list action bar advertises the LIVE keybindings and degrades by whole 
   }
 })
 
+test('an unbound confirm key paints a complete pointer-only View action', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const keybindings = getKeybindings()
+  keybindings.setUserBindings({ 'tui.select.confirm': [] })
+  try {
+    const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+    let opens = 0
+    const workspace = new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [{ value: '1', label: '#1 · shot.png' }],
+      resolve: () => { opens += 1; return { ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} } },
+      onStale: () => {},
+      onClose: () => {},
+      initial: { kind: 'list' },
+    })
+    const lines = workspace.render(80)
+    const bar = strip(lines[lines.length - 1] ?? '').trimEnd()
+    assert.ok(bar.includes('View'), `the pointer-only View is painted: ${bar}`)
+    assert.ok(!bar.includes('View ['), `no key badge is invented when the action is unbound: ${bar}`)
+    // The complete span is a real target and activates the SAME picker path.
+    const col = bar.indexOf('View')
+    const event = (type: 'press' | 'click'): import('@xmoon76/pi-tui').TuiMouseEvent => ({
+      type, button: 'left', x: col, y: lines.length - 1, screenX: col, screenY: lines.length - 1,
+      width: 80, height: lines.length, shift: false, alt: false, ctrl: false,
+    })
+    assert.ok(workspace.handleMouse(event('press'))?.handled)
+    assert.ok(workspace.handleMouse(event('click'))?.handled)
+    assert.equal(opens, 1, 'the pointer-only View resolves the live selection through the picker path')
+    assert.ok(strip(workspace.render(80)[0] ?? '').includes('Image · shot.png'), 'the Viewer opened')
+    workspace.dispose()
+  } finally {
+    keybindings.setUserBindings({})
+    resetCapabilitiesCache()
+  }
+})
+
 test('a hostile attachment name cannot emit terminal controls through the /view-image list', async () => {
   // The attachment name is untrusted and the list renders it on a terminal row.
   // `SearchablePicker` folds line breaks only — it is NOT a control filter — so

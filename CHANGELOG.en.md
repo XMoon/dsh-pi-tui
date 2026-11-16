@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Fullscreen image, task and history surfaces now have complete pointer view, back and close entries.** In `/view-image`, list rows, the `View`/`Close` bar and the viewer's `Back`/`Close` are clickable; in the Fullscreen Task Center the Work/Team `Close`, search `Back` and type-filter `Cancel` spans are clickable (the Stop confirmation and every other keyboard hint are unchanged); and the Fullscreen History footer's `Scope`/`Expand`/`Cancel` are clickable, with same-semantics footer fallbacks for `Use`/`Copy All` when a narrow frame drops the heading buttons. Every click acts only on the last-painted, still-current complete span, and Regular/Main keeps no application mouse.
 - **The Fullscreen `/model` action bar is directly clickable.** Pointer actions enter Effort, select, go back, close, and retry/recheck Team; Effort candidates remain draft-only, and an unpainted target, short row grant, stale press or a directory refresh that retires the current model never commits a hidden target.
 
 - **Opening Session Search in TSP Focus no longer crashes the renderer.** Focus top-level user and final-assistant rows now carry the same presentation scope prefix as every other top-level row; after a source or scope replacement an old `main.msg-N` can no longer collide with a same-named row in the new scope, and the Search card opens, closes and restores the original Composer and draft normally.

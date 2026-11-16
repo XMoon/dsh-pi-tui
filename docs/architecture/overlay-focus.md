@@ -962,7 +962,14 @@ modal-pre-emption, exactly-once close and final-dispose rules.
   Enter moves list → viewer; `Esc back` returns to the exact same list instance
   and selection; a second Esc closes the workspace. A viewer opened directly
   from a transcript image body has no list below and advertises `Esc close`.
-  No nested Alt Screen, no second focus owner, no overlay fallback.
+  No nested Alt Screen, no second focus owner, no overlay fallback. The
+  workspace's own complete painted exit spans are pointer targets: the LIST
+  bar's `View`/`Close`, the raster VIEWER's right-aligned `Back [Esc]` /
+  `Close [Esc]` (a Viewer opened from the list backs out; a direct Viewer
+  closes the lease), resolved against the last-painted frame, the live
+  selection and the current mode, so a press can never cross the LIST↔VIEWER
+  boundary. The SVG Viewer keeps its own local controller and cell dispatch;
+  the workspace root never claims its cells.
 - **The return surface is paused, never rebuilt.** Opening/closing the workspace
   never rebuilds, scrolls, collapses or expands the transcript; the paused
   screen's object tree, focus, draft and scroll state survive. A session
