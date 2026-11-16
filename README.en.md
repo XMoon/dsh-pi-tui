@@ -131,6 +131,36 @@ dsh --profile pi-tui --continue            # continue the latest Session in this
 
 A bare or whitespace-only `--session` opens Browse All. **Only a canonical full id** (`session-`/`session_` plus 32 hex characters) resumes before the surface mounts, and it needs no roster read. Every other non-blank value opens the same Browser immediately: once the official roster lands, it matches an exact listed id first, then a unique prefix of at least four hex characters, and uses the existing guarded Resume; a keyword, an ambiguity or a miss stays one global search. The first `Esc` restores the browse list and the second returns to the sessionless Welcome. The Browser stays live, editable and closable while the roster is loading; a user edit cancels the pending CLI auto-match. `-c, --continue` selects only inside the Host-confirmed Workspace, through the intersection of official membership and the main Session roster, keeping the roster order (the baseline and roster must come from the same Host/Connection generation); an unconfirmed Workspace or no readable history keeps the surface sessionless with one notice, never guesses another Workspace and creates no Session. `--session` and `-c` are mutually exclusive; `--preset` keeps its existing blank-Session rule.
 
+### Daemon (Linux, opt-in)
+
+The candidate release offers a local Linux daemon backend. **Direct (the in-process TUI) stays the default.** Nothing changes in an existing installation until the user opts in explicitly:
+
+- **Selection**: set `DSH_PI_TUI_BACKEND=daemon` for this launch, or save `Daemon` in `/settings → General → Backend` (the official Profile Config entry `tui-startup.backend`). Precedence is `DSH_PI_TUI_BACKEND` > saved Profile config > `direct`; an illegal value, an empty string or a non-Linux platform exits nonzero and never silently falls back to Direct. The choice applies only to the next cold launch and never hot-switches the running process or restarts a Host.
+- **Management commands** (they operate on the current `--profile` only; a systemd user manager is preferred, and a strictly absent one uses an independent local process):
+
+  ```sh
+  dsh --profile pi-tui daemon status
+  dsh --profile pi-tui daemon start
+  dsh --profile pi-tui daemon stop
+  dsh --profile pi-tui daemon restart
+  dsh --profile pi-tui daemon logs --lines 200
+  dsh --profile pi-tui daemon uninstall
+  ```
+
+The Host is preferably supervised by the user's own systemd `--user` unit; the unit's `ExecStart`, `Environment`, `Restart`, `ExecStartPre`, symlink source and drop-ins belong to the user and systemd. When no user manager genuinely exists, the Host runs as an independent local process and writes a `0600` log in the current Profile scope. `status` is a pure read: it creates no Host or unit and starts or stops no service; neither `ActiveState=active` nor `MainPID` means Ready — readiness remains the authenticated Cookie, Host identity echo and process starttime. A management command never automatically restarts, stops or rescues a Host, never treats a manager failure as "not installed", and never rewrites or deletes user unit content. `stop`/`restart` interrupt in-flight work of the current Session/Turn; unsettled writes are not replayed automatically.
+
+**Explicit upgrade across install builds** (same DSH runtime, same Profile):
+
+1. Finish every in-flight Turn, exit TUI Clients other than the management command, and back up `DSH_HOME` and the Profile (rollback and data safety stay the user's responsibility).
+2. Run `dsh --profile pi-tui daemon stop` and confirm `status` reports `host=stopped` with the old Host PID/starttime gone; do not skip this step.
+3. Replace the package with the official Profile command — never overwrite an installation while the Host runs: `dsh plugin --profile pi-tui -- add <new package path or version>`.
+4. While the old unit still exists, `daemon start`/`restart` from the new installation refuses with a nonzero exit and leaves the unit bytes and user configuration unchanged; once the old unit is no longer wanted, the user explicitly runs `dsh --profile pi-tui daemon uninstall` (it removes only this Profile's unit path and keeps symlink sources, drop-ins, the Profile and its data).
+5. Run `dsh --profile pi-tui daemon start`, wait for the new authenticated Ready Host and its new `instance`/PID; `status` should report `compatibility=compatible`.
+
+**Rollback** (same DSH runtime, same Profile): ① keep both packages and their checksums and finish Turns on the new Host; ② `daemon stop` and confirm the new Host exited; ③ restore the trusted old package with the official Profile command; ④ a leftover new-build unit makes `start`/`restart` refuse with a nonzero exit, so the user explicitly runs `daemon uninstall` before `start`; ⑤ confirm the old build's Ready Host and that its Sessions/credentials still read back. Rollback promises only package-level recovery within the same DSH runtime, never an in-place downgrade across DSH data schemas; use a separate backup directory across versions and verify the pairing yourself.
+
+If you edited the unit/symlink/drop-in yourself: the product preserves those bytes and never rewrites them into a new build's defaults; if an old `ExecStart` or drop-in prevents the new Host from authenticating, the command reports the real failure, and you adjust it through normal systemd operations. Do not read this flow as zero-downtime, automatic rollback or arbitrary in-place data downgrade.
+
 ## Features
 
 ### Conversation and tools

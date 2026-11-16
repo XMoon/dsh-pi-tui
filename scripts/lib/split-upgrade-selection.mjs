@@ -12,10 +12,16 @@
  * a selector only runs the registered cases below and never claims the complete
  * cross-build compatibility.
  *
+ * One opt-in native case lives in the same frozen registry with
+ * `defaultLane: false`: the full lane keeps its historical U01-U09 meaning, and
+ * only an explicit `--case`/`--suite` selection can run the real-OS systemd
+ * user-manager upgrade/rollback proof.
+ *
  * @module split-upgrade-selection
  */
 
 import { runCrossBuildCompatibility } from '../smoke/split-upgrade/cross-build-compatibility.mjs'
+import { runManagedDaemonUpgrade } from '../smoke/split-upgrade/managed-daemon-upgrade.mjs'
 import { runManualClientReload } from '../smoke/split-upgrade/manual-client-reload.mjs'
 import { runReloadSourceIsolation } from '../smoke/split-upgrade/reload-source-isolation.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
@@ -28,7 +34,9 @@ const SELECTABLE_SCOPE = 'SELECTABLE_ONLY'
  *
  * The order IS the execution order a suite or the full lane follows: the
  * cross-build case keeps the old Host/Turn together, then the two independent
- * Client-reload cases run in their own isolated profiles.
+ * Client-reload cases run in their own isolated profiles. The opt-in native
+ * case is registered last: it never runs in the default lane and needs its own
+ * real systemd user-manager environment.
  */
 const CASE_REGISTRY = Object.freeze([
   Object.freeze({
@@ -49,6 +57,13 @@ const CASE_REGISTRY = Object.freeze([
     title: 'the manual command resolves the active profile while the qualification signal uses the side-build override in one Client process',
     run: runReloadSourceIsolation,
   }),
+  Object.freeze({
+    suite: 'managed-daemon',
+    id: 'managed-daemon.cross-build-upgrade-rollback',
+    title: 'two packed builds of one profile move old-to-new-to-old through the public daemon verbs, refusing a foreign install build before any stop',
+    defaultLane: false,
+    run: runManagedDaemonUpgrade,
+  }),
 ])
 
 function fail(detail) {
@@ -61,6 +76,16 @@ function fail(detail) {
 /** The frozen registry, in registration order (read-only to every caller). */
 export function listSelectableUpgradeCases() {
   return CASE_REGISTRY
+}
+
+/**
+ * The default-lane registry: every case whose qualification does not need an
+ * explicit opt-in environment. The full lane runs exactly this list and keeps
+ * its historical U01-U09 meaning; the native opt-in case is never silently
+ * skipped or counted as covered.
+ */
+export function listDefaultUpgradeCases() {
+  return Object.freeze(CASE_REGISTRY.filter(entry => entry.defaultLane !== false))
 }
 
 /**

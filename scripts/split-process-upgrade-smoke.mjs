@@ -92,6 +92,7 @@ import {
   seatFree,
 } from './lib/split-smoke-processes.mjs'
 import {
+  listDefaultUpgradeCases,
   listSelectableUpgradeCases,
   parseUpgradeSelectionArgs,
   resolveUpgradeSelection,
@@ -217,6 +218,20 @@ export function parseUpgradeArguments(argv) {
 }
 
 /**
+ * Whether this parsed selection may pair two artifacts that carry the SAME
+ * package version. The historical default-lane cases keep their old
+ * "different versions" input rule (their cross-build evidence names
+ * `differentBundleVersions`); only an exclusively opt-in native selection may
+ * use two builds of one version, where the production `computeBuildId` — not
+ * the SemVer string — is the real difference under test.
+ */
+export function allowsSameArtifactVersion(options) {
+  return options.mode !== 'full' && Array.isArray(options.cases)
+    && options.cases.length > 0
+    && options.cases.every(entry => entry.defaultLane === false)
+}
+
+/**
  * Write an operator-requested evidence document, or fail the lane.
  *
  * The PASS document is part of what the operator asked for, so a write that
@@ -241,6 +256,7 @@ function usage() {
     '       pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --suite client-reload',
     '       pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --case client-reload.production-command',
     '       pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --case client-reload.target-source-isolation',
+    '       pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --case managed-daemon.cross-build-upgrade-rollback',
   ].join('\n')
 }
 
@@ -250,6 +266,33 @@ function printSelectableUpgradeCases() {
   for (const entry of listSelectableUpgradeCases()) {
     process.stdout.write(`suite=${entry.suite} case=${entry.id} title=${entry.title}\n`)
   }
+}
+
+/**
+ * Project the executed selected-case verdicts onto the lane's output contract.
+ *
+ * A historical default-lane case reports no explicit status; its successful
+ * execution stays the existing `SPLIT_UPGRADE_SELECTED_PASS` expression. An
+ * opt-in native case must report `{status:'PASS', scope:'REAL_SYSTEMD_USER_L6'}`
+ * to earn that same line; an honest `NOT_VERIFIED` (no real systemd user
+ * manager, no isolated account) prints its own line and makes the lane nonzero,
+ * so a skipped native qualification can never be mistaken for a PASS.
+ */
+export function projectSelectedUpgradeVerdicts(verdicts) {
+  const lines = []
+  let failed = false
+  for (const verdict of verdicts) {
+    const passed = verdict.status === 'PASS'
+      && (verdict.defaultLane !== false || verdict.scope === 'REAL_SYSTEMD_USER_L6')
+    if (passed) {
+      lines.push(selectedUpgradePassLine(verdict.id))
+      continue
+    }
+    const reason = verdict.reason ?? verdict.status
+    lines.push(`SPLIT_UPGRADE_SELECTED_NOT_VERIFIED id=${verdict.id} scope=SELECTABLE_ONLY reason=${reason}`)
+    failed = true
+  }
+  return { lines, failed }
 }
 
 /** Merge one case's real evidence fragment into the lane's accumulated JSON. */
@@ -377,7 +420,7 @@ async function runScene(options, oldArtifact, newArtifact, targetDshVersion) {
       captureFailure,
     }
     if (options.mode === 'full') {
-      for (const entry of listSelectableUpgradeCases()) {
+      for (const entry of listDefaultUpgradeCases()) {
         diagnostics.checkpoint(`case/${entry.id}`)
         const fragment = await entry.run(context)
         mergeEvidence(evidence, fragment)
@@ -411,20 +454,39 @@ async function runScene(options, oldArtifact, newArtifact, targetDshVersion) {
       },
       selectedCases: [],
     }
+    const verdicts = []
     for (const entry of options.cases) {
       diagnostics.checkpoint(`case/${entry.id}`)
-      const fragment = await entry.run(context)
+      const result = await entry.run(context)
+      // The verdict is evidence about the CASE, not a fact to merge into the
+      // selected document's own top-level `scope`; keep it in the verdict list.
+      const { status, scope, reason, ...fragment } = result ?? {}
       mergeEvidence(selectedEvidence, fragment)
       selectedEvidence.selectedCases.push(entry.id)
+      verdicts.push({
+        id: entry.id,
+        defaultLane: entry.defaultLane !== false,
+        status: typeof status === 'string' ? status : 'PASS',
+        ...(scope === undefined ? {} : { scope }),
+        ...(reason === undefined ? {} : { reason }),
+      })
     }
+    selectedEvidence.selectedVerdicts = verdicts.map(verdict => ({
+      id: verdict.id,
+      status: verdict.status,
+      ...(verdict.scope === undefined ? {} : { scope: verdict.scope }),
+      ...(verdict.reason === undefined ? {} : { reason: verdict.reason }),
+    }))
     for (const path of [oldArtifact.path, newArtifact.path]) {
       if (sha256(path) !== (path === oldArtifact.path ? oldArtifact.sha256 : newArtifact.sha256)) {
         throw new Error(`the packaged artifact changed during the lane: ${basename(path)}`)
       }
     }
+    const projection = projectSelectedUpgradeVerdicts(verdicts)
     if (options.evidence !== undefined) writeRequestedEvidence(options.evidence, selectedEvidence)
     process.stdout.write(`${JSON.stringify(selectedEvidence, null, 2)}\n`)
-    for (const id of selectedEvidence.selectedCases) process.stdout.write(`${selectedUpgradePassLine(id)}\n`)
+    for (const line of projection.lines) process.stdout.write(`${line}\n`)
+    if (projection.failed) process.exitCode = 1
   } catch (error) {
     // Report BEFORE the cleanup below: the projection reads the still-live
     // process handles, and the work root still exists while it is built.
@@ -526,7 +588,7 @@ async function runLane() {
     if (oldArtifact.sha256 === newArtifact.sha256) {
       throw new Error('split upgrade smoke: --old and --new must be different packaged bytes')
     }
-    if (oldArtifact.manifest.version === newArtifact.manifest.version) {
+    if (!allowsSameArtifactVersion(options) && oldArtifact.manifest.version === newArtifact.manifest.version) {
       throw new Error('split upgrade smoke: --old and --new must carry different package versions')
     }
     targetDshVersion = npmDshVersion()
