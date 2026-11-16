@@ -361,6 +361,13 @@ export interface SubmissionController {
    *  left intact (or replaced only by the acceptance boundary) and another
    *  attempt's restore is replayed when that hold settles. */
   restoreSubmissionDraft(text: string, ownerRequestId?: string): void
+  /** PR2/RFL015: the owner-aware STALE restore (the shared two-fact stale
+   *  policy + the same exact-owner fence; never rewrites a foreign hold). */
+  restoreStaleDraftIntoEditor(
+    text: string,
+    capturedSubject?: unknown,
+    ownerRequestId?: string,
+  ): 'merged-verbatim' | 'merged' | 'dropped'
   /** Steer one draft into the running turn.
    *  `consumeDraft: true` makes THIS owner clear the editor after snapshotting
    *  the persist facts; the caller leaves it unset when it already consumed the
@@ -908,16 +915,32 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    * still the live document — every restore of THAT text is a no-op
    * ('merged-verbatim'), because merging would duplicate it.
    */
-  const restoreStaleDraft = (value: string, capturedSubject: SessionSubject | undefined): 'merged-verbatim' | 'merged' | 'dropped' => {
-    if (composerHold !== undefined && composerHold.phase === 'sending'
-      && (composerHold.subject === undefined || deps.captureMatches(composerHold.subject))) {
-      // The held text needs no restore (it never left). A DIFFERENT value is an
-      // authoritative draft another owner (a claimed command) dictated: it
-      // REPLACES the held document — merging would duplicate the stale text.
-      if (composerHold.text !== value) {
-        deps.app().setEditorText(value)
-        ;(composerHold as { text: string }).text = value
+  const restoreStaleDraft = (
+    value: string,
+    capturedSubject: SessionSubject | undefined,
+    ownerRequestId?: string,
+  ): 'merged-verbatim' | 'merged' | 'dropped' => {
+    if (composerHold !== undefined && composerHold.phase === 'sending') {
+      const own = ownerRequestId !== undefined && composerHold.submissionRequestId === ownerRequestId
+      if (own) {
+        // This attempt's own frozen document: the same text needs no restore;
+        // a DIFFERENT text belongs to the acceptance boundary and is replayed
+        // after this hold settles — never written into the frozen document and
+        // never recorded as its text.
+        if (composerHold.text !== value) {
+          deferredDraftRestores.push({ text: value, subject: deps.ownership.captureSubject() })
+        }
+        return 'merged-verbatim'
       }
+      if (composerHold.submissionRequestId === undefined
+        && composerHold.text === value
+        && (composerHold.subject === undefined || deps.captureMatches(composerHold.subject))) {
+        return 'merged-verbatim'
+      }
+      // ANOTHER attempt owns the editor (RFL015: this includes the stale
+      // restore of a legacy command whose first ensureSession failed). Defer
+      // the text to that hold's settlement; never rewrite its record.
+      deferredDraftRestores.push({ text: value, subject: deps.ownership.captureSubject() })
       return 'merged-verbatim'
     }
     if (!deps.retainsStaleDraftRestore && deps.ownerWasReplaced(capturedSubject)) {
@@ -1283,7 +1306,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           // lifetime fence precedes it (round 11): a cancelled gesture writes
           // nothing at all.
           if (!lifetimeOwnsSurface()) return
-          const restored = restoreStaleDraft(text, submittedSubject)
+          const restored = restoreStaleDraft(text, submittedSubject, submitRequestId)
           settleLocalSubmission(submitRequestId)
           settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
           // RFL013: settle THIS attempt (its exact hold only).
@@ -1312,7 +1335,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         // behaves identically for the plain-prompt flow). Lifetime fence
         // first (round 11).
         if (!lifetimeOwnsSurface()) return
-        const restored = restoreStaleDraft(text, submittedSubject)
+        const restored = restoreStaleDraft(text, submittedSubject, submitRequestId)
         settleLocalSubmission(submitRequestId)
         settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
         // RFL013: settle THIS attempt (its exact hold only).
@@ -1603,7 +1626,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // retaining renderer still merge). The lifetime fence precedes it
       // (round 11): a cancelled or disposed gesture restores nothing.
       restore: (t) => {
-        if (lifetimeOwnsSurface()) restoredDraft = restoreStaleDraft(t, submittedSubject)
+        if (lifetimeOwnsSurface()) restoredDraft = restoreStaleDraft(t, submittedSubject, submitRequestId)
       },
     }, text), {
       diag: deps.diag,
@@ -1836,12 +1859,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         deps.app().setEditorText(merged)
         return merged === value
       },
-      restoreStaleDraftIntoEditor: (value, capturedSubject) =>
+      restoreStaleDraftIntoEditor: (value, capturedSubject, ownerRequestId) =>
         // PR3-B §7.3 (round 10 F1): ONE policy — the steer deps hook, the
         // controller's async stale exits and the submission runtime all
         // route through the same two-fact decision (see
-        // `restoreStaleDraft` above).
-        restoreStaleDraft(value, capturedSubject as SessionSubject | undefined),
+        // `restoreStaleDraft` above). The owner id keeps a FOREIGN hold's
+        // frozen document out of the restore.
+        restoreStaleDraft(value, capturedSubject as SessionSubject | undefined, ownerRequestId),
       notify: (message, kind) => {
         if (deps.isCleanedUp()) return
         deps.app().notify(message, kind)
@@ -2628,7 +2652,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         },
         // PR3-B §7.3 (round 10 F1): same async-restore class as the Host
         // command flow above; the lifetime fence precedes it (round 11).
-        restore: (draft) => { if (lifetimeOwnsSurface()) restoreStaleDraft(draft, contributionSubject) },
+        restore: (draft) => {
+          if (lifetimeOwnsSurface()) restoreStaleDraft(draft, contributionSubject)
+        },
       }, text), {
         diag: deps.diag,
         sessionId: () => deps.liveAgent()?.session.id,
@@ -2939,6 +2965,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     ownsComposerHold: (requestId: string) => composerHoldActive()
       && composerHold?.submissionRequestId === requestId,
     restoreSubmissionDraft,
+    restoreStaleDraftIntoEditor: (text, capturedSubject, ownerRequestId) =>
+      restoreStaleDraft(text, capturedSubject as SessionSubject | undefined, ownerRequestId),
     dequeue,
     abortLocalShell,
     cancelLocalShellIfRunning,

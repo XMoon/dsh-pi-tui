@@ -230,6 +230,10 @@ interface AttemptMount {
   /** Hold the NEXT writer call and settle it later (the FIFO window). */
   holdNextWriter(): void
   releaseHeldWriter(): void
+  /** Gate the NEXT ensureSession (the legacy pre-dispatch preparation). */
+  holdNextEnsureSession(): void
+  resolveHeldEnsureSession(): void
+  rejectHeldEnsureSession(error: unknown): void
 }
 
 function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}): AttemptMount {
@@ -254,6 +258,7 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
   let ownerReplaced = false
   let releaseWriter: (() => void) | undefined
   let heldWriter = false
+  let heldEnsure: { resolve: () => void; reject: (error: unknown) => void } | undefined
   const settleWriter = async (): Promise<WriteOutcome> => {
     if (next.acceptedFirst) writerCalls.at(-1)?.onAccepted?.()
     if (next.outcome === 'throw') throw new Error('writer exploded')
@@ -308,7 +313,15 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
     },
     scope: { captureLive: () => scope, isCurrent: () => scopeCurrent, requireLive: () => scope },
     session: {
-      ensureSession: async () => {},
+      ensureSession: async () => {
+        if (heldEnsure === undefined) return
+        await new Promise<void>((resolve, reject) => {
+          heldEnsure = {
+            resolve: () => { resolve() },
+            reject: (error) => { reject(error) },
+          }
+        })
+      },
       beginCommandSettlement: () => {},
       abortCommandSettlement: () => {},
       settleCommandSettlement: () => {},
@@ -454,6 +467,11 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
     setOwnerReplaced: (replaced) => { ownerReplaced = replaced; },
     holdNextWriter: () => { heldWriter = true; },
     releaseHeldWriter: () => { heldWriter = false; releaseWriter?.() },
+    holdNextEnsureSession: () => {
+      heldEnsure = { resolve: () => {}, reject: () => {} }
+    },
+    resolveHeldEnsureSession: () => { heldEnsure?.resolve(); heldEnsure = undefined },
+    rejectHeldEnsureSession: (error) => { heldEnsure?.reject(error); heldEnsure = undefined },
   }
 }
 
@@ -1001,4 +1019,33 @@ test('PR2/RFL014: a deferred restore for a REPLACED owner never lands after a la
   assert.equal(h.composer.text, '', 'the new owner’s acceptance clears only its own document')
   assert.equal(h.composer.text.includes('/deploy now'), false,
     'the replaced owner’s deferred restore never resurfaced')
+})
+
+test('PR2/RFL015: a legacy pre-dispatch failure under a held prompt defers, never mutates the hold', async () => {
+  const h = mountAttempt()
+  h.setCommandBehavior('legacy-command-pending')
+  // A: the legacy command is gated inside its pre-dispatch ensureSession.
+  h.holdNextEnsureSession()
+  assert.equal(h.controller.beginComposerSubmission('/deploy now', 'enter'), 'legacy')
+  h.controller.submit('/deploy now', 'enter')
+  await attemptTick()
+  // B: an ordinary prompt is submitted behind the FIFO and takes the hold.
+  h.composer.text = 'B own original'
+  h.holdNextWriter()
+  assert.equal(h.controller.beginComposerSubmission('B own original', 'enter'), 'held')
+  await attemptTick()
+  assert.equal(h.composer.text, 'B own original')
+  // A's ensureSession FAILS before any command execution: the wrapper's stale
+  // restore must not touch B's frozen document nor rewrite its hold record.
+  h.rejectHeldEnsureSession(new Error('session creation refused'))
+  await attemptTick()
+  assert.equal(h.composer.text, 'B own original', 'A never overwrites B; it is deferred')
+  assert.equal(h.controller.composerHoldActive(), true, 'B still owns the attempt')
+  // B is rejected: the deferred A restore lands immediately, exactly once.
+  h.respond({ kind: 'rejected', error: { code: 'session/agent-busy', message: 'busy' } }, false)
+  h.releaseHeldWriter()
+  await attemptTick()
+  assert.equal(h.controller.composerHoldActive(), false)
+  assert.equal(h.composer.text, 'B own original\n\n/deploy now',
+    'A is restored exactly once when B settles (never lost behind the foreign hold)')
 })

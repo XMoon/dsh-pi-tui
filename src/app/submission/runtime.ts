@@ -147,7 +147,7 @@ export interface SubmissionRuntimeSurface {
    * (a failed switch kept the owner; a same-session rollover; a retaining
    * renderer) merges exactly like the ordinary restore.
    */
-  restoreStaleDraftIntoEditor(text: string, capturedSubject?: unknown): 'merged-verbatim' | 'merged' | 'dropped'
+  restoreStaleDraftIntoEditor(text: string, capturedSubject?: unknown, ownerRequestId?: string): 'merged-verbatim' | 'merged' | 'dropped'
   /** Consume ONLY the image/file drafts referenced by one committed write. */
   consumeDraftAttachments(text: string): void
   /** Start the latency dispatch mark for one session. */
@@ -315,7 +315,7 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
       attempt?.rejected()
       return
     }
-    const restored = surface.restoreStaleDraftIntoEditor(submission.text, submission.staleSubject)
+    const restored = surface.restoreStaleDraftIntoEditor(submission.text, submission.staleSubject, submission.requestId)
     surface.settleLocalSubmission(submission.requestId)
     surface.settleSubmitAck('submit stale', { token: submission.ackToken, terminal: true })
     surface.notify(restored === 'merged-verbatim' ? STALE_NOTICE
@@ -1024,7 +1024,11 @@ export interface SteerSubmissionDeps {
    * ownership SUBJECT (the owner-replacement discriminator; a same-owner
    * invalidation is not a replacement and still restores).
    */
-  readonly restoreStaleDraftIntoEditor: (text: string, capturedSubject?: unknown) => 'merged-verbatim' | 'merged' | 'dropped'
+  readonly restoreStaleDraftIntoEditor: (
+    text: string,
+    capturedSubject?: unknown,
+    ownerRequestId?: string,
+  ) => 'merged-verbatim' | 'merged' | 'dropped'
   readonly notify: (message: string, kind: 'info' | 'error') => void
   readonly acceptSubmitAck: () => number
   readonly settleLocalSubmission: (requestId: string) => void
@@ -1251,7 +1255,7 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
         // the pinned owner was genuinely REPLACED and the renderer drops
         // drafts at committed switches (the implementation decides; a
         // same-owner invalidation still restores).
-        const restored = deps.restoreStaleDraftIntoEditor(text, submittedSubject)
+        const restored = deps.restoreStaleDraftIntoEditor(text, submittedSubject, steerRequestId)
         deps.settleLocalSubmission(steerRequestId)
         deps.settleSubmitAck('steer stale', { token: steerAckToken, terminal: true })
         deps.notify(restored === 'merged-verbatim' ? 'the session changed while sending — try again'
@@ -1304,7 +1308,7 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
             // PR3-B §7.3 (F2): the stale restore may be suppressed — only
             // when the pinned owner was genuinely REPLACED and the renderer
             // drops drafts at committed switches.
-            const restored = deps.restoreStaleDraftIntoEditor(text, steerSubject)
+            const restored = deps.restoreStaleDraftIntoEditor(text, steerSubject, steerRequestId)
             deps.settleLocalSubmission(steerRequestId)
             deps.settleSubmitAck('steer stale', { token: steerAckToken, terminal: true })
             deps.notify(restored === 'merged-verbatim' ? 'the session changed while sending — try again'
@@ -1335,7 +1339,7 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
               // the replaced-owner shape on a switch-dropping renderer (the
               // ownership authority's opaque-ref comparison — never a raw
               // session-id match, which A→B→A would defeat).
-              const restored = deps.restoreStaleDraftIntoEditor(draft, steerSubject)
+              const restored = deps.restoreStaleDraftIntoEditor(draft, steerSubject, steerRequestId)
               steerRestored = true
               return restored === 'merged-verbatim'
             },
