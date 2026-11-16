@@ -390,7 +390,8 @@ function regionOf(frame) {
   const bar = actionBarOf(frame)
   // The credential Detail advertises `Enter open in Models` — check the DETAIL
   // verbs BEFORE the list's generic `Enter open` substring.
-  if (bar.includes('Enter open in Models') || bar.includes('Enter confirm')) return 'detail'
+  if (bar.includes('Enter open in Models') || bar.includes('Enter confirm')
+    || bar.includes('Confirm [Enter]')) return 'detail'
   if (bar.includes('Enter open')) return 'list'
   if (bar.includes('refresh') || bar === 'Back [Esc]') return 'detail'
   return 'other'
@@ -449,8 +450,20 @@ async function openWebRow(client, index, label, needle = 'Current: ') {
   await selectListRow(client, index, label)
   client.send('\r')
   await waitForScreenText(client, needle, `${label} ${WEB_ROW_LABELS[index]} detail`, 30_000)
-  await waitForCondition(async () => regionOf(await frameOf(client)) === 'detail',
-    `${label} ${WEB_ROW_LABELS[index]} Detail region`, 15_000)
+  // The Detail region oracle reads the page's own action bar. Report the bar it
+  // actually painted when the region never settles, so a wording change is
+  // diagnosable instead of a bare 15s timeout.
+  const deadline = Date.now() + 15_000
+  let lastBar = ''
+  let lastTail = ''
+  while (Date.now() < deadline) {
+    const frame = await frameOf(client)
+    lastBar = actionBarOf(frame)
+    lastTail = frame.split('\n').slice(-6).join(' | ')
+    if (regionOf(frame) === 'detail') return
+    await sleep(150)
+  }
+  assert(false, `${label} ${WEB_ROW_LABELS[index]} Detail region timeout; bar=${JSON.stringify(lastBar)}; tail=${JSON.stringify(lastTail)}`)
 }
 
 /** Home + Down*index inside the Detail's candidate list and prove the marker
