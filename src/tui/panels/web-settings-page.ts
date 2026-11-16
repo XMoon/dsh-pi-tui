@@ -260,37 +260,65 @@ function composeRow(left: string, right: string, width: number): string {
   return fit(left + ' '.repeat(width - leftWidth - rightWidth) + right, width)
 }
 
-/** One whole Action Bar wording and, when its LAST segment is the real
- *  `Verb [Esc]` affordance, the UNPAINTED geometry of exactly that segment. */
+/** One complete Action Bar segment and the ink role it paints with: a pure
+ *  browsing HINT (muted, inert), the page's REAL confirm verb, or the root's
+ *  Esc affordance. */
+interface BarSegmentWording {
+  readonly text: string
+  readonly ink: 'hint' | 'confirm' | 'escape'
+}
+
+/** One whole Action Bar wording: COMPLETE segments only (never truncated),
+ *  each with the exact cells the same string paints. */
 interface BarWording {
   readonly text: string
-  readonly escape?: {
+  readonly segments: readonly (BarSegmentWording & {
     readonly startCol: number
     readonly endCol: number
-    /** The painted prefix, INCLUDING the trailing ` · ` separator. */
-    readonly lead: string
-    readonly token: string
-  }
+  })[]
 }
 
-/** Build one wording whose LAST segment is `Verb [Esc]` (design §7.1), with the
- *  span measured from the very string it paints. */
+/** Compose whole ` · `-joined segments and measure their painted cells from
+ *  the very strings that are painted. */
+function barWording(parts: readonly BarSegmentWording[]): BarWording {
+  const segments: Array<BarSegmentWording & { readonly startCol: number; readonly endCol: number }> = []
+  let text = ''
+  for (const part of parts) {
+    if (segments.length > 0) text += ACTION_BAR_SEPARATOR
+    const startCol = visibleWidth(text)
+    text += part.text
+    segments.push({ ...part, startCol, endCol: visibleWidth(text) })
+  }
+  return { text, segments }
+}
+
+/** The empty wording: a width that cannot paint even one complete segment. */
+const EMPTY_WORDING: BarWording = { text: '', segments: [] }
+
+/** Build one wording whose LAST segment is the real `Verb [Esc]` affordance
+ *  (design §7.1), with its span measured from the painted string. */
 function escapeWording(lead: string, verb: string): BarWording {
-  const token = `${verb} [Esc]`
-  if (lead === '') return { text: token, escape: { startCol: 0, endCol: visibleWidth(token), lead: '', token } }
-  const prefix = lead + ACTION_BAR_SEPARATOR
-  const startCol = visibleWidth(prefix)
-  return {
-    text: prefix + token,
-    escape: { startCol, endCol: startCol + visibleWidth(token), lead: prefix, token },
-  }
+  return barWording([
+    ...lead === '' ? [] : [{ text: lead, ink: 'hint' as const }],
+    { text: `${verb} [Esc]`, ink: 'escape' as const },
+  ])
 }
 
-/** The LONGEST wording that fits `width` WHOLE, or '' when none does. The
- *  chosen value is the SAME value the row paints, so its Esc span is never
- *  re-derived from a coloured string. */
+/** Build the page's explicit `Verb [Enter] · Back [Esc]` wording: the commit
+ *  verb is the ONE delegated target and the Esc affordance stays the root's. */
+function confirmWording(lead: string): BarWording {
+  return barWording([
+    ...lead === '' ? [] : [{ text: lead, ink: 'hint' as const }],
+    { text: 'Confirm [Enter]', ink: 'confirm' as const },
+    { text: 'Back [Esc]', ink: 'escape' as const },
+  ])
+}
+
+/** The LONGEST wording that fits `width` WHOLE, or the empty one when none
+ *  does. The chosen value is the SAME value the row paints, so its spans are
+ *  never re-derived from a coloured string. */
 function wholeWording(preferred: BarWording, width: number, shorter: readonly BarWording[] = []): BarWording {
-  return [preferred, ...shorter].find(word => visibleWidth(word.text) <= width) ?? { text: '' }
+  return [preferred, ...shorter].find(word => visibleWidth(word.text) <= width) ?? EMPTY_WORDING
 }
 
 /** The state WORD + ink of one transient phase (§4A.2 vocabulary). */
@@ -332,6 +360,19 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
    *  own content columns. Cleared by a row-grant change and on dispose, so
    *  a resize never keeps the previous frame's geometry clickable. */
   private paintedEscapeSpanValue: { readonly startCol: number; readonly endCol: number } | undefined
+  /** The page's ONE delegated confirm target of the LAST PAINTED frame: the
+   *  exact `Confirm [Enter]` cells plus the semantic snapshot they were painted
+   *  from. It is presentation-only pointer state — the command owner's Web FIFO
+   *  stays the ONE write authority. */
+  private paintedConfirmTarget:
+    | {
+      readonly revision: number
+      readonly rowId: WebSettingRowId
+      readonly candidate: string
+      readonly startCol: number
+      readonly endCol: number
+    }
+    | undefined
   /** The credential action the LAST COMMITTED frame painted as the ACTIVE
    *  cursor (Detail region only). Enter must target exactly this identity. It
    *  is updated ONLY while the real render runs: a non-render projection (the
@@ -357,8 +398,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   /** The root's row-budget seam: the granted lines INCLUDE the Action Bar. */
   setMaxRows(rows: number): void {
     this.rowGrant = Math.max(1, Math.floor(rows))
-    // A new grant has not painted yet: the previous bar's geometry is stale.
+    // A new grant has not painted yet: the previous bar's geometry (including
+    // the delegated Confirm target) is stale.
     this.paintedEscapeSpanValue = undefined
+    this.paintedConfirmTarget = undefined
   }
 
   private bodyRows(): number {
@@ -384,6 +427,11 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   handleInput(data: string): void {
     if (this.disposed) return
+    // Every real key starts a new semantic frame: a bar press that began
+    // before it can never complete against the state this key changes (or
+    // re-affirms). The painted target is re-published by the next render.
+    this.revision += 1
+    this.paintedConfirmTarget = undefined
     if (matchesKey(data, 'escape')) {
       if (this.region === 'detail') {
         this.commitPresentation(() => { this.region = 'list' })
@@ -423,21 +471,68 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return this.paintedEscapeSpanValue
   }
 
-  /** The page's own SEMANTIC identity for a pointer gesture: the region and
-   *  selected row plus every transient phase its Esc really acts on. The
-   *  Settings root stores it at press and re-proves it at the release, so a
-   *  child repaint that keeps the same bar cells cannot hand a press to a
-   *  different Esc outcome. */
+  /** The NON-Esc Action-Bar span the LAST PAINTED frame really published: the
+   *  page's own `Confirm [Enter]`. The Settings root owns the ONE physical last
+   *  row and DELEGATES these cells through {@link activateBarSpan}; a frame
+   *  that painted no confirmable candidate publishes nothing. */
+  paintedBarSpans(): readonly { readonly id: string; readonly startCol: number; readonly endCol: number }[] {
+    const target = this.paintedConfirmTarget
+    return target === undefined
+      ? []
+      : [{ id: 'web:confirm', startCol: target.startCol, endCol: target.endCol }]
+  }
+
+  /**
+   * Invoke the ONE delegated confirm gesture. The id came from
+   * {@link paintedBarSpans} of the last frame; the pointer's own currentness is
+   * re-proven HERE against the LIVE page state before the EXISTING
+   * `confirmSelected()` sink runs:
+   *
+   * - a new frame/gesture revision (any key, wheel, row/candidate/phase move,
+   *   resize, dispose) makes the old press stale;
+   * - the LATEST authority read must still be ready and writable, and must
+   *   still offer the SAME raw candidate at the SAME choice index the frame
+   *   painted (the painted snapshot is never a commit base);
+   * - a saving row offers no second write, and the candidate must still be
+   *   inside the last-painted Detail viewport.
+   *
+   * A refusal dispatches NOTHING (never a different candidate, never a
+   * second command-layer entry).
+   */
+  activateBarSpan(id: string): void {
+    if (this.disposed || id !== 'web:confirm') return
+    const target = this.paintedConfirmTarget
+    if (target === undefined) return
+    if (target.revision !== this.revision) return
+    if (this.region !== 'detail') return
+    if (this.selectedSettingId() !== target.rowId) return
+    const facts = this.intents.readFacts()
+    if (facts.kind !== 'ready') return
+    if (this.intents.writableRefusal() !== undefined) return
+    if (this.phases.get(target.rowId)?.kind === 'saving') return
+    if (this.choiceValues()[this.choiceIndex] !== target.candidate) return
+    if (!this.paintedChoiceVisible(target.candidate)) return
+    // The ONE business sink: the original Enter path (never a second writer).
+    this.confirmSelected()
+  }
+
+  /** The page's own SEMANTIC identity for a pointer gesture: the region, the
+   *  selected row and the monotonic semantic revision (plus every transient
+   *  phase its Esc/Confirm really acts on). The Settings root stores it at
+   *  press and re-proves it at the release, so a child repaint that keeps the
+   *  same bar cells cannot hand a press to a different outcome — including a
+   *  candidate A → B → A round trip. */
   gestureIdentity(): string {
     const rowId = this.selectedSettingId()
     const phase = rowId === undefined ? undefined : this.phases.get(rowId)?.kind
-    return `${this.region}:${rowId ?? ''}:${phase ?? ''}:${this.choiceIndex}:${this.actionIndex}`
+    return `${this.region}:${rowId ?? ''}:${phase ?? ''}:${this.choiceIndex}:${this.actionIndex}:${this.revision}`
   }
 
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
     this.paintedEscapeSpanValue = undefined
+    this.paintedConfirmTarget = undefined
     this.paint = undefined
     this.pressed = undefined
     this.phases.clear()
@@ -967,9 +1062,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     // never retain the credential action an earlier Detail painted.
     this.paintedCredentialAction = undefined
     // Same rule for the bar's clickable geometry: a frame that paints no
-    // complete Esc affordance (a dropped wording, a saving/loading fact) must
-    // not leave the previous frame's span alive.
+    // complete Esc affordance or Confirm target (a dropped wording, a
+    // saving/loading fact) must not leave the previous frame's spans alive.
     this.paintedEscapeSpanValue = undefined
+    this.paintedConfirmTarget = undefined
     // A fresh read can invalidate the credential cursor before this frame: clamp
     // it FIRST so the painted cursor, the bar and the Enter target agree.
     if (this.selectedRowId() === 'web-credential') {
@@ -1012,8 +1108,25 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     while (lines.length < bodyRows) lines.push(fit('', width))
     const bar = this.actionBar(width, bodyRows)
     // `fit` below only pads (the chosen wording is already whole and in budget),
-    // so the recorded span is exactly the painted bar's geometry.
-    this.paintedEscapeSpanValue = bar.escape
+    // so the recorded spans are exactly the painted bar's geometry.
+    const escapeSegment = bar.segments.find(segment => segment.ink === 'escape')
+    this.paintedEscapeSpanValue = escapeSegment === undefined
+      ? undefined
+      : { startCol: escapeSegment.startCol, endCol: escapeSegment.endCol }
+    const confirmSegment = bar.segments.find(segment => segment.ink === 'confirm')
+    if (confirmSegment !== undefined) {
+      const rowId = this.selectedSettingId()
+      const candidate = rowId === undefined ? undefined : this.choiceValues()[this.choiceIndex]
+      if (rowId !== undefined && candidate !== undefined) {
+        this.paintedConfirmTarget = {
+          revision: this.revision,
+          rowId,
+          candidate,
+          startCol: confirmSegment.startCol,
+          endCol: confirmSegment.endCol,
+        }
+      }
+    }
     lines.push(fit(this.paintBarWording(bar), width))
     this.paint = { width, rows: grant, bodyRows, targetRows: targets }
     return lines.slice(0, grant)
@@ -1034,9 +1147,11 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return composeRow(left, right, width)
   }
 
-  /** A choice row's Action Bar: `Enter confirm` only while the highlighted
-   *  candidate is inside THIS render's Detail viewport (the same gate the
-   *  dispatch uses), so a resize can never advertise a Confirm it will drop. */
+  /** A choice row's Action Bar: the explicit `Confirm [Enter]` only while the
+   *  highlighted candidate is inside THIS render's Detail viewport (the same
+   *  gate the dispatch uses), so a resize can never advertise a Confirm it
+   *  will drop. The commit verb is painted with the real action ink and
+   *  published as the page's ONE delegated last-row span. */
   private choiceActionBar(width: number, bodyRows: number): BarWording {
     // A dispatched write owns the row: the bar states it and never advertises a
     // Confirm that `confirmChoice()` would silently drop.
@@ -1053,9 +1168,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const visible = entry !== undefined && entry.line >= offset && entry.line < offset + viewport
     if (!visible) return wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
     return wholeWording(
-      escapeWording('↑/↓ choose · Enter confirm', 'Back'),
+      confirmWording('↑/↓ choose'),
       width,
-      [escapeWording('Enter confirm', 'Back'), escapeWording('Enter', 'Back'), escapeWording('', 'Back')],
+      [confirmWording(''), escapeWording('', 'Back')],
     )
   }
 
@@ -1108,12 +1223,19 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         : this.choiceActionBar(width, bodyRows)
   }
 
-  /** Paint one chosen Action Bar wording: the row stays muted; only the real
-   *  Esc affordance carries the secondary ink (its `[Esc]` cap is muted). */
+  /** Paint one chosen Action Bar wording: pure browsing hints and separators
+   *  stay muted, the page's real Confirm carries the primary action ink, and
+   *  the root's Esc affordance keeps the secondary verb ink (both `[Key]` caps
+   *  are muted by {@link paintActionSpan}). */
   private paintBarWording(wording: BarWording): string {
-    const escape = wording.escape
-    if (escape === undefined) return color.textMuted(wording.text)
-    return `${color.textMuted(escape.lead)}${paintActionSpan(escape.token, 'secondary')}`
+    if (wording.segments.length === 0) return color.textMuted(wording.text)
+    return wording.segments.map(segment => {
+      switch (segment.ink) {
+        case 'confirm': return paintActionSpan(segment.text, 'primary')
+        case 'escape': return paintActionSpan(segment.text, 'secondary')
+        case 'hint': return color.textMuted(segment.text)
+      }
+    }).join(color.textMuted(ACTION_BAR_SEPARATOR))
   }
 
   private renderList(
@@ -1515,6 +1637,11 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (event.type === 'wheel') {
       const delta = event.wheelDelta ?? 0
       if (delta === 0) return undefined
+      // An EFFECTIVE wheel input starts a new semantic frame even when it
+      // scrolls nothing (a boundary, a short viewport): a bar press that began
+      // before it can never complete against the scrolled frame.
+      this.revision += 1
+      this.paintedConfirmTarget = undefined
       const width = this.liveWidth()
       const bodyRows = this.liveBodyRows()
       if (this.paintsBothRegions(width, bodyRows)) {
