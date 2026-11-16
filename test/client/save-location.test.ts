@@ -622,6 +622,68 @@ test('mouse parity: a suggestion press selects and a click accepts it (Tab seman
   assert.equal(prompt.getValue(), 'src/', 'the click must accept the suggestion like Tab')
 })
 
+test('mouse parity: a key between a suggestion press and release revokes the accept', async (t) => {
+  const deps = {
+    resolveDirectory: (input: string) => input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async (raw: string) =>
+      raw === './' ? [{ value: 'src/', displayPath: 'src' }, { value: 'lib/', displayPath: 'lib' }] : null,
+  }
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    () => {},
+  )
+  await new Promise<void>(resolve => setTimeout(resolve, 10))
+  const rendered = prompt.render(60)
+  const srcRow = rendered.findIndex(line => line.includes('src/'))
+  assert.ok(srcRow >= 0, `suggestion row missing:\n${rendered.join('\n')}`)
+  const geometry = { width: 60, height: rendered.length }
+  const point = { row: srcRow, column: 2 }
+  prompt.handleMouse(pointerEvent(point, 'press', geometry))
+  const state = prompt as unknown as { mousePressedValue: string | undefined }
+  assert.equal(state.mousePressedValue, 'src/', 'precondition — the suggestion press is latched')
+  // Right moves the Input cursor WITHOUT changing the value or the suggestion
+  // list: the held identity must still die with the semantic frame.
+  prompt.handleInput('\x1b[C')
+  assert.equal(state.mousePressedValue, undefined, 'the key must revoke the held suggestion identity')
+  prompt.handleMouse(pointerEvent(point, 'click', geometry))
+  assert.equal(prompt.getValue(), './', 'the stale release must not accept the suggestion')
+})
+
+test('mouse parity: a cursor move between a suggestion press and release revokes the accept', async (t) => {
+  const deps = {
+    resolveDirectory: (input: string) => input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async (raw: string) =>
+      raw === './' ? [{ value: 'src/', displayPath: 'src' }, { value: 'lib/', displayPath: 'lib' }] : null,
+  }
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    () => {},
+  )
+  await new Promise<void>(resolve => setTimeout(resolve, 10))
+  const rendered = prompt.render(60)
+  const srcRow = rendered.findIndex(line => line.includes('src/'))
+  assert.ok(srcRow >= 0, `suggestion row missing:\n${rendered.join('\n')}`)
+  const geometry = { width: 60, height: rendered.length }
+  const point = { row: srcRow, column: 2 }
+  prompt.handleMouse(pointerEvent(point, 'press', geometry))
+  // Down moves the suggestion cursor (Suggestion A stays listed under the same
+  // cell): a release there may not accept the pre-move press.
+  prompt.handleInput('\x1b[B')
+  assert.equal(prompt.getSuggestionCursor(), 1, 'precondition — the cursor really moved')
+  prompt.handleMouse(pointerEvent(point, 'click', geometry))
+  assert.equal(prompt.getValue(), './', 'the pre-move suggestion press must not accept')
+  // The next complete gesture still accepts the row it presses.
+  prompt.handleMouse(pointerEvent(point, 'press', geometry))
+  prompt.handleMouse(pointerEvent(point, 'click', geometry))
+  assert.equal(prompt.getValue(), 'src/', 'a fresh complete gesture still accepts the suggestion')
+})
+
 test('mouse parity: title and file rows and the action-row gap cells are inert', (t) => {
   const { deps } = fixtureDeps(testLifecycle(t))
   const prompt = new SaveLocationPrompt(
