@@ -438,7 +438,7 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
     surface: { refreshPendingInput: () => {} },
     supportsLocalShellCards: true,
     supportsTuiBuiltinUi: true,
-    retainsStaleDraftRestore,
+    get retainsStaleDraftRestore() { return retainsStaleDraftRestore },
     ownerWasReplaced: (subject: { owner?: string } | undefined) =>
       subject !== undefined && subject.owner !== (ownerReplaced ? 's2' : 's1'),
     captureMatches: (subject?: { owner?: string }) =>
@@ -1078,6 +1078,13 @@ test('PR2/RFL014: a LATE stale restore after owner replacement is dropped even b
   h.rejectHeldEnsureSession(new Error('old preparation failed'))
   await attemptTick()
   assert.equal(h.composer.text, 'B of the new owner', 'the old text never touches the successor')
+  // The suppression-first branch itself: the OLD subject is replaced, so the
+  // stale restore is DROPPED (not queued behind the successor's hold).
+  assert.equal(
+    h.controller.restoreStaleDraftIntoEditor('/deploy old owner', { owner: 's1' }, 'old-request'),
+    'dropped',
+    'the replaced owner’s stale restore is dropped before any hold deferral',
+  )
   // The successor's acceptance clears its own document; the old text is gone.
   h.respond({ kind: 'committed', value: undefined }, true)
   h.releaseHeldWriter()
