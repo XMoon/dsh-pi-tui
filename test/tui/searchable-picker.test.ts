@@ -452,6 +452,19 @@ test('renders a hint footer when search is enabled', () => {
   assert.ok(rendered.some((line) => line.includes('Type to filter')), 'hint missing')
 })
 
+test('an external hint owner suppresses the inner footer without changing search or selection', () => {
+  const picker = new SearchablePicker([{ value: 'a', label: 'alpha' }], 5, testTheme, {}, {
+    enableSearch: true,
+    externalHint: true,
+    hint: 'Enter toggle · Esc back',
+  })
+  const rendered = picker.render(44)
+  assert.ok(rendered.some(line => line.includes('alpha')))
+  assert.ok(!rendered.some(line => /Enter toggle|Esc back|Type to filter/u.test(line)), 'the outer owner paints the sole footer')
+  picker.handleInput('alpha')
+  assert.equal(picker.getSelectedItem()?.value, 'a', 'the search keeps its ordinary selected item')
+})
+
 test('keeps the compact height without hints for inline usage', () => {
   const picker = new SearchablePicker([{ value: 'a', label: 'alpha' }], 5, testTheme)
   const rendered = picker.render(80)
