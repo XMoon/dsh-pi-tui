@@ -3187,6 +3187,49 @@ test('PO-4C F2: a session/cancel abandons a held image read and settles on the r
   assert.deepEqual(view.notifications, [], 'the not-yet-converted event is dropped; no partial chunk is sent')
 })
 
+test('PO-4C F2 sibling: a cancel after a held image read drops the following queued event and never fabricates delivery', async () => {
+  const view = promptView()
+  await view.attach()
+  const readStarted = deferred<void>()
+  const releaseRead = deferred<AcpStoredImage>()
+  let readSignal: AbortSignal | undefined
+  view.access.imageReadImpl = async (_ref, signal) => {
+    readSignal = signal
+    readStarted.resolve()
+    return await releaseRead.promise
+  }
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-sibling')
+  view.access.turnFence = { openTurnStartSeq: 100, lastTurn: 2 }
+  view.access.agentStatus = 'running'
+  view.claim('m-sibling', 2, request.requestId)
+  // A: an assistant event whose image read is held.
+  view.commit('assistant/message', assistantData(2, 'm-image', [
+    imageBlock('sha256:sibling'),
+  ]))
+  await readStarted.promise
+  // B: a later text event queued BEHIND the held read in the SAME outputTail.
+  view.commit('assistant/message', assistantData(2, 'm-after', [{ type: 'text', text: 'after-cancel' }]))
+  // The official running-turn cancel is addressed while A is held.
+  view.registry.cancelSession(view.conn, view.access, 'P1')
+  assert.equal(readSignal?.aborted, true, 'the commit cancellation stops this flight\'s held Store read')
+  // Release the held read: the abort rejection (or a late success) must not
+  // unblock B. A backend that ignores the signal is modelled by resolving here.
+  releaseRead.resolve({ data: IMAGE_BYTES, mediaType: 'image/png' })
+  view.commit('turn/end', { turn: 2, reason: { kind: 'aborted', reason: { kind: 'user' } } })
+  const settled = await Promise.race([
+    attempt.then(value => ({ kind: 'settled' as const, value }), (error: unknown) => ({ kind: 'failed' as const, error })),
+    // Bounded hang-detection window: the authoritative result is the real user-aborted turn/end above.
+    new Promise<{ kind: 'timeout' }>(resolveTimeout => setTimeout(() => resolveTimeout({ kind: 'timeout' }), 2_000)),
+  ])
+  assert.equal(settled.kind, 'settled', 'the cancelled settlement must not hang on the queued sibling')
+  assert.deepEqual(settled.kind === 'settled' ? settled.value : undefined, { stopReason: 'cancelled' })
+  assert.deepEqual(view.notifications, [],
+    'neither the held image event nor the later queued text may be delivered after the cancellation')
+  assert.equal(JSON.stringify(view.notifications).includes('after-cancel'), false)
+})
+
 test('PO-4C C-L1-05: an Agent disposal during a read fails the request once and a late read never reaches the wire', async () => {
   const view = promptView()
   await view.attach()
