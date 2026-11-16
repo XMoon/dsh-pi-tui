@@ -360,7 +360,7 @@ import type { CompactActionSource, CompactActionStats } from './tui/transcript/p
 import { projectCompact } from './tui/transcript/compact-projection.ts'
 import { clusterByMemberOf, isFoldableWorkContext, projectTranscriptStructure, workByMemberOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './tui/transcript/structure.ts'
 import { transcriptRevealAncestryFor, transcriptRevealPathFor, type TranscriptRevealAncestry } from './tui/transcript/reveal.ts'
-import { deepestCommonTranscriptContainer, sameTranscriptContainerPath, type TranscriptContainerOwner, type TranscriptContainerPath } from './tui/transcript/container-owner.ts'
+import { deepestCommonTranscriptContainer, sameTranscriptContainerOwner, sameTranscriptContainerPath, type TranscriptContainerOwner, type TranscriptContainerPath } from './tui/transcript/container-owner.ts'
 import { CompactWorkComponent } from './tui/components/transcript/compact-work.ts'
 import { summarizeWorkSpan, type CompactWorkSummary } from './tui/transcript/work-summary.ts'
 import { activityClockOf, resolveWorkLifetimes, type ActivityClock, type WorkLifetime } from './tui/transcript/activity-clock.ts'
@@ -4097,6 +4097,10 @@ export class TuiApp {
   /** PTC sub-calls the user explicitly collapsed while the search reveal had
    * them open: they stay collapsed until the next explicit navigation. */
   private readonly searchSuppressedSubCalls = new Set<string>()
+  /** The one-shot PLAN inspection's OWN child-collapse record: the search
+   * navigation and the plan inspection are independent temporary requests, so
+   * neither may write or clear the other's suppression state. */
+  private readonly planSuppressedSubCallIds = new Set<string>()
   /** The block-relative transcript range of the current search selection
    * (welcome card excluded), recomputed on every rebuild/remeasure. */
   private currentSearchTranscriptRange: RenderedSearchScrollRange | undefined
@@ -10702,18 +10706,27 @@ export class TuiApp {
     return this.effectiveMessageExpanded(message, this.expandBoundary(), this.userExpandBoundary(), true)
   }
 
-  /** Whether the current search target's PTC path contains this sub-call. */
-  private forcesSubCallExpandedTemporarily(subCallId: string): boolean {
-    // The plan inspection's located PTC child (the plan body lives inside the
-    // nested card) is opened for the reading step only — an explicit user
-    // collapse of that child (the shared temporary-suppression set) wins.
-    if (this.planInspection?.subCallId === subCallId) {
-      return !this.searchSuppressedSubCalls.has(subCallId)
-    }
+  /** Whether the CURRENT SEARCH target's PTC path contains this sub-call
+   * (the search request's own force; the plan inspection never reads or writes
+   * this request's suppression record). */
+  private searchForcesSubCall(subCallId: string): boolean {
     if (!this.searchRevealGranted) return false
     if (this.searchSuppressedSubCalls.has(subCallId)) return false
     const source = this.searchTarget?.match.source
     return source?.kind === 'subcall-field' && source.subCallIds.includes(subCallId)
+  }
+
+  /** Whether a temporary request (the plan inspection or the search
+   * navigation) forces this sub-call open. Each request consults ONLY its own
+   * suppression record. */
+  private forcesSubCallExpandedTemporarily(subCallId: string): boolean {
+    // The plan inspection's located PTC child (the plan body lives inside the
+    // nested card) is opened for the reading step only — an explicit user
+    // collapse of that child during THIS lease suppresses it (plan-scoped).
+    if (this.planInspection?.subCallId === subCallId) {
+      return !this.planSuppressedSubCallIds.has(subCallId)
+    }
+    return this.searchForcesSubCall(subCallId)
   }
 
   /** Whether the current search target is inside this Workflow run (temporary
@@ -11899,13 +11912,26 @@ export class TuiApp {
     // The plan inspection's one-shot presentation owns its own lease: its
     // located card's hiding ancestors open exactly like a search navigation
     // (the SAME reveal path resolution — never a second reveal owner).
+    // The plan inspection and the search navigation are INDEPENDENT temporary
+    // requests: both may hide different containers at the same time (a search
+    // the plan review temporarily parked, or a search that stays active while
+    // the review is suspended). The effective reveal path is the UNION of both
+    // requests' paths — one request never shadows the other, and each is
+    // released by its own owner.
+    const owners: TranscriptContainerOwner[] = []
+    const addOwners = (path: SearchRevealPath | undefined): void => {
+      for (const owner of path ?? []) {
+        if (owners.some(existing => sameTranscriptContainerOwner(existing, owner))) continue
+        owners.push(owner)
+      }
+    }
     const planTarget = this.planInspection?.message
     if (planTarget !== undefined && this.expandedOverride.get(planTarget) !== false) {
-      return this.revealPathFromAncestry(this.searchRevealAncestryFor(planTarget))
+      addOwners(this.revealPathFromAncestry(this.searchRevealAncestryFor(planTarget)))
     }
     const target = this.searchRevealedMessage()
-    if (target === undefined) return undefined
-    return this.revealPathFromAncestry(this.searchRevealAncestry(target))
+    if (target !== undefined) addOwners(this.revealPathFromAncestry(this.searchRevealAncestry(target)))
+    return owners.length === 0 ? undefined : owners
   }
 
   /** Whether one Work span is opened ONLY by the granted search reveal. */
@@ -17414,6 +17440,8 @@ export class TuiApp {
     // session's subCallId expansions, and the old message objects must not
     // be retained by the hit map.
     this.subCallExpanded.clear()
+    this.searchSuppressedSubCalls.clear()
+    this.planSuppressedSubCallIds.clear()
     this.subCallHitsByMessage.clear()
     this.subCallExpandedRevision += 1
     // The one-shot plan inspection is session-scoped too: a switched-in
@@ -22213,26 +22241,25 @@ export class TuiApp {
   /** Toggle one PTC sub-call body's disclosure (mouse click on its header
    * row). The state is keyed by the durable subCallId. */
   private toggleSubCallExpanded(subCallId: string): void {
-    // Capture the search force BEFORE mutating: a sub-call can be open both
-    // because the user expanded it earlier AND because the search target's
-    // path covers it. An explicit collapse must suppress the search force in
-    // that case too, or the body reopens immediately.
-    const searchForced = this.forcesSubCallExpandedTemporarily(subCallId)
+    // Capture BOTH temporary forces BEFORE mutating: a sub-call can be open
+    // because the user expanded it earlier, the search target's path covers
+    // it, and/or the plan inspection opened it. Each request owns its own
+    // suppression record: an explicit collapse suppresses the search request
+    // for that child and revokes the plan lease (the lease never keeps forcing
+    // a container the user just collapsed), never mixing the two states.
+    const planForced = this.planInspection?.subCallId === subCallId
+    const searchForced = this.searchForcesSubCall(subCallId)
     if (this.subCallExpanded.has(subCallId)) {
       this.subCallExpanded.delete(subCallId)
       if (searchForced) this.searchSuppressedSubCalls.add(subCallId)
-      // The durable manual expansion is gone; if the one-shot plan inspection
-      // is ALSO forcing this child open, the explicit collapse revokes the
-      // whole lease (every collapse branch follows the same rule).
-      if (this.planInspection?.subCallId === subCallId) this.revokePlanInspectionLease()
-    } else if (searchForced) {
-      // The body is open only because of a temporary reveal: an explicit click
-      // collapses just that sub-call. The one-shot PLAN inspection lease is
-      // revoked wholesale (the reading lease must not keep forcing a container
-      // the user just collapsed); a search navigation keeps its reveal minus
-      // this child.
-      this.searchSuppressedSubCalls.add(subCallId)
+      if (planForced) this.revokePlanInspectionLease()
+    } else if (planForced) {
+      if (searchForced) this.searchSuppressedSubCalls.add(subCallId)
       this.revokePlanInspectionLease()
+    } else if (searchForced) {
+      // The body is open only because of the search navigation: an explicit
+      // click collapses just that sub-call for the rest of that search.
+      this.searchSuppressedSubCalls.add(subCallId)
     } else {
       this.subCallExpanded.add(subCallId)
     }
@@ -22879,6 +22906,22 @@ export class TuiApp {
       // source), so the expanded card keeps the command row in every wiring.
       this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
       return
+    }
+    // The reviewed PLAN BODY lives in the CALL arguments for the WHOLE life of
+    // an official exit_plan_mode card: the settled result is the review
+    // OUTCOME, never a replacement for the plan. Render the call view body
+    // here as well (then continue to the ordinary settled result), so the
+    // Transcript stays the ONE long-term reading entry after approval,
+    // dismissal, a failed delivery and a replayed Session — Direct
+    // presentCall and the Remote Client presenter alike.
+    if (message.name === 'exit_plan_mode') {
+      const callView = this.present?.call(message.name, message.args)
+      if (callView !== undefined && callView.card === 'generic' && (callView.content?.length ?? 0) > 0) {
+        for (const block of callView.content ?? []) {
+          if (block.type === 'text') card.addChild(new Text(color.textDim(sanitizeDisplayText(block.text)), 0, 0))
+          else card.addChild(new Text(color.textDim(sanitizeDisplayText(this.blockDisplayText(block))), 0, 0))
+        }
+      }
     }
     // A settled ask_user_question renders its answered-count summary, never
     // the raw `{"answers":[…]}` JSON the tool's render text carries (Web
@@ -29287,9 +29330,9 @@ export class TuiApp {
     // dropped here; a collapse made DURING the new reading lease still wins
     // (the reveal predicates honor it), so a repaint never fights the user.
     if (this.expandedOverride.get(card) === false) this.expandedOverride.delete(card)
-    if (ptcSubCallId !== undefined && this.searchSuppressedSubCalls.has(ptcSubCallId)) {
-      this.searchSuppressedSubCalls.delete(ptcSubCallId)
-    }
+    // A plan View never edits the SEARCH request's suppression record: a child
+    // the user collapsed under search stays collapsed for search after this
+    // lease ends (the plan lease ignores that record while it is active).
     // Commit the one-shot presentation and re-project: the card and the
     // hiding ancestors open, and (for a PTC target) the nested child opens.
     this.planInspection = ptcSubCallId === undefined
@@ -29344,9 +29387,10 @@ export class TuiApp {
   private revokePlanInspectionLease(): void {
     if (this.planInspection === undefined) return
     this.planInspection = undefined
-    // The suppression set is the shared temporary-collapse record; a lease
-    // never leaves an inspection-scoped entry behind.
-    this.searchSuppressedSubCalls.clear()
+    // Only the PLAN request's own suppression record is released: the search
+    // navigation's explicit collapses are a different request's state and must
+    // survive a plan View/reading/settlement untouched.
+    this.planSuppressedSubCallIds.clear()
     this.clearFocusLiveHeightState()
   }
 
@@ -29497,6 +29541,16 @@ export class TuiApp {
       if (scroll === undefined) return
       scroll.updateLayout(this.transcriptContentHeight, scroll.viewportHeight, () => this.requestRender())
       scroll.scrollBy(direction * (page ? Math.max(1, scroll.viewportHeight - 1) : 1))
+      this.requestRender()
+    }
+    // Home/End use the existing ScrollView owners (never a second viewport or
+    // a guessed row): the reading lease forwards the jump, the host clamps.
+    state.flow.onPlanReadingEdge = (edge) => {
+      const scroll = this.fullscreenScroll
+      if (scroll === undefined) return
+      scroll.updateLayout(this.transcriptContentHeight, scroll.viewportHeight, () => this.requestRender())
+      if (edge === 'start') scroll.scrollToStart()
+      else scroll.scrollToEnd()
       this.requestRender()
     }
     state.flow.onPlanReadingEnd = () => this.releasePlanInspectionReveal()

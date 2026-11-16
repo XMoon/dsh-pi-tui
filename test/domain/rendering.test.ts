@@ -18,6 +18,7 @@ import { renderDiffLine } from '../../src/tui/components/transcript/diff.ts'
 import {
   foldedCallPreview, genericRawInputLines, parseReadEnvelopes, parseSkillEnvelope, resultTextLines, subagentModelDisplay, systemContextBody, toolPresenterFrom, webCardLines,
 } from '../../src/tui/transcript/tool-presentation.ts'
+import { createClientToolPresenter } from '../../src/tui/transcript/client-tool-presenter.ts'
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import { HostKeybindingManager } from '../../src/tui/keybindings/manager.ts'
 import { KeybindingEditorPanel } from '../../src/tui/keybindings/ui/list.ts'
@@ -4977,6 +4978,56 @@ test('exit_plan_mode renders its content plan body while running', async () => {
   assert.ok(view.includes('Step one.'), `plan body missing:\n${view}`)
   assert.ok(view.includes('Step two.'), `plan body truncated:\n${view}`)
   assert.ok(!view.includes('"plan"'), `raw JSON leaked:\n${view}`)
+  app.stop()
+})
+
+test('a SETTLED exit_plan_mode card keeps the full plan body and appends the outcome', async () => {
+  // The plan is the CALL's content for the card's whole life: the settled
+  // result is the review OUTCOME, never a replacement for the plan (the
+  // Transcript is the only long-term reading entry).
+  const plan = `# Settled Plan\n## Scope\n- keep the body\n${'x'.repeat(120)}\ntail-of-plan-marker`
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({ card: 'generic', title: 'Settled Plan', kind: 'other', content: [{ type: 'text', text: plan }] }),
+      result: () => ({ card: 'generic', title: 'Plan review', content: [{ type: 'text', text: 'Plan approved — carry it out.' }] }),
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'exit_plan_mode',
+    args: JSON.stringify({ plan }), result: 'Plan approved — carry it out.', status: 'ok',
+    resultBlocks: [{ type: 'text', text: 'Plan approved — carry it out.' }],
+  }])
+  app.setTranscriptDetailExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('## Scope'), `the settled card lost the plan body:\n${view}`)
+  assert.ok(view.includes('keep the body'), `the settled card lost the plan body lines:\n${view}`)
+  assert.ok(view.includes('tail-of-plan-marker'), `the settled card lost the plan tail:\n${view}`)
+  assert.ok(view.includes('Plan approved — carry it out.'), `the review outcome is missing:\n${view}`)
+  assert.ok(!view.includes('"plan"'), `raw JSON leaked:\n${view}`)
+  app.stop()
+})
+
+test('a replayed Remote-shape settled exit_plan_mode card derives the plan body from the arguments', async () => {
+  // The Remote branch has no Host registry: the Client presenter derives the
+  // same generic card from the logged arguments, so a replayed Session (a
+  // settled tool row) still reads the plan body.
+  const plan = '# Remote Plan\n## Steps\n- one\n- two'
+  const presenter = createClientToolPresenter()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: presenter })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'exit_plan_mode',
+    args: JSON.stringify({ plan }), result: 'The user chose to keep planning; revise the plan and present it again.', status: 'error',
+  }])
+  app.setTranscriptDetailExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('## Steps'), `the replayed Remote card lost the plan body:\n${view}`)
+  assert.ok(view.includes('- one') && view.includes('- two'), `the replayed Remote card lost plan lines:\n${view}`)
   app.stop()
 })
 

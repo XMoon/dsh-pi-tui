@@ -1249,11 +1249,14 @@ Every card renders through the Web parity render intents in
   available.
 - `exit_plan_mode` (plan review): the Direct branch renders the Host
   `presentCall`'s generic card (the plan's first heading as the title, the
-  complete plan markdown as the content — visible while the call runs, not
-  only after settle). The Remote Client presenter derives the SAME generic
-  card presentation-only from the logged call arguments (`plan` a non-empty
-  string starting with a `#` heading; anything else keeps the generic tool
-  row), so replay and the Remote branch show the same card. A PTC-dispatched
+  complete plan markdown as the content). The plan body belongs to the CALL for
+  the card's WHOLE life: it stays visible while the call runs AND after it
+  settles (the settled result is the review OUTCOME shown beside the plan, never
+  a replacement for it), so a replayed Session keeps its long-term reading
+  entry. The Remote Client presenter derives the SAME generic card
+  presentation-only from the logged call arguments (`plan` a non-empty string
+  starting with a `#` heading; anything else keeps the generic tool row), so
+  replay and the Remote branch show the same card. A PTC-dispatched
   `exit_plan_mode` sub-call renders the presenter's generic body inside its
   nested card for the same reason (the plan body lives in the call arguments,
   so a running child is readable before its result exists). The card is the

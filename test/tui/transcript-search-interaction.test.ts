@@ -1402,3 +1402,212 @@ test('Compact Work sibling: the plan reveal opens the Work span and a real heade
   await settle.then(() => {}, () => {})
   app.stop()
 })
+
+// ── Independent temporary requests: a parked Search + the plan inspection ──
+
+const SEARCH_PLAN = '# Search Plan\n## Scope\n- union of reveals\n## Execution\nship it'
+
+/** A Compact transcript whose turn-1 PTC child is a search target and whose
+ * turn-2 native card is the plan review target: two independent temporary
+ * requests that must not shadow each other. */
+function searchPlanFixture(): { messages: TranscriptMessage[]; root: Extract<TranscriptMessage, { kind: 'tool' }>; planCard: Extract<TranscriptMessage, { kind: 'tool' }> } {
+  const root: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 1, name: 'run_code', callId: 'call-root',
+    args: '{}', result: '', status: 'running',
+    subCalls: [{
+      kind: 'tool', turn: 1, name: 'read', subCallId: 'search-child',
+      parentCallId: 'call-root', rootCallId: 'call-root',
+      args: JSON.stringify({ path: 'src/a.ts' }), result: 'needle body line', status: 'ok',
+    }],
+  }
+  const planCard: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 2, name: 'exit_plan_mode', callId: 'call-plan-1',
+    args: JSON.stringify({ plan: SEARCH_PLAN }), result: '', status: 'running',
+  }
+  return {
+    root,
+    planCard,
+    messages: [
+      { kind: 'user', turn: 0, text: 'search then plan' },
+      root,
+      { kind: 'user', turn: 1, text: 'process done' },
+      planCard,
+      { kind: 'user', turn: 3, text: 'tail' },
+    ],
+  }
+}
+
+function searchTargetFor(root: Extract<TranscriptMessage, { kind: 'tool' }>): Parameters<TuiApp['setTranscriptSearchPresentation']>[0] {
+  return {
+    matchMessages: new Set([root]),
+    target: {
+      query: 'needle',
+      message: root,
+      match: {
+        id: 0, turn: 1, occurrence: 0,
+        source: { kind: 'subcall-field', subCallIds: ['search-child'], field: 'name' },
+        sourceOccurrence: 0,
+      },
+    },
+    grantReveal: true,
+  }
+}
+
+test('a parked Search keeps its own collapsed child across a plan View/reading lease', async () => {
+  const { messages, root } = searchPlanFixture()
+  const vt = new VirtualTerminal(100, 26)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setDisplayPreset('compact')
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  await vt.waitForRender()
+  app.setTranscriptSearchPresentation(searchTargetFor(root))
+  await vt.waitForRender()
+  const body = (): string => vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(body().includes('needle body line'), `precondition: the search reveal opens the child:\n${body()}`)
+  // The user explicitly collapses the search child.
+  ;(app as unknown as { toggleSubCallExpanded(subCallId: string): void }).toggleSubCallExpanded('search-child')
+  await vt.waitForRender()
+  assert.ok(!body().includes('needle body line'), `precondition: the explicit collapse holds:\n${body()}`)
+  const internals = app as unknown as { searchSuppressedSubCalls: Set<string> }
+  assert.equal(internals.searchSuppressedSubCalls.has('search-child'), true, 'the search request records the collapse')
+  // A plan review arrives (the search stays suspended behind it) and the user
+  // enters reading, then returns.
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: SEARCH_PLAN,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  vt.sendInput('\r') // View plan
+  await vt.waitForRender()
+  assert.ok(body().includes('## Scope'), `the plan lease opens its own card:\n${body()}`)
+  assert.ok(!body().includes('needle body line'), `the plan lease never re-opens the search-collapsed child:\n${body()}`)
+  assert.equal(internals.searchSuppressedSubCalls.has('search-child'), true,
+    'the plan lease never writes/clears the search request\'s suppression record')
+  vt.sendInput('\x1b') // Esc back to the decision list (release the plan lease)
+  await vt.waitForRender()
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined, 'the plan lease is released')
+  assert.equal(internals.searchSuppressedSubCalls.has('search-child'), true,
+    'the search request keeps its own collapse after the plan lease ends')
+  assert.ok(!body().includes('needle body line'), `the search child stays collapsed for the search request:\n${body()}`)
+  vt.sendInput('\x1b') // official dismiss
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('the plan lease and the search reveal COMPOSE (union) and release independently', async () => {
+  const { messages, root } = searchPlanFixture()
+  const vt = new VirtualTerminal(100, 26)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setDisplayPreset('compact')
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  await vt.waitForRender()
+  const body = (): string => vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(!body().includes('needle body line'), 'precondition: the collapsed Work spans hide both cards')
+  app.setTranscriptSearchPresentation(searchTargetFor(root))
+  await vt.waitForRender()
+  assert.ok(body().includes('needle body line'), `precondition: the search reveal opens its span/child:\n${body()}`)
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: SEARCH_PLAN,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  vt.sendInput('\r') // View plan
+  await vt.waitForRender()
+  assert.ok(body().includes('## Scope'), `the plan lease opens its own card:\n${body()}`)
+  assert.ok(body().includes('needle body line'),
+    `the plan lease must not SHADOW the search reveal (union of both requests):\n${body()}`)
+  vt.sendInput('\x1b') // Esc back: release the plan lease only
+  await vt.waitForRender()
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined)
+  assert.ok(body().includes('needle body line'), `the search reveal survives the plan release:\n${body()}`)
+  assert.ok(!body().includes('## Scope'), `the plan-leased span collapses again:\n${body()}`)
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('Regular mode names the one honest reading path: the plan above in terminal history', async () => {
+  // No app-owned seek in Regular: the decision list must say where the plan
+  // is (the native scrollback tool card above) and must NOT offer View plan.
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setTranscript(planTranscript('call-plan-1'))
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: PLAN_MD,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  const frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(frame.includes('Read the plan above in terminal history.'),
+    `the Regular reading guidance is missing:\n${frame}`)
+  assert.ok(!frame.includes('View plan'), `Regular must not offer an unusable View plan:\n${frame}`)
+  assert.ok(frame.includes('Keep planning…') && frame.includes('Approve plan'),
+    `the two-row decision list is intact:\n${frame}`)
+  // The guidance disappears once the capability is executable (Fullscreen).
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const fullscreenFrame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(fullscreenFrame.includes('View plan'), `Fullscreen offers the real View:\n${fullscreenFrame}`)
+  assert.ok(!fullscreenFrame.includes('Read the plan above in terminal history.'),
+    `the Regular-only guidance must not paint in Fullscreen:\n${fullscreenFrame}`)
+  vt.sendInput('\x1b') // official dismiss
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('the reading step jumps to the transcript start/end with Home/End (never in the feedback input)', async () => {
+  const { vt, app, settle } = planScene(planTranscript('call-plan-1'), 100, 24, { present: planDirectPresenter })
+  await vt.waitForRender()
+  const scroll = (): { scrollTop: number; maxScrollTop: number } => {
+    const state = app.fullscreenScrollForTest()
+    assert.ok(state !== undefined)
+    return { scrollTop: state.scrollTop, maxScrollTop: state.maxScrollTop }
+  }
+  vt.sendInput('\r') // View → reading
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('Reading the submitted plan'))
+  // PageDown a few times, then End → the transcript end; Home → the start.
+  for (let i = 0; i < 3; i += 1) vt.sendInput('\x1b[6~')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[F') // End
+  await vt.waitForRender()
+  assert.equal(scroll().scrollTop, scroll().maxScrollTop, 'End must reach the transcript end')
+  vt.sendInput('\x1b[H') // Home
+  await vt.waitForRender()
+  assert.equal(scroll().scrollTop, 0, 'Home must reach the transcript start')
+  // The feedback input owns Home/End as TEXT-CURSOR keys: the transcript must
+  // not move while editing the revision text.
+  vt.sendInput('\x1b') // back to the decision list
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // Keep planning…
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('What should be changed?'), 'the feedback input is active')
+  vt.sendInput('o')
+  vt.sendInput('k')
+  await vt.waitForRender()
+  const parked = scroll().scrollTop
+  vt.sendInput('\x1b[H')
+  vt.sendInput('\x1b[F')
+  await vt.waitForRender()
+  assert.equal(scroll().scrollTop, parked, 'Home/End inside the feedback edit never move the transcript')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})

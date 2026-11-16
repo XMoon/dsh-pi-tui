@@ -767,6 +767,8 @@ export class QuestionFlow implements Component, Focusable {
           || componentKeymap.matches(data, 'question.cursorDown')
           || componentKeymap.matches(data, 'question.pageUp')
           || componentKeymap.matches(data, 'question.pageDown')
+          || matchesKey(data, 'home')
+          || matchesKey(data, 'end')
       }
       if (this.planStep === 'fallback') {
         return componentKeymap.matches(data, 'question.cancel')
@@ -1711,6 +1713,16 @@ export class QuestionFlow implements Component, Focusable {
         this.onPlanReadingScroll?.(1, true)
         return
       }
+      // §3.2: Home/End jump to the transcript start/end (the existing
+      // ScrollView owners), through the same reading-lease seam.
+      if (matchesKey(data, 'home')) {
+        this.onPlanReadingEdge?.('start')
+        return
+      }
+      if (matchesKey(data, 'end')) {
+        this.onPlanReadingEdge?.('end')
+        return
+      }
       return
     }
     if (this.planStep === 'fallback') {
@@ -1788,6 +1800,9 @@ export class QuestionFlow implements Component, Focusable {
    * is active (the flow owns no transcript geometry). `page` asks for one
    * viewport page, otherwise one line; the host clamps. */
   onPlanReadingScroll: ((direction: -1 | 1, page: boolean) => void) | undefined
+  /** Host hook for the reading step's Home/End jumps: the host owns the
+   * ScrollView's start/end positions (the flow owns no geometry). */
+  onPlanReadingEdge: ((edge: 'start' | 'end') => void) | undefined
 
   handleInput(data: string): void {
     if (data === '\u0000') return
@@ -2197,6 +2212,13 @@ export class QuestionFlow implements Component, Focusable {
       ? `${color.textStrong(title)}${' '.repeat(width - titleWidth - factWidth)}${color.textMuted(statusFact)}`
       : color.textStrong(title))
     lines.push('')
+    // §3.4: without the Fullscreen inspection there is no app-owned seek, so
+    // the decision list names the ONE honest reading path — the plan already
+    // painted above in the native terminal scrollback (the tool card; expand
+    // it with the effective disclosure key). No `V view`, no located claim.
+    if (this.planInspection?.canInspect() !== true) {
+      lines.push(color.textDim(truncateToWidth('Read the plan above in terminal history.', Math.max(1, width), '…')))
+    }
     const rows = this.planDecisionRows()
     this.planCursor = this.planCursorIndex(rows)
     rows.forEach((row, index) => {
