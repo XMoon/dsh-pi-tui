@@ -2068,6 +2068,71 @@ test('a wide Detail whose candidate is cropped by a long verdict publishes no Co
   }
 })
 
+test('a wide Detail wheel onto the candidate row keeps the bar and the activation on one projection', async () => {
+  // Same root cause as the cropped-Confirm case, but through the INPUT paths:
+  // the bar projects at the real detail width, so the scroll/activation
+  // projections must use that same width or the painted Confirm and the
+  // activation disagree about where the candidate line really is.
+  const longReason = 'x'.repeat(200)
+  const facts: WebSettingsFacts = {
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-official',
+      fetchProvider: 'http',
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {},
+      credential: { configured: true, source: 'file' },
+    },
+  }
+  const commits: string[] = []
+  const page = new WebSettingsPage({
+    readFacts: () => facts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => true,
+    commit: async (id, requested) => {
+      commits.push(`${id}:${requested}`)
+      return { kind: 'not-saved', reason: longReason }
+    },
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: (_label, task) => { void task() },
+    done: () => {},
+  })
+  const drainVerdict = async (): Promise<void> => {
+    for (let index = 0; index < 40; index += 1) await Promise.resolve()
+  }
+  try {
+    page.setMaxRows(6) // 5 body rows: the wide Detail column is 64 cells
+    page.render(100)
+    page.handleInput('\r') // provider Detail
+    page.handleInput('\x1b[B') // highlight DeepSeek Search API
+    page.handleInput('\r') // one dispatched write returns the long not-saved verdict
+    await drainVerdict()
+    page.handleInput('\x1b[6~') // PgDn once (a full Detail page)
+    page.render(100)
+    for (let step = 0; step < 2; step += 1) {
+      // Wheel inside the Detail column (x = 40 is past the 34-cell list).
+      page.handleMouse({
+        type: 'wheel', button: 'none', x: 40, y: 1, screenX: 40, screenY: 1,
+        width: 100, height: 6, shift: false, alt: false, ctrl: false, wheelDelta: 1,
+      })
+      page.render(100)
+    }
+    const internals = page as unknown as { detailOffset: number }
+    assert.equal(internals.detailOffset, 7, 'precondition — the Detail is scrolled onto the candidate row')
+    const frame = stripTerminalSequences(page.render(100).join('\n'))
+    assert.match(frame, /Confirm \[Enter\]/u, 'the candidate row really owns the first painted Detail row')
+    assert.equal(page.paintedBarSpans().length, 1)
+    page.activateBarSpan('web:confirm')
+    await drainVerdict()
+    assert.equal(commits.length, 2,
+      'the activation uses the SAME real detail projection the bar painted')
+  } finally {
+    page.dispose()
+  }
+})
+
 test('Billing rows are Not selected and inert when their API provider is not the current route', async () => {
   const facts = (): WebSettingsFacts => ({
     kind: 'ready',
