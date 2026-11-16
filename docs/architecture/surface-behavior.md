@@ -1260,8 +1260,9 @@ neither USER-field deletion nor `overridden=false` is a success criterion.
   is `Not saved` with zero dispatch. A lost settlement is `Outcome unconfirmed`
   and a fresh readback that disagrees with an accepted write is `Unverified`;
   neither offers a blind replay: a manual `Retry save` appears only for a
-  definite `Not saved` settlement, and any retry re-enters the current cascade
-  with a fresh candidate confirmation.
+  definite `Not saved` settlement and re-dispatches the previously confirmed
+  candidate through the current row's revision/generation write check. It does
+  not reopen the L2 confirmation.
   A non-current or disconnected authority offers no candidate and never
   presents a stale On/Off as the current Host state. Retaining a historical row
   is a TUI presentation choice, not a requirement of the official namespace
