@@ -146,6 +146,8 @@ interface Harness {
   readonly settingsDescribeCalls: () => number
   /** Hold the NEXT mutation in flight (deferred settlement). */
   holdSettingsMutation: () => () => void
+  /** Move the controlled descriptor revision without a Host roster change. */
+  bumpSettingsRevision: () => void
   readonly invoke: (name: string, rawInput?: string) => Promise<unknown>
   readonly view: () => string
 }
@@ -155,6 +157,8 @@ function setup(options: {
   readonly rows?: number
   readonly withManager?: boolean
   readonly inheritedAlpha?: boolean
+  /** The alpha entry comes from the base layer with ONE base-owned env key. */
+  readonly inheritedAlphaEnv?: boolean
   readonly settingsService?: SettingsServiceLike
 } = {}): Harness {
   const ctx = new Context()
@@ -190,7 +194,8 @@ function setup(options: {
   let settingsDescribeCalls = 0
   let settingsHold: Promise<void> | undefined
   let settingsRevision = 3
-  const alphaEntry = { transport: 'stdio', command: '/bin/echo', args: [], env: {}, cwd: '', enabled: true }
+  const baseEnv = options.inheritedAlphaEnv === true ? { BASE_KEY: 'base' } : {}
+  const alphaEntry = { transport: 'stdio', command: '/bin/echo', args: [], env: baseEnv, cwd: '', enabled: true }
   const settingsCtx = {
     get: (name: string): unknown => name === 'settings'
       ? {
@@ -202,7 +207,9 @@ function setup(options: {
               value: { servers: { alpha: alphaEntry } },
               base: { servers: options.inheritedAlpha === true
                 ? { alpha: { ...alphaEntry, command: '/bin/true' } }
-                : {} },
+                : options.inheritedAlphaEnv === true
+                  ? { alpha: { ...alphaEntry } }
+                  : {} },
               user: { servers: { alpha: alphaEntry } },
               revision: settingsRevision,
             }]
@@ -363,6 +370,7 @@ function setup(options: {
     },
     settingsMutateCalls,
     settingsDescribeCalls: () => settingsDescribeCalls,
+    bumpSettingsRevision: () => { settingsRevision += 1 },
     holdSettingsMutation: () => {
       let release!: () => void
       settingsHold = new Promise<void>(resolve => { release = resolve })
@@ -1087,5 +1095,287 @@ test('a zero-row discard body refuses `d` and preserves the draft', async () => 
   const page = h.embeddedMcpPage()!
   const controller = (page as unknown as { controller: McpServersController }).controller
   assert.ok(controller.snapshot().editor !== undefined, 'the refused answer keeps the draft')
+  assert.deepEqual(h.settingsMutateCalls, [])
+})
+
+/* ------------------------------------------------------------------------- *
+ * PR-D pointer journeys over the REAL AltScreen event producer.
+ *
+ * Every case drives `vt.sendInput('\x1b[<…M' / '…m')` so the SGR parser, the
+ * Settings Root physical last-row owner, the per-open Controller and the Direct
+ * adapters all run; `settingsPanel().onCellPress/onCellClick` is never the
+ * evidence here.
+ * ------------------------------------------------------------------------- */
+
+/** Send one real SGR left press/release at a 0-based viewport cell. */
+function sgrMouse(h: Harness, kind: 'press' | 'release', col: number, row: number): void {
+  h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}${kind === 'press' ? 'M' : 'm'}`)
+}
+
+/** Send one real SGR wheel at a 0-based viewport cell. */
+function sgrWheel(h: Harness, direction: 'up' | 'down', col: number, row: number): void {
+  h.vt.sendInput(`\x1b[<${direction === 'up' ? 64 : 65};${col + 1};${row + 1}M`)
+}
+
+/** Locate the first painted cell of `label` (0-based). */
+function locateCell(h: Harness, label: string): { readonly row: number; readonly col: number } {
+  const lines = h.vt.getViewport().map(stripTerminalSequences)
+  const row = lines.findIndex(line => line.includes(label))
+  assert.ok(row >= 0, `missing ${label} in the painted frame:\n${lines.join('\n')}`)
+  return { row, col: lines[row]!.indexOf(label) }
+}
+
+/** One complete real SGR click on the painted cell of `label`. */
+async function sgrClick(h: Harness, label: string): Promise<void> {
+  const cell = locateCell(h, label)
+  sgrMouse(h, 'press', cell.col, cell.row)
+  sgrMouse(h, 'release', cell.col, cell.row)
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+}
+
+/** The LIVE per-open controller of the mounted MCP page. */
+function embeddedController(h: Harness): McpServersController {
+  const page = h.embeddedMcpPage()
+  assert.ok(page !== undefined, 'the MCP page must be mounted')
+  return (page as unknown as { controller: McpServersController }).controller
+}
+
+/** The label the frame paints as the focused form row. */
+function focusedLabel(h: Harness): string {
+  const match = /▸ ([^:\n]+):/u.exec(h.view())
+  assert.ok(match !== null, `no focused form row is painted:\n${h.view()}`)
+  return (match[1] ?? '').trim()
+}
+
+test('a real SGR pointer journey completes the MCP search with zero Host writes', async () => {
+  const h = setup()
+  await openMcpPage(h)
+  // 1) The painted `Search [/]` is a real pointer target for the `/` sink.
+  await sgrClick(h, 'Search [/]')
+  assert.match(h.view(), /search: \//u, 'the Search click opened the same search input')
+  // 2) The query itself is keyboard text (never a mouse capability).
+  await press(h.vt, 'a')
+  assert.match(h.view(), /search: \/ a/u)
+  // 3) A filtered result row click ONLY selects: the query stays, no intent runs.
+  const betaRow = h.vt.getViewport().map(stripTerminalSequences).findIndex(line => line.includes('beta'))
+  assert.ok(betaRow >= 0)
+  sgrMouse(h, 'press', 1, betaRow)
+  sgrMouse(h, 'release', 1, betaRow)
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.match(h.view(), /▸ beta/u, 'the clicked result row is the selection')
+  assert.match(h.view(), /search: \/ a/u, 'the search input and query stay open')
+  // 4) `Done [Enter]` finishes through the SAME Enter commit.
+  await sgrClick(h, 'Done [Enter]')
+  assert.doesNotMatch(h.view(), /search: \//u, 'Done returned to the list')
+  assert.match(h.view(), /▸ beta/u)
+  // 5) The existing list/detail journey still works by pointer.
+  await sgrClick(h, 'Enter details')
+  assert.match(h.view(), /Server: beta/u)
+  await sgrClick(h, 'Back [Esc]')
+  assert.match(h.view(), /Search \[\/\]/u)
+  assert.doesNotMatch(h.view(), /Server: beta/u)
+  assert.deepEqual(h.manager.probes, [], 'search never probes')
+  assert.deepEqual(h.manager.restarts, [], 'search never restarts')
+  assert.deepEqual(h.settingsMutateCalls, [], 'search never writes the profile')
+})
+
+test('the Root Cancel [Esc] cancels only the search, and a held Done never survives a query edit', async () => {
+  const h = setup()
+  await openMcpPage(h)
+  await sgrClick(h, 'Search [/]')
+  await press(h.vt, 'b')
+  assert.match(h.view(), /search: \/ b/u)
+  // A held Done press whose query changed before the release never completes.
+  const done = locateCell(h, 'Done [Enter]')
+  sgrMouse(h, 'press', done.col, done.row)
+  h.vt.sendInput('x')
+  sgrMouse(h, 'release', done.col, done.row)
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.match(h.view(), /search: \/ bx/u, 'the stale Done did not finish the search')
+  // The ONE physical Root escape cancels the search only.
+  await sgrClick(h, 'Cancel [Esc]')
+  const after = h.view()
+  assert.doesNotMatch(after, /search: /u, 'the query is cleared')
+  assert.match(after, /Settings · Tools · MCP servers/u, 'the MCP page is still open')
+  assert.match(after, /alpha/u, 'the unfiltered list is back')
+  assert.deepEqual(h.settingsMutateCalls, [])
+  assert.deepEqual(h.manager.probes, [])
+})
+
+test('a held probe press never completes against a replacement Host with the same roster', async () => {
+  const h = setup()
+  await openMcpPage(h)
+  await press(h.vt, '\r') // the detail view hosts `p probe`
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  const probe = locateCell(h, 'p probe')
+  sgrMouse(h, 'press', probe.col, probe.row)
+  // Host B replaces Host A with the SAME names/statuses/count and selection.
+  const managerB = h.replaceManager()
+  await flushOwnedTurns()
+  h.vt.sendInput('r') // observe the new authority before releasing
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  sgrMouse(h, 'release', probe.col, probe.row)
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.deepEqual(h.manager.probes, [], 'the pressed Host A was never probed')
+  assert.deepEqual(managerB.probes, [], 'the stale release never probed Host B')
+  // POSITIVE control: a fresh painted gesture on the SAME span (a different
+  // word cell, because the alt screen treats a same-word rapid repeat as a
+  // double-click word selection) operates B exactly once.
+  const freshProbe = locateCell(h, 'p probe')
+  sgrMouse(h, 'press', freshProbe.col + 2, freshProbe.row)
+  sgrMouse(h, 'release', freshProbe.col + 2, freshProbe.row)
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.deepEqual(managerB.probes, ['alpha'], 'a fresh gesture on B probes exactly once')
+  assert.deepEqual(h.manager.probes, [])
+})
+
+test('a configuration read that moves the revision between press and release refuses the old CRUD press', async () => {
+  const h = setup()
+  await openMcpPage(h)
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  const controller = embeddedController(h)
+  const del = locateCell(h, 'd delete')
+  sgrMouse(h, 'press', del.col, del.row)
+  // The SAME roster re-reads the configuration at a new revision.
+  h.bumpSettingsRevision()
+  h.manager.push()
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  sgrMouse(h, 'release', del.col, del.row)
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.equal(controller.snapshot().configConfirm, undefined,
+    'the press from the previous revision never opened the question')
+  assert.deepEqual(h.settingsMutateCalls, [])
+  // A fresh painted press opens the question at the CURRENT revision (the
+  // `delete` word cell: a same-word rapid repeat is a double-click selection).
+  const freshDel = locateCell(h, 'd delete')
+  sgrMouse(h, 'press', freshDel.col + 2, freshDel.row)
+  sgrMouse(h, 'release', freshDel.col + 2, freshDel.row)
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.equal(controller.snapshot().configConfirm?.kind, 'delete')
+  assert.deepEqual(h.settingsMutateCalls, [], 'the question itself still writes nothing')
+})
+
+test('the mounted editor wheel and Remove stay Client-local and the Save still uses the official namespace once', async () => {
+  const h = setup()
+  await openMcpPage(h)
+  const controller = embeddedController(h)
+  await sgrClick(h, 'a Add')
+  assert.match(h.view(), /Identity/u)
+  // Text is keyboard input; opening and applying the field are pointer cells.
+  await sgrClick(h, 'Name:')
+  for (const char of 'mouse-remove') await h.vt.sendInput(char)
+  await frames(h.vt)
+  await sgrClick(h, 'Enter apply')
+  await sgrClick(h, 'Command:')
+  for (const char of '/bin/sleep') await h.vt.sendInput(char)
+  await frames(h.vt)
+  await sgrClick(h, 'Enter apply')
+  // `+ Add argument` inserts a draft row and focuses it.
+  await sgrClick(h, 'Arguments:')
+  assert.equal(controller.snapshot().editor?.args.length, 1)
+  assert.match(h.view(), /Remove \[Backspace\]/u, 'the focused removable row advertises Remove')
+  // The wheel moves ONLY the form focus: the hidden list selection stays put.
+  const selection = controller.snapshot().selectedName
+  const before = focusedLabel(h)
+  const transportRow = locateCell(h, 'Transport:').row
+  sgrWheel(h, 'down', 2, transportRow)
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  assert.notEqual(focusedLabel(h), before, 'the wheel advanced the form focus')
+  assert.doesNotMatch(h.view(), /Remove \[Backspace\]/u, 'a non-removable row offers no Remove')
+  assert.equal(controller.snapshot().selectedName, selection, 'the hidden list selection never moves')
+  sgrWheel(h, 'up', 2, transportRow)
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  assert.match(h.view(), /Remove \[Backspace\]/u, 'the removable row offers Remove again')
+  // Removing is Client-local: the draft shrinks and no Host write runs.
+  await sgrClick(h, 'Remove [Backspace]')
+  assert.equal(controller.snapshot().editor?.args.length, 0, 'only that draft row is removed')
+  assert.equal(controller.snapshot().editor?.name, 'mouse-remove', 'the rest of the draft is intact')
+  assert.deepEqual(h.settingsMutateCalls, [], 'the local removal writes nothing')
+  // Save + Y still travel through the ONE official settings mutation.
+  await sgrClick(h, 's Save')
+  assert.match(h.view(), /can execute an external command/u)
+  await sgrClick(h, 'Y confirm')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.deepEqual(h.settingsMutateCalls, ['mcp-manager'], 'exactly one official mutation')
+  assert.match(h.view(), /Saved/u)
+})
+
+test('the wide editor wheel moves the form focus without selecting the hidden list row', async () => {
+  const h = setup({ columns: 120, rows: 40 })
+  await openMcpPage(h)
+  const controller = embeddedController(h)
+  await sgrClick(h, 'a Add')
+  const selection = controller.snapshot().selectedName
+  const first = focusedLabel(h)
+  // The LEFT region (where the list column would live) and the RIGHT region
+  // both move the FORM focus only.
+  sgrWheel(h, 'down', 4, locateCell(h, 'Transport:').row)
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  const afterLeft = focusedLabel(h)
+  assert.notEqual(afterLeft, first, 'the left-region wheel advanced the form focus')
+  sgrWheel(h, 'down', 110, locateCell(h, 'Transport:').row)
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  assert.notEqual(focusedLabel(h), afterLeft, 'the right-region wheel advanced the form focus')
+  assert.equal(controller.snapshot().selectedName, selection, 'the hidden list selection never moves')
+})
+
+test('an inherited env key paints no Remove while the user-added key beside it removes alone', async () => {
+  const h = setup({ inheritedAlphaEnv: true })
+  await openMcpPage(h)
+  const controller = embeddedController(h)
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await sgrClick(h, 'e edit')
+  assert.match(h.view(), /Inherited · cannot remove here/u)
+  // Add a user-owned env key through its own row.
+  await sgrClick(h, 'Env:')
+  assert.equal(controller.snapshot().editor?.env.length, 2, 'the draft has the base key plus the new one')
+  // Walk the focus until the BASE-owned key row is focused: no Remove paints.
+  for (let step = 0; step < 20 && !/▸ Env key: BASE_KEY · Inherited/u.test(h.view()); step += 1) {
+    sgrWheel(h, 'down', 2, locateCell(h, 'Transport:').row)
+    await frames(h.vt, 2)
+    await flushOwnedTurns()
+  }
+  assert.match(h.view(), /▸ Env key: BASE_KEY · Inherited/u)
+  assert.doesNotMatch(h.view(), /Remove \[Backspace\]/u, 'the inherited key never offers Remove')
+  // Walk to the user-added key: Remove paints and deletes ONLY it.
+  for (let step = 0; step < 20 && !/▸ Env key: KEY_2/u.test(h.view()); step += 1) {
+    sgrWheel(h, 'down', 2, locateCell(h, 'Transport:').row)
+    await frames(h.vt, 2)
+    await flushOwnedTurns()
+  }
+  assert.match(h.view(), /▸ Env key: KEY_2/u)
+  assert.match(h.view(), /Remove \[Backspace\]/u)
+  await sgrClick(h, 'Remove [Backspace]')
+  const env = controller.snapshot().editor?.env ?? []
+  assert.deepEqual(env.map(entry => entry.key), ['BASE_KEY'], 'only the user-added key was removed')
   assert.deepEqual(h.settingsMutateCalls, [])
 })

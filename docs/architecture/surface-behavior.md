@@ -1622,7 +1622,12 @@ pointer refuse — an uninformed `y` is never accepted. A pointer obeys the same
 modal authority as the keyboard: while a confirmation, discard prompt, restart
 question or search owns the surface, no click can change the draft, and every
 painted Action-Bar segment — including the input bar's `Enter apply` — is a
-pointer target for its own intent. An ACTIVE form input is such a modal too: the
+pointer target for its own intent. A search is the ONE modal whose filtered
+RESULT rows stay pointer-selectable: a result-row click only selects (the query
+and the search stay open and no Host intent runs), a wheel moves that filtered
+selection only, and the search's `Done [Enter]` / the list's `Search [/]` replay
+the SAME Enter and `/` sinks — the single `Cancel [Esc]` is never a second span,
+it is the Root's physical escape. An ACTIVE form input is such a modal too: the
 body cannot be clicked behind it, while its own `Enter apply` / `Esc cancel`
 stay reachable. Every env/header value carries an EXPLICIT storage
 form the user chooses — `Credential reference` (the default, written as the
@@ -1632,7 +1637,11 @@ is the host alone and fails closed to `Unknown target` when the URL cannot be
 parsed, so no path, query or credential can be echoed. Per-key Remove is offered
 for keys the BASE layer does not own only: the official per-key `unset` on a
 base-owned key RESTORES the inherited value (it cannot delete it), so such rows
-state `Inherited · cannot remove here` and a backspace on them is inert.
+state `Inherited · cannot remove here` and a backspace on them is inert. The
+CURRENTLY FOCUSED removable row also paints a complete `Remove [Backspace]`
+segment beside `s Save` (dropped by the layout only when the row cannot hold it
+whole) whose click is the same Backspace intent; an active input, an open
+question or an unsettled save never offers it.
 
 Keys: list `↑/↓` move, `Enter` opens the detail, `a` begins Add from the LIST
 when the Host settings are current and no configuration write is unsettled, `/`
@@ -1676,9 +1685,19 @@ one focus (`Enter` switches to the detail actions, `Esc` back to the list);
 `76–107` paint one compact column with a selected-row summary and an in-page
 detail state; `≤75` paint the list only. `44×8` keeps the selected row, its
 status and the complete `Back [Esc]`; the form keeps the current field, its
-status and `Save`/`Esc` reachable. Mouse targets are the last painted cells
-(a press whose frame repaints never completes), and the wheel scrolls only the
-one current region.
+status and `Save`/`Esc` reachable. Mouse targets are the last painted cells and
+a press whose frame repaints never completes. A wheel reaches only the region
+under the pointer: the list moves its selection, the Detail scrolls itself, the
+form moves its OWN field focus (never the hidden list selection or detail
+offset), and a search wheel moves only the filtered result selection; ANY
+effective wheel — a boundary/no-op one or one a modal ignores — retires the
+pending press. The pointer identity additionally carries the page revision and
+the READ-ONLY Host roster / configuration-read epochs, so a press recorded
+before a Host replacement (even one with identical names, statuses and row
+count) or before a configuration re-read is refused until the next frame
+paints. That is UI anti-replay only: the Host manager generation, the official
+settings revision CAS and the write terminal settlement remain the sole write
+authority.
 
 Authority: `src/app/command/mcp-servers.ts` (`McpServersController`),
 `src/tui/panels/mcp-servers-page.ts`, the `McpServerPort`,
