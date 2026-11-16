@@ -3049,15 +3049,18 @@ test('PO-4C C-L1-04: an unsupported committed block still fails closed instead o
   }
 })
 
-test('PO-4C C-L1-05: a mixed turn drops a held pre-mix image event and everything committed after it', async () => {
+test('PO-4C C-L1-05: a mixed turn aborts a held image read, hangs no settlement and is never a content failure', async () => {
   const view = promptView()
   await view.attach()
-  view.access.storedImages.set('sha256:race', { bytes: IMAGE_BYTES, mediaType: 'image/png' })
   const readStarted = deferred<void>()
-  const readGate = deferred<AcpStoredImage>()
-  view.access.imageReadImpl = async () => {
+  // A signal-respecting official Store read: it only ends because the mixing
+  // aborts this flight's output IO (a read that ignored the signal would be an
+  // upstream contract violation, not a View behaviour).
+  view.access.imageReadImpl = async (_ref, signal) => {
     readStarted.resolve()
-    return await readGate.promise
+    return await new Promise<AcpStoredImage>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+    })
   }
   const attempt = view.start()
   const request = view.access.promptCalls[0]!
@@ -3068,14 +3071,18 @@ test('PO-4C C-L1-05: a mixed turn drops a held pre-mix image event and everythin
     imageBlock('sha256:race'),
   ]))
   await readStarted.promise
-  // A foreign message claimed into the SAME turn proves MIXED while the
-  // pre-mix event's image read is still running: its not-yet-sent chunks are
-  // ours to drop, and nothing committed afterwards may be projected either.
+  // A foreign message claimed into the SAME turn proves MIXED while the pre-mix
+  // event's image read is still running: the read is abandoned, the queued
+  // output is dropped, and turn/end can still settle promptly.
   view.claim('m-foreign', 1, 'tui-steer')
   view.commit('assistant/message', assistantData(1, 'm-after-mix', [{ type: 'text', text: 'after mix' }]))
+  // The real Host terminal arrives while the abandoned read unwinds: the tail
+  // must resolve (never hold the settlement) and the MIXED class must win.
   view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
-  readGate.resolve({ data: IMAGE_BYTES, mediaType: 'image/png' })
-  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_MIXED_TURN'))
+  const error = await attempt.then(() => undefined, (reason: unknown) => reason)
+  assert.ok(isPromptError('LOCAL_ACP_PROMPT_MIXED_TURN')(error), 'the mixed settlement (not the aborted read) classifies the request')
+  assert.equal(isPromptError('LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED')(error), false,
+    'an abort-induced read rejection never masquerades as a content-read failure')
   assert.deepEqual(view.notifications, [], 'a mixed turn hands none of its pending output to the transport')
   assert.equal(JSON.stringify(view.notifications).includes('after mix'), false)
 })
