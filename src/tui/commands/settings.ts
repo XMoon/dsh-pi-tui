@@ -1281,6 +1281,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           const controller = new HostNumericSettingsController<ShellExecutionSettings>({
             port,
             fields,
+            // The served executor row is part of the captured read's identity:
+            // two namespaces can carry the same revision number.
+            valueIdentity: value => value.executor,
             requestRender,
             onAuthoritativeChange,
             runOwned: runOwnedTask,
@@ -2127,6 +2130,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       edit: {
         field: 'session-log-upload',
         primary: 'persisted',
+        // The L2 confirmation frame must paint this warning in full; the panel
+        // refuses both keyboard and pointer Confirm otherwise.
+        confirmationWarning: 'Risk: May send chat content to DeepSeek API',
+        // A dispatched write with a lost/unknown settlement needs a fresh
+        // current read, never a blind replay.
+        retryable: false,
         ...(ready ? { revision: read.revision, generation: read.generation } : {}),
         options: editable
           ? [
@@ -2202,9 +2211,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     if (value === 'Reset') return { outcome: 'verified' }
     const expected = value === 'On'
     if (readback.effective.enabled !== expected) {
+      // An accepted official write whose fresh readback differs cannot be
+      // called a refusal: another writer may have overwritten it after the
+      // commit. It is an unverified accepted settlement, not "Not saved".
       return {
-        outcome: 'not-saved',
-        reason: `the write reported success, but the authoritative setting reads ${readback.effective.enabled ? 'On' : 'Off'}`,
+        outcome: 'unverified',
+        reason: `the accepted write has no matching current readback (reads ${readback.effective.enabled ? 'On' : 'Off'}); another writer may have changed it — refresh to review`,
       }
     }
     return { outcome: 'verified' }

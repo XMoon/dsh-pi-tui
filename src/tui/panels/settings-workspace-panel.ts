@@ -198,6 +198,12 @@ export interface SettingsWorkspaceEdit {
   /** The opaque Host generation this candidate source was read at, for writers
    *  that must also refuse a REPLACED Host authority (Session log upload). */
   readonly generation?: object
+  /** A risk statement that must be FULLY painted in the L2 confirmation frame
+   *  before a Confirm may dispatch (keyboard and pointer alike). */
+  readonly confirmationWarning?: string
+  /** Whether a non-verified settlement offers `Retry save` (default true).
+   *  A dispatched-unknown write that requires a fresh current read sets false. */
+  readonly retryable?: boolean
 }
 
 /**
@@ -472,6 +478,10 @@ type SettingsWorkspaceEditPhase =
       readonly field: SettingsWorkspaceWritableField
       readonly candidate: string
       readonly index: number
+      /** The exact Host revision/generation captured when L2 opened. Candidate
+       *  movement never changes it; Confirm dispatches only while the current
+       *  row still carries the same fence. */
+      readonly fence: { readonly revision?: number; readonly generation?: object }
       readonly registrationToken?: number
     }
   | {
@@ -728,6 +738,8 @@ interface DetailProjection {
   readonly optionRegion?: DetailRegionProjection
   /** Whether this frame paints the selected candidate's identity-bearing head. */
   readonly confirmCandidateVisible: boolean
+  /** Whether the row's confirmation warning is FULLY visible in this frame. */
+  readonly confirmationWarningVisible: boolean
 }
 
 /** The TEN category ids that always exist, in their visible order. `extensions`
@@ -1125,6 +1137,7 @@ export class SettingsWorkspacePanel implements Component {
   /** Facts from the current painted projection, used to grant choice actions. */
   private paintedChoiceCandidateVisible = false
   private paintedEnterConfirm = false
+  private paintedConfirmationWarning = false
   private paintedChoiceNavigation = false
   private paintedChoiceFactScroll = false
   private paintedRevision = -1
@@ -1470,6 +1483,7 @@ export class SettingsWorkspacePanel implements Component {
         field: phase.field,
         candidate: phase.candidate,
         index,
+        fence: phase.fence,
         ...phase.registrationToken === undefined ? {} : { registrationToken: phase.registrationToken },
       }
     }
@@ -1730,6 +1744,7 @@ export class SettingsWorkspacePanel implements Component {
     this.paintedFocus = this.focus
     this.paintedChoiceCandidateVisible = false
     this.paintedEnterConfirm = false
+    this.paintedConfirmationWarning = false
     this.paintedChoiceNavigation = false
     this.paintedChoiceFactScroll = false
     // C2-R5: the typed deeplink is consumed on THIS first real frame, BEFORE the
@@ -2728,6 +2743,7 @@ export class SettingsWorkspacePanel implements Component {
       const detail = this.detailLines(pane.width, contentRows)
       detailProjection = detail
       this.paintedChoiceCandidateVisible = detail.confirmCandidateVisible
+      this.paintedConfirmationWarning = detail.confirmationWarningVisible
       const buttonRow = contentTop + Math.max(0, contentRows - 1)
       for (const painted of detail.buttons) {
         itemHits.push({
@@ -2848,6 +2864,7 @@ export class SettingsWorkspacePanel implements Component {
     }
     const detail = this.detailLines(width, viewport)
     this.paintedChoiceCandidateVisible = detail.confirmCandidateVisible
+    this.paintedConfirmationWarning = detail.confirmationWarningVisible
     panes.detail = {
       x: 0,
       width,
@@ -3015,7 +3032,7 @@ export class SettingsWorkspacePanel implements Component {
       const decorated = painted.text === '' ? noteInk : noteInk === '' ? painted.text : `${painted.text}  ${noteInk}`
       lines.push(fit(visibleWidth(decorated) <= width ? decorated : painted.text, width))
     }
-    return { lines, content, viewport: scrollViewport, buttons: painted.painted, optionRows: [], confirmCandidateVisible: false }
+    return { lines, content, viewport: scrollViewport, buttons: painted.painted, optionRows: [], confirmCandidateVisible: false, confirmationWarningVisible: false }
   }
 
   /** Compose facts, optional heading, candidate viewport and pinned buttons.
@@ -3024,6 +3041,16 @@ export class SettingsWorkspacePanel implements Component {
     const actionRows = viewport >= 2 ? 1 : 0
     const scrollableRows = Math.max(0, viewport - actionRows)
     const options = row.edit?.options ?? []
+    // The row's own risk statement is a FIRST-CLASS confirmation fact, not a
+    // Detail-only sentence: it is reserved above the facts/candidates and only
+    // a completely painted warning admits Confirm.
+    const warning = row.edit?.confirmationWarning
+    const warningLines = warning === undefined
+      ? []
+      : wrapTextWithAnsi(color.warning(escapedPhysicalLine(warning)), Math.max(1, width))
+    const visibleWarning = warningLines.slice(0, scrollableRows)
+    const warningVisible = warning === undefined || warningLines.length <= scrollableRows
+    const contentRows = Math.max(0, scrollableRows - visibleWarning.length)
     const blocks = this.choiceBlocks(row, width)
     const flattened = blocks.flat()
     const phase = this.editPhase
@@ -3031,9 +3058,9 @@ export class SettingsWorkspacePanel implements Component {
     const identityRows = selectedOption === undefined
       ? 0
       : wrapTextWithAnsi(escapedPhysicalLine(selectedOption.value), Math.max(1, width - 2)).length
-    let factRows = scrollableRows >= 6 ? 3 : scrollableRows >= 4 ? 2 : scrollableRows >= 2 ? 1 : 0
-    let headingRows = scrollableRows - factRows >= 2 ? 1 : 0
-    let optionViewport = Math.max(0, scrollableRows - factRows - headingRows)
+    let factRows = contentRows >= 6 ? 3 : contentRows >= 4 ? 2 : contentRows >= 2 ? 1 : 0
+    let headingRows = contentRows - factRows >= 2 ? 1 : 0
+    let optionViewport = Math.max(0, contentRows - factRows - headingRows)
     if (identityRows > optionViewport) {
       // Keep the original split by default. A long selected identity first
       // reclaims the optional heading, then facts only down to the old Value row;
@@ -3041,10 +3068,10 @@ export class SettingsWorkspacePanel implements Component {
       const previousFactRows = this.paintedPanes.detail?.factRegion?.rows ?? 0
       const previousOptionRows = this.paintedPanes.detail?.optionRegion?.rows ?? 0
       headingRows = 0
-      optionViewport = Math.max(0, scrollableRows - factRows)
+      optionViewport = Math.max(0, contentRows - factRows)
       if (identityRows > optionViewport && factRows > 1) {
-        factRows = Math.max(1, scrollableRows - identityRows)
-        optionViewport = Math.max(0, scrollableRows - factRows)
+        factRows = Math.max(1, contentRows - identityRows)
+        optionViewport = Math.max(0, contentRows - factRows)
       }
       if (previousFactRows !== factRows || previousOptionRows !== optionViewport) this.detailOffset = 0
     }
@@ -3055,7 +3082,7 @@ export class SettingsWorkspacePanel implements Component {
     for (let i = 0; i < factRows; i += 1) visibleFacts.push(factContent[this.detailOffset + i] ?? '')
 
     const optionOffset = this.rebaseChoice(blocks, optionViewport, width)
-    const lines = [...visibleFacts]
+    const lines = [...visibleWarning, ...visibleFacts]
     if (headingRows === 1) lines.push(color.textStrong('Choose value'))
     for (let i = 0; i < optionViewport; i += 1) lines.push(flattened[optionOffset + i] ?? '')
 
@@ -3069,6 +3096,7 @@ export class SettingsWorkspacePanel implements Component {
       && selectedStart >= optionOffset
       && selectedStart + identityRows <= optionOffset + optionViewport
     const confirmActionVisible = confirmCandidateVisible
+      && warningVisible
       && this.paintedViewport >= 3
       && renderActionBarRow(
         [CHOICE_CONFIRM_HINT, CHOICE_BACK_HINT],
@@ -3087,7 +3115,7 @@ export class SettingsWorkspacePanel implements Component {
       const option = options[index]
       if (option !== undefined) {
         for (let line = Math.max(start, optionOffset); line < Math.min(end, optionOffset + optionViewport); line += 1) {
-          optionRows.push({ value: option.value, line: factRows + headingRows + line - optionOffset, endCol: width })
+          optionRows.push({ value: option.value, line: visibleWarning.length + factRows + headingRows + line - optionOffset, endCol: width })
         }
       }
       start = end
@@ -3099,16 +3127,17 @@ export class SettingsWorkspacePanel implements Component {
       buttons: painted.painted,
       optionRows,
       ...(factRows === 0 ? {} : {
-        factRegion: { lineStart: 0, rows: factRows, maxOffset: factMaxOffset },
+        factRegion: { lineStart: visibleWarning.length, rows: factRows, maxOffset: factMaxOffset },
       }),
       ...(optionViewport === 0 ? {} : {
         optionRegion: {
-          lineStart: factRows + headingRows,
+          lineStart: visibleWarning.length + factRows + headingRows,
           rows: optionViewport,
           maxOffset: Math.max(0, flattened.length - optionViewport),
         },
       }),
       confirmCandidateVisible,
+      confirmationWarningVisible: warningVisible,
     }
   }
 
@@ -3210,7 +3239,8 @@ export class SettingsWorkspacePanel implements Component {
     const edit = row.edit
     if (edit !== undefined && edit.options.length > 0 && phase.kind !== 'pending') {
       buttons.push({ verb: 'change', text: 'Change…', id: row.id })
-      if (phase.kind === 'settled' && phase.field === edit.field && phase.outcome !== 'verified') {
+      if (phase.kind === 'settled' && phase.field === edit.field && phase.outcome !== 'verified'
+        && edit.retryable !== false) {
         buttons.push({ verb: 'retry', text: 'Retry save', id: phase.attempted })
       }
     }
@@ -4915,6 +4945,7 @@ export class SettingsWorkspacePanel implements Component {
       field: phase.field,
       candidate: option.value,
       index: next,
+      fence: phase.fence,
       ...phase.registrationToken === undefined ? {} : { registrationToken: phase.registrationToken },
     }
     // The candidate change is a state version: a press recorded against the
@@ -4944,6 +4975,10 @@ export class SettingsWorkspacePanel implements Component {
       field: fresh.edit.field,
       candidate: options[index]!.value,
       index,
+      // Capture the exact Host fence ONCE. Candidate movement and any later
+      // snapshot refresh never rebase it; Confirm compares it with the row it
+      // is about to dispatch for.
+      fence: { revision: fresh.edit.revision, generation: fresh.edit.generation },
       // The registration the choice was opened for: an HMR replacement keeps
       // the same field string, so this token is its write identity.
       ...fresh.extensionRegistrationToken === undefined ? {} : { registrationToken: fresh.extensionRegistrationToken },
@@ -4984,6 +5019,18 @@ export class SettingsWorkspacePanel implements Component {
       return
     }
     if (!this.paintedEnterConfirm) return
+    if (edit.confirmationWarning !== undefined && !this.paintedConfirmationWarning) return
+    // The L2 capture is the decision fence. A refresh that changed the row while
+    // the SAME painted choice stays open must not silently rebase the CAS.
+    if (phase.fence.revision !== undefined || phase.fence.generation !== undefined) {
+      if (edit.revision !== phase.fence.revision || !Object.is(edit.generation, phase.fence.generation)) {
+        this.settle(phase.field, phase.candidate, {
+          outcome: 'not-saved',
+          reason: 'Host settings changed since this choice was opened; refresh to review',
+        }, phase.registrationToken)
+        return
+      }
+    }
     const option = edit.options.find(candidate => candidate.value === phase.candidate)
     if (option === undefined) {
       // The source vanished between the paint and the confirm: report it instead of
@@ -5001,7 +5048,7 @@ export class SettingsWorkspacePanel implements Component {
       }, phase.registrationToken)
       return
     }
-    this.dispatch(phase.field, phase.candidate, edit.revision, edit.generation, phase.registrationToken)
+    this.dispatch(phase.field, phase.candidate, phase.fence.revision, phase.fence.generation, phase.registrationToken)
   }
 
   /** `[Retry save]`: re-dispatch the FAILED attempt's value, re-proving that its

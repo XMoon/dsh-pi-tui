@@ -263,6 +263,10 @@ interface HarnessOptions {
   sessionLog?: { readonly enabled: boolean; readonly inherited?: boolean; readonly unreadable?: boolean }
   /** Make the session-log mutation reject with this reason. */
   sessionLogWriteFailure?: string
+  /** Return `outcome-unconfirmed` after dispatch (a lost ACK). */
+  sessionLogUnconfirmed?: boolean
+  /** Accept the write but do NOT apply it (a fresh readback disagrees). */
+  sessionLogIgnoreWrite?: boolean
   /** The icon style the REAL `TuiApp` starts with (the composition's persisted
    *  read). Omitted = the app's own default. */
   iconStyle?: 'emoji' | 'symbols' | 'minimal'
@@ -468,6 +472,10 @@ interface Harness {
   readonly shellExecutionWrites: () => readonly HostSectionWrite[]
   /** FR5-B: every session-log field write, in dispatch order. */
   readonly sessionLogWrites: () => readonly HostSectionWrite[]
+  /** Advance the fake session-log revision without a write (an external edit). */
+  readonly advanceSessionLogRevision: () => void
+  /** Replace the fake session-log Host generation while keeping its revision. */
+  readonly replaceSessionLogGeneration: () => void
   /** FR5-B: the LIVE fake section values the ports currently serve. */
   readonly hostSections: () => {
     readonly agentLoop: { readonly maxParallelToolCalls: number; readonly inherited: number } | undefined
@@ -586,7 +594,7 @@ function setup(options: HarnessOptions = {}): Harness {
     ...(options.shellExecution.unreadable === true ? { unreadable: true } : {}),
   }
   const shellExecutionWrites: HostSectionWrite[] = []
-  const sessionLogGeneration = {}
+  let sessionLogGeneration: object = {}
   let sessionLogRevision = 1
   let sessionLogValue: { enabled: boolean; inherited: boolean; unreadable?: boolean } | undefined =
     options.sessionLog === undefined ? undefined : {
@@ -1165,12 +1173,17 @@ function setup(options: HarnessOptions = {}): Harness {
           if (options.sessionLogWriteFailure !== undefined) {
             return { kind: 'rejected' as const, reason: options.sessionLogWriteFailure }
           }
+          if (options.sessionLogUnconfirmed === true) {
+            return { kind: 'outcome-unconfirmed' as const, reason: 'transport lost after dispatch' }
+          }
           sessionLogWrites.push(edit.kind === 'reset'
             ? { field: 'enabled', op: 'reset' }
             : { field: 'enabled', op: 'set', value: edit.value })
-          sessionLogValue = {
-            ...sessionLogValue,
-            enabled: edit.kind === 'reset' ? sessionLogValue.inherited : edit.value,
+          if (options.sessionLogIgnoreWrite !== true) {
+            sessionLogValue = {
+              ...sessionLogValue,
+              enabled: edit.kind === 'reset' ? sessionLogValue.inherited : edit.value,
+            }
           }
           sessionLogRevision += 1
           return { kind: 'accepted' as const }
@@ -1300,6 +1313,8 @@ function setup(options: HarnessOptions = {}): Harness {
     agentLoopWrites: () => agentLoopWrites,
     shellExecutionWrites: () => shellExecutionWrites,
     sessionLogWrites: () => sessionLogWrites,
+    advanceSessionLogRevision: () => { sessionLogRevision += 1 },
+    replaceSessionLogGeneration: () => { sessionLogGeneration = {} },
     hostSections: () => ({
       agentLoop: agentLoopValue === undefined ? undefined : {
         maxParallelToolCalls: agentLoopValue.maxParallelToolCalls,
@@ -2598,6 +2613,8 @@ test('Session log upload paints its upload risk and offers On/Off/Reset; Reset m
   assert.match(detail, /Session data can include conversation content/u)
 
   await key(h, '\r') // L1 -> the scalar candidate choice
+  assert.match(h.view(), /Risk: May send chat content to DeepSeek API/u,
+    'the L2 confirmation frame paints the upload risk in full')
   assert.match(h.view(), /> On/u)
   await highlightCandidate(h, 'Off')
   await key(h, '\r')
@@ -2617,6 +2634,57 @@ test('Session log upload paints its upload risk and offers On/Off/Reset; Reset m
   assert.match(after, /Verified/u)
   assert.match(after, /On/u)
   assert.doesNotMatch(after, /Off[^\n]*safe|safe[^\n]*Off/iu, 'Reset is never presented as a safety guarantee')
+  h.dispose()
+})
+
+test('Session log unknown/mismatched settlements never offer a blind Retry', async () => {
+  // A dispatched write whose ACK is lost is NOT a retryable refusal.
+  const unknown = setup({ columns: 200, rows: 44, sessionLog: { enabled: true }, sessionLogUnconfirmed: true })
+  await unknown.open('General')
+  await key(unknown, '\r')
+  await highlightRow(unknown, 'Session log upload')
+  await key(unknown, '\r')
+  await highlightCandidate(unknown, 'Off')
+  await key(unknown, '\r')
+  await settle(unknown, 12)
+  const unknownFrame = unknown.view()
+  assert.match(unknownFrame, /Outcome unconfirmed/u, 'the lost settlement is named explicitly')
+  assert.doesNotMatch(unknownFrame, /Retry save/u, 'a blind replay is not offered')
+  assert.equal(unknown.sessionLogWrites().length, 0, 'the fake did not apply the unconfirmed write')
+  unknown.dispose()
+
+  // An accepted official mutation whose fresh readback disagrees is not a
+  // definite refusal: it is an unverified accepted settlement.
+  const mismatched = setup({ columns: 200, rows: 44, sessionLog: { enabled: true }, sessionLogIgnoreWrite: true })
+  await mismatched.open('General')
+  await key(mismatched, '\r')
+  await highlightRow(mismatched, 'Session log upload')
+  await key(mismatched, '\r')
+  await highlightCandidate(mismatched, 'Off')
+  await key(mismatched, '\r')
+  await settle(mismatched, 12)
+  const mismatchedFrame = mismatched.view()
+  assert.match(mismatchedFrame, /Commit accepted · verification unavailable/u,
+    'the accepted but disagreeing readback is Unverified')
+  assert.doesNotMatch(mismatchedFrame, /Retry save/u)
+  assert.equal(mismatched.sessionLogWrites().length, 1, 'the official write was dispatched once')
+  assert.equal(mismatched.hostSections().sessionLog?.enabled, true)
+  mismatched.dispose()
+})
+
+test('the Session log Confirm button is pointer-complete and requires the same painted risk frame', async () => {
+  const h = setup({ columns: 200, rows: 44, sessionLog: { enabled: true } })
+  await h.open('General')
+  await key(h, '\r')
+  await highlightRow(h, 'Session log upload')
+  await key(h, '\r') // L2 choice
+  await highlightCandidate(h, 'Off')
+  const frame = h.view()
+  assert.match(frame, /Risk: May send chat content to DeepSeek API/u)
+  await clickPainted(h, 'Confirm')
+  await settle(h, 12)
+  assert.deepEqual(h.sessionLogWrites(), [{ field: 'enabled', op: 'set', value: false }])
+  assert.match(h.view(), /Verified/u)
   h.dispose()
 })
 

@@ -1211,6 +1211,12 @@ the Root keeps the physical Action Bar and Esc, and a painted row/field/Reset/
 Apply/Save/Back control delegates to the SAME page/controller path a key press
 uses. Both pages paint the current effective value, its `Inherited`/`Overridden`
 relation to the base, an explicit `[Reset]` per field and `Status: …` feedback.
+The fixed status line reports `Ready`, `Unavailable`, `Unreadable` or
+`Last-known · read-only` from the captured read and the live section; it never
+says Ready for a missing, unreadable or superseded authority. A field's
+`[Reset]` action is painted as a complete segment and its pointer span is
+derived from that same painted line; a width that cannot host the whole word
+drops the Reset target entirely.
 Numeric validation is a safe positive integer (`Number.isSafeInteger(n) && n>=1`)
 for every field; an empty field stages the official Reset, invalid text keeps
 the draft and never dispatches. Save sends ONE exact-revision/revision-checked
@@ -1240,6 +1246,14 @@ neither USER-field deletion nor `overridden=false` is a success criterion.
   `On` carries the explicit risk (session-log data, possibly conversation
   content, is sent with requests to the official DeepSeek API), `Off` is a real
   saved value, and `Reset` is the official `unset` whose readback MAY be `On`.
+  The L2 confirmation frame must paint the whole risk sentence before either
+  keyboard or pointer Confirm is admitted; the CAS fence captured when L2
+  opened (Host generation + exact revision) is never rebased by a later
+  refresh, so a changed same-Host revision or a same-revision Host replacement
+  is `Not saved` with zero dispatch. A lost settlement is `Outcome unconfirmed`
+  and a fresh readback that disagrees with an accepted write is `Unverified`;
+  neither offers a blind `Retry save` for this row, which requires an explicit
+  Refresh and a new confirmation.
   A stale or disconnected authority keeps the row and its risk text but shows
   `Current unknown`, offers no candidate and never presents an Off as a safety
   guarantee.

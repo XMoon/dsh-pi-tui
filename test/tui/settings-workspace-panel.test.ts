@@ -20,6 +20,7 @@ import {
   type SettingsWorkspaceCommitOutcome,
   type SettingsWorkspaceCommitRequest,
   type SettingsWorkspacePanelIntents,
+  type SettingsWorkspaceRow,
   type SettingsWorkspaceSnapshot,
 } from '../../src/tui/panels/settings-workspace-panel.ts'
 import type { AboutStatusController } from '../../src/app/command/about-status.ts'
@@ -3569,4 +3570,105 @@ test('read-only / writable / specialist rows own their own verb and a row hit ac
   assert.equal(pointer.webBuilds(), 0, 'a row hit only selects; it never mounts the page')
   assert.equal(pointer.commits(), 0, 'a row hit writes nothing')
   assert.equal(pointer.closes(), 0, 'a row hit never closes the workspace')
+})
+
+// ── FR5-B: the L2 CAS fence and the confirmation warning ──────────────────
+
+function scalarSnapshot(options: {
+  readonly revision: number
+  readonly generation: object
+  readonly warning?: string
+}): SettingsWorkspaceSnapshot {
+  const row: SettingsWorkspaceRow = {
+    id: 'visual-tools',
+    category: 'tools',
+    label: 'Visual tools',
+    summary: 'Off',
+    value: 'Off',
+    scope: 'Host profile',
+    freshness: 'ready',
+    description: 'the scalar test row',
+    edit: {
+      field: 'visual-tools',
+      primary: 'persisted',
+      revision: options.revision,
+      generation: options.generation,
+      runtime: 'configured Off',
+      persisted: 'Off',
+      options: [
+        { value: 'Off', label: 'Off', available: true, current: true },
+        { value: 'On', label: 'On', available: true, current: false },
+      ],
+      ...(options.warning === undefined ? {} : { confirmationWarning: options.warning }),
+    },
+  }
+  return { ...SNAPSHOT, rows: [row] }
+}
+
+function openScalarChoice(h: ReturnType<typeof setup>): void {
+  plain(h)
+  walkTo(h, 'tools')
+  h.panel.handleInput('\r') // categories -> rows
+  h.panel.handleInput('\r') // rows -> the L2 choice
+  assert.match(plain(h), /Choose value/u)
+}
+
+test('a same-Host revision change while L2 stays painted refuses Confirm with zero dispatch', () => {
+  let revision = 5
+  const generation = {}
+  const h = setup({ columns: 120, rows: 40, snapshot: () => scalarSnapshot({ revision, generation }) })
+  openScalarChoice(h)
+  revision = 6
+  ;(h.panel as unknown as { refresh(requestRender?: boolean): void }).refresh(false)
+  plain(h)
+  h.panel.handleInput('\r')
+  assert.equal(h.commits(), 0, 'the rebased row never dispatches')
+  assert.match(plain(h), /Not saved/u, 'the stale fence is reported')
+  assert.match(plain(h), /Host settings changed since/u)
+})
+
+test('a replaced Host generation with the SAME revision refuses Confirm with zero dispatch', () => {
+  let generation: object = {}
+  const h = setup({ columns: 120, rows: 40, snapshot: () => scalarSnapshot({ revision: 5, generation }) })
+  openScalarChoice(h)
+  generation = {}
+  ;(h.panel as unknown as { refresh(requestRender?: boolean): void }).refresh(false)
+  plain(h)
+  h.panel.handleInput('\r')
+  assert.equal(h.commits(), 0, 'a same-revision Host replacement is not the captured fence')
+  assert.match(plain(h), /Not saved/u)
+})
+
+test('the confirmation warning is painted in L2 and a short frame without it cannot Confirm', () => {
+  const warning = 'Risk: May send chat content to DeepSeek API'
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    snapshot: () => scalarSnapshot({ revision: 1, generation: {}, warning }),
+  })
+  openScalarChoice(h)
+  const frame = plain(h)
+  assert.match(frame, /Risk: May send chat content to DeepSeek API/u, 'the L2 choice paints the risk')
+  const lines = frame.split('\n')
+  const confirmRow = lines.findIndex(line => line.includes('Confirm'))
+  assert.ok(confirmRow >= 0, `the pointer Confirm is painted in the same warning frame:\n${frame}`)
+  const confirmColumn = lines[confirmRow]!.indexOf('Confirm')
+  h.panel.onCellPress(confirmColumn, confirmRow)
+  h.panel.onCellClick(confirmColumn, confirmRow)
+  assert.equal(h.commits(), 1, 'a fully painted warning admits the pointer Confirm')
+
+  const longWarning = `Risk: ${'sensitive-session-content '.repeat(80)}`
+  const short = setup({
+    columns: 120,
+    rows: 8,
+    snapshot: () => scalarSnapshot({ revision: 1, generation: {}, warning: longWarning }),
+  })
+  plain(short)
+  walkTo(short, 'tools')
+  short.panel.handleInput('\r') // categories -> rows
+  short.panel.handleInput('\r') // rows -> the L2 choice
+  assert.match(plain(short), /Risk:/u, 'the warning starts painting')
+  assert.doesNotMatch(plain(short), /\bConfirm\b/u, 'no pointer Confirm is painted without the full warning')
+  short.panel.handleInput('\r')
+  assert.equal(short.commits(), 0, 'a warning that cannot be painted in full refuses the Confirm')
 })
