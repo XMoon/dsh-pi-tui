@@ -380,8 +380,17 @@ async function inputScene(context) {
     const from = sdk.updates.length
     await assert.rejects(sdk.request(acp.methods.agent.session.prompt, {
       sessionId, prompt: [{ type: 'image', mimeType: 'image/jpeg', data: small.toString('base64') }],
-    }), error => error instanceof acp.RequestError && error.data?.code === 'LOCAL_ACP_PROMPT_HOST_REJECTED'
-      && error.data?.hostCode === 'IMAGE_TYPE_MISMATCH', 'MIME mismatch reaches the real Host admission')
+    }), error => {
+      requireFact(error instanceof acp.RequestError, 'MIME mismatch returns an official SDK RequestError')
+      requireFact(error.data?.code === 'LOCAL_ACP_PROMPT_HOST_REJECTED',
+        `MIME mismatch reaches Host admission (ACP code ${String(error.data?.code)})`)
+      // The official Session Controller maps AttachmentError into its RemoteError
+      // taxonomy before the ACP View preserves the Host code on the wire.
+      requireFact(error.data?.hostCode === 'session/attachment-invalid',
+        `MIME mismatch preserves the Session Controller code (${String(error.data?.hostCode)})`)
+      context.trace('acp-sdk/negative-admission', { sessionId, acpCode: error.data.code, hostCode: error.data.hostCode })
+      return true
+    })
     requireFact(sdk.finishWindow(from, sdk.updates.length, sessionId).length === 0, 'rejected admission emits no content')
     requireFact(hostSessionEvents(context.dshHome, sessionId).slice(negativeStart).every(event => event.type !== 'user/message'), 'Host rejection precedes every durable user/message')
     const healthMarker = `sdk-input-health-${hash(randomBytes(16))}`
