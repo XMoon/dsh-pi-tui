@@ -1913,7 +1913,7 @@ test('the delegated Confirm re-proves the LIVE authority and revokes a stale ges
     run: (_label, task) => { void task() },
     done: () => {},
   })
-  const settle = async (): Promise<void> => {
+  const drainCommitSettlement = async (): Promise<void> => {
     for (let index = 0; index < 20; index += 1) await Promise.resolve()
   }
   try {
@@ -1925,13 +1925,13 @@ test('the delegated Confirm re-proves the LIVE authority and revokes a stale ges
     // The live candidate the authority holds is already current; confirming it
     // still joins the command owner's FIFO exactly once.
     page.activateBarSpan('web:confirm')
-    await settle()
+    await drainCommitSettlement()
     assert.deepEqual(commits, ['web-search-provider:deepseek-official'],
       'the delegated Confirm runs the original confirmSelected sink exactly once')
     // A DISPATCHED write owns the row: the same target cannot enqueue a second
     // intent while the phase is saving.
     page.activateBarSpan('web:confirm')
-    await settle()
+    await drainCommitSettlement()
     assert.equal(commits.length, 1, 'no second intent is enqueued while saving')
 
     // The authority becomes pending WITHOUT any page state change: the painted
@@ -1941,7 +1941,7 @@ test('the delegated Confirm re-proves the LIVE authority and revokes a stale ges
     facts = { kind: 'pending' }
     assert.equal(page.gestureIdentity(), before, 'precondition — the page identity is unchanged')
     page.activateBarSpan('web:confirm')
-    await settle()
+    await drainCommitSettlement()
     assert.equal(commits.length, 1, 'a pending authority dispatches nothing')
 
     // An externally CUSTOM route removes every official candidate.
@@ -1956,25 +1956,25 @@ test('the delegated Confirm re-proves the LIVE authority and revokes a stale ges
       },
     }
     page.activateBarSpan('web:confirm')
-    await settle()
+    await drainCommitSettlement()
     assert.equal(commits.length, 1, 'a custom route dispatches nothing')
 
     // A wheel starts a new semantic frame even when it scrolls nothing.
     page.activateBarSpan('web:confirm')
-    await settle()
+    await drainCommitSettlement()
     assert.equal(commits.length, 1, 'a stale target stays inert')
     page.handleMouse({
       type: 'wheel', button: 'none', x: 1, y: 1, screenX: 1, screenY: 1,
       width: 140, height: 20, shift: false, alt: false, ctrl: false, wheelDelta: 1,
     })
     page.activateBarSpan('web:confirm')
-    await settle()
+    await drainCommitSettlement()
     assert.equal(commits.length, 1, 'a wheel revokes the pending Confirm target')
   } finally {
     page.dispose()
   }
   page.activateBarSpan('web:confirm')
-  await settle()
+  await drainCommitSettlement()
   assert.equal(commits.length, 1, 'a disposed page dispatches nothing')
 })
 
@@ -2101,6 +2101,7 @@ function paintedWordCell(h: Harness, word: string): { readonly row: number; read
  * a second disclosure (the fork's REAL 500ms contract, not a blind wait).
  */
 async function settlePointerClick(h: Harness): Promise<void> {
+  // The fork's real DOUBLE_CLICK window contract (500 ms), not an async guess:
   await new Promise<void>(resolve => setTimeout(resolve, 550))
   await h.vt.waitForRender()
 }

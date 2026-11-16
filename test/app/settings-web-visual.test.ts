@@ -282,6 +282,7 @@ function clickWord(h: Harness, word: string): void {
  * slack), not a blind wait for an async result.
  */
 async function settlePointerClick(h: Harness): Promise<void> {
+  // The fork's real DOUBLE_CLICK window contract (500 ms), not an async guess:
   await new Promise<void>(resolve => setTimeout(resolve, 550))
   await h.vt.waitForRender()
 }
