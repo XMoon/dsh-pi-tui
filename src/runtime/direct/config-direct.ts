@@ -358,25 +358,21 @@ function readDirectSection<T extends object>(
   return projectDirectDescriptor(read.settings, descriptor, project)
 }
 
-/** The official model-tool shell executor rows. The base composition mounts
- *  exactly one of them at a time (POSIX Bash / Windows PowerShell); the
- *  Settings descriptor list is the Host's own ACTIVE-row evidence. */
+/** The official model-tool shell settings are bound to the Host-served
+ *  namespace, following dsh-web: `pwsh-sandbox` wins when both are served,
+ *  otherwise the single served row is used, and no served row is unavailable. */
 const SHELL_EXECUTOR_ROWS: readonly { readonly executor: HostShellExecutor; readonly namespace: string }[] = [
-  { executor: 'bash', namespace: 'bash-sandbox' },
   { executor: 'pwsh', namespace: 'pwsh-sandbox' },
+  { executor: 'bash', namespace: 'bash-sandbox' },
 ]
 
 function readDirectShellExecutionSection(ctx: HostContextLike): SectionRead<ShellExecutionSettings> {
   const read = readDirectDescriptors(ctx)
   if (read.kind !== 'ready') return read
-  const mounted = SHELL_EXECUTOR_ROWS.filter(row => read.descriptors.some(entry => entry.ns === row.namespace))
-  if (mounted.length === 0) {
+  const active = SHELL_EXECUTOR_ROWS.find(row => read.descriptors.some(entry => entry.ns === row.namespace))
+  if (active === undefined) {
     return { kind: 'unavailable', reason: 'no active Host shell executor settings row is mounted' }
   }
-  if (mounted.length !== 1) {
-    return { kind: 'unreadable', reason: 'both Host shell executor settings rows are mounted; the active executor is ambiguous' }
-  }
-  const active = mounted[0]!
   const descriptor = read.descriptors.find(entry => entry.ns === active.namespace)!
   return projectDirectDescriptor(read.settings, descriptor, projectShellExecutionSettings(active.executor))
 }
@@ -1945,9 +1941,9 @@ export class DirectAgentLoopSettingsConfig implements AgentLoopSettingsConfig {
   }
 }
 
-/** The two numeric caps of the ACTIVE Host model-tool shell executor. The
- *  namespace is chosen from the Host's own ACTIVE Settings descriptors, never
- *  from the Client OS; an absent or ambiguous executor row fails closed. */
+/** The two numeric caps of the Host-served model-tool shell executor. The
+ *  namespace follows the official dsh-web served-bound rule (`pwsh` preferred),
+ *  never the Client OS; no served row is unavailable. */
 export class DirectShellExecutionSettingsConfig implements ShellExecutionSettingsConfig {
   private readonly ctx: HostContextLike
 
@@ -1965,20 +1961,17 @@ export class DirectShellExecutionSettingsConfig implements ShellExecutionSetting
     patch: SectionPatch<ShellExecutionSettings>,
     expectedRevision: number,
     generation: object,
-    expectedExecutor: HostShellExecutor,
   ): Promise<SectionMutationOutcome> {
     if (patch.executor !== undefined) {
       return { kind: 'rejected', reason: 'the Host shell executor identity is a Host observation, not an editable setting' }
     }
-    // Re-resolve the ACTIVE row at dispatch: a profile change between the
-    // page's read and Save must not write the other executor's row.
+    // Re-resolve the served-bound row at dispatch: a profile change between
+    // the page's read and Save must not write the other namespace.
     const current = readDirectShellExecutionSection(this.ctx)
     if (current.kind !== 'ready') {
       return { kind: 'rejected', reason: current.reason }
     }
-    if (current.effective.executor !== expectedExecutor) {
-      return { kind: 'rejected', reason: 'the active Host shell executor changed; refresh before saving' }
-    }
+    const namespace = SHELL_EXECUTOR_ROWS.find(row => row.executor === current.effective.executor)!.namespace
     const ops: SettingsMutationOp[] = []
     for (const field of ['timeoutMs', 'maxOutputBytes'] as const) {
       const edit = patch[field]
@@ -1987,7 +1980,6 @@ export class DirectShellExecutionSettingsConfig implements ShellExecutionSetting
         ? { op: 'unset', path: [field] }
         : { op: 'set', path: [field], value: edit.value })
     }
-    const namespace = expectedExecutor === 'bash' ? 'bash-sandbox' : 'pwsh-sandbox'
     return mutateDirectSection(this.ctx, namespace, ops, expectedRevision, generation)
   }
 }

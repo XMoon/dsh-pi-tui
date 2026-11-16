@@ -22,6 +22,11 @@ export interface HostNumericSettingsStatus {
 export interface HostNumericSettingsField<T extends object> {
   readonly key: keyof T & string
   readonly label: string
+  /** The owning field's accepted numeric text. Defaults to the Agent-loop
+   *  safe-positive-integer contract. */
+  readonly validate?: (text: string) => boolean
+  /** The field-specific draft error shown when `validate` rejects the text. */
+  readonly invalidHint?: string
 }
 
 type Ready<T extends object> = Extract<SectionRead<T>, { kind: 'ready' }>
@@ -42,9 +47,6 @@ export interface HostNumericSettingsPort<T extends object> {
 export interface HostNumericSettingsControllerDeps<T extends object> {
   readonly port: HostNumericSettingsPort<T>
   readonly fields: readonly HostNumericSettingsField<T>[]
-  /** The Host-observation identity that must remain equal for the captured
-   *  read to stay editable (the shell executor row identity). */
-  readonly valueIdentity?: (value: T) => string
   readonly requestRender: () => void
   readonly onAuthoritativeChange?: () => void
   readonly runOwned: (label: string, task: () => Promise<void>) => void
@@ -80,14 +82,9 @@ function hasPatch<T extends object>(patch: SectionPatch<T>): boolean {
   return Object.keys(patch).length !== 0
 }
 
-function readyCurrent<T extends object>(
-  source: SectionRead<T>,
-  live: SectionRead<T>,
-  identity?: (value: T) => string,
-): boolean {
+function readyCurrent<T extends object>(source: SectionRead<T>, live: SectionRead<T>): boolean {
   return source.kind === 'ready' && live.kind === 'ready'
     && source.generation === live.generation && source.revision === live.revision
-    && (identity === undefined || identity(source.effective) === identity(live.effective))
 }
 
 export class HostNumericSettingsController<T extends object> {
@@ -123,7 +120,7 @@ export class HostNumericSettingsController<T extends object> {
       dirty: this.dirty(),
       saved: this.saved,
       source: this.state.source,
-      current: this.state.refreshRequired !== true && readyCurrent(this.state.source, live, this.deps.valueIdentity),
+      current: this.state.refreshRequired !== true && readyCurrent(this.state.source, live),
       ...(live.kind === 'ready' ? { currentGeneration: live.generation } : {}),
       texts: Object.fromEntries(this.texts) as Readonly<Partial<Record<keyof T & string, string>>>,
       resetFields: this.resetFields(),
@@ -159,7 +156,7 @@ export class HostNumericSettingsController<T extends object> {
   private editable(): boolean {
     if (this.disposed || this.loading || this.saving) return false
     const live = this.deps.port.read()
-    if (this.state.refreshRequired === true || !readyCurrent(this.state.source, live, this.deps.valueIdentity)) {
+    if (this.state.refreshRequired === true || !readyCurrent(this.state.source, live)) {
       this.notice = 'Host settings changed or are unavailable; refresh before editing.'
       this.changed()
       return false
@@ -179,7 +176,7 @@ export class HostNumericSettingsController<T extends object> {
     if (text.trim() === '') patch[key] = { kind: 'reset' }
     else {
       const value = Number(text)
-      if (value === source.effective[key] && this.numberValid(text)) delete patch[key]
+      if (value === source.effective[key] && this.numberValid(key, text)) delete patch[key]
       else patch[key] = { kind: 'set', value }
     }
     this.state.patch = patch as SectionPatch<T>
@@ -255,7 +252,10 @@ export class HostNumericSettingsController<T extends object> {
     for (const field of this.deps.fields) this.texts.set(field.key, String(source.effective[field.key]))
   }
 
-  private numberValid(text: string): boolean {
+  private numberValid(key: keyof T & string, text: string): boolean {
+    if (text.trim() === '') return false
+    const field = this.deps.fields.find(candidate => candidate.key === key)
+    if (field?.validate !== undefined) return field.validate(text)
     if (!/^\d+$/u.test(text.trim())) return false
     const value = Number(text)
     return Number.isSafeInteger(value) && value >= 1
@@ -267,8 +267,8 @@ export class HostNumericSettingsController<T extends object> {
     for (const field of this.deps.fields) {
       const text = this.texts.get(field.key)
       if (text === undefined || text.trim() === '') continue
-      if (!this.numberValid(text)) {
-        this.issues.set(field.key, 'Enter a safe positive integer (1 or greater).')
+      if (!this.numberValid(field.key, text)) {
+        this.issues.set(field.key, field.invalidHint ?? 'Enter a safe positive integer (1 or greater).')
       }
     }
     return this.issues.size === 0
@@ -286,7 +286,7 @@ export class HostNumericSettingsController<T extends object> {
     if (base.kind !== 'ready') return
     const patch = { ...this.state.patch }
     const live = this.deps.port.read()
-    if (this.state.refreshRequired === true || !readyCurrent(base, live, this.deps.valueIdentity)) {
+    if (this.state.refreshRequired === true || !readyCurrent(base, live)) {
       this.state.status = { kind: 'not-saved', text: 'Not saved · Host settings changed; refresh to review. Unsaved changes retained.' }
       this.changed()
       return

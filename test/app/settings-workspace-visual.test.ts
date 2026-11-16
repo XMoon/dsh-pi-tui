@@ -1118,12 +1118,8 @@ function setup(options: HarnessOptions = {}): Harness {
           patch: import('../../src/runtime/config-port.ts').SectionPatch<import('../../src/runtime/config-port.ts').ShellExecutionSettings>,
           revision: number,
           generation: object,
-          expectedExecutor: 'bash' | 'pwsh',
         ) => {
           if (shellValue === undefined) return { kind: 'rejected' as const, reason: 'No active shell executor row is mounted.' }
-          if (expectedExecutor !== shellValue.executor) {
-            return { kind: 'rejected' as const, reason: 'the active Host shell executor changed; refresh before saving' }
-          }
           if (revision !== shellRevision || generation !== shellGeneration) {
             return { kind: 'conflict' as const, reason: 'the shell executor section changed since it was read' }
           }
@@ -2486,7 +2482,7 @@ test('the real Root numeric Agent-loop page stages, saves, resets and discards t
   assert.match(h.view(), /Settings · Agent · Agent loop/u)
   assert.match(h.view(), /Host profile · effective settings · revision 1/u)
   assert.match(h.view(), /Parallel tool calls\s+10\s+\[Reset\]/u)
-  assert.match(h.view(), /Source: Overridden/u)
+  assert.match(h.view(), /Comparison: Differs from base/u)
 
   // Root row/field click -> the page's own single-line edit -> painted Apply.
   await clickPainted(h, 'Parallel tool calls')
@@ -2573,6 +2569,26 @@ test('the real Root Shell-execution page saves both caps in ONE official mutatio
   assert.match(h.view(), /Status: Verified/u)
   await clickPainted(h, 'Back [Esc]', true)
   assert.match(h.view(), /Settings · Tools · Rows/u)
+  h.dispose()
+})
+
+test('the real Root Shell page accepts a positive finite decimal cap', async () => {
+  const h = setup({
+    columns: 160,
+    rows: 44,
+    shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
+  })
+  await h.open('Tools')
+  await key(h, '\r')
+  await clickPainted(h, 'Shell execution')
+  await clickPainted(h, 'Command timeout (ms)')
+  await key(h, '\x15')
+  for (const character of '1.5') await key(h, character)
+  await clickPainted(h, 'Apply [Enter]', true)
+  await clickPainted(h, 'Save [S]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.shellExecutionWrites(), [{ field: 'timeoutMs', op: 'set', value: 1.5 }])
+  assert.match(h.view(), /Status: Verified/u)
   h.dispose()
 })
 
@@ -2670,9 +2686,29 @@ test('Session log unknown/mismatched settlements never offer a blind Retry', asy
   assert.equal(mismatched.sessionLogWrites().length, 1, 'the official write was dispatched once')
   assert.equal(mismatched.hostSections().sessionLog?.enabled, true)
   mismatched.dispose()
+
+  // A definite Host refusal is different: the normal manual retry route stays.
+  const refused = setup({
+    columns: 200,
+    rows: 44,
+    sessionLog: { enabled: true },
+    sessionLogWriteFailure: 'official validator refused',
+  })
+  await refused.open('General')
+  await key(refused, '\r')
+  await highlightRow(refused, 'Session log upload')
+  await key(refused, '\r')
+  await highlightCandidate(refused, 'Off')
+  await key(refused, '\r')
+  await settle(refused, 12)
+  const refusedFrame = refused.view()
+  assert.match(refusedFrame, /Not saved/u)
+  assert.match(refusedFrame, /Retry save/u, 'a definite refusal keeps the manual retry route')
+  assert.equal(refused.sessionLogWrites().length, 0)
+  refused.dispose()
 })
 
-test('the Session log Confirm button is pointer-complete and requires the same painted risk frame', async () => {
+test('the Session log Confirm button is pointer-complete with the risk frame', async () => {
   const h = setup({ columns: 200, rows: 44, sessionLog: { enabled: true } })
   await h.open('General')
   await key(h, '\r')

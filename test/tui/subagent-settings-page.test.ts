@@ -568,9 +568,14 @@ function numericShellRig(options: { holdMutation?: boolean; reject?: boolean } =
       return { kind: 'accepted' }
     },
   }
+  const positiveFinite = (text: string): boolean => {
+    if (text.trim() === '') return false
+    const value = Number(text)
+    return Number.isFinite(value) && value > 0
+  }
   const fields: readonly HostNumericSettingsField<NumericShellSettings>[] = [
-    { key: 'timeoutMs', label: 'Command timeout (ms)' },
-    { key: 'maxOutputBytes', label: 'Output cap per stream (bytes)' },
+    { key: 'timeoutMs', label: 'Command timeout (ms)', validate: positiveFinite, invalidHint: 'Enter a positive finite number.' },
+    { key: 'maxOutputBytes', label: 'Output cap per stream (bytes)', validate: positiveFinite, invalidHint: 'Enter a positive finite number.' },
   ]
   return {
     port, fields, writes,
@@ -646,8 +651,8 @@ test('two fields paint their effective values, source fact and Reset actions', a
   assert.match(plain[0] ?? '', /Host model-tool executor · POSIX Bash/u)
   assert.ok(plain.some(line => line.includes('Command timeout (ms)') && line.includes('60000') && line.includes('[Reset]')))
   assert.ok(plain.some(line => line.includes('Output cap per stream (bytes)') && line.includes('64000') && line.includes('[Reset]')))
-  assert.ok(plain.some(line => line.includes('Source: Overridden')), 'effective/base deviation is stated')
-  assert.ok(plain.some(line => line.includes('Source: Inherited')))
+  assert.ok(plain.some(line => line.includes('Comparison: Differs from base')), 'effective/base deviation is stated')
+  assert.ok(plain.some(line => line.includes('Comparison: Matches base')))
   assert.match(strip(frame.at(-1) ?? ''), /Back \[Esc\]/u)
   assert.ok(h.page.paintedEscapeSpan() !== undefined)
   h.page.dispose()
@@ -699,7 +704,24 @@ test('an invalid non-integer never saves and keeps the field error reachable', a
   h.page.handleInput('s')
   await h.drain()
   assert.equal(h.writes.length, 0, 'the invalid draft is refused before dispatch')
-  assert.match(h.page.render(80).map(strip).join('\n'), /safe positive integer/u)
+  assert.match(h.page.render(80).map(strip).join('\n'), /positive finite number/u)
+  h.page.dispose()
+})
+
+test('the Shell page accepts the official positive-finite decimal shape', async () => {
+  const h = await startedNumeric()
+  let frame = h.page.render(80)
+  clickNumericRow(h.page, frame, numericRowIndex(frame, 'Command timeout (ms)'), 80, 'Command timeout (ms)')
+  h.page.handleInput('\x15')
+  for (const character of '1.5') h.page.handleInput(character)
+  h.page.handleInput(ENTER)
+  frame = h.page.render(80)
+  assert.ok(frame.map(strip).some(line => line.includes('1.5')), 'the fractional draft is painted')
+  assert.ok(h.page.paintedBarSpans().some(span => span.id === 'bar:save'))
+  h.page.activateBarSpan('bar:save')
+  await h.drain()
+  assert.deepEqual(h.writes[0]?.patch, { timeoutMs: { kind: 'set', value: 1.5 } })
+  assert.match(h.page.render(80).map(strip).join('\n'), /Status: Verified/u)
   h.page.dispose()
 })
 

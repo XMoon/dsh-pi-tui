@@ -1209,16 +1209,20 @@ two SPECIALIST pages sharing ONE numeric renderer inside the existing Settings
 lease. Each page owns only its per-open draft, focus, scroll and confirmation;
 the Root keeps the physical Action Bar and Esc, and a painted row/field/Reset/
 Apply/Save/Back control delegates to the SAME page/controller path a key press
-uses. Both pages paint the current effective value, its `Inherited`/`Overridden`
-relation to the base, an explicit `[Reset]` per field and `Status: …` feedback.
+uses. Both pages paint the current effective value and its
+`Differs from base` / `Matches base` relation to the base, an explicit
+`[Reset]` per field and `Status: …` feedback. These comparison labels are not
+USER-layer override presence claims.
 The fixed status line reports `Ready`, `Unavailable`, `Unreadable` or
 `Last-known · read-only` from the captured read and the live section; it never
 says Ready for a missing, unreadable or superseded authority. A field's
 `[Reset]` action is painted as a complete segment and its pointer span is
 derived from that same painted line; a width that cannot host the whole word
 drops the Reset target entirely.
-Numeric validation is a safe positive integer (`Number.isSafeInteger(n) && n>=1`)
-for every field; an empty field stages the official Reset, invalid text keeps
+Numeric validation follows the owning field: Agent loop requires a safe
+positive integer (`Number.isSafeInteger(n) && n>=1`), while the Shell fields
+require a positive finite number as the Host runtime does. An empty field stages
+the official Reset; invalid text keeps
 the draft and never dispatches. Save sends ONE exact-revision/revision-checked
 Host mutation for the page's namespace and reports `Not saved`, `Unverified` or
 `Outcome unconfirmed` exactly as the Host settlement and same-generation
@@ -1231,13 +1235,13 @@ neither USER-field deletion nor `overridden=false` is a success criterion.
   batch; tool calls already dispatched are never rewritten. The other
   `agent-loop` Config (notably `agents`) is never part of this page's write.
 - `Shell execution` edits the two numeric caps (`timeoutMs`,
-  `maxOutputBytes`) of the ACTIVE Host model-tool executor row in ONE mutation.
-  The executor identity is a Host observation: POSIX Hosts serve
-  `bash-sandbox`, Windows Hosts `pwsh-sandbox`, and the Client OS is never used
-  to guess it. An absent or ambiguous active row is `Unavailable`/`Unreadable`
-  and offers no write; a profile that switches the active row rejects the stale
-  page's write. The caps affect the NEXT shell execution; a running subprocess
-  keeps its current timeout. This is not the `!`/`!!` user-shell sandbox policy.
+  `maxOutputBytes`) of the Host-served model-tool executor row in ONE mutation.
+  The bound row follows official dsh-web: `pwsh-sandbox` is preferred when both
+  `bash-sandbox` and `pwsh-sandbox` are served, otherwise the single served row
+  is used, and no served row is `Unavailable`; the Client OS is never used to
+  guess it. A stale captured generation/revision refuses the write. The caps
+  affect the NEXT shell execution; a running subprocess keeps its current
+  timeout. This is not the `!`/`!!` user-shell sandbox policy.
 - `General` paints `Backend`, `Start Web automatically`, `Start ACP
   automatically` and `Session log upload` in that frozen order. `Session log
   upload` is the official `session-log-deepseek.enabled` scalar row and is
@@ -1246,17 +1250,21 @@ neither USER-field deletion nor `overridden=false` is a success criterion.
   `On` carries the explicit risk (session-log data, possibly conversation
   content, is sent with requests to the official DeepSeek API), `Off` is a real
   saved value, and `Reset` is the official `unset` whose readback MAY be `On`.
-  The L2 confirmation frame must paint the whole risk sentence before either
-  keyboard or pointer Confirm is admitted; the CAS fence captured when L2
+  The risk sentence is a scrollable first-class fact of the confirmation
+  flow: a short frame may reveal it before Confirm, and no incompletely painted
+  Confirm button has a pointer target; warning, candidate and Confirm need not
+  share one frame. The CAS fence captured when L2
   opened (Host generation + exact revision) is never rebased by a later
   refresh, so a changed same-Host revision or a same-revision Host replacement
   is `Not saved` with zero dispatch. A lost settlement is `Outcome unconfirmed`
   and a fresh readback that disagrees with an accepted write is `Unverified`;
-  neither offers a blind `Retry save` for this row, which requires an explicit
-  Refresh and a new confirmation.
-  A stale or disconnected authority keeps the row and its risk text but shows
-  `Current unknown`, offers no candidate and never presents an Off as a safety
-  guarantee.
+  neither offers a blind replay: a manual `Retry save` appears only for a
+  definite `Not saved` settlement, and any retry re-enters the current cascade
+  with a fresh candidate confirmation.
+  A non-current or disconnected authority offers no candidate and never
+  presents a stale On/Off as the current Host state. Retaining a historical row
+  is a TUI presentation choice, not a requirement of the official namespace
+  lifecycle.
 
 ### Startup backend (General)
 

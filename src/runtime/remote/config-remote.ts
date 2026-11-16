@@ -1747,24 +1747,20 @@ function readRemoteSection<T extends object>(
   return projectRemoteView(snapshot.generation, view, project)
 }
 
-/** The official model-tool shell executor rows. The HOST's served Settings
- *  namespaces decide which one is active — never the Client OS. */
+/** Follow dsh-web's served-bound shell selection: the Host's served namespace
+ *  set decides the row, with `pwsh-sandbox` preferred when both are served. */
 const SHELL_EXECUTOR_ROWS: readonly { readonly executor: HostShellExecutor; readonly namespace: string }[] = [
-  { executor: 'bash', namespace: 'bash-sandbox' },
   { executor: 'pwsh', namespace: 'pwsh-sandbox' },
+  { executor: 'bash', namespace: 'bash-sandbox' },
 ]
 
 function readRemoteShellExecutionSection(mirror: RemoteConfigMirror): SectionRead<ShellExecutionSettings> {
   const snapshot = readRemoteSnapshot(mirror)
   if (snapshot.kind !== 'ready') return snapshot
-  const mounted = SHELL_EXECUTOR_ROWS.filter(row => mirror.namespace(row.namespace) !== undefined)
-  if (mounted.length === 0) {
+  const active = SHELL_EXECUTOR_ROWS.find(row => mirror.namespace(row.namespace) !== undefined)
+  if (active === undefined) {
     return { kind: 'unavailable', reason: 'no active Host shell executor settings row is mounted' }
   }
-  if (mounted.length !== 1) {
-    return { kind: 'unreadable', reason: 'both Host shell executor settings rows are mounted; the active executor is ambiguous' }
-  }
-  const active = mounted[0]!
   return projectRemoteView(snapshot.generation, mirror.namespace(active.namespace)!, projectShellExecutionSettings(active.executor))
 }
 
@@ -1945,20 +1941,17 @@ class RemoteShellExecutionSettingsConfig implements ShellExecutionSettingsConfig
     patch: SectionPatch<ShellExecutionSettings>,
     expectedRevision: number,
     generation: object,
-    expectedExecutor: HostShellExecutor,
   ): Promise<SectionMutationOutcome> {
     if (patch.executor !== undefined) {
       return { kind: 'rejected', reason: 'the Host shell executor identity is a Host observation, not an editable setting' }
     }
-    // Re-prove the ACTIVE Host row before dispatch: never write the other
-    // platform's row from a Client-side guess.
+    // Re-prove the served-bound Host row before dispatch: never write the
+    // other namespace from a Client-side guess or a stale generation.
     const current = readRemoteShellExecutionSection(this.mirror)
-    if (current.kind !== 'ready') {
-      return { kind: 'rejected', reason: current.reason }
+    if (current.kind !== 'ready' || !Object.is(current.generation, generation)) {
+      return { kind: 'rejected', reason: 'the Host shell settings are no longer current; refresh before saving' }
     }
-    if (current.effective.executor !== expectedExecutor || !Object.is(current.generation, generation)) {
-      return { kind: 'rejected', reason: 'the active Host shell executor changed; refresh before saving' }
-    }
+    const namespace = SHELL_EXECUTOR_ROWS.find(row => row.executor === current.effective.executor)!.namespace
     const ops: RemoteSettingsPathOp[] = []
     for (const field of ['timeoutMs', 'maxOutputBytes'] as const) {
       const edit = patch[field]
@@ -1967,7 +1960,6 @@ class RemoteShellExecutionSettingsConfig implements ShellExecutionSettingsConfig
         ? { op: 'unset', path: [field] }
         : { op: 'set', path: [field], value: edit.value })
     }
-    const namespace = expectedExecutor === 'bash' ? 'bash-sandbox' : 'pwsh-sandbox'
     return mutateRemoteSection(this.mirror, namespace, ops, expectedRevision, generation)
   }
 }
