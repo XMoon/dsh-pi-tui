@@ -112,6 +112,10 @@ function snapshot(overrides: Partial<McpServersSnapshot> = {}): McpServersSnapsh
     phase: 'ready',
     rows: [connected('alpha'), { name: 'beta', configured: true, status: { state: 'disabled' }, source: 'Plugin-owned' }],
     selectedName: 'alpha',
+    // The controller's read-only pointer-currentness projections: a controlled
+    // snapshot starts at the first observation and read.
+    observationEpoch: 0,
+    configurationReadEpoch: 0,
     ...overrides,
   }
 }
@@ -133,6 +137,45 @@ function makePage(state: McpServersSnapshot, done: () => void = () => {}): {
 function render(page: McpServersPage, width: number, rows: number): string[] {
   page.setMaxRows(rows)
   return page.render(width).map(line => stripTerminalSequences(line))
+}
+
+/** The page-local mouse event base of one frame. */
+function mouseBase(width: number, rows: number): {
+  readonly button: 'left'
+  readonly screenX: number
+  readonly screenY: number
+  readonly shift: boolean
+  readonly alt: boolean
+  readonly ctrl: boolean
+  readonly width: number
+  readonly height: number
+} {
+  return {
+    button: 'left' as const,
+    screenX: 1,
+    screenY: 1,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    width,
+    height: Math.max(0, rows - 1),
+  }
+}
+
+/** Press+release one PAINTED bar span through the page's own hit map. */
+function clickBarSpan(page: McpServersPage, id: string, width: number, rows: number): void {
+  const span = page.paintedBarSpans().find(candidate => candidate.id === id)
+  assert.ok(span !== undefined, `the ${id} span must be published`)
+  const base = mouseBase(width, rows)
+  page.handleMouse({ ...base, type: 'press', x: span.startCol, y: rows - 1 })
+  page.handleMouse({ ...base, type: 'click', x: span.startCol, y: rows - 1 })
+}
+
+/** Press+release one painted body row cell. */
+function clickBodyCell(page: McpServersPage, width: number, rows: number, y: number): void {
+  const base = mouseBase(width, rows)
+  page.handleMouse({ ...base, type: 'press', x: 1, y })
+  page.handleMouse({ ...base, type: 'click', x: 1, y })
 }
 
 /** Reach the editor at the compact (100-column) layout: list -> detail -> editor. */
@@ -297,6 +340,192 @@ test('search filters by name only and p/x/r are query text while searching', () 
   const restored = render(page, 88, 12).join('\n')
   assert.match(restored, /alpha/u)
   assert.match(restored, /beta/u)
+})
+
+test('the list paints a clickable Search and the search bar a clickable Done; Cancel stays the ONE Root Esc', () => {
+  const { page, controller } = makePage(snapshot())
+  render(page, 100, 14)
+  const listBar = render(page, 100, 14).at(-1) ?? ''
+  assert.match(listBar, /Search \[\/\]/u, 'the list advertises the search entry')
+  assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:start-search'),
+    'the Search entry is a real delegated span')
+  clickBarSpan(page, 'bar:start-search', 100, 14)
+  const searchFrame = render(page, 100, 14).join('\n')
+  assert.match(searchFrame, /search: \//u, 'the same `/` search sink opened the input')
+  const searchBar = render(page, 100, 14).at(-1) ?? ''
+  assert.match(searchBar, /Done \[Enter\]/u)
+  assert.match(searchBar, /Cancel \[Esc\]/u)
+  const spans = page.paintedBarSpans()
+  assert.ok(spans.some(span => span.id === 'bar:finish-search'), 'Done is a real delegated span')
+  assert.equal(spans.some(span => span.id === 'bar:cancel' || span.id === 'bar:search-cancel'), false,
+    'the search cancel is the ONE physical Root Esc, never a second span')
+  assert.ok(page.paintedEscapeSpan() !== undefined, 'Cancel [Esc] publishes the Root escape span')
+  assert.deepEqual(controller.calls, [], 'entering search is Client-local presentation')
+  clickBarSpan(page, 'bar:finish-search', 100, 14)
+  const list = render(page, 100, 14)
+  assert.doesNotMatch(list.join('\n'), /search: \//u, 'Done returns to the list')
+  assert.match(list.at(-1) ?? '', /Search \[\/\]/u, 'the list advertises Search again')
+})
+
+test('Search stays a Client filter while the Host observation is not ready; Add does not', () => {
+  const loading = makePage(snapshot({ phase: 'loading', rows: [], selectedName: undefined }))
+  loading.controller.addable = false
+  render(loading.page, 100, 14)
+  const spans = loading.page.paintedBarSpans().map(span => span.id)
+  assert.ok(spans.includes('bar:start-search'), 'Search only filters the Client view')
+  assert.equal(spans.includes('bar:add'), false, 'Add needs a current descriptor')
+  clickBarSpan(loading.page, 'bar:start-search', 100, 14)
+  assert.match(render(loading.page, 100, 14).join('\n'), /search: \//u)
+  assert.doesNotMatch(render(loading.page, 100, 14).at(-1) ?? '', /a Add/u)
+})
+
+test('a search-result row click only selects; the query and the search stay', () => {
+  const { page, controller } = makePage(snapshot())
+  render(page, 100, 14)
+  clickBarSpan(page, 'bar:start-search', 100, 14)
+  page.handleInput('b')
+  const lines = render(page, 100, 14)
+  const betaRow = lines.findIndex(line => line.includes('beta'))
+  assert.ok(betaRow >= 0, `the filtered result must be painted: ${lines.join('\n')}`)
+  // The query edit reconciled the selection onto the only match; the CLICK is
+  // the gesture under test.
+  controller.calls.length = 0
+  clickBodyCell(page, 100, 14, betaRow)
+  assert.deepEqual(controller.calls, ['select:beta'], 'a result click is a selection, nothing else')
+  const after = render(page, 100, 14).join('\n')
+  assert.match(after, /search: \/ b/u, 'the query stays')
+  assert.deepEqual(
+    controller.calls.filter(call => ['probe', 'beginRestart', 'beginAdd', 'beginEdit', 'beginToggle', 'beginDelete', 'beginReset', 'saveEditor'].includes(call)),
+    [],
+    'a result row click never runs a Host intent',
+  )
+})
+
+test('a wheel while searching moves the filtered selection and scrolls no hidden region', () => {
+  const { page, controller } = makePage(snapshot())
+  render(page, 100, 14)
+  clickBarSpan(page, 'bar:start-search', 100, 14)
+  render(page, 100, 14)
+  const base = mouseBase(100, 14)
+  page.handleMouse({ ...base, type: 'wheel', wheelDelta: 1, x: 2, y: 2 })
+  assert.deepEqual(controller.calls, ['move:1'], 'the search wheel moves the filtered selection')
+  assert.match(render(page, 100, 14).join('\n'), /search: \//u, 'the search stays open')
+})
+
+test('a non-zero wheel revokes a pending press even when it scrolls nothing or a modal ignores it', () => {
+  // (a) A boundary wheel in a one-result search cannot move the selection, but
+  // it is still a gesture boundary: the held row press never selects.
+  const single = makePage(snapshot())
+  render(single.page, 100, 14)
+  single.page.handleInput('/')
+  single.page.handleInput('b')
+  const lines = render(single.page, 100, 14)
+  const row = lines.findIndex(line => line.includes('beta'))
+  assert.ok(row >= 0)
+  single.controller.calls.length = 0
+  const base = mouseBase(100, 14)
+  single.page.handleMouse({ ...base, type: 'press', x: 1, y: row })
+  single.page.handleMouse({ ...base, type: 'wheel', wheelDelta: -1, x: 1, y: row })
+  single.page.handleMouse({ ...base, type: 'click', x: 1, y: row })
+  assert.deepEqual(single.controller.calls.filter(call => call.startsWith('select:')), [],
+    'a wheel-revoked press never selects')
+
+  // (b) A modal ignores the wheel, but the pending decision press is revoked.
+  const modal = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 1 },
+  }))
+  const modalLines = render(modal.page, 100, 14)
+  const barRow = modalLines.length - 1
+  const col = (modalLines[barRow] ?? '').indexOf('Y confirm') + 1
+  assert.ok(col > 0, `the confirm affordance must paint: ${modalLines[barRow]}`)
+  modal.page.handleMouse({ ...base, type: 'press', x: col, y: barRow })
+  modal.page.handleMouse({ ...base, type: 'wheel', wheelDelta: 1, x: 2, y: 2 })
+  modal.page.handleMouse({ ...base, type: 'click', x: col, y: barRow })
+  assert.deepEqual(modal.controller.calls.filter(call => call.startsWith('answerConfigConfirm')), [],
+    'a modal wheel revokes its pending decision press')
+
+  // (c) A zero-delta wheel is no input at all: the press survives.
+  const zero = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 1 },
+  }))
+  const zeroLines = render(zero.page, 100, 14)
+  const zeroBar = zeroLines.length - 1
+  const zeroCol = (zeroLines[zeroBar] ?? '').indexOf('Y confirm') + 1
+  zero.page.handleMouse({ ...base, type: 'press', x: zeroCol, y: zeroBar })
+  zero.page.handleMouse({ ...base, type: 'wheel', wheelDelta: 0, x: 2, y: 2 })
+  zero.page.handleMouse({ ...base, type: 'click', x: zeroCol, y: zeroBar })
+  assert.deepEqual(zero.controller.calls, ['answerConfigConfirm:true'],
+    'a zero-delta wheel changes nothing')
+})
+
+test('a Host observation rebuild between press and release refuses the identical-looking gesture', () => {
+  const { page, controller } = makePage(snapshot())
+  render(page, 100, 14)
+  const lines = render(page, 100, 14)
+  const row = lines.findIndex(line => line.includes('beta'))
+  assert.ok(row >= 0)
+  const base = mouseBase(100, 14)
+  page.handleMouse({ ...base, type: 'press', x: 1, y: row })
+  // Host B replaces Host A with the SAME names, statuses, count and selection:
+  // only the observation epoch moved, and no frame has painted it yet.
+  controller.snapshotValue = { ...controller.snapshotValue, observationEpoch: 1 }
+  page.handleMouse({ ...base, type: 'click', x: 1, y: row })
+  assert.deepEqual(controller.calls, [], 'a press from the previous observation never completes')
+  // A fresh press on the repainted B frame selects normally.
+  const fresh = render(page, 100, 14)
+  const freshRow = fresh.findIndex(line => line.includes('beta'))
+  clickBodyCell(page, 100, 14, freshRow)
+  assert.deepEqual(controller.calls, ['select:beta'], 'a fresh gesture on B is admitted')
+})
+
+test('a configuration read result between press and release refuses the old draft intent', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    config: { kind: 'ready', generation: {}, revision: 1, entries: [] },
+  }))
+  render(page, 100, 14)
+  page.handleInput('\r')
+  const lines = render(page, 100, 14)
+  const barRow = lines.length - 1
+  const col = (lines[barRow] ?? '').indexOf('e edit') + 1
+  assert.ok(col > 0, `the Edit affordance must paint: ${lines[barRow]}`)
+  const base = mouseBase(100, 14)
+  page.handleMouse({ ...base, type: 'press', x: col, y: barRow })
+  // The same roster re-read the configuration: the revision moved before any
+  // frame painted it.
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    configurationReadEpoch: 1,
+    config: { kind: 'ready', generation: {}, revision: 2, entries: [] },
+  }
+  page.handleMouse({ ...base, type: 'click', x: col, y: barRow })
+  assert.deepEqual(controller.calls, [], 'the old Edit intent never runs against the new revision')
+  // A fresh press on the repainted frame opens the draft.
+  const fresh = render(page, 100, 14)
+  const freshBar = fresh.length - 1
+  const freshCol = (fresh[freshBar] ?? '').indexOf('e edit') + 1
+  page.handleMouse({ ...base, type: 'press', x: freshCol, y: freshBar })
+  page.handleMouse({ ...base, type: 'click', x: freshCol, y: freshBar })
+  assert.deepEqual(controller.calls, ['beginEdit'], 'a fresh gesture reads the current revision')
+})
+
+test('a query keystroke between a Done press and its release refuses the stale completion', () => {
+  const { page } = makePage(snapshot())
+  render(page, 100, 14)
+  clickBarSpan(page, 'bar:start-search', 100, 14)
+  render(page, 100, 14)
+  const span = page.paintedBarSpans().find(candidate => candidate.id === 'bar:finish-search')
+  assert.ok(span !== undefined)
+  const base = mouseBase(100, 14)
+  page.handleMouse({ ...base, type: 'press', x: span.startCol, y: 13 })
+  page.handleInput('x') // the query text changed under the held Done press
+  page.handleMouse({ ...base, type: 'click', x: span.startCol, y: 13 })
+  assert.match(render(page, 100, 14).join('\n'), /search: \/ x/u, 'the stale Done never completes')
+  // A fresh complete Done click finishes the search exactly once.
+  clickBarSpan(page, 'bar:finish-search', 100, 14)
+  assert.doesNotMatch(render(page, 100, 14).join('\n'), /search: \//u)
 })
 
 test('a restarted refresh/grant change invalidates the previous pointer gesture', () => {
