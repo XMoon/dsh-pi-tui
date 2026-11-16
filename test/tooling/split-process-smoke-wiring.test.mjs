@@ -992,6 +992,9 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
     toolFailedStatus: true,
     missingImageRejected: true,
     largeImageFrameAboveLegacyCap: true,
+    capacityPositive: true,
+    capacityNegative: true,
+    memoryMeasured: true,
     slowPeerIsolated: true,
     siblingAcpAndTuiUnaffected: true,
     reattachAfterFailureClean: true,
@@ -1022,6 +1025,35 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
       },
       failedTool: { turn: 13, callId: 'po4c-tool-failed', isError: true },
       missingImage: { turn: 14, attachmentId: `sha256:${'f'.repeat(64)}`, hostCode: 'ATTACHMENT_NOT_FOUND', acpCode: 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED' },
+      capacity: {
+        maxImageBytes: 4194304,
+        maxImagesPerMessage: 1,
+        maxMessageImageBytes: 524288,
+        storedBytes: 3550000,
+        base64Bytes: 4733336,
+        deliveredFrameBytes: 4733610,
+        derivedBudget: 6710616,
+        positive: true,
+      },
+      boundedTransport: {
+        overBudgetCode: 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE',
+        overBudgetImageCount: 2,
+        overBudgetStoredBytes: [3550000, 3550000],
+        noContentOrStopReason: true,
+        siblingAfterOverflow: true,
+        tuiAlive: true,
+      },
+      memory: {
+        hostPid: 4242,
+        rssBaselineBytes: 200000000,
+        rssPeakBytes: 260000000,
+        rssDeltaBytes: 60000000,
+        storedBytes: 3550000,
+        base64Bytes: 4733336,
+        sdkFrameBytes: 1_900_000,
+        writerBacklogBoundBytes: 262144,
+        sdkMaterializesWholeFrame: true,
+      },
       slowPeer: {
         backpressureCode: 'LOCAL_ACP_OUTPUT_BACKPRESSURE',
         siblingSessionId: 'S-sibling',
@@ -1044,7 +1076,8 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
   for (const field of [
     'assistantTextImageTextOrdered', 'assistantImageOnlyAccepted', 'toolResultOrderedContent',
     'toolFailedStatus', 'missingImageRejected', 'largeImageFrameAboveLegacyCap', 'slowPeerIsolated',
-    'siblingAcpAndTuiUnaffected', 'reattachAfterFailureClean', 'lateReadAfterCloseInert', 'noForeignTurnProjected', 'readImageVerified',
+    'siblingAcpAndTuiUnaffected', 'reattachAfterFailureClean', 'lateReadAfterCloseInert', 'noForeignTurnProjected',
+    'readImageVerified', 'capacityPositive', 'capacityNegative', 'memoryMeasured',
   ]) {
     const missing = { ...complete }
     delete missing[field]
@@ -1076,6 +1109,19 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
   }), /selected acp\.po4c-content-output/u)
   assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
     ...complete, evidence: { ...complete.evidence, slowPeer: { ...complete.evidence.slowPeer, lateRead: { ...complete.evidence.slowPeer.lateRead, hostCloseConnections: 0 } } },
+  }), /selected acp\.po4c-content-output/u)
+  // F1 (Owner amendment A1): the capacity positive/negative and the real RSS
+  // measurement are required facts, not inferred from PASS.
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', { ...complete, capacityNegative: false }),
+    /selected acp\.po4c-content-output/u)
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
+    ...complete, evidence: { ...complete.evidence, capacity: { ...complete.evidence.capacity, maxImageBytes: 524288 } },
+  }), /selected acp\.po4c-content-output/u)
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
+    ...complete, evidence: { ...complete.evidence, boundedTransport: { ...complete.evidence.boundedTransport, overBudgetCode: 'LOCAL_ACP_OUTPUT_BACKPRESSURE' } },
+  }), /selected acp\.po4c-content-output/u)
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
+    ...complete, evidence: { ...complete.evidence, memory: { ...complete.evidence.memory, rssPeakBytes: 1 } },
   }), /selected acp\.po4c-content-output/u)
   // A NOT_VERIFIED status never becomes a selected PASS.
   assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', { ...complete, status: 'NOT_VERIFIED' }),

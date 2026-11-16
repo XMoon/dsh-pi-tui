@@ -116,28 +116,39 @@ export function deriveImageInputBounds(limits: AcpImageLimits | undefined): Conn
 /**
  * Derive ONE connection's outbound single-frame budget from the Host's OWN
  * boot-frozen attachment limits. A committed image arrives from the official
- * Store, so its canonical Base64 can exceed the legacy 256 KiB frame; the
- * allowance covers one bounded event (Base64 expansion of the admitted image
- * batch, one metadata allowance per image, the JSON-RPC envelope and the
- * preserved text allowance). This is a TRANSPORT resource bound, never an image
- * acceptance policy and never a reason to drop, shrink or re-encode content:
- * the official Attachment Store keeps every byte/count/pixel limit.
+ * Store as ONE independently Base64-encoded object, and the Store's
+ * `maxMessageImageBytes` is a PROMPT-batch admission limit that does not bound
+ * a stored output image. The allowance therefore bounds each image by the
+ * Store's per-object admission ceiling (`maxImageBytes`), encodes every image
+ * separately and sums those encoded ceilings, then adds one metadata allowance
+ * per image, the JSON-RPC envelope and the preserved text allowance.
+ *
+ * This is a TRANSPORT resource bound, never an image acceptance policy and never
+ * a reason to drop, shrink or re-encode content: the official Attachment Store
+ * keeps every byte/pixel limit, and its normalization may even produce a stored
+ * image larger than `maxImageBytes` (the accepted upstream limitation). A frame
+ * above this allowance fails closed with `LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE`
+ * before any byte of that frame is written.
  *
  * @param limits - the exact Host attachment limits, or undefined without a store.
  * @returns the per-frame byte budget, or undefined when it cannot be represented.
  */
 export function deriveImageOutputBounds(limits: AcpImageLimits | undefined): number | undefined {
   if (limits === undefined) return undefined
-  const { maxMessageImageBytes, maxImagesPerMessage } = limits
-  if (!Number.isSafeInteger(maxMessageImageBytes) || maxMessageImageBytes <= 0
-    || !Number.isSafeInteger(maxImagesPerMessage) || maxImagesPerMessage <= 0
-    || !Number.isSafeInteger(limits.maxImageBytes) || limits.maxImageBytes <= 0) {
+  const { maxImagesPerMessage, maxImageBytes } = limits
+  if (!Number.isSafeInteger(maxImageBytes) || maxImageBytes <= 0
+    || !Number.isSafeInteger(maxImagesPerMessage) || maxImagesPerMessage <= 0) {
     return undefined
   }
-  const encoded = 4 * Math.ceil(maxMessageImageBytes / 3)
+  // Each committed image is Base64-encoded on its own, so the batch ceiling is
+  // the SUM of per-image encoded ceilings (never one ceiling of a summed byte
+  // count, which would understate the encoded bytes).
+  const encodedPerImage = 4 * Math.ceil(maxImageBytes / 3)
+  const encoded = maxImagesPerMessage * encodedPerImage
   const candidate = encoded + IMAGE_METADATA_BYTES * maxImagesPerMessage + JSON_ENVELOPE_BYTES + OUTPUT_TEXT_BYTES
   const maxFrameBytes = Math.max(MAX_OUTPUT_FRAME_BYTES, candidate)
-  if (!Number.isSafeInteger(encoded) || !Number.isSafeInteger(candidate) || !Number.isSafeInteger(maxFrameBytes)
+  if (!Number.isSafeInteger(encodedPerImage) || !Number.isSafeInteger(encoded)
+    || !Number.isSafeInteger(candidate) || !Number.isSafeInteger(maxFrameBytes)
     || maxFrameBytes > bufferConstants.MAX_LENGTH) {
     return undefined
   }

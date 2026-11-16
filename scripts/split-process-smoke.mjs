@@ -646,6 +646,9 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.toolFailedStatus === true
       && result?.missingImageRejected === true
       && result?.largeImageFrameAboveLegacyCap === true
+      && result?.capacityPositive === true
+      && result?.capacityNegative === true
+      && result?.memoryMeasured === true
       && result?.slowPeerIsolated === true
       && result?.siblingAcpAndTuiUnaffected === true
       && result?.reattachAfterFailureClean === true
@@ -696,6 +699,27 @@ export function assertSelectedVerdict(caseId, result) {
       && result.evidence.slowPeer.lateRead.hostCloseConnections >= 1
       && Number.isInteger(result?.evidence?.slowPeer?.lateRead?.lateAttempts)
       && result.evidence.slowPeer.lateRead.lateAttempts >= 1
+      && Number.isInteger(result?.evidence?.capacity?.maxImageBytes)
+      && Number.isInteger(result?.evidence?.capacity?.maxImagesPerMessage)
+      && Number.isInteger(result?.evidence?.capacity?.maxMessageImageBytes)
+      && result.evidence.capacity.maxImageBytes > result.evidence.capacity.maxMessageImageBytes
+      && Number.isInteger(result?.evidence?.capacity?.storedBytes)
+      && result.evidence.capacity.storedBytes > result.evidence.capacity.maxMessageImageBytes
+      && result.evidence.capacity.storedBytes <= result.evidence.capacity.maxImageBytes
+      && Number.isInteger(result?.evidence?.capacity?.deliveredFrameBytes)
+      && result.evidence.capacity.deliveredFrameBytes > 256 * 1024
+      && Number.isInteger(result?.evidence?.capacity?.derivedBudget)
+      && result.evidence.capacity.deliveredFrameBytes <= Math.max(256 * 1024, result.evidence.capacity.derivedBudget)
+      && result?.evidence?.boundedTransport?.overBudgetCode === 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'
+      && result.evidence.boundedTransport.noContentOrStopReason === true
+      && result.evidence.boundedTransport.siblingAfterOverflow === true
+      && result.evidence.boundedTransport.tuiAlive === true
+      && Number.isInteger(result?.evidence?.memory?.rssBaselineBytes)
+      && Number.isInteger(result?.evidence?.memory?.rssPeakBytes)
+      && result.evidence.memory.rssPeakBytes >= result.evidence.memory.rssBaselineBytes
+      && result.evidence.memory.hostPid === result.evidence.hostPid
+      && result.evidence.memory.sdkFrameBytes === result.evidence.assistant.wireFrameBytes
+      && result.evidence.memory.writerBacklogBoundBytes === 256 * 1024
       && Array.isArray(result?.evidence?.imageProbes)
       && result.evidence.imageProbes.length === 2,
     `selected ${caseId}: the ACP committed content-output verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
