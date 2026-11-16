@@ -1961,6 +1961,7 @@ export class DirectShellExecutionSettingsConfig implements ShellExecutionSetting
     patch: SectionPatch<ShellExecutionSettings>,
     expectedRevision: number,
     generation: object,
+    expectedExecutor: HostShellExecutor,
   ): Promise<SectionMutationOutcome> {
     if (patch.executor !== undefined) {
       return { kind: 'rejected', reason: 'the Host shell executor identity is a Host observation, not an editable setting' }
@@ -1970,6 +1971,9 @@ export class DirectShellExecutionSettingsConfig implements ShellExecutionSetting
     const current = readDirectShellExecutionSection(this.ctx)
     if (current.kind !== 'ready') {
       return { kind: 'rejected', reason: current.reason }
+    }
+    if (current.effective.executor !== expectedExecutor) {
+      return { kind: 'rejected', reason: 'the Host served shell row changed; refresh before saving' }
     }
     const namespace = SHELL_EXECUTOR_ROWS.find(row => row.executor === current.effective.executor)!.namespace
     const ops: SettingsMutationOp[] = []

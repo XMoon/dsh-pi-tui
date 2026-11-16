@@ -435,7 +435,7 @@ test('two shell caps dispatch as ONE mutation on the captured ACTIVE row and nev
   const result = await shell.mutate({
     timeoutMs: { kind: 'set', value: 45_000 },
     maxOutputBytes: { kind: 'reset' },
-  }, opened.revision, opened.generation)
+  }, opened.revision, opened.generation, opened.effective.executor)
   assert.deepEqual(result, { kind: 'accepted' })
   assert.equal(settings.mutations.length, 1, 'both caps are one official mutate call')
   assert.deepEqual(settings.mutations[0], {
@@ -451,7 +451,32 @@ test('two shell caps dispatch as ONE mutation on the captured ACTIVE row and nev
     maxOutputBytes: 64_000,
   }, 'the reset cap reads back the inherited 64000 while the sibling set stays')
   // The executor identity is a Host observation, never an editable field.
-  assert.equal((await shell.mutate({ executor: { kind: 'set', value: 'pwsh' } } as never, opened.revision, opened.generation)).kind, 'rejected')
+  assert.equal((await shell.mutate({ executor: { kind: 'set', value: 'pwsh' } } as never, opened.revision, opened.generation, opened.effective.executor)).kind, 'rejected')
+})
+
+test('a same-generation/same-revision served-row switch rejects the stale shell page', async () => {
+  const settings = makeHostSectionsSettings({ shell: 'bash' })
+  const shell = new DirectShellExecutionSettingsConfig(hostSectionsContext(settings))
+  const opened = shell.read()
+  assert.equal(opened.kind, 'ready')
+  if (opened.kind !== 'ready') return
+  // Replace the served row without changing the Settings authority or revision.
+  settings.descriptors = [{
+    ns: 'pwsh-sandbox',
+    base: { timeoutMs: 120_000, maxOutputBytes: 64_000 },
+    user: {},
+    value: { timeoutMs: 120_000, maxOutputBytes: 64_000 },
+    revision: opened.revision,
+  }]
+  const switched = shell.read()
+  assert.equal(switched.kind, 'ready')
+  if (switched.kind !== 'ready') return
+  assert.equal(switched.effective.executor, 'pwsh')
+  assert.equal(switched.revision, opened.revision)
+  assert.equal(switched.generation, opened.generation)
+  const result = await shell.mutate({ timeoutMs: { kind: 'set', value: 1 } }, opened.revision, opened.generation, 'bash')
+  assert.equal(result.kind, 'rejected')
+  assert.equal(settings.mutations.length, 0, 'the stale bash page never writes the pwsh row')
 })
 
 test('the session-log switch accepts false, and Reset may read back On without requiring USER deletion', async () => {

@@ -47,6 +47,9 @@ export interface HostNumericSettingsPort<T extends object> {
 export interface HostNumericSettingsControllerDeps<T extends object> {
   readonly port: HostNumericSettingsPort<T>
   readonly fields: readonly HostNumericSettingsField<T>[]
+  /** Identity of the captured Host row (the Shell executor) that must remain
+   *  current; revision/generation alone can coincide across served rows. */
+  readonly valueIdentity?: (value: T) => string
   readonly requestRender: () => void
   readonly onAuthoritativeChange?: () => void
   readonly runOwned: (label: string, task: () => Promise<void>) => void
@@ -82,9 +85,14 @@ function hasPatch<T extends object>(patch: SectionPatch<T>): boolean {
   return Object.keys(patch).length !== 0
 }
 
-function readyCurrent<T extends object>(source: SectionRead<T>, live: SectionRead<T>): boolean {
+function readyCurrent<T extends object>(
+  source: SectionRead<T>,
+  live: SectionRead<T>,
+  identity?: (value: T) => string,
+): boolean {
   return source.kind === 'ready' && live.kind === 'ready'
     && source.generation === live.generation && source.revision === live.revision
+    && (identity === undefined || identity(source.effective) === identity(live.effective))
 }
 
 export class HostNumericSettingsController<T extends object> {
@@ -120,7 +128,7 @@ export class HostNumericSettingsController<T extends object> {
       dirty: this.dirty(),
       saved: this.saved,
       source: this.state.source,
-      current: this.state.refreshRequired !== true && readyCurrent(this.state.source, live),
+      current: this.state.refreshRequired !== true && readyCurrent(this.state.source, live, this.deps.valueIdentity),
       ...(live.kind === 'ready' ? { currentGeneration: live.generation } : {}),
       texts: Object.fromEntries(this.texts) as Readonly<Partial<Record<keyof T & string, string>>>,
       resetFields: this.resetFields(),
@@ -156,7 +164,7 @@ export class HostNumericSettingsController<T extends object> {
   private editable(): boolean {
     if (this.disposed || this.loading || this.saving) return false
     const live = this.deps.port.read()
-    if (this.state.refreshRequired === true || !readyCurrent(this.state.source, live)) {
+    if (this.state.refreshRequired === true || !readyCurrent(this.state.source, live, this.deps.valueIdentity)) {
       this.notice = 'Host settings changed or are unavailable; refresh before editing.'
       this.changed()
       return false
@@ -286,7 +294,7 @@ export class HostNumericSettingsController<T extends object> {
     if (base.kind !== 'ready') return
     const patch = { ...this.state.patch }
     const live = this.deps.port.read()
-    if (this.state.refreshRequired === true || !readyCurrent(base, live)) {
+    if (this.state.refreshRequired === true || !readyCurrent(base, live, this.deps.valueIdentity)) {
       this.state.status = { kind: 'not-saved', text: 'Not saved · Host settings changed; refresh to review. Unsaved changes retained.' }
       this.changed()
       return

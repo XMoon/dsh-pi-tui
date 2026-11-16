@@ -636,6 +636,7 @@ export interface ShellExecutionSettingsConfig {
     patch: SectionPatch<ShellExecutionSettings>,
     expectedRevision: number,
     generation: object,
+    expectedExecutor: HostShellExecutor,
   ): Promise<SectionMutationOutcome>
 }
 
