@@ -1127,6 +1127,7 @@ class RemoteFooterCustomItems implements FooterCustomItemsConfig {
    *  descriptor/user section that cannot be read safely. */
   private readUserRaw(): { readonly value: unknown; readonly failed: boolean } {
     const descriptor = this.mirror.namespace(TUI_SETTINGS_NS)
+      ?? this.mirror.namespace(HOST_RUNTIME_TUI_SETTINGS_NS)
     if (descriptor === undefined) return { value: undefined, failed: true }
     const user = descriptor.user
     if (user === undefined) return { value: undefined, failed: false }

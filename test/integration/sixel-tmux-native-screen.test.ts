@@ -27,7 +27,7 @@ import type { TuiAppEvents } from '../../src/tui-app.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
 import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
 import { setAssistantVisualPresentation, type VisualPresentationKey } from '../../src/domain/visual/presentation.ts'
-import { svgFactFromArgs } from '../../src/domain/visual/svg.ts'
+import { svgDigest, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
@@ -464,6 +464,9 @@ test('the Assistant SVG thumbnail paints through native tmux SIXEL with a contro
   // E04 owns the real Assistant publication -> SvgRasterLoader -> native tmux
   // SIXEL sink. Native resvg child lifecycle/timeout is qualified separately
   // by test/client/svg-raster.test.ts, not by this load-sensitive CI integration.
+  // This branch keeps its loader-state observation: the SAME variant the
+  // component requested is read back from the real loader, so a real raster
+  // failure reports itself instead of waiting for a DCS that cannot arrive.
   const svgLoader = new SvgRasterLoader(async (source, options) => {
     assert.equal(source, svg, 'the Assistant publication reached the real SVG loader')
     if (options.signal.aborted) throw new Error('cancelled')
@@ -488,7 +491,15 @@ test('the Assistant SVG thumbnail paints through native tmux SIXEL with a contro
   app.setTranscript(assistantSvgVisual(svg).messages())
   app.requestRender()
   await until(() => terminal.getViewport().join('\n').includes('Service topology'), 'the Assistant SVG card')
-  await until(() => paintedRasters(terminal).length > 0, 'the SVG thumbnail raster')
+  await until(() => {
+    const width = requestedWidths.at(-1)
+    if (width === undefined) return false
+    const state = svgLoader.get(svgDigest(svg), width)
+    // Report the real raster failure (including its phase diagnostics) instead
+    // of spending the remaining budget waiting for an impossible DCS.
+    if (state.state === 'error') throw state.error
+    return state.state === 'ready' && paintedRasters(terminal).length > 0
+  }, 'the SVG thumbnail raster')
   assert.ok(requestedWidths.length > 0, 'the Assistant SVG used the loader and a raster width')
   const svgDecoded = decodeSixel(paintedRasters(terminal).at(-1)!)
   assert.ok(svgDecoded.width > 0 && svgDecoded.height > 0, 'the existing SVG loader produced real pixels')

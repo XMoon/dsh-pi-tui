@@ -1629,7 +1629,7 @@ export async function apply(ctx) {
   let lastQuestionCallId
   const questionProjection = () => {
     try {
-      const agent = ctx.agents.roots()[0]
+      const agent = ctx.agents.list().find(candidate => ctx.subagents.rootOf(candidate) === candidate)
       if (agent === undefined) return undefined
       const projections = ctx.get('sessionProjections')
       const state = projections?.stateOf(agent.session, 'userQuestions')
@@ -1725,7 +1725,7 @@ export async function apply(ctx) {
     const timer = setInterval(() => {
       if (!existsSync(cancelBarrier)) return
       clearInterval(timer)
-      for (const agent of ctx.agents.roots()) {
+      for (const agent of ctx.agents.list().filter(candidate => ctx.subagents.rootOf(candidate) === candidate)) {
         record('agent-cancel-requested', { agentId: String(agent.id) })
         agent.cancel({ kind: 'user' })
       }
@@ -1748,7 +1748,7 @@ export async function apply(ctx) {
       if (!existsSync(probePath)) return
       clearInterval(timer)
       try {
-        const agent = ctx.agents.roots()[0]
+        const agent = ctx.agents.list().find(candidate => ctx.subagents.rootOf(candidate) === candidate)
         const userQuestions = ctx.get('userQuestions')
         if (agent === undefined || userQuestions === undefined) {
           record('answer-probe', { phase, error: agent === undefined ? 'no-root-agent' : 'no-user-questions' })
@@ -1789,7 +1789,7 @@ export async function apply(ctx) {
           return
         }
         if (status !== 'idle' || !sawRunning || armed) return
-        if (!ctx.agents.roots().includes(agent)) return
+        if (ctx.subagents.rootOf(agent) !== agent) return
         armed = true
         setTimeout(() => { callback(agent) }, 0)
       })

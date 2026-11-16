@@ -981,6 +981,63 @@ test('footerCustomItems reads the USER layer for both the runtime view and persi
   assert.deepEqual(port.footerCustomItems.rawForPersistence(), { kind: 'available', value: items })
 })
 
+test('Host-only Split settings preserve raw USER footer definitions during an unrelated preference save', async () => {
+  const namespace = 'split-host-pi-tui-runtime'
+  const userItems = [{ schemaVersion: 9, id: 'user:future', opaque: { keep: ['bytes', 'unchanged'] } }]
+  const projectItems = [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'project only' }]
+  const { port, state } = createBackend(current => {
+    current.namespaces.set(namespace, {
+      ns: namespace,
+      value: { ...TUI_DEFAULTS, footerCustomItems: projectItems },
+      user: { footerCustomItems: userItems },
+      revision: 7,
+    })
+  })
+  await port.describe()
+  const raw = port.footerCustomItems.rawForPersistence()
+  assert.equal(raw.kind, 'available')
+  if (raw.kind !== 'available') assert.fail('the Host USER layer must be readable before saving')
+  assert.deepEqual(raw.value, userItems, 'merged project definitions are not a USER persistence source')
+  const settings = port.tuiSettings
+  assert.ok(settings)
+  await settings.replace({ ...settings.get(), terminalProgress: 'off', footerCustomItems: raw.value })
+  assert.deepEqual(state.mutateCalls, [{
+    ns: namespace, revision: 7,
+    ops: [{ op: 'set', path: ['terminalProgress'], value: 'off' }],
+  }], 'the unrelated preference dispatches one revision-fenced Host operation')
+  assert.equal(settings.get().terminalProgress, 'off', 'the persisted mode reads back from the refreshed authority')
+  assert.deepEqual(state.namespaces.get(namespace)?.user?.footerCustomItems, userItems)
+  ;(raw.value as typeof userItems)[0].opaque.keep.push('client mutation')
+  assert.deepEqual(port.footerCustomItems.rawForPersistence(), { kind: 'available', value: userItems },
+    'mutating the detached read cannot change the mirrored raw USER layer')
+})
+
+test('Host-only footer custom items keep namespace precedence and unreadable USER layers fail closed', async () => {
+  const namespace = 'split-host-pi-tui-runtime'
+  const item = { schemaVersion: 1, id: 'user:clock', kind: 'text', text: 'hi' }
+  const host = createBackend(current => {
+    current.namespaces.set(namespace, { ns: namespace, value: {}, user: { footerCustomItems: [item] }, revision: 1 })
+  })
+  await host.port.describe()
+  assert.deepEqual(host.port.footerCustomItems.get(), { items: [item], invalidCount: 0 })
+  host.state.namespaces.set(TUI_NS, { ns: TUI_NS, value: {}, revision: 2 })
+  await host.port.describe()
+  assert.deepEqual(host.port.footerCustomItems.rawForPersistence(), { kind: 'available', value: undefined },
+    'the primary TUI descriptor wins even when only the Host descriptor has definitions')
+  host.state.namespaces.delete(TUI_NS)
+  host.state.namespaces.get(namespace)!.user = [] as unknown as Record<string, unknown>
+  await host.port.describe()
+  assert.deepEqual(host.port.footerCustomItems.rawForPersistence(), { kind: 'unavailable' })
+  host.state.namespaces.get(namespace)!.user = undefined
+  host.state.namespaces.get(namespace)!.value = { footerCustomItems: [item] }
+  await host.port.describe()
+  assert.deepEqual(host.port.footerCustomItems.rawForPersistence(), { kind: 'available', value: undefined },
+    'a project-only definition is not promoted into the absent USER layer')
+  host.state.namespaces.clear()
+  await host.port.describe()
+  assert.deepEqual(host.port.footerCustomItems.rawForPersistence(), { kind: 'unavailable' })
+})
+
 /* ------------------------------------------------------------------------- *
  * Providers.
  * ------------------------------------------------------------------------- */
