@@ -1583,3 +1583,199 @@ test('pointer B1: a direct Viewer closes through its painted Close [Esc] span', 
   app.setFullscreen(false)
   app.stop()
 })
+
+// ── PR-B review: intervening input revokes the pending image gesture ────────
+
+/** One minimal event at a workspace frame's exact grant. */
+function imageMouse(
+  type: 'press' | 'click' | 'wheel',
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  wheelDelta?: number,
+): import('@xmoon76/pi-tui').TuiMouseEvent {
+  return {
+    type,
+    button: type === 'wheel' ? 'none' : 'left',
+    x, y, screenX: x, screenY: y, width, height,
+    shift: false, alt: false, ctrl: false,
+    ...(type === 'wheel' ? { wheelDelta: wheelDelta ?? 1 } : {}),
+  }
+}
+
+test('image gesture: a wheel between a list row press and release never opens the Viewer', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    let opens = 0
+    const workspace = new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [
+        { value: '1', label: '#1 · shot.png' },
+        { value: '2', label: '#2 · second.png' },
+      ],
+      resolve: () => {
+        opens += 1
+        return { ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} }
+      },
+      onStale: () => {},
+      onClose: () => {},
+      initial: { kind: 'list' },
+    })
+    workspace.render(80)
+    // Row 2 is the first occurrence; the wheel really moves the selection.
+    assert.ok(workspace.handleMouse(imageMouse('press', 5, 2, 80, 8))?.handled)
+    assert.ok(workspace.handleMouse(imageMouse('wheel', 5, 2, 80, 8, 1))?.handled)
+    assert.equal(workspace.handleMouse(imageMouse('click', 5, 2, 80, 8)), undefined,
+      'a wheel between press and release makes the old row click inert')
+    assert.equal(opens, 0, 'no Viewer was opened by the wheel-scrolled press')
+    // The next independent press remains legitimate.
+    assert.ok(workspace.handleMouse(imageMouse('press', 5, 2, 80, 8))?.handled)
+    assert.ok(workspace.handleMouse(imageMouse('click', 5, 2, 80, 8))?.handled)
+    assert.equal(opens, 1, 'a fresh press→release after the wheel opens exactly once')
+    workspace.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('image gesture: invalidation and keyboard input revoke a pending row press', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    let opens = 0
+    const make = (): ImageWorkspacePanel => new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [
+        { value: '1', label: '#1 · shot.png' },
+        { value: '2', label: '#2 · second.png' },
+      ],
+      resolve: () => {
+        opens += 1
+        return { ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} }
+      },
+      onStale: () => {},
+      onClose: () => {},
+      initial: { kind: 'list' },
+    })
+    const invalidated = make()
+    invalidated.render(80)
+    assert.ok(invalidated.handleMouse(imageMouse('press', 5, 2, 80, 8))?.handled)
+    invalidated.invalidate()
+    invalidated.render(80)
+    assert.equal(invalidated.handleMouse(imageMouse('click', 5, 2, 80, 8)), undefined,
+      'a press invalidated before its release cannot open the Viewer')
+    invalidated.dispose()
+
+    const keyed = make()
+    keyed.render(80)
+    assert.ok(keyed.handleMouse(imageMouse('press', 5, 2, 80, 8))?.handled)
+    keyed.handleInput('\x1b[B') // a real keyboard selection move
+    keyed.render(80)
+    assert.equal(keyed.handleMouse(imageMouse('click', 5, 2, 80, 8)), undefined,
+      'a keyboard move between press and release cannot open the old row')
+    keyed.dispose()
+    assert.equal(opens, 0)
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('image gesture: a wheel revokes a pending list Close and Viewer exit press', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    let closes = 0
+    const list = new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [
+        { value: '1', label: '#1 · shot.png' },
+        { value: '2', label: '#2 · second.png' },
+      ],
+      resolve: () => ({ ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} }),
+      onStale: () => {},
+      onClose: () => { closes += 1 },
+      initial: { kind: 'list' },
+    })
+    const lines = list.render(80)
+    const bar = lines[lines.length - 1]!.replace(/\x1b\[[0-9;]*m/g, '')
+    const closeCol = bar.indexOf('Close [Esc]')
+    assert.ok(list.handleMouse(imageMouse('press', closeCol, 7, 80, 8))?.handled)
+    list.handleMouse(imageMouse('wheel', 5, 2, 80, 8, 1))
+    assert.equal(list.handleMouse(imageMouse('click', closeCol, 7, 80, 8)), undefined)
+    assert.equal(closes, 0, 'a wheel between the Close press and release keeps the workspace')
+    list.dispose()
+
+    const viewer = new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [],
+      resolve: () => undefined,
+      onStale: () => {},
+      onClose: () => { closes += 1 },
+      initial: { kind: 'viewer', source: { ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} } },
+    })
+    const viewerLines = viewer.render(80)
+    const last = viewerLines[viewerLines.length - 1]!.replace(/\x1b\[[0-9;]*m/g, '')
+    const exitCol = last.indexOf('Close [Esc]')
+    assert.ok(viewer.handleMouse(imageMouse('press', exitCol, 7, 80, 8))?.handled)
+    viewer.handleMouse(imageMouse('wheel', 5, 2, 80, 8, 1))
+    assert.equal(viewer.handleMouse(imageMouse('click', exitCol, 7, 80, 8)), undefined)
+    assert.equal(closes, 0, 'a wheel between the Viewer exit press and release keeps the Viewer')
+    // A fresh independent press still closes.
+    assert.ok(viewer.handleMouse(imageMouse('press', exitCol, 7, 80, 8))?.handled)
+    assert.ok(viewer.handleMouse(imageMouse('click', exitCol, 7, 80, 8))?.handled)
+    assert.equal(closes, 1)
+    viewer.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('pointer B1: a real wheel between a list row press and release never opens the Viewer', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    userMessage([{ type: 'image', attachment: IMAGE_REF }], 1),
+    userMessage([{ type: 'image', attachment: IMAGE_REF_2 }], 2),
+  ])
+  app.setTranscript(folder.messages())
+  vt.resize(100, 30)
+  await vt.waitForRender()
+  ;(app as unknown as { openTranscriptImagePicker(): void }).openTranscriptImagePicker()
+  const list = await viewport(vt)
+  const rowA = rowOfNth(list, '#1 · shot.png', 0)
+  const colA = cellOfText(list, rowA, '#1 · shot.png')
+  // Press, then a REAL wheel (the picker really moves the selection), then
+  // release on the pressed cell: no Viewer may open and the old row click is
+  // dead.
+  vt.sendInput(`\x1b[<0;${colA};${rowA}M`)
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<65;${colA};${rowA}M`)
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;${colA};${rowA}m`)
+  await settleClick(vt)
+  const after = await viewport(vt)
+  assert.ok(!after.includes('Image · '), `a wheel between press and release opens no Viewer:\n${after}`)
+  assert.ok(after.includes('Images · current transcript'), 'the list stays open')
+  assert.ok(after.split('\n').some(line => line.startsWith('> ') && line.includes('#2')),
+    `the wheel really moved the list selection:\n${after}`)
+  // A fresh independent click on the same row still opens its occurrence.
+  const fresh = await viewport(vt)
+  const freshRow = rowOfNth(fresh, '#1 · shot.png', 0)
+  await clickCell(vt, cellOfText(fresh, freshRow, '#1 · shot.png'), freshRow)
+  assert.ok((await viewport(vt)).includes('Image · shot.png'), 'a fresh press→release after the wheel opens normally')
+  app.setFullscreen(false)
+  app.stop()
+})

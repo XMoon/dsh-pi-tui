@@ -149,6 +149,10 @@ export class ImageWorkspacePanel implements Component {
   private listGridPainted = false
   /** The one press this root is still allowed to complete. */
   private gesture: ImageWorkspaceGesture | undefined
+  /** The picker-row press the root may still forward a click for. A wheel,
+   *  drag, key or invalidation between press and release revokes it: the
+   *  picker's own pressed-value latch must never complete an old row click. */
+  private pickerPress: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | undefined
 
   constructor(input: ImageWorkspaceInput) {
     this.input = input
@@ -202,6 +206,13 @@ export class ImageWorkspacePanel implements Component {
    * press is never dispatched twice.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // WHEEL/DRAG/MOVE between a press and its release is intervening input:
+    // the old press must never complete a row View, a bar Close or a Viewer
+    // exit. Keyboard input and invalidation revoke it in their own entries.
+    if (event.type === 'wheel' || event.type === 'drag' || event.type === 'move') {
+      this.gesture = undefined
+      this.pickerPress = undefined
+    }
     // Every left press starts a fresh gesture, and a click consumes the one
     // the press armed — captured BEFORE the latch is cleared, so the click
     // can still prove its press. A rejected event also ends the old gesture.
@@ -210,10 +221,41 @@ export class ImageWorkspacePanel implements Component {
       this.gesture = undefined
     }
     if (this.mode === 'list') {
-      const pickerResult = this.listGridPainted ? this.picker?.handleMouse(event) : undefined
-      if (pickerResult !== undefined) return pickerResult
-      return this.handleListBarMouse(event, clicked)
+      if (event.type === 'wheel') {
+        // Wheel is real list navigation: forward it to the picker, but the
+        // pressed latches above already make the old click impossible.
+        return this.listGridPainted ? this.picker?.handleMouse(event) : undefined
+      }
+      if (event.type === 'press') {
+        const pickerResult = this.listGridPainted ? this.picker?.handleMouse(event) : undefined
+        if (pickerResult !== undefined) {
+          // A row press: only a click for THIS exact press cell/grant may be
+          // forwarded to the picker's activation path.
+          this.pickerPress = { x: event.x, y: event.y, width: event.width, height: event.height }
+          return pickerResult
+        }
+        return this.handleListBarMouse(event, clicked)
+      }
+      if (event.type === 'click') {
+        if (clicked?.kind === 'list-bar') return this.handleListBarMouse(event, clicked)
+        const pressed = this.pickerPress
+        this.pickerPress = undefined
+        if (pressed === undefined
+          || pressed.x !== event.x
+          || pressed.y !== event.y
+          || pressed.width !== event.width
+          || pressed.height !== event.height) return undefined
+        return this.picker?.handleMouse(event)
+      }
+      if (event.type === 'release') {
+        // Keep the row press latched for the click that follows the release.
+        return this.pickerPress === undefined || !this.listGridPainted
+          ? undefined
+          : this.picker?.handleMouse(event)
+      }
+      return undefined
     }
+    if (event.type === 'wheel' || event.type === 'drag' || event.type === 'move') return undefined
     const panel = this.viewPanel
     if (!(panel instanceof ImageViewerPanel)) return undefined
     return this.handleViewerMouse(event, panel, clicked)
@@ -317,6 +359,7 @@ export class ImageWorkspacePanel implements Component {
     // or a stale bar hit must not complete before the next render rebuilds
     // them. (The Viewer's own `invalidate` drops its painted exit span.)
     this.gesture = undefined
+    this.pickerPress = undefined
     this.listBarHits = []
     this.listGridPainted = false
     this.picker?.invalidate()
@@ -326,6 +369,7 @@ export class ImageWorkspacePanel implements Component {
   dispose(): void {
     // Teardown owns the screen gesture: no press may survive the lease.
     this.gesture = undefined
+    this.pickerPress = undefined
     this.listBarHits = []
     this.listGridPainted = false
     this.viewPanel?.dispose()
@@ -333,6 +377,11 @@ export class ImageWorkspacePanel implements Component {
   }
 
   handleInput(data: string): void {
+    // Keyboard input is intervening input for a pending pointer gesture: an
+    // arrow/key repaint must never let the following release complete the old
+    // press.
+    this.gesture = undefined
+    this.pickerPress = undefined
     if (this.mode === 'list') {
       // A FIXED Esc fallback, not an alternative binding: `KeybindingsManager`
       // accepts an EMPTY key list, so `tui.select.cancel` can legally resolve to

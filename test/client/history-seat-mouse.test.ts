@@ -702,3 +702,61 @@ test('B3: a Footer Cancel pressed before a Question park never acts after the re
   assert.ok(view(h.vt).includes('Input History'), 'the stale footer release must not close the restored seat')
   assert.equal(h.app.getDraft(), '', 'the stale release never accepts')
 })
+
+test('B3 gesture: a real wheel between a Footer Cancel/Scope press and release is inert', async () => {
+  const h = startApp([
+    row('alpha prompt', 3, '/work/a', 'id-a'),
+    row('beta prompt', 2, '/work/a', 'id-b'),
+  ])
+  await openFullscreenHistory(h)
+  const frame = rawView(h.vt)
+  const footerRow = rowOfText(h.vt, 'Cancel [Esc]')
+  const footerLine = frame[footerRow]!
+  const cancelCol = footerLine.indexOf('Cancel [Esc]')
+  const scopeCol = footerLine.indexOf('Scope [Tab]')
+  const selectedBefore = frame.find(line => line.startsWith('> ')) ?? ''
+  const listRow = rowOf(h.vt, 'beta prompt')
+  assert.ok(footerRow >= 0 && cancelCol >= 0 && scopeCol >= 0 && listRow >= 0)
+
+  // Press Cancel, wheel the list, then release on the pressed footer cell.
+  press(h.vt, footerRow, cancelCol)
+  await h.vt.waitForRender()
+  wheelDown(h.vt, listRow, 4)
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.notEqual(rawView(h.vt).find(line => line.startsWith('> ')) ?? '', selectedBefore,
+    'the wheel really moved the result selection between press and release')
+  release(h.vt, footerRow, cancelCol)
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.ok(view(h.vt).includes('Input History'),
+    `a wheel between the Footer Cancel press and release must not close the seat:\n${view(h.vt)}`)
+
+  // Press Scope, wheel, then release: the old scope action must not replay.
+  const scopeFrame = rawView(h.vt)
+  const scopeFooter = rowOf(h.vt, 'Cancel [Esc]')
+  const scopeText = scopeFrame[scopeFooter]!
+  const nextScopeCol = scopeText.indexOf('Scope [Tab]')
+  const scopeBefore = scopeFrame.find(line => line.includes('Scope: ')) ?? ''
+  press(h.vt, scopeFooter, nextScopeCol)
+  await h.vt.waitForRender()
+  wheelDown(h.vt, rowOf(h.vt, 'alpha prompt'), 4)
+  await h.vt.waitForRender()
+  await flush(2)
+  release(h.vt, scopeFooter, nextScopeCol)
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.equal(rawView(h.vt).find(line => line.includes('Scope: ')) ?? '', scopeBefore,
+    'the wheel-scrolled Scope press changed no scope')
+
+  // A fresh independent press still performs each action exactly once.
+  const freshFrame = rawView(h.vt)
+  const freshFooter = rowOf(h.vt, 'Cancel [Esc]')
+  const freshText = freshFrame[freshFooter]!
+  const freshCancelCol = freshText.indexOf('Cancel [Esc]')
+  press(h.vt, freshFooter, freshCancelCol)
+  release(h.vt, freshFooter, freshCancelCol)
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.ok(!view(h.vt).includes('Input History'), 'a fresh Footer Cancel click still closes the seat')
+})

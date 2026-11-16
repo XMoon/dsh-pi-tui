@@ -615,6 +615,9 @@ export class HistoryPanel implements Component, Focusable {
   }
 
   handleInput(data: string): void {
+    // Keyboard input between a press and its release is intervening input: the
+    // release must never replay a Footer/heading action taken for the old frame.
+    this.gesture = undefined
     // Tab: scope toggle — the query SURVIVES.
     if (this.matchesChord('scope', data)) {
       this.toggleScope()
@@ -675,6 +678,16 @@ export class HistoryPanel implements Component, Focusable {
    * ONLY the region under the pointer.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // Intervening pointer input revokes the pending gesture: a wheel scrolls
+    // the list/preview under the pressed cell (the old row/action identity may
+    // still resolve after a repaint), and a non-preview drag moves the pointer
+    // away from the pressed cell. The Preview drag OWNs its drags, so only the
+    // wheel cancels it.
+    if (event.type === 'wheel' || event.type === 'move'
+      || (event.type === 'drag' && this.gesture?.kind !== 'preview')) {
+      if (this.gesture?.kind === 'preview') this.resetPreviewSelection()
+      this.gesture = undefined
+    }
     // The pointer path never passes the Host key ladder, so THIS is the entry
     // that must guard the live tenant identity (the captured session subject):
     // a click must never act on another session's page, and the fork keeps
