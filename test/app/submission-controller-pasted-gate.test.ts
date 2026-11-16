@@ -216,12 +216,24 @@ interface AttemptMount {
   /** Configures the final command plane: unmatched, an executed command that
    *  writes the corrected draft and records `restored`, or a late genuine
    *  claim that refuses the attachments. */
-  setCommandBehavior(behavior: 'unmatched' | 'executed-error-restored' | 'late-claim-attachments-refused'): void
+  setCommandBehavior(behavior: 'unmatched' | 'executed-error-restored' | 'late-claim-attachments-refused'
+    | 'host-non-invocation-skill-wrapper' | 'legacy-command-pending'): void
+  /** Resolve the deferred legacy command's execution (its failure path). */
+  resolveCommand(outcome: unknown): void
+  /** PR2: the mount agent's live status (a busy agent makes the steer DELIVERY
+   *  mode 'steer'; an idle one starts a new turn). */
+  setAgentRunning(running: boolean): void
+  /** Flip the captured scope's currentness (the stale-settlement window). */
+  setScopeCurrent(current: boolean): void
+  /** Hold the NEXT writer call and settle it later (the FIFO window). */
+  holdNextWriter(): void
+  releaseHeldWriter(): void
 }
 
 function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}): AttemptMount {
   const composer = new AttemptComposer()
   const port = options.port ?? composer
+  let controllerRef: ReturnType<typeof createSubmissionController> | undefined
   const writerCalls: AttemptWriterCall[] = []
   const historyRows: { text: string; sessionId: string | undefined }[] = []
   const files = new DraftFileStore()
@@ -231,14 +243,25 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
     outcome: { kind: 'committed', value: undefined },
     acceptedFirst: true,
   }
-  let commandBehavior: 'unmatched' | 'executed-error-restored' | 'late-claim-attachments-refused' = 'unmatched'
+  let commandBehavior: 'unmatched' | 'executed-error-restored' | 'late-claim-attachments-refused'
+    | 'host-non-invocation-skill-wrapper' | 'legacy-command-pending' = 'unmatched'
   let claimReads = 0
+  let releaseCommand: ((outcome: unknown) => void) | undefined
+  let agentRunning = false
+  let scopeCurrent = true
+  let releaseWriter: (() => void) | undefined
+  let heldWriter = false
+  const settleWriter = async (): Promise<WriteOutcome> => {
+    if (next.acceptedFirst) writerCalls.at(-1)?.onAccepted?.()
+    if (next.outcome === 'throw') throw new Error('writer exploded')
+    return next.outcome
+  }
   const scope = { sessionId: 's1' }
   const surface: SubmissionRuntimeSurface = {
     withWriter: async (_scope, task) => task(),
     withPromptAdmission: async (_scope, _line, task) => task(),
     isDisposed: () => false,
-    isScopeCurrent: () => true,
+    isScopeCurrent: () => scopeCurrent,
     composerHoldActive: () => controller.composerHoldActive(),
     mergeDraftIntoEditor: (text) => { port.setEditorText(port.getDraft() + text); return true },
     restoreStaleDraftIntoEditor: () => 'merged-verbatim',
@@ -255,13 +278,12 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
     prepareMessage: async () => ({ prepared: true }),
     prompt: async (_sessionId, _message, options) => {
       writerCalls.push({ mode: 'queue', onAccepted: options?.onAccepted })
-      if (next.acceptedFirst) options?.onAccepted?.()
-      if (next.outcome === 'throw') throw new Error('writer exploded')
-      return next.outcome
+      if (heldWriter) await new Promise<void>(resolve => { releaseWriter = resolve })
+      return settleWriter()
     },
   }
   const runtime = bindSubmissionRuntime({ surface })
-  const agent = { status: 'idle', session: { id: 's1' }, options: {} }
+  const agent = { get status() { return agentRunning ? 'running' : 'idle' }, session: { id: 's1' }, options: {} }
   const inert: unknown = new Proxy(function inert(): void {}, {
     get: (_target, key) => (key === 'then' ? undefined : inert),
     apply: () => undefined,
@@ -304,6 +326,15 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
         // The late-claim behaviour: the standing view cannot classify the name
         // (the admission is an ordinary held prompt), the FINAL catalog does
         // (the invocation-time re-read refuses the attachments).
+        if (parsed.name === 'export' && commandBehavior === 'host-non-invocation-skill-wrapper') {
+          // The genuine catalog owns the NAME but does not claim the ARGUED
+          // line; a live same-named Skill Wrapper also exists. The shared
+          // policy returns ordinary-submission (Host-name priority).
+          return { claimed: false }
+        }
+        if (parsed.name === 'deploy' && commandBehavior === 'legacy-command-pending') {
+          return { claimed: true }
+        }
         if (parsed.name === 'late-command'
           && (commandBehavior === 'late-claim-attachments-refused' || commandBehavior === 'executed-error-restored')) {
           claimReads += 1
@@ -317,8 +348,10 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
       },
       hostCatalogResolves: () => false,
       clientClaimsLine: () => false,
-      isSkillWrapperName: () => false,
-      isSkillInvocation: () => false,
+      isSkillInvocation: (parsed: { name: string } | undefined) =>
+        parsed?.name === 'export' && commandBehavior === 'host-non-invocation-skill-wrapper',
+      isSkillWrapperName: (name: string) =>
+        name === 'export' && commandBehavior === 'host-non-invocation-skill-wrapper',
       withCommandDelivery: (_delivery: unknown, run: () => unknown) => run(),
       takeCommandDraftDisposition: () =>
         commandBehavior === 'executed-error-restored' ? 'restored' : undefined,
@@ -330,16 +363,20 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
       hostFile: inert,
       pendingInputReader: { snapshot: () => ({ running: false, items: [] }) },
       sessionWriter: {
-        prompt: async (_sessionId: string, _message: unknown, _mode: 'queue' | 'steer', options?: { onAccepted?: () => void }) => {
-          writerCalls.push({ mode: 'queue', onAccepted: options?.onAccepted })
-          if (next.acceptedFirst) options?.onAccepted?.()
-          if (next.outcome === 'throw') throw new Error('writer exploded')
-          return next.outcome
+        prompt: async (_sessionId: string, _message: unknown, mode: 'queue' | 'steer', options?: { onAccepted?: () => void }) => {
+          writerCalls.push({ mode, onAccepted: options?.onAccepted })
+          if (heldWriter) {
+            await new Promise<void>(resolve => { releaseWriter = resolve })
+          }
+          return settleWriter()
         },
         updateQueue: async () => ({ kind: 'committed', value: undefined }),
       },
       hostCommand: {
         execute: async () => {
+          if (commandBehavior === 'legacy-command-pending') {
+            return new Promise(resolve => { releaseCommand = resolve })
+          }
           if (commandBehavior === 'executed-error-restored') {
             // The handler wrote its own authoritative retry draft before
             // settling an error (commands.ts' restored producer).
@@ -394,6 +431,7 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
   controller = createSubmissionController(new Proxy(deps, {
     get: (target, key) => (key in target ? target[key as string] : inert),
   }) as never)
+  controllerRef = controller
   return {
     controller,
     composer,
@@ -405,7 +443,13 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
     setCommandBehavior: (behavior) => {
       commandBehavior = behavior
       claimReads = 0
+      releaseCommand = undefined
     },
+    resolveCommand: (outcome) => { releaseCommand?.(outcome) },
+    setAgentRunning: (running) => { agentRunning = running; },
+    setScopeCurrent: (current) => { scopeCurrent = current; },
+    holdNextWriter: () => { heldWriter = true; },
+    releaseHeldWriter: () => { heldWriter = false; releaseWriter?.() },
   }
 }
 
@@ -738,4 +782,139 @@ test('PR2: a command-restored retry draft reaches the REAL PiTui composer (hold 
   } finally {
     guard.disposeAll()
   }
+})
+
+// ── Round-4 external review (F2/F3/F4) ─────────────────────────────────────
+
+test('PR2/F2: a Host non-invocation with a same-named live Skill Wrapper stays an ordinary held prompt', async () => {
+  const h = mountAttempt()
+  h.setCommandBehavior('host-non-invocation-skill-wrapper')
+  // The shared policy's Host-name priority decides: the argued line is NOT
+  // claimed, so the live skill wrapper must not reclassify it as a command.
+  assert.equal(h.controller.beginComposerSubmission('/export foo', 'enter'), 'held',
+    'the admission follows the shared classification, not the raw skill flag')
+  await attemptTick()
+  assert.equal(h.composer.calls.find(call => call.kind === 'hold') !== undefined, true,
+    'the held attempt froze the composer')
+  assert.equal(h.composer.calls.find(call => call.kind === 'settle')?.result, 'accepted',
+    'the ordinary submission reached the Host acceptance path')
+})
+
+test('PR2/F3: a legacy command failure while another attempt holds restores only after that hold settles', async () => {
+  const h = mountAttempt()
+  h.setCommandBehavior('legacy-command-pending')
+  // A: a genuine Host command line — a LEGACY (pre-clear) dispatch, no hold.
+  assert.equal(h.controller.beginComposerSubmission('/deploy now', 'enter'), 'legacy')
+  h.controller.submit('/deploy now', 'enter')
+  await attemptTick()
+  // The legacy path cleared the composer and the command is executing.
+  assert.equal(h.composer.text, '')
+  // B: the user typed an ordinary message while A still runs, then submits it.
+  // Its writer is held in flight so the hold is genuinely live when A fails.
+  h.composer.text = 'B held behind FIFO'
+  h.holdNextWriter()
+  assert.equal(h.controller.beginComposerSubmission('B held behind FIFO', 'enter'), 'held')
+  await attemptTick()
+  assert.equal(h.composer.text, 'B held behind FIFO', 'B owns the frozen composer')
+  // A fails and its restore must not touch B's frozen snapshot.
+  h.resolveCommand({
+    kind: 'committed',
+    matched: true,
+    execution: { commandId: 'cmd-a', result: { kind: 'error' } },
+  })
+  await attemptTick()
+  assert.equal(h.composer.text, 'B held behind FIFO',
+    'the legacy restore never mutates the live hold document')
+  // B is accepted: its clear runs, then A's deferred restore lands.
+  h.respond({ kind: 'committed', value: undefined }, true)
+  h.releaseHeldWriter()
+  await attemptTick()
+  assert.equal(h.composer.text, '/deploy now',
+    'the legacy command line is restored exactly once after the live hold settles')
+  assert.deepEqual(h.historyRows.map(row => row.text), ['/deploy now', 'B held behind FIFO'],
+    'the legacy command kept its dispatch-time row and the accepted B wrote its own')
+})
+
+test('PR2/F4: the public steer-draft action shares the composer admission', async () => {
+  const { createApplicationEvents } = await import('../../src/app/surface/application-events.ts')
+  const makeEvents = (controller: ReturnType<typeof mountAttempt>['controller'], composer: ReturnType<typeof mountAttempt>['composer']) => {
+    const inert: unknown = new Proxy(function () {}, {
+      get: (_target, key) => key === 'then' ? undefined : inert,
+      apply: () => inert,
+    })
+    const deps = {
+      submission: controller,
+      surface: {
+        app: { getDraft: () => composer.getDraft() },
+        composer,
+      },
+      viewer: { isViewing: () => false },
+      lifecycle: { isCleanedUp: () => false, requestExit: () => {} },
+      pastedImageIntake: { blocksDelivery: () => false },
+    }
+    const full = new Proxy(deps as object, {
+      get: (target, key) => (key in target
+        ? (target as Record<PropertyKey, unknown>)[key]
+        : inert),
+    }) as unknown as Parameters<typeof createApplicationEvents>[0]
+    return createApplicationEvents(full).events
+  }
+
+  // No live attempt: the action opens the SAME held attempt as Ctrl+S — the
+  // draft stays until the Host accepts it.
+  const first = mountAttempt()
+  const events = makeEvents(first.controller, first.composer)
+  first.composer.text = 'steer through the public action'
+  first.setAgentRunning(true)
+  first.holdNextWriter()
+  events.onExtensionAction!('steer-draft')
+  await attemptTick()
+  assert.equal(first.writerCalls.length, 1, 'one steer writer call')
+  assert.equal(first.writerCalls[0]?.mode, 'steer', 'delivered through the draft-steer path')
+  assert.equal(first.composer.text, 'steer through the public action',
+    'the draft stays until the Host accepts it')
+  assert.equal(first.controller.beginComposerSubmission('second gesture', 'enter'), 'refused',
+    'the public action opened the single-flight attempt')
+  first.respond({ kind: 'committed', value: undefined }, true)
+  first.releaseHeldWriter()
+  await attemptTick()
+  assert.equal(first.composer.text, '', 'the Host acceptance clears the steered draft')
+
+  // A live attempt refuses the public action: no second request id, no writer.
+  await attemptTick() // let the first steer settle (accepted)
+  const second = mountAttempt()
+  const events2 = makeEvents(second.controller, second.composer)
+  second.composer.text = 'held by a submit'
+  second.holdNextWriter()
+  assert.equal(second.controller.beginComposerSubmission('held by a submit', 'enter'), 'held')
+  await attemptTick()
+  const writerCallsBefore = second.writerCalls.length
+  events2.onExtensionAction!('steer-draft')
+  await attemptTick()
+  assert.equal(second.writerCalls.length, writerCallsBefore,
+    'a held composer never starts a second steer write')
+  assert.equal(second.composer.text, 'held by a submit', 'the held document is untouched')
+})
+
+test('PR2/F5: a stale settlement releases the exact hold and the next gesture is admitted', async () => {
+  const h = mountAttempt()
+  h.composer.text = 'stale settlement witness'
+  // The captured scope goes stale before the write admission: the runtime's
+  // post-prepare fence settles the submission as STALE.
+  h.setScopeCurrent(false)
+  assert.equal(h.controller.beginComposerSubmission('stale settlement witness', 'enter'), 'held')
+  await attemptTick()
+  assert.equal(h.writerCalls.length, 0, 'a stale capture never reaches the Host write')
+  assert.equal(h.controller.composerHoldActive(), false,
+    'the stale settlement ends the attempt (no stranded sending hold)')
+  assert.equal(h.composer.text, 'stale settlement witness', 'the stale draft is retained')
+  assert.equal(h.composer.calls.find(call => call.kind === 'settle')?.result, 'not-accepted',
+    'the renderer was unlocked by the exact hold settlement')
+  // The NEXT gesture is admitted again — the editor is not locked out.
+  h.setScopeCurrent(true)
+  h.holdNextWriter()
+  assert.equal(h.controller.beginComposerSubmission('stale settlement witness', 'enter'), 'held',
+    'a new gesture opens a new attempt after the stale one settled')
+  h.releaseHeldWriter()
+  await attemptTick()
 })

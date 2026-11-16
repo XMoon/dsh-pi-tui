@@ -625,9 +625,15 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
           // The steered draft is an agent-facing submission: the OWNER snapshots
           // the persist facts (ts + image check) BEFORE consuming the draft, and
           // the row is written after the session exists (the deferred-start
-          // gate) with the FINAL session id. This action hands the still-present
-          // draft over, so the owner consumes it.
-          deps.submission.steer(deps.surface.app.getDraft(), { consumeDraft: true })
+          // gate) with the FINAL session id. This action shares the SAME
+          // synchronous Composer admission as Ctrl+S (PR2/F4): 'held' has
+          // already opened the attempt, frozen the renderer and started the
+          // steer — the draft stays until the Host accepts it; 'refused' is a
+          // silent no-op (no second request id, no writer call, no history row);
+          // only 'legacy' keeps the pre-PR2 clear-then-steer contract.
+          const text = deps.surface.app.getDraft()
+          const admission = deps.submission.beginComposerSubmission(text, 'steer')
+          if (admission === 'legacy') deps.submission.steer(text, { consumeDraft: true })
           break
         }
         case 'cancel-activity': {

@@ -1564,3 +1564,25 @@ test('the formal History-scope commits retire an open card and leave the compose
   await h.observeAbsence()
   assert.equal(h.composer().text, '', 'and the retired card restored nothing')
 })
+
+// ── PR2/F1: the History Restore is a composer WRITE ─────────────────────────
+
+test('PR2/F1: a held submission refuses the History Restore but keeps the card browsable', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.composer().text
+  // A live composer hold (the exact submission attempt) owns the draft.
+  h.renderer.composer.holdSubmission?.('attempt-history')
+  h.pane.key(CTRL_R)
+  await h.painted(() => h.cardPainted(), 'the card still opens for read-only browsing')
+  const before = h.composer()
+  h.key(ENTER) // the explicit Restore
+  await h.observeAbsence()
+  assert.deepEqual(h.composer(), before, 'a held composer never takes the History Restore write')
+  assert.equal(h.cardPainted(), true, 'the card stays browsable (the refusal is the WRITE, not the seat)')
+  h.renderer.composer.settleSubmission?.('attempt-history', 'not-accepted')
+  h.pane.key(CTRL_R)
+  await h.painted(() => h.cardPainted(), 'the card reopens after the release')
+  h.key(ENTER)
+  await h.painted(() => h.composer().text !== before.text, 'the released composer accepts the Restore again')
+  await h.dispose()
+})

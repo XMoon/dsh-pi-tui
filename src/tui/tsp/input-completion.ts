@@ -585,6 +585,7 @@ export function createTspInputCompletion(
     // owed on EVERY path that wrote nothing, and a successful write is never
     // double-rendered (the composer's own sink already committed that frame).
     const written = writes
+      && ports.admitted()
       && ports.composer.applyCompletionEdit(
         { text: document.text, cursor: document.cursor },
         { text: nextText, cursor: nextCursor },

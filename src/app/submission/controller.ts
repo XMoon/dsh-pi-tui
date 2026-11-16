@@ -354,6 +354,13 @@ export interface SubmissionController {
   /** PR2: whether the live composer is held by a sending attempt (the
    *  renderers' input-lock read). */
   composerHoldActive(): boolean
+  /** PR2/F3: whether the live hold belongs to `requestId` (an ownership
+   *  proof, never a global "a hold exists" fact). */
+  ownsComposerHold(requestId: string): boolean
+  /** PR2/F3: the owner-aware draft restore — the live hold's own draft is
+   *  left intact (or replaced only by the acceptance boundary) and another
+   *  attempt's restore is replayed when that hold settles. */
+  restoreSubmissionDraft(text: string, ownerRequestId?: string): void
   /** Steer one draft into the running turn.
    *  `consumeDraft: true` makes THIS owner clear the editor after snapshotting
    *  the persist facts; the caller leaves it unset when it already consumed the
@@ -550,11 +557,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // cleared before submit) — the error text is best-effort afterwards,
     // so a hostile value can never prevent the user's input from coming
     // back. (The classification diagnostics are owned by runOwned.)
-    // PR2: a held attempt's draft is still the live document; restoring it
-    // would duplicate the text.
-    const held = composerHold !== undefined && composerHold.phase === 'sending'
-      && composerHold.text === draft && deps.captureMatches(composerHold.subject)
-    if (!held) deps.app().setEditorText(mergeDraft(deps.app().getDraft(), draft))
+    // PR2/F3: the owner-aware restore keeps a held attempt's live document
+    // intact and defers a restore that belongs to another attempt.
+    restoreSubmissionDraft(draft)
     const message = safeErrorMessage(error)
     // Image intake/admission/capability failures are THEIR OWN actionable
     // errors ("Current model ... does not support image input") — wrapping
@@ -572,16 +577,42 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     deps.app().notify(`could not start a session: ${message}`, 'error')
   }
 
-  const restoreSubmissionDraft = (draft: string): void => {
+  /**
+   * PR2/F3: restores that arrived while a DIFFERENT submission attempt held
+   * the composer. They are replayed once that hold settles — the restoring
+   * attempt's text is never dropped and the live hold's frozen snapshot is
+   * never rewritten.
+   */
+  const deferredDraftRestores: string[] = []
+  const flushDeferredDraftRestores = (): void => {
+    if (deferredDraftRestores.length === 0 || composerHoldActive()) return
+    const pending = deferredDraftRestores.splice(0)
+    for (const draft of pending) {
+      deps.app().setEditorText?.(mergeDraft(deps.app().getDraft(), draft))
+    }
+  }
+  /** Restore one submission's draft. `ownerRequestId` names the attempt that
+   *  owns the restore: only THAT attempt may settle the live hold's record;
+   *  any other attempt's restore is deferred to the hold's settlement. */
+  const restoreSubmissionDraft = (draft: string, ownerRequestId?: string): void => {
     if (deps.signal.aborted) return
-    if (composerHold !== undefined && composerHold.phase === 'sending'
-      && (composerHold.subject === undefined || deps.captureMatches(composerHold.subject))) {
-      // The held text needs no restore; a DIFFERENT value is an authoritative
-      // replacement (a claimed command's restored retry) and replaces it.
-      if (composerHold.text !== draft) {
-        deps.app().setEditorText(draft)
-        ;(composerHold as { text: string }).text = draft
+    if (composerHold !== undefined && composerHold.phase === 'sending') {
+      const own = ownerRequestId !== undefined && composerHold.submissionRequestId === ownerRequestId
+      if (own) {
+        // The attempt's own frozen document is the live authority. The same
+        // text needs no restore; a DIFFERENT text belongs to the acceptance
+        // boundary and is replayed after this hold settles.
+        if (composerHold.text !== draft) deferredDraftRestores.push(draft)
+        return
       }
+      if (composerHold.submissionRequestId === undefined
+        && composerHold.text === draft
+        && (composerHold.subject === undefined || deps.captureMatches(composerHold.subject))) {
+        return
+      }
+      // ANOTHER attempt owns the editor: never mutate it (its renderer would
+      // refuse the write) and never rewrite that hold's record.
+      deferredDraftRestores.push(draft)
       return
     }
     deps.app().setEditorText(mergeDraft(deps.app().getDraft(), draft))
@@ -1336,7 +1367,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
             deps.app().setEditorText(merged)
             return merged === value
           },
-          restoreSubmissionDraft: (value) => restoreSubmissionDraft(value),
+          restoreSubmissionDraft: (value, owner) => restoreSubmissionDraft(value, owner),
           consumeDraftAttachments: (value) => consumeDraftAttachments(value, deps.drafts.images, deps.drafts.files),
           pinDraftAttachments: (value) => pinDraftAttachments(value, deps.drafts.images, deps.drafts.files),
           settleLocalSubmission: (requestId) => settleLocalSubmission(requestId),
@@ -1824,7 +1855,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         deps.direct.withPromptAdmission(agent as unknown as ExactAgent, hasImages, task),
       prepareMessage: (value, requestId) => prepareMessage(value, requestId),
       markDispatch: (sessionId) => submitLatencyTracker.mark(sessionId, 'dispatch'),
-      restoreSubmissionDraft: (value) => restoreSubmissionDraft(value),
+      restoreSubmissionDraft: (value, owner) => restoreSubmissionDraft(value, owner),
       notifySubmissionFailure: (error) => notifySubmissionFailure(error),
       consumeDraftAttachments: (value) => consumeDraftAttachments(value, deps.drafts.images, deps.drafts.files),
       writerSection: withWriterSection,
@@ -1998,6 +2029,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       deps.diag.debug('composer acceptance fenced by subject replacement', {})
     }
     if (composerHold === hold) composerHold = undefined
+    flushDeferredDraftRestores()
   }
 
   /** A proven pre-acceptance failure: retire the hold, keep the draft and
@@ -2022,6 +2054,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     hold.acceptedEffects.length = 0
     deps.app().settleSubmission?.(hold.id, 'unknown')
     if (composerHold === hold) composerHold = undefined
+    flushDeferredDraftRestores()
   }
 
   /** Hand a held line to the LEGACY command contract: the composer clears
@@ -2051,6 +2084,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     }
     deps.app().settleSubmission?.(hold.id, 'accepted')
     if (composerHold === hold) composerHold = undefined
+    flushDeferredDraftRestores()
   }
 
   /** The writer-facing acceptance hook for an attempt's write: idempotent,
@@ -2775,6 +2809,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // A composition whose renderer cannot present a held submission (no
     // hold/settle on the composer port) keeps the pre-PR2 clear-first path.
     if (deps.app().holdSubmission === undefined || deps.app().settleSubmission === undefined) return 'legacy'
+    // A pasted image path still being attached keeps its own fail-closed gate:
+    // the legacy path restores the text and explains the refusal.
+    if (deps.pendingPastedPath?.(text) === true) return 'legacy'
     // The empty wire form is the dispatch's own silent no-op — EXCEPT for the
     // Ctrl+S steer gesture, whose empty draft IS the queue sweep (a legacy
     // bulk affordance that opens no composer attempt).
@@ -2809,11 +2846,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // Skills are agent-facing INPUT, but their delivery belongs to
       // loadSkill's own command contract (§5: slash/skill keep their own
       // permission and delivery boundary) — never the Composer acceptance
-      // transaction.
+      // transaction. The SHARED classifier is the authority: a Host line the
+      // genuine catalog does NOT claim stays an ordinary submission even when a
+      // same-named live Skill Wrapper also exists (the Host-name priority is
+      // the dispatch's own rule). Never re-decide from the raw skill flag.
       if (classification.kind === 'host-command'
         || classification.kind === 'client-command'
-        || classification.kind === 'skill-invocation'
-        || skillInvocation) {
+        || classification.kind === 'skill-invocation') {
         return 'legacy'
       }
     }
@@ -2881,6 +2920,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     beginComposerSubmission,
     composerHoldActive: () => composerHold !== undefined && composerHold.phase === 'sending',
     steer: steerDraft,
+    ownsComposerHold: (requestId: string) => composerHoldActive()
+      && composerHold?.submissionRequestId === requestId,
+    restoreSubmissionDraft,
     dequeue,
     abortLocalShell,
     cancelLocalShellIfRunning,

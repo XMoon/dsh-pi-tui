@@ -1064,14 +1064,21 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // this mount's ONE composer object is a mount constant, so identity needs
       // no second fence here.
       current: () => !disposed && !hydrating && !historyHoldsComposerSeat()
+        && !composerHeld()
         && composer.editRevision() === acceptedRevision
         && composer.getDraft() === acceptedText
         && composer.state().cursor === acceptedCursor,
       draft: () => (disposed ? undefined : composer.getDraft()),
-      commit: (placeholder) => composer.replaceInlineAttachmentFragment(
-        { text: acceptedText, cursor: acceptedCursor, editRevision: acceptedRevision },
-        span,
-        placeholder,
+      commit: (placeholder) => (
+        // PR2/F1: the LAST fence — a hold that began after the read owns the
+        // document; the late placeholder must not land.
+        composerHeld()
+          ? false
+          : composer.replaceInlineAttachmentFragment(
+            { text: acceptedText, cursor: acceptedCursor, editRevision: acceptedRevision },
+            span,
+            placeholder,
+          )
       ),
       notify: (message, kind) => composer.notify(message, kind),
     })
@@ -1097,6 +1104,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // History card owns that seat — the same rule Send, Stop, Model and the
     // Permission menu answer to.
     admitted: () => composerActionsAdmitted()
+      && !composerHeld()
       && !permissionMenuOpen
       && modelQuick?.isOpen() !== true,
     requestRender: () => render(),
@@ -6257,7 +6265,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         admitted: historySeatAdmitted,
         requestRender: () => render(),
         setFocus: () => applyFocus(true),
-        restoreToComposer: (raw) => { composer.setEditorText(raw) },
+        restoreToComposer: (raw) => {
+          // PR2/F1: the History card may stay browsable, but its Restore is a
+          // composer WRITE — a live submission attempt owns the document.
+          if (composerHeld()) return
+          composer.setEditorText(raw)
+        },
         copyRaw: (raw, live) => { issueHistoryCopy(raw, live) },
         reveal: (id) => { surface.reveal(id, 'nearest') },
         scroll: (id, to) => { surface.scroll(id, to) },

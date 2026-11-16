@@ -5740,6 +5740,16 @@ test('in-window composer submissions end stale with their draft retained; legacy
   // occurrence is fabricated. The refusal copy itself is pinned by the
   // dedicated transition-fence test.
   assert.equal(mounted.app.getDraft(), 'held across the hydration', 'the stale draft stays editable')
+  // F5: the stale settlement MUST release the exact attempt — the programmatic
+  // write admission (the same fence the renderer uses) proves the hold is gone.
+  mounted.app.insertIntoEditor(' (editable)')
+  assert.equal(mounted.app.getDraft(), 'held across the hydration (editable)',
+    'a stale submission leaves no stranded composer hold')
+  // ... and the NEXT gesture opens a fresh attempt instead of being refused.
+  mounted.app.setDraft('retry after stale')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  assert.equal(mounted.app.getDraft(), 'retry after stale',
+    'the retry is admitted and held (the draft is not pre-cleared)')
   assert.ok(!loadHistoryRecords(file).some(row => row.content === 'held across the hydration'),
     'a stale (never accepted) prompt leaves no "sent" history row')
   assert.ok(![...mounted.app.getInputHistory()].includes('held across the hydration'),

@@ -2547,3 +2547,36 @@ test('accepting at the first line\'s command argument and at the inline skill se
   assert.equal(h.submits.length, 0, 'an inline skill reference executed nothing')
   assert.equal(h.writes.length, 0, 'an inline skill reference wrote no business prompt')
 })
+
+test('PR2/F1: a submission hold opened while the Client-local read is in flight refuses the late placeholder', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('pi-tui-tsp-id-hold-intake-')
+  writeClientFiles(home, ['hold.png'])
+  const h = await mountChain(life, home, { holdImageRead: true })
+  assert.equal(h.mountPorts.stagers.length, 1, 'the ONE stager is installed on this mount')
+
+  await h.setDraft('')
+  await waitUntil('the draft is clear', () => h.editor().text === '')
+  await h.setDraft('look /image hold')
+  await h.triggerQuietly(TAB)
+  await waitUntil('the Client-local row painted', () => h.rows().length > 0)
+  await h.press(ENTER)
+  await waitUntil('the accepted path is on the wire', () => h.editor().text === 'look /image hold.png ')
+  await waitUntil('the intake read is really in flight', () => h.imageRead.heldCount() === 1)
+
+  // The submission attempt takes the composer WHILE the read is in flight. The
+  // document bytes, caret and revision are all unchanged, so the identity fence
+  // alone would accept the late placeholder — the hold must refuse it.
+  h.renderer().composer.holdSubmission?.('attempt-inline-hold')
+  h.imageRead.releaseAll()
+  // reason: bounded absence window — a committed placeholder is a controlled
+  // editor frame; a refused intake commits nothing and writes no frame.
+  await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
+  assert.equal(h.editor().text, 'look /image hold.png ',
+    'the late placeholder never lands in a held document')
+  assert.equal(h.images.values().length, 0, 'the refused intake staged no bytes')
+  assert.equal(wireText(h.pane).includes('Enter to send'), false,
+    'a placeholder that never landed is never announced as attached')
+  // The refusal unlocks; the same intake stages normally on a later gesture.
+  h.renderer().composer.settleSubmission?.('attempt-inline-hold', 'not-accepted')
+})
