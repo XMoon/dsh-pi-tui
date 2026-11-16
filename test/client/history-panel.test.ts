@@ -1307,6 +1307,27 @@ function footerRowOf(lines: readonly string[]): number {
   return lines.findLastIndex(line => line.includes('Cancel [Esc]'))
 }
 
+/** Observe the panel at an EXPLICIT width until the committed predicate holds.
+ * The 2ms poll keeps the test turn responsive; the deadline is the failure
+ * bound, never a blind fixed sleep. */
+async function renderUntil(
+  panel: HistoryPanel,
+  width: number,
+  predicate: (lines: string[]) => boolean,
+  label: string,
+  timeoutMs = 2_000,
+): Promise<string[]> {
+  const start = Date.now()
+  for (;;) {
+    const lines = panel.render(width)
+    if (predicate(lines)) return lines
+    if (Date.now() - start > timeoutMs) {
+      assert.fail(`${label}: the async history search never reached its final state:\n${plain(lines).join('\n')}`)
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, 2))
+  }
+}
+
 test('B3: the Fullscreen footer Scope/Expand/Cancel spans run the ORIGINAL seat transitions', async () => {
   const source = new FakeSource()
   source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
@@ -1315,8 +1336,11 @@ test('B3: the Fullscreen footer Scope/Expand/Cancel spans run the ORIGINAL seat 
     pointerEnabled: () => true,
   })
   panel.start()
-  await settle()
-  const lines = plain(panel.render(120))
+  const lines = plain(await waitForHistoryRender(
+    panel,
+    rows => rows.some(line => line.includes('alpha prompt')),
+    'the initial page',
+  ))
   const footerRow = footerRowOf(lines)
   assert.ok(footerRow >= 0, `the fullscreen footer paints its actions:\n${lines.join('\n')}`)
   const footer = lines[footerRow]!
@@ -1363,8 +1387,12 @@ test('B3: the narrow footer carries the Use fallback only while the heading drop
     pointerEnabled: () => true,
   })
   narrow.panel.start()
-  await settle()
-  const lines = plain(narrow.panel.render(44))
+  const lines = plain(await renderUntil(
+    narrow.panel,
+    44,
+    rows => rows.some(line => line.includes('Use [Enter]')),
+    'the committed narrow fallback page',
+  ))
   const heading = lines.find(line => line.includes('Preview'))!
   assert.ok(heading.includes('Copy All [Alt+C]'), `the heading keeps Copy at 44:\n${heading}`)
   assert.ok(!heading.includes('Use Selected [Enter]'), `the heading had to drop Use at 44:\n${heading}`)
@@ -1388,8 +1416,12 @@ test('B3: a Footer Use pressed before an async page replacement never accepts th
     pointerEnabled: () => true,
   })
   panel.start()
-  await settle()
-  const frame = plain(panel.render(44))
+  const frame = plain(await renderUntil(
+    panel,
+    44,
+    rows => rows.some(line => line.includes('Use [Enter]')),
+    'the initial fallback page',
+  ))
   const footerRow = footerRowOf(frame)
   const col = frame[footerRow]!.indexOf('Use [Enter]')
   assert.ok(footerRow >= 0 && col >= 0, `the Use fallback is painted:\n${frame.join('\n')}`)
@@ -1398,7 +1430,12 @@ test('B3: a Footer Use pressed before an async page replacement never accepts th
   // The page is replaced under the SAME painted cells before the release.
   source.rows = [row('BETA prompt', 2, '/a', 'id-b')]
   panel.handleInput('x')
-  await settle()
+  await renderUntil(
+    panel,
+    44,
+    rows => rows.some(line => line.includes('BETA prompt')),
+    'the replaced page',
+  )
   panel.render(44)
   panel.handleMouse(historyPointer('click', col, footerRow, 44, height))
   assert.equal(accepted(), undefined, 'a fallback pressed for A must never accept B')
@@ -1414,16 +1451,23 @@ test('B3: a Footer Scope press does not replay across a scope change', async () 
     sessionId: 'ses_a',
   })
   panel.start()
-  await settle()
-  const frame = plain(panel.render(120))
+  const frame = plain(await waitForHistoryRender(
+    panel,
+    rows => rows.some(line => line.includes('Scope: session')),
+    'the initial session-scope page',
+  ))
   const footerRow = footerRowOf(frame)
   const col = frame[footerRow]!.indexOf('Scope [Tab]')
   const height = panel.render(120).length
   assert.ok(panel.handleMouse(historyPointer('press', col, footerRow, 120, height)) !== undefined)
   // The keyboard changes the scope (and the generation) before the release.
   panel.handleInput('\t')
-  await settle()
-  const afterKeyboard = plain(panel.render(120)).find(line => line.includes('Scope: '))
+  const toggled = plain(await waitForHistoryRender(
+    panel,
+    rows => rows.some(line => line.includes('Scope: directory')),
+    'the keyboard-toggled scope page',
+  ))
+  const afterKeyboard = toggled.find(line => line.includes('Scope: '))
   assert.ok(afterKeyboard !== undefined, 'the metadata scope is painted')
   panel.handleMouse(historyPointer('click', col, footerRow, 120, height))
   const afterClick = plain(panel.render(120)).find(line => line.includes('Scope: '))
@@ -1441,7 +1485,6 @@ test('B3: a Footer Cancel closes the empty and error pages without touching the 
     pointerEnabled: () => true,
   })
   empty.panel.start()
-  await settle()
   const emptyLines = plain(empty.panel.render(100))
   const emptyRow = footerRowOf(emptyLines)
   assert.ok(emptyRow >= 0, `the empty page still paints Cancel:\n${emptyLines.join('\n')}`)
@@ -1460,7 +1503,6 @@ test('B3: a Footer Cancel closes the empty and error pages without touching the 
     pointerEnabled: () => true,
   })
   failed.panel.start()
-  await settle()
   const failLines = plain(failed.panel.render(100))
   const failRow = footerRowOf(failLines)
   assert.ok(failRow >= 0, `the error page still paints Cancel:\n${failLines.join('\n')}`)
