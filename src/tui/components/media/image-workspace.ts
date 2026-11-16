@@ -35,7 +35,6 @@ import { SearchablePicker } from '../../pickers/searchable-picker.ts'
 import { color, selectListTheme } from '../../theme/runtime.ts'
 import { formatKeyId } from '../../keybindings/hints.ts'
 import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../../presentation/action-bar.ts'
-import { paintActionSpan } from '../../presentation/action-ink.ts'
 import type { ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import type { ImageLoader } from '../../../client/media/image/loader.ts'
 import type { SvgRasterLoader } from '../../../client/media/svg/raster-loader.ts'
@@ -459,7 +458,10 @@ export class ImageWorkspacePanel implements Component {
           endCol: span.endCol,
         })
       }
-      return paintActionSpan(span.text, 'secondary')
+      // The Image workspace is NOT one of the Owner-scoped DENSE Action Bars
+      // (design-language §7.1): its affordances keep Role 14 `primary`, next to
+      // the muted browsing hints.
+      return color.primary(span.text)
     })
     const segmentWidth = layout.spans.reduce((sum, span) => sum + visibleWidth(span.text), 0)
       + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)

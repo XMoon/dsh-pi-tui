@@ -54,7 +54,6 @@ import { HISTORY_SEARCH_RESULT_LIMIT } from '../../client/history/search.ts'
 import { HISTORY_SEARCH_DEBOUNCE_MS } from '../../client/history/search.ts'
 import { HISTORY_CHORDS, type HistoryChordId } from '../keybindings/hints.ts'
 import { ACTION_BAR_SEPARATOR, layoutActionBarRow, renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
-import { paintActionSpan } from '../presentation/action-ink.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 import {
@@ -1355,7 +1354,9 @@ export class HistoryPanel implements Component, Focusable {
       const target = targets.get(span.inputIndex)
       if (target === undefined) return color.textMuted(span.text)
       actions.push({ from: span.startCol, to: span.endCol, action: target })
-      return paintActionSpan(span.text, target.kind === 'useSelected' ? 'primary' : 'secondary')
+      // Not a DENSE Action Bar surface (design-language §7.1): every Footer
+      // affordance keeps Role 14 `primary`; the inert hints stay muted.
+      return color.primary(span.text)
     })
     const segmentWidth = layout.spans.reduce((sum, span) => sum + visibleWidth(span.text), 0)
       + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
