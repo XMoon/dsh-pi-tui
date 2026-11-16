@@ -12,8 +12,9 @@ import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
-import { TuiApp } from '../../src/tui-app.ts'
+import { TuiApp, type TuiAppOptions } from '../../src/tui-app.ts'
 import type { TranscriptMessage } from '../../src/transcript.ts'
+import { createClientToolPresenter } from '../../src/tui/transcript/client-tool-presenter.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
@@ -48,11 +49,28 @@ interface Scene {
   cancelled: () => number
 }
 
-function scene(messages: TranscriptMessage[], width = 100, height = 24): Scene {
+/** The OFFICIAL Direct `presentCall` shape for exit_plan_mode (what
+ * toolPresenterFrom forwards from the host registry). */
+const directPlanPresenter = {
+  call: (name: string, argsRaw: string) => {
+    if (name !== 'exit_plan_mode') return undefined
+    const plan = (JSON.parse(argsRaw) as { plan?: string }).plan ?? ''
+    const heading = /^#{1,6}\s+(.+?)\s*$/m.exec(plan)?.[1] ?? 'Plan'
+    return { card: 'generic' as const, title: heading, kind: 'other' as const, content: [{ type: 'text' as const, text: plan }] }
+  },
+  result: () => undefined,
+}
+
+function scene(
+  messages: TranscriptMessage[],
+  width = 100,
+  height = 24,
+  options: TuiAppOptions = {},
+): Scene {
   const vt = new VirtualTerminal(width, height)
   let cancelledCount = 0
   let app!: TuiApp
-  app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, options)
   app.start()
   startedApps.add(app)
   app.setFullscreen(true)
@@ -71,13 +89,16 @@ function scene(messages: TranscriptMessage[], width = 100, height = 24): Scene {
   return { vt, app, settle, cancelled: () => cancelledCount }
 }
 
-test('View plan reveals the called plan card in the transcript and the answer still settles', async () => {
-  const { vt, app, settle } = scene(transcript('call-plan-1'))
+test('View plan reveals the called plan card body in the transcript and the answer still settles', async () => {
+  // The REAL Direct presenter seam: the plan body comes from the official
+  // generic call view, not from a test-only synthetic card.
+  const { vt, app, settle } = scene(transcript('call-plan-1'), 100, 24, { present: directPlanPresenter })
   await vt.waitForRender()
   // Park the viewport at the bottom so the reveal scroll is observable.
   app.scrollToBottom({ disableFollow: true })
   await vt.waitForRender()
   const parked = app.fullscreenScrollForTest()?.scrollTop ?? 0
+  assert.ok(!view(vt).includes('## Scope'), 'precondition: the plan body row is out of view before the reveal')
   // Enter on the default View row triggers the inspection + reading step.
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -85,12 +106,34 @@ test('View plan reveals the called plan card in the transcript and the answer st
   assert.ok(reading.includes('Reading the submitted plan'), `reading step must render:\n${reading}`)
   const after = app.fullscreenScrollForTest()?.scrollTop ?? -1
   assert.ok(after < parked, `the reveal must scroll up to the plan card (parked=${parked}, after=${after})`)
+  assert.ok(view(vt).includes('## Scope'), `the revealed card shows the plan body, not just its header:\n${view(vt)}`)
   // Esc returns to the decision list; the question is still answerable.
   vt.sendInput('\x1b')
   await vt.waitForRender()
   const decision = view(vt)
   assert.ok(decision.includes('View plan'), `Esc returns to the decision list:\n${decision}`)
   // ↓↓ to Approve, Enter — the official settle path.
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\r')
+  const answers = await settle
+  assert.deepEqual(answers, [{ id: 'plan-review', selected: ['Approve'] }])
+  app.stop()
+})
+
+test('the Remote client presenter path also reveals the full plan body (no Host registry)', async () => {
+  // The Remote branch has no Host tool registry: createClientToolPresenter
+  // derives the generic card from the logged arguments instead.
+  const remote = createClientToolPresenter()
+  const { vt, app, settle } = scene(transcript('call-plan-1'), 100, 24, { present: remote })
+  await vt.waitForRender()
+  app.scrollToBottom({ disableFollow: true })
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('## Scope'), `the Remote-derived card must show the plan body:\n${view(vt)}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
   vt.sendInput('\x1b[B')
   vt.sendInput('\x1b[B')
   vt.sendInput('\r')

@@ -192,6 +192,37 @@ test('Esc on the decision list is the OFFICIAL dismiss (onCancel)', () => {
   assert.equal(cancelled, 1, 'Esc on the decision list cancels the flow')
 })
 
+test('Ctrl+C is the official cancel in every plan step (no orphaned reading state)', () => {
+  // Decision.
+  let cancelled = 0
+  const decision = makeFlow([planQuestion()], { onCancel: () => { cancelled += 1 } })
+  decision.setMaxRows(24)
+  decision.setPlanInspection(() => true)
+  decision.handleInput('\x03')
+  assert.equal(cancelled, 1, 'Ctrl+C cancels from the decision list')
+  // Reading: the host reading lease is released and the flow cancels.
+  let readingEnded = 0
+  let readingCancelled = 0
+  const reading = makeFlow([planQuestion()], { onCancel: () => { readingCancelled += 1 } })
+  reading.setMaxRows(24)
+  reading.setPlanInspection(() => true)
+  reading.onPlanReadingEnd = () => { readingEnded += 1 }
+  reading.handleInput('\r')
+  assert.ok(reading.isPlanReading())
+  reading.handleInput('\x03')
+  assert.equal(readingCancelled, 1, 'Ctrl+C cancels while reading')
+  assert.equal(readingEnded, 1, 'Ctrl+C releases the reading lease')
+  // Feedback: Ctrl+C cancels instead of the Input consuming it.
+  let feedbackCancelled = 0
+  const feedback = makeFlow([planQuestion()], { onCancel: () => { feedbackCancelled += 1 } })
+  feedback.setMaxRows(24)
+  feedback.setPlanInspection(() => true)
+  feedback.handleInput('\x1b[B')
+  feedback.handleInput('\r')
+  feedback.handleInput('\x03')
+  assert.equal(feedbackCancelled, 1, 'Ctrl+C cancels while editing feedback')
+})
+
 test('a non-plan question keeps the generic flow pages untouched', () => {
   const flow = makeFlow([planQuestion({
     intent: undefined,
@@ -203,4 +234,114 @@ test('a non-plan question keeps the generic flow pages untouched', () => {
   assert.ok(joined.includes('Approve this plan'), `the question text renders:\n${joined}`)
   assert.ok(joined.includes('Review'), `the generic Review tab renders:\n${joined}`)
   assert.ok(!joined.includes('Plan review · '), `no plan decision component:\n${joined}`)
+})
+
+function stripLines(flow: QuestionFlow, width = 80): string[] {
+  return flow.render(width).map(line => stripTerminalSequences(line))
+}
+
+/** Click the plan decision row with `label` through the last-painted hit map. */
+function clickPlanRow(flow: QuestionFlow, label: string, width = 80): void {
+  const lines = stripLines(flow, width)
+  const row = lines.findIndex(line => line.includes(label))
+  assert.ok(row >= 0, `row '${label}' must be painted:\n${lines.join('\n')}`)
+  const gesture = flow.beginMousePress(row, 0)
+  assert.ok(gesture !== undefined, `press on '${label}' must capture its row`)
+  flow.completeMouseClick(gesture, row, 0)
+}
+
+test('Fullscreen pointer: clicking a decision row is keyboard-Enter parity (never a stray approve)', () => {
+  const settled: unknown[] = []
+  const flow = makeFlow([planQuestion()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  flow.setMouseActionsEnabled(true)
+  flow.setPlanInspection(() => true)
+  const lines = stripLines(flow)
+  const joined = lines.join('\n')
+  // The action bar is the frozen hint row, not a second list of verbs.
+  assert.ok(joined.includes('↑↓ select'), `selection hint missing:\n${joined}`)
+  assert.ok(joined.includes('Enter choose'), `enter hint missing:\n${joined}`)
+  assert.ok(joined.includes('Discuss [Esc]'), `the clickable Discuss verb missing:\n${joined}`)
+  assert.ok(joined.includes('Waiting for decision'), `the decision status fact missing:\n${joined}`)
+  // Clicking the Approve row settles with the official label.
+  clickPlanRow(flow, 'Approve plan')
+  assert.deepEqual(settled, [[{ id: 'plan-review', selected: ['Approve'] }]])
+})
+
+test('Fullscreen pointer: clicking View runs the inspection (a click is never a submit)', () => {
+  const settled: unknown[] = []
+  const inspections: number[] = []
+  const flow = makeFlow([planQuestion()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  flow.setMouseActionsEnabled(true)
+  flow.setPlanInspection(() => { inspections.push(1); return true })
+  clickPlanRow(flow, 'View plan')
+  assert.equal(inspections.length, 1, 'the click runs the inspection once')
+  assert.deepEqual(settled, [], 'View never submits')
+  assert.ok(flow.isPlanReading(), 'the click enters the reading step')
+})
+
+test('Fullscreen pointer: clicking Keep opens the feedback input, and the Send verb submits', () => {
+  const settled: unknown[] = []
+  const flow = makeFlow([planQuestion()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  flow.setMouseActionsEnabled(true)
+  flow.setPlanInspection(() => true)
+  clickPlanRow(flow, 'Keep planning…')
+  let lines = stripLines(flow)
+  assert.ok(lines.join('\n').includes('What should be changed?'), `feedback step missing:\n${lines.join('\n')}`)
+  // The feedback Input row is a real pointer target (click places the cursor).
+  const inputRow = lines.findIndex(line => line.trimStart().startsWith('>'))
+  assert.ok(inputRow >= 0, `the feedback input row must paint:\n${lines.join('\n')}`)
+  const inputGesture = flow.beginMousePress(inputRow, 4)
+  assert.ok(inputGesture !== undefined)
+  flow.completeMouseClick(inputGesture, inputRow, 4)
+  // Click the Send revision span.
+  const sendRow = lines.length - 1
+  const sendCol = lines[sendRow]!.indexOf('Send revision')
+  assert.ok(sendCol >= 0, `Send revision missing:\n${lines[sendRow]}`)
+  const sendGesture = flow.beginMousePress(sendRow, sendCol)
+  assert.ok(sendGesture !== undefined)
+  flow.completeMouseClick(sendGesture, sendRow, sendCol)
+  assert.deepEqual(settled, [[{ id: 'plan-review', selected: ['Keep planning'] }]],
+    'the click submits the official keep label')
+})
+
+test('Fullscreen pointer: a stale gesture cannot act on a repainted plan step', () => {
+  const settled: unknown[] = []
+  const flow = makeFlow([planQuestion()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  flow.setMouseActionsEnabled(true)
+  flow.setPlanInspection(() => true)
+  const lines = stripLines(flow)
+  const viewRow = lines.findIndex(line => line.includes('View plan'))
+  assert.ok(viewRow >= 0)
+  // Press on View, then change the mode (keyboard enters reading) before the
+  // release: the release must be inert, never a submit and never a re-entry.
+  const gesture = flow.beginMousePress(viewRow, 0)
+  assert.ok(gesture !== undefined)
+  flow.handleInput('\r')
+  flow.completeMouseClick(gesture, viewRow, 0)
+  assert.deepEqual(settled, [], 'a stale release never approves')
+  assert.ok(flow.isPlanReading(), 'the keyboard action owns the transition')
+})
+
+test('Fullscreen pointer: the fallback Back returns to the decision list without an answer', () => {
+  const settled: unknown[] = []
+  const flow = makeFlow([planQuestion()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  flow.setMouseActionsEnabled(true)
+  flow.setPlanInspection(() => false)
+  flow.handleInput('\r') // View → fallback (no provable target)
+  let lines = stripLines(flow)
+  assert.ok(lines.join('\n').includes('Full review text'), `fallback missing:\n${lines.join('\n')}`)
+  const backRow = lines.length - 1
+  const backCol = lines[backRow]!.indexOf('Back')
+  assert.ok(backCol >= 0, `fallback Back verb missing:\n${lines[backRow]}`)
+  const gesture = flow.beginMousePress(backRow, backCol)
+  assert.ok(gesture !== undefined)
+  flow.completeMouseClick(gesture, backRow, backCol)
+  lines = stripLines(flow)
+  assert.ok(lines.join('\n').includes('View plan'), `Back returns to the decision list:\n${lines.join('\n')}`)
+  assert.deepEqual(settled, [], 'Back never answers')
 })

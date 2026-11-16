@@ -1560,6 +1560,13 @@ export interface TuiQuestionStatus {
   onDraftChange?: (draft: QuestionFlowDraft) => void
   /** Local progress to seed the flow with (reopening the SAME parked call). */
   initialDraft?: QuestionFlowDraft
+  /**
+   * The OFFICIAL Question's owning Session identity (presentation-only). A
+   * plan-review inspection compares it with the CURRENT display subject before
+   * locating a tool card, so a question of another Session can never navigate
+   * this one. It never reaches the wire or the answer.
+   */
+  reviewSessionId?: string
 }
 
 /** Live state of one user-questions flow (the QuestionFlow seat). */
@@ -29082,13 +29089,22 @@ export class TuiApp {
    * mutates the question, never creates a second ScrollView, and never
    * interprets headings/titles as identity.
    */
-  private inspectPlanReview(state: QuestionState): boolean {
+  private inspectPlanReview(state: QuestionState, reviewSessionId: string | undefined): boolean {
     const question = state.flow.planReviewQuestionForHost()
     const callId = question?.intent?.callId
     if (question === undefined || callId === undefined || callId === '') return false
     // Currentness: the flow must still be the live seat owner (the caller
     // already checked, but the reveal writes projection state).
     if (this.activeQuestions !== state) return false
+    // Currentness: the OFFICIAL Question's Session must be the CURRENT display
+    // subject. An unknown identity on either side falls back to the callId's
+    // own uniqueness inside the displayed transcript (fail closed: a miss
+    // becomes the detail fallback, never a guessed plan card).
+    const displaySubject = this.statusStore.snapshot().view.subject
+    const displaySessionId = displaySubject.kind === 'main'
+      ? this.mainSessionIdText
+      : this.displaySubjectPresentation?.sessionId
+    if (reviewSessionId !== undefined && displaySessionId !== undefined && reviewSessionId !== displaySessionId) return false
     // Locate the tool card in the CURRENT projection: native callId first,
     // then a recursive PTC sub-call walk (the sub-call renders INSIDE its
     // root card, so the reveal targets the ROOT and the sub-call id).
@@ -29272,10 +29288,12 @@ export class TuiApp {
     // releases the temporary reveal grant — the plan card keeps its
     // user-opened state but the QUESTION never leaves a pinned reveal behind.
     if (state.flow.isPlanReviewFlow() && this.fullscreen !== undefined) {
-      state.flow.setPlanInspection(() => this.inspectPlanReview(state))
-      state.flow.onPlanReadingScroll = (lines) => {
-        this.fullscreenScroll?.updateLayout(this.transcriptContentHeight, this.fullscreenScroll.viewportHeight, () => this.requestRender())
-        this.fullscreenScroll?.scrollBy(lines)
+      state.flow.setPlanInspection(() => this.inspectPlanReview(state, state.status?.reviewSessionId))
+      state.flow.onPlanReadingScroll = (direction, page) => {
+        const scroll = this.fullscreenScroll
+        if (scroll === undefined) return
+        scroll.updateLayout(this.transcriptContentHeight, scroll.viewportHeight, () => this.requestRender())
+        scroll.scrollBy(direction * (page ? Math.max(1, scroll.viewportHeight - 1) : 1))
         this.requestRender()
       }
       state.flow.onPlanReadingEnd = () => this.releasePlanInspectionReveal()

@@ -110,6 +110,9 @@ const OTHER_ROW = '\u0000other'
  * that repaints into the marker row must not toggle the expanded panel
  * (and vice versa). */
 const MARKER_ROW = '\u0000marker'
+/** The plan-review feedback Input row's hit identity (click to place the
+ * text cursor; never a row selection). */
+const PLAN_FEEDBACK_ROW = '\u0000plan-feedback'
 
 /** The semantic keybindings consumed by pi-tui Input before it inserts text.
  * Keeping this ownership predicate beside QuestionFlow prevents an app-level
@@ -504,6 +507,8 @@ export class QuestionFlow implements Component, Focusable {
   private planFeedbackInput = new Input({ prompt: '' })
   /** Scroll offset of the plan FALLBACK full-text page (question.detail). */
   private planFallbackScroll = 0
+  /** The visible content rows the last fallback render windowed (paging). */
+  private planFallbackVisible = 1
 
   constructor(
     questions: readonly QuestionFlowQuestion[],
@@ -993,8 +998,33 @@ export class QuestionFlow implements Component, Focusable {
   clickRow(row: number, x?: number): void {
     if (this.planReview !== undefined) {
       // The plan decision rows are real click targets (keyboard Enter
-      // parity); reading/fallback have no list rows (the marker is inert).
+      // parity); the feedback Input row positions its cursor; the fallback
+      // scroll marker pages the plan text.
       const key = this.hitMap.get(row)
+      if (key === PLAN_FEEDBACK_ROW) {
+        if (this.planStep !== 'feedback' || x === undefined) return
+        const localX = x - 2
+        if (localX < 0) return
+        this.planFeedbackInput.handleMouse?.({
+          type: 'press',
+          button: 'left',
+          x: localX,
+          y: 0,
+          screenX: x,
+          screenY: row,
+          width: Math.max(1, this.lastContentWidth - 2),
+          height: 1,
+          shift: false,
+          alt: false,
+          ctrl: false,
+        })
+        return
+      }
+      if (key === MARKER_ROW) {
+        if (this.planStep !== 'fallback') return
+        this.planFallbackScroll += Math.max(1, this.planFallbackVisible)
+        return
+      }
       if (this.planStep === 'decision' && key !== undefined && key.startsWith('plan:')) {
         const action = key.slice('plan:'.length)
         if (action === 'view' || action === 'keep' || action === 'approve') {
@@ -1594,23 +1624,24 @@ export class QuestionFlow implements Component, Focusable {
   /** The plan-review branch's input routing. Esc semantics by step:
    * decision = the OFFICIAL dismiss (onCancel); reading/feedback/fallback =
    * back to the decision list, never a dismiss. Enter never submits from
-   * reading or fallback. Ctrl+C is always the official cancel. */
+   * reading or fallback. Ctrl+C is always the official cancel (the §3.6
+   * table: no step may leave an orphaned reading state). */
   private handlePlanInput(data: string): void {
     const plan = this.planReview
     if (plan === undefined) return
+    // Ctrl+C is the official cancel in EVERY plan step — checked before the
+    // step branches so the shared Input's own cancel binding never turns it
+    // into a local back.
+    if (matchesKey(data, 'ctrl+c')) {
+      if (this.planStep === 'reading') this.onPlanReadingEnd?.()
+      this.onCancel()
+      return
+    }
     if (this.planStep === 'feedback') {
       if (componentKeymap.matches(data, 'question.cancel')) {
         // Esc leaves the feedback edit back to the decision list, keeping
         // the draft (the Input's own onEscape does the step move).
         this.planFeedbackInput.handleInput(data)
-        return
-      }
-      if (componentKeymap.matches(data, 'question.pageUp')) {
-        this.planFallbackScroll = Math.max(0, this.planFallbackScroll - 1)
-        return
-      }
-      if (componentKeymap.matches(data, 'question.pageDown')) {
-        this.planFallbackScroll += 1
         return
       }
       if (componentKeymap.matches(data, 'question.confirm')) {
@@ -1623,27 +1654,27 @@ export class QuestionFlow implements Component, Focusable {
     }
     if (this.planStep === 'reading') {
       // Reading is a HOST-owned viewport (the transcript's own scroll);
-      // the flow only owns the Esc-back verb here. Every other key is a
-      // no-op in the seat (never an approve, never a cancel).
+      // the flow owns the Esc-back verb and forwards scroll keys. Every
+      // other key is a no-op in the seat (never an approve).
       if (componentKeymap.matches(data, 'question.cancel')) {
         this.planStep = 'decision'
         this.onPlanReadingEnd?.()
         return
       }
       if (componentKeymap.matches(data, 'question.cursorUp')) {
-        this.onPlanReadingScroll?.(-1)
+        this.onPlanReadingScroll?.(-1, false)
         return
       }
       if (componentKeymap.matches(data, 'question.cursorDown')) {
-        this.onPlanReadingScroll?.(1)
+        this.onPlanReadingScroll?.(1, false)
         return
       }
       if (componentKeymap.matches(data, 'question.pageUp')) {
-        this.onPlanReadingScroll?.(-Math.max(1, this.lastRegionHeight))
+        this.onPlanReadingScroll?.(-1, true)
         return
       }
       if (componentKeymap.matches(data, 'question.pageDown')) {
-        this.onPlanReadingScroll?.(Math.max(1, this.lastRegionHeight))
+        this.onPlanReadingScroll?.(1, true)
         return
       }
       return
@@ -1655,11 +1686,11 @@ export class QuestionFlow implements Component, Focusable {
         return
       }
       if (componentKeymap.matches(data, 'question.pageUp')) {
-        this.planFallbackScroll = Math.max(0, this.planFallbackScroll - 1)
+        this.planFallbackScroll = Math.max(0, this.planFallbackScroll - Math.max(1, this.planFallbackVisible))
         return
       }
       if (componentKeymap.matches(data, 'question.pageDown')) {
-        this.planFallbackScroll += 1
+        this.planFallbackScroll += Math.max(1, this.planFallbackVisible)
         return
       }
       return
@@ -1714,9 +1745,9 @@ export class QuestionFlow implements Component, Focusable {
    * transcript scroll/read lease is released here (Client-local). */
   onPlanReadingEnd: (() => void) | undefined
   /** Host hook that scrolls the TRANSCRIPT viewport while the reading step
-   * is active (the flow owns no transcript geometry). Positive lines scroll
-   * down; the host clamps. */
-  onPlanReadingScroll: ((lines: number) => void) | undefined
+   * is active (the flow owns no transcript geometry). `page` asks for one
+   * viewport page, otherwise one line; the host clamps. */
+  onPlanReadingScroll: ((direction: -1 | 1, page: boolean) => void) | undefined
 
   handleInput(data: string): void {
     if (data === '\u0000') return
@@ -1927,6 +1958,7 @@ export class QuestionFlow implements Component, Focusable {
 
   invalidate(): void {
     this.otherInput.invalidate()
+    this.planFeedbackInput.invalidate()
   }
 
   setMouseActionsEnabled(enabled: boolean): void {
@@ -2078,6 +2110,10 @@ export class QuestionFlow implements Component, Focusable {
       lines.push('')
       lines.push(color.textDim('What should be changed? (optional)'))
       const inputLine = this.planFeedbackInput.render(Math.max(1, width - 2))[0] ?? ''
+      // The single-line feedback Input is a real pointer target (click to
+      // place the text cursor), reached through the flow's own row hit map.
+      this.pinnedOtherRow = lines.length
+      this.hitMap.set(lines.length, PLAN_FEEDBACK_ROW)
       lines.push(`> ${this.planFeedbackText() === '' ? color.textDim('type feedback…') : inputLine}`)
       return lines
     }
@@ -2093,6 +2129,7 @@ export class QuestionFlow implements Component, Focusable {
       // The fallback never silently drops the tail: the scroll window is
       // clamped so the LAST lines stay reachable (no fixed 256-row cap here).
       const visible = Math.max(1, this.budget - lines.length - 1)
+      this.planFallbackVisible = visible
       const maxScroll = Math.max(0, wrapped.length - visible)
       this.planFallbackScroll = Math.min(this.planFallbackScroll, maxScroll)
       const start = this.planFallbackScroll
@@ -2109,9 +2146,16 @@ export class QuestionFlow implements Component, Focusable {
       }
       return lines
     }
-    // Decision list (§3.1): title row, blank, fixed rows; the hint/action
-    // bar is painted by the caller below these rows.
-    lines.push(color.textStrong(`Plan review · ${this.planTitle(width)}`))
+    // Decision list (§3.1): title row (with the right-aligned status fact),
+    // blank, fixed rows; the hint/action bar is painted by the caller below.
+    const title = `Plan review · ${this.planTitle(width)}`
+    const statusFact = 'Waiting for decision'
+    const gap = 2
+    const titleWidth = visibleWidth(title)
+    const factWidth = visibleWidth(statusFact)
+    lines.push(titleWidth + gap + factWidth <= width
+      ? `${color.textStrong(title)}${' '.repeat(width - titleWidth - factWidth)}${color.textMuted(statusFact)}`
+      : color.textStrong(title))
     lines.push('')
     const rows = this.planDecisionRows()
     this.planCursor = Math.min(this.planCursor, Math.max(0, rows.length - 1))
@@ -2174,10 +2218,17 @@ export class QuestionFlow implements Component, Focusable {
       actionByIndex.set(segments.length, action)
       segments.push({ text: keycap === '' ? label : `${label} [${keycap}]`, short: label, priority })
     }
+    const addHint = (text: string, priority: number): void => {
+      segments.push({ text, short: text, priority })
+    }
     if (this.planStep === 'decision') {
-      add('edit', 'Keep planning…', undefined, 95)
-      if (this.planDecisionRows().some(row => row.action === 'view')) add('progress', 'View plan', undefined, 94)
-      add('submit', 'Approve', undefined, 50)
+      // The THREE decision rows are the pointer targets for View/Keep/
+      // Approve (a click equals selecting that row, keyboard-Enter parity).
+      // The bar itself is the frozen §3.1 hint row (`↑↓ select · Enter
+      // choose · Esc discuss`), with only the real `Discuss [Esc]` span
+      // clickable — a painted hint never invents a second click route.
+      addHint('↑↓ select', 25)
+      addHint('Enter choose', 20)
       add('cancel', 'Discuss', 'question.cancel', 1000)
     } else if (this.planStep === 'feedback') {
       add('submit', 'Send revision', 'question.confirm', 95)

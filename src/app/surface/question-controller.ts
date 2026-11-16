@@ -644,7 +644,10 @@ export class QuestionSurfaceController {
     if (this.disposed) return next()
     const callId = request.callId
     const timed = request.timed && callId !== undefined
-    const status: TuiQuestionStatus = {}
+    // The official request's OWN Session identity travels as presentation-only
+    // state: a plan-review inspection can then prove it belongs to the subject
+    // this surface is showing (it never reaches the flow logic or the answer).
+    const status: TuiQuestionStatus = { reviewSessionId: request.sessionId }
     const local = new AbortController()
     const signal = request.signal === undefined ? local.signal : AbortSignal.any([local.signal, request.signal])
     let timedOut = false
@@ -881,6 +884,7 @@ export class QuestionSurfaceController {
   private async presentContinued(entry: ContinuedEntry, controller: AbortController): Promise<void> {
     const key = this.callKey(entry.sessionId, entry.callId)
     const status: TuiQuestionStatus = {
+      reviewSessionId: entry.sessionId,
       text: 'The Agent continued. Your answer will arrive as a new turn; Esc to answer later.',
       // Keep the user's progress live while they work, and restore it when this
       // is a reopen of the SAME call (§6).
