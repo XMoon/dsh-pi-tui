@@ -24,7 +24,7 @@
 
 import assertStrict from 'node:assert/strict'
 import { createHash, randomBytes } from 'node:crypto'
-import { chmodSync, closeSync, mkdirSync, openSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { join } from 'node:path'
 import sharp from 'sharp'
@@ -50,6 +50,7 @@ const MARKERS = Object.freeze({
   toolFailed: 'po4c:tool-failed:v1',
   missingImage: 'po4c:missing-image:v1',
   health: 'po4c:health',
+  toolTwoImages: 'po4c:tool-two-images:v1',
 })
 const TEXT_BEFORE = 'before\r\n'
 const TEXT_AFTER = 'after 中文🙂\n'
@@ -58,6 +59,20 @@ const A2UI_TEXT = 'A2UI_JSON={"version":"popo.a2ui/1","components":[{"kind":"tex
 const TOOL_ANSWER = 'tool completed\n'
 const TOOL_FAILED_ANSWER = 'tool failed\n'
 const TOOL_NAME = 'po4c_output_tool'
+
+/**
+ * F1 (Owner amendment A1) capacity qualification: a legal, independent Host
+ * attachment configuration where a stored output image is NOT bounded by the
+ * prompt-batch limit (`maxImageBytes` > `maxMessageImageBytes`), and the single
+ * event allowance is one image.
+ */
+const CAPACITY_LIMITS = Object.freeze({
+  maxImageBytes: 4 * 1024 * 1024,
+  maxImagesPerMessage: 1,
+  maxMessageImageBytes: 512 * 1024,
+})
+const CAPACITY_PNG_DIMENSION = 1080
+const WRITER_BACKLOG_BOUND_BYTES = 256 * 1024
 
 function hash(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
@@ -184,14 +199,19 @@ export async function runAcpPo4cContentOutput(context) {
   const pngDir = join(workDir, 'po4c-images')
   mkdirSync(pngDir, { recursive: true, mode: 0o700 })
   chmodSync(pngDir, 0o700)
-  // The official Store normalizes what it stores, so the >256 KiB proof is made
-  // against the REAL stored reference/frame below, never against this input.
-  const mixedPng = await sharp(randomBytes(700 * 700 * 3), { raw: { width: 700, height: 700, channels: 3 } })
+  // The official Store normalizes what it stores, so every capacity proof below
+  // is made against the REAL stored reference/frame, never against this input.
+  // Each source sits just under the configured per-object admission ceiling and
+  // inside the official normalization limits, so it is stored verbatim.
+  const dimension = CAPACITY_PNG_DIMENSION
+  const mixedPng = await sharp(randomBytes(dimension * dimension * 3), { raw: { width: dimension, height: dimension, channels: 3 } })
     .png({ compressionLevel: 1 }).toBuffer()
-  const toolPng = await sharp(randomBytes(120 * 120 * 3), { raw: { width: 120, height: 120, channels: 3 } })
+  const toolPng = await sharp(randomBytes(dimension * dimension * 3), { raw: { width: dimension, height: dimension, channels: 3 } })
     .png({ compressionLevel: 1 }).toBuffer()
-  assert(mixedPng.length > 1024 * 1024 && mixedPng.length < 2 * 1024 * 1024,
-    `PO-4C L6 needs a valid 1..2 MiB PNG under the Host single-image limit; got ${String(mixedPng.length)} bytes`)
+  for (const [label, png] of [['mixed', mixedPng], ['tool', toolPng]]) {
+    assert(png.length > 3 * 1024 * 1024 && png.length < CAPACITY_LIMITS.maxImageBytes,
+      `PO-4C L6 needs a valid near-ceiling PNG under the Host per-object limit (${label}: ${String(png.length)} bytes)`)
+  }
   writeFileSync(join(pngDir, 'mixed.png'), mixedPng, { mode: 0o600 })
   writeFileSync(join(pngDir, 'tool.png'), toolPng, { mode: 0o600 })
 
@@ -200,6 +220,9 @@ export async function runAcpPo4cContentOutput(context) {
   let host
   let tui
   let caseId = 0
+  /** The Host RSS sampler of this case; always cleared by the outer finally. */
+  let rssTimer
+  const rssSamples = []
   const track = client => { acpClients.push(client); return client }
 
   const enableAcp = async () => {
@@ -303,6 +326,7 @@ export async function runAcpPo4cContentOutput(context) {
   try {
     const started = await scene.startC1Host('acp-po4c', 'po4c Host', {
       C1_PO4C_IMAGE_DIR: pngDir,
+      C1_PO4C_IMAGE_LIMITS_JSON: JSON.stringify(CAPACITY_LIMITS),
       C1_PO4C_READ_ARM: join(workDir, 'po4c-read.arm'),
       C1_PO4C_READ_RELEASE: join(workDir, 'po4c-read.release'),
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8',
@@ -311,6 +335,21 @@ export async function runAcpPo4cContentOutput(context) {
     const ready = started.ready
     const hostIdentity = await scene.hostIdentityFacts(host)
     const scopeDir = join(dshHome, 'run', 'dsh-pi-tui', ready.localHost.scopeId)
+    // F1 memory evidence: sample the REAL Host process RSS while the bounded
+    // transport carries a near-ceiling image frame and rejects an over-budget
+    // one. The SDK materializes the complete JSON + Uint8Array before the
+    // writer sees the frame, so the peak is the fact that matters.
+    const rssPath = `/proc/${String(hostIdentity.hostPid)}/status`
+    const sampleRss = () => {
+      try {
+        const match = /VmRSS:\s+(\d+) kB/u.exec(readFileSync(rssPath, 'utf8'))
+        if (match !== null) rssSamples.push(Number(match[1]) * 1024)
+      } catch {
+        // The sample window may race the process; a missing sample is not a fact.
+      }
+    }
+    sampleRss()
+    rssTimer = setInterval(sampleRss, 20)
     assert(ready.localHost?.hostPid === hostIdentity.hostPid && typeof ready.localHost.instanceId === 'string',
       'PO-4C L6 must retain the exact Host process and instance identity')
     await enableAcp()
@@ -355,6 +394,23 @@ export async function runAcpPo4cContentOutput(context) {
     assert(mixedStored.attachmentId === mixedRef.attachmentId && mixedStored.bytes === mixedImage.length
       && mixedStored.sha256 === hash(mixedImage) && mixedStored.mediaType === mixedRef.mediaType,
     'PO-4C: the wire bytes/digest/MIME must equal the Host Store save + re-read proof')
+    // F1 capacity positive: the Host ran an independent legal configuration
+    // (maxImageBytes > maxMessageImageBytes), the official Store kept a stored
+    // image near the per-object ceiling, and the complete frame arrived.
+    const effectiveLimits = await waitForC1WorkEvent(workRoot,
+      event => event.kind === 'po4c-image-limits' && event.pid === hostIdentity.hostPid,
+      'PO-4C effective official attachment limits')
+    assert(effectiveLimits.maxImageBytes === CAPACITY_LIMITS.maxImageBytes
+      && effectiveLimits.maxImagesPerMessage === CAPACITY_LIMITS.maxImagesPerMessage
+      && effectiveLimits.maxMessageImageBytes === CAPACITY_LIMITS.maxMessageImageBytes,
+    `PO-4C: the Host must run the requested independent attachment limits (got ${JSON.stringify(effectiveLimits)})`)
+    const encodedPerImage = 4 * Math.ceil(effectiveLimits.maxImageBytes / 3)
+    const derivedBudget = effectiveLimits.maxImagesPerMessage * encodedPerImage
+      + effectiveLimits.maxImagesPerMessage * 65_536 + 4_096 + 1024 * 1024
+    assert(mixedRef.bytes > CAPACITY_LIMITS.maxMessageImageBytes,
+      'PO-4C: the delivered stored image must exceed the prompt-batch limit (the F1 gap)')
+    assert(mixedFrameBytes <= Math.max(LEGACY_FRAME_BYTES, derivedBudget),
+      `PO-4C: the delivered frame must fit the amended allowance (frame ${String(mixedFrameBytes)}, budget ${String(derivedBudget)})`)
 
     // L6-C02: an image-only assistant message is real visible output.
     const imageOnly = await runPrompt(acp, sessionId, MARKERS.assistantImageOnly, 'PO-4C assistant image-only')
@@ -576,6 +632,55 @@ export async function runAcpPo4cContentOutput(context) {
       'PO-4C: the new View receives only its own output after a late Store read completion')
     assertStrict.equal(lateClean.settled.updates[0].message.params.update.content.type, 'text')
 
+    // L6-C08 (F1 negative): the bounded allowance is finite. ONE committed tool
+    // result carrying TWO independently stored images exceeds the count-1
+    // allowance; the frame fails closed before any byte, only that connection
+    // closes, and the Host/sibling/TUI keep working.
+    const capacity = await openConnection(scopeDir, 'PO-4C capacity-negative connection')
+    const capacityNew = ++caseId
+    capacity.send({ jsonrpc: '2.0', id: capacityNew, method: 'session/new', params: { cwd: hostCwd, mcpServers: [] } })
+    const capacitySession = (await capacity.next(message => message.id === capacityNew)).message.result?.sessionId
+    assert(typeof capacitySession === 'string' && capacitySession !== sessionId,
+      'PO-4C: the capacity-negative connection owns its own Host Session')
+    const capacityRecordIndex = host.records.length
+    const capacityPromptId = ++caseId
+    capacity.send({ jsonrpc: '2.0', id: capacityPromptId, method: 'session/prompt',
+      params: { sessionId: capacitySession, prompt: [{ type: 'text', text: MARKERS.toolTwoImages }] } })
+    const overflowRecord = await waitForHostRecordAfter(capacityRecordIndex,
+      record => record.m4a0 === 'diag' && record.message === 'local-acp.error'
+        && record.code === 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE',
+      'PO-4C over-budget frame classification')
+    await withDeadline(capacity.closed, 30_000, 'PO-4C over-budget connection close')
+    // The tool-start update was already handed to the transport BEFORE the
+    // oversized result frame existed; delivered notifications cannot be
+    // retracted. What must NEVER appear is any image content from the
+    // over-budget frame or a fabricated StopReason.
+    const capacityUpdates = capacity.entries
+      .filter(entry => entry.message?.method === 'session/update')
+      .map(entry => entry.message.params?.update)
+    const capacityResponses = capacity.entries.filter(entry => entry.message?.id === capacityPromptId)
+    assert(capacityResponses.length === 0,
+      `PO-4C: an over-budget frame never fabricates a StopReason (got ${String(capacityResponses.length)})`)
+    assert(capacityUpdates.every(update => update?.sessionUpdate === 'tool_call'),
+      `PO-4C: an over-budget frame delivers no result content (got ${JSON.stringify(capacityUpdates.map(update => update?.sessionUpdate))})`)
+    assert(!JSON.stringify(capacity.entries).includes('"type":"image"'),
+      'PO-4C: an over-budget frame never delivers any image content')
+    const afterOverflow = await runPrompt(sibling, siblingSession, MARKERS.health,
+      'PO-4C sibling ACP prompt after the over-budget frame')
+    assertEndTurn(afterOverflow.settled, 'PO-4C sibling ACP prompt after the over-budget frame')
+    const tuiAfterOverflow = (tui.records.filter(record => record.m4b2s === 'surface-status').at(-1))?.openSessionId
+    assert(tuiAfterOverflow === sessionId,
+      'PO-4C: the real TUI keeps its Session after the over-budget frame')
+
+    // F1 memory evidence: the SDK materializes the complete frame before the
+    // writer sees it, so the REAL Host RSS peak is part of the verdict.
+    clearInterval(rssTimer)
+    sampleRss()
+    const rssBaselineBytes = rssSamples[0]
+    const rssPeakBytes = rssSamples.length === 0 ? undefined : Math.max(...rssSamples)
+    assert(Number.isInteger(rssBaselineBytes) && Number.isInteger(rssPeakBytes),
+      'PO-4C: the Host RSS samples must be real integers')
+
     const identityAfter = await scene.hostIdentityFacts(host)
     assert(identityAfter.hostPid === hostIdentity.hostPid && identityAfter.instanceId === hostIdentity.instanceId,
       'PO-4C: no Host process/instance was replaced or restarted')
@@ -625,6 +730,36 @@ export async function runAcpPo4cContentOutput(context) {
           lateAttempts,
         },
       },
+      capacity: {
+        maxImageBytes: effectiveLimits.maxImageBytes,
+        maxImagesPerMessage: effectiveLimits.maxImagesPerMessage,
+        maxMessageImageBytes: effectiveLimits.maxMessageImageBytes,
+        storedBytes: mixedRef.bytes,
+        base64Bytes: 4 * Math.ceil(mixedRef.bytes / 3),
+        deliveredFrameBytes: mixedFrameBytes,
+        derivedBudget,
+        positive: true,
+      },
+      boundedTransport: {
+        overBudgetCode: overflowRecord.code,
+        overBudgetImageCount: 2,
+        overBudgetStoredBytes: [mixedRef.bytes, toolRef.bytes],
+        noContentOrStopReason: capacityUpdates.every(update => update?.sessionUpdate === 'tool_call')
+          && capacityResponses.length === 0,
+        siblingAfterOverflow: true,
+        tuiAlive: tuiAfterOverflow === sessionId,
+      },
+      memory: {
+        hostPid: hostIdentity.hostPid,
+        rssBaselineBytes,
+        rssPeakBytes,
+        rssDeltaBytes: rssPeakBytes - rssBaselineBytes,
+        storedBytes: mixedRef.bytes,
+        base64Bytes: 4 * Math.ceil(mixedRef.bytes / 3),
+        sdkFrameBytes: mixedFrameBytes,
+        writerBacklogBoundBytes: WRITER_BACKLOG_BOUND_BYTES,
+        sdkMaterializesWholeFrame: true,
+      },
       imageProbes,
     }
     trace('acp-po4c/evidence', evidence)
@@ -637,6 +772,8 @@ export async function runAcpPo4cContentOutput(context) {
       toolFailedStatus: true,
       missingImageRejected: true,
       largeImageFrameAboveLegacyCap: true,
+      capacityPositive: true,
+      capacityNegative: true,
       slowPeerIsolated: true,
       siblingAcpAndTuiUnaffected: true,
       reattachAfterFailureClean: true,
@@ -644,10 +781,12 @@ export async function runAcpPo4cContentOutput(context) {
       noForeignTurnProjected: true,
       hostIdentityKept: true,
       readImageVerified: true,
+      memoryMeasured: true,
       l6EvidenceRecorded: true,
       evidence,
     }
   } finally {
+    if (rssTimer !== undefined) clearInterval(rssTimer)
     for (const client of acpClients) {
       try { client.close() } catch { /* already closed */ }
     }

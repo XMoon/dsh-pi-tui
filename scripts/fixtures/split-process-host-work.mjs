@@ -118,6 +118,7 @@ const PO4C_MARKERS = Object.freeze({
   toolContent: 'po4c:tool-content:v1',
   toolFailed: 'po4c:tool-failed:v1',
   missingImage: 'po4c:missing-image:v1',
+  toolTwoImages: 'po4c:tool-two-images:v1',
 })
 const PO4C_TOOL_NAME = 'po4c_output_tool'
 const PO4C_TEXT_BEFORE = 'before\r\n'
@@ -180,6 +181,31 @@ async function createPo4cOutputProbe(ctx, record) {
   const dir = process.env.C1_PO4C_IMAGE_DIR
   if (typeof dir !== 'string' || dir === '') {
     throw new Error('m4-c1-host-work: acp-po4c requires C1_PO4C_IMAGE_DIR')
+  }
+  // PO-4C capacity qualification: the official Attachment Store limits are
+  // boot-frozen configuration, and this fixture is the test-only configuration
+  // boundary. The env JSON replaces the SAME live store's limits object before
+  // any image is stored, so every official `saveImage`/`readImage`/listener
+  // derivation reads the requested independent configuration.
+  const limitsJson = process.env.C1_PO4C_IMAGE_LIMITS_JSON
+  if (typeof limitsJson === 'string' && limitsJson !== '') {
+    const requested = JSON.parse(limitsJson)
+    const current = ctx.attachments.imageLimits
+    const limits = {
+      maxImageBytes: Number(requested.maxImageBytes),
+      maxImagesPerMessage: Number(requested.maxImagesPerMessage),
+      maxMessageImageBytes: Number(requested.maxMessageImageBytes),
+      maxImagePixels: Number(requested.maxImagePixels ?? current.maxImagePixels),
+      maxImageDimension: Number(requested.maxImageDimension ?? current.maxImageDimension),
+      mediaTypes: current.mediaTypes,
+    }
+    for (const key of ['maxImageBytes', 'maxImagesPerMessage', 'maxMessageImageBytes', 'maxImagePixels', 'maxImageDimension']) {
+      if (!Number.isSafeInteger(limits[key]) || limits[key] <= 0) {
+        throw new Error(`m4-c1-host-work: PO-4C requested an invalid attachment limit ${key}`)
+      }
+    }
+    ctx.attachments.imageLimits = Object.freeze(limits)
+    record('po4c-image-limits', { ...limits, mediaTypes: [...limits.mediaTypes] })
   }
   const store = async name => {
     const data = readFileSync(join(dir, name))
@@ -384,6 +410,28 @@ class C1Model extends LlmAdapter {
       if (authoredText.includes(PO4C_MARKERS.missingImage)) {
         yield* imageBlocks(this.po4c.missing, 0)
         yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      if (authoredText.includes(PO4C_MARKERS.toolTwoImages)) {
+        if (afterTool) {
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: PO4C_TOOL_ANSWER }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: PO4C_TOOL_ANSWER } }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+          return
+        }
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield {
+          type: 'block-end',
+          index: 0,
+          block: {
+            type: 'tool-call',
+            id: 'po4c-tool-two',
+            name: PO4C_TOOL_NAME,
+            arguments: JSON.stringify({ twoImages: true }),
+          },
+        }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
         return
       }
       if (authoredText.includes(PO4C_MARKERS.toolContent) || authoredText.includes(PO4C_MARKERS.toolFailed)) {
@@ -1032,14 +1080,20 @@ export async function apply(ctx) {
       parameters: {
         // Optional by omission: the parameter DSL only annotates `required: true`.
         fail: { type: 'boolean', description: 'Throw instead of returning the ordered content.' },
+        twoImages: { type: 'boolean', description: 'Return TWO independently stored images instead of the ordered text/image/text batch.' },
       },
       output: {
         schema: { type: 'string' },
-        render: () => [
-          { type: 'text', text: PO4C_A2UI_TEXT },
-          { type: 'image', attachment: po4c.tool },
-          { type: 'text', text: PO4C_TOOL_TAIL },
-        ],
+        render: args => (args?.twoImages === true
+          ? [
+            { type: 'image', attachment: po4c.mixed },
+            { type: 'image', attachment: po4c.tool },
+          ]
+          : [
+            { type: 'text', text: PO4C_A2UI_TEXT },
+            { type: 'image', attachment: po4c.tool },
+            { type: 'text', text: PO4C_TOOL_TAIL },
+          ]),
       },
       async execute(args, exec) {
         record('po4c-tool-executed', {

@@ -2129,14 +2129,26 @@ test('PO-4C C-L5-02: a derived outbound budget carries one complete ACP image fr
   assert.equal(deriveImageOutputBounds({
     maxImageBytes: 1, maxImagesPerMessage: 1, maxMessageImageBytes: 3, mediaTypes: ['image/png'],
   }), 4 + 65_536 + 4_096 + 1024 * 1024, 'the derived budget keeps the bounded metadata/envelope/text allowances')
+  // Each image is Base64-encoded on its own, so the batch ceiling sums the
+  // per-image ceilings (3 * 4*ceil(10/3) = 48) instead of one ceiling of the
+  // summed byte count (which would be 40 and understate the wire bytes).
+  assert.equal(deriveImageOutputBounds({
+    maxImageBytes: 10, maxImagesPerMessage: 3, maxMessageImageBytes: 3, mediaTypes: ['image/png'],
+  }), 3 * (4 * 4) + 3 * 65_536 + 4_096 + 1024 * 1024, 'the per-image encoded ceilings sum exactly')
   const derived = deriveImageOutputBounds(limits)
-  assert.equal(derived, 533_336 + 2 * 65_536 + 4_096 + 1024 * 1024,
-    'the derived budget is canonical Base64 expansion plus bounded metadata, envelope and text allowance')
+  assert.equal(derived, 2 * (4 * Math.ceil(400_000 / 3)) + 2 * 65_536 + 4_096 + 1024 * 1024,
+    'the derived budget is the per-image canonical Base64 ceiling sum plus bounded metadata, envelope and text allowance')
+  // A prompt-batch limit is NOT part of the outbound budget: an output image is
+  // bounded by the Store's per-object admission ceiling instead.
+  assert.equal(deriveImageOutputBounds({
+    maxImageBytes: 400_000, maxImagesPerMessage: 2, maxMessageImageBytes: 1, mediaTypes: ['image/png'],
+  }), derived, 'maxMessageImageBytes never narrows the outbound allowance')
   for (const unsafe of [
     { maxImageBytes: 0, maxImagesPerMessage: 1, maxMessageImageBytes: 3, mediaTypes: ['image/png'] },
     { maxImageBytes: 1, maxImagesPerMessage: 0, maxMessageImageBytes: 3, mediaTypes: ['image/png'] },
-    { maxImageBytes: 1, maxImagesPerMessage: 1, maxMessageImageBytes: -1, mediaTypes: ['image/png'] },
+    { maxImageBytes: -1, maxImagesPerMessage: 1, maxMessageImageBytes: 3, mediaTypes: ['image/png'] },
     { maxImageBytes: 1, maxImagesPerMessage: Number.MAX_SAFE_INTEGER, maxMessageImageBytes: 3, mediaTypes: ['image/png'] },
+    { maxImageBytes: Number.MAX_SAFE_INTEGER, maxImagesPerMessage: Number.MAX_SAFE_INTEGER, maxMessageImageBytes: 3, mediaTypes: ['image/png'] },
   ]) {
     assert.equal(deriveImageOutputBounds(unsafe), undefined, 'unsafe arithmetic cannot derive a frame budget')
   }
@@ -2206,8 +2218,12 @@ test('PO-4C C-L5-02: a frame above the derived budget closes only that connectio
   const { scope } = newScope(t)
   const recorded = recordingDiag()
   // 1.2 MiB stored -> ~1.6 MiB Base64, above the small derived budget below.
-  const limits = { maxImageBytes: 1_200_000, maxImagesPerMessage: 2, maxMessageImageBytes: 300_000, mediaTypes: ['image/png'] }
-  const imageBytes = Uint8Array.from({ length: 1_200_000 }, (_value, index) => (index * 3) % 251)
+  const limits = { maxImageBytes: 400_000, maxImagesPerMessage: 1, maxMessageImageBytes: 300_000, mediaTypes: ['image/png'] }
+  // The verified stored object here is larger than the seam's per-object
+  // admission ceiling: the official normalization may keep its smallest ladder
+  // output above the target (the accepted upstream limitation), so the frame
+  // budget must still fail closed instead of truncating or guessing.
+  const imageBytes = Uint8Array.from({ length: 2_000_000 }, (_value, index) => (index * 3) % 251)
   const fake = makeFakeAccess({
     imageLimits: limits,
     readOutputImage: async () => ({ data: imageBytes, mediaType: 'image/png' }),

@@ -729,19 +729,36 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     accept-then-resolve behavior under the same 256 KiB unwritten-backlog bound.
     When the Host mounts the official Attachment Store, the connection derives
     ONCE at establish time a larger single-frame budget from that Host's
-    boot-frozen `attachments.imageLimits` (canonical Base64 expansion of the
-    admitted image batch, one metadata allowance per image, the JSON-RPC
-    envelope and a preserved text allowance). That derivation is a TRANSPORT
-    resource bound — never an image acceptance policy, never a reason to drop,
-    shrink, re-encode or re-describe a committed image, and never derived from
-    `initialize.promptCapabilities.image`. A frame above the legacy cap is
-    written in 64 KiB chunks under the same unwritten-backlog bound, waiting at
-    most 30 seconds per kernel drain. A reader that never drains is closed as
-    `LOCAL_ACP_OUTPUT_BACKPRESSURE` and a frame above the connection budget as
-    `LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE`; a socket close/error ends that drain wait
-    immediately and keeps its real errno as the diagnostic. Every one of these
-    affects ONLY that connection and never the Host, an Agent, a Session or a
-    sibling connection.
+    boot-frozen `attachments.imageLimits`. Each committed image is bounded by the
+    Store's per-object admission ceiling (`maxImageBytes`) and is Base64-encoded
+    ON ITS OWN, so the batch term sums the per-image encoded ceilings
+    (`maxImagesPerMessage * (4 * ceil(maxImageBytes / 3))`) instead of taking one
+    ceiling of a summed byte count; one 64 KiB metadata allowance per image, the
+    JSON-RPC envelope and a preserved 1 MiB text allowance are added on top. The
+    prompt-batch limit `maxMessageImageBytes` is NOT part of this derivation: it
+    governs prompt admission, not a stored output image. That derivation is a
+    TRANSPORT resource bound — never an image acceptance policy, never a reason
+    to drop, shrink, re-encode or re-describe a committed image, and never
+    derived from `initialize.promptCapabilities.image`. A frame above the legacy
+    cap is written in 64 KiB chunks under the same unwritten-backlog bound,
+    waiting at most 30 seconds per kernel drain.
+    - **Accepted upstream limitation.** The official localization may store a
+      normalized image whose bytes exceed both `maxImageBytes` and the
+      normalization byte target (when every quality-ladder output misses the
+      target the smallest output is kept), and the exposed
+      `AttachmentStore.imageLimits` carries no stored-byte upper bound. The
+      allowance therefore cannot guarantee that EVERY legal stored image is
+      deliverable, and the Host does not claim it: a frame above the connection
+      allowance fails closed as `LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE` BEFORE any byte
+      of that frame is written. That failure never truncates, re-compresses,
+      re-describes the image as Markdown/URL, invents a business image limit,
+      adds a second Attachment Store, or affects the Host, an Agent, a Session,
+      the TUI or another ACP connection. A true all-content guarantee requires an
+      upstream DSH stored-byte contract, which this phase does not invent.
+    - A reader that never drains is closed as `LOCAL_ACP_OUTPUT_BACKPRESSURE`; a
+      socket close/error ends that drain wait immediately and keeps its real
+      errno as the diagnostic. Every one of these affects ONLY that connection
+      and never the Host, an Agent, a Session or a sibling connection.
   - `session/close` detaches ONLY this connection's View/reservation: it never
     disposes, flushes or resumes the Agent/Session, so a TUI referencing the
     same Session keeps working and a later connection may resume again. With an
