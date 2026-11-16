@@ -176,9 +176,12 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     return !snapshot.loading && !snapshot.saving && section.current && section.source.kind === 'ready'
   }
   private canSave(snapshot: SubagentSettingsSnapshot): boolean {
+    // Each official namespace has its own CAS revision. One stale section must
+    // not disable a current sibling; the controller still refuses a replacement
+    // Host before dispatching either section.
     return snapshot.dirty && !snapshot.saving && !snapshot.loading
-      && (!snapshot.limits.dirty || snapshot.limits.current)
-      && (!snapshot.selection.dirty || snapshot.selection.current)
+      && ((snapshot.limits.dirty && snapshot.limits.current)
+        || (snapshot.selection.dirty && snapshot.selection.current))
   }
   private openQuestion(target: 'leave' | 'refresh' | 'discard'): void {
     this.question = { instance: ++this.nextQuestion, target }
