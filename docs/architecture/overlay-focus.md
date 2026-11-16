@@ -1239,7 +1239,15 @@ becomes a second authority over them or over the editor seat.
   terminal selection/scrollback stays untouched. A result click only SELECTS;
   the explicit `[Use selected]` / `[Copy all]` actions (and Enter / `Alt+C`)
   accept or copy, and a button pressed for one entry never acts on whatever moved
-  into its painted cells.
+  into its painted cells. In Fullscreen the Footer's complete painted
+  `Cancel [Esc]`, `Scope [Tab]` and `Expand`/`Collapse [F2]` spans are pointer
+  targets too, plus `Use [Enter]` / `Copy All [Alt+C]` fallbacks ONLY when the
+  Preview heading dropped its own matching button; every fallback keeps that
+  button's identity and eligibility, and the pure browsing hints stay inert.
+  All of them re-prove the same last-painted frame and search generation, the
+  seat's scope/expanded state and (for Use/Copy) the pressed result identity;
+  a replaced page, a park, a resize or a screen swap revokes them. Regular/Main
+  paints no Footer target at all.
 - **Approval seat mount fence.** `ApprovalRuntime.showNext()` commits `active =
   pending` BEFORE the park / save cancellation / seat projection, and re-reads
   that same stage identity (`ownsStage`) after EVERY mount-phase hook that can run
