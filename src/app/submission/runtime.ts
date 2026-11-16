@@ -1473,6 +1473,17 @@ export interface HostCommandSubmissionDeps {
    */
   readonly settleComposerHold?: (outcome: 'rejected' | 'unknown') => void
   /**
+   * PR2: the INVOCATION-TIME genuine Host contract claim for this line (the
+   * same authority the routing used). A claimed line WILL run as a command, so
+   * the composer must be handed over BEFORE the handler runs — the handler's
+   * own restored-draft producer writes into the editor and must not hit the
+   * hold fence.
+   */
+  readonly invocationHostClaim?: () => { readonly claimed: boolean } | undefined
+  /** PR2: whether THIS plane invocation runs a TUI-owned command line (the
+   *  local/skill route), known before the handler executes. */
+  readonly commandPlaneLineWillExecute?: () => boolean
+  /**
    * PR2: the line the FINAL catalog claims as a command takes over the
    * composer through the legacy pre-clear (the command's restore-on-failure
    * contract assumes an emptied editor); this is NOT a prompt acceptance —
@@ -1557,6 +1568,16 @@ export function executeHostCommandSubmission(
     // of dispatch, and a non-invocation stages nothing at all.
     const hostAttachmentsDeclared = submittedClaim?.claimed === true && submittedClaim.attachments === true
     const commandPlaneLine = deps.commandPlaneOwnsLine()
+    // PR2: hand a HELD composer over to the legacy command contract BEFORE the
+    // handler runs when the line will certainly execute as a command (a TUI
+    // route, or a genuine Host contract claim). This is what lets the
+    // command's own restore-on-failure producer write its authoritative draft
+    // into the editor; a plane-owned line with NO claim (an unknown slash
+    // name) keeps its hold and falls back to the ordinary prompt.
+    if ((commandPlaneLine && deps.commandPlaneLineWillExecute?.() === true)
+      || (input.parsedName !== undefined && deps.invocationHostClaim?.()?.claimed === true)) {
+      deps.handComposerHoldToLegacyCommand?.()
+    }
     planeAdvertised = commandPlaneLine && input.wasAdvertisedAtSubmit
     const tuiOwnedCommand = deps.isTuiOwnedCommand()
     // The navigation intent starts HERE: after every early refusal window and

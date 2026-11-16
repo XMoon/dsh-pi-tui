@@ -29,18 +29,21 @@ interface ComposerCall {
 class Composer implements SubmissionComposerPort {
   text = ''
   readonly calls: ComposerCall[] = []
+  held = false
   readonly notices: { readonly message: string; readonly kind: string }[] = []
   getDraft(): string { return this.text }
-  setDraft(text: string): void { this.text = text }
-  setEditorText(text: string): void { this.text = text }
-  insertIntoEditor(text: string): void { this.text += text }
+  setDraft(text: string): void { if (!this.held) this.text = text }
+  setEditorText(text: string): void { if (!this.held) this.text = text }
+  insertIntoEditor(text: string): void { if (!this.held) this.text += text }
   notify(message: string, kind: 'info' | 'error' = 'info'): void { this.notices.push({ message, kind }) }
   setSubmitPending(): void {}
   holdSubmission(attemptId: string): void {
     this.calls.push({ kind: 'hold', attemptId })
+    this.held = true
   }
   settleSubmission(attemptId: string, result: 'accepted' | 'not-accepted' | 'unknown'): void {
     this.calls.push({ kind: 'settle', attemptId, result })
+    this.held = false
     if (result === 'accepted') this.text = ''
   }
 }
@@ -65,8 +68,9 @@ interface Mount {
   setCommandBehavior(behavior: 'unmatched' | 'executed-error-restored' | 'late-claim-attachments-refused'): void
 }
 
-function mount(): Mount {
+function mount(options: { readonly port?: SubmissionComposerPort } = {}): Mount {
   const composer = new Composer()
+  const port = options.port ?? composer
   const writerCalls: WriterCall[] = []
   const historyRows: { text: string; sessionId: string | undefined }[] = []
   const files = new DraftFileStore()
@@ -85,7 +89,7 @@ function mount(): Mount {
     isDisposed: () => false,
     isScopeCurrent: () => true,
     composerHoldActive: () => controller.composerHoldActive(),
-    mergeDraftIntoEditor: (text) => { composer.setEditorText(composer.getDraft() + text); return true },
+    mergeDraftIntoEditor: (text) => { port.setEditorText(port.getDraft() + text); return true },
     restoreStaleDraftIntoEditor: () => 'merged-verbatim',
     consumeDraftAttachments: (text) => {
       consumes.push(text)
@@ -95,7 +99,7 @@ function mount(): Mount {
     beginLocalSubmission: () => {},
     settleLocalSubmission: () => {},
     settleSubmitAck: () => {},
-    notify: (message, kind) => composer.notify(message, kind),
+    notify: (message, kind) => port.notify(message, kind),
     refuseByTransitionFence: () => {},
     prepareMessage: async () => ({ prepared: true }),
     prompt: async (_sessionId, _message, options) => {
@@ -112,7 +116,7 @@ function mount(): Mount {
     apply: () => undefined,
   })
   const deps: Record<string, unknown> = {
-    app: () => composer,
+    app: () => port,
     diag: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} },
     signal: new AbortController().signal,
     isCleanedUp: () => false,
@@ -149,11 +153,14 @@ function mount(): Mount {
         // The late-claim behaviour: the standing view cannot classify the name
         // (the admission is an ordinary held prompt), the FINAL catalog does
         // (the invocation-time re-read refuses the attachments).
-        if (parsed.name === 'late-command' && commandBehavior === 'late-claim-attachments-refused') {
+        if (parsed.name === 'late-command'
+          && (commandBehavior === 'late-claim-attachments-refused' || commandBehavior === 'executed-error-restored')) {
           claimReads += 1
           // The standing view (admission + submit-time capture) cannot classify
-          // the name; the LATE re-read after ensureSession does.
-          return claimReads > 2 ? { claimed: true, attachments: false } : undefined
+          // the name; the LATE re-read at invocation does.
+          return claimReads > 2
+            ? { claimed: true, attachments: commandBehavior === 'executed-error-restored' }
+            : undefined
         }
         return undefined
       },
@@ -185,7 +192,7 @@ function mount(): Mount {
           if (commandBehavior === 'executed-error-restored') {
             // The handler wrote its own authoritative retry draft before
             // settling an error (commands.ts' restored producer).
-            composer.setEditorText('corrected retry')
+            port.setEditorText('corrected retry')
             return {
               kind: 'committed',
               matched: true,
@@ -509,8 +516,15 @@ test('PR2: a held line the final catalog runs as a command keeps the command-res
   await tick()
   assert.equal(h.composer.text, 'corrected retry',
     'the command handler’s authoritative restored draft is preserved (never cleared by the handover)')
-  assert.equal(h.composer.calls.find(call => call.kind === 'settle')?.result, 'not-accepted',
-    'the held attempt unlocks for the command-owned draft')
+  // The handover clears the composer through the port's accepted-clear BEFORE
+  // the handler runs; that is NOT a prompt acceptance: no prompt history row
+  // and no prompt attachment transfer may exist for a command-consumed line.
+  assert.equal(h.composer.calls.find(call => call.kind === 'settle') !== undefined, true)
+  // The LEGACY command contract still writes the line's history row at dispatch
+  // (exactly one, the submitted line); the acceptance bookkeeping (ledger
+  // publication, attachment transfer) is what a command-consumed line never gets.
+  assert.deepEqual(h.historyRows.map(row => row.text), ['/late-command original'])
+  assert.deepEqual(h.consumes, [], 'the command owns its attachment disposition')
   assert.equal(h.controller.composerHoldActive(), false)
   // The editor is editable again for the retry.
   h.composer.setEditorText('corrected retry + edit')
@@ -544,4 +558,33 @@ test('PR2: a held line whose FINAL command claim refuses the attachments unlocks
   assert.equal(h.controller.beginComposerSubmission('ordinary retry without the attachment', 'enter'), 'held')
   await tick()
   assert.equal(h.composer.text, '', 'the retry reaches the ordinary acceptance path')
+})
+
+test('PR2: a command-restored retry draft reaches the REAL PiTui composer (hold released before the handler)', async () => {
+  const { TuiApp: TuiAppClass } = await import('../../src/tui-app.ts')
+  const { VirtualTerminal } = await import('../support/virtual-terminal.ts')
+  const { createAppLifecycleGuard } = await import('../support/app-lifecycle-guard.ts')
+  const guard = createAppLifecycleGuard<InstanceType<typeof TuiAppClass>>()
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiAppClass(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
+  app.start()
+  guard.started.add(app)
+  try {
+    const h = mount({ port: app })
+    h.setCommandBehavior('executed-error-restored')
+    app.setDraft('/late-command original')
+    assert.equal(h.controller.beginComposerSubmission('/late-command original', 'enter'), 'held',
+      'the standing view admits the line as an ordinary held prompt')
+    await tick()
+    assert.equal(h.controller.composerHoldActive(), false,
+      'the invocation-time claim hands the composer over BEFORE the handler runs')
+    assert.equal(app.getDraft(), 'corrected retry',
+      'the handler’s authoritative retry draft lands in the REAL composer (no hold fence)')
+    // The general programmatic fence still applies to a held attempt elsewhere:
+    // this assertion is covered by the pitui-composer-hold suite.
+    assert.deepEqual(h.historyRows.map(row => row.text), ['/late-command original'],
+      'the legacy command history row is written once')
+  } finally {
+    guard.disposeAll()
+  }
 })

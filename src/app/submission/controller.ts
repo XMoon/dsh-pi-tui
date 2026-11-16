@@ -1532,6 +1532,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
             else activeHold.reject()
           },
           handComposerHoldToLegacyCommand: activeHold === undefined ? undefined : () => { activeHold.handToLegacyCommand() },
+          invocationHostClaim: () => parsedAtSubmit === undefined ? undefined : effectiveOriginClaim(parsedAtSubmit),
+          commandPlaneLineWillExecute: () => isTuiOwnedCommandLine(),
           diag: deps.diag,
         }, {
           text,
