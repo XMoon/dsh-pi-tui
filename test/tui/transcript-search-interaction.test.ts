@@ -807,6 +807,7 @@ function planScene(
   /** The official Question's session identity; `null` means "unknown" (an
    * explicit `undefined` argument would re-trigger the default). */
   reviewSessionId: string | null = SESSION,
+  withDetail = false,
 ): PlanScene {
   const vt = new VirtualTerminal(width, height)
   let cancelledCount = 0
@@ -819,11 +820,15 @@ function planScene(
   app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
   app.setFullscreen(true)
   app.setTranscript(messages)
+  // `withDetail` keeps the question's detail body (needed by the tests that
+  // assert the in-flow review text). The settle-path tests pass false: their
+  // ↓-arithmetic targets the THREE-row list [View plan, Keep…, Approve] and
+  // their plan BODY evidence comes from the transcript card, not the detail.
   const settle = app.askQuestions([{
     id: 'plan-review',
     question: 'Approve this plan and leave plan mode?',
     header: 'Plan review',
-    detail: PLAN_MD,
+    ...(withDetail ? { detail: PLAN_MD } : {}),
     options: [
       { label: 'Approve', description: 'Leave plan mode.' },
       { label: 'Keep planning', description: 'Stay in plan mode.' },
@@ -888,7 +893,7 @@ test('the Remote client presenter path also reveals the full plan body (no Host 
 
 test('a missing plan card (no logged call) degrades View to the question-detail fallback', async () => {
   // No callId on the card: the inspection cannot prove the target.
-  const { vt, app, settle } = planScene(planTranscript())
+  const { vt, app, settle } = planScene(planTranscript(), 100, 24, {}, undefined, true)
   await vt.waitForRender()
   vt.sendInput('\r') // Enter on View
   await vt.waitForRender()
@@ -898,6 +903,7 @@ test('a missing plan card (no logged call) degrades View to the question-detail 
   // Esc back, then Keep planning with feedback — the settle still works.
   vt.sendInput('\x1b')
   await vt.waitForRender()
+  vt.sendInput('\x1b[B') // View review text
   vt.sendInput('\x1b[B') // Keep planning…
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -989,7 +995,7 @@ test('settling the plan question releases the temporary reveal and forced sub-ca
 })
 
 test('an identity mismatch fails closed to the detail fallback (no reveal, no scroll)', async () => {
-  const { vt, app, settle } = planScene(planTranscript('call-plan-1'), 100, 24, { present: planDirectPresenter }, 'session-other')
+  const { vt, app, settle } = planScene(planTranscript('call-plan-1'), 100, 24, { present: planDirectPresenter }, 'session-other', true)
   await vt.waitForRender()
   app.scrollToBottom({ disableFollow: true })
   await vt.waitForRender()
@@ -1011,7 +1017,7 @@ test('an identity mismatch fails closed to the detail fallback (no reveal, no sc
 })
 
 test('an unknown Question session identity fails closed (no callId-only locate)', async () => {
-  const { vt, app, settle } = planScene(planTranscript('call-plan-1'), 100, 24, { present: planDirectPresenter }, null)
+  const { vt, app, settle } = planScene(planTranscript('call-plan-1'), 100, 24, { present: planDirectPresenter }, null, true)
   await vt.waitForRender()
   app.scrollToBottom({ disableFollow: true })
   await vt.waitForRender()
@@ -1260,6 +1266,9 @@ test('a QUEUED plan-review question mounts with the live View capability (FIFO h
   assert.ok(planView(vt).includes('## Scope'), `the handed-over flow locates the body:\n${planView(vt)}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
+  // Rows with a detail body: [View plan, View review text, Keep…, Approve];
+  // three moves reach Approve from the View-plan default.
+  vt.sendInput('\x1b[B')
   vt.sendInput('\x1b[B')
   vt.sendInput('\x1b[B')
   vt.sendInput('\r')
@@ -1661,7 +1670,7 @@ test('Regular WITHOUT a logged tool card reads the full plan in-flow and can sti
 })
 
 test('Fullscreen WITH a provable card offers View plan FIRST and View review text SECOND', async () => {
-  const { vt, app, settle } = planScene(planTranscript('call-plan-1'), 100, 24, { present: planDirectPresenter })
+  const { vt, app, settle } = planScene(planTranscript('call-plan-1'), 100, 24, { present: planDirectPresenter }, undefined, true)
   await vt.waitForRender()
   const frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
   const viewRow = frame.split('\n').findIndex(line => line.includes('View plan'))
@@ -1671,8 +1680,7 @@ test('Fullscreen WITH a provable card offers View plan FIRST and View review tex
   // The default cursor is View plan, and the review row is also reachable.
   assert.ok(frame.split('\n')[viewRow]!.includes('>'), 'View plan keeps the default cursor')
   assert.ok(!frame.split('\n')[reviewRow]!.includes('>'), 'View review text is not the default')
-  vt.sendInput('\x1b')
-  vt.sendInput('\x1b')
+  vt.sendInput('\x1b') // the decision list's official dismiss
   await settle.then(() => {}, () => {})
   app.stop()
 })
