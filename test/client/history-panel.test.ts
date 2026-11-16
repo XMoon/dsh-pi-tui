@@ -1521,3 +1521,124 @@ test('B3: a Footer Cancel closes the empty and error pages without touching the 
   assert.equal(failed.closed(), 1)
   failed.panel.dispose()
 })
+
+// ── PR-B review: intervening input revokes the pending Footer gesture ───────
+
+/** One wheel event at a frame's exact grant (the picker/seat only needs it to
+ *  be a genuine intervening scroll). */
+function historyWheel(x: number, y: number, width: number, height: number): import('@xmoon76/pi-tui').TuiMouseEvent {
+  return {
+    type: 'wheel', button: 'none', x, y, screenX: x, screenY: y, width, height,
+    shift: false, alt: false, ctrl: false, wheelDelta: 1,
+  }
+}
+
+/** The painted selected result row (or the first result row). */
+function resultRowOf(lines: readonly string[]): number {
+  return lines.findIndex(line => line.startsWith('> ') || line.includes('alpha prompt'))
+}
+
+test('B3 gesture: a wheel between a Footer Cancel press and release never closes the seat', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a'), row('beta prompt', 2, '/a', 'id-b')]
+  const { panel, closed } = makePanel(source, {
+    geometry: seatGeometry(120, 40, 2),
+    pointerEnabled: () => true,
+  })
+  panel.start()
+  const lines = plain(await waitForHistoryRender(panel, rows => footerRowOf(rows) >= 0, 'the initial page'))
+  const footerRow = footerRowOf(lines)
+  const cancelCol = lines[footerRow]!.indexOf('Cancel [Esc]')
+  const listRow = resultRowOf(lines)
+  const height = panel.render(120).length
+  assert.ok(panel.handleMouse(historyPointer('press', cancelCol, footerRow, 120, height)) !== undefined)
+  panel.handleMouse(historyWheel(5, listRow, 120, height))
+  panel.render(120)
+  assert.equal(panel.handleMouse(historyPointer('click', cancelCol, footerRow, 120, height)), undefined,
+    'a wheel between the Footer Cancel press and release is inert')
+  assert.equal(closed(), 0)
+  // A fresh independent press still closes.
+  const next = plain(panel.render(120))
+  const nextFooter = footerRowOf(next)
+  const nextCol = next[nextFooter]!.indexOf('Cancel [Esc]')
+  const nextHeight = panel.render(120).length
+  assert.ok(panel.handleMouse(historyPointer('press', nextCol, nextFooter, 120, nextHeight)) !== undefined)
+  assert.ok(panel.handleMouse(historyPointer('click', nextCol, nextFooter, 120, nextHeight)) !== undefined)
+  assert.equal(closed(), 1)
+  panel.dispose()
+})
+
+test('B3 gesture: a wheel between a Footer Scope/Expand press and release never replays it', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a'), row('beta prompt', 2, '/a', 'id-b')]
+  const { panel } = makePanel(source, {
+    geometry: seatGeometry(120, 40, 2),
+    pointerEnabled: () => true,
+    sessionId: 'ses_a',
+  })
+  panel.start()
+  await waitForHistoryRender(panel, rows => rows.some(line => line.includes('alpha prompt')), 'the initial page')
+  const frame = plain(panel.render(120))
+  const footerRow = footerRowOf(frame)
+  const listRow = resultRowOf(frame)
+  const height = panel.render(120).length
+  const scopeCol = frame[footerRow]!.indexOf('Scope [Tab]')
+  assert.ok(panel.handleMouse(historyPointer('press', scopeCol, footerRow, 120, height)) !== undefined)
+  panel.handleMouse(historyWheel(5, listRow, 120, height))
+  panel.render(120)
+  assert.equal(panel.handleMouse(historyPointer('click', scopeCol, footerRow, 120, height)), undefined)
+  assert.ok(plain(panel.render(120)).some(line => line.includes('Scope: session')), 'the stale Scope click changed nothing')
+
+  const expandedFrame = plain(panel.render(120))
+  const expandRow = footerRowOf(expandedFrame)
+  const expandCol = expandedFrame[expandRow]!.indexOf('Expand [F2]')
+  const expandHeight = panel.render(120).length
+  assert.ok(panel.handleMouse(historyPointer('press', expandCol, expandRow, 120, expandHeight)) !== undefined)
+  panel.handleMouse(historyWheel(5, resultRowOf(expandedFrame), 120, expandHeight))
+  panel.render(120)
+  assert.equal(panel.handleMouse(historyPointer('click', expandCol, expandRow, 120, expandHeight)), undefined)
+  assert.equal(panel.isExpanded(), false, 'the stale Expand click changed nothing')
+  // Fresh presses still work exactly once.
+  const fresh = plain(panel.render(120))
+  const freshRow = footerRowOf(fresh)
+  const freshHeight = panel.render(120).length
+  const freshExpand = fresh[freshRow]!.indexOf('Expand [F2]')
+  assert.ok(panel.handleMouse(historyPointer('press', freshExpand, freshRow, 120, freshHeight)) !== undefined)
+  assert.ok(panel.handleMouse(historyPointer('click', freshExpand, freshRow, 120, freshHeight)) !== undefined)
+  assert.equal(panel.isExpanded(), true)
+  panel.dispose()
+})
+
+test('B3 gesture: a wheel between a narrow Footer Use press and release never accepts', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  const { panel, accepted } = makePanel(source, {
+    geometry: seatGeometry(44, 20, 2),
+    pointerEnabled: () => true,
+  })
+  panel.start()
+  const lines = plain(await renderUntil(
+    panel,
+    44,
+    rows => rows.some(line => line.includes('Use [Enter]')),
+    'the committed narrow fallback page',
+  ))
+  const footerRow = footerRowOf(lines)
+  const useCol = lines[footerRow]!.indexOf('Use [Enter]')
+  const listRow = resultRowOf(lines)
+  const height = panel.render(44).length
+  assert.ok(panel.handleMouse(historyPointer('press', useCol, footerRow, 44, height)) !== undefined)
+  panel.handleMouse(historyWheel(5, listRow, 44, height))
+  panel.render(44)
+  assert.equal(panel.handleMouse(historyPointer('click', useCol, footerRow, 44, height)), undefined)
+  assert.equal(accepted(), undefined, 'the wheel-scrolled Use press never accepts the entry')
+  // A fresh independent press accepts.
+  const fresh = plain(panel.render(44))
+  const freshFooter = footerRowOf(fresh)
+  const freshCol = fresh[freshFooter]!.indexOf('Use [Enter]')
+  const freshHeight = panel.render(44).length
+  assert.ok(panel.handleMouse(historyPointer('press', freshCol, freshFooter, 44, freshHeight)) !== undefined)
+  assert.ok(panel.handleMouse(historyPointer('click', freshCol, freshFooter, 44, freshHeight)) !== undefined)
+  assert.deepEqual(accepted(), { id: 'id-a', content: 'alpha prompt' })
+  panel.dispose()
+})
