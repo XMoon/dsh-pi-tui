@@ -181,6 +181,7 @@ async function mountSurface(life: { after(fn: () => unknown): void }, options: {
     settleLocalSubmitAck: () => {},
     markSubmitLatency: () => {},
     observeDurableSubmission: () => {},
+    observeDirectPendingSubmissionEvent: () => false,
     markContextDirty: () => {},
     refreshContextMeasurement: () => {},
     currentWorkingFromLog: () => false,

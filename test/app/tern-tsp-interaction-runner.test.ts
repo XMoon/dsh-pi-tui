@@ -360,6 +360,7 @@ async function mountRunnerHarness(options: {
     settleLocalSubmitAck: () => {},
     markSubmitLatency: () => {},
     observeDurableSubmission: () => {},
+    observeDirectPendingSubmissionEvent: () => false,
     markContextDirty: () => {},
     refreshContextMeasurement: () => {},
     currentWorkingFromLog: () => false,

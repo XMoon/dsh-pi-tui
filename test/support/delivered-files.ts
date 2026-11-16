@@ -113,6 +113,8 @@ export function deliveredSurfaceRouting(facts: {
     currentSessionId: facts.sessionId,
     hasLiveAgent: () => true,
     completionOwnerId: () => undefined,
+    // The Direct pending-echo seam is inert in this snapshot-read stub.
+    observeDirectPendingSubmissionEvent: () => false,
     observeMainEvent: () => ({ refreshAgents: false }),
     appendOpeningViewerEvent: () => false,
     main: () => ({

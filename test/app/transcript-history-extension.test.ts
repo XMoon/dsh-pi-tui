@@ -232,6 +232,7 @@ function mountBoundaryHarness(turns: number, options: {
   const extension = { calls: 0, answer: options.extensionAnswer }
   const routingSource = {
     viewedChildId: () => undefined,
+    observeDirectPendingSubmissionEvent: () => false,
     main: () => ({ folder, window: controller, previews: [] }),
     mainFolder: () => folder,
     extendLoadedHistory: () => {

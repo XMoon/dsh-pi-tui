@@ -195,7 +195,7 @@ async function mountChain(
     queueTextOf: () => '', exitView: () => {}, refreshStatusCheap: () => {}, refreshStatusAndWelcome: () => {},
     refreshWorkspaceFacts: () => {}, applyGoalChange: () => {}, sessionTitleOf: () => undefined,
     extendLoadedHistory: () => false, settleLocalSubmitAck: () => {}, markSubmitLatency: () => {},
-    observeDurableSubmission: () => {}, markContextDirty: () => {}, refreshContextMeasurement: () => {},
+    observeDurableSubmission: () => {}, observeDirectPendingSubmissionEvent: () => false, markContextDirty: () => {}, refreshContextMeasurement: () => {},
     currentWorkingFromLog: () => false, flushTurn: () => {}, registeredAgentIs: () => false,
     isCurrentOwnerAgent: () => false, viewedChildAgent: () => undefined, setViewedChildAgent: () => {},
     setViewedQueueAgent: () => {}, agentForSession: () => undefined,

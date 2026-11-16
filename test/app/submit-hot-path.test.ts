@@ -917,6 +917,328 @@ test('the local submit ack appears with the gesture and settles on the first aut
   assert.ok(!settled.includes('Submitting…'), `the ack row must clear on the authoritative event:\n${settled}`)
 })
 
+// ── Direct pending-echo terminal reconciliation (application composition) ──
+// These cases mount the REAL runner composition: the runner binds the Direct
+// Host-event seam, routes the durable Session events through the REAL surface
+// routing, updates the ONE pending ledger and publishes the shared pending
+// presentation over the REAL VirtualTerminal sink. The Host Inbox events carry
+// the exact official data shape; the submission identity is the one the Direct
+// writer actually persisted on the delivered Host message — never a test-built
+// id detached from the runner.
+
+/** The exact user-message shape an official Inbox occurrence carries. */
+function hostUserMessage(rpcId: string, text: string): Record<string, unknown> {
+  return {
+    id: MessageId(`message-${rpcId}`),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user', rpcId },
+  }
+}
+
+/** Drive one REAL composer submit and return the request identity the Direct
+ *  writer persisted on the delivered Host message. */
+async function submitDelivered(
+  mounted: { app: TuiApp },
+  harness: ReturnType<typeof makeHarness>,
+  text: string,
+): Promise<string> {
+  const beforeTurn = harness.host.followedUp.length
+  const beforeStep = harness.host.steered.length
+  mounted.app.setDraft(text)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  const delivered = await drainUntil(
+    () => harness.host.followedUp.length > beforeTurn || harness.host.steered.length > beforeStep,
+    15_000,
+  )
+  assert.ok(delivered, `${text}: the submission must reach the Host inbox`)
+  const message = (harness.host.followedUp.length > beforeTurn
+    ? harness.host.followedUp[beforeTurn]
+    : harness.host.steered[beforeStep]) as { source?: { rpcId?: unknown } }
+  const rpcId = message?.source?.rpcId
+  assert.equal(typeof rpcId, 'string', 'the Direct writer persists the minted request identity')
+  return rpcId as string
+}
+
+/** The official Inbox insertion of one identity at the tail. */
+function inboxInsert(seq: number, rpcId: string, text: string): SessionEvent {
+  return event('agent/inbox/spliced', {
+    target: 'next-turn',
+    start: 0,
+    inserted: [hostUserMessage(rpcId, text)],
+  } as never, seq)
+}
+
+/** The official Inbox claim of the first queued occurrence. */
+function inboxClaim(seq: number): SessionEvent {
+  return event('agent/inbox/spliced', {
+    target: 'next-turn',
+    start: 0,
+    removedCount: 1,
+    inserted: [],
+  } as never, seq)
+}
+
+test('a claimed Direct submit that never becomes durable stops showing sending…', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-pending', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-pending' })
+
+  const rpcId = await submitDelivered(mounted, harness, '再看看')
+  await waitForRenderView(vt)
+  const pending = vt.getViewport().join('\n')
+  assert.ok(pending.includes('sending…'), `the local echo advertises its wait:\n${pending}`)
+
+  // The real Host accepted the prompt: the Inbox row carries the same rpcId.
+  context.emit('session/event', harness.session as never, inboxInsert(100, rpcId, '再看看') as never)
+  await waitForRenderView(vt)
+  // The Host claims the pending occurrence (removes it) BEFORE a durable
+  // user/message: the echo must re-present, not blank.
+  context.emit('session/event', harness.session as never, inboxClaim(101) as never)
+  await waitForRenderView(vt)
+  assert.ok(vt.getViewport().join('\n').includes('sending…'),
+    'the claimed-but-not-yet-durable echo stays visible instead of blanking')
+
+  // The claimed request then fails before its durable user/message: the turn
+  // boundary is the official terminal proof for that exact echo.
+  context.emit('session/event', harness.session as never, event('turn/end', {
+    turn: 1,
+    reason: { kind: 'error', error: { message: 'UNSUPPORTED_REASONING_EFFORT', code: 'UNSUPPORTED_REASONING_EFFORT' } },
+  }, 102) as never)
+  await waitForRenderView(vt)
+  const settled = vt.getViewport().join('\n')
+  assert.ok(!settled.includes('sending…'), `the failed echo must stop sending:\n${settled}`)
+  assert.ok(!settled.includes('再看看'),
+    `the failed claim never fabricates a durable user row:\n${settled}`)
+  assert.equal(harness.host.followedUp.length, 1, 'the reconciliation never resends or retries')
+})
+
+test('retiring one claimed identity leaves a different pending echo visible', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-pending', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-pending' })
+
+  const failed = await submitDelivered(mounted, harness, 'failed one')
+  const kept = await submitDelivered(mounted, harness, 'kept one')
+  await waitForRenderView(vt)
+  const before = vt.getViewport().join('\n')
+  assert.equal(before.split('sending…').length - 1, 2, `both pending echoes advertise their wait:\n${before}`)
+
+  context.emit('session/event', harness.session as never, inboxInsert(110, failed, 'failed one') as never)
+  context.emit('session/event', harness.session as never, inboxClaim(111) as never)
+  context.emit('session/event', harness.session as never, event('turn/end', {
+    turn: 1,
+    reason: { kind: 'error', error: { message: 'UNSUPPORTED_REASONING_EFFORT', code: 'UNSUPPORTED_REASONING_EFFORT' } },
+  }, 112) as never)
+  await waitForRenderView(vt)
+  const after = vt.getViewport().join('\n')
+  assert.equal(after.split('sending…').length - 1, 1,
+    `exactly the failed identity retires; the other echo keeps waiting:\n${after}`)
+  assert.ok(after.includes('kept one'), `the untouched echo stays visible:\n${after}`)
+  assert.ok(!after.includes('failed one'), `the retired echo is gone:\n${after}`)
+
+  // The untouched identity later becomes durable: the transcript shows it and
+  // the last echo retires.
+  context.emit('session/event', harness.session as never, event('user/message',
+    hostUserMessage(kept, 'kept one') as never, 113) as never)
+  await waitForRenderView(vt)
+  const durable = vt.getViewport().join('\n')
+  assert.ok(!durable.includes('sending…'), `no echo survives the durable admission:\n${durable}`)
+  assert.equal(durable.split('kept one').length - 1, 1,
+    `the durable row replaces the echo exactly once:\n${durable}`)
+})
+
+test('compaction failure and unclaimed turn boundaries never retire a pending echo', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-pending', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-pending' })
+
+  const rpcId = await submitDelivered(mounted, harness, 'still pending')
+  await waitForRenderView(vt)
+  assert.ok(vt.getViewport().join('\n').includes('sending…'))
+
+  // A compaction failure is NOT a submission terminal: it never retires a
+  // pending echo.
+  context.emit('session/event', harness.session as never, event('compaction/end', {
+    compactionId: 'compact-1',
+    error: 'Compaction could not produce a useful summary',
+  } as never, 120) as never)
+  await waitForRenderView(vt)
+  assert.ok(vt.getViewport().join('\n').includes('sending…'),
+    'a failed compaction leaves the pending echo alone')
+
+  // A turn boundary WITHOUT a matching Inbox claim (the echo's occurrence is
+  // still queued) proves nothing about this request.
+  context.emit('session/event', harness.session as never, event('turn/end', {
+    turn: 1,
+    reason: { kind: 'error', error: { message: 'UNSUPPORTED_REASONING_EFFORT', code: 'UNSUPPORTED_REASONING_EFFORT' } },
+  }, 121) as never)
+  await waitForRenderView(vt)
+  assert.ok(vt.getViewport().join('\n').includes('sending…'),
+    'an unrelated turn/end leaves an unclaimed echo pending')
+
+  // Control: the SAME echo is genuinely retirable once the exact identity is
+  // claimed and a strictly later boundary crosses it.
+  context.emit('session/event', harness.session as never, inboxInsert(123, rpcId, 'still pending') as never)
+  context.emit('session/event', harness.session as never, inboxClaim(124) as never)
+  context.emit('session/event', harness.session as never, event('turn/end', {
+    turn: 3,
+    reason: { kind: 'error', error: { message: 'UNSUPPORTED_REASONING_EFFORT', code: 'UNSUPPORTED_REASONING_EFFORT' } },
+  }, 125) as never)
+  await waitForRenderView(vt)
+  assert.ok(!vt.getViewport().join('\n').includes('sending…'),
+    'the exact claimed identity retires on its terminal boundary')
+})
+
+test('a late event from the previous owner cannot retire the new owner claimed echo', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-owner-a', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-owner-a' })
+  const previousOwnerSession = harness.session
+
+  // The REAL /new transition commits a new owner and ownership generation,
+  // exactly like the production navigation gesture.
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the runner must register the /new transition command')
+  await (newHandler as () => Promise<void>)()
+  await waitForRenderView(vt)
+  const newSessionId = harness.createdSessionIds[0]
+  assert.equal(typeof newSessionId, 'string', 'the switch created the new owner session')
+  const newOwnerSession = (harness.sessions as { get(id: string): { id: string } | undefined }).get(newSessionId)
+  assert.ok(newOwnerSession, 'the new owner session is attached')
+
+  // Build a CLAIMED receipt for a NEW-owner echo: a strictly later boundary
+  // CAN retire it, so a stale event that wrongly passed the fence would be
+  // detectable instead of being vacuously harmless.
+  const rpcId = await submitDelivered(mounted, harness, 'new owner echo')
+  await waitForRenderView(vt)
+  assert.ok(vt.getViewport().join('\n').includes('sending…'))
+  context.emit('session/event', newOwnerSession as never, inboxInsert(200, rpcId, 'new owner echo') as never)
+  context.emit('session/event', newOwnerSession as never, inboxClaim(201) as never)
+  await waitForRenderView(vt)
+  assert.ok(vt.getViewport().join('\n').includes('sending…'),
+    'the claimed new-owner echo re-presents while awaiting its boundary')
+  mounted.app.setDraft('owner draft')
+
+  // A late boundary of the EXACT previous owner Session must be fenced: the
+  // new owner's claimed echo, the draft and the painted frame stay untouched.
+  context.emit('session/event', previousOwnerSession as never, event('turn/end', {
+    turn: 1,
+    reason: { kind: 'error', error: { message: 'UNSUPPORTED_REASONING_EFFORT', code: 'UNSUPPORTED_REASONING_EFFORT' } },
+  }, 900) as never)
+  await waitForRenderView(vt)
+  const afterStale = vt.getViewport().join('\n')
+  assert.ok(afterStale.includes('sending…'),
+    `the stale previous-owner boundary must not retire the new echo:\n${afterStale}`)
+  assert.ok(afterStale.includes('new owner echo'), `the new echo stays visible:\n${afterStale}`)
+  assert.equal(mounted.app.getDraft(), 'owner draft', 'the stale event must not touch the new owner draft')
+
+  // Positive control: the CURRENT owner's own strictly later boundary is the
+  // legitimate terminal proof for this claimed echo.
+  context.emit('session/event', newOwnerSession as never, event('turn/end', {
+    turn: 1,
+    reason: { kind: 'error', error: { message: 'UNSUPPORTED_REASONING_EFFORT', code: 'UNSUPPORTED_REASONING_EFFORT' } },
+  }, 901) as never)
+  await waitForRenderView(vt)
+  const afterOwn = vt.getViewport().join('\n')
+  assert.ok(!afterOwn.includes('sending…'), `the current owner's later boundary retires the echo:\n${afterOwn}`)
+  assert.ok(!afterOwn.includes('new owner echo'), `the retired echo is gone:\n${afterOwn}`)
+})
+
+test('an Alt+Up recall retires the queued local echo it removed', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  // The Direct queue-remove adapter retires the occurrence's upload receipt
+  // through the official file-uploads service; the recall's committed removal
+  // settles as committed through this seam (steering never reaches it).
+  context.provide('fileUploads', { retirePrompt: () => {} } as never)
+  const harness = makeHarness(home, { id: 'submit-session-recall', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-recall' })
+
+  harness.host.status = 'running'
+  const rpcId = await submitDelivered(mounted, harness, 'queued recall text')
+  const delivered = harness.host.followedUp[0] as { id: string }
+  // The accepted occurrence is now owned by the Host inbox projection.
+  harness.host.nextTurn.push(delivered as never)
+  await waitForRenderView(vt)
+
+  const dispatched = (mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.dequeue')
+  assert.equal(dispatched, true, 'the Alt+Up action must be dispatched')
+  assert.equal(await drainUntil(() => harness.host.nextTurn.length === 0, 5_000), true,
+    'the real pull-back must remove the queued occurrence')
+  assert.equal(await drainUntil(() => mounted.app.getDraft().includes('queued recall text'), 5_000), true,
+    'the recalled text must reach the editor')
+
+  // The committed removal is the occurrence's business terminal: its exact
+  // local echo is retired, never re-presented as a local queue row.
+  const queueItems = (mounted.app as unknown as {
+    queueItems: readonly { id: string; text: string }[]
+  }).queueItems
+  assert.ok(!queueItems.some(item => item.id === rpcId || item.text.includes('queued recall text')),
+    `the recalled echo must be dismissed: ${JSON.stringify(queueItems)}`)
+})
+
 test('a context `!` submit shows the ack DURING the run and settles on the authoritative event', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-submit-hot-')

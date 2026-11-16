@@ -461,10 +461,13 @@ export type PullableQueueBlock =
   | { readonly type: 'file'; readonly attachment: unknown }
 
 /** One pullable queued occurrence (the runner's semantic queue projection).
- * `content` stays structural: the runner projects the Host content blocks. */
+ * `content` stays structural: the runner projects the Host content blocks.
+ * `rpcId` is the occurrence's exact request identity when it has one: the
+ * recall's committed removal retires that local echo by identity. */
 export interface PullableQueueMessage {
   readonly id: string
   readonly content: readonly unknown[]
+  readonly rpcId?: string
 }
 
 /** The runner-supplied operations the Alt+Up queue pull-back drives. */
@@ -494,6 +497,11 @@ export interface PullBackQueueDeps {
   ) => Promise<WriteOutcome>
   /** Park one confirmed recall until its transition settles. */
   readonly deferQueueRecall: (recall: PendingQueueRecall) => void
+  /** Retire the local echo of one occurrence a COMMITTED recall removal
+   *  removed. A removal only proves the occurrence left the inbox, so a
+   *  genuine removal settles its exact identity here — the canceled splice
+   *  itself is never treated as a business terminal. */
+  readonly dismissLocalSubmission?: (rpcId: string) => void
   /** Stage one durable queued image as a recalled draft; returns its id + placeholder. */
   readonly stageRecalledImage: (attachment: unknown) => { readonly id: number; readonly placeholder: string }
   /** Drop one staged recalled draft. */
@@ -648,6 +656,10 @@ export function pullBackQueue(deps: PullBackQueueDeps): void {
         outcomes.push(next)
         if (next.kind !== 'committed') break
         settledRemovals += 1
+        // The committed removal is the ONLY business terminal for this
+        // occurrence: retire its exact local echo now (a canceled splice alone
+        // never proves a business cancel).
+        if (message.rpcId !== undefined) deps.dismissLocalSubmission?.(message.rpcId)
       }
       const outcome = outcomes[outcomes.length - 1]!
       const confirmed = recalledEntries.slice(0, settledRemovals)

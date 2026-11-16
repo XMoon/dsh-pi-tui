@@ -4215,6 +4215,18 @@ export function applyRunnerWithRuntime(
       settleLocalSubmitAck: (reason) => submission.settleLocalSubmitAck(reason),
       markSubmitLatency: (sessionId, phase) => { submission.markLatency(sessionId, phase) },
       observeDurableSubmission: (rpcId) => submission.observeDurable(rpcId),
+      // PR1: the Direct pending-echo terminal reconciliation. The official
+      // receipt/index/seq lifecycle is mapped onto the Direct ledger ONLY;
+      // the Remote branch consumes the official Client
+      // `pendingSubmissions` source, so its routing answers false and no
+      // second Direct-style observer ever runs beside it.
+      observeDirectPendingSubmissionEvent: (event, sessionId) => {
+        if (remoteSources !== undefined) return false
+        if (event.type !== 'agent/inbox/spliced'
+          && event.type !== 'request/context'
+          && event.type !== 'turn/end') return false
+        return submission.observeDirectHostEvent(event, sessionId)
+      },
       markContextDirty: () => status.markContextDirty(),
       refreshContextMeasurement: (reason) => status.refreshContextMeasurement(reason),
       // Bound late: these helpers are declared AFTER the startup calls that
