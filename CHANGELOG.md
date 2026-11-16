@@ -36,6 +36,7 @@
 
 ### 修复
 
+- **Fullscreen 的图片、任务与历史页面补齐鼠标查看、返回与关闭入口。** `/view-image` 的列表行、底栏 `View`/`Close` 与查看器的 `Back`/`Close` 可直接点击；Fullscreen Task Center 的 Work/Team `Close`、搜索 `Back` 与类型筛选 `Cancel` 可点击（Stop 确认与其余键盘提示保持原样）；Fullscreen History 底栏的 `Scope`/`Expand`/`Cancel` 可点击，并在窄屏 Use/Copy 按钮被整体降级时提供同语义的底栏后备。所有点击只作用于最后绘制且当前仍有效的完整片段，Regular/Main 仍不启用应用鼠标。
 - **Fullscreen `/model` 的操作栏支持直接点击。** 可点击进入 Effort、选择、返回、关闭及 Team 的重试/只读复查；Effort 候选仍只改草稿，目标未绘制、短行预算、旧按压或目录刷新退出当前模型时只保留安全退出，不会提交隐藏目标。
 
 - **TSP Focus 阅读模式下打开 Session Search 不再导致渲染器崩溃。** Focus 顶层的用户行与最终回答行现在与其他顶层行一样携带 presentation scope 前缀；替换来源或新 scope 后，旧 scope 的 `main.msg-N` 不会再与新 scope 的同名行冲突，Search 卡可正常打开、关闭并保留原 Composer 与草稿。
