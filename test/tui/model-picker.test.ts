@@ -913,14 +913,276 @@ function mouse(type: 'press' | 'click', x: number, y: number, width = 80, height
   }
 }
 
-test('a mouse click submits the model with its inline effort (mouse parity)', async () => {
-  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
-  h.picker.render(72)
-  const row = h.picker.render(72).map(stripAnsi).findIndex(line => line.includes('Plain'))
-  assert.ok(row >= 0)
-  h.picker.handleMouse(mouse('press', 5, row, 72, 24))
-  h.picker.handleMouse(mouse('click', 5, row, 72, 24))
-  assert.deepEqual(h.applied, [{ provider: 'p1', model: 'plain' }])
+function sgrPress(vt: VirtualTerminal, col: number, row: number): void {
+  vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M`)
+}
+
+function sgrRelease(vt: VirtualTerminal, col: number, row: number): void {
+  vt.sendInput(`\x1b[<0;${col + 1};${row + 1}m`)
+}
+
+function clickVisibleText(h: Harness, needle: string): void {
+  const row = rowOf(h.vt, needle)
+  const start = cellIndexOf(h.vt, row, needle)
+  const col = start + Math.floor(visibleWidth(needle) / 2)
+  sgrPress(h.vt, col, row)
+  sgrRelease(h.vt, col, row)
+}
+
+test('mounted Fullscreen SGR completes the model effort draft and commit journey', async () => {
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, fullscreen: true })
+  const initialHints = linesOf(h.vt).filter(line => line.includes('Tab Team') || line.includes('Type to filter') || line.includes('navigate'))
+  assert.equal(initialHints.length, 1, `the model surface paints its own footer once:\n${viewOf(h.vt)}`)
+  clickVisibleText(h, 'Sol')
+  await h.vt.waitForRender()
+  assert.deepEqual(h.applied, [], 'opening the selected reasoning model does not apply it')
+  assert.ok(viewOf(h.vt).includes('Select [Enter]'), `Effort mode advertises the existing Select action:\n${viewOf(h.vt)}`)
+  clickVisibleText(h, 'High')
+  await h.vt.waitForRender()
+  assert.deepEqual(h.applied, [], 'the Effort candidate click only changes the local draft')
+  clickVisibleText(h, 'Select [Enter]')
+  await h.vt.waitForRender()
+  assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol', reasoningEffort: 'high' }])
+  assert.equal(h.closeCount(), 1)
+  h.app.stop()
+})
+
+test('a painted model Enter action replays the selected model semantic path', async () => {
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, fullscreen: true })
+  clickVisibleText(h, 'Effort [Enter]')
+  await h.vt.waitForRender()
+  assert.deepEqual(h.applied, [], 'model Enter first enters Effort without writing')
+  assert.ok(viewOf(h.vt).includes('Select [Enter]'), viewOf(h.vt))
+  clickVisibleText(h, 'Select [Enter]')
+  await h.vt.waitForRender()
+  assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol', reasoningEffort: 'medium' }])
+  h.app.stop()
+})
+
+test('painted Back and Close use the current Esc ladder and never apply a model', async () => {
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, fullscreen: true })
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  clickVisibleText(h, 'Back [Esc]')
+  await h.vt.waitForRender()
+  assert.equal(h.closeCount(), 0)
+  clickVisibleText(h, 'Close [Esc]')
+  await h.vt.waitForRender()
+  assert.equal(h.closeCount(), 1)
+  assert.deepEqual(h.applied, [])
+  h.app.stop()
+})
+
+test('a model action press cannot commit after resize or keyboard selection change', async () => {
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, fullscreen: true })
+  let row = rowOf(h.vt, 'Effort [Enter]')
+  let col = cellIndexOf(h.vt, row, 'Effort [Enter]') + 2
+  sgrPress(h.vt, col, row)
+  h.vt.resize(60, 24)
+  sgrRelease(h.vt, col, row)
+  assert.deepEqual(h.applied, [], 'a release against resized geometry is inert')
+  await h.vt.waitForRender()
+  row = rowOf(h.vt, 'Effort [Enter]')
+  col = cellIndexOf(h.vt, row, 'Effort [Enter]') + 2
+  sgrPress(h.vt, col, row)
+  h.vt.sendInput(DOWN)
+  await h.vt.waitForRender()
+  sgrRelease(h.vt, col, row)
+  assert.deepEqual(h.applied, [], 'a selection change revokes the pending action intent')
+  h.app.stop()
+})
+
+test('a mouse click submits a model with no effort in one action', async () => {
+  const pending = deferred<ModelApplyOutcome>()
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'plain' }, fullscreen: true, apply: () => pending.promise })
+  const row = rowOf(h.vt, 'Select [Enter]')
+  const col = cellIndexOf(h.vt, row, 'Select [Enter]') + 2
+  clickVisibleText(h, 'Select [Enter]')
+  sgrPress(h.vt, col, row)
+  sgrRelease(h.vt, col, row)
+  assert.deepEqual(h.applied, [{ provider: 'p1', model: 'plain' }], 'an in-flight apply cannot be repeated')
+  await h.vt.waitForRender()
+  assert.doesNotMatch(viewOf(h.vt), /Select \[Enter\]|Close \[Esc\]/u, 'Selecting advertises no false commit/cancel')
+  pending.resolve('rejected')
+  await h.vt.waitForRender()
+  assert.equal(h.closeCount(), 0, 'a rejected apply retains the picker')
+  clickVisibleText(h, 'Close [Esc]')
+  await h.vt.waitForRender()
+  assert.equal(h.closeCount(), 1)
+  h.app.stop()
+})
+
+test('loading, error, no-match and failure rows publish only a mouse Close action', async () => {
+  for (const state of ['loading', 'error', 'empty', 'no-match', 'failure'] as const) {
+    const h = await openPicker({ loading: true, fullscreen: true, team: false })
+    if (state === 'error') h.picker.setLoadError('directory refused')
+    else if (state === 'empty') h.hydrate(makeDirectory())
+    else if (state === 'failure') h.hydrate(makeDirectory({ failures: [{ id: 'bad', name: 'Bad', message: 'unreadable' }] }))
+    else if (state === 'no-match') {
+      h.hydrate(EFFORT_DIRECTORY)
+      h.vt.sendInput('nothing-matches')
+    }
+    await h.vt.waitForRender()
+    assert.doesNotMatch(viewOf(h.vt), /Select \[Enter\]|Effort \[Enter\]|Tab Team/u, state)
+    clickVisibleText(h, 'Close [Esc]')
+    await h.vt.waitForRender()
+    assert.equal(h.closeCount(), 1, state)
+    assert.deepEqual(h.applied, [], state)
+    h.app.dispose()
+  }
+})
+
+test('Team mouse recovery distinguishes Retry from read-only Recheck and keeps the OFF confirmation seat', async () => {
+  const team = new FakeTeam({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  team.queueOutcome({ kind: 'rejected', reason: 'refused before dispatch' })
+  const h = await openPicker({ fullscreen: true, team })
+  clickVisibleText(h, 'On')
+  await h.vt.waitForRender()
+  assert.equal(team.beginCalls, 1)
+  assert.match(viewOf(h.vt), /Retry \[Enter\]/u)
+  team.queueOutcome({ kind: 'indeterminate', reason: 'connection lost' })
+  clickVisibleText(h, 'Retry [Enter]')
+  await h.vt.waitForRender()
+  assert.equal(team.beginCalls, 2)
+  assert.deepEqual(team.setEnabledCalls, [true, true])
+  assert.doesNotMatch(viewOf(h.vt), /Retry \[Enter\]/u)
+  clickVisibleText(h, 'Recheck [R]')
+  await h.vt.waitForRender()
+  assert.equal(team.beginCalls, 2, 'Recheck is a read, never another admission')
+  assert.deepEqual(team.setEnabledCalls, [true, true], 'Recheck sends no duplicate write')
+  clickVisibleText(h, 'Back [Esc]')
+  await h.vt.waitForRender()
+  assert.equal(h.closeCount(), 0)
+  clickVisibleText(h, 'Close [Esc]')
+  await h.vt.waitForRender()
+  h.app.dispose()
+
+  const on = new FakeTeam({ kind: 'ready', enabled: true, modelRequestHistory: 'recorded' })
+  on.nextConfirmRequired = true
+  const off = await openPicker({ fullscreen: true, team: on })
+  clickVisibleText(off, 'Off')
+  await off.vt.waitForRender()
+  assert.match(viewOf(off.vt), /Disable Agent Team/u)
+  assert.deepEqual(on.setEnabledCalls, [], 'the OFF seat remains an independent confirmation')
+  off.vt.sendInput('\x1b')
+  await off.vt.waitForRender()
+  assert.deepEqual(on.setEnabledCalls, [])
+  off.app.dispose()
+})
+
+test('a model bar press survives a pure repaint but is revoked by filter, hydration, phase and focus changes', async () => {
+  const h = await openPicker({ fullscreen: true })
+  const pressAction = (): { row: number; col: number } => {
+    const row = rowOf(h.vt, 'Effort [Enter]')
+    const col = cellIndexOf(h.vt, row, 'Effort [Enter]') + 3
+    sgrPress(h.vt, col, row)
+    return { row, col }
+  }
+  for (const change of ['query', 'directory', 'team', 'focus'] as const) {
+    const target = pressAction()
+    if (change === 'query') {
+      h.vt.sendInput('s')
+      h.vt.sendInput('\x7f')
+    } else if (change === 'directory') h.hydrate(EFFORT_DIRECTORY)
+    else if (change === 'team') h.team!.setSnapshot({ kind: 'ready', enabled: true, modelRequestHistory: 'none' })
+    else {
+      h.picker.focused = false
+      h.picker.focused = true
+    }
+    await h.vt.waitForRender()
+    sgrRelease(h.vt, target.col, target.row)
+    assert.doesNotMatch(viewOf(h.vt), /Back \[Esc\]/u, `${change}: the stale press cannot enter Effort`)
+    assert.deepEqual(h.applied, [], change)
+  }
+  const target = pressAction()
+  h.app.requestRender()
+  await h.vt.waitForRender()
+  sgrRelease(h.vt, target.col, target.row)
+  await h.vt.waitForRender()
+  assert.match(viewOf(h.vt), /Back \[Esc\]/u, 'a pure repaint retains a valid press')
+  h.app.stop()
+})
+
+test('model bars keep whole actions across widths and reject separators, crossed spans and dropped controls', async () => {
+  for (const [columns, rows] of [[44, 20], [64, 20], [72, 24], [88, 28], [44, 8]] as const) {
+    const h = await openPicker({ fullscreen: true, columns, rows })
+    const row = rowOf(h.vt, 'Effort [Enter]')
+    const enterCol = cellIndexOf(h.vt, row, 'Effort [Enter]')
+    const closeCol = cellIndexOf(h.vt, row, 'Close [Esc]')
+    sgrRelease(h.vt, enterCol, row)
+    sgrPress(h.vt, enterCol, row)
+    sgrRelease(h.vt, closeCol, row)
+    sgrPress(h.vt, enterCol + visibleWidth('Effort [Enter]') + 1, row)
+    sgrRelease(h.vt, enterCol + visibleWidth('Effort [Enter]') + 1, row)
+    assert.deepEqual(h.applied, [])
+    assert.equal(h.closeCount(), 0)
+    clickVisibleText(h, 'Effort [Enter]')
+    await h.vt.waitForRender()
+    assert.match(viewOf(h.vt), /Back \[Esc\]/u, `${columns}x${rows}`)
+    clickVisibleText(h, 'Back [Esc]')
+    await h.vt.waitForRender()
+    clickVisibleText(h, 'Close [Esc]')
+    await h.vt.waitForRender()
+    assert.equal(h.closeCount(), 1)
+    h.app.dispose()
+  }
+  const h = await openPicker({ fullscreen: true })
+  h.picker.setMaxRows(1)
+  assert.deepEqual(h.picker.render(44).map(stripAnsi), ['  Close [Esc]'], 'one row retains only the safe exit')
+  h.picker.setMaxRows(20)
+  assert.match(h.picker.render(20).map(stripAnsi).at(-1)!, /Close \[Esc\]/u)
+  assert.doesNotMatch(h.picker.render(20).map(stripAnsi).at(-1)!, /Effort \[Enter\]/u)
+  const clipped = h.picker.render(6).map(stripAnsi)
+  h.picker.handleMouse(mouse('press', 3, clipped.length - 1, 6))
+  h.picker.handleMouse(mouse('click', 3, clipped.length - 1, 6))
+  assert.equal(h.closeCount(), 0, 'a truncated escape has no hit')
+  h.app.dispose()
+})
+
+test('a directory refresh that retires the effort-bound model keeps a mouse-operable Close', async () => {
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, fullscreen: true })
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  h.hydrate(makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [
+      model('other', { name: 'Other', efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'low' }),
+    ] }],
+    default: { provider: 'p1', model: 'other' },
+  }))
+  await h.vt.waitForRender()
+  const view = viewOf(h.vt)
+  assert.match(view, /Close \[Esc\]/u, `the transition keeps a pointer exit:\n${view}`)
+  assert.doesNotMatch(view, /Select \[Enter\]|Effort \[Enter\]/u, `no hidden replacement commit is advertised:\n${view}`)
+  clickVisibleText(h, 'Close [Esc]')
+  await h.vt.waitForRender()
+  assert.equal(h.closeCount(), 1, 'the pointer can leave the swallowed transition')
+  assert.deepEqual(h.applied, [], 'leaving the transition commits no model')
+  h.app.stop()
+})
+
+test('a body pointer press releases the refresh transition and restores the normal pointer ladder', async () => {
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, fullscreen: true })
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  h.hydrate(makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [
+      model('other', { name: 'Other', efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'low' }),
+    ] }],
+    default: { provider: 'p1', model: 'other' },
+  }))
+  await h.vt.waitForRender()
+  assert.match(viewOf(h.vt), /Close \[Esc\]/u)
+  clickVisibleText(h, 'Other')
+  await h.vt.waitForRender()
+  assert.match(viewOf(h.vt), /Select \[Enter\] · Back \[Esc\]/u,
+    `a deliberate body press releases the transition and opens the selected model's effort:\n${viewOf(h.vt)}`)
+  clickVisibleText(h, 'Back [Esc]')
+  await h.vt.waitForRender()
+  assert.match(viewOf(h.vt), /Close \[Esc\]/u, `Back returns to the model list:\n${viewOf(h.vt)}`)
+  clickVisibleText(h, 'Close [Esc]')
+  await h.vt.waitForRender()
+  assert.equal(h.closeCount(), 1)
+  assert.deepEqual(h.applied, [], 'the pointer ladder never commits the replacement model')
   h.app.stop()
 })
 
@@ -1121,7 +1383,32 @@ test('a tiny 80x6 terminal keeps the Team row and footer inside the frame (no ha
   // The composed strips are whole rows: at a grant below FIXED_ROWS+2 the
   // overlay keeps the actionable Team row + the footer, never a cut chip.
   assert.ok(rowLine(h.vt, 'Agent Team') !== undefined, `the Team row must stay inside:\n${viewOf(h.vt)}`)
-  assert.ok(rowLine(h.vt, 'Tab Team') !== undefined, `the footer hint must stay inside:\n${viewOf(h.vt)}`)
+  assert.ok(rowLine(h.vt, 'Close [Esc]') !== undefined, `the exit action must stay inside:\n${viewOf(h.vt)}`)
+  assert.ok(rowLine(h.vt, 'Tab Team') === undefined, `hidden model rows have no browsing hint:\n${viewOf(h.vt)}`)
+  h.app.stop()
+})
+
+test('short row grants do not advertise model commits whose content rows are hidden', async () => {
+  const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, fullscreen: true })
+  for (const grant of [2, 3, 4, 5]) {
+    h.picker.setMaxRows(grant)
+    let lines = h.picker.render(72).map(stripAnsi)
+    assert.ok(lines.length <= grant)
+    assert.ok(lines.at(-1)?.includes('Close [Esc]'))
+    assert.doesNotMatch(lines.at(-1)!, /Effort \[Enter\]|Select \[Enter\]|Tab Team/u)
+
+    h.picker.handleInput(ENTER)
+    lines = h.picker.render(72).map(stripAnsi)
+    assert.ok(lines.at(-1)?.includes('Back [Esc]'))
+    assert.doesNotMatch(lines.at(-1)!, /Select \[Enter\]/u, 'no hidden effort value can be committed')
+    h.picker.handleInput('\x1b')
+    h.picker.handleInput('\t')
+    lines = h.picker.render(72).map(stripAnsi)
+    assert.match(lines.at(-1)!, /Toggle \[Enter\].*Back \[Esc\]/u, 'the visible Team row keeps its own action')
+    assert.doesNotMatch(lines.at(-1)!, /Tab model/u, 'no hint points to a hidden model list')
+    h.picker.handleInput('\x1b')
+  }
+  assert.deepEqual(h.applied, [])
   h.app.stop()
 })
 
@@ -2109,7 +2396,7 @@ test('a refresh that drops the reasoning metadata exits Effort mode to the no-ef
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
   assert.ok(!view.includes('←→ effort'), `the focus must be released:\n${view}`)
-  assert.ok(view.includes('Enter effort/select'), `the model-mode hint must return:\n${view}`)
+  assert.ok(view.includes('Select [Enter]'), `the model-mode action must return:\n${view}`)
   h.vt.sendInput(ENTER) // the no-effort fast path commits directly
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol' }])
   h.app.stop()
@@ -2286,7 +2573,7 @@ test('the Agent Team row shows the saved state and Tab moves focus models ⇄ te
   const focusedTeam = contentLinesOf(h.vt).find(line => line.includes('Agent Team'))!
   assert.ok(focusedTeam.startsWith('> Agent Team'), `the focused team row uses the > prefix:\n${focusedTeam}`)
   assert.ok(viewOf(h.vt).includes('Tab model'), `the team-zone hint:\n${viewOf(h.vt)}`)
-  assert.ok(viewOf(h.vt).includes('Enter/Space toggle'), `the team-zone hint:\n${viewOf(h.vt)}`)
+  assert.ok(viewOf(h.vt).includes('Toggle [Enter]'), `the team-zone action:\n${viewOf(h.vt)}`)
   h.vt.sendInput('\t') // Tab -> models
   await h.vt.waitForRender()
   assert.ok(viewOf(h.vt).includes('Tab Team'), `back to the models-zone hint:\n${viewOf(h.vt)}`)
@@ -2351,7 +2638,7 @@ test('an unknown Team write offers only a read-only R recheck', async () => {
   await h.vt.waitForRender()
   const unknownRow = contentLinesOf(h.vt).find(line => line.includes('Agent Team'))!
   assert.ok(unknownRow.includes('Outcome unknown — R recheck'), `unknown row:\n${unknownRow}`)
-  assert.ok(viewOf(h.vt).includes('R recheck'), `the team hint offers only a recheck:\n${viewOf(h.vt)}`)
+  assert.ok(viewOf(h.vt).includes('Recheck [R]'), `the team-zone action is read-only:\n${viewOf(h.vt)}`)
   const writesBefore = team.setEnabledCalls.length
   // A fresh official read that the target did not land: R is READ-ONLY.
   team.setSnapshot({ kind: 'ready', enabled: false, modelRequestHistory: 'none' })

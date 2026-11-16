@@ -1616,14 +1616,32 @@ the seat safely without claiming the write landed, and a `stale` authority
 (superseded Session / lost Connection) retires it automatically; a transiently
 `unavailable` readback stays `Checking…` but remains exitable.
 
-The pointer contract follows the same last-painted-frame rule: only a complete
-visible Team `On`/`Off` token or an Effort candidate is hittable; a press
-followed by a resize, re-hydration or a different frame never commits. An
-Effort hit is bound to the `(provider, model)` identity that PAINTED it, so a
-selection move before the repaint cannot retarget another model; an Effort click
-changes the draft only and never submits the model. Below `64`
-content columns the strip compacts to `Effort: <value>`; the Team row and the
-footer hint remain visible down to `44×8`.
+The Fullscreen pointer contract follows the same last-painted-frame rule:
+complete visible Team `On`/`Off` tokens, Effort candidates and currently reachable
+Action Bar spans are hittable. The bar replays the existing keyboard handlers:
+Models offers `Effort [Enter]` or `Select [Enter]` for a valid selected route and
+`Close [Esc]`; Effort offers `Select [Enter]` and `Back [Esc]`; Team offers
+`Toggle [Enter]`, a failed write's `Retry [Enter]`, or an unknown outcome's
+read-only `Recheck [R]`, plus `Back [Esc]`. Pending Team writes offer no second
+commit, and an in-flight model apply offers no commit or cancellation action.
+Loading, error and non-model rows never offer model selection or a catalog Retry.
+When the list or Effort strip is not granted by a short row budget, its hidden
+model/Effort commit action is not offered; a visible Team row keeps only its own
+state-appropriate Team action. Escape stays last and names its actual level.
+Only whole painted spans have hits; separators, browsing hints and dropped or
+truncated segments remain inert.
+
+A press followed by a semantic change, resize, re-hydration, focus transfer or
+replacement never commits. An Effort hit is bound to the `(provider, model)`
+identity that PAINTED it, so a selection move before the repaint cannot retarget
+another model; an Effort click changes the draft only and never submits the
+model. Team OFF retains its independent confirmation seat. Below `64` content
+columns the strip compacts to `Effort: <value>`; the Team row and state-specific
+bar remain visible down to `44×8`. A one-row grant retains only the exit bar.
+A directory refresh that retires the effort-bound model keeps a pointer Close
+reachable while the ambiguous next keyboard key stays consumed; a deliberate
+body pointer press releases that transition for the newer pointer intent.
+Regular/Main has no application mouse route.
 
 ## Task Quick
 

@@ -58,6 +58,7 @@ import type {
   ModelPickerTeamControl,
 } from '../../app/command/model-presentation.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import {
   modelIdentity,
   projectModelDirectory,
@@ -116,15 +117,6 @@ const FAILURE_PREFIX = `${IDENTITY_SEP}failure${IDENTITY_SEP}`
  *  into a single private `Unavailable` section (a real provider's own
  *  `groupKey` is its id and can never collide with this NUL-prefixed key). */
 const FAILURE_GROUP_KEY = `${IDENTITY_SEP}unavailable`
-/** Model-zone footer hint. §4.1/§7.1 key tokens are Capitalized, verbs
- *  lowercase, and `Esc` is last (§7.2/D8). */
-const MODEL_MODE_HINT = 'Tab Team · ↑↓ model · Enter effort/select · Esc close'
-/** Effort-zone footer hint (the strip below the list owns the keys). */
-const EFFORT_MODE_HINT = '←→ effort · Enter select · Esc back'
-/** Team-zone footer hint. */
-const TEAM_MODE_HINT = 'Tab model · Enter/Space toggle · Esc back'
-/** The narrow-terminal hint every zone falls back to. */
-const COMPACT_HINT = 'Tab Team · Enter select · Esc'
 /** Rows the composed surface reserves below the model list: separator, Effort,
  *  Team and the footer hint. */
 const FIXED_ROWS = 4
@@ -151,6 +143,17 @@ interface TeamHit extends HitSegment {
 
 interface EffortHit extends HitSegment {
   readonly value: string
+}
+
+type ModelBarActionId = 'model-enter' | 'effort-confirm' | 'team-enter' | 'team-recheck' | 'escape'
+
+interface ModelBarSegment extends ActionBarSegment {
+  readonly actionId?: ModelBarActionId
+  readonly ink: 'primary' | 'muted'
+}
+
+interface ModelBarHit extends HitSegment {
+  readonly actionId: ModelBarActionId
 }
 
 /** One local Team write phase (the Host value is ALWAYS re-read). */
@@ -203,23 +206,43 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   /** One gesture-level refusal/notice (e.g. "another operation is in progress"). */
   private teamNotice: string | undefined
   private readonly unsubscribeTeam: (() => void) | undefined
-  /** Last painted geometry for the Team/Effort hit testing. The press latch is
-   *  fenced on the painted WIDTH + token identity (the SearchablePicker
-   *  contract), not a render counter: an ordinary focus repaint between press
-   *  and release must NOT drop a valid click, while a resize/re-hydration that
-   *  changes the hit geometry still rejects it. */
+  /** Semantic changes revoke every outstanding pointer gesture. A pure paint
+   *  keeps the generation stable so an ordinary repaint between press/release
+   *  remains a valid one-click action. */
+  private gestureGeneration = 0
+  /** Last painted geometry for the Team/Effort/action-bar hit testing. */
   private lastFrame: {
     readonly width: number
     readonly teamRow: number
     readonly effortRow: number
+    readonly hintRow: number
     /** The (provider, model) identity the painted Effort tokens belong to. */
     readonly effortModelKey: string | undefined
+    readonly modelKey: string | undefined
+    readonly modeMarker: string
+    readonly teamPhaseMarker: string
+    readonly generation: number
     readonly teamHits: readonly TeamHit[]
     readonly effortHits: readonly EffortHit[]
+    readonly barHits: readonly ModelBarHit[]
   } | undefined
   private pressed:
     | { readonly kind: 'team'; readonly enabled: boolean }
     | { readonly kind: 'effort'; readonly modelKey: string; readonly value: string }
+    | {
+      readonly kind: 'bar'
+      readonly actionId: ModelBarActionId
+      readonly row: number
+      readonly start: number
+      readonly end: number
+      readonly modelKey: string | undefined
+      readonly modeMarker: string
+      readonly teamPhaseMarker: string
+      readonly generation: number
+      readonly height: number
+      readonly originX: number
+      readonly originY: number
+    }
     | undefined
 
   get focused(): boolean {
@@ -227,6 +250,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   }
 
   set focused(value: boolean) {
+    if (this._focused && !value) this.invalidateGestures()
     this._focused = value
     this.modelsList.focused = value
   }
@@ -248,7 +272,10 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     })
     this.modelsList.onSelect = (item) => { this.activateModel(item.value) }
     this.modelsList.onCancel = () => { this.deps.close() }
-    this.modelsList.onSelectionChange = () => { this.deps.requestRender() }
+    this.modelsList.onSelectionChange = () => {
+      this.invalidateGestures()
+      this.deps.requestRender()
+    }
     this.applyRowBudget()
     if (deps.team !== undefined) {
       this.teamSnapshot = deps.team.read()
@@ -265,6 +292,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   /** Host row-budget seam: keep the composed strips inside the grant and give
    *  the remainder to the model list. */
   setMaxRows(rows: number): void {
+    if (this.rowGrant !== rows) this.invalidateGestures()
     this.rowGrant = rows
     this.applyRowBudget()
   }
@@ -280,6 +308,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
    *  keeps a surviving selected value). A no-op on a disposed picker. */
   setDirectory(input: ModelPickerDirectory): void {
     if (this.disposed) return
+    this.invalidateGestures()
     // Every (re-)hydration starts from a clean latch: only THIS refresh may
     // consume the next key, and only if it actually drops the bound model.
     this.swallowNextKey = false
@@ -338,6 +367,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
    *  keeping the mounted panel, so a retry never closes and reopens it. */
   setLoading(): void {
     if (this.disposed) return
+    this.invalidateGestures()
     this.swallowNextKey = false
     this.modelRows.clear()
     this.effortChoices.clear()
@@ -353,6 +383,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
    *  the transcript). No retry; Esc still closes; Enter is inert. */
   setLoadError(message: string): void {
     if (this.disposed) return
+    this.invalidateGestures()
     // A lifecycle/error reset also clears the one-shot latch: a later
     // re-hydration must not have its first key silently consumed.
     this.swallowNextKey = false
@@ -434,6 +465,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   private selectEffortDraft(modelKey: string, value: string): void {
     const choices = this.choicesByModel.get(modelKey) ?? []
     if (!choices.some(choice => choice.value === value)) return
+    this.invalidateGestures()
     this.effortChoices.set(modelKey, value)
     this.interactionMode = { kind: 'effort', modelKey }
     this.modelsList.setSelectedValue(modelKey)
@@ -443,6 +475,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   /** Enter the effort strip of a model, or commit a no-effort model directly. */
   private activateModel(value: string): void {
     if (this.disposed || this.selecting) return
+    this.invalidateGestures()
     const row = this.modelRows.get(value)
     if (row === undefined) return
     if ((this.choicesByModel.get(value) ?? []).length === 0) {
@@ -457,12 +490,15 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   /** Leave the effort zone without closing or changing anything else. */
   private leaveEffortMode(): void {
     if (this.interactionMode.kind !== 'effort') return
+    this.invalidateGestures()
     this.interactionMode = { kind: 'models' }
     this.deps.requestRender()
   }
 
   handleInput(data: string): void {
-    if (this.disposed || this.selecting) return
+    if (this.disposed) return
+    this.invalidateGestures()
+    if (this.selecting) return
     // A refresh removed the effort-bound model: consume the triggering key.
     if (this.swallowNextKey) {
       this.swallowNextKey = false
@@ -582,6 +618,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   /** Admit and run one Agent Team toggle gesture from the Team zone. */
   private beginTeam(requested?: boolean): void {
     if (this.disposed || this.selecting || this.deps.team === undefined) return
+    this.invalidateGestures()
     if (this.teamPhase.kind === 'saving' || this.teamPhase.kind === 'checking') return
     // An unknown outcome admits no blind write: the user's only Team-zone
     // gesture is the explicit read-only recheck.
@@ -697,6 +734,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
    *  local phase when the official value now proves the target. */
   private onTeamProjectionChanged(): void {
     if (this.disposed || this.deps.team === undefined) return
+    this.invalidateGestures()
     this.teamSnapshot = this.deps.team.read()
     if (this.teamPhase.kind !== 'saving' && this.teamPhase.kind !== 'idle'
       && this.teamSnapshot.kind === 'ready'
@@ -709,6 +747,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   /** Explicit read-only recheck after an unknown Team write outcome. */
   private recheckTeam(): void {
     if (this.disposed || this.deps.team === undefined) return
+    this.invalidateGestures()
     const phase = this.teamPhase
     const target = phase.kind === 'unknown' || phase.kind === 'failed' || phase.kind === 'checking'
       ? phase.target
@@ -751,18 +790,188 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.invalidateGestures()
+    this.lastFrame = undefined
     this.unsubscribeTeam?.()
   }
 
-  /** Mouse routing: the Effort/Team strips own their last-painted token hit
-   *  segments; every other row is the list's own (already identity-fenced)
-   *  pointer router. */
+  private invalidateGestures(): void {
+    this.gestureGeneration += 1
+    this.pressed = undefined
+  }
+
+  private modeMarker(): string {
+    return this.interactionMode.kind === 'effort'
+      ? `effort:${this.interactionMode.modelKey}`
+      : this.interactionMode.kind
+  }
+
+  private teamPhaseMarker(): string {
+    const phase = this.teamPhase.kind === 'idle'
+      ? 'idle'
+      : `${this.teamPhase.kind}:${this.teamPhase.target}:${'message' in this.teamPhase ? this.teamPhase.message : ''}`
+    const snapshot = this.teamSnapshot === undefined
+      ? 'unread'
+      : this.teamSnapshot.kind === 'ready'
+        ? `ready:${this.teamSnapshot.enabled}:${this.teamSnapshot.modelRequestHistory}`
+        : `${this.teamSnapshot.kind}:${this.teamSnapshot.reason}`
+    return `${phase}|${snapshot}`
+  }
+
+  private selectedModelKey(): string | undefined {
+    return this.modelsList.getSelectedItem()?.value
+  }
+
+  private modelBarSegments(escapeOnly = false): ModelBarSegment[] {
+    const selectedKey = this.selectedModelKey()
+    const selectedRow = selectedKey === undefined ? undefined : this.modelRows.get(selectedKey)
+    const hasEffort = selectedKey !== undefined && (this.choicesByModel.get(selectedKey)?.length ?? 0) > 0
+    const contentVisible = !Number.isFinite(this.rowGrant) || Math.floor(this.rowGrant) >= FIXED_ROWS + 2
+    const browse = (text: string, priority = 0): ModelBarSegment => ({ text, priority, ink: 'muted' })
+    const action = (text: string, actionId: ModelBarActionId, priority = 2): ModelBarSegment => ({
+      text,
+      priority,
+      actionId,
+      ink: 'primary',
+    })
+    const escape = (text: string): ModelBarSegment => ({ text, priority: 100, actionId: 'escape', ink: 'primary' })
+
+    if (this.selecting) return []
+    if (this.swallowNextKey) {
+      return [escape(this.interactionMode.kind === 'models' ? 'Close [Esc]' : 'Back [Esc]')]
+    }
+    if (escapeOnly) return [escape(this.interactionMode.kind === 'effort' ? 'Back [Esc]' : this.interactionMode.kind === 'team' ? 'Back [Esc]' : 'Close [Esc]')]
+    if (this.interactionMode.kind === 'effort') {
+      return contentVisible
+        ? [browse('←→ effort'), action('Select [Enter]', 'effort-confirm'), escape('Back [Esc]')]
+        : [escape('Back [Esc]')]
+    }
+    if (this.interactionMode.kind === 'team') {
+      const phase = this.teamPhase.kind
+      const segments: ModelBarSegment[] = contentVisible ? [browse('Tab model')] : []
+      if (phase === 'unknown') segments.push(action('Recheck [R]', 'team-recheck'))
+      else if (phase === 'failed') segments.push(action('Retry [Enter]', 'team-enter'))
+      else if (phase === 'idle' && this.teamSnapshot?.kind === 'ready') segments.push(action('Toggle [Enter]', 'team-enter'))
+      return [...segments, escape('Back [Esc]')]
+    }
+    const segments: ModelBarSegment[] = []
+    if (contentVisible && this.deps.team !== undefined) segments.push(browse('Tab Team'))
+    if (contentVisible) segments.push(browse('↑↓ model'))
+    if (contentVisible && selectedRow !== undefined) {
+      segments.push(action(hasEffort ? 'Effort [Enter]' : 'Select [Enter]', 'model-enter'))
+    }
+    segments.push(escape('Close [Esc]'))
+    return segments
+  }
+
+  private renderActionBar(width: number, escapeOnly = false): { line: string; hits: readonly ModelBarHit[] } {
+    const segments = this.modelBarSegments(escapeOnly)
+    const contentWidth = Math.max(0, Math.floor(width) - 2)
+    const layout = layoutActionBarRow(segments, contentWidth)
+    const hits: ModelBarHit[] = []
+    const line = layout.truncated
+      ? color.textMuted(layout.text)
+      : layout.spans.map((span) => {
+        const segment = segments[span.inputIndex]!
+        if (segment.actionId !== undefined) {
+          hits.push({ actionId: segment.actionId, start: span.startCol + 2, end: span.endCol + 2 })
+        }
+        return segment.ink === 'primary' ? color.primary(span.text) : color.textMuted(span.text)
+      }).join(color.textMuted(ACTION_BAR_SEPARATOR))
+    return { line: truncateToWidth(`  ${line}`, width, ''), hits }
+  }
+
+  private dispatchModelBarAction(actionId: ModelBarActionId): void {
+    // A directory refresh that retired the effort-bound model keeps the next
+    // KEYBOARD key swallowed, but a deliberate pointer exit must not be trapped
+    // in that transition. Clearing the one-shot latch for this explicit exit
+    // keeps the old press fence: no hidden replacement can be committed.
+    if (actionId === 'escape' && this.swallowNextKey) {
+      this.swallowNextKey = false
+      this.handleInput('\x1b')
+      return
+    }
+    if (!this.modelBarSegments().some(segment => segment.actionId === actionId)) return
+    switch (actionId) {
+      case 'model-enter':
+      case 'effort-confirm':
+      case 'team-enter':
+        this.handleInput('\r')
+        break
+      case 'team-recheck':
+        this.handleInput('r')
+        break
+      case 'escape':
+        this.handleInput('\x1b')
+        break
+    }
+  }
+
+  /** Mouse routing: the local Action Bar owns only its complete visible action
+   *  spans; Effort/Team strips retain their existing token hit maps and every
+   *  other row remains the list's own identity-fenced pointer router. */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-    if (this.disposed || this.selecting) return undefined
+    if (this.disposed) return undefined
     const pressed = this.pressed
     if (event.type === 'click' || (event.type === 'press' && event.button === 'left')) this.pressed = undefined
     const frame = this.lastFrame
     if (frame === undefined || event.width !== frame.width) return undefined
+    // The one-shot latch protects the next KEYBOARD key from acting on a
+    // replacement model after a refresh. A deliberate left press on a body row
+    // is a new pointer intent: it releases that transition so the pointer path
+    // remains complete. A press on the bar itself is left to the exit action,
+    // which is the only action painted in this state.
+    if (this.swallowNextKey && event.type === 'press' && event.button === 'left' && event.y !== frame.hintRow) {
+      this.swallowNextKey = false
+      this.deps.requestRender()
+    }
+
+    if (event.y === frame.hintRow) {
+      if (event.type === 'wheel') return { handled: true }
+      const hit = frame.barHits.find(candidate => event.x >= candidate.start && event.x < candidate.end)
+      if (event.type === 'press') {
+        if (event.button !== 'left' || hit === undefined) return { handled: true }
+        this.pressed = {
+          kind: 'bar',
+          actionId: hit.actionId,
+          row: frame.hintRow,
+          start: hit.start,
+          end: hit.end,
+          modelKey: frame.modelKey,
+          modeMarker: frame.modeMarker,
+          teamPhaseMarker: frame.teamPhaseMarker,
+          generation: frame.generation,
+          height: event.height,
+          originX: event.screenX - event.x,
+          originY: event.screenY - event.y,
+        }
+        return { handled: true, focus: !this.focused }
+      }
+      if (event.type === 'release') return { handled: true }
+      if (event.type !== 'click' || event.button !== 'left' || hit === undefined) return { handled: true }
+      if (pressed?.kind !== 'bar'
+        || pressed.actionId !== hit.actionId
+        || pressed.row !== frame.hintRow
+        || pressed.start !== hit.start
+        || pressed.end !== hit.end
+        || pressed.modelKey !== frame.modelKey
+        || pressed.modeMarker !== frame.modeMarker
+        || pressed.teamPhaseMarker !== frame.teamPhaseMarker
+        || pressed.generation !== frame.generation
+        || pressed.generation !== this.gestureGeneration
+        || frame.generation !== this.gestureGeneration
+        || pressed.modeMarker !== this.modeMarker()
+        || pressed.teamPhaseMarker !== this.teamPhaseMarker()
+        || pressed.height !== event.height
+        || pressed.originX !== event.screenX - event.x
+        || pressed.originY !== event.screenY - event.y) {
+        return { handled: true }
+      }
+      this.dispatchModelBarAction(hit.actionId)
+      return { handled: true }
+    }
+
+    if (this.selecting) return undefined
     if (event.y === frame.teamRow) {
       if (event.type === 'wheel') return { handled: true }
       const hit = frame.teamHits.find(candidate => event.x >= candidate.start && event.x < candidate.end)
@@ -772,7 +981,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
         this.pressed = { kind: 'team', enabled: hit.enabled }
         this.interactionMode = { kind: 'team' }
         this.deps.requestRender()
-        return { handled: true, focus: true }
+        return { handled: true, focus: !this.focused }
       }
       if (event.type !== 'click' || event.button !== 'left') return { handled: true }
       if (pressed === undefined || pressed.kind !== 'team' || pressed.enabled !== hit.enabled) {
@@ -787,9 +996,6 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       const hit = frame.effortHits.find(candidate => event.x >= candidate.start && event.x < candidate.end)
       if (hit === undefined) return { handled: true }
       const selected = this.modelsList.getSelectedItem()
-      // The hit belongs to LAST PAINTED geometry; bind the gesture to the model
-      // identity that OWNED those painted tokens, not to an internal selection
-      // that moved before the repaint. Both must agree when the gesture starts.
       const paintedModelKey = frame.effortModelKey
       if (event.type === 'press') {
         if (event.button !== 'left') return { handled: true }
@@ -797,7 +1003,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
           return { handled: true }
         }
         this.pressed = { kind: 'effort', modelKey: paintedModelKey, value: hit.value }
-        return { handled: true, focus: true }
+        return { handled: true, focus: !this.focused }
       }
       if (event.type !== 'click' || event.button !== 'left') return { handled: true }
       if (pressed === undefined || pressed.kind !== 'effort'
@@ -817,44 +1023,53 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   }
 
   render(width: number): string[] {
-    // A model apply keeps the strips visible: the Team row must still show the
-    // current Host state while the model write is in flight.
-    const inner = this.selecting ? ['  Selecting…'] : this.modelsList.render(width)
-    const team = this.renderTeamLine(width)
-    const hint = this.renderHintLine(width)
+    if (this.lastFrame !== undefined && this.lastFrame.width !== width) this.invalidateGestures()
     const budget = Number.isFinite(this.rowGrant) ? Math.max(1, Math.floor(this.rowGrant)) : Number.POSITIVE_INFINITY
-    // Degenerate grants: keep the actionable Team row and the footer, never a
-    // half-cut strip. The specified 44×8 layout still grants six content rows,
-    // so this path only protects a terminal smaller than the design matrix.
+    const team = this.renderTeamLine(width)
+    const bar = this.renderActionBar(width, budget === 1)
+    const semantics = {
+      modelKey: this.selectedModelKey(),
+      modeMarker: this.modeMarker(),
+      teamPhaseMarker: this.teamPhaseMarker(),
+      generation: this.gestureGeneration,
+      barHits: bar.hits,
+    }
+    // A one-row grant belongs to the safe escape hint alone; nothing sliced out
+    // of this frame may retain a Team or model-confirm hit map.
     if (budget < FIXED_ROWS + 2) {
-      const lines = [team.line, hint].slice(0, budget)
+      const lines = budget === 1 ? [bar.line] : [team.line, bar.line]
       this.lastFrame = {
         width,
-        teamRow: 0,
+        teamRow: budget === 1 ? -1 : 0,
         effortRow: -1,
+        hintRow: lines.length - 1,
         effortModelKey: undefined,
-        teamHits: team.hits,
+        teamHits: budget === 1 ? [] : team.hits,
         effortHits: [],
+        ...semantics,
       }
       return lines
     }
+    // A model apply keeps the strips visible: Team still reports the current
+    // Host state while the model write is in flight.
+    const inner = this.selecting ? ['  Selecting…'] : this.modelsList.render(width)
     const effort = this.renderEffortLine(width)
     const lines = [
       ...inner,
       this.renderSeparator(width),
       effort.line,
       team.line,
-      hint,
+      bar.line,
     ]
-    const effortRow = inner.length + 1
-    const teamRow = inner.length + 2
     this.lastFrame = {
       width,
-      teamRow,
-      effortRow,
+      teamRow: inner.length + 2,
+      effortRow: inner.length + 1,
+      hintRow: lines.length - 1,
       effortModelKey: effort.modelKey,
       teamHits: team.hits,
       effortHits: effort.hits,
+      ...semantics,
     }
     return lines
   }
@@ -1003,26 +1218,6 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     if (onEnd <= width) hits.push({ start: onStart, end: onEnd, enabled: true })
     if (offEnd <= width) hits.push({ start: offStart, end: offEnd, enabled: false })
     return { line: truncateToWidth(line, width, ''), hits }
-  }
-
-  private renderHintLine(width: number): string {
-    // A surface without the Team seam paints no Team row it can act on, so its
-    // hint must not advertise a dead `Tab Team`.
-    const servesTeam = this.deps.team !== undefined
-    const hint = width < WIDE_LAYOUT_WIDTH
-      ? (servesTeam ? COMPACT_HINT : '↑↓ model · Enter select · Esc')
-      : this.interactionMode.kind === 'team'
-        ? this.teamPhase.kind === 'unknown'
-          ? 'R recheck · Tab model · Esc back'
-          : this.teamPhase.kind === 'failed'
-            ? 'Enter retry · Tab model · Esc back'
-            : TEAM_MODE_HINT
-        : this.interactionMode.kind === 'effort'
-          ? EFFORT_MODE_HINT
-          : servesTeam
-            ? MODEL_MODE_HINT
-            : '↑↓ model · Enter effort/select · Esc close'
-    return truncateToWidth(`  ${color.textDim(hint)}`, width, '')
   }
 
   /** Paint a composed strip with the shared 2-cell prefix. */

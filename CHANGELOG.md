@@ -36,6 +36,8 @@
 
 ### 修复
 
+- **Fullscreen `/model` 的操作栏支持直接点击。** 可点击进入 Effort、选择、返回、关闭及 Team 的重试/只读复查；Effort 候选仍只改草稿，目标未绘制、短行预算、旧按压或目录刷新退出当前模型时只保留安全退出，不会提交隐藏目标。
+
 - **TSP Focus 阅读模式下打开 Session Search 不再导致渲染器崩溃。** Focus 顶层的用户行与最终回答行现在与其他顶层行一样携带 presentation scope 前缀；替换来源或新 scope 后，旧 scope 的 `main.msg-N` 不会再与新 scope 的同名行冲突，Search 卡可正常打开、关闭并保留原 Composer 与草稿。
 
 - **在已打开的会话中执行 `/new` 不再丢失命令结算记录。** 旧会话会在新会话就绪后、命令执行器写回本次 `/new` 的完成记录时才被关闭，因此该记录能正常保存，不会再出现 `cannot append outside a SessionStore`；新会话的可见与可恢复行为不变。
