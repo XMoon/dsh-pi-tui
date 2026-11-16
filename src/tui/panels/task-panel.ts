@@ -31,7 +31,15 @@ import type { TeamBoardSnapshot, TeamBoardTask } from '../../runtime/team-board-
 
 export type { TaskPanelItem, TaskScope } from '../../app/surface/task-presentation.ts'
 
-type TaskMouseAction = 'stop' | 'confirm-stop' | 'cancel-stop'
+type TaskMouseAction =
+  | 'stop'
+  | 'confirm-stop'
+  | 'cancel-stop'
+  | 'work-close'
+  | 'work-search-back'
+  | 'team-close'
+  | 'team-search-back'
+  | 'filter-cancel'
 
 interface TaskMouseActionHit {
   action: TaskMouseAction
@@ -809,12 +817,29 @@ export class TaskBrowserPanel implements Component, Focusable {
     // toggles anything visible there — do not advertise it at that width.
     const teamHintSegments: ActionBarSegment[] = [{ text: '↑↓ select', priority: 80 }]
     if (safeWidth < 110) teamHintSegments.push({ text: 'Enter details', priority: 90 })
-    teamHintSegments.push(
-      { text: `${componentKeymap.keyHint('tasks.tab.next')} Work`, priority: 15 },
-      { text: 'Esc close', priority: 1000 },
-    )
-    const teamHintLayout = layoutActionBarRow(teamHintSegments, Math.max(0, safeWidth - 2))
-    const hintLine = color.textMuted(`  ${teamHintLayout.text}`)
+    teamHintSegments.push({ text: `${componentKeymap.keyHint('tasks.tab.next')} Work`, priority: 15 })
+    const teamTargets = new Map<number, {
+      action: TaskMouseAction
+      value: string
+      pendingValue: string | undefined
+      role: 'primary' | 'secondary'
+    }>()
+    if (this.options.mouseActionsEnabled?.() === true) {
+      // S0 whitelist: the Team page's ONLY new pointer exits. Esc in search
+      // mode backs out of the query (never closes the browser), so the two
+      // states advertise different verbs.
+      const back = this.teamSearchMode
+      teamTargets.set(teamHintSegments.length, {
+        action: back ? 'team-search-back' : 'team-close',
+        value: '',
+        pendingValue: undefined,
+        role: 'secondary',
+      })
+      teamHintSegments.push({ text: back ? 'Back [Esc]' : 'Close [Esc]', priority: 1000 })
+    } else {
+      teamHintSegments.push({ text: 'Esc close', priority: 1000 })
+    }
+    const hint = this.paintActionBar(teamHintSegments, Math.max(0, safeWidth - 2), teamTargets)
     const selectedIndex = rows.findIndex(row => row.value === this.teamSelectedValue)
 
     const build = (count: number, start: number): { lines: string[]; hits: TaskMouseHit[] } => {
@@ -877,7 +902,7 @@ export class TaskBrowserPanel implements Component, Focusable {
         out.push(color.textMuted(`  ${selectedIndex + 1}/${rows.length}`)); outHits.push({ kind: 'inert' })
       }
       out.push(''); outHits.push({ kind: 'inert' })
-      out.push(hintLine); outHits.push({ kind: 'inert' })
+      out.push(hint.line); outHits.push(hint.hit)
       return { lines: out, hits: outHits }
     }
 
@@ -911,7 +936,7 @@ export class TaskBrowserPanel implements Component, Focusable {
         slim.push(color.textDim(truncateToWidth(this.emptyTeamText(), safeWidth, '…')))
         slimHits.push({ kind: 'inert' })
       }
-      if (slim.length + 1 <= limit) { slim.push(hintLine); slimHits.push({ kind: 'inert' }) }
+      if (slim.length + 1 <= limit) { slim.push(hint.line); slimHits.push(hint.hit) }
       candidate = { lines: slim.slice(0, limit), hits: slimHits.slice(0, limit) }
       count = selected === undefined ? 0 : 1
     }
@@ -953,8 +978,30 @@ export class TaskBrowserPanel implements Component, Focusable {
       lines.push(color.textMuted(`  ${this.filterSelected + 1}/${candidates.length}`)); hits.push({ kind: 'inert' })
     }
     lines.push(''); hits.push({ kind: 'inert' })
-    lines.push(color.textMuted(truncateToWidth('  ↑↓ select · Enter apply · Esc cancel', safeWidth, '…')))
-    hits.push({ kind: 'inert' })
+    if (this.options.mouseActionsEnabled?.() === true) {
+      // S0 whitelist: the filter's OWN cancel span only. `Enter apply` and the
+      // candidate rows keep their existing routes.
+      const targets = new Map<number, {
+        action: TaskMouseAction
+        value: string
+        pendingValue: string | undefined
+        role: 'primary' | 'secondary'
+      }>([[2, { action: 'filter-cancel', value: '', pendingValue: undefined, role: 'secondary' }]])
+      const hint = this.paintActionBar(
+        [
+          { text: '↑↓ select', priority: 80 },
+          { text: 'Enter apply', priority: 90 },
+          { text: 'Cancel [Esc]', priority: 1000 },
+        ],
+        Math.max(0, safeWidth - 2),
+        targets,
+      )
+      lines.push(hint.line)
+      hits.push(hint.hit)
+    } else {
+      lines.push(color.textMuted(truncateToWidth('  ↑↓ select · Enter apply · Esc cancel', safeWidth, '…')))
+      hits.push({ kind: 'inert' })
+    }
     if (lines.length > limit) {
       // Degrade to the title, the selected candidate and the hint.
       const chosen = candidates[this.filterSelected]
@@ -1004,6 +1051,30 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   private taskMouseActionCurrent(target: TaskMouseActionHit): boolean {
     if (this.disposed || this.options.mouseActionsEnabled?.() !== true) return false
+    // The Owner-approved exit whitelist (surface-behavior §Task Center): the
+    // action is current only in the EXACT state that painted it. A pending
+    // destructive confirmation is a modal state: no exit may step around it.
+    if (target.action === 'work-close') {
+      return !this.filterOpen && this.pageView === 'work' && !this.searchMode
+        && this.pendingStopValue === undefined && this.interactionCurrent?.() !== false
+    }
+    if (target.action === 'work-search-back') {
+      return !this.filterOpen && this.pageView === 'work' && this.searchMode
+        && this.pendingStopValue === undefined && this.interactionCurrent?.() !== false
+    }
+    if (target.action === 'team-close') {
+      return !this.filterOpen && this.pageView === 'team' && !this.teamSearchMode
+        && this.pendingStopValue === undefined && this.team !== undefined
+        && this.interactionCurrent?.() !== false
+    }
+    if (target.action === 'team-search-back') {
+      return !this.filterOpen && this.pageView === 'team' && this.teamSearchMode
+        && this.pendingStopValue === undefined && this.team !== undefined
+        && this.interactionCurrent?.() !== false
+    }
+    if (target.action === 'filter-cancel') {
+      return this.filterOpen && this.pendingStopValue === undefined && this.interactionCurrent?.() !== false
+    }
     const selected = this.selectedItem()
     if (target.action === 'stop') {
       return target.pendingValue === undefined
@@ -1334,16 +1405,9 @@ export class TaskBrowserPanel implements Component, Focusable {
     const hit = this.hitMap[event.y]
     if (!hit) return undefined
 
-    // FR2: the Work type-filter list owns the pointer while open.
-    if (this.filterOpen) return this.handleFilterMouse(event, hit, fr2Pressed)
-    // FR2: the tab labels are shared by both pages — the SAME painted-span,
-    // press→release identity path governs either page's switch. setPage()
-    // refuses a pending Work Stop, so a mouse Tab can never bypass the
-    // confirmation.
-    if (hit.kind === 'tab') return this.handleTabMouse(event, hit, fr2Pressed)
-    // FR2: the Team page owns the pointer while active (item rows only).
-    if (this.pageView === 'team') return this.handleTeamMouse(event, hit, fr2Pressed)
-
+    // The pinned Action Bar is shared by every state: its complete painted
+    // spans are resolved before the page-specific item handling (a Team/filter
+    // page paints no `tab`/`item` hit on the hint row anyway).
     if (hit.kind === 'actions') {
       if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
       const target = hit.actions.find(action => event.x >= action.startCol && event.x < action.endCol)
@@ -1367,11 +1431,19 @@ export class TaskBrowserPanel implements Component, Focusable {
         || pressedAction.width !== event.width
         || pressedAction.height !== event.height
         || !this.taskMouseActionCurrent(target)) return undefined
-      if (target.action === 'stop') this.requestStop()
-      else if (target.action === 'confirm-stop') this.confirmStop()
-      else this.clearPendingStop()
+      this.activateBarAction(target.action)
       return { handled: true }
     }
+
+    // FR2: the Work type-filter list owns the pointer while open.
+    if (this.filterOpen) return this.handleFilterMouse(event, hit, fr2Pressed)
+    // FR2: the tab labels are shared by both pages — the SAME painted-span,
+    // press→release identity path governs either page's switch. setPage()
+    // refuses a pending Work Stop, so a mouse Tab can never bypass the
+    // confirmation.
+    if (hit.kind === 'tab') return this.handleTabMouse(event, hit, fr2Pressed)
+    // FR2: the Team page owns the pointer while active (item rows only).
+    if (this.pageView === 'team') return this.handleTeamMouse(event, hit, fr2Pressed)
 
     if (hit.kind === 'search') {
       if (event.type !== 'press') return undefined
@@ -1437,6 +1509,21 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
 
     return undefined
+  }
+
+  /** The ONE sink of a clicked Action Bar span: every whitelisted action
+   *  replays its ORIGINAL local transition (never a second business path). */
+  private activateBarAction(action: TaskMouseAction): void {
+    if (action === 'stop') this.requestStop()
+    else if (action === 'confirm-stop') this.confirmStop()
+    else if (action === 'cancel-stop') this.clearPendingStop()
+    else if (action === 'work-close' || action === 'team-close') this.onCancel()
+    else if (action === 'work-search-back') this.exitSearchMode()
+    else if (action === 'team-search-back') this.exitTeamSearchMode()
+    else {
+      this.filterOpen = false
+      this.requestRender()
+    }
   }
 
   private decodeFilterToken(token: string): string | null {
@@ -2102,7 +2189,13 @@ export class TaskBrowserPanel implements Component, Focusable {
       add({ text: '←→ edit', priority: 70 })
       if (this.team !== undefined) add({ text: `${componentKeymap.keyHint('tasks.tab.next')} Team`, priority: 15 })
       add({ text: 'type to filter', priority: 10 })
-      add({ text: 'Esc back', priority: 1000 })
+      if (this.options.mouseActionsEnabled?.() === true) {
+        add({ text: 'Back [Esc]', priority: 1000 }, {
+          action: 'work-search-back', value: '', pendingValue: undefined, role: 'secondary',
+        })
+      } else {
+        add({ text: 'Esc back', priority: 1000 })
+      }
     } else {
       add({ text: 'Enter open', priority: 90 })
       add({ text: '↑↓ select', priority: 80 })
@@ -2123,36 +2216,58 @@ export class TaskBrowserPanel implements Component, Focusable {
       add({ text: 'a scope', priority: 20 })
       if (this.team !== undefined) add({ text: `${componentKeymap.keyHint('tasks.tab.next')} Team`, priority: 15 })
       add({ text: `${componentKeymap.keyHint('tasks.type.filter')} type`, priority: 10 })
-      add({ text: 'Esc close', priority: 1000 })
+      if (this.options.mouseActionsEnabled?.() === true) {
+        add({ text: 'Close [Esc]', priority: 1000 }, {
+          action: 'work-close', value: '', pendingValue: undefined, role: 'secondary',
+        })
+      } else {
+        add({ text: 'Esc close', priority: 1000 })
+      }
     }
 
-    const layout = layoutActionBarRow(segments, actionWidth)
-    if (this.options.mouseActionsEnabled?.() !== true) {
+    return this.paintActionBar(segments, actionWidth, actionByInputIndex)
+  }
+
+  /**
+   * Lay out ONE Fullscreen Action Bar and publish the COMPLETE painted action
+   * spans of the final row (never a substring search over the rendered text).
+   * Regular/Main (`mouseActionsEnabled` false) keeps the historical keyboard
+   * hint with no target at all. The caller owns the two-cell row indent.
+   */
+  private paintActionBar(
+    segments: readonly ActionBarSegment[],
+    width: number,
+    targets: ReadonlyMap<number, {
+      action: TaskMouseAction
+      value: string
+      pendingValue: string | undefined
+      role: 'primary' | 'secondary'
+    }>,
+  ): { line: string; hit: TaskMouseHit } {
+    const layout = layoutActionBarRow(segments, Math.max(0, width))
+    if (this.options.mouseActionsEnabled?.() !== true || layout.truncated || layout.spans.length === 0) {
       return { line: color.textMuted(`  ${layout.text}`), hit: { kind: 'inert' } }
     }
     const actions: TaskMouseActionHit[] = []
-    let line: string
-    if (layout.truncated || layout.spans.length === 0) {
-      line = color.textMuted(`  ${layout.text}`)
-    } else {
-      const painted = layout.spans.map(span => {
-        const target = actionByInputIndex.get(span.inputIndex)
-        if (target === undefined) return color.textMuted(span.text)
-        actions.push({
-          action: target.action,
-          value: target.value,
-          pendingValue: target.pendingValue,
-          startCol: span.startCol + 2,
-          endCol: span.endCol + 2,
-        })
-        return paintActionSpan(span.text, target.role)
+    const painted = layout.spans.map(span => {
+      const target = targets.get(span.inputIndex)
+      if (target === undefined) return color.textMuted(span.text)
+      actions.push({
+        action: target.action,
+        value: target.value,
+        pendingValue: target.pendingValue,
+        startCol: span.startCol + 2,
+        endCol: span.endCol + 2,
       })
-      const segmentWidth = layout.spans.reduce((sum, span) => sum + visibleWidth(span.text), 0)
-        + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
-      const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
-      line = `  ${painted.join(color.textMuted(ACTION_BAR_SEPARATOR))}${' '.repeat(padding)}`
+      return paintActionSpan(span.text, target.role)
+    })
+    const segmentWidth = layout.spans.reduce((sum, span) => sum + visibleWidth(span.text), 0)
+      + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
+    const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
+    return {
+      line: `  ${painted.join(color.textMuted(ACTION_BAR_SEPARATOR))}${' '.repeat(padding)}`,
+      hit: actions.length > 0 ? { kind: 'actions', actions } : { kind: 'inert' },
     }
-    return { line, hit: actions.length > 0 ? { kind: 'actions', actions } : { kind: 'inert' } }
   }
 }
 

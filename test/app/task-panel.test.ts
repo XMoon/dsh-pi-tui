@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict'
 import test, { mock } from 'node:test'
-import { visibleWidth } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { TaskBrowserPanel, formatElapsed } from '../../src/tui/panels/task-panel.ts'
 import { componentKeymap } from '../../src/tui/keybindings/component-keymap.ts'
 import { formatKeyId } from '../../src/tui/keybindings/hints.ts'
@@ -479,16 +479,16 @@ test('the Full action bar keeps the real Esc outcome last and visible at 44/80/1
     const tabHint = `${componentKeymap.keyHint('tasks.tab.next')} Team`
     const typeHint = `${componentKeymap.keyHint('tasks.type.filter')} type`
     const allowed = outcome === 'close'
-      ? new Set(['Enter open', '↑↓ select', '←→ tree', stopLabel, 'Stop', '/ search', 'a scope', tabHint, typeHint, 'Esc close'])
-      : new Set(['Enter open', '↑↓ select', '←→ edit', tabHint, 'type to filter', 'Esc back'])
+      ? new Set(['Enter open', '↑↓ select', '←→ tree', stopLabel, 'Stop', '/ search', 'a scope', tabHint, typeHint, 'Close [Esc]'])
+      : new Set(['Enter open', '↑↓ select', '←→ edit', tabHint, 'type to filter', 'Back [Esc]'])
     assert.ok(segments.every(segment => allowed.has(segment)),
       `width ${width}: only complete advertised segments remain: ${JSON.stringify(segments)}`)
-    assert.equal(segments.at(-1), `Esc ${outcome}`,
+    assert.equal(segments.at(-1), outcome === 'close' ? 'Close [Esc]' : 'Back [Esc]',
       `width ${width}: the real Esc outcome is the final painted segment:\n${rows.join('\n')}`)
     if (width === 44) {
       const expected = outcome === 'close'
-        ? ['Enter open', stopLabel, `Esc ${outcome}`]
-        : ['Enter open', '↑↓ select', `Esc ${outcome}`]
+        ? ['Enter open', stopLabel, 'Close [Esc]']
+        : ['Enter open', '↑↓ select', 'Back [Esc]']
       assert.deepEqual(segments, expected,
         `width ${width}: lower-priority actions drop whole before Esc`)
     }
@@ -992,8 +992,9 @@ test('Fullscreen Task Action Bar uses quiet ink roles and muted keycaps', () => 
   assert.equal(visibleWidth(normal), visibleWidth(strip(normal)), 'ink must not change the painted cell width')
   assert.ok(normal.includes(color.textDim('Stop')), `Stop is secondary ink:\n${normal}`)
   assert.ok(normal.includes(color.textMuted(' [S]')), `the Stop keycap is muted:\n${normal}`)
-  assert.ok(normal.includes(color.textMuted('Enter open')) && normal.includes(color.textMuted('Esc close')),
-    `pure keyboard hints are muted:\n${normal}`)
+  assert.ok(normal.includes(color.textMuted('Enter open')), `pure keyboard hints are muted:\n${normal}`)
+  assert.ok(normal.includes(color.textDim('Close')) && normal.includes(color.textMuted(' [Esc]')),
+    `the close verb is secondary ink with a muted keycap:\n${normal}`)
   assert.ok(normal.includes(color.textMuted(' · ')), `the separator is muted:\n${normal}`)
   assert.ok(!normal.includes(color.primary('Stop')), `Stop is not flooded with primary ink:\n${normal}`)
 
@@ -1801,7 +1802,7 @@ test('FR2: at 88 columns Enter reveals description/blockedBy/scopes/warnings inl
   // row reachable and an exit hint.
   panel.setMaxRows(8)
   const tiny = panel.render(44).map(strip).join('\n')
-  assert.ok(tiny.includes('Ship') || tiny.includes('Esc close'), `44x8 keeps the selected row or Esc:\n${tiny}`)
+  assert.ok(tiny.includes('Ship') || tiny.includes('Close'), `44x8 keeps the selected row or close:\n${tiny}`)
   panel.dispose()
 })
 
@@ -1908,7 +1909,7 @@ test('FR2-ext3: on a short grant the SELECTED Team row stays visible (search + m
   const selected = frame.find(line => line.includes('gamma'))
   assert.ok(selected !== undefined, `the selected member must be painted:\n${frame.join('\n')}`)
   assert.ok(selected!.includes('→'), `the selected marker must be on gamma:\n${selected}`)
-  assert.ok(frame.join('\n').includes('Esc close'), 'the exit hint stays')
+  assert.ok(frame.join('\n').includes('Back [Esc]'), 'the exit hint stays')
   panel.dispose()
 })
 
@@ -2009,7 +2010,7 @@ test('FR2-ext3b: an EXPANDED lower task stays selected on a very short narrow gr
   const selected = frame.find(line => line.includes('Task Two'))
   assert.ok(selected !== undefined, `the expanded selected task must still be painted:\n${frame.join('\n')}`)
   assert.ok(selected!.includes('→'), `the selected marker must stay on Task Two:\n${selected}`)
-  assert.ok(frame.join('\n').includes('Esc close'), 'the exit hint stays')
+  assert.ok(frame.join('\n').includes('Close [Esc]'), 'the exit hint stays')
   panel.dispose()
 })
 
@@ -2137,6 +2138,162 @@ test('FR2-r5-P3: the Team hint advertises Enter details only where it has a visi
   assert.ok(narrow.includes('Enter details'), `narrow layout expands inline details on Enter:\n${narrow}`)
   const wide = panel.render(120).map(strip).join('\n')
   assert.ok(!wide.includes('Enter details'), `wide layout always shows the detail pane, so Enter is not advertised:\n${wide}`)
-  assert.ok(wide.includes('Esc close'), 'the exit hint remains')
+  assert.ok(wide.includes('Close [Esc]'), 'the exit hint remains')
+  panel.dispose()
+})
+
+// ── PR-B B2: the Owner-approved Fullscreen exit whitelist ───────────────────
+
+/** A Full Task Center panel with a recording onCancel; `interactionCurrent`
+ *  mirrors the production-mounted Browser (task-runtime supplies it). */
+function makeExitPanel(
+  items: TaskPanelItem[],
+  options: {
+    team?: TeamBrowserPresentation
+    enableSearch?: boolean
+    mouseActionsEnabled?: () => boolean
+  } = {},
+): { panel: TaskBrowserPanel; closes: unknown[] } {
+  const closes: unknown[] = []
+  const panel = new TaskBrowserPanel(
+    items,
+    10,
+    {
+      mode: 'full',
+      header: 'Tasks',
+      enableSearch: options.enableSearch ?? true,
+      mouseActionsEnabled: options.mouseActionsEnabled ?? (() => true),
+      interactionCurrent: () => true,
+      ...(options.team === undefined ? {} : { team: options.team }),
+    },
+    () => {},
+    () => { closes.push(undefined) },
+    () => {},
+  )
+  return { panel, closes }
+}
+
+test('B2: Work Close [Esc] calls the original onCancel and only its complete span is a target', () => {
+  const { panel, closes } = makeExitPanel([runningJob()])
+  const frame = panel.render(100).map(strip)
+  assert.ok(frame.join('\n').includes('Close [Esc]'), `the Work bar paints the complete close span:\n${frame.join('\n')}`)
+  // Non-whitelisted hints stay inert chrome.
+  const hintRow = frame.findLastIndex(line => line.includes('Enter open'))
+  assert.ok(hintRow >= 0)
+  const enterCol = frame[hintRow]!.indexOf('Enter open')
+  assert.equal(panel.handleMouse(mouse('press', enterCol, hintRow, 100, 24)), undefined,
+    '`Enter open` stays a keyboard hint')
+  assert.equal(clickPanelText(panel, 'Close [Esc]'), true)
+  assert.equal(closes.length, 1, 'the close span enters the existing onCancel exactly once')
+  panel.dispose()
+})
+
+test('B2: Work search Back [Esc] exits the search mode, keeps the query and never closes the browser', () => {
+  const { panel, closes } = makeExitPanel([runningJob()], { enableSearch: true })
+  panel.handleInput('/')
+  panel.handleInput('a')
+  const search = panel.render(100).map(strip).join('\n')
+  assert.ok(search.includes('Back [Esc]'), `the search state advertises the back span:\n${search}`)
+  assert.equal(clickPanelText(panel, 'Back [Esc]'), true)
+  assert.equal(panel.getViewState().searchMode, false, 'the click leaves search mode')
+  assert.equal(panel.getFilter(), 'a', 'the query is preserved')
+  assert.equal(closes.length, 0, 'Back never closes the Full Task Center')
+  assert.ok(panel.render(100).map(strip).join('\n').includes('Close [Esc]'), 'the Work bar returns')
+  panel.dispose()
+})
+
+test('B2: Work filter Cancel [Esc] closes only the filter list and keeps the active type', () => {
+  const { panel, closes } = makeExitPanel([typed(runningJob(), 'bash'), typed(subagent(), 'job')])
+  panel.handleInput('f')
+  panel.handleInput(DOWN) // All → bash
+  panel.handleInput('\r')
+  assert.ok(panel.render(100).map(strip).join('\n').includes('[bash]'), 'precondition — the type was applied')
+  panel.handleInput('f')
+  const frame = panel.render(100).map(strip).join('\n')
+  assert.ok(frame.includes('Cancel [Esc]'), `the filter paints its complete cancel span:\n${frame}`)
+  assert.equal(clickPanelText(panel, 'Cancel [Esc]'), true)
+  const after = panel.render(100).map(strip).join('\n')
+  assert.ok(!after.includes('Type filter'), 'the filter list is closed')
+  assert.ok(after.includes('[bash]'), 'the active type is untouched')
+  assert.equal(closes.length, 0)
+  panel.dispose()
+})
+
+test('B2: the Team page Close [Esc] closes through the same onCancel', () => {
+  const { panel, closes } = makeExitPanel([], { team: readyTeam([teamTask()]) })
+  panel.handleInput('\t')
+  const team = panel.render(100).map(strip).join('\n')
+  assert.ok(team.includes('Close [Esc]'), `the Team bar paints the complete close span:\n${team}`)
+  assert.equal(clickPanelText(panel, 'Close [Esc]'), true)
+  assert.equal(closes.length, 1)
+  panel.dispose()
+})
+
+test('B2: Team search Back [Esc] exits the team query without closing the browser', () => {
+  const { panel, closes } = makeExitPanel([], {
+    team: readyTeam([teamTask({ subject: 'Implement adapter' })]),
+  })
+  panel.handleInput('\t')
+  panel.handleInput('/')
+  panel.handleInput('a')
+  const searching = panel.render(100).map(strip).join('\n')
+  assert.ok(searching.includes('Back [Esc]'), `the Team search state advertises back:\n${searching}`)
+  assert.equal(clickPanelText(panel, 'Back [Esc]'), true)
+  assert.equal(closes.length, 0, 'the browser stays open')
+  const after = panel.render(100).map(strip).join('\n')
+  assert.ok(after.includes('Members'), 'the Team page is still painted')
+  // The query survives: re-entering search paints the retained `a`.
+  panel.handleInput('/')
+  const reopened = panel.render(100).map(line => stripTerminalSequences(strip(line)))
+  assert.ok(reopened.some(line => line.trim() === 'a'), `the retained query is painted:\n${reopened.join('\n')}`)
+  panel.dispose()
+})
+
+test('B2: a pending Stop offers no Close and cannot be bypassed by an armed Work close press', () => {
+  const { panel, closes } = makeExitPanel([subagent()])
+  assert.ok(panel.render(100).map(strip).join('\n').includes('Close [Esc]'))
+  // Arm the Work close span, then enter the destructive confirmation: the
+  // keyboard latch clear means the release has no action at all.
+  const frame = panel.render(100).map(strip)
+  const hintRow = frame.findLastIndex(line => line.includes('Close [Esc]'))
+  const closeCol = frame[hintRow]!.indexOf('Close [Esc]')
+  assert.ok(panel.handleMouse(mouse('press', closeCol, hintRow, 100, 24))?.handled)
+  panel.handleInput('s')
+  const pending = panel.render(100).map(strip).join('\n')
+  assert.ok(pending.includes('Confirm stop [Y]') && pending.includes('Cancel [Esc]'), `pending bar:\n${pending}`)
+  assert.ok(!pending.includes('Close [Esc]'), 'a pending Stop never advertises a close')
+  panel.handleMouse(mouse('click', closeCol, hintRow, 100, 24))
+  assert.equal(closes.length, 0, 'the old close press cannot step around the confirmation')
+  assert.ok(panel.render(100).map(strip).join('\n').includes('Confirm stop [Y]'), 'the confirmation survives')
+  // The existing Cancel span still clears it, and the close returns.
+  assert.equal(clickPanelText(panel, 'Cancel [Esc]'), true)
+  assert.ok(panel.render(100).map(strip).join('\n').includes('Close [Esc]'))
+  panel.dispose()
+})
+
+test('B2: a page switch between the press and release never completes the old exit', () => {
+  const { panel, closes } = makeExitPanel([], { team: readyTeam([teamTask()]) })
+  panel.handleInput('\t') // Team
+  const frame = panel.render(100).map(strip)
+  const hintRow = frame.findLastIndex(line => line.includes('Close [Esc]'))
+  const closeCol = frame[hintRow]!.indexOf('Close [Esc]')
+  assert.ok(panel.handleMouse(mouse('press', closeCol, hintRow, 100, 24))?.handled)
+  panel.handleInput('\t') // Team → Work while the press is live
+  panel.handleMouse(mouse('click', closeCol, hintRow, 100, 24))
+  assert.equal(closes.length, 0, 'a release after a page switch is inert')
+  assert.ok(panel.render(100).map(strip).join('\n').includes('Work'), 'the page switch stands')
+  panel.dispose()
+})
+
+test('B2: Regular/Main keeps its keyboard-only bar and no exit target', () => {
+  const { panel, closes } = makeExitPanel([runningJob()], { mouseActionsEnabled: () => false })
+  const frame = panel.render(100).map(strip)
+  const hintRow = frame.findLastIndex(line => line.includes('Esc close'))
+  assert.ok(hintRow >= 0, `Regular keeps the historical hint:\n${frame.join('\n')}`)
+  assert.ok(!frame[hintRow]!.includes('Close [Esc]'), 'no fullscreen affordance is painted')
+  const col = frame[hintRow]!.indexOf('Esc close')
+  assert.equal(panel.handleMouse(mouse('press', col, hintRow, 100, 24)), undefined)
+  panel.handleMouse(mouse('click', col, hintRow, 100, 24))
+  assert.equal(closes.length, 0)
   panel.dispose()
 })
