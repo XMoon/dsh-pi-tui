@@ -11256,16 +11256,21 @@ export class TuiApp {
     // while a local shell card's override (turn Infinity) survives. A granted
     // search-only reveal is an effective root too and must be revoked.
     const searchTurn = this.searchTargetTurn()
+    const planTurn = this.planInspectionTurn()
     const expandedTurns = new Set(this.focusExpandedTurns)
     if (searchTurn !== undefined) expandedTurns.add(searchTurn)
+    if (planTurn !== undefined) expandedTurns.add(planTurn)
     this.focusExpandedTurns.clear()
     this.clearFocusSecondaryExpansionsForTurns(expandedTurns)
     // Collapse All always revokes a granted search reveal: the reveal is a
     // TEMPORARY grant and may be what opened the root (`searchTargetTurn()`).
+    // The one-shot plan inspection is the same kind of temporary grant and is
+    // revoked by the same explicit collapse.
     // A settled surfaced-interaction card's OWN disclosure is unaffected — it
     // survives via the secondary-reset carve-out above, not by keeping the
     // root open.
     if (searchTurn !== undefined) this.suppressSearchReveal()
+    if (planTurn !== undefined) this.revokePlanInspectionLease()
     this.transcriptDetailExpanded = false
     this.rebuildMessages('focus-disclosure')
     this.applyFullscreenFocusTurnAnchor(anchorTurn)
@@ -11283,9 +11288,12 @@ export class TuiApp {
     const top = this.fullscreenScroll.scrollTop - welcomeHeight
     const bottom = top + this.fullscreenScroll.viewportHeight
     const searchTurn = this.searchTargetTurn()
+    const planTurn = this.planInspectionTurn()
     let row = 0
     for (const entry of this.messageRows) {
-      if (entry.activity !== undefined && (this.focusExpandedTurns.has(entry.activity.turn) || entry.activity.turn === searchTurn)) {
+      if (entry.activity !== undefined && (this.focusExpandedTurns.has(entry.activity.turn)
+        || entry.activity.turn === searchTurn
+        || entry.activity.turn === planTurn)) {
         if (row < bottom && row + entry.height > top) return entry.activity.turn
       }
       row += entry.height
@@ -22209,10 +22217,13 @@ export class TuiApp {
       this.subCallExpanded.delete(subCallId)
       if (searchForced) this.searchSuppressedSubCalls.add(subCallId)
     } else if (searchForced) {
-      // The body is open only because of the search reveal: an explicit click
-      // collapses just that sub-call until the next navigation (the rest of
-      // the reveal path stays).
+      // The body is open only because of a temporary reveal: an explicit click
+      // collapses just that sub-call. The one-shot PLAN inspection lease is
+      // revoked wholesale (the reading lease must not keep forcing a container
+      // the user just collapsed); a search navigation keeps its reveal minus
+      // this child.
       this.searchSuppressedSubCalls.add(subCallId)
+      this.revokePlanInspectionLease()
     } else {
       this.subCallExpanded.add(subCallId)
     }

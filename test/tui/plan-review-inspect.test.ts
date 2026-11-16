@@ -378,6 +378,20 @@ test('Focus collapsed Thought: View opens the owner Thought and locates the card
   vt.sendInput('\r')
   await vt.waitForRender()
   assert.ok(view(vt).includes('## Scope'), `a new View re-opens the Focus card:\n${view(vt)}`)
+  // The Ctrl+O Collapse All path (the modal inspection allowlist) is the SAME
+  // explicit-collapse owner: it must revoke the plan lease and hide the card.
+  ;(app as unknown as { collapseAllFullscreenFocusRoots(): void }).collapseAllFullscreenFocusRoots()
+  await vt.waitForRender()
+  assert.ok(!view(vt).includes('## Scope'), `Collapse All revokes the plan lease:\n${view(vt)}`)
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
+    'Collapse All revoked the one-shot lease')
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'Collapse All wrote no manual expansion')
+  // A new View re-opens it again.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('## Scope'), `a new View re-opens after Collapse All:\n${view(vt)}`)
   vt.sendInput('\x1b') // back to the decision list
   await vt.waitForRender()
   vt.sendInput('\x1b') // official dismiss
@@ -450,6 +464,8 @@ test('a PTC child collapsed during reading stays folded; a new View re-opens it'
   assert.ok(!view(vt).includes('## Scope'), `an explicit child collapse during reading wins:\n${view(vt)}`)
   assert.equal((app as unknown as { subCallExpanded: Set<string> }).subCallExpanded.has('call-plan-1'), false,
     'the inspection never mints a durable sub-call expansion')
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
+    'an explicit child collapse revokes the one-shot lease for the rest of the reading step')
   // A new explicit View re-opens it.
   vt.sendInput('\x1b')
   await vt.waitForRender()
