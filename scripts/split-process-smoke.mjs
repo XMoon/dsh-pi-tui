@@ -608,6 +608,25 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.hostIdentityKept === true
       && result?.readImageVerified === true
       && result?.l6EvidenceRecorded === true
+      && result?.po4bMarkdownExact === true
+      && result?.po4bHostFileReadable === true
+      && result?.po4bHostPermissionDenied === true
+      && result?.po4bClientLocalityMeasured === true
+      && result?.po4bNoImplicitArtifact === true
+      && typeof result?.evidence?.po4b?.sessionId === 'string'
+      && result.evidence.po4b.sessionId === result.evidence.sessionId
+      && Number.isInteger(result?.evidence?.po4b?.turn)
+      && typeof result?.evidence?.po4b?.assistantMessageId === 'string'
+      && result.evidence.po4b.assistantMessageId.length > 0
+      && result.evidence.po4b.hostPid === result.evidence.hostPid
+      && result.evidence.po4b.hostInstanceId === result.evidence.hostInstanceId
+      && Array.isArray(result?.evidence?.po4b?.blockSha256)
+      && result.evidence.po4b.blockSha256.length === 2
+      && result.evidence.po4b.blockSha256.every(digest => typeof digest === 'string' && /^[0-9a-f]{64}$/u.test(digest))
+      && typeof result?.evidence?.po4b?.hostReportSha256 === 'string'
+      && /^[0-9a-f]{64}$/u.test(result.evidence.po4b.hostReportSha256)
+      && result.evidence.po4b.hostMissing === 'ENOENT'
+      && result.evidence.po4b.hostUnreadable === 'EACCES'
       && Number.isInteger(result?.evidence?.largeFrameBytes)
       && result.evidence.largeFrameBytes > 1024 * 1024
       && Array.isArray(result?.evidence?.imageProbes)

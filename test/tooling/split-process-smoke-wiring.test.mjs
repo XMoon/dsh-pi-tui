@@ -908,13 +908,44 @@ test('the ACP PO-4A content-input selected verdict requires the complete real-L6
     largeImageFrameOverOneMiB: true, hostRejectedInvalidAndOverLimit: true,
     imageCancelScopedToOwnAdmission: true, tuiRemainsActive: true, perSessionViewIsolation: true,
     sameSessionReattach: true, hostIdentityKept: true, readImageVerified: true, l6EvidenceRecorded: true,
-    evidence: { largeFrameBytes: 1_200_000, imageProbes: [{ success: true }, { success: true }, { success: true }] },
+    po4bMarkdownExact: true, po4bHostFileReadable: true, po4bHostPermissionDenied: true,
+    po4bClientLocalityMeasured: true, po4bNoImplicitArtifact: true,
+    evidence: {
+      largeFrameBytes: 1_200_000,
+      hostPid: 4242,
+      hostInstanceId: 'host-instance',
+      sessionId: 'S-1',
+      imageProbes: [{ success: true }, { success: true }, { success: true }],
+      po4b: {
+        sessionId: 'S-1',
+        turn: 7,
+        assistantMessageId: 'm-po4b',
+        hostPid: 4242,
+        hostInstanceId: 'host-instance',
+        blockSha256: ['a'.repeat(64), 'b'.repeat(64)],
+        hostReportSha256: 'c'.repeat(64),
+        hostMissing: 'ENOENT',
+        hostUnreadable: 'EACCES',
+      },
+    },
   }
   assert.equal(assertSelectedVerdict('acp.po4a-content-input', complete), undefined)
   assert.throws(() => assertSelectedVerdict('acp.po4a-content-input', { ...complete, readImageVerified: false }),
     /selected acp\.po4a-content-input/u)
   assert.throws(() => assertSelectedVerdict('acp.po4a-content-input', {
     ...complete, evidence: { ...complete.evidence, largeFrameBytes: 1024 * 1024 },
+  }), /selected acp\.po4a-content-input/u)
+  // The PO-4B qualification facts are mandatory and cannot be inferred from
+  // `status: PASS`: the Markdown fidelity and the Host file/permission facts
+  // are each independently required.
+  const missingMarkdown = { ...complete }
+  delete missingMarkdown.po4bMarkdownExact
+  assert.throws(() => assertSelectedVerdict('acp.po4a-content-input', missingMarkdown),
+    /selected acp\.po4a-content-input/u)
+  assert.throws(() => assertSelectedVerdict('acp.po4a-content-input', { ...complete, po4bHostPermissionDenied: false }),
+    /selected acp\.po4a-content-input/u)
+  assert.throws(() => assertSelectedVerdict('acp.po4a-content-input', {
+    ...complete, evidence: { ...complete.evidence, po4b: { ...complete.evidence.po4b, hostReportSha256: 'not-a-digest' } },
   }), /selected acp\.po4a-content-input/u)
   const entry = listSelectableCases().find(item => item.id === 'acp.po4a-content-input')
   assert.ok(entry && entry.defaultLane === false, 'PO-4A remains selectable-only, not part of the default L6 lane')

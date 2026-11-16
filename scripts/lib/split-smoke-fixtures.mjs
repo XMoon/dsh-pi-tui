@@ -109,7 +109,7 @@ export function writeC1WorkFixture(profileDir, workDir, options = {}) {
     '- insert:',
     '    - id: split-process-host-work',
     `      name: '${pathToFileURL(fixturePath).href}'`,
-    `      inject: [llm, tools, jobs, subagents, agents, typertGateway, connection, skills${options.shellPolicyPatches === true ? ', settings' : ''}${options.fileProbe === true || options.imageProbe === true ? ', attachments' : ''}${options.imageProbe === true ? ', agentDefaultModel' : ''}${options.webSettingsProbe === true ? ', settings, credentials' : ''}${options.mcpManagerProbe === true ? ', mcpManager' : ''}]`,
+    `      inject: [llm, tools, jobs, subagents, agents, typertGateway, connection, skills${options.shellPolicyPatches === true ? ', settings' : ''}${options.fileProbe === true || options.imageProbe === true ? ', attachments' : ''}${options.imageProbe === true ? ', agentDefaultModel' : ''}${options.markdownProbe === true ? ', workingDirectory' : ''}${options.webSettingsProbe === true ? ', settings, credentials' : ''}${options.mcpManagerProbe === true ? ', mcpManager' : ''}]`,
     // The default agent route is normally forced to the offline fixture. A case
     // that must exercise the OFFICIAL writable `agent-default-model` profile
     // entry (the sessionless default-model save) sets `keepBaseDefaultModel` so

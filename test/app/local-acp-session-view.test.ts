@@ -858,6 +858,31 @@ test('a prompt settles end_turn only from rpcId -> inserted id -> claimed turn -
   assert.deepEqual(await attempt, { stopReason: 'end_turn' })
 })
 
+test('an assistant message with two Markdown text blocks projects each block verbatim and in order', async () => {
+  // Regression: PO-4B Markdown fidelity (external qualification plan §6): the
+  // sample keeps CRLF, blank lines, backticks, JSON characters and Unicode, and
+  // each committed text block must become exactly one ordered chunk.
+  const block1 = '# PO-4B Report\r\n\r\n- [report](./.po4b/report.md)\r\n- [missing](./.po4b/missing.md)\r\n- [private](./.po4b/private.md)\r\n\r\n'
+  const block2 = '```json\n{"path":"./.po4b/report.md","quote":"`literal`"}\n```\n\n**bold**  _italic_  中文🙂\n'
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start('po4b:markdown-host-files:v1')
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-markdown')
+  view.claim('m-markdown', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-markdown', [
+    { type: 'text', text: block1 },
+    { type: 'text', text: block2 },
+  ]))
+  await flushOutput()
+  assert.deepEqual(view.notifications, [
+    { sessionUpdate: 'agent_message_chunk', messageId: 'm-markdown', content: { type: 'text', text: block1 } },
+    { sessionUpdate: 'agent_message_chunk', messageId: 'm-markdown', content: { type: 'text', text: block2 } },
+  ])
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
+
 test('a prompt answers only after its own turn/end AND the ordered notification drain', async () => {
   const view = promptView()
   await view.attach()

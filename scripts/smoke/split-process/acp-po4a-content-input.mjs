@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import sharp from 'sharp'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
@@ -14,6 +15,16 @@ import { createC1Scene } from './c1-scene.mjs'
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
 }
+
+/**
+ * PO-4B qualification sample: one marker prompt makes the offline model emit
+ * these two Markdown text blocks verbatim, and the Host file probe creates the
+ * workspace files the first block links to.
+ */
+const PO4B_MARKER = 'po4b:markdown-host-files:v1'
+const PO4B_BLOCK_1 = '# PO-4B Report\r\n\r\n- [report](./.po4b/report.md)\r\n- [missing](./.po4b/missing.md)\r\n- [private](./.po4b/private.md)\r\n\r\n'
+const PO4B_BLOCK_2 = '```json\n{"path":"./.po4b/report.md","quote":"`literal`"}\n```\n\n**bold**  _italic_  中文🙂\n'
+const PO4B_REPORT = 'PO4B HOST FILE BYTES\nline two: π\n'
 
 class AcpRawClient {
   constructor(socket) {
@@ -144,6 +155,14 @@ function userEventsAfter(home, sessionId, start) {
 
 function hash(bytes) { return createHash('sha256').update(bytes).digest('hex') }
 
+/** The turn that owns the durable event at `index` (the nearest preceding turn/start). */
+function turnOfEvent(events, index) {
+  for (let cursor = index; cursor >= 0; cursor -= 1) {
+    if (events[cursor]?.type === 'turn/start') return events[cursor].data?.turn
+  }
+  return undefined
+}
+
 function imageProbeEvents(probeDir) {
   const path = join(probeDir, 'image-probe.jsonl')
   if (!existsSync(path)) return []
@@ -152,7 +171,7 @@ function imageProbeEvents(probeDir) {
 
 export async function runAcpPo4aContentInput(context) {
   const { dshHome, workDir, trace, installation } = context
-  const scene = createC1Scene(context, { imageProbe: true })
+  const scene = createC1Scene(context, { imageProbe: true, markdownProbe: true })
   const workRoot = scene.c1WorkRoot('acp-po4a')
   const probeDir = join(workDir, 'po4a-image-probes')
   const hostCwd = realpathSync(workDir)
@@ -228,6 +247,7 @@ export async function runAcpPo4aContentInput(context) {
       C1_PO4A_TUI_HOLD: tuiHold,
       C1_PO4A_ADMISSION_HOLD: imageAdmissionHold,
       C1_PO4A_ADMISSION_RELEASE: imageAdmissionRelease,
+      C1_PO4B_EXPECTED_WORKSPACE: hostCwd,
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8',
     }, workRoot)
     host = started.host
@@ -383,6 +403,117 @@ export async function runAcpPo4aContentInput(context) {
       'PO-4A reattached prompt', message => messageText(message) === 'po4a-reattached')
     assert(reattached.response.result.stopReason === 'end_turn')
 
+    // L6-09: one ordinary prompt's committed Markdown reaches the wire block by
+    // block, while the same Host workspace really carries the file the first
+    // block links to and its absent/unreadable siblings fail at the OS boundary.
+    //
+    // `readPromptResponse` only COLLECTS `session/update` frames; every other
+    // JSON-RPC message stays in the client queue. Snapshot the queue BEFORE the
+    // prompt so the window can be proven to carry nothing but the two standard
+    // chunks and its own response (an artifact/upload notification would
+    // otherwise remain invisible to the collected-update assertion).
+    const queuedBeforeMarkdown = sibling.queue.length
+    const markdown = await finishPrompt(sibling, sessionId, [{ type: 'text', text: PO4B_MARKER }],
+      'PO-4B markdown prompt', message => messageText(message) === PO4B_MARKER)
+    const strayMarkdownMessages = sibling.queue.slice(queuedBeforeMarkdown)
+    const eventsAfterMarkdown = hostSessionEvents(dshHome, sessionId) ?? []
+    const userIndex = eventsAfterMarkdown.findIndex((event, index) => index >= markdown.start
+      && event.type === 'user/message' && event.data?.source?.rpcId === markdown.requestId)
+    assert(userIndex >= 0, 'PO-4B: the marker prompt must be one durable user/message of this exact ACP request')
+    const markdownTurn = turnOfEvent(eventsAfterMarkdown, userIndex)
+    assert(Number.isInteger(markdownTurn), 'PO-4B: the marker message must be claimed by a real turn/start')
+    await waitForHostSessionEventAfter(dshHome, sessionId, markdown.start,
+      event => event.type === 'turn/end' && event.data?.turn === markdownTurn, 'PO-4B marker turn end')
+    const committedOfTurn = (hostSessionEvents(dshHome, sessionId) ?? [])
+      .filter(event => event.type === 'assistant/message' && event.data?.turn === markdownTurn)
+    assertStrict.equal(committedOfTurn.length, 1,
+      'PO-4B: the marker turn must commit exactly one assistant message')
+    const committedMessage = committedOfTurn[0].data.message
+    const assistantBlocks = committedMessage.content
+    assert(Array.isArray(assistantBlocks) && assistantBlocks.length === 2,
+      'PO-4B: the committed assistant message must carry exactly two blocks')
+    assertStrict.deepEqual(assistantBlocks.map(block => block.type), ['text', 'text'],
+      'PO-4B: both committed blocks are standard text')
+    assertStrict.equal(assistantBlocks[0].text, PO4B_BLOCK_1)
+    assertStrict.equal(assistantBlocks[1].text, PO4B_BLOCK_2)
+    assert(typeof committedMessage.id === 'string' && committedMessage.id.length > 0,
+      'PO-4B: the committed assistant message carries its stable message id')
+
+    // The complete standard envelopes, not only the selected fields: a matched
+    // update or the prompt response could otherwise carry an extra
+    // artifact/receipt field while the per-field and queue checks still pass.
+    const expectedUpdates = [PO4B_BLOCK_1, PO4B_BLOCK_2].map(text => ({
+      sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        messageId: committedMessage.id,
+        content: { type: 'text', text },
+      },
+    }))
+    const po4bMarkdownExact = isDeepStrictEqual(markdown.updates, expectedUpdates)
+    assert(po4bMarkdownExact,
+      `PO-4B: each ACP chunk must be the complete standard envelope of one exact committed Markdown block (got ${JSON.stringify(markdown.updates).slice(0, 400)})`)
+
+    const wire = JSON.stringify(markdown.updates)
+    const po4bNoImplicitArtifact = strayMarkdownMessages.length === 0
+      && isDeepStrictEqual(markdown.response, {
+        jsonrpc: '2.0', id: markdown.response.id, result: { stopReason: 'end_turn' },
+      })
+      && !wire.includes('PO4B HOST FILE BYTES')
+      && !wire.includes('PO4B PRIVATE FILE MUST NOT BE READ')
+    assert(po4bNoImplicitArtifact,
+      `PO-4B: the ACP window carries only the Markdown text, no file bytes or additional notification (got ${JSON.stringify(strayMarkdownMessages).slice(0, 300)} / ${JSON.stringify(markdown.response).slice(0, 300)})`)
+
+    const hostProbe = await waitForC1WorkEvent(workRoot,
+      event => event.kind === 'po4b-host-file-proof'
+        && event.sessionId === sessionId && event.pid === hostIdentity.hostPid,
+      'PO-4B Host workspace file proof')
+    const expectedReportSha256 = hash(PO4B_REPORT)
+    const po4bHostFileReadable = hostProbe.workspaceMatched === true
+      && hostProbe.reportSha256 === expectedReportSha256
+    assert(po4bHostFileReadable,
+      'PO-4B: the exact Host workingDirectory must carry the report file with its exact bytes')
+    const po4bHostPermissionDenied = hostProbe.missing === 'ENOENT' && hostProbe.unreadable === 'EACCES'
+    assert(po4bHostPermissionDenied,
+      `PO-4B: the Host reads must fail with real ENOENT/EACCES (got ${String(hostProbe.missing)}/${String(hostProbe.unreadable)})`)
+
+    // The ACP test client is its own OS process: the Host absolute path is
+    // readable under the shared same-UID filesystem, while the same relative
+    // path in another client-local root is genuinely absent. This is a
+    // locality observation, never an ACP file-access grant.
+    const clientReport = readFileSync(join(hostCwd, '.po4b', 'report.md'))
+    const clientReportSha256 = hash(clientReport)
+    const clientLocalDir = join(workDir, 'po4b-client-local')
+    mkdirSync(clientLocalDir, { recursive: true, mode: 0o700 })
+    chmodSync(clientLocalDir, 0o700)
+    let clientRelativeMissing = false
+    try {
+      readFileSync(join(clientLocalDir, '.po4b', 'report.md'))
+    } catch (error) {
+      clientRelativeMissing = error?.code === 'ENOENT'
+    }
+    const po4bClientLocalityMeasured = clientReportSha256 === expectedReportSha256
+      && clientReport.toString('utf8') === PO4B_REPORT
+      && clientRelativeMissing
+    assert(po4bClientLocalityMeasured,
+      'PO-4B: the independent client reads the Host absolute path while the same relative path in its own root is ENOENT')
+
+    const po4b = {
+      sessionId,
+      turn: markdownTurn,
+      assistantMessageId: committedMessage.id,
+      hostPid: hostIdentity.hostPid,
+      hostInstanceId: hostIdentity.instanceId,
+      blockSha256: [hash(PO4B_BLOCK_1), hash(PO4B_BLOCK_2)],
+      hostReportSha256: hostProbe.reportSha256,
+      hostMissing: hostProbe.missing,
+      hostUnreadable: hostProbe.unreadable,
+      clientAbsoluteReadSha256: clientReportSha256,
+      clientRelativeMissing,
+      clientTopology: 'same-uid-shared-fs',
+    }
+    trace('acp-po4a/l6-09', po4b)
+
     const imageProbes = imageProbeEvents(probeDir)
     assert(imageProbes.length >= 3, `the Host readImage probe must verify admitted images (got ${imageProbes.length})`)
     const verifiedHashes = new Set(imageProbes.map(event => event.sha256))
@@ -401,7 +532,7 @@ export async function runAcpPo4aContentInput(context) {
       resourceLinkExact: true, imageOnly: true, mixedOrder: true, largeFrameBytes: largeWire.length,
       largeImageBytes: pngLarge.length, invalidImagesRejectedWithoutMessage: true,
       imageCancelRemovalProven: true, tuiTurnPreserved: true, reattachSameHost: true,
-      imageProbes,
+      imageProbes, po4b,
     }
     trace('acp-po4a/evidence-final', evidence)
     return {
@@ -410,7 +541,9 @@ export async function runAcpPo4aContentInput(context) {
       largeImageFrameOverOneMiB: true, hostRejectedInvalidAndOverLimit: true,
       imageCancelScopedToOwnAdmission: true, tuiRemainsActive: true,
       perSessionViewIsolation: true, sameSessionReattach: true, hostIdentityKept: true,
-      readImageVerified: true, l6EvidenceRecorded: true, evidence,
+      readImageVerified: true, l6EvidenceRecorded: true,
+      po4bMarkdownExact, po4bHostFileReadable, po4bHostPermissionDenied,
+      po4bClientLocalityMeasured, po4bNoImplicitArtifact, evidence,
     }
   } finally {
     for (const client of acpClients) { try { client.close() } catch { /* already closed */ } }
