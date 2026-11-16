@@ -17,6 +17,7 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { createToolResultMessage, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { getKeybindings, resetCapabilitiesCache, setCapabilities, visibleWidth } from '@xmoon76/pi-tui'
+import { color } from '../../src/tui/theme/runtime.ts'
 import { ImageWorkspacePanel } from '../../src/tui/components/media/image-workspace.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
@@ -877,6 +878,31 @@ test('the list action bar advertises the LIVE keybindings and degrades by whole 
       assert.ok(!bar.includes('…'), `no truncation marker at ${width}: ${JSON.stringify(bar)}`)
       assert.ok(!/[·]\s*$/.test(bar), `no dangling separator at ${width}: ${JSON.stringify(bar)}`)
     }
+  }
+})
+
+test('the /view-image list affordances keep Role 14 primary ink', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    const workspace = new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [{ value: '1', label: '#1 · shot.png' }],
+      resolve: () => ({ ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} }),
+      onStale: () => {},
+      onClose: () => {},
+      initial: { kind: 'list' },
+    })
+    const raw = workspace.render(80)
+    const bar = raw[raw.length - 1] ?? ''
+    assert.ok(bar.includes(color.primary('View [Enter]')), `the View affordance is primary ink: ${JSON.stringify(bar)}`)
+    assert.ok(bar.includes(color.primary('Close [Esc]')), `the Close affordance is primary ink: ${JSON.stringify(bar)}`)
+    assert.ok(bar.includes(color.textMuted('Up/Down navigate')), `the browsing hint stays muted: ${JSON.stringify(bar)}`)
+    workspace.dispose()
+  } finally {
+    resetCapabilitiesCache()
   }
 })
 

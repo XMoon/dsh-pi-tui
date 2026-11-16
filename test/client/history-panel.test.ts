@@ -1321,6 +1321,11 @@ test('B3: the Fullscreen footer Scope/Expand/Cancel spans run the ORIGINAL seat 
   assert.ok(footerRow >= 0, `the fullscreen footer paints its actions:\n${lines.join('\n')}`)
   const footer = lines[footerRow]!
   assert.ok(footer.includes('Scope [Tab]') && footer.includes('Expand [F2]'), footer)
+  const rawFooter = panel.render(120)[footerRow]!
+  assert.ok(rawFooter.includes(color.primary('Scope [Tab]'))
+    && rawFooter.includes(color.primary('Expand [F2]'))
+    && rawFooter.includes(color.primary('Cancel [Esc]')),
+  `the Footer affordances keep Role 14 primary ink: ${JSON.stringify(rawFooter)}`)
   assert.ok(!footer.includes('Use [Enter]') && !footer.includes('Copy All [Alt+C]'),
     `the painted heading owns Use/Copy, so the footer adds no duplicate sink:\n${footer}`)
   const clickFooter = (text: string): boolean => {

@@ -263,7 +263,9 @@ export class ImageViewerPanel implements Component {
     const leftRoom = width - hint.length
     const fitted = truncateToWidth(left, leftRoom, '…')
     const pad = Math.max(0, width - visibleWidth(fitted) - hint.length)
-    return `${fitted}${' '.repeat(pad)}${hint}`
+    // Role 14 affordance ink: the exit is clickable, so it keeps the canonical
+    // primary role (this workspace is not in the DENSE Action Bar exception).
+    return `${fitted}${' '.repeat(pad)}${color.primary(hint)}`
   }
 
   /** The body area: exactly one status row, or the clipped image rows. */
