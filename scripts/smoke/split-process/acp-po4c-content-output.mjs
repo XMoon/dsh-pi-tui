@@ -268,6 +268,23 @@ export async function runAcpPo4cContentOutput(context) {
     return { start, id, turn, requestId, messageId: durable.data.id, settled, turnEvents }
   }
 
+  /**
+   * Wait for a Host record arriving AFTER `fromIndex`. The Host's stdout record
+   * stream is append-only, so the index is the fence between "before this step"
+   * and "this step's own fact".
+   */
+  const waitForHostRecordAfter = async (fromIndex, matches, label, timeoutMs = 120_000) => {
+    const started = Date.now()
+    for (;;) {
+      const record = host.records.slice(fromIndex).find(matches)
+      if (record !== undefined) return record
+      if (Date.now() - started > timeoutMs) {
+        throw new SplitSmokeAssertionError(`PO-4C: timed out waiting for ${label}`)
+      }
+      await new Promise(resolveTick => setTimeout(resolveTick, 25))
+    }
+  }
+
   const assertEndTurn = (settled, label) => {
     assert(settled.response.error === undefined && settled.response.result?.stopReason === 'end_turn',
       `${label}: prompt failed: ${JSON.stringify(settled.response.error ?? settled.response.result)}`)
@@ -516,7 +533,25 @@ export async function runAcpPo4cContentOutput(context) {
       event => event.kind === 'po4c-read-held' && event.attachmentId === mixedRef.attachmentId,
       'PO-4C held official Store read', 120_000)
     assert(readHeld.attachmentId === mixedRef.attachmentId)
+    const closeRecordIndex = host.records.length
     acp.close()
+    // The Host's own listener teardown record for the destroyed connection is
+    // the only authority that the close was PROCESSED (the SDK client close is
+    // not enough). No other ACP connection is closing here, so the first new
+    // teardown record belongs to this close.
+    const closeRecord = await waitForHostRecordAfter(closeRecordIndex,
+      record => record.m4a0 === 'diag' && record.message === 'local-acp.connection.close',
+      'PO-4C Host-processed teardown of the destroyed ACP connection')
+    // Session correlation: the destroyed connection's View still owns the
+    // Session claim because its flight is held on the Store read.
+    const claimProbe = await openConnection(scopeDir, 'PO-4C claim probe after the destroyed close')
+    const claimProbeResume = await resume(claimProbe, sessionId, 'PO-4C claim probe after the destroyed close')
+    claimProbe.close()
+    assert(claimProbeResume.error?.data?.code === 'LOCAL_ACP_VIEW_ALREADY_ATTACHED',
+      `PO-4C: the destroyed connection must still hold the Session claim until its flight settles (got ${JSON.stringify(claimProbeResume)})`)
+    // Only AFTER those Host facts is the held Store read released.
+    const releasedAfterHostClose = closeRecord.connections >= 1
+      && claimProbeResume.error?.data?.code === 'LOCAL_ACP_VIEW_ALREADY_ATTACHED'
     writeFileSync(releasePath, 'release\n', { mode: 0o600 })
     await waitForC1WorkEvent(workRoot,
       event => event.kind === 'po4c-read-released' && event.attachmentId === mixedRef.attachmentId,
@@ -582,7 +617,13 @@ export async function runAcpPo4cContentOutput(context) {
         siblingSessionId: siblingSession,
         tuiTurn,
         reattachAttempts,
-        lateRead: { attachmentId: mixedRef.attachmentId, releasedAfterDisconnect: true, lateAttempts },
+        lateRead: {
+          attachmentId: mixedRef.attachmentId,
+          hostCloseConnections: closeRecord.connections,
+          claimHeldBeforeRelease: true,
+          releasedAfterDisconnect: releasedAfterHostClose,
+          lateAttempts,
+        },
       },
       imageProbes,
     }

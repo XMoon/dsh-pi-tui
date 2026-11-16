@@ -690,7 +690,10 @@ export function assertSelectedVerdict(caseId, result) {
       && Number.isInteger(result?.evidence?.slowPeer?.reattachAttempts)
       && result.evidence.slowPeer.reattachAttempts >= 1
       && result?.evidence?.slowPeer?.lateRead?.releasedAfterDisconnect === true
+      && result?.evidence?.slowPeer?.lateRead?.claimHeldBeforeRelease === true
       && result.evidence.slowPeer.lateRead.attachmentId === result.evidence.assistant.attachmentId
+      && Number.isInteger(result?.evidence?.slowPeer?.lateRead?.hostCloseConnections)
+      && result.evidence.slowPeer.lateRead.hostCloseConnections >= 1
       && Number.isInteger(result?.evidence?.slowPeer?.lateRead?.lateAttempts)
       && result.evidence.slowPeer.lateRead.lateAttempts >= 1
       && Array.isArray(result?.evidence?.imageProbes)

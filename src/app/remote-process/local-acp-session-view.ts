@@ -540,12 +540,19 @@ interface InflightPrompt {
   /**
    * PO-4C: the ONLY abort channel of this flight's own output work. It is
    * passed to the official image read and to nothing else — never to the
-   * Agent, Session or writer — and is aborted whenever this flight's delivery
-   * closes.
+   * Agent, Session or writer — and is aborted whenever this flight's output is
+   * stopped (close, disconnect, request abort, Off, disposal, MIXED or a
+   * committed cancellation).
    */
   readonly outputAbort: AbortController
   /** The `outputAbort` signal handed to the official image read. */
   readonly outputSignal: AbortSignal
+  /**
+   * Whether this flight's output IO was intentionally stopped. An output
+   * rejection observed after this fact is a local closure, never a content
+   * failure (the flight keeps its real Host terminal classification).
+   */
+  outputStopped: boolean
   /**
    * PO-3B F2: this flight's Host work is provably TERMINAL — the owned turn
    * reached its durable `turn/end`, or the exact Agent was disposed (nothing
@@ -1030,7 +1037,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // the flight still settles on the real Host terminal facts below.
     if (reason === 'disconnect' || reason === 'closing') {
       flight.deliveryClosed = true
-      flight.outputAbort.abort()
+      this.stopFlightOutput(flight)
     }
     flight.cancelRequested = true
     this.addressCancelIntent(claim, flight, access)
@@ -1100,6 +1107,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       const removed = access.cancelPending(sessionId, agent, session, flight.messageId)
       if (removed === 'removed') {
         flight.cancelKind = 'queued-removed'
+        this.stopFlightOutput(flight)
         this.settleQueuedRemoval(claim, flight)
         return
       }
@@ -1127,6 +1135,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     const addressed = access.cancelCurrentTurn(sessionId, agent, session, flight.turn)
     if (addressed === 'addressed') {
       flight.cancelKind = 'running-addressed'
+      // The official user cancel is now the authority for this turn: stop this
+      // flight's own output IO so a held Store read can never delay the real
+      // cancelled `turn/end` settlement. Already delivered notifications stay.
+      this.stopFlightOutput(flight)
       return
     }
     if (addressed === 'stale') {
@@ -1250,6 +1262,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       deliveryClosed: false,
       outputAbort,
       outputSignal: outputAbort.signal,
+      outputStopped: false,
       ownTurnEnded: false,
       permissionRequests: new Map(),
     }
@@ -1273,7 +1286,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // The request channel is gone: this flight's OWN output IO stops here
       // (a later settlement still owns the real Host fact). The Agent is
       // untouched — an aborted request is never a Host cancellation proof.
-      flight.outputAbort.abort()
+      this.stopFlightOutput(flight)
       this.abortPermissionRequests(flight)
       if (!flight.settledDone && !flight.cancelRequested) {
         flight.cancelRequested = true
@@ -2200,11 +2213,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           }
         }
       } catch (error) {
-        // An abort caused by this flight's own delivery close is not a content
-        // failure: the closure already classified the request. Anything else is
-        // this event's own real failure and settles the request here, so the
-        // tail never rejects unobserved and `turn/end` never waits forever.
-        if (flight.settledDone || flight.mixed || flight.deliveryClosed) return
+        // An abort caused by this flight's own output stop (close, disconnect,
+        // request abort, Off, disposal, MIXED or a committed cancellation) is
+        // not a content failure: the flight keeps its real Host classification.
+        // Anything else is this event's own real failure and settles the request
+        // here, so the tail never rejects unobserved and `turn/end` never waits
+        // forever.
+        if (flight.outputStopped || flight.settledDone || flight.mixed || flight.deliveryClosed) return
         this.failPrompt(claim, flight, error instanceof LocalAcpViewError
           ? error
           : promptError('LOCAL_ACP_PROMPT_OUTPUT_FAILED', 'the committed output could not be delivered', JSONRPC_INTERNAL_ERROR))
@@ -2266,6 +2281,17 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
+   * Stop ONLY this flight's own output IO. Already delivered notifications stay
+   * delivered; a queued read is abandoned and its rejection is classified as a
+   * closure by the tail, never as a content failure. The Host Agent, Session
+   * and writer keep their authority.
+   */
+  private stopFlightOutput(flight: InflightPrompt): void {
+    flight.outputStopped = true
+    flight.outputAbort.abort()
+  }
+
+  /**
    * Commit the MIXED fact of one flight: no output committed from now on is
    * projected, and this flight's own not-yet-finished output IO stops (an
    * in-flight official image read is abandoned) so a stalled read can never
@@ -2275,7 +2301,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    */
   private markFlightMixed(flight: InflightPrompt): void {
     flight.mixed = true
-    flight.outputAbort.abort()
+    this.stopFlightOutput(flight)
   }
 
   /** Fail one flight exactly once and release its slot and correlation state. */
@@ -2289,7 +2315,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     flight.deliveryClosed = true
     // Only this flight's own output IO stops here: the official Host Agent,
     // Session and writer keep their authority.
-    flight.outputAbort.abort()
+    this.stopFlightOutput(flight)
     this.abortPermissionRequests(flight)
     flight.failureCode = error.code
     // A flight that already holds its official claimed turn but settles before
@@ -2341,7 +2367,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     flight.detachAbort = undefined
     flight.foreignTurn = undefined
     flight.deliveryClosed = true
-    flight.outputAbort.abort()
+    this.stopFlightOutput(flight)
     this.abortPermissionRequests(flight)
     if (claim.inflight === flight) claim.inflight = undefined
     this.notifyWorkSettled()
