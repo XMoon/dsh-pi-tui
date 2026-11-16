@@ -76,6 +76,7 @@ import {
 import { runAcpPo3aTurnEvents } from '../smoke/split-process/acp-po3a-turn-events.mjs'
 import { runAcpPo3bCancelApproval } from '../smoke/split-process/acp-po3b-cancel-approval.mjs'
 import { runAcpPo4aContentInput } from '../smoke/split-process/acp-po4a-content-input.mjs'
+import { runAcpPo4cContentOutput } from '../smoke/split-process/acp-po4c-content-output.mjs'
 import {
   runDaemonControlConcurrentControls,
   runDaemonControlInflightStop,
@@ -498,7 +499,14 @@ const CASE_REGISTRY = Object.freeze([
     defaultLane: false,
     id: 'daemon-control.m6-2c-inflight-stop',
     title: 'a REAL Host Session turn in flight is interrupted by stop, the Host exits, and the restarted Host never replays it or fabricates its completion',
-    run: runDaemonControlInflightStop
+    run: runDaemonControlInflightStop,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    defaultLane: false,
+    id: 'acp.po4c-content-output',
+    title: 'one real Host and TUI project committed assistant text/image/text, image-only output and one ordered tool_call_update with verified Host Store bytes, carry a standard image frame above 256 KiB, fail an absent image reference closed and isolate a slow reader from the sibling ACP connection and the real TUI',
+    run: runAcpPo4cContentOutput,
   }),
 ])
 

@@ -25,6 +25,8 @@ import {
   type AcpImageLimits,
   type AcpPromptFactListener,
   type AcpSessionPromptRequest,
+  type AcpStoredImage,
+  type AcpStoredImageRef,
   type HostAcpSessionAccess,
   type LiveAgentViewIdentity,
 } from '../../src/app/remote-process/local-acp-session-view.ts'
@@ -169,6 +171,23 @@ class FakeAccess implements HostAcpSessionAccess {
 
   imageLimits(): AcpImageLimits | undefined { return { maxImageBytes: 4, maxImagesPerMessage: 2, maxMessageImageBytes: 8, mediaTypes: ['image/png'] } }
   supportsImagePrompts(): Promise<boolean> { return Promise.resolve(false) }
+
+  /** The fake official Store objects this fake can verify, keyed by attachmentId. */
+  readonly storedImages = new Map<string, { bytes: Uint8Array; mediaType: string }>()
+  /** Every committed image reference the View asked the Store to read. */
+  readonly imageReadCalls: AcpStoredImageRef[] = []
+  /** One held/scripted Store read; the default verifies a known object. */
+  imageReadImpl: (ref: AcpStoredImageRef, signal: AbortSignal) => Promise<AcpStoredImage> =
+    async ref => {
+      const stored = this.storedImages.get(ref.attachmentId)
+      if (stored === undefined) throw new Error('attachment not found')
+      return { data: stored.bytes, mediaType: stored.mediaType }
+    }
+
+  async readOutputImage(ref: AcpStoredImageRef, signal: AbortSignal): Promise<AcpStoredImage> {
+    this.imageReadCalls.push(ref)
+    return await this.imageReadImpl(ref, signal)
+  }
 
   observePromptFacts(_listener: AcpPromptFactListener): () => void {
     return () => {}
@@ -809,6 +828,18 @@ function promptView(sessionId = 'P1'): {
       return { promise, release }
     },
   }
+}
+
+/** The `sessionUpdate` kind of one collected update (typed for assertions). */
+function updateKind(update: SessionUpdate): string {
+  return update.sessionUpdate
+}
+
+/** The one content block of a collected agent chunk update. */
+function chunkOf(update: SessionUpdate | undefined): Record<string, unknown> {
+  assert.ok(update !== undefined, 'the expected ACP update was delivered')
+  assert.ok('content' in update, 'the expected ACP update carries one content block')
+  return update.content as Record<string, unknown>
 }
 
 /** One committed assistant message event carrying ordered content blocks. */
@@ -2749,4 +2780,364 @@ test('LC-04: an early failure + claimed turn detaches after the real turn/end an
   const next = view.registry.createConnection()
   await view.registry.resumeSession(next, view.access, { sessionId: 'P1', cwd: '/w' })
   assert.equal(view.registry.phaseOf(next), 'attached')
+})
+
+// ---------------------------------------------------------------------------
+// PO-4C: committed assistant/tool standard content output.
+// ---------------------------------------------------------------------------
+
+/** One committed image block naming a structural official image reference. */
+function imageBlock(attachmentId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    type: 'image',
+    attachment: {
+      attachmentId,
+      mediaType: 'image/png',
+      bytes: 8,
+      width: 1,
+      height: 1,
+      ...overrides,
+    },
+  }
+}
+
+/** One committed tool result message carrying ordered content blocks. */
+function toolResultData(turn: number, toolCallId: string, isError: boolean, blocks: Array<Record<string, unknown>>): Record<string, unknown> {
+  return { turn, step: 1, message: { toolCallId, isError, content: blocks } }
+}
+
+const IMAGE_BYTES = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+test('PO-4C C-L1-01: an assistant text/image/text message projects every committed block in order with Store-verified bytes', async () => {
+  const view = promptView()
+  await view.attach()
+  // The fake Store returns the VERIFIED media type; the committed block's own
+  // `mediaType` is ignored, so a block can never dictate the wire MIME.
+  view.access.storedImages.set('sha256:img1', { bytes: IMAGE_BYTES, mediaType: 'image/png' })
+  const attempt = view.start('po4c:assistant-mixed:v1')
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-po4c')
+  view.claim('m-po4c', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-po4c', [
+    { type: 'reasoning', text: 'thinking' },
+    { type: 'text', text: 'before\r\n' },
+    imageBlock('sha256:img1', { mediaType: 'image/webp' }),
+    { type: 'text', text: 'after 中文🙂\n' },
+  ]))
+  await flushOutput()
+  assert.equal(view.access.imageReadCalls.length, 1, 'the committed reference is read exactly once')
+  assert.deepEqual(view.access.imageReadCalls[0], {
+    attachmentId: 'sha256:img1', mediaType: 'image/webp', bytes: 8, width: 1, height: 1,
+  })
+  assert.deepEqual(view.notifications, [
+    { sessionUpdate: 'agent_thought_chunk', messageId: 'm-po4c', content: { type: 'text', text: 'thinking' } },
+    { sessionUpdate: 'agent_message_chunk', messageId: 'm-po4c', content: { type: 'text', text: 'before\r\n' } },
+    {
+      sessionUpdate: 'agent_message_chunk',
+      messageId: 'm-po4c',
+      content: { type: 'image', data: Buffer.from(IMAGE_BYTES).toString('base64'), mimeType: 'image/png' },
+    },
+    { sessionUpdate: 'agent_message_chunk', messageId: 'm-po4c', content: { type: 'text', text: 'after 中文🙂\n' } },
+  ])
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
+
+test('PO-4C C-L1-01: an image-only assistant message is valid visible output (and reasoning-only still fails closed)', async () => {
+  {
+    const view = promptView()
+    await view.attach()
+    view.access.storedImages.set('sha256:only', { bytes: IMAGE_BYTES, mediaType: 'image/png' })
+    const attempt = view.start('po4c:assistant-image-only:v1')
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-image-only')
+    view.claim('m-image-only', 1, request.requestId)
+    view.commit('assistant/message', assistantData(1, 'm-image-only', [{ type: 'reasoning', text: 'plan' }, imageBlock('sha256:only')]))
+    view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    assert.deepEqual(await attempt, { stopReason: 'end_turn' }, 'an image is visible output: no NO_ASSISTANT_TEXT')
+    assert.deepEqual(view.notifications.map(updateKind), ['agent_thought_chunk', 'agent_message_chunk'])
+    assert.equal(chunkOf(view.notifications[1]).type, 'image')
+  }
+  {
+    const view = promptView()
+    await view.attach()
+    const attempt = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-reasoning')
+    view.claim('m-reasoning', 1, request.requestId)
+    view.commit('assistant/message', assistantData(1, 'm-reasoning', [{ type: 'reasoning', text: 'thinking only' }]))
+    view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT'))
+  }
+})
+
+test('PO-4C C-L1-02: one committed tool result becomes ONE ordered text/image tool_call_update with the durable status and callId', async () => {
+  const a2ui = 'A2UI_JSON={"version":"popo.a2ui/1","components":[]}'
+  const view = promptView()
+  await view.attach()
+  view.access.storedImages.set('sha256:tool-img', { bytes: IMAGE_BYTES, mediaType: 'image/png' })
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-tool')
+  view.claim('m-tool', 1, request.requestId)
+  view.commit('tool/call', { turn: 1, step: 1, callId: 'call-po4c', name: 'po4c_tool', arguments: 'not-json{' })
+  view.commit('tool/result', toolResultData(1, 'call-po4c', false, [
+    { type: 'text', text: a2ui },
+    imageBlock('sha256:tool-img'),
+    { type: 'text', text: 'tool-tail\n' },
+  ]))
+  view.commit('assistant/message', assistantData(1, 'm-answer', [{ type: 'text', text: 'tool completed\n' }]))
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+  assert.deepEqual(view.notifications, [
+    {
+      sessionUpdate: 'tool_call',
+      toolCallId: 'call-po4c',
+      title: 'po4c_tool',
+      kind: 'other',
+      status: 'in_progress',
+      rawInput: 'not-json{',
+    },
+    {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-po4c',
+      status: 'completed',
+      content: [
+        { type: 'content', content: { type: 'text', text: a2ui } },
+        {
+          type: 'content',
+          content: { type: 'image', data: Buffer.from(IMAGE_BYTES).toString('base64'), mimeType: 'image/png' },
+        },
+        { type: 'content', content: { type: 'text', text: 'tool-tail\n' } },
+      ],
+    },
+    { sessionUpdate: 'agent_message_chunk', messageId: 'm-answer', content: { type: 'text', text: 'tool completed\n' } },
+  ])
+  assert.equal(view.notifications.filter(update => updateKind(update) === 'tool_call_update').length, 1,
+    'one committed tool result is exactly one update, never one per content block')
+  assert.equal(view.notifications.filter(update => updateKind(update) === 'tool_call').length, 1,
+    'the assistant tool-call block never duplicates the durable tool/call start')
+})
+
+test('PO-4C C-L1-02: a failed tool result keeps its official isError status', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start('po4c:tool-failed:v1')
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-failed')
+  view.claim('m-failed', 1, request.requestId)
+  view.commit('tool/call', { turn: 1, step: 1, callId: 'call-fail', name: 'po4c_tool', arguments: '{"x":1}' })
+  view.commit('tool/result', toolResultData(1, 'call-fail', true, [{ type: 'text', text: 'tool exploded: error' }]))
+  view.commit('assistant/message', assistantData(1, 'm-failed', [{ type: 'text', text: 'tool failed\n' }]))
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+  const update = view.notifications.find(candidate => updateKind(candidate) === 'tool_call_update')
+  assert.deepEqual(update, {
+    sessionUpdate: 'tool_call_update',
+    toolCallId: 'call-fail',
+    status: 'failed',
+    content: [{ type: 'content', content: { type: 'text', text: 'tool exploded: error' } }],
+  })
+})
+
+test('PO-4C C-L1-03: a held Store read blocks every later committed event (single FIFO, no reordering)', async () => {
+  const view = promptView()
+  await view.attach()
+  view.access.storedImages.set('sha256:held', { bytes: IMAGE_BYTES, mediaType: 'image/png' })
+  const readStarted = deferred<void>()
+  const readGate = deferred<AcpStoredImage>()
+  view.access.imageReadImpl = async () => {
+    readStarted.resolve()
+    return await readGate.promise
+  }
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-fifo')
+  view.claim('m-fifo', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-fifo', [
+    { type: 'text', text: 'first' },
+    imageBlock('sha256:held'),
+  ]))
+  await readStarted.promise
+  // Later committed events arrive while the first event's image read is held.
+  view.commit('tool/call', { turn: 1, step: 2, callId: 'call-after', name: 'po4c_tool', arguments: '{}' })
+  view.commit('tool/result', toolResultData(1, 'call-after', false, [{ type: 'text', text: 'after image' }]))
+  view.commit('assistant/message', assistantData(1, 'm-after', [{ type: 'text', text: 'answer' }]))
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  let settled = false
+  void attempt.then(() => { settled = true }, () => { settled = true })
+  await flushOutput()
+  assert.deepEqual(view.notifications, [], 'nothing overtakes the held image read')
+  assert.equal(settled, false, 'turn/end is not a delivery proof: settlement waits for the tail')
+  readGate.resolve({ data: IMAGE_BYTES, mediaType: 'image/png' })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+  assert.deepEqual(view.notifications.map(updateKind), [
+    'agent_message_chunk',
+    'agent_message_chunk',
+    'tool_call',
+    'tool_call_update',
+    'agent_message_chunk',
+  ])
+  assert.equal(chunkOf(view.notifications[1]).type, 'image')
+  assert.equal(chunkOf(view.notifications[4]).text, 'answer')
+})
+
+test('PO-4C C-L1-04: a Store read failure fails the event without any partial chunk and before later output', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start('po4c:missing-image:v1')
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-missing')
+  view.claim('m-missing', 1, request.requestId)
+  // A real earlier event was already delivered and must not be retracted.
+  view.commit('assistant/message', assistantData(1, 'm-earlier', [{ type: 'text', text: 'earlier' }]))
+  await flushOutput()
+  assert.equal(view.notifications.length, 1)
+  // The committed image names an object the fake Store cannot verify: the
+  // text block of the SAME event must not be sent either.
+  view.commit('assistant/message', assistantData(1, 'm-broken', [
+    { type: 'text', text: 'would-be-partial' },
+    imageBlock('sha256:absent'),
+  ]))
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED'))
+  assert.deepEqual(view.notifications.map(updateKind), ['agent_message_chunk'])
+  assert.equal(chunkOf(view.notifications[0]).text, 'earlier')
+  assert.equal(JSON.stringify(view.notifications).includes(Buffer.from(IMAGE_BYTES).toString('base64')), false,
+    'a failed read never emits fabricated bytes')
+})
+
+test('PO-4C C-L1-04: an unsupported committed block still fails closed instead of truncating', async () => {
+  {
+    const view = promptView()
+    await view.attach()
+    const attempt = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-file')
+    view.claim('m-file', 1, request.requestId)
+    view.commit('assistant/message', assistantData(1, 'm-file', [
+      { type: 'text', text: 'visible' },
+      { type: 'file', attachment: { attachmentId: 'sha256:file', name: 'a.txt', bytes: 1 } },
+    ]))
+    await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_UNSUPPORTED_CONTENT'))
+    assert.equal(view.notifications.length, 0, 'the whole event fails before any partial block is sent')
+  }
+  {
+    const view = promptView()
+    await view.attach()
+    const attempt = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-bad-ref')
+    view.claim('m-bad-ref', 1, request.requestId)
+    // A committed image without the structural official reference is not
+    // readable content: never guess an object or emit an empty image.
+    view.commit('assistant/message', assistantData(1, 'm-bad-ref', [{ type: 'image', attachment: { id: 'img' } }]))
+    await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_UNSUPPORTED_CONTENT'))
+    assert.equal(view.access.imageReadCalls.length, 0)
+  }
+  {
+    const view = promptView()
+    await view.attach()
+    const attempt = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-tool-file')
+    view.claim('m-tool-file', 1, request.requestId)
+    view.commit('tool/result', toolResultData(1, 'call-file', false, [
+      { type: 'file', attachment: { attachmentId: 'sha256:file', name: 'a.txt', bytes: 1 } },
+    ]))
+    await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_UNSUPPORTED_CONTENT'))
+    assert.equal(view.notifications.length, 0)
+  }
+})
+
+test('PO-4C C-L1-05: a mixed turn aborts the pending image read and never sends its late chunks', async () => {
+  const view = promptView()
+  await view.attach()
+  view.access.storedImages.set('sha256:race', { bytes: IMAGE_BYTES, mediaType: 'image/png' })
+  const readStarted = deferred<void>()
+  view.access.imageReadImpl = async (_ref, signal) => {
+    readStarted.resolve()
+    return await new Promise<AcpStoredImage>((resolve, reject) => {
+      const timer = setTimeout(() => resolve({ data: IMAGE_BYTES, mediaType: 'image/png' }), 50)
+      signal.addEventListener('abort', () => {
+        clearTimeout(timer)
+        reject(new Error('aborted'))
+      }, { once: true })
+    })
+  }
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-mixed')
+  view.claim('m-mixed', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-mixed', [{ type: 'text', text: 'before' }, imageBlock('sha256:race')]))
+  await readStarted.promise
+  // A foreign message claimed into the SAME turn proves MIXED while the read runs.
+  view.claim('m-foreign', 1, 'tui-steer')
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_MIXED_TURN'))
+  assert.deepEqual(view.notifications, [], 'the aborted read is a closure, not a content failure: no chunk leaked')
+  // A late read completion after the failure never revives delivery.
+  await flushOutput()
+  assert.deepEqual(view.notifications, [])
+})
+
+test('PO-4C C-L1-05: an Agent disposal during a read fails the request once and a late read never reaches the wire', async () => {
+  const view = promptView()
+  await view.attach()
+  view.access.storedImages.set('sha256:disposed', { bytes: IMAGE_BYTES, mediaType: 'image/png' })
+  const readStarted = deferred<void>()
+  const releaseRead = deferred<AcpStoredImage>()
+  view.access.imageReadImpl = async () => {
+    readStarted.resolve()
+    return await releaseRead.promise
+  }
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-disposed')
+  view.claim('m-disposed', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-disposed', [imageBlock('sha256:disposed')]))
+  await readStarted.promise
+  view.registry.onAgentDisposed(view.agent)
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_TURN_FAILED'))
+  releaseRead.resolve({ data: IMAGE_BYTES, mediaType: 'image/png' })
+  await flushOutput()
+  assert.deepEqual(view.notifications, [], 'a late read result of a settled flight is inert')
+  assert.equal(view.access.promptCalls.length, 1, 'a disposed Agent is never re-dispatched')
+  // The exact durable terminal (Agent disposal) removed the flight, so no
+  // second responsibility or fence lingers for it.
+  let lateApproval = 'unset'
+  lateApproval = await view.registry.onApprovalRequest({ agent: view.agent, toolName: 'po4c_tool', callId: 'late' }, async () => 'allowed-once')
+  assert.equal(lateApproval, 'allowed-once', 'a proven terminal turn has no lingering retired fence')
+})
+
+test('PO-4C C-L1-06: the pending-update budget reserves image chunks before any Store read', async () => {
+  {
+    const view = promptView()
+    await view.attach()
+    const attempt = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-over')
+    view.claim('m-over', 1, request.requestId)
+    const blocks = Array.from({ length: 65 }, (_entry, index) => imageBlock(`sha256:many-${String(index)}`))
+    view.commit('assistant/message', assistantData(1, 'm-over', blocks))
+    await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_OUTPUT_BACKPRESSURE'))
+    assert.equal(view.access.imageReadCalls.length, 0, 'the overflow is detected on the reservation, not mid-read')
+    assert.equal(view.notifications.length, 0)
+  }
+  {
+    const view = promptView()
+    await view.attach()
+    for (let index = 0; index < 64; index += 1) {
+      view.access.storedImages.set(`sha256:ok-${String(index)}`, { bytes: IMAGE_BYTES, mediaType: 'image/png' })
+    }
+    const attempt = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-at-cap')
+    view.claim('m-at-cap', 1, request.requestId)
+    const blocks = Array.from({ length: 64 }, (_entry, index) => imageBlock(`sha256:ok-${String(index)}`))
+    view.commit('assistant/message', assistantData(1, 'm-at-cap', blocks))
+    view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+    assert.equal(view.notifications.length, 64)
+    assert.equal(view.notifications.every(update => updateKind(update) === 'agent_message_chunk'), true)
+  }
 })

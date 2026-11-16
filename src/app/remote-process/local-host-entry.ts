@@ -454,6 +454,17 @@ export interface AcpControlControllerOptions {
 
 interface AttachmentServiceLike {
   readonly imageLimits: AcpImageLimits & { readonly maxImagePixels?: number; readonly maxImageDimension?: number }
+  /** Read one committed image back with the Store's OWN integrity verification. */
+  readImage(
+    ref: {
+      readonly attachmentId: string
+      readonly mediaType: string
+      readonly bytes: number
+      readonly width: number
+      readonly height: number
+    },
+    signal?: AbortSignal,
+  ): Promise<{ readonly ref: { readonly mediaType: string }; readonly data: Uint8Array }>
 }
 
 interface LlmServiceLike {
@@ -602,6 +613,17 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
     currentAgent: sessionId => agents.get(sessionId),
     currentSession: sessionId => sessions.get(sessionId),
     imageLimits: () => attachments?.imageLimits,
+    // The ONE official Host Attachment Store reads and verifies the committed
+    // image; the View never sees a Host path, a second store or an unverified
+    // `ref.bytes`. A missing Store rejects this read instead of fabricating an
+    // empty image or an `end_turn`.
+    readOutputImage: async (ref, signal) => {
+      if (attachments === undefined) {
+        throw new Error('local host entry: no official attachment store can read a committed output image')
+      }
+      const stored = await attachments.readImage(ref, signal)
+      return { data: stored.data, mediaType: stored.ref.mediaType }
+    },
     supportsImagePrompts: async () => {
       if (attachments === undefined || llm === undefined || agentDefaultModel === undefined) return false
       try {

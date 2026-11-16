@@ -46,6 +46,9 @@ const SCENARIOS = new Set([
   'acp-po3b',
   // PO-4A content admission: only this scenario declares the test route's image modality.
   'acp-po4a',
+  // PO-4C committed output: the offline model emits standard assistant/tool
+  // images that were first stored and re-verified by the official Host Store.
+  'acp-po4c',
   // Host-liveness qualification scenarios. They only reach official Host
   // services (`goals`, `schedule`, `Agent.runMaintenance`) and record facts.
   'goal-armed',
@@ -103,6 +106,27 @@ const PO4B_BLOCK_2 = '```json\n{"path":"./.po4b/report.md","quote":"`literal`"}\
 const PO4B_REPORT = 'PO4B HOST FILE BYTES\nline two: π\n'
 const PO4B_PRIVATE = 'PO4B PRIVATE FILE MUST NOT BE READ\n'
 
+/**
+ * PO-4C qualification samples. The marker prompts only select fixture
+ * behaviour; the committed content itself is produced by the real Agent stream
+ * (assistant blocks) and the real Host tool execution (tool/result), and every
+ * image is first stored and re-read through the official Host Attachment Store.
+ */
+const PO4C_MARKERS = Object.freeze({
+  assistantMixed: 'po4c:assistant-mixed:v1',
+  assistantImageOnly: 'po4c:assistant-image-only:v1',
+  toolContent: 'po4c:tool-content:v1',
+  toolFailed: 'po4c:tool-failed:v1',
+  missingImage: 'po4c:missing-image:v1',
+})
+const PO4C_TOOL_NAME = 'po4c_output_tool'
+const PO4C_TEXT_BEFORE = 'before\r\n'
+const PO4C_TEXT_AFTER = 'after 中文🙂\n'
+const PO4C_TOOL_TAIL = 'tool-tail\n'
+const PO4C_A2UI_TEXT = 'A2UI_JSON={"version":"popo.a2ui/1","components":[{"kind":"text","value":"透明"}]}'
+const PO4C_TOOL_ANSWER = 'tool completed\n'
+const PO4C_TOOL_FAILED_ANSWER = 'tool failed\n'
+
 /** Quote one token for the Host shell used by the harmless fixture commands. */
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`
@@ -146,6 +170,60 @@ function prepareWorkRoot(rawRoot) {
   return { root: rawRoot, proof }
 }
 
+/**
+ * PO-4C: store the smoke-generated PNGs through the ONE official Host
+ * Attachment Store and re-read them with its own integrity verification. The
+ * returned references are exactly the durable ones the committed assistant and
+ * tool content will carry; no bytes or paths are ever committed.
+ */
+async function createPo4cOutputProbe(ctx, record) {
+  const dir = process.env.C1_PO4C_IMAGE_DIR
+  if (typeof dir !== 'string' || dir === '') {
+    throw new Error('m4-c1-host-work: acp-po4c requires C1_PO4C_IMAGE_DIR')
+  }
+  const store = async name => {
+    const data = readFileSync(join(dir, name))
+    const stored = await ctx.attachments.saveImage({ data, mediaType: 'image/png' })
+    const verified = await ctx.attachments.readImage(stored)
+    const digest = createHash('sha256').update(verified.data).digest('hex')
+    if (stored.attachmentId !== `sha256:${digest}` || stored.bytes !== verified.data.byteLength
+      || verified.ref.mediaType !== 'image/png') {
+      throw new Error(`m4-c1-host-work: PO-4C stored image ${name} did not verify against its durable reference`)
+    }
+    record('po4c-image-stored', {
+      name,
+      attachmentId: stored.attachmentId,
+      mediaType: stored.mediaType,
+      bytes: verified.data.byteLength,
+      width: stored.width,
+      height: stored.height,
+      sha256: digest,
+    })
+    return stored
+  }
+  const mixed = await store('mixed.png')
+  const tool = await store('tool.png')
+  // A FORMAT-VALID content-addressed reference that was never stored: the real
+  // official Store must reject it (never a fake/absent store).
+  const missing = {
+    attachmentId: `sha256:${createHash('sha256').update('po4c:missing-image:v1').digest('hex')}`,
+    mediaType: 'image/png',
+    bytes: 4096,
+    width: 64,
+    height: 64,
+  }
+  let missingCode
+  try {
+    await ctx.attachments.readImage(missing)
+    throw new Error('m4-c1-host-work: the PO-4C absent image reference resolved in the official Store')
+  } catch (error) {
+    if (typeof error?.code !== 'string') throw error
+    missingCode = error.code
+  }
+  record('po4c-missing-image-rejected', { attachmentId: missing.attachmentId, code: missingCode })
+  return { mixed, tool, missing, missingCode }
+}
+
 function textOf(value) {
   if (typeof value === 'string') return value
   if (Array.isArray(value)) return value.map(textOf).join('\\n')
@@ -175,7 +253,7 @@ function recordPromptFacts(options) {
 }
 
 class C1Model extends LlmAdapter {
-  constructor(scenario, proof, root, agentStatusOf, neverSetup, imageProbe, markdownFileProbe) {
+  constructor(scenario, proof, root, agentStatusOf, neverSetup, imageProbe, markdownFileProbe, po4c) {
     super()
     this.scenario = scenario
     this.proof = proof
@@ -184,6 +262,7 @@ class C1Model extends LlmAdapter {
     this.neverSetup = neverSetup
     this.imageProbe = imageProbe
     this.markdownFileProbe = markdownFileProbe
+    this.po4c = po4c
     this.toolIssued = new Set()
     this.longTurnCount = new Map()
     this.failflowStep = new Map()
@@ -268,6 +347,72 @@ class C1Model extends LlmAdapter {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: answer }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: answer } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
+    if (this.scenario === 'acp-po4c') {
+      // The Host appends its OWN user-role context after the author's prompt, so
+      // the marker is matched against the newest AUTHORED user text only.
+      const authoredUser = [...(options.messages ?? [])].reverse()
+        .find(message => message?.role === 'user' && message?.source?.kind === 'user')
+      const authoredText = (authoredUser?.content ?? [])
+        .map(part => typeof part?.text === 'string' ? part.text : '')
+        .join('')
+      const matched = Object.entries(PO4C_MARKERS).find(([, value]) => authoredText.includes(value))
+      this.record('po4c-model-branch', { marker: matched?.[0] ?? 'none', afterTool })
+      const imageBlocks = (ref, index) => [
+        { type: 'block-start', index, blockType: 'image' },
+        { type: 'block-end', index, block: { type: 'image', attachment: ref } },
+      ]
+      if (authoredText.includes(PO4C_MARKERS.assistantMixed)) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: PO4C_TEXT_BEFORE }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: PO4C_TEXT_BEFORE } }
+        yield* imageBlocks(this.po4c.mixed, 1)
+        yield { type: 'block-start', index: 2, blockType: 'text' }
+        yield { type: 'text-delta', index: 2, text: PO4C_TEXT_AFTER }
+        yield { type: 'block-end', index: 2, block: { type: 'text', text: PO4C_TEXT_AFTER } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      if (authoredText.includes(PO4C_MARKERS.assistantImageOnly)) {
+        yield* imageBlocks(this.po4c.mixed, 0)
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      if (authoredText.includes(PO4C_MARKERS.missingImage)) {
+        yield* imageBlocks(this.po4c.missing, 0)
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      if (authoredText.includes(PO4C_MARKERS.toolContent) || authoredText.includes(PO4C_MARKERS.toolFailed)) {
+        if (afterTool) {
+          const answer = authoredText.includes(PO4C_MARKERS.toolContent) ? PO4C_TOOL_ANSWER : PO4C_TOOL_FAILED_ANSWER
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: answer }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: answer } }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+          return
+        }
+        const failing = authoredText.includes(PO4C_MARKERS.toolFailed)
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield {
+          type: 'block-end',
+          index: 0,
+          block: {
+            type: 'tool-call',
+            id: failing ? 'po4c-tool-failed' : 'po4c-tool-ok',
+            name: PO4C_TOOL_NAME,
+            arguments: JSON.stringify(failing ? { fail: true } : {}),
+          },
+        }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: `po4c answer ${token}` }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: `po4c answer ${token}` } }
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
     }
@@ -842,12 +987,55 @@ export async function apply(ctx) {
       }
     : undefined
 
+  const po4c = scenario === 'acp-po4c'
+    ? await createPo4cOutputProbe(ctx, record)
+    : undefined
+
   const model = new C1Model(scenario, proof, root, sessionId => {
     const agent = ctx.agents.get(sessionId)
     return agent === undefined ? undefined : agent.status
-  }, neverSetup, imageProbe, markdownFileProbe)
+  }, neverSetup, imageProbe, markdownFileProbe, po4c)
 
   ctx.effect(() => ctx.llm.registerAdapter(['c1-qualification'], model))
+
+  if (scenario === 'acp-po4c') {
+    ctx.effect(() => ctx.on('agent/error', payload => {
+      record('po4c-agent-error', {
+        turn: payload?.turn,
+        step: payload?.step,
+        name: payload?.error?.name,
+        code: payload?.error?.code,
+        message: String(payload?.error?.message ?? payload?.error).slice(0, 500),
+      })
+    }), 'po4c-agent-error-probe')
+    // One real Host tool whose rendered model-facing content is the ordered
+    // [text, verified image, text] batch the Host commits to `tool/result`.
+    ctx.effect(() => ctx.tools.register(defineTool({
+      name: PO4C_TOOL_NAME,
+      description: 'PO-4C qualification tool emitting one ordered text/image/text result batch.',
+      parameters: {
+        // Optional by omission: the parameter DSL only annotates `required: true`.
+        fail: { type: 'boolean', description: 'Throw instead of returning the ordered content.' },
+      },
+      output: {
+        schema: { type: 'string' },
+        render: () => [
+          { type: 'text', text: PO4C_A2UI_TEXT },
+          { type: 'image', attachment: po4c.tool },
+          { type: 'text', text: PO4C_TOOL_TAIL },
+        ],
+      },
+      async execute(args, exec) {
+        record('po4c-tool-executed', {
+          callId: String(exec.callId),
+          sessionId: exec.agent === undefined ? undefined : String(exec.agent.id),
+          failing: args?.fail === true,
+        })
+        if (args?.fail === true) throw new Error('po4c tool failure')
+        return 'po4c-tool-ok'
+      },
+    })))
+  }
 
   if (scenario === 'mcp-servers-fr3' || scenario === 'mcp-servers-fr4') {
     // FR3: one PLUGIN-OWNED server contributed for this Host row's lifetime.

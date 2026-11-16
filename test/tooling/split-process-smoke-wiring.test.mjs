@@ -982,6 +982,85 @@ test('the ACP PO-4A content-input selected verdict requires the complete real-L6
   assert.equal(typeof entry.run, 'function')
 })
 
+test('the ACP PO-4C committed content-output selected verdict requires the complete real-L6 wire and Host evidence', () => {
+  const complete = {
+    status: 'PASS',
+    scope: 'REAL_SPLIT_PROCESS_L6',
+    assistantTextImageTextOrdered: true,
+    assistantImageOnlyAccepted: true,
+    toolResultOrderedContent: true,
+    toolFailedStatus: true,
+    missingImageRejected: true,
+    largeImageFrameAboveLegacyCap: true,
+    slowPeerIsolated: true,
+    siblingAcpAndTuiUnaffected: true,
+    reattachAfterFailureClean: true,
+    noForeignTurnProjected: true,
+    hostIdentityKept: true,
+    readImageVerified: true,
+    l6EvidenceRecorded: true,
+    evidence: {
+      hostPid: 4242,
+      hostInstanceId: 'host-instance-po4c',
+      sessionId: 'S-po4c',
+      assistant: {
+        turn: 11,
+        messageId: 'm-po4c',
+        attachmentId: `sha256:${'a'.repeat(64)}`,
+        storedBytes: 1_400_000,
+        wireFrameBytes: 1_900_000,
+        legacyFrameBytes: 256 * 1024,
+        blockSha256: ['b'.repeat(64), 'c'.repeat(64)],
+      },
+      tool: {
+        turn: 12,
+        callId: 'po4c-tool-ok',
+        resultAttachmentId: `sha256:${'d'.repeat(64)}`,
+        resultStoredBytes: 12_000,
+        a2uiSha256: 'e'.repeat(64),
+      },
+      failedTool: { turn: 13, callId: 'po4c-tool-failed', isError: true },
+      missingImage: { turn: 14, attachmentId: `sha256:${'f'.repeat(64)}`, hostCode: 'ATTACHMENT_NOT_FOUND', acpCode: 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED' },
+      slowPeer: { backpressureCode: 'LOCAL_ACP_OUTPUT_BACKPRESSURE', siblingSessionId: 'S-sibling', tuiTurn: 15, reattachAttempts: 2 },
+      imageProbes: [{ kind: 'po4c-image-stored' }, { kind: 'po4c-image-stored' }],
+    },
+  }
+  assert.equal(assertSelectedVerdict('acp.po4c-content-output', complete), undefined)
+  // A missing proof field is a rejected verdict: the selected PASS cannot be
+  // assembled from `status: 'PASS'` alone.
+  for (const field of [
+    'assistantTextImageTextOrdered', 'assistantImageOnlyAccepted', 'toolResultOrderedContent',
+    'toolFailedStatus', 'missingImageRejected', 'largeImageFrameAboveLegacyCap', 'slowPeerIsolated',
+    'siblingAcpAndTuiUnaffected', 'reattachAfterFailureClean', 'noForeignTurnProjected', 'readImageVerified',
+  ]) {
+    const missing = { ...complete }
+    delete missing[field]
+    assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', missing), /selected acp\.po4c-content-output/u)
+  }
+  // A present-but-false proof field is rejected.
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', { ...complete, slowPeerIsolated: false }),
+    /selected acp\.po4c-content-output/u)
+  // A frame at (not above) the legacy cap never proves the new transport path.
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
+    ...complete, evidence: { ...complete.evidence, assistant: { ...complete.evidence.assistant, wireFrameBytes: 256 * 1024 } },
+  }), /selected acp\.po4c-content-output/u)
+  // The Host Store's own rejection code is required, not merely an ACP error.
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
+    ...complete, evidence: { ...complete.evidence, missingImage: { ...complete.evidence.missingImage, hostCode: 'READ_OK' } },
+  }), /selected acp\.po4c-content-output/u)
+  // The slow-reader and the sibling session must be the real distinct facts.
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
+    ...complete, evidence: { ...complete.evidence, slowPeer: { ...complete.evidence.slowPeer, siblingSessionId: 'S-po4c' } },
+  }), /selected acp\.po4c-content-output/u)
+  // A NOT_VERIFIED status never becomes a selected PASS.
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', { ...complete, status: 'NOT_VERIFIED' }),
+    /selected acp\.po4c-content-output/u)
+  // The case is registered as a real selectable-only runner.
+  const entry = listSelectableCases().find(item => item.id === 'acp.po4c-content-output')
+  assert.ok(entry && entry.defaultLane === false, 'PO-4C stays selectable-only, not part of the default L6 lane')
+  assert.equal(typeof entry.run, 'function')
+})
+
 test('a selected result names only the selectable scope', () => {
   const first = listSelectableCases()[0]
   assert.ok(first, 'the registry must expose a case')
