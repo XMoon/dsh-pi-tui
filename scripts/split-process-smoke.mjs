@@ -637,6 +637,62 @@ export function assertSelectedVerdict(caseId, result) {
     `selected ${caseId}: the ACP content-input verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
     return
   }
+  if (caseId === 'acp.po4c-content-output') {
+    assert(result?.status === 'PASS'
+      && result?.scope === 'REAL_SPLIT_PROCESS_L6'
+      && result?.assistantTextImageTextOrdered === true
+      && result?.assistantImageOnlyAccepted === true
+      && result?.toolResultOrderedContent === true
+      && result?.toolFailedStatus === true
+      && result?.missingImageRejected === true
+      && result?.largeImageFrameAboveLegacyCap === true
+      && result?.slowPeerIsolated === true
+      && result?.siblingAcpAndTuiUnaffected === true
+      && result?.reattachAfterFailureClean === true
+      && result?.noForeignTurnProjected === true
+      && result?.hostIdentityKept === true
+      && result?.readImageVerified === true
+      && result?.l6EvidenceRecorded === true
+      && typeof result?.evidence?.sessionId === 'string'
+      && result.evidence.sessionId.length > 0
+      && Number.isInteger(result?.evidence?.hostPid)
+      && typeof result?.evidence?.hostInstanceId === 'string'
+      && result.evidence.hostInstanceId.length > 0
+      && Number.isInteger(result?.evidence?.assistant?.turn)
+      && typeof result?.evidence?.assistant?.messageId === 'string'
+      && result.evidence.assistant.messageId.length > 0
+      && typeof result?.evidence?.assistant?.attachmentId === 'string'
+      && /^sha256:[0-9a-f]{64}$/u.test(result.evidence.assistant.attachmentId)
+      && Number.isInteger(result?.evidence?.assistant?.storedBytes)
+      && result.evidence.assistant.storedBytes > 0
+      && Number.isInteger(result?.evidence?.assistant?.wireFrameBytes)
+      && result.evidence.assistant.wireFrameBytes > 256 * 1024
+      && result.evidence.assistant.legacyFrameBytes === 256 * 1024
+      && Array.isArray(result?.evidence?.assistant?.blockSha256)
+      && result.evidence.assistant.blockSha256.length === 2
+      && result.evidence.assistant.blockSha256.every(digest => typeof digest === 'string' && /^[0-9a-f]{64}$/u.test(digest))
+      && Number.isInteger(result?.evidence?.tool?.turn)
+      && typeof result?.evidence?.tool?.callId === 'string'
+      && result.evidence.tool.callId.length > 0
+      && typeof result?.evidence?.tool?.resultAttachmentId === 'string'
+      && /^sha256:[0-9a-f]{64}$/u.test(result.evidence.tool.resultAttachmentId)
+      && /^[0-9a-f]{64}$/u.test(result?.evidence?.tool?.a2uiSha256 ?? '')
+      && Number.isInteger(result?.evidence?.failedTool?.turn)
+      && result?.evidence?.failedTool?.isError === true
+      && Number.isInteger(result?.evidence?.missingImage?.turn)
+      && result?.evidence?.missingImage?.hostCode === 'ATTACHMENT_NOT_FOUND'
+      && result?.evidence?.missingImage?.acpCode === 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED'
+      && result?.evidence?.slowPeer?.backpressureCode === 'LOCAL_ACP_OUTPUT_BACKPRESSURE'
+      && typeof result?.evidence?.slowPeer?.siblingSessionId === 'string'
+      && result.evidence.slowPeer.siblingSessionId !== result.evidence.sessionId
+      && Number.isInteger(result?.evidence?.slowPeer?.tuiTurn)
+      && Number.isInteger(result?.evidence?.slowPeer?.reattachAttempts)
+      && result.evidence.slowPeer.reattachAttempts >= 1
+      && Array.isArray(result?.evidence?.imageProbes)
+      && result.evidence.imageProbes.length === 2,
+    `selected ${caseId}: the ACP committed content-output verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
+    return
+  }
   if (caseId === 'account.official-composition') {
     assert(result?.status === 'PASS'
       && result?.browser === 'PASS'

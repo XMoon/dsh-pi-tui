@@ -38,11 +38,20 @@
  * user's message is a MIXED turn: no further output is projected and the
  * request fails closed instead of returning a fabricated success.
  *
+ * PO-4C widens that projection to the standard committed content of
+ * `assistant/message` and `tool/result`: ordered text, thought chunks and
+ * images, where every image is re-read and integrity-verified by the official
+ * Host Attachment Store before its canonical Base64 reaches the wire. The
+ * conversion runs INSIDE the flight's single `outputTail`, so a committed
+ * event's asynchronous image read never lets a later event overtake it; a
+ * content conversion failure fails the request instead of sending a partial
+ * event as success.
+ *
  * @module app/remote-process/local-acp-session-view
  */
 
 import { randomUUID } from 'node:crypto'
-import type { ContentBlock as AcpWireContentBlock, SessionUpdate, StopReason } from '@agentclientprotocol/sdk'
+import type { ContentBlock as AcpWireContentBlock, SessionUpdate, StopReason, ToolCallContent } from '@agentclientprotocol/sdk'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { observeSettled, runDetached } from '../../runtime/process/tasks.ts'
 
@@ -101,6 +110,14 @@ export interface HostAcpSessionAccess {
   currentSession(sessionId: string): object | undefined
   /** The current boot-frozen Host image limits needed to derive UDS framing. */
   imageLimits(): AcpImageLimits | undefined
+  /**
+   * Re-read ONE committed image reference through the official Host Attachment
+   * Store and return its verified bytes plus the stored media type. The Store
+   * owns the integrity check; a missing Store, an absent object or corrupt bytes
+   * reject. This is not a client-reachable capability: only an owned turn's own
+   * committed block may name a reference.
+   */
+  readOutputImage(ref: AcpStoredImageRef, signal: AbortSignal): Promise<AcpStoredImage>
   /** Whether the exact configured Host default route explicitly accepts images. */
   supportsImagePrompts(): Promise<boolean>
   /** Submit ONE prompt through the official Session Controller (queue mode only). */
@@ -171,6 +188,12 @@ export type LocalAcpPromptErrorCode =
   | 'LOCAL_ACP_PROMPT_DISPATCH_INDETERMINATE'
   /** A committed event could not be projected and delivery kept its real failure. */
   | 'LOCAL_ACP_PROMPT_OUTPUT_FAILED'
+  /**
+   * The official Host Attachment Store could not read/verify an image a
+   * committed assistant or tool block referenced. The event is never sent
+   * partially and a fabricated image is never substituted.
+   */
+  | 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED'
   /** The bounded View output queue could not keep up with committed events. */
   | 'LOCAL_ACP_PROMPT_OUTPUT_BACKPRESSURE'
   /** A committed block has no PO-3A standard ACP projection (never truncated). */
@@ -179,7 +202,11 @@ export type LocalAcpPromptErrorCode =
   | 'LOCAL_ACP_PROMPT_MIXED_TURN'
   /** The exact live Agent/Session changed since this View attached. */
   | 'LOCAL_ACP_PROMPT_STALE_AGENT'
-  /** The owned turn ended without a real non-empty assistant text chunk. */
+  /**
+   * The owned turn ended without ANY visible assistant output: no non-empty
+   * committed assistant text and no verified assistant image block. The historical
+   * external code is preserved; its meaning is the visible-output requirement.
+   */
   | 'LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT'
   /** The owned turn ended blocked/error/aborted/interrupted or the Agent died. */
   | 'LOCAL_ACP_PROMPT_TURN_FAILED'
@@ -248,6 +275,27 @@ export interface AcpImageLimits {
   readonly maxImagesPerMessage: number
   readonly maxMessageImageBytes: number
   readonly mediaTypes: readonly string[]
+}
+
+/**
+ * The structural official `ImageAttachmentRef` a committed image block carries.
+ * The View never interprets these fields: they identify the object the official
+ * Host Attachment Store must verify and read back.
+ */
+export interface AcpStoredImageRef {
+  readonly attachmentId: string
+  readonly mediaType: string
+  readonly bytes: number
+  readonly width: number
+  readonly height: number
+}
+
+/** One committed image read back and integrity-verified by the Host Store. */
+export interface AcpStoredImage {
+  /** Exact stored bytes; the View encodes these and nothing else. */
+  readonly data: Uint8Array
+  /** The media type the Store verified against those bytes. */
+  readonly mediaType: string
 }
 
 /**
@@ -420,10 +468,24 @@ interface ViewClaim {
 const MAX_PENDING_OUTPUT_UPDATES = 64
 
 /**
+ * One synchronously validated committed-output unit. The flight builds the WHOLE
+ * event's plan in its event callback (so the FIFO position and the reserved
+ * update count are committed before any await), then the tail resolves image
+ * entries through the official Host Store and sends the ordered updates.
+ */
+type CommittedOutputEntry =
+  | { readonly kind: 'thought'; readonly text: string }
+  | { readonly kind: 'message'; readonly text: string }
+  | { readonly kind: 'message-image'; readonly ref: AcpStoredImageRef }
+  | { readonly kind: 'tool'; readonly text: string }
+  | { readonly kind: 'tool-image'; readonly ref: AcpStoredImageRef }
+
+/**
  * One unsettled prompt flight. Each field is a DIFFERENT authoritative fact:
  * `requestId` is View-minted, `messageId` comes from the official
  * `agent/inbox/inserted`, `turn` from the official `agent/inbox/claimed`, and
- * `assistantText` only from a committed, non-empty assistant text block.
+ * `assistantVisibleOutput` only from a committed non-empty assistant text or a
+ * committed assistant image block.
  */
 interface InflightPrompt {
   readonly requestId: string
@@ -439,7 +501,8 @@ interface InflightPrompt {
   /** The official open turn and its approval origin before Host admission. */
   turnProvenance?: TurnProvenance
   mixed: boolean
-  assistantText: boolean
+  /** A committed assistant message carried visible output (non-empty text or image). */
+  assistantVisibleOutput: boolean
   pendingUpdates: number
   outputTail: Promise<void>
   readonly sendUpdate: (update: SessionUpdate) => Promise<void>
@@ -474,6 +537,15 @@ interface InflightPrompt {
   readonly settleAdmission: () => void
   /** PO-3B: output delivery is closed; queued-but-unsent updates are dropped. */
   deliveryClosed: boolean
+  /**
+   * PO-4C: the ONLY abort channel of this flight's own output work. It is
+   * passed to the official image read and to nothing else — never to the
+   * Agent, Session or writer — and is aborted whenever this flight's delivery
+   * closes.
+   */
+  readonly outputAbort: AbortController
+  /** The `outputAbort` signal handed to the official image read. */
+  readonly outputSignal: AbortSignal
   /**
    * PO-3B F2: this flight's Host work is provably TERMINAL — the owned turn
    * reached its durable `turn/end`, or the exact Agent was disposed (nothing
@@ -952,8 +1024,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     access: HostAcpSessionAccess,
     reason: 'cancel' | 'closing' | 'disconnect',
   ): Promise<void> {
-    // A disconnect cannot deliver any further output; close delivery first.
-    if (reason === 'disconnect') flight.deliveryClosed = true
+    // A disconnect cannot deliver any further output; close delivery first and
+    // stop this flight's own output IO (never the Host Agent/Session).
+    if (reason === 'disconnect') {
+      flight.deliveryClosed = true
+      flight.outputAbort.abort()
+    }
     flight.cancelRequested = true
     this.addressCancelIntent(claim, flight, access)
     if (
@@ -1143,6 +1219,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       throw promptError('LOCAL_ACP_PROMPT_STALE_AGENT', 'the borrowed turn identity changed before admission', JSONRPC_INVALID_PARAMS)
     }
     const admission = Promise.withResolvers<void>()
+    const outputAbort = new AbortController()
     const flight: InflightPrompt = {
       requestId: randomUUID(),
       phase: 'admitting',
@@ -1153,7 +1230,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         },
       }),
       mixed: false,
-      assistantText: false,
+      assistantVisibleOutput: false,
       pendingUpdates: 0,
       outputTail: Promise.resolve(),
       sendUpdate,
@@ -1169,6 +1246,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         admission.resolve()
       },
       deliveryClosed: false,
+      outputAbort,
+      outputSignal: outputAbort.signal,
       ownTurnEnded: false,
       permissionRequests: new Map(),
     }
@@ -1189,6 +1268,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // cancellation every other path uses; the real Host facts alone settle
       // the flight (never this signal).
       flight.deliveryClosed = true
+      // The request channel is gone: this flight's OWN output IO stops here
+      // (a later settlement still owns the real Host fact). The Agent is
+      // untouched — an aborted request is never a Host cancellation proof.
+      flight.outputAbort.abort()
       this.abortPermissionRequests(flight)
       if (!flight.settledDone && !flight.cancelRequested) {
         flight.cancelRequested = true
@@ -1350,7 +1433,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           flight.turn = turn
           if (flight.phase === 'admitting' || flight.phase === 'queued') flight.phase = 'claimed'
           const turnProvenance = flight.turnProvenance
-          if (turnProvenance?.turn === turn || flight.foreignTurn === turn) flight.mixed = true
+          if (turnProvenance?.turn === turn || flight.foreignTurn === turn) this.markFlightMixed(flight)
           flight.foreignTurn = undefined
           // A pending cancellation now has its authoritative turn: address it
           // in this SAME callback stack before the Agent can run further.
@@ -1361,7 +1444,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         continue
       }
       if (flight.turn !== undefined) {
-        if (flight.turn === turn) flight.mixed = true
+        if (flight.turn === turn) this.markFlightMixed(flight)
         continue
       }
       flight.foreignTurn = turn
@@ -1863,14 +1946,20 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
   }
 
-  /** Project one committed assistant message of the owned turn in block order. */
+  /**
+   * Validate ONE committed assistant message synchronously and reserve its
+   * ordered output units on this flight's single tail. Shapes are checked here
+   * (a malformed/unsupported event fails before anything is queued); the image
+   * reads and the sends happen inside the tail so no later event can overtake
+   * this one.
+   */
   private projectAssistantMessage(claim: ViewClaim, flight: InflightPrompt, data: unknown): void {
     const message = (data as { readonly message?: { readonly id?: unknown; readonly content?: unknown } }).message
     if (message === undefined || typeof message.id !== 'string' || !Array.isArray(message.content)) {
       this.failPrompt(claim, flight, unsupportedContent())
       return
     }
-    const updates: SessionUpdate[] = []
+    const entries: CommittedOutputEntry[] = []
     for (const block of message.content as readonly unknown[]) {
       const type = (block as { readonly type?: unknown } | null)?.type
       const text = (block as { readonly text?: unknown } | null)?.text
@@ -1879,7 +1968,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           this.failPrompt(claim, flight, unsupportedContent())
           return
         }
-        if (text.length > 0) updates.push({ sessionUpdate: 'agent_thought_chunk', messageId: message.id, content: { type: 'text', text } })
+        if (text.length > 0) entries.push({ kind: 'thought', text })
         continue
       }
       if (type === 'text') {
@@ -1888,8 +1977,18 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           return
         }
         if (text.length === 0) continue
-        updates.push({ sessionUpdate: 'agent_message_chunk', messageId: message.id, content: { type: 'text', text } })
-        flight.assistantText = true
+        entries.push({ kind: 'message', text })
+        flight.assistantVisibleOutput = true
+        continue
+      }
+      if (type === 'image') {
+        const ref = committedImageRef(block)
+        if (ref === undefined) {
+          this.failPrompt(claim, flight, unsupportedContent())
+          return
+        }
+        entries.push({ kind: 'message-image', ref })
+        flight.assistantVisibleOutput = true
         continue
       }
       if (type === 'tool-call') {
@@ -1899,11 +1998,30 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         // source, so the block here is skipped instead of duplicated.
         continue
       }
-      // Images/audio/unknown blocks belong to PO-4: never truncate or fake one.
+      // Audio/file/tool-change/unknown blocks have no standard ACP output form:
+      // never truncate or fake one, and never claim the event was delivered.
       this.failPrompt(claim, flight, unsupportedContent())
       return
     }
-    this.enqueueUpdates(claim, flight, updates)
+    const messageId = message.id
+    this.enqueueOutputTask(claim, flight, entries.length, async () => {
+      const updates: SessionUpdate[] = []
+      for (const entry of entries) {
+        if (entry.kind === 'thought') {
+          updates.push({ sessionUpdate: 'agent_thought_chunk', messageId, content: { type: 'text', text: entry.text } })
+        } else if (entry.kind === 'message') {
+          updates.push({ sessionUpdate: 'agent_message_chunk', messageId, content: { type: 'text', text: entry.text } })
+        } else if (entry.kind === 'message-image') {
+          const stored = await this.readOutputImage(flight, entry.ref)
+          updates.push({
+            sessionUpdate: 'agent_message_chunk',
+            messageId,
+            content: { type: 'image', data: Buffer.from(stored.data).toString('base64'), mimeType: stored.mediaType },
+          })
+        }
+      }
+      return updates
+    })
   }
 
   /** Project one committed tool call of the owned turn as a standard start update. */
@@ -1914,17 +2032,23 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       return
     }
     const rawInput = typeof call.arguments === 'string' ? parseToolArguments(call.arguments) : undefined
-    this.enqueueUpdates(claim, flight, [{
+    const update: SessionUpdate = {
       sessionUpdate: 'tool_call',
       toolCallId: call.callId,
       title: call.name,
       kind: 'other',
       status: 'in_progress',
       ...(rawInput === undefined ? {} : { rawInput }),
-    }])
+    }
+    this.enqueueOutputTask(claim, flight, 1, async () => [update])
   }
 
-  /** Project one committed tool result of the owned turn, text content only. */
+  /**
+   * Project ONE committed tool result as a single standard `tool_call_update`.
+   * Its `content` keeps the committed block order (non-empty text and verified
+   * images); the status comes only from the official `isError` fact and the
+   * `toolCallId` only from the durable message.
+   */
   private projectToolResult(claim: ViewClaim, flight: InflightPrompt, data: unknown): void {
     const message = (data as {
       readonly message?: {
@@ -1937,32 +2061,83 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       this.failPrompt(claim, flight, unsupportedContent())
       return
     }
-    const content: Array<{ readonly type: 'content'; readonly content: { readonly type: 'text'; readonly text: string } }> = []
+    const entries: CommittedOutputEntry[] = []
     for (const block of message.content as readonly unknown[]) {
       const type = (block as { readonly type?: unknown } | null)?.type
       const text = (block as { readonly text?: unknown } | null)?.text
-      if (type !== 'text' || typeof text !== 'string') {
-        this.failPrompt(claim, flight, unsupportedContent())
-        return
+      if (type === 'text') {
+        if (typeof text !== 'string') {
+          this.failPrompt(claim, flight, unsupportedContent())
+          return
+        }
+        if (text.length > 0) entries.push({ kind: 'tool', text })
+        continue
       }
-      if (text.length > 0) content.push({ type: 'content', content: { type: 'text', text } })
+      if (type === 'image') {
+        const ref = committedImageRef(block)
+        if (ref === undefined) {
+          this.failPrompt(claim, flight, unsupportedContent())
+          return
+        }
+        entries.push({ kind: 'tool-image', ref })
+        continue
+      }
+      this.failPrompt(claim, flight, unsupportedContent())
+      return
     }
-    this.enqueueUpdates(claim, flight, [{
-      sessionUpdate: 'tool_call_update',
-      toolCallId: message.toolCallId,
-      status: message.isError === true ? 'failed' : 'completed',
-      content,
-    }])
+    const toolCallId = message.toolCallId
+    const status = message.isError === true ? 'failed' : 'completed'
+    this.enqueueOutputTask(claim, flight, 1, async () => {
+      const content: ToolCallContent[] = []
+      for (const entry of entries) {
+        if (entry.kind === 'tool') {
+          content.push({ type: 'content', content: { type: 'text', text: entry.text } })
+        } else if (entry.kind === 'tool-image') {
+          const stored = await this.readOutputImage(flight, entry.ref)
+          content.push({
+            type: 'content',
+            content: { type: 'image', data: Buffer.from(stored.data).toString('base64'), mimeType: stored.mediaType },
+          })
+        }
+      }
+      const update: SessionUpdate = { sessionUpdate: 'tool_call_update', toolCallId, status, content }
+      return [update]
+    })
   }
 
   /**
-   * Append one committed event's updates to this flight's single ordered output
-   * tail. The bounded pending count is the ONLY additional queue: exceeding it
-   * fails this View's request instead of growing without limit.
+   * Read ONE committed image through the official Host Attachment Store. The
+   * Store owns the ID/format/byte/dimension verification; the View only encodes
+   * the verified bytes. Every Store rejection keeps ONE stable content class —
+   * never a partial event, a fabricated image or a leaked path/exception.
    */
-  private enqueueUpdates(claim: ViewClaim, flight: InflightPrompt, updates: readonly SessionUpdate[]): void {
-    if (updates.length === 0 || flight.settledDone) return
-    flight.pendingUpdates += updates.length
+  private async readOutputImage(flight: InflightPrompt, ref: AcpStoredImageRef): Promise<AcpStoredImage> {
+    const access = this.access
+    if (access === undefined) throw attachmentReadFailed()
+    try {
+      return await access.readOutputImage(ref, flight.outputSignal)
+    } catch {
+      throw attachmentReadFailed()
+    }
+  }
+
+  /**
+   * Append ONE committed event's conversion to this flight's single ordered
+   * output tail. `reserve` is the event's synchronously known update count: the
+   * FIFO position and the bounded pending counter are committed BEFORE any
+   * await, the whole event is converted (official image reads included) inside
+   * the tail, and only then are its updates handed to the transport. The
+   * bounded pending counter is the ONLY additional queue: exceeding it fails
+   * this View's request instead of growing without limit.
+   */
+  private enqueueOutputTask(
+    claim: ViewClaim,
+    flight: InflightPrompt,
+    reserve: number,
+    build: () => Promise<readonly SessionUpdate[]>,
+  ): void {
+    if (reserve === 0 || flight.settledDone) return
+    flight.pendingUpdates += reserve
     if (flight.pendingUpdates > MAX_PENDING_OUTPUT_UPDATES) {
       this.failPrompt(claim, flight, promptError(
         'LOCAL_ACP_PROMPT_OUTPUT_BACKPRESSURE',
@@ -1972,27 +2147,38 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       return
     }
     flight.outputTail = flight.outputTail.then(async () => {
-      for (const update of updates) {
+      try {
         // A mixed turn, a settled flight or a closed delivery stops ALL output
         // that has not yet been handed to the transport. Notifications already
-        // sent cannot be retracted, but a queued one is still ours to drop.
-        if (flight.settledDone || flight.mixed || flight.deliveryClosed) {
-          flight.pendingUpdates -= 1
-          continue
+        // sent cannot be retracted, but a queued event is still ours to drop.
+        if (flight.settledDone || flight.mixed || flight.deliveryClosed) return
+        const updates = await build()
+        for (const update of updates) {
+          if (flight.settledDone || flight.mixed || flight.deliveryClosed) return
+          try {
+            await flight.sendUpdate(update)
+          } catch {
+            // The transport failure keeps its real classification; it never
+            // turns into a StopReason and never touches the Host Agent.
+            this.failPrompt(claim, flight, promptError(
+              'LOCAL_ACP_PROMPT_OUTPUT_FAILED',
+              'an ACP session/update notification could not be delivered',
+              JSONRPC_INTERNAL_ERROR,
+            ))
+            return
+          }
         }
-        try {
-          await flight.sendUpdate(update)
-        } catch {
-          // The transport failure keeps its real classification; it never turns
-          // into a StopReason and never touches the Host Agent.
-          this.failPrompt(claim, flight, promptError(
-            'LOCAL_ACP_PROMPT_OUTPUT_FAILED',
-            'an ACP session/update notification could not be delivered',
-            JSONRPC_INTERNAL_ERROR,
-          ))
-        } finally {
-          flight.pendingUpdates -= 1
-        }
+      } catch (error) {
+        // An abort caused by this flight's own delivery close is not a content
+        // failure: the closure already classified the request. Anything else is
+        // this event's own real failure and settles the request here, so the
+        // tail never rejects unobserved and `turn/end` never waits forever.
+        if (flight.settledDone || flight.mixed || flight.deliveryClosed) return
+        this.failPrompt(claim, flight, error instanceof LocalAcpViewError
+          ? error
+          : promptError('LOCAL_ACP_PROMPT_OUTPUT_FAILED', 'the committed output could not be delivered', JSONRPC_INTERNAL_ERROR))
+      } finally {
+        flight.pendingUpdates -= reserve
       }
     })
   }
@@ -2034,16 +2220,28 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         ))
         return
       }
-      if (!flight.assistantText) {
+      if (!flight.assistantVisibleOutput) {
+        // The historical external code is preserved; its fact is the visible
+        // output requirement, so text-only, image-only and mixed turns all pass.
         this.failPrompt(claim, flight, promptError(
           'LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT',
-          'the owned turn ended without a non-empty assistant text chunk',
+          'the owned turn ended without any visible assistant output',
           JSONRPC_INTERNAL_ERROR,
         ))
         return
       }
       this.completePrompt(claim, flight, { stopReason: kind === 'completed' ? 'end_turn' : 'max_tokens' })
     }, { diag: this.diag })
+  }
+
+  /**
+   * Commit the MIXED fact of one flight. A turn that also claims another user's
+   * message projects nothing further, and its not-yet-finished image reads stop:
+   * they belong to output this View may no longer deliver.
+   */
+  private markFlightMixed(flight: InflightPrompt): void {
+    flight.mixed = true
+    flight.outputAbort.abort()
   }
 
   /** Fail one flight exactly once and release its slot and correlation state. */
@@ -2055,6 +2253,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     flight.detachAbort = undefined
     flight.foreignTurn = undefined
     flight.deliveryClosed = true
+    // Only this flight's own output IO stops here: the official Host Agent,
+    // Session and writer keep their authority.
+    flight.outputAbort.abort()
     this.abortPermissionRequests(flight)
     flight.failureCode = error.code
     // A flight that already holds its official claimed turn but settles before
@@ -2106,6 +2307,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     flight.detachAbort = undefined
     flight.foreignTurn = undefined
     flight.deliveryClosed = true
+    flight.outputAbort.abort()
     this.abortPermissionRequests(flight)
     if (claim.inflight === flight) claim.inflight = undefined
     this.notifyWorkSettled()
@@ -2207,6 +2409,37 @@ function validatePromptContent(prompt: readonly unknown[], imageEnabled: boolean
     throw promptError('LOCAL_ACP_PROMPT_INVALID_CONTENT', 'a prompt must include non-whitespace text or an image', JSONRPC_INVALID_PARAMS)
   }
   return content
+}
+
+/** One stable "the official Store could not read this committed image" failure. */
+function attachmentReadFailed(): LocalAcpViewError {
+  return promptError(
+    'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED',
+    'a committed image attachment could not be read and verified',
+    JSONRPC_INTERNAL_ERROR,
+  )
+}
+
+/**
+ * The structural official `ImageAttachmentRef` of one committed image block.
+ * Only the reference SHAPE is checked here; the official Host Attachment Store
+ * remains the authority that verifies the object named by this reference.
+ */
+function committedImageRef(block: unknown): AcpStoredImageRef | undefined {
+  const attachment = (block as { readonly attachment?: unknown } | null)?.attachment
+  if (attachment === null || typeof attachment !== 'object') return undefined
+  const ref = attachment as Record<string, unknown>
+  if (typeof ref.attachmentId !== 'string' || typeof ref.mediaType !== 'string'
+    || typeof ref.bytes !== 'number' || typeof ref.width !== 'number' || typeof ref.height !== 'number') {
+    return undefined
+  }
+  return {
+    attachmentId: ref.attachmentId,
+    mediaType: ref.mediaType,
+    bytes: ref.bytes,
+    width: ref.width,
+    height: ref.height,
+  }
 }
 
 /** One stable "this committed block has no PO-3A projection" failure. */

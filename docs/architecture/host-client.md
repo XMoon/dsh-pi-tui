@@ -620,14 +620,16 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
   version — never the DSH engine version). When the Host installs the shared
   Session View it advertises `sessionCapabilities: { resume: {}, close: {} }`
   and never `loadSession`, `session/list`, config options or MCP capability.
-  Inline image capability is advertised only on that connection when the Host's
-  boot-frozen Attachment Store and exact configured default model route explicitly
-  declare image support; unknown services, route metadata or attachment media
-  support are negative. The capability is frozen for the connection at
-  `initialize`. Every image prompt is checked again against the exact attached
-  Agent's current model route and is refused before Host dispatch unless that
-  route explicitly declares image support. The View is a BORROW of the Host's
-  own Agent and Session, never a second owner:
+  Inline image PROMPT capability is advertised only on that connection when the
+  Host's boot-frozen Attachment Store and exact configured default model route
+  explicitly declare image support; unknown services, route metadata or
+  attachment media support are negative. The capability is frozen for the
+  connection at `initialize`. Every image prompt is checked again against the
+  exact attached Agent's current model route and is refused before Host dispatch
+  unless that route explicitly declares image support. That capability governs
+  CLIENT-to-Agent prompt images only: committed assistant/tool OUTPUT images come
+  from the durable Session content and are never filtered by it. The View is a
+  BORROW of the Host's own Agent and Session, never a second owner:
   - One ACP connection may borrow **at most one** Host Session (one View), and
     one Host Session carries **at most one** ACP View at a time, while any
     number of human Split TUI Clients may still reference the same Session.
@@ -657,23 +659,54 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     messages contain image references, never Base64. Image capability is not
     inferred from a client declaration, an arbitrary available model or the TUI
     selection display.
-  - `session/prompt` with text/resource_link-only content preserves the existing
-    behavior. The View mints ONE stable `requestId`, submits exactly ONE official
+  - `session/prompt` mints ONE stable `requestId`, submits exactly ONE official
     `SessionController.prompt` in queue mode, and correlates the real Host facts
     — `source.rpcId` at `agent/inbox/inserted`, the claimed turn of that exact
     message id (`agent/inbox/claimed`), the committed `data.turn` events and
     `turn/end` — before answering a real ACP StopReason (`end_turn` /
     `max_tokens`). Only the committed output of that claimed turn is projected as
-    standard `session/update` notifications, and the answer is sent after the
-    turn's `turn/end` and the ordered notification drain. A turn that also claims
-    another user's message (e.g. a TUI steer) is a MIXED turn: no further output
-    is projected and the request fails closed with
-    `LOCAL_ACP_PROMPT_MIXED_TURN`, never a fabricated success. A completed turn
-    without real non-empty assistant text fails
-    `LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT`. Message ordering, the bounded
-    per-connection output cap and the one-View-per-Session rule are unchanged;
-    `session/close` and physical-dispatch release semantics are owned by the
-    scoped-cancellation contract above.
+    standard `session/update` notifications, in durable order, and the answer is
+    sent after the turn's `turn/end` and the ordered notification drain. A turn
+    that also claims another user's message (e.g. a TUI steer) is a MIXED turn:
+    no further output is projected and the request fails closed with
+    `LOCAL_ACP_PROMPT_MIXED_TURN`, never a fabricated success. The bounded
+    per-connection output cap and the one-View-per-Session rule are unchanged.
+    - **Committed assistant/tool content.** An `assistant/message` keeps block
+      order: non-empty text becomes `agent_message_chunk` text, reasoning becomes
+      `agent_thought_chunk`, and an image becomes a standard `image` content
+      block. An assistant `tool-call` block is never projected — the dedicated
+      durable `tool/call` event is the only start update (with the committed
+      `callId`/name and the parsed arguments, or the raw string when the model
+      arguments are malformed). ONE committed `tool/result` becomes exactly ONE
+      `tool_call_update` whose ordered `content` keeps every non-empty text and
+      image and whose status is the official `isError ? failed : completed`;
+      structured tool text such as a JSON payload sample is forwarded as its
+      committed bytes, and the Host parses no domain JSON.
+    - **Verified images only.** Every committed image is re-read through the SAME
+      official Host `AttachmentStore.readImage(ref, signal)`. The wire `data` is
+      exactly the verified stored bytes in canonical Base64 and `mimeType` is the
+      verified stored media type; a stored `ref` is never trusted on its own. A
+      missing Store, an absent object or a corrupt raster fails the flight with
+      `LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED`: the event is never partially
+      sent and no placeholder image is fabricated. A committed block type with no
+      standard ACP projection (e.g. `file`/`tool-addition`) still fails
+      `LOCAL_ACP_PROMPT_UNSUPPORTED_CONTENT` instead of being silently dropped.
+    - **One async ordered tail per flight.** The synchronous committed-event
+      callback appends the event's already shape-validated conversion to the
+      flight's single output tail and reserves its bounded update count; the
+      image reads and the notification sends run INSIDE that tail. A later
+      committed event can never overtake an earlier one, one event's whole
+      content is converted before its first chunk is sent, and the StopReason is
+      answered only after `turn/end` AND the ordered drain. The tail never
+      rejects unobserved: a real content/transport failure fails the one request
+      (with `LOCAL_ACP_PROMPT_OUTPUT_FAILED` for delivery), and a closed flight
+      drops only output it has not yet handed to the transport. The flight's own
+      AbortSignal stops only ITS output IO on close/disconnect/Off/disposal/MIXED
+      — it never cancels or disposes the Host Agent.
+    - A completed turn needs at least ONE visible assistant output: non-empty
+      committed text or a committed assistant image, so an image-only turn
+      succeeds. A turn with no visible output keeps the stable
+      `LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT` failure.
   - **Bounded input.** Text-only and unnegotiated connections retain the legacy
     1 MiB frame and 2 MiB unconsumed-input limits. An image-enabled connection
     derives its larger per-frame and unconsumed bounds from that Host's official
@@ -684,6 +717,22 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     Each socket has independent accounting and a breach closes only that
     connection; the reader assembles each fragmented NDJSON line with one
     concatenation rather than repeatedly copying the pending image frame.
+  - **Bounded output.** Each connection bounds its own buffered output. Frames
+    up to the legacy 256 KiB single-frame cap keep the original
+    accept-then-resolve behavior under the same 256 KiB unwritten-backlog bound.
+    When the Host mounts the official Attachment Store, the connection derives
+    ONCE at establish time a larger single-frame budget from that Host's
+    boot-frozen `attachments.imageLimits` (canonical Base64 expansion of the
+    admitted image batch, one metadata allowance per image, the JSON-RPC
+    envelope and a preserved text allowance). That derivation is a TRANSPORT
+    resource bound — never an image acceptance policy, never a reason to drop,
+    shrink, re-encode or re-describe a committed image, and never derived from
+    `initialize.promptCapabilities.image`. A frame above the legacy cap is
+    written in 64 KiB chunks under the same unwritten-backlog bound, waiting at
+    most 30 seconds per kernel drain; a stalled reader, an over-budget frame or a
+    socket fault closes ONLY that connection (`LOCAL_ACP_OUTPUT_BACKPRESSURE` /
+    `LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE`) and never touches the Host, an Agent, a
+    Session or a sibling connection.
   - `session/close` detaches ONLY this connection's View/reservation: it never
     disposes, flushes or resumes the Agent/Session, so a TUI referencing the
     same Session keeps working and a later connection may resume again. With an
@@ -698,9 +747,9 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     on the exact Host identity proves there was no inserted message. The
     Session, Agent and writer keep their Host authority; a pending
     create/resume whose connection closed never publishes an attached View.
-  - `session/list`, `session/set_config_option`, MCP prompts and committed
-    assistant/tool image projection are NOT provided by this View and fail
-    closed with their stable `LOCAL_ACP_*` code.
+  - `session/list`, `session/set_config_option`, MCP prompts and ACP
+    file/artifact transfer are NOT provided by this View and fail closed with
+    their stable `LOCAL_ACP_*` code.
   - **Scoped cancellation (PO-3B).** `session/cancel` addresses ONLY this
     connection's own unsettled prompt flight, decided from authoritative Host
     facts — never an Agent-global cancel, a status/timing guess or an
@@ -781,24 +830,11 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
     never bypassed. The official `approval/asked`/`approval/decided` audit
     pair stays the single decision record; this View adds no second audit
     writer.
-  - **One prompt flight per View.** `session/prompt` is admitted only on
-    an attached View that already holds the exact Session claim. The View mints
-    ONE stable `requestId`, submits exactly ONE official
-    `SessionController.prompt` in queue mode, and correlates the real Host facts
-    — `source.rpcId` at `agent/inbox/inserted`, the claimed turn of that exact
-    message id (`agent/inbox/claimed`), the committed `data.turn` events and
-    `turn/end` — before answering a real ACP StopReason (`end_turn` /
-    `max_tokens`). Only the committed output of that claimed turn is projected as
-    standard `session/update` notifications, and the answer is sent after the
-    turn's `turn/end` and the ordered notification drain. A turn that also claims
-    another user's message (e.g. a TUI steer) is a MIXED turn: no further output
-    is projected and the request fails closed with
-    `LOCAL_ACP_PROMPT_MIXED_TURN`, never a fabricated success. A completed turn
-    without real non-empty assistant text fails
-    `LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT`. Message ordering, the bounded
-    per-connection output cap and the one-View-per-Session rule are unchanged;
-    `session/close` and physical-dispatch release semantics are owned by the
-    scoped-cancellation contract above.
+  - **One prompt flight per View.** `session/prompt` is admitted only on an
+    attached View that already holds the exact Session claim: the ONE flight, its
+    committed-output projection/drain and its StopReason settlement are owned by
+    the contract above. `session/close` and physical-dispatch release semantics
+    are owned by the scoped-cancellation contract below.
 - **Bounded per Host and per connection.** The Host start-time
   `DSH_PI_TUI_ACP_MAX_CONNECTIONS` integer (default 4, valid 1..16, an invalid
   value is a startup failure) caps live connections; an over-limit connection

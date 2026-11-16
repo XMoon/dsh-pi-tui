@@ -28,12 +28,15 @@ import {
   parseAcpMaxConnections,
   startLocalAcpListener,
   type LocalAcpListener,
+  deriveImageOutputBounds,
 } from '../../src/app/remote-process/local-acp-listener.ts'
 import {
   AcpSessionViewRegistry,
   type AcpImageLimits,
   type AcpPromptFactListener,
   type AcpSessionPromptRequest,
+  type AcpStoredImage,
+  type AcpStoredImageRef,
   type HostAcpSessionAccess,
   type LiveAgentViewIdentity,
 } from '../../src/app/remote-process/local-acp-session-view.ts'
@@ -121,6 +124,11 @@ class RawClient {
   /** Stop reading from the kernel so the peer's output bound is exercised. */
   pause(): void {
     this.socket.pause()
+  }
+
+  /** Resume reading after a `pause()` so the peer's close/replies are observed. */
+  resume(): void {
+    this.socket.resume()
   }
 
   next(timeoutMs = 5_000): Promise<unknown> {
@@ -767,7 +775,11 @@ test('a stale PRIVATE bind socket left by SIGKILL is recovered on the next start
 })
 
 /** A minimal in-memory Host Session access that keeps EXACT object identity. */
-function makeFakeAccess(options: { readonly imageLimits?: AcpImageLimits; readonly supportsImagePrompts?: () => Promise<boolean> } = {}): {
+function makeFakeAccess(options: {
+  readonly imageLimits?: AcpImageLimits
+  readonly supportsImagePrompts?: () => Promise<boolean>
+  readonly readOutputImage?: (ref: AcpStoredImageRef, signal: AbortSignal) => Promise<AcpStoredImage>
+} = {}): {
   access: HostAcpSessionAccess
   seed: (id: string, cwd: string) => LiveAgentViewIdentity
   agentOf: (id: string) => LiveAgentViewIdentity | undefined
@@ -818,6 +830,10 @@ function makeFakeAccess(options: { readonly imageLimits?: AcpImageLimits; readon
       },
       supportsImagePrompts() {
         return options.supportsImagePrompts?.() ?? Promise.resolve(false)
+      },
+      async readOutputImage(ref: AcpStoredImageRef, signal: AbortSignal) {
+        if (options.readOutputImage === undefined) throw new Error('no attachment store')
+        return await options.readOutputImage(ref, signal)
       },
       async prompt(request: AcpSessionPromptRequest) {
         prompts.push(request)
@@ -1005,6 +1021,9 @@ test('session/new carries the authoritative created session id in JSON-RPC error
     },
     supportsImagePrompts() {
       return Promise.resolve(false)
+    },
+    async readOutputImage() {
+      throw new Error('no attachment store')
     },
     async prompt() {
       return { accepted: true as const }
@@ -2035,3 +2054,285 @@ test('the derived frame budget accepts exactly its bound and rejects one byte ab
     rejected.close()
   }
 })
+
+test('PO-4C C-L5-01: committed output images are delivered even when the connection never negotiated image PROMPTS', async t => {
+  const { scope } = newScope(t)
+  const imageBytes = Uint8Array.from({ length: 4096 }, (_value, index) => index % 251)
+  const fake = makeFakeAccess({
+    // No image prompt capability at all: no limits, no model modality.
+    supportsImagePrompts: () => Promise.resolve(false),
+    readOutputImage: async ref => {
+      assert.equal(ref.attachmentId, 'sha256:out-1')
+      return { data: imageBytes, mediaType: 'image/png' }
+    },
+  })
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    const init = (await client.next()) as { result?: { agentCapabilities?: { promptCapabilities?: { image?: boolean } } } }
+    assert.equal(init.result?.agentCapabilities?.promptCapabilities?.image, false, 'the connection did not negotiate image prompts')
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host/proj', mcpServers: [] } })
+    const created = (await client.next()) as { result?: { sessionId?: string } }
+    const sessionId = created.result?.sessionId as string
+    assert.equal(typeof sessionId, 'string')
+
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'draw' }] } })
+    const request = await waitForFact(() => fake.prompts[0], 'the Host prompt request')
+    const agent = fake.agentOf(sessionId)
+    assert.ok(agent !== undefined)
+    const facts = fake.facts()
+    assert.ok(facts !== undefined)
+    const message = { id: 'm-output-image', source: { kind: 'user', rpcId: request.requestId } }
+    facts.onInboxInserted(agent, message)
+    facts.onInboxClaimed(agent, message, 1)
+    facts.onSessionEvent(agent.session, {
+      type: 'assistant/message',
+      data: {
+        turn: 1,
+        message: {
+          id: 'm-output-image',
+          content: [{
+            type: 'image',
+            attachment: { attachmentId: 'sha256:out-1', mediaType: 'image/png', bytes: imageBytes.length, width: 1, height: 1 },
+          }],
+        },
+      },
+    })
+    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+
+    const update = (await client.next()) as {
+      method?: string
+      params?: { sessionId?: string; update?: { sessionUpdate?: string; messageId?: string; content?: unknown } }
+    }
+    assert.equal(update.method, 'session/update')
+    assert.equal(update.params?.sessionId, sessionId)
+    assert.equal(update.params?.update?.sessionUpdate, 'agent_message_chunk')
+    assert.deepEqual(update.params?.update?.content, {
+      type: 'image',
+      data: Buffer.from(imageBytes).toString('base64'),
+      mimeType: 'image/png',
+    })
+    const response = (await client.next()) as { id?: number; result?: { stopReason?: string }; error?: unknown }
+    assert.equal(response.id, 3)
+    assert.equal(response.error, undefined)
+    assert.equal(response.result?.stopReason, 'end_turn', 'an image-only committed answer is a real end_turn')
+  } finally {
+    client.close()
+  }
+})
+
+test('PO-4C C-L5-02: a derived outbound budget carries one complete ACP image frame above the legacy 256 KiB cap', async t => {
+  const limits = { maxImageBytes: 400_000, maxImagesPerMessage: 2, maxMessageImageBytes: 400_000, mediaTypes: ['image/png'] }
+  assert.equal(deriveImageOutputBounds(undefined), undefined, 'no Store keeps the legacy frame budget')
+  assert.equal(deriveImageOutputBounds({
+    maxImageBytes: 1, maxImagesPerMessage: 1, maxMessageImageBytes: 3, mediaTypes: ['image/png'],
+  }), 4 + 65_536 + 4_096 + 1024 * 1024, 'the derived budget keeps the bounded metadata/envelope/text allowances')
+  const derived = deriveImageOutputBounds(limits)
+  assert.equal(derived, 533_336 + 2 * 65_536 + 4_096 + 1024 * 1024,
+    'the derived budget is canonical Base64 expansion plus bounded metadata, envelope and text allowance')
+  for (const unsafe of [
+    { maxImageBytes: 0, maxImagesPerMessage: 1, maxMessageImageBytes: 3, mediaTypes: ['image/png'] },
+    { maxImageBytes: 1, maxImagesPerMessage: 0, maxMessageImageBytes: 3, mediaTypes: ['image/png'] },
+    { maxImageBytes: 1, maxImagesPerMessage: 1, maxMessageImageBytes: -1, mediaTypes: ['image/png'] },
+    { maxImageBytes: 1, maxImagesPerMessage: Number.MAX_SAFE_INTEGER, maxMessageImageBytes: 3, mediaTypes: ['image/png'] },
+  ]) {
+    assert.equal(deriveImageOutputBounds(unsafe), undefined, 'unsafe arithmetic cannot derive a frame budget')
+  }
+
+  const { scope } = newScope(t)
+  // 300_000 stored bytes -> ~400 KiB of canonical Base64 in ONE frame.
+  const imageBytes = Uint8Array.from({ length: 300_000 }, (_value, index) => (index * 7) % 251)
+  const fake = makeFakeAccess({
+    imageLimits: limits,
+    readOutputImage: async () => ({ data: imageBytes, mediaType: 'image/png' }),
+  })
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host/proj', mcpServers: [] } })
+    const created = (await client.next()) as { result?: { sessionId?: string } }
+    const sessionId = created.result?.sessionId as string
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'big' }] } })
+    const request = await waitForFact(() => fake.prompts[0], 'the Host prompt request')
+    const agent = fake.agentOf(sessionId)
+    assert.ok(agent !== undefined)
+    const facts = fake.facts()
+    assert.ok(facts !== undefined)
+    const message = { id: 'm-big-image', source: { kind: 'user', rpcId: request.requestId } }
+    facts.onInboxInserted(agent, message)
+    facts.onInboxClaimed(agent, message, 1)
+    facts.onSessionEvent(agent.session, {
+      type: 'assistant/message',
+      data: {
+        turn: 1,
+        message: {
+          id: 'm-big-image',
+          content: [{
+            type: 'image',
+            attachment: { attachmentId: 'sha256:big', mediaType: 'image/png', bytes: imageBytes.length, width: 1, height: 1 },
+          }],
+        },
+      },
+    })
+    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+
+    const update = (await client.next(30_000)) as {
+      method?: string
+      params?: { update?: { content?: { type?: string; data?: string; mimeType?: string } } }
+    }
+    assert.equal(update.method, 'session/update')
+    const content = update.params?.update?.content
+    assert.equal(content?.type, 'image')
+    assert.equal(content?.mimeType, 'image/png')
+    const received = Buffer.from(content?.data ?? '', 'base64')
+    assert.deepEqual(received, Buffer.from(imageBytes), 'the complete Base64 payload decodes to the exact stored bytes')
+    const frameBytes = Buffer.byteLength(`${JSON.stringify(update)}\n`, 'utf8')
+    assert.ok(frameBytes > 256 * 1024, `the delivered ACP frame must exceed the legacy 256 KiB cap (got ${String(frameBytes)})`)
+    assert.ok(frameBytes <= derived, 'the frame fits the derived outbound budget')
+    const response = (await client.next()) as { id?: number; result?: { stopReason?: string } }
+    assert.equal(response.id, 3)
+    assert.equal(response.result?.stopReason, 'end_turn')
+  } finally {
+    client.close()
+  }
+})
+
+test('PO-4C C-L5-02: a frame above the derived budget closes only that connection before any frame byte is written', async t => {
+  const { scope } = newScope(t)
+  const recorded = recordingDiag()
+  // 1.2 MiB stored -> ~1.6 MiB Base64, above the small derived budget below.
+  const limits = { maxImageBytes: 1_200_000, maxImagesPerMessage: 2, maxMessageImageBytes: 300_000, mediaTypes: ['image/png'] }
+  const imageBytes = Uint8Array.from({ length: 1_200_000 }, (_value, index) => (index * 3) % 251)
+  const fake = makeFakeAccess({
+    imageLimits: limits,
+    readOutputImage: async () => ({ data: imageBytes, mediaType: 'image/png' }),
+  })
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: recorded.diag, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host/proj', mcpServers: [] } })
+    const created = (await client.next()) as { result?: { sessionId?: string } }
+    const sessionId = created.result?.sessionId as string
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'too big' }] } })
+    const request = await waitForFact(() => fake.prompts[0], 'the Host prompt request')
+    const agent = fake.agentOf(sessionId)
+    assert.ok(agent !== undefined)
+    const facts = fake.facts()
+    assert.ok(facts !== undefined)
+    const message = { id: 'm-too-big', source: { kind: 'user', rpcId: request.requestId } }
+    facts.onInboxInserted(agent, message)
+    facts.onInboxClaimed(agent, message, 1)
+    facts.onSessionEvent(agent.session, {
+      type: 'assistant/message',
+      data: {
+        turn: 1,
+        message: {
+          id: 'm-too-big',
+          content: [{
+            type: 'image',
+            attachment: { attachmentId: 'sha256:too-big', mediaType: 'image/png', bytes: imageBytes.length, width: 1, height: 1 },
+          }],
+        },
+      },
+    })
+    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await withTimeout(client.closed, 20_000, 'the over-budget frame must close its own connection')
+    assert.ok(recorded.warnings.some(warning => warning.code === 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'),
+      `the over-budget frame keeps its own class; saw ${JSON.stringify(recorded.warnings.map(warning => warning.code))}`)
+    assert.equal(JSON.stringify(client.getLastFailure?.() ?? null).includes('too-big'), false)
+  } finally {
+    client.close()
+  }
+})
+
+test('PO-4C C-L5-03: a slow reader is closed by the bounded chunked drain while a sibling keeps working', async t => {
+  // The drain deadline is the ONE timer this test drives: the mocked clock
+  // proves the writer really waited for kernel drain instead of rejecting on
+  // the frame cap, so every wait below uses immediate event-loop turns.
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  t.after(() => t.mock.timers.reset())
+  const waitForImmediate = async <T>(read: () => T | undefined, label: string): Promise<T> => {
+    for (let attempt = 0; attempt < 50_000; attempt += 1) {
+      const value = read()
+      if (value !== undefined) return value
+      await new Promise<void>(resolveTick => setImmediate(resolveTick))
+    }
+    throw new Error(`timed out waiting for ${label}`)
+  }
+  const { scope } = newScope(t)
+  const recorded = recordingDiag()
+  const limits = { maxImageBytes: 2 * 1024 * 1024, maxImagesPerMessage: 4, maxMessageImageBytes: 8 * 1024 * 1024, mediaTypes: ['image/png'] }
+  // ~900 KiB of stored bytes -> ~1.2 MiB of canonical Base64 in ONE frame,
+  // above every kernel send buffer so the writer really blocks on drain.
+  const imageBytes = Uint8Array.from({ length: 900_000 }, (_value, index) => (index * 11) % 251)
+  const fake = makeFakeAccess({
+    imageLimits: limits,
+    readOutputImage: async () => ({ data: imageBytes, mediaType: 'image/png' }),
+  })
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: recorded.diag, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const victim = await RawClient.open(listener.socketPath)
+  const healthy = await RawClient.open(listener.socketPath)
+  try {
+    initialize(victim, 1)
+    await victim.next()
+    initialize(healthy, 1)
+    await healthy.next()
+    victim.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host/proj', mcpServers: [] } })
+    const created = (await victim.next()) as { result?: { sessionId?: string } }
+    const sessionId = created.result?.sessionId as string
+    victim.pause()
+    victim.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'stall' }] } })
+    const request = await waitForImmediate(() => fake.prompts[0], 'the Host prompt request')
+    const agent = fake.agentOf(sessionId)
+    assert.ok(agent !== undefined)
+    const facts = fake.facts()
+    assert.ok(facts !== undefined)
+    const message = { id: 'm-stall', source: { kind: 'user', rpcId: request.requestId } }
+    facts.onInboxInserted(agent, message)
+    facts.onInboxClaimed(agent, message, 1)
+    facts.onSessionEvent(agent.session, {
+      type: 'assistant/message',
+      data: {
+        turn: 1,
+        message: {
+          id: 'm-stall',
+          content: [{
+            type: 'image',
+            attachment: { attachmentId: 'sha256:stall', mediaType: 'image/png', bytes: imageBytes.length, width: 1, height: 1 },
+          }],
+        },
+      },
+    })
+    // Advance the mocked clock only after real event-loop turns: once the
+    // chunked writer is waiting on the kernel drain, its 30s deadline closes
+    // ONLY this connection and nothing here ever waits on an unmocked sleep.
+    const sawBackpressure = (): boolean => recorded.warnings.some(warning => warning.code === 'LOCAL_ACP_OUTPUT_BACKPRESSURE')
+    for (let attempt = 0; attempt < 400 && !sawBackpressure(); attempt += 1) {
+      await new Promise<void>(resolveTick => setImmediate(resolveTick))
+      t.mock.timers.tick(30_000)
+    }
+    assert.equal(sawBackpressure(), true, 'the bounded drain closed the slow reader with the existing backpressure class')
+    // A paused reader only observes its peer's close once it reads again.
+    t.mock.timers.reset()
+    victim.resume()
+    await withTimeout(victim.closed, 10_000, 'the dead slow-reader connection is observed by its client')
+    // The sibling connection is entirely unaffected.
+    healthy.send({ jsonrpc: '2.0', id: 9, method: 'session/list', params: {} })
+    const siblingResponse = (await healthy.next()) as { id?: number; error?: { code?: number } }
+    assert.equal(siblingResponse.id, 9)
+    assert.equal(siblingResponse.error?.code, -32042)
+  } finally {
+    victim.close()
+    healthy.close()
+  }
+})
+

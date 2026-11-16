@@ -62,6 +62,12 @@ const MAX_PENDING_REQUESTS = 8
 const IMAGE_METADATA_BYTES = 65_536
 /** Bytes reserved for the JSON-RPC envelope and its trailing newline. */
 const JSON_ENVELOPE_BYTES = 4_096
+/**
+ * Text allowance of ONE outbound committed event when the connection derives
+ * its frame budget from Host attachment limits: a larger derived budget must
+ * not reject ordinary large text output that the legacy wire already bounded.
+ */
+const OUTPUT_TEXT_BYTES = 1024 * 1024
 
 /** The per-connection input bounds; image limits widen only this connection. */
 interface ConnectionInputBounds {
@@ -107,10 +113,45 @@ export function deriveImageInputBounds(limits: AcpImageLimits | undefined): Conn
   }
   return { maxFrameBytes, maxUnconsumedBytes }
 }
-/** A single outbound ACP frame may not exceed this many bytes. */
+/**
+ * Derive ONE connection's outbound single-frame budget from the Host's OWN
+ * boot-frozen attachment limits. A committed image arrives from the official
+ * Store, so its canonical Base64 can exceed the legacy 256 KiB frame; the
+ * allowance covers one bounded event (Base64 expansion of the admitted image
+ * batch, one metadata allowance per image, the JSON-RPC envelope and the
+ * preserved text allowance). This is a TRANSPORT resource bound, never an image
+ * acceptance policy and never a reason to drop, shrink or re-encode content:
+ * the official Attachment Store keeps every byte/count/pixel limit.
+ *
+ * @param limits - the exact Host attachment limits, or undefined without a store.
+ * @returns the per-frame byte budget, or undefined when it cannot be represented.
+ */
+export function deriveImageOutputBounds(limits: AcpImageLimits | undefined): number | undefined {
+  if (limits === undefined) return undefined
+  const { maxMessageImageBytes, maxImagesPerMessage } = limits
+  if (!Number.isSafeInteger(maxMessageImageBytes) || maxMessageImageBytes <= 0
+    || !Number.isSafeInteger(maxImagesPerMessage) || maxImagesPerMessage <= 0
+    || !Number.isSafeInteger(limits.maxImageBytes) || limits.maxImageBytes <= 0) {
+    return undefined
+  }
+  const encoded = 4 * Math.ceil(maxMessageImageBytes / 3)
+  const candidate = encoded + IMAGE_METADATA_BYTES * maxImagesPerMessage + JSON_ENVELOPE_BYTES + OUTPUT_TEXT_BYTES
+  const maxFrameBytes = Math.max(MAX_OUTPUT_FRAME_BYTES, candidate)
+  if (!Number.isSafeInteger(encoded) || !Number.isSafeInteger(candidate) || !Number.isSafeInteger(maxFrameBytes)
+    || maxFrameBytes > bufferConstants.MAX_LENGTH) {
+    return undefined
+  }
+  return maxFrameBytes
+}
+
+/** The legacy single outbound ACP frame cap (unchanged for a text-only Host). */
 const MAX_OUTPUT_FRAME_BYTES = 256 * 1024
 /** Total bytes buffered in the socket awaiting flush on ONE connection. */
 const MAX_OUTPUT_BUFFER_BYTES = 256 * 1024
+/** A frame above the legacy cap is written to the socket in bounded chunks. */
+const OUTPUT_WRITE_CHUNK_BYTES = 64 * 1024
+/** The longest ONE kernel-drain wait of a chunked frame may block the writer. */
+const OUTPUT_DRAIN_TIMEOUT_MS = 30_000
 /** How long a short stale-socket connect probe may run before it is treated as inert-unknown. */
 const CONNECT_PROBE_TIMEOUT_MS = 500
 /** The logical socket file name inside the 0700 scope directory. */
@@ -223,6 +264,13 @@ interface ConnectionState {
   imageEnabled: boolean
   /** The input bounds derived from the Host image limits; text-only until negotiated. */
   inputBounds: ConnectionInputBounds
+  /**
+   * This connection's outbound single-frame budget. It is derived ONCE at
+   * connection establish from the same boot-frozen Host attachment limits (or
+   * the legacy cap without a Store); the inbound image capability never widens
+   * or narrows it, because output images are committed content, not prompts.
+   */
+  maxOutputFrameBytes: number
   /** The connection-scoped Session View state; present only when Session View is installed. */
   view?: ConnectionViewState
 }
@@ -406,32 +454,103 @@ export function createBoundedInput(
 }
 
 /**
+ * Wait for ONE `drain` of this socket under a fixed deadline. A socket
+ * `close`/`error` ends the wait immediately (the connection is gone), and the
+ * deadline fails this connection alone with the existing backpressure class.
+ * Every exit path removes the listeners and the timer.
+ */
+function waitForOutputDrain(socket: Socket, fail: (code: string) => void): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let timer: NodeJS.Timeout | undefined
+    let finished = false
+    const cleanup = (): void => {
+      if (timer !== undefined) clearTimeout(timer)
+      socket.off('drain', onDrain)
+      socket.off('close', onClose)
+      socket.off('error', onError)
+    }
+    const finish = (outcome: 'drained' | 'closed' | 'timeout'): void => {
+      if (finished) return
+      finished = true
+      cleanup()
+      if (outcome === 'drained') resolve()
+      else if (outcome === 'closed') reject(new Error('local acp: output socket closed while draining'))
+      else {
+        fail('LOCAL_ACP_OUTPUT_BACKPRESSURE')
+        reject(new Error('local acp: output drain exceeded its bounded wait'))
+      }
+    }
+    const onDrain = (): void => { finish('drained') }
+    const onClose = (): void => { finish('closed') }
+    const onError = (): void => { finish('closed') }
+    timer = setTimeout(() => { finish('timeout') }, OUTPUT_DRAIN_TIMEOUT_MS)
+    socket.once('drain', onDrain)
+    socket.once('close', onClose)
+    socket.once('error', onError)
+  })
+}
+
+/**
+ * Write ONE frame above the legacy cap in bounded chunks. The connection's
+ * unwritten backlog may never exceed `MAX_OUTPUT_BUFFER_BYTES`: before each
+ * chunk the writer waits (bounded) for the kernel to drain, and a refused
+ * `socket.write()` waits for its own `drain` before the next chunk. A reader
+ * that never drains the socket therefore closes THIS connection on the existing
+ * backpressure class; the Host, the Agent and every sibling connection are
+ * untouched, and no Host prompt is retried.
+ */
+async function writeChunkedFrame(socket: Socket, frame: Uint8Array, fail: (code: string) => void): Promise<void> {
+  let offset = 0
+  while (offset < frame.byteLength) {
+    const end = Math.min(offset + OUTPUT_WRITE_CHUNK_BYTES, frame.byteLength)
+    // The backlog guard is checked BEFORE every chunk, so a chunk is never
+    // accepted past the connection's unwritten-output bound.
+    while (!socket.destroyed && socket.writableLength + (end - offset) > MAX_OUTPUT_BUFFER_BYTES) {
+      await waitForOutputDrain(socket, fail)
+    }
+    if (socket.destroyed) throw new Error('local acp: output socket closed while writing a frame')
+    const accepted = socket.write(frame.subarray(offset, end))
+    offset = end
+    if (!accepted) await waitForOutputDrain(socket, fail)
+  }
+}
+
+/**
  * Build the bounded output side.
  *
  * Node reflects bytes accepted but not yet flushed to the kernel in
  * `socket.writableLength`, so the pre-write cap on `writableLength + frame` is
  * the enforced bound on "unwritten output": it closes a slow reader's
- * connection instead of letting the queue grow without limit. We deliberately
- * resolve each sink write after `socket.write()` accepts the bytes rather than
- * chaining an unbounded drain wait; the cap above is what terminates a stalled
- * consumer and keeps memory bounded.
+ * connection instead of letting the queue grow without limit. Frames up to the
+ * legacy cap keep the original accept-then-resolve behavior. A larger frame —
+ * only possible when the connection derived a bounded budget from the Host's
+ * attachment limits — is written in 64 KiB chunks under the same backlog bound
+ * and a bounded kernel drain, so ONE legal committed image can reach a reading
+ * client without letting a stalled reader grow memory.
  */
 function createBoundedOutput(
   socket: Socket,
   fail: (code: string) => void,
+  maxOutputFrameBytes: number,
 ): WritableStream<Uint8Array> {
   return new WritableStream<Uint8Array>({
-    write(frame) {
+    async write(frame) {
       if (socket.destroyed) throw new Error('local acp: output socket already closed')
-      if (frame.byteLength > MAX_OUTPUT_FRAME_BYTES) {
+      // The frame-budget refusal happens BEFORE any byte of this frame is
+      // written; the connection closes and the content is never truncated.
+      if (frame.byteLength > maxOutputFrameBytes) {
         fail('LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE')
-        throw new Error('local acp: output frame exceeds the per-frame cap')
+        throw new Error('local acp: output frame exceeds the connection frame budget')
       }
-      if (socket.writableLength + frame.byteLength > MAX_OUTPUT_BUFFER_BYTES) {
-        fail('LOCAL_ACP_OUTPUT_BACKPRESSURE')
-        throw new Error('local acp: output backlog exceeds the connection cap')
+      if (frame.byteLength <= MAX_OUTPUT_FRAME_BYTES) {
+        if (socket.writableLength + frame.byteLength > MAX_OUTPUT_BUFFER_BYTES) {
+          fail('LOCAL_ACP_OUTPUT_BACKPRESSURE')
+          throw new Error('local acp: output backlog exceeds the connection cap')
+        }
+        socket.write(frame)
+        return
       }
-      socket.write(frame)
+      await writeChunkedFrame(socket, frame, fail)
     },
   }, new ByteLengthQueuingStrategy({ highWaterMark: MAX_OUTPUT_BUFFER_BYTES }))
 }
@@ -641,6 +760,7 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
     closed: false,
     imageEnabled: false,
     inputBounds: TEXT_ONLY_BOUNDS,
+    maxOutputFrameBytes: deriveImageOutputBounds(context.sessionAccess?.imageLimits()) ?? MAX_OUTPUT_FRAME_BYTES,
     ...(view === undefined ? {} : { view }),
   }
   context.connectionStates.set(socket, state)
@@ -686,7 +806,7 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
   socket.on('close', teardown)
 
   const input = createBoundedInput(socket, state, fail)
-  const output = createBoundedOutput(socket, fail)
+  const output = createBoundedOutput(socket, fail, state.maxOutputFrameBytes)
   const app = buildAgentApp(state, view, context, fail)
   const stream = ndJsonStream(output, input)
   connection = app.connect(stream)
