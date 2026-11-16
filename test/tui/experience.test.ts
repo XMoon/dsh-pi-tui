@@ -100,12 +100,13 @@ test('plan mode hints the EMPTY composer draft and never a non-empty or pending-
   await vt.waitForRender()
   // Pending enter (plan off, a selection awaiting the next step): the hint
   // never claims the mode is already committed.
-  app.setPlanMode({ effective: false, pending: true })
+  app.setPlanMode(false, true)
   await vt.waitForRender()
   view = await viewport(vt)
   assert.ok(!view.includes('Plan mode · describe'), `a pending-enter session must not claim committed plan mode:\n${view}`)
+  assert.ok(view.includes('Plan requested · pending'), `the pending-enter hint missing:\n${view}`)
   // Effective + pending change: the change note, still not silent.
-  app.setPlanMode({ effective: true, pending: false })
+  app.setPlanMode(true, true)
   await vt.waitForRender()
   view = await viewport(vt)
   assert.ok(view.includes('Plan mode · change pending'), `the pending-change hint missing:\n${view}`)

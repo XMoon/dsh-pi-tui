@@ -179,6 +179,45 @@ transcript Search under Question/Approval**. Until that ownership proof exists,
 the existing modal routing consumes Search input rather than falling through to
 the generic Host ladder.
 
+### 6.0 The official plan-review Question branch
+
+An OFFICIAL plan-review Question (the exact intent shape: one question whose
+`intent.kind` is `plan-review`, whose `intent.approve` names one of its own
+options, and which offers at least one other option — nothing else, never a
+header or label match) replaces the generic Q1→Review→Submit pages with ONE
+compact decision component in the same editor seat:
+
+- Decision rows are fixed `View plan → Keep planning… → <official approve
+  label> plan`; the default cursor is View (Fullscreen, when the host's
+  read-only inspection is installed) or Keep (otherwise) — never Approve.
+  Answer values are always the OFFICIAL option labels.
+- `View plan` triggers the host's one-shot read-only inspection: it resolves
+  the official `intent.callId` against the CURRENT transcript (a native
+  `tool.callId` or a nested PTC `subCallId`), reveals the card through the
+  existing temporary search-reveal machinery (no second ScrollView, no manual
+  disclosure writes) and scrolls the same fullscreen viewport to the card's
+  measured row. A proven locate enters the READING step; an unprovable target
+  degrades to the question's own `detail` full-text page (paged to the very
+  end) — never a claimed-located reading state.
+- Reading: scroll keys drive the transcript viewport through the same
+  ScrollView; `Enter` is inert; `Esc` returns to the decision list (never a
+  cancel) and releases the temporary reveal grant plus the plan's own forced
+  PTC sub-call expansion (a user-opened sub-call stays open). Settling the
+  question releases them too.
+- Keep planning… opens the feedback input (draft survives Esc); Enter answers
+  the official keep label with the optional custom text. The generic
+  custom-first submit path is never used (it would clear the selected label).
+- `Esc` on the decision list is the OFFICIAL dismiss (`onCancel` →
+  `ASK_CANCELLED`); `Ctrl+C` is the official cancel everywhere in the branch.
+- The pointer route follows §6's Question contract: the decision rows are real
+  click targets (keyboard-Enter parity), the action bar carries the same verbs
+  with last-painted identity, and Regular has no application pointer path.
+- A plan-review Question keeps the ordinary Question lifetime: the
+  `QuestionSurfaceController`, the FIFO queue, park/reopen and the continued
+  lifecycle own it exactly like any other question. The branch owns only its
+  local step state (decision/reading/feedback/fallback) and the feedback
+  draft; `draftSnapshot` carries only that draft.
+
 Fullscreen Question pointer handling uses the same semantic boundary:
 
 - clicks inside the Question frame remain Question-owned;

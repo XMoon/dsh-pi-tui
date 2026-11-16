@@ -30,7 +30,7 @@ export function pituiDisplaySeam(app: TuiApp): SurfaceDisplaySeam {
     commitStatusFacts(facts: DisplayStatusFacts) {
       if (facts.busy !== undefined) app.setBusy(facts.busy)
       if (facts.working !== undefined) app.setWorking(facts.working)
-      if (facts.planMode !== undefined) app.setPlanMode(facts.planMode)
+      if (facts.planMode !== undefined) app.setPlanMode(facts.planMode, facts.planPending)
       // `sessionTitle` may be EXPLICITLY undefined (the Remote current-facts
       // path clears an absent title); distinguish presence from value.
       if ('sessionTitle' in facts) app.setSessionTitle(facts.sessionTitle)

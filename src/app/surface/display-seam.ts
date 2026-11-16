@@ -54,10 +54,11 @@ export interface DisplayDockNotice {
 export interface DisplayStatusFacts {
   readonly busy?: boolean
   readonly working?: boolean
-  /** The official plan projection's effective/pending state. `pending` is
-   * present only when the official source reports it (a selection awaiting
-   * the next accepted step); absent keeps the boolean-only contract. */
-  readonly planMode?: boolean | { readonly effective: boolean; readonly pending?: boolean }
+  readonly planMode?: boolean
+  /** The official plan projection's pending selection, committed beside
+   * `planMode` (a selection awaiting the next accepted step). Omitted when
+   * the source cannot report it. */
+  readonly planPending?: boolean
   readonly sessionTitle?: string | undefined
   readonly todos?: readonly TodoItem[]
   readonly compactionPhase?: CompactionPhase

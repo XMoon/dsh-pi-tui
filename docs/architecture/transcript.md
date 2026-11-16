@@ -1247,6 +1247,16 @@ Every card renders through the Web parity render intents in
   `presentCall` remains the preferred Direct presentation; this fallback covers
   replay after definition unload and Remote logs, where no Host definition is
   available.
+- `exit_plan_mode` (plan review): the Direct branch renders the Host
+  `presentCall`'s generic card (the plan's first heading as the title, the
+  complete plan markdown as the content — visible while the call runs, not
+  only after settle). The Remote Client presenter derives the SAME generic
+  card presentation-only from the logged call arguments (`plan` a non-empty
+  string starting with a `#` heading; anything else keeps the generic tool
+  row), so replay and the Remote branch show the same card. The card is the
+  read target of the plan-review Question's one-shot inspection (see
+  `overlay-focus.md` §6.0); a card-less review degrades to the question's own
+  detail text, never a fabricated card.
 
 Must-not: render raw JSON or raw model-facing XML on a folded row; beautify an
 expanded generic JSON body; mutate `TranscriptMessage` or model bytes; let an

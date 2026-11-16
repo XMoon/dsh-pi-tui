@@ -17366,31 +17366,32 @@ export class TuiApp {
    * border and the empty-draft composer hint (`Plan mode · describe the task`,
    * or the pending variants while a selection awaits the next accepted step).
    * The viewer placeholder (a child viewer's `Message <label>…`) keeps its own
-   * priority; the plan hint applies only to the MAIN subject's empty draft. */
-  setPlanMode(active: boolean | { readonly effective: boolean; readonly pending?: boolean }): void {
-    const effective = typeof active === 'boolean' ? active : active.effective
-    const pending = typeof active === 'boolean' ? undefined : active.pending
-    this.planMode = effective
+   * priority; the plan hint applies only to the MAIN subject's empty draft.
+   * @param active - the official `plan` projection's effective flag.
+   * @param pending - the projection's pending selection, when it reports one.
+   */
+  setPlanMode(active: boolean, pending?: boolean): void {
+    this.planMode = active
     // The composer's plan hint state (presentation-only; the same projection
     // drives the footer badge — never a second plan authority).
-    this.planHint = effective
+    this.planHint = active
       ? pending === true
+        ? 'Plan mode · change pending'
+        : 'Plan mode · describe the task'
+      : pending === true
         ? 'Plan requested · pending'
-        : pending === false
-          ? 'Plan mode · change pending'
-          : 'Plan mode · describe the task'
-      : undefined
+        : undefined
     // The collaboration projection's store notify re-renders the footer.
     this.projectStatus({
       collaboration: {
         plan: pending === undefined
-          ? { effective }
-          : { effective, pending },
+          ? { effective: active }
+          : { effective: active, pending },
       },
     })
     this.renderHeader()
     const seat = this.seatEditor()
-    seat.borderColor = effective ? color.warning : this.editorBorder
+    seat.borderColor = active ? color.warning : this.editorBorder
     seat.invalidate()
     this.refreshComposerPlaceholder()
     this.requestRender()

@@ -570,7 +570,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       eventCount: events.length,
       elapsedMs: Number(hydrated.scanTimings.statsMs.toFixed(3)),
     })
-    deps.surface.display.commitStatusFacts({ planMode: input.planActive, working: input.working, busy: input.working })
+    deps.surface.display.commitStatusFacts({ ...planFacts(input.planActive), working: input.working, busy: input.working })
     if (input.facts !== undefined) {
       // REMOTE: the official projections ARE the current-value authority. An
       // unavailable one is OMITTED — the bounded window never stands in for a
@@ -769,15 +769,24 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   /** The Remote-branch plan fact: the official `plan` projection read is
    *  injected by the bootstrap (status facts bundle); absent deps read
    *  inactive. Kept as a late-bound read so the projection updates between
-   *  hydration and commit are honored. Carries the projection's `pending`
-   *  when the official view reports it. */
+   *  hydration and commit are honored. */
   const planActiveRemote = (
     sessionId: string,
-  ): boolean | { readonly effective: boolean; readonly pending?: boolean } => {
+  ): { readonly effective: boolean; readonly pending?: boolean } => {
     const plan = deps.remote?.plan?.(sessionId)
-    if (plan === undefined) return false
-    return { effective: plan.active, ...(plan.pending ? { pending: true } : { pending: false }) }
+    if (plan === undefined) return { effective: false }
+    return plan.pending ? { effective: plan.active, pending: true } : { effective: plan.active }
   }
+
+  /** Split one official plan fact into the two committed status facts: the
+   * boolean mode and (only when the official view reports it) the pending
+   * selection. */
+  const planFacts = (
+    plan: boolean | { readonly effective: boolean; readonly pending?: boolean },
+  ): { planMode: boolean; planPending?: boolean } =>
+    typeof plan === 'boolean'
+      ? { planMode: plan }
+      : { planMode: plan.effective, ...(plan.pending === undefined ? {} : { planPending: plan.pending }) }
 
   /**
    * Re-hydrate the main transcript from the CURRENT reader window after an
@@ -852,7 +861,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // `applyResumedCompaction(false)` clears only the compaction phase, so
     // without this commit a stale working/busy would stay on screen after an
     // outage-spanning compaction/turn end.
-    deps.surface.display.commitStatusFacts({ planMode: planActive, working, busy: working })
+    deps.surface.display.commitStatusFacts({ ...planFacts(planActive), working, busy: working })
     deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active, resumedCompaction.phase)
     // Same parity as the cold hydrate: the routing's bracket is this window's
     // now, so the LIVE tracker must agree — otherwise a later matched live end
