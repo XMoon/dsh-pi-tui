@@ -147,6 +147,8 @@ type McpBarAction =
   | 'start-search'
   /** PR-D: finish the search with the EXISTING Enter commit. */
   | 'finish-search'
+  /** PR-D: remove the currently FOCUSED removable form row via Backspace. */
+  | 'remove-form-row'
 
 /** One painted hit target of the LAST frame, in page-local cells. A form row
  *  carries the FIELD identity so a click activates exactly the row that was
@@ -329,6 +331,16 @@ const EDITOR_HINTS: readonly McpBarSegment[] = [
   { text: 's Save', priority: 40, action: 'save' },
   { text: 'Back [Esc]', priority: 1000, action: 'back' },
 ]
+/** PR-D: the per-field Remove affordance, inserted after `s Save` in display
+ *  order. Its priority outlives the browsing hints and drops before Save, so a
+ *  tight row keeps `s Save · Remove · Back [Esc]` whole. */
+const REMOVE_FORM_HINT: McpBarSegment = {
+  text: 'Remove [Backspace]',
+  short: 'Remove',
+  priority: 35,
+  action: 'remove-form-row',
+  ink: 'secondary',
+}
 const EDITOR_INPUT_HINTS: readonly McpBarSegment[] = [
   { text: 'Enter apply', short: 'Enter', priority: 30, action: 'apply-input' },
   { text: 'Esc cancel', short: 'Esc', priority: 1000, action: 'cancel' },
@@ -914,6 +926,24 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     }
   }
 
+  /**
+   * PR-D: the focused form row when it is a REMOVABLE one. The capability comes
+   * from {@link mcpFormRows}'s `removable` (itself derived from the controller's
+   * per-key provenance), never from the painted text, and never while an input,
+   * a question or an unsettled save owns the draft.
+   */
+  private focusedRemovableRow(snapshot: McpServersSnapshot): McpFormRow | undefined {
+    const editor = snapshot.editor
+    if (this.view !== 'editor' || editor === undefined) return undefined
+    if (this.formInput !== undefined || this.discardConfirm) return undefined
+    if (snapshot.configConfirm !== undefined || snapshot.confirmingName !== undefined) return undefined
+    if (snapshot.configStatus?.kind === 'saving') return undefined
+    const row = mcpFormRows(editor,
+      (field, key) => this.controller.dictValueForm(field, key),
+      (field, key) => this.controller.canRemoveDictKey(field, key))[this.formFocus]
+    return row?.removable === true ? row : undefined
+  }
+
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
     const paint = this.paint
@@ -939,6 +969,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         if (this.searching && this.view === 'list' && !this.inDetailAt(event.x)) {
           this.moveSelection(delta, this.controller.snapshot())
         }
+        return { handled: true }
+      }
+      if (this.view === 'editor') {
+        // PR-D: the Editor wheel moves ONLY the current form field focus (the
+        // same Up/Down the keyboard runs); the hidden list selection and the
+        // hidden detail offset never move.
+        this.handleEditorInput(delta < 0 ? '\x1b[A' : '\x1b[B', this.controller.snapshot())
         return { handled: true }
       }
       if (this.inDetailAt(event.x)) {
@@ -1150,6 +1187,12 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       case 'finish-search':
         // The search bar's `Done [Enter]` IS the keyboard Enter commit.
         if (this.searching) this.handleInput('\r')
+        return
+      case 'remove-form-row':
+        // The bar's `Remove [Backspace]` IS the keyboard Backspace on the
+        // CURRENT focused row: the same admission and the same controller
+        // intent, never a direct draft write.
+        if (this.focusedRemovableRow(snapshot) !== undefined) this.handleInput('\x7f')
         return
     }
   }
@@ -1943,7 +1986,15 @@ export class McpServersPage implements EmbeddedSpecialistPage {
           { text: 'Esc', priority: 999 },
         ], width, true)
       }
-      return paintBar(EDITOR_HINTS, width, true)
+      if (this.focusedRemovableRow(snapshot) === undefined) return paintBar(EDITOR_HINTS, width, true)
+      // The per-field Remove sits after `s Save`; the layout drops browsing
+      // hints first, so a tight row keeps Save · Remove · Back whole.
+      const saveIndex = EDITOR_HINTS.findIndex(segment => segment.action === 'save')
+      return paintBar([
+        ...EDITOR_HINTS.slice(0, saveIndex + 1),
+        REMOVE_FORM_HINT,
+        ...EDITOR_HINTS.slice(saveIndex + 1),
+      ], width, true)
     }
     if (snapshot.confirmingName !== undefined) {
       return paintBar(

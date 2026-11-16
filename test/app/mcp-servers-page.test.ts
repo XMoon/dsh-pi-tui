@@ -1515,3 +1515,197 @@ test('a reopened discard needs a new painted admission for both keyboard and poi
   page.handleInput('d')
   assert.equal(controller.calls.includes('discardEditor'), true)
 })
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * PR-D D2: the editor wheel and the per-field Remove affordance.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/** Walk the form focus with the keyboard Down until the frame matches. */
+function focusUntil(page: McpServersPage, width: number, rows: number, predicate: (frame: string) => boolean): void {
+  for (let step = 0; step < 40; step += 1) {
+    if (predicate(render(page, width, rows).join('\n'))) return
+    page.handleInput('\x1b[B')
+  }
+  assert.fail(`the form focus never reached the expected row:\n${render(page, width, rows).join('\n')}`)
+}
+
+/** Walk the form focus with the WHEEL until the frame matches. */
+function wheelFocusUntil(page: McpServersPage, width: number, rows: number, predicate: (frame: string) => boolean): void {
+  for (let step = 0; step < 40; step += 1) {
+    if (predicate(render(page, width, rows).join('\n'))) return
+    page.handleMouse({ ...mouseBase(width, rows), type: 'wheel', wheelDelta: 1, x: 2, y: 2 })
+  }
+  assert.fail(`the wheel never reached the expected form row:\n${render(page, width, rows).join('\n')}`)
+}
+
+test('the editor wheel moves only the current form focus, never the hidden list selection or detail', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ args: ['--one'], dirty: true }),
+  }))
+  // The WIDE layout still holds the list model behind the whole-page form.
+  openEditor(page, 'e', 120, 24)
+  const base = mouseBase(120, 24)
+  assert.match(render(page, 120, 24).join('\n'), /▸ Name:/u, 'the focus starts on the first field')
+  // The LEFT region (where the hidden list would live) moves the FORM focus.
+  page.handleMouse({ ...base, type: 'wheel', wheelDelta: 1, x: 4, y: 5 })
+  assert.match(render(page, 120, 24).join('\n'), /▸ Transport:/u,
+    'the left-region wheel advances the form field')
+  // The RIGHT region (where the hidden Detail would live) moves the FORM focus.
+  page.handleMouse({ ...base, type: 'wheel', wheelDelta: 1, x: 100, y: 5 })
+  assert.match(render(page, 120, 24).join('\n'), /▸ Enabled:/u,
+    'the right-region wheel advances the form field')
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('move:') || call.startsWith('select:')), [],
+    'the wheel never moves the hidden list selection')
+  assert.equal(controller.snapshotValue.selectedName, 'alpha', 'the hidden selection is untouched')
+})
+
+test('the short editor wheel reaches a field that was not painted, and clicking it opens its Enter intent', () => {
+  for (const [width, rows] of [[44, 20], [44, 8]] as const) {
+    const { page, controller } = makePage(snapshot({
+      selectedConfig: CONFIG_FACET,
+      editor: editorSnapshot({ args: ['--one', '--two', '--three'], dirty: true }),
+    }))
+    openEditor(page, 'e', width, rows)
+    wheelFocusUntil(page, width, rows, frame => /▸ Arg 2:/u.test(frame))
+    const lines = render(page, width, rows)
+    const focusRow = lines.findIndex(line => line.includes('▸ Arg 2'))
+    assert.ok(focusRow >= 0, `${width}x${rows}: the wheeled-to field must be painted`)
+    controller.calls.length = 0
+    clickBodyCell(page, width, rows, focusRow)
+    assert.match(render(page, width, rows).join('\n'), /edit: >/u,
+      `${width}x${rows}: the pointer opened the field's own input`)
+    page.handleInput('Z')
+    page.handleInput('\r')
+    assert.deepEqual(controller.calls.filter(call => call.startsWith('setArg')), [`setArg:1=--twoZ`],
+      `${width}x${rows}: the input commit ran the row's own sink exactly once`)
+  }
+})
+
+test('a painted Remove deletes exactly the focused removable row and writes nothing', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ args: ['--flag'], env: [{ key: 'E', value: '${credential:E}' }], dirty: true }),
+  }))
+  openEditor(page, 'e', 100, 20)
+  focusUntil(page, 100, 20, frame => /▸ Arg 1:/u.test(frame))
+  const bar = render(page, 100, 20).at(-1) ?? ''
+  assert.match(bar, /Remove \[Backspace\]/u, 'the removable row advertises Remove')
+  assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:remove-form-row'))
+  controller.calls.length = 0
+  clickBarSpan(page, 'bar:remove-form-row', 100, 20)
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('removeArg')), ['removeArg:0'],
+    'only the focused argument row is removed')
+  assert.deepEqual(
+    controller.calls.filter(call => call.startsWith('set') || call === 'saveEditor' || call.startsWith('removeDict')),
+    [],
+    'nothing else is touched and no Host write runs',
+  )
+  // The original keyboard Backspace stays the same sink on the same row.
+  page.handleInput('\x7f')
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('removeArg')), ['removeArg:0', 'removeArg:0'],
+    'the keyboard Backspace removes the same focused row through the same intent')
+})
+
+test('an inherited key never paints or runs Remove, while a user-added key right beside it does', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({
+      env: [{ key: 'BASE', value: 'base' }, { key: 'USER', value: '${credential:U}' }],
+      dirty: true,
+    }),
+  }))
+  // The real controller refuses removal of exactly the base-owned key.
+  controller.canRemoveDictKey = (_field: string, key: string) => key !== 'BASE'
+  openEditor(page, 'e', 100, 32)
+  focusUntil(page, 100, 32, frame => /▸ Env key: BASE · Inherited/u.test(frame))
+  const inheritedBar = render(page, 100, 32).at(-1) ?? ''
+  assert.doesNotMatch(inheritedBar, /Remove/u, 'an inherited key offers no Remove affordance')
+  assert.equal(page.paintedBarSpans().some(span => span.id === 'bar:remove-form-row'), false)
+  controller.calls.length = 0
+  // Even a forged activation of the absent span runs nothing.
+  page.activateBarSpan('bar:remove-form-row')
+  page.handleInput('\x7f')
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('removeDict')), [],
+    'the inherited key is never removed')
+  // The user-added key beside it paints Remove and removes ONLY that key.
+  focusUntil(page, 100, 32, frame => /▸ Env key: USER/u.test(frame))
+  const userBar = render(page, 100, 32).at(-1) ?? ''
+  assert.match(userBar, /Remove/u)
+  controller.calls.length = 0
+  clickBarSpan(page, 'bar:remove-form-row', 100, 32)
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('removeDict')), ['removeDict:env:USER'])
+})
+
+test('Remove is absent while an input, a discard prompt or a save owns the editor', () => {
+  // (a) the active input bar is the input's own decision surface.
+  const input = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ args: ['--flag'], dirty: true }),
+  }))
+  openEditor(input.page, 'e', 100, 20)
+  focusUntil(input.page, 100, 20, frame => /▸ Arg 1:/u.test(frame))
+  input.page.handleInput('\r')
+  const inputBar = render(input.page, 100, 20).at(-1) ?? ''
+  assert.match(inputBar, /Enter apply/u)
+  assert.doesNotMatch(inputBar, /Remove/u)
+  // (b) an unsettled Save freezes the draft and offers no Remove.
+  const saving = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ args: ['--flag'], dirty: true }),
+    configStatus: { kind: 'saving', text: 'Saving configuration…' },
+  }))
+  openEditor(saving.page, 'e', 100, 20)
+  const savingBar = render(saving.page, 100, 20).at(-1) ?? ''
+  assert.match(savingBar, /Saving configuration/u)
+  assert.doesNotMatch(savingBar, /Remove/u)
+  // (c) the discard question owns the decision surface.
+  const discard = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ args: ['--flag'], dirty: true }),
+  }))
+  openEditor(discard.page, 'e', 100, 20)
+  discard.page.handleInput('\x1b')
+  const discardBar = render(discard.page, 100, 20).at(-1) ?? ''
+  assert.match(discardBar, /Discard/u)
+  assert.doesNotMatch(discardBar, /Remove/u)
+})
+
+test('a wheel between the Remove press and its release never removes', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ args: ['--flag'], dirty: true }),
+  }))
+  openEditor(page, 'e', 100, 20)
+  focusUntil(page, 100, 20, frame => /▸ Arg 1:/u.test(frame))
+  const span = page.paintedBarSpans().find(candidate => candidate.id === 'bar:remove-form-row')
+  assert.ok(span !== undefined)
+  const base = mouseBase(100, 20)
+  page.handleMouse({ ...base, type: 'press', x: span.startCol, y: 19 })
+  page.handleMouse({ ...base, type: 'wheel', wheelDelta: 1, x: 2, y: 3 })
+  render(page, 100, 20)
+  page.handleMouse({ ...base, type: 'click', x: span.startCol, y: 19 })
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('removeArg')), [],
+    'a wheel-revoked Remove press never removes')
+  // A fresh complete click is the positive control and removes once.
+  page.handleInput('\x1b[A') // back to the Arg 1 row the wheel moved off
+  render(page, 100, 20)
+  clickBarSpan(page, 'bar:remove-form-row', 100, 20)
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('removeArg')), ['removeArg:0'])
+})
+
+test('44 columns still paints s Save, Remove and Back [Esc] whole for a removable row', () => {
+  const { page } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ args: ['--flag'], dirty: true }),
+  }))
+  openEditor(page, 'e', 44, 20)
+  wheelFocusUntil(page, 44, 20, frame => /▸ Arg 1:/u.test(frame))
+  const bar = render(page, 44, 20).at(-1) ?? ''
+  assert.match(bar, /s Save/u)
+  assert.match(bar, /Remove/u)
+  assert.match(bar, /Back \[Esc\]/u)
+  assert.ok(visibleWidth(bar) <= 44, `no overflow at 44 columns: ${bar}`)
+  assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:remove-form-row'),
+    'the compacted Remove is still a real target')
+})
