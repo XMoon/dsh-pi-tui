@@ -663,6 +663,34 @@ it never changes the current listener, and its Detail states that explicitly.
 On Direct the runtime row is a truthful Unavailable while the persisted
 preference stays editable for the Split Host the user may later start.
 
+## Save Location
+
+`/export` and `/transcript` open the ONE Client-local Save Location prompt in
+the editor seat. It is filesystem UI, never an agent question, and it never
+introduces a second artifact writer: the artifact filename is FIXED and
+read-only, only the directory (resolved against the Client process cwd) is
+editable, and the existing per-artifact local writer stays the only commit
+sink.
+
+Fullscreen paints the complete action row for the CURRENT state, and a pointer
+click is equivalent to that state's keyboard verb:
+
+- editing with no suggestions: `Save [Enter]` validates and saves exactly like
+  Enter, and `Cancel [Esc]` cancels exactly like Esc;
+- editing with suggestions visible: `Dismiss suggestions [Esc]` only closes the
+  suggestion list (the next frame then offers `Cancel [Esc]`); clicking a
+  suggestion row still selects/accepts it with the Tab semantic;
+- a target-file collision: `Yes [Y]` is the ONE overwrite consent for that
+  validated target, and `No [N]` (like Esc in that state) returns to directory
+  editing without cancelling or writing.
+
+A verb is painted WHOLE or dropped, with the safe exit kept first, and a
+truncated or off-frame verb is never a hit target. The complete click target is
+proven against the last-painted frame and the current prompt state, so a key,
+wheel, resize, async suggestion refresh, preempting seat or already-settled
+prompt can never replay an old gesture. The per-open settle latch still permits
+exactly ONE `selected`/`cancelled` result.
+
 ## Settings Workspace
 
 `/settings` and its real alias `/status` open ONE fullscreen lease with ONE
@@ -1101,12 +1129,22 @@ specialist-page contract below).
   this page (an optional legacy notice points the user to the external profile
   YAML; no automatic migration).
 
-  Every write is ONE explicit Enter confirmation that enters the command
-  owner's single Web FIFO. At its turn the intent re-proves readiness and
-  section availability, takes the NEWEST committed read as its base, refuses a
-  custom-route/candidate violation with ZERO writes and dispatches the ONE
-  official setter. A fresh read-back then decides the settled word: `Verified`
-  only when the authority holds the requested identity, `Not saved` (with the
+  Every write is ONE explicit confirmation — the keyboard `Enter` OR a click on
+  the complete, same-intent `Confirm [Enter]` span that this page painted in the
+  LAST frame and the Settings workspace root delegates through its ONE physical
+  Action Bar row — that enters the command owner's single Web FIFO. The bar
+  paints `Confirm [Enter] · Back [Esc]` (plus a muted `↑/↓ choose` hint when the
+  width allows) only while the highlighted candidate is inside the painted
+  Detail viewport and the latest authority is ready and writable; a candidate
+  row click only moves the draft highlight and writes nothing. A Confirm span
+  that is absent, cropped, from a previous frame or invalidated by any
+  key/wheel/resize/refresh/save phase dispatches nothing, and the delegated
+  activation re-proves the same row, raw candidate and live authority before
+  the same `confirmSelected()` path runs. At its turn the intent re-proves
+  readiness and section availability, takes the NEWEST committed read as its
+  base, refuses a custom-route/candidate violation with ZERO writes and
+  dispatches the ONE official setter. A fresh read-back then decides the
+  settled word: `Verified` only when the authority holds the requested identity, `Not saved` (with the
   value the Host really keeps) when a readable authority differs, and `Outcome
   unknown` when the result cannot be read back. A superseded read never decides
   a verdict; a newer read is awaited first, and a page closed mid-write only

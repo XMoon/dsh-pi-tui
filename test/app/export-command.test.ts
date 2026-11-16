@@ -20,7 +20,7 @@ import { afterEach, test } from 'node:test'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { ProcessTerminal } from '@xmoon76/pi-tui'
+import { ProcessTerminal, stripTerminalSequences } from '@xmoon76/pi-tui'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
@@ -36,6 +36,7 @@ import { DirectSessionArchive } from '../../src/runtime/direct/session-archive-d
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { waitForFrame } from '../support/frame-wait.ts'
 import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import type { SessionMarkdownPort } from '../../src/runtime/session-markdown-port.ts'
@@ -1333,8 +1334,129 @@ test('BLOCKING: /transcript writes the OFFICIAL Markdown of the captured origina
   assert.equal(content.endsWith('\n'), true)
 })
 
-// ── 23.4 ArtifactSaveOwner Markdown source classification ────────────────
+/** The painted fullscreen frame as plain text lines (ANSI stripped). */
+function paintedScreen(vt: VirtualTerminal): readonly string[] {
+  return vt.getViewport().map(line => stripTerminalSequences(line))
+}
 
+/** Wait for one painted fullscreen frame satisfying the predicate. */
+async function waitForScreen(
+  vt: VirtualTerminal,
+  label: string,
+  predicate: (frame: string) => boolean,
+): Promise<readonly string[]> {
+  await waitForFrame(() => paintedScreen(vt).join('\n'), predicate, () => vt.waitForRender(), label)
+  return paintedScreen(vt)
+}
+
+/** One REAL SGR left press/release on a painted word (1-based terminal cells). */
+function clickScreenWord(vt: VirtualTerminal, lines: readonly string[], word: string): void {
+  const row = lines.findIndex(line => line.includes(word))
+  assert.ok(row >= 0, `${word} is not painted:\n${lines.join('\n')}`)
+  const column = lines[row]!.indexOf(word)
+  assert.ok(column >= 0, `${word} has no painted column`)
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+}
+
+test('SGR Save / No / Yes in the fullscreen editor seat writes the official transcript exactly once', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-export-mouse-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const outDir = life.tempDir('dsh-export-mouse-out-')
+  const target = join(outDir, 'dsh-session-session-a.md')
+  // C-S03: a pre-existing target enters the collision confirmation; NO must
+  // leave it untouched and YES must replace it exactly once.
+  writeFileSync(target, 'STALE\n')
+  const eventsA = [
+    { type: 'session/title', seq: 0, time: 1, data: { title: 'Session A title' } },
+    { type: 'turn/start', seq: 1, time: 2, data: { turn: 0 } },
+    {
+      type: 'user/message', seq: 2, time: 3, surfaceOp: 'append',
+      data: { id: 'u-a', role: 'user', content: [{ type: 'text', text: 'question from A 汉字' }], source: { kind: 'user' } },
+    },
+    {
+      type: 'assistant/message', seq: 3, time: 4, surfaceOp: 'append',
+      data: {
+        turn: 0, step: 0,
+        message: {
+          id: 'a-a', role: 'assistant',
+          content: [{ type: 'text', text: 'answer from A 🙂' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+        stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    },
+    { type: 'turn/end', seq: 4, time: 5, data: { turn: 0, reason: { kind: 'completed' } } },
+  ] as const
+  const sessionA = {
+    id: 'session-a',
+    header: { id: 'session-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: eventsA,
+  }
+  const harness = makeHarness(home, { sessions: { 'session-a': sessionA } })
+  const probe = installAppProbe()
+  life.defer(probe.restore)
+  const vt = new VirtualTerminal(100, 30)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const ctx = new Context()
+  life.defer(() => disposeContext(ctx))
+  const fiber = await mountRunner(ctx, home, harness, { sessionId: 'session-a' }, {})
+  life.defer(() => fiber.dispose())
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  startedApps.add(app)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // The REAL fullscreen input path submits the command; the artifact workflow
+  // then opens the Save Location seat after the command lifecycle settles.
+  vt.sendInput('/transcript')
+  vt.sendInput('\r')
+  await waitForScreen(vt, 'the Save Location seat to open', frame => frame.includes('Save readable transcript'))
+  // Type the absolute Client directory, replacing the initial './'.
+  vt.sendInput('\x15') // Ctrl+U: delete to line start (the shared Input binding)
+  vt.sendInput(outDir)
+  const ready = await waitForScreen(vt, 'the settled directory suggestion', frame =>
+    frame.includes('Save [Enter]') && frame.includes(`→ ${outDir}/`))
+  // The painted suggestion row proves the async refresh settled; this frame's
+  // action row is now the current one.
+  clickScreenWord(vt, ready, 'Save [Enter]')
+  const collision = await waitForScreen(vt, 'the collision confirmation', frame =>
+    frame.includes('Replace existing file?'))
+  assert.match(collision.join('\n'), /Yes \[Y\] · No \[N\]/u)
+  clickScreenWord(vt, collision, 'No [N]')
+  assert.equal(readFileSync(target, 'utf8'), 'STALE\n', 'No never overwrites the target')
+  // No returns to editing and re-runs the suggestion refresh; wait for THAT
+  // settled frame before the next Save gesture.
+  const back = await waitForScreen(vt, 'the directory editing state', frame =>
+    frame.includes('Save [Enter]') && !frame.includes('Replace existing file?') && frame.includes(`→ ${outDir}/`))
+  clickScreenWord(vt, back, 'Save [Enter]')
+  const again = await waitForScreen(vt, 'the collision confirmation again', frame =>
+    frame.includes('Replace existing file?'))
+  clickScreenWord(vt, again, 'Yes [Y]')
+  // The ONE overwrite-consented write replaces the target with the official
+  // Markdown of the captured Session.
+  const official = formatSessionMarkdown(eventsA as never, '/host/sessions/session-a.jsonl')
+  const deadline = Date.now() + 3_000
+  for (;;) {
+    await new Promise<void>(resolve => setTimeout(resolve, 25))
+    await flushMicrotasks()
+    if (existsSync(target) && readFileSync(target, 'utf8') === official) break
+    if (Date.now() > deadline) break
+  }
+  assert.equal(readFileSync(target, 'utf8'), official,
+    'the overwrite-consented artifact is the official Markdown of the captured Session')
+  assert.deepEqual(harness.markdownReads, ['session-a'], 'exactly ONE official Markdown read owns the write')
+  await vt.waitForRender()
+})
+
+// ── 23.4 ArtifactSaveOwner Markdown source classification ────────────────
 /** A focused ArtifactSaveOwner harness: the REAL owner/sink over a fake
  *  official Markdown port. Used ONLY for the sink/error classification the
  *  real end-to-end runner test above cannot drive (a Host that answers

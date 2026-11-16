@@ -646,7 +646,7 @@ test('mouse parity: title and file rows and the action-row gap cells are inert',
 
 // ── C1: the clickable action row (Save / Dismiss / Cancel / Yes / No) ──────
 
-test('C1-S01 action row: Save runs the original confirm and selects a collision-free directory', (t) => {
+test('action row: Save runs the original confirm and selects a collision-free directory', (t) => {
   const { deps, cwd } = fixtureDeps(testLifecycle(t))
   const results: SaveLocationResult[] = []
   const prompt = new SaveLocationPrompt(
@@ -660,7 +660,7 @@ test('C1-S01 action row: Save runs the original confirm and selects a collision-
   assert.deepEqual(results, [{ kind: 'selected', directory: cwd, overwrite: false }])
 })
 
-test('C1-S02 action row: Dismiss suggestions hides them first and the next frame offers Cancel', async (t) => {
+test('action row: Dismiss suggestions only closes the list and the next frame offers Cancel', async (t) => {
   const { deps } = fixtureDeps(testLifecycle(t))
   const results: SaveLocationResult[] = []
   const prompt = new SaveLocationPrompt(
@@ -682,7 +682,7 @@ test('C1-S02 action row: Dismiss suggestions hides them first and the next frame
   assert.deepEqual(results, [{ kind: 'cancelled' }])
 })
 
-test('C1-S03 action row: collision No returns to editing and Yes replaces exactly once', (t) => {
+test('action row: collision No returns to editing and Yes replaces exactly once', (t) => {
   const { deps, out } = fixtureDeps(testLifecycle(t))
   const results: SaveLocationResult[] = []
   const prompt = new SaveLocationPrompt(
@@ -710,7 +710,7 @@ test('C1-S03 action row: collision No returns to editing and Yes replaces exactl
   assert.equal(results.length, 1, 'the per-open settle latch wins')
 })
 
-test('C1-S04 action row: an invalid directory keeps the error and never settles', (t) => {
+test('action row: an invalid directory keeps the error and never settles', (t) => {
   const { deps } = fixtureDeps(testLifecycle(t))
   const results: SaveLocationResult[] = []
   const prompt = new SaveLocationPrompt(
@@ -730,7 +730,7 @@ test('C1-S04 action row: an invalid directory keeps the error and never settles'
   assert.deepEqual(results, [{ kind: 'cancelled' }])
 })
 
-test('C1-S05 action row: a stale press never runs after a key, wheel or resize', (t) => {
+test('action row: a key, wheel or resize between press and click never saves', (t) => {
   const { deps, cwd } = fixtureDeps(testLifecycle(t))
   const results: SaveLocationResult[] = []
   const prompt = new SaveLocationPrompt(
@@ -772,7 +772,7 @@ test('C1-S05 action row: a stale press never runs after a key, wheel or resize',
   assert.deepEqual(results, [{ kind: 'selected', directory: cwd, overwrite: false }])
 })
 
-test('C1-S05 action row: a settled completion refresh refuses the pre-refresh press', async (t) => {
+test('action row: a settled suggestion refresh refuses the pre-refresh press', async (t) => {
   let resolveCompletion: ((items: DirectoryCompletionCandidate[] | null) => void) | undefined
   const deps: SaveLocationDeps = {
     resolveDirectory: input => input,
@@ -801,7 +801,7 @@ test('C1-S05 action row: a settled completion refresh refuses the pre-refresh pr
   assert.deepEqual(results, [{ kind: 'selected', directory: './', overwrite: false }])
 })
 
-test('C1-S06 action row: a settled prompt never acts again', (t) => {
+test('action row: a settled prompt renders but never saves again', (t) => {
   const { deps } = fixtureDeps(testLifecycle(t))
   const results: SaveLocationResult[] = []
   const prompt = new SaveLocationPrompt(
@@ -822,7 +822,7 @@ test('C1-S06 action row: a settled prompt never acts again', (t) => {
   prompt.dispose()
 })
 
-test('C1-S07 action row: narrow widths drop whole verbs and keep the safe exit', (t) => {
+test('action row: narrow widths drop whole verbs and keep the safe exit', (t) => {
   const { deps } = fixtureDeps(testLifecycle(t))
   const results: SaveLocationResult[] = []
   const prompt = new SaveLocationPrompt(
@@ -991,6 +991,65 @@ test('alt-screen integration: a real SGR wheel reaches the prompt through the fr
     assert.strictEqual(state.suggestionCursor, 1, 'the real SGR wheel must move the suggestion selection')
   } finally {
     tui.stop()
+  }
+})
+
+test('alt-screen integration: a real SGR press/click on the painted Save action selects', async (t) => {
+  const { deps, cwd } = fixtureDeps(testLifecycle(t))
+  const noSuggestions: SaveLocationDeps = { ...deps, complete: async () => null }
+  const results: SaveLocationResult[] = []
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    noSuggestions,
+    (value) => { results.push(value) },
+  )
+  const frame = new Frame(prompt, true)
+  const vt = new VirtualTerminal(100, 24)
+  const tui = new TuiAltScreen(vt)
+  tui.start()
+  try {
+    tui.showOverlay(frame)
+    await vt.waitForRender()
+    const viewport = vt.getViewport()
+    const row = viewport.findIndex(line => line.includes('Save [Enter]'))
+    assert.ok(row >= 0, `the Save action row is painted:\n${viewport.join('\n')}`)
+    const column = paintedColumn(viewport[row]!, 'Save [Enter]')
+    // A REAL left press/release: the alt screen synthesizes the click, the
+    // frame translates it into the prompt's content cells.
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+    await vt.waitForRender()
+    assert.deepEqual(results, [{ kind: 'selected', directory: cwd, overwrite: false }])
+  } finally {
+    tui.stop()
+  }
+})
+
+test('app: a real SGR click on the Save action in the fullscreen editor seat selects', async (t) => {
+  const life = testLifecycle(t)
+  const { deps, cwd } = fixtureDeps(life)
+  const noSuggestions: SaveLocationDeps = { ...deps, complete: async () => null }
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
+  app.start()
+  try {
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    const promise = app.askSaveLocation(
+      { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+      noSuggestions,
+    )
+    await vt.waitForRender()
+    const viewport = vt.getViewport()
+    const row = viewport.findIndex(line => line.includes('Save [Enter]'))
+    assert.ok(row >= 0, `the Save action row is painted in the seat:\n${viewport.join('\n')}`)
+    const column = paintedColumn(viewport[row]!, 'Save [Enter]')
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+    assert.deepEqual(await promise, { kind: 'selected', directory: cwd, overwrite: false })
+    await vt.waitForRender()
+  } finally {
+    app.dispose()
   }
 })
 
