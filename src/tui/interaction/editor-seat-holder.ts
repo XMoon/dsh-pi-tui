@@ -229,6 +229,8 @@ export class EditorSeatHolder {
   private readonly clearError: ((id: string) => void) | undefined
   /** The host's view-swap callback (re-mounts a recompiled plugin view). */
   private readonly viewSwap: SeatViewSwap
+  /** PR2/RFL011: see the constructor option. */
+  private readonly writeAdmitted: () => boolean
 
   constructor(options: {
     hostAdapter: () => HostEditorAdapter
@@ -239,6 +241,14 @@ export class EditorSeatHolder {
     recordError?: (id: string, message: string) => void
     clearError?: (id: string) => void
     viewSwap: SeatViewSwap
+    /**
+     * PR2/RFL011: the surface's composer write admission. The PUBLIC
+     * `EditorHost.replaceText` is an authorized mutation seam, so it is
+     * gated exactly like every other draft writer — a live submission
+     * attempt (or a stopped/disposed surface) owns the document. Reads,
+     * subscriptions and invalidate stay live.
+     */
+    writeAdmitted?: () => boolean
   }) {
     this.hostAdapter = options.hostAdapter
     this.surfaceId = options.surfaceId
@@ -248,6 +258,7 @@ export class EditorSeatHolder {
     this.recordError = options.recordError
     this.clearError = options.clearError
     this.viewSwap = options.viewSwap
+    this.writeAdmitted = options.writeAdmitted ?? (() => true)
     this.current = this.adaptHost()
   }
 
@@ -622,7 +633,10 @@ export class EditorSeatHolder {
       // through to the previous occupant.
       getSnapshot: () => live() ? holder.snapshotOf(replacementId) : inertSnapshot,
       replaceText: (text, cursor) => {
-        if (!live()) return
+        // PR2/RFL011: the lease fence proves the HOST is current; the write
+        // admission proves the COMPOSER is writable (no live submission
+        // attempt, surface not stopped/disposed).
+        if (!live() || !holder.writeAdmitted()) return
         holder.current.setText(text)
         if (cursor !== undefined) holder.current.setCursor(cursor)
         holder.notifyChanged()

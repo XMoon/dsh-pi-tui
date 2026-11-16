@@ -4873,12 +4873,14 @@ export class TuiApp {
    */
   private externalEditorStale = false
   /**
-   * PR2/RFL009: an attempt ACCEPTED while the surface was stopped. The
-   * physical accepted clear is deferred to the next start() — a stopped
-   * screen is never cleared or repainted, but the accepted document must not
-   * survive the restart as a live, submittable draft either.
+   * PR2/RFL009: an attempt ACCEPTED while the surface was stopped. The FULL
+   * physical accepted commit — the recall/history bookkeeping AND the draft
+   * clear — is deferred to the next start(): a stopped screen is never
+   * cleared or repainted, but the accepted document must not survive the
+   * restart as a live, submittable draft, and its recall row must exist
+   * exactly once like any live acceptance.
    */
-  private deferredAcceptedClear = false
+  private deferredAcceptedSettle: { readonly text: string; readonly remember: boolean } | undefined
   /**
    * The surface was STOPPED through the public lifecycle (stop/start), as
    * opposed to the external editor's temporary presentation suspension: only a
@@ -5580,6 +5582,9 @@ export class TuiApp {
       hostAdapter: () => this.hostEditorAdapter(),
       surfaceId: `tui-${Date.now().toString(36)}`,
       generation: () => this.generation,
+      // PR2/RFL011: the public EditorHost.replaceText seam shares the ONE
+      // composer write admission with every other draft writer.
+      writeAdmitted: () => this.draftWriteAdmitted(),
       // Round-2 P1: a plugin editor's invalidate() recompiles its view and
       // swaps the child in the seat (the M4 compiler caches at
       // construction — a live plugin view needs a recompile to repaint).
@@ -5868,12 +5873,18 @@ export class TuiApp {
       throw new Error('cannot start a disposed TuiApp')
     }
     this.surfaceStopped = false
-    // RFL009: complete a physical accepted clear that settled while the
-    // surface was stopped. The screen paints its FIRST post-restart frame
-    // below, so the cleared composer is the only frame the user ever sees —
-    // the stopped screen itself was never repainted.
-    if (this.deferredAcceptedClear) {
-      this.deferredAcceptedClear = false
+    // RFL009: complete the FULL accepted commit that settled while the
+    // surface was stopped — the recall/history row first (the text is still
+    // in the hold record), then the clear. The screen paints its FIRST
+    // post-restart frame below, so the cleared composer is the only frame
+    // the user ever sees; the stopped screen itself was never repainted.
+    if (this.deferredAcceptedSettle !== undefined) {
+      const deferred = this.deferredAcceptedSettle
+      this.deferredAcceptedSettle = undefined
+      if (deferred.remember) {
+        this.editor.addToHistory(deferred.text.trim())
+        this.historyRecall.rememberAccepted(deferred.text)
+      }
       this.clearSubmittedDraft()
       this.resetEditorMode()
     }
@@ -24766,9 +24777,13 @@ export class TuiApp {
     // ownership just changed: its write-back must be discarded (F1).
     if (this.externalEditorInFlight) this.externalEditorStale = true
     if (this.surfaceStopped) {
-      // RFL009: only the ACCEPTED clear is deferred to the restart; a refusal
-      // keeps its retained draft as the live document across the round trip.
-      if (result === 'accepted') this.deferredAcceptedClear = true
+      // RFL009: only the ACCEPTED commit is deferred to the restart (the
+      // recall/history row AND the clear, applied exactly once at start());
+      // a refusal keeps its retained draft as the live document across the
+      // round trip.
+      if (result === 'accepted') {
+        this.deferredAcceptedSettle = { text: hold.text, remember: hold.remember }
+      }
       return
     }
     if (result === 'accepted') {

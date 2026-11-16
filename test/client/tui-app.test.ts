@@ -6177,3 +6177,80 @@ test('PR2/RFL008: a replacement editor cannot mutate the held document', async (
     app.stop()
   }
 })
+
+test('PR2/RFL011: a plugin EditorHost.replaceText cannot mutate the held document', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const { EditorRegistry } = await import('../../src/extension/internal/editor-registry.ts')
+  const registry = new EditorRegistry()
+  let pluginText = 'base'
+  let host: import('../../src/extension/public-types.ts').EditorHost | undefined
+  registry.register({
+    id: 'plugin-editor',
+    priority: 1,
+    create: (editorHost) => {
+      host = editorHost
+      return {
+        component: { kind: 'text', spans: [{ text: pluginText }] },
+        getText: () => pluginText,
+        setText: (text: string) => { pluginText = text },
+        getCursor: () => 0,
+        setCursor: () => {},
+        dispose: () => {},
+      }
+    },
+  }, 'plugin')
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.reconcileEditorNow()
+    await vt.waitForRender()
+    assert.ok(host !== undefined, 'the plugin received its EditorHost')
+    app.holdSubmission('attempt-host-replace')
+    await vt.waitForRender()
+    host!.replaceText('new unsent extension text')
+    await vt.waitForRender()
+    assert.notEqual(pluginText, 'new unsent extension text',
+      'the public replaceText seam refuses to write the held document')
+    app.settleSubmission('attempt-host-replace', 'accepted')
+    await vt.waitForRender()
+    // After the release the seam is admitted again.
+    host!.replaceText('post-acceptance write')
+    assert.equal(pluginText, 'post-acceptance write',
+      'the seam works again once the composer is released')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/RFL009: an accepted-while-stopped prompt recalls exactly once after the restart', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('accepted recall witness')
+    app.holdSubmission('attempt-recall-stopped')
+    app.stop()
+    app.settleSubmission('attempt-recall-stopped', 'accepted')
+    app.start()
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), '', 'the deferred accepted clear completed at the restart')
+    // The recall row exists exactly once: ↑ recalls the accepted text.
+    vt.sendInput('\x1b[A')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'accepted recall witness',
+      'the accepted-while-stopped prompt recalls after the restart (deferred exactly once)')
+    // And a LIVE acceptance still recalls the same way (no divergence).
+    app.setDraft('live recall witness')
+    await vt.waitForRender()
+    app.holdSubmission('attempt-recall-live')
+    app.settleSubmission('attempt-recall-live', 'accepted')
+    await vt.waitForRender()
+    vt.sendInput('\x1b[A')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'live recall witness', 'a live acceptance recalls identically')
+  } finally {
+    app.stop()
+  }
+})
