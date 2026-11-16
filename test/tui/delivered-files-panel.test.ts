@@ -1600,3 +1600,520 @@ test('a Files body press leaves the cell for overlay text selection; a button pr
     'fixture: the row was already selected by the click above')
   assert.equal(event('click', 12, dataRow), undefined, 'a dragged release is not a row click')
 })
+
+// ── wheel navigation (delivered-files wheel scroll follow-up) ──────────────
+
+/** One wheel event at a panel-relative cell. The fork produces `button: 'none'`
+ *  wheel events carrying the SIGNED `wheelDelta` (negative scrolls up). */
+function wheelAt(
+  panel: DeliveredFilesPanel,
+  cell: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
+  wheelDelta: number,
+) {
+  return panel.handleMouse({
+    type: 'wheel', button: 'none', wheelDelta,
+    x: cell.x, y: cell.y, screenX: cell.x, screenY: cell.y,
+    width: cell.width, height: cell.height,
+    shift: false, alt: false, ctrl: false,
+  })
+}
+
+const wheelCell = (x: number, y: number, columns = 100, rows = 30) => ({
+  x, y, width: contentWidth(columns, rows), height: contentRows(columns, rows),
+})
+
+function manyFiles(count: number): string[] {
+  return Array.from({ length: count }, (_, index) => `/ws/dir/file-${String(index).padStart(3, '0')}.txt`)
+}
+
+function manyTurns(count: number): DeliveredFilesSnapshot {
+  return snapshotOf(Array.from({ length: count }, (_, index) => ({ turn: 100 - index, files: [`/ws/turn-${100 - index}.md`] })))
+}
+
+const PAGED_TEXT = (count: number, prefix: string): string =>
+  Array.from({ length: count }, (_, index) => `${prefix} ${index}`).join('\n')
+
+test('Files wheel moves the selection inside the painted list and never reads the Host', async () => {
+  const h = previewHarness(snapshotOf([{ turn: 1, files: manyFiles(200) }]), { pointerActions: true })
+  h.setSize(100, 30)
+  h.rows()
+  const selectedRow = (): number => h.rows().findIndex(row => row.trimStart().startsWith('> file-'))
+  assert.ok(selectedRow() > 0, 'fixture: the first file is selected')
+
+  // One notch moves one entry, and a multi-line delta moves several at once.
+  wheelAt(h.panel, wheelCell(4, selectedRow()), 1)
+  assert.match(h.rows().find(row => row.trimStart().startsWith('> '))!, /file-001/)
+  wheelAt(h.panel, wheelCell(4, selectedRow()), 3)
+  assert.match(h.rows().find(row => row.trimStart().startsWith('> '))!, /file-004/)
+  wheelAt(h.panel, wheelCell(4, selectedRow()), -2)
+  assert.match(h.rows().find(row => row.trimStart().startsWith('> '))!, /file-002/)
+
+  // A fast spin stays inside the list and keeps the selection VISIBLE.
+  for (let step = 0; step < 20; step += 1) wheelAt(h.panel, wheelCell(4, 10), 6)
+  const row = h.rows().find(row => row.trimStart().startsWith('> '))
+  assert.match(row!, /file-12\d/, 'the selection moved far down the list')
+  assert.ok(selectedRow() >= 0, 'the selection stayed visible after the spin')
+  // Clamped at the last file, still visible.
+  for (let step = 0; step < 30; step += 1) wheelAt(h.panel, wheelCell(4, 10), 6)
+  assert.match(h.rows().find(row => row.trimStart().startsWith('> '))!, /file-199/)
+
+  assert.deepEqual(h.readCalls(), [], 'a Files wheel never reads the Host')
+  assert.equal(h.statCalls(), 0, 'a Files wheel never stats the Host')
+})
+
+test('a filtered wheel only moves the filtered selection; the query and seat stay', () => {
+  const h = harness(ONE_TURN)
+  h.setSize(100, 30)
+  h.rows()
+  h.type('/')
+  h.type('report')
+  const rows = h.rows()
+  const filterRow = rows.findIndex(row => row.includes('Filter: report'))
+  assert.ok(filterRow === 1, `fixture: the filter row is painted: ${rows.join('\n')}`)
+  const firstMatch = rows.findIndex((row, y) => y > filterRow && row.trimStart().startsWith('> '))
+  assert.ok(firstMatch > filterRow, rows.join('\n'))
+
+  const wheelRow = rows.findIndex((row, y) => y > firstMatch && /report-(final|index)/.test(row))
+  wheelAt(h.panel, wheelCell(4, wheelRow), 1)
+  const after = h.rows()
+  assert.ok(after[filterRow]!.includes('Filter: report'), 'the wheel never types into the query')
+  assert.match(after.find(row => row.trimStart().startsWith('> '))!, /report-(final|index)/,
+    'the wheel moved the filtered selection')
+  // Back up, then Esc still clears the query.
+  wheelAt(h.panel, wheelCell(4, wheelRow - 1), -1)
+  assert.match(h.rows().find(row => row.trimStart().startsWith('> '))!, /report\.md/)
+  h.type('esc')
+  assert.ok(!h.rows().some(row => row.includes('Filter: report')), 'Esc still clears the query')
+})
+
+test('wide side-pane, header and footer wheels never move the Files selection', () => {
+  const h = harness(snapshotOf([{ turn: 1, files: manyFiles(40) }]))
+  h.setSize(160, 50)
+  const rows = h.rows()
+  const firstListRow = rows.findIndex(row => row.includes('file-000.txt'))
+  assert.ok(firstListRow > 1, rows.join('\n'))
+  assert.ok(firstListRow < rows.length - 1, 'fixture: painted list rows exist')
+  // 160x50 grants a two-column frame: the list column ends before the side pane.
+  const sideColumn = contentWidth(160, 50) - 20
+  assert.ok(sideColumn > Math.floor((contentWidth(160, 50) - 3) * 0.58), 'fixture: the column is in the side pane')
+
+  wheelAt(h.panel, wheelCell(sideColumn, firstListRow, 160, 50), 3)
+  assert.match(h.rows().find(row => row.trimStart().startsWith('> '))!, /file-000/,
+    'a side-pane wheel never moves the selection')
+  wheelAt(h.panel, wheelCell(4, 0, 160, 50), 3)
+  assert.match(h.rows().find(row => row.trimStart().startsWith('> '))!, /file-000/, 'the header is inert')
+  wheelAt(h.panel, wheelCell(4, rows.length - 1, 160, 50), 3)
+  assert.match(h.rows().find(row => row.trimStart().startsWith('> '))!, /file-000/, 'the footer is inert')
+
+  // Positive control: the painted list column really scrolls.
+  const result = wheelAt(h.panel, wheelCell(4, firstListRow, 160, 50), 1)
+  assert.equal(result?.handled, true)
+  assert.match(h.rows().find(row => row.trimStart().startsWith('> '))!, /file-001/)
+})
+
+test('Turns wheel moves the uncommitted cursor only; Enter commits and Esc restores', () => {
+  const h = harness(manyTurns(30))
+  h.setSize(100, 30)
+  h.type('T')
+  let rows = h.rows()
+  const firstTurnRow = rows.findIndex(row => row.trimStart().startsWith('> Turn '))
+  assert.ok(firstTurnRow > 0, rows.join('\n'))
+
+  wheelAt(h.panel, wheelCell(2, firstTurnRow), 1)
+  assert.match(h.rows().find(row => row.trimStart().startsWith('> '))!, /> Turn 99\b/)
+  wheelAt(h.panel, wheelCell(2, firstTurnRow), 2)
+  assert.match(h.rows().find(row => row.trimStart().startsWith('> '))!, /> Turn 97\b/)
+  // Chrome and blank rows are consumed but inert.
+  wheelAt(h.panel, wheelCell(2, 0), 3)
+  wheelAt(h.panel, wheelCell(2, rows.length - 1), 3)
+  assert.match(h.rows().find(row => row.trimStart().startsWith('> '))!, /> Turn 97\b/)
+
+  // Enter commits; the wheel never did.
+  h.type('enter')
+  assert.equal(h.panel.currentPage(), 'files')
+  assert.deepEqual(h.panel.selection(), { turn: 97, path: '/ws/turn-97.md' })
+
+  // Esc returns the ORIGINAL Turn — a wheel cursor move is not a commitment.
+  const esc = harness(manyTurns(30))
+  esc.setSize(100, 30)
+  esc.type('T')
+  esc.rows()
+  wheelAt(esc.panel, wheelCell(2, 2), 3)
+  wheelAt(esc.panel, wheelCell(2, 3), 1)
+  esc.type('esc')
+  assert.equal(esc.panel.currentPage(), 'files')
+  assert.deepEqual(esc.panel.selection(), { turn: 100, path: '/ws/turn-100.md' })
+
+  // A short list clamps at both ends.
+  const short = harness(snapshotOf([{ turn: 5, files: ['/ws/a.md'] }, { turn: 3, files: ['/ws/b.md'] }]))
+  short.setSize(100, 30)
+  short.type('T')
+  short.rows()
+  wheelAt(short.panel, wheelCell(2, 2), 5)
+  assert.match(short.rows().find(row => row.trimStart().startsWith('> '))!, /> Turn 3\b/, 'clamped at the last Turn')
+  wheelAt(short.panel, wheelCell(2, 2), -5)
+  assert.match(short.rows().find(row => row.trimStart().startsWith('> '))!, /> Turn 5\b/, 'clamped at the first Turn')
+})
+
+test('Details wheel scrolls the wrapped body; title and footer are inert; metadata never reads', async () => {
+  const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/report.md'] }]), {
+    pointerActions: true,
+    autoResolve: {
+      stat: { version: 'v1', bytes: 400 },
+      offset: 1,
+      limit: DELIVERED_FILE_PAGE_LINES,
+      text: PAGED_TEXT(40, 'line'),
+      lines: 40,
+      eof: false,
+    },
+  })
+  h.setSize(100, 30)
+  h.type('enter')
+  await h.waitForPreviewState('text-page')
+  let rows = h.rows()
+  // A fresh text page scrolls to the CONTENT (previewStart), so the visible
+  // body starts at the first preview row; the prefix rows sit above it.
+  assert.match(rows[1]!, /line 0/, 'fixture: the body starts at the preview content')
+  const footerRow = rows.length - 1
+
+  // Two wheel steps move the window over the physical (wrapped) rows.
+  wheelAt(h.panel, wheelCell(4, 5), 2)
+  rows = h.rows()
+  assert.match(rows[1]!, /line 2/, 'the window advanced over the physical rows')
+  assert.match(rows[2]!, /line 3/, 'the projection keeps every physical row in order')
+  wheelAt(h.panel, wheelCell(4, 5), -2)
+  assert.match(h.rows()[1]!, /line 0/, 'the wheel returned to the top')
+  // Walking the prefix: two more wheels up reach the Host path; title and
+  // footer never scroll.
+  wheelAt(h.panel, wheelCell(4, 5), -1)
+  wheelAt(h.panel, wheelCell(4, 5), -1)
+  assert.match(h.rows()[1]!, /Host: \/ws\/report\.md/, 'the wheel walks the prefix rows')
+  wheelAt(h.panel, wheelCell(4, 0), 2)
+  wheelAt(h.panel, wheelCell(4, footerRow), 2)
+  assert.match(h.rows()[1]!, /Host: \/ws\/report\.md/, 'title/footer wheels are inert')
+
+  assert.deepEqual(h.readCalls(), [{ offset: 1, limit: DELIVERED_FILE_PAGE_LINES }],
+    'in-window wheel scrolling never reads the Host again')
+
+  // A metadata page scrolls nothing and reads nothing.
+  const binary = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/pic.png'] }]), {
+    pointerActions: true,
+    autoResolve: { stat: { version: 'v1', bytes: 9 }, offset: 1, limit: DELIVERED_FILE_PAGE_LINES, text: '', lines: 0, eof: true },
+  })
+  binary.setSize(100, 30)
+  binary.type('enter')
+  await binary.waitForPreviewState('metadata')
+  binary.rows()
+  wheelAt(binary.panel, wheelCell(4, 5), 2)
+  assert.deepEqual(binary.readCalls(), [], 'a metadata wheel never reads')
+  assert.ok(binary.rows().some(row => row.includes('Preview unavailable')), 'the metadata page still paints')
+})
+
+test('a confirmed Details bottom wheel reads exactly ONE next page; pending and EOF never re-read', async () => {
+  const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/report.md'] }]), { pointerActions: true })
+  h.setSize(100, 30)
+  h.type('enter')
+  h.resolveStat({ version: 'v1', bytes: 720 })
+  await h.waitForPreviewState('loading-page')
+  h.resolveRead({
+    stat: { version: 'v1', bytes: 720 }, offset: 1, limit: DELIVERED_FILE_PAGE_LINES,
+    text: PAGED_TEXT(120, 'row'), lines: 120, eof: false,
+  })
+  await h.waitForPreviewState('text-page')
+  h.rows()
+
+  // 100x30 grants 18 body rows and the fresh window starts at the 2-row
+  // prefix: 102 rows to the edge, so 17 six-row wheels land ON the edge
+  // (move, no read) and the NEXT wheel reads.
+  for (let step = 0; step < 17; step += 1) wheelAt(h.panel, wheelCell(4, 5), 6)
+  assert.deepEqual(h.readCalls().slice(1), [], 'landing on the edge only moves')
+  const edge = wheelAt(h.panel, wheelCell(4, 5), 6)
+  assert.equal(edge?.handled, true)
+  assert.deepEqual(h.readCalls().slice(1), [{ offset: 1 + DELIVERED_FILE_PAGE_LINES, limit: DELIVERED_FILE_PAGE_LINES }],
+    'the confirmed bottom reads the NEXT 120-line page exactly once')
+
+  // A pending request swallows further wheels without a second read.
+  wheelAt(h.panel, wheelCell(4, 5), 6)
+  wheelAt(h.panel, wheelCell(4, 5), 6)
+  assert.equal(h.readCalls().length, 2, 'a pending read never duplicates')
+
+  // An EOF page is a definite end: wheels at its bottom stay silent.
+  h.resolveRead({
+    stat: { version: 'v1', bytes: 726 }, offset: 121, limit: DELIVERED_FILE_PAGE_LINES,
+    text: 'tail', lines: 1, eof: true,
+  })
+  await h.waitForPreviewState('text-page')
+  h.rows()
+  for (let step = 0; step < 3; step += 1) wheelAt(h.panel, wheelCell(4, 5), 6)
+  assert.equal(h.readCalls().length, 2, 'EOF wheels never re-read')
+})
+
+test('a Details wheel reads the previous page only from the very top; the first window never reads back', async () => {
+  const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/report.md'] }]), { pointerActions: true })
+  h.setSize(100, 30)
+  h.type('enter')
+  h.resolveStat({ version: 'v1', bytes: 720 })
+  await h.waitForPreviewState('loading-page')
+  // The Host reply owns the truth: this mount presents the offset-121 window.
+  h.resolveRead({
+    stat: { version: 'v1', bytes: 720 }, offset: 121, limit: DELIVERED_FILE_PAGE_LINES,
+    text: PAGED_TEXT(120, 'next'), lines: 120, eof: false,
+  })
+  await h.waitForPreviewState('text-page')
+  h.rows()
+
+  // From the window top the wheel first walks the painted prefix rows (Host
+  // path, blank) — two local rows, no Host read.
+  for (let step = 0; step < 2; step += 1) wheelAt(h.panel, wheelCell(4, 5), -1)
+  assert.deepEqual(h.readCalls().slice(1), [], 'walking the prefix never reads')
+  // At the VERY top, the previous page — exactly once.
+  wheelAt(h.panel, wheelCell(4, 5), -1)
+  assert.deepEqual(h.readCalls().slice(1), [{ offset: 1, limit: DELIVERED_FILE_PAGE_LINES }],
+    'the confirmed top reads the previous page')
+  // A pending read is not duplicated.
+  wheelAt(h.panel, wheelCell(4, 5), -1)
+  assert.equal(h.readCalls().length, 2, 'no duplicate while pending')
+})
+
+test('a next page that changed version restarts at the first window through the wheel', async () => {
+  const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/report.md'] }]), { pointerActions: true })
+  h.setSize(100, 30)
+  h.type('enter')
+  h.resolveStat({ version: 'v1', bytes: 720 })
+  await h.waitForPreviewState('loading-page')
+  h.resolveRead({
+    stat: { version: 'v1', bytes: 720 }, offset: 1, limit: DELIVERED_FILE_PAGE_LINES,
+    text: PAGED_TEXT(120, 'v1row'), lines: 120, eof: false,
+  })
+  await h.waitForPreviewState('text-page')
+  h.rows()
+  for (let step = 0; step < 18; step += 1) wheelAt(h.panel, wheelCell(4, 5), 6)
+  assert.deepEqual(h.readCalls().slice(1), [{ offset: 121, limit: DELIVERED_FILE_PAGE_LINES }])
+  // The Host answers with a DIFFERENT version: restart, never splice.
+  h.resolveRead({
+    stat: { version: 'v2', bytes: 400 }, offset: 121, limit: DELIVERED_FILE_PAGE_LINES,
+    text: PAGED_TEXT(120, 'v2row'), lines: 120, eof: false,
+  })
+  await h.waitForPreviewState('loading-stat')
+  h.resolveStat({ version: 'v2', bytes: 400 })
+  await h.waitForPreviewState('loading-page')
+  h.resolveRead({
+    stat: { version: 'v2', bytes: 400 }, offset: 1, limit: DELIVERED_FILE_PAGE_LINES,
+    text: PAGED_TEXT(120, 'v2row'), lines: 120, eof: false,
+  })
+  await h.waitForPreviewState('text-page')
+  assert.deepEqual(h.readCalls().slice(2), [{ offset: 1, limit: DELIVERED_FILE_PAGE_LINES }],
+    'the restart re-reads the FIRST window')
+  assert.equal(h.statCalls(), 2, 'the restart stats again through the same owner')
+  const text = h.rows().join('\n')
+  assert.ok(text.includes('File changed; preview restarted'), 'the restart notice is painted')
+  assert.ok(!text.includes('v1row'), 'no v1 text splices into the v2 preview')
+})
+
+test('wheel steps on a near-limit line stay lazily wrapped at narrow widths', async () => {
+  const longLine = 'x'.repeat(2 * 1024 * 1024 - 16)
+  const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/huge.txt'] }]), {
+    pointerActions: true,
+    autoResolve: {
+      stat: { version: 'v1', bytes: longLine.length },
+      offset: 1, limit: DELIVERED_FILE_PAGE_LINES, text: longLine, lines: 1, eof: false,
+    },
+  })
+  h.setSize(40, 16)
+  h.type('enter')
+  await h.waitForPreviewState('text-page')
+  interface WrapProbe { readonly wrappedSourceLines: number; readonly wrappedPhysicalRows: number }
+  const probe = (): number => (h.panel as unknown as WrapProbe).wrappedSourceLines
+  const physical = (): number => (h.panel as unknown as WrapProbe).wrappedPhysicalRows
+  h.rows()
+  const afterOpen = probe()
+
+  for (let step = 0; step < 20; step += 1) wheelAt(h.panel, wheelCell(4, 5, 40, 16), 3)
+  assert.equal(probe(), afterOpen, 'wheeling never re-wraps the source line')
+  assert.ok(physical() <= 128, `wheel materialisation stays viewport-bounded (${physical()})`)
+
+  // A narrower terminal re-derives the wrap once and keeps wheeling bounded.
+  h.setSize(16, 14)
+  h.rows()
+  for (let step = 0; step < 10; step += 1) wheelAt(h.panel, wheelCell(4, 5, 16, 14), 3)
+  assert.equal(probe(), 1, 'the width change wrapped the line exactly once')
+  assert.ok(physical() <= 256, `narrow wheeling stays bounded (${physical()})`)
+  assert.deepEqual(h.readCalls(), [{ offset: 1, limit: 120 }], 'an unfinished wrapped line never triggers the next Host window')
+})
+
+test('a non-zero wheel revokes the held press; a zero wheel keeps the gesture', async () => {
+  const cell = { ...wheelCell(4, 5) }
+
+  // A held [Back] survives NOTHING but a zero wheel: any real wheel cancels it.
+  const back = harness(ONE_TURN)
+  back.setSize(100, 30)
+  back.type('enter')
+  const backRows = back.rows()
+  const backCell = { x: backRows.at(-1)!.indexOf('[Back]') + 2, y: backRows.length - 1, width: cell.width, height: cell.height }
+  back.panel.handleMouse({ type: 'press', button: 'left', x: backCell.x, y: backCell.y, screenX: backCell.x, screenY: backCell.y, width: backCell.width, height: backCell.height, shift: false, alt: false, ctrl: false })
+  wheelAt(back.panel, wheelCell(4, 5), 1)
+  assert.equal(clickOnly(back.panel, backCell), undefined, 'the revoked press cannot run [Back]')
+  assert.equal(back.panel.currentPage(), 'details')
+
+  // A ZERO wheel is a strict no-op: the gesture survives and the click runs.
+  const zero = harness(ONE_TURN)
+  zero.setSize(100, 30)
+  zero.type('enter')
+  const zeroRows = zero.rows()
+  const zeroCell = { x: zeroRows.at(-1)!.indexOf('[Back]') + 2, y: zeroRows.length - 1, width: cell.width, height: cell.height }
+  zero.panel.handleMouse({ type: 'press', button: 'left', x: zeroCell.x, y: zeroCell.y, screenX: zeroCell.x, screenY: zeroCell.y, width: zeroCell.width, height: zeroCell.height, shift: false, alt: false, ctrl: false })
+  assert.equal(wheelAt(zero.panel, wheelCell(4, 5), 0), undefined, 'a zero wheel is unhandled')
+  assert.equal(clickOnly(zero.panel, zeroCell)?.handled, true, 'the zero wheel kept the gesture')
+  assert.equal(zero.panel.currentPage(), 'files', 'the preserved click really ran [Back]')
+
+  // The same revocation covers a wheel over chrome and a boundary no-move.
+  const chrome = harness(ONE_TURN)
+  chrome.setSize(100, 30)
+  chrome.rows()
+  const verbRows = chrome.rows()
+  const verbColumn = verbRows.find(row => row.includes('report-final.md'))!.lastIndexOf('Details') + 2
+  const verbRow = verbRows.findIndex(row => row.includes('report-final.md'))
+  chrome.panel.handleMouse({ type: 'press', button: 'left', x: verbColumn, y: verbRow, screenX: verbColumn, screenY: verbRow, width: cell.width, height: cell.height, shift: false, alt: false, ctrl: false })
+  wheelAt(chrome.panel, wheelCell(4, verbRows.length - 1), 1) // footer wheel
+  assert.equal(clickOnly(chrome.panel, { x: verbColumn, y: verbRow, width: cell.width, height: cell.height }), undefined,
+    'a chrome wheel also revokes the held verb press')
+  assert.equal(chrome.panel.currentPage(), 'files')
+
+  // A held Turns row cannot commit across a wheel; a FRESH click still works.
+  const turns = harness(manyTurns(4))
+  turns.setSize(100, 30)
+  turns.type('T')
+  const turnRows = turns.rows()
+  const turnRow = turnRows.findIndex(row => row.includes('Turn 99'))
+  turns.panel.handleMouse({ type: 'press', button: 'left', x: 2, y: turnRow, screenX: 2, screenY: turnRow, width: cell.width, height: cell.height, shift: false, alt: false, ctrl: false })
+  wheelAt(turns.panel, wheelCell(4, 5), 1)
+  assert.equal(clickOnly(turns.panel, { x: 2, y: turnRow, width: cell.width, height: cell.height }), undefined,
+    'the revoked press cannot commit the Turn')
+  assert.equal(turns.panel.currentPage(), 'turns')
+  const fresh = clickAt(turns.panel, { x: 2, y: turnRow, width: cell.width, height: cell.height })
+  assert.equal(fresh?.handled, true, 'a fresh press/click after the wheel still works')
+  assert.deepEqual(turns.panel.selection(), { turn: 99, path: '/ws/turn-99.md' })
+
+  // A fresh [Close] after a revoking wheel still closes.
+  const close = harness(ONE_TURN)
+  close.setSize(100, 30)
+  const closeRows = close.rows()
+  const closeCell = { x: closeRows.at(-1)!.indexOf('[Close]') + 2, y: closeRows.length - 1, width: cell.width, height: cell.height }
+  close.panel.handleMouse({ type: 'press', button: 'left', x: closeCell.x, y: closeCell.y, screenX: closeCell.x, screenY: closeCell.y, width: closeCell.width, height: closeCell.height, shift: false, alt: false, ctrl: false })
+  wheelAt(close.panel, wheelCell(4, 5), -1)
+  assert.equal(clickOnly(close.panel, closeCell), undefined)
+  assert.equal(clickAt(close.panel, closeCell)?.handled, true)
+  assert.equal(close.closes(), 1, 'the fresh click closed the overlay')
+})
+
+test('stale frames, disposed panels and surfaces without the pointer never scroll', async () => {
+  const h = harness(snapshotOf([{ turn: 1, files: manyFiles(10) }]))
+  h.setSize(100, 30)
+  h.rows()
+  // A wheel carrying the geometry of a DIFFERENT painted size is dead.
+  assert.equal(wheelAt(h.panel, { x: 4, y: 2, width: contentWidth(80, 24), height: contentRows(80, 24) }, 1), undefined)
+  assert.match(h.rows().find(row => row.trimStart().startsWith('> '))!, /file-000/, 'the stale wheel scrolled nothing')
+
+  const disposed = harness(ONE_TURN)
+  disposed.setSize(100, 30)
+  disposed.rows()
+  disposed.panel.dispose()
+  assert.equal(wheelAt(disposed.panel, wheelCell(4, 2), 1), undefined, 'a disposed panel never scrolls')
+
+  const unowned = previewHarness(snapshotOf([{ turn: 1, files: manyFiles(10) }]), { pointerActions: false })
+  unowned.setSize(100, 30)
+  unowned.rows()
+  assert.equal(wheelAt(unowned.panel, wheelCell(4, 2), 1), undefined, 'no pointer owner, no wheel claim')
+  assert.deepEqual(unowned.readCalls(), [], 'and no Host read')
+})
+
+test('wheel magnitude rounds up and caps at the painted body; empty filters keep no selection', () => {
+  const h = harness(snapshotOf([{ turn: 1, files: manyFiles(200) }]))
+  const rows = h.rows()
+  wheelAt(h.panel, wheelCell(4, 2), 1.2)
+  assert.equal(h.panel.selection().path, manyFiles(3)[2])
+  wheelAt(h.panel, wheelCell(4, 2), 10_000)
+  assert.equal(h.panel.selection().path, manyFiles(200)[2 + rows.length - 3], 'one event cannot move beyond the body budget')
+  h.type('/')
+  h.type('no-match')
+  h.rows()
+  wheelAt(h.panel, wheelCell(4, 2), 3)
+  assert.equal(h.panel.selection().path, undefined)
+  assert.ok(h.rows()[1]!.includes('no-match'), 'the query and filter seat stay unchanged')
+})
+
+test('all held actions cancel on inert, boundary and stale wheels, then accept a fresh click', () => {
+  for (const label of ['[Close]', 'Details', '[Back]', '[Copy path]', 'Turn 99']) {
+    for (const location of ['header', 'boundary', 'stale']) {
+      const h = harness(label === 'Turn 99' ? manyTurns(4) : ONE_TURN)
+      if (label === '[Back]' || label === '[Copy path]') h.type('enter')
+      if (label === 'Turn 99') h.type('T')
+      const rows = h.rows()
+      const y = rows.findIndex(row => row.includes(label))
+      assert.ok(y >= 0, `${label} is painted`)
+      const cell = wheelCell(rows[y]!.indexOf(label) + 2, y)
+      h.panel.handleMouse({ ...cell, screenX: cell.x, screenY: y, type: 'press', button: 'left', shift: false, alt: false, ctrl: false })
+      const page = h.panel.currentPage()
+      const wheel = location === 'stale' ? { ...wheelCell(4, 2), width: cell.width + 1 }
+        : wheelCell(4, location === 'header' ? 0 : 2)
+      wheelAt(h.panel, wheel, -1)
+      assert.equal(clickOnly(h.panel, cell), undefined, `${label}: ${location} cancels the old click`)
+      assert.equal(h.panel.currentPage(), page)
+      assert.equal(h.closes(), 0)
+      assert.deepEqual(h.copied(), [])
+      assert.equal(clickAt(h.panel, cell)?.handled, true, `${label}: a fresh gesture still works`)
+    }
+  }
+})
+
+test('Details wheel advances wrapped physical rows rather than source lines', async () => {
+  const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/wrapped.txt'] }]), {
+    pointerActions: true,
+    autoResolve: { stat: { version: 'v1' }, offset: 1, limit: 120,
+      text: `alpha-${'a'.repeat(1000)}\nbeta`, lines: 2, eof: true },
+  })
+  h.setSize(40, 16)
+  h.type('enter')
+  await h.waitForPreviewState('text-page')
+  assert.match(h.rows()[1]!, /^alpha-/)
+  wheelAt(h.panel, wheelCell(4, 3, 40, 16), 1)
+  assert.match(h.rows()[1]!, /^a+$/, 'one wheel moves inside the first wrapped source line')
+  wheelAt(h.panel, wheelCell(4, 3, 40, 16), -1)
+  assert.match(h.rows()[1]!, /^alpha-/)
+  assert.equal(h.readCalls().length, 1)
+})
+
+test('loading, metadata, failure and idle wheels scroll local metadata without reading', async () => {
+  const { SupersededReadError } = await import('../../src/runtime/read-error.ts')
+  for (const kind of ['loading-stat', 'loading-page', 'metadata', 'failure', 'idle'] as const) {
+    const h = previewHarness(snapshotOf([{ turn: 1, files: [{
+      path: kind === 'metadata' ? '/ws/report.png' : '/ws/report.md',
+      description: PAGED_TEXT(40, 'metadata'),
+    }] }]), { pointerActions: true })
+    h.type('enter')
+    if (kind === 'loading-page' || kind === 'metadata') h.resolveStat({ version: 'v1' })
+    if (kind === 'failure') h.rejectStat(new DeliveredFileReadError('not-found', 'refused'))
+    if (kind === 'idle') h.rejectStat(new SupersededReadError('generation'))
+    await h.waitForPreviewState(kind)
+    const before = h.rows()
+    const reads = h.readCalls().length
+    for (let notch = 0; notch < 8; notch += 1) wheelAt(h.panel, wheelCell(4, 3), 4)
+    assert.notDeepEqual(h.rows(), before, `${kind}: local metadata really scrolls`)
+    assert.equal(h.readCalls().length, reads, `${kind}: no additional Host read`)
+    assert.equal(h.preview().kind, kind)
+    h.panel.dispose()
+  }
+})
+
+test('an empty EOF first window ignores wheels in both directions', async () => {
+  const h = previewHarness(ONE_TURN, {
+    pointerActions: true,
+    autoResolve: { stat: { version: 'v1' }, offset: 1, limit: 120, text: '', lines: 0, eof: true },
+  })
+  h.type('enter')
+  await h.waitForPreviewState('text-page')
+  h.rows()
+  for (const direction of [1, -1, 1, -1]) wheelAt(h.panel, wheelCell(4, 3), direction * 100)
+  assert.deepEqual(h.readCalls(), [{ offset: 1, limit: 120 }])
+  assert.ok(h.rows().some(row => row.includes('(end of file)')))
+})
