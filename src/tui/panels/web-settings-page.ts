@@ -1117,7 +1117,12 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (confirmSegment !== undefined) {
       const rowId = this.selectedSettingId()
       const candidate = rowId === undefined ? undefined : this.choiceValues()[this.choiceIndex]
-      if (rowId !== undefined && candidate !== undefined) {
+      // The delegate may only describe a candidate this frame REALLY painted:
+      // the option must own a painted hit target (a cropped candidate has
+      // none), so the bar can never advertise an unexecutable Confirm.
+      const paintedOption = candidate !== undefined
+        && targets.some(target => target.kind === 'option' && target.id === candidate)
+      if (rowId !== undefined && candidate !== undefined && paintedOption) {
         this.paintedConfirmTarget = {
           revision: this.revision,
           rowId,
@@ -1162,7 +1167,11 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const requested = this.choiceValues()[this.choiceIndex]
     if (requested === undefined) return wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
     const viewport = this.detailViewport(width, bodyRows)
-    const projection = this.detailProjection(width, viewport)
+    // The Detail pane really paints inside its OWN column in the wide layout:
+    // the visibility proof must wrap the SAME width the actual render used, or
+    // a long fact/verdict can crop the candidate under the bar's projection
+    // while the real frame no longer paints it.
+    const projection = this.detailProjection(this.detailWidth(width), viewport)
     const entry = projection.optionLines.find(line => line.value === requested)
     const offset = Math.min(Math.max(0, this.detailOffset), projection.maxOffset)
     const visible = entry !== undefined && entry.line >= offset && entry.line < offset + viewport
