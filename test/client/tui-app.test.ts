@@ -6068,13 +6068,16 @@ test('PR2/F5: a settlement while stopped completes the hold; start() leaves no s
     app.settleSubmission('attempt-stopped', 'accepted')
     app.start()
     await vt.waitForRender()
-    // The hold is GONE (not stranded across the round trip): the editor
-    // accepts fresh input and the write admission is live again.
-    app.setDraft('')
+    // RFL009: the accepted clear itself is deferred to the restart — the
+    // stopped screen was never repainted, but the FIRST post-restart frame
+    // shows a CLEARED composer (the accepted document is not a live draft
+    // that a fresh Enter could resubmit).
+    assert.equal(app.getDraft(), '',
+      'the accepted-while-stopped document is cleared at the restart, never resubmittable')
     vt.sendInput('fresh after restart')
     await vt.waitForRender()
     assert.equal(app.getDraft(), 'fresh after restart',
-      'the restarted editor accepts input and programmatic writes — no stale submit lock')
+      'the restarted editor accepts input — no stale submit lock')
     app.holdSubmission('attempt-after-restart')
     app.settleSubmission('attempt-after-restart', 'not-accepted')
     assert.equal(app.getDraft(), 'fresh after restart',
@@ -6100,6 +6103,76 @@ test('PR2/F5: a rejection while stopped unlocks the composer on start()', async 
     await vt.waitForRender()
     assert.equal(app.getDraft(), 'refused while stopped+refused',
       'a refusal settled while stopped still unlocks the editor for the restart')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/RFL008: Ctrl+C during a hold cancels activity without clearing the submitted draft', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('held through ctrl+c')
+    app.holdSubmission('attempt-ctrlc')
+    await vt.waitForRender()
+    vt.sendInput('\x03') // Ctrl+C — pi-parity clear-then-confirm key
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'held through ctrl+c',
+      'the pre-acceptance document survives Ctrl+C (cancel-activity only)')
+    app.settleSubmission('attempt-ctrlc', 'accepted')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), '', 'the acceptance still clears the document')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/RFL008: a replacement editor cannot mutate the held document', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const { EditorRegistry } = await import('../../src/extension/internal/editor-registry.ts')
+  const registry = new EditorRegistry()
+  let pluginText = 'held plugin base'
+  let inputEvents = 0
+  registry.register({
+    id: 'plugin-editor',
+    priority: 1,
+    create: () => ({
+      component: { kind: 'text', spans: [{ text: pluginText }] },
+      getText: () => pluginText,
+      setText: (text: string) => { pluginText = text },
+      getCursor: () => 0,
+      setCursor: () => {},
+      // The routed SEMANTIC input channel (P1-5): the plugin owns the key
+      // events it accepts. The hold gate must consume them before this hook.
+      handleInput: (event: import('../../src/extension/public-types.ts').EditorInputEvent) => {
+        inputEvents += 1
+        if (event.kind === 'text') pluginText += event.text
+        return true
+      },
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.reconcileEditorNow()
+    await vt.waitForRender()
+    assert.equal(app.seatEditorForTest().id, 'plugin-editor')
+    app.holdSubmission('attempt-plugin')
+    await vt.waitForRender()
+    const textAtHold = pluginText
+    vt.sendInput('X')
+    await vt.waitForRender()
+    assert.equal(inputEvents, 0,
+      'the replacement editor input is consumed while the composer is held')
+    assert.equal(pluginText, textAtHold, `the plugin document is unchanged (${JSON.stringify(textAtHold)})`)
+    app.settleSubmission('attempt-plugin', 'accepted')
+    await vt.waitForRender()
+    assert.equal(pluginText, '', 'the acceptance clears the LIVE plugin seat document')
+    assert.equal(inputEvents, 0, 'no unsent plugin input ever entered the cleared document')
   } finally {
     app.stop()
   }

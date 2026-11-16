@@ -1604,3 +1604,26 @@ test('PR2/F4: a submission hold started after the read refuses the late placehol
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), 'c /image shot.png ', 'the release changes nothing by itself')
 })
+
+test('PR2/RFL010: a surface stopped mid-read refuses the late placeholder at restart', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  type(vt, 'd /image ')
+  await vt.waitForRender()
+  type(vt, 'shot')
+  await waitForDraft(app, draft => draft === 'd /image shot', 'the filter lands in the draft')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the single filtered image candidate')
+  const hold = h.holdImageRead()
+  vt.sendInput('\r')
+  await hold.entered
+  app.stop()
+  hold.release()
+  await h.postRead()
+  app.start()
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'd /image shot.png ',
+    'the late placeholder never lands in a stopped/restarted surface')
+  assert.equal(h.imageStore.size(), 0, 'no bytes were staged for the refused write')
+})
