@@ -227,6 +227,8 @@ interface AttemptMount {
   setScopeCurrent(current: boolean): void
   /** Simulate a COMMITTED owner replacement (the subject authority read). */
   setOwnerReplaced(replaced: boolean): void
+  /** The renderer's stale-draft retention policy (TSP drops at a switch). */
+  setRetainsStaleDraftRestore(retains: boolean): void
   /** Hold the NEXT writer call and settle it later (the FIFO window). */
   holdNextWriter(): void
   releaseHeldWriter(): void
@@ -256,6 +258,7 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
   let agentRunning = false
   let scopeCurrent = true
   let ownerReplaced = false
+  let retainsStaleDraftRestore = true
   let releaseWriter: (() => void) | undefined
   let heldWriter = false
   let heldEnsure: { resolve: () => void; reject: (error: unknown) => void } | undefined
@@ -305,7 +308,7 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
     liveAgent: () => agent,
     ownership: {
       generation: () => 1,
-      captureSubject: () => ({ owner: 's1' }),
+      captureSubject: () => ({ owner: ownerReplaced ? 's2' : 's1' }),
       transitionPending: () => false,
       awaitTransitionSettled: async () => {},
       beginNavigationIntent: () => () => {},
@@ -435,9 +438,11 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
     surface: { refreshPendingInput: () => {} },
     supportsLocalShellCards: true,
     supportsTuiBuiltinUi: true,
-    retainsStaleDraftRestore: true,
-    ownerWasReplaced: () => ownerReplaced,
-    captureMatches: () => !ownerReplaced,
+    retainsStaleDraftRestore,
+    ownerWasReplaced: (subject: { owner?: string } | undefined) =>
+      subject !== undefined && subject.owner !== (ownerReplaced ? 's2' : 's1'),
+    captureMatches: (subject?: { owner?: string }) =>
+      subject === undefined || subject.owner === (ownerReplaced ? 's2' : 's1'),
     model: { selected: { get current() { return undefined } } },
     image: { attachments: () => undefined, llm: () => undefined },
     tuiSettings: undefined,
@@ -465,6 +470,7 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
     setAgentRunning: (running) => { agentRunning = running; },
     setScopeCurrent: (current) => { scopeCurrent = current; },
     setOwnerReplaced: (replaced) => { ownerReplaced = replaced; },
+    setRetainsStaleDraftRestore: (retains) => { retainsStaleDraftRestore = retains; },
     holdNextWriter: () => { heldWriter = true; },
     releaseHeldWriter: () => { heldWriter = false; releaseWriter?.() },
     holdNextEnsureSession: () => {
@@ -1048,4 +1054,33 @@ test('PR2/RFL015: a legacy pre-dispatch failure under a held prompt defers, neve
   assert.equal(h.controller.composerHoldActive(), false)
   assert.equal(h.composer.text, 'B own original\n\n/deploy now',
     'A is restored exactly once when B settles (never lost behind the foreign hold)')
+})
+
+test('PR2/RFL014: a LATE stale restore after owner replacement is dropped even behind a successor hold', async () => {
+  const h = mountAttempt()
+  h.setRetainsStaleDraftRestore(false) // the TSP switch-dropping renderer
+  h.setCommandBehavior('legacy-command-pending')
+  // A: the legacy command of the OLD owner is gated inside ensureSession.
+  h.holdNextEnsureSession()
+  assert.equal(h.controller.beginComposerSubmission('/deploy old owner', 'enter'), 'legacy')
+  h.controller.submit('/deploy old owner', 'enter')
+  await attemptTick()
+  // The COMMITTED owner replacement happens BEFORE the old failure arrives.
+  h.setOwnerReplaced(true)
+  h.controller.clearPending()
+  // The successor's ordinary prompt opens its hold behind the FIFO.
+  h.composer.text = 'B of the new owner'
+  h.holdNextWriter()
+  assert.equal(h.controller.beginComposerSubmission('B of the new owner', 'enter'), 'held')
+  await attemptTick()
+  // The OLD preparation now fails: the stale-subject suppression must decide
+  // BEFORE any foreign-hold deferral (a deferral would carry the NEW owner).
+  h.rejectHeldEnsureSession(new Error('old preparation failed'))
+  await attemptTick()
+  assert.equal(h.composer.text, 'B of the new owner', 'the old text never touches the successor')
+  // The successor's acceptance clears its own document; the old text is gone.
+  h.respond({ kind: 'committed', value: undefined }, true)
+  h.releaseHeldWriter()
+  await attemptTick()
+  assert.equal(h.composer.text, '', 'the replaced owner’s late restore was dropped, not replayed')
 })

@@ -920,6 +920,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     capturedSubject: SessionSubject | undefined,
     ownerRequestId?: string,
   ): 'merged-verbatim' | 'merged' | 'dropped' => {
+    // RFL014 (reopened): the stale-subject suppression is decided FIRST. A
+    // restore captured for a REPLACED owner never reaches the successor's
+    // composer, not even through the foreign-hold deferral — the queue entry
+    // keeps the CAPTURED subject (never the receiver's current owner).
+    if (!deps.retainsStaleDraftRestore && deps.ownerWasReplaced(capturedSubject)) {
+      return 'dropped'
+    }
     if (composerHold !== undefined && composerHold.phase === 'sending') {
       const own = ownerRequestId !== undefined && composerHold.submissionRequestId === ownerRequestId
       if (own) {
@@ -928,7 +935,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         // after this hold settles — never written into the frozen document and
         // never recorded as its text.
         if (composerHold.text !== value) {
-          deferredDraftRestores.push({ text: value, subject: deps.ownership.captureSubject() })
+          deferredDraftRestores.push({ text: value, subject: capturedSubject })
         }
         return 'merged-verbatim'
       }
@@ -939,12 +946,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       }
       // ANOTHER attempt owns the editor (RFL015: this includes the stale
       // restore of a legacy command whose first ensureSession failed). Defer
-      // the text to that hold's settlement; never rewrite its record.
-      deferredDraftRestores.push({ text: value, subject: deps.ownership.captureSubject() })
+      // the text to that hold's settlement, pinned to the CAPTURED subject;
+      // never rewrite the live hold's record.
+      deferredDraftRestores.push({ text: value, subject: capturedSubject })
       return 'merged-verbatim'
-    }
-    if (!deps.retainsStaleDraftRestore && deps.ownerWasReplaced(capturedSubject)) {
-      return 'dropped'
     }
     const merged = mergeDraft(deps.app().getDraft(), value)
     deps.app().setEditorText(merged)
