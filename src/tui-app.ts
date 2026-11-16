@@ -4097,10 +4097,6 @@ export class TuiApp {
   /** PTC sub-calls the user explicitly collapsed while the search reveal had
    * them open: they stay collapsed until the next explicit navigation. */
   private readonly searchSuppressedSubCalls = new Set<string>()
-  /** The one-shot PLAN inspection's OWN child-collapse record: the search
-   * navigation and the plan inspection are independent temporary requests, so
-   * neither may write or clear the other's suppression state. */
-  private readonly planSuppressedSubCallIds = new Set<string>()
   /** The block-relative transcript range of the current search selection
    * (welcome card excluded), recomputed on every rebuild/remeasure. */
   private currentSearchTranscriptRange: RenderedSearchScrollRange | undefined
@@ -10721,11 +10717,10 @@ export class TuiApp {
    * suppression record. */
   private forcesSubCallExpandedTemporarily(subCallId: string): boolean {
     // The plan inspection's located PTC child (the plan body lives inside the
-    // nested card) is opened for the reading step only — an explicit user
-    // collapse of that child during THIS lease suppresses it (plan-scoped).
-    if (this.planInspection?.subCallId === subCallId) {
-      return !this.planSuppressedSubCallIds.has(subCallId)
-    }
+    // nested card) is opened for the reading step; an explicit user collapse
+    // of that child revokes the whole lease (see toggleSubCallExpanded), so no
+    // plan-scoped suppression record is needed.
+    if (this.planInspection?.subCallId === subCallId) return true
     return this.searchForcesSubCall(subCallId)
   }
 
@@ -17441,7 +17436,6 @@ export class TuiApp {
     // be retained by the hit map.
     this.subCallExpanded.clear()
     this.searchSuppressedSubCalls.clear()
-    this.planSuppressedSubCallIds.clear()
     this.subCallHitsByMessage.clear()
     this.subCallExpandedRevision += 1
     // The one-shot plan inspection is session-scoped too: a switched-in
@@ -29387,10 +29381,9 @@ export class TuiApp {
   private revokePlanInspectionLease(): void {
     if (this.planInspection === undefined) return
     this.planInspection = undefined
-    // Only the PLAN request's own suppression record is released: the search
-    // navigation's explicit collapses are a different request's state and must
-    // survive a plan View/reading/settlement untouched.
-    this.planSuppressedSubCallIds.clear()
+    // The search navigation's explicit collapses are a DIFFERENT request's
+    // state and survive a plan View/reading/settlement untouched (the plan
+    // lease writes no search suppression of its own).
     this.clearFocusLiveHeightState()
   }
 

@@ -187,12 +187,18 @@ options, and which offers at least one other option — nothing else, never a
 header or label match) replaces the generic Q1→Review→Submit pages with ONE
 compact decision component in the same editor seat:
 
-- Decision rows are ALWAYS the fixed three `View plan → Keep planning… →
-  <official approve label> plan` (any further official non-approve options
-  never add rows: the FIRST non-approve option in the official order is the
-  keep-planning class and the label this branch answers with). The default
-  cursor is View (Fullscreen, when the host's read-only inspection is
-  installed) or Keep (otherwise) — never Approve. Answer values are always the
+- Decision rows are ALWAYS the fixed order `View plan → View review text →
+  Keep planning… → <official approve label> plan`, each present only when its
+  entry is real: `View plan` only while the host's live read-only inspection is
+  executable (Fullscreen); `View review text` whenever the official question
+  carries its own detail body — the reading entry of LAST resort that keeps the
+  complete plan readable on Regular (no app-owned seek) and on a Fullscreen
+  locate that cannot prove a card, without ever claiming a located transcript
+  (§3.5's official exception; no second Reader). Any further official
+  non-approve options never add rows: the FIRST non-approve option in the
+  official order is the keep-planning class and the label this branch answers
+  with. The default cursor is the FIRST available reading row (View plan, else
+  View review text, else Keep) — never Approve. Answer values are always the
   OFFICIAL option labels.
 - `View plan` triggers the host's one-shot read-only inspection: it requires a
   PROVEN identity first — the official Question's own Session (the
@@ -229,11 +235,13 @@ compact decision component in the same editor seat:
   ancestors (one never shadows the other), and each request owns its own PTC
   child-collapse record: a plan View/reading/release never writes or clears a
   search suppression, and vice versa.
-- Regular/Main has no app-owned seek: the decision list carries the frozen
+- Regular/Main has no app-owned seek: it offers no `View plan` and never
+  claims a located reading state. The question's own detail keeps the full text
+  readable in-flow through `View review text`; when even that body is absent
+  (a detail-less official shape), the decision list carries the frozen
   single-line guidance `Read the plan above in terminal history.` (the plan is
   the tool card already painted in the native scrollback, expanded through the
-  effective disclosure key), offers no `View plan`, and never claims a located
-  reading state.
+  effective disclosure key).
 - Keep planning… opens the feedback input (draft survives Esc); Enter answers
   the official keep label with the optional custom text. The generic
   custom-first submit path is never used (it would clear the selected label).

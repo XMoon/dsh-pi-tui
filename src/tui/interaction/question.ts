@@ -507,7 +507,7 @@ export class QuestionFlow implements Component, Focusable {
    * index): the View row can appear/disappear when the host's live inspection
    * capability changes, and a remembered index would silently reinterpret
    * Keep as Approve. */
-  private planCursorAction: 'view' | 'keep' | 'approve' = 'view'
+  private planCursorAction: 'view' | 'review' | 'keep' | 'approve' = 'view'
   /** The current row list's highlighted index (derived from
    * {@link planCursorAction}; recomputed on every use). */
   private planCursor = 0
@@ -571,10 +571,17 @@ export class QuestionFlow implements Component, Focusable {
    * only, offered by the host through {@link beginPlanInspection}), then
    * `Keep planning…` (feedback), then the official approve label last. The
    * approve row is never the default cursor. */
-  private planDecisionRows(): { action: 'view' | 'keep' | 'approve'; label: string }[] {
+  private planDecisionRows(): { action: 'view' | 'review' | 'keep' | 'approve'; label: string }[] {
     if (this.planReview === undefined) return []
-    const rows: { action: 'view' | 'keep' | 'approve'; label: string }[] = []
+    const rows: { action: 'view' | 'review' | 'keep' | 'approve'; label: string }[] = []
     if (this.planInspection?.canInspect() === true) rows.push({ action: 'view', label: 'View plan' })
+    // The OFFICIAL question detail is the reading entry of LAST resort: a
+    // Regular surface (no app-owned seek) and a Fullscreen locate that cannot
+    // prove a card both keep the complete plan readable through the question's
+    // OWN text — the user is never asked to approve an unreadable plan
+    // (§3.5's official exception; no second Reader is created).
+    const detail = this.planReview.question.detail
+    if (detail !== undefined && detail.trim() !== '') rows.push({ action: 'review', label: 'View review text' })
     // The official request may offer several non-approve options; the frozen
     // decision UI is ONE Keep row, so the FIRST non-approve option (the
     // official option order) is the keep-planning class and the label this
@@ -605,7 +612,7 @@ export class QuestionFlow implements Component, Focusable {
   /** Resolve the highlighted row index from the remembered ACTION: a row that
    * no longer exists (the View row lost its live capability) falls back to the
    * FIRST row (Keep) — never to Approve, and never silently. */
-  private planCursorIndex(rows: readonly { action: 'view' | 'keep' | 'approve' }[]): number {
+  private planCursorIndex(rows: readonly { action: 'view' | 'review' | 'keep' | 'approve' }[]): number {
     const index = rows.findIndex(row => row.action === this.planCursorAction)
     if (index >= 0) return index
     const fallback = rows[0]
@@ -1057,7 +1064,7 @@ export class QuestionFlow implements Component, Focusable {
       }
       if (this.planStep === 'decision' && key !== undefined && key.startsWith('plan:')) {
         const action = key.slice('plan:'.length)
-        if (action === 'view' || action === 'keep' || action === 'approve') {
+        if (action === 'view' || action === 'review' || action === 'keep' || action === 'approve') {
           this.planCursorAction = action
           this.planCursor = this.planCursorIndex(this.planDecisionRows())
           this.executePlanRow(action)
@@ -1769,7 +1776,7 @@ export class QuestionFlow implements Component, Focusable {
   /** Execute one plan decision row (keyboard Enter and the pointer route
    * share this ONE verb; a missing inspection capability degrades View to
    * the question-detail fallback). */
-  private executePlanRow(action: 'view' | 'keep' | 'approve' | undefined): void {
+  private executePlanRow(action: 'view' | 'review' | 'keep' | 'approve' | undefined): void {
     if (action === 'view') {
       if (this.planInspection?.canInspect() !== true) return
       const inspected = this.planInspection.inspect() === true
@@ -1781,6 +1788,13 @@ export class QuestionFlow implements Component, Focusable {
         this.planStep = 'fallback'
         this.planFallbackScroll = 0
       }
+      return
+    }
+    if (action === 'review') {
+      // The official question's own detail: §3.5's exception. ALWAYS the full
+      // text (paged to the end), never a claimed-located transcript state.
+      this.planStep = 'fallback'
+      this.planFallbackScroll = 0
       return
     }
     if (action === 'keep') {
@@ -2213,10 +2227,13 @@ export class QuestionFlow implements Component, Focusable {
       : color.textStrong(title))
     lines.push('')
     // §3.4: without the Fullscreen inspection there is no app-owned seek, so
-    // the decision list names the ONE honest reading path — the plan already
+    // the decision list names the honest reading paths — the plan already
     // painted above in the native terminal scrollback (the tool card; expand
-    // it with the effective disclosure key). No `V view`, no located claim.
-    if (this.planInspection?.canInspect() !== true) {
+    // it with the effective disclosure key), and when the question carries its
+    // own detail body the `View review text` row reads the complete text
+    // in-flow. The scrollback line appears only when BOTH are unavailable.
+    if (this.planInspection?.canInspect() !== true
+      && (this.planReview?.question.detail ?? '').trim() === '') {
       lines.push(color.textDim(truncateToWidth('Read the plan above in terminal history.', Math.max(1, width), '…')))
     }
     const rows = this.planDecisionRows()

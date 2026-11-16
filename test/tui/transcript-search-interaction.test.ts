@@ -1536,9 +1536,10 @@ test('the plan lease and the search reveal COMPOSE (union) and release independe
   app.stop()
 })
 
-test('Regular mode names the one honest reading path: the plan above in terminal history', async () => {
-  // No app-owned seek in Regular: the decision list must say where the plan
-  // is (the native scrollback tool card above) and must NOT offer View plan.
+test('Regular mode keeps the plan readable and never offers an unusable View plan', async () => {
+  // No app-owned seek in Regular: with a question detail the in-flow
+  // `View review text` row is the default; without one the honest scrollback
+  // line names the tool card above. Regular never paints `View plan`.
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
   app.start()
@@ -1552,18 +1553,16 @@ test('Regular mode names the one honest reading path: the plan above in terminal
   }], undefined, { reviewSessionId: SESSION }, false)
   await vt.waitForRender()
   const frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
-  assert.ok(frame.includes('Read the plan above in terminal history.'),
-    `the Regular reading guidance is missing:\n${frame}`)
+  assert.ok(frame.includes('View review text'), `the in-flow reading row is the Regular default:\n${frame}`)
   assert.ok(!frame.includes('View plan'), `Regular must not offer an unusable View plan:\n${frame}`)
   assert.ok(frame.includes('Keep planning…') && frame.includes('Approve plan'),
-    `the two-row decision list is intact:\n${frame}`)
-  // The guidance disappears once the capability is executable (Fullscreen).
+    `the decision rows are intact:\n${frame}`)
+  // The Fullscreen capability adds the REAL View plan on top.
   app.setFullscreen(true)
   await vt.waitForRender()
   const fullscreenFrame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
   assert.ok(fullscreenFrame.includes('View plan'), `Fullscreen offers the real View:\n${fullscreenFrame}`)
-  assert.ok(!fullscreenFrame.includes('Read the plan above in terminal history.'),
-    `the Regular-only guidance must not paint in Fullscreen:\n${fullscreenFrame}`)
+  assert.ok(fullscreenFrame.includes('View review text'), `the detail entry stays available:\n${fullscreenFrame}`)
   vt.sendInput('\x1b') // official dismiss
   await settle.then(() => {}, () => {})
   app.stop()
@@ -1607,6 +1606,96 @@ test('the reading step jumps to the transcript start/end with Home/End (never in
   assert.equal(scroll().scrollTop, parked, 'Home/End inside the feedback edit never move the transcript')
   vt.sendInput('\x1b')
   await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('Regular WITHOUT a logged tool card reads the full plan in-flow and can still answer', async () => {
+  // The official plan-review may arrive with NO logged exit_plan_mode card
+  // (the plan exists only in question.detail). Regular has no transcript
+  // seek, so the decision list must keep the complete text readable through
+  // the question's OWN body — never an unreadable approve target.
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  // NO card: the transcript has no exit_plan_mode row at all.
+  app.setTranscript([{ kind: 'user', turn: 0, text: 'plan without a logged call' }])
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: PLAN_MD,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  let frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(frame.includes('View review text'), `the in-flow reading row is missing:\n${frame}`)
+  assert.ok(!frame.includes('View plan'), `Regular offers no View plan:\n${frame}`)
+  assert.ok(!frame.includes('Read the plan above in terminal history.'),
+    `the scrollback line must not replace the in-flow row when detail exists:\n${frame}`)
+  // Open the full text; verify the plan body head and (paging) the tail. The
+  // default cursor IS `View review text` (row 0 without the Fullscreen View).
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(frame.includes('Full review text'), `the detail fallback opens:\n${frame}`)
+  assert.ok(frame.includes('# Upgrade 0.5.7'), `the plan head renders:\n${frame}`)
+  for (let page = 0; page < 8 && !frame.includes('ship it'); page += 1) {
+    vt.sendInput('\x1b[6~')
+    await vt.waitForRender()
+    frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  }
+  assert.ok(frame.includes('ship it'), `the plan tail pages in:\n${frame}`)
+  // Esc back to the decision list; the question is STILL answerable — approve
+  // through the official answer (↓ to Approve since View review text is row 0).
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // View review text -> Keep planning…
+  vt.sendInput('\x1b[B') // Keep planning… -> Approve plan
+  vt.sendInput('\r')
+  const answers = await settle
+  assert.deepEqual(answers, [{ id: 'plan-review', selected: ['Approve'] }],
+    'the answer still settles through the official path after in-flow reading')
+  app.stop()
+})
+
+test('Fullscreen WITH a provable card offers View plan FIRST and View review text SECOND', async () => {
+  const { vt, app, settle } = planScene(planTranscript('call-plan-1'), 100, 24, { present: planDirectPresenter })
+  await vt.waitForRender()
+  const frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  const viewRow = frame.split('\n').findIndex(line => line.includes('View plan'))
+  const reviewRow = frame.split('\n').findIndex(line => line.includes('View review text'))
+  assert.ok(viewRow >= 0 && reviewRow >= 0, `both reading rows exist:\n${frame}`)
+  assert.ok(viewRow < reviewRow, `View plan stays the preferred (first) entry:\n${frame}`)
+  // The default cursor is View plan, and the review row is also reachable.
+  assert.ok(frame.split('\n')[viewRow]!.includes('>'), 'View plan keeps the default cursor')
+  assert.ok(!frame.split('\n')[reviewRow]!.includes('>'), 'View review text is not the default')
+  vt.sendInput('\x1b')
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('a question WITHOUT detail keeps the scrollback guidance and no review row (Regular)', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setTranscript([{ kind: 'user', turn: 0, text: 'detail-less shape' }])
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?',
+    header: 'Plan review',
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  const frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(frame.includes('Read the plan above in terminal history.'),
+    `the honest scrollback guidance returns when no detail exists:\n${frame}`)
+  assert.ok(!frame.includes('View review text'), `no dead review row without a body:\n${frame}`)
+  assert.ok(!frame.includes('View plan'), `no View plan in Regular:\n${frame}`)
   vt.sendInput('\x1b')
   await settle.then(() => {}, () => {})
   app.stop()
