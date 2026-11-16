@@ -152,10 +152,11 @@ test('rejects an illegal backendSource value or source', () => {
 // ── surface failure sanitization (R2-02) ─────────────────────────────────
 
 import { surfaceStartupFailureLine, sanitizeSurfaceText } from '../../src/app/remote-process/local-client-entry.ts'
+import { LocalScopeError } from '../../src/app/remote-process/local-scope.ts'
 
 test('surface failure line strips paths, URLs and control characters from an entry error', () => {
   const error = new Error('local client entry: could not open /home/user/.dsh/profiles/pi-tui/x at http://127.0.0.1:9999/launch\u001b[31mBOOM')
-  const line = surfaceStartupFailureLine(error)
+  const line = surfaceStartupFailureLine(error, 'pi-tui')
   assert.ok(!line.includes('/home/user'), 'no absolute path')
   assert.ok(!line.includes('127.0.0.1'), 'no host URL')
   assert.ok(!/[\u0000-\u001f]/u.test(line), 'no control characters')
@@ -163,18 +164,28 @@ test('surface failure line strips paths, URLs and control characters from an ent
 })
 
 test('a self-authored entry failure keeps its sanitized reason and daemon recovery guidance', () => {
-  const line = surfaceStartupFailureLine(new Error('local client entry: context gate missing at /home/user/.dsh/profile'))
+  const line = surfaceStartupFailureLine(new Error('local client entry: context gate missing at /home/user/.dsh/profile'), 'staging')
   assert.match(line, /context gate missing/u)
   assert.match(line, /The Host was not stopped/u)
-  assert.match(line, /dsh --profile pi-tui daemon status/u)
-  assert.match(line, /dsh --profile pi-tui daemon logs/u)
-  assert.match(line, /dsh --profile pi-tui daemon restart/u)
+  assert.match(line, /dsh --profile staging daemon status/u)
+  assert.match(line, /dsh --profile staging daemon logs/u)
+  assert.match(line, /dsh --profile staging daemon restart/u)
   assert.match(line, /not guaranteed/u)
   assert.ok(!line.includes('/home/user'), 'no absolute path')
 })
 
+test('surface recovery commands use the actual profile and shell-safe quoting', () => {
+  const staging = surfaceStartupFailureLine(new LocalScopeError('HOST_AUTH_FAILED', 'no cookie'), 'staging')
+  assert.match(staging, /dsh --profile staging daemon status/u)
+  assert.match(staging, /dsh --profile staging daemon logs/u)
+  assert.match(staging, /dsh --profile staging daemon restart/u)
+  assert.doesNotMatch(staging, /dsh --profile pi-tui/u)
+  const quoted = surfaceStartupFailureLine(new LocalScopeError('HOST_AUTH_FAILED', 'no cookie'), "team's profile")
+  assert.ok(quoted.includes("--profile 'team'\\''s profile' daemon restart"), quoted)
+})
+
 test('an unknown surface failure is a fixed concise reason, never the raw message', () => {
-  const line = surfaceStartupFailureLine(new Error('boom at /etc/passwd http://host/x'))
+  const line = surfaceStartupFailureLine(new Error('boom at /etc/passwd http://host/x'), 'pi-tui')
   assert.match(line, /startup failed before the TUI mounted/u)
   assert.match(line, /The Host was not stopped/u)
   assert.match(line, /dsh --profile pi-tui daemon status/u)

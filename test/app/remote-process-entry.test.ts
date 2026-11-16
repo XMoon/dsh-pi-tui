@@ -423,6 +423,7 @@ test('the B1 Client transport mounts exactly the three Node client halves and no
 test('a surface startup protocol refusal states the code, preserved Host and daemon recovery guidance', () => {
   const line = surfaceStartupFailureLine(
     new LocalScopeError('HOST_PROTOCOL_INCOMPATIBLE', 'local discovery: the live Host uses a different local protocol or DSH runtime'),
+    'pi-tui',
   )
   assert.match(line, /^HOST_PROTOCOL_INCOMPATIBLE: /u)
   assert.match(line, /different local protocol or DSH runtime/u)
@@ -439,7 +440,7 @@ test('a surface startup protocol refusal states the code, preserved Host and dae
   // Other typed scope failures are reported by CODE with a fixed recovery line;
   // the raw message (which can carry an endpoint / detail) is never echoed.
   for (const code of ['HOST_UNRESPONSIVE', 'HOST_BUILD_INCOMPATIBLE'] as const) {
-    const other = surfaceStartupFailureLine(new LocalScopeError(code, 'local discovery: identity route answered HTTP 503 at http://10.0.0.1/x'))
+    const other = surfaceStartupFailureLine(new LocalScopeError(code, 'local discovery: identity route answered HTTP 503 at http://10.0.0.1/x'), 'pi-tui')
     assert.match(other, new RegExp(`cannot establish the local Host \\(${code}\\)`, 'u'))
     assert.match(other, /dsh --profile pi-tui daemon status/u)
     assert.match(other, /dsh --profile pi-tui daemon logs/u)

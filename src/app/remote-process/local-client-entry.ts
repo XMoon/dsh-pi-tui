@@ -1350,7 +1350,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       // drives this stop path also gets ONE sanitized human line (a clean
       // /exit or signal carries no failure and prints nothing).
       if (options.mode === 'surface' && failure !== undefined) {
-        process.stderr.write(`${surfaceStartupFailureLine(failure)}\n`)
+        process.stderr.write(`${surfaceStartupFailureLine(failure, options.profile)}\n`)
       }
       process.stdin.pause()
       resolveStopped?.()
@@ -2349,7 +2349,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     if (options.mode === 'surface') {
       const line = expectedHostInstanceId !== undefined
         ? handoffStartupFailureLine(failure)
-        : surfaceStartupFailureLine(failure)
+        : surfaceStartupFailureLine(failure, options.profile)
       process.stderr.write(`${line}\n`)
     }
     process.stdin.pause()
@@ -2433,25 +2433,32 @@ async function waitForStartupHold(path: string, signal: AbortSignal): Promise<vo
   signal.throwIfAborted()
 }
 
+/** Quote an official Profile name for a copy-pasteable shell command. */
+function shellProfileArg(profile: string): string {
+  if (/^[A-Za-z0-9_.-]+$/u.test(profile)) return profile
+  return `'${profile.replace(/'/gu, "'\\''")}'`
+}
+
 /**
  * The human-facing surface line for one startup failure. The live-Host
  * protocol/DSH refusal gets a dedicated, actionable line that names the code,
  * keeps the old Host untouched and points at the public daemon management
- * commands for diagnosis and an explicit user-chosen recovery. It never
- * includes the registry PID, the launch URL/token or a private profile path.
- * Every other startup failure keeps the existing diagnostic plus the same
- * daemon-oriented recovery guidance.
+ * commands for THIS official Profile. It never includes the registry PID, the
+ * launch URL/token or a private profile path. Every other startup failure
+ * keeps the existing diagnostic plus the same daemon-oriented recovery
+ * guidance.
  */
-export function surfaceStartupFailureLine(error: unknown): string {
+export function surfaceStartupFailureLine(error: unknown, profile: string): string {
+  const daemon = (verb: string): string => `dsh --profile ${shellProfileArg(profile)} daemon ${verb}`
   if (error instanceof LocalScopeError) {
     if (error.code === 'HOST_PROTOCOL_INCOMPATIBLE') {
-      return 'HOST_PROTOCOL_INCOMPATIBLE: Another live local Host for this profile uses a different local protocol or DSH runtime. The Host has not been stopped or replaced. Inspect it with: dsh --profile pi-tui daemon status; read its logs with: dsh --profile pi-tui daemon logs. If you decide this Profile service is yours to recover, run: dsh --profile pi-tui daemon restart. Recovery is not guaranteed; Automatic upgrade and migration of in-memory work are not supported.'
+      return `HOST_PROTOCOL_INCOMPATIBLE: Another live local Host for this profile uses a different local protocol or DSH runtime. The Host has not been stopped or replaced. Inspect it with: ${daemon('status')}; read its logs with: ${daemon('logs')}. If you decide this Profile service is yours to recover, run: ${daemon('restart')}. Recovery is not guaranteed; Automatic upgrade and migration of in-memory work are not supported.`
     }
     // Every other typed scope failure is a controlled code; never echo the raw
     // message (it can carry a private profile path / Host origin).
-    return `split client surface: cannot establish the local Host (${error.code}); the Host was not stopped. Inspect it with: dsh --profile pi-tui daemon status; read its logs with: dsh --profile pi-tui daemon logs. If you choose to recover, run: dsh --profile pi-tui daemon restart; recovery is not guaranteed.`
+    return `split client surface: cannot establish the local Host (${error.code}); the Host was not stopped. Inspect it with: ${daemon('status')}; read its logs with: ${daemon('logs')}. If you choose to recover, run: ${daemon('restart')}; recovery is not guaranteed.`
   }
-  return `split client surface: ${controlledSurfaceReason(error)}`
+  return `split client surface: ${controlledSurfaceReason(error, daemon)}`
 }
 
 /**
@@ -2461,13 +2468,13 @@ export function surfaceStartupFailureLine(error: unknown): string {
  * in the controlled Client/Host log; the TTY never receives a raw error, a path
  * or a Host launch URL.
  */
-function controlledSurfaceReason(error: unknown): string {
+function controlledSurfaceReason(error: unknown, daemon: (verb: string) => string): string {
   const raw = error instanceof Error ? error.message : String(error)
   const entryPrefix = 'local client entry: '
   if (raw.startsWith(entryPrefix)) {
-    return `${sanitizeSurfaceText(raw.slice(entryPrefix.length))} The Host was not stopped. Inspect with: dsh --profile pi-tui daemon status and dsh --profile pi-tui daemon logs; if you choose to recover, run dsh --profile pi-tui daemon restart (not guaranteed).`
+    return `${sanitizeSurfaceText(raw.slice(entryPrefix.length))} The Host was not stopped. Inspect with: ${daemon('status')} and ${daemon('logs')}; if you choose to recover, run ${daemon('restart')} (not guaranteed).`
   }
-  return 'startup failed before the TUI mounted; see the Host log for detail. The Host was not stopped. Inspect with: dsh --profile pi-tui daemon status and dsh --profile pi-tui daemon logs; if you choose to recover, run dsh --profile pi-tui daemon restart (not guaranteed).'
+  return `startup failed before the TUI mounted; see the Host log for detail. The Host was not stopped. Inspect with: ${daemon('status')} and ${daemon('logs')}; if you choose to recover, run ${daemon('restart')} (not guaranteed).`
 }
 
 /** Strip control characters, URLs and absolute paths; bound the length. */
@@ -2546,7 +2553,7 @@ if (import.meta.main) {
       // on stderr, never a JSON record on the terminal.
       const handoff = process.env.SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID
       const line = handoff === undefined || handoff === ''
-        ? surfaceStartupFailureLine(error)
+        ? surfaceStartupFailureLine(error, process.env.SPLIT_PROCESS_PROFILE ?? 'pi-tui')
         : handoffStartupFailureLine(error)
       process.stderr.write(`${line}\n`)
     } else {

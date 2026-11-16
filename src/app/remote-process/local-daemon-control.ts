@@ -200,6 +200,8 @@ interface Snapshot {
   readonly authenticated: VerifiedLocalHost | undefined
   /** True only when the authenticated `/connect` handshake failed for a live Host. */
   readonly hostAuthenticationFailed: boolean
+  /** True only when a live Host failed protocol/DSH compatibility before auth. */
+  readonly hostCompatibilityFailed: boolean
   readonly status: DaemonControlStatus
   readonly exitCode: number
   readonly failure: DaemonControlError | undefined
@@ -339,6 +341,7 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
       processAlive: false,
       authenticated: undefined,
       hostAuthenticationFailed: false,
+      hostCompatibilityFailed: false,
       status: {
         profile: profile.name,
         manager: 'unmanaged',
@@ -365,6 +368,7 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
   let compatibility: DaemonCompatibility = 'none'
   let authenticated: VerifiedLocalHost | undefined
   let hostAuthenticationFailed = false
+  let hostCompatibilityFailed = false
   let failure: DaemonControlError | undefined
   let exitCode = 0
   let record: LocalInstanceRecord | undefined
@@ -392,6 +396,7 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
     } catch (error) {
       host = 'incompatible'
       compatibility = 'incompatible'
+      hostCompatibilityFailed = true
       failure = toDaemonControlError(error)
       exitCode = failure.exitCode
     }
@@ -499,6 +504,7 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
     processAlive,
     authenticated,
     hostAuthenticationFailed,
+    hostCompatibilityFailed,
     status: {
       profile: profile.name,
       manager,
@@ -555,12 +561,13 @@ async function withAdminSeat<T>(scope: LocalScope, operation: () => Promise<T>):
   }
 }
 
-/** A live Host authentication failure is a diagnosis, not a unit-ownership
- *  verdict. A verified current-Profile unit remains manageable through the
- *  manager; every other snapshot failure keeps its normal admission. The
- *  product never auto-recovers — this only permits an explicit user command. */
+/** A live Host authentication or compatibility failure is a diagnosis, not a
+ *  unit-ownership verdict. A verified current-Profile unit remains manageable
+ *  through the manager; every other snapshot failure keeps its normal
+ *  admission. The product never auto-recovers — this only permits an explicit
+ *  user command. */
 function verifiedUnitManagementAdmitted(snapshot: Snapshot): boolean {
-  return snapshot.hostAuthenticationFailed
+  return (snapshot.hostAuthenticationFailed || snapshot.hostCompatibilityFailed)
     && snapshot.unit !== undefined
     && snapshot.probe.kind === 'available'
 }
@@ -822,7 +829,7 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
   const inspected = inspectScope(profile, deps)
   return await withAdminSeat(inspected, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
-    const authOnlyUnitRecovery = verifiedUnitManagementAdmitted(pre)
+    const unitFailureRecovery = verifiedUnitManagementAdmitted(pre)
       && (pre.record === undefined || !pre.processAlive || pre.unitMainPid === pre.record.hostPid)
     // An explicit restart is a unit operation, not a Ready verdict. A verified
     // current-Profile unit that is active/activating may be stuck before
@@ -833,9 +840,9 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
       && pre.probe.kind === 'available'
       && (pre.unitActiveState === 'active' || pre.unitActiveState === 'activating')
       && (pre.record === undefined || !pre.processAlive || pre.unitMainPid === pre.record.hostPid)
-    if (pre.failure !== undefined && !authOnlyUnitRecovery) throw pre.failure
+    if (pre.failure !== undefined && !unitFailureRecovery) throw pre.failure
     if (pre.status.host !== 'ready' && pre.status.host !== 'stopped'
-      && !authOnlyUnitRecovery && !verifiedUnitRestart) throw refuseHostState(pre.status)
+      && !unitFailureRecovery && !verifiedUnitRestart) throw refuseHostState(pre.status)
     const oldInstance = pre.record?.instanceId
     // Owner decision (M6-2C scope): an owned unit from ANOTHER installed build
     // is never migrated here. Cross-build unit replacement is M6-2D work; this
