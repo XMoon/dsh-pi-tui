@@ -162,6 +162,7 @@ test('the real lane starts above the Windows argv budget with complete shard and
     writeFileSync(join(probe, filename), `import test from 'node:test'
 test('probe ${index}', () => {
   if (process.cwd() !== process.env.PROBE_ROOT) throw new Error('wrong test cwd')
+  if (process.env.DSH_TEST_JSONL !== undefined) throw new Error('reporter destination leaked to a worker')
 })
 `)
   }
@@ -196,6 +197,23 @@ test('probe ${index}', () => {
   assert.equal(records.filter(record => record.name.startsWith('probe ')).length, 4,
     'the reporter must record the four real test cases')
   assert.ok(records.every(record => record.result === 'pass'))
+
+  // A failing worker must still fail the outer lane; the programmatic API
+  // does not set process.exitCode for us. Exercise the reporter-free path too.
+  writeFileSync(join(probe, filenames[0]), `import test from 'node:test'
+test('failure propagation', () => { throw new Error('expected failure') })
+`)
+  const failed = spawnSync(process.execPath, [
+    join(scripts, 'run-test-lane.mjs'), 'probe', '--shard=1/128', '--test-concurrency=2',
+  ], {
+    cwd: fixture,
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: { ...process.env, NODE_TEST_CONTEXT: undefined,
+      DSH_TEST_JSONL: undefined, DSH_TEST_EFFECTIVE_JSON: undefined },
+  })
+  assert.equal(failed.status, 1, failed.stderr ?? failed.error?.message)
+  assert.match(failed.stdout, /failure propagation/u)
 })
 
 // ---------------------------------------------------------------------------
