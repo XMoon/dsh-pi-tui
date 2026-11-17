@@ -265,6 +265,23 @@ test('an unterminated record over the IO bound is a finder failure with the fall
     `the bounded fallback answers after the guard trips: ${JSON.stringify(candidates.map(candidate => candidate.path))}`)
 })
 
+test('a single terminated record over the IO bound is a finder failure with the fallback answer', async (t) => {
+  const life = testLifecycle(t)
+  const cwd = life.tempDir('dsh-client-overbound-terminated-')
+  writeFileSync(join(cwd, 'fallback-needle.txt'), 'x')
+  // One NUL-terminated record longer than the guard: the completion and its
+  // NUL arrive inside the same chunk, so only the completed-record check can
+  // catch it. The run fails and the bounded fallback answers.
+  const finder = scriptedFinder(life, ['x'.repeat(65_600)])
+  const driver = new ClientLocalDiscoveryDriver(finder.path)
+  const candidates = await discoverForQuery(resolvePathQuery('needle', cwd, ENV), driver, abort)
+  const paths = candidates.map(candidate => candidate.path)
+  assert.ok(paths.includes('fallback-needle.txt'),
+    `the bounded fallback answers after the guard trips: ${JSON.stringify(paths)}`)
+  assert.ok(!paths.some(path => path.length > 65_536),
+    'the over-bound record never surfaces as a candidate')
+})
+
 test('a successful finder with no matches is a valid empty result, never a fallback scan', async (t) => {
   const life = testLifecycle(t)
   const cwd = life.tempDir('dsh-client-empty-')

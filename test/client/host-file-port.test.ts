@@ -649,6 +649,30 @@ test('the explicit session scope reaches excluded, symlinked and absolute Host d
     [{ path: `${outside}/logs/a.log`, kind: 'file' }])
 })
 
+test('a Host finder record over the IO bound is a finder failure with the bounded fallback', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-hostfile-overbound-')
+  writeFileSync(join(root, 'fallback-needle.txt'), 'x')
+  // One NUL-terminated record longer than the guard: the Host run fails and
+  // the bounded scan answers, like the Client adapter.
+  const finder = scriptedFd(life, ['x'.repeat(65_600)])
+  const live = { session: { header: { cwd: root } } }
+  const port = new DirectHostFilePort(
+    (sessionId) => sessionId === 'session-live' ? live : undefined,
+    finder.path,
+  )
+  const items = okItems(await port.listReferences(
+    { kind: 'session', sessionId: 'session-live' },
+    // EXPLICIT scope: the Host finder owns this route (a bare query belongs
+    // to the official provider, which this case does not exercise).
+    `${root}/needle`,
+  ))
+  assert.ok(items.some(item => item.path === join(root, 'fallback-needle.txt')),
+    `the bounded fallback answers: ${JSON.stringify(items)}`)
+  assert.ok(!items.some(item => item.path.length > 65_536),
+    'the over-bound Host record never surfaces as a candidate')
+})
+
 test('the Host-home shorthand returns an ABSOLUTE Host path, never a literal ~/... value', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)

@@ -194,6 +194,12 @@ function runClientFinder(
       }
     })
     child.on('error', () => settle(null))
+    child.stdout.on('error', () => {
+      // A stdout stream error is an INCOMPLETE finder run: stop the producer
+      // so nothing keeps filling a dead pipe and settle once as a failure.
+      if (child.exitCode === null) child.kill('SIGKILL')
+      settle(null)
+    })
     child.on('close', (code) => {
       if (signal.aborted) {
         settle([])

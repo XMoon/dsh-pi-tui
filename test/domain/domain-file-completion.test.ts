@@ -320,6 +320,19 @@ test('an unterminated record over the IO bound trips the stream guard', () => {
   assert.equal(stream.finish(), false)
 })
 
+test('a record that reaches the bound and is terminated in a later chunk still trips the guard', () => {
+  // The reviewer's exact probe: the fragment sits exactly at the bound, then
+  // the over-bound completion and its NUL arrive in ONE later chunk. The
+  // completed record is over the bound, so the run fails — the record is
+  // never emitted as a success.
+  const records: FinderRecord[] = []
+  const stream = createFinderRecordStream(record => records.push(record))
+  assert.equal(stream.push('a'.repeat(MAX_UNTERMINATED_FINDER_CODE_UNITS)), true)
+  assert.equal(stream.push('a\0'), false)
+  assert.equal(stream.finish(), false)
+  assert.equal(records.length, 0, 'an over-bound record is never emitted')
+})
+
 function file2(path: string): PathCandidate {
   return { path, kind: 'file' }
 }

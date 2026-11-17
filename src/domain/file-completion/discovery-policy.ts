@@ -180,6 +180,13 @@ export function createFinderRecordStream(emit: (record: FinderRecord) => void): 
       let boundary = pending.indexOf('\0')
       while (boundary !== -1) {
         nulDialect = true
+        // The bound protects against ONE pathological record, however it
+        // arrives: a record completing in this chunk is over the bound when
+        // its length is, exactly like an unterminated fragment.
+        if (boundary > MAX_UNTERMINATED_FINDER_CODE_UNITS) {
+          overflowed = true
+          return false
+        }
         emitRecord(pending.slice(0, boundary))
         pending = pending.slice(boundary + 1)
         boundary = pending.indexOf('\0')
