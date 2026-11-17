@@ -744,6 +744,8 @@ test('the kernel seat is exclusive and becomes reusable after close', async () =
   const name = `\0dsh-m4-b1-test-${String(process.pid)}-${randomUUID()}`
   const first = await bindProcessSeat(name, 'HOST_ALREADY_OWNED')
   try {
+    // The live holder can prove its own kernel claim; a closed seat cannot.
+    first.assertCurrent()
     await assert.rejects(
       bindProcessSeat(name, 'HOST_ALREADY_OWNED'),
       (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_ALREADY_OWNED',
@@ -755,7 +757,12 @@ test('the kernel seat is exclusive and becomes reusable after close', async () =
   } finally {
     await first.close()
   }
+  assert.throws(
+    () => first.assertCurrent(),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_IDENTITY_MISMATCH',
+  )
   const second = await bindProcessSeat(name, 'HOST_ALREADY_OWNED')
+  second.assertCurrent()
   await second.close()
 })
 

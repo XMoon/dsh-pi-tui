@@ -831,7 +831,7 @@ test('the shutdown tail closes the seat before spawning and propagates the repla
   const order: string[] = []
   const records: Array<Record<string, unknown>> = []
   const code = await finishClientEntryShutdown({
-    seat: { close: async () => { order.push('seat-close') } },
+    seat: { assertCurrent: () => {}, close: async () => { order.push('seat-close') } },
     reexec: { intent: fixture.intent, teardownSucceeded: true },
     emit: record => { records.push(record) },
     stderr: line => { order.push(`stderr:${line}`) },
@@ -848,7 +848,7 @@ test('the shutdown tail closes the seat before spawning and propagates the repla
   assert.equal(records.filter(record => record.m4r === 'handoff-parent-exit').length, 1)
 
   const signaled = await finishClientEntryShutdown({
-    seat: { close: async () => {} },
+    seat: { assertCurrent: () => {}, close: async () => {} },
     reexec: { intent: fixture.intent, teardownSucceeded: true },
     emit: record => { records.push(record) },
     stderr: () => {},
@@ -863,7 +863,7 @@ test('a failed seat close or teardown never spawns a replacement Client', async 
   const records: Array<Record<string, unknown>> = []
   const stderr: string[] = []
   const seatFailure = await finishClientEntryShutdown({
-    seat: { close: async () => { throw new Error('seat close exploded') } },
+    seat: { assertCurrent: () => {}, close: async () => { throw new Error('seat close exploded') } },
     reexec: { intent: fixture.intent, teardownSucceeded: true },
     emit: record => { records.push(record) },
     stderr: line => { stderr.push(line) },
@@ -881,7 +881,7 @@ test('a failed seat close or teardown never spawns a replacement Client', async 
     'the teardown failure line leaked a private detail')
 
   const teardownFailure = await finishClientEntryShutdown({
-    seat: { close: async () => {} },
+    seat: { assertCurrent: () => {}, close: async () => {} },
     reexec: { intent: fixture.intent, teardownSucceeded: false },
     emit: record => { records.push(record) },
     stderr: line => { stderr.push(line) },
@@ -900,7 +900,7 @@ test('a failed Client seat close stays a nonzero normal exit without a replaceme
   const records: Array<Record<string, unknown>> = []
   const stderr: string[] = []
   const code = await finishClientEntryShutdown({
-    seat: { close: async () => { throw new Error('seat close exploded') } },
+    seat: { assertCurrent: () => {}, close: async () => { throw new Error('seat close exploded') } },
     emit: record => { records.push(record) },
     stderr: line => { stderr.push(line) },
   })
@@ -916,7 +916,7 @@ test('a replacement package that changed after the preflight is refused without 
   writeFileSync(join(fixture.packageRoot, 'dist', 'index.mjs'), 'export const value = 9\n')
   const records: Array<Record<string, unknown>> = []
   const code = await finishClientEntryShutdown({
-    seat: { close: async () => {} },
+    seat: { assertCurrent: () => {}, close: async () => {} },
     reexec: { intent: fixture.intent, teardownSucceeded: true },
     emit: record => { records.push(record) },
     stderr: line => { stderr.push(line) },
@@ -934,7 +934,7 @@ test('a failing spawn is visible, nonzero and leaves no second Client owner', as
   const stderr: string[] = []
   const records: Array<Record<string, unknown>> = []
   const code = await finishClientEntryShutdown({
-    seat: { close: async () => {} },
+    seat: { assertCurrent: () => {}, close: async () => {} },
     reexec: { intent: fixture.intent, teardownSucceeded: true },
     emit: record => { records.push(record) },
     stderr: line => { stderr.push(line) },
@@ -976,7 +976,7 @@ test('a handoff cancelled before spawn never spawns and reports one visible line
   const stderr: string[] = []
   const records: Array<Record<string, unknown>> = []
   const code = await finishClientEntryShutdown({
-    seat: { close: async () => {} },
+    seat: { assertCurrent: () => {}, close: async () => {} },
     reexec: { intent: fixture.intent, teardownSucceeded: true, cancelled: () => true },
     emit: record => { records.push(record) },
     stderr: line => { stderr.push(line) },
@@ -1001,7 +1001,7 @@ test('a termination signal during the seat close race cancels before spawn', asy
   let releaseSeat!: () => void
   const seatClose = new Promise<void>(resolve => { releaseSeat = resolve })
   const pending = finishClientEntryShutdown({
-    seat: { close: async () => { await seatClose } },
+    seat: { assertCurrent: () => {}, close: async () => { await seatClose } },
     reexec: {
       intent: fixture.intent,
       teardownSucceeded: true,
@@ -1028,7 +1028,7 @@ test('the spawned replacement child is exposed to the waiting parent exactly onc
   const seen: ReexecChildHandle[] = []
   const child: ReexecChildHandle = { kill: () => true }
   const code = await finishClientEntryShutdown({
-    seat: { close: async () => {} },
+    seat: { assertCurrent: () => {}, close: async () => {} },
     reexec: { intent: fixture.intent, teardownSucceeded: true },
     emit: () => {},
     stderr: () => {},

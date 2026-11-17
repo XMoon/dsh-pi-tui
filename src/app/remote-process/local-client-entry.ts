@@ -39,6 +39,7 @@ import type { CliSessionLaunchIntent } from '../../startup.ts'
 import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryControlRequest, type EntryRecordSink } from './entry-control.ts'
 import {
   bindProcessSeat,
+  NO_PROCESS_SEAT,
   computeBuildId,
   installedPackageRootFromEntry,
   LocalScopeError,
@@ -1183,7 +1184,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   // the same authenticated Host without a profile-global seat.
   const seat: ProcessSeat = options.mode === 'qualification'
     ? await bindProcessSeat(scope.clientSeatSocketName, 'CLIENT_ALREADY_ACTIVE')
-    : { close: async () => {} }
+    : NO_PROCESS_SEAT
   let context: import('@deepseek-ai/cordis').Context | undefined
   let loaderFiber: Fiber | undefined
   let startupGate: InteractionStartupGate | undefined
