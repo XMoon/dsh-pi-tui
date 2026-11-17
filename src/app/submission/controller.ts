@@ -564,10 +564,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   
   const failSubmission = (draft: string) => (error: unknown): void => {
     if (deps.signal.aborted) return
-    // Correctness side effect FIRST: restore the draft (the editor was
-    // cleared before submit) — the error text is best-effort afterwards,
-    // so a hostile value can never prevent the user's input from coming
-    // back. (The classification diagnostics are owned by runOwned.)
+    // Correctness side effect FIRST: restore the draft (a legacy cleared
+    // editor must get it back; a held PR2 composer keeps its document) — the
+    // error text is best-effort afterwards, so a hostile value can never
+    // prevent the user's input from coming back. (The classification
+    // diagnostics are owned by runOwned.)
     // PR2/F3: the owner-aware restore keeps a held attempt's live document
     // intact and defers a restore that belongs to another attempt.
     restoreSubmissionDraft(draft)
@@ -597,13 +598,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   const deferredDraftRestores: Array<{
     readonly text: string
     /** R6-1: the ORIGINATING operation's captured subject (never the
-     *  receiver's current owner). */
+     *  receiver's current owner). Replay must not re-decide retention with a
+     *  stricter identity check: the originating policy already took that
+     *  verdict at enqueue/retirement (a stale restore a dropping renderer
+     *  refuses never reaches the queue). */
     readonly subject: SessionSubject | undefined
-    /** R6-1: the retention verdict the ORIGINATING policy already took (a
-     *  renderer that drops stale drafts never enqueues; a retaining renderer
-     *  and a same-owner invalidation do). Replay must not re-decide it with a
-     *  stricter identity check. */
-    readonly retain: boolean
   }> = []
   /** R6-1B: the one policy read shared by the enqueue, the retirement filter
    *  and the replay: a replaced owner's draft is dropped ONLY on a renderer
@@ -619,7 +618,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     if (deps.app().draftWriteAccepted?.() === false) return
     const pending = deferredDraftRestores.splice(0)
     for (const entry of pending) {
-      if (!entry.retain) continue
       deps.app().setEditorText?.(mergeDraft(deps.app().getDraft(), entry.text))
     }
   }
@@ -642,7 +640,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           deferredDraftRestores.push({
             text: draft,
             subject: originSubject ?? composerHold.subject,
-            retain: true,
           })
         }
         return
@@ -654,14 +651,14 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       }
       // ANOTHER attempt owns the editor: never mutate it (its renderer would
       // refuse the write) and never rewrite that hold's record.
-      deferredDraftRestores.push({ text: draft, subject: originSubject, retain: true })
+      deferredDraftRestores.push({ text: draft, subject: originSubject })
       return
     }
     // R5-1: a renderer that would refuse the write (a stopped surface) must
     // not consume the obligation either — park it for the replay when the
     // surface presents again.
     if (deps.app().draftWriteAccepted?.() === false) {
-      deferredDraftRestores.push({ text: draft, subject: originSubject, retain: true })
+      deferredDraftRestores.push({ text: draft, subject: originSubject })
       return
     }
     deps.app().setEditorText(mergeDraft(deps.app().getDraft(), draft))
@@ -669,7 +666,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
 
   // ── Local submit acknowledgement + latency timeline (app/submission/ack.ts /
   // app/submission/latency.ts) ── the immediate "Submitting…" / "Queued…" row
-  // between the editor clearing and the FIRST authoritative DSH event,
+  // between the submit gesture and the FIRST authoritative DSH event,
   // and the T0-T5 phase timings for the diag channel. The window is real
   // even without any per-submit persistence check: session create, image
   // admission
@@ -681,7 +678,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
 
   /**
    * Client-local submission echoes (D2.1 follow-up): the presentation-only
-   * bridge between the editor clearing and the authoritative inbox/durable
+   * bridge between the submit gesture and the authoritative inbox/durable
    * occurrence. Keyed by the request id minted before the first async
    * preparation await and persisted on the Direct user-message source as
    * `rpcId`, so the handoff correlates by identity — never by text.
@@ -751,7 +748,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
 
   /**
    * Register one local submission echo and publish it immediately, so an
-   * accepted submission is never visually silent between the editor clearing
+   * accepted submission is never visually silent between the submit gesture
    * and its authoritative occurrence.
    *
    * A RUNNING placement (queued/steering) settles this gesture's generic
@@ -1051,9 +1048,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           deferredDraftRestores.push({
             text: value,
             subject: capturedSubject,
-            // The suppression above already decided the policy; reaching here
-            // means this renderer retains the stale draft.
-            retain: true,
           })
         }
         return 'merged-verbatim'
@@ -1067,7 +1061,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // restore of a legacy command whose first ensureSession failed). Defer
       // the text to that hold's settlement, pinned to the CAPTURED subject;
       // never rewrite the live hold's record.
-      deferredDraftRestores.push({ text: value, subject: capturedSubject, retain: true })
+      deferredDraftRestores.push({ text: value, subject: capturedSubject })
       return 'merged-verbatim'
     }
     // R5-1/RFL017: a renderer that would refuse the write (a stopped surface)
@@ -1075,7 +1069,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // CAPTURED subject) for the replay when the surface presents again. The
     // reported outcome stays the merge the writable renderer will produce.
     if (deps.app().draftWriteAccepted?.() === false) {
-      deferredDraftRestores.push({ text: value, subject: capturedSubject, retain: true })
+      deferredDraftRestores.push({ text: value, subject: capturedSubject })
       return mergedStaleOutcomeFor(value)
     }
     const merged = mergeDraft(deps.app().getDraft(), value)
@@ -2109,9 +2103,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     readonly id: string
     readonly text: string
     readonly subject: SessionSubject | undefined
-    readonly generation: number
     phase: 'sending' | 'settled'
-    outcome: 'unset' | 'accepted' | 'rejected' | 'unknown'
     /** The gesture's local-submission identity (the Direct `rpcId`), bound by
      *  the dispatch the moment it is minted: the acceptance publishes THAT
      *  ledger record and settles THIS renderer hold. */
@@ -2148,7 +2140,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   }
 
   /** Begin ONE attempt: refuses a second submit while an attempt is live and
-   *  freezes the exact submitted value + subject/generation synchronously. */
+   *  freezes the exact submitted value + subject synchronously. */
   const openComposerHold = (text: string): ComposerHold | undefined => {
     if (composerHold !== undefined && composerHold.phase === 'sending') return undefined
     composerHoldSerial += 1
@@ -2156,9 +2148,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       id: `composer-${composerHoldSerial}-${randomUUID()}`,
       text,
       subject: deps.ownership.captureSubject(),
-      generation: deps.ownership.generation(),
       phase: 'sending',
-      outcome: 'unset',
       submissionRequestId: undefined,
       acceptedEffects: [],
     }
@@ -2177,7 +2167,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   const acceptComposerHold = (hold: ComposerHold): void => {
     if (composerHold !== hold || hold.phase !== 'sending') return
     hold.phase = 'settled'
-    hold.outcome = 'accepted'
     // The subject fence: a replaced owner never receives the old clear. A
     // hold opened before any subject existed (the deferred start's FIRST
     // prompt) belongs to the Session that same gesture created, so it is not
@@ -2228,7 +2217,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   const rejectComposerHold = (hold: ComposerHold): void => {
     if (composerHold !== hold || hold.phase !== 'sending') return
     hold.phase = 'settled'
-    hold.outcome = 'rejected'
     hold.acceptedEffects.length = 0
     deps.app().settleSubmission?.(hold.id, 'not-accepted')
     if (composerHold === hold) composerHold = undefined
@@ -2241,7 +2229,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   const unknownComposerHold = (hold: ComposerHold): void => {
     if (composerHold !== hold || hold.phase !== 'sending') return
     hold.phase = 'settled'
-    hold.outcome = 'unknown'
     hold.acceptedEffects.length = 0
     deps.app().settleSubmission?.(hold.id, 'unknown')
     if (composerHold === hold) composerHold = undefined
@@ -2256,7 +2243,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   const handComposerHoldToLegacy = (hold: ComposerHold): void => {
     if (composerHold !== hold || hold.phase !== 'sending') return
     hold.phase = 'settled'
-    hold.outcome = 'rejected'
     hold.submissionRequestId = undefined
     // The legacy contract wrote the line's history row at dispatch time; the
     // deferred prompt effects carry exactly that row (never the accepted-only
@@ -2348,7 +2334,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         // Either way the composer must unlock: settle not-accepted WITHOUT a
         // renderer clear (the legacy path owns the draft's fate).
         openedHold.phase = 'settled'
-        openedHold.outcome = 'rejected'
         deps.app().settleSubmission?.(openedHold.id, 'not-accepted')
         composerHold = undefined
       }

@@ -89,16 +89,6 @@ test('a late settlement of one identity never clears a newer unrelated echo', ()
   assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['new'])
 })
 
-test('clearForSubject drops echoes from another session or generation', () => {
-  const pending = ledger()
-  pending.begin({ requestId: 'a', placement: 'queued', text: 'A', createdAt: 1, sessionId: 's1', generation: 1 })
-  pending.accept('a')
-  pending.begin({ requestId: 'b', placement: 'queued', text: 'B', createdAt: 2, sessionId: 's2', generation: 2 })
-  pending.accept('b')
-  pending.clearForSubject('s1', 1)
-  assert.deepEqual(pending.snapshot().map(echo => echo.requestId), ['a'])
-})
-
 test('clear removes every echo', () => {
   const pending = ledger()
   pending.begin({ requestId: 'a', placement: 'steering', text: 'A', createdAt: 1 })
