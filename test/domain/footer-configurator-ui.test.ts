@@ -17,6 +17,8 @@ import { FooterConfiguratorModel, sameFooterCustomItem } from '../../src/tui/foo
 import { FooterCustomItemCatalog } from '../../src/tui/footer/custom-item-catalog.ts'
 import { FooterItemRegistry } from '../../src/tui/footer/item-registry.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../../src/domain/footer/presets.ts'
+import type { FooterLayoutV1 } from '../../src/domain/footer/layout.ts'
+import type { FooterCustomItemSettings } from '../../src/domain/footer/custom-items.ts'
 import type { StatusSnapshot } from '../../src/domain/status/types.ts'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -1787,6 +1789,44 @@ function mouseClick(vt: VirtualTerminal, row: number, leftBorder: number): void 
   vt.sendInput(`\x1b[<0;${leftBorder + 3};${row + 1}m`)
 }
 
+/** One SGR wheel notch on a painted viewport row (0-based row; SGR is 1-based).
+ *  `alt` adds the SGR Alt bit so the fork applies its 5-line accelerator. */
+function mouseWheel(vt: VirtualTerminal, row: number, direction: 'up' | 'down', alt = false): void {
+  const button = (direction === 'up' ? 64 : 65) + (alt ? 8 : 0)
+  vt.sendInput(`\x1b[<${button};3;${row + 1}M`)
+}
+
+/** Build a real Page/Model over ONE long custom-item row (unique labels per
+ *  item) so a short grant really has to scroll the body. */
+function longRowPage(
+  vt: VirtualTerminal,
+  app: TuiApp,
+  options: { readonly count?: number; readonly columns?: number; readonly rows?: number } = {},
+): { readonly model: FooterConfiguratorModel; readonly registry: FooterItemRegistry; readonly panel: ReturnType<TuiApp['createFooterConfiguratorPanel']> } {
+  const count = options.count ?? 20
+  const custom: FooterCustomItemSettings[] = Array.from({ length: count }, (_, index) => ({
+    schemaVersion: 1,
+    id: `user:scroll-${String(index).padStart(2, '0')}`,
+    kind: 'text',
+    text: `value ${index}`,
+  }))
+  const catalog = new FooterCustomItemCatalog(custom)
+  const registry = new FooterItemRegistry(app.getFooterItemRegistry())
+  registry.setCustomSource(catalog)
+  const layout: FooterLayoutV1 = {
+    schemaVersion: 1,
+    rows: [{ left: custom.map(item => ({ id: item.id })), right: [] }],
+  }
+  const model = new FooterConfiguratorModel(layout, registry, catalog)
+  const opened = openPage(vt, app, { model, registry, composer: new FooterComposer(registry) })
+  return { model, registry, panel: opened.panel }
+}
+
+/** The rows the page painted above its ONE physical Action Bar. */
+function pageRows(vt: VirtualTerminal): string[] {
+  return vt.getViewport().slice(0, -1)
+}
+
 test('configurator: rows page mouse click selects a row and Save changes saves (mouse parity)', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
@@ -1999,4 +2039,455 @@ test('a grant change invalidates the painted Esc span before the repaint', async
   panel.setMaxRows(5)
   assert.equal(panel.paintedEscapeSpan(), undefined,
     'a new grant has not painted yet, so no old geometry stays clickable')
+})
+
+
+/* ─── PR-3 / F3: Footer Configurator body wheel (viewport only) ────────── */
+
+test('wheel scrolls a long row body only: the model selection, layout, draft and preview stay fixed', async () => {
+  const { vt, app } = startApp(44, 20)
+  const { model } = longRowPage(vt, app, { count: 20 })
+  await vt.waitForRender()
+  vt.sendInput('\r') // open Row 1: the long Edit Row body is the scrollport
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'row')
+  const before = vt.getViewport()
+  const previewAt = before.findIndex(line => line.includes('Preview'))
+  assert.ok(previewAt > 0, `the fixed preview must paint below the body:\n${before.join('\n')}`)
+  const beforeBody = before.slice(0, previewAt).join('\n')
+  assert.ok(beforeBody.includes('Left') && beforeBody.includes('scroll-00'),
+    `the first body page paints the headings and the first item:\n${beforeBody}`)
+  assert.ok(!beforeBody.includes('scroll-16'), 'the later items are cut off before scrolling')
+
+  mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  const after = vt.getViewport()
+  const afterPreviewAt = after.findIndex(line => line.includes('Preview'))
+  const afterBody = after.slice(0, afterPreviewAt).join('\n')
+  assert.ok(!afterBody.includes('Left'), `the heading scrolled away with the body:\n${afterBody}`)
+  assert.ok(afterBody.includes('scroll-16'), `later body rows became visible:\n${afterBody}`)
+  assert.equal(after.slice(afterPreviewAt, -1).join('\n'), before.slice(previewAt, -1).join('\n'),
+    'the fixed preview block never scrolls with the body')
+
+  const state = model.state()
+  assert.equal(state.mode, 'row')
+  assert.equal(state.cursor, 0, 'the wheel never moves the model selection')
+  assert.equal(state.rowIndex, 0)
+  assert.equal(model.isDirty(), false, 'the wheel never dirties the draft')
+
+  // Wheel-up returns; repeated wheel-up clamps at the top without a bounce.
+  mouseWheel(vt, 0, 'up')
+  await vt.waitForRender()
+  mouseWheel(vt, 0, 'up')
+  await vt.waitForRender()
+  mouseWheel(vt, 0, 'up')
+  await vt.waitForRender()
+  mouseWheel(vt, 0, 'up')
+  await vt.waitForRender()
+  mouseWheel(vt, 0, 'up')
+  await vt.waitForRender()
+  const top = vt.getViewport().join('\n')
+  assert.ok(top.includes('Left') && top.includes('scroll-00'), `wheel-up returns to the first page:\n${top}`)
+
+  // Wheel-down clamps at the real last page; a boundary notch is a byte-stable
+  // no-op rather than a reverse bounce.
+  for (let step = 0; step < 30; step += 1) mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  const bottom = vt.getViewport()
+  const bottomBody = bottom.slice(0, bottom.findIndex(line => line.includes('Preview'))).join('\n')
+  assert.ok(bottomBody.includes('scroll-19'), `the real last item is reachable:\n${bottomBody}`)
+  mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  assert.equal(vt.getViewport().join('\n'), bottom.join('\n'),
+    'a boundary wheel is consumed without moving or repainting a different frame')
+  assert.equal(model.state().cursor, 0)
+  assert.equal(model.isDirty(), false)
+  app.stop()
+})
+
+
+test('wheel uses the fork signed delta once: one Alt notch equals five plain notches', async () => {
+  const { vt, app } = startApp(44, 20)
+  longRowPage(vt, app, { count: 20 })
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const top = vt.getViewport().join('\n')
+  mouseWheel(vt, 1, 'down', true)
+  await vt.waitForRender()
+  const altOnce = vt.getViewport().join('\n')
+  assert.notEqual(altOnce, top, 'one Alt wheel notch really scrolls')
+  for (let step = 0; step < 5; step += 1) mouseWheel(vt, 1, 'up')
+  await vt.waitForRender()
+  assert.equal(vt.getViewport().join('\n'), top, 'five plain wheel-ups return to the same top frame')
+  for (let step = 0; step < 5; step += 1) mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  assert.equal(vt.getViewport().join('\n'), altOnce,
+    'the panel applies the fork Alt delta exactly once (no second Wheel Lines multiplication)')
+  app.stop()
+})
+
+test('wheel in row-move mode scrolls the viewport and never reorders; only the explicit keyboard reorders', async () => {
+  const { vt, app } = startApp(44, 20)
+  const { model } = longRowPage(vt, app, { count: 20 })
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('m') // Move Mode
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'row-move')
+  const orderBefore = model.state().layout.rows[0]!.left.map(ref => ref.id)
+  const dirtyBefore = model.isDirty()
+  for (let step = 0; step < 6; step += 1) mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'row-move')
+  assert.deepEqual(model.state().layout.rows[0]!.left.map(ref => ref.id), orderBefore,
+    'wheel never runs the row-move reorder')
+  assert.equal(model.isDirty(), dirtyBefore, 'wheel never dirties the draft')
+  const scrolled = vt.getViewport().join('\n')
+  assert.ok(!scrolled.includes('Left'), `the row-move body really scrolled:\n${scrolled}`)
+  // ONLY the explicit Up/Down keyboard reorders in Move Mode.
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  const orderAfter = model.state().layout.rows[0]!.left.map(ref => ref.id)
+  assert.notDeepEqual(orderAfter, orderBefore, 'the explicit keyboard Down still reorders exactly once')
+  assert.equal(model.isDirty(), true, 'the keyboard reorder dirties the draft as before')
+  app.stop()
+})
+
+test('wheel leaves the selector/item/picker cursors and the add query untouched', async () => {
+  // Row Selector: a long row list scrolls while homeCursor stays put.
+  const rowsApp = startApp(44, 20)
+  const manyRows: FooterLayoutV1 = {
+    schemaVersion: 1,
+    rows: Array.from({ length: 20 }, (_, index) => ({ left: [{ id: 'model', prefix: `r${index}-` }], right: [] })),
+  }
+  const rowModel = new FooterConfiguratorModel(manyRows, rowsApp.app.getFooterItemRegistry())
+  openPage(rowsApp.vt, rowsApp.app, { model: rowModel, registry: rowsApp.app.getFooterItemRegistry() })
+  await rowsApp.vt.waitForRender()
+  const selectorBefore = rowModel.state()
+  mouseWheel(rowsApp.vt, 4, 'down')
+  await rowsApp.vt.waitForRender()
+  assert.equal(rowModel.state().homeCursor, selectorBefore.homeCursor, 'wheel never moves the Row Selector cursor')
+  assert.equal(rowModel.state().rowIndex, selectorBefore.rowIndex)
+  assert.equal(rowModel.isDirty(), false)
+  rowsApp.app.stop()
+
+  // Item editor (a custom item has the longest menu): a tiny grant scrolls the
+  // menu while itemCursor stays put.
+  const itemApp = startApp(44, 6)
+  const { model: itemModel } = longRowPage(itemApp.vt, itemApp.app, { count: 1 })
+  await itemApp.vt.waitForRender()
+  itemApp.vt.sendInput('\r') // row mode
+  await itemApp.vt.waitForRender()
+  itemApp.vt.sendInput('\r') // item editor of the custom item
+  await itemApp.vt.waitForRender()
+  assert.equal(itemModel.state().mode, 'item')
+  const itemBefore = itemModel.state()
+  const itemViewBefore = itemApp.vt.getViewport().join('\n')
+  mouseWheel(itemApp.vt, 1, 'down')
+  await itemApp.vt.waitForRender()
+  assert.equal(itemModel.state().itemCursor, itemBefore.itemCursor, 'wheel never moves the item menu cursor')
+  assert.equal(itemModel.state().mode, 'item')
+  assert.notEqual(itemApp.vt.getViewport().join('\n'), itemViewBefore, 'the tiny item menu really scrolled')
+  itemApp.app.stop()
+
+  // Add picker: candidates scroll while pickerIndex/addQuery stay put; the
+  // pinned Search row, the description tail, the preview and the ONE bar do
+  // not scroll and are wheel-inert.
+  const addApp = startApp(44, 20)
+  const { model: addModel } = longRowPage(addApp.vt, addApp.app, { count: 20 })
+  await addApp.vt.waitForRender()
+  addApp.vt.sendInput('\r')
+  await addApp.vt.waitForRender()
+  addApp.vt.sendInput('a')
+  await addApp.vt.waitForRender()
+  const addBefore = addModel.state()
+  assert.equal(addBefore.mode, 'add')
+  const viewBefore = addApp.vt.getViewport()
+  const searchRow = viewBefore.findIndex(line => line.includes('Search:'))
+  const previewAt = viewBefore.findIndex(line => line.includes('Preview'))
+  assert.ok(searchRow >= 0 && previewAt > searchRow, `the add picker pins Search above its body:\n${viewBefore.join('\n')}`)
+  const bodyBefore = viewBefore.slice(searchRow + 1, previewAt).join('\n')
+  const tailBefore = viewBefore[previewAt - 1]!
+  const inertView = viewBefore.join('\n')
+  mouseWheel(addApp.vt, searchRow, 'down') // pinned Search row is inert
+  await addApp.vt.waitForRender()
+  assert.equal(addApp.vt.getViewport().join('\n'), inertView, 'the pinned Search row is not a wheel sink')
+  mouseWheel(addApp.vt, viewBefore.length - 1, 'down') // the ONE bar is inert
+  await addApp.vt.waitForRender()
+  assert.equal(addApp.vt.getViewport().join('\n'), inertView, 'the ONE Action Bar is not a wheel sink')
+  mouseWheel(addApp.vt, searchRow + 1, 'down') // the real candidate body
+  await addApp.vt.waitForRender()
+  const viewAfter = addApp.vt.getViewport()
+  const previewAfter = viewAfter.findIndex(line => line.includes('Preview'))
+  assert.equal(viewAfter[searchRow], viewBefore[searchRow], 'the pinned Search row never scrolls')
+  assert.equal(viewAfter[previewAfter - 1], tailBefore, 'the pinned description tail never scrolls')
+  assert.deepEqual(viewAfter.slice(previewAfter, -1), viewBefore.slice(previewAt, -1),
+    'the fixed Preview never scrolls with the body')
+  assert.equal(viewAfter[viewAfter.length - 1], viewBefore[viewBefore.length - 1], 'the ONE bar never scrolls')
+  assert.notEqual(viewAfter.slice(searchRow + 1, previewAfter).join('\n'), bodyBefore,
+    'the candidate body really scrolled')
+  const addAfter = addModel.state()
+  assert.equal(addAfter.pickerIndex, addBefore.pickerIndex, 'wheel never moves the Add picker cursor')
+  assert.equal(addAfter.addQuery, addBefore.addQuery, 'wheel never edits the Add query')
+  assert.equal(addModel.isDirty(), false)
+  addApp.app.stop()
+})
+
+
+test('a manual wheel window restores the hidden cursor before the first dangerous key', async () => {
+  const { vt, app } = startApp(44, 20)
+  const { model } = longRowPage(vt, app, { count: 20 })
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  for (let step = 0; step < 8; step += 1) mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  assert.equal(model.state().cursor, 0)
+  assert.ok(!vt.getViewport().some(line => line.includes('›') && line.includes('scroll-00')),
+    `the cursor row is scrolled out of the painted slice:\n${vt.getViewport().join('\n')}`)
+
+  // The FIRST dangerous key only restores the visible cursor: no item editor.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'row', 'the hidden selection is never activated by the first Enter')
+  assert.equal(vt.getViewport().some(line => line.includes('›') && line.includes('scroll-00')), true,
+    'cursor-follow repaints the SAME selection before the next action')
+
+  // The second explicit Enter follows the normal model path.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'item')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'row')
+
+  // Keyboard navigation is not a dangerous action: one Down moves once and
+  // render follows the cursor again.
+  for (let step = 0; step < 8; step += 1) mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(model.state().cursor, 1, 'keyboard navigation runs exactly one model move')
+  assert.ok(vt.getViewport().some(line => line.includes('›') && line.includes('scroll-01')),
+    'the next ordinary frame follows the moved cursor')
+
+  // Esc is never intercepted by the hidden-cursor gate.
+  for (let step = 0; step < 8; step += 1) mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'rows', 'Esc still leaves the row page')
+  app.stop()
+})
+
+test('a click after a manual wheel acts on the painted item, never the hidden cursor', async () => {
+  const { vt, app } = startApp(44, 20)
+  const { model } = longRowPage(vt, app, { count: 20 })
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  for (let step = 0; step < 5; step += 1) mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const targetLine = view.findIndex(line => line.includes('scroll-10'))
+  assert.ok(targetLine >= 0, `the painted item target exists:\n${view.join('\n')}`)
+  mouseClick(vt, targetLine, 0)
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'item', 'the click opens the item painted under the pointer')
+  assert.equal(model.state().cursor, 10, 'the click target is the painted item, not the old hidden cursor')
+  app.stop()
+})
+
+test('the wheel is inert in text editors, the delete prompt and while a save is in flight', async () => {
+  // Inline advanced editor: a tiny grant would allow scrolling, but the text
+  // editor owns its buffer and the wheel must not change it.
+  const editing = startApp(44, 6)
+  const { model: editModel } = longRowPage(editing.vt, editing.app, { count: 1 })
+  await editing.vt.waitForRender()
+  editing.vt.sendInput('\r')
+  await editing.vt.waitForRender()
+  editing.vt.sendInput('\r') // item editor (custom menu: advanced is index 4)
+  await editing.vt.waitForRender()
+  for (let step = 0; step < 4; step += 1) editing.vt.sendInput('\x1b[B')
+  editing.vt.sendInput('\r')
+  await editing.vt.waitForRender()
+  assert.equal(editModel.state().mode, 'advanced')
+  editing.vt.sendInput('\r') // open the inline Prefix editor
+  await editing.vt.waitForRender()
+  assert.equal(editModel.state().editing, true)
+  editing.vt.sendInput('abc')
+  await editing.vt.waitForRender()
+  const buffer = editModel.state().editBuffer
+  const editorFrame = editing.vt.getViewport().join('\n')
+  mouseWheel(editing.vt, 0, 'down')
+  await editing.vt.waitForRender()
+  mouseWheel(editing.vt, 0, 'up')
+  await editing.vt.waitForRender()
+  assert.equal(editModel.state().editBuffer, buffer, 'wheel never edits the inline buffer')
+  assert.equal(editing.vt.getViewport().join('\n'), editorFrame, 'wheel is inert in the inline editor')
+  editing.app.stop()
+
+  // Delete prompt: inert, never confirms or scrolls the transaction away.
+  const deleting = startApp(44, 6)
+  const { model: deleteModel } = longRowPage(deleting.vt, deleting.app, { count: 1 })
+  await deleting.vt.waitForRender()
+  deleting.vt.sendInput('\r')
+  await deleting.vt.waitForRender()
+  deleting.vt.sendInput('\r')
+  await deleting.vt.waitForRender()
+  for (let step = 0; step < 6; step += 1) deleting.vt.sendInput('\x1b[B')
+  deleting.vt.sendInput('\r')
+  await deleting.vt.waitForRender()
+  assert.equal(deleteModel.state().mode, 'custom-delete')
+  const deleteFrame = deleting.vt.getViewport().join('\n')
+  mouseWheel(deleting.vt, 0, 'down')
+  await deleting.vt.waitForRender()
+  assert.equal(deleteModel.state().mode, 'custom-delete')
+  assert.equal(deleting.vt.getViewport().join('\n'), deleteFrame, 'wheel is inert in the delete prompt')
+  deleting.app.stop()
+
+  // Saving: the wheel never scrolls or starts a second write.
+  const saving = startApp(44, 20)
+  let resolveSave!: () => void
+  const savePromise = new Promise<void>(resolve => { resolveSave = resolve })
+  let saves = 0
+  const saveModel = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, saving.app.getFooterItemRegistry())
+  openPage(saving.vt, saving.app, {
+    model: saveModel,
+    registry: saving.app.getFooterItemRegistry(),
+    onSave: () => { saves += 1; return savePromise },
+  })
+  await saving.vt.waitForRender()
+  await makeDirty(saving.vt)
+  saving.vt.sendInput('s')
+  await saving.vt.waitForRender()
+  assert.equal(saveModel.state().saving, true)
+  assert.equal(saves, 1)
+  const savingFrame = saving.vt.getViewport().join('\n')
+  mouseWheel(saving.vt, 1, 'down')
+  await saving.vt.waitForRender()
+  mouseWheel(saving.vt, 1, 'up')
+  await saving.vt.waitForRender()
+  assert.equal(saving.vt.getViewport().join('\n'), savingFrame, 'wheel is inert while a save is in flight')
+  assert.equal(saves, 1, 'wheel never starts a second save')
+  resolveSave()
+  await settle()
+  saving.app.stop()
+})
+
+test('press -> real wheel -> release is inert; zero delta keeps the press; a fresh press still acts', async () => {
+  const { vt, app } = startApp(44, 20)
+  const { model, panel } = longRowPage(vt, app, { count: 20 })
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  for (let step = 0; step < 5; step += 1) mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+
+  let targetLine = vt.getViewport().findIndex(line => line.includes('scroll-10'))
+  assert.ok(targetLine >= 0)
+  vt.sendInput(`\x1b[<0;3;${targetLine + 1}M`)
+  await vt.waitForRender()
+  mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;3;${targetLine + 1}m`)
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'row', 'a real wheel retires the pressed item action')
+
+  // A boundary wheel is a real intent too: the same cell cannot activate.
+  for (let step = 0; step < 40; step += 1) mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  targetLine = vt.getViewport().findIndex(line => line.includes('scroll-19'))
+  assert.ok(targetLine >= 0)
+  vt.sendInput(`\x1b[<0;3;${targetLine + 1}M`)
+  await vt.waitForRender()
+  mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;3;${targetLine + 1}m`)
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'row', 'a boundary wheel still retires the old press')
+
+  // Zero delta keeps a legal press: the direct call is the only negative
+  // control here (the Fork never produces a zero-delta notch).
+  targetLine = vt.getViewport().findIndex(line => line.includes('scroll-19'))
+  vt.sendInput(`\x1b[<0;3;${targetLine + 1}M`)
+  await vt.waitForRender()
+  assert.deepEqual(panel.handleMouse({
+    type: 'wheel',
+    button: 'none',
+    x: 2,
+    y: 1,
+    screenX: 2,
+    screenY: 1,
+    width: 44,
+    height: 20,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    wheelDelta: 0,
+  }), { handled: true, render: false })
+  vt.sendInput(`\x1b[<0;3;${targetLine + 1}m`)
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'item', 'a zero-delta wheel never cancels the legal press')
+
+  // A fresh press on the next visible item still activates normally.
+  mouseClick(vt, vt.getViewport().findIndex(line => line.includes('scroll-19')), 0)
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'item')
+  app.stop()
+})
+
+test('the wheel only hits really painted body rows on tiny and short frames', async () => {
+  // Bar-only frame (1 row): no body, nothing scrolls.
+  const barOnly = startApp(44, 1)
+  longRowPage(barOnly.vt, barOnly.app, { count: 20 })
+  await barOnly.vt.waitForRender()
+  const oneFrame = barOnly.vt.getViewport().join('\n')
+  mouseWheel(barOnly.vt, 0, 'down')
+  await barOnly.vt.waitForRender()
+  assert.equal(barOnly.vt.getViewport().join('\n'), oneFrame, 'a bar-only frame has no wheel sink')
+  barOnly.app.stop()
+
+  // 2-row frame: the ONE painted body row scrolls; the bar row is inert.
+  const twoRows = startApp(44, 2)
+  const { model: twoModel } = longRowPage(twoRows.vt, twoRows.app, { count: 20 })
+  await twoRows.vt.waitForRender()
+  const twoBefore = twoRows.vt.getViewport().join('\n')
+  mouseWheel(twoRows.vt, 0, 'down')
+  await twoRows.vt.waitForRender()
+  assert.notEqual(twoRows.vt.getViewport().join('\n'), twoBefore, 'the ONE painted body row scrolls')
+  const twoAfter = twoRows.vt.getViewport().join('\n')
+  mouseWheel(twoRows.vt, 1, 'down') // the real Action Bar row
+  await twoRows.vt.waitForRender()
+  assert.equal(twoRows.vt.getViewport().join('\n'), twoAfter, 'the tiny Action Bar row is not a wheel sink')
+  assert.equal(twoModel.state().mode, 'rows')
+
+  // 80x10 short frame: a long row body scrolls and the bar stays last.
+  const short = startApp(80, 10)
+  const { model: shortModel } = longRowPage(short.vt, short.app, { count: 20 })
+  await short.vt.waitForRender()
+  short.vt.sendInput('\r')
+  await short.vt.waitForRender()
+  const shortView = short.vt.getViewport()
+  assert.ok(shortView[shortView.length - 1]!.includes('Back [Esc]'), 'the ONE bar stays the last row')
+  const shortBefore = short.vt.getViewport().join('\n')
+  mouseWheel(short.vt, 1, 'down')
+  await short.vt.waitForRender()
+  assert.notEqual(short.vt.getViewport().join('\n'), shortBefore, 'the short frame really scrolls its body')
+  assert.equal(shortModel.state().mode, 'row')
+  mouseWheel(short.vt, shortView.length - 1, 'down')
+  await short.vt.waitForRender()
+  assert.equal(short.vt.getViewport()[shortView.length - 1], shortView[shortView.length - 1]!,
+    'the short frame Action Bar is inert')
+  short.app.stop()
 })
