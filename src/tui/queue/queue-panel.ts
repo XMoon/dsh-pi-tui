@@ -92,32 +92,33 @@ interface BarLayout {
 
 const BAR_SEPARATOR = ' · '
 
-/** Lay out the action bar exactly like the shared row (compact short forms
- * first, then drop whole lowest-priority segments; Esc is never dropped). */
+/** Lay out the action bar on ONE row: compact short forms first, then drop
+ * whole lowest-priority segments until every painted span fits. A span is
+ * published only for a segment that is COMPLETELY painted; `navigate` is a
+ * painted fact, never a clickable action. When even the last whole segment
+ * does not fit, the bar paints nothing (keyboard Esc still works) instead of
+ * leaving a partial token's truncated range live. */
 function layoutBar(input: readonly BarSegment[], width: number): BarLayout {
   const list = input.map(segment => ({ ...segment }))
   for (;;) {
-    const pieces: { id: ActionId; start: number; end: number }[] = []
-    let cursor = 0
-    let text = ''
-    for (const [index, segment] of list.entries()) {
-      if (index > 0) {
-        text += BAR_SEPARATOR
-        cursor += BAR_SEPARATOR.length
+    const text = list.map(segment => segment.text).join(BAR_SEPARATOR)
+    if (visibleWidth(text) <= width) {
+      const pieces: { id: ActionId; start: number; end: number }[] = []
+      let cursor = 0
+      for (const [index, segment] of list.entries()) {
+        if (index > 0) cursor += visibleWidth(BAR_SEPARATOR)
+        const start = cursor
+        cursor += visibleWidth(segment.text)
+        if (segment.id !== 'navigate') pieces.push({ id: segment.id, start, end: cursor })
       }
-      const start = cursor
-      text += segment.text
-      cursor += visibleWidth(segment.text)
-      pieces.push({ id: segment.id, start, end: cursor })
-    }
-    if (visibleWidth(text) <= width || list.length <= 1) {
-      return { text: color.textDim(truncateToWidth(text, width, '…', true)), ranges: pieces }
+      return { text: color.textDim(text), ranges: pieces }
     }
     const shortenable = list.find(segment => segment.short !== undefined && segment.text !== segment.short)
     if (shortenable !== undefined) {
       shortenable.text = shortenable.short!
       continue
     }
+    if (list.length <= 1) return { text: '', ranges: [] }
     let lowest = 0
     for (let index = 1; index < list.length; index += 1) {
       if (list[index]!.priority < list[lowest]!.priority) lowest = index
@@ -144,21 +145,38 @@ function actionAvailable(view: QueueManagerView, id: ActionId): boolean {
 type PanelHit =
   | { readonly kind: 'picker'; readonly offsetY: number }
   | { readonly kind: 'action'; readonly ranges: readonly { readonly id: ActionId; readonly start: number; readonly end: number }[] }
+  | {
+      readonly kind: 'editor-line'
+      /** The ONE-based row the fork Editor's own mouse contract needs (top
+       * border included), never the Queue panel's physical y. */
+      readonly editorY: number
+      readonly occurrenceId: string | undefined
+    }
   | { readonly kind: 'inert' }
 
-/** The ONE unfinished pointer gesture: the whole painted bar identity the press
- * resolved (mode, selected occurrence, action and its exact painted cells) plus
- * the frame grant. A synthesized click may only complete the SAME identity. */
-interface PanelPress {
-  readonly mode: QueueManagerMode
-  readonly selectedId: string | undefined
-  readonly actionId: ActionId
-  readonly row: number
-  readonly start: number
-  readonly end: number
-  readonly width: number
-  readonly height: number
-}
+/** The ONE unfinished pointer gesture: the whole painted identity the press
+ * resolved plus the frame grant. A synthesized click may only complete the
+ * SAME identity. */
+type PanelPress =
+  | {
+      readonly kind: 'action'
+      readonly mode: QueueManagerMode
+      readonly selectedId: string | undefined
+      readonly actionId: ActionId
+      readonly row: number
+      readonly start: number
+      readonly end: number
+      readonly width: number
+      readonly height: number
+    }
+  | {
+      readonly kind: 'editor-line'
+      readonly occurrenceId: string | undefined
+      readonly editorY: number
+      readonly row: number
+      readonly width: number
+      readonly height: number
+    }
 
 export class QueuePanel implements Component, Focusable {
   private readonly controller: QueueManagerController
@@ -176,6 +194,8 @@ export class QueuePanel implements Component, Focusable {
    * latches a bar that was painted for the SAME mode/selection. */
   private paintedMode: QueueManagerMode = 'closed'
   private paintedSelectedId: string | undefined
+  /** The row count the fork Editor last painted (its own hit contract). */
+  private editorRenderedHeight = 0
   private pickerSignature = ''
   private focusedFlag = false
 
@@ -324,6 +344,45 @@ export class QueuePanel implements Component, Focusable {
         .handleMouse?.(translated)
       return result === undefined ? undefined : { handled: true }
     }
+    if (hit.kind === 'editor-line') {
+      if (event.type === 'wheel') return undefined
+      if (event.type === 'press') {
+        // The editor body is click-to-position only while the CURRENT painted
+        // page still edits this same occurrence and no write is in flight.
+        const view = this.controller.view()
+        if (view.mode !== 'edit' || view.pending) return undefined
+        if (view.mode !== this.paintedMode || view.selectedId !== this.paintedSelectedId) return undefined
+        if (hit.occurrenceId !== view.selectedId) return undefined
+        this.pressed = {
+          kind: 'editor-line',
+          occurrenceId: view.selectedId,
+          editorY: hit.editorY,
+          row: event.y,
+          width: event.width,
+          height: event.height,
+        }
+        return { handled: true }
+      }
+      const pressed = clicked
+      if (pressed === undefined || pressed.kind !== 'editor-line') return undefined
+      if (pressed.width !== event.width || pressed.height !== event.height || pressed.row !== event.y) return undefined
+      if (pressed.editorY !== hit.editorY || pressed.occurrenceId !== hit.occurrenceId) return undefined
+      const view = this.controller.view()
+      if (view.mode !== 'edit' || view.pending) return undefined
+      if (view.selectedId !== pressed.occurrenceId) return undefined
+      // The fork Editor owns the grapheme/soft-wrap mapping. The Queue only
+      // translates this ONE painted row into its own one-based editor row and
+      // forwards the grant the editor actually rendered at.
+      const result = this.ensureEditor(view).handleMouse({
+        ...event,
+        y: pressed.editorY,
+        width: this.lastRenderWidth,
+        height: this.editorRenderedHeight,
+      })
+      if (result === undefined) return undefined
+      this.requestRender()
+      return { handled: true }
+    }
     if (event.type === 'wheel') return undefined
     if (event.type === 'press') {
       // Only a COMPLETELY painted segment can start a gesture. The painted bar
@@ -336,6 +395,7 @@ export class QueuePanel implements Component, Focusable {
       if (view.mode === 'closed' || view.mode !== this.paintedMode || view.selectedId !== this.paintedSelectedId) return undefined
       if (!actionAvailable(view, segment.id)) return undefined
       this.pressed = {
+        kind: 'action',
         mode: view.mode,
         selectedId: view.selectedId,
         actionId: segment.id,
@@ -348,7 +408,7 @@ export class QueuePanel implements Component, Focusable {
       return { handled: true }
     }
     const pressed = clicked
-    if (pressed === undefined) return undefined
+    if (pressed === undefined || pressed.kind !== 'action') return undefined
     if (pressed.width !== event.width || pressed.height !== event.height || pressed.row !== event.y) return undefined
     const segment = hit.ranges.find(range =>
       range.id === pressed.actionId && range.start === pressed.start && range.end === pressed.end)
@@ -428,18 +488,34 @@ export class QueuePanel implements Component, Focusable {
     const safeDraft = sanitizeDisplayText(view.draft ?? '')
     if (editor.getText() !== safeDraft) editor.setText(safeDraft)
     const rendered = editor.render(width)
+    this.editorRenderedHeight = rendered.length
     // The fork editor paints its own top/bottom border; the overlay Frame is
     // the ONE frame, so only its content rows are painted. A short grant clips
     // the visible window from the BOTTOM (the caret is kept by the editor's own
     // scroll window).
     const content = rendered.slice(1, -1)
-    const visible = content.length > editorRows ? content.slice(content.length - editorRows) : content
-    for (const line of visible) record(truncateToWidth(line, width, '…'), { kind: 'inert' })
+    const hidden = Math.max(0, content.length - editorRows)
+    const visible = content.slice(hidden)
+    for (let index = 0; index < visible.length; index += 1) {
+      // Only a row this frame ACTUALLY paints is a cursor target. `editorY`
+      // translates it into the fork Editor's own one-based row (top border
+      // included); the Queue's physical y is never passed through.
+      record(truncateToWidth(visible[index]!, width, '…'), {
+        kind: 'editor-line',
+        editorY: 1 + hidden + index,
+        occurrenceId: view.selectedId,
+      })
+    }
     if (blanks > 0) record('', { kind: 'inert' })
     if (view.notice !== undefined) record(noticeLine(view.notice, width), { kind: 'inert' })
     this.pushBar(width, [
       { id: 'save', text: `${QUEUE_CHORDS.save.label} save`, priority: 30 },
-      { id: 'cancel', text: `${QUEUE_CHORDS.cancel.label} cancel`, priority: 100 },
+      {
+        id: 'cancel',
+        text: `${QUEUE_CHORDS.cancel.label} cancel`,
+        short: QUEUE_CHORDS.cancel.label,
+        priority: 100,
+      },
     ], record)
   }
 
@@ -473,7 +549,12 @@ export class QueuePanel implements Component, Focusable {
     if (view.notice !== undefined) record(noticeLine(view.notice, width), { kind: 'inert' })
     this.pushBar(width, [
       { id: 'confirm', text: `${QUEUE_CHORDS.edit.label} confirm`, priority: 30 },
-      { id: 'cancel', text: `${QUEUE_CHORDS.cancel.label} cancel`, priority: 100 },
+      {
+        id: 'cancel',
+        text: `${QUEUE_CHORDS.cancel.label} cancel`,
+        short: QUEUE_CHORDS.cancel.label,
+        priority: 100,
+      },
     ], record)
   }
 
@@ -499,7 +580,12 @@ export class QueuePanel implements Component, Focusable {
     // Navigation is a painted FACT, not an action: it carries its own inert
     // identity so a click can never close the panel through the Esc segment.
     actions.push({ id: 'navigate', text: '↑↓ navigate', priority: 10 })
-    actions.push({ id: 'cancel', text: `${QUEUE_CHORDS.cancel.label} close`, priority: 100 })
+    actions.push({
+      id: 'cancel',
+      text: `${QUEUE_CHORDS.cancel.label} close`,
+      short: QUEUE_CHORDS.cancel.label,
+      priority: 100,
+    })
     return actions
   }
 

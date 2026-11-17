@@ -137,7 +137,9 @@ test('browse paints the header, the queued count, one cursor and a whole action 
     assert.ok(lines[0]!.includes('Queue'), `the header is the first row at ${width}:\n${lines.join('\n')}`)
     assert.ok(lines[0]!.includes('2 queued'), `the count is right-aligned at ${width}:\n${lines.join('\n')}`)
     const bar = lines[lines.length - 1]!
-    assert.ok(bar.includes('Esc close'), `Esc is never dropped at ${width}:\n${lines.join('\n')}`)
+    // `Esc close` shortens to the whole `Esc` floor when the full bar cannot
+    // fit (46 columns); the token itself is never dropped or partially painted.
+    assert.ok(bar.includes('Esc'), `Esc is never dropped at ${width}:\n${lines.join('\n')}`)
     assert.ok(bar.includes('Delete [D]'), `Delete is a real action at ${width}:\n${lines.join('\n')}`)
     const cursors = lines.filter(line => line.startsWith('> ') || line.startsWith('❯') || line.trimStart().startsWith('> '))
     assert.equal(cursors.length <= 1, true, `at most one active cursor at ${width}:\n${lines.join('\n')}`)
@@ -430,6 +432,199 @@ test('the Edit bar follows the same currentness fence when a wheel changes the t
   assert.equal(h.controller.view().mode, 'edit', 'a fresh Edit press opens the wheel-selected occurrence')
   assert.equal(h.controller.view().selectedId, 'occ-b')
   assert.equal(h.controller.view().draft, 'queued bravo')
+})
+
+test('narrow action bars publish only complete spans and never a partial token', () => {
+  const h = harness([item('occ-1', [{ type: 'text', text: 'hello' }])])
+  // 8 columns: only the whole `Esc` segment survives.
+  const narrow = h.panel.render(8)
+  assert.equal(plain(narrow[narrow.length - 1]!).trim(), 'Esc', `only the whole Esc segment may survive:\n${narrow.join('\n')}`)
+  const escX = plain(narrow[narrow.length - 1]!).indexOf('Esc')
+  // A cell in the empty tail is not a button.
+  h.panel.handleMouse(mouse(narrow.length - 1, 6, 8, 'press'))
+  h.panel.handleMouse(mouse(narrow.length - 1, 6, 8, 'release'))
+  h.panel.handleMouse(mouse(narrow.length - 1, 6, 8, 'click'))
+  assert.equal(h.controller.view().mode, 'browse', 'empty bar cells are inert')
+  // The whole Esc is clickable and uses the original keyboard path.
+  h.panel.handleMouse(mouse(narrow.length - 1, escX, 8, 'press'))
+  h.panel.handleMouse(mouse(narrow.length - 1, escX, 8, 'release'))
+  h.panel.handleMouse(mouse(narrow.length - 1, escX, 8, 'click'))
+  assert.equal(h.controller.view().mode, 'closed', 'the whole Esc remains clickable')
+
+  // Width 2 cannot paint even `Esc`: the bar is blank and no cell acts.
+  const tiny = harness([item('occ-1', [{ type: 'text', text: 'hello' }])])
+  const tinyLines = tiny.panel.render(2)
+  assert.equal(plain(tinyLines[tinyLines.length - 1]!).trim(), '', 'a bar that cannot hold Esc paints nothing')
+  for (const cell of [0, 1]) {
+    tiny.panel.handleMouse(mouse(tinyLines.length - 1, cell, 2, 'press'))
+    tiny.panel.handleMouse(mouse(tinyLines.length - 1, cell, 2, 'release'))
+    tiny.panel.handleMouse(mouse(tinyLines.length - 1, cell, 2, 'click'))
+    assert.equal(tiny.controller.view().mode, 'browse', 'no partial Esc cell may activate')
+  }
+  // Keyboard Esc remains the recovery.
+  tiny.panel.handleInput('\x1b')
+  assert.equal(tiny.controller.view().mode, 'closed', 'the keyboard Esc route is never degraded')
+})
+
+/** Open Edit through the painted bar and return the first Edit frame. */
+function openEdit(h: Harness, width = 84): string[] {
+  const lines = h.panel.render(width)
+  const barIndex = lines.length - 1
+  const x = plain(lines[barIndex]!).indexOf('Edit [')
+  assert.ok(x >= 0, `the Edit action must be painted:\n${lines.join('\n')}`)
+  h.panel.handleMouse(mouse(barIndex, x, width, 'press'))
+  h.panel.handleMouse(mouse(barIndex, x, width, 'release'))
+  h.panel.handleMouse(mouse(barIndex, x, width, 'click'))
+  assert.equal(h.controller.view().mode, 'edit')
+  return h.panel.render(width)
+}
+
+/** The physical row and column of one painted piece of editor text. */
+function editorCell(lines: readonly string[], needle: string, column: number): { readonly row: number; readonly x: number } {
+  const row = lines.findIndex(line => plain(line).includes(needle))
+  assert.ok(row >= 0, `the editor row ${needle} must be painted:\n${lines.join('\n')}`)
+  return { row, x: plain(lines[row]!).indexOf(needle) + column }
+}
+
+test('a click on a painted editor line positions the real cursor and typing inserts there exactly', async () => {
+  const h = harness([item('occ-1', [{ type: 'text', text: 'abc\ndef' }])])
+  const width = 84
+  const lines = openEdit(h, width)
+  // Click the `b` cell of the FIRST line: the cursor lands before `b`.
+  const first = editorCell(lines, 'abc', 1)
+  assert.equal(h.panel.handleMouse(mouse(first.row, first.x, width, 'press'))?.handled, true)
+  assert.equal(h.panel.handleMouse(mouse(first.row, first.x, width, 'release')), undefined)
+  assert.equal(h.panel.handleMouse(mouse(first.row, first.x, width, 'click'))?.handled, true)
+  assert.deepEqual(h.writes, [], 'positioning the cursor never writes the Host')
+  h.panel.handleInput('X')
+  assert.equal(h.controller.view().draft, 'aXbc\ndef', 'typing inserts at the clicked grapheme position')
+
+  // Click the `f` cell of the SECOND line: the cursor lands before `f`.
+  h.panel.render(width)
+  const second = editorCell(h.panel.render(width), 'def', 2)
+  h.panel.handleMouse(mouse(second.row, second.x, width, 'press'))
+  h.panel.handleMouse(mouse(second.row, second.x, width, 'release'))
+  h.panel.handleMouse(mouse(second.row, second.x, width, 'click'))
+  h.panel.handleInput('Y')
+  assert.equal(h.controller.view().draft, 'aXbc\ndeYf', 'the second painted line maps to the right logical line')
+  assert.deepEqual(h.writes, [], 'only an explicit Save may write')
+
+  // The Save gesture is the original controller intent and writes once.
+  const saved = h.panel.render(width)
+  const barIndex = saved.length - 1
+  const saveX = plain(saved[barIndex]!).indexOf('Ctrl+S save')
+  assert.ok(saveX >= 0, `the Save action must be painted:\n${saved.join('\n')}`)
+  h.panel.handleMouse(mouse(barIndex, saveX, width, 'press'))
+  h.panel.handleMouse(mouse(barIndex, saveX, width, 'release'))
+  h.panel.handleMouse(mouse(barIndex, saveX, width, 'click'))
+  await h.drain()
+  assert.deepEqual(h.writes, [{
+    id: 'occ-1',
+    kind: 'edit',
+    content: [{ type: 'text', text: 'aXbc\ndeYf' }],
+  }])
+  assert.equal(h.controller.view().mode, 'browse', 'a committed save returns to Browse')
+})
+
+test('soft-wrapped, CJK and combining-grapheme lines map through the painted window, never substring counting', () => {
+  // An unbroken ASCII token force-breaks at the editor layout width.
+  const ascii = harness([item('occ-1', [{ type: 'text', text: 'abcdefghijklmnop' }])])
+  ascii.panel.handleInput('\r')
+  const asciiLines = ascii.panel.render(10)
+  const secondChunk = editorCell(asciiLines, 'jklmnop', 2)
+  ascii.panel.handleMouse(mouse(secondChunk.row, secondChunk.x, 10, 'press'))
+  ascii.panel.handleMouse(mouse(secondChunk.row, secondChunk.x, 10, 'release'))
+  ascii.panel.handleMouse(mouse(secondChunk.row, secondChunk.x, 10, 'click'))
+  ascii.panel.handleInput('X')
+  assert.equal(ascii.controller.view().draft, 'abcdefghijkXlmnop', 'the wrapped chunk keeps its logical index')
+
+  // CJK wide glyphs: the second painted line is `世界`, and cell 2 lands
+  // between `世` and `界` in the SAME logical line.
+  const cjk = harness([item('occ-1', [{ type: 'text', text: '你好世界' }])])
+  cjk.panel.handleInput('\r')
+  const cjkLines = cjk.panel.render(5)
+  const cjkSecond = editorCell(cjkLines, '世界', 2)
+  cjk.panel.handleMouse(mouse(cjkSecond.row, cjkSecond.x, 5, 'press'))
+  cjk.panel.handleMouse(mouse(cjkSecond.row, cjkSecond.x, 5, 'release'))
+  cjk.panel.handleMouse(mouse(cjkSecond.row, cjkSecond.x, 5, 'click'))
+  cjk.panel.handleInput('X')
+  assert.equal(cjk.controller.view().draft, '你好世X界', 'the wide-glyph cell maps to the right grapheme boundary')
+
+  // A combining grapheme is one cursor stop (`a\u0301` is one cell): the `b`
+  // cell is visual column 1, never the UTF-16 substring index of `bc`.
+  const combining = harness([item('occ-1', [{ type: 'text', text: 'a\u0301bc' }])])
+  combining.panel.handleInput('\r')
+  const combiningLines = combining.panel.render(84)
+  const combiningRow = combiningLines.findIndex(line => plain(line).includes('bc'))
+  assert.ok(combiningRow >= 0, `the combining row must be painted:\n${combiningLines.join('\n')}`)
+  combining.panel.handleMouse(mouse(combiningRow, 1, 84, 'press'))
+  combining.panel.handleMouse(mouse(combiningRow, 1, 84, 'release'))
+  combining.panel.handleMouse(mouse(combiningRow, 1, 84, 'click'))
+  combining.panel.handleInput('X')
+  assert.equal(combining.controller.view().draft, 'a\u0301Xbc', 'the combining sequence stays one grapheme stop')
+})
+
+test('only the painted tail of a scrolled editor is clickable; header and blanks never move the cursor', () => {
+  const text = Array.from({ length: 10 }, (_, index) => `line${index}`).join('\n')
+  const h = harness([item('occ-1', [{ type: 'text', text }])])
+  h.panel.setMaxRows(6)
+  h.panel.handleInput('\r')
+  const width = 84
+  const lines = h.panel.render(width)
+  assert.equal(h.controller.view().mode, 'edit')
+  // The editor keeps its own 7-row window; the queue paints the LAST 2 rows
+  // of that window (`line8`, `line9`). The header and the blank rows above are
+  // not cursor targets.
+  const painted = editorCell(lines, 'line8', 1)
+  h.panel.handleMouse(mouse(painted.row, painted.x, width, 'press'))
+  h.panel.handleMouse(mouse(painted.row, painted.x, width, 'release'))
+  h.panel.handleMouse(mouse(painted.row, painted.x, width, 'click'))
+  // A header click and a blank-row click must not move the cursor.
+  h.panel.handleMouse(mouse(0, 1, width, 'press'))
+  h.panel.handleMouse(mouse(0, 1, width, 'release'))
+  h.panel.handleMouse(mouse(0, 1, width, 'click'))
+  const blankRow = plain(lines[1]!).trim() === '' ? 1 : 2
+  h.panel.handleMouse(mouse(blankRow, 1, width, 'press'))
+  h.panel.handleMouse(mouse(blankRow, 1, width, 'release'))
+  h.panel.handleMouse(mouse(blankRow, 1, width, 'click'))
+  h.panel.handleInput('X')
+  const expected = Array.from({ length: 10 }, (_, index) => index === 8 ? 'lXine8' : `line${index}`).join('\n')
+  assert.equal(h.controller.view().draft, expected, 'the hidden-window offset is translated through the editor contract')
+})
+
+test('pending, a stale grant and Cancel retire the editor click', async () => {
+  const h = harness([item('occ-1', [{ type: 'text', text: 'abc\ndef' }])])
+  const width = 84
+  const lines = openEdit(h, width)
+  const row = editorCell(lines, 'abc', 1).row
+
+  // A save in flight refuses a new editor press.
+  const saveX = plain(lines[lines.length - 1]!).indexOf('Ctrl+S save')
+  h.panel.handleMouse(mouse(lines.length - 1, saveX, width, 'press'))
+  h.panel.handleMouse(mouse(lines.length - 1, saveX, width, 'release'))
+  h.panel.handleMouse(mouse(lines.length - 1, saveX, width, 'click'))
+  assert.equal(h.controller.view().pending, true)
+  const draftBefore = h.controller.view().draft
+  assert.equal(h.panel.handleMouse(mouse(row, 1, width, 'press')), undefined, 'pending blocks the editor press')
+  assert.equal(h.controller.view().draft, draftBefore)
+  await h.drain()
+  assert.equal(h.controller.view().mode, 'browse')
+
+  // A width change before the click invalidates the captured visual row.
+  const reopened = openEdit(h, width)
+  const target = editorCell(reopened, 'abc', 1)
+  h.panel.handleMouse(mouse(target.row, target.x, width, 'press'))
+  h.panel.render(60)
+  assert.equal(h.panel.handleMouse(mouse(target.row, target.x, 60, 'click')), undefined, 'a changed grant retires the click')
+
+  // Cancel is a keyboard gesture boundary: the late click is inert. The stale
+  // grant click above left the SAME Edit page open, so reuse its fresh paint.
+  const cancelled = h.panel.render(width)
+  const editRow = editorCell(cancelled, 'abc', 1).row
+  h.panel.handleMouse(mouse(editRow, 1, width, 'press'))
+  h.panel.handleInput('\x1b')
+  assert.equal(h.controller.view().mode, 'browse')
+  assert.equal(h.panel.handleMouse(mouse(editRow, 1, width, 'click')), undefined, 'a cancelled Edit page has no cursor target')
 })
 
 
