@@ -2198,6 +2198,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     if (delta === 0) return undefined
     const step = delta < 0 ? -1 : 1
     if (this.snapshot.confirm !== undefined) return undefined
+    const viewportBefore = this.viewportFingerprint()
     if (this.snapshot.mode === 'list') {
       const layout = scheduleWorkspaceLayout(frame.width, frame.height)
       if (layout === 'wide' && event.x >= this.wideLeftWidth(frame.width) + 2) {
@@ -2216,8 +2217,20 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     } else if (this.snapshot.mode === 'help') {
       this.helpScroll = Math.max(0, this.helpScroll + step)
     }
+    // An EFFECTIVE wheel (the pointed pane's viewport really moved) is a
+    // gesture boundary: the press was recorded against the previous view, so
+    // the same-cell release must not replay it (overlay-focus §7 lists scroll
+    // among the press-invalidating changes). A boundary/zero-effect wheel
+    // keeps the existing same-cell contract.
+    if (this.viewportFingerprint() !== viewportBefore) this.pressed = undefined
     this.deps.requestRender()
     return { handled: true, render: true }
+  }
+
+  /** The panel-local viewport positions that decide whether a wheel was
+   *  effective. A wheel on the pointed pane moves exactly one of them. */
+  private viewportFingerprint(): string {
+    return `${this.listScroll}/${this.detailScroll}/${this.historyScroll}/${this.editorScroll}/${this.helpScroll}`
   }
 
   /** Whether the LAST painted frame still describes the CURRENT page and
