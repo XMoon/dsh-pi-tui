@@ -53,6 +53,10 @@ import {
   type PiTuiWebAccessStatus,
 } from '../../runtime/remote/pi-tui-web-access-contract.ts'
 import {
+  LOCAL_WORKSPACE_OBJECT_ROUTE,
+  createWorkspaceObjectHandler,
+} from './local-workspace-object.ts'
+import {
   assertRecordedHostKernelIdentityCurrent,
   cleanupOwnedFiles,
   readHostProcessIdentity,
@@ -308,14 +312,26 @@ interface HostScratchOwner {
 type LocalRequestInit = RequestInit & { readonly cache?: 'no-store' }
 
 /** Wait for one unauthenticated route to answer with the expected refusal. */
-async function waitForRefusal(url: string, timeoutMs = 10_000): Promise<void> {
+async function waitForRefusal(
+  url: string,
+  timeoutMs = 10_000,
+  init: { readonly method?: string; readonly headers?: Record<string, string>; readonly body?: string } = {},
+): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     try {
-      const request: LocalRequestInit = { method: 'GET', redirect: 'manual', cache: 'no-store' }
+      const request: LocalRequestInit = {
+        method: init.method ?? 'GET',
+        redirect: 'manual',
+        cache: 'no-store',
+        ...(init.headers === undefined ? {} : { headers: init.headers }),
+        ...(init.body === undefined ? {} : { body: init.body }),
+      }
       const response = await fetch(url, request)
       await response.body?.cancel()
-      if (response.status === 401) return
+      // The official admission must refuse a request that carries no Cookie.
+      // Any other status (especially 200) is not proof and keeps the wait.
+      if (response.status === 401 || response.status === 403) return
     } catch {
       // The listener or route may still be settling; retry inside the bound.
     }
@@ -1021,7 +1037,9 @@ interface HostWebServerService {
 
 interface PublishedLocalHost {
   readonly identity: LocalInstanceRecord
-  unregisterIdentity(): Promise<void>
+  /** Release BOTH entry-owned exact routes (identity echo and the read-only
+   *  workspace-object observation) before the official shutdown runs. */
+  unregisterRoutes(): Promise<void>
 }
 
 /**
@@ -1080,9 +1098,10 @@ async function publishLocalHost(
 
   const { writeLaunchMaterial, writeLocalRecord } = await import('./local-discovery.ts')
   writeLaunchMaterial(scope, identity, { schema: 1, instanceId, connectUrl })
-  let unregister: (() => Promise<void>) | undefined
+  let unregisterIdentity: (() => Promise<void>) | undefined
+  let unregisterWorkspaceObject: (() => Promise<void>) | undefined
   try {
-    unregister = connection.fetch.register({
+    unregisterIdentity = connection.fetch.register({
       path: '/api/pi-tui.local-host',
       methods: ['GET'],
       requestBody: 'buffered',
@@ -1093,9 +1112,24 @@ async function publishLocalHost(
         },
       }),
     })
-    // Admission runs before the exact route; this proves the route sits behind
-    // the official Connection owner rather than a bare webserver handler.
+    // The read-only directory-object observation joins the SAME official
+    // Owner-only admission and the SAME publication lifetime. It never
+    // registers a Workspace or returns file content.
+    unregisterWorkspaceObject = connection.fetch.register({
+      path: LOCAL_WORKSPACE_OBJECT_ROUTE,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: createWorkspaceObjectHandler(instanceId),
+    })
+    // Admission runs before the exact routes; this proves both routes sit
+    // behind the official Connection owner rather than a bare webserver
+    // handler.
     await waitForRefusal(`${origin}/api/pi-tui.local-host`)
+    await waitForRefusal(`${origin}${LOCAL_WORKSPACE_OBJECT_ROUTE}`, 10_000, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ instanceId, path: scope.profileRealpath }),
+    })
     // The READY commit re-proves BOTH authorities immediately before the
     // registry becomes discoverable: the kernel process identity is still the
     // one this Host captured, and the singleton seat is still held. A replaced
@@ -1112,7 +1146,12 @@ async function publishLocalHost(
     }
   } catch (error) {
     try {
-      await unregister?.()
+      await unregisterWorkspaceObject?.()
+    } catch {
+      // The registry was never committed; cleanup continues below.
+    }
+    try {
+      await unregisterIdentity?.()
     } catch {
       // The registry was never committed; cleanup continues below.
     }
@@ -1121,8 +1160,9 @@ async function publishLocalHost(
   }
   return {
     identity,
-    async unregisterIdentity(): Promise<void> {
-      await unregister?.()
+    async unregisterRoutes(): Promise<void> {
+      await unregisterWorkspaceObject?.()
+      await unregisterIdentity?.()
     },
   }
 }
@@ -1296,7 +1336,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
           // there is nothing to unregister and no owned registry file to delete.
           if (owner !== undefined) {
             try {
-              await owner.unregisterIdentity()
+              await owner.unregisterRoutes()
             } catch (error) {
               errors.push({ step: 'identity-unregister', error })
             }
@@ -1554,7 +1594,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         })
       }
       try {
-        await registration?.unregisterIdentity()
+        await registration?.unregisterRoutes()
       } catch (cleanupError) {
         priorCleanupFailure ??= cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
         writeEntryRecord({
