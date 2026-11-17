@@ -29,7 +29,7 @@ import type { ImageGraphics, PixelBody } from '../../graphics/native-image.ts'
 import { effectiveImageProtocol, type EffectiveImageProtocol } from '../../graphics/image-capability.ts'
 import type { ImageProtocolPreference } from '../../graphics/image-protocol-preference.ts'
 import type { ImageThumbnailTheme } from './image-thumbnail.ts'
-import { MAX_IMAGE_ROWS, MAX_IMAGE_WIDTH, NARROW_WIDTH_THRESHOLD } from './image-thumbnail.ts'
+import { MAX_IMAGE_ROWS, MAX_IMAGE_WIDTH } from './image-thumbnail.ts'
 import type { SvgRasterLoader } from '../../../client/media/svg/raster-loader.ts'
 
 /** The image theme surface reused from the PR-C thumbnail. */
@@ -212,7 +212,11 @@ export class SvgThumbnail implements Component {
     // frame's geometry must never survive a state change at the same width.
     this.paintedBody = undefined
     this.paintedPixel = undefined
-    if (width < NARROW_WIDTH_THRESHOLD) return []
+    // PR-4B: the old <42-cell blanket ban is gone. The placement adapts to the
+    // actual grant through maxWidthCells = min(MAX_IMAGE_WIDTH, width - 2), so
+    // only a grant with no pixel width after the 2-cell margins (1..2 columns)
+    // paints nothing at all.
+    if (width <= 2) return []
     // SVG preview pixels are available through Kitty and Direct SIXEL
     // (Image-8 / I8-2B). iTerm2's inline framing is not understood by the
     // fork's ANSI width layer, and platforms without the isolated raster lane

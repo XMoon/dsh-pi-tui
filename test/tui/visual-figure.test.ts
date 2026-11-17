@@ -457,3 +457,63 @@ test('a negotiated Zellij SIXEL figure follows async text → committed crop hit
     resetCapabilitiesCache()
   }
 })
+
+// ── PR-4B: the narrow-width matrix for the SVG figure ─────────────────────
+
+test('the narrow-width matrix keeps description/actions clickable and pixel bodies only from real grants', async () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    const loader = new SvgRasterLoader(async () => ({
+      png: new Uint8Array(),
+      base64: TINY_PNG_BASE64,
+      widthPx: 640,
+      heightPx: 320,
+    }))
+    const figure = figureOf(svgPublication(), {
+      onView: () => {},
+      svgLoader: loader,
+      svgTheme: { fallbackColor: text => text },
+      svgAdmissionWidth: 640,
+    })
+    // The PR-4B grant matrix: 1..2 cannot paint (no pixel width after the
+    // 2-cell margins); 3..41 paint real pixels inside the grant; >=42 keeps
+    // the previous placement. The first render at each width drives the load,
+    // the second paints from the settled derivative (the same contract the
+    // transcript uses). Whole-segment degradation may drop the title and the
+    // action labels truncate to the grant, but the description text survives
+    // wherever the wrap can carry it (from 3 columns up).
+    for (const width of [1, 2, 3, 8, 12, 20, 30, 41, 42, 43, 80]) {
+      figure.render(width)
+      for (let index = 0; index < 40; index += 1) await Promise.resolve()
+      const lines = figure.render(width)
+      const hits = figure.paintedHitMap(width)
+      assert.ok(hits !== undefined, `width ${width}: the figure paints a hit map`)
+      const painted = stripSgr(lines.join('\n'))
+      if (width >= 3) {
+        // The description survives wherever its words fit the wrap: at the
+        // narrow floor the wrap splits long words, so assert on a fragment.
+        const needle = width >= 12 ? 'Gateway' : width >= 8 ? 'Gatew' : 'Gat'
+        assert.ok(painted.includes(needle),
+          `width ${width}: the description survives (${needle})`)
+      }
+      const actionLabels = hits.actions.map(hit => stripSgr(lines[hit.row]!).slice(hit.startCol, hit.endCol))
+      assert.ok(
+        actionLabels.every(label => label.length > 0 && !label.includes('\n')),
+        `width ${width}: every painted action cell is a complete word`,
+      )
+      const body = hits.thumbnailBody
+      if (width <= 2) {
+        assert.equal(body, undefined, `width ${width}: no pixel body below the margin budget`)
+      } else {
+        assert.ok(body !== undefined && body.endCol > 0 && body.endCol <= width - 2,
+          `width ${width}: the pixel body is real and inside the width-2 margins: ${JSON.stringify(body)}`)
+        const bodyLine = lines[body.startRow] ?? ''
+        assert.ok(/^\x1b_G/.test(bodyLine), `width ${width}: the body starts at an anchored Kitty APC`)
+      }
+    }
+    figure.dispose()
+    loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
