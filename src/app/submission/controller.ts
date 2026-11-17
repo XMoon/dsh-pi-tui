@@ -360,7 +360,7 @@ export interface SubmissionController {
   /** PR2/F3: the owner-aware draft restore — the live hold's own draft is
    *  left intact (or replaced only by the acceptance boundary) and another
    *  attempt's restore is replayed when that hold settles. */
-  restoreSubmissionDraft(text: string, ownerRequestId?: string): void
+  restoreSubmissionDraft(text: string, ownerRequestId?: string, originSubject?: unknown): void
   /** PR2/R5-1: replay a draft-restore obligation that could not be written
    *  while the renderer was stopped (called by the renderer once it presents
    *  again; a no-op when nothing is queued or a hold is live). */
@@ -594,7 +594,22 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    * attempt's text is never dropped and the live hold's frozen snapshot is
    * never rewritten.
    */
-  const deferredDraftRestores: Array<{ readonly text: string; readonly subject: SessionSubject | undefined }> = []
+  const deferredDraftRestores: Array<{
+    readonly text: string
+    /** R6-1: the ORIGINATING operation's captured subject (never the
+     *  receiver's current owner). */
+    readonly subject: SessionSubject | undefined
+    /** R6-1: the retention verdict the ORIGINATING policy already took (a
+     *  renderer that drops stale drafts never enqueues; a retaining renderer
+     *  and a same-owner invalidation do). Replay must not re-decide it with a
+     *  stricter identity check. */
+    readonly retain: boolean
+  }> = []
+  /** R6-1B: the one policy read shared by the enqueue, the retirement filter
+   *  and the replay: a replaced owner's draft is dropped ONLY on a renderer
+   *  that drops stale drafts at the switch. */
+  const deferredRestoreRetained = (subject: SessionSubject | undefined): boolean =>
+    subject === undefined || deps.retainsStaleDraftRestore || !deps.ownerWasReplaced(subject)
   const flushDeferredDraftRestores = (): void => {
     if (deferredDraftRestores.length === 0 || composerHoldActive()) return
     // R5-1: the splice happens only for entries the renderer can actually
@@ -604,16 +619,18 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     if (deps.app().draftWriteAccepted?.() === false) return
     const pending = deferredDraftRestores.splice(0)
     for (const entry of pending) {
-      // RFL014: a restore captured for a REPLACED owner never lands in the new
-      // owner's composer — the exact owner fact decides, never a global hold.
-      if (entry.subject !== undefined && !deps.captureMatches(entry.subject)) continue
+      if (!entry.retain) continue
       deps.app().setEditorText?.(mergeDraft(deps.app().getDraft(), entry.text))
     }
   }
   /** Restore one submission's draft. `ownerRequestId` names the attempt that
    *  owns the restore: only THAT attempt may settle the live hold's record;
    *  any other attempt's restore is deferred to the hold's settlement. */
-  const restoreSubmissionDraft = (draft: string, ownerRequestId?: string): void => {
+  const restoreSubmissionDraft = (
+    draft: string,
+    ownerRequestId?: string,
+    originSubject?: SessionSubject,
+  ): void => {
     if (deps.signal.aborted) return
     if (composerHold !== undefined && composerHold.phase === 'sending') {
       const own = ownerRequestId !== undefined && composerHold.submissionRequestId === ownerRequestId
@@ -622,7 +639,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         // text needs no restore; a DIFFERENT text belongs to the acceptance
         // boundary and is replayed after this hold settles.
         if (composerHold.text !== draft) {
-          deferredDraftRestores.push({ text: draft, subject: deps.ownership.captureSubject() })
+          deferredDraftRestores.push({
+            text: draft,
+            subject: originSubject ?? composerHold.subject,
+            retain: true,
+          })
         }
         return
       }
@@ -633,14 +654,14 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       }
       // ANOTHER attempt owns the editor: never mutate it (its renderer would
       // refuse the write) and never rewrite that hold's record.
-      deferredDraftRestores.push({ text: draft, subject: deps.ownership.captureSubject() })
+      deferredDraftRestores.push({ text: draft, subject: originSubject, retain: true })
       return
     }
     // R5-1: a renderer that would refuse the write (a stopped surface) must
     // not consume the obligation either — park it for the replay when the
     // surface presents again.
     if (deps.app().draftWriteAccepted?.() === false) {
-      deferredDraftRestores.push({ text: draft, subject: deps.ownership.captureSubject() })
+      deferredDraftRestores.push({ text: draft, subject: originSubject, retain: true })
       return
     }
     deps.app().setEditorText(mergeDraft(deps.app().getDraft(), draft))
@@ -957,7 +978,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         // after this hold settles — never written into the frozen document and
         // never recorded as its text.
         if (composerHold.text !== value) {
-          deferredDraftRestores.push({ text: value, subject: capturedSubject })
+          deferredDraftRestores.push({
+            text: value,
+            subject: capturedSubject,
+            // The suppression above already decided the policy; reaching here
+            // means this renderer retains the stale draft.
+            retain: true,
+          })
         }
         return 'merged-verbatim'
       }
@@ -970,7 +997,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // restore of a legacy command whose first ensureSession failed). Defer
       // the text to that hold's settlement, pinned to the CAPTURED subject;
       // never rewrite the live hold's record.
-      deferredDraftRestores.push({ text: value, subject: capturedSubject })
+      deferredDraftRestores.push({ text: value, subject: capturedSubject, retain: true })
       return 'merged-verbatim'
     }
     // R5-1/RFL017: a renderer that would refuse the write (a stopped surface)
@@ -978,7 +1005,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // CAPTURED subject) for the replay when the surface presents again. The
     // reported outcome stays the merge the writable renderer will produce.
     if (deps.app().draftWriteAccepted?.() === false) {
-      deferredDraftRestores.push({ text: value, subject: capturedSubject })
+      deferredDraftRestores.push({ text: value, subject: capturedSubject, retain: true })
       return mergedStaleOutcomeFor(value)
     }
     const merged = mergeDraft(deps.app().getDraft(), value)
@@ -1437,7 +1464,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
             deps.app().setEditorText(merged)
             return merged === value
           },
-          restoreSubmissionDraft: (value, owner) => restoreSubmissionDraft(value, owner),
+          restoreSubmissionDraft: (value, owner, subject) =>
+            restoreSubmissionDraft(value, owner, subject as SessionSubject | undefined),
           consumeDraftAttachments: (value) => consumeDraftAttachments(value, deps.drafts.images, deps.drafts.files),
           pinDraftAttachments: (value) => pinDraftAttachments(value, deps.drafts.images, deps.drafts.files),
           settleLocalSubmission: (requestId) => settleLocalSubmission(requestId),
@@ -1926,7 +1954,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         deps.direct.withPromptAdmission(agent as unknown as ExactAgent, hasImages, task),
       prepareMessage: (value, requestId) => prepareMessage(value, requestId),
       markDispatch: (sessionId) => submitLatencyTracker.mark(sessionId, 'dispatch'),
-      restoreSubmissionDraft: (value, owner) => restoreSubmissionDraft(value, owner),
+      restoreSubmissionDraft: (value, owner, subject) =>
+        restoreSubmissionDraft(value, owner, subject as SessionSubject | undefined),
       notifySubmissionFailure: (error) => notifySubmissionFailure(error),
       consumeDraftAttachments: (value) => consumeDraftAttachments(value, deps.drafts.images, deps.drafts.files),
       writerSection: withWriterSection,
@@ -2025,9 +2054,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // the outcome is not an acceptance. A cleaned-up surface is not
     // repainted at all.
     if (!deps.isCleanedUp()) deps.app().settleSubmission?.(hold.id, 'not-accepted')
-    // RFL014: the attempt's owner is gone; its deferred restores must not
-    // resurface on the replacement's composer.
+    // R6-1B: retirement applies the SAME policy — a renderer that drops stale
+    // drafts discards a replaced owner's queued restores; a retaining
+    // renderer keeps them (and a same-owner invalidation always keeps them).
+    const kept = deferredDraftRestores.filter(entry => deferredRestoreRetained(entry.subject))
     deferredDraftRestores.length = 0
+    deferredDraftRestores.push(...kept)
     deps.diag.debug('composer hold retired', { reason })
   }
 
@@ -2999,7 +3031,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     steer: steerDraft,
     ownsComposerHold: (requestId: string) => composerHoldActive()
       && composerHold?.submissionRequestId === requestId,
-    restoreSubmissionDraft,
+    restoreSubmissionDraft: (text, ownerRequestId, originSubject) =>
+      restoreSubmissionDraft(text, ownerRequestId, originSubject as SessionSubject | undefined),
     replayDeferredDraftRestores: flushDeferredDraftRestores,
     restoreStaleDraftIntoEditor: (text, capturedSubject, ownerRequestId) =>
       restoreStaleDraft(text, capturedSubject as SessionSubject | undefined, ownerRequestId),

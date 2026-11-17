@@ -1000,8 +1000,10 @@ test('PR2/RFL013: a controller-level stale scope settles the exact hold', async 
   await attemptTick()
 })
 
-test('PR2/RFL014: a deferred restore for a REPLACED owner never lands after a later acceptance', async () => {
+test('PR2/RFL014/R6-1B: on a switch-dropping renderer a replaced owner’s deferred restore never lands', async () => {
   const h = mountAttempt()
+  // TSP: drops stale drafts at a committed switch.
+  h.setRetainsStaleDraftRestore(false)
   h.setCommandBehavior('legacy-command-pending')
   assert.equal(h.controller.beginComposerSubmission('/deploy now', 'enter'), 'legacy')
   h.controller.submit('/deploy now', 'enter')
@@ -1186,4 +1188,48 @@ test('PR2/R5-1: a deferred restore parked by a stopped renderer is replayed once
   h.controller.replayDeferredDraftRestores()
   await attemptTick()
   assert.equal(h.composer.text, 'B behind the stop\n\n/deploy now', 'the replay is never duplicated')
+})
+
+test('PR2/R6-1B: a RETAINING renderer keeps a replaced owner’s parked restore across the restart', async () => {
+  const h = mountAttempt()
+  // PiTui: a retained stale draft is the documented policy after a switch.
+  h.setRetainsStaleDraftRestore(true)
+  h.setCommandBehavior('legacy-command-pending')
+  // A: the legacy command of the OLD owner is gated inside ensureSession.
+  h.holdNextEnsureSession()
+  assert.equal(h.controller.beginComposerSubmission('/deploy old owner', 'enter'), 'legacy')
+  h.controller.submit('/deploy old owner', 'enter')
+  await attemptTick()
+  // The owner is replaced while A is still preparing.
+  h.setOwnerReplaced(true)
+  h.controller.clearPending()
+  // The renderer is STOPPED when A's preparation finally fails: the allowed
+  // stale restore parks with A's ORIGINATING subject.
+  h.setRendererStopped(true)
+  h.rejectHeldEnsureSession(new Error('old preparation failed'))
+  await attemptTick()
+  assert.equal(h.composer.text, '', 'the stopped renderer wrote nothing')
+  // The surface presents again: the retaining policy replays A exactly once.
+  h.setRendererStopped(false)
+  h.controller.replayDeferredDraftRestores()
+  await attemptTick()
+  assert.equal(h.composer.text, '/deploy old owner',
+    'a retaining renderer preserves the replaced owner’s stale draft exactly once')
+  h.controller.replayDeferredDraftRestores()
+  await attemptTick()
+  assert.equal(h.composer.text, '/deploy old owner', 'the replay is not duplicated')
+
+  // The SAME-OWNER generation invalidation (owner not replaced) also survives.
+  const same = mountAttempt()
+  same.setRetainsStaleDraftRestore(true)
+  same.setRendererStopped(true)
+  same.composer.text = 'visible draft'
+  const outcome = same.controller.restoreStaleDraftIntoEditor('/same owner stale', { owner: 's1' }, 'same-request')
+  assert.equal(same.composer.text, 'visible draft', 'the stopped renderer wrote nothing')
+  assert.equal(outcome, 'merged')
+  same.setRendererStopped(false)
+  same.controller.replayDeferredDraftRestores()
+  await attemptTick()
+  assert.equal(same.composer.text, 'visible draft\n\n/same owner stale',
+    'a same-owner invalidation is not a replacement — its restore is preserved')
 })

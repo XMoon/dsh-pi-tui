@@ -4411,8 +4411,8 @@ export function applyRunnerWithRuntime(
         // renderer-neutral composer projection — the PiTui-only `app` binding is
         // undefined on the TSP branch (the B2 review's newly-reachable-consumer
         // requirement).
-        restoreSubmissionDraft: (text, ownerRequestId) => {
-          submission.restoreSubmissionDraft(text, ownerRequestId)
+        restoreSubmissionDraft: (text, ownerRequestId, originSubject) => {
+          submission.restoreSubmissionDraft(text, ownerRequestId, originSubject)
         },
         ownsComposerHold: (requestId) => submission.ownsComposerHold(requestId),
         mergeDraftIntoEditor: (text) => {

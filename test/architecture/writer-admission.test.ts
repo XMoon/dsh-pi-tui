@@ -1231,3 +1231,27 @@ test('positive control: a current-scope settlement performs the normal visible b
     'a current-scope settlement settles its rows normally')
   assert.ok(calls.includes('consume'), 'a current-scope success consumes the draft attachments')
 })
+
+test('R6-1A: a stale exit behind ANOTHER attempt’s hold goes through the stale-policy authority', async () => {
+  const calls: string[] = []
+  const staleSubject = { owner: 'owner-a' }
+  const { surface } = recordingSurface({
+    isDisposed: () => false,
+    // The captured scope died BEFORE the write, while a DIFFERENT attempt owns
+    // the composer hold.
+    isScopeCurrent: () => false,
+    prepareMessage: async () => undefined,
+    composerHoldActive: () => true,
+    ownsComposerHold: () => false,
+    restoreSubmissionDraft: (_text, owner) => { calls.push(`plain:${String(owner)}`) },
+    restoreStaleDraftIntoEditor: (text, subject, owner) => {
+      calls.push(`stale:${text}:${JSON.stringify(subject)}:${String(owner)}`)
+      return 'merged-verbatim'
+    },
+  })
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt({ ...SUBMISSION, staleSubject: staleSubject as never })
+  assert.deepEqual(calls, [
+    `stale:hello:${JSON.stringify(staleSubject)}:request-1`,
+  ], 'the foreign-hold stale exit carries the ORIGINATING subject and request through the stale policy — never the plain restore')
+})
