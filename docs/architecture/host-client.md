@@ -207,7 +207,7 @@ real interactive TTY, and any other OS or a non-interactive launch fails closed.
 A real public-managed start uses the platform's supervision path when one
 exists (the Linux user manager with a strict-absence detached process
 fallback); on macOS it always uses that existing detached Host process
-fallback, because launchd supervision is not part of this stage. The public
+fallback, because there is no launchd supervisor. The public
 `dsh daemon status/start/stop/restart/logs` management verbs DO cover this
 macOS detached process (see the management section below); no launchd unit is
 involved. Selection is cold-launch only: writing the Profile value shows "applies on next
@@ -521,9 +521,9 @@ command. A management command publishes one typed intent to the same
 artifact, opens no Direct/Remote TUI, creates no Session/Agent/Writer and starts
 no Host unless `start`/`restart` asks for one. The verbs are supported on Linux
 and macOS. Linux attributes OS supervision through the verified systemd user
-unit; macOS has no service manager in this stage and manages only the
-independent Host process — launchd supervision belongs to the later D4 stage.
-The macOS local Host/Client link never depends on a service manager. `--help`
+unit; macOS has no service manager and manages only the independent Host
+process, with no launchd supervisor. The macOS local Host/Client link never
+depends on a service manager. `--help`
 provides neither startup service.
 
 The exit and error taxonomy is fixed: `0` success (including a confirmed
@@ -686,7 +686,7 @@ stdout/stderr.
   normal Client cold start keeps its existing Host kernel-singleton semantics and
   takes no admin seat. On macOS `install`/`uninstall` refuse as
   `UNSUPPORTED_PLATFORM`/exit 3 before taking the seat, writing a unit or
-  creating any directory; no launchd plist exists in this stage.
+  creating any directory; no launchd plist exists.
 - **Running-work boundary.** `stop`/`restart` are explicit user Host control and
   can interrupt a running Session, accepted Turn, tool or pending Interaction;
   `uninstall` prints the same warning only when it actually stopped a running
