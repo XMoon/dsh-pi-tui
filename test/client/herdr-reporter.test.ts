@@ -352,13 +352,16 @@ async function settleThroughDispatch(fixture: HerdrCliFixture, label?: string): 
   await settleQueue(fixture, label)
 }
 
-/** Session invocations whose own child exited 0 (Herdr actually accepted them). */
-function deliveredSessions(fixture: HerdrCliFixture): string[] {
-  const entries = fixture.entries()
+/** Successful Session invocations derived from ONE log snapshot. */
+function deliveredSessions(
+  fixture: HerdrCliFixture,
+  entries: readonly HerdrCliEntry[] = fixture.entries(),
+): string[] {
   const endedOk = new Set(entries.filter(entry => entry.phase === 'end' && entry.code === 0).map(entry => entry.pid))
-  return fixture.sessions()
-    .filter((_, index) => endedOk.has(sessionStarts(fixture)[index].pid))
-    .map(session => session.sessionId)
+  return entries
+    .filter(entry => entry.phase === 'start'
+      && commandOf(entry) === 'report-agent-session' && endedOk.has(entry.pid))
+    .map(sessionIdOf)
 }
 
 function startPhases(entries: readonly HerdrCliEntry[]): string[] {
@@ -879,8 +882,12 @@ test('a quick switch back while the superseded Session is in flight ends on the 
   reporter.observeSession(directSession(SESSION_A))
 
   // The stale B cannot win: A must be the LAST delivered Session.
-  await fixture.waitFor(entries => deliveredSessions(fixture).at(-1) === SESSION_A
-    && deliveredSessions(fixture).length >= 2, 'A re-delivered after the stale B settled')
+  // A single snapshot prevents the old A and newly settled B from satisfying
+  // two halves of the predicate across separate log reads.
+  await fixture.waitFor(entries => {
+    const delivered = deliveredSessions(fixture, entries)
+    return delivered.length >= 3 && delivered.at(-1) === SESSION_A
+  }, 'A re-delivered after the stale B settled')
   await fixture.waitFor(entries => entries.filter(entry => entry.phase === 'end').length
     >= entries.filter(entry => entry.phase === 'start').length, 'the queue settled after the recovery')
   assert.deepEqual(deliveredSessions(fixture), [SESSION_A, SESSION_B, SESSION_A],
