@@ -485,6 +485,9 @@ test('the official compact definition that synchronously appends its paired mark
   const host = officialHost(t)
   const agent = host.createAgent('session-a')
   const { promise: gate, resolve: release } = Promise.withResolvers<void>()
+  // A held gate always keeps a fallback release: an assertion failure before the
+  // explicit release must not leave the command promise parked.
+  t.after(() => release())
   let commandId: unknown
   host.commands.register({
     name: 'compact',
@@ -558,49 +561,6 @@ test('a same-name non-official definition never opens the ordering window, even 
     'the normal command result is unchanged')
 })
 
-test('a Session-scoped shadow of the official definition never opens the ordering window', async (t) => {
-  const host = officialHost(t)
-  const agent = host.createAgent('session-a')
-  host.commands.register({
-    name: 'compact',
-    description: 'official manual compaction',
-    definitionId: '@deepseek-ai/dsh-command-compact' as never,
-    handler: (invocation) => {
-      // The official handler still runs under the wrapper's `find`; the point is
-      // the adapter must read the EFFECTIVE winner, which the scoped layer wins.
-      agent.session.append('compaction/start', {
-        compactionId: 'compaction-shadowed',
-        sourceCommandId: invocation.commandId,
-        turn: null,
-      })
-      return { kind: 'success' as const, text: 'shadowed' }
-    },
-  })
-  // A structural stand-in for the upstream `ScopedLayers.merge` result: the
-  // session's scoped definition shadows the official global for this exact
-  // Agent. The registry merge itself is upstream-owned.
-  const shadowed = {
-    execute: (agentScope: unknown, line: string, attachments: readonly unknown[], signal: AbortSignal) =>
-      host.commands.execute(agentScope as never, line, attachments as never, signal),
-    find: (agentScope: unknown, name: string) => name === 'compact'
-      ? { definitionId: 'example/session-scoped-compact' }
-      : host.commands.find(agentScope as never, name),
-  }
-  const port = new DirectHostCommandPort(
-    { get: (name: string) => name === 'commands' ? shadowed : host.ctx.get(name) },
-    sessionId => host.agents.get(sessionId),
-  )
-  let entries = 0
-  await port.execute({
-    sessionId: 'session-a',
-    line: '/compact',
-    attachments: [],
-    signal: new AbortController().signal,
-    onOfficialCompactEntered: () => { entries += 1 },
-  })
-  assert.equal(entries, 0, 'a scoped override of the same name is never the official definition')
-})
-
 test('a command/run without its paired compaction/start never opens the ordering window', async (t) => {
   const host = officialHost(t)
   host.createAgent('session-a')
@@ -621,6 +581,46 @@ test('a command/run without its paired compaction/start never opens the ordering
   assert.equal(entries, 0, 'the executor lifecycle row alone is not maintenance evidence')
   assert.ok(outcome.kind === 'committed' && outcome.matched)
   assert.equal((outcome.execution as { result: { text: string } }).result.text, 'No compactable history yet.')
+})
+
+test('a failed pre-handler lifecycle append never opens the ordering window', async (t) => {
+  const host = officialHost(t)
+  const agent = host.createAgent('session-a')
+  // A structural stand-in for the pinned executor whose `command/run` append
+  // throws BEFORE the handler can claim maintenance: the failure must stay a
+  // classified indeterminate outcome and must not open ordering.
+  const port = new DirectHostCommandPort(
+    {
+      get: (name: string) => name === 'commands'
+        ? {
+          find: () => ({ definitionId: '@deepseek-ai/dsh-command-compact' }),
+          execute: async () => {
+            agent.session.append('command/run', {
+              commandId: 'cmd-never-dispatched',
+              name: 'compact',
+              args: '',
+              source: { kind: 'user' },
+            })
+            throw new Error('command/run append failed')
+          },
+        }
+        : host.ctx.get(name),
+    },
+    sessionId => host.agents.get(sessionId),
+  )
+  let entries = 0
+  const outcome = await port.execute({
+    sessionId: 'session-a',
+    line: '/compact',
+    attachments: [],
+    signal: new AbortController().signal,
+    onOfficialCompactEntered: () => { entries += 1 },
+  })
+  assert.equal(entries, 0, 'a lifecycle row without the paired marker is not maintenance evidence')
+  assert.deepEqual(outcome, {
+    kind: 'indeterminate',
+    error: { code: 'session/write-indeterminate', message: 'command/run append failed' },
+  })
 })
 
 test('an argued line, attachments, an older find-less service or an aborted signal never opens the ordering window', async (t) => {

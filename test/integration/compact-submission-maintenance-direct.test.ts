@@ -45,6 +45,7 @@ import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { DirectHostCommandPort } from '../../src/runtime/direct/host-command-direct.ts'
 import { DirectSessionWriter } from '../../src/runtime/direct/session-writer-direct.ts'
+import { SessionOperationBarrier } from '../../src/app/session/operation-barrier.ts'
 import {
   createDirectTspFixture,
   directSettle,
@@ -269,6 +270,115 @@ test('a failed official compact summary still ends its bracket and keeps the acc
     'the parked prompt starts its own turn instead of being lost or replayed')
 })
 
+test('a Session-scoped compact definition shadows the official global for its Agent and never opens the ordering window', async (t) => {
+  const life = testLifecycle(t)
+  const host = await mountHost()
+  t.after(() => host.dispose())
+  let shadowRuns = 0
+  // A REAL session-scoped registration through the REAL Agent scope context:
+  // the official global definition stays registered and the scoped layer wins
+  // for this exact Agent (the upstream ScopedLayers merge, not a stand-in).
+  const scopedCommands = (host.agent as unknown as { ctx: { get(name: string): unknown } })
+    .ctx.get('commands') as { register(def: unknown): () => void }
+  life.defer(scopedCommands.register({
+    name: 'compact',
+    description: 'a session-scoped compact override',
+    definitionId: 'example/session-scoped-compact',
+    handler: () => {
+      shadowRuns += 1
+      return { kind: 'success', text: 'scoped compact' }
+    },
+  }))
+  const commands = host.ctx.get('commands') as {
+    find(agent: unknown, name: string): { definitionId?: string } | undefined
+  }
+  assert.equal(commands.find(host.agent, 'compact')?.definitionId, 'example/session-scoped-compact',
+    'the scoped definition is the EFFECTIVE winner for this exact Agent')
+  let entries = 0
+  const outcome = await host.port.execute({
+    sessionId: host.agent.session.id,
+    line: '/compact',
+    attachments: [],
+    signal: new AbortController().signal,
+    onOfficialCompactEntered: () => { entries += 1 },
+  })
+  assert.equal(entries, 0, 'the effective winner is not the official definition')
+  assert.equal(shadowRuns, 1, 'the command plane executed the scoped handler')
+  assert.ok(outcome.kind === 'committed' && outcome.matched)
+  assert.equal((outcome.execution as { result: { text: string } }).result.text, 'scoped compact')
+})
+
+test('an official compact with no compactable history settles normally and never opens the ordering window', async (t) => {
+  const host = await mountHost()
+  t.after(() => host.dispose())
+  let entries = 0
+  const outcome = await host.port.execute({
+    sessionId: host.agent.session.id,
+    line: '/compact',
+    attachments: [],
+    signal: new AbortController().signal,
+    onOfficialCompactEntered: () => { entries += 1 },
+  })
+  assert.equal(entries, 0, 'no transaction began, so no ordering window opens')
+  assert.ok(outcome.kind === 'committed' && outcome.matched)
+  const result = (outcome.execution as { result: { kind: string; text: string } }).result
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /No compactable history yet/)
+  assert.ok(!host.agent.session.snapshotEvents().some(event => event.type === 'compaction/start'),
+    'the engine opened no durable compaction bracket')
+})
+
+test('aborting a held official compact closes its bracket and still delivers the prompt accepted during it', async (t) => {
+  const life = testLifecycle(t)
+  const host = await mountHost()
+  t.after(() => host.dispose())
+  const { promise: summaryGate, resolve: releaseSummary } = Promise.withResolvers<void>()
+  life.defer(() => releaseSummary())
+  host.engine.gate = summaryGate
+  await host.seed()
+  const seedTurns = turnStarts(host.agent.session.snapshotEvents()).length
+  const request = new AbortController()
+  let entries = 0
+  const command = host.port.execute({
+    sessionId: host.agent.session.id,
+    line: '/compact',
+    attachments: [],
+    signal: request.signal,
+    onOfficialCompactEntered: () => { entries += 1 },
+  })
+  assert.equal(entries, 1)
+  await waitFor('the real compaction transaction to reach summarization',
+    () => host.engine.summarizeEntries === 1)
+  let accepted = 0
+  const write = await host.writer.prompt(host.agent.session.id, createUserMessage({
+    content: [{ type: 'text', text: PROMPT_TEXT }],
+    source: { kind: 'user' },
+  }), 'queue', { onAccepted: () => { accepted += 1 } })
+  assert.equal(write.kind, 'committed')
+  assert.equal(accepted, 1)
+  // The user cancels the command; the pinned engine observes the abort at the
+  // transaction boundary once the held summarizer returns.
+  request.abort(new Error('user cancelled the command'))
+  releaseSummary()
+  const outcome = await command
+  // The pinned executor races the caller signal, so an abort during the held
+  // summary settles the DISPATCH as indeterminate (the command may already have
+  // run); the transaction still closes its own bracket below.
+  assert.equal(outcome.kind, 'indeterminate', 'an aborted in-flight command is indeterminate')
+  await host.agent.whenIdle()
+  const settled = host.agent.session.snapshotEvents()
+  const ends = settled.filter(event => event.type === 'compaction/end')
+  assert.equal(ends.length, 1, 'the cancellation closed the bracket exactly once')
+  assert.ok(ends[0]!.data !== undefined && 'error' in ends[0]!.data)
+  assert.ok(settled.some(event => event.type === 'command/done'
+    && (event.data as { kind?: string }).kind === 'error'),
+  'the command lifecycle records the cancellation as an error')
+  assert.equal(userMessages(settled, PROMPT_TEXT).length, 1,
+    'the accepted prompt survives the cancelled maintenance exactly once')
+  assert.equal(turnStarts(settled).length, seedTurns + 1,
+    'the parked prompt starts its own turn after the cancellation')
+})
+
 // ── The application (L6) composition over the real TSP runner ───────────────
 
 /** The latest controlled editor text committed for the composer. */
@@ -314,6 +424,28 @@ test('a TSP Enter reaches the real Host during a held official compact, while th
   }> = []
   const recorder = fixture.recordPrompts(call => { prompts.push(call) })
   life.defer(() => recorder.detach())
+  // Writer occupancy, observed on the PRODUCTION barrier instance: ordering must
+  // open WITHOUT releasing the compact command's Host writer section. The
+  // recorder is one-to-one (original called with the true receiver, result
+  // returned unchanged) and its identity is restored at teardown.
+  const barrierSections: Array<{ readonly sessionId: string; open: boolean }> = []
+  const barrierPrototype = SessionOperationBarrier.prototype
+  const originalRunWriter = barrierPrototype.runWriter
+  const recordingRunWriter = async function (
+    this: SessionOperationBarrier,
+    sessionId: string,
+    task: () => Promise<unknown>,
+  ): Promise<unknown> {
+    const section = { sessionId, open: true }
+    barrierSections.push(section)
+    try {
+      return await originalRunWriter.call(this, sessionId, task as never)
+    } finally {
+      section.open = false
+    }
+  }
+  barrierPrototype.runWriter = recordingRunWriter as typeof barrierPrototype.runWriter
+  life.defer(() => { barrierPrototype.runWriter = originalRunWriter })
   try {
     await waitForInputDelivery(fixture.pane)
     // A real closed turn first: the official manual compaction needs a
@@ -322,6 +454,7 @@ test('a TSP Enter reaches the real Host during a held official compact, while th
     await waitFor('the seed prompt write to settle', () => recorder.calls() === 1 && prompts.length === 1, 30_000)
     const sessionEvents = (): readonly SessionEvent[] => liveSessionEvents(fixture, prompts[0]!.sessionId)
     await waitFor('the seed turn to close', () => sessionEvents().some(event => event.type === 'turn/end'), 30_000)
+    const compactSectionMark = barrierSections.length
 
     await submitInput(fixture, '/compact')
     await waitFor('the real official compact to reach summarization',
@@ -342,6 +475,11 @@ test('a TSP Enter reaches the real Host during a held official compact, while th
     assert.equal(prompts[1]!.outcome.kind, 'committed', 'B settled committed')
     assert.equal(prompts[1]!.mode, 'queue', 'an idle-looking maintenance admits a queued prompt')
     assert.equal(composerText(fixture), '', 'B left the held composer at the Host acceptance')
+    const compactSection = barrierSections.slice(compactSectionMark)
+      .find(section => section.sessionId === prompts[0]!.sessionId)
+    assert.ok(compactSection !== undefined, 'the compact command owns a real Host writer section')
+    assert.equal(compactSection.open, true,
+      'ordering opened while the compact command still occupies its writer section')
     const held = sessionEvents()
     assert.equal(held.filter(event => event.type === 'user/message'
       && JSON.stringify(event.data).includes(PROMPT_TEXT)).length, 0,
