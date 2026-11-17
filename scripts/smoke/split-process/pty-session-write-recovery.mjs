@@ -942,7 +942,13 @@ export async function runPtySessionWriteRecovery(context) {
     const c4Ready = await c4.waitFor(record => record.m4a0 === 'ready', 'T35 ACK-drop Client ready', 180_000)
     assert(c4Ready.sessionOpen === true && c4Ready.openSessionId === sessionA,
       'T35 the ACK-drop Client did not open the retained Session')
-    c4.send('ackdrop\r')
+    // Split typing from submitting. A batched `ackdrop\r` may be consumed before
+    // the next paint; if Host acceptance then clears the draft, the accepted
+    // branch would read a baseline empty Composer that never held this gesture.
+    // Prove the REAL Composer painted this exact input first, then submit.
+    c4.send('ackdrop')
+    await c4.waitForComposerDraft('ackdrop', 60_000)
+    c4.send('\r')
     // The injection witness fires only after the REAL `session/prompt` request
     // reached the Host and its response body was discarded: without it, a
     // silently broken injection could leave this case green on durable facts
