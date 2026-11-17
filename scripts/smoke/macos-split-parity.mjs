@@ -84,6 +84,26 @@ function sleep(ms) {
   return new Promise(resolveSleep => setTimeout(resolveSleep, ms))
 }
 
+/**
+ * Bound a helper promise for a NEGATIVE CONTROL: if the helper under test
+ * regresses into never settling, the control must report a failure instead of
+ * hanging the whole smoke. The guard timer is always cleared.
+ */
+function settleWithin(promise, deadlineMs) {
+  let timer
+  const deadline = new Promise(resolve => {
+    timer = setTimeout(() => resolve({ kind: 'hung' }), deadlineMs)
+  })
+  return Promise.race([
+    promise.then(() => ({ kind: 'settled' }), error => ({ kind: 'error', error })),
+    deadline,
+  ]).finally(() => clearTimeout(timer))
+}
+
+function describeOutcome(outcome) {
+  return outcome.kind === 'error' ? outcome.error.message : outcome.kind
+}
+
 /** Bounded poll on one real observable fact. */
 async function waitFor(probe, label, timeoutMs) {
   const deadline = Date.now() + timeoutMs
@@ -254,10 +274,13 @@ function runDaemonCommand(installation, args) {
 }
 
 /**
- * Start one bounded child process. The result settles only after the OS has
- * reaped the child: the deadline sends SIGKILL and the promise rejects on
- * `exit`/`close`, so a hung management command can never block the smoke's
- * cleanup/evidence path or leave an owned subprocess behind.
+ * Start one bounded child process. The deadline rejects only after the OS
+ * reaped the child; the one exception is an already-reaped child whose
+ * inherited stdout/stderr pipes are still held by a grandchild — the helper
+ * owns those stream copies, so it releases them and settles at the deadline
+ * instead of waiting for a `close` that may never come. So neither a hung
+ * command nor a surviving pipe holder can block the smoke's cleanup/evidence
+ * path or leave an owned subprocess behind.
  */
 function startBoundedProcess(label, file, args, options) {
   const child = spawn(file, args, {
@@ -268,7 +291,12 @@ function startBoundedProcess(label, file, args, options) {
   let stdout = ''
   let stderr = ''
   let settled = false
+  /** The child's own process exit was observed; its pipes may still be held. */
+  let reaped = false
+  /** The deadline fired. */
   let timedOut = false
+  /** The race coordinator asked to stop a still-pending child. */
+  let terminating = false
   let settle
   const result = new Promise((resolve, reject) => { settle = { resolve, reject } })
   const finish = (fn, value) => {
@@ -277,29 +305,53 @@ function startBoundedProcess(label, file, args, options) {
     clearTimeout(timer)
     fn(value)
   }
-  const rejectTimedOut = () => {
-    // The child is already reaped at this point; drop any stream that a
-    // surviving grandchild might still hold so the evidence path can run.
+  const releaseStreams = () => {
     child.stdout?.destroy()
     child.stderr?.destroy()
+  }
+  const finishTimedOut = () => {
+    releaseStreams()
     finish(settle.reject, new SplitSmokeAssertionError(
-      `${label}: did not exit within ${String(options.timeoutMs)}ms and was killed (pid ${String(child.pid)})`,
+      `${label}: did not settle within ${String(options.timeoutMs)}ms (pid ${String(child.pid)})`,
     ))
+  }
+  const finishTerminated = () => {
+    releaseStreams()
+    finish(settle.resolve, { status: null, signal: 'SIGKILL', stdout, stderr, pid: child.pid, terminated: true })
   }
   const timer = setTimeout(() => {
     timedOut = true
-    // SIGKILL cannot be ignored; `close`/`exit` below proves the reap.
-    try { child.kill('SIGKILL') } catch { /* already gone */ }
+    // A child that already exited must not be waited on again: the inherited
+    // pipes are the only reason `close` is missing, and they are ours to drop.
+    if (reaped) {
+      finishTimedOut()
+      return
+    }
+    try {
+      // SIGKILL cannot be ignored; `exit` below proves the reap.
+      child.kill('SIGKILL')
+    } catch {
+      finishTimedOut()
+    }
   }, options.timeoutMs)
   child.stdout?.on('data', chunk => { stdout += chunk })
   child.stderr?.on('data', chunk => { stderr += chunk })
   child.once('error', error => {
     finish(settle.reject, new SplitSmokeAssertionError(`${label}: could not run: ${error.message}`))
   })
-  child.once('exit', () => { if (timedOut) rejectTimedOut() })
+  child.once('exit', () => {
+    reaped = true
+    if (timedOut) finishTimedOut()
+    else if (terminating) finishTerminated()
+  })
   child.once('close', (status, signal) => {
+    reaped = true
     if (timedOut) {
-      rejectTimedOut()
+      finishTimedOut()
+      return
+    }
+    if (terminating) {
+      finishTerminated()
       return
     }
     finish(settle.resolve, { status, signal, stdout, stderr, pid: child.pid })
@@ -307,10 +359,16 @@ function startBoundedProcess(label, file, args, options) {
   return {
     child,
     result,
-    /** Kill an owned child that is still running and await its reaping. */
+    /** Stop an owned child that is still pending and await its settlement. */
     async dispose() {
       if (!settled) {
-        try { child.kill('SIGKILL') } catch { /* already gone */ }
+        terminating = true
+        if (reaped) {
+          // The process is already gone; only inherited pipes remain.
+          finishTerminated()
+        } else {
+          try { child.kill('SIGKILL') } catch { finishTerminated() }
+        }
       }
       return result.then(() => undefined, () => undefined)
     },
@@ -916,20 +974,74 @@ async function runScene({ installation, workRoot, report }) {
   // any Host/unit mutation.
   const preRaceStop = runDaemonCommand(installation, ['stop'])
   assert(preRaceStop.status === 0, `P05: pre-race stop failed (${String(preRaceStop.status)})`)
-  // Negative control for the bounded race helper itself: a child that never
-  // exits must be reaped by the deadline, not merely abandoned by a race.
+  // Negative controls for the bounded race helper itself. Control 1: a child
+  // that never exits must be reaped by the deadline, not merely abandoned by a
+  // race. Control 2: a child that exits BEFORE the deadline but leaves a
+  // grandchild holding the inherited stdout/stderr pipes must settle at its
+  // deadline (a `close` may never come), and its owned streams are released.
   const hung = startBoundedProcess('P05 reaping control', process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
     timeoutMs: 500,
     cwd: workRoot,
     env: daemonEnvironment(installation),
   })
   const hungPid = hung.child.pid
-  const hungFailure = await hung.result.then(() => undefined, error => error)
-  assert(hungFailure instanceof Error && /did not exit within 500ms/u.test(hungFailure.message),
-    `P05: a never-exiting child must fail at its deadline, saw ${String(hungFailure)}`)
-  assert(hungPid !== undefined && !alive(hungPid),
-    `P05: the timed-out child pid ${String(hungPid)} was not reaped`)
+  let hungFailure
+  try {
+    const outcome = await settleWithin(hung.result, 5_000)
+    assert(outcome.kind === 'error' && /did not settle within 500ms/u.test(outcome.error.message),
+      `P05: a never-exiting child must fail at its deadline, saw ${describeOutcome(outcome)}`)
+    hungFailure = outcome.error
+    assert(hungPid !== undefined && !alive(hungPid),
+      `P05: the timed-out child pid ${String(hungPid)} was not reaped`)
+  } finally {
+    if (hungPid !== undefined && alive(hungPid)) {
+      try { process.kill(hungPid, 'SIGKILL') } catch { /* already gone */ }
+    }
+  }
+  assert(hungFailure !== undefined, 'P05: the reaping control did not settle')
   report.rows.push({ id: 'P05-REAP', status: 'PASS', timeoutMs: 500, reapedPid: hungPid })
+
+  const pipePidFile = join(workRoot, 'p05-inherited-pipe-grandchild.pid')
+  const pipeParent = [
+    "const { spawn } = require('node:child_process')",
+    "const fs = require('node:fs')",
+    "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'] })",
+    'fs.writeFileSync(process.argv[1], String(child.pid))',
+    'process.exit(0)',
+    '',
+  ].join('\n')
+  const pipeControl = startBoundedProcess('P05 inherited-pipe control', process.execPath, ['-e', pipeParent, pipePidFile], {
+    timeoutMs: 500,
+    cwd: workRoot,
+    env: daemonEnvironment(installation),
+  })
+  let pipeGrandchildPid
+  try {
+    const outcome = await settleWithin(pipeControl.result, 5_000)
+    assert(outcome.kind === 'error' && /did not settle within 500ms/u.test(outcome.error.message),
+      `P05: an exited child with inherited pipes must settle at its deadline, saw ${describeOutcome(outcome)}`)
+    pipeGrandchildPid = Number(readFileSync(pipePidFile, 'utf8'))
+    assert(Number.isSafeInteger(pipeGrandchildPid) && pipeGrandchildPid > 0,
+      'P05: the inherited-pipe control did not record its grandchild pid')
+    assert(alive(pipeGrandchildPid), 'P05: the control grandchild should still hold the inherited pipes')
+    const disposeOutcome = await settleWithin(pipeControl.dispose(), 5_000)
+    assert(disposeOutcome.kind === 'settled', 'P05: dispose did not complete for an already-reaped child')
+    report.rows.push({
+      id: 'P05-PIPE',
+      status: 'PASS',
+      timeoutMs: 500,
+      grandchildPid: pipeGrandchildPid,
+      disposed: true,
+    })
+  } finally {
+    // This grandchild is the control's own resource, not the management race's
+    // child: clean it up here and prove it is gone.
+    if (pipeGrandchildPid !== undefined && alive(pipeGrandchildPid)) {
+      try { process.kill(pipeGrandchildPid, 'SIGKILL') } catch { /* already gone */ }
+    }
+    await waitFor(() => (pipeGrandchildPid === undefined || !alive(pipeGrandchildPid) ? true : undefined),
+      'P05 inherited-pipe control grandchild is reaped', TIMEOUTS.process)
+  }
   const raceOne = startDaemonCommand(installation, ['start'])
   const raceTwo = startDaemonCommand(installation, ['start'])
   let raceOutcomes
