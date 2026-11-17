@@ -137,13 +137,13 @@ test('a user-scope-bus refusal or permission error is never treated as absence',
   assert.equal(classifyUserManagerProbe(probeFacts({ systemctl: exited(1, '', 'Failed to connect to user scope bus: Connection refused') })).kind, 'error')
 })
 
-test('the two-step probe classifies a genuinely absent (no systemctl) host as absent', async () => {
+test('the two-step probe classifies a genuinely absent (no systemctl) host as absent', { skip: process.platform !== 'linux' ? 'the user manager probe is the Linux systemd contract' : false }, async () => {
   const enoent: SystemctlResult = { kind: 'spawn-error', error: Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) }
   const result = await probeUserManager({ systemctl: async () => enoent, pathExists: () => false })
   assert.deepEqual(result, { kind: 'absent' })
 })
 
-test('the two-step probe reports available on a successful show-environment', async () => {
+test('the two-step probe reports available on a successful show-environment', { skip: process.platform !== 'linux' ? 'the user manager probe is the Linux systemd contract' : false }, async () => {
   const result = await probeUserManager({
     systemctl: async args => (args.includes('show-environment') ? exited(0, 'HOME=/home/u\n') : exited(1)),
     pathExists: () => true,
@@ -612,6 +612,21 @@ test('a DSH anchor pinned to a different runtime is refused before any unit is w
     error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
   )
   assert.deepEqual(readdirSync(unitDir), [])
+})
+
+test('macOS public-managed start uses the detached fallback without a user manager', { skip: process.platform !== 'darwin' ? 'the real Darwin detached fallback requires macOS' : false }, async t => {
+  const fx = managedFixture(t)
+  const forbidden = (): never => { throw new Error('macOS must not consult a systemd unit directory or systemctl') }
+  const observation = await startManagedHostCandidate(
+    { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: fx.anchor, profile: 'pi-tui' },
+    { unitDir: forbidden as never, systemctl: forbidden as never },
+  )
+  assert.equal(observation(), undefined)
+  const deadline = Date.now() + 10_000
+  while (!existsSync(fx.markerPath) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  assert.equal(existsSync(fx.markerPath), true, 'the real Darwin public-managed path must spawn the Host entry')
 })
 
 // ── M6-2C shared helper: read-only unit inspection and narrow actions ───────
