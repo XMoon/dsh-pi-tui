@@ -10,6 +10,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import {
   existsSync,
   lstatSync,
@@ -316,12 +317,11 @@ function safeDistributionFile(directory, fileName) {
     fail(`DSH distribution artifact must be a single relative .tgz filename: ${JSON.stringify(fileName)}`)
   }
   if (!existsSync(directory) || !lstatSync(directory).isDirectory()) fail(`DSH distribution directory is missing: ${directory}`)
+  // Canonicalize BOTH sides before comparing: on macOS the caller may spell
+  // the directory through the `/var` alias of `/private/var`, and `relative()`
+  // over two spellings of the SAME directory yields a false escape.
   const root = realpathSync(directory)
   const path = resolve(directory, fileName)
-  const rel = relative(root, path)
-  if (rel === '' || rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel)) {
-    fail(`DSH distribution artifact escapes its directory: ${fileName}`)
-  }
   const info = existsSync(path) ? lstatSync(path) : undefined
   if (!isRegularUnlinkedFile(info)) {
     fail(`DSH distribution artifact must be a regular file with exactly one link: ${path}`)
@@ -908,6 +908,65 @@ function scanDependencySpecs(value, location, forbidden) {
 }
 
 /**
+ * One archive member from the STRUCTURED header listing: the member path, its
+ * tar type and (for links) its link target. BSD and GNU `tar(1)` text listings
+ * differ and GNU's `--quoting-style` is unavailable on BSD, so the headers are
+ * read through node-tar's synchronous listing instead — one pass, no text
+ * parsing, identical results on every POSIX toolchain.
+ *
+ * @param {string} tarball - the archive to list.
+ * @returns {Array<{path: string, type: string, linkpath: string}>} every member header.
+ */
+function listArchiveMembers(tarball) {
+  // node-tar is a DEV dependency and this module is also imported by
+  // pre-install CI context resolution (a bare checkout has no node_modules).
+  // Resolve it at CALL time, when an archive is actually listed, never at
+  // module load.
+  let tarList
+  try {
+    ({ t: tarList } = createRequire(import.meta.url)('tar'))
+  } catch (error) {
+    fail(`the tar package is required to list ${tarball}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  /** @type {Array<{path: string, type: string, linkpath: string}>} */
+  const members = []
+  try {
+    tarList({
+      file: tarball,
+      sync: true,
+      strict: true,
+      onReadEntry(entry) {
+        members.push({ path: entry.path, type: String(entry.type), linkpath: String(entry.linkpath ?? '') })
+      },
+    })
+  } catch (error) {
+    fail(`tar listing failed for ${tarball}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  return members
+}
+
+/**
+ * The ONLY archive member types a package tarball may contain. A FIFO, device
+ * node or socket has no meaningful package payload, and its extraction
+ * semantics differ across tar implementations — an unexpected type is refused
+ * instead of being guessed about.
+ */
+const ARCHIVE_MEMBER_TYPES = new Set(['File', 'Directory', 'SymbolicLink', 'Link'])
+
+/**
+ * One archive member's canonical extraction target: empty segments (`a//b`) and
+ * `.` segments (`a/./b`, `./a`) all name the SAME file, so they must collide in
+ * the duplicate check. `..` is deliberately NOT resolved here — it is refused
+ * as an unsafe member elsewhere, and resolving it would hide the escape.
+ *
+ * @param {string} path - a member path with `/` separators.
+ * @returns {string} the canonical member path (`''` for the archive root).
+ */
+function canonicalArchivePath(path) {
+  return path.split('/').filter(segment => segment !== '' && segment !== '.').join('/')
+}
+
+/**
  * Inspect a candidate tarball for source-only dependency specs or checkout
  * paths. Dependency manifests are authoritative; archive-content scanning is
  * bounded and checks concrete temporary/source path tokens without rejecting
@@ -934,7 +993,9 @@ export function assertNoSourceLeak(tarball, options = {}) {
 
   if (options.scanArchive === false) return metadata
 
-  const allEntries = runTar(['-tzf', tarball]).split(/\r?\n/u).filter(Boolean)
+  // STRUCTURED archive listing: one tar.t pass yields every member's
+  // {path,type,linkpath} from the archive HEADERS — no `tar -tvf` text is
+  // parsed, so GNU and BSD tar behave identically here.
   // Explicit source roots are used to reject dependency specs, not ordinary
   // prose embedded in a package's documentation. Archive bytes still reject
   // concrete temporary/build-root tokens below.
@@ -944,9 +1005,12 @@ export function assertNoSourceLeak(tarball, options = {}) {
   ]
   const archiveForbidden = [...new Set(forbidden.flatMap(token => {
     const normalized = token.replaceAll('\\', '/').toLowerCase()
-    return [normalized, normalized.replace(/^\/+/, '')]
+    return [normalized, normalized.replace(/^\/+/u, '')]
   }))]
-  for (const entry of allEntries) {
+  const members = listArchiveMembers(tarball)
+  const seenCanonicalPaths = new Set()
+  for (const member of members) {
+    const entry = member.path
     const normalized = entry.replaceAll('\\', '/')
     const normalizedLower = normalized.toLowerCase()
     const pathLeak = archiveForbidden.find(token => token !== '' && normalizedLower.includes(token))
@@ -957,14 +1021,23 @@ export function assertNoSourceLeak(tarball, options = {}) {
     if (normalized.startsWith('/') || normalized.startsWith('\\\\') || /^[A-Za-z]:[\\/]/u.test(normalized) || parts.includes('..') || /\.tgz$/iu.test(normalized)) {
       fail(`source leak in ${tarball}: unsafe or nested archive entry ${entry}`)
     }
+    if (normalized.includes('\0')) {
+      fail(`source leak in ${tarball}: NUL byte in archive entry ${entry}`)
+    }
+    if (!ARCHIVE_MEMBER_TYPES.has(member.type)) {
+      fail(`source leak in ${tarball}: unsafe archive entry type ${member.type} for ${entry}`)
+    }
+    // Equivalent spellings of one extraction target must collide: `./a`, `a/`,
+    // `a//b` and `a/./b` all name the same file, so a duplicate is refused.
+    const canonical = canonicalArchivePath(normalized)
+    if (canonical !== '' && seenCanonicalPaths.has(canonical)) {
+      fail(`source leak in ${tarball}: duplicate canonical archive entry ${canonical}`)
+    }
+    if (canonical !== '') seenCanonicalPaths.add(canonical)
   }
-  const linkEntries = runTar(['-tvzf', tarball, '--quoting-style=escape']).split(/\r?\n/u).filter(line => line.startsWith('l') || line.startsWith('h'))
-  for (const line of linkEntries) {
-    const arrow = line.indexOf(' -> ')
-    const hardLink = line.indexOf(' link to ')
-    const marker = arrow >= 0 ? arrow + 4 : hardLink >= 0 ? hardLink + 9 : -1
-    if (marker < 0) continue
-    const target = line.slice(marker).trim()
+  for (const member of members) {
+    if (member.type !== 'SymbolicLink' && member.type !== 'Link') continue
+    const target = member.linkpath
     const normalizedTarget = target.replaceAll('\\', '/').toLowerCase()
     const targetLeak = archiveForbidden.find(token => token !== '' && normalizedTarget.includes(token))
     const targetParts = normalizedTarget.split('/')
@@ -976,18 +1049,28 @@ export function assertNoSourceLeak(tarball, options = {}) {
       fail(`source leak in ${tarball}: unsafe archive link target ${target}`)
     }
   }
+  // Payload extraction is for REGULAR FILES only: a symlink or hardlink is
+  // validated through its linkpath above, never followed by `tar -xOf`.
+  //
+  // CLASSIFY by the canonical extraction target (`./package/a`, `package//a`
+  // and `package/./a` are the same member), but EXTRACT by the raw member
+  // spelling — `tar -xOf` selects a member by its stored name. Duplicates are
+  // already refused above, so one canonical path names exactly one member.
+  const files = members
+    .filter(member => member.type === 'File')
+    .map(member => ({ path: member.path, canonical: canonicalArchivePath(member.path.replaceAll('\\', '/')) }))
   // Documentation may legitimately mention an absolute path as prose. Scan
   // executable and metadata payloads for leaked build roots, while leaving
   // README/license text to the dependency and archive-path checks above.
-  const entries = allEntries.filter(entry => {
-    if (!entry.startsWith('package/') || entry.endsWith('/')) return false
+  const entries = files.filter(({ canonical }) => {
+    if (!canonical.startsWith('package/') || canonical === '') return false
     // README and license files are documentation, not executable payloads;
     // extensionless files under lib/dist are still commonly loaders/scripts.
-    if (/(?:^|\/)(?:README|LICENSE)(?:\.[^/]*)?$/iu.test(entry)) return false
-    return /\.(?:[cm]?js|[cm]?ts|json|map|ya?ml|sh|ps1|css|html)$/iu.test(entry)
-      || /(?:^|\/)(?:lib|dist)\/[^/]+$/u.test(entry)
+    if (/(?:^|\/)(?:README|LICENSE)(?:\.[^/]*)?$/iu.test(canonical)) return false
+    return /\.(?:[cm]?js|[cm]?ts|json|map|ya?ml|sh|ps1|css|html)$/iu.test(canonical)
+      || /(?:^|\/)(?:lib|dist)\/[^/]+$/u.test(canonical)
   })
-  for (const entry of entries) {
+  for (const { path: entry } of entries) {
     const bytes = runTarBuffer(['-xOf', tarball, entry])
     const byteMatch = textForbidden.find(token => bytes.includes(Buffer.from(token)))
     const binary = bytes.includes(0)

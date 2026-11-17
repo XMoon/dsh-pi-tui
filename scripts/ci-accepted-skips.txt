@@ -30,3 +30,11 @@ no fd/fdfind on PATH
 # them, so a skip for either reason means the environment changed under us.
 # Accepting them here would report that change as a healthy run; leaving them
 # out makes it FAIL, which is the point.
+
+# The Darwin KERNEL primitives cannot exist on Linux: the seat is an O_EXLOCK
+# file and process identity is libproc. The Linux runner must NOT provide
+# them, so this class is the platform boundary itself, not a capability that
+# disappeared from the image. The real-kernel positive and negative evidence
+# is recorded from macOS; the macOS product path is owned by later PRs.
+Darwin kernel seats require macOS
+Darwin kernel process identity requires macOS

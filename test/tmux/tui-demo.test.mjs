@@ -14,7 +14,9 @@ const script = await readFile(new URL('../../scripts/tmux/tui-demo.sh', import.m
 test('each tmux demo owns a private output directory and DSH_HOME', () => {
   assert.match(script, /OUT=\$\(mktemp -d \/tmp\/tui-demo\.XXXXXX\)/)
   assert.match(script, /DSH_HOME="\$OUT\/dsh-home"/)
-  assert.match(script, /mkdir -p "\$DSH_HOME"/)
+  // The demo creates its OWN isolated home (and the profile directory that
+  // receives the build-script policy before the first plugin install).
+  assert.match(script, /mkdir -p "\$DSH_HOME(?:\/profiles\/\$PROFILE)?"/)
   assert.match(script, /tmux capture-pane -t "\$S" -p > "\$OUT\/\$1\.txt"/)
   assert.match(script, /tmux capture-pane -t "\$S" -e -p > "\$OUT\/\$1\.ansi"/)
   assert.match(script, /node "\$\(dirname "\$0"\)\/ansi2html\.mjs" "\$ansi" "\$OUT\/\$base\.html"/)

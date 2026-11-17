@@ -128,7 +128,7 @@ for (const name of JSON.parse(process.env.DSH_FAKE_PACKAGES)) {
   mkdirSync(packageDirectory)
   writeFileSync(join(packageDirectory, 'package.json'), JSON.stringify({ name, version: process.env.DSH_FAKE_VERSION }))
   const fileName = name.replace(/^@/u, '').replaceAll('/', '-') + '.tgz'
-  const packed = spawnSync('tar', ['-czf', join(output, fileName), '-C', temporary, 'package'], { encoding: 'utf8' })
+  const packed = spawnSync('tar', ['-czf', join(output, fileName), '-C', temporary, 'package'], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
   rmSync(temporary, { recursive: true, force: true })
   if (packed.status !== 0) process.exit(packed.status ?? 1)
 }

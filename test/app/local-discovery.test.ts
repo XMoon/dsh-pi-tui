@@ -36,6 +36,17 @@ import {
   type LocalScope,
 } from '../../src/app/remote-process/local-scope.ts'
 import {
+  classifyDarwinReadOutcome,
+  DARWIN_BSDINFO_BYTES,
+  DARWIN_UNIQINFO_BYTES,
+} from '../../src/runtime/native-process/darwin.ts'
+import {
+  listKernelGroupMembers,
+  readKernelProcess,
+  sameKernelProcess,
+  type KernelProcessIdentity,
+} from '../../src/runtime/native-process/identity.ts'
+import {
   assertClientHostCompatible,
   assertHostPublicationIdentity,
   authenticateLocalHost,
@@ -461,6 +472,96 @@ test('an existing group/other-accessible run chain is rejected without creating 
   }
 })
 
+test('the /proc stat parser keeps the long-lived local-scope behavior', () => {
+  // The comm field may contain spaces and parentheses; everything after the
+  // LAST ')' is the fixed positional tail. Field 3 (state) and field 22
+  // (starttime) are the only facts local-scope's parser exposes.
+  const stat = '4321 (a (weird) comm) S 4300 4310 4300 34816 4310 4194560 100 0 0 0 1 2 4 0 20 0 1 0 98765 123456789 800 18446744073709551615'
+  assert.deepEqual(parseProcessStat(stat), { state: 'S', starttime: '98765' })
+  assert.equal(parseProcessStatStarttime(stat), '98765')
+  assert.equal(parseProcessStat('no-paren stat'), undefined)
+  assert.equal(parseProcessStat('1 (x) ? 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 not-a-tick'), undefined)
+  assert.equal(parseProcessStatStarttime(''), undefined)
+})
+
+test('sameKernelProcess classifies reuse, absence and unverifiable reads without guessing', () => {
+  const linux: KernelProcessIdentity = {
+    platform: 'linux', pid: 4321, startTicks: '98765', ppid: 4300, pgid: 4321, sid: 4321, state: 'S',
+  }
+  const linuxObserved = (overrides: Partial<KernelProcessIdentity> = {}): { kind: 'alive'; identity: KernelProcessIdentity } => ({
+    kind: 'alive',
+    identity: { ...linux, ...overrides } as KernelProcessIdentity,
+  })
+  assert.equal(sameKernelProcess(linux, linuxObserved()), 'same')
+  // A reused pid carries a different starttime.
+  assert.equal(sameKernelProcess(linux, linuxObserved({ startTicks: '98766' })), 'different')
+  // A changed state (e.g. zombie) is the SAME process: state is not identity.
+  assert.equal(sameKernelProcess(linux, linuxObserved({ state: 'Z' })), 'same')
+  assert.equal(sameKernelProcess(linux, linuxObserved({ pid: 4322 })), 'different')
+  assert.equal(sameKernelProcess(linux, { kind: 'gone' }), 'gone')
+  assert.equal(sameKernelProcess(linux, { kind: 'unknown', code: 'ACCESS_DENIED' }), 'unknown')
+  assert.equal(sameKernelProcess(linux, { kind: 'unknown', code: 'READ_FAILED' }), 'unknown')
+
+  const darwin: KernelProcessIdentity = {
+    platform: 'darwin', pid: 77, bootUUID: 'B24345D0-493C-461C-AB45-C3E6F55A40B5',
+    uniqueId: '328530', parentUniqueId: '328529', processUUID: '0270d61394183ae9a1b1634739e39157',
+    startSec: '1794876639', startUsec: '168170', ppid: 10, pgid: 77, sid: 77, uid: 501, state: 2,
+  }
+  const darwinObserved = (overrides: Partial<KernelProcessIdentity> = {}): { kind: 'alive'; identity: KernelProcessIdentity } => ({
+    kind: 'alive',
+    identity: { ...darwin, ...overrides } as KernelProcessIdentity,
+  })
+  assert.equal(sameKernelProcess(darwin, darwinObserved()), 'same')
+  assert.equal(sameKernelProcess(darwin, darwinObserved({ uniqueId: '328531' })), 'different')
+  assert.equal(sameKernelProcess(darwin, darwinObserved({ bootUUID: '00000000-0000-0000-0000-000000000000' })), 'different')
+  assert.equal(sameKernelProcess(darwin, darwinObserved({ startUsec: '168171' })), 'different')
+  assert.equal(sameKernelProcess(darwin, darwinObserved({ processUUID: 'ff'.repeat(16) })), 'different')
+  // A platform mismatch can never be the same process.
+  assert.equal(sameKernelProcess(darwin, linuxObserved()), 'different')
+})
+
+test('the Darwin native read classifier refuses every truncated or unverifiable ABI reply', () => {
+  assert.deepEqual(classifyDarwinReadOutcome(DARWIN_BSDINFO_BYTES, DARWIN_BSDINFO_BYTES, 0), { kind: 'ok' })
+  assert.deepEqual(classifyDarwinReadOutcome(DARWIN_UNIQINFO_BYTES, DARWIN_UNIQINFO_BYTES, 0), { kind: 'ok' })
+  // The historical 40-byte flavor-17 reply must never be accepted as a
+  // truncated identity, and a larger surprise is no better.
+  assert.deepEqual(classifyDarwinReadOutcome(DARWIN_UNIQINFO_BYTES, 40, 0), { kind: 'unknown', code: 'ABI_UNSUPPORTED' })
+  assert.deepEqual(classifyDarwinReadOutcome(DARWIN_BSDINFO_BYTES, DARWIN_BSDINFO_BYTES + 8, 0), { kind: 'unknown', code: 'ABI_UNSUPPORTED' })
+  assert.deepEqual(classifyDarwinReadOutcome(DARWIN_BSDINFO_BYTES, 0, 3), { kind: 'gone' })
+  assert.deepEqual(classifyDarwinReadOutcome(DARWIN_BSDINFO_BYTES, 0, 1), { kind: 'unknown', code: 'ACCESS_DENIED' })
+  assert.deepEqual(classifyDarwinReadOutcome(DARWIN_BSDINFO_BYTES, 0, 13), { kind: 'unknown', code: 'ACCESS_DENIED' })
+  assert.deepEqual(classifyDarwinReadOutcome(DARWIN_BSDINFO_BYTES, 0, 22), { kind: 'unknown', code: 'ABI_UNSUPPORTED' })
+  assert.deepEqual(classifyDarwinReadOutcome(DARWIN_BSDINFO_BYTES, 0, 0), { kind: 'unknown', code: 'READ_FAILED' })
+})
+
+test('readKernelProcess returns the current platform identity and a definitive absence', () => {
+  const self = readKernelProcess(process.pid)
+  assert.equal(self.kind, 'alive')
+  if (self.kind !== 'alive') return
+  assert.equal(self.identity.pid, process.pid)
+  if (process.platform === 'linux') {
+    assert.equal(self.identity.platform, 'linux')
+    assert.match((self.identity as { readonly startTicks: string }).startTicks, /^\d+$/u)
+  } else if (process.platform === 'darwin') {
+    assert.equal(self.identity.platform, 'darwin')
+    const darwin = self.identity as Extract<KernelProcessIdentity, { platform: 'darwin' }>
+    assert.match(darwin.bootUUID, /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/iu)
+    assert.match(darwin.uniqueId, /^\d+$/u)
+    assert.match(darwin.startSec, /^\d+$/u)
+    assert.equal(darwin.sid, self.identity.sid)
+    // The SAME pid read twice is the same process; a stranger's identity is not.
+    assert.equal(sameKernelProcess(self.identity, readKernelProcess(process.pid)), 'same')
+    assert.equal(sameKernelProcess(self.identity, { kind: 'alive', identity: { ...self.identity, uniqueId: '0' } }), 'different')
+  }
+  // 2^22 is far beyond any configured pid_max/OS pid space in this environment;
+  // a missing pid is a definitive absence, not an unknown read.
+  assert.deepEqual(readKernelProcess(4_194_304), { kind: 'gone' })
+  // A group that does not exist has no verifiable member.
+  const members = listKernelGroupMembers(4_194_304)
+  assert.ok(Array.isArray(members), `a missing group scan must not be unknown: ${JSON.stringify(members)}`)
+  assert.deepEqual(members, [])
+})
+
 test('a definite missing PID is dead, while unreadable or malformed proc data is unavailable', t => {
   const value = fixture(t)
   try {
@@ -643,6 +744,8 @@ test('the kernel seat is exclusive and becomes reusable after close', async () =
   const name = `\0dsh-m4-b1-test-${String(process.pid)}-${randomUUID()}`
   const first = await bindProcessSeat(name, 'HOST_ALREADY_OWNED')
   try {
+    // The live holder can prove its own kernel claim; a closed seat cannot.
+    first.assertCurrent()
     await assert.rejects(
       bindProcessSeat(name, 'HOST_ALREADY_OWNED'),
       (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_ALREADY_OWNED',
@@ -654,7 +757,12 @@ test('the kernel seat is exclusive and becomes reusable after close', async () =
   } finally {
     await first.close()
   }
+  assert.throws(
+    () => first.assertCurrent(),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_IDENTITY_MISMATCH',
+  )
   const second = await bindProcessSeat(name, 'HOST_ALREADY_OWNED')
+  second.assertCurrent()
   await second.close()
 })
 

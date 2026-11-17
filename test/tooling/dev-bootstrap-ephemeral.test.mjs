@@ -805,7 +805,7 @@ if (args.includes('release:pack')) {
     mkdirSync(packageDirectory, { recursive: true })
     writeFileSync(join(packageDirectory, 'package.json'), JSON.stringify({ name, version: process.env.DSH_FAKE_VERSION }))
     const fileName = name.replace(/^@/u, '').replaceAll('/', '-') + '.tgz'
-    const packed = spawnSync('tar', ['-czf', join(output, fileName), '-C', temporary, 'package'], { encoding: 'utf8' })
+    const packed = spawnSync('tar', ['-czf', join(output, fileName), '-C', temporary, 'package'], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
     rmSync(temporary, { recursive: true, force: true })
     if (packed.status !== 0) process.exit(packed.status ?? 1)
   }
@@ -861,6 +861,11 @@ function sourceBootstrapFixture(life) {
   mkdirSync(join(root, 'test', 'compat'), { recursive: true })
   const scriptsDir = fileURLToPath(new URL('../../scripts', import.meta.url))
   cpSync(scriptsDir, join(root, 'scripts'), { recursive: true })
+  // The copied distribution helper imports node-tar; a hermetic fixture has no
+  // install of its own, so expose the REAL devDependency to it (the symlink
+  // resolves node-tar's own dependencies from the real virtual store).
+  mkdirSync(join(root, 'node_modules'), { recursive: true })
+  symlinkSync(fileURLToPath(new URL('../../node_modules/tar', import.meta.url)), join(root, 'node_modules', 'tar'), 'dir')
 
   const harness = life.tempDir('dsh-ephemeral-harness-')
   mkdirSync(join(harness, 'apps', 'cli'), { recursive: true })

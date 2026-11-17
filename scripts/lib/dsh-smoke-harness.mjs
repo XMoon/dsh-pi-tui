@@ -35,6 +35,7 @@ import {
   withoutMinimumReleaseAge,
 } from './dsh-distribution.mjs'
 import { cleanupTimedOutProcessTree, pnpmExecutable } from './process.mjs'
+import { seedProfileBuildPolicy } from './dsh-profile-build-policy.mjs'
 
 export const PNPM_COMMAND = pnpmExecutable()
 export const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
@@ -379,6 +380,9 @@ export function runDsh(invocation, args, cwd, env, timeout = SUBPROCESS_TIMEOUTS
 }
 
 export function installPlugin(invocation, spec, cwd, env, retry) {
+  // pnpm 12 fails an UNDECIDED dependency build script; the isolated profile
+  // records this repository's explicit decision before its first install.
+  if (typeof env.DSH_HOME === 'string' && env.DSH_HOME !== '') seedProfileBuildPolicy(env.DSH_HOME, 'pi-tui')
   const args = ['plugin', '--profile', 'pi-tui', 'add', spec]
   const attempts = retry ? 2 : 1
   let result

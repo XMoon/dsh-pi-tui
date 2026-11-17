@@ -539,7 +539,10 @@ function releaseSourceLock(lock) {
 
 function assertHarnessCheckout(directory, repository, { requirePackage = true } = {}) {
   const top = runCapture('git', ['-C', directory, 'rev-parse', '--show-toplevel'], { label: 'inspect Harness checkout' })
-  if (resolve(top) !== resolve(directory)) fail(`Harness checkout is not a repository root: ${directory}`)
+  // Compare canonical spellings: a checkout reached through a symlinked path
+  // (macOS `/var` -> `/private/var`) is still the SAME repository root, and
+  // lexical resolve() alone would call it a foreign checkout.
+  if (canonicalPath(top) !== canonicalPath(directory)) fail(`Harness checkout is not a repository root: ${directory}`)
   const remote = runCapture('git', ['-C', directory, 'remote', 'get-url', 'origin'], { label: 'inspect Harness checkout remote' })
   if (normalizeDshRepositoryRemote(remote) !== expectedDshRepositoryRemote(repository)) {
     fail(`Harness checkout remote must be ${expectedDshRepositoryRemote(repository)}, got ${remote}`)

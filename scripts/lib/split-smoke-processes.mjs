@@ -23,6 +23,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import xterm from '@xterm/headless'
 
 import { SplitSmokeAssertionError, SplitSmokeWaitError } from './split-smoke-diagnostics.mjs'
+import { currentPtyScriptArgv } from './pty-script.mjs'
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
@@ -226,11 +227,8 @@ export function createSplitProcessScope() {
         disableStdin: true,
         allowProposedApi: true,
       })
-      this.child = spawn('script', [
-        '-qefc',
-        `${shellQuote(process.execPath)} ${shellQuote(entry)}`,
-        '/dev/null',
-      ], {
+      const pty = currentPtyScriptArgv(`${shellQuote(process.execPath)} ${shellQuote(entry)}`)
+      this.child = spawn(pty.program, pty.args, {
         cwd: options.cwd,
         env: {
           ...options.env,

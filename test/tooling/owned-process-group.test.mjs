@@ -17,17 +17,29 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
-  isExecuting, killStillExecuting, readPidRecords, startTimeOf, waitForNoExecuting, waitForPidRecords,
+  isExecuting, killStillExecuting, readPidRecords, waitForNoExecuting, waitForPidRecords,
 } from '../support/pid-records.ts'
 import { waitForFileLine } from '../support/wait-for-file.ts'
 import { groupStillAlive, stopOwnedGroup } from '../../scripts/lib/owned-process-group.mjs'
+import { listKernelGroupMembers, readKernelProcess, sameKernelProcess } from '../../src/runtime/native-process/identity.ts'
 
 const HOLDER = fileURLToPath(new URL('../fixtures/signal-tree/holder.mjs', import.meta.url))
 const POSIX_ONLY = process.platform === 'win32' ? 'process groups are POSIX-only' : false
-// These cases read REAL /proc identities; on POSIX without /proc they would
-// pass for the wrong reason, so they are Linux-gated and the macOS boundary is
-// reported as NOT_VERIFIED rather than exercised.
-const PROC_ONLY = process.platform !== 'linux' ? 'the verifiable-identity escalation needs /proc' : false
+// The escalation proof comes from the shared kernel-identity seam, so the real
+// cases run on every supported POSIX kernel (Linux /proc and Darwin libproc).
+
+/** The production identity seam, injectable in the same shape the module uses. */
+const REAL_IDENTITY = Object.freeze({
+  read: readKernelProcess,
+  listGroupMembers: listKernelGroupMembers,
+  same: sameKernelProcess,
+})
+
+/** One scripted leader observation (a structurally valid Linux identity: the
+ * runners never interpret the platform, they only compare identities). */
+function scriptedLeader(pid, startTicks, ppid = process.pid, pgid = pid) {
+  return { kind: 'alive', identity: { platform: 'linux', pid, startTicks, ppid, pgid, sid: pgid, state: 'S' } }
+}
 
 /** Whether `promise` settles within `deadlineMs`; the timer never outlives the wait. */
 async function settlesWithin(promise, deadlineMs) {
@@ -147,7 +159,7 @@ test('the group probe reports a live descendant and never signals it', { skip: P
     'the group survives its leader: a normal-close check must still see the descendant')
 })
 
-test('a verifiable group is escalated to SIGKILL after its leader exits', { skip: POSIX_ONLY || PROC_ONLY, timeout: 30_000 }, async (t) => {
+test('a verifiable group is escalated to SIGKILL after its leader exits', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
   const { child, descendant, exited } = await startOwnedGroup(t, 'owned-group-escalate-')
   // reason: the grace is the behaviour under test — 300 ms is the bounded wait
   // that lets the leader exit BEFORE the escalation, which is the guarded case.
@@ -163,9 +175,9 @@ test('an unverifiable group is not escalated: the survivor is reported, never ki
   const settled = await stopOwnedGroup(child, 'SIGTERM', {
     graceMs: 300,
     settleMs: 300,
-    // A platform without /proc cannot prove the numeric pgid still names OUR
-    // group once the leader is gone, so the escalation must fail closed.
-    statStartTime: () => undefined,
+    // A reader that cannot produce a verifiable identity cannot prove the
+    // numeric pgid still names OUR group, so the escalation must fail closed.
+    kernelIdentity: { ...REAL_IDENTITY, read: () => ({ kind: 'unknown', code: 'READ_FAILED' }) },
   })
   assert.equal(settled, false)
   await exited
@@ -177,63 +189,87 @@ test('a free leader slot without a surviving ownership witness is not escalated'
   // The reviewer's shape: the leader identity was readable at signal time, and
   // it is gone by escalation time. With no recorded witness the numeric pgid
   // proves nothing, so the escalation must not be sent.
-  const startTimes = ['ours', undefined]
-  let index = 0
+  let leaderReads = 0
   const settled = await stopOwnedGroup(child, 'SIGTERM', {
     graceMs: 300,
     settleMs: 300,
-    statStartTime: () => startTimes[Math.min(index++, startTimes.length - 1)],
-    captureWitnesses: () => [],
+    kernelIdentity: {
+      ...REAL_IDENTITY,
+      read: (pid) => (pid === child.pid
+        ? (leaderReads++ === 0 ? scriptedLeader(pid, 'ours', process.pid, child.pid) : { kind: 'gone' })
+        : REAL_IDENTITY.read(pid)),
+      listGroupMembers: () => [],
+    },
   })
   assert.equal(settled, false)
   await exited
   assert.equal(isExecuting(descendant), true, 'an unproven group must never receive SIGKILL')
 })
 
-test('a witness whose pid was reused is not ownership', { skip: POSIX_ONLY || PROC_ONLY, timeout: 30_000 }, async (t) => {
+test('a witness whose pid was reused is not ownership', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
   const { child, descendant, exited } = await startOwnedGroup(t, 'owned-group-reused-witness-')
-  const startTimes = ['ours', undefined]
-  let index = 0
+  let leaderReads = 0
   const settled = await stopOwnedGroup(child, 'SIGTERM', {
     graceMs: 300,
     settleMs: 300,
-    statStartTime: () => startTimes[Math.min(index++, startTimes.length - 1)],
-    // Same pid, DIFFERENT start time: a recycled process, not our witness.
-    captureWitnesses: () => [{ pid: descendant.pid, startTime: 'not-this-process' }],
+    kernelIdentity: {
+      ...REAL_IDENTITY,
+      read: (pid) => {
+        if (pid === child.pid) {
+          return leaderReads++ === 0 ? scriptedLeader(pid, 'ours', process.pid, child.pid) : { kind: 'gone' }
+        }
+        // Same pid, DIFFERENT starttime: a recycled process, not our witness.
+        if (pid === descendant.pid) return scriptedLeader(pid, 'not-this-process', 1, child.pid)
+        return REAL_IDENTITY.read(pid)
+      },
+      listGroupMembers: () => [scriptedLeader(descendant.pid, 'ours', 1, child.pid)],
+    },
   })
   assert.equal(settled, false)
   await exited
   assert.equal(isExecuting(descendant), true, 'a recycled pid must never authorize SIGKILL')
 })
 
-test('a witness outside the group or session is not ownership', { skip: POSIX_ONLY || PROC_ONLY, timeout: 30_000 }, async (t) => {
+test('a witness outside the group or session is not ownership', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
   const { child, exited } = await startOwnedGroup(t, 'owned-group-wrong-group-')
-  const startTimes = ['ours', undefined]
-  let index = 0
+  const ourIdentity = readKernelProcess(process.pid)
+  assert.equal(ourIdentity.kind, 'alive', 'the test process must have a verifiable identity')
+  let leaderReads = 0
   const settled = await stopOwnedGroup(child, 'SIGTERM', {
     graceMs: 300,
     settleMs: 300,
-    statStartTime: () => startTimes[Math.min(index++, startTimes.length - 1)],
-    // This process IS running, but it is not a member of the wrapper's group or
-    // session: a live process is not a witness.
-    captureWitnesses: () => [{ pid: process.pid, startTime: startTimeOf(process.pid) }],
+    kernelIdentity: {
+      ...REAL_IDENTITY,
+      read: (pid) => (pid === child.pid
+        ? (leaderReads++ === 0 ? scriptedLeader(pid, 'ours', process.pid, child.pid) : { kind: 'gone' })
+        : REAL_IDENTITY.read(pid)),
+      // This process IS running, but it is not a member of the wrapper's group
+      // or session: a live process is not a witness.
+      listGroupMembers: () => [ourIdentity],
+    },
   })
   assert.equal(settled, false)
   await exited
 })
 
-test('a recorded witness proves the group after the leader was reaped and the escalation runs', { skip: POSIX_ONLY || PROC_ONLY, timeout: 30_000 }, async (t) => {
+test('a recorded witness proves the group after the leader was reaped and the escalation runs', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
   const { child, descendant, exited } = await startOwnedGroup(t, 'owned-group-witness-')
-  // Force the unreadable-identity branch: the leader identity is 'ours' at
-  // signal time and unavailable at escalation time. The recorded witness is
-  // the descendant itself, so ownership is proven and the escalation must run.
-  const startTimes = ['ours', undefined]
-  let index = 0
+  // Force the leader-lost branch: the leader identity is 'ours' at signal time
+  // and gone at escalation time. The recorded witness is the descendant itself,
+  // so ownership is proven and the escalation must run.
+  const witness = readKernelProcess(descendant.pid)
+  assert.equal(witness.kind, 'alive', 'the descendant must have a verifiable identity')
+  let leaderReads = 0
   const settled = await stopOwnedGroup(child, 'SIGTERM', {
     graceMs: 300,
     settleMs: 2_000,
-    statStartTime: () => startTimes[Math.min(index++, startTimes.length - 1)],
-    captureWitnesses: () => [{ pid: descendant.pid, startTime: descendant.startTime }],
+    kernelIdentity: {
+      ...REAL_IDENTITY,
+      read: (pid) => (pid === child.pid
+        ? (leaderReads++ === 0 ? scriptedLeader(pid, 'ours', process.pid, child.pid) : { kind: 'gone' })
+        : REAL_IDENTITY.read(pid)),
+      listGroupMembers: () => [witness],
+    },
   })
   assert.equal(settled, true)
   await exited
@@ -259,14 +295,19 @@ test('the FIRST group signal is not sent once the leader is already gone', { ski
 
 test('a reused pgid is never signalled', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
   const { child, descendant, exited } = await startOwnedGroup(t, 'owned-group-reused-')
-  // The read while the leader is alive is OUR start time; the read at
-  // escalation time reports a DIFFERENT process under the same pid.
-  const reads = ['ours', 'theirs']
-  let index = 0
+  // The read while the leader is alive is OUR identity; the read at escalation
+  // time reports a DIFFERENT process under the same pid, and no witness exists.
+  let leaderReads = 0
   const settled = await stopOwnedGroup(child, 'SIGTERM', {
     graceMs: 300,
     settleMs: 300,
-    statStartTime: () => reads[Math.min(index++, reads.length - 1)],
+    kernelIdentity: {
+      ...REAL_IDENTITY,
+      read: (pid) => (pid === child.pid
+        ? scriptedLeader(pid, leaderReads++ === 0 ? 'ours' : 'theirs', process.pid, child.pid)
+        : REAL_IDENTITY.read(pid)),
+      listGroupMembers: () => [],
+    },
   })
   assert.equal(settled, false)
   await exited

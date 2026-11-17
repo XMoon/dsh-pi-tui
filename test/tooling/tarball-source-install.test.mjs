@@ -34,7 +34,7 @@ function tarPackage(directory, fileName, metadata, files = {}) {
     writeFileSync(path, content)
   }
   const tarball = join(directory, fileName)
-  const result = spawnSync('tar', ['-czf', tarball, '-C', staging, 'package'], { encoding: 'utf8' })
+  const result = spawnSync('tar', ['-czf', tarball, '-C', staging, 'package'], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
   assert.equal(result.status, 0, result.stderr)
   rmSync(staging, { recursive: true, force: true })
   return tarball

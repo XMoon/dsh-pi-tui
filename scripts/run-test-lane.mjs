@@ -38,7 +38,7 @@
 
 import { spawn } from 'node:child_process'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { run } from 'node:test'
@@ -48,7 +48,7 @@ import { resolveLane } from './test-discovery.mjs'
 import { LANES } from './test-lanes.mjs'
 import { groupStillAlive, stopOwnedGroup } from './lib/owned-process-group.mjs'
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const ROOT = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), '..'))
 const TEST_ROOT = join(ROOT, 'test')
 
 /**
@@ -87,8 +87,12 @@ export function sanitizeTestEnvironment(env = process.env) {
 
 /** A command's trimmed output, or null when it cannot be read. */
 function commandOutput(file, args) {
+  // A fixture repository copied out of a real checkout (the lane-runner tests
+  // build one under the disposable temp root) has no `.git` above it: the SHA
+  // is genuinely unavailable there, which is recorded as null instead of
+  // spraying git's diagnostic into the lane's stderr.
   try {
-    return execFileSync(file, args, { encoding: 'utf8', cwd: ROOT }).trim()
+    return execFileSync(file, args, { encoding: 'utf8', cwd: ROOT, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
   } catch {
     return null
   }
@@ -223,7 +227,10 @@ function main() {
   }
   // No discovered file path is passed through argv. The child resolves the
   // lane inside its own process and calls node:test.run({ files, shard }).
-  const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-test-run-'))
+  // realpath immediately: on macOS `os.tmpdir()` returns the `/var`
+  // alias of `/private/var`, and every path the child observes (TMPDIR, cwd,
+  // markers) must describe the SAME directory object, not two spellings of it.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-pi-tui-test-run-')))
   const keep = process.env.DSH_TEST_KEEP_TMP === '1'
   const spawnArgs = [fileURLToPath(import.meta.url), '--lane-child', laneName, ...args]
 
@@ -345,8 +352,24 @@ function main() {
   process.on('SIGHUP', () => onSignal('SIGHUP'))
 }
 
+/**
+ * Whether THIS file was started as the process entry. Both spellings are
+ * canonicalized first: on macOS `os.tmpdir()` is a `/var` alias of
+ * `/private/var`, so a copied runner invoked through the alias would otherwise
+ * compare unequal to its own real module path and silently do nothing.
+ */
+function isMainModule(scriptPath) {
+  if (process.argv[1] === undefined) return false
+  try {
+    return realpathSync(resolve(process.argv[1])) === realpathSync(scriptPath)
+  } catch {
+    // An argv path that cannot be resolved is not this module.
+    return false
+  }
+}
+
 // The runner runs only when EXECUTED; tests may import its parsers.
-if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMainModule(fileURLToPath(import.meta.url))) {
   if (process.argv[2] === '--lane-child') {
     void runLaneChild(process.argv[3], process.argv.slice(4)).catch(error => {
       console.error('[run-test-lane] test runner failed:', error)

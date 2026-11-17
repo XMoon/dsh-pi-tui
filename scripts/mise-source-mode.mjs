@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
 import { assertBuildOutput, assertIsolatedHome } from './mise-dev-profile.mjs'
+import { seedProfileBuildPolicy } from './lib/dsh-profile-build-policy.mjs'
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const ROOT = resolve(dirname(SCRIPT_PATH), '..')
@@ -70,6 +71,9 @@ export function runSourceProfile({ root = ROOT, environment = process.env, comma
   assertIsolatedHome(environment, 'mise run source:profile', root)
   assertSourceReady(environment)
   assertBuildOutput(root)
+  // Same prebuilt-binary decision as the npm development profile: pnpm 12
+  // fails an UNDECIDED dependency build script before the plugin is installed.
+  if (command === 'profile') seedProfileBuildPolicy(environment.DSH_HOME, PROFILE)
   const envFile = join(root, '.dsh-dev-env')
   if (!existsSync(envFile)) fail(`source environment file is missing: ${envFile}; run \`mise run source:bootstrap\` first`)
   const cli = sourceCliPath(root)

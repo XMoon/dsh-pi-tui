@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve, win32 } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
@@ -142,6 +142,21 @@ function copyLaneRunnerSources(scripts) {
   }
   writeFileSync(join(scripts, 'lib', 'owned-process-group.mjs'),
     readFileSync(join(ROOT, 'scripts', 'lib', 'owned-process-group.mjs')))
+  // The runner imports the shared kernel-identity seam for process-group
+  // teardown, so a fixture repository must carry those modules too — otherwise
+  // the fixture runner dies at import and no readiness line ever appears.
+  const fixtureRoot = join(scripts, '..')
+  const nativeProcess = join(fixtureRoot, 'src', 'runtime', 'native-process')
+  mkdirSync(nativeProcess, { recursive: true })
+  for (const name of ['identity.ts', 'darwin.ts']) {
+    writeFileSync(join(nativeProcess, name), readFileSync(join(ROOT, 'src', 'runtime', 'native-process', name)))
+  }
+  // The identity seam imports node-koffi LAZILY; the sanitized lane child has
+  // no NODE_PATH, so the copied repository must resolve the REAL devDependency
+  // itself (a koffi resolved from an ambient global path could be another
+  // version entirely). The symlink keeps the fixture hermetic.
+  mkdirSync(join(fixtureRoot, 'node_modules'), { recursive: true })
+  symlinkSync(join(ROOT, 'node_modules', 'koffi'), join(fixtureRoot, 'node_modules', 'koffi'), 'dir')
 }
 
 const WINDOWS_COMMAND_LINE_LIMIT = 32_767

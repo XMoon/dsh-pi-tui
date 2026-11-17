@@ -16,7 +16,9 @@
  */
 
 import { createHash } from 'node:crypto'
-import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
+import { readProcessStarttime } from '../../runtime/native-process/identity.ts'
+import { runSyncDisposalStepsWithPrimary } from '../../runtime/process/disposal.ts'
+import { closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { Buffer } from 'node:buffer'
 import { basename, dirname, join, relative, sep } from 'node:path'
@@ -118,9 +120,199 @@ export interface LocalScope {
   readonly dshVersion: string
 }
 
-/** One held process seat; closing it releases the kernel name. */
+/** One held process seat; closing it releases the kernel claim. */
 export interface ProcessSeat {
+  /**
+   * Prove the ONE kernel claim this seat represents is still the holder. The
+   * Host calls this at startup and again before publishing its registry/Ready
+   * fact: a seat whose file was replaced, linked, re-permissioned or moved is
+   * no longer ownership, so the caller must stop instead of continuing.
+   */
+  assertCurrent(): void
+  /** Release the kernel claim. Idempotent; never removes a foreign file. */
   close(): Promise<void>
+}
+
+/** The three independent Darwin seat purposes. Each purpose owns its own
+ * deterministic file in the private per-profile scope directory, so a
+ * qualification Client or a short-lived daemon-control claim can never
+ * conflict with the Host Singleton (and a real surface Client holds none). */
+export type ProcessSeatKind = 'host' | 'qualification-client' | 'admin'
+
+/** The no-op seat for a caller that holds no kernel claim (every real
+ * `surface` Client): nothing is held, so nothing can be lost or asserted. */
+export const NO_PROCESS_SEAT: ProcessSeat = Object.freeze({
+  assertCurrent: () => {},
+  close: async () => {},
+})
+
+/** Darwin numeric `open(2)` flags: O_RDWR|O_CREAT|O_EXLOCK|O_NONBLOCK|
+ * O_NOFOLLOW|O_CLOEXEC = 16778022 on the qualified macOS ABI (Q0: the values
+ * come from the real SDK headers, not from a portable guess). */
+const DARWIN_SEAT_FLAGS = 2 | 512 | 32 | 4 | 256 | 16777216
+/** A seat file is created 0600; an EXISTING file must already be exactly this. */
+const DARWIN_SEAT_FILE_MODE = 0o600
+
+/** Fail before any runtime file is written on a platform the seat does not
+ * implement. */
+function assertDarwin(): number {
+  if (process.platform !== 'darwin' || typeof process.getuid !== 'function') {
+    throw new LocalScopeError(
+      'B1_PLATFORM_UNSUPPORTED',
+      'local scope: file-backed kernel seats require Darwin',
+    )
+  }
+  return process.getuid()
+}
+
+/** The ONE deterministic seat-file path per scope and purpose. */
+export function processSeatPath(scopeDir: string, scopeId: string, kind: ProcessSeatKind): string {
+  return join(scopeDir, `seat-${kind}-${scopeId}.lock`)
+}
+
+/** Validate one already-claimed seat file: a real regular file, owned by this
+ * user, readable/writable by this user ONLY, with exactly one link. */
+function assertSeatFileSafe(path: string, uid: number): void {
+  let info
+  try {
+    info = lstatSync(path)
+  } catch (error) {
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: seat ${path} is not accessible`, error)
+  }
+  if (info.isSymbolicLink()) {
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: seat ${path} must not be a symlink`)
+  }
+  if (!info.isFile()) {
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: seat ${path} must be a regular file`)
+  }
+  if (info.uid !== uid || (info.mode & 0o777) !== DARWIN_SEAT_FILE_MODE) {
+    // Never "fix" an existing file with chmod: a mode this process did not
+    // create is not ownership, it is a foreign file that must be refused.
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: seat ${path} must be owned by uid ${String(uid)} with mode 0600`)
+  }
+  if (info.nlink !== 1) {
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: seat ${path} must have exactly one link`)
+  }
+}
+
+/** Validate the private 0700 directory the seat file lives in. */
+function assertSeatDirectorySafe(dir: string, uid: number): { readonly dev: number; readonly ino: number } {
+  let info
+  try {
+    info = lstatSync(dir)
+  } catch (error) {
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: seat directory ${dir} is not accessible`, error)
+  }
+  if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== uid || (info.mode & 0o077) !== 0) {
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: seat directory ${dir} must be a real uid-${String(uid)} directory without group/other access`)
+  }
+  return { dev: info.dev, ino: info.ino }
+}
+
+/**
+ * One held Darwin kernel seat: the kernel's exclusive `O_EXLOCK` claim on one
+ * fixed inode, kept for the whole lifetime of the owning process. The FD is
+ * close-on-exec, so a spawned child never inherits the Host's claim.
+ */
+class DarwinKernelSeat implements ProcessSeat {
+  private fd: number | undefined
+  private readonly path: string
+  private readonly dir: string
+  private readonly uid: number
+  private readonly dirDev: number
+  private readonly dirIno: number
+
+  constructor(fd: number, path: string, dir: string, uid: number, dirIdentity: { readonly dev: number; readonly ino: number }) {
+    this.fd = fd
+    this.path = path
+    this.dir = dir
+    this.uid = uid
+    this.dirDev = dirIdentity.dev
+    this.dirIno = dirIdentity.ino
+  }
+
+  /** Re-prove the directory, the path and the held FD still name ONE inode
+   * owned by this user. Called right after the claim and before Ready. */
+  assertCurrent(): void {
+    if (this.fd === undefined) {
+      throw new LocalScopeError('HOST_IDENTITY_MISMATCH', `local scope: seat ${this.path} was already closed`)
+    }
+    const directory = assertSeatDirectorySafe(this.dir, this.uid)
+    if (directory.dev !== this.dirDev || directory.ino !== this.dirIno) {
+      throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: seat directory ${this.dir} was replaced`)
+    }
+    assertSeatFileSafe(this.path, this.uid)
+    const held = fstatSync(this.fd)
+    const pathInfo = lstatSync(this.path)
+    if (held.dev !== pathInfo.dev
+      || held.ino !== pathInfo.ino
+      || held.uid !== pathInfo.uid
+      || (held.mode & 0o777) !== (pathInfo.mode & 0o777)
+      || held.nlink !== pathInfo.nlink) {
+      // The path no longer names the inode this FD holds: unlink/recreate (or a
+      // rename) produced a double owner. Refuse further use; the holder must
+      // stop and let PR-2's admission handle the split-brain.
+      throw new LocalScopeError('HOST_IDENTITY_MISMATCH', `local scope: seat ${this.path} no longer matches the held inode`)
+    }
+  }
+
+  /**
+   * Release the held descriptor synchronously. Idempotent: the FD is cleared
+   * FIRST, so a throwing close can never leave a stale descriptor for a second
+   * close, and an unpublished seat's rollback can run without a promise.
+   */
+  releaseSync(): void {
+    const fd = this.fd
+    if (fd === undefined) return
+    this.fd = undefined
+    closeSync(fd)
+  }
+
+  async close(): Promise<void> {
+    this.releaseSync()
+  }
+}
+
+/** Claim one Darwin seat file. `EAGAIN`/`EWOULDBLOCK` means another process of
+ * this scope already holds this purpose; every other open failure is real and
+ * is reported as-is (never re-labelled "already owned"). */
+export async function bindDarwinKernelSeat(scopeDir: string, scopeId: string, kind: ProcessSeatKind, conflictCode: ProcessSeatConflictCode): Promise<ProcessSeat> {
+  const uid = assertDarwin()
+  const dirIdentity = assertSeatDirectorySafe(scopeDir, uid)
+  const path = processSeatPath(scopeDir, scopeId, kind)
+  // An existing seat file is validated BEFORE the open: O_CREAT must never
+  // "repair" a symlink, hardlink or over-permissive file in place.
+  let existing = true
+  try {
+    lstatSync(path)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: seat ${path} is not accessible`, error)
+    }
+    existing = false
+  }
+  if (existing) assertSeatFileSafe(path, uid)
+  let fd: number
+  try {
+    fd = openSync(path, DARWIN_SEAT_FLAGS, DARWIN_SEAT_FILE_MODE)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'EAGAIN' || code === 'EWOULDBLOCK') {
+      throw new LocalScopeError(conflictCode, `local scope: the ${kind} seat of this profile is already held by another live process`, error)
+    }
+    throw error
+  }
+  const seat = new DarwinKernelSeat(fd, path, scopeDir, uid, dirIdentity)
+  try {
+    seat.assertCurrent()
+  } catch (error) {
+    // A failed post-open proof must release the claim it just took. This is a
+    // PRIMARY-failure rollback, so it runs synchronously through the owning
+    // disposal primitive: the proof failure is never replaced by a release
+    // failure, and no fire-and-forget promise is discarded.
+    runSyncDisposalStepsWithPrimary('release unproven Darwin seat', error, [() => seat.releaseSync()])
+  }
+  return seat
 }
 
 /** Fail before any runtime file is written on a platform B1 does not implement. */
@@ -347,45 +539,19 @@ export function scopeFromInstalledProfile(facts: InstalledProfileFacts): LocalSc
   return Object.freeze({ ...inspected, dir })
 }
 
-/** Field 3 (state) and field 22 (`starttime`) from one `/proc/<pid>/stat`. */
-export interface LinuxProcessStat {
-  /** Single-letter Linux task state: R/S/D/T/t/Z/X/x/K/W/P/I. */
-  readonly state: string
-  /** Starttime in clock ticks since boot. */
-  readonly starttime: string
-}
-
 /**
- * Parse field 3 (`state`) and field 22 (`starttime`) from one
- * `/proc/<pid>/stat` text. The comm field may contain spaces and parentheses;
- * everything after the LAST ')' is the fixed positional tail whose first entry
- * is field 3. A stat without a single-letter state and a numeric starttime is
- * malformed, never a usable liveness observation.
+ * The `/proc/<pid>/stat` parser and best-effort starttime reader moved to the
+ * shared kernel-identity seam (`runtime/native-process/identity.ts`), which is
+ * now the ONLY owner of that parsing. These re-exports preserve the long-lived
+ * local-scope surface (and its external behavior) for existing callers and
+ * tests.
  */
-export function parseProcessStat(stat: string): LinuxProcessStat | undefined {
-  const close = stat.lastIndexOf(')')
-  if (close < 0) return undefined
-  const fields = stat.slice(close + 2).trim().split(/\s+/)
-  const state = fields[0]
-  const value = fields[19]
-  if (state === undefined || !/^[A-Za-z]$/u.test(state)) return undefined
-  if (value === undefined || !/^\d+$/u.test(value)) return undefined
-  return { state, starttime: value }
-}
-
-/** Parse only field 22 (`starttime`) from one `/proc/<pid>/stat`. */
-export function parseProcessStatStarttime(stat: string): string | undefined {
-  return parseProcessStat(stat)?.starttime
-}
-
-/** Best-effort Linux `starttime` read used by A0 status surfaces (may be undefined). */
-export function readProcessStarttime(pid: number = process.pid): string | undefined {
-  try {
-    return parseProcessStatStarttime(readFileSync(`/proc/${String(pid)}/stat`, 'utf8'))
-  } catch {
-    return undefined
-  }
-}
+export {
+  parseProcessStat,
+  parseProcessStatStarttime,
+  readProcessStarttime,
+  type LinuxProcessStat,
+} from '../../runtime/native-process/identity.ts'
 
 /**
  * Strict Linux process-start identity. B1 identity comparison never falls
@@ -403,6 +569,9 @@ export function readLinuxStarttime(pid: number = process.pid): string {
   return value
 }
 
+/** The stable conflict classification each seat purpose reports. */
+type ProcessSeatConflictCode = 'HOST_ALREADY_OWNED' | 'CLIENT_ALREADY_ACTIVE' | 'DAEMON_CONTROL_BUSY'
+
 /**
  * Claim one kernel abstract-socket seat. `EADDRINUSE` means another process
  * of this scope already holds the seat and is the sole winner; any other
@@ -411,11 +580,10 @@ export function readLinuxStarttime(pid: number = process.pid): string {
  * users; a real `surface` Client holds no seat. The returned close is
  * idempotent.
  */
-export function bindProcessSeat(
+function bindLinuxAbstractSeat(
   name: string,
-  conflictCode: 'HOST_ALREADY_OWNED' | 'CLIENT_ALREADY_ACTIVE' | 'DAEMON_CONTROL_BUSY',
+  conflictCode: ProcessSeatConflictCode,
 ): Promise<ProcessSeat> {
-  assertLinux()
   if (!name.startsWith('\0')) {
     return Promise.reject(new Error('local scope: process seats require a Linux abstract socket name'))
   }
@@ -437,6 +605,11 @@ export function bindProcessSeat(
       if (settled) return
       settled = true
       resolve({
+        assertCurrent(): void {
+          if (!server.listening) {
+            throw new LocalScopeError('HOST_IDENTITY_MISMATCH', `local scope: ${name.slice(1)} seat is no longer held`)
+          }
+        },
         close(): Promise<void> {
           if (closed !== undefined) return closed
           closed = new Promise<void>((resolveClose, rejectClose) => {
@@ -450,6 +623,36 @@ export function bindProcessSeat(
       })
     })
   })
+}
+
+/** One kernel-claim request: the Linux abstract socket name or the Darwin
+ * per-purpose file. Both variants are claimed ONLY through {@link bindKernelSeat}
+ * so the ProcessSeat contract (idempotent close, currentness proof) has one
+ * implementation family and one error taxonomy. */
+type KernelSeatClaim =
+  | { readonly claim: 'linux-abstract'; readonly name: string }
+  | { readonly claim: 'darwin-file'; readonly dir: string; readonly scopeId: string; readonly kind: ProcessSeatKind }
+
+function bindKernelSeat(claim: KernelSeatClaim, conflictCode: ProcessSeatConflictCode): Promise<ProcessSeat> {
+  return claim.claim === 'linux-abstract'
+    ? bindLinuxAbstractSeat(claim.name, conflictCode)
+    : bindDarwinKernelSeat(claim.dir, claim.scopeId, claim.kind, conflictCode)
+}
+
+/**
+ * Claim one kernel abstract-socket seat. `EADDRINUSE` means another process
+ * of this scope already holds the seat and is the sole winner; any other
+ * listen error is a real failure. The Host Singleton, the frozen
+ * `qualification` Client and the short-lived daemon-control seat are the live
+ * users; a real `surface` Client holds no seat. The returned close is
+ * idempotent.
+ */
+export function bindProcessSeat(
+  name: string,
+  conflictCode: ProcessSeatConflictCode,
+): Promise<ProcessSeat> {
+  assertLinux()
+  return bindKernelSeat({ claim: 'linux-abstract', name }, conflictCode)
 }
 
 /**
