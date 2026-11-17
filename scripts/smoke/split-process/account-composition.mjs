@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -15,6 +14,7 @@ import {
   waitForSurfaceStatus,
 } from '../../lib/split-smoke-processes.mjs'
 import { SplitSmokeAssertionError, redactWebQualificationText } from '../../lib/split-smoke-diagnostics.mjs'
+import { runBounded } from '../../lib/process.mjs'
 import { PR_A_WELCOME_NOTICE_VERSION } from './web-helpers.mjs'
 
 const FIXTURE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'fixtures')
@@ -24,12 +24,14 @@ function assert(condition, message) {
 }
 
 /** Open the official Web Account menu and return its credential state. */
-function readWebAccountMenu(dshHome, workDir, playwrightRoot) {
+async function readWebAccountMenu(dshHome, workDir, playwrightRoot) {
   const coordination = join(workDir, 'f2-t11-web-account')
   mkdirSync(coordination, { recursive: true, mode: 0o700 })
   const playwrightBrowsers = process.env.SPLIT_PROCESS_PLAYWRIGHT_BROWSERS ?? join(playwrightRoot, 'browsers')
   const chromiumLibs = process.env.SPLIT_PROCESS_CHROMIUM_LIBS ?? join(playwrightRoot, 'libs', 'usr', 'lib', 'x86_64-linux-gnu')
-  const child = spawnSync(process.execPath, [join(FIXTURE_DIR, 'pr-a-web-browser.mjs'), coordination, 'account-check'], {
+  // The mock platform server belongs to this runner's event loop. Keep it
+  // live while the real Browser asks the Host for Account details/notifications.
+  const child = await runBounded(process.execPath, [join(FIXTURE_DIR, 'pr-a-web-browser.mjs'), coordination, 'account-check'], {
     cwd: workDir,
     env: {
       ...process.env,
@@ -41,10 +43,11 @@ function readWebAccountMenu(dshHome, workDir, playwrightRoot) {
       PLAYWRIGHT_BROWSERS_PATH: playwrightBrowsers,
       LD_LIBRARY_PATH: `${chromiumLibs}${process.env.LD_LIBRARY_PATH === undefined ? '' : `:${process.env.LD_LIBRARY_PATH}`}`,
     },
-    timeout: 180_000,
-    encoding: 'utf8',
+    timeoutMs: 180_000,
+    label: 'F2-T11 official Web Account Browser',
   })
-  assert(child.status === 0, `F2-T11 the official Web Account Browser failed: ${redactWebQualificationText(`${child.stderr} ${child.stdout}`).trim().slice(-600)}`)
+  assert(child.status === 0 && !child.timedOut,
+    `F2-T11 the official Web Account Browser failed (${String(child.status)}; timedOut=${String(child.timedOut)})`)
   const report = JSON.parse(readFileSync(join(coordination, 'browser-result.json'), 'utf8'))
   assert(report.error === undefined, `F2-T11 the official Web Account Browser reported ${String(report.error)}`)
   assert(report.accountOnly === true && report.accountSignedIn === true,
@@ -168,7 +171,8 @@ async function selectDeepseekAccountModel(client, label) {
   try {
     await waitForCondition(async () => {
       frame = await sanitizedFrame(client)
-      return frame.includes('DeepSeek Flash') && frame.includes('←→ effort · Enter select · Esc back')
+      return frame.includes('DeepSeek Flash') && frame.includes('Reasoning Effort')
+        && frame.includes('←→ effort · Select [Enter] · Back [Esc]')
     }, `${label} selected DeepSeek Flash entered its inline effort phase`, 15_000)
   } catch (error) {
     throw new SplitSmokeAssertionError(
@@ -376,6 +380,12 @@ export async function runF2AccountComposition(context) {
           })
           return
         }
+        if (request.method === 'GET' && url.pathname === '/api/v0/users/notifications/list') {
+          assert(request.headers['x-dsh-auth-token'] === 'm6-f2-mock-grant-token',
+            'the Host notification request did not use its committed mock grant')
+          reply(response, { next_poll_after: 60, notifications: [] })
+          return
+        }
         if (request.method === 'POST' && url.pathname === '/auth-api/v0/users/logout') {
           assert(request.headers['x-dsh-auth-token'] === 'm6-f2-mock-grant-token',
             'the Host logout request did not use its committed mock grant')
@@ -419,6 +429,7 @@ export async function runF2AccountComposition(context) {
       '  config:',
       `    platformOrigin: '${platformOrigin}'`,
       `    inferenceOrigin: '${platformOrigin}'`,
+      `    harnessOrigin: '${platformOrigin}'`,
       `    baseURL: '${platformOrigin}/anthropic'`,
       '    allowLoopbackHttp: true',
       '    requestTimeoutMs: 3000',
@@ -489,13 +500,16 @@ export async function runF2AccountComposition(context) {
       let frame = await sanitizedFrame(client)
       if (frame.includes('DeepSeek Account')) {
         client.send('\x1b')
-        await waitForAccountFrame(client, '[Categories (9)]', `${label} Account page yielded to Settings`, trace, 20_000)
+        await waitForCondition(async () => {
+          const current = await sanitizedFrame(client)
+          return current.includes('Settings · Categories') && /\[Categories \(\d+\)\]/u.test(current)
+        }, `${label} Account page yielded to Settings`, 20_000)
       }
       frame = await sanitizedFrame(client)
-      if (frame.includes('[Categories (9)]')) client.send('\x1b')
+      if (frame.includes('Settings · Categories') && /\[Categories \(\d+\)\]/u.test(frame)) client.send('\x1b')
       await waitForCondition(async () => {
         const current = await sanitizedFrame(client)
-        return !current.includes('[Categories (9)]') && !current.includes('DeepSeek Account')
+        return !current.includes('Settings ·') && !current.includes('DeepSeek Account')
       }, `${label} Settings and Account surfaces closed`, 20_000)
       await waitForSurfaceStatus(client,
         record => record.sessionOpen === true && typeof record.openSessionId === 'string',
@@ -520,7 +534,98 @@ export async function runF2AccountComposition(context) {
     await submitOnRealEditor(clientB, '/settings',
       'F2 opens Settings while its Host Connection is unavailable')
     await clientB.waitForScreen('Settings · Categories', 'F2 offline Settings category rail opened', 30_000)
-    clientB.send('\x1b[B\x1b[B')
+    // Follow the category that was actually painted; inserting/reordering a
+    // category must not redirect this offline Account witness into Models.
+    const CATEGORY_LABELS_F2 = ['About', 'General', 'Models', 'Account', 'Agent', 'Appearance', 'Conversation', 'Input & Terminal', 'Tools', 'Plugins']
+    const selectedCategoryOf = frame => {
+      const strict = /^\s*(?:│\s*)?> ([^│]+?)\s{2,}/mu.exec(frame)?.[1]?.trim()
+      if (frame.includes('Settings · Categories') && /\[Categories \(\d+\)\]/u.test(frame)
+        && strict !== undefined && CATEGORY_LABELS_F2.includes(strict)) return strict
+      // While the offline Rows pane settles, the alt-screen repaint can leave
+      // the visible viewport showing only the MIDDLE of the rail (the header
+      // scrolled out) and a SECOND `> ` cursor in the content pane. The rail's
+      // frozen labels are still the authority: a rail cursor line is one whose
+      // label after `> ` is EXACTLY a frozen category name (the content pane's
+      // `> ← Back` never matches). Exactly one such line decides.
+      const railCursors = new Set()
+      for (const line of frame.split('\n')) {
+        if (!/^\s*(?:│\s*)?> /u.test(line)) continue
+        // Gate by the RAIL COLUMN, not by cursor markers alone: the content
+        // pane paints its own `> ` cursors at a greater column (the wide rail
+        // is 22 columns + gutter), and a direct-category page can even repeat
+        // a category NAME there (the Models page's selected row '> Models').
+        // Only a cursor that starts inside the rail column can be the rail's.
+        const cursorColumn = line.indexOf('>')
+        if (cursorColumn < 0 || cursorColumn >= 22) continue
+        // The rail label is the text after `> ` up to the pane gutter.
+        const label = /^.{0,21}?> (.*?)\s{2,}/u.exec(line)?.[1]?.trim() ?? line.trim().slice(2).trimEnd()
+        if (CATEGORY_LABELS_F2.includes(label)) railCursors.add(label)
+
+      }
+      // A mid-repaint offline frame can briefly carry TWO rail cursor rows
+      // (the previous and the next category). The rail's own category ORDER is
+      // frozen, so the DESTINATION of a Down is deterministic: when exactly two
+      // adjacent labels are marked, the one AFTER the previous selection is the
+      // settled target; the wait's caller compares it against `selected`.
+      if (railCursors.size === 2) {
+        const ordered = CATEGORY_LABELS_F2.filter(label => railCursors.has(label))
+        if (ordered[0] === previousRailLabel) return ordered[1]
+        if (ordered[1] === previousRailLabel) return ordered[0]
+      }
+      return railCursors.size >= 1 ? [...railCursors][0] : undefined
+    }
+    let previousRailLabel = ''
+    let categoryFrame = ''
+    await waitForCondition(async () => {
+      categoryFrame = await sanitizedFrame(clientB)
+      return selectedCategoryOf(categoryFrame) !== undefined
+    }, 'F2 offline Settings focused category rail painted', 20_000)
+    let accountSelected = false
+    for (let step = 0; step < 20; step += 1) {
+      const selected = selectedCategoryOf(categoryFrame)
+      assert(selected !== undefined, 'F2 offline Settings has no painted selected category')
+      if (selected === 'Account') {
+        accountSelected = true
+        break
+      }
+      const beforeFrame = categoryFrame
+      // The offline rail navigation must prove FOCUS stayed on the category
+      // rail before each Down: an offline workspace repaint can briefly hand
+      // focus to the Rows pane, whose own Down moves the ROW cursor instead
+      // (the rail then never repaints and the case failed intermittently).
+      // The rail's bar wording differs by category kind ('Up/Down navigate' on
+      // direct categories, 'Up/Down select · Enter open' on ordinary ones), so
+      // a single literal cannot be the focus oracle. The rail ALWAYS owns the
+      // keyboard when its own bar is the last row: on ordinary categories that
+      // bar carries 'Right open' WITHOUT 'Left back' (the Rows level's bar has
+      // 'Left back'); on direct categories it carries 'Enter/Right focus'. If
+      // focus drifted to Rows, ONE Tab returns it to the rail.
+      const railBarOf = frame => {
+        const bar = frame.split('\n').map(line => line.trim()).filter(line => line !== '').at(-1) ?? ''
+        if (bar.includes('Up/Down navigate')) return true
+        if (bar.includes('Up/Down select') && bar.includes('Right open') && !bar.includes('Left back')) return true
+        return false
+      }
+      if (!railBarOf(categoryFrame)) {
+        clientB.send('\t')
+        await waitForCondition(async () => {
+          categoryFrame = await sanitizedFrame(clientB)
+          return selectedCategoryOf(categoryFrame) !== undefined && railBarOf(categoryFrame)
+        }, 'F2 offline Settings rail focus restored', 10_000)
+      }
+      clientB.send('\x1b[B')
+      previousRailLabel = selected
+      try {
+        await waitForCondition(async () => {
+          categoryFrame = await sanitizedFrame(clientB)
+          const next = selectedCategoryOf(categoryFrame)
+          return next !== undefined && next !== selected
+        }, 'F2 offline Settings category selection repainted', 20_000)
+      } catch (error) {
+        throw new SplitSmokeAssertionError(`F2 offline category Down from ${selected} at step ${step} did not repaint: before=${redactWebQualificationText(beforeFrame)}; last=${redactWebQualificationText(categoryFrame)}`, { cause: error })
+      }
+    }
+    assert(accountSelected, 'F2 offline Settings never selected the Account category')
     await clientB.waitForScreen('DeepSeek Account', 'F2 Settings Account page opened while offline', 30_000)
     await waitForAccountFrame(clientB, 'unavailable', 'F2 offline Account did not invent signed-out state', trace, 20_000)
     assert(!(await sanitizedFrame(clientB)).includes('Signed out / no stored credential'),
@@ -752,7 +857,11 @@ export async function runF2AccountComposition(context) {
       `F2-T11 the Web enable remounted the Account Controller: ${JSON.stringify({ before: ownerBeforeWeb, after: ownerWhileWeb })}`)
     await waitForAccountFrame(clientB, 'Signed in (stored credential)',
       'F2-T11 TUI keeps the stored grant while Web is enabled', trace, 30_000)
-    const webMenu = readWebAccountMenu(dshHome, workDir, playwrightRoot)
+    const notificationsBeforeBrowser = requests.filter(path => path === 'GET /api/v0/users/notifications/list').length
+    const webMenu = await readWebAccountMenu(dshHome, workDir, playwrightRoot)
+    const notificationsDuringBrowser = requests.filter(path => path === 'GET /api/v0/users/notifications/list').length - notificationsBeforeBrowser
+    assert(notificationsDuringBrowser >= 1,
+      'F2-T11 the Browser Account notification producer never reached the live isolated mock')
     assert(parseYaml(readFileSync(credentialsPath, 'utf8')).records?.['deepseek-account-platform/default'] !== undefined,
       'F2-T11 enabling Web cleared the stored Host grant')
     assert(requests.filter(path => path === 'POST /auth-api/v0/users/logout').length === webLogoutCalls,
@@ -777,6 +886,7 @@ export async function runF2AccountComposition(context) {
       fiberUnchanged: true,
       webAccountUi: 'active',
       webAccountMenu: 'credential-stored',
+      notificationsDuringBrowser,
       tuiBefore: 'credential-stored',
       tuiWhileWeb: 'credential-stored',
       tuiAfterWeb: 'credential-stored',

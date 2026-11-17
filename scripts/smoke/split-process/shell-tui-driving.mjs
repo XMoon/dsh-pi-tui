@@ -188,8 +188,14 @@ export async function completeMultilineFromTui(client, mode, bodyLines, candidat
   await waitForComposerMode(client, mode, `${label} shell-mode activation`)
   client.send(`\x1b[200~${bodyLines.join('\n')}\x1b[201~`)
   await waitForComposerText(client, bodyLines.at(-1), `${label} multiline draft`)
-  const before = (await client.viewport()).join('\n')
-  assert(!before.includes(candidate), `${label} candidate was already painted before Tab`)
+  // Only the CURRENT editor surface belongs to this Tab: the transcript above
+  // the composer may already paint a real earlier command with this name, and
+  // the rows below the composer are the only place a completion menu may appear.
+  const beforeFrame = await client.viewport()
+  const beforeComposer = (await client.composerText()) ?? ''
+  assert(!beforeComposer.includes(candidate), `${label} candidate was already in the draft before Tab`)
+  assert(!belowComposerRows(beforeFrame).join('\n').includes(candidate),
+    `${label} candidate was already below the composer before Tab`)
   client.send('\t')
   // The offer may be auto-applied OR a dropdown (git has several `che…`
   // subcommands); both are accepted through the shared step.

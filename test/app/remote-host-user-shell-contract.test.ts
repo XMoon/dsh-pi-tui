@@ -41,6 +41,26 @@ test('a settled one-shot outcome carries both bounded streams, truncation and re
   assert.deepEqual(parsed, settled)
 })
 
+test('the registered run result codec preserves NUL, Unicode and control delimiters in both output streams', () => {
+  const stdout = '\0UTF8:é 中文\t\x1b[31mCONTROL\x1b[0m\r\n'
+  const stderr = '\0STDERR:中文\t\x1b[2KEND\r\n'
+  const outcome = {
+    ...settled,
+    result: {
+      ...settled.result,
+      stdout: { text: stdout, truncated: false },
+      stderr: { text: stderr, truncated: false },
+    },
+  }
+  const codec = PI_TUI_HOST_USER_SHELL_RUN.result
+  assert.ok(codec.mode === 'strict')
+  const parsed = codec.create().parse(outcome) as typeof outcome
+  assert.deepEqual(parsed, outcome)
+  assert.deepEqual(Buffer.from(parsed.result.stdout.text, 'utf8'), Buffer.from(stdout, 'utf8'))
+  assert.deepEqual(Buffer.from(parsed.result.stderr.text, 'utf8'), Buffer.from(stderr, 'utf8'))
+  assert.deepEqual(codec.decode?.(outcome), outcome)
+})
+
 test('a refused outcome is the only way to prove nothing executed', () => {
   assert.deepEqual(parseHostUserShellRunOutcome({
     kind: 'refused', reason: 'policy-unavailable', message: 'nothing ran',

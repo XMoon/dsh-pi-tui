@@ -166,6 +166,21 @@
       config:
         sessionId: ''
 
+    # The Split Host's ONE built-in Host Runtime row (the private contribution
+    # plus its business services). It is DECLARED here, disabled by default, so
+    # its config belongs to this bundle patch and the USER profile can own every
+    # saved preference; the Host-only overlay only flips `disabled: false`.
+    # Declaring it in that overlay instead would make the official ConfigEditor
+    # refuse every save ("overridden by a home patch or command-line overlay"),
+    # because this row is the Split Host's ONE live TUI settings authority.
+    # Direct keeps the `tui-app` row and the daemon supervisor mounts neither.
+    - id: split-host-pi-tui-runtime
+      name: '@xmoon76/dsh-pi-tui/host-runtime'
+      inject: [typert, agents, fileReferences, workingDirectory, sessions, subprocess, workspaceRegistry, skills, agentPresets]
+      disabled: true
+      config:
+        sessionId: ''
+
     # One background Job's observation stream (P1-B): the official Host
     # controller wraps `jobs.events` + `jobs.readAt()` into a
     # NON-CONSUMING follow stream (never `jobs.read()`), so the selected Job

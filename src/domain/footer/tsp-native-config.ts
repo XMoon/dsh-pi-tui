@@ -79,7 +79,7 @@ export const TSP_NATIVE_ROW_SEPARATOR = '  '
  *    is deliberately not read so a stale layout cannot pollute it.
  */
 export function resolveTspNativeFooterConfig(input: {
-  readonly doc: { readonly footer: string; readonly footerFallbackMode?: unknown; readonly footerLayout?: unknown }
+  readonly doc: { readonly footer: string; readonly footerFallbackMode?: unknown; readonly footerLayout?: unknown } | undefined
   readonly readiness: string
   readonly userItems: FooterCustomItemsParseResult
 }): TspNativeFooterConfig {
@@ -89,7 +89,7 @@ export function resolveTspNativeFooterConfig(input: {
   }
 
   // 1. Not ready: the fixed default, no USER-layer values, one notice.
-  if (input.readiness !== 'ready') {
+  if (input.readiness !== 'ready' || input.doc === undefined) {
     pushNotice(TSP_FOOTER_NOTICES.notCurrent)
     return { mode: 'default', userTextItems: [], userCommandIds: new Set<string>(), notices }
   }

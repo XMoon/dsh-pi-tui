@@ -300,12 +300,14 @@ export async function runWebRuntimeToggle(context) {
       await tui.waitForScreen('DeepSeek Account', `${label} TUI Account page`, 60_000)
       await tui.waitForScreen('Signed out / no stored credential', `${label} TUI Host Account state`, 30_000)
       tui.send('\x1b')
-      await waitForCondition(async () => (await tui.viewport()).join('\n').includes('[Categories (9)]'),
-        `${label} TUI Account page yielded to Settings`, 20_000)
+      await waitForCondition(async () => {
+        const frame = (await tui.viewport()).join('\n')
+        return frame.includes('Settings · Categories') && /\[Categories \(\d+\)\]/u.test(frame)
+      }, `${label} TUI Account page yielded to Settings`, 20_000)
       tui.send('\x1b')
       await waitForCondition(async () => {
         const frame = (await tui.viewport()).join('\n')
-        return !frame.includes('DeepSeek Account') && !frame.includes('[Categories (9)]')
+        return !frame.includes('DeepSeek Account') && !frame.includes('Settings ·')
       }, `${label} TUI returned to its Session`, 20_000)
       trace('t73-account-tui-state', { label, account: 'signed-out', hostCredential: 'absent', webToggle: label.startsWith('PB-10') ? 'off' : 'on' })
     }

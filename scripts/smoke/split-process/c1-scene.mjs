@@ -118,10 +118,13 @@ export function createC1Scene(context, options = {}) {
     // scenario only has to start its own process and authenticate the Host.
     // `options.cwd` gives one Client its own launch directory (its Workspace
     // proposal input); the Host Workspace identity still comes from the Host.
+    // `options.columns` widens one Client's real PTY when a case must read a
+    // draft longer than the default 100-column composer in one painted line.
     const client = new SurfaceEntryProcess(entries.client, {
       ...base,
       workDir,
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      ...(options.columns === undefined ? {} : { columns: options.columns }),
       env: { ...base.env, ...extraEnv },
     })
     c1Clients.push(client)

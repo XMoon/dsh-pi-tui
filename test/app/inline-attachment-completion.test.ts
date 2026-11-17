@@ -780,6 +780,9 @@ test('an ABSOLUTE-path candidate is accept-only on ENTER too', async (t) => {
   const h = setup(life)
   const { vt, app } = h
   const absolute = h.absoluteImagePath
+  // This case qualifies Enter admission, so leave enough room for the full
+  // discovered candidate even under a long isolated temporary base.
+  vt.resize(Math.max(100, absolute.length + 20), 30)
   await vt.waitForRender()
   type(vt, 'abs /image ')
   await vt.waitForRender()

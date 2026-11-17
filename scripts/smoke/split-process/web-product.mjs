@@ -1089,12 +1089,9 @@ export const runWebProductQualification = async context => {
     chmodSync(tuiHome, 0o700)
     mkdirSync(join(productRoot, 'client-local-scratch'), { recursive: true, mode: 0o700 })
     writeFileSync(join(tuiCwd, 'tui-private-sentinel.txt'), `prd-tui-private-${productNonce}\n`, { mode: 0o600 })
-    // The Remote prompt serializer has NO generic-file upload-receipt seam
-    // (`prompt-serializer-remote.ts` returns `unsupported` for a generic
-    // file), so the TUI Client-local intake is qualified with an IMAGE: the
-    // bytes are read by the Client, encoded into the prompt and stored by the
-    // Host attachment owner. The generic-file `/attach` boundary is recorded
-    // as UNAVAILABLE, never claimed as PASS.
+    // This case qualifies Client-local image intake through the prompt path.
+    // Generic-file `/attach` has its own official Host upload-receipt proof in
+    // `surface.generic-file-upload-f4`; it is not exercised by this image case.
     const tuiImageBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC', 'base64')
     const tuiImagePath = join(tuiCwd, 'tui-local-image.png')
     writeFileSync(tuiImagePath, tuiImageBytes, { mode: 0o600 })
@@ -1104,13 +1101,19 @@ export const runWebProductQualification = async context => {
     // The REAL TUI process gets its OWN cwd, HOME and PATH; the Host keeps
     // base.cwd/base home/PATH. The locality assertions must compare the real
     // process facts, not two directories that were only created.
-    const { tui: tuiLocal } = await startTui('WP-09 Client-local TUI', {
+    const { tui: tuiLocal, ready: tuiLocalReady } = await startTui('WP-09 Client-local TUI', {
       HOME: tuiHome,
       PATH: tuiPathValue,
       SPLIT_PROCESS_CLIENT_SESSION: sessionToggle,
       SPLIT_PROCESS_SCRATCH: join(productRoot, 'client-local-scratch'),
     }, { cwd: tuiCwd })
-    await tuiLocal.waitForScreen(`W-${productNonce}-seed`, 'WP-09 Client-local TUI reads the Session', 180_000)
+    assert(tuiLocalReady.sessionOpen === true && tuiLocalReady.openSessionId === sessionToggle,
+      'WP-09 the Client-local TUI must open the exact Host Session before its painted history is checked')
+    assertClientHostFacts(tuiLocalReady.host, toggleIdentity, 'WP-09 Client-local TUI Host identity')
+    // The cold surface follows the transcript tail. WP-08 has committed five
+    // turns, so its original seed can already be outside the visible viewport.
+    // The latest marker was independently verified in the Host log above.
+    await tuiLocal.waitForScreen(`W-${productNonce}-after-recompose`, 'WP-09 Client-local TUI reads the Session', 180_000)
     const browserUploadMarker = `w-${productNonce}-browser-upload`
     let hostShellFact
     let hostShellFeature
@@ -1252,7 +1255,7 @@ export const runWebProductQualification = async context => {
     }
     recordSession('wp09-locality', sessionToggle)
     await ptyFrames('wp09-locality', tuiLocal)
-    setWc('WC-10', 'PASS', 'Browser-local upload, TUI Client-local image intake and a real Host-owned Web terminal command were proven: Host-side files were created in the Session workspace and not in the TUI cwd; a TUI-private file never reached the Host. TUI generic-file /attach is UNAVAILABLE in the Remote composition (no upload-receipt seam) and is recorded, not claimed', ['WP-04A', 'WP-09'])
+    setWc('WC-10', 'PASS', 'Browser-local upload, TUI Client-local image intake and a real Host-owned Web terminal command were proven: Host-side files were created in the Session workspace and not in the TUI cwd; a TUI-private file never reached the Host. Generic-file /attach is outside this image case and has a separate surface.generic-file-upload-f4 qualification.', ['WP-04A', 'WP-09'])
 
     // WP-10: the honest visible-feature inventory.
     const inventory = await browserCase('wp10-inventory', {}, async () => {})
@@ -2165,6 +2168,10 @@ export const runWebProductQualification = async context => {
             const quoteTurnEnd = await waitForHostSessionEvent(dshHome, wp11Session,
               event => event.type === 'turn/end' && event.seq > lastTurnEndBeforeQuote,
               'WP-11 quoted turn/end', 180_000)
+            // Release the Browser into its NEXT scenario only after the exact
+            // single-write assertions above and the quoted turn settlement are
+            // proven; its next prompt must not pollute this Session's count.
+            await handle.signal('quote-verified')
 
             // W5-CHANGES negative: a tool-active Turn with no file change stays card-free.
             await handle.waitFact('nochange-prompted', 'WP-11 no-change prompt', 300_000)

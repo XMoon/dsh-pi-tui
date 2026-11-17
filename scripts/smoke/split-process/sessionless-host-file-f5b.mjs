@@ -146,10 +146,18 @@ export async function runSessionlessHostFileF5B(context) {
     // enumerates a directory OUTSIDE the registered Workspace root, keeps the
     // user-typed prefix, and is ACCEPTED into the editor as the Host-located
     // value. A dedicated throwaway sessionless Client keeps alpha's editor
-    // pristine for the original F5B-A flow below.
+    // pristine for the original F5B-A flow below. The Client runs WIDE: the
+    // absolute draft (private runtime root + marker) exceeds the default
+    // 100-column composer, and the qualification must read the COMPLETE
+    // accepted path — prefix directory AND filename — in one painted line
+    // instead of only its scrolled tail.
+    const EXPLICIT_CLIENT_COLUMNS = 200
+    const absoluteDraft = `@${sharedDir}/${sharedMarker}`
+    assert(absoluteDraft.length <= EXPLICIT_CLIENT_COLUMNS - 2,
+      `F5B the wide explicit Client must fit the absolute draft (${absoluteDraft.length} chars)`)
     const { client: expl, ready: explReady } = await startC1Client('F5B explicit client', {
       HOME: explHome,
-    }, { cwd: alphaDir })
+    }, { cwd: alphaDir, columns: EXPLICIT_CLIENT_COLUMNS })
     assert(explReady.sessionOpen === false && explReady.surfaceMounted === true,
       `F5B explicit client is not a mounted sessionless surface: ${JSON.stringify(explReady)}`)
     await waitForConfirmedDirectory(expl, canonicalAlpha, 'F5B explicit client confirmed Host directory')
@@ -158,7 +166,9 @@ export async function runSessionlessHostFileF5B(context) {
     // does NOT contain the file name), WAIT until the Host candidate is really
     // PAINTED (waitForScreen polls the live frame — never a fixed sleep), Tab
     // to accept, and require the EXACT Host-located draft. A mismatch retries
-    // from a clean editor instead of trusting timing.
+    // from a clean editor instead of trusting timing. The wide Client makes
+    // the FULL accepted path (absolute directory prefix + filename) readable
+    // in one line, so both halves of the draft are asserted directly.
     const acceptExplicit = async (query, draft, label) => {
       for (let attempt = 0; attempt < 3; attempt += 1) {
         await hardClear()
@@ -177,7 +187,6 @@ export async function runSessionlessHostFileF5B(context) {
     }
     const relativeDraft = `@../${basename(sharedDir)}/${sharedMarker}`
     await acceptExplicit(`@../${basename(sharedDir)}/`, relativeDraft, 'F5B explicit relative')
-    const absoluteDraft = `@${sharedDir}/${sharedMarker}`
     await acceptExplicit(`@${sharedDir}/`, absoluteDraft, 'F5B explicit absolute')
     // Negative control on the SAME sessionless Client: a BARE query stays inside
     // the registered Workspace and never reaches the external marker.

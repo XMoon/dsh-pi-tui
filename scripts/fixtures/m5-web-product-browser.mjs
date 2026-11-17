@@ -1850,6 +1850,10 @@ const cases = {
     await sendDraft(page)
     await waitConversation(page, changesMarker, ['w5-quote answer'], 240_000, 'the quoted prompt answer')
     driverFact('quote-sent', { quoted: `> ${sentence}` })
+    // The runner must finish its single-write settlement assertions before this
+    // Browser starts the NEXT scenario: its next prompt would otherwise become
+    // a second user-authored message in the same Session and invalidate them.
+    await waitSignal('quote-verified')
     step('quote-draft-then-send', true, { quoted: `> ${sentence}` })
 
     // ── W5-CHANGES negative: a tool-active Turn with NO file change paints no card.

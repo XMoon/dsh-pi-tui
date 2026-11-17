@@ -108,11 +108,16 @@ export async function runHostNumericSettingsFr5B(context) {
   let host
   let clientA
   let clientB
+  // Captured BEFORE the try so the finally block can restore them: the full
+  // lane shares ONE installed profile, and this case's seeded USER rows plus its
+  // real UI saves must not leak into later cases (`web.startup-preference`
+  // asserts a pristine `userOverridden === false` first read).
+  const profilePatch = join(installation.profileDir, 'cordis.patch.yml')
+  const originalPatch = existsSync(profilePatch) ? readFileSync(profilePatch, 'utf8') : ''
   try {
     // Real pre-existing PROFILE USER values prove the migrated preference rows
     // read their ORIGINAL ids and values after moving to General (and remain
     // writable through the same official profile patch).
-    const profilePatch = join(installation.profileDir, 'cordis.patch.yml')
     const existingRows = existsSync(profilePatch) ? (parseYaml(readFileSync(profilePatch, 'utf8')) ?? []) : []
     assert(Array.isArray(existingRows), 'the isolated profile patch must be a row list')
     writeFileSync(profilePatch, `${JSON.stringify([
@@ -342,5 +347,10 @@ export async function runHostNumericSettingsFr5B(context) {
     if (clientA !== undefined) await clientA.dispose().catch(() => {})
     if (host !== undefined) await scene.stopC1Host(host)
     await scene.dispose()
+    // Restore the exact original bytes: this case's seeded USER rows and real
+    // UI saves are its own preconditions, never lane-wide facts. A failure here
+    // MUST surface — silently swallowing it is what let the leak reach the next
+    // case and fail `web.startup-preference`.
+    writeFileSync(profilePatch, originalPatch, { mode: 0o600 })
   }
 }
