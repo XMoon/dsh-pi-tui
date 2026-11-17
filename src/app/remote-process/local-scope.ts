@@ -16,6 +16,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { readProcessStarttime } from '../../runtime/native-process/identity.ts'
 import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { Buffer } from 'node:buffer'
@@ -347,45 +348,19 @@ export function scopeFromInstalledProfile(facts: InstalledProfileFacts): LocalSc
   return Object.freeze({ ...inspected, dir })
 }
 
-/** Field 3 (state) and field 22 (`starttime`) from one `/proc/<pid>/stat`. */
-export interface LinuxProcessStat {
-  /** Single-letter Linux task state: R/S/D/T/t/Z/X/x/K/W/P/I. */
-  readonly state: string
-  /** Starttime in clock ticks since boot. */
-  readonly starttime: string
-}
-
 /**
- * Parse field 3 (`state`) and field 22 (`starttime`) from one
- * `/proc/<pid>/stat` text. The comm field may contain spaces and parentheses;
- * everything after the LAST ')' is the fixed positional tail whose first entry
- * is field 3. A stat without a single-letter state and a numeric starttime is
- * malformed, never a usable liveness observation.
+ * The `/proc/<pid>/stat` parser and best-effort starttime reader moved to the
+ * shared kernel-identity seam (`runtime/native-process/identity.ts`), which is
+ * now the ONLY owner of that parsing. These re-exports preserve the long-lived
+ * local-scope surface (and its external behavior) for existing callers and
+ * tests.
  */
-export function parseProcessStat(stat: string): LinuxProcessStat | undefined {
-  const close = stat.lastIndexOf(')')
-  if (close < 0) return undefined
-  const fields = stat.slice(close + 2).trim().split(/\s+/)
-  const state = fields[0]
-  const value = fields[19]
-  if (state === undefined || !/^[A-Za-z]$/u.test(state)) return undefined
-  if (value === undefined || !/^\d+$/u.test(value)) return undefined
-  return { state, starttime: value }
-}
-
-/** Parse only field 22 (`starttime`) from one `/proc/<pid>/stat`. */
-export function parseProcessStatStarttime(stat: string): string | undefined {
-  return parseProcessStat(stat)?.starttime
-}
-
-/** Best-effort Linux `starttime` read used by A0 status surfaces (may be undefined). */
-export function readProcessStarttime(pid: number = process.pid): string | undefined {
-  try {
-    return parseProcessStatStarttime(readFileSync(`/proc/${String(pid)}/stat`, 'utf8'))
-  } catch {
-    return undefined
-  }
-}
+export {
+  parseProcessStat,
+  parseProcessStatStarttime,
+  readProcessStarttime,
+  type LinuxProcessStat,
+} from '../../runtime/native-process/identity.ts'
 
 /**
  * Strict Linux process-start identity. B1 identity comparison never falls
