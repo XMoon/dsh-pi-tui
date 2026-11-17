@@ -163,6 +163,15 @@ const UNSUPPORTED_IMAGE_FORMAT_MESSAGE = 'Clipboard image format is unsupported.
 /** The fixed message for an advertised image whose payload was empty. */
 const NO_IMAGE_DATA_MESSAGE = 'Clipboard advertised an image but no image data could be read.'
 
+/** The fixed messages for a CONFIRMED image whose temp transfer failed. A
+ * confirmed image that cannot be written to or read from the temp file is a
+ * read failure, never a silent empty-text paste. */
+const IMAGE_WRITE_FAILURE_MESSAGE = 'Failed to write the clipboard image to a temporary file.'
+const IMAGE_READ_FAILURE_MESSAGE = 'Failed to read the clipboard image from the temporary file.'
+
+/** The AppleScript sentinel for "PNG data existed but the temp write failed". */
+const WRITE_FAILED_SENTINEL = 'write-failed'
+
 /** Wait-free bounded run helper for clipboard commands. ANY non-zero exit is a
  * clipboard-read FAILURE — even when the command printed bytes before dying: a
  * half-finished helper output is never a valid clipboard payload. */
@@ -247,10 +256,12 @@ async function x11Probe(run: RunCommand): Promise<ClipboardReadResult> {
  * cannot request (TIFF)" — distinct from "no image at all". */
 const TIFF_ONLY_SENTINEL = 'unsupported-image'
 
-/** macOS: AppKit NSPasteboard PNG → temp file. A TIFF-only pasteboard is an
- * advertised image whose format this build cannot decode: it must report the
- * unsupported-format error rather than silently reading an empty text
- * clipboard. No TIFF transcoding and no second OS probe process. */
+/** macOS: AppKit NSPasteboard PNG → temp file. The script reports its own
+ * outcome so every confirmed-image failure is distinguishable: a TIFF-only
+ * pasteboard is an unsupported format, a failed temp write is a write failure,
+ * and PNG data with no temp file afterwards is a read failure — none of them
+ * may degrade into the plain-text fallback (a silent empty-text paste). No
+ * TIFF transcoding and no second OS probe process. */
 async function macosProbe(run: RunCommand): Promise<ClipboardReadResult> {
   const file = join(tmpdir(), `dsh-clipboard-${randomUUID()}.png`)
   const osascript = [
@@ -263,23 +274,33 @@ async function macosProbe(run: RunCommand): Promise<ClipboardReadResult> {
     '  return ""',
     'end if',
     `set theFile to POSIX file "${file}"`,
-    "theData's writeToFile:theFile atomically:true",
+    "set writeOk to theData's writeToFile:theFile atomically:true",
+    `if writeOk is false then return "${WRITE_FAILED_SENTINEL}"`,
     'return "ok"',
   ].join('\n')
   try {
     const result = await run('osascript', ['-e', osascript], { timeoutMs: 5000 })
     if (result.code !== 0) throw new ClipboardImageError(`osascript failed (exit ${result.code})`)
-    if (result.stdout.toString('utf8').trim() === TIFF_ONLY_SENTINEL) {
+    const outcome = result.stdout.toString('utf8').trim()
+    if (outcome === TIFF_ONLY_SENTINEL) {
       throw new ClipboardImageError(UNSUPPORTED_IMAGE_FORMAT_MESSAGE)
+    }
+    if (outcome === WRITE_FAILED_SENTINEL) {
+      throw new ClipboardImageError(IMAGE_WRITE_FAILURE_MESSAGE)
+    }
+    if (outcome !== 'ok') {
+      // No PNG and no TIFF on the clipboard: fall back to the plain-text
+      // payload (an empty text is a genuinely empty clipboard).
+      const text = await run('osascript', ['-e', 'the clipboard as text'], { timeoutMs: 3000 })
+      return { kind: 'text', text: text.stdout.toString('utf8') }
     }
     let bytes: Uint8Array
     try {
       bytes = new Uint8Array(readFileSync(file))
     } catch {
-      // No PNG and no TIFF on the clipboard: fall back to the plain-text
-      // payload (an empty text is a genuinely empty clipboard).
-      const text = await run('osascript', ['-e', 'the clipboard as text'], { timeoutMs: 3000 })
-      return { kind: 'text', text: text.stdout.toString('utf8') }
+      // The script reported a written PNG: a missing/unreadable temp file is
+      // a confirmed image read failure, never "no image".
+      throw new ClipboardImageError(IMAGE_READ_FAILURE_MESSAGE)
     }
     return imageFromBytes(bytes)
   } finally {
@@ -306,6 +327,9 @@ async function powershellProbe(run: RunCommand, wsl: boolean): Promise<Clipboard
     '$img = [System.Windows.Forms.Clipboard]::GetImage()',
     'if ($null -eq $img) { exit 0 }',
     `$img.Save('${escaped}')`,
+    // An image the script saved must exist afterwards: a silent no-file Save
+    // is a probe FAILURE (non-zero exit), never the no-image text fallback.
+    `if (-not (Test-Path -LiteralPath '${escaped}')) { exit 3 }`,
   ].join('; ')
   try {
     const result = await run('powershell.exe', ['-NoProfile', '-Command', script], { timeoutMs: 8000 })

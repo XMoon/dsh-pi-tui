@@ -175,11 +175,43 @@ test('macOS probes through osascript', async () => {
   const run = (async (command: string) => {
     ran.push(command)
     assert.equal(command, 'osascript')
-    return { stdout: Buffer.from('ok'), stderr: Buffer.alloc(0), code: 0 }
+    // The first probe returns "no PNG": the script's own no-image outcome.
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 }
   }) as unknown as RunCommand
   const result = await readClipboardImage(run, envOf({ platform: 'darwin' }))
   assert.ok(ran.includes('osascript'), 'osascript probed for the PNG')
   assert.equal(result.kind, 'text', 'no PNG file → plain-text fallback probe')
+})
+
+test('macOS: PNG data that fails to write to the temp file rejects instead of pasting empty text', async () => {
+  const run = (async (_command: string, args: readonly string[]) => {
+    const script = args[1] ?? ''
+    if (script.includes('writeToFile')) {
+      return { stdout: Buffer.from('write-failed'), stderr: Buffer.alloc(0), code: 0 }
+    }
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 }
+  }) as unknown as RunCommand
+  await rejectsWith(
+    readClipboardImage(run, envOf({ platform: 'darwin' })),
+    'Failed to write the clipboard image to a temporary file.',
+  )
+})
+
+test('macOS: an ok probe without a readable temp PNG rejects instead of pasting empty text', async () => {
+  // The reviewer's probe: the script reports a written PNG but the temp file
+  // is missing, so the confirmed image read failure must reject — never fall
+  // back to an (empty) text payload.
+  let textProbeRan = false
+  const run = (async (_command: string, args: readonly string[]) => {
+    const script = args[1] ?? ''
+    if (script.includes('the clipboard as text')) textProbeRan = true
+    return { stdout: Buffer.from('ok'), stderr: Buffer.alloc(0), code: 0 }
+  }) as unknown as RunCommand
+  await rejectsWith(
+    readClipboardImage(run, envOf({ platform: 'darwin' })),
+    'Failed to read the clipboard image from the temporary file.',
+  )
+  assert.equal(textProbeRan, false, 'a confirmed image never degrades to the text fallback')
 })
 
 test('clipboardBackendOf names the platform backend', () => {
@@ -414,4 +446,16 @@ test('Windows: a failing GetText fallback rejects instead of masquerading as an 
     code: 0,
   })) as unknown as RunCommand
   assert.deepEqual(await readClipboardImage(emptyRun, envOf({ platform: 'win32' })), { kind: 'text', text: '' })
+})
+
+test('Windows: the GetImage script verifies the saved temp PNG exists (no silent no-file save)', async () => {
+  const run = (async (_command: string, args: readonly string[]) => {
+    const script = args[2] ?? ''
+    assert.ok(script.includes('Test-Path -LiteralPath'),
+      `the Save must be followed by an existence check: ${script}`)
+    // The guard exits non-zero when the saved file is missing: the failure is
+    // reported, never interpreted as "no image".
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 3 }
+  }) as unknown as RunCommand
+  await rejectsWith(readClipboardImage(run, envOf({ platform: 'win32' })), 'powershell failed (exit 3)')
 })

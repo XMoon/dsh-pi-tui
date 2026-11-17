@@ -629,3 +629,28 @@ test('a failed image classification that settles after the ownership moved repor
     assert.deepEqual(h.seat.current.notices, [], `${move}: the current seat receives no stale error`)
   }
 })
+
+test('a macOS confirmed-image write failure is classified by the REAL reader and reports one error notice', async () => {
+  const h = harness({
+    probeImplementation: () => readClipboardImage(
+      (async (_command: string, args: readonly string[]) => {
+        const script = args[1] ?? ''
+        if (script.includes('writeToFile')) {
+          return { stdout: Buffer.from('write-failed'), stderr: Buffer.alloc(0), code: 0 }
+        }
+        return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 }
+      }) as unknown as RunCommand,
+      { platform: 'darwin', env: {}, exists: () => true },
+    ),
+  })
+  h.paste()
+  await h.drained()
+
+  assert.deepEqual(h.started, [0], 'the OS clipboard was probed exactly once')
+  assert.deepEqual(h.composer.notices, [{
+    text: 'Failed to write the clipboard image to a temporary file.',
+    kind: 'error',
+  }], 'the macOS write failure reaches the captured composer exactly once')
+  assert.equal(h.store.size(), 0, 'no image draft is staged')
+  assert.equal(h.composer.getDraft(), '', 'the editor is untouched')
+})
