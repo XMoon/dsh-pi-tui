@@ -268,6 +268,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   private searchFocused = false
   private chooser: OpenChooser | undefined
   private listScroll = 0
+  /** The EFFECTIVE viewport positions of the LAST PAINTED frame (what the
+   *  render actually drew after clamp/reveal). A press records them, and the
+   *  next painted frame retires the press only when one really moved. */
+  private paintedViewport = { list: 0, detail: 0, history: 0, editor: 0, help: 0 }
   /** A wheel gesture owns the list viewport until the selection changes. */
   private listScrollPinned = false
   private detailScroll = 0
@@ -293,6 +297,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     readonly rosterFacts: string
     readonly navigationPending: boolean
     readonly pageEpoch: number
+    readonly viewport: { readonly list: number; readonly detail: number; readonly history: number; readonly editor: number; readonly help: number }
   } | undefined
   private readonly searchInput = new Input({ prompt: '' })
   private readonly editorInput = new Input({ prompt: '' })
@@ -1046,7 +1051,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     if (snapshot.confirm !== undefined) {
       this.paintSingleBody(lines, regions, paintedWidth, bodyHeight, this.confirmBody(snapshot.confirm, paintedWidth), 0)
     } else if (snapshot.mode === 'help') {
-      this.paintSingleBody(lines, regions, paintedWidth, bodyHeight, this.helpBody(paintedWidth), this.helpScroll)
+      this.helpScroll = this.scrolled(this.helpScroll, this.helpBody(paintedWidth).length, bodyHeight)
+      this.paintedViewport.help = this.paintSingleBody(lines, regions, paintedWidth, bodyHeight, this.helpBody(paintedWidth), this.helpScroll)
     } else if (layout === 'wide') {
       this.paintWideBody(lines, regions, paintedWidth, bodyHeight)
     } else {
@@ -1055,6 +1061,20 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
 
     this.paintActionBar(lines, regions, paintedWidth)
     while (lines.length < rows) lines.push(' '.repeat(paintedWidth))
+    if (this.pressed !== undefined) {
+      // An EFFECTIVE wheel is the wheel whose pointed pane's PAINTED viewport
+      // really moved. Comparing the effective positions (after clamp/reveal)
+      // avoids retiring a legitimate press for a wheel the render clamped back
+      // (over-scroll at an edge, caret-follow reveal), while any real window
+      // move retires it (overlay-focus §7 lists scroll among the
+      // press-invalidating changes).
+      const v = this.paintedViewport
+      const p = this.pressed.viewport
+      if (v.list !== p.list || v.detail !== p.detail || v.history !== p.history
+        || v.editor !== p.editor || v.help !== p.help) {
+        this.pressed = undefined
+      }
+    }
     this.frame = {
       width: paintedWidth,
       height: lines.length,
@@ -1210,13 +1230,14 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         return
       case 'detail': {
         const content = this.detailBody(this.detailEntry(), width)
-        this.paintSingleBody(lines, regions, width, bodyHeight, content, this.scrolled(this.detailScroll, content.length, bodyHeight))
+        this.detailScroll = this.scrolled(this.detailScroll, content.length, bodyHeight)
+        this.paintedViewport.detail = this.paintSingleBody(lines, regions, width, bodyHeight, content, this.detailScroll)
         return
       }
       case 'history': {
         const content = this.historyBody(width)
         this.historyScroll = this.revealHistorySelection(content, this.historyScroll, bodyHeight)
-        this.paintSingleBody(lines, regions, width, bodyHeight, content, this.historyScroll)
+        this.paintedViewport.history = this.paintSingleBody(lines, regions, width, bodyHeight, content, this.historyScroll)
         return
       }
       case 'editor': {
@@ -1224,7 +1245,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         this.editorScroll = this.chooser === undefined
           ? this.revealField(content, this.editorScroll, bodyHeight)
           : this.revealChooser(content, this.editorScroll, bodyHeight)
-        this.paintSingleBody(lines, regions, width, bodyHeight, content, this.editorScroll)
+        this.paintedViewport.editor = this.paintSingleBody(lines, regions, width, bodyHeight, content, this.editorScroll)
         return
       }
       case 'help':
@@ -1241,7 +1262,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   ): void {
     const content = this.listBody(width)
     this.listScroll = this.listViewport(content, bodyHeight)
-    this.paintSingleBody(lines, regions, width, bodyHeight, content, this.listScroll)
+    this.paintedViewport.list = this.paintSingleBody(lines, regions, width, bodyHeight, content, this.listScroll)
   }
 
   private wideLeftWidth(width: number): number {
@@ -1258,6 +1279,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     const rightWidth = Math.max(1, width - 2 - leftWidth)
     const list = this.listBody(leftWidth)
     this.listScroll = this.listViewport(list, bodyHeight)
+    this.paintedViewport.list = this.listScroll
     const right = this.wideRightBody(rightWidth)
     let rightScroll: number
     switch (this.snapshot.mode) {
@@ -1279,6 +1301,9 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       default:
         rightScroll = 0
     }
+    if (this.snapshot.mode === 'list' || this.snapshot.mode === 'detail') this.paintedViewport.detail = rightScroll
+    else if (this.snapshot.mode === 'history') this.paintedViewport.history = rightScroll
+    else if (this.snapshot.mode === 'editor') this.paintedViewport.editor = rightScroll
     for (let index = 0; index < bodyHeight; index += 1) {
       const left = list[this.listScroll + index]
       const rightLine = right[rightScroll + index]
@@ -1888,7 +1913,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     bodyHeight: number,
     content: readonly BodyLine[],
     offset: number,
-  ): void {
+  ): number {
     const start = Math.max(0, Math.min(offset, Math.max(0, content.length - bodyHeight)))
     for (let index = 0; index < bodyHeight; index += 1) {
       const line = content[start + index]
@@ -1898,6 +1923,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       }
       this.pushBodyLine(lines, regions, width, line)
     }
+    return start
   }
 
   private pushBodyLine(
@@ -2155,6 +2181,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
           rosterFacts: frame.rosterFacts,
           navigationPending: frame.navigationPending,
           pageEpoch: frame.pageEpoch,
+          viewport: { ...this.paintedViewport },
         }
   }
 
@@ -2198,7 +2225,6 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     if (delta === 0) return undefined
     const step = delta < 0 ? -1 : 1
     if (this.snapshot.confirm !== undefined) return undefined
-    const viewportBefore = this.viewportFingerprint()
     if (this.snapshot.mode === 'list') {
       const layout = scheduleWorkspaceLayout(frame.width, frame.height)
       if (layout === 'wide' && event.x >= this.wideLeftWidth(frame.width) + 2) {
@@ -2217,21 +2243,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     } else if (this.snapshot.mode === 'help') {
       this.helpScroll = Math.max(0, this.helpScroll + step)
     }
-    // An EFFECTIVE wheel (the pointed pane's viewport really moved) is a
-    // gesture boundary: the press was recorded against the previous view, so
-    // the same-cell release must not replay it (overlay-focus §7 lists scroll
-    // among the press-invalidating changes). A boundary/zero-effect wheel
-    // keeps the existing same-cell contract.
-    if (this.viewportFingerprint() !== viewportBefore) this.pressed = undefined
     this.deps.requestRender()
     return { handled: true, render: true }
   }
 
-  /** The panel-local viewport positions that decide whether a wheel was
-   *  effective. A wheel on the pointed pane moves exactly one of them. */
-  private viewportFingerprint(): string {
-    return `${this.listScroll}/${this.detailScroll}/${this.historyScroll}/${this.editorScroll}/${this.helpScroll}`
-  }
 
   /** Whether the LAST painted frame still describes the CURRENT page and
    *  confirmation identity; anything else is a stale click. */

@@ -910,7 +910,7 @@ const paintCell = (vt: VirtualTerminal, needle: string): { readonly row: number;
   return { row, column: lines[row]!.indexOf(needle) }
 }
 
-test('PR-4 R3: an effective Help wheel refuses a stale close-help press', async () => {
+test('an effective Help wheel refuses a stale close-help press', async () => {
   const port = createRecordingPort()
   const controller = createController(port, false)
   const vt = new VirtualTerminal(120, 30)
@@ -961,7 +961,7 @@ test('PR-4 R3: an effective Help wheel refuses a stale close-help press', async 
   }
 })
 
-test('PR-4 R3: an effective History wheel refuses a stale unselected-record press (selection marker intact)', async () => {
+test('an effective History wheel refuses a stale unselected-record press (selection marker intact)', async () => {
   const port = createRecordingPort()
   const records = Array.from({ length: 60 }, (_, index) => ({
     messageId: `m${index}`,
@@ -1024,7 +1024,7 @@ test('PR-4 R3: an effective History wheel refuses a stale unselected-record pres
   }
 })
 
-test('PR-4 R3: an effective RAW Editor wheel refuses a stale Esc-back press', async () => {
+test('an effective RAW Editor wheel refuses a stale Esc-back press', async () => {
   const longPrompt = Array.from({ length: 60 }, (_, line) => `editor proof line ${String(line).padStart(2, '0')}`).join('\n')
   const port = createRecordingPort([task({ id: 'task-a', title: 'Alpha report', prompt: longPrompt })])
   const controller = createController(port, true)
