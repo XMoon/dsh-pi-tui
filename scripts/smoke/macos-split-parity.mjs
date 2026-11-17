@@ -104,6 +104,17 @@ function describeOutcome(outcome) {
   return outcome.kind === 'error' ? outcome.error.message : outcome.kind
 }
 
+/** Kill and await one probe child this smoke created itself (not a management
+ *  child): used even when the probe's own guard assertion is about to fail. */
+async function reapOwnedProbeChild(pid) {
+  if (pid === undefined) return
+  if (alive(pid)) {
+    try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+  }
+  await waitFor(() => (!alive(pid) ? true : undefined),
+    `owned probe child ${String(pid)} is reaped`, TIMEOUTS.process)
+}
+
 /** Bounded poll on one real observable fact. */
 async function waitFor(probe, label, timeoutMs) {
   const deadline = Date.now() + timeoutMs
@@ -1017,12 +1028,17 @@ async function runScene({ installation, workRoot, report }) {
   })
   let pipeGrandchildPid
   try {
+    // Register the control's own grandchild BEFORE any assertion can fail: the
+    // parent writes this pid synchronously at startup, so a helper regression
+    // still leaves the finally a real identity to kill and reap.
+    pipeGrandchildPid = await waitFor(() => {
+      if (!existsSync(pipePidFile)) return undefined
+      const value = Number(readFileSync(pipePidFile, 'utf8'))
+      return Number.isSafeInteger(value) && value > 0 ? value : undefined
+    }, 'P05 inherited-pipe control grandchild pid', TIMEOUTS.process)
     const outcome = await settleWithin(pipeControl.result, 5_000)
     assert(outcome.kind === 'error' && /did not settle within 500ms/u.test(outcome.error.message),
       `P05: an exited child with inherited pipes must settle at its deadline, saw ${describeOutcome(outcome)}`)
-    pipeGrandchildPid = Number(readFileSync(pipePidFile, 'utf8'))
-    assert(Number.isSafeInteger(pipeGrandchildPid) && pipeGrandchildPid > 0,
-      'P05: the inherited-pipe control did not record its grandchild pid')
     assert(alive(pipeGrandchildPid), 'P05: the control grandchild should still hold the inherited pipes')
     const disposeOutcome = await settleWithin(pipeControl.dispose(), 5_000)
     assert(disposeOutcome.kind === 'settled', 'P05: dispose did not complete for an already-reaped child')
@@ -1035,12 +1051,45 @@ async function runScene({ installation, workRoot, report }) {
     })
   } finally {
     // This grandchild is the control's own resource, not the management race's
-    // child: clean it up here and prove it is gone.
-    if (pipeGrandchildPid !== undefined && alive(pipeGrandchildPid)) {
-      try { process.kill(pipeGrandchildPid, 'SIGKILL') } catch { /* already gone */ }
+    // child. If the guard was already hung, the pid above is still registered;
+    // when even that registration failed, re-read the file once more.
+    if (pipeGrandchildPid === undefined && existsSync(pipePidFile)) {
+      try {
+        const value = Number(readFileSync(pipePidFile, 'utf8'))
+        if (Number.isSafeInteger(value) && value > 0) pipeGrandchildPid = value
+      } catch { /* no registered pid */ }
     }
-    await waitFor(() => (pipeGrandchildPid === undefined || !alive(pipeGrandchildPid) ? true : undefined),
-      'P05 inherited-pipe control grandchild is reaped', TIMEOUTS.process)
+    await reapOwnedProbeChild(pipeGrandchildPid)
+  }
+
+  // Prove the P05-PIPE guard-FAILURE branch itself: a registered grandchild is
+  // still killed and reaped even when the guarded promise never settles.
+  const guardPidFile = join(workRoot, 'p05-guard-regression-grandchild.pid')
+  const guardParent = spawn(process.execPath, ['-e', pipeParent, guardPidFile], {
+    cwd: workRoot,
+    env: daemonEnvironment(installation),
+    stdio: 'ignore',
+  })
+  const guardParentExit = new Promise(resolve => {
+    guardParent.once('exit', resolve)
+    guardParent.once('error', resolve)
+  })
+  let guardGrandchildPid
+  try {
+    guardGrandchildPid = await waitFor(() => {
+      if (!existsSync(guardPidFile)) return undefined
+      const value = Number(readFileSync(guardPidFile, 'utf8'))
+      return Number.isSafeInteger(value) && value > 0 ? value : undefined
+    }, 'P05 guard-regression grandchild pid', TIMEOUTS.process)
+    const guardOutcome = await settleWithin(new Promise(() => {}), 250)
+    assert(guardOutcome.kind === 'hung',
+      `P05: the guard-regression probe expected a hung guard, saw ${describeOutcome(guardOutcome)}`)
+    await reapOwnedProbeChild(guardGrandchildPid)
+    assert(!alive(guardGrandchildPid), 'P05: the guard-failure branch did not reap its grandchild')
+    report.rows.push({ id: 'P05-GUARD', status: 'PASS', guardMs: 250, grandchildPid: guardGrandchildPid })
+  } finally {
+    await reapOwnedProbeChild(guardGrandchildPid)
+    await guardParentExit
   }
   const raceOne = startDaemonCommand(installation, ['start'])
   const raceTwo = startDaemonCommand(installation, ['start'])
