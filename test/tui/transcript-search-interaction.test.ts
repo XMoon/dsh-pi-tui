@@ -1543,10 +1543,11 @@ test('the plan lease and the search reveal COMPOSE (union) and release independe
   app.stop()
 })
 
-test('Regular mode keeps the plan readable and never offers an unusable View plan', async () => {
-  // No app-owned seek in Regular: with a question detail the in-flow
-  // `View review text` row is the default; without one the honest scrollback
-  // line names the tool card above. Regular never paints `View plan`.
+test('Regular WITH a provable card keeps the frozen ordinary layout (guidance + Keep default)', async () => {
+  // Section 3.4's ordinary Regular UI: the plan is the tool card already
+  // painted above in terminal history; the decision list names it and offers
+  // exactly Keep planning… / Approve plan with Keep as the default. The
+  // in-flow review row is the CARD-UNPROVABLE exception only.
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
   app.start()
@@ -1560,17 +1561,20 @@ test('Regular mode keeps the plan readable and never offers an unusable View pla
   }], undefined, { reviewSessionId: SESSION }, false)
   await vt.waitForRender()
   const frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
-  assert.ok(frame.includes('View review text'), `the in-flow reading row is the Regular default:\n${frame}`)
-  assert.ok(!frame.includes('View plan'), `Regular must not offer an unusable View plan:\n${frame}`)
-  assert.ok(frame.includes('Keep planning…') && frame.includes('Approve plan'),
-    `the decision rows are intact:\n${frame}`)
-  // The Fullscreen capability restores the frozen three-row layout: the
-  // exception row disappears (a failed locate degrades View plan instead).
+  assert.ok(frame.includes('Read the plan above in terminal history.'),
+    `the Regular ordinary guidance is missing:\n${frame}`)
+  assert.ok(!frame.includes('View review text'), `no exception row with a provable card:\n${frame}`)
+  assert.ok(!frame.includes('View plan'), `Regular offers no View plan:\n${frame}`)
+  const rows = frame.split('\n').filter(line => />?\s*(View plan|View review text|Keep planning…|Approve plan)\s*│?\s*$/.test(line))
+  assert.equal(rows.length, 2, `exactly two decision rows:\n${frame}`)
+  assert.ok(rows[0]!.includes('> Keep planning…'), `Keep is the default:\n${frame}`)
+  assert.ok(!rows[1]!.includes('>'), `Approve is never defaulted:\n${frame}`)
+  // Fullscreen restores the frozen three rows (View plan first).
   app.setFullscreen(true)
   await vt.waitForRender()
   const fullscreenFrame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
   assert.ok(fullscreenFrame.includes('View plan'), `Fullscreen offers the real View:\n${fullscreenFrame}`)
-  assert.ok(!fullscreenFrame.includes('View review text'), `the exception row leaves the normal Fullscreen layout:\n${fullscreenFrame}`)
+  assert.ok(!fullscreenFrame.includes('View review text'), `no exception row in the frozen Fullscreen layout:\n${fullscreenFrame}`)
   vt.sendInput('\x1b') // official dismiss
   await settle.then(() => {}, () => {})
   app.stop()
@@ -1724,6 +1728,140 @@ test('a question WITHOUT detail keeps the scrollback guidance and no review row 
     `the honest scrollback guidance returns when no detail exists:\n${frame}`)
   assert.ok(!frame.includes('View review text'), `no dead review row without a body:\n${frame}`)
   assert.ok(!frame.includes('View plan'), `no View plan in Regular:\n${frame}`)
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('collapsing the SEARCH-owned span leaves the Plan lease and body intact', async () => {
+  // F1 regression: the union may decide VISIBILITY, but an explicit collapse
+  // revokes only the request that owns THAT container. Search owns span S; the
+  // plan lease owns a different span P. Collapsing S must not cancel the plan
+  // reading lease.
+  const { messages, root } = searchPlanFixture()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setDisplayPreset('compact')
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  await vt.waitForRender()
+  app.setTranscriptSearchPresentation(searchTargetFor(root))
+  await vt.waitForRender()
+  const body = (): string => vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: SEARCH_PLAN,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  vt.sendInput('\r') // View plan -> lease opens span P
+  await vt.waitForRender()
+  assert.ok(body().includes('## Scope'), `precondition: the plan body is leased open:\n${body()}`)
+  assert.ok(body().includes('needle body line'), `precondition: the search reveal is open:\n${body()}`)
+  // Collapse the SEARCH-owned span S.
+  const ownerS = (app as unknown as {
+    canonicalStructureIndex(): { workByMember: Map<TranscriptMessage, { owner: TranscriptMessage }> }
+  }).canonicalStructureIndex().workByMember.get(root)?.owner
+  assert.ok(ownerS !== undefined, 'fixture: the search card belongs to a Work span')
+  app.toggleWorkSpan(ownerS)
+  await vt.waitForRender()
+  assert.ok(!body().includes('needle body line'), `the search-owned span collapses:\n${body()}`)
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection !== undefined, true,
+    'collapsing the Search span must NOT revoke the plan lease')
+  assert.ok(body().includes('## Scope'), `the plan body stays readable:\n${body()}`)
+  vt.sendInput('\x1b') // leave reading, then dismiss
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('collapsing the PLAN-owned span leaves the Search request and body intact', async () => {
+  // The symmetric direction: Plan owns span P, Search owns span S. Collapsing
+  // P revokes only the plan lease; the search navigation keeps its grant.
+  const { messages, root } = searchPlanFixture()
+  const planCard = messages.find(
+    (m): m is Extract<TranscriptMessage, { kind: 'tool' }> => m.kind === 'tool' && m.name === 'exit_plan_mode',
+  )!
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setDisplayPreset('compact')
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  await vt.waitForRender()
+  app.setTranscriptSearchPresentation(searchTargetFor(root))
+  await vt.waitForRender()
+  const body = (): string => vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: SEARCH_PLAN,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(body().includes('## Scope') && body().includes('needle body line'))
+  const ownerP = (app as unknown as {
+    canonicalStructureIndex(): { workByMember: Map<TranscriptMessage, { owner: TranscriptMessage }> }
+  }).canonicalStructureIndex().workByMember.get(planCard)?.owner
+  assert.ok(ownerP !== undefined, 'fixture: the plan card belongs to a Work span')
+  app.toggleWorkSpan(ownerP)
+  await vt.waitForRender()
+  assert.ok(!body().includes('## Scope'), `the plan-owned span collapses:\n${body()}`)
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
+    'the plan lease is revoked by collapsing its own span')
+  assert.equal(body().includes('needle body line'), true,
+    `collapsing the Plan span must NOT suppress the search request:\n${body()}`)
+  assert.notEqual(app.transcriptSearchPresentationForTest(), undefined,
+    'the search presentation survives the plan collapse')
+  vt.sendInput('\x1b') // reading -> decision (the plan lease is gone already)
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('collapsing the PLAN card itself leaves an unrelated Search request intact', async () => {
+  const { messages, root } = searchPlanFixture()
+  const planCard = messages.find(
+    (m): m is Extract<TranscriptMessage, { kind: 'tool' }> => m.kind === 'tool' && m.name === 'exit_plan_mode',
+  )!
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setDisplayPreset('compact')
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  await vt.waitForRender()
+  app.setTranscriptSearchPresentation(searchTargetFor(root))
+  await vt.waitForRender()
+  const body = (): string => vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: SEARCH_PLAN,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(body().includes('## Scope') && body().includes('needle body line'))
+  ;(app as unknown as { toggleMessageExpanded(message: TranscriptMessage): void }).toggleMessageExpanded(planCard)
+  await vt.waitForRender()
+  assert.ok(!body().includes('## Scope'), `the plan card collapses:\n${body()}`)
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
+    'the plan lease is revoked by the card collapse')
+  assert.equal(body().includes('needle body line'), true,
+    `the unrelated search request is untouched:\n${body()}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
   vt.sendInput('\x1b')
   await settle.then(() => {}, () => {})
   app.stop()

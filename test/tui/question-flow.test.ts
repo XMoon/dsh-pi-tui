@@ -2717,8 +2717,9 @@ function planMakeFlow(
 function planInspectionSeam(
   inspect: () => boolean,
   canInspect: () => boolean = () => true,
-): { canInspect: () => boolean; inspect: () => boolean } {
-  return { canInspect, inspect }
+  cardPresent: () => boolean = () => true,
+): { canInspect: () => boolean; inspect: () => boolean; cardPresent: () => boolean } {
+  return { canInspect, inspect, cardPresent }
 }
 
 function planRender(flow: QuestionFlow, width = 80): string[] {

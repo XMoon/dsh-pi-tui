@@ -189,17 +189,22 @@ compact decision component in the same editor seat:
 
 - Decision rows keep the frozen order `View plan → Keep planning… →
   <official approve label> plan` in the normal Fullscreen layout (a
-  detail-bearing request does NOT add a row there). `View review text` is the
-  §3.5 EXCEPTION entry, present only where the transcript inspection cannot be
-  executed at all (Regular has no app-owned seek) and the official question
-  carries its own detail body: it reads the complete text in-flow without ever
-  claiming a located transcript and without a second Reader. On Fullscreen a
-  FAILED locate degrades `View plan` to that same detail page. Any further
-  official non-approve options never add rows: the FIRST non-approve option in
-  the official order is the keep-planning class and the label this branch
-  answers with. The default cursor is the FIRST available reading row (View
-  plan, else View review text, else Keep) — never Approve. Answer values are
-  always the OFFICIAL option labels.
+  detail-bearing request does NOT add a row there), and in the ordinary Regular
+  layout (see below). `View review text` is the §3.5 EXCEPTION entry, present
+  only where the transcript inspection cannot be executed at all (Regular has
+  no app-owned seek) AND the official card is NOT provably present in the
+  mounted transcript — the presence probe is the SAME local `intent.callId`
+  identity lookup the inspection uses, read-only, no Host service and no
+  second Reader. With a provable card Regular keeps its frozen ordinary layout
+  (the `Read the plan above in terminal history.` line plus Keep/Approve, Keep
+  default); only the card-unprovable exception replaces that line with
+  `View review text` (the complete in-flow text, never a claimed-located
+  transcript). On Fullscreen a FAILED locate degrades `View plan` to that same
+  detail page. Any further official non-approve options never add rows: the
+  FIRST non-approve option in the official order is the keep-planning class and
+  the label this branch answers with. The default cursor is the FIRST available
+  reading row (View plan, else View review text, else Keep) — never Approve.
+  Answer values are always the OFFICIAL option labels.
 - `View plan` triggers the host's one-shot read-only inspection: it requires a
   PROVEN identity first — the official Question's own Session (the
   presentation-only `reviewSessionId` the surface controller forwards) and the
@@ -235,16 +240,22 @@ compact decision component in the same editor seat:
   ancestors (one never shadows the other), and their explicit-collapse records
   stay separate: the SEARCH navigation owns the PTC child-suppression record,
   while the plan inspection keeps NO suppression of its own — an explicit
-  collapse of a plan-opened child revokes the whole one-shot lease. A plan
-  View/reading/release never writes or clears a search suppression, and vice
-  versa.
+  collapse of a plan-opened child revokes the whole one-shot lease. Collapse
+  OWNERSHIP is per-request, never the union: an explicit collapse of one
+  container (card / PTC child / Work span / Context cluster / Focus Thought /
+  the Ctrl+O bulk) revokes only the temporary request that opened THAT
+  container or whose target lives inside it — collapsing a Search-opened span
+  must not cancel an unrelated Plan lease, and collapsing a Plan-opened
+  container must not suppress the search grant. A plan View/reading/release
+  never writes or clears a search suppression, and vice versa.
 - Regular/Main has no app-owned seek: it offers no `View plan` and never
-  claims a located reading state. The question's own detail keeps the full text
-  readable in-flow through `View review text`; when even that body is absent
-  (a detail-less official shape), the decision list carries the frozen
-  single-line guidance `Read the plan above in terminal history.` (the plan is
-  the tool card already painted in the native scrollback, expanded through the
-  effective disclosure key).
+  claims a located reading state. With a provable card the decision list
+  carries the frozen single-line guidance `Read the plan above in terminal
+  history.` (the plan is the tool card already painted in the native
+  scrollback, expanded through the effective disclosure key) and the two
+  ordinary rows Keep/Approve; with NO provable card the question's own detail
+  keeps the full text readable in-flow through `View review text`; a
+  detail-less official shape keeps the guidance line alone.
 - Keep planning… opens the feedback input (draft survives Esc); Enter answers
   the official keep label with the optional custom text. The generic
   custom-first submit path is never used (it would clear the selected label).

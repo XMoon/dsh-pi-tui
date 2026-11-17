@@ -10021,15 +10021,19 @@ export class TuiApp {
    * it?" (a manual-open container that the target also sits in would otherwise
    * silently reopen on the next rebuild). */
   toggleWorkSpan(owner: TranscriptMessage): void {
-    const span = this.eligibleWorkSpans().find(candidate => candidate.owner === owner)
-    const revealed = span !== undefined && this.workSpanTemporarilyRevealed(span)
-    const revokesReveal = this.searchTargetInsideWork(owner)
-    const revokesPlan = this.planTargetInsideWork(owner)
-    if (this.expandedWorkOwners.has(owner) || revealed) {
+    // Per-REQUEST ownership, never the union: an explicit collapse revokes
+    // ONLY the temporary request that actually opened this span or whose
+    // target lives inside it. Collapsing a Search-opened span must not cancel
+    // an unrelated Plan lease, and vice versa.
+    const searchRevealedThis = this.searchRevealsWork(owner)
+    const planRevealedThis = this.planRevealsWork(owner)
+    const searchTargetInside = this.searchTargetInsideWork(owner)
+    const planTargetInside = this.planTargetInsideWork(owner)
+    if (this.expandedWorkOwners.has(owner) || searchRevealedThis || planRevealedThis) {
       this.mutateTranscriptDisclosure(() => {
         this.expandedWorkOwners.delete(owner)
-        if (revealed || revokesReveal) this.suppressSearchReveal()
-        if (revealed || revokesPlan) this.revokePlanInspectionLease()
+        if (searchRevealedThis || searchTargetInside) this.suppressSearchReveal()
+        if (planRevealedThis || planTargetInside) this.revokePlanInspectionLease()
       })
       return
     }
@@ -10042,15 +10046,17 @@ export class TuiApp {
    * explicit collapse revokes the temporary search reveal whenever the target
    * lives inside this cluster (same ownership rule as Work). */
   toggleContextCluster(owner: TranscriptMessage): void {
-    const cluster = this.canonicalStructureIndex().clusterByMember.get(owner)
-    const revealed = cluster !== undefined && this.clusterTemporarilyRevealed(cluster)
-    const revokesReveal = this.searchTargetInsideCluster(owner)
-    const revokesPlan = this.planTargetInsideCluster(owner)
-    if (this.expandedContextClusterOwners.has(owner) || revealed) {
+    // Per-REQUEST ownership (same rule as Work): collapse revokes only the
+    // request that opened this cluster or whose target lives inside it.
+    const searchRevealedThis = this.searchRevealsCluster(owner)
+    const planRevealedThis = this.planRevealsCluster(owner)
+    const searchTargetInside = this.searchTargetInsideCluster(owner)
+    const planTargetInside = this.planTargetInsideCluster(owner)
+    if (this.expandedContextClusterOwners.has(owner) || searchRevealedThis || planRevealedThis) {
       this.mutateTranscriptDisclosure(() => {
         this.expandedContextClusterOwners.delete(owner)
-        if (revealed || revokesReveal) this.suppressSearchReveal()
-        if (revealed || revokesPlan) this.revokePlanInspectionLease()
+        if (searchRevealedThis || searchTargetInside) this.suppressSearchReveal()
+        if (planRevealedThis || planTargetInside) this.revokePlanInspectionLease()
       })
       return
     }
@@ -10650,6 +10656,12 @@ export class TuiApp {
     if (this.planInspection?.message === message) {
       return this.expandedOverride.get(message) !== false
     }
+    return this.searchForcesMessageExpanded(message)
+  }
+
+  /** Whether the CURRENT SEARCH navigation forces this card open (its own
+   * request only; the plan lease is a different request). */
+  private searchForcesMessageExpanded(message: TranscriptMessage): boolean {
     if (!this.searchRevealGranted || this.searchTarget?.message !== message) return false
     if (isUserMessageDisclosureCandidate(message)) {
       if (!this.searchRevealHostOwned) return false
@@ -11903,6 +11915,38 @@ export class TuiApp {
 
   /** The GRANTED reveal's container path (undefined when no reveal is active).
    * The stable ancestry is memoized; the current open state is not. */
+  /** The CURRENT search navigation's own reveal path (undefined when no
+   * reveal is granted). ONE request's answer — never the union. */
+  private searchRevealPathOwners(): SearchRevealPath | undefined {
+    const target = this.searchRevealedMessage()
+    return target === undefined ? undefined : this.revealPathFromAncestry(this.searchRevealAncestry(target))
+  }
+
+  /** The ONE-SHOT plan inspection's own reveal path (undefined when no lease
+   * or the user explicitly collapsed the located card). */
+  private planRevealPathOwners(): SearchRevealPath | undefined {
+    const target = this.planInspection?.message
+    if (target === undefined || this.expandedOverride.get(target) === false) return undefined
+    return this.revealPathFromAncestry(this.searchRevealAncestryFor(target))
+  }
+
+  /** Whether ONE request's path hides a row inside this Work span / cluster. */
+  private searchRevealsWork(owner: TranscriptMessage): boolean {
+    return this.searchRevealPathOwners()?.some(node => node.kind === 'work' && node.owner === owner) === true
+  }
+
+  private planRevealsWork(owner: TranscriptMessage): boolean {
+    return this.planRevealPathOwners()?.some(node => node.kind === 'work' && node.owner === owner) === true
+  }
+
+  private searchRevealsCluster(owner: TranscriptMessage): boolean {
+    return this.searchRevealPathOwners()?.some(node => node.kind === 'context-cluster' && node.owner === owner) === true
+  }
+
+  private planRevealsCluster(owner: TranscriptMessage): boolean {
+    return this.planRevealPathOwners()?.some(node => node.kind === 'context-cluster' && node.owner === owner) === true
+  }
+
   private temporaryRevealOwner(): SearchRevealPath | undefined {
     // The plan inspection's one-shot presentation owns its own lease: its
     // located card's hiding ancestors open exactly like a search navigation
@@ -11920,12 +11964,8 @@ export class TuiApp {
         owners.push(owner)
       }
     }
-    const planTarget = this.planInspection?.message
-    if (planTarget !== undefined && this.expandedOverride.get(planTarget) !== false) {
-      addOwners(this.revealPathFromAncestry(this.searchRevealAncestryFor(planTarget)))
-    }
-    const target = this.searchRevealedMessage()
-    if (target !== undefined) addOwners(this.revealPathFromAncestry(this.searchRevealAncestry(target)))
+    addOwners(this.planRevealPathOwners())
+    addOwners(this.searchRevealPathOwners())
     return owners.length === 0 ? undefined : owners
   }
 
@@ -17197,11 +17237,12 @@ export class TuiApp {
       // the explicit collapse revokes the lease too (first click collapses).
       if (this.planInspection?.message === message) this.revokePlanInspectionLease()
     } else if (this.forcesMessageExpandedTemporarily(message)) {
-      // The card is open only because of a temporary reveal (search navigation
-      // or the plan inspection): a click must collapse it explicitly (a
-      // deleted override would let the reveal re-open).
+      // The card is open only because of a temporary reveal: a click must
+      // collapse it explicitly (a deleted override would let the reveal
+      // re-open). Revoke ONLY the request that forces THIS card — a
+      // Plan-only card's collapse must not cancel an unrelated Search grant.
       this.expandedOverride.set(message, false)
-      this.suppressSearchReveal()
+      if (this.searchForcesMessageExpanded(message)) this.suppressSearchReveal()
       if (this.planInspection?.message === message) this.revokePlanInspectionLease()
     } else {
       this.expandedOverride.set(message, true)
@@ -29276,6 +29317,39 @@ export class TuiApp {
    * the current display subject's Session must be known and equal; an unknown
    * identity is not a proven locate (fail closed to the detail fallback).
    */
+  /**
+   * Locate one OFFICIAL plan tool card in the CURRENT mounted transcript by
+   * the official `intent.callId` (a native `tool.callId`, or a nested PTC
+   * `subCallId` — the sub-call renders INSIDE its root card, so the reveal
+   * targets the ROOT message plus the child id). Local, read-only, no
+   * scroll and no presentation write: the Fullscreen inspection and the
+   * Regular card-presence probe share this ONE identity lookup.
+   */
+  private locatePlanCard(callId: string): { card: TranscriptMessage; ptcSubCallId?: string } | undefined {
+    let ptcSubCallId: string | undefined
+    const matches = (tool: Extract<TranscriptMessage, { kind: 'tool' }>): boolean => {
+      if (tool.name !== 'exit_plan_mode') return false
+      if (tool.callId === callId) return true
+      if (tool.subCallId === callId) {
+        ptcSubCallId = callId
+        return true
+      }
+      return false
+    }
+    const find = (messages: readonly TranscriptMessage[]): TranscriptMessage | undefined => {
+      for (const message of messages) {
+        if (message.kind === 'tool') {
+          if (matches(message)) return message
+          const nested = find(message.subCalls ?? [])
+          if (nested !== undefined) return message
+        }
+      }
+      return undefined
+    }
+    const card = find(this.messages)
+    return card === undefined ? undefined : { card, ...(ptcSubCallId === undefined ? {} : { ptcSubCallId }) }
+  }
+
   private inspectPlanReview(state: QuestionState, reviewSessionId: string | undefined): boolean {
     const question = state.flow.planReviewQuestionForHost()
     const callId = question?.intent?.callId
@@ -29294,31 +29368,9 @@ export class TuiApp {
     // A locate without a fullscreen viewport has nothing to address.
     const scroll = this.fullscreenScroll
     if (scroll === undefined) return false
-    // Locate the tool card in the CURRENT projection: native callId first,
-    // then a recursive PTC sub-call walk (the sub-call renders INSIDE its
-    // root card, so the reveal targets the ROOT message and the child id).
-    let ptcSubCallId: string | undefined
-    const matchesCard = (tool: Extract<TranscriptMessage, { kind: 'tool' }>): boolean => {
-      if (tool.name !== 'exit_plan_mode') return false
-      if (tool.callId === callId) return true
-      if (tool.subCallId === callId) {
-        ptcSubCallId = callId
-        return true
-      }
-      return false
-    }
-    const findCard = (messages: readonly TranscriptMessage[]): TranscriptMessage | undefined => {
-      for (const message of messages) {
-        if (message.kind === 'tool') {
-          if (matchesCard(message)) return message
-          const nested = findCard(message.subCalls ?? [])
-          if (nested !== undefined) return message
-        }
-      }
-      return undefined
-    }
-    const card = findCard(this.messages)
-    if (card === undefined) return false
+    const located = this.locatePlanCard(callId)
+    if (located === undefined) return false
+    const { card, ptcSubCallId } = located
     // An EXPLICIT new View supersedes an earlier user collapse of this card
     // (the user is asking to see the plan again). The collapse marker is
     // dropped here; a collapse made DURING the new reading lease still wins
@@ -29528,6 +29580,14 @@ export class TuiApp {
     state.flow.setPlanInspection({
       canInspect: () => this.fullscreen !== undefined,
       inspect: () => this.inspectPlanReview(state, state.status?.reviewSessionId),
+      // Local card-presence probe (the SAME official callId identity lookup,
+      // read-only): a provable card in the mounted transcript IS the "plan
+      // above in terminal history" that Regular's frozen ordinary layout
+      // names; no card ⇒ the question's own full-text exception entry.
+      cardPresent: () => {
+        const callId = state.flow.planReviewQuestionForHost()?.intent?.callId
+        return callId !== undefined && callId !== '' && this.locatePlanCard(callId) !== undefined
+      },
     })
     state.flow.onPlanReadingScroll = (direction, page) => {
       const scroll = this.fullscreenScroll

@@ -324,6 +324,17 @@ export function planReviewOf(
   return { question, approve }
 }
 
+/** The host-installed plan-review capability (FR7 A4). `canInspect` is the
+ * LIVE executability probe (Fullscreen can toggle while the flow stays parked
+ * in the seat), `inspect` the one-shot transcript locate, and `cardPresent` a
+ * local read-only probe answering whether the reviewed plan card is provably
+ * present in the mounted transcript (the "plan above in terminal history"). */
+interface PlanInspectionSeam {
+  canInspect: () => boolean
+  inspect: () => boolean
+  cardPresent: () => boolean
+}
+
 /** The local step of the plan-review branch (one flow, one step at a time):
  * the decision list, the reading viewport, the keep-planning feedback input,
  * or the question-detail full-text fallback. */
@@ -575,13 +586,17 @@ export class QuestionFlow implements Component, Focusable {
     if (this.planReview === undefined) return []
     const rows: { action: 'view' | 'review' | 'keep' | 'approve'; label: string }[] = []
     if (this.planInspection?.canInspect() === true) rows.push({ action: 'view', label: 'View plan' })
-    // 3.5's EXCEPTION, not a fourth normal row: the official question detail
-    // is the reading entry ONLY where the transcript inspection cannot be
-    // executed at all (Regular has no app-owned seek). In Fullscreen with the
-    // live capability the frozen three-row layout stands and a FAILED locate
-    // already degrades View plan to this same detail page.
+    // 3.5's EXCEPTION, not a normal row: the in-flow full text is the reading
+    // entry ONLY where the transcript cannot be read by this surface (Regular
+    // has no app-owned seek) AND the official card is NOT provably present in
+    // the mounted transcript. With a provable card Regular keeps the frozen
+    // 3.4 ordinary layout (the plan above in terminal history); in Fullscreen
+    // the frozen three-row layout stands and a FAILED locate degrades View
+    // plan to this same detail page.
     const detail = this.planReview.question.detail
-    if (this.planInspection?.canInspect() !== true && detail !== undefined && detail.trim() !== '') {
+    const cardProvable = this.planInspection?.cardPresent() === true
+    if (this.planInspection?.canInspect() !== true && !cardProvable
+      && detail !== undefined && detail.trim() !== '') {
       rows.push({ action: 'review', label: 'View review text' })
     }
     // The official request may offer several non-approve options; the frozen
@@ -599,13 +614,13 @@ export class QuestionFlow implements Component, Focusable {
    * viewport request the flow triggers from the `View plan` decision row, plus
    * the LIVE executability probe (Fullscreen can toggle while this flow stays
    * parked in the seat). The flow itself owns no transcript geometry. */
-  private planInspection: { canInspect: () => boolean; inspect: () => boolean } | undefined
+  private planInspection: PlanInspectionSeam | undefined
 
   /** Install the host's plan inspection capability (A4). Called by the
    * mounting host after the flow exists AND on every queued handover;
    * `undefined` removes the capability (the decision list then has no View
    * row). Returns false when the flow is not a plan review. */
-  setPlanInspection(seam: { canInspect: () => boolean; inspect: () => boolean } | undefined): boolean {
+  setPlanInspection(seam: PlanInspectionSeam | undefined): boolean {
     if (this.planReview === undefined) return false
     this.planInspection = seam
     return true
@@ -2233,14 +2248,15 @@ export class QuestionFlow implements Component, Focusable {
       ? `${color.textStrong(title)}${' '.repeat(width - titleWidth - factWidth)}${color.textMuted(statusFact)}`
       : color.textStrong(title))
     lines.push('')
-    // §3.4: without the Fullscreen inspection there is no app-owned seek, so
-    // the decision list names the honest reading paths — the plan already
-    // painted above in the native terminal scrollback (the tool card; expand
-    // it with the effective disclosure key), and when the question carries its
-    // own detail body the `View review text` row reads the complete text
-    // in-flow. The scrollback line appears only when BOTH are unavailable.
-    if (this.planInspection?.canInspect() !== true
-      && (this.planReview?.question.detail ?? '').trim() === '') {
+    // §3.4 ordinary UI: without the Fullscreen inspection there is no
+    // app-owned seek, so the decision list names the plan ALREADY painted
+    // above in the native terminal scrollback (the tool card; expand it with
+    // the effective disclosure key). The in-flow `View review text` exception
+    // row (rendered only when the card is NOT provably present) replaces this
+    // line, so the two never claim the same reading path.
+    const detailBody = (this.planReview?.question.detail ?? '').trim() !== ''
+    const cardProvable = this.planInspection?.cardPresent() === true
+    if (this.planInspection?.canInspect() !== true && (cardProvable || !detailBody)) {
       lines.push(color.textDim(truncateToWidth('Read the plan above in terminal history.', Math.max(1, width), '…')))
     }
     const rows = this.planDecisionRows()
