@@ -158,8 +158,8 @@ interface OfficialAgent {
     readonly id: string
     readonly header: { readonly id: string; readonly origin: string }
     readonly seq: number
-    eventAt(seq: number): unknown
-    snapshotEvents(): readonly unknown[]
+    eventAt(seq: number): { readonly type: string; readonly data: unknown } | undefined
+    snapshotEvents(): readonly { readonly type: string; readonly data: unknown }[]
     append(type: string, data: unknown): unknown
   }
 }
@@ -464,4 +464,218 @@ test('the official handler receives IMAGE → FILE → IMAGE → FILE in submiss
   }
   assert.equal(await readHash(blocks[1]?.attachment), createHash('sha256').update(firstBytes).digest('hex'))
   assert.equal(await readHash(blocks[3]?.attachment), createHash('sha256').update(secondBytes).digest('hex'))
+})
+
+// ── The official manual-compaction ordering hint (Direct, real registry) ────
+// Evidence level: L2. The OFFICIAL `CommandRuntime` mints `command/run`, and the
+// handler below performs the SAME synchronous compaction-entry work the pinned
+// official definition performs (append `compaction/start` before its first
+// await). The adapter must open the ordering window ONLY for the bare line whose
+// effective definition is the official one AND whose invocation is cited by the
+// marker it just appended. The real BasicCompactionEngine/AgentLoop chain is
+// qualified separately in the application composition suite.
+
+/** Read the ONE `compaction/start` data recorded on the fake Session. */
+function compactionStartData(agent: OfficialAgent): { readonly sourceCommandId?: unknown; readonly turn?: unknown } | undefined {
+  const event = agent.session.snapshotEvents().find(candidate => candidate.type === 'compaction/start')
+  return event?.data as { readonly sourceCommandId?: unknown; readonly turn?: unknown } | undefined
+}
+
+test('the official compact definition that synchronously appends its paired marker opens the ordering window once, before it settles', async (t) => {
+  const host = officialHost(t)
+  const agent = host.createAgent('session-a')
+  const { promise: gate, resolve: release } = Promise.withResolvers<void>()
+  let commandId: unknown
+  host.commands.register({
+    name: 'compact',
+    description: 'official manual compaction',
+    definitionId: '@deepseek-ai/dsh-command-compact' as never,
+    handler: (invocation) => {
+      commandId = invocation.commandId
+      // The pinned official definition's compaction entry: the marker is
+      // appended in the handler's synchronous prefix, before summarization.
+      agent.session.append('compaction/start', {
+        compactionId: 'compaction-1',
+        sourceCommandId: invocation.commandId,
+        turn: null,
+      })
+      return gate.then(() => ({ kind: 'success' as const, text: 'Compacted.' }))
+    },
+  })
+  const entered: number[] = []
+  const pending = host.port.execute({
+    sessionId: 'session-a',
+    line: '/compact',
+    attachments: [],
+    signal: new AbortController().signal,
+    onOfficialCompactEntered: () => { entered.push(agent.session.seq) },
+  })
+  // The proof is the dispatch's OWN synchronous window: the hint has already
+  // fired while the command promise is still held by the summary gate.
+  assert.equal(entered.length, 1,
+    'the ordering hint fires exactly once, inside the dispatch, before the command settles')
+  const start = compactionStartData(agent)
+  assert.equal(start?.sourceCommandId, commandId, 'the marker cites THIS invocation commandId')
+  assert.equal(start?.turn, null, 'a manual compaction owns a standalone (turn-less) bracket')
+  let settled = false
+  pending.then(() => { settled = true }, () => { settled = true })
+  await new Promise<void>(resolve => process.nextTick(resolve))
+  assert.equal(settled, false, 'the command business lifetime is still running when ordering opens')
+  release()
+  const outcome = await pending
+  assert.equal(outcome.kind, 'committed')
+  assert.ok(outcome.kind === 'committed' && outcome.matched)
+  assert.equal(entered.length, 1, 'the hint is never repeated at settlement')
+})
+
+test('a same-name non-official definition never opens the ordering window, even when it appends a compaction marker', async (t) => {
+  const host = officialHost(t)
+  const agent = host.createAgent('session-a')
+  host.commands.register({
+    name: 'compact',
+    description: 'a plugin command that happens to compact',
+    definitionId: 'example/plugin-compact' as never,
+    handler: (invocation) => {
+      agent.session.append('compaction/start', {
+        compactionId: 'compaction-plugin',
+        sourceCommandId: invocation.commandId,
+        turn: null,
+      })
+      return { kind: 'success' as const, text: 'plugin compacted' }
+    },
+  })
+  let entries = 0
+  const outcome = await host.port.execute({
+    sessionId: 'session-a',
+    line: '/compact',
+    attachments: [],
+    signal: new AbortController().signal,
+    onOfficialCompactEntered: () => { entries += 1 },
+  })
+  assert.equal(entries, 0,
+    'the EFFECTIVE definition id — not the name or the marker — is the only exception authority')
+  assert.ok(outcome.kind === 'committed' && outcome.matched,
+    'the normal command result is unchanged')
+})
+
+test('a Session-scoped shadow of the official definition never opens the ordering window', async (t) => {
+  const host = officialHost(t)
+  const agent = host.createAgent('session-a')
+  host.commands.register({
+    name: 'compact',
+    description: 'official manual compaction',
+    definitionId: '@deepseek-ai/dsh-command-compact' as never,
+    handler: (invocation) => {
+      // The official handler still runs under the wrapper's `find`; the point is
+      // the adapter must read the EFFECTIVE winner, which the scoped layer wins.
+      agent.session.append('compaction/start', {
+        compactionId: 'compaction-shadowed',
+        sourceCommandId: invocation.commandId,
+        turn: null,
+      })
+      return { kind: 'success' as const, text: 'shadowed' }
+    },
+  })
+  // A structural stand-in for the upstream `ScopedLayers.merge` result: the
+  // session's scoped definition shadows the official global for this exact
+  // Agent. The registry merge itself is upstream-owned.
+  const shadowed = {
+    execute: (agentScope: unknown, line: string, attachments: readonly unknown[], signal: AbortSignal) =>
+      host.commands.execute(agentScope as never, line, attachments as never, signal),
+    find: (agentScope: unknown, name: string) => name === 'compact'
+      ? { definitionId: 'example/session-scoped-compact' }
+      : host.commands.find(agentScope as never, name),
+  }
+  const port = new DirectHostCommandPort(
+    { get: (name: string) => name === 'commands' ? shadowed : host.ctx.get(name) },
+    sessionId => host.agents.get(sessionId),
+  )
+  let entries = 0
+  await port.execute({
+    sessionId: 'session-a',
+    line: '/compact',
+    attachments: [],
+    signal: new AbortController().signal,
+    onOfficialCompactEntered: () => { entries += 1 },
+  })
+  assert.equal(entries, 0, 'a scoped override of the same name is never the official definition')
+})
+
+test('a command/run without its paired compaction/start never opens the ordering window', async (t) => {
+  const host = officialHost(t)
+  host.createAgent('session-a')
+  host.commands.register({
+    name: 'compact',
+    description: 'official definition with no compactable history',
+    definitionId: '@deepseek-ai/dsh-command-compact' as never,
+    handler: () => ({ kind: 'success' as const, text: 'No compactable history yet.' }),
+  })
+  let entries = 0
+  const outcome = await host.port.execute({
+    sessionId: 'session-a',
+    line: '/compact',
+    attachments: [],
+    signal: new AbortController().signal,
+    onOfficialCompactEntered: () => { entries += 1 },
+  })
+  assert.equal(entries, 0, 'the executor lifecycle row alone is not maintenance evidence')
+  assert.ok(outcome.kind === 'committed' && outcome.matched)
+  assert.equal((outcome.execution as { result: { text: string } }).result.text, 'No compactable history yet.')
+})
+
+test('an argued line, attachments, an older find-less service or an aborted signal never opens the ordering window', async (t) => {
+  const host = officialHost(t)
+  const agent = host.createAgent('session-a')
+  host.commands.register({
+    name: 'compact',
+    description: 'official manual compaction',
+    definitionId: '@deepseek-ai/dsh-command-compact' as never,
+    handler: (invocation) => {
+      agent.session.append('compaction/start', {
+        compactionId: 'compaction-guard',
+        sourceCommandId: invocation.commandId,
+        turn: null,
+      })
+      return { kind: 'success' as const, text: 'compacted' }
+    },
+  })
+  let entries = 0
+  const onOfficialCompactEntered = (): void => { entries += 1 }
+  const signal = new AbortController().signal
+  // An argued line is an ordinary submission upstream; it must never qualify.
+  await host.port.execute({ sessionId: 'session-a', line: '/compact extra', attachments: [], signal, onOfficialCompactEntered })
+  assert.equal(entries, 0, 'the argued form is not the official argument-free invocation')
+  // An attachment-bearing invocation is refused before the handler runs.
+  await host.port.execute({
+    sessionId: 'session-a',
+    line: '/compact',
+    attachments: [{ type: 'image', mediaType: 'image/png', data: '' }],
+    signal,
+    onOfficialCompactEntered,
+  })
+  assert.equal(entries, 0, 'a rejected attachment admission proves nothing entered maintenance')
+  // An OLDER structural service without the effective-find seam cannot prove
+  // the official identity, so it never opens the window.
+  const legacy = new DirectHostCommandPort(
+    {
+      get: (name: string) => name === 'commands'
+        ? { execute: (agentScope: unknown, line: string, attachments: readonly unknown[]) => host.commands.execute(agentScope as never, line, attachments as never, signal) }
+        : host.ctx.get(name),
+    },
+    sessionId => host.agents.get(sessionId),
+  )
+  await legacy.execute({ sessionId: 'session-a', line: '/compact', attachments: [], signal, onOfficialCompactEntered })
+  assert.equal(entries, 0, 'a find-less stand-in never opens the ordering window')
+  // An already-aborted request is a known cancellation: nothing is dispatched.
+  const aborted = new AbortController()
+  aborted.abort()
+  const outcome = await host.port.execute({
+    sessionId: 'session-a',
+    line: '/compact',
+    attachments: [],
+    signal: aborted.signal,
+    onOfficialCompactEntered,
+  })
+  assert.deepEqual(outcome, { kind: 'cancelled' })
+  assert.equal(entries, 0, 'a pre-aborted dispatch never enters maintenance')
 })

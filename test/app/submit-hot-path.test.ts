@@ -96,13 +96,15 @@ function longSessionEvents(totalTurns: number): SessionEvent[] {
 }
 
 /** The current Session shape: the backing log is private; production code
- * sees only the snapshot reads (compatibility-plan B4). */
+ * sees only the snapshot reads (compatibility-plan B4) plus the append the
+ * Host command lifecycle uses. */
 interface LiveSession {
   id: string
   header: { id: string; cwd: string; createdAt: number; version: number }
   readonly seq: number
   eventAt(seq: number): SessionEvent | undefined
   snapshotEvents(): readonly SessionEvent[]
+  append(type: string, data: Record<string, unknown>): SessionEvent
 }
 
 /** Build the current Session mock over a private backing log. */
@@ -114,6 +116,11 @@ function makeLiveSession(id: string, header: LiveSession['header'], events: read
     get seq() { return log.length },
     eventAt: (seq: number) => log[seq],
     snapshotEvents: () => Object.freeze([...log]),
+    append: (type, data) => {
+      const appended = { type, seq: SessionSeq(log.length), time: 1_700_000_000_000 + log.length * 1000, data } as SessionEvent
+      log.push(appended)
+      return appended
+    },
   }
 }
 
@@ -865,6 +872,254 @@ test('a held ordinary prompt waits behind an earlier legacy command in the ONE s
     harness.host.followedUp.some(message => JSON.stringify(message).includes('B after the command')), 5_000), true,
   'both writes eventually deliver, in FIFO order')
   assert.deepEqual(canonicalized, ['B after the command'], 'the ordinary prompt canonicalized once, after the turn')
+})
+
+// ── The official manual-compaction ordering window (Direct application) ────
+// Evidence level: application composition (Controller + Direct adapter + the
+// real FIFO). The Host command service is a structural stand-in for the pinned
+// `CommandRuntime`: its `execute` performs the SAME synchronous entry work
+// (append `command/run`, append the paired `compaction/start`) and then holds the
+// command open. The exact official definition identity is proven at L2 in
+// `test/app/host-command-port.test.ts`; the real AgentLoop maintenance chain is
+// proven in `test/integration/compact-submission-maintenance-direct.test.ts`.
+
+interface CompactCommandHarness {
+  register(definition: {
+    name: string
+    description?: string
+    definitionId?: string
+    handler: (invocation: unknown) => unknown
+  }): () => void
+  execute(agent: unknown, line: string, attachments?: readonly unknown[]): Promise<unknown>
+}
+
+test('an ordinary queued prompt and its successor reach the Host while an official compact maintenance is held', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-compact-fifo-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-compact', events: sessionEvents('resumed answer') })
+  const session = harness.session!
+  const { promise: compactGate, resolve: releaseCompact } = Promise.withResolvers<void>()
+  // A held gate always keeps a fallback release: a failing assertion before the
+  // explicit release must not park the owned command workflow forever.
+  life.defer(() => releaseCompact())
+  const { promise: entered, resolve: markEntered } = Promise.withResolvers<void>()
+  let didEnter = false
+  entered.then(() => { didEnter = true })
+  const compactCommandId = CommandId('cmd-official-compact')
+  const commands = harness.commands as CompactCommandHarness
+  const originalExecute = commands.execute.bind(commands)
+  commands.register({
+    name: 'compact',
+    description: 'official manual compaction',
+    definitionId: '@deepseek-ai/dsh-command-compact',
+    handler: () => ({ kind: 'success' }),
+  })
+  commands.execute = async (agent, line, attachments = []) => {
+    if (line.trim() === '/compact') {
+      // The pinned official executor's synchronous prefix: lifecycle row, then
+      // the compaction transaction's opening marker citing this invocation.
+      session.append('command/run', {
+        commandId: compactCommandId,
+        name: 'compact',
+        args: '',
+        source: { kind: 'user' },
+      })
+      session.append('compaction/start', {
+        compactionId: 'compaction-1',
+        sourceCommandId: compactCommandId,
+        turn: null,
+      })
+      markEntered()
+      await compactGate
+      session.append('command/done', { commandId: compactCommandId, kind: 'success', text: 'Compacted.' })
+      return { commandId: compactCommandId, result: { kind: 'success', text: 'Compacted.' } }
+    }
+    return originalExecute(agent, line, attachments)
+  }
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-compact' })
+  const submit = (text: string): void => {
+    mounted.app.setDraft(text)
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  }
+  // A: the official compact takes the FIFO turn and enters maintenance.
+  submit('/compact')
+  assert.equal(await drainUntil(() => didEnter, 5_000), true,
+    'the official compact handler enters maintenance')
+  assert.ok(session.snapshotEvents().some(event => event.type === 'compaction/start'),
+    'the maintenance transaction is open on the REAL session log')
+  assert.ok(!session.snapshotEvents().some(event => event.type === 'command/done'),
+    'the command business lifetime is still running')
+  // B: an ordinary queued prompt submitted behind A. The old FIFO held it until
+  // A settled; the proven maintenance entry opens ordering for it.
+  submit('B during the compact maintenance')
+  const bAccepted = await drainUntil(() =>
+    harness.host.followedUp.some(message => JSON.stringify(message).includes('B during the compact maintenance')), 5_000)
+  assert.equal(bAccepted, true, 'B reaches the Host Inbox while the compact summary is still held')
+  assert.equal(mounted.app.getDraft(), '', 'B leaves the composer at the Host acceptance')
+  assert.ok(!session.snapshotEvents().some(event => event.type === 'command/done'),
+    'B was accepted BEFORE the compact command settled')
+  // C: the next ordinary queue keeps the single FIFO order behind B.
+  submit('C after B')
+  assert.equal(await drainUntil(() => harness.host.followedUp.length === 2, 5_000), true,
+    'C reaches the Host as well')
+  assert.deepEqual(
+    harness.host.followedUp.map(message => JSON.stringify(message).includes('C after B') ? 'C' : 'B'),
+    ['B', 'C'],
+    'B and C keep their submission order',
+  )
+  releaseCompact()
+  assert.equal(await drainUntil(() =>
+    session.snapshotEvents().some(event => event.type === 'command/done'), 5_000), true,
+  'the compact command reaches its real terminal settlement')
+  assert.equal(harness.host.followedUp.length, 2, 'no prompt was written twice')
+})
+
+test('an ordinary queue may pass the held compact, while a later Host command and the queue behind it wait for it', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-compact-barrier-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-compact-barrier', events: sessionEvents('resumed answer') })
+  const session = harness.session!
+  const { promise: compactGate, resolve: releaseCompact } = Promise.withResolvers<void>()
+  const { promise: slowGate, resolve: releaseSlow } = Promise.withResolvers<void>()
+  life.defer(() => { releaseCompact(); releaseSlow() })
+  const { promise: entered, resolve: markEntered } = Promise.withResolvers<void>()
+  let didEnter = false
+  entered.then(() => { didEnter = true })
+  const compactCommandId = CommandId('cmd-official-compact')
+  const slowCommandId = CommandId('cmd-slow-after-compact')
+  const executed: string[] = []
+  const commands = harness.commands as CompactCommandHarness
+  const originalExecute = commands.execute.bind(commands)
+  commands.register({
+    name: 'compact',
+    description: 'official manual compaction',
+    definitionId: '@deepseek-ai/dsh-command-compact',
+    handler: () => ({ kind: 'success' }),
+  })
+  commands.register({ name: 'slowcmd', description: 'a slow ordinary Host command', handler: () => ({ kind: 'success' }) })
+  commands.execute = async (agent, line, attachments = []) => {
+    if (line.trim() === '/compact') {
+      session.append('command/run', { commandId: compactCommandId, name: 'compact', args: '', source: { kind: 'user' } })
+      session.append('compaction/start', { compactionId: 'compaction-1', sourceCommandId: compactCommandId, turn: null })
+      markEntered()
+      await compactGate
+      session.append('command/done', { commandId: compactCommandId, kind: 'success', text: 'Compacted.' })
+      return { commandId: compactCommandId, result: { kind: 'success', text: 'Compacted.' } }
+    }
+    if (line.trim() === '/slowcmd') {
+      executed.push('slowcmd')
+      await slowGate
+      return { commandId: slowCommandId, result: { kind: 'success' } }
+    }
+    return originalExecute(agent, line, attachments)
+  }
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-compact-barrier' })
+  const submit = (text: string): void => {
+    mounted.app.setDraft(text)
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  }
+  submit('/compact')
+  assert.equal(await drainUntil(() => didEnter, 5_000), true,
+    'the official compact handler enters maintenance')
+  submit('B before the slow command')
+  assert.equal(await drainUntil(() =>
+    harness.host.followedUp.some(message => JSON.stringify(message).includes('B before the slow command')), 5_000), true,
+  'the ordinary queue passes the held compact')
+  // D: a non-qualifying Host command submitted after B. It must NOT reach its
+  // handler while the official command is unsettled.
+  submit('/slowcmd')
+  // E: an ordinary queue behind D. It must not overtake D's own FIFO position.
+  submit('E behind the slow command')
+  for (let index = 0; index < 200; index += 1) await Promise.resolve()
+  assert.deepEqual(executed, [], 'the non-qualifying command never enters while the compact is unsettled')
+  assert.equal(harness.host.followedUp.length, 1, 'the queue behind it cannot overtake it')
+  // A settles: D now runs and holds its OWN business lifetime.
+  releaseCompact()
+  assert.equal(await drainUntil(() => executed.length === 1, 5_000), true,
+    'the Host command starts only after the official compact settles')
+  for (let index = 0; index < 200; index += 1) await Promise.resolve()
+  assert.equal(harness.host.followedUp.length, 1, 'E still cannot overtake the running Host command')
+  releaseSlow()
+  assert.equal(await drainUntil(() =>
+    harness.host.followedUp.some(message => JSON.stringify(message).includes('E behind the slow command')), 5_000), true,
+  'E follows D in FIFO order once D settles')
+  assert.equal(harness.host.followedUp.length, 2, 'each gesture wrote exactly once')
+})
+
+test('a same-name plugin compact never opens the ordering window and keeps the fully serial FIFO', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-compact-plugin-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-compact-plugin', events: sessionEvents('resumed answer') })
+  const session = harness.session!
+  const { promise: pluginGate, resolve: releasePlugin } = Promise.withResolvers<void>()
+  life.defer(() => releasePlugin())
+  const { promise: entered, resolve: markEntered } = Promise.withResolvers<void>()
+  let didEnter = false
+  entered.then(() => { didEnter = true })
+  const commandId = CommandId('cmd-plugin-compact')
+  const commands = harness.commands as CompactCommandHarness
+  commands.register({
+    name: 'compact',
+    description: 'a plugin command that compacts under the same name',
+    definitionId: 'example/plugin-compact',
+    handler: () => ({ kind: 'success' }),
+  })
+  const originalExecute = commands.execute.bind(commands)
+  commands.execute = async (agent, line, attachments = []) => {
+    if (line.trim() === '/compact') {
+      // Even the SAME marker shape appended in the same synchronous window does
+      // not qualify: the effective definition id is not the official one.
+      session.append('command/run', { commandId, name: 'compact', args: '', source: { kind: 'user' } })
+      session.append('compaction/start', { compactionId: 'compaction-plugin', sourceCommandId: commandId, turn: null })
+      markEntered()
+      await pluginGate
+      return { commandId, result: { kind: 'success', text: 'plugin compacted' } }
+    }
+    return originalExecute(agent, line, attachments)
+  }
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-compact-plugin' })
+  const submit = (text: string): void => {
+    mounted.app.setDraft(text)
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  }
+  submit('/compact')
+  assert.equal(await drainUntil(() => didEnter, 5_000), true,
+    'the plugin compact handler runs')
+  submit('B behind the plugin compact')
+  for (let index = 0; index < 200; index += 1) await Promise.resolve()
+  assert.equal(harness.host.followedUp.length, 0,
+    'a non-official same-name command keeps the fully serial FIFO')
+  assert.equal(mounted.app.getDraft(), 'B behind the plugin compact',
+    'the held prompt keeps its draft while it waits')
+  releasePlugin()
+  assert.equal(await drainUntil(() =>
+    harness.host.followedUp.some(message => JSON.stringify(message).includes('B behind the plugin compact')), 5_000), true,
+  'the prompt is delivered once the plugin command settles')
+  assert.equal(harness.host.followedUp.length, 1)
 })
 
 test('submit work does not scale with session history length', async (t) => {
