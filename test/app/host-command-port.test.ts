@@ -247,7 +247,13 @@ function officialHost(t: TestContext): OfficialHost {
     agents,
     commands,
     port: new DirectHostCommandPort(
-      { get: (name: string) => ctx.get(name) },
+      {
+        get: (name: string) => ctx.get(name),
+        // The official synchronous observation seam the adapter uses for the
+        // ordering proof; the fake Session emits like the real producer.
+        on: (name: string, listener: (session: unknown, event: { readonly type?: unknown; readonly data?: unknown }) => void) =>
+          ctx.on(name as never, listener as never),
+      },
       sessionId => agents.get(sessionId),
     ),
     handlerInvocations,
@@ -264,6 +270,9 @@ function officialHost(t: TestContext): OfficialHost {
           append: (type: string, data: unknown) => {
             const event = { type, seq: events.length, time: Date.now(), data }
             events.push(event)
+            // The real pinned Session publishes `session/event` synchronously
+            // inside `append`; the fake mirrors that official observation.
+            ctx.emit('session/event', agent.session as never, event as never)
             return event
           },
         },
@@ -605,6 +614,8 @@ test('a failed pre-handler lifecycle append never opens the ordering window', as
           },
         }
         : host.ctx.get(name),
+      on: (name: string, listener: (session: unknown, event: { readonly type?: unknown; readonly data?: unknown }) => void) =>
+        host.ctx.on(name as never, listener as never),
     },
     sessionId => host.agents.get(sessionId),
   )
@@ -661,6 +672,8 @@ test('an argued line, attachments, an older find-less service or an aborted sign
       get: (name: string) => name === 'commands'
         ? { execute: (agentScope: unknown, line: string, attachments: readonly unknown[]) => host.commands.execute(agentScope as never, line, attachments as never, signal) }
         : host.ctx.get(name),
+      on: (name: string, listener: (session: unknown, event: { readonly type?: unknown; readonly data?: unknown }) => void) =>
+        host.ctx.on(name as never, listener as never),
     },
     sessionId => host.agents.get(sessionId),
   )

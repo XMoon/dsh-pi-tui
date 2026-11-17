@@ -906,6 +906,11 @@ test('an ordinary queued prompt and its successor reach the Host while an offici
   life.defer(() => disposeContext(context))
   const harness = makeHarness(home, { id: 'submit-session-compact', events: sessionEvents('resumed answer') })
   const session = harness.session!
+  // The fake Session mirrors the real producer's synchronous `session/event`
+  // publication: the Direct adapter observes the official event, never a log read.
+  const append = (type: string, data: Record<string, unknown>): void => {
+    context.emit('session/event', session as never, session.append(type, data) as never)
+  }
   const { promise: compactGate, resolve: releaseCompact } = Promise.withResolvers<void>()
   // A held gate always keeps a fallback release: a failing assertion before the
   // explicit release must not park the owned command workflow forever.
@@ -926,20 +931,20 @@ test('an ordinary queued prompt and its successor reach the Host while an offici
     if (line.trim() === '/compact') {
       // The pinned official executor's synchronous prefix: lifecycle row, then
       // the compaction transaction's opening marker citing this invocation.
-      session.append('command/run', {
+      append('command/run', {
         commandId: compactCommandId,
         name: 'compact',
         args: '',
         source: { kind: 'user' },
       })
-      session.append('compaction/start', {
+      append('compaction/start', {
         compactionId: 'compaction-1',
         sourceCommandId: compactCommandId,
         turn: null,
       })
       markEntered()
       await compactGate
-      session.append('command/done', { commandId: compactCommandId, kind: 'success', text: 'Compacted.' })
+      append('command/done', { commandId: compactCommandId, kind: 'success', text: 'Compacted.' })
       return { commandId: compactCommandId, result: { kind: 'success', text: 'Compacted.' } }
     }
     return originalExecute(agent, line, attachments)
@@ -995,6 +1000,9 @@ test('an ordinary queue may pass the held compact, while a later Host command an
   life.defer(() => disposeContext(context))
   const harness = makeHarness(home, { id: 'submit-session-compact-barrier', events: sessionEvents('resumed answer') })
   const session = harness.session!
+  const append = (type: string, data: Record<string, unknown>): void => {
+    context.emit('session/event', session as never, session.append(type, data) as never)
+  }
   const { promise: compactGate, resolve: releaseCompact } = Promise.withResolvers<void>()
   const { promise: slowGate, resolve: releaseSlow } = Promise.withResolvers<void>()
   life.defer(() => { releaseCompact(); releaseSlow() })
@@ -1015,11 +1023,11 @@ test('an ordinary queue may pass the held compact, while a later Host command an
   commands.register({ name: 'slowcmd', description: 'a slow ordinary Host command', handler: () => ({ kind: 'success' }) })
   commands.execute = async (agent, line, attachments = []) => {
     if (line.trim() === '/compact') {
-      session.append('command/run', { commandId: compactCommandId, name: 'compact', args: '', source: { kind: 'user' } })
-      session.append('compaction/start', { compactionId: 'compaction-1', sourceCommandId: compactCommandId, turn: null })
+      append('command/run', { commandId: compactCommandId, name: 'compact', args: '', source: { kind: 'user' } })
+      append('compaction/start', { compactionId: 'compaction-1', sourceCommandId: compactCommandId, turn: null })
       markEntered()
       await compactGate
-      session.append('command/done', { commandId: compactCommandId, kind: 'success', text: 'Compacted.' })
+      append('command/done', { commandId: compactCommandId, kind: 'success', text: 'Compacted.' })
       return { commandId: compactCommandId, result: { kind: 'success', text: 'Compacted.' } }
     }
     if (line.trim() === '/slowcmd') {
@@ -1075,6 +1083,9 @@ test('a same-name plugin compact never opens the ordering window and keeps the f
   life.defer(() => disposeContext(context))
   const harness = makeHarness(home, { id: 'submit-session-compact-plugin', events: sessionEvents('resumed answer') })
   const session = harness.session!
+  const append = (type: string, data: Record<string, unknown>): void => {
+    context.emit('session/event', session as never, session.append(type, data) as never)
+  }
   const { promise: pluginGate, resolve: releasePlugin } = Promise.withResolvers<void>()
   life.defer(() => releasePlugin())
   const { promise: entered, resolve: markEntered } = Promise.withResolvers<void>()
@@ -1093,8 +1104,8 @@ test('a same-name plugin compact never opens the ordering window and keeps the f
     if (line.trim() === '/compact') {
       // Even the SAME marker shape appended in the same synchronous window does
       // not qualify: the effective definition id is not the official one.
-      session.append('command/run', { commandId, name: 'compact', args: '', source: { kind: 'user' } })
-      session.append('compaction/start', { compactionId: 'compaction-plugin', sourceCommandId: commandId, turn: null })
+      append('command/run', { commandId, name: 'compact', args: '', source: { kind: 'user' } })
+      append('compaction/start', { compactionId: 'compaction-plugin', sourceCommandId: commandId, turn: null })
       markEntered()
       await pluginGate
       return { commandId, result: { kind: 'success', text: 'plugin compacted' } }

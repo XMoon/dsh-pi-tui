@@ -46,6 +46,12 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { DirectHostCommandPort } from '../../src/runtime/direct/host-command-direct.ts'
 import { DirectSessionWriter } from '../../src/runtime/direct/session-writer-direct.ts'
 import { SessionOperationBarrier } from '../../src/app/session/operation-barrier.ts'
+import { QueueManagerController } from '../../src/app/queue/manager.ts'
+import { queueTextOf } from '../../src/app/surface/pending-presentation.ts'
+import { DirectPendingInputReader } from '../../src/runtime/direct/pending-input-reader-direct.ts'
+import { TuiApp } from '../../src/tui-app.ts'
+import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import {
   createDirectTspFixture,
   directSettle,
@@ -129,7 +135,7 @@ async function mountHost(): Promise<HostUnderTest> {
     ctx,
     agent,
     engine,
-    port: new DirectHostCommandPort({ get: (name: string) => ctx.get(name) }, agentFor),
+    port: new DirectHostCommandPort(ctx, agentFor),
     writer: new DirectSessionWriter({ get: (name: string) => ctx.get(name) }, agentFor),
     async seed() {
       agent.followup(createUserMessage({
@@ -379,6 +385,150 @@ test('aborting a held official compact closes its bracket and still delivers the
     'the parked prompt starts its own turn after the cancellation')
 })
 
+/**
+ * The REAL Queue Manager controller over the REAL Direct writer and the REAL
+ * Agent Inbox. This is the production owner of occurrence edit/delete (the TUI
+ * panel only drives it), so the held-maintenance queue-management cases exercise
+ * the same `withWriter` + `SessionWriter.updateQueue` path the panel uses.
+ */
+function queueManagerFor(host: HostUnderTest): {
+  readonly controller: QueueManagerController
+  drain(): Promise<void>
+} {
+  const agentFor = (sessionId: string) => sessionId === host.agent.session.id ? host.agent as never : undefined
+  const barrier = new SessionOperationBarrier()
+  const tasks: Promise<void>[] = []
+  const controller = new QueueManagerController({
+    reader: new DirectPendingInputReader(agentFor),
+    writer: host.writer,
+    captureSessionId: () => host.agent.session.id,
+    captureSubject: () => ({ owner: host.agent.session.id }),
+    isSubjectCurrent: token => (token as { readonly owner?: string }).owner === host.agent.session.id,
+    captureScope: () => ({ sessionId: host.agent.session.id } as never),
+    isScopeCurrent: () => true,
+    isViewing: () => false,
+    withWriter: (scope, task) => barrier.runWriter(scope.sessionId, () => task()),
+    beginClientWrite: () => () => {},
+    runOwned: (_label, task) => { tasks.push(task()) },
+    refreshPendingInput: () => {},
+    notify: () => {},
+    textOf: content => queueTextOf(content as never),
+  })
+  controller.attach({ present: () => {}, retire: () => {} })
+  return {
+    controller,
+    async drain() {
+      while (tasks.length > 0) await tasks.shift()
+    },
+  }
+}
+
+function inboxTexts(host: HostUnderTest): string[] {
+  return host.agent.inbox.nextTurn.map(item => JSON.stringify(item))
+}
+
+test('the real Queue Manager edits a prompt accepted during a held compact to ONE effective occurrence', async (t) => {
+  const life = testLifecycle(t)
+  const host = await mountHost()
+  t.after(() => host.dispose())
+  const { promise: summaryGate, resolve: releaseSummary } = Promise.withResolvers<void>()
+  life.defer(() => releaseSummary())
+  host.engine.gate = summaryGate
+  await host.seed()
+  const seedTurns = turnStarts(host.agent.session.snapshotEvents()).length
+  const command = host.port.execute({
+    sessionId: host.agent.session.id,
+    line: '/compact',
+    attachments: [],
+    signal: new AbortController().signal,
+    onOfficialCompactEntered: () => {},
+  })
+  await waitFor('the real compaction transaction to reach summarization',
+    () => host.engine.summarizeEntries === 1)
+  await host.writer.prompt(host.agent.session.id, createUserMessage({
+    content: [{ type: 'text', text: PROMPT_TEXT }],
+    source: { kind: 'user' },
+  }), 'queue', { onAccepted: () => {} })
+  const pending = host.agent.inbox.nextTurn.find(item => JSON.stringify(item).includes(PROMPT_TEXT))
+  assert.ok(pending !== undefined, 'the accepted prompt is a real pending occurrence')
+  const queue = queueManagerFor(host)
+  queue.controller.open()
+  queue.controller.startEdit(pending.id)
+  assert.equal(queue.controller.view().mode, 'edit')
+  queue.controller.setDraft('edited during the held maintenance')
+  queue.controller.save()
+  await queue.drain()
+  assert.equal(queue.controller.view().notice, undefined, 'the edit committed')
+  const edited = host.agent.inbox.nextTurn.filter(item => item.id === pending.id)
+  assert.equal(edited.length, 1, 'the occurrence keeps exactly ONE identity')
+  assert.match(JSON.stringify(edited[0]), /edited during the held maintenance/)
+  assert.equal(inboxTexts(host).some(text => text.includes(PROMPT_TEXT)), false,
+    'the original text is replaced, never duplicated')
+  assert.ok(!host.agent.session.snapshotEvents().some(event => event.type === 'command/done'),
+    'the compact is still unsettled while the edit committed')
+  releaseSummary()
+  const outcome = await command
+  assert.ok(outcome.kind === 'committed' && outcome.matched)
+  await host.agent.whenIdle()
+  const settled = host.agent.session.snapshotEvents()
+  assert.equal(userMessages(settled, 'edited during the held maintenance').length, 1,
+    'the edited occurrence is consumed exactly once')
+  assert.equal(userMessages(settled, PROMPT_TEXT).length, 0, 'the original text is never consumed')
+  assert.equal(turnStarts(settled).length, seedTurns + 1)
+})
+
+test('the real Queue Manager deletes a prompt accepted during a held compact so it is never consumed', async (t) => {
+  const life = testLifecycle(t)
+  const host = await mountHost()
+  t.after(() => host.dispose())
+  const { promise: summaryGate, resolve: releaseSummary } = Promise.withResolvers<void>()
+  life.defer(() => releaseSummary())
+  host.engine.gate = summaryGate
+  await host.seed()
+  const seedTurns = turnStarts(host.agent.session.snapshotEvents()).length
+  const command = host.port.execute({
+    sessionId: host.agent.session.id,
+    line: '/compact',
+    attachments: [],
+    signal: new AbortController().signal,
+    onOfficialCompactEntered: () => {},
+  })
+  await waitFor('the real compaction transaction to reach summarization',
+    () => host.engine.summarizeEntries === 1)
+  await host.writer.prompt(host.agent.session.id, createUserMessage({
+    content: [{ type: 'text', text: PROMPT_TEXT }],
+    source: { kind: 'user' },
+  }), 'queue', { onAccepted: () => {} })
+  const pending = host.agent.inbox.nextTurn.find(item => JSON.stringify(item).includes(PROMPT_TEXT))
+  assert.ok(pending !== undefined)
+  const queue = queueManagerFor(host)
+  queue.controller.open()
+  queue.controller.startDelete(pending.id)
+  queue.controller.confirmDelete()
+  await queue.drain()
+  assert.equal(queue.controller.view().notice, undefined, 'the delete committed')
+  assert.equal(host.agent.inbox.nextTurn.some(item => item.id === pending.id), false,
+    'the occurrence is removed from the real Inbox')
+  assert.ok(!host.agent.session.snapshotEvents().some(event => event.type === 'command/done'))
+  releaseSummary()
+  const outcome = await command
+  assert.ok(outcome.kind === 'committed' && outcome.matched)
+  await host.agent.whenIdle()
+  const settled = host.agent.session.snapshotEvents()
+  assert.equal(userMessages(settled, PROMPT_TEXT).length, 0, 'the withdrawn prompt is never consumed')
+  assert.equal(turnStarts(settled).length, seedTurns,
+    'the withdrawn prompt starts no model turn')
+  // A CONSUMED occurrence is not presented as manageable afterwards.
+  const consumed = host.agent.session.snapshotEvents().find(event => event.type === 'user/message')
+  assert.ok(consumed !== undefined)
+  // The panel is still open in Browse after the committed delete; a repeated
+  // keyboard/Manage open would toggle-close it.
+  queue.controller.startDelete(pending.id)
+  assert.equal(queue.controller.view().notice?.text, 'This message is no longer queued',
+    'a no-longer-pending occurrence is refused, never faked as recallable')
+  await queue.drain()
+})
+
 // ── The application (L6) composition over the real TSP runner ───────────────
 
 /** The latest controlled editor text committed for the composer. */
@@ -395,13 +545,13 @@ async function submitInput(fixture: DirectTspFixture, command: string): Promise<
 }
 
 /** The live Host Agents this surface owns, by Session id (the Host authority). */
-function liveAgentIds(fixture: DirectTspFixture): string[] {
+function liveAgentIds(fixture: { readonly ctx: Context }): string[] {
   const agents = fixture.ctx.get('agents') as unknown as { list(): readonly { session: { id: string } }[] }
   return agents.list().map(agent => agent.session.id)
 }
 
 /** One live Session's authoritative log (the Host store's own read). */
-function liveSessionEvents(fixture: DirectTspFixture, sessionId: string): readonly SessionEvent[] {
+function liveSessionEvents(fixture: { readonly ctx: Context }, sessionId: string): readonly SessionEvent[] {
   const sessions = fixture.ctx.get('sessions') as unknown as {
     get(id: SessionId): { snapshotEvents(): readonly SessionEvent[] } | undefined
   }
@@ -517,6 +667,91 @@ test('a TSP Enter reaches the real Host during a held official compact, while th
   } finally {
     // Fallback release BEFORE teardown: a failing assertion must not strand the
     // owned command workflow the fixture's disposal waits for.
+    releaseSummary()
+    recorder.detach()
+    await fixture.settle()
+  }
+})
+
+test('a real Alt+↑ recalls the prompt accepted during a held compact before the compact settles', async (t) => {
+  const life = testLifecycle(t)
+  const { promise: summaryGate, resolve: releaseSummary } = Promise.withResolvers<void>()
+  life.defer(() => releaseSummary())
+  // The regular PiTui physical-terminal stand-in: the direct fixture leaves the
+  // tty to this VirtualTerminal, so the alt+up BYTES go through the production
+  // keybinding → action → controller.dequeue chain (no direct callback call).
+  const vt = new VirtualTerminal(110, 32)
+  life.defer(installVirtualProcessTerminal(vt))
+  const apps: TuiApp[] = []
+  const originalStart = TuiApp.prototype.start
+  TuiApp.prototype.start = function (this: TuiApp) {
+    apps.push(this)
+    return originalStart.call(this)
+  }
+  life.defer(() => { TuiApp.prototype.start = originalStart })
+  // The PiTui composer paints only the visible draft lines, so the typed seed
+  // stays short while a LONG scripted assistant answer supplies the compactable
+  // surface span (the summary must genuinely shrink the shadowed content).
+  const fixture = await createDirectTspFixture(life, {
+    renderer: 'pi-tui',
+    officialCompact: true,
+    deltas: [('long scripted assistant history '.repeat(120))],
+  })
+  const compact = fixture.officialCompact
+  assert.ok(compact !== undefined)
+  compact.holdSummary(summaryGate)
+  const prompts: Array<{ readonly sessionId: string }> = []
+  const recorder = fixture.recordPrompts(call => { prompts.push(call) })
+  life.defer(() => recorder.detach())
+  const view = (): string => vt.getViewport().join('\n')
+  const submit = async (text: string): Promise<void> => {
+    vt.sendInput(text)
+    await waitFor('the composer to hold the typed input', () => view().includes(text), 30_000)
+    vt.sendInput('\r')
+  }
+  try {
+    await waitFor('the PiTui runner painted', () => view().includes('dsh-pi-tui'), 30_000)
+    await submit('seed history for manual compaction')
+    await waitFor('the seed prompt write to settle', () => recorder.calls() === 1, 30_000)
+    const sessionEvents = (): readonly SessionEvent[] => liveSessionEvents(fixture, prompts[0]!.sessionId)
+    await waitFor('the seed turn to close',
+      () => sessionEvents().some(event => event.type === 'turn/end'), 30_000)
+    await submit('/compact')
+    await waitFor('the real official compact to reach summarization',
+      () => compact.summarizeEntries() === 1, 30_000)
+    await submit(PROMPT_TEXT)
+    await waitFor('B to be accepted during the held maintenance', () => recorder.calls() === 2, 30_000)
+    const sessionId = prompts[0]!.sessionId
+    const inboxHas = (marker: string): boolean => {
+      const agents = fixture.ctx.get('agents') as unknown as {
+        get(id: SessionId): {
+          readonly inbox: {
+            readonly nextTurn: readonly unknown[]
+            readonly nextStep: readonly unknown[]
+          }
+        } | undefined
+      }
+      const agent = agents.get(SessionId(sessionId))
+      return agent !== undefined
+        && [...agent.inbox.nextTurn, ...agent.inbox.nextStep].some(item => JSON.stringify(item).includes(marker))
+    }
+    assert.equal(inboxHas(PROMPT_TEXT), true, 'B is a real pending Host occurrence')
+    // The REAL user gesture: alt+up through the terminal input boundary.
+    vt.sendInput('\x1b[1;3A')
+    await waitFor('the recalled prompt to land in the composer', () => view().includes(PROMPT_TEXT), 30_000)
+    assert.equal(inboxHas(PROMPT_TEXT), false, 'the occurrence left the real Inbox')
+    assert.ok(!sessionEvents().some(event => event.type === 'command/done'),
+      'the compact is still unsettled after the recall committed')
+    releaseSummary()
+    await waitFor('the compact command terminal',
+      () => sessionEvents().some(event => event.type === 'command/done'), 30_000)
+    // The maintenance wake decision is made by this terminal: the recall removed
+    // the only pending occurrence, so no B turn starts and nothing is replayed.
+    assert.equal(userMessages(sessionEvents(), PROMPT_TEXT).length, 0,
+      'the recalled prompt is never consumed by the maintenance wake')
+    assert.equal(recorder.calls(), 2, 'no re-enqueue and no duplicate write')
+    assert.ok(apps.at(-1) !== undefined, 'the real runner started a TuiApp')
+  } finally {
     releaseSummary()
     recorder.detach()
     await fixture.settle()
