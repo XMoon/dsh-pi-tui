@@ -670,8 +670,11 @@ test('the payload scan classifies by canonical member path, not by the raw spell
   const manifestBytes = JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.4.0-alpha.1' })
   const leak = 'const x = "/tmp/dsh-source-pack/x"\n'
   const clean = 'const x = 1\n'
-  const write = (fileName, memberName, content) => {
-    const tarball = join(directory, fileName)
+  // NOTE: the helper takes the ALREADY-COMPOSED path, not a directory+name:
+  // the production-reads guard classifies any local helper whose body calls
+  // `join(<base>, <own parameter>)` as a READ helper, and an archive WRITER
+  // would then be reported as an unresolvable production read.
+  const write = (tarball, memberName, content) => {
     writeUstarTarGz(tarball, [
       { name: 'package/', type: '5' },
       { name: 'package/package.json', type: '0', size: manifestBytes.length, bytes: manifestBytes },
@@ -682,18 +685,18 @@ test('the payload scan classifies by canonical member path, not by the raw spell
 
   // Positive control: the canonical spelling is scanned and rejected.
   expectDistributionFailure(
-    () => assertNoSourceLeak(write('canonical.tgz', 'package/dist/a.js', leak)),
+    () => assertNoSourceLeak(write(join(directory, 'canonical.tgz'), 'package/dist/a.js', leak)),
     /source leak/u,
   )
   // Every equivalent spelling of the SAME extraction target must be scanned.
   for (const [index, alias] of ['./package/dist/a.js', '././package/dist/a.js', 'package/./dist/a.js', 'package//dist/a.js'].entries()) {
     expectDistributionFailure(
-      () => assertNoSourceLeak(write(`alias-${index}.tgz`, alias, leak)),
+      () => assertNoSourceLeak(write(join(directory, `alias-${index}.tgz`), alias, leak)),
       /source leak/u,
     )
   }
   // A clean alias is still a legitimate archive.
-  assert.doesNotThrow(() => assertNoSourceLeak(write('clean-alias.tgz', './package/dist/ok.js', clean)))
+  assert.doesNotThrow(() => assertNoSourceLeak(write(join(directory, 'clean-alias.tgz'), './package/dist/ok.js', clean)))
 })
 
 test('package map derives names from tarball metadata and rejects duplicate names', (t) => {
