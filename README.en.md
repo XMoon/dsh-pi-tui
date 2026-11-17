@@ -135,7 +135,7 @@ A bare or whitespace-only `--session` opens Browse All. **Only a canonical full 
 
 The candidate release offers a local Linux daemon backend. **Direct (the in-process TUI) stays the default.** Nothing changes in an existing installation until the user opts in explicitly:
 
-- **Selection**: set `DSH_PI_TUI_BACKEND=daemon` for this launch, or save `Daemon` in `/settings → General → Backend` (the official Profile Config entry `tui-startup.backend`). Precedence is `DSH_PI_TUI_BACKEND` > saved Profile config > `direct`; an illegal value, an empty string or a non-Linux platform exits nonzero and never silently falls back to Direct. The choice applies only to the next cold launch and never hot-switches the running process or restarts a Host.
+- **Selection**: set `DSH_PI_TUI_BACKEND=daemon` for this launch, or save `Daemon` in `/settings → General → Backend` (the official Profile Config entry `tui-startup.backend`). Precedence is `DSH_PI_TUI_BACKEND` > saved Profile config > `direct`; an illegal value, an empty string or a non-Linux/macOS platform exits nonzero and never silently falls back to Direct. The choice applies only to the next cold launch and never hot-switches the running process or restarts a Host.
 - **Management commands** (they operate on the current `--profile` only):
 
   ```sh

@@ -39,7 +39,7 @@ import {
   type KernelObservation,
   type KernelProcessIdentity,
 } from '../../runtime/native-process/identity.ts'
-import { spawnHostCandidate, startManagedHostCandidate, startPublicHostCandidate } from './local-host-manager.ts'
+import { spawnHostCandidate, startManagedHostCandidate } from './local-host-manager.ts'
 
 /** Registry file name inside the private scope directory. */
 const REGISTRY_FILE = 'instance.json'
@@ -888,11 +888,13 @@ export async function ensureLocalHost(options: EnsureLocalHostOptions): Promise<
     return await authenticateLocalHost(existing, scope, options.signal)
   }
 
-  const spawnFailure = options.hostStartPolicy === 'public'
-    ? await startPublicHostCandidate(options)
-    : options.hostStartPolicy === 'public-managed'
-      ? await startManagedHostCandidate(options)
-      : spawnHostCandidate(options)
+  // Both public policies go through the cross-platform entry: macOS has no
+  // systemd user manager and detached-spawns there, while Linux delegates to
+  // the D0 installed-unit decision. A direct startPublicHostCandidate call here
+  // would reject Darwin before any Host could be spawned.
+  const spawnFailure = options.hostStartPolicy === 'public' || options.hostStartPolicy === 'public-managed'
+    ? await startManagedHostCandidate(options)
+    : spawnHostCandidate(options)
   const deadline = Date.now() + REGISTRY_WAIT_TIMEOUT_MS
   while (Date.now() < deadline) {
     options.signal?.throwIfAborted()
