@@ -668,6 +668,20 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   revision, so a resize that has not repainted yet also drops the gesture. A
   same-row double click on the same word stays the terminal's word-selection
   gesture, so one fast double click toggles a Folder at most once.
+- **Wheel scrolls the painted pane it really hits.** The mouse wheel navigates
+  the ordinary Browse typed selection over the painted list viewport (painted
+  rows and their trailing blank), the Search result selection over the real
+  painted result rows (a wheel there moves focus from the Search editor to that
+  result list), and the pinned Peek detail over its actual body lines.
+  It uses the fork's already-computed signed line count — the Wheel Lines
+  setting and the Alt acceleration are never applied a second time — and only
+  acts on zones derived from the LAST painted frame and its live terminal
+  grant. Header, status, the Search Input, the column gap, the ordinary
+  read-only Preview, the Action Bar and the inline Host-directory editor are
+  inert; a wheel never activates, resumes, queries, expands or writes. The
+  leased root consumes every wheel, so an inert wheel never scrolls the
+  background Transcript; a real navigation hit retires an old press while an
+  inert wheel leaves a legal press intact.
 - **One lifecycle.** Each open keeps exactly one Workspace follow, one roster
   read owner, one Activity sample generation and one fullscreen lease. The close
   path aborts list/search/Activity, disposes the follow once, stops the screen
