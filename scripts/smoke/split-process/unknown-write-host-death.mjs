@@ -156,6 +156,8 @@ export async function runUnknownWriteHostDeath(context) {
         assert(settledFrame.includes('indeterminate'),
           'T66 the unaccepted unknown discarded its uncertainty notice')
       }
+      assert(client.records.filter(record => record.m4b2s === 'qualification' && record.op === 'prompt-ack-dropped').length === 1,
+        'T66 the prompt ACK-drop witness must fire exactly once for this Client')
       // The committing Host dies BEFORE the Turn settles: the write's outcome is
       // now permanently unknown to every Client.
       process.kill(hostPid, 'SIGKILL')

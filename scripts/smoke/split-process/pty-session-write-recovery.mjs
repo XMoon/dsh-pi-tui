@@ -1010,6 +1010,8 @@ export async function runPtySessionWriteRecovery(context) {
       assert(settledFrame.includes('indeterminate'),
         'T35 the unaccepted unknown discarded its uncertainty notice')
     }
+    assert(c4.records.filter(record => record.m4b2s === 'qualification' && record.op === 'prompt-ack-dropped').length === 1,
+      'T35 the prompt ACK-drop witness must fire exactly once for this Client')
     c4.signalBusiness('SIGTERM')
     const c4Exit = await c4.waitForExit(60_000)
     assert(c4Exit.code === 0, `T35 ACK-drop Client exit was ${JSON.stringify(c4Exit)}`)

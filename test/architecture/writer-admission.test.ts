@@ -290,7 +290,11 @@ test('negative control: an indeterminate prompt result never restores the draft'
   ], 'an unproven post-dispatch result is not restored and not reclassified as a rejection')
 })
 
-// ── A1/A2: an ACCEPTED attempt's late terminal settle ─────────────────────
+// ── an ACCEPTED attempt's late terminal settle ────────────────────────────
+//
+// Regression: Issue #731 — the obsolete T35 `indeterminate` oracle and the
+// accepted-terminal submit-ack gap. The plan's AC mapping lives in the PR
+// body, not in these titles (docs/guides/testing.md §7 rule 1).
 //
 // Once the Host accepted the prompt, a late transport failure is an EXECUTION
 // problem, not a Composer problem: the draft never comes back, nothing is
@@ -348,7 +352,7 @@ function acceptedOutcomeSurface(
   return { surface, calls, ackSettles }
 }
 
-test('A1: early Host acceptance + indeterminate settles THIS gesture\'s ACK once and never restores/replays', async () => {
+test('early Host acceptance + indeterminate settles this gesture\'s ACK once with no restore or replay', async () => {
   const { surface, calls, ackSettles } = acceptedOutcomeSurface('indeterminate')
   const { hooks, settled } = attemptRecorder()
   let releases = 0
@@ -367,7 +371,7 @@ test('A1: early Host acceptance + indeterminate settles THIS gesture\'s ACK once
   assert.equal(releases, 1, 'the reservation releases exactly once')
 })
 
-test('A2: accepted + late rejected settles the ACK with the gesture token, no restore/notice', async () => {
+test('accepted + late rejected settles the ACK with the gesture token and no restore or notice', async () => {
   const { surface, calls, ackSettles } = acceptedOutcomeSurface('rejected')
   const { hooks, settled } = attemptRecorder()
   const runtime = bindSubmissionRuntime({ surface })
@@ -381,7 +385,7 @@ test('A2: accepted + late rejected settles the ACK with the gesture token, no re
     [[SUBMISSION.ackToken, true]], 'the tokenized terminal ack survives the late refusal')
 })
 
-test('A2: accepted + writer throw settles the ACK with the gesture token, no restore/notice', async () => {
+test('accepted + writer throw settles the ACK with the gesture token and no restore or notice', async () => {
   const { surface, calls, ackSettles } = acceptedOutcomeSurface('throw')
   const { hooks, settled } = attemptRecorder()
   const runtime = bindSubmissionRuntime({ surface })
@@ -395,7 +399,7 @@ test('A2: accepted + writer throw settles the ACK with the gesture token, no res
     [[SUBMISSION.ackToken, true]], 'the catch path owns the same tokenized terminal settle')
 })
 
-test('A2 negative control: accepted + cancelled keeps its EXISTING echo + ACK settlement', async () => {
+test('accepted + cancelled keeps its existing echo + ACK settlement', async () => {
   const { surface, calls, ackSettles } = acceptedOutcomeSurface('cancelled')
   const { hooks, settled } = attemptRecorder()
   const runtime = bindSubmissionRuntime({ surface })
@@ -410,7 +414,7 @@ test('A2 negative control: accepted + cancelled keeps its EXISTING echo + ACK se
     [[SUBMISSION.ackToken, true]], 'the existing cancelled settle stays tokenized')
 })
 
-test('A2 negative control: accepted + committed settles NO temporary ACK inside the runtime', async () => {
+test('accepted + committed settles no temporary ACK inside the runtime', async () => {
   // The normal committed path rides the official inbox/user-message/turn-start
   // bridge; an unconditional early ACK settle here would change that feedback
   // timing even though this issue proves nothing wrong with it.
@@ -423,7 +427,7 @@ test('A2 negative control: accepted + committed settles NO temporary ACK inside 
   assert.deepEqual(ackSettles, [], 'no unconditional ACK settle was added to the committed path')
 })
 
-test('A6: an OLD gesture\'s accepted+indeterminate settle never clears the NEWER pending ack row', async () => {
+test('an old gesture\'s accepted+indeterminate settle never clears the newer pending ack row', async () => {
   // The real SubmitAckState + the runtime wiring: gesture A is accepted, then
   // B supersedes its epoch while A's write is still in flight. A's late
   // terminal settle must carry A's token, so the state machine ignores it.
@@ -456,7 +460,7 @@ test('A6: an OLD gesture\'s accepted+indeterminate settle never clears the NEWER
   assert.equal(ack.detail, 'queued', 'the newer gesture still owns the pending row')
 })
 
-test('A1 negative control: unaccepted + indeterminate keeps the draft, notifies and settles with the token', async () => {
+test('unaccepted + indeterminate keeps the draft, notifies and settles with the token', async () => {
   const ackSettles: AckSettle[] = []
   const { surface, calls } = recordingSurface({
     prepareMessage: async () => undefined,
