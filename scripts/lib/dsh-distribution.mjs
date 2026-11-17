@@ -317,12 +317,11 @@ function safeDistributionFile(directory, fileName) {
     fail(`DSH distribution artifact must be a single relative .tgz filename: ${JSON.stringify(fileName)}`)
   }
   if (!existsSync(directory) || !lstatSync(directory).isDirectory()) fail(`DSH distribution directory is missing: ${directory}`)
+  // Canonicalize BOTH sides before comparing: on macOS the caller may spell
+  // the directory through the `/var` alias of `/private/var`, and `relative()`
+  // over two spellings of the SAME directory yields a false escape.
   const root = realpathSync(directory)
   const path = resolve(directory, fileName)
-  const rel = relative(root, path)
-  if (rel === '' || rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel)) {
-    fail(`DSH distribution artifact escapes its directory: ${fileName}`)
-  }
   const info = existsSync(path) ? lstatSync(path) : undefined
   if (!isRegularUnlinkedFile(info)) {
     fail(`DSH distribution artifact must be a regular file with exactly one link: ${path}`)
