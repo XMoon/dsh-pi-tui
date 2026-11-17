@@ -958,13 +958,15 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       orderReleased = true
       releaseTail()
     }
-    const wait = previous.then(async () => {
-      // Read the gate when the PREDECESSOR opens ordering, never at creation:
-      // the official compact may have entered after this turn was taken.
-      if (!allowQueueDuringOfficialCompact) {
-        await officialCompactSettlement?.done
-      }
-    })
+    // An eligible ordinary queue only needs its predecessor's ordering release:
+    // it IS the one gesture class allowed through an open maintenance window. A
+    // non-qualifying turn must additionally wait for the official command that
+    // owns the window — read when the PREDECESSOR opens ordering, never at
+    // creation, because the compact may have entered after this turn was taken.
+    // The direct `then` (not an async wrapper) adds the minimum one microtask.
+    const wait = allowQueueDuringOfficialCompact
+      ? previous
+      : previous.then(() => officialCompactSettlement?.done)
     return {
       wait,
       openAfterOfficialCompactEntered: () => {
