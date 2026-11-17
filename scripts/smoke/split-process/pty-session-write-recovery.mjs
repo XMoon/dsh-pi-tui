@@ -1164,8 +1164,6 @@ export async function runPtySessionWriteRecovery(context) {
       assertClientHostFacts(rolledOver.host, surfaceHostFacts, 'T61 after rollover')
       writeFileSync(barrier, 'release\n', { mode: 0o600 })
       await parked.waitForComposerDraft(staleToken, 60_000)
-      // The restored draft IS the writer's own settlement: the outcome is final
-      // before the composer paints it, so no observation window is needed here.
       assert(!(await parked.viewport()).join('\n').includes('indeterminate'),
         'T61 the not-dispatched write was reported as indeterminate')
       // Restored EXACTLY once: the composer holds the token once, not twice.
@@ -1174,8 +1172,32 @@ export async function runPtySessionWriteRecovery(context) {
       const restoredOccurrences = restoredComposer.split(staleToken).length - 1
       assert(restoredOccurrences === 1,
         `T61 the draft was restored ${String(restoredOccurrences)} times, expected exactly once`)
-      // Same Client process, CURRENT generation: a fresh prompt must commit.
+      // PR2 accepted-hold: the refused draft never left the frozen Composer, so
+      // a painted draft is NOT the writer's settlement. Prove the stale
+      // cancellation actually released the editor by landing ONE marker in the
+      // real document, re-assert the draft is still restored exactly once, then
+      // clear it. A permanently frozen editor still fails this bounded wait.
+      const releaseDeadline = Date.now() + 30_000
+      let releasedDraft
+      while (Date.now() < releaseDeadline) {
+        const draft = await parked.composerText()
+        if (draft !== undefined && draft.includes(staleToken) && draft.includes('x')) {
+          releasedDraft = draft
+          break
+        }
+        parked.send('x')
+        await sleep(100)
+      }
+      assert(releasedDraft !== undefined,
+        'T61 the held Composer never accepted input after the stale cancellation settlement')
+      const releasedOccurrences = releasedDraft.split(staleToken).length - 1
+      assert(releasedOccurrences === 1,
+        `T61 the draft was restored ${String(releasedOccurrences)} times after the settlement, expected exactly once`)
+      // Over-send the burst (extra backspaces on an empty editor are harmless);
+      // clearComposerDraft still verifies the token left the real document.
+      parked.send('\x7f'.repeat(releasedDraft.length))
       await parked.clearComposerDraft(staleToken)
+      // Same Client process, CURRENT generation: a fresh prompt must commit.
       // Watermark: this Session already carries earlier turns from this lane, so a
       // bare `turn/end` wait could match HISTORY. Every fact below must be a NEW
       // durable event, i.e. one with an index at or after this snapshot.
