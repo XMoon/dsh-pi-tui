@@ -676,6 +676,7 @@ test('a TSP Enter reaches the real Host during a held official compact, while th
     // owned command workflow the fixture's disposal waits for.
     releaseSummary()
     recorder.detach()
+    // reason: the fixture's OWN teardown drain, not a wait for a fact
     await fixture.settle()
   }
 })
@@ -764,6 +765,7 @@ test('a real Alt+↑ recalls the prompt accepted during a held compact before th
   } finally {
     releaseSummary()
     recorder.detach()
+    // reason: the fixture's OWN teardown drain, not a wait for a fact
     await fixture.settle()
   }
 })
@@ -795,8 +797,9 @@ test('the real /new Session publication waits for the held official compact to s
     await waitFor('the real official compact to reach summarization',
       () => compact.summarizeEntries() === 1, 30_000)
     await submitInput(fixture, '/new')
-    // Bounded observation window: the held official command cannot settle on its
-    // own, so the navigation's writer drain / FIFO position is the ONLY gate here.
+    // The held official command cannot settle on its own, so the navigation's
+    // writer drain / FIFO position is the only gate here.
+    // reason: bounded observation window
     await directSettle(800)
     assert.deepEqual(liveAgentIds(fixture), before,
       'the /new Session is not published while the official compact is unsettled')
@@ -812,6 +815,7 @@ test('the real /new Session publication waits for the held official compact to s
   } finally {
     releaseSummary()
     recorder.detach()
+    // reason: the fixture's OWN teardown drain, not a wait for a fact
     await fixture.settle()
   }
 })
