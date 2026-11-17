@@ -3,10 +3,11 @@
 This document owns the long-lived Host/Client boundary: locality, the semantic
 port contract, Direct/Remote equivalence, currentness/identity rules and the
 qualification tiers. Direct remains the production backend. Remote is the
-internal, Linux-only split-process backend: one Host process plus zero or more
-Client processes (`dist/local-host.mjs` / `dist/local-client.mjs`; the Host
-lifetime is independent of Client attachment) over an authenticated loopback
-HTTP/WebSocket carrier, entered through ONE lazy Client edge
+internal, local split-process backend: the Host/Client link is supported on
+Linux and macOS, and one Host process plus zero or more Client processes
+(`dist/local-host.mjs` / `dist/local-client.mjs`; the Host lifetime is
+independent of Client attachment) over an authenticated loopback HTTP/WebSocket
+carrier, entered through ONE lazy Client edge
 (`app/remote-process/local-client-entry.ts -> app/bootstrap.ts`) after
 the official PluginPackages resolution. It is not a package export, bin, backend
 selector or Session surface. The former in-process composition is retired from
@@ -122,7 +123,7 @@ runner and does not compose through that facade:
 - **Direct (production default).** `src/index.ts -> app/bootstrap.ts` boots one
   Direct runtime over the caller's Host Context. No Remote module participates.
   This is one of the two `app/bootstrap.ts` roots.
-- **Split Client (internal, Linux-only).** `local-client-entry.ts ->
+- **Split Client (internal, local Linux/macOS split).** `local-client-entry.ts ->
   app/bootstrap.ts` owns its OWN Client Context, the official B1 transport and
   the one official Client Domain mount (`app/remote/client-runtime.ts`, mounted
   in two stages so the interaction owner exists before the Gateway's first
@@ -132,7 +133,7 @@ runner and does not compose through that facade:
   `app/remote/application-stage.ts`, and adopts that pre-built core through the
   selection seam instead of constructing a second graph. This is the second
   `app/bootstrap.ts` root.
-- **Split Host (internal, Linux-only).** `local-host-entry.ts` boots the official
+- **Split Host (internal, local Linux/macOS split).** `local-host-entry.ts` boots the official
   profile through `runProfile()` with the Host-only overlay; it does NOT enter
   `app/bootstrap.ts`. The overlay's single built-in
   `@xmoon76/dsh-pi-tui/host-runtime` row owns the package's ONE private Typert
@@ -201,9 +202,13 @@ public `sessionLaunch` value resolved Client-locally by the existing
 resume) — never an exact-id bypass. It is dropped on Client reexec so the
 confirmed exact Session is restored instead of re-running the public intent.
 
-The daemon backend is the LOCAL Linux split process: it requires a real
-interactive TTY, and an unsupported OS or a non-interactive launch fails closed.
-Selection is cold-launch only: writing the Profile value shows "applies on next
+The daemon backend is the LOCAL split process on Linux and macOS: it requires a
+real interactive TTY, and any other OS or a non-interactive launch fails closed.
+A real public-managed start uses the platform's supervision path when one
+exists (the Linux user manager with a strict-absence detached process
+fallback); on macOS it always uses that existing detached Host process
+fallback, because launchd supervision and the six `dsh daemon` management
+verbs are not part of this local Host/Client link. Selection is cold-launch only: writing the Profile value shows "applies on next
 launch" and never hot-switches the running process or restarts the Host, and an
 environment override never writes back to the Profile. The `.volatile()` Config
 value lets a Direct and a Remote TUI Client read and write the same Host Profile
@@ -213,12 +218,15 @@ node through the official revision-checked Settings mutation.
 
 The internal split-process entry is one Host process plus zero or more Client
 processes from ONE installed npm package. The Host lifetime is independent of
-Client attachment and may continue with zero active Clients. It is Linux-only.
-Linux abstract AF_UNIX sockets are the kernel admission authority for the Host
-Singleton and for the qualification-only Client seat; a real `surface` Client
+Client attachment and may continue with zero active Clients. The local
+Host/Client link is supported on Linux and macOS. The kernel admission
+authority is platform-owned: Linux uses abstract AF_UNIX sockets for the Host
+Singleton and the qualification-only Client seat; macOS uses one
+`O_EXLOCK`-held file per purpose inside the same private 0700 scope directory,
+re-proved by inode and directory identity before Ready. A real `surface` Client
 automatically discovers or starts the local Host, then completes the internal
 `/connect` Cookie exchange and authenticated identity verification. No manual
-connect command, address or token input is required. The non-Linux entry fails
+connect command, address or token input is required. Any other platform fails
 before writing runtime files with `B1_PLATFORM_UNSUPPORTED`. No PID file,
 `O_EXCL` marker, registry record or `hasLiveClient()` result may stand in for
 the kernel seat where one is required.
@@ -233,10 +241,11 @@ the kernel seat where one is required.
   scope across workspaces and package builds; the Client cwd is not a scope
   input.
 - **Single Host seat, qualification-only Client seat.** The Host holds one
-  abstract socket from before the profile Context exists until process
-  termination; a second Host candidate loses `bind` and exits without building
-  a Context, webserver, Agent or Session. Only the frozen `qualification` Client
-  binds the second, Client abstract socket for its lifetime; a second
+  platform kernel claim from before the profile Context exists until process
+  termination: one abstract socket on Linux, one `O_EXLOCK` file descriptor on
+  macOS. A second Host candidate loses the claim and exits without building a
+  Context, webserver, Agent or Session. Only the frozen `qualification` Client
+  binds the second, qualification-only claim for its lifetime; a second
   qualification Client fails `CLIENT_ALREADY_ACTIVE` before spawning or touching
   a Host. A real `surface` Client — and the non-TUI `peer` — binds no
   profile-global seat; it is admitted automatically by the authenticated
@@ -247,13 +256,18 @@ the kernel seat where one is required.
   process death is the only stale-seat recovery.
 - **Identity is authenticated, never registry-only.** The registry
   (`instance.json`, 0600) is an unauthenticated hint containing the scope,
-  canonical profile path, `instanceId`, Host PID, Linux `/proc/<pid>/stat`
-  starttime, loopback origin, protocol `dsh-pi-tui/local/1`, installed
-  bundle/DSH versions and the installed-build fingerprint. Readiness requires
-  the official `dsh-client-connection` `/connect` launch-token exchange (signed
+  canonical profile path, `instanceId`, Host PID, loopback origin, protocol
+  `dsh-pi-tui/local/1`, installed bundle/DSH versions and the installed-build
+  fingerprint. Its identity material is versioned by schema: Linux schema 1
+  carries the `/proc/<pid>/stat` starttime, while macOS schema 2 carries the
+  complete PR-1 Darwin kernel identity (boot session, unique process id, process
+  UUID and start timestamp as exact decimal strings). Readiness requires the
+  official `dsh-client-connection` `/connect` launch-token exchange (signed
   Cookie) and the owner-only authenticated identity Fetch route
   `/api/pi-tui.local-host`, with every identity field strictly equal to the
-  registry and the current kernel starttime. A Client whose protocol or exact
+  registry and the live kernel identity re-read as the SAME process. An
+  unavailable kernel read is `PROCESS_STARTTIME_UNAVAILABLE`; a gone/different
+  process is only a stale candidate, never authorization to signal it. A Client whose protocol or exact
   DSH runtime differs is `HOST_PROTOCOL_INCOMPATIBLE` before authentication; a
   Host that publishes a protocol or installed build other than its own is
   `HOST_BUILD_INCOMPATIBLE`; a mismatched authenticated identity is
@@ -265,9 +279,12 @@ the kernel seat where one is required.
   on the single A0 Client Context with a Cookie-bearing
   `fetch`/`createWebSocket` and `streamBaseUrl`. `ownsHost`, in-process
   RPC/openStream bridges, custom Bearer/Basic auth and any second business RPC
-  are prohibited. The only private route is the read-only GET identity route
-  behind the official `/api` admission; it carries no Session, write,
-  shutdown, approval or version-switch operation.
+  are prohibited. The private routes behind the official `/api` Owner admission
+  are read-only: the GET identity echo and the POST workspace-object
+  observation, which returns only the current Host instance's own
+  `(device, inode)` for one bounded absolute directory path. Neither carries a
+  Session, Workspace registration, file content, write, shutdown, approval or
+  version-switch operation.
 - **Secret boundary.** The launch token lives only in the Host process and its
   0600 `launch.json` (atomic same-directory rename); the Client keeps its own
   Cookie in memory only. Neither token, Cookie nor `connectUrl` may appear in
@@ -451,8 +468,10 @@ and the current terminal state never select, block or redirect a management
 command. A management command publishes one typed intent to the same
 `tuiDaemonStartup` service and the same launcher row; it resolves no Client
 artifact, opens no Direct/Remote TUI, creates no Session/Agent/Writer and starts
-no Host unless `start`/`restart` asks for one. Every other platform fails closed.
-`--help` provides neither startup service.
+no Host unless `start`/`restart` asks for one. The management verbs are
+Linux-only: macOS fails closed until launchd supervision and the Darwin admin
+seat land, while the macOS local Host/Client link itself does not depend on
+them. `--help` provides neither startup service.
 
 The exit and error taxonomy is fixed: `0` success (including a confirmed
 `stopped`, an idempotent stop and an uninstall with no owned unit), `2` CLI usage,
@@ -996,9 +1015,15 @@ Client filesystem read:
 - **Unselected means zero dispatch.** Without a confirmed `workspaceId` the port
   answers `unavailable` without any Remote call; the surface guides the user to
   the existing Browser. The Client launch directory is only a candidate, and
-  only after the Linux `/proc/<hostPid>/root` + `(dev, ino)` equivalence proof
-  against the authenticated Host identity; an explicit choice survives the next
-  sessionless create while an automatic one is one-shot.
+  only after a `(dev, ino)` object equivalence proof against the authenticated
+  Host identity: on Linux through `/proc/<hostPid>/root` and the Host
+  starttime, on macOS through the Host's own Owner-only workspace-object
+  observation plus the schema 2 kernel identity and the current official
+  Connection generation. The proof is asynchronous and is re-run before every
+  Workspace resolution/create/adoption and before `-c` resumes; a rename,
+  recreation, Host restart, Cookie/generation replacement or unreadable fact
+  revokes it back to the unselected Browser path. An explicit choice survives
+  the next sessionless create while an automatic one is one-shot.
 - **Session scope is unchanged.** A live Session keeps
   `piTuiFileReferences/list(sessionId, query, signal)` — the Host router's bare
   official `ctx.fileReferences` route plus the accepted explicit-path Host
@@ -2367,9 +2392,11 @@ Rules:
   implementation files.
 - Never present a Host-only suite as a TUI PASS, a skipped/mode-gated CI step as
   passed, or a lane green on a different snapshot.
-- The Linux split-process lane (`smoke:split-process`, driven from an installed
-  npm tarball) is a distribution-boundary proof outside L1–L6: it is the only
-  tier that observes a real Host process plus real Client OS processes. What it
+- The Linux split-process lane (`smoke:split-process`) and the macOS
+  public-selector lane (`smoke:macos-split`, driven from an installed npm
+  tarball inside a private macOS tmux server) are distribution-boundary proofs
+  outside L1–L6: they are the tiers that observe a real Host process plus real
+  Client OS processes. What it
   proves is a list of durable capability classes, not one boundary row: OS
   process admission and kernel-seat
   uniqueness; the official authenticated loopback carrier and Host identity;
