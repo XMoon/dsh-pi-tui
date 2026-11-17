@@ -3173,3 +3173,40 @@ test('Fullscreen pointer: clicking the feedback input row MOVES the text cursor'
     `the click must move the text cursor (typing after the click inserts mid-text): got "${valueAfter}"`)
   assert.ok(cursorBefore > 0, 'precondition: text was typed before the click')
 })
+
+test('the fallback respects the seat budget with BOTH trailing rows (hint and marker)', () => {
+  const detail = `# Long\n${Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n')}`
+  const question: QuestionFlowQuestion = {
+    id: 'plan-review', question: 'A?', header: 'Plan review', detail,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve' },
+  }
+  for (const budget of [8, 12, 24]) {
+    // Keyboard hint row (non-mouse).
+    const keyboard = planMakeFlow([question])
+    keyboard.setMaxRows(budget)
+    assert.ok(keyboard.setPlanInspection(planInspectionSeam(() => false)))
+    keyboard.handleInput('\r') // View -> fallback
+    const rows = planRender(keyboard, 80)
+    assert.ok(rows.length <= budget, `keyboard hint: ${rows.length} rows exceeds budget ${budget}:\n${rows.join('\n')}`)
+    assert.ok(rows.at(-1)!.includes('esc back'), `the Back hint stays reachable at budget ${budget}`)
+    // Fullscreen action bar (mouse mode paints the bar the budget must hold).
+    const pointer = planMakeFlow([question])
+    pointer.setMaxRows(budget)
+    pointer.setMouseActionsEnabled(true)
+    assert.ok(pointer.setPlanInspection(planInspectionSeam(() => false)))
+    pointer.handleInput('\r')
+    const pointerRows = planRender(pointer, 80)
+    assert.ok(pointerRows.length <= budget, `pointer bar: ${pointerRows.length} rows exceeds budget ${budget}:\n${pointerRows.join('\n')}`)
+    assert.ok(pointerRows.at(-1)!.includes('Back'), `the pointer Back stays painted at budget ${budget}`)
+    // The tail is still reachable by paging (marker pages, Esc returns).
+    for (let page = 0; page < 16 && !planRender(pointer, 80).some(l => l.includes('line 29')); page += 1) {
+      pointer.handleInput('\x1b[6~')
+    }
+    assert.ok(planRender(pointer, 80).some(l => l.includes('line 29')),
+      `the fallback tail stays reachable by paging at budget ${budget}`)
+    pointer.handleInput('\x1b')
+    assert.ok(planRender(pointer, 80).some(l => l.includes('Keep planning…')),
+      `Esc returns to the decision list at budget ${budget}`)
+  }
+})

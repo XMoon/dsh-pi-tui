@@ -2199,7 +2199,12 @@ export class QuestionFlow implements Component, Focusable {
       }
       // The fallback never silently drops the tail: the scroll window is
       // clamped so the LAST lines stay reachable (no fixed 256-row cap here).
-      const visible = Math.max(1, this.budget - lines.length - 1)
+      // The budget reserves BOTH trailing rows this render adds: the overflow
+      // marker AND the hint/action bar the caller appends below — one row for
+      // the marker only used the space bar, overflowing the seat on short
+      // screens (8-row budget rendered 9 rows).
+      const chrome = lines.length + 2
+      const visible = Math.max(1, this.budget - chrome)
       this.planFallbackVisible = visible
       const maxScroll = Math.max(0, wrapped.length - visible)
       this.planFallbackScroll = Math.min(this.planFallbackScroll, maxScroll)
