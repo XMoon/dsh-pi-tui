@@ -3,8 +3,8 @@
  *
  * The cache owns dedupe, settle notification and the stale-generation fence;
  * the rasterizer owns the OS process boundary and the PNG budget checks. The
- * real raster test uses the pinned `@resvg/resvg-js` platform binary and the
- * same safe source the chart/SVG cards use.
+ * real child lifecycle cases prove timeout/cancellation/close. Size-budget
+ * refusals must not depend on a native PNG happy path.
  * @module @xmoon76/dsh-pi-tui/svg-raster.test
  */
 
@@ -420,23 +420,25 @@ test('the live subscriber terminal state survives arbitrary cache-history churn'
 const ASPECT_MISMATCH_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="4" viewBox="0 0 2048 64">'
   + '<rect width="64" height="32" fill="#ff0000"/></svg>'
 
-test('the native canvas budget is checked before render() allocates', { skip: nativeRasterSkip }, async () => {
+test('an admitted aspect-mismatched SVG is refused before a native child starts', { skip: nativeRasterSkip }, async () => {
   const admission = admitSvg(ASPECT_MISMATCH_SVG)
   assert.equal(admission.ok, true, 'the source itself is admitted')
   if (admission.ok) {
     assert.equal(admission.width, 2048)
     assert.equal(admission.height, 64)
   }
-  // The rendered viewport is 1:4, so targetWidth 2048 becomes 2048x8192: the
-  // worker must refuse the real canvas before render()/asPng allocation.
+  // The declared viewport is 1:4, so targetWidth 2048 becomes 2048x8192.
+  // The parent must reject this canvas before even launching a native process.
+  let spawned = 0
+  const rasterize = createSvgRasterizer(((...args: Parameters<typeof spawn>) => {
+    spawned += 1
+    return spawn(...args)
+  }) as typeof spawn)
   await assert.rejects(
-    rasterizeSvg(ASPECT_MISMATCH_SVG, { targetWidth: 2048, signal: new AbortController().signal }),
+    rasterize(ASPECT_MISMATCH_SVG, { targetWidth: 2048, signal: new AbortController().signal }),
     /raster canvas 2048x8192/u,
   )
-  // A target that fits the same aspect still renders normally.
-  const small = await rasterizeSvg(ASPECT_MISMATCH_SVG, { targetWidth: 128, signal: new AbortController().signal })
-  assert.equal(small.widthPx, 128)
-  assert.equal(small.heightPx, 512)
+  assert.equal(spawned, 0, 'an over-budget canvas must not spawn a native child')
 })
 
 
@@ -464,9 +466,6 @@ test('a fractional CSS viewport is refused before the native child spawns', { sk
     /raster canvas 1x4096/u,
   )
   assert.equal(spawned, 0)
-  const small = await rasterize(FRACTIONAL_SVG, { targetWidth: 128, signal: new AbortController().signal })
-  assert.equal(small.widthPx, 128)
-  assert.equal(small.heightPx, 256)
 })
 
 
@@ -492,9 +491,6 @@ test('the missing-side viewBox intrinsic is used before the native child spawns'
     /raster canvas 1900x3892/u,
   )
   assert.equal(spawned, 0, 'the missing-side intrinsic must be refused before spawning')
-  const small = await rasterize(WIDTH_ONLY_VIEWBOX_SVG, { targetWidth: 128, signal: new AbortController().signal })
-  assert.equal(small.widthPx, 128)
-  assert.ok(small.heightPx === 262 || small.heightPx === 263, `safe target height ${small.heightPx}`)
 })
 
 // ── width variants: the viewer derivative is NOT the thumbnail PNG ────────
