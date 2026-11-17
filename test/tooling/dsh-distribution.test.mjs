@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
+import { gzipSync } from 'node:zlib'
 import test from 'node:test'
 
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -38,6 +39,45 @@ import {
 
 const VERSION = '0.1.2-alpha.1'
 const SHA = 'a'.repeat(40)
+
+/**
+ * Write a minimal gzip-compressed ustar archive from explicit member
+ * descriptors — the SAME bytes on every platform, because no platform
+ * `tar(1)` is involved. This is how a fixture carries a MALICIOUS header
+ * (escaping member path, escaping linkpath, duplicate member) that a host
+ * tar would refuse to create or rewrite: the source-leak gate must reject
+ * the crafted bytes, not the platform toolchain's ability to produce them.
+ */
+function writeUstarTarGz(tarball, members) {
+  const BLOCK = 512
+  const octal = (value, length) => `${value.toString(8).padStart(length - 1, '0')}\0`
+  const headerOf = ({ name, linkname = '', type = '0', size = 0 }) => {
+    const header = Buffer.alloc(BLOCK)
+    header.write(name.slice(0, 100), 0, 100, 'utf8')
+    header.write(octal(0o644, 8), 100)
+    header.write(octal(0, 8), 108)
+    header.write(octal(0, 8), 116)
+    header.write(octal(size, 12), 124)
+    header.write(octal(0, 12), 136)
+    header.write('        ', 148)
+    header.write(type, 156, 1, 'ascii')
+    header.write(linkname.slice(0, 100), 157, 100, 'utf8')
+    header.write('ustar\0', 257, 6)
+    header.write('00', 263, 2)
+    let sum = 0
+    for (const byte of header) sum += byte
+    header.write(octal(sum, 8), 148)
+    return header
+  }
+  const pad = (buffer) => Buffer.concat([buffer, Buffer.alloc((BLOCK - (buffer.length % BLOCK)) % BLOCK)])
+  const chunks = []
+  for (const member of members) {
+    chunks.push(headerOf(member))
+    if (member.type === '0' && member.size > 0) chunks.push(pad(Buffer.from(member.bytes ?? '')))
+  }
+  chunks.push(Buffer.alloc(BLOCK * 2))
+  writeFileSync(tarball, gzipSync(Buffer.concat(chunks)))
+}
 
 function tarPackage(directory, fileName, metadata, files = {}) {
   const staging = join(directory, `stage-${fileName.replace(/[^a-z0-9]/giu, '-')}`)
@@ -547,40 +587,44 @@ test('the structured archive listing rejects link escapes with the same strictne
   const traversalLink = tarPackageWithSymlink(directory, 'bad-traversal-link.tgz', base, '../../outside')
   expectDistributionFailure(() => assertNoSourceLeak(traversalLink), /unsafe archive link target/u)
 
-  // HARDLINK escape: a Link member whose stored MEMBER PATH escapes the
-  // archive root (`..` in the path). bsdtar's `-s` rewrite changes the stored
-  // header path of a hardlink member; GNU tar reads the same header field.
-  const escapingHardlink = join(directory, 'escaping-hardlink.tgz')
-  {
-    const stage = join(directory, 'stage-hardlink')
-    mkdirSync(join(stage, 'package'), { recursive: true })
-    writeFileSync(join(stage, 'package', 'package.json'), `${JSON.stringify(base)}\n`)
-    writeFileSync(join(stage, 'package', 'real.js'), 'x\n')
-    linkSync(join(stage, 'package', 'real.js'), join(stage, 'package', 'alias.js'))
-    const result = spawnSync('tar', [
-      '-czf', escapingHardlink, '-C', stage,
-      '-s', '|^package/alias.js$|../../escaped/alias.js|',
-      'package',
-    ], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
-    assert.equal(result.status, 0, result.stderr)
-  }
-  expectDistributionFailure(() => assertNoSourceLeak(escapingHardlink), /unsafe or nested archive entry|unsafe archive link target/u)
+  // HARDLINK escape and escaping MEMBER PATH: both come from CRAFTED ustar
+  // bytes (writeUstarTarGz above). A host tar(1) cannot be relied on to
+  // produce a malicious header — GNU tar has no BSD `-s` rewrite, and what a
+  // platform toolchain refuses to create is exactly what an attacker crafts.
+  const pkgJson = { name: '@xmoon76/dsh-pi-tui', version: '0.4.0-alpha.1' }
+  const manifestBytes = JSON.stringify(pkgJson)
 
-  // An escaping MEMBER PATH (`..` inside the member name itself).
+  // A hardlink member whose linkpath escapes the archive root.
+  const escapingHardlink = join(directory, 'escaping-hardlink.tgz')
+  writeUstarTarGz(escapingHardlink, [
+    { name: 'package/', type: '5' },
+    { name: 'package/package.json', type: '0', size: manifestBytes.length, bytes: manifestBytes },
+    { name: 'package/alias.js', type: '1', linkname: 'package/../../escaped/alias.js' },
+  ])
+  expectDistributionFailure(() => assertNoSourceLeak(escapingHardlink), /unsafe archive link target/u)
+
+  // A member whose NAME escapes the archive root (`..` inside the path).
   const escapingMember = join(directory, 'escaping-member.tgz')
-  {
-    const stage = join(directory, 'stage-member')
-    mkdirSync(join(stage, 'package'), { recursive: true })
-    writeFileSync(join(stage, 'package', 'package.json'), `${JSON.stringify(base)}\n`)
-    writeFileSync(join(stage, 'escape.txt'), 'x\n')
-    const result = spawnSync('tar', [
-      '-czf', escapingMember, '-C', stage,
-      '-s', '|^escape.txt$|package/../escape.txt|',
-      'package', 'escape.txt',
-    ], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
-    assert.equal(result.status, 0, result.stderr)
-  }
-  expectDistributionFailure(() => assertNoSourceLeak(escapingMember), /unsafe or nested archive entry/u)
+  writeUstarTarGz(escapingMember, [
+    { name: 'package/', type: '5' },
+    { name: 'package/package.json', type: '0', size: manifestBytes.length, bytes: manifestBytes },
+    { name: 'package/../escape.txt', type: '2', linkname: '../../outside' },
+  ])
+  expectDistributionFailure(() => assertNoSourceLeak(escapingMember), /unsafe or nested archive entry|unsafe archive link target/u)
+
+  // Two members whose names differ only by the `./` prefix collide as ONE
+  // canonical path: neither can be extracted safely. The duplicate is NOT the
+  // manifest member — `tar -xOf package/package.json` concatenates duplicates,
+  // which would fail the earlier JSON read instead of the listing check.
+  const duplicateCanonical = join(directory, 'duplicate-canonical.tgz')
+  writeUstarTarGz(duplicateCanonical, [
+    { name: 'package/', type: '5' },
+    { name: 'package/package.json', type: '0', size: manifestBytes.length, bytes: manifestBytes },
+    { name: 'package/dist/', type: '5' },
+    { name: 'package/dist/loader.mjs', type: '0', size: 1, bytes: 'x' },
+    { name: './package/dist/loader.mjs', type: '0', size: 1, bytes: 'x' },
+  ])
+  expectDistributionFailure(() => assertNoSourceLeak(duplicateCanonical), /duplicate canonical archive entry/u)
 })
 
 test('package map derives names from tarball metadata and rejects duplicate names', (t) => {
