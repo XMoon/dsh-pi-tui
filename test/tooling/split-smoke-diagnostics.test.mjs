@@ -108,7 +108,7 @@ function syntheticTarball(root, name, manifest) {
   mkdirSync(join(stage, 'package'), { recursive: true })
   writeFileSync(join(stage, 'package', 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`)
   const path = join(root, `${name}.tgz`)
-  const packed = spawnSync('tar', ['-czf', path, '-C', stage, 'package'], { encoding: 'utf8' })
+  const packed = spawnSync('tar', ['-czf', path, '-C', stage, 'package'], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
   assert.equal(packed.status, 0, `the synthetic fixture could not be packed: ${packed.stderr}`)
   return path
 }

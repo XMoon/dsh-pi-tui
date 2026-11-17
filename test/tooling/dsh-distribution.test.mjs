@@ -50,7 +50,12 @@ function tarPackage(directory, fileName, metadata, files = {}) {
     writeFileSync(path, content)
   }
   const tarball = join(directory, fileName)
-  const result = spawnSync('tar', ['-czf', tarball, '-C', staging, 'package'], { encoding: 'utf8' })
+  // COPYFILE_DISABLE: macOS bsdtar stores AppleDouble `._*` metadata sidecars
+  // by default; a fixture archive must contain exactly the files written here.
+  const result = spawnSync('tar', ['-czf', tarball, '-C', staging, 'package'], {
+    encoding: 'utf8',
+    env: { ...process.env, COPYFILE_DISABLE: '1' },
+  })
   assert.equal(result.status, 0, result.stderr)
   rmSync(staging, { recursive: true, force: true })
   return tarball
@@ -63,7 +68,10 @@ function tarPackageWithSymlink(directory, fileName, metadata, target) {
   writeFileSync(join(packageDir, 'package.json'), `${JSON.stringify(metadata)}\n`)
   symlinkSync(target, join(packageDir, 'loader'))
   const tarball = join(directory, fileName)
-  const result = spawnSync('tar', ['-czf', tarball, '-C', staging, 'package'], { encoding: 'utf8' })
+  const result = spawnSync('tar', ['-czf', tarball, '-C', staging, 'package'], {
+    encoding: 'utf8',
+    env: { ...process.env, COPYFILE_DISABLE: '1' },
+  })
   assert.equal(result.status, 0, result.stderr)
   rmSync(staging, { recursive: true, force: true })
   return tarball
@@ -526,6 +534,53 @@ test('source leak gate accepts prose but rejects source dependency specs and pat
     version: '0.4.0-alpha.1',
   }, { 'dist/index.mjs': 'const source = "C:\\runner\\deepseek-harness"\n' })
   expectDistributionFailure(() => assertNoSourceLeak(badWindows), /source leak/u)
+})
+
+test('the structured archive listing rejects link escapes with the same strictness for symlinks and hardlinks', (t) => {
+  const life = testLifecycle(t)
+  const directory = life.tempDir('dsh-structured-leak-')
+  const base = { name: '@xmoon76/dsh-pi-tui', version: '0.4.0-alpha.1' }
+
+  // Symlink escapes: absolute target and traversal target.
+  const badSymlink = tarPackageWithSymlink(directory, 'bad-abs-symlink.tgz', base, '/tmp/dsh-source-pack/x')
+  expectDistributionFailure(() => assertNoSourceLeak(badSymlink), /unsafe archive link target/u)
+  const traversalLink = tarPackageWithSymlink(directory, 'bad-traversal-link.tgz', base, '../../outside')
+  expectDistributionFailure(() => assertNoSourceLeak(traversalLink), /unsafe archive link target/u)
+
+  // HARDLINK escape: a Link member whose stored MEMBER PATH escapes the
+  // archive root (`..` in the path). bsdtar's `-s` rewrite changes the stored
+  // header path of a hardlink member; GNU tar reads the same header field.
+  const escapingHardlink = join(directory, 'escaping-hardlink.tgz')
+  {
+    const stage = join(directory, 'stage-hardlink')
+    mkdirSync(join(stage, 'package'), { recursive: true })
+    writeFileSync(join(stage, 'package', 'package.json'), `${JSON.stringify(base)}\n`)
+    writeFileSync(join(stage, 'package', 'real.js'), 'x\n')
+    linkSync(join(stage, 'package', 'real.js'), join(stage, 'package', 'alias.js'))
+    const result = spawnSync('tar', [
+      '-czf', escapingHardlink, '-C', stage,
+      '-s', '|^package/alias.js$|../../escaped/alias.js|',
+      'package',
+    ], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
+    assert.equal(result.status, 0, result.stderr)
+  }
+  expectDistributionFailure(() => assertNoSourceLeak(escapingHardlink), /unsafe or nested archive entry|unsafe archive link target/u)
+
+  // An escaping MEMBER PATH (`..` inside the member name itself).
+  const escapingMember = join(directory, 'escaping-member.tgz')
+  {
+    const stage = join(directory, 'stage-member')
+    mkdirSync(join(stage, 'package'), { recursive: true })
+    writeFileSync(join(stage, 'package', 'package.json'), `${JSON.stringify(base)}\n`)
+    writeFileSync(join(stage, 'escape.txt'), 'x\n')
+    const result = spawnSync('tar', [
+      '-czf', escapingMember, '-C', stage,
+      '-s', '|^escape.txt$|package/../escape.txt|',
+      'package', 'escape.txt',
+    ], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
+    assert.equal(result.status, 0, result.stderr)
+  }
+  expectDistributionFailure(() => assertNoSourceLeak(escapingMember), /unsafe or nested archive entry/u)
 })
 
 test('package map derives names from tarball metadata and rejects duplicate names', (t) => {

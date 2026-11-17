@@ -204,7 +204,7 @@ test('both artifacts are pin-qualified and the default-lane version rule runs be
       devDependencies: { '@deepseek-ai/dsh-agent': dshPin },
     }))
     const artifact = join(dir, `${name}.tgz`)
-    const tar = spawnSync('tar', ['-czf', artifact, '-C', source, 'package'], { encoding: 'utf8' })
+    const tar = spawnSync('tar', ['-czf', artifact, '-C', source, 'package'], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
     assert.equal(tar.status, 0, tar.stderr)
     rmSync(source, { recursive: true, force: true })
     return artifact

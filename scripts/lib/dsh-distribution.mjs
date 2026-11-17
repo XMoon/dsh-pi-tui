@@ -10,6 +10,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
+import { t as tarList } from 'tar'
 import {
   existsSync,
   lstatSync,
@@ -908,6 +909,34 @@ function scanDependencySpecs(value, location, forbidden) {
 }
 
 /**
+ * One archive member from the STRUCTURED header listing: the member path, its
+ * tar type and (for links) its link target. BSD and GNU `tar(1)` text listings
+ * differ and GNU's `--quoting-style` is unavailable on BSD, so the headers are
+ * read through node-tar's synchronous listing instead — one pass, no text
+ * parsing, identical results on every POSIX toolchain.
+ *
+ * @param {string} tarball - the archive to list.
+ * @returns {Array<{path: string, type: string, linkpath: string}>} every member header.
+ */
+function listArchiveMembers(tarball) {
+  /** @type {Array<{path: string, type: string, linkpath: string}>} */
+  const members = []
+  try {
+    tarList({
+      file: tarball,
+      sync: true,
+      strict: true,
+      onReadEntry(entry) {
+        members.push({ path: entry.path, type: String(entry.type), linkpath: String(entry.linkpath ?? '') })
+      },
+    })
+  } catch (error) {
+    fail(`tar listing failed for ${tarball}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  return members
+}
+
+/**
  * Inspect a candidate tarball for source-only dependency specs or checkout
  * paths. Dependency manifests are authoritative; archive-content scanning is
  * bounded and checks concrete temporary/source path tokens without rejecting
@@ -934,7 +963,9 @@ export function assertNoSourceLeak(tarball, options = {}) {
 
   if (options.scanArchive === false) return metadata
 
-  const allEntries = runTar(['-tzf', tarball]).split(/\r?\n/u).filter(Boolean)
+  // STRUCTURED archive listing: one tar.t pass yields every member's
+  // {path,type,linkpath} from the archive HEADERS — no `tar -tvf` text is
+  // parsed, so GNU and BSD tar behave identically here.
   // Explicit source roots are used to reject dependency specs, not ordinary
   // prose embedded in a package's documentation. Archive bytes still reject
   // concrete temporary/build-root tokens below.
@@ -944,9 +975,12 @@ export function assertNoSourceLeak(tarball, options = {}) {
   ]
   const archiveForbidden = [...new Set(forbidden.flatMap(token => {
     const normalized = token.replaceAll('\\', '/').toLowerCase()
-    return [normalized, normalized.replace(/^\/+/, '')]
+    return [normalized, normalized.replace(/^\/+/u, '')]
   }))]
-  for (const entry of allEntries) {
+  const members = listArchiveMembers(tarball)
+  const seenCanonicalPaths = new Set()
+  for (const member of members) {
+    const entry = member.path
     const normalized = entry.replaceAll('\\', '/')
     const normalizedLower = normalized.toLowerCase()
     const pathLeak = archiveForbidden.find(token => token !== '' && normalizedLower.includes(token))
@@ -957,14 +991,20 @@ export function assertNoSourceLeak(tarball, options = {}) {
     if (normalized.startsWith('/') || normalized.startsWith('\\\\') || /^[A-Za-z]:[\\/]/u.test(normalized) || parts.includes('..') || /\.tgz$/iu.test(normalized)) {
       fail(`source leak in ${tarball}: unsafe or nested archive entry ${entry}`)
     }
+    if (normalized.includes('\0')) {
+      fail(`source leak in ${tarball}: NUL byte in archive entry ${entry}`)
+    }
+    // The `./` prefix and a trailing slash are one canonical spelling: two
+    // members whose canonical paths collide cannot both be extracted safely.
+    const canonical = normalized.replace(/^\.\//u, '').replace(/\/$/u, '')
+    if (canonical !== '' && seenCanonicalPaths.has(canonical)) {
+      fail(`source leak in ${tarball}: duplicate canonical archive entry ${canonical}`)
+    }
+    if (canonical !== '') seenCanonicalPaths.add(canonical)
   }
-  const linkEntries = runTar(['-tvzf', tarball, '--quoting-style=escape']).split(/\r?\n/u).filter(line => line.startsWith('l') || line.startsWith('h'))
-  for (const line of linkEntries) {
-    const arrow = line.indexOf(' -> ')
-    const hardLink = line.indexOf(' link to ')
-    const marker = arrow >= 0 ? arrow + 4 : hardLink >= 0 ? hardLink + 9 : -1
-    if (marker < 0) continue
-    const target = line.slice(marker).trim()
+  for (const member of members) {
+    if (member.type !== 'SymbolicLink' && member.type !== 'Link') continue
+    const target = member.linkpath
     const normalizedTarget = target.replaceAll('\\', '/').toLowerCase()
     const targetLeak = archiveForbidden.find(token => token !== '' && normalizedTarget.includes(token))
     const targetParts = normalizedTarget.split('/')
@@ -976,6 +1016,7 @@ export function assertNoSourceLeak(tarball, options = {}) {
       fail(`source leak in ${tarball}: unsafe archive link target ${target}`)
     }
   }
+  const allEntries = members.map(member => member.path)
   // Documentation may legitimately mention an absolute path as prose. Scan
   // executable and metadata payloads for leaked build roots, while leaving
   // README/license text to the dependency and archive-path checks above.

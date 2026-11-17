@@ -13,6 +13,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
+import { currentPtyScriptArgv } from '../../lib/pty-script.mjs'
 import { readFileSync, readdirSync, writeFileSync, existsSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -145,7 +146,8 @@ async function waitForProcesses(dshHome, predicate, label, timeoutMs) {
 /** Spawn the real `dsh` CLI under a PTY with one backend selection. */
 function spawnDsh(dshInvocation, profileDir, env, backend) {
   const command = `${shellQuote(dshInvocation[0])} ${shellQuote(dshInvocation[1])} --profile pi-tui`
-  const child = spawn('script', ['-qefc', command, '/dev/null'], {
+  const pty = currentPtyScriptArgv(command)
+  const child = spawn(pty.program, pty.args, {
     cwd: profileDir,
     env: { ...env, DSH_PI_TUI_BACKEND: backend, COLUMNS: '100', LINES: '30' },
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -277,7 +279,8 @@ class RealDshScreen {
     this.term = new xterm.Terminal({ cols: 100, rows: 30, disableStdin: true, allowProposedApi: true })
     const { dshInvocation, env, profileDir } = installation
     const command = `${shellQuote(dshInvocation[0])} ${shellQuote(dshInvocation[1])} --profile pi-tui${args.map(a => ' ' + shellQuote(a)).join('')}`
-    this.child = spawn('script', ['-qefc', command, '/dev/null'], {
+    const pty = currentPtyScriptArgv(command)
+    this.child = spawn(pty.program, pty.args, {
       cwd: profileDir,
       env: { ...env, ...(backend === undefined ? {} : { DSH_PI_TUI_BACKEND: backend }), ...extraEnv, COLUMNS: '100', LINES: '30' },
       stdio: ['pipe', 'pipe', 'pipe'],

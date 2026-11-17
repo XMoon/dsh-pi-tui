@@ -34,7 +34,7 @@ function leakTarball(life, leakText) {
   writeFileSync(join(pkgDir, 'README.md'), 'readme\n')
   writeFileSync(join(pkgDir, 'README.en.md'), 'readme\n')
   const tarball = join(dir, 'leak.tgz')
-  const tar = spawnSync('tar', ['-czf', tarball, '-C', dir, 'package'])
+  const tar = spawnSync('tar', ['-czf', tarball, '-C', dir, 'package'], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
   assert.equal(tar.status, 0, tar.stderr)
   return { dir, tarball }
 }
