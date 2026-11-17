@@ -97,7 +97,6 @@ test('boundary/no-op wheels keep the legitimate press in the other modes too (no
     ...task({ id: `task-${index}`, title: `Task ${String(index).padStart(2, '0')}` }),
     prompt: index === 0 ? Array.from({ length: 60 }, (_, line) => `caret proof line ${String(line).padStart(2, '0')}`).join('\n') : 'short prompt',
   }))
-  const longPrompt = Array.from({ length: 60 }, (_, line) => `caret proof line ${String(line).padStart(2, '0')}`).join('\n')
   const portWithRows = {
     ...port,
     async catalog() { return rows },
@@ -175,13 +174,20 @@ test('boundary/no-op wheels keep the legitimate press in the other modes too (no
     vt.sendInput('e')
     await vt.waitForRender()
     assert.equal(controller.snapshot().mode, 'editor', 'the editor page is open')
-    for (let step = 0; step < 30; step += 1) vt.sendInput('\x1b[6~')
+    // Tab from Title to the Instruction RAW textarea, then walk the caret to
+    // the LAST line: the caret-follow reveal anchors the window on that line.
+    vt.sendInput('\t')
     await vt.waitForRender()
+    for (let step = 0; step < 60; step += 1) vt.sendInput('\x1b[B')
+    await vt.waitForRender()
+    assert.ok(rowsOf().some(line => line.includes('caret proof line 59')), 'the caret-follow window is anchored on the last line')
     const escRow = rowsOf().findIndex(line => line.includes('Esc back'))
     const escCol = rowsOf()[escRow]!.indexOf('Esc back')
     const beforeEditor = rowsOf().join('\n')
     press(escRow, escCol)
-    wheel(Math.max(2, escRow - 2), 30)
+    // The bottom caret makes a wheel-UP window move get revealed back to the
+    // caret: the painted window must not change, so the press stays valid.
+    vt.sendInput(`\x1b[<64;30;${Math.max(2, escRow - 2)}M`)
     await vt.waitForRender()
     assert.equal(rowsOf().join('\n'), beforeEditor, 'the caret-reveal-clamped wheel left the painted editor window unchanged')
     release(escRow, escCol)
