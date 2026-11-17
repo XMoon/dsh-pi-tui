@@ -1827,6 +1827,13 @@ function pageRows(vt: VirtualTerminal): string[] {
   return vt.getViewport().slice(0, -1)
 }
 
+/** The painted viewport row of the first line containing `needle`. */
+function rowIndexOf(rows: readonly string[], needle: string): number {
+  const index = rows.findIndex(line => line.includes(needle))
+  assert.ok(index >= 0, `the frame paints ${JSON.stringify(needle)}:\n${rows.join('\n')}`)
+  return index
+}
+
 test('configurator: rows page mouse click selects a row and Save changes saves (mouse parity)', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
@@ -2240,6 +2247,14 @@ test('wheel leaves the selector/item/picker cursors and the add query untouched'
   assert.equal(addAfter.pickerIndex, addBefore.pickerIndex, 'wheel never moves the Add picker cursor')
   assert.equal(addAfter.addQuery, addBefore.addQuery, 'wheel never edits the Add query')
   assert.equal(addModel.isDirty(), false)
+  // A wheel directly on the pinned description tail or preview is inert too.
+  const scrolledFrame = addApp.vt.getViewport().join('\n')
+  mouseWheel(addApp.vt, previewAfter - 1, 'down')
+  await addApp.vt.waitForRender()
+  assert.equal(addApp.vt.getViewport().join('\n'), scrolledFrame, 'the pinned description tail is inert')
+  mouseWheel(addApp.vt, previewAfter, 'down')
+  await addApp.vt.waitForRender()
+  assert.equal(addApp.vt.getViewport().join('\n'), scrolledFrame, 'the fixed preview is inert')
   addApp.app.stop()
 })
 
@@ -2280,6 +2295,20 @@ test('a manual wheel window restores the hidden cursor before the first dangerou
   assert.equal(model.state().cursor, 1, 'keyboard navigation runs exactly one model move')
   assert.ok(vt.getViewport().some(line => line.includes('›') && line.includes('scroll-01')),
     'the next ordinary frame follows the moved cursor')
+
+  // The first Space only restores the visible cursor; the SECOND explicit
+  // Space runs the original remove.
+  for (let step = 0; step < 8; step += 1) mouseWheel(vt, 1, 'down')
+  await vt.waitForRender()
+  const itemsBefore = model.state().layout.rows[0]!.left.length
+  vt.sendInput(' ')
+  await vt.waitForRender()
+  assert.equal(model.state().layout.rows[0]!.left.length, itemsBefore,
+    'the hidden selection is never removed by the first Space')
+  vt.sendInput(' ')
+  await vt.waitForRender()
+  assert.equal(model.state().layout.rows[0]!.left.length, itemsBefore - 1,
+    'the second explicit Space follows the normal remove path')
 
   // Esc is never intercepted by the hidden-cursor gate.
   for (let step = 0; step < 8; step += 1) mouseWheel(vt, 1, 'down')
@@ -2349,11 +2378,17 @@ test('the wheel is inert in text editors, the delete prompt and while a save is 
   deleting.vt.sendInput('\r')
   await deleting.vt.waitForRender()
   assert.equal(deleteModel.state().mode, 'custom-delete')
+  // Shrink to a grant where the two-line delete prompt is REALLY clipped: a
+  // broken inert guard would scroll the second line into view.
+  deleting.vt.resize(44, 2)
+  await deleting.vt.waitForRender()
   const deleteFrame = deleting.vt.getViewport().join('\n')
+  assert.ok(!deleteFrame.includes('layout reference'), `the second prompt line is clipped:\n${deleteFrame}`)
   mouseWheel(deleting.vt, 0, 'down')
   await deleting.vt.waitForRender()
   assert.equal(deleteModel.state().mode, 'custom-delete')
-  assert.equal(deleting.vt.getViewport().join('\n'), deleteFrame, 'wheel is inert in the delete prompt')
+  assert.equal(deleting.vt.getViewport().join('\n'), deleteFrame, 'wheel is inert in the clipped delete prompt')
+  assert.ok(deleteModel.customItem('user:scroll-00') !== undefined, 'wheel never deletes the custom item')
   deleting.app.stop()
 
   // Saving: the wheel never scrolls or starts a second write.
@@ -2380,8 +2415,46 @@ test('the wheel is inert in text editors, the delete prompt and while a save is 
   await saving.vt.waitForRender()
   assert.equal(saving.vt.getViewport().join('\n'), savingFrame, 'wheel is inert while a save is in flight')
   assert.equal(saves, 1, 'wheel never starts a second save')
+  // Shrink WHILE saving so the selector body is really clipped (4 lines in a
+  // 3-row body window): a broken saving guard would scroll the frame.
+  saving.vt.resize(44, 4)
+  await saving.vt.waitForRender()
+  const clippedSaving = saving.vt.getViewport().join('\n')
+  assert.equal(saveModel.state().saving, true)
+  mouseWheel(saving.vt, 0, 'down')
+  await saving.vt.waitForRender()
+  assert.equal(saving.vt.getViewport().join('\n'), clippedSaving,
+    'wheel is inert while the saving frame is really clipped')
+  assert.equal(saves, 1, 'the clipped saving wheel never starts a second save')
   resolveSave()
   saving.app.stop()
+
+  // Create-name input: clipped body + typed buffer must stay untouched.
+  const creating = startApp(44, 20)
+  const { model: createModel } = longRowPage(creating.vt, creating.app, { count: 1 })
+  await creating.vt.waitForRender()
+  creating.vt.sendInput('\r')
+  await creating.vt.waitForRender()
+  creating.vt.sendInput('a')
+  await creating.vt.waitForRender()
+  const matches = createModel.addMatches().length
+  for (let step = 0; step < matches; step += 1) {
+    creating.vt.sendInput('\x1b[B') // walk to + Create Custom Text
+  }
+  creating.vt.sendInput('\r')
+  await creating.vt.waitForRender()
+  assert.equal(createModel.state().mode, 'create-name')
+  creating.vt.sendInput('abc')
+  await creating.vt.waitForRender()
+  assert.equal(createModel.state().customName, 'abc')
+  creating.vt.resize(44, 2)
+  await creating.vt.waitForRender()
+  const createFrame = creating.vt.getViewport().join('\n')
+  mouseWheel(creating.vt, 0, 'down')
+  await creating.vt.waitForRender()
+  assert.equal(creating.vt.getViewport().join('\n'), createFrame, 'wheel is inert in the clipped create input')
+  assert.equal(createModel.state().customName, 'abc', 'wheel never edits the create-name buffer')
+  creating.app.stop()
 })
 
 test('press -> real wheel -> release is inert; zero delta keeps the press; a fresh press still acts', async () => {
@@ -2489,4 +2562,101 @@ test('the wheel only hits really painted body rows on tiny and short frames', as
   assert.equal(short.vt.getViewport()[shortView.length - 1], shortView[shortView.length - 1]!,
     'the short frame Action Bar is inert')
   short.app.stop()
+})
+
+
+test('a real wheel retires a pressed Save/Discard action; zero delta keeps it and a fresh press acts', async () => {
+  // The painted "Save changes" row is a sensitive sink.
+  const saveApp = startApp(44, 20)
+  let saves = 0
+  const saveModel = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, saveApp.app.getFooterItemRegistry())
+  const openedSave = openPage(saveApp.vt, saveApp.app, {
+    model: saveModel,
+    registry: saveApp.app.getFooterItemRegistry(),
+    onSave: () => { saves += 1 },
+  })
+  await saveApp.vt.waitForRender()
+  await makeDirty(saveApp.vt)
+  let view = saveApp.vt.getViewport()
+  let saveRow = rowIndexOf(view, 'Save changes')
+  saveApp.vt.sendInput(`\x1b[<0;3;${saveRow + 1}M`)
+  await saveApp.vt.waitForRender()
+  mouseWheel(saveApp.vt, 1, 'down') // nonzero, body fits → boundary no-op
+  await saveApp.vt.waitForRender()
+  saveApp.vt.sendInput(`\x1b[<0;3;${saveRow + 1}m`)
+  await saveApp.vt.waitForRender()
+  assert.equal(saves, 0, 'a nonzero wheel retires the pressed Save action even at a boundary')
+  assert.equal(saveModel.state().mode, 'rows')
+  // Zero delta keeps the legal press; the release runs the ONE save path.
+  view = saveApp.vt.getViewport()
+  saveRow = rowIndexOf(view, 'Save changes')
+  saveApp.vt.sendInput(`\x1b[<0;3;${saveRow + 1}M`)
+  await saveApp.vt.waitForRender()
+  assert.deepEqual(openedSave.panel.handleMouse({
+    type: 'wheel',
+    button: 'none',
+    x: 2,
+    y: 1,
+    screenX: 2,
+    screenY: 1,
+    width: 44,
+    height: 20,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    wheelDelta: 0,
+  }), { handled: true, render: false })
+  saveApp.vt.sendInput(`\x1b[<0;3;${saveRow + 1}m`)
+  await saveApp.vt.waitForRender()
+  assert.equal(saves, 1, 'a zero-delta wheel never cancels the painted Save press')
+  saveApp.app.stop()
+
+  // The exit guard's Discard & Exit is the other sensitive painted sink.
+  const exitApp = startApp(44, 20)
+  let cancels = 0
+  const exitModel = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, exitApp.app.getFooterItemRegistry())
+  const openedExit = openPage(exitApp.vt, exitApp.app, {
+    model: exitModel,
+    registry: exitApp.app.getFooterItemRegistry(),
+    onSave: () => {},
+    onCancel: () => { cancels += 1 },
+  })
+  await exitApp.vt.waitForRender()
+  await makeDirty(exitApp.vt)
+  exitApp.vt.sendInput('\x1b') // dirty selector → exit-confirm
+  await exitApp.vt.waitForRender()
+  assert.equal(exitModel.state().mode, 'exit-confirm')
+  view = exitApp.vt.getViewport()
+  let discardRow = rowIndexOf(view, 'Discard & Exit')
+  exitApp.vt.sendInput(`\x1b[<0;3;${discardRow + 1}M`)
+  await exitApp.vt.waitForRender()
+  mouseWheel(exitApp.vt, 1, 'down')
+  await exitApp.vt.waitForRender()
+  exitApp.vt.sendInput(`\x1b[<0;3;${discardRow + 1}m`)
+  await exitApp.vt.waitForRender()
+  assert.equal(cancels, 0, 'a nonzero wheel retires the pressed Discard & Exit action')
+  assert.equal(exitModel.state().mode, 'exit-confirm')
+  // Zero delta keeps that legal press too.
+  view = exitApp.vt.getViewport()
+  discardRow = rowIndexOf(view, 'Discard & Exit')
+  exitApp.vt.sendInput(`\x1b[<0;3;${discardRow + 1}M`)
+  await exitApp.vt.waitForRender()
+  assert.deepEqual(openedExit.panel.handleMouse({
+    type: 'wheel',
+    button: 'none',
+    x: 2,
+    y: 1,
+    screenX: 2,
+    screenY: 1,
+    width: 44,
+    height: 20,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    wheelDelta: 0,
+  }), { handled: true, render: false })
+  exitApp.vt.sendInput(`\x1b[<0;3;${discardRow + 1}m`)
+  await exitApp.vt.waitForRender()
+  assert.equal(cancels, 1, 'a zero-delta wheel leaves the painted Discard press legal')
+  exitApp.app.stop()
 })

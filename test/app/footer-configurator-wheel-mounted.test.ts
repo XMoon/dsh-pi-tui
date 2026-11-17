@@ -63,6 +63,8 @@ interface MountedFooter {
   readonly handle: SettingsWorkspaceHandle
   readonly saves: SaveCall[]
   readonly cancels: () => number
+  /** Mutable save outcome: set to throw the next attempt. */
+  readonly saveError: { value: Error | undefined }
   readonly page: () => FooterConfiguratorModel | undefined
   readonly panel: () => ReturnType<TuiApp['createFooterConfiguratorPanel']> | undefined
   view(): string
@@ -91,19 +93,25 @@ function mountFooter(options: {
   readonly items?: number
   readonly entry?: 'deeplink' | 'row'
   readonly gateSave?: Promise<void>
+  /** Reuse a started app (same-app close/reopen currentness); owns it=false. */
+  readonly app?: TuiApp
+  readonly vt?: VirtualTerminal
 } = {}): MountedFooter {
   const columns = options.columns ?? 100
   const rows = options.rows ?? 40
-  const vt = new VirtualTerminal(columns, rows)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  started.add(app)
+  const vt = options.vt ?? new VirtualTerminal(columns, rows)
+  const app = options.app ?? new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  if (options.app === undefined) {
+    app.start()
+    started.add(app)
+  }
   const generated = longLayout(options.items ?? 24)
   app.setFooterCustomItems(generated.custom)
   app.setFooterLayout(generated.layout)
   app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
   const saves: SaveCall[] = []
   const state = { cancels: 0 }
+  const saveError: { value: Error | undefined } = { value: undefined }
   let model: FooterConfiguratorModel | undefined
   let panel: ReturnType<TuiApp['createFooterConfiguratorPanel']> | undefined
   const source: SettingsWorkspaceSource = {
@@ -126,6 +134,7 @@ function mountFooter(options: {
       sessionOnly: false,
       onSave: async (layout, customItems) => {
         saves.push({ layout, customItems })
+        if (saveError.value !== undefined) throw saveError.value
         await options.gateSave
         done()
       },
@@ -152,6 +161,7 @@ function mountFooter(options: {
     handle,
     saves,
     cancels: () => state.cancels,
+    saveError,
     page: () => model,
     panel: () => panel,
     view: () => vt.getViewport().map(stripTerminalSequences).join('\n'),
@@ -229,37 +239,85 @@ test('the real Settings root delegates the wheel to the Footer body and the fixe
   started.delete(short.app)
 })
 
-test('a real SGR wheel and a painted click reach the real page; the recording save fires once', async () => {
+test('wheel -> painted item edit -> explicit Save once; a failed save keeps the draft editable', async () => {
   const h = mountFooter({ columns: 100, rows: 40, entry: 'row' })
   await h.paint()
-  // Normal Appearance entry: Enter on the Footer row opens the SAME real page.
+  // Normal Appearance row entry mounts the SAME real page.
   assert.ok(h.view().includes('Configure footer layout…'), `the Appearance row is painted:\n${h.view()}`)
-  h.vt.sendInput('\r') // the selected Appearance row -> the typed specialist page
-  await h.paint()
-  assert.ok(h.view().includes('Footer layout'), `the normal entry mounts the Footer page:\n${h.view()}`)
-  // Open Row 1 and make the draft dirty through the real keyboard path.
   h.vt.sendInput('\r')
   await h.paint()
-  assert.equal(h.page()!.state().mode, 'row')
-  h.vt.sendInput(' ') // remove the first item → dirty
+  assert.ok(h.view().includes('Footer layout'), `the normal entry mounts the Footer page:\n${h.view()}`)
+  assert.equal(h.page()!.state().mode, 'rows')
+  h.vt.sendInput('\r') // Row Selector → the long Edit Row body
   await h.paint()
-  h.vt.sendInput('\x1b') // back to the Row Selector
+  assert.equal(h.page()!.state().mode, 'row')
+
+  // REAL wheel first: scroll the body, then click a painted item → its editor.
+  const scrolled = h.view()
+  for (let step = 0; step < 4; step += 1) wheel(h.vt, rowOf(scrolled, 'scroll-10'), 'down')
+  await h.paint()
+  const itemRow = rowOf(h.view(), 'scroll-10')
+  h.vt.sendInput(`\x1b[<0;6;${itemRow + 1}M`)
+  await h.paint()
+  h.vt.sendInput(`\x1b[<0;6;${itemRow + 1}m`)
+  await h.paint()
+  assert.equal(h.page()!.state().mode, 'item', 'the wheel-scrolled painted item opens its editor')
+  assert.equal(h.page()!.state().cursor, 10)
+  h.vt.sendInput('\x1b') // item → row
+  await h.paint()
+  assert.equal(h.page()!.state().mode, 'row')
+
+  // Dirty the draft through the real keyboard path, then save explicitly.
+  const itemsBefore = h.page()!.state().layout.rows[0]!.left.length
+  h.vt.sendInput(' ') // remove the current item
+  await h.paint()
+  h.vt.sendInput('\x1b') // row → selector
   await h.paint()
   assert.equal(h.page()!.state().mode, 'rows')
   assert.ok(h.page()!.isDirty())
-  const saveRow = rowOf(h.view(), 'Save changes')
-  // Real SGR click on the painted Save changes row.
+  let saveRow = rowOf(h.view(), 'Save changes')
   h.vt.sendInput(`\x1b[<0;6;${saveRow + 1}M`)
   await h.paint()
   h.vt.sendInput(`\x1b[<0;6;${saveRow + 1}m`)
   await h.paint()
   assert.equal(h.saves.length, 1, 'the explicit painted Save click runs the ONE save path once')
-  assert.equal(h.saves[0]!.layout.rows[0]!.left.length, 23, 'the saved layout is the edited draft')
+  assert.equal(h.saves[0]!.layout.rows[0]!.left.length, itemsBefore - 1, 'the saved layout is the edited draft')
+  assert.ok(h.panel()!.isDisposed(), 'a successful save closes the page')
   h.close()
   h.app.dispose()
   started.delete(h.app)
-})
 
+  // Failure recovery: reopen the SAME real page, dirty it, fail the save, then
+  // retry with a fresh explicit Save. The wheel never wrote anything itself.
+  const retry = mountFooter({ columns: 100, rows: 40, items: 24 })
+  await retry.handle.whenInitialSpecialistSettled()
+  await retry.paint()
+  retry.vt.sendInput('\r')
+  await retry.paint()
+  retry.vt.sendInput(' ')
+  await retry.paint()
+  retry.vt.sendInput('\x1b')
+  await retry.paint()
+  assert.equal(retry.page()!.state().mode, 'rows')
+  saveRow = rowOf(retry.view(), 'Save changes')
+  retry.saveError.value = new Error('refused by the settings authority')
+  retry.vt.sendInput(`\x1b[<0;6;${saveRow + 1}M`)
+  await retry.paint()
+  retry.vt.sendInput(`\x1b[<0;6;${saveRow + 1}m`)
+  await retry.paint()
+  assert.equal(retry.saves.length, 1, 'one failed save attempt reached the sink')
+  assert.equal(retry.page()!.state().saving, false)
+  assert.ok(retry.page()!.isDirty(), 'the failed save keeps the draft dirty')
+  assert.equal(retry.panel()!.isDisposed(), false, 'the failed save keeps the editor open')
+  retry.saveError.value = undefined
+  retry.vt.sendInput('s') // retry through the ONE save path
+  await retry.paint()
+  assert.equal(retry.saves.length, 2, 'the retry reaches the ONE save sink exactly once more')
+  assert.ok(retry.panel()!.isDisposed(), 'the successful retry closes the page')
+  retry.close()
+  retry.app.dispose()
+  started.delete(retry.app)
+})
 
 test('wheel never submits the dirty-exit guard; the explicit Keep/Discard clicks still own the exit', async () => {
   const h = mountFooter({ columns: 100, rows: 40, items: 24 })
@@ -390,21 +448,65 @@ test('a pre-repaint resize never replays the old cell; the repainted frame and a
   h.app.dispose()
   started.delete(h.app)
 
-  // A fresh lease with the SAME app-level layout never inherits the old cell.
-  const next = mountFooter({ columns: 100, rows: 40, items: 32 })
-  await next.handle.whenInitialSpecialistSettled()
-  await next.paint()
-  const nextBefore = next.view()
-  next.vt.sendInput('\x1b[<65;6;6M')
-  await next.paint()
-  assert.ok(next.view().includes('Select row to edit'), 'the fresh lease opens on its own selector')
-  next.vt.sendInput('\r')
-  await next.paint()
-  assert.ok(next.view().includes('scroll-00'), 'an old wheel cell cannot scroll the new lease')
-  assert.notEqual(next.view(), nextBefore)
-  next.close()
-  next.app.dispose()
-  started.delete(next.app)
+  // Root notice: a chrome change moves the child box; a wheel against the old
+  // cell before the new frame paints is refused and a fresh frame works.
+  const notice = mountFooter({ columns: 100, rows: 40, items: 32 })
+  await notice.handle.whenInitialSpecialistSettled()
+  await notice.paint()
+  notice.vt.sendInput('\r')
+  await notice.paint()
+  notice.app.notify('a notice moves the painted chrome', 'info')
+  notice.vt.sendInput('\x1b[<65;6;6M') // old body cell, before the notice repaint
+  await notice.paint()
+  assert.ok(notice.view().includes('scroll-00'), 'the notice-stale wheel never scrolls the moved body')
+  const noticeTarget = rowOf(notice.view(), 'scroll-10')
+  for (let step = 0; step < 3; step += 1) wheel(notice.vt, noticeTarget, 'down')
+  await notice.paint()
+  assert.ok(!notice.view().includes('scroll-00'), 'the freshly painted body scrolls again')
+  notice.close()
+  notice.app.dispose()
+  started.delete(notice.app)
+
+  // SAME app, close/reopen: the retired page is inert, and the new lease never
+  // inherits the old panel's cell.
+  const shared = mountFooter({ columns: 100, rows: 40, items: 32 })
+  await shared.handle.whenInitialSpecialistSettled()
+  await shared.paint()
+  shared.vt.sendInput('\r')
+  await shared.paint()
+  const retiredPanel = shared.panel()!
+  const retiredModel = shared.page()!
+  const retiredItemCount = retiredModel.state().layout.rows[0]!.left.length
+  shared.close() // close the lease, SAME app stays alive
+  assert.deepEqual(retiredPanel.handleMouse({
+    type: 'wheel',
+    button: 'none',
+    x: 4,
+    y: 4,
+    screenX: 4,
+    screenY: 4,
+    width: 100,
+    height: 40,
+    shift: false,
+    alt: true,
+    ctrl: false,
+    wheelDelta: 5,
+  }), undefined, 'a retired page never consumes or scrolls a late wheel')
+  assert.equal(retiredModel.state().layout.rows[0]!.left.length, retiredItemCount)
+  const reopened = mountFooter({ app: shared.app, vt: shared.vt, columns: 100, rows: 40, items: 32 })
+  reopened.vt.sendInput('\x1b[<65;6;6M') // stale cell before the reopened frame paints
+  await reopened.handle.whenInitialSpecialistSettled()
+  await reopened.paint()
+  reopened.vt.sendInput('\r')
+  await reopened.paint()
+  assert.ok(reopened.view().includes('scroll-00'), 'the same-app reopened lease ignores the old cell')
+  const reopenedTarget = rowOf(reopened.view(), 'scroll-10')
+  for (let step = 0; step < 3; step += 1) wheel(reopened.vt, reopenedTarget, 'down')
+  await reopened.paint()
+  assert.ok(!reopened.view().includes('scroll-00'), 'the same-app reopened lease accepts a fresh wheel')
+  reopened.close()
+  shared.app.dispose()
+  started.delete(shared.app)
 })
 
 
