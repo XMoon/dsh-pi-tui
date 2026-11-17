@@ -42,7 +42,7 @@
  * Set DSH_TEST_KEEP_TMP=1 to keep (and print) the run root for debugging.
  */
 import { spawn } from 'node:child_process'
-import { existsSync, globSync, rmSync } from 'node:fs'
+import { existsSync, globSync, realpathSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { groupStillAlive, stopOwnedGroup } from './lib/owned-process-group.mjs'
