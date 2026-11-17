@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
  * The test LANE runner: resolve a lane's membership through the discovery
- * rule and hand the explicit file list to Node's test runner.
+ * rule and hand the in-memory file list to Node's test-runner API.
  *
  * The lane's membership is a PATTERN, not a hand-maintained path list, so a
  * test that moves into an ownership directory cannot silently stop being
- * discovered. The patterns live in `scripts/test-lanes.mjs`; this script
- * resolves them and spawns the runner.
+ * discovered. The patterns live in `scripts/test-lanes.mjs`; the short-argv
+ * child resolves them and runs Node's native test runner.
  *
  * The lane runner keeps the repository's execution contract:
  *
@@ -41,6 +41,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { run } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import { resolveLane } from './test-discovery.mjs'
@@ -155,6 +156,59 @@ export function parseConcurrency(args) {
   return `--test-concurrency=${concurrency}`
 }
 
+/**
+ * The spawned lane leader: the complete file list stays in this process, never
+ * on a Windows CreateProcessW command line. Node still owns native sharding.
+ */
+async function runLaneChild(laneName, args) {
+  const lane = LANES[laneName]
+  const relativeFiles = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
+    .map(rel => join('test', rel))
+  const shard = parseShard(args)
+  const concurrency = parseConcurrency(args)
+  const options = {
+    files: relativeFiles,
+    // Node's programmatic API defaults to serial files. TRUE preserves the
+    // CLI default of running files up to the available parallelism.
+    concurrency: concurrency === undefined ? true : Number(concurrency.slice('--test-concurrency='.length)),
+    ...(shard === undefined ? {} : {
+      shard: { index: Number(shard.split('/')[0]), total: Number(shard.split('/')[1]) },
+    }),
+  }
+
+  // Record what the child actually hands to run(), not only what CI intended.
+  // The original effective-params.json fields remain the shard aggregate's
+  // contract; argvPrefix is now the fixed, short child invocation.
+  const effective = process.env.DSH_TEST_EFFECTIVE_JSON
+  if (effective !== undefined) {
+    writeFileSync(effective, `${JSON.stringify({
+      shard: shard ?? null,
+      testConcurrency: concurrency === undefined ? null : options.concurrency,
+      laneFileCount: relativeFiles.length,
+      argvPrefix: process.argv.slice(1),
+      nodeExecPath: process.execPath,
+      nodeVersion: process.version,
+      sha: commandOutput('git', ['rev-parse', 'HEAD']),
+      runId: process.env.GITHUB_RUN_ID ?? null,
+      runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? null,
+    }, null, 2)}\n`)
+  }
+
+  // Load the reporter BEFORE starting any worker: its module initialization
+  // removes DSH_TEST_JSONL from the inherited environment so nested test runs
+  // cannot write into this run's case inventory.
+  const { default: reporter } = await import('./test-case-reporter.mjs')
+  const events = run(options)
+  // The run() API does not set the host process' failure exit code as the
+  // CLI does; a failing test must still fail the lane and its CI job.
+  events.on('test:fail', () => { process.exitCode = 1 })
+  events.on('error', (error) => {
+    console.error('[run-test-lane] test runner failed:', error)
+    process.exitCode = 1
+  })
+  await reporter(events, {})
+}
+
 function main() {
   const laneName = process.argv[2]
   const args = process.argv.slice(3)
@@ -167,75 +221,11 @@ function main() {
     console.error(`unknown test lane: ${laneName}\nlanes: ${Object.keys(LANES).join(', ')}`)
     process.exit(2)
   }
-  // The lane's patterns are relative to the test root.
-  const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-  // Pass discovered test paths relative to the repository root, and run
-  // the Node child from that root. Absolute paths unnecessarily consume
-  // the Windows CreateProcessW command-line budget; the tooling suite
-  // checks the representative CI shard/reporter argv length separately.
-  // Node's --test-shard partitions execution after receiving the full list.
-  const relativeFiles = files.map(rel => join('test', rel))
-
-  // The optional shard. It is a runner ARGUMENT, not a mode: the default
-  // is the WHOLE lane.
-  const shard = parseShard(args)
-
-  // The optional concurrency. It is a runner ARGUMENT, not a mode: the
-  // default is Node's own.
-  const concurrency = parseConcurrency(args)
-
-  // The MACHINE-READABLE reporter.
-  //
-  // It is opt-in: the destination variable is what turns it on. Without
-  // the variable, the lane runs exactly as it always did, with Node's own
-  // reporter and no extra file. With it, the reporter is loaded and it
-  // writes the case records NEXT TO the human report.
-  //
-  // The reporter has to be named on the COMMAND LINE — the destination
-  // variable alone does not make Node load it, so a run that set the
-  // variable but not the flag would produce no records at all, and every
-  // consumer of them would fail later with a confusing "file not found".
-  const jsonl = process.env.DSH_TEST_JSONL
-  const reporterArgs = jsonl === undefined
-    ? []
-    : [`--test-reporter=${join(ROOT, 'scripts', 'test-case-reporter.mjs')}`]
-
+  // No discovered file path is passed through argv. The child resolves the
+  // lane inside its own process and calls node:test.run({ files, shard }).
   const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-test-run-'))
   const keep = process.env.DSH_TEST_KEEP_TMP === '1'
-  const spawnArgs = [
-    '--test',
-    ...reporterArgs,
-    ...(shard === undefined ? [] : [`--test-shard=${shard}`]),
-    ...(concurrency === undefined ? [] : [concurrency]),
-    ...relativeFiles,
-  ]
-
-  // The EFFECTIVE parameters.
-  //
-  // The workflow knows what it INTENDED to run; only this process knows what
-  // it actually put on the child's command line. The difference between the
-  // two is not hypothetical: the concurrency used to be accepted here and
-  // then dropped, so five CI runs were reported as a concurrency comparison
-  // while every one of them ran at Node's default.
-  //
-  // So the applied values are recorded here, next to the case records, and
-  // the aggregate checks them against what the run claims to be.
-  const effective = process.env.DSH_TEST_EFFECTIVE_JSON
-  if (effective !== undefined) {
-    writeFileSync(effective, `${JSON.stringify({
-      shard: shard ?? null,
-      testConcurrency: concurrency === undefined ? null : Number(concurrency.slice('--test-concurrency='.length)),
-      // The files this shard handed to Node, before Node's own sharding.
-      laneFileCount: relativeFiles.length,
-      // The fixed flags, so a reader can see the whole prefix.
-      argvPrefix: spawnArgs.slice(0, spawnArgs.length - relativeFiles.length),
-      nodeExecPath: process.execPath,
-      nodeVersion: process.version,
-      sha: commandOutput('git', ['rev-parse', 'HEAD']),
-      runId: process.env.GITHUB_RUN_ID ?? null,
-      runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? null,
-    }, null, 2)}\n`)
-  }
+  const spawnArgs = [fileURLToPath(import.meta.url), '--lane-child', laneName, ...args]
 
   // POSIX only: the child leads its own process group, which is what a
   // forwarded signal can address as a TREE (the `node --test` workers and the
@@ -355,9 +345,14 @@ function main() {
   process.on('SIGHUP', () => onSignal('SIGHUP'))
 }
 
-// The runner runs only when it is EXECUTED. A test that imports the
-// argument parsers must be able to reach them without the module running a
-// lane.
+// The runner runs only when EXECUTED; tests may import its parsers.
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main()
+  if (process.argv[2] === '--lane-child') {
+    void runLaneChild(process.argv[3], process.argv.slice(4)).catch(error => {
+      console.error('[run-test-lane] test runner failed:', error)
+      process.exitCode = 1
+    })
+  } else {
+    main()
+  }
 }
