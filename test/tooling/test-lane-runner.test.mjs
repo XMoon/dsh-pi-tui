@@ -1,20 +1,7 @@
 /**
- * The test LANE RUNNER's cross-platform command-line contract.
- *
- * The runner passes the lane's file list to Node's test runner as command
- * line arguments. A Windows process is created with `CreateProcessW`, whose
- * command line is capped at 32,767 characters, so the runner passes the
- * discovered list RELATIVE to the repository root and runs the child with
- * that root as its working directory.
- *
- * These cases prove the CONTRACT, not one platform's spelling: one dynamic
- * budget case measures a representative CI shard+reporter argv against the
- * Windows limit, and separate cases protect the relative file list, the
- * child's working directory and the runner's SIGNAL responsibility.
- *
- * The last case owns the runner's SIGNAL contract on POSIX: the child leads
- * its own process group, so the signal reaches the `node --test` worker tree
- * and the disposable temp root survives until that whole tree is gone.
+ * The lane runner must launch a discovered test set of arbitrary size with
+ * bounded argv while keeping Node-native shard, concurrency, reporter, cwd,
+ * and process-tree signal/cleanup contracts.
  *
  * @module @xmoon76/dsh-pi-tui/test/tooling/test-lane-runner.test
  */
@@ -22,13 +9,11 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join, relative, resolve, win32 } from 'node:path'
+import { basename, dirname, join, resolve, win32 } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import { parseConcurrency, sanitizeTestEnvironment } from '../../scripts/run-test-lane.mjs'
-import { resolveLane } from '../../scripts/test-discovery.mjs'
-import { LANES } from '../../scripts/test-lanes.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
   isExecuting, killStillExecuting, readPidRecords, startTimeOf, waitForNoExecuting,
@@ -36,7 +21,6 @@ import {
 import { waitForFileLine } from '../support/wait-for-file.ts'
 
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)), '..', '..')
-const TEST_ROOT = join(ROOT, 'test')
 const SIGNAL_TREE_DESCENDANT = join(ROOT, 'test', 'fixtures', 'signal-tree', 'descendant.mjs')
 const POSIX_ONLY = process.platform === 'win32' ? 'signal forwarding to a process group is POSIX-only' : false
 
@@ -150,48 +134,68 @@ function deferWrapperCleanup(life, { child, closed, marker, descendantFixture = 
   })
 }
 
-/**
- * The Windows command-line limit: `CreateProcessW` caps the command line at
- * 32,767 characters, including the executable and every argument.
- */
+/** Copy the production lane sources into a test-owned fixture repository. */
+function copyLaneRunnerSources(scripts) {
+  mkdirSync(join(scripts, 'lib'), { recursive: true })
+  for (const name of ['run-test-lane.mjs', 'test-discovery.mjs', 'test-case-reporter.mjs']) {
+    writeFileSync(join(scripts, name), readFileSync(join(ROOT, 'scripts', name)))
+  }
+  writeFileSync(join(scripts, 'lib', 'owned-process-group.mjs'),
+    readFileSync(join(ROOT, 'scripts', 'lib', 'owned-process-group.mjs')))
+}
+
 const WINDOWS_COMMAND_LINE_LIMIT = 32_767
 
-test('the product lane CI shard and reporter argv fits the Windows command-line budget', () => {
-  const lane = LANES.product
-  const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-  const relativeArguments = files.map(rel => win32.join('test', rel))
-  // One representative Windows Node executable and CI reporter path.
-  // Node receives the WHOLE list even when --test-shard is present.
-  const fixed = '"C:\\Program Files\\nodejs\\node.exe" --test --test-shard=1/4 --test-reporter=C:\\Users\\owner\\projects\\dsh-pi-tui\\scripts\\test-case-reporter.mjs '
-  const length = fixed.length + relativeArguments.join(' ').length
-  assert.ok(
-    length < WINDOWS_COMMAND_LINE_LIMIT,
-    `the sharded command line must fit the Windows limit: ${length} >= ${WINDOWS_COMMAND_LINE_LIMIT}`,
-  )
+test('the real lane starts above the Windows argv budget with complete shard and reporter evidence', (t) => {
+  const fixture = testLifecycle(t).tempDir('dsh-lane-argv-')
+  const scripts = join(fixture, 'scripts')
+  copyLaneRunnerSources(scripts)
+  writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
+  probe: { description: 'long argv probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
+}\n`)
+  const probe = join(fixture, 'test', 'probe')
+  mkdirSync(probe, { recursive: true })
+  const filenames = []
+  for (let index = 0; index < 400; index += 1) {
+    const filename = `${String(index).padStart(3, '0')}-${'x'.repeat(80)}.test.mjs`
+    filenames.push(filename)
+    writeFileSync(join(probe, filename), `import test from 'node:test'
+test('probe ${index}', () => {
+  if (process.cwd() !== process.env.PROBE_ROOT) throw new Error('wrong test cwd')
 })
+`)
+  }
+  const hypotheticalOldArgv = filenames.map(name => win32.join('test', 'probe', name)).join(' ').length
+  assert.ok(hypotheticalOldArgv > WINDOWS_COMMAND_LINE_LIMIT,
+    `the fixture must exceed the old Windows argv limit: ${hypotheticalOldArgv}`)
 
-test('the runner passes the file list RELATIVE to the repository root', () => {
-  // The runner's own source is the contract: it must build the argument
-  // list from the test-root-relative paths and set the child's working
-  // directory to the repository root.
-  const source = readFileSync(join(ROOT, 'scripts', 'run-test-lane.mjs'), 'utf8')
-  assert.match(source, /const relativeFiles = files\.map\(rel => join\('test', rel\)\)/u,
-    'the runner must pass the file list relative to the repository root')
-  assert.match(source, /cwd: ROOT/u,
-    "the child must run with the repository root as its working directory")
-  assert.doesNotMatch(source, /files\.map\(rel => join\(TEST_ROOT, rel\)\)/u,
-    'the runner must not pass absolute paths')
-})
-
-test('the child runs with the repository root as its working directory', (t) => {
-  // The tests depend on it: 22 of them read `process.cwd()`.
-  const result = spawnSync(process.execPath, ['-e', 'process.stdout.write(process.cwd())'], {
-    cwd: ROOT,
+  const diagnostics = join(fixture, 'diagnostics')
+  mkdirSync(diagnostics, { recursive: true })
+  const casesPath = join(diagnostics, 'cases.jsonl')
+  const effectivePath = join(diagnostics, 'effective-params.json')
+  const result = spawnSync(process.execPath, [
+    join(scripts, 'run-test-lane.mjs'), 'probe', '--shard=1/128', '--test-concurrency=2',
+  ], {
+    cwd: fixture,
     encoding: 'utf8',
+    timeout: 30_000,
+    env: { ...process.env, NODE_TEST_CONTEXT: undefined, DSH_TEST_JSONL: casesPath,
+      DSH_TEST_EFFECTIVE_JSON: effectivePath, PROBE_ROOT: fixture },
   })
-  assert.equal(result.status, 0, result.stderr)
-  assert.equal(resolve(result.stdout), resolve(ROOT),
-    'the child must see the repository root as its working directory')
+  assert.equal(result.status, 0, result.stderr ?? result.error?.message)
+  const applied = JSON.parse(readFileSync(effectivePath, 'utf8'))
+  assert.equal(applied.laneFileCount, 400)
+  assert.equal(applied.shard, '1/128')
+  assert.equal(applied.testConcurrency, 2)
+  assert.ok(applied.argvPrefix.join(' ').length < WINDOWS_COMMAND_LINE_LIMIT,
+    'the child invocation must not grow with the discovered file set')
+
+  const records = readFileSync(casesPath, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+  assert.equal(records.filter(record => record.name === record.file).length, 4,
+    'Node native shard 1/128 must run four of 400 files')
+  assert.equal(records.filter(record => record.name.startsWith('probe ')).length, 4,
+    'the reporter must record the four real test cases')
+  assert.ok(records.every(record => record.result === 'pass'))
 })
 
 // ---------------------------------------------------------------------------
