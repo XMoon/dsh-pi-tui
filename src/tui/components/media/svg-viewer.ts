@@ -395,7 +395,8 @@ export class SvgViewerPanel implements Component {
   }
 
   /** Whether this surface may paint real SVG pixels at all: Kitty and Direct
-   *  SIXEL (the isolated raster lane is Linux-only); iTerm2 stays excluded. */
+   *  SIXEL (the isolated raster lane is supported on Linux and, under the
+   *  Owner-accepted risk policy, macOS); iTerm2 stays excluded. */
   private previewSupported(): boolean {
     const protocol = effectiveImageProtocol(this.input.graphics, this.input.imageProtocolPreference)
     return this.input.loader !== undefined
