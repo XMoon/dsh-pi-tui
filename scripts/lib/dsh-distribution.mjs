@@ -936,6 +936,27 @@ function listArchiveMembers(tarball) {
 }
 
 /**
+ * The ONLY archive member types a package tarball may contain. A FIFO, device
+ * node or socket has no meaningful package payload, and its extraction
+ * semantics differ across tar implementations — an unexpected type is refused
+ * instead of being guessed about.
+ */
+const ARCHIVE_MEMBER_TYPES = new Set(['File', 'Directory', 'SymbolicLink', 'Link'])
+
+/**
+ * One archive member's canonical extraction target: empty segments (`a//b`) and
+ * `.` segments (`a/./b`, `./a`) all name the SAME file, so they must collide in
+ * the duplicate check. `..` is deliberately NOT resolved here — it is refused
+ * as an unsafe member elsewhere, and resolving it would hide the escape.
+ *
+ * @param {string} path - a member path with `/` separators.
+ * @returns {string} the canonical member path (`''` for the archive root).
+ */
+function canonicalArchivePath(path) {
+  return path.split('/').filter(segment => segment !== '' && segment !== '.').join('/')
+}
+
+/**
  * Inspect a candidate tarball for source-only dependency specs or checkout
  * paths. Dependency manifests are authoritative; archive-content scanning is
  * bounded and checks concrete temporary/source path tokens without rejecting
@@ -993,9 +1014,12 @@ export function assertNoSourceLeak(tarball, options = {}) {
     if (normalized.includes('\0')) {
       fail(`source leak in ${tarball}: NUL byte in archive entry ${entry}`)
     }
-    // The `./` prefix and a trailing slash are one canonical spelling: two
-    // members whose canonical paths collide cannot both be extracted safely.
-    const canonical = normalized.replace(/^\.\//u, '').replace(/\/$/u, '')
+    if (!ARCHIVE_MEMBER_TYPES.has(member.type)) {
+      fail(`source leak in ${tarball}: unsafe archive entry type ${member.type} for ${entry}`)
+    }
+    // Equivalent spellings of one extraction target must collide: `./a`, `a/`,
+    // `a//b` and `a/./b` all name the same file, so a duplicate is refused.
+    const canonical = canonicalArchivePath(normalized)
     if (canonical !== '' && seenCanonicalPaths.has(canonical)) {
       fail(`source leak in ${tarball}: duplicate canonical archive entry ${canonical}`)
     }
@@ -1015,7 +1039,9 @@ export function assertNoSourceLeak(tarball, options = {}) {
       fail(`source leak in ${tarball}: unsafe archive link target ${target}`)
     }
   }
-  const allEntries = members.map(member => member.path)
+  // Payload extraction is for REGULAR FILES only: a symlink or hardlink is
+  // validated through its linkpath above, never followed by `tar -xOf`.
+  const allEntries = members.filter(member => member.type === 'File').map(member => member.path)
   // Documentation may legitimately mention an absolute path as prose. Scan
   // executable and metadata payloads for leaked build roots, while leaving
   // README/license text to the dependency and archive-path checks above.

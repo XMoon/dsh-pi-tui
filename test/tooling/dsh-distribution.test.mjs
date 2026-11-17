@@ -612,10 +612,9 @@ test('the structured archive listing rejects link escapes with the same strictne
   ])
   expectDistributionFailure(() => assertNoSourceLeak(escapingMember), /unsafe or nested archive entry|unsafe archive link target/u)
 
-  // Two members whose names differ only by the `./` prefix collide as ONE
-  // canonical path: neither can be extracted safely. The duplicate is NOT the
-  // manifest member — `tar -xOf package/package.json` concatenates duplicates,
-  // which would fail the earlier JSON read instead of the listing check.
+  // Equivalent spellings of ONE extraction target must collide. The duplicate
+  // is NOT the manifest member — `tar -xOf package/package.json` concatenates
+  // duplicates, which would fail the earlier JSON read instead of the listing.
   const duplicateCanonical = join(directory, 'duplicate-canonical.tgz')
   writeUstarTarGz(duplicateCanonical, [
     { name: 'package/', type: '5' },
@@ -625,6 +624,44 @@ test('the structured archive listing rejects link escapes with the same strictne
     { name: './package/dist/loader.mjs', type: '0', size: 1, bytes: 'x' },
   ])
   expectDistributionFailure(() => assertNoSourceLeak(duplicateCanonical), /duplicate canonical archive entry/u)
+
+  // Interior `.` and repeated separators name the same file too.
+  for (const [name, equivalent] of [
+    ['package/dist/loader.mjs', 'package/./dist/loader.mjs'],
+    ['package/dist/loader.mjs', 'package//dist/loader.mjs'],
+    ['package/dist/loader.mjs', '././package/dist/loader.mjs'],
+  ]) {
+    const tarball = join(directory, `duplicate-${name.replaceAll('/', '-')}-${equivalent.replaceAll('/', '-')}.tgz`.replaceAll('.', '-'))
+    writeUstarTarGz(tarball, [
+      { name: 'package/', type: '5' },
+      { name: 'package/package.json', type: '0', size: manifestBytes.length, bytes: manifestBytes },
+      { name, type: '0', size: 1, bytes: 'x' },
+      { name: equivalent, type: '0', size: 1, bytes: 'x' },
+    ])
+    expectDistributionFailure(() => assertNoSourceLeak(tarball), /duplicate canonical archive entry/u)
+  }
+
+  // A member type that no package archive may contain (FIFO, character
+  // device) is refused before any payload extraction.
+  for (const [type, label] of [['6', 'fifo'], ['3', 'character-device']]) {
+    const unusual = join(directory, `unusual-${label}.tgz`)
+    writeUstarTarGz(unusual, [
+      { name: 'package/', type: '5' },
+      { name: 'package/package.json', type: '0', size: manifestBytes.length, bytes: manifestBytes },
+      { name: 'package/dist/odd.js', type },
+    ])
+    expectDistributionFailure(() => assertNoSourceLeak(unusual), /unsafe archive entry type/u)
+  }
+
+  // A safe hardlink under a payload-scanned path is allowed and checked through
+  // its linkpath only; it must NOT fail just because it cannot be read as bytes.
+  const safeHardlink = join(directory, 'safe-hardlink.tgz')
+  writeUstarTarGz(safeHardlink, [
+    { name: 'package/', type: '5' },
+    { name: 'package/package.json', type: '0', size: manifestBytes.length, bytes: manifestBytes },
+    { name: 'package/dist/loader.mjs', type: '1', linkname: 'package/package.json' },
+  ])
+  assert.doesNotThrow(() => assertNoSourceLeak(safeHardlink))
 })
 
 test('package map derives names from tarball metadata and rejects duplicate names', (t) => {
