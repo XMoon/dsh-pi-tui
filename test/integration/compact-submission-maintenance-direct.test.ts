@@ -475,6 +475,14 @@ test('the real Queue Manager edits a prompt accepted during a held compact to ON
     'the edited occurrence is consumed exactly once')
   assert.equal(userMessages(settled, PROMPT_TEXT).length, 0, 'the original text is never consumed')
   assert.equal(turnStarts(settled).length, seedTurns + 1)
+  // The SAME occurrence id — now consumed by the real Agent — is no longer
+  // manageable: the manager refuses it before any Host write.
+  queue.controller.startDelete(pending.id)
+  assert.equal(queue.controller.view().notice?.text, 'This message is no longer queued',
+    'a consumed occurrence cannot be presented as recallable')
+  await queue.drain()
+  assert.equal(inboxTexts(host).some(text => text.includes('edited during the held maintenance')), false,
+    'the refusal performed no Host write')
 })
 
 test('the real Queue Manager deletes a prompt accepted during a held compact so it is never consumed', async (t) => {
@@ -518,11 +526,10 @@ test('the real Queue Manager deletes a prompt accepted during a held compact so 
   assert.equal(userMessages(settled, PROMPT_TEXT).length, 0, 'the withdrawn prompt is never consumed')
   assert.equal(turnStarts(settled).length, seedTurns,
     'the withdrawn prompt starts no model turn')
-  // A CONSUMED occurrence is not presented as manageable afterwards.
-  const consumed = host.agent.session.snapshotEvents().find(event => event.type === 'user/message')
-  assert.ok(consumed !== undefined)
-  // The panel is still open in Browse after the committed delete; a repeated
-  // keyboard/Manage open would toggle-close it.
+  // The panel is still open in Browse after the committed delete (a repeated
+  // keyboard/Manage open would toggle-close it); the deleted occurrence id is
+  // refused as no longer queued. The CONSUMED-occurrence case is proven by the
+  // edit test, where the SAME id is really consumed before the refusal.
   queue.controller.startDelete(pending.id)
   assert.equal(queue.controller.view().notice?.text, 'This message is no longer queued',
     'a no-longer-pending occurrence is refused, never faked as recallable')
@@ -736,9 +743,13 @@ test('a real Alt+↑ recalls the prompt accepted during a held compact before th
         && [...agent.inbox.nextTurn, ...agent.inbox.nextStep].some(item => JSON.stringify(item).includes(marker))
     }
     assert.equal(inboxHas(PROMPT_TEXT), true, 'B is a real pending Host occurrence')
+    const app = apps.at(-1)
+    assert.ok(app !== undefined, 'the real runner started a TuiApp')
+    assert.equal(app.getDraft(), '', 'B was accepted out of the composer, not held there')
     // The REAL user gesture: alt+up through the terminal input boundary.
     vt.sendInput('\x1b[1;3A')
-    await waitFor('the recalled prompt to land in the composer', () => view().includes(PROMPT_TEXT), 30_000)
+    await waitFor('the recalled prompt to land in the production composer draft',
+      () => app.getDraft() === PROMPT_TEXT, 30_000)
     assert.equal(inboxHas(PROMPT_TEXT), false, 'the occurrence left the real Inbox')
     assert.ok(!sessionEvents().some(event => event.type === 'command/done'),
       'the compact is still unsettled after the recall committed')
@@ -750,7 +761,6 @@ test('a real Alt+↑ recalls the prompt accepted during a held compact before th
     assert.equal(userMessages(sessionEvents(), PROMPT_TEXT).length, 0,
       'the recalled prompt is never consumed by the maintenance wake')
     assert.equal(recorder.calls(), 2, 'no re-enqueue and no duplicate write')
-    assert.ok(apps.at(-1) !== undefined, 'the real runner started a TuiApp')
   } finally {
     releaseSummary()
     recorder.detach()
