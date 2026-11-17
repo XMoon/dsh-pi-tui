@@ -667,6 +667,68 @@ test('wheel moves filtered selection (mouse parity)', () => {
   assert.equal(picker.getSelectedIndex(), 0, 'wheel down must wrap to the first item')
 })
 
+test('an effective wheel retires the pressed item so the old row cannot activate (mouse parity)', () => {
+  const activated: string[] = []
+  const selected: string[] = []
+  const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
+  picker.onSelect = (item) => { activated.push(item.value) }
+  picker.onSelectionChange = (item) => { selected.push(item.value) }
+  picker.render(80)
+  // Rows: 0=search, 1=blank, 2=alpha, 3=bravo, 4=charlie.
+  picker.handleMouse(mouse('press', 5, 2, 80, 10)) // press alpha
+  picker.handleMouse(mouse('wheel', 5, 2, 80, 10, 1)) // wheel down selects bravo
+  assert.equal(picker.getSelectedIndex(), 1, 'the wheel moved the selection to bravo')
+  assert.deepEqual(selected, ['b'], 'only the wheel navigation fires onSelectionChange')
+  picker.handleMouse(mouse('click', 5, 2, 80, 10)) // release/click the old alpha row
+  assert.deepEqual(activated, [], 'the retired press must not activate the old item')
+  // A fresh press on the same row is a NEW gesture and activates once.
+  picker.handleMouse(mouse('press', 5, 2, 80, 10))
+  picker.handleMouse(mouse('click', 5, 2, 80, 10))
+  assert.deepEqual(activated, ['a'], 'a fresh press/click activates the pressed value once')
+})
+
+test('a boundary wheel with no selection change still retires the press (mouse parity)', () => {
+  const activated: string[] = []
+  const picker = new SearchablePicker([{ value: 'only', label: 'only' }], 5, testTheme, {}, { enableSearch: true })
+  picker.onSelect = (item) => { activated.push(item.value) }
+  picker.render(80)
+  // Rows: 0=search, 1=blank, 2=only. A one-item wheel wraps onto itself: the
+  // selection is unchanged, but the event is still an effective navigation.
+  picker.handleMouse(mouse('press', 5, 2, 80, 10))
+  picker.handleMouse(mouse('wheel', 5, 2, 80, 10, 1))
+  assert.equal(picker.getSelectedIndex(), 0, 'a one-item list stays on its only row')
+  picker.handleMouse(mouse('click', 5, 2, 80, 10))
+  assert.deepEqual(activated, [], 'a boundary wheel still retires the unfinished press')
+})
+
+test('a wheel on inert picker chrome retires the pressed item (mouse parity)', () => {
+  const activated: string[] = []
+  const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
+  picker.onSelect = (item) => { activated.push(item.value) }
+  const rendered = picker.render(80)
+  const hintRow = rendered.findIndex(line => line.includes('navigate'))
+  assert.ok(hintRow >= 0, `the hint row must be painted:\n${rendered.join('\n')}`)
+  picker.handleMouse(mouse('press', 5, 2, 80, 10))
+  picker.handleMouse(mouse('wheel', 5, hintRow, 80, 10, 1))
+  picker.handleMouse(mouse('click', 5, 2, 80, 10))
+  assert.deepEqual(activated, [], 'the wheel gesture boundary applies before the hit lookup')
+})
+
+test('a zero-delta wheel changes nothing and keeps the pressed item (mouse parity)', () => {
+  const activated: string[] = []
+  const selected: string[] = []
+  const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
+  picker.onSelect = (item) => { activated.push(item.value) }
+  picker.onSelectionChange = (item) => { selected.push(item.value) }
+  picker.render(80)
+  picker.handleMouse(mouse('press', 5, 2, 80, 10))
+  assert.equal(picker.handleMouse(mouse('wheel', 5, 2, 80, 10, 0)), undefined, 'a zero-delta wheel is not a navigation')
+  assert.equal(picker.getSelectedIndex(), 0, 'the zero-delta wheel must not move the selection')
+  assert.deepEqual(selected, [], 'the zero-delta wheel must not fire a selection change')
+  picker.handleMouse(mouse('click', 5, 2, 80, 10))
+  assert.deepEqual(activated, ['a'], 'the unchanged press completes normally')
+})
+
 test('search Input click repositions the search cursor (mouse parity)', () => {
   const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
   picker.render(80)

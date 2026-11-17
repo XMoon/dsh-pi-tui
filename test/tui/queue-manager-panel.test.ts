@@ -95,10 +95,16 @@ function plain(text: string): string {
   return text.replace(/\x1b\[[0-9;]*m/gu, '')
 }
 
-function mouse(y: number, x: number, width: number, type: 'press' | 'release' | 'click'): Parameters<QueuePanel['handleMouse']>[0] {
+function mouse(
+  y: number,
+  x: number,
+  width: number,
+  type: 'press' | 'release' | 'click' | 'wheel',
+  wheelDelta?: number,
+): Parameters<QueuePanel['handleMouse']>[0] {
   return {
     type,
-    button: 'left',
+    button: type === 'wheel' ? 'none' : 'left',
     x,
     y,
     screenX: x,
@@ -108,6 +114,7 @@ function mouse(y: number, x: number, width: number, type: 'press' | 'release' | 
     shift: false,
     alt: false,
     ctrl: false,
+    ...(type === 'wheel' ? { wheelDelta: wheelDelta ?? 1 } : {}),
   }
 }
 
@@ -281,6 +288,148 @@ test('the real press → release → click sequence reaches the action bar exact
   assert.equal(h.controller.view().mode, 'browse', 'release must not consume the press identity')
   h.panel.handleMouse(mouse(barIndex, x, width, 'click'))
   assert.equal(h.controller.view().mode, 'confirm-delete', 'the synthesized click opens the confirmation')
+})
+
+/** The painted row and x of one action-bar segment in the last render. */
+function barCells(
+  panel: QueuePanel,
+  width: number,
+  label: string,
+): { readonly barIndex: number; readonly x: number; readonly lines: string[] } {
+  const lines = panel.render(width)
+  const barIndex = lines.length - 1
+  const x = plain(lines[barIndex]!).indexOf(label)
+  assert.ok(x >= 0, `${label} must be painted:\n${lines.join('\n')}`)
+  return { barIndex, x, lines }
+}
+
+test('a bar press is retired by an effective wheel before the click, and a fresh press uses the new selection', () => {
+  const h = harness([
+    item('occ-a', [{ type: 'text', text: 'queued alpha' }]),
+    item('occ-b', [{ type: 'text', text: 'queued bravo' }]),
+  ])
+  const width = 84
+  const { barIndex, x, lines } = barCells(h.panel, width, 'Delete [D]')
+  const pickerRow = lines.findIndex(line => plain(line).includes('queued alpha'))
+  assert.ok(pickerRow >= 0, `the first queued row must be painted:\n${lines.join('\n')}`)
+  assert.equal(h.controller.view().selectedId, 'occ-a')
+
+  h.panel.handleMouse(mouse(barIndex, x, width, 'press'))
+  // A real item wheel navigates A → B (wrapping to the last row); the wheel
+  // event's button is `none`, never `left`.
+  h.panel.handleMouse(mouse(pickerRow, 5, width, 'wheel', -1))
+  assert.equal(h.controller.view().selectedId, 'occ-b', 'the wheel moved the queue selection')
+  h.panel.handleMouse(mouse(barIndex, x, width, 'release'))
+  h.panel.handleMouse(mouse(barIndex, x, width, 'click'))
+  assert.equal(h.controller.view().mode, 'browse', 'the old bar click must not open B confirmation')
+  assert.deepEqual(h.writes, [])
+
+  // The freshly painted bar for the NEW selection is a valid new gesture.
+  h.panel.render(width)
+  const fresh = barCells(h.panel, width, 'Delete [D]')
+  h.panel.handleMouse(mouse(fresh.barIndex, fresh.x, width, 'press'))
+  h.panel.handleMouse(mouse(fresh.barIndex, fresh.x, width, 'release'))
+  h.panel.handleMouse(mouse(fresh.barIndex, fresh.x, width, 'click'))
+  assert.equal(h.controller.view().mode, 'confirm-delete')
+  assert.equal(h.controller.view().selectedId, 'occ-b', 'the fresh press targeted the wheel-selected occurrence')
+  assert.deepEqual(h.writes, [], 'opening the confirmation is not a Host write')
+})
+
+test('keyboard input, another press and a changed selection all retire the old bar click', () => {
+  const h = harness([
+    item('occ-a', [{ type: 'text', text: 'queued alpha' }]),
+    item('occ-b', [{ type: 'text', text: 'queued bravo' }]),
+  ])
+  const width = 84
+  const first = barCells(h.panel, width, 'Delete [D]')
+  const pickerRow = first.lines.findIndex(line => plain(line).includes('queued alpha'))
+
+  // Any keyboard input is a fresh gesture boundary.
+  h.panel.handleMouse(mouse(first.barIndex, first.x, width, 'press'))
+  h.panel.handleInput('\x1b[B')
+  h.panel.render(width)
+  h.panel.handleMouse(mouse(first.barIndex, first.x, width, 'release'))
+  h.panel.handleMouse(mouse(first.barIndex, first.x, width, 'click'))
+  assert.equal(h.controller.view().mode, 'browse', 'a keyboard-moved selection must not inherit the old press')
+
+  // Another left press replaces the unfinished gesture (even on a picker row).
+  const second = barCells(h.panel, width, 'Delete [D]')
+  h.panel.handleMouse(mouse(second.barIndex, second.x, width, 'press'))
+  h.panel.handleMouse(mouse(pickerRow >= 0 ? pickerRow : 2, 1, width, 'press'))
+  h.panel.render(width)
+  h.panel.handleMouse(mouse(second.barIndex, second.x, width, 'release'))
+  h.panel.handleMouse(mouse(second.barIndex, second.x, width, 'click'))
+  assert.equal(h.controller.view().mode, 'browse', 'a later press must replace the old bar press')
+
+  // A selection changed by the authoritative row click is rejected at click.
+  const third = barCells(h.panel, width, 'Delete [D]')
+  h.panel.handleMouse(mouse(third.barIndex, third.x, width, 'press'))
+  const selectedBefore = h.controller.view().selectedId
+  h.controller.select(selectedBefore === 'occ-a' ? 'occ-b' : 'occ-a')
+  h.panel.render(width)
+  h.panel.handleMouse(mouse(third.barIndex, third.x, width, 'release'))
+  h.panel.handleMouse(mouse(third.barIndex, third.x, width, 'click'))
+  assert.equal(h.controller.view().mode, 'browse', 'a different selected occurrence must reject the old click')
+})
+
+test('the bar click is fenced by the press frame grant and by a stale repaint', () => {
+  const h = harness([item('occ-a', [{ type: 'text', text: 'queued alpha' }])])
+  const width = 84
+  const { barIndex, x } = barCells(h.panel, width, 'Delete [D]')
+
+  // The height grant changed between press and click (a resize/remount).
+  h.panel.handleMouse(mouse(barIndex, x, width, 'press'))
+  h.panel.handleMouse({ ...mouse(barIndex, x, width, 'click'), height: 31 })
+  assert.equal(h.controller.view().mode, 'browse', 'a different frame grant must reject the old press')
+
+  // Width changed before the click: the stale-width guard already rejects, and
+  // the captured grant stays authoritative.
+  h.panel.handleMouse(mouse(barIndex, x, width, 'press'))
+  h.panel.render(60)
+  h.panel.handleMouse(mouse(barIndex, x, 60, 'click'))
+  assert.equal(h.controller.view().mode, 'browse', 'a stale-width click must not act on the last-painted bar')
+})
+
+test('a zero-delta wheel is not a navigation and introduces no side effect on the press', () => {
+  const h = harness([
+    item('occ-a', [{ type: 'text', text: 'queued alpha' }]),
+    item('occ-b', [{ type: 'text', text: 'queued bravo' }]),
+  ])
+  const width = 84
+  const { barIndex, x, lines } = barCells(h.panel, width, 'Delete [D]')
+  const pickerRow = lines.findIndex(line => plain(line).includes('queued alpha'))
+  h.panel.handleMouse(mouse(barIndex, x, width, 'press'))
+  h.panel.handleMouse(mouse(pickerRow, 5, width, 'wheel', 0))
+  assert.equal(h.controller.view().selectedId, 'occ-a', 'a zero-delta wheel must not move the selection')
+  h.panel.handleMouse(mouse(barIndex, x, width, 'release'))
+  h.panel.handleMouse(mouse(barIndex, x, width, 'click'))
+  assert.equal(h.controller.view().mode, 'confirm-delete', 'the unchanged press still completes')
+})
+
+test('the Edit bar follows the same currentness fence when a wheel changes the target', () => {
+  const h = harness([
+    item('occ-a', [{ type: 'text', text: 'queued alpha' }]),
+    item('occ-b', [{ type: 'text', text: 'queued bravo' }]),
+  ])
+  const width = 84
+  const { barIndex, x, lines } = barCells(h.panel, width, 'Edit [')
+  const pickerRow = lines.findIndex(line => plain(line).includes('queued alpha'))
+  h.panel.handleMouse(mouse(barIndex, x, width, 'press'))
+  h.panel.handleMouse(mouse(pickerRow, 5, width, 'wheel', -1))
+  assert.equal(h.controller.view().selectedId, 'occ-b')
+  h.panel.handleMouse(mouse(barIndex, x, width, 'release'))
+  h.panel.handleMouse(mouse(barIndex, x, width, 'click'))
+  assert.equal(h.controller.view().mode, 'browse', 'the old Edit press must not open A/B Edit')
+  assert.deepEqual(h.writes, [])
+
+  h.panel.render(width)
+  const fresh = barCells(h.panel, width, 'Edit [')
+  h.panel.handleMouse(mouse(fresh.barIndex, fresh.x, width, 'press'))
+  h.panel.handleMouse(mouse(fresh.barIndex, fresh.x, width, 'release'))
+  h.panel.handleMouse(mouse(fresh.barIndex, fresh.x, width, 'click'))
+  assert.equal(h.controller.view().mode, 'edit', 'a fresh Edit press opens the wheel-selected occurrence')
+  assert.equal(h.controller.view().selectedId, 'occ-b')
+  assert.equal(h.controller.view().draft, 'queued bravo')
 })
 
 

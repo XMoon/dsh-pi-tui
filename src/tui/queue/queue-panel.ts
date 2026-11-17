@@ -24,7 +24,13 @@ import { SearchablePicker, type SearchablePickerItem } from '../pickers/searchab
 import { QUEUE_CHORDS, type QueueChordId } from '../keybindings/hints.ts'
 import { color, editorTheme, selectListTheme } from '../theme/runtime.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
-import { attachmentCountLabel, type QueueManagerController, type QueueManagerRow, type QueueManagerView } from '../../app/queue/manager.ts'
+import {
+  attachmentCountLabel,
+  type QueueManagerController,
+  type QueueManagerMode,
+  type QueueManagerRow,
+  type QueueManagerView,
+} from '../../app/queue/manager.ts'
 
 /** The One Wide Overlay geometry of the queue manager (design language D10). */
 export interface QueueOverlayGeometry {
@@ -120,17 +126,38 @@ function layoutBar(input: readonly BarSegment[], width: number): BarLayout {
   }
 }
 
+/** Whether one action is live on the page the controller currently reports. */
+function actionAvailable(view: QueueManagerView, id: ActionId): boolean {
+  switch (view.mode) {
+    case 'browse':
+      return id === 'edit' || id === 'delete' || id === 'cancel'
+    case 'edit':
+      return id === 'save' || id === 'cancel'
+    case 'confirm-delete':
+      return id === 'confirm' || id === 'cancel'
+    case 'closed':
+      return false
+  }
+}
+
 /** One last-painted hit region of the panel. */
 type PanelHit =
   | { readonly kind: 'picker'; readonly offsetY: number }
   | { readonly kind: 'action'; readonly ranges: readonly { readonly id: ActionId; readonly start: number; readonly end: number }[] }
   | { readonly kind: 'inert' }
 
+/** The ONE unfinished pointer gesture: the whole painted bar identity the press
+ * resolved (mode, selected occurrence, action and its exact painted cells) plus
+ * the frame grant. A synthesized click may only complete the SAME identity. */
 interface PanelPress {
-  readonly hit: PanelHit
+  readonly mode: QueueManagerMode
+  readonly selectedId: string | undefined
+  readonly actionId: ActionId
+  readonly row: number
+  readonly start: number
+  readonly end: number
   readonly width: number
-  /** The exact action segment the press resolved (when it hit one). */
-  readonly actionId?: ActionId
+  readonly height: number
 }
 
 export class QueuePanel implements Component, Focusable {
@@ -145,6 +172,10 @@ export class QueuePanel implements Component, Focusable {
   private hits: PanelHit[] = []
   private lastRenderWidth = -1
   private pressed: PanelPress | undefined
+  /** The controller view identity the LAST render published: a press only
+   * latches a bar that was painted for the SAME mode/selection. */
+  private paintedMode: QueueManagerMode = 'closed'
+  private paintedSelectedId: string | undefined
   private pickerSignature = ''
   private focusedFlag = false
 
@@ -194,9 +225,14 @@ export class QueuePanel implements Component, Focusable {
 
   dispose(): void {
     this.editor = undefined
+    this.pressed = undefined
   }
 
   handleInput(data: string): void {
+    // Any keyboard input is a fresh gesture boundary: a bar press recorded
+    // before it must never complete on a later synthesized click, even when
+    // the key only moves the selection (or is consumed without a repaint).
+    this.pressed = undefined
     const view = this.controller.view()
     switch (view.mode) {
       case 'closed':
@@ -266,6 +302,15 @@ export class QueuePanel implements Component, Focusable {
     // press → release → synthesized click: the release leaves the press
     // identity intact for the click to validate and activate.
     if (event.type === 'release') return undefined
+    // Gesture boundaries come BEFORE every geometry/missing-hit guard: an
+    // effective wheel or a new left press retires the unfinished bar press
+    // even when it lands on inert chrome or a stale frame, and a synthesized
+    // click consumes the snapshotted press exactly once. A zero-delta wheel
+    // is not a navigation and keeps the existing gesture untouched.
+    if (event.type === 'wheel' && (event.wheelDelta ?? 0) !== 0) this.pressed = undefined
+    if (event.type === 'press' && event.button === 'left') this.pressed = undefined
+    const clicked = event.type === 'click' ? this.pressed : undefined
+    if (event.type === 'click') this.pressed = undefined
     if (event.type !== 'press' && event.type !== 'click' && event.type !== 'wheel') return undefined
     if (event.button !== 'left' && event.type !== 'wheel') return undefined
     if (event.width !== this.lastRenderWidth) return undefined
@@ -280,16 +325,38 @@ export class QueuePanel implements Component, Focusable {
       return result === undefined ? undefined : { handled: true }
     }
     if (event.type === 'wheel') return undefined
-    const segment = hit.ranges.find(range => event.x >= range.start && event.x < range.end)
-    if (segment === undefined) return undefined
     if (event.type === 'press') {
-      this.pressed = { hit, width: event.width, actionId: segment.id }
+      // Only a COMPLETELY painted segment can start a gesture. The painted bar
+      // must also belong to the controller view this press resolves against:
+      // a state change between the last paint and the press leaves nothing
+      // clickable until the next render publishes the new bar.
+      const segment = hit.ranges.find(range => event.x >= range.start && event.x < range.end)
+      if (segment === undefined) return undefined
+      const view = this.controller.view()
+      if (view.mode === 'closed' || view.mode !== this.paintedMode || view.selectedId !== this.paintedSelectedId) return undefined
+      if (!actionAvailable(view, segment.id)) return undefined
+      this.pressed = {
+        mode: view.mode,
+        selectedId: view.selectedId,
+        actionId: segment.id,
+        row: event.y,
+        start: segment.start,
+        end: segment.end,
+        width: event.width,
+        height: event.height,
+      }
       return { handled: true }
     }
-    const pressed = this.pressed
-    this.pressed = undefined
-    if (pressed === undefined || pressed.width !== event.width) return undefined
-    if (pressed.hit.kind !== 'action' || pressed.actionId !== segment.id) return undefined
+    const pressed = clicked
+    if (pressed === undefined) return undefined
+    if (pressed.width !== event.width || pressed.height !== event.height || pressed.row !== event.y) return undefined
+    const segment = hit.ranges.find(range =>
+      range.id === pressed.actionId && range.start === pressed.start && range.end === pressed.end)
+    if (segment === undefined) return undefined
+    if (event.x < segment.start || event.x >= segment.end) return undefined
+    const view = this.controller.view()
+    if (view.mode !== pressed.mode || view.selectedId !== pressed.selectedId) return undefined
+    if (!actionAvailable(view, segment.id)) return undefined
     this.activate(segment.id)
     return { handled: true }
   }
@@ -299,6 +366,8 @@ export class QueuePanel implements Component, Focusable {
     this.lastRenderWidth = safeWidth
     this.hits = []
     const view = this.controller.view()
+    this.paintedMode = view.mode
+    this.paintedSelectedId = view.selectedId
     const lines: string[] = []
     const record = (line: string, hit: PanelHit): void => {
       lines.push(line)

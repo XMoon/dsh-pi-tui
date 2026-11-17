@@ -762,17 +762,23 @@ export class SearchablePicker implements Component, Focusable {
    * Wheel moves one logical selection step (wrapping like the keyboard).
    */
   handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {
-    // A click ends any gesture, and every left press starts a fresh
-    // one: release the pressed identity up front — BEFORE the width
-    // guard / hit lookup / search dispatch / inert return, so a
-    // delegated search press (or a press on stale-width or missing-hit
-    // geometry) still replaces the old latch. The TUI keeps the picker
-    // as the press target for a handled search press, so a later
-    // release on the same cell synthesizes a click that must not match
-    // a stale identity. The local copy still guards the valid-row
+    // A click ends any gesture, every left press starts a fresh one, and an
+    // EFFECTIVE wheel (a non-zero delta, even at a boundary that changes no
+    // selection) retires the old item press: a release on the cell that still
+    // shows the pressed row must never activate an item a wheel has already
+    // navigated away from. These boundaries come BEFORE the width guard / hit
+    // lookup / search dispatch / inert return, so a delegated search press (or
+    // a press on stale-width or missing-hit geometry) still replaces the old
+    // latch. The TUI keeps the picker as the press target for a handled search
+    // press, so a later release on the same cell synthesizes a click that must
+    // not match a stale identity. The local copy still guards the valid-row
     // comparison below.
     const pressedValue = this.mousePressedValue
-    if (event.type === 'click' || (event.type === 'press' && event.button === 'left')) {
+    if (
+      event.type === 'click'
+      || (event.type === 'press' && event.button === 'left')
+      || (event.type === 'wheel' && (event.wheelDelta ?? 0) !== 0)
+    ) {
       this.mousePressedValue = undefined
     }
     // The hit map is only valid for the last painted width: a resize
