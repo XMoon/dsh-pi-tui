@@ -4307,6 +4307,34 @@ test('F2/W02: a 44x20 long list keeps the wheel-selected typed row painted and n
   assert.ok(/^> .*Current session/m.test(tree.view()), 'wheel-up returns to the same typed Session')
   assert.deepEqual(tree.resumes, [])
   assert.equal(tree.closes, 0)
+  tree.dispose()
+
+  // A painted Show more row is a typed selection target: the wheel selects it
+  // but never runs its explicit reveal or grows this open's watermark.
+  const more = harness({ columns: 100, rows: 24 })
+  const moreHistory = Array.from({ length: 30 }, (_, index) => row(`session-wheel-more-${index}`, 900 - index, { title: `More ${index}` }))
+  more.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Current session' }), ...moreHistory] }))
+  more.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-more', path: '/ws', title: 'More', sessionIds: [CURRENT, ...moreHistory.map(item => item.id)] },
+  ] })
+  settleActivity(more)
+  await more.paint()
+  const moreRow = lineIndexOf(panelFrame(more), 'Show more sessions')
+  const remaining = Number(/· (\d+) remaining/.exec(panelFrame(more)[moreRow]!)?.[1])
+  const visibleMore = panelFrame(more).filter(line => /More \d+/.test(line)).length
+  for (let step = 0; step < 20; step += 1) await wheelCell(more, 5, moreRow, 'down')
+  assert.ok(/^> .*Show more sessions/m.test(more.view()), `the wheel selects the painted Show more row:\n${more.view()}`)
+  const afterMore = panelFrame(more)[lineIndexOf(panelFrame(more), 'Show more sessions')]!
+  assert.equal(Number(/· (\d+) remaining/.exec(afterMore)?.[1]), remaining,
+    'a wheel over Show more never invokes the reveal or changes the watermark')
+  assert.equal(panelFrame(more).filter(line => /More \d+/.test(line)).length, visibleMore,
+    'the wheel reveals no hidden history')
+  more.vt.sendInput('\r')
+  await more.paint()
+  const revealed = panelFrame(more)[lineIndexOf(panelFrame(more), 'Show more sessions')]!
+  assert.equal(Number(/· (\d+) remaining/.exec(revealed)?.[1]), remaining - 5,
+    `Enter still reveals the next five history rows:\n${more.view()}`)
+  more.dispose()
 })
 
 test('F2/W03: the wide left list takes the wheel while the right Preview and the column gap stay inert', async () => {
@@ -4410,6 +4438,32 @@ test('F2/W04+W05: Search Results wheel takes focus, moves only the selection, cl
   await h.paint()
   assert.ok(/^> .*Other session/m.test(h.view()), `Esc restores the pre-search Browse selection:\n${h.view()}`)
   assert.ok(!h.view().includes('Search all workspaces'), 'the second Esc leaves the global search')
+})
+
+test('F2/W05: a result page longer than the viewport scrolls with the wheel selection', async () => {
+  const results = Array.from({ length: 24 }, (_, index) => ({
+    row: row(`session-wheel-result-${index}`, 1_000 - index, { title: `Result ${index}` }),
+    source: 'Content' as const,
+    snippet: `needle ${index}`,
+  }))
+  const h = harness({ columns: 100, rows: 24, initialMode: 'search' })
+  h.handle.setSnapshot(snapshot({ query: 'needle', searchState: 'ready', searchResults: results }), 'needle')
+  settleActivity(h)
+  await h.paint()
+  assert.ok(h.view().includes('Search: needle'), `the Search editor keeps its seeded query:\n${h.view()}`)
+  const firstResult = lineIndexOf(panelFrame(h), 'Result 0')
+  for (let step = 0; step < 20; step += 1) await wheelCell(h, 5, firstResult, 'down')
+  const view = h.view()
+  assert.ok(/^> .*Result 20/m.test(view), `the result viewport follows the wheel selection:\n${view}`)
+  assert.ok(!view.includes('Result 0 ') && !view.includes('Result 2 '), `the first result page scrolled away:\n${view}`)
+  assert.ok(view.includes('Result 3'), 'the rebased result page starts at the real painted row')
+  assert.ok(h.view().includes('Search: needle'), 'scrolling the results never edits the query')
+  assert.deepEqual(h.queries, [], 'the wheel never issues a Host query')
+  assert.deepEqual(h.resumes, [], 'the wheel never resumes a result')
+  for (let step = 0; step < 20; step += 1) await wheelCell(h, 5, firstResult, 'up')
+  assert.ok(/^> .*Result 0/m.test(h.view()), `the wheel returns to the first painted result:\n${h.view()}`)
+  assert.ok(h.view().includes('Result 17') && !h.view().includes('Result 18'),
+    'the result viewport rebases back to the first page')
 })
 
 test('F2/W06+W07: Peek wheel scrolls only the pinned detail and the left column stays inert', async () => {
@@ -4626,6 +4680,7 @@ test('F2/W12: an async Activity refresh keeps the wheel-selected Session and a v
 
 test('F2/W13: a zero delta or a stale grant is consumed without acting; only a painted wheel navigates', async () => {
   let renders = 0
+  let closes = 0
   let rows = 24
   let columns = 100
   const host: SessionWorkspacePanelHost = {
@@ -4635,7 +4690,7 @@ test('F2/W13: a zero delta or a stale grant is consumed without acting; only a p
     notice: () => undefined,
     onQueryChange: () => {},
     onResume: () => {},
-    onClose: () => {},
+    onClose: () => { closes += 1 },
   }
   const panel = new SessionWorkspacePanel(host, { initialMode: 'browse', initialBrowseScope: 'all', currentSessionId: CURRENT })
   panel.setSnapshot(snapshot())
@@ -4673,8 +4728,17 @@ test('F2/W13: a zero delta or a stale grant is consumed without acting; only a p
   rows = 20
   assert.deepEqual(panel.handleMouse(event({ height: 20 })), { handled: true, render: false })
   assert.equal(renders, 0, 'a pre-repaint resize never replays an old cell')
-  // The painted frame still navigates through the existing move method once.
   rows = 24
+  // A zero-delta wheel keeps a legal press alive: its release still acts.
+  const bar = stripTerminalSequences(panel.render(columns).at(-1) ?? '')
+  const barX = bar.indexOf('Return [Enter]') + 1
+  assert.ok(barX > 0, `the fake frame paints its Return verb:\n${bar}`)
+  panel.onCellPress(barX, rows - 1)
+  assert.deepEqual(panel.handleMouse(event({ wheelDelta: 0 })), { handled: true, render: false })
+  assert.equal(renders, 0, 'the zero-delta wheel never requests a repaint')
+  panel.onCellClick(barX, rows - 1)
+  assert.equal(closes, 1, 'a zero-delta wheel never cancels the legal press')
+  // The painted frame still navigates through the existing move method once.
   assert.deepEqual(panel.handleMouse(event({})), { handled: true, render: false })
   assert.equal(renders, 1, 'a valid wheel runs exactly one existing navigation request')
   panel.dispose()
@@ -4699,4 +4763,82 @@ test('F2/W13: a pre-repaint resize never replays an old wheel cell, and the repa
   assert.ok(/^> .*Resize 0/m.test(h.view()), `the repainted frame accepts the wheel:\n${h.view()}`)
   assert.deepEqual(h.resumes, [])
   assert.equal(h.closes, 0)
+})
+
+test('F2/W13: wheel hit zones follow the 110/112 column threshold and tiny frames', async () => {
+  const sessions = Array.from({ length: 8 }, (_, index) => row(`session-wheel-threshold-${index}`, 900 - index, { title: `Threshold ${index}` }))
+  const h = harness({ columns: 120, rows: 40 })
+  h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Current session' }), ...sessions] }))
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-threshold', path: '/ws', title: 'Threshold', sessionIds: [CURRENT, ...sessions.map(item => item.id)] },
+  ] })
+  settleActivity(h)
+  await h.paint()
+  await wheelCell(h, 5, bodyTopRow(h), 'down')
+  assert.ok(/^> .*Threshold 0/m.test(h.view()), `the wide left column navigates:\n${h.view()}`)
+  // 110x12 is BELOW the 112 threshold: one full-width body scrolls.
+  h.vt.resize(110, 12)
+  await h.paint()
+  await wheelCell(h, 60, bodyTopRow(h), 'down')
+  assert.ok(/^> .*Threshold 1/m.test(h.view()), `110x12 is one column and its whole body navigates:\n${h.view()}`)
+  // 112x12 crosses the threshold: only the left column navigates.
+  h.vt.resize(112, 12)
+  await h.paint()
+  await wheelCell(h, 5, bodyTopRow(h), 'down')
+  assert.ok(/^> .*Threshold 2/m.test(h.view()), `112x12 splits and its left column navigates:\n${h.view()}`)
+  const splitFrame = h.view()
+  await wheelCell(h, 100, bodyTopRow(h), 'down')
+  assert.equal(h.view(), splitFrame, 'the right Preview is inert at the exact two-column threshold')
+  // Shrink -> grow: the left column is live again, but the old press is not.
+  h.vt.resize(120, 40)
+  await h.paint()
+  await wheelCell(h, 5, bodyTopRow(h), 'down')
+  assert.ok(/^> .*Threshold 3/m.test(h.view()), `the grown round trip keeps the left column live:\n${h.view()}`)
+  const frame = panelFrame(h)
+  const bar = frame[frame.length - 1]!
+  const x = bar.indexOf('Peek [Space]') + 1
+  const y = frame.length - 1
+  assert.ok(x > 0 && bar.includes('Peek [Space]'), `the wide bar paints its Peek:\n${bar}`)
+  h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
+  await h.paint()
+  h.vt.resize(80, 10)
+  await h.paint()
+  h.vt.resize(120, 40)
+  await h.paint()
+  h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
+  await h.paint()
+  assert.ok(!h.view().includes('Peek ·'), 'a shrink/grow repaint never revives the old bar press')
+  await clickBarAction(h, 'Open [Enter]')
+  assert.deepEqual(h.resumes, ['session-wheel-threshold-3'], 'a fresh press on the repainted bar still acts')
+  h.dispose()
+
+  // Tiny frames: only a body row that was really painted may navigate.
+  const one = harness({ columns: 80, rows: 1 })
+  one.handle.setSnapshot(snapshot())
+  settleActivity(one)
+  await one.paint()
+  const oneFrame = one.view()
+  await wheelCell(one, 5, 0, 'down')
+  assert.equal(one.view(), oneFrame, 'the one-row header is never a wheel sink')
+  one.dispose()
+
+  const two = harness({ columns: 80, rows: 2 })
+  two.handle.setSnapshot(snapshot())
+  settleActivity(two)
+  await two.paint()
+  const twoFrame = two.view()
+  await wheelCell(two, 5, 1, 'down')
+  assert.equal(two.view(), twoFrame, 'a two-row frame paints no body to scroll')
+  two.dispose()
+
+  const three = harness({ columns: 80, rows: 3 })
+  three.handle.setSnapshot(snapshot())
+  settleActivity(three)
+  await three.paint()
+  await wheelCell(three, 5, 1, 'down')
+  assert.ok(/^> .*Other session/m.test(three.view()), `the ONE painted 3-row body row really navigates:\n${three.view()}`)
+  const threeFrame = three.view()
+  await wheelCell(three, 5, 2, 'down')
+  assert.equal(three.view(), threeFrame, 'the tiny action bar row is not a wheel sink')
+  three.dispose()
 })
