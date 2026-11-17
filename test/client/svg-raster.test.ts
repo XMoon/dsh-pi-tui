@@ -336,6 +336,70 @@ test('a crashed raster child releases the lane for the next real render', { skip
   assert.equal(recovered.heightPx, 64)
 })
 
+test('a real crashed child releases the LOADER lane for a successor real render', { skip: nativeRasterSkip }, async () => {
+  let children = 0
+  const spawnProcess = ((...args: Parameters<typeof spawn>) => {
+    children += 1
+    if (children === 1) {
+      // A REAL process that dies abnormally; the second request must get the
+      // real production launcher args unchanged.
+      return spawn(process.execPath, ['-e', 'process.exit(3)'], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      })
+    }
+    return spawn(...args)
+  }) as typeof spawn
+  const loader = new SvgRasterLoader(createSvgRasterizer(spawnProcess))
+  const settled = (digest: string): Promise<void> => new Promise((resolve) => {
+    const unsubscribe = loader.subscribe(digest, 128, () => {
+      unsubscribe()
+      resolve()
+    })
+  })
+  const crashed = settled('crash-digest')
+  loader.load('crash-digest', SVG_SOURCE, 128)
+  await crashed
+  assert.equal(loader.get('crash-digest', 128).state, 'error', 'the crash is a terminal error state')
+  const recovered = settled('successor-digest')
+  loader.load('successor-digest', SVG_SOURCE, 128)
+  await recovered
+  assert.equal(loader.get('successor-digest', 128).state, 'ready',
+    'the same loader starts a new real child after the crash')
+  loader.dispose()
+})
+
+test('a real child stdout overflow releases the LOADER lane for a successor real render', { skip: nativeRasterSkip }, async () => {
+  let children = 0
+  const spawnProcess = ((...args: Parameters<typeof spawn>) => {
+    children += 1
+    if (children === 1) {
+      return spawn(process.execPath, [
+        '-e',
+        "process.stdout.write('x'.repeat(9 * 1024 * 1024)); setInterval(() => {}, 1000)",
+      ], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+    }
+    return spawn(...args)
+  }) as typeof spawn
+  const loader = new SvgRasterLoader(createSvgRasterizer(spawnProcess))
+  const settled = (digest: string): Promise<void> => new Promise((resolve) => {
+    const unsubscribe = loader.subscribe(digest, 128, () => {
+      unsubscribe()
+      resolve()
+    })
+  })
+  const overflowed = settled('overflow-digest')
+  loader.load('overflow-digest', SVG_SOURCE, 128)
+  await overflowed
+  assert.equal(loader.get('overflow-digest', 128).state, 'error', 'the overflow is a terminal error state')
+  const recovered = settled('after-overflow-digest')
+  loader.load('after-overflow-digest', SVG_SOURCE, 128)
+  await recovered
+  assert.equal(loader.get('after-overflow-digest', 128).state, 'ready',
+    'the same loader starts a new real child after the overflow')
+  loader.dispose()
+})
+
 test('the loader runs ONE global raster at a time and an evicted digest reaches a terminal state', async () => {
   let active = 0
   let maxActive = 0
