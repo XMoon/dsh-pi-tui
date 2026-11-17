@@ -1313,7 +1313,26 @@ specialist-page contract below).
   page's ROOT back verbs — the real Esc, plus `←` while the page is on that
   same root state — never a hidden save/open/search/list/leader/record control;
   the root's painted content box, revision and child grant fence every pointer
-  gesture. A pending Keybinding mutation owns the page until its result is
+  gesture. The Footer body accepts the pointer wheel as a VIEWPORT-ONLY
+  scroll: only rows the last frame really painted in its scrollport are
+  eligible, the Fork's signed line count is used as-is (Wheel Lines and Alt are
+  never applied twice), and the page keeps the manual offset until the next
+  explicit keyboard input. The wheel never calls the model's move/reorder path,
+  so the model selection, `row-move` order, Add query/cursor and every drafted
+  value stay untouched; the pinned Add search/description, the preview, the
+  help and the ONE Action Bar are fixed and inert. A manual offset may hide the
+  model cursor: while the painted frame still hides it, every
+  Enter/Space/A/M/F/S/Left/Right zone-or-format/tone change/reorder key only
+  restores cursor-follow and is consumed (a second such key arriving before the
+  restored frame paints is consumed too), while Up/Down navigation, typing, Esc
+  and the Row Selector `←` keep their paths. In the zero-match Add picker the
+  inert `(no matching items)` notice never carries the cursor: the selected
+  Create row is the painted cursor and the first Enter follows the normal
+  visible-selection admission. Clicking the guard's `Keep Editing` row runs the
+  SAME model return to the Row Selector as keyboard Esc. Inline text editors, the
+  delete prompt and a saving page are wheel-inert; a nonzero wheel retires an
+  old body press while a zero notch never cancels one. A pending Keybinding
+  mutation owns the page until its result is
   painted, so leaving can never strand an invisible write. No second
   alt-screen, overlay, editor or settings manager exists for these entries, and
   a deeplink that cannot take the lease or build its page returns a real command
