@@ -755,7 +755,9 @@ test('review finding (round 5): fd matches case-insensitively (aligned with the 
   // what produces both matches. A fallback-only null would pass even
   // without -i. SKIP when no finder is installed (CI without fd/fdfind
   // must not fail the suite — the fallback path is tested separately).
-  const port = new DirectHostFilePort(() => ({ session: { header: { cwd: root } } }), null)
+  // Do NOT pin `null` here: that would force the fallback and make the
+  // availability check below skip this case unconditionally.
+  const port = new DirectHostFilePort(() => ({ session: { header: { cwd: root } } }))
   const fd = port.fdPathAvailableForTest()
   if (fd === null) {
     t.skip('no fd/fdfind on PATH: the real-fd case test cannot run')
