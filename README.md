@@ -128,9 +128,9 @@ dsh --profile pi-tui --continue            # 继续当前 Host Workspace 中最�
 
 `--session` 不带值或只含空白时进入 Browse All。**只有规范完整 ID**（`session-`/`session_` 加 32 位十六进制）在挂载前直接恢复，且不需要读取列表。其他非空值都会立即打开同一个 Browser：等官方列表到位后，先精确匹配已列出 ID，再按至少 4 位十六进制唯一前缀匹配，并走现有受保护 Resume；关键词、歧义或未命中只进入同一个全局搜索。搜索态先按一次 `Esc` 回到浏览列表，再按一次回到 sessionless Welcome。列表加载中 Browser 始终可输入、可 `Esc`，不会因 Host 列表挂起而卡住启动；加载期间手动修改查询会取消原 CLI 自动匹配。`-c, --continue` 只在 Host 已确认的 Workspace 内、按官方成员关系与主 Session 列表的交集选择最近一条（baseline 与列表必须来自同一 Host/Connection generation）；未确认 Workspace 或无历史时保持 sessionless 并提示一次，不会猜选其他 Workspace，也不会创建 Session。`--session` 与 `-c` 互斥；`--preset` 仍按原规则只对空白 Session 生效。
 
-### Daemon（Linux，可选）
+### Daemon（Linux / macOS，可选）
 
-候选版提供 Linux 本地 daemon 后端，**默认仍是 Direct**（进程内 TUI）。它不改变现有安装，只有显式选择后才生效：
+候选版提供 Linux 与 macOS 本地 daemon 后端，**默认仍是 Direct**（进程内 TUI）。它不改变现有安装，只有显式选择后才生效：
 
 - **选择**：本次启动设置 `DSH_PI_TUI_BACKEND=daemon`，或在 `/settings → General → Backend` 保存 `Daemon`（官方 Profile 配置项 `tui-startup.backend`）。优先级为 `DSH_PI_TUI_BACKEND` > 已保存 Profile 配置 > `direct`；非法值、空串与非 Linux/macOS 平台会非零退出，不会静默回退 Direct。选择只影响下一次冷启动，不会热切换当前进程，也不会重启任何 Host。
 - **管理命令**（只操作当前 `--profile`）：
@@ -145,9 +145,9 @@ dsh --profile pi-tui --continue            # 继续当前 Host Workspace 中最�
   dsh --profile pi-tui daemon uninstall
   ```
 
-**基础 Daemon 就是独立本地进程**：没有为本 Profile 显式安装 systemd unit 时，公开的 daemon 冷启动直接启动独立 Host，不查询 user manager，也不需要 systemd。`daemon install` 才是显式的服务安装：它只为当前 Profile 创建/验证 systemd `--user` unit，不 start、不 enable、不重启现有 Host；`daemon uninstall` 只移除本 Profile 的 unit，不停止独立 Host。unit 的 `ExecStart`、`Environment`、`Restart`、`ExecStartPre`、symlink 源与 drop-in 归用户和 systemd 所有，产品不会改写用户内容。`status` 是纯只读：没有 unit 时不调用 systemctl，也不会创建 Host/unit；`ActiveState=active` 与 `MainPID` 都不等于 Ready，Ready 仍以认证 Cookie、Host 身份回显和进程 starttime 为准。`daemon logs` 在当前被证实的归属下读取 unit journal 或该 Profile 的 `host.log`。管理命令不会自动重启、停止或“抢救”Host，也不会改写或删除用户 unit 内容。`stop`/`restart` 会中断当前 Session/Turn 的进行中工作，未结算写入不会自动重放；`install` 不会产生该中断。
+**基础 Daemon 就是独立本地进程**：没有为本 Profile 显式安装 systemd unit 时，公开的 daemon 冷启动直接启动独立 Host，不查询 user manager，也不需要 systemd。Linux 上 `daemon install` 才是显式的服务安装：它只为当前 Profile 创建/验证 systemd `--user` unit，不 start、不 enable、不重启现有 Host；`daemon uninstall` 只移除本 Profile 的 unit，不停止独立 Host。macOS 当前**没有 launchd supervisor**：`status/start/stop/restart/logs` 管理同一个独立 Host 进程，`install`/`uninstall` 明确以 `UNSUPPORTED_PLATFORM`（exit 3）拒绝且不创建 plist；macOS 的 `user-manager` 始终为 `not-checked`，`unit` 始终为 `none`。unit 的 `ExecStart`、`Environment`、`Restart`、`ExecStartPre`、symlink 源与 drop-in 归用户和 systemd 所有，产品不会改写用户内容。`status` 是纯只读：没有 unit 时不调用 systemctl，也不会创建 Host/unit；`ActiveState=active` 与 `MainPID` 都不等于 Ready，Ready 仍以认证 Cookie、Host 身份回显和新鲜内核身份（Linux starttime / macOS schema 2）为准。`daemon logs` 在当前被证实的归属下读取 unit journal 或该 Profile 的 `host.log`；macOS 只读 `host.log`。管理命令不会自动重启、停止或“抢救”Host，也不会改写或删除用户 unit 内容。`stop`/`restart` 会中断当前 Session/Turn 的进行中工作，未结算写入不会自动重放；`install` 不会产生该中断。
 
-**不同 install build 的显式升级**（同一 DSH 运行时、同一 Profile）：
+**不同 install build 的显式升级（仅 Linux systemd；同一 DSH 运行时、同一 Profile）**：
 
 1. 结束所有进行中的 Turn，退出除管理命令外的 TUI Client，并备份 `DSH_HOME` 与 Profile（回滚与数据安全由用户负责）。
 2. `dsh --profile pi-tui daemon stop`，确认 `status` 为 `host=stopped` 且旧 Host 的 PID/starttime 已消失；不要跳过此步。

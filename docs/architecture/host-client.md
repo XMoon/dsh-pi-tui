@@ -207,8 +207,10 @@ real interactive TTY, and any other OS or a non-interactive launch fails closed.
 A real public-managed start uses the platform's supervision path when one
 exists (the Linux user manager with a strict-absence detached process
 fallback); on macOS it always uses that existing detached Host process
-fallback, because launchd supervision and the six `dsh daemon` management
-verbs are not part of this local Host/Client link. Selection is cold-launch only: writing the Profile value shows "applies on next
+fallback, because launchd supervision is not part of this stage. The public
+`dsh daemon status/start/stop/restart/logs` management verbs DO cover this
+macOS detached process (see the management section below); no launchd unit is
+involved. Selection is cold-launch only: writing the Profile value shows "applies on next
 launch" and never hot-switches the running process or restarts the Host, and an
 environment override never writes back to the Profile. The `.volatile()` Config
 value lets a Direct and a Remote TUI Client read and write the same Host Profile
@@ -517,10 +519,12 @@ and the current terminal state never select, block or redirect a management
 command. A management command publishes one typed intent to the same
 `tuiDaemonStartup` service and the same launcher row; it resolves no Client
 artifact, opens no Direct/Remote TUI, creates no Session/Agent/Writer and starts
-no Host unless `start`/`restart` asks for one. The management verbs are
-Linux-only: macOS fails closed until launchd supervision and the Darwin admin
-seat land, while the macOS local Host/Client link itself does not depend on
-them. `--help` provides neither startup service.
+no Host unless `start`/`restart` asks for one. The verbs are supported on Linux
+and macOS. Linux attributes OS supervision through the verified systemd user
+unit; macOS has no service manager in this stage and manages only the
+independent Host process — launchd supervision belongs to the later D4 stage.
+The macOS local Host/Client link never depends on a service manager. `--help`
+provides neither startup service.
 
 The exit and error taxonomy is fixed: `0` success (including a confirmed
 `stopped`, an idempotent stop and an uninstall with no owned unit), `2` CLI usage,
@@ -543,7 +547,13 @@ stdout/stderr.
   is live). With no installed unit the command issues NO manager query and
   reports `user-manager=not-checked`; `user-manager=available|error` only
   describes the real `systemctl show` of an installed unit, and no absence is
-  inferred or reported as `absent`. `manager` names the VERIFIED supervision
+  inferred or reported as `absent`. On macOS there is no unit fact at all: the
+  command never inspects a unit path, resolves a systemd runtime directory or
+  invokes `systemctl`/`journalctl`/`launchctl`, and always reports
+  `user-manager=not-checked`, `unit=none`, `unit-state=not-found`; an
+  authenticated live Host is `manager=process` and `host=ready`, and with no
+  Host the macOS status is `manager=unmanaged` and `host=stopped`. `manager`
+  names the VERIFIED supervision
   attribution: `systemd` only when the loaded unit's `MainPID` equals the
   authenticated Host PID, `process` for a verified independent Host (even when a
   user bus exists), otherwise `unmanaged`; it never means "systemctl exists".
@@ -583,6 +593,17 @@ stdout/stderr.
   only by one SIGTERM to the verified original PID after re-authentication,
   re-checking the kernel starttime and the product Host entry command identity;
   this routing does not depend on whether the machine happens to have systemd.
+  On macOS the same independent-process branch proves the schema-2 Darwin kernel
+  identity instead: after the fresh authenticated handshake
+  `assertRecordedHostKernelIdentityCurrent()` must still prove the SAME kernel
+  process, the kernel read is repeated immediately before the signal, and a
+  `gone`/`different`/`unknown` observation or a replaced registry instance is
+  refused with ZERO signals. The bounded wait then requires that recorded kernel identity to
+  become `gone`/`different`; `unknown` stays uncertainty and is never treated as
+  stopped. No platform invokes `readLinuxStarttime`/`/proc` or a Linux abstract
+  admin seat on macOS. The Host's existing `SIGTERM` process-lifetime admission
+  still runs the one official `runProfile` `shutdownOwner.shutdown()`; the
+  management command adds no second shutdown owner, RPC or SIGKILL.
   No process group and no `pkill`. A live Host beside an active unit with a
   different `MainPID`, a unit in flux, a foreign or wrong-scope unit, or an
   unreadable manager is refused instead of being signalled. A timeout is exit 5
@@ -644,18 +665,28 @@ stdout/stderr.
   unit whose `MainPID` differs, a unit in flux, or an unreadable manager is an
   explicit exit-4 log-source failure and never a guessed file. There is no
   arbitrary path/command input and no business side effect; missing/unreadable
-  output is exit 4. Output is bounded and best-effort
+  output is exit 4. On macOS there is no journal path at all: `daemon logs`
+  always reads the same bounded/sanitized scope `host.log` tail and never invokes
+  `journalctl`/`launchctl` or invents another source. Output is bounded and
+  best-effort
   sanitized (ANSI/control sequences, token/cookie/Authorization and
   connect/launch URL material); the user-facing notice states that the
   sanitization cannot promise every secret shape in free-form user text.
 - **Mutating verbs serialize per Profile, not globally.** `start`, `stop`,
-  `restart`, `install` and `uninstall` hold one short-lived profile-scoped Linux abstract
-  admin seat (`\0dsh-pi-tui-admin-<scope prefix>`); the kernel releases it when
-  the command exits, so there is no lock file or persistent state. A second
+  `restart`, `install` and `uninstall` hold one short-lived profile-scoped admin
+  seat. Linux holds the abstract socket name
+  (`\0dsh-pi-tui-admin-<scope prefix>`); macOS holds the existing Darwin `admin`
+  `O_EXLOCK` seat file in the account-home seat chain beside the Host singleton
+  (`seat-admin-<scopeId>.lock`), claimed through `bindDarwinKernelSeat`. `status`
+  and `logs` take no seat and create no directory. The kernel releases the claim
+  when the command exits, so there is no persistent lock file or second state
+  machine. A second
   concurrent mutating command for the same Profile gets `DAEMON_CONTROL_BUSY`
   and exit 5 before any Host/unit mutation; another Profile is unaffected. A
   normal Client cold start keeps its existing Host kernel-singleton semantics and
-  takes no admin seat.
+  takes no admin seat. On macOS `install`/`uninstall` refuse as
+  `UNSUPPORTED_PLATFORM`/exit 3 before taking the seat, writing a unit or
+  creating any directory; no launchd plist exists in this stage.
 - **Running-work boundary.** `stop`/`restart` are explicit user Host control and
   can interrupt a running Session, accepted Turn, tool or pending Interaction;
   `uninstall` prints the same warning only when it actually stopped a running
