@@ -11,7 +11,8 @@
  * every child; a `ulimit` installation failure exits the child with code 97
  * BEFORE the native rasterizer runs — it never silently continues.
  *
- * macOS has no usable finite `RLIMIT_AS`/`RLIMIT_DATA` bound (MAC-08A:
+ * The tested finite `RLIMIT_AS`/`RLIMIT_DATA` settings fail on macOS; no
+ * qualifying kernel-enforced hard bound was proven (MAC-08A:
  * HARD_MEMORY_BOUND_NOT_PROVEN, kept as the technical fact). Under the
  * Owner-accepted policy (MAC-08_POLICY: OWNER_RISK_ACCEPTED) Darwin runs the
  * SAME isolated child without the kernel cap, while the process boundary,

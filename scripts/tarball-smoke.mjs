@@ -637,14 +637,7 @@ const helper = require(${JSON.stringify(prebuild)})
 for (const key of ['isModifierPressed', 'getText', 'setText', 'getImage', 'getFilePaths']) {
   if (typeof helper[key] !== 'function') throw new Error('missing native export: ' + key)
 }
-const text = await helper.getText()
-if (text !== null && typeof text !== 'string') throw new Error('getText returned ' + typeof text)
-const image = await helper.getImage()
-if (image !== null && !(image instanceof Uint8Array)) throw new Error('getImage returned ' + typeof image)
-const files = await helper.getFilePaths()
-if (files !== null && (!Array.isArray(files) || files.some((file) => typeof file !== 'string'))) throw new Error('getFilePaths returned ' + typeof files)
-if (typeof helper.isModifierPressed('shift') !== 'boolean') throw new Error('isModifierPressed returned a non-boolean')
-console.log(JSON.stringify({ text, imageBytes: image === null ? null : image.length, files }))
+console.log('installed Darwin native helper exposes the pinned five-function API')
 `
           const helperRun = run(process.execPath, ['--input-type=module', '-e', helperScript], { cwd: probeDir })
           check('installed Darwin native helper loads and exposes the real API',

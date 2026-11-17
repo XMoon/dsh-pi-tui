@@ -1450,9 +1450,10 @@ thumbnail's clickable body is the Screen-committed footprint read at hit time,
 never the component's render-time candidate.
 
 The isolated raster child runs on Linux under the verified virtual-memory cap.
-On macOS there is no usable kernel hard memory bound (the measured `RLIMIT_AS`
-/ `RLIMIT_DATA` setting fails and is not a solved problem); the Owner accepted
-that residual native-memory-pressure risk for normal macOS preview capability.
+On macOS the tested finite `RLIMIT_AS` / `RLIMIT_DATA` settings returned
+`EINVAL`; no qualifying kernel-enforced hard bound was proven
+(`MAC-08A = HARD_MEMORY_BOUND_NOT_PROVEN`). The Owner accepted that residual
+native-memory-pressure risk for normal macOS preview capability.
 The process boundary, the 3,000 ms deadline, the single worker lane, the input
 and output budgets, close-before-settle and the Source fallback are the defenses
 that remain, and they are not claimed as an OOM guarantee. Windows and every
