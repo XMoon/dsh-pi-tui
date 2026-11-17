@@ -15,7 +15,13 @@ import test from 'node:test'
 import { createApplicationEvents, type ApplicationEventsDeps } from '../../src/app/surface/application-events.ts'
 import type { SubmissionComposerPort } from '../../src/app/submission/composer-port.ts'
 import type { ClientActions } from '../../src/app/surface/client-actions.ts'
-import type { ClipboardReadResult } from '../../src/client/clipboard/read.ts'
+import {
+  readClipboardImage,
+  type ClipboardEnvironment,
+  type ClipboardReadResult,
+  type RunCommand,
+} from '../../src/client/clipboard/read.ts'
+import { ClipboardImageError } from '../../src/domain/media/errors.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { DraftFileStore } from '../../src/client/media/attachment/file-draft.ts'
 import { checkImageLimits } from '../../src/client/media/image/intake.ts'
@@ -95,7 +101,15 @@ interface Harness {
   drained(): Promise<void>
 }
 
-function harness(): Harness {
+function harness(options: {
+  /**
+   * A TEST-ONLY classifier override: the REAL `readClipboardImage()` over a
+   * scripted OS runner (or a controlled rejection), used to prove the
+   * production classification → `runOwned` → composer-notice chain. When
+   * omitted the harness keeps its per-intent pre-classified Probe queue.
+   */
+  readonly probeImplementation?: () => Promise<ClipboardReadResult>
+} = {}): Harness {
   const store = new DraftImageStore()
   const fileStore = new DraftFileStore()
   const seat: { current: RecordingComposer } = { current: recordingComposer() }
@@ -134,6 +148,7 @@ function harness(): Harness {
       readClipboardImage: (): Promise<ClipboardReadResult> => {
         const index = started.length
         started.push(index)
+        if (options.probeImplementation !== undefined) return options.probeImplementation()
         const probe = probes[index]
         if (probe === undefined) throw new Error(`unscripted clipboard probe #${index}`)
         return probe.promise
@@ -512,4 +527,105 @@ test('PR2: the same paste settles normally once the hold is released before the 
   assert.equal(h.composer.inserts.length, 1, 'the placeholder lands')
   assert.equal(h.composer.notices.length, 1, 'the success notice follows the placeholder')
   h.dispose()
+})
+
+// ── the REAL clipboard classifier feeding the real application-event sink ──
+
+/** A tiny valid PNG header (1×1). */
+function pngBytes(): Buffer {
+  const bytes = Buffer.alloc(33)
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0)
+  bytes.set([0, 0, 0, 13], 8)
+  bytes.set([0x49, 0x48, 0x44, 0x52], 12)
+  bytes.writeUInt32BE(1, 16)
+  bytes.writeUInt32BE(1, 20)
+  return bytes
+}
+
+const WAYLAND_ENV: ClipboardEnvironment = {
+  platform: 'linux',
+  env: { WAYLAND_DISPLAY: 'wayland-0' },
+  exists: () => true,
+}
+
+/** A scripted Wayland OS clipboard: its type list advertises image/png and the
+ * requested payload is the given bytes. */
+function waylandClipboard(payload: Buffer): RunCommand {
+  return (async (_command: string, args: readonly string[]) => {
+    if (args.includes('--list-types')) {
+      return { stdout: Buffer.from('text/plain\nimage/png'), stderr: Buffer.alloc(0), code: 0 }
+    }
+    return { stdout: payload, stderr: Buffer.alloc(0), code: 0 }
+  }) as unknown as RunCommand
+}
+
+test('an advertised invalid image is classified by the REAL reader and reports exactly one error notice', async () => {
+  // Source → decision → sink: the production readClipboardImage() runs over
+  // scripted OS bytes, its ClipboardImageError crosses the existing runOwned
+  // classifier, and the captured current composer receives exactly one notice.
+  const h = harness({
+    probeImplementation: () => readClipboardImage(
+      waylandClipboard(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3])),
+      WAYLAND_ENV,
+    ),
+  })
+  h.paste()
+  await h.drained()
+
+  assert.deepEqual(h.started, [0], 'the OS clipboard was probed exactly once')
+  assert.deepEqual(h.composer.notices, [{
+    text: 'Clipboard image data is invalid or unsupported. Supported: PNG, JPEG, WebP, GIF.',
+    kind: 'error',
+  }], 'the real classification reaches the captured composer exactly once')
+  assert.equal(h.store.size(), 0, 'no image draft is staged')
+  assert.equal(h.composer.getDraft(), '', 'no placeholder is inserted')
+  assert.deepEqual(h.composer.inserts, [], 'the editor is untouched')
+})
+
+test('a failed image classification does not block the next queued paste, which stages its own image', async () => {
+  let probe = 0
+  const h = harness({
+    probeImplementation: () => {
+      probe += 1
+      return probe === 1
+        ? readClipboardImage(waylandClipboard(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3])), WAYLAND_ENV)
+        : readClipboardImage(waylandClipboard(pngBytes()), WAYLAND_ENV)
+    },
+  })
+  h.paste()
+  h.paste()
+  await h.drained()
+
+  assert.deepEqual(h.started, [0, 1], 'each intent probed the OS exactly once, in FIFO order')
+  assert.equal(h.store.size(), 1, 'only the valid image is staged (the failed read leaves no orphan draft)')
+  const token = h.store.values()[0]!.placeholder
+  assert.equal(h.composer.getDraft(), `${token} `, 'the valid queued paste commits its own placeholder')
+  const errors = h.composer.notices.filter(notice => notice.kind === 'error')
+  assert.deepEqual(errors, [{
+    text: 'Clipboard image data is invalid or unsupported. Supported: PNG, JPEG, WebP, GIF.',
+    kind: 'error',
+  }], 'the failed intent reports once')
+  assert.deepEqual(h.composer.notices.filter(notice => notice.kind !== 'error'),
+    [{ text: `attached ${token} — Enter to send`, kind: undefined }],
+    'the successful intent announces only its own token')
+})
+
+test('a failed image classification that settles after the ownership moved reports nothing', async () => {
+  for (const move of ['generation', 'composer', 'hold'] as const) {
+    const pending = probeOf()
+    const h = harness({ probeImplementation: () => pending.probe.promise })
+    h.paste()
+    await flush()
+    assert.deepEqual(h.started, [0], `${move}: the real probe started`)
+    if (move === 'generation') h.bumpGeneration()
+    else if (move === 'composer') h.replaceComposer(recordingComposer())
+    else h.setComposerHold(true)
+    pending.reject(new ClipboardImageError(
+      'Clipboard image data is invalid or unsupported. Supported: PNG, JPEG, WebP, GIF.',
+    ))
+    await h.drained()
+    assert.equal(h.store.size(), 0, `${move}: no image draft is staged`)
+    assert.deepEqual(h.composer.notices, [], `${move}: the old seat receives no stale error`)
+    assert.deepEqual(h.seat.current.notices, [], `${move}: the current seat receives no stale error`)
+  }
 })

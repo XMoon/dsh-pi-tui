@@ -150,75 +150,118 @@ export function clipboardBackendOf(env: ClipboardEnvironment): string {
   return 'unsupported'
 }
 
-/** Wait-free bounded run helper for clipboard commands. */
+/** The raster types the clipboard probe may request, in preference order. */
+const SUPPORTED_CLIPBOARD_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const
+
+/** The fixed, actionable message for advertised bytes that do not parse. */
+const INVALID_IMAGE_MESSAGE = 'Clipboard image data is invalid or unsupported. Supported: PNG, JPEG, WebP, GIF.'
+
+/** The fixed message for an advertised image whose format this build cannot
+ * request (TIFF/SVG/HEIC, ...). */
+const UNSUPPORTED_IMAGE_FORMAT_MESSAGE = 'Clipboard image format is unsupported. Supported: PNG, JPEG, WebP, GIF.'
+
+/** The fixed message for an advertised image whose payload was empty. */
+const NO_IMAGE_DATA_MESSAGE = 'Clipboard advertised an image but no image data could be read.'
+
+/** Wait-free bounded run helper for clipboard commands. ANY non-zero exit is a
+ * clipboard-read FAILURE — even when the command printed bytes before dying: a
+ * half-finished helper output is never a valid clipboard payload. */
 async function runWithTimeout(
   run: RunCommand,
   command: string,
   args: readonly string[],
   timeoutMs: number,
-): Promise<{ stdout: Buffer; code: number }> {
+): Promise<Buffer> {
   const result = await run(command, args, { timeoutMs })
-  if (result.code !== 0 && result.stdout.length === 0) {
+  if (result.code !== 0) {
     throw new ClipboardImageError(`clipboard command failed: ${command} (exit ${result.code})`)
   }
-  return { stdout: result.stdout, code: result.code }
+  return result.stdout
 }
 
-/** Parse the bytes once a binary clipboard payload arrives. */
+/**
+ * Parse the bytes once a binary clipboard payload arrives. A clipboard that
+ * ADVERTISED an image and produced bytes that do not parse is a read FAILURE,
+ * never an empty text clipboard — the silent `text: ''` conversion made Ctrl+V
+ * look like a no-op.
+ */
 function imageFromBytes(bytes: Uint8Array): ClipboardReadResult {
   const meta = parseImageMetadata(bytes)
-  if (meta === undefined) return { kind: 'text', text: '' }
+  if (meta === undefined) throw new ClipboardImageError(INVALID_IMAGE_MESSAGE)
   return { kind: 'image', bytes, mediaType: meta.mediaType, width: meta.width, height: meta.height }
+}
+
+/**
+ * Resolve the advertised-image branch shared by the Wayland and X11 probes:
+ * the FIRST supported non-empty payload is the image authority, and a
+ * clipboard that advertised an image but delivered nothing supported is an
+ * error with an actionable reason — never a default-text read that would
+ * fabricate empty text.
+ */
+function advertisedImageFailure(supportedPayloadSeen: boolean): never {
+  throw new ClipboardImageError(
+    supportedPayloadSeen ? NO_IMAGE_DATA_MESSAGE : UNSUPPORTED_IMAGE_FORMAT_MESSAGE,
+  )
 }
 
 async function waylandProbe(run: RunCommand): Promise<ClipboardReadResult> {
   const types = await runWithTimeout(run, 'wl-paste', ['--list-types'], 1500)
-  const list = types.stdout.toString('utf8')
+  const list = types.toString('utf8')
   if (!/[iI]mage\//.test(list)) {
     const text = await runWithTimeout(run, 'wl-paste', [], 1500)
-    return { kind: 'text', text: text.stdout.toString('utf8') }
+    return { kind: 'text', text: text.toString('utf8') }
   }
-  for (const mediaType of ['image/png', 'image/jpeg', 'image/webp', 'image/gif']) {
+  let advertised = false
+  for (const mediaType of SUPPORTED_CLIPBOARD_IMAGE_TYPES) {
     if (!list.includes(mediaType)) continue
+    advertised = true
     const data = await runWithTimeout(run, 'wl-paste', ['-t', mediaType], 2000)
-    if (data.stdout.length === 0) continue
-    return imageFromBytes(data.stdout)
+    if (data.length === 0) continue
+    return imageFromBytes(data)
   }
-  // The clipboard advertises a raster we do not name: read the default.
-  const data = await runWithTimeout(run, 'wl-paste', [], 2000)
-  if (data.stdout.length === 0) return { kind: 'text', text: '' }
-  return imageFromBytes(data.stdout)
+  return advertisedImageFailure(advertised)
 }
 
 async function x11Probe(run: RunCommand): Promise<ClipboardReadResult> {
   const targets = await runWithTimeout(run, 'xclip', ['-selection', 'clipboard', '-t', 'TARGETS', '-o'], 1500)
-  const list = targets.stdout.toString('utf8')
+  const list = targets.toString('utf8')
   if (!/[mM]age\//.test(list)) {
     const text = await runWithTimeout(run, 'xclip', ['-selection', 'clipboard', '-o'], 1500)
-    return { kind: 'text', text: text.stdout.toString('utf8') }
+    return { kind: 'text', text: text.toString('utf8') }
   }
   // Try the supported raster types in order, exactly like the Wayland
   // probe — a clipboard advertising only image/jpeg or image/webp must
   // still work (review finding 6).
-  for (const mediaType of ['image/png', 'image/jpeg', 'image/webp', 'image/gif']) {
+  let advertised = false
+  for (const mediaType of SUPPORTED_CLIPBOARD_IMAGE_TYPES) {
     if (!list.includes(mediaType)) continue
+    advertised = true
     const data = await runWithTimeout(run, 'xclip', ['-selection', 'clipboard', '-t', mediaType, '-o'], 2000)
-    if (data.stdout.length === 0) continue
-    return imageFromBytes(data.stdout)
+    if (data.length === 0) continue
+    return imageFromBytes(data)
   }
-  const data = await runWithTimeout(run, 'xclip', ['-selection', 'clipboard', '-o'], 2000)
-  if (data.stdout.length === 0) return { kind: 'text', text: '' }
-  return imageFromBytes(data.stdout)
+  return advertisedImageFailure(advertised)
 }
 
-/** macOS: AppKit NSPasteboard PNG → temp file. */
+/** The AppleScript sentinel for "the pasteboard holds an image this build
+ * cannot request (TIFF)" — distinct from "no image at all". */
+const TIFF_ONLY_SENTINEL = 'unsupported-image'
+
+/** macOS: AppKit NSPasteboard PNG → temp file. A TIFF-only pasteboard is an
+ * advertised image whose format this build cannot decode: it must report the
+ * unsupported-format error rather than silently reading an empty text
+ * clipboard. No TIFF transcoding and no second OS probe process. */
 async function macosProbe(run: RunCommand): Promise<ClipboardReadResult> {
   const file = join(tmpdir(), `dsh-clipboard-${randomUUID()}.png`)
   const osascript = [
     'use framework "AppKit"',
     `set thePasteboard to current application's NSPasteboard's generalPasteboard()`,
     `set theData to thePasteboard's dataForType:(current application's NSPasteboardTypePNG)`,
-    'if theData is missing value then return ""',
+    'if theData is missing value then',
+    `  set theTypes to thePasteboard's types()`,
+    `  if (theTypes's containsObject:(current application's NSPasteboardTypeTIFF)) then return "${TIFF_ONLY_SENTINEL}"`,
+    '  return ""',
+    'end if',
     `set theFile to POSIX file "${file}"`,
     "theData's writeToFile:theFile atomically:true",
     'return "ok"',
@@ -226,11 +269,15 @@ async function macosProbe(run: RunCommand): Promise<ClipboardReadResult> {
   try {
     const result = await run('osascript', ['-e', osascript], { timeoutMs: 5000 })
     if (result.code !== 0) throw new ClipboardImageError(`osascript failed (exit ${result.code})`)
+    if (result.stdout.toString('utf8').trim() === TIFF_ONLY_SENTINEL) {
+      throw new ClipboardImageError(UNSUPPORTED_IMAGE_FORMAT_MESSAGE)
+    }
     let bytes: Uint8Array
     try {
       bytes = new Uint8Array(readFileSync(file))
     } catch {
-      // No PNG on the clipboard: fall back to the plain-text payload.
+      // No PNG and no TIFF on the clipboard: fall back to the plain-text
+      // payload (an empty text is a genuinely empty clipboard).
       const text = await run('osascript', ['-e', 'the clipboard as text'], { timeoutMs: 3000 })
       return { kind: 'text', text: text.stdout.toString('utf8') }
     }
@@ -269,8 +316,10 @@ async function powershellProbe(run: RunCommand, wsl: boolean): Promise<Clipboard
     } catch {
       // No image on the clipboard: read the plain-text payload. The
       // SECOND PowerShell invocation must load System.Windows.Forms itself
-      // (each -Command process starts fresh — review finding 2).
+      // (each -Command process starts fresh — review finding 2). A non-zero
+      // exit is a read FAILURE, never an empty clipboard.
       const text = await run('powershell.exe', ['-NoProfile', '-Command', 'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::GetText()'], { timeoutMs: 3000 })
+      if (text.code !== 0) throw new ClipboardImageError(`powershell failed (exit ${text.code})`)
       return { kind: 'text', text: text.stdout.toString('utf8') }
     }
     return imageFromBytes(bytes)
