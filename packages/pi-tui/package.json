@@ -57,5 +57,5 @@
 	"engines": {
 		"node": ">=22.19.0"
 	},
-	"//native": "native/ prebuilds (darwin/win32 modifier keys, linux X11 clipboard) are deliberately not vendored. Without them the TUI still runs, but platform input and clipboard degrade: on Windows/Apple Terminal Shift+Tab is indistinguishable from Tab and the native Shift+Enter modifier fallback is unavailable (terminal.ts falls back to sequence heuristics), and the Linux X11 clipboard helper resolves to undefined so getNativeClipboard() reports nothing (host falls back to its own clipboard path). Supported surface: Linux/WSL/SSH into Linux. See AGENTS.md."
+	"//native": "The pinned Darwin arm64/x64 prebuilds are vendored under native/darwin/prebuilds and the root build copies them into the published dist/native tree, where the bundled loader resolves them (macOS modifier keys and clipboard helper). The Linux X11 and Windows prebuilds remain deliberately unvendored. Without a matching prebuild the TUI still runs, but platform input and clipboard degrade: Shift+Tab is indistinguishable from Tab and the native Shift+Enter modifier fallback is unavailable (terminal.ts falls back to sequence heuristics), the Windows virtual-terminal input helper is unavailable, and getNativeClipboard() reports nothing. Supported surface: macOS (arm64/x64), Linux/WSL/SSH into Linux. See AGENTS.md."
 }

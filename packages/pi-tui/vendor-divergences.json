@@ -2659,21 +2659,24 @@
    "risk": "HIGH",
    "files": [
     "tsdown.config.ts",
-    "src/native-module-path.ts"
+    "src/native-module-path.ts",
+    "native/darwin/prebuilds/darwin-arm64/darwin-platform.node",
+    "native/darwin/prebuilds/darwin-x64/darwin-platform.node"
    ],
    "why": "The vendored package has an XMoon package shell and must build from its own CWD without the root tsdown config shadowing it. Native self-reference must follow the package rename.",
    "changedSurface": [
     "package-local tsdown entry/output/declaration configuration",
     "TUI_PACKAGE_NAME native-module self-reference uses @xmoon76/pi-tui",
-    "native/ prebuilds stay unvendored: the upstream-prebuilt assertions in test/native-platform.test.ts skip when the prebuild is absent, and a degradation test asserts getNativeClipboard() fails closed instead of loading another platform's binary"
+    "the pinned Darwin arm64/x64 prebuilds are vendored under native/darwin/prebuilds and copied by the root build into dist/native; Linux X11 and Windows prebuilds stay unvendored, and a missing prebuild still fails closed instead of loading another platform's binary"
    ],
    "dependencies": {
     "vendorInternal": {
      "audited": true,
      "items": [
-      "native-module-path resolves package metadata and optional native assets through the renamed package."
+      "native-module-path resolves package metadata and optional native assets through the renamed package.",
+      "native/darwin/prebuilds carries the exact pinned upstream arm64 and x64 Mach-O addons, byte-for-byte."
      ],
-     "notes": "The package shell and source helper are coupled."
+     "notes": "The package shell, source helper and vendored Darwin assets are coupled."
     },
     "inheritanceStructural": {
      "audited": true,
@@ -2699,16 +2702,16 @@
      "items": [
       "building from packages/pi-tui is deterministic",
       "root tsdown does not shadow the fork config",
-      "optional native lookup fails gracefully under the renamed scope"
+      "native lookup resolves the vendored Darwin prebuilds under the renamed scope and fails closed when the matching prebuild is absent"
      ],
-     "notes": "A source diff gate must not ignore this non-src divergence."
+     "notes": "A source diff gate must not ignore this non-src divergence; the root build copies the pinned Darwin assets into the published dist."
     }
    },
    "tests": [
     "packages/pi-tui/test/native-module-path.test.ts: renamed package lookup and graceful fallback",
     "pnpm --dir packages/pi-tui build and root bundle build",
-    "scripts/tarball-smoke.mjs package/export checks",
-    "packages/pi-tui/test/native-platform.test.ts: no-prebuild ELF/X11 packaging tests skip; the Linux clipboard degrades to undefined"
+    "scripts/tarball-smoke.mjs package/export and packed Darwin prebuild checks",
+    "packages/pi-tui/test/native-platform.test.ts: the pinned Darwin arm64/x64 Mach-O files, the real Darwin helper load and opt-in clipboard text round-trip; the no-prebuild ELF/X11 packaging tests skip and the Linux clipboard degrades to undefined"
    ],
    "upstream": {
     "equivalence": "NO",
@@ -2722,7 +2725,7 @@
      "packages/tui/package.json"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream package metadata and build contract use the Earendil scope/tooling. Copying them would break the private @xmoon76 package shell and root bundle build. v1.1.0 also ships native/ prebuilds (including the new linux X11 clipboard helper); the fork keeps them unvendored and adapts the upstream prebuild assertions to the degradation contract."
+    "semanticDelta": "Upstream package metadata and build contract use the Earendil scope/tooling. Copying them would break the private @xmoon76 package shell and root bundle build. Upstream also ships native/ prebuilds (including the linux X11 clipboard helper); the fork vendors only the pinned Darwin arm64/x64 Mach-O addons and keeps the Linux/Windows prebuilds unvendored under the degradation contract."
    },
    "retirement": {
     "conditions": [
@@ -2742,7 +2745,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Non-src packaging divergence was explicitly included in the structured ledger; the source diff gate will continue to ignore it while the ledger gate validates it. Re-verified at v1.1.0 (abe508e1): the package shell and the renamed self-reference are unchanged, and the new native platform module fails closed without prebuilds."
+    "notes": "Non-src packaging divergence was explicitly included in the structured ledger; the source diff gate will continue to ignore it while the ledger gate validates it. Re-verified at v1.5.0 (f9a26365): the package shell and the renamed self-reference are unchanged. The fork vendors only the pinned Darwin arm64/x64 prebuilds and still fails closed when the matching prebuild is absent; the Linux/Windows prebuilds remain unvendored."
    }
   },
   "X026": {

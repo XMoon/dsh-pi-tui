@@ -215,10 +215,9 @@ export class SvgThumbnail implements Component {
     if (width < NARROW_WIDTH_THRESHOLD) return []
     // SVG preview pixels are available through Kitty and Direct SIXEL
     // (Image-8 / I8-2B). iTerm2's inline framing is not understood by the
-    // fork's ANSI width layer, and the other platforms have no verified native
-    // raster bound: the figure keeps its description and source actions instead
-    // of faking a pixel body. An admitted tmux virtual handle is a real Kitty
-    // transport here.
+    // fork's ANSI width layer, and platforms without the isolated raster lane
+    // keep the description and source actions instead of faking a pixel body.
+    // An admitted tmux virtual handle is a real Kitty transport here.
     if (protocol !== 'kitty' && protocol !== 'sixel') return []
     // The FIXED row budget is a real PIXEL-height ceiling for SIXEL: slicing
     // the returned lines cannot crop the DCS the Screen encodes. One row is

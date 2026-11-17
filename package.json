@@ -326,7 +326,7 @@
     "clean": "rm -rf dist",
     "clean:fork": "pnpm --dir packages/pi-tui clean",
     "build:fork": "pnpm --dir packages/pi-tui build",
-    "build:bundle": "pnpm gen:dsh-presets && tsdown",
+    "build:bundle": "pnpm gen:dsh-presets && tsdown && node scripts/copy-pi-darwin-native.mjs",
     "build": "pnpm build:fork && pnpm build:bundle",
     "typecheck:fork": "pnpm --dir packages/pi-tui typecheck",
     "typecheck:bundle": "tsc -p tsconfig.json --noEmit",

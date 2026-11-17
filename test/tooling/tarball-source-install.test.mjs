@@ -100,8 +100,19 @@ function candidateFiles() {
       + 'export declare const Config: unknown\n'
       + 'export declare const apply: () => void\n',
     'cordis.patch.yml': 'patch: []\n',
+    // The smoke also asserts the pinned Darwin native payload; a synthetic
+    // candidate must therefore mirror the REAL published asset tree instead
+    // of passing only because the native checks were skipped.
+    'dist/native/darwin/prebuilds/darwin-arm64/darwin-platform.node': readFileSync(join(
+      ROOT, 'packages', 'pi-tui', 'native', 'darwin', 'prebuilds', 'darwin-arm64', 'darwin-platform.node')),
+    'dist/native/darwin/prebuilds/darwin-x64/darwin-platform.node': readFileSync(join(
+      ROOT, 'packages', 'pi-tui', 'native', 'darwin', 'prebuilds', 'darwin-x64', 'darwin-platform.node')),
     'README.md': '# source probe\n',
     'README.en.md': '# source probe\n',
+    // The smoke asserts the packaged LICENSE carries the upstream pi-tui
+    // notice for the newly distributed Darwin binaries; the synthetic
+    // candidate mirrors the real root LICENSE rather than skipping the gate.
+    'LICENSE': readFileSync(join(ROOT, 'LICENSE'), 'utf8'),
   }
 }
 

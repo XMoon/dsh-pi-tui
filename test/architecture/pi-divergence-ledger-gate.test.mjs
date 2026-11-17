@@ -192,6 +192,11 @@ test('report rendering is deterministic and naturally sorts mixed IDs', () => {
 
 test('non-src packaging paths remain registered without entering source coverage', () => {
   const manifest = fixture()
-  assert.deepEqual(manifest.divergences.X025.files, ['tsdown.config.ts', 'src/native-module-path.ts'])
+  assert.deepEqual(manifest.divergences.X025.files, [
+    'tsdown.config.ts',
+    'src/native-module-path.ts',
+    'native/darwin/prebuilds/darwin-arm64/darwin-platform.node',
+    'native/darwin/prebuilds/darwin-x64/darwin-platform.node',
+  ])
   assert.deepEqual(errorsFor(manifest), [])
 })

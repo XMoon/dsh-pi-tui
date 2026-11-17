@@ -7,12 +7,21 @@
  * abort (resvg's own unbounded-viewBox failure was measured as a real
  * `SIGABRT`); the admission gate in `domain/visual/svg-admission.ts` already
  * refuses the known crash inputs, and process isolation contains the residual
- * native risk. A POSIX virtual-memory cap and a hard timeout bound the child;
- * The production composition only enables this rasterizer on Linux, where the
- * `ulimit` boundary is verified. Platforms without a verifiable native memory
- * bound (macOS, Windows) use the description + source text fallback; a DIRECT
- * call also refuses there. A `ulimit` installation failure exits the child
- * with code 97 BEFORE the native rasterizer runs — it never silently continues.
+ * native risk. Linux keeps a POSIX virtual-memory cap and a hard timeout bounds
+ * every child; a `ulimit` installation failure exits the child with code 97
+ * BEFORE the native rasterizer runs — it never silently continues.
+ *
+ * The tested finite `RLIMIT_AS`/`RLIMIT_DATA` settings fail on macOS; no
+ * qualifying kernel-enforced hard bound was proven (MAC-08A:
+ * HARD_MEMORY_BOUND_NOT_PROVEN, kept as the technical fact). Under the
+ * Owner-accepted policy (MAC-08_POLICY: OWNER_RISK_ACCEPTED) Darwin runs the
+ * SAME isolated child without the kernel cap, while the process boundary,
+ * single lane, 3,000 ms timeout, input/output budgets, close-before-settle rule
+ * and PNG validation remain in force. The residual risk is that a pathological
+ * SVG can pressure native memory inside that short-lived child before the
+ * timeout; it is not claimed as an OOM guarantee. Windows and every other
+ * platform keep the description + source text fallback; a DIRECT call also
+ * refuses there.
  * @module @xmoon76/dsh-pi-tui/client/media/svg/rasterize
  */
 
@@ -107,12 +116,39 @@ process.stdin.on('end', async () => {
 `
 
 /**
- * Whether this deployment has a verified native memory boundary for the
- * raster child. Only Linux is qualified today (`ulimit -v` was measured); every
- * other platform converges to the description/source text mode.
+ * Whether this deployment runs the isolated SVG raster child.
+ *
+ * Linux has the verified `ulimit -v` boundary. Darwin runs the same isolated
+ * child under MAC-08_POLICY: OWNER_RISK_ACCEPTED — the hard native-memory
+ * bound was not proven (MAC-08A stays HARD_MEMORY_BOUND_NOT_PROVEN), but the
+ * Owner accepted the residual pressure risk in exchange for the existing
+ * normal preview capability. Every other platform keeps the description/source
+ * text fallback.
  */
 export function isolatedSvgRasterSupported(): boolean {
-  return process.platform === 'linux'
+  return process.platform === 'linux' || process.platform === 'darwin'
+}
+
+/**
+ * The child launcher of ONE raster process.
+ *
+ * Linux is unchanged: `/bin/sh` installs the 4 GiB virtual-memory cap and
+ * `exit 97` refuses to exec the rasterizer if it cannot. Darwin has no usable
+ * finite rlimit on this OS, so the child is spawned directly with the same V8
+ * heap flag; that flag bounds the V8 heap only, never native allocations, and
+ * the Owner-accepted policy above is the reason the child still runs.
+ */
+function rasterChildCommand(): { readonly command: string; readonly args: string[] } {
+  if (process.platform === 'linux') {
+    return {
+      command: '/bin/sh',
+      args: ['-c', `ulimit -v ${POSIX_MEMORY_CAP_KB} || exit 97; exec "$0" --max-old-space-size=256 --input-type=module -e "$1"`, process.execPath, WORKER_SOURCE],
+    }
+  }
+  if (process.platform === 'darwin') {
+    return { command: process.execPath, args: ['--max-old-space-size=256', '--input-type=module', '-e', WORKER_SOURCE] }
+  }
+  throw new Error('SVG rasterization requires a supported isolated child platform')
 }
 
 /** Resolve the platform binary package once per call (fail with a clear message). */
@@ -154,7 +190,7 @@ export type SpawnProcess = typeof spawn
 export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRasterize {
   return async (source, options) => {
     if (!isolatedSvgRasterSupported()) {
-      throw new Error('SVG rasterization requires a verifiable native memory bound; this platform uses the text/source fallback')
+      throw new Error('SVG rasterization requires a supported isolated child platform; this platform uses the text/source fallback')
     }
     // Re-run the bounded admission to obtain the EXACT source-declared
     // viewport, then refuse an over-budget canvas BEFORE spawning the native
@@ -171,11 +207,11 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
       throw new Error(`SVG raster canvas ${canvasWidth}x${canvasHeight} exceeds the ${SVG_MAX_RASTER_SIDE}px / ${SVG_MAX_RASTER_PIXELS}-pixel budget`)
     }
     const modulePath = resvgModulePath()
-    // `|| exit 97` is the fail-closed gate: if the shell cannot install the
-    // virtual-memory cap, the native rasterizer must never run. The parent
-    // reports the exit and the card keeps its description/source text.
-    const command = '/bin/sh'
-    const args = ['-c', `ulimit -v ${POSIX_MEMORY_CAP_KB} || exit 97; exec "$0" --max-old-space-size=256 --input-type=module -e "$1"`, process.execPath, WORKER_SOURCE]
+    // Linux's `|| exit 97` is the fail-closed gate: if the shell cannot install
+    // the virtual-memory cap, the native rasterizer must never run. Darwin's
+    // launcher has no kernel cap by policy; both paths keep the same isolated
+    // child, timeout, output and PNG validation.
+    const { command, args } = rasterChildCommand()
     return await new Promise<SvgRasterResult>((resolve, reject) => {
       const child = spawnProcess(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
       let stdout = ''
@@ -326,5 +362,8 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
   }
 }
 
-/** The production rasterizer (Linux-only, verified native memory bound). */
+/**
+ * The production rasterizer. Linux runs with the verified native memory bound;
+ * macOS runs the same isolated child under the Owner-accepted risk policy.
+ */
 export const rasterizeSvg: SvgRasterize = createSvgRasterizer()
