@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Stale pointer gestures in the Fullscreen Queue manager no longer act on a different queued message, and an Edit draft now accepts a direct cursor click.** The Browser wheel only moves the selection; a wheel, keyboard input or selection change after a bar press retires the old click, so it cannot edit or delete another occurrence by accident. In Edit, clicking a painted body row places the cursor at that position (an explicit save is still required); on very narrow widths only completely painted actions are clickable, and `Esc` remains available.
 - **The `/deliverables` file list, Turn list and text preview now support the wheel; browsing a long file no longer repeats reads or triggers accidental buttons, and drag-to-select copy is unchanged.**
 - **Daemon Clients can save TUI preferences and restore them on a cold launch.** Settings such as terminal progress now save and read back through the Host settings document; display and fullscreen changes use the same settings source instead of applying only to the current Client.
 
