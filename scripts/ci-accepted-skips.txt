@@ -38,3 +38,13 @@ no fd/fdfind on PATH
 # is recorded from macOS; the macOS product path is owned by later PRs.
 Darwin kernel seats require macOS
 Darwin kernel process identity requires macOS
+
+# The schema 2 registry publication, the account-home Host seat dispatch and
+# the Darwin detached managed-start fallback are the macOS side of the local
+# split backend (PR-2). Their contracts are executed and recorded on the macOS
+# product lane; the Linux runner sees the platform boundary skip, and the
+# Linux schema 1/abstract-seat side runs for real here.
+Darwin libproc identity requires macOS
+Darwin file seats require macOS
+Darwin schema 2 requires the real libproc identity
+the real Darwin detached fallback requires macOS
