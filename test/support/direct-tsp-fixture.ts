@@ -70,6 +70,9 @@ import { LlmAdapter, ReasoningEffortId, ToolCallId, type StreamChunk } from '@de
 import type { WriteOutcome } from '../../src/runtime/session-writer-port.ts'
 import { DirectSessionWriter } from '../../src/runtime/direct/session-writer-direct.ts'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
+import TokenMeter from '@deepseek-ai/dsh-token-meter'
+import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
+import * as CommandCompact from '@deepseek-ai/dsh-command-compact'
 import { apply as applyRunner, Config as TuiConfigSchema } from '../../src/index.ts'
 import { apply as applyExtensionHost, PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
 import { apply as applyBuiltins } from '../../src/builtins.ts'
@@ -257,6 +260,42 @@ class ScriptedToolCallAdapter extends ScriptedStreamingAdapter {
   }
 }
 
+/**
+ * The REAL official compaction engine with the ONE controlled summarizer used
+ * by the manual-`/compact` ordering cases. `summarize` runs only after the
+ * production transaction has appended its durable `compaction/start` marker, so
+ * holding it here holds an OPEN official maintenance — never a fabricated
+ * "isCompacting" flag. Everything around it (selection, markers, maintenance
+ * claim, command/Inbox semantics, persistence) stays real.
+ */
+class FixtureCompactionEngine extends BasicCompactionEngine {
+  /** Held before the summary result is produced. */
+  gate: Promise<void> = Promise.resolve()
+  /** How many times a real transaction reached summarization. */
+  entries = 0
+
+  override async summarize(
+    ...args: Parameters<BasicCompactionEngine['summarize']>
+  ): Promise<Awaited<ReturnType<BasicCompactionEngine['summarize']>>> {
+    void args
+    this.entries += 1
+    await this.gate
+    return {
+      summary: [{ type: 'text', text: 'fixture checkpoint: condensed older history' }],
+      provider: DIRECT_TSP_PROVIDER,
+      model: DIRECT_TSP_MODEL,
+    }
+  }
+}
+
+/** The controllable summarizer of the fixture-mounted official engine. */
+export interface FixtureOfficialCompact {
+  /** How many real transactions reached summarization. */
+  summarizeEntries(): number
+  /** Hold summarization until this gate resolves (always keep a fallback release). */
+  holdSummary(gate: Promise<void>): void
+}
+
 export interface DirectTspFixture {
   readonly pane: TspPane
   readonly ctx: Context
@@ -302,6 +341,8 @@ export interface DirectTspFixture {
   /** Release the parked mount Workspace preflight (only with
    *  `holdWorkspacePreflight`). */
   readonly releaseWorkspacePreflight?: () => void
+  /** The fixture-mounted official `/compact` engine (only with `officialCompact`). */
+  readonly officialCompact?: FixtureOfficialCompact
 }
 
 /** Wait a fixed slice so the renderer/application frames can settle. */
@@ -518,6 +559,13 @@ export interface DirectTspFixtureOptions {
    * (the same physical-terminal stand-in every PiTui runner suite uses).
    */
   readonly renderer?: 'tsp' | 'pi-tui'
+  /**
+   * Mount the OFFICIAL manual-compaction chain into the real Host composition:
+   * the official `TokenMeter`, the official `BasicCompactionEngine` (with the
+   * fixture's gated summarizer) and the official `dsh-command-compact`
+   * definition. Off by default; every other fixture assembly is unchanged.
+   */
+  readonly officialCompact?: true
 }
 
 export interface DirectTspExternalFixture extends Omit<DirectTspFixture, 'pane'> {}
@@ -588,6 +636,7 @@ export async function createDirectTspFixture(
   const hostCommandDisposers: Array<() => void> = []
   let persistenceFiber: Fiber | undefined
   let releaseWorkspacePreflight: (() => void) | undefined
+  let officialCompact: FixtureOfficialCompact | undefined
   let settlement: Promise<void> | undefined
   const settle = (): Promise<void> => {
     settlement ??= (async () => {
@@ -661,6 +710,22 @@ export async function createDirectTspFixture(
       ...(command.definitionId === undefined ? {} : { definitionId: command.definitionId as never }),
       handler: (invocation) => command.handler({ rawInput: invocation.rawInput }) as never,
     }))
+  }
+  if (options.officialCompact === true) {
+    // The official manual-compaction chain, mounted exactly where the shipped
+    // bundle mounts it: the engine provides `compaction`, the official command
+    // plugin registers `/compact` over `commands` + `compaction`.
+    await ctx.plugin(TokenMeter)
+    const engine = new FixtureCompactionEngine(ctx, { auto: false } as never)
+    await ctx.plugin({
+      name: CommandCompact.name,
+      inject: CommandCompact.inject,
+      apply: CommandCompact.apply,
+    } as never, undefined as never)
+    officialCompact = {
+      summarizeEntries: () => engine.entries,
+      holdSummary: (gate) => { engine.gate = gate },
+    }
   }
   if (options.profileDefault === undefined) {
     ctx.provide('agentDefaultModel', {
@@ -956,6 +1021,7 @@ export async function createDirectTspFixture(
     recordPrompts,
     settle,
     ...(releaseWorkspacePreflight === undefined ? {} : { releaseWorkspacePreflight }),
+    ...(officialCompact === undefined ? {} : { officialCompact }),
   }
   return pane === undefined ? fixture : { ...fixture, pane }
 }

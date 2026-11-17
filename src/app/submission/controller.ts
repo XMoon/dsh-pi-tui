@@ -879,10 +879,29 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   }
 
   // Every accepted user submission takes one FIFO turn before async
-  // preparation. The turn is released only after its semantic write settles,
-  // so a later gesture cannot overtake an earlier canonicalization.
-  
+  // preparation. A turn owns TWO releases that normally coincide: its ORDERING
+  // slot (a later gesture may start) and its BUSINESS lifetime (the semantic
+  // command/write path, the Host writer section and every settlement
+  // obligation). Both are held until that path settles, so a later gesture
+  // cannot overtake an earlier canonicalization.
   let submitSerialTail: Promise<void> = Promise.resolve()
+
+  /**
+   * The ONE transient ORDERING obligation of a still-unsettled official manual
+   * `/compact`. It is NOT a "Host is compacting" cache: the real outcome stays
+   * owned by the original Host command Promise, and the entry is created only
+   * after the Direct adapter has proved — against the official command
+   * service — that THIS invocation synchronously entered its compaction
+   * transaction. The entry says only that the turn which proved entry still
+   * owns an ordering slot the official command will close at its real terminal.
+   */
+  let officialCompactSettlement: {
+    /** The FIFO turn whose ordering slot the official command still owns. */
+    readonly owner: Promise<void>
+    /** Resolves when that turn reaches its real terminal settlement. */
+    readonly done: Promise<void>
+    readonly finish: () => void
+  } | undefined
 
   /**
    * M4 PR4: the accepted business-write lifetime counter of this controller.
@@ -909,21 +928,72 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    * Take the ONE submit FIFO turn. `countsClientWrite` (default true) makes
    * this turn the accepted-write lifetime of the gesture: a local UI/control
    * command passes false, every user/Host mutation keeps it.
+   *
+   * `allowQueueDuringOfficialCompact` (default false) marks the ONE gesture
+   * class allowed to use an already-open official-`/compact` ordering window:
+   * an ordinary queued prompt. It still waits for its FIFO predecessor, so the
+   * single queue order is unchanged; it merely does not wait for the official
+   * command's BUSINESS settlement. Every other gesture keeps the default and
+   * waits for that settlement after its predecessor opens, holding its own
+   * FIFO position so nothing behind it can overtake.
    */
-  const takeSubmitTurn = (countsClientWrite = true): { wait: Promise<void>; release: () => void } => {
-    const wait = submitSerialTail
+  const takeSubmitTurn = (
+    countsClientWrite = true,
+    allowQueueDuringOfficialCompact = false,
+  ): {
+    wait: Promise<void>
+    release: () => void
+    /** Direct-only: this turn's official `/compact` really entered maintenance. */
+    openAfterOfficialCompactEntered: () => void
+  } => {
+    const previous = submitSerialTail
     let releaseTail!: () => void
     const turn = new Promise<void>(resolve => { releaseTail = resolve })
     submitSerialTail = turn
     if (countsClientWrite) unsettledClientWrites += 1
-    let released = false
+    let orderReleased = false
+    let businessReleased = false
+    const releaseOrdering = (): void => {
+      if (orderReleased) return
+      orderReleased = true
+      releaseTail()
+    }
+    // An eligible ordinary queue only needs its predecessor's ordering release:
+    // it IS the one gesture class allowed through an open maintenance window. A
+    // non-qualifying turn must additionally wait for the official command that
+    // owns the window — read when the PREDECESSOR opens ordering, never at
+    // creation, because the compact may have entered after this turn was taken.
+    // The direct `then` (not an async wrapper) adds the minimum one microtask.
+    const wait = allowQueueDuringOfficialCompact
+      ? previous
+      : previous.then(() => officialCompactSettlement?.done)
     return {
       wait,
+      openAfterOfficialCompactEntered: () => {
+        // A closed window or an already-released ordering slot has nothing to
+        // open; a second live window would silently drop the earlier owner's
+        // obligation, so it fails loudly.
+        if (businessReleased || orderReleased) return
+        if (officialCompactSettlement !== undefined) {
+          throw new Error('BUG: overlapping official compact FIFO windows')
+        }
+        const { promise: done, resolve: finish } = Promise.withResolvers<void>()
+        // Commit the obligation BEFORE opening ordering: a reentrant observer of
+        // the release must already see the gate.
+        officialCompactSettlement = { owner: turn, done, finish }
+        releaseOrdering()
+      },
       release: () => {
-        if (released) return
-        released = true
+        if (businessReleased) return
+        businessReleased = true
         if (countsClientWrite) unsettledClientWrites -= 1
-        releaseTail()
+        // Only the original owner may close the window it opened.
+        if (officialCompactSettlement?.owner === turn) {
+          const settled = officialCompactSettlement
+          officialCompactSettlement = undefined
+          settled.finish()
+        }
+        releaseOrdering()
       },
     }
   }
@@ -1275,7 +1345,15 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           && deps.command.isSkillWrapperName(parsedAtSubmit.name) !== true
           && deps.extensions.findContribution(parsedAtSubmit.name) !== undefined))
     const tag = `${text.slice(0, 14)}:${submitRequestId.slice(0, 8)}`
-    const submitTurn = takeSubmitTurn(!localControlAtSubmit)
+    // The ONE gesture class allowed to reach the Host while an official manual
+    // `/compact` maintenance is still running: an ordinary queued prompt with
+    // no slash line at all (and therefore no Host/TUI/skill command, no
+    // sessionless control and no navigation). Any `/<name>` — including
+    // `/compact extra` and deferred-catalog command names — and every steer
+    // stay on the conservative default.
+    const allowQueueDuringOfficialCompact =
+      parsedAtSubmit === undefined && delivery === 'queue' && !localControlAtSubmit
+    const submitTurn = takeSubmitTurn(!localControlAtSubmit, allowQueueDuringOfficialCompact)
     // The ONE operation-local outcome of this gesture's failure restore. It is
     // an admission fact for the recovery navigation below — never a second
     // draft, a saved copy or a replay queue.
@@ -1609,6 +1687,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
                   line: commandLine,
                   attachments,
                   signal: commandSignal,
+                  // Local, same-process ordering hint ONLY: the Direct adapter
+                  // calls it after proving this exact invocation synchronously
+                  // entered the official `/compact` transaction. It opens
+                  // ordering for ordinary queued prompts and never releases this
+                  // gesture's command/writer/settlement lifetime.
+                  onOfficialCompactEntered: () => submitTurn.openAfterOfficialCompactEntered(),
                 })
               })
             }),

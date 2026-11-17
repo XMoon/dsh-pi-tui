@@ -534,10 +534,39 @@ owned rejection path, while occurrence-level exceptions remain indeterminate
 because removal may already have happened.
 
 A single process-local submit FIFO covers ordinary prompts, explicit queue
-prompts, Ctrl+S per-occurrence steer sweeps, and command execution including its fallback
-prompt. Each gesture takes its turn before async preparation and releases it
-only after the semantic command/write path settles, so delayed mention or
-attachment preparation cannot let a later gesture overtake an earlier one.
+prompts, Ctrl+S per-occurrence steer sweeps, and command execution including its
+fallback prompt. Each gesture takes its turn before async preparation and, for
+almost every gesture, releases ordering and its business lifetime together only
+after the semantic command/write path settles, so delayed mention or attachment
+preparation cannot let a later gesture overtake an earlier one.
+
+The ONE exception separates those two releases. When a Direct Host `/compact`
+resolves — against the official command service — to the official
+argument-free manual-compaction definition, and that invocation's synchronously
+appended `compaction/start` cites its own `command/run`, the turn releases its
+ORDERING slot as the maintenance transaction begins. It keeps its complete
+business lifetime: the command Promise, the command-settlement window, the Host
+writer section, draft consumption and Session retirement still settle exactly
+as before. Only an ordinary queued prompt — no slash line at all, therefore no
+Host/TUI/skill command and no navigation — may use the open window: it reaches
+the Host Inbox and is accepted there during the maintenance, and its model turn
+starts only after the maintenance ends. The first later gesture that does not
+qualify waits for the official command to settle while holding its own FIFO
+position, so a queued prompt behind it cannot overtake. A same-named plugin or
+Session-scoped override, an argued `/compact ...` line, every other Host command
+and the Remote backend never open the window; Remote keeps the fully serial
+ordering. The ordering window is a transient same-process fact owned by the
+proving turn — never a cached "Host is compacting" state, and never a release of
+the writer barrier, the accepted-write lifetime or a command outcome.
+
+The exception decides only which NEW submissions may reach the Host during a
+maintenance. Occurrence-level management of a message the Host has already
+accepted — recall-all (Alt+↑), edit and delete through the Queue Manager — stays
+a direct Host Inbox mutation under the ordinary writer admission: it is never
+re-ordered by the submit FIFO, never blocked by the exception's window, and it
+keeps the existing occurrence identity and settlement classification. An
+occurrence the Agent has already consumed is no longer pending and cannot be
+managed as if it were.
 
 A TUI-owned SESSIONLESS command (`/preset`, `/model`, `/settings`, ...) is
 routed by `liveAgent()`: with a live Agent it executes through the Session's

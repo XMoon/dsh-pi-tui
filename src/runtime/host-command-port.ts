@@ -24,6 +24,14 @@ export interface HostCommandRequest {
   readonly attachments: readonly unknown[]
   /** Caller-owned lifecycle cancellation; the adapter must forward this exact signal. */
   readonly signal: AbortSignal
+  /**
+   * Direct-only ORDERING hint. It never means command success or prompt
+   * acceptance: the adapter calls it at most once, after proving this exact
+   * invocation synchronously entered the official manual-compaction
+   * transaction. The callback lives in the same process and is never
+   * serialized to a wire; a Remote adapter must ignore it.
+   */
+  readonly onOfficialCompactEntered?: () => void
 }
 
 /** One submit-time Client file to stage as an official command receipt. */
