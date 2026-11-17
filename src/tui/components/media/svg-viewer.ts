@@ -87,6 +87,8 @@ type SvgViewerPage = 'preview' | 'source'
 type SvgViewerHit =
   | { readonly kind: 'page'; readonly page: SvgViewerPage; readonly id: string; readonly startCol: number; readonly endCol: number }
   | { readonly kind: 'copy'; readonly id: string; readonly startCol: number; readonly endCol: number }
+  | { readonly kind: 'retry'; readonly id: string; readonly startCol: number; readonly endCol: number }
+  | { readonly kind: 'close'; readonly id: string; readonly startCol: number; readonly endCol: number }
 
 /** The geometry of the last frame: what a press may actually resolve. */
 interface SvgViewerPainted {
@@ -165,6 +167,14 @@ export class SvgViewerPanel implements Component {
       this.input.requestRender()
       return
     }
+    // PR-4B: `r` retries a RECOVERABLE preview failure. Only the Preview page
+    // takes it; the loader's `retryFailed` re-checks eligibility and returns
+    // false for a loading variant (keyboard repeat) or a permanent error, so
+    // one physical key press issues at most one new request.
+    if (this.page === 'preview' && chords.retry.keys.some(key => matchesKey(data, key))) {
+      this.retryPreview()
+      return
+    }
     if (this.page !== 'source') return
     const bodyRows = this.bodyGrant()
     if (bodyRows <= 0) return
@@ -234,6 +244,16 @@ export class SvgViewerPanel implements Component {
     if (hit.startCol !== press.startCol || hit.endCol !== press.endCol) return
     if (hit.kind === 'copy') {
       this.input.source.onCopy()
+      return
+    }
+    // PR-4B: the Retry and Close action cells are their own sinks — neither
+    // may be written into `this.page` as a page switch.
+    if (hit.kind === 'retry') {
+      this.retryPreview()
+      return
+    }
+    if (hit.kind === 'close') {
+      this.input.onClose()
       return
     }
     this.page = hit.page
@@ -343,6 +363,13 @@ export class SvgViewerPanel implements Component {
     // then Esc last. The browsing hint is the FIRST whole segment dropped.
     segments.push({ text: `${chords.switchPage.label} view`, short: chords.switchPage.label, priority: 4 })
     segments.push({ text: `${chords.copy.label} copy source`, short: `${chords.copy.label} copy`, priority: 6 })
+    // PR-4B: the Retry affordance is painted ONLY for a currently recoverable
+    // failure of THIS viewer's own subscribed variant, below Copy and above
+    // the read-only browsing hint.
+    if (this.page === 'preview' && this.subscribedWidth !== undefined
+      && (this.input.loader?.canRetryFailed(this.input.source.digest, this.subscribedWidth) ?? false)) {
+      segments.push({ text: `${chords.retry.label} retry`, short: `${chords.retry.label} retry`, priority: 3 })
+    }
     if (this.page === 'source') {
       segments.push({
         text: `${SVG_VIEWER_SCROLL_LABEL} scroll`,
@@ -355,21 +382,37 @@ export class SvgViewerPanel implements Component {
     return { painted: color.textDim(plain), plain }
   }
 
-  /** The REAL bottom-bar copy segment cells of one painted bar (the full
-   * label, or its whole-segment short form when the bar degraded). */
+  /** The REAL bottom-bar action-segment cells of one painted bar: Copy and
+   * Close always when painted; Retry only when its whole segment survived.
+   * A whole segment that degraded away is never a hit. */
   private barHits(plain: string): readonly SvgViewerHit[] {
-    const key = SVG_VIEWER_CHORDS.copy.label
-    const label = plain.includes(`${key} copy source`)
-      ? `${key} copy source`
-      : plain.includes(`${key} copy`) ? `${key} copy` : undefined
-    if (label === undefined) return []
-    const index = plain.indexOf(label)
-    return [{
-      kind: 'copy',
-      id: 'svg-viewer:copy',
-      startCol: index,
-      endCol: index + visibleWidth(label),
-    }]
+    const chords = SVG_VIEWER_CHORDS
+    const hits: SvgViewerHit[] = []
+    const span = (label: string, kind: 'copy' | 'retry' | 'close', id: string): SvgViewerHit | undefined => {
+      const index = plain.indexOf(label)
+      if (index < 0) return undefined
+      return { kind, id, startCol: index, endCol: index + visibleWidth(label) }
+    }
+    // Copy: the full label or its whole-segment short form, exactly as painted.
+    const copyLabel = plain.includes(`${chords.copy.label} copy source`)
+      ? `${chords.copy.label} copy source`
+      : plain.includes(`${chords.copy.label} copy`) ? `${chords.copy.label} copy` : undefined
+    if (copyLabel !== undefined) {
+      const hit = span(copyLabel, 'copy', 'svg-viewer:copy')
+      if (hit !== undefined) hits.push(hit)
+    }
+    // Retry: only the exact full segment (its `short` is identical, so a
+    // degraded-to-short bar still registers the visible cells).
+    if (plain.includes(`${chords.retry.label} retry`)) {
+      const hit = span(`${chords.retry.label} retry`, 'retry', 'svg-viewer:retry')
+      if (hit !== undefined) hits.push(hit)
+    }
+    // Close: the segment text as painted (`Esc close`).
+    if (plain.includes(`${chords.close.label} close`)) {
+      const hit = span(`${chords.close.label} close`, 'close', 'svg-viewer:close')
+      if (hit !== undefined) hits.push(hit)
+    }
+    return hits
   }
 
   /** Resolve one cell of the last painted frame. */
@@ -378,7 +421,7 @@ export class SvgViewerPanel implements Component {
       return painted.hits.find(hit => hit.kind === 'page' && x >= hit.startCol && x < hit.endCol)
     }
     if (y === painted.termRows - 1) {
-      return painted.hits.find(hit => hit.kind === 'copy' && x >= hit.startCol && x < hit.endCol)
+      return painted.hits.find(hit => hit.kind !== 'page' && x >= hit.startCol && x < hit.endCol)
     }
     return undefined
   }
@@ -440,6 +483,22 @@ export class SvgViewerPanel implements Component {
     if (this.subscribedWidth !== undefined) {
       this.input.loader?.releaseUnused(this.input.source.digest, this.subscribedWidth)
       this.subscribedWidth = undefined
+    }
+  }
+
+  /**
+   * The ONE retry sink for both the `r` key and the painted Retry action cell:
+   * the loader re-checks eligibility atomically and rebuilds the errored
+   * variant through the ordinary load path. A false return (loading again,
+   * permanent error, evicted, no live demand) is a no-op, never a second
+   * child or a queue entry.
+   */
+  private retryPreview(): void {
+    const loader = this.input.loader
+    if (loader === undefined || this.subscribedWidth === undefined) return
+    if (loader.retryFailed(this.input.source.digest, this.input.source.svgSource, this.subscribedWidth)) {
+      this.invalidate()
+      this.input.requestRender()
     }
   }
 

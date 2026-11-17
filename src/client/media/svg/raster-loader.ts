@@ -23,6 +23,8 @@
 
 import type { SvgRasterize } from './rasterize.ts'
 
+import { isRetryableRasterFailure } from './rasterize.ts'
+
 /** One source's display state as a render component sees it. */
 export type SvgRasterState =
   | { readonly state: 'idle' }
@@ -101,6 +103,40 @@ export class SvgRasterLoader {
         this.terminalEvictions.delete(key)
       }
     }
+  }
+
+  /**
+   * The read-only retry eligibility of one errored variant: exactly the
+   * transient child/lane failures (`timeout`, `spawn`, `worker-exit`) with a
+   * live subscriber and no terminal eviction. This NEVER queues, mutates the
+   * cache or starts a child — the viewer paints its Retry affordance from
+   * this answer, and `retryFailed` re-checks the same conditions atomically
+   * before acting.
+   */
+  canRetryFailed(digest: string, targetWidth: number): boolean {
+    const key = variantKey(digest, targetWidth)
+    if (this.terminalEvictions.has(key)) return false
+    if ((this.listeners.get(key)?.size ?? 0) === 0) return false
+    const state = this.entries.get(key)?.state
+    return state !== undefined && state.state === 'error' && isRetryableRasterFailure(state.error)
+  }
+
+  /**
+   * ONE user-intent-driven retry of an errored variant. Atomically re-checks
+   * the same eligibility `canRetryFailed` reports, drops the errored entry
+   * and rebuilds it through the ordinary `load` path (a NEW controller/entry,
+   * behind the same single lane). Every other shape — a loading variant, a
+   * non-retryable failure, a terminal eviction, no live subscriber — returns
+   * false without touching any other variant, the epoch or a running child.
+   * A repeated call while the rebuilt request is in flight finds a `loading`
+   * entry and returns false, so keyboard repeat cannot stack requests.
+   */
+  retryFailed(digest: string, source: string, targetWidth: number): boolean {
+    if (!this.canRetryFailed(digest, targetWidth)) return false
+    const key = variantKey(digest, targetWidth)
+    this.entries.delete(key)
+    this.load(digest, source, targetWidth)
+    return true
   }
 
   /**

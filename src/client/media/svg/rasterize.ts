@@ -46,6 +46,45 @@ export interface SvgRasterResult {
   readonly heightPx: number
 }
 
+/**
+ * The failure kinds a raster child can end with. The kind is a TYPE fact the
+ * loader reads to decide whether a user-driven retry is meaningful; it is a
+ * read-only supplement to `Error.message` (which stays verbatim for existing
+ * diagnostics and tests), never a second error-handling pipeline.
+ *
+ * - `timeout` / `spawn` / `worker-exit`: TRANSIENT child/lane failures a user
+ *   may retry once.
+ * - `cancelled`, `output-overflow`, `invalid-output`, `rejected`,
+ *   `unavailable`: deterministic outcomes a retry would only repeat.
+ */
+export type SvgRasterFailureKind =
+  | 'timeout'
+  | 'spawn'
+  | 'worker-exit'
+  | 'cancelled'
+  | 'output-overflow'
+  | 'invalid-output'
+  | 'rejected'
+  | 'unavailable'
+
+/** The typed raster failure carrying its classification kind. */
+export class SvgRasterFailure extends Error {
+  readonly kind: SvgRasterFailureKind
+  constructor(kind: SvgRasterFailureKind, message: string) {
+    super(message)
+    this.name = 'SvgRasterFailure'
+    this.kind = kind
+  }
+}
+
+/** The kinds a single user-driven retry may recover: transient child/lane facts. */
+const RETRYABLE_KINDS: ReadonlySet<SvgRasterFailureKind> = new Set(['timeout', 'spawn', 'worker-exit'])
+
+/** Whether this failure kind is one an explicit user retry may recover. */
+export function isRetryableRasterFailure(error: unknown): boolean {
+  return error instanceof SvgRasterFailure && RETRYABLE_KINDS.has(error.kind)
+}
+
 /** The injectable rasterizer seam (the loader owns dedupe and stale fences). */
 export type SvgRasterize = (
   source: string,
@@ -190,23 +229,28 @@ export type SpawnProcess = typeof spawn
 export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRasterize {
   return async (source, options) => {
     if (!isolatedSvgRasterSupported()) {
-      throw new Error('SVG rasterization requires a supported isolated child platform; this platform uses the text/source fallback')
+      throw new SvgRasterFailure('unavailable', 'SVG rasterization requires a supported isolated child platform; this platform uses the text/source fallback')
     }
     // Re-run the bounded admission to obtain the EXACT source-declared
     // viewport, then refuse an over-budget canvas BEFORE spawning the native
     // child (the post-render IHDR check remains the last line of defense).
     const admission = admitSvg(source)
     if (!admission.ok) {
-      throw new Error(`SVG rasterizer rejected the document: ${admission.reason}`)
+      throw new SvgRasterFailure('rejected', `SVG rasterizer rejected the document: ${admission.reason}`)
     }
     const width = Math.max(1, Math.min(SVG_MAX_RASTER_SIDE, Math.floor(options.targetWidth)))
     const canvasWidth = width
     const canvasHeight = Math.ceil(width * (admission.viewportHeight / admission.viewportWidth))
     if (canvasWidth > SVG_MAX_RASTER_SIDE || canvasHeight > SVG_MAX_RASTER_SIDE
       || canvasWidth * canvasHeight > SVG_MAX_RASTER_PIXELS) {
-      throw new Error(`SVG raster canvas ${canvasWidth}x${canvasHeight} exceeds the ${SVG_MAX_RASTER_SIDE}px / ${SVG_MAX_RASTER_PIXELS}-pixel budget`)
+      throw new SvgRasterFailure('rejected', `SVG raster canvas ${canvasWidth}x${canvasHeight} exceeds the ${SVG_MAX_RASTER_SIDE}px / ${SVG_MAX_RASTER_PIXELS}-pixel budget`)
     }
-    const modulePath = resvgModulePath()
+    let modulePath: string
+    try {
+      modulePath = resvgModulePath()
+    } catch (error) {
+      throw new SvgRasterFailure('unavailable', error instanceof Error ? error.message : String(error))
+    }
     // Linux's `|| exit 97` is the fail-closed gate: if the shell cannot install
     // the virtual-memory cap, the native rasterizer must never run. Darwin's
     // launcher has no kernel cap by policy; both paths keep the same isolated
@@ -267,6 +311,10 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
         if (error !== undefined) reject(error)
         else resolve(result as SvgRasterResult)
       }
+      /** Wrap one terminal failure in its typed kind (message stays verbatim). */
+      const fail = (kind: SvgRasterFailureKind, message: string): void => {
+        finish(new SvgRasterFailure(kind, message))
+      }
       // A termination only kills the child. The promise settles on the child's
       // `close` event, so the loader's single worker lane cannot start the NEXT
       // native process while this one still exists (SIGSTOP, a slow teardown and
@@ -292,53 +340,53 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
       child.stderr.on('data', (chunk: string) => {
         if (stderr.length < MAX_STDERR_BYTES) stderr += chunk
       })
-      child.on('error', (error: Error) => finish(new Error(`SVG rasterizer failed to start: ${error.message}`)))
+      child.on('error', (error: Error) => fail('spawn', `SVG rasterizer failed to start: ${error.message}`))
       child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
         mark('exit', `code=${code ?? 'null'} signal=${signal ?? 'null'}`)
       })
       child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
         mark('close', `code=${code ?? 'null'} signal=${signal ?? 'null'}`)
         if (timedOut) {
-          finish(new Error(`SVG rasterization exceeded ${SVG_RASTER_TIMEOUT_MS} ms [${phases.join(' ')}] [${workerPhases()}]`))
+          fail('timeout', `SVG rasterization exceeded ${SVG_RASTER_TIMEOUT_MS} ms [${phases.join(' ')}] [${workerPhases()}]`)
           return
         }
         if (cancelled) {
-          finish(new Error('SVG rasterization was cancelled'))
+          fail('cancelled', 'SVG rasterization was cancelled')
           return
         }
         if (overflow) {
-          finish(new Error('SVG rasterizer produced too much output'))
+          fail('output-overflow', 'SVG rasterizer produced too much output')
           return
         }
         if (code !== 0) {
-          finish(new Error(`SVG rasterizer exited (${code ?? signal ?? 'unknown'}): ${workerStderr()}`))
+          fail('worker-exit', `SVG rasterizer exited (${code ?? signal ?? 'unknown'}): ${workerStderr()}`)
           return
         }
         let message: unknown
         try {
           message = JSON.parse(stdout)
         } catch {
-          finish(new Error('SVG rasterizer returned an unreadable answer'))
+          fail('invalid-output', 'SVG rasterizer returned an unreadable answer')
           return
         }
         const answer = message as { ok?: unknown; png?: unknown; error?: unknown }
         if (answer.ok !== true || typeof answer.png !== 'string') {
-          finish(new Error(typeof answer.error === 'string' ? `SVG rasterizer rejected the document: ${answer.error}` : 'SVG rasterizer rejected the document'))
+          fail('rejected', typeof answer.error === 'string' ? `SVG rasterizer rejected the document: ${answer.error}` : 'SVG rasterizer rejected the document')
           return
         }
         const png = Buffer.from(answer.png, 'base64')
         if (png.length === 0 || png.length > SVG_MAX_PNG_BYTES) {
-          finish(new Error(`SVG rasterizer produced an out-of-budget PNG (${png.length} bytes)`))
+          fail('invalid-output', `SVG rasterizer produced an out-of-budget PNG (${png.length} bytes)`)
           return
         }
         const dimensions = pngDimensions(png)
         if (dimensions === undefined) {
-          finish(new Error('SVG rasterizer produced an invalid PNG'))
+          fail('invalid-output', 'SVG rasterizer produced an invalid PNG')
           return
         }
         if (dimensions.width > SVG_MAX_RASTER_SIDE || dimensions.height > SVG_MAX_RASTER_SIDE
           || dimensions.width * dimensions.height > SVG_MAX_RASTER_PIXELS) {
-          finish(new Error(`SVG raster exceeded the pixel budget (${dimensions.width}×${dimensions.height})`))
+          fail('invalid-output', `SVG raster exceeded the pixel budget (${dimensions.width}×${dimensions.height})`)
           return
         }
         finish(undefined, { png, base64: answer.png, widthPx: dimensions.width, heightPx: dimensions.height })

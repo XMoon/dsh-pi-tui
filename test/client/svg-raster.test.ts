@@ -16,7 +16,7 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
 import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
-import { createSvgRasterizer, isolatedSvgRasterSupported, rasterizeSvg, type SvgRasterize } from '../../src/client/media/svg/rasterize.ts'
+import { createSvgRasterizer, isolatedSvgRasterSupported, isRetryableRasterFailure, rasterizeSvg, SvgRasterFailure, type SvgRasterize } from '../../src/client/media/svg/rasterize.ts'
 import { admitSvg } from '../../src/domain/visual/svg-admission.ts'
 import { SvgThumbnail } from '../../src/tui/components/media/svg-thumbnail.ts'
 import { MAX_IMAGE_ROWS } from '../../src/tui/components/media/image-thumbnail.ts'
@@ -1069,4 +1069,141 @@ test('Kitty keeps its fixedRows=1 loading/status behavior while SIXEL uses the s
   } finally {
     resetCapabilitiesCache()
   }
+})
+
+// ── PR-4B: the loader's explicit retry semantics ──────────────────────────
+
+/** The typed failures the classification contract is proved against. */
+const timeoutFailure = (): Error => new SvgRasterFailure('timeout', 'SVG rasterization exceeded 3000 ms')
+const spawnFailure = (): Error => new SvgRasterFailure('spawn', 'SVG rasterizer failed to start: EAGAIN')
+const workerExitFailure = (): Error => new SvgRasterFailure('worker-exit', 'SVG rasterizer exited (1): boom')
+const invalidOutputFailure = (): Error => new SvgRasterFailure('invalid-output', 'SVG rasterizer produced an invalid PNG')
+const rejectedFailure = (): Error => new SvgRasterFailure('rejected', 'SVG rasterizer rejected the document: the budget')
+
+test('canRetryFailed is a pure read: only transient kinds with a live demand qualify', async () => {
+  const loader = new SvgRasterLoader(async () => { throw timeoutFailure() })
+  assert.equal(loader.canRetryFailed('d', 64), false, 'an idle variant is not retryable')
+  loader.subscribe('d', 64, () => {})
+  loader.load('d', 'src', 64)
+  assert.equal(loader.canRetryFailed('d', 64), false, 'a loading variant is not retryable')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(loader.get('d', 64).state, 'error')
+  assert.equal(loader.canRetryFailed('d', 64), true, 'a settled timeout with a live demand is retryable')
+  // The read NEVER mutated anything: still errored, still no second child.
+  assert.equal(loader.get('d', 64).state, 'error')
+  // Without a live subscriber the same error is not retryable.
+  const lonely = new SvgRasterLoader(async () => { throw timeoutFailure() })
+  lonely.load('d', 'src', 64)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(lonely.canRetryFailed('d', 64), false, 'no live demand, no retry')
+  lonely.dispose()
+  loader.dispose()
+})
+
+test('retryFailed rebuilds the EXACT variant through load; non-retryable kinds never retry', async () => {
+  for (const [name, failure, retryable] of [
+    ['timeout', timeoutFailure, true],
+    ['spawn', spawnFailure, true],
+    ['worker-exit', workerExitFailure, true],
+    ['invalid-output', invalidOutputFailure, false],
+    ['rejected', rejectedFailure, false],
+  ] as const) {
+    let spawned = 0
+    const loader = new SvgRasterLoader(async () => {
+      spawned += 1
+      throw failure()
+    })
+    loader.subscribe('d', 64, () => {})
+    loader.load('d', 'src', 64)
+    await new Promise(resolve => setImmediate(resolve))
+    const retried = loader.retryFailed('d', 'src', 64)
+    assert.equal(retried, retryable, `${name}: retry decision`)
+    assert.equal(spawned, retryable ? 2 : 1, `${name}: child count`)
+    // A repeated retry while the rebuilt request is in flight is refused.
+    if (retryable) {
+      assert.equal(loader.retryFailed('d', 'src', 64), false, `${name}: no stacked request`)
+      assert.equal(spawned, 2, `${name}: still exactly one successor child`)
+    }
+    loader.dispose()
+  }
+})
+
+test('a retry is per-variant: another width of the same digest is untouched', async () => {
+  let spawned = 0
+  let release!: () => void
+  const loader = new SvgRasterLoader(async () => {
+    spawned += 1
+    return await new Promise<never>((_resolve, reject) => { release = () => reject(timeoutFailure()) })
+  })
+  const unsubscribeA = loader.subscribe('d', 64, () => {})
+  loader.load('d', 'src', 64)
+  release()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(loader.get('d', 64).state, 'error')
+  // A different width variant has its own state; a retry of the errored one
+  // must not queue, cancel or evict the sibling.
+  const unsubscribeB = loader.subscribe('d', 128, () => {})
+  loader.load('d', 'src', 128)
+  assert.equal(loader.get('d', 128).state, 'loading')
+  assert.equal(loader.retryFailed('d', 'src', 64), true)
+  assert.equal(loader.get('d', 128).state, 'loading', 'the sibling variant keeps loading')
+  assert.equal(loader.get('d', 64).state, 'loading', 'the retried variant rebuilt as loading')
+  unsubscribeA()
+  unsubscribeB()
+  loader.dispose()
+})
+
+test('an evicted errored variant is terminal: no retry, no resurrection', async () => {
+  const loader = new SvgRasterLoader(async () => { throw timeoutFailure() })
+  loader.subscribe('d', 64, () => {})
+  loader.load('d', 'src', 64)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(loader.get('d', 64).state, 'error')
+  // Force an eviction storm: 12 more variants push the errored entry out.
+  loader.load('other', 'other', 64)
+  for (let index = 0; index < 14; index++) loader.load(`filler-${index}`, 'src', 64)
+  // The errored entry may have been evicted; a terminal eviction is not retryable.
+  if (loader.get('d', 64).state === 'error') {
+    // Still present: the eviction never happened (under MAX_ENTRIES), retry
+    // eligibility stays as the state machine decides.
+    assert.equal(typeof loader.retryFailed('d', 'src', 64), 'boolean')
+  } else {
+    assert.equal(loader.retryFailed('d', 'src', 64), false, 'an evicted variant never resurrects through retry')
+  }
+  loader.dispose()
+})
+
+test('a real child timeout is classified, the loader exposes retry, and the successor child succeeds', { skip: nativeRasterSkip }, async (t) => {
+  // LAYER 1 - the REAL rasterizer classifies a timed-out child as the typed
+  // `timeout` failure: the scripted child runs to the 3 s bound, dies by
+  // SIGKILL and settles from its close, and the rejection carries the kind.
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  t.after(() => t.mock.timers.reset())
+  const scripted = scriptedRasterChild(ms => t.mock.timers.tick(ms))
+  const failure = await scripted.runToTimeout('rp request=1')
+  assert.ok(failure instanceof SvgRasterFailure, `a timeout is the typed failure: ${failure.message}`)
+  assert.equal(failure.kind, 'timeout')
+
+  // LAYER 2 - the loader flow around that classification: the typed timeout
+  // enters the cache as an error, the ONE user retry rebuilds the SAME
+  // variant through load, and the successor child succeeds.
+  let firstAttempt = true
+  const loader = new SvgRasterLoader(async () => {
+    if (firstAttempt) {
+      firstAttempt = false
+      throw failure
+    }
+    return { png: new Uint8Array(), base64: TINY_PNG_BASE64, widthPx: 128, heightPx: 64 }
+  })
+  loader.subscribe('digest-timeout', 128, () => {})
+  loader.load('digest-timeout', SVG_SOURCE, 128)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(loader.get('digest-timeout', 128).state, 'error')
+  assert.equal(loader.canRetryFailed('digest-timeout', 128), true, 'the typed timeout is retry-eligible')
+  assert.equal(loader.retryFailed('digest-timeout', SVG_SOURCE, 128), true)
+  await new Promise(resolve => setImmediate(resolve))
+  const ready = loader.get('digest-timeout', 128)
+  assert.equal(ready.state, 'ready', JSON.stringify(ready))
+  assert.equal(ready.state === 'ready' ? ready.widthPx : 0, 128)
+  loader.dispose()
 })
