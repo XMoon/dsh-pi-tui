@@ -109,6 +109,10 @@ function candidateFiles() {
       ROOT, 'packages', 'pi-tui', 'native', 'darwin', 'prebuilds', 'darwin-x64', 'darwin-platform.node')),
     'README.md': '# source probe\n',
     'README.en.md': '# source probe\n',
+    // The smoke asserts the packaged LICENSE carries the upstream pi-tui
+    // notice for the newly distributed Darwin binaries; the synthetic
+    // candidate mirrors the real root LICENSE rather than skipping the gate.
+    'LICENSE': readFileSync(join(ROOT, 'LICENSE'), 'utf8'),
   }
 }
 

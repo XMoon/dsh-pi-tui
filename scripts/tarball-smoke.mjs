@@ -422,6 +422,12 @@ function main() {
     }
     check('README included', has('README.md'))
     check('English README included', has('README.en.md'))
+    check('LICENSE included', has('LICENSE'))
+    const packagedLicense = has('LICENSE') ? readFileSync(join(extracted, 'LICENSE'), 'utf8') : ''
+    check('LICENSE carries the pinned upstream pi-tui copyright notice',
+      packagedLicense.includes('Copyright (c) 2025 Mario Zechner')
+        && packagedLicense.includes('The above copyright notice and this permission notice'),
+      has('LICENSE') ? '' : 'LICENSE is missing')
     const leaks = files.filter(name => name.includes('test/')
       || name.endsWith('.bak')
       || name.endsWith('.tgz')

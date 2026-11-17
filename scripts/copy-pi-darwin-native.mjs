@@ -20,7 +20,7 @@
 
 import { createHash } from 'node:crypto'
 import { copyFileSync, lstatSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
-import { dirname, join, relative } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -79,8 +79,41 @@ function assertNoForeignTarget(path) {
   if (!stat.isFile()) throw new Error(`target exists and is not a regular file: ${path}`)
 }
 
+/**
+ * `dist`, `dist/native`, ... are inside the build tree, but `mkdirSync` /
+ * `copyFileSync` follow a symlinked parent. A stale or foreign link at ANY
+ * existing level would redirect the copy outside the package, so every
+ * existing component from the package root to the target directory must be a
+ * real directory. A missing component is fine: the subsequent `mkdirSync`
+ * creates real directories from there.
+ */
+function assertRealTargetDirectoryChain(root, directory) {
+  const relativePath = relative(root, directory)
+  const inside = relativePath === ''
+    || (!isAbsolute(relativePath) && relativePath !== '..' && !relativePath.startsWith(`..${sep}`))
+  if (!inside) throw new Error(`target directory escapes the package root: ${directory}`)
+  let current = root
+  for (const component of relativePath.split(sep)) {
+    if (component === '') continue
+    current = join(current, component)
+    let stat
+    try {
+      stat = lstatSync(current)
+    } catch (error) {
+      if (error.code === 'ENOENT') return
+      throw error
+    }
+    if (stat.isSymbolicLink()) throw new Error(`refusing to copy through target symlink: ${current}`)
+    if (!stat.isDirectory()) throw new Error(`target path component is not a directory: ${current}`)
+  }
+}
+
 /** Reject any extra file under the copied prebuild tree (the tree is exactly two assets). */
 function assertExactTargetTree(targetRoot) {
+  const targetStat = lstatSync(targetRoot)
+  if (targetStat.isSymbolicLink() || !targetStat.isDirectory()) {
+    throw new Error(`copied prebuild root is not a real directory: ${targetRoot}`)
+  }
   const expected = new Set(DARWIN_PREBUILDS.map((entry) => relativeAsset(entry.arch)))
   const found = []
   const walk = (directory, prefix) => {
@@ -120,6 +153,7 @@ export function copyPiDarwinNative({ root = ROOT } = {}) {
     const source = join(sourceRoot, relativeAsset(expected.arch))
     const target = join(targetRoot, relativeAsset(expected.arch))
     assertPinnedFile(source, expected, 'source prebuild')
+    assertRealTargetDirectoryChain(root, dirname(target))
     assertNoForeignTarget(target)
     mkdirSync(dirname(target), { recursive: true })
     copyFileSync(source, target)

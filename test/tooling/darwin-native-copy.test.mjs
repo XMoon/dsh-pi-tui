@@ -12,7 +12,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { copyFileSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 
@@ -108,4 +108,30 @@ test('refuses a foreign target and an extra file in the copied tree', (t) => {
   copyPiDarwinNative({ root })
   writeFileSync(join(root, 'dist', 'native', 'darwin', 'prebuilds', 'rogue.node'), 'extra')
   assert.throws(() => copyPiDarwinNative({ root }), /unexpected file\(s\) under dist\/native/u)
+})
+
+test('refuses a symlinked target parent before writing outside dist', (t) => {
+  const life = testLifecycle(t)
+  // Every existing component under the package root is checked, not only the
+  // final file: a link at dist, prebuilds or the architecture directory must
+  // fail BEFORE mkdir/copy can follow it.
+  for (const shape of ['dist', 'prebuilds', 'arch']) {
+    const root = life.tempDir(`darwin-native-copy-parent-${shape}-`)
+    seedSources(root)
+    const outside = life.tempDir(`darwin-native-copy-outside-${shape}-`)
+    const dist = join(root, 'dist')
+    if (shape === 'dist') {
+      symlinkSync(outside, dist)
+    } else {
+      const darwin = join(dist, 'native', 'darwin')
+      const prebuilds = join(darwin, 'prebuilds')
+      mkdirSync(shape === 'prebuilds' ? darwin : prebuilds, { recursive: true })
+      if (shape === 'prebuilds') symlinkSync(outside, prebuilds)
+      else symlinkSync(outside, join(prebuilds, 'darwin-arm64'))
+    }
+    assert.throws(() => copyPiDarwinNative({ root }),
+      /refusing to copy through target symlink/u, `${shape}: the copier must refuse the parent symlink`)
+    assert.deepEqual(readdirSync(outside), [],
+      `${shape}: no file may be written outside the package root`)
+  }
 })
