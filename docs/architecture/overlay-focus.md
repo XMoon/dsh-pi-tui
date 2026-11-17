@@ -179,6 +179,112 @@ transcript Search under Question/Approval**. Until that ownership proof exists,
 the existing modal routing consumes Search input rather than falling through to
 the generic Host ladder.
 
+### 6.0 The official plan-review Question branch
+
+An OFFICIAL plan-review Question (the exact intent shape: one question whose
+`intent.kind` is `plan-review`, whose `intent.approve` names one of its own
+options, and which offers at least one other option — nothing else, never a
+header or label match) replaces the generic Q1→Review→Submit pages with ONE
+compact decision component in the same editor seat:
+
+- Decision rows keep the frozen order `View plan → Keep planning… →
+  <official approve label> plan` in the normal Fullscreen layout (a
+  detail-bearing request does NOT add a row there), and in the ordinary Regular
+  layout (see below). `View review text` is the §3.5 EXCEPTION entry, present
+  only where the transcript inspection cannot be executed at all (Regular has
+  no app-owned seek) AND the official card is NOT provably present in the
+  mounted transcript — the presence probe shares the inspection's READ-ONLY
+  admission (the flow is still the live seat owner, the official Question's
+  Session provably equals the current display subject, then the local
+  `intent.callId` lookup); a mismatched or unknown Session is never provable,
+  is never claimed as "the plan above", and keeps the question's own detail
+  entry. No Host service and no second Reader. With a provable card Regular
+  keeps its frozen ordinary layout
+  (the `Read the plan above in terminal history.` line plus Keep/Approve, Keep
+  default); only the card-unprovable exception replaces that line with
+  `View review text` (the complete in-flow text, never a claimed-located
+  transcript). On Fullscreen a FAILED locate degrades `View plan` to that same
+  detail page. Any further official non-approve options never add rows: the
+  FIRST non-approve option in the official order is the keep-planning class and
+  the label this branch answers with. The default cursor is the FIRST available
+  reading row (View plan, else View review text, else Keep) — never Approve.
+  Answer values are always the OFFICIAL option labels.
+- `View plan` triggers the host's one-shot read-only inspection: it requires a
+  PROVEN identity first — the official Question's own Session (the
+  presentation-only `reviewSessionId` the surface controller forwards) and the
+  current display subject's Session must both be known and equal; either one
+  unknown fails closed to the detail fallback, never a callId-only locate. It
+  then resolves the official `intent.callId` against the CURRENT transcript
+  (a native `tool.callId` or a nested PTC `subCallId`), commits a DEDICATED
+  one-shot presentation (the located card plus its hiding ancestors open
+  through the SAME reveal path resolution the search navigation uses — no
+  search target, no synthetic match, no second ScrollView, no manual
+  disclosure write), and scrolls the same fullscreen viewport to the card's
+  measured row. A proven locate enters the READING step; every failed proof
+  ROLLS THE PRESENTATION BACK, and the question degrades to its own `detail`
+  full-text page (paged to the very end) — never a half-applied reveal and
+  never a claimed-located reading state.
+- A PTC sub-call target opens its own disclosure inside the located root card
+  and renders the presenter's generic call body (the same card-presentation
+  authority the top-level card uses), so a RUNNING `exit_plan_mode` plan body
+  is readable from its call arguments before the call settles.
+- Reading: `↑/↓`, `PgUp/PgDn` and `Home/End` drive the SAME transcript
+  viewport through the same ScrollView (Home/End use its existing
+  start/end owners); `Enter` is inert; `Esc` returns to the decision list (never
+  a cancel) and releases the one-shot presentation. Every EXPLICIT user collapse
+  of a container the lease opened — the located card's own disclosure, its PTC
+  child, its Compact Work span, its Context cluster or its Focus Thought —
+  revokes the lease for the rest of that reading step (and never writes a
+  manual expansion for a temporary one); a NEW explicit `View plan` re-opens
+  it. Settling the question, a session switch and a failed locate release the
+  lease too.
+- The plan inspection and the transcript SEARCH navigation are INDEPENDENT
+  temporary requests. They may both be alive at once (a search parked behind
+  the review), the effective reveal path is the UNION of both requests' hiding
+  ancestors (one never shadows the other), and their explicit-collapse records
+  stay separate: the SEARCH navigation owns the PTC child-suppression record,
+  while the plan inspection keeps NO suppression of its own — an explicit
+  collapse of a plan-opened child revokes the whole one-shot lease. Collapse
+  OWNERSHIP is per-request, never the union: an explicit collapse of one
+  container (card / PTC child / Work span / Context cluster / Focus Thought /
+  the Ctrl+O bulk) revokes only the temporary request that opened THAT
+  container or whose target lives inside it — collapsing a Search-opened span
+  must not cancel an unrelated Plan lease, and collapsing a Plan-opened
+  container must not suppress the search grant. A plan View/reading/release
+  never writes or clears a search suppression, and vice versa.
+- Regular/Main has no app-owned seek: it offers no `View plan` and never
+  claims a located reading state. With a provable card the decision list
+  carries the frozen single-line guidance `Read the plan above in terminal
+  history.` (the plan is the tool card already painted in the native
+  scrollback, expanded through the effective disclosure key) and the two
+  ordinary rows Keep/Approve; with NO provable card the question's own detail
+  keeps the full text readable in-flow through `View review text`; a
+  detail-less official shape keeps the guidance line alone.
+- Keep planning… opens the feedback input (draft survives Esc); Enter answers
+  the official keep label with the optional custom text. The generic
+  custom-first submit path is never used (it would clear the selected label).
+  A real feedback edit reports the SAME answer-mutation fact the generic
+  free-text path does (it freezes a timed claim and keeps the park/reopen
+  draft live); cursor-only keys never do.
+- `Esc` on the decision list is the OFFICIAL dismiss (`onCancel` →
+  `ASK_CANCELLED`); `Ctrl+C` is the official cancel everywhere in the branch.
+- The pointer route follows §6's Question contract: the decision rows are real
+  click targets (keyboard-Enter parity), the action bar carries the same verbs
+  with last-painted identity, and Regular has no application pointer path.
+- A plan-review Question keeps the ordinary Question lifetime: the
+  `QuestionSurfaceController`, the FIFO queue, park/reopen and the continued
+  lifecycle own it exactly like any other question. The branch owns only its
+  local step state (decision/reading/feedback/fallback) and the feedback
+  draft; `draftSnapshot` carries only that draft.
+
+The plan-mode composer hint (`Plan mode · describe the task`, and the pending
+variants `Plan requested · pending` / `Plan mode · change pending`) is a
+presentation of the ONE committed collaboration plan fact: the official `plan`
+projection's `{active, pending}` wire view. The committed `plan/mode` event
+carries only the committed bit, so the event handler must re-derive the official
+projection instead of assuming the event is the whole fact; the composer and
+the footer badge then read the same committed section.
+
 Fullscreen Question pointer handling uses the same semantic boundary:
 
 - clicks inside the Question frame remain Question-owned;

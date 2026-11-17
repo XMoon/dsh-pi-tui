@@ -497,7 +497,14 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     const isKnob = isPolicyKnobEvent(event.type)
     if (!isKnob) options.schedulePaint()
     if (event.type === 'todo/write') options.mounted().commitStatusFacts({ todos: (event.data as { readonly todos: readonly TodoItem[] }).todos })
-    if (event.type === 'plan/mode') options.mounted().commitStatusFacts({ planMode: (event.data as { readonly active: boolean }).active })
+    if (event.type === 'plan/mode') {
+      // The instant badge commit, then the OFFICIAL projection read: only the
+      // projection knows the pending selection (a `/plan` during an open turn
+      // queues the mode), so the composer/status facts must be re-derived
+      // here instead of being assumed equal to the event's committed bit.
+      options.mounted().commitStatusFacts({ planMode: (event.data as { readonly active: boolean }).active })
+      source.refreshStatusCheap()
+    }
     if (event.type === 'session/title') options.mounted().commitStatusFacts({ sessionTitle: source.sessionTitleOf(event) })
     // The Session's EFFECTIVE directory is a projection fact (S2/PR-B): the
     // committed change reaches the footer, the welcome card, the OSC 0

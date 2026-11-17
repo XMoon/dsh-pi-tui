@@ -176,7 +176,7 @@ function harness(): Harness {
         return window
       },
       running: () => running,
-      plan: () => false,
+      plan: () => ({ active: false, pending: false }),
       isStillCurrent: () => current,
       captureTransportToken: () => { captures.push(transportToken); return transportToken },
       isTransportTokenCurrent: () => Object.is(transportToken, liveTransportToken),

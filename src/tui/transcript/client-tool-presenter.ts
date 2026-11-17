@@ -91,6 +91,34 @@ function terminalView(args: Record<string, unknown>): TerminalCallView | undefin
   }
 }
 
+/** The FIRST markdown heading of a plan body (the official exit tool's own
+ * title rule), or undefined when the body has none. */
+function planHeading(plan: string): string | undefined {
+  return /^#{1,6}\s+(.+?)\s*$/m.exec(plan)?.[1]
+}
+
+/**
+ * The Client-local presentation-only view of an official `exit_plan_mode`
+ * call (the Remote branch's parity with the Host `presentCall`): the plan
+ * body rides the generic card's content blocks exactly the way the official
+ * presenter emits them. The MINIMUM legitimate shape is the official tool's
+ * own argument contract — `args` a JSON object whose `plan` is a non-empty
+ * string starting with a `#` heading; anything else keeps the generic tool
+ * card (never a guessed plan body). This mirrors presentation ONLY: it is
+ * not an approval authority and never reads or writes plan mode.
+ */
+function planReviewView(args: Record<string, unknown>): ToolCallView | undefined {
+  const plan = stringOf(args.plan)
+  if (plan === undefined) return undefined
+  if (!/^#\s+\S/.test(plan.trim())) return undefined
+  return {
+    card: 'generic',
+    title: planHeading(plan) ?? 'Plan',
+    kind: 'other',
+    content: [{ type: 'text', text: plan }],
+  }
+}
+
 /** One read line, narrowed the way `dsh-tool-fs`'s own `isFileTextLine` does. */
 function isFileTextLine(value: unknown): value is ReadFileLine {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
@@ -281,6 +309,7 @@ export function createClientToolPresenter(): ToolPresenter {
       if (name === 'edit' || name === 'write') return editDiffView(name, args)
       if (name === 'apply_patch') return patchDiffView(args)
       if (name === 'bash' || name === 'pwsh') return terminalView(args)
+      if (name === 'exit_plan_mode') return planReviewView(args)
       return undefined
     },
     result(_name: string, argsRaw: string, result: { readonly content: readonly ContentBlock[]; readonly isError: boolean; readonly meta?: unknown }): ToolResultView | undefined {

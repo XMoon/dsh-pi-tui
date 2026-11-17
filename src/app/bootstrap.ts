@@ -1831,7 +1831,7 @@ export function applyRunnerWithRuntime(
         remote: {
           read: (sessionId) => remoteSources.presentationReader.read(sessionId, lifecycleController.signal),
           running: (sessionId) => presentationBridge.remoteRunningOf(sessionId),
-          plan: (sessionId) => remoteSources.sessionFacts.plan(sessionId)?.active,
+          plan: (sessionId) => remoteSources.sessionFacts.plan(sessionId),
           // The §6.5 visible-commit fence (EXACT GENERATION, never
           // sessionId alone): the token is captured before the reader
           // await; every owner commit — switch/new/fork/resume, INCLUDING a

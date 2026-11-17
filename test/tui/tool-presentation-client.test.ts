@@ -59,6 +59,28 @@ test('apply_patch: a bounded multi-file diff card from the patch headers', () =>
   assert.deepEqual(view.diffs.map(diff => diff.path), ['src/one.ts', 'src/two.ts'])
 })
 
+test('exit_plan_mode: the full plan body rides the generic card content (Host presentCall parity)', () => {
+  const plan = '# Upgrade 0.5.7\n## Scope\n- goal dock\n- plan review\n## Execution\nship it'
+  const view = presenter.call('exit_plan_mode', JSON.stringify({ plan }))
+  assert.deepEqual(view, {
+    card: 'generic',
+    title: 'Upgrade 0.5.7',
+    kind: 'other',
+    content: [{ type: 'text', text: plan }],
+  })
+})
+
+test('exit_plan_mode: an invalid plan shape keeps the generic tool card (never a guessed body)', () => {
+  // No heading start.
+  assert.equal(presenter.call('exit_plan_mode', JSON.stringify({ plan: 'just text' })), undefined)
+  // Empty plan.
+  assert.equal(presenter.call('exit_plan_mode', JSON.stringify({ plan: '' })), undefined)
+  // Missing plan field.
+  assert.equal(presenter.call('exit_plan_mode', JSON.stringify({ other: 1 })), undefined)
+  // Malformed args JSON.
+  assert.equal(presenter.call('exit_plan_mode', 'not json'), undefined)
+})
+
 test('unknown/other tools: undefined (the existing Client fallbacks stay authoritative)', () => {
   assert.equal(presenter.call('read', JSON.stringify({ path: 'a.ts' })), undefined)
   assert.equal(presenter.call('web_search', JSON.stringify({ query: 'x' })), undefined)

@@ -2,7 +2,10 @@
  * Fullscreen transcript-search interaction contract (perf plan S4 §7 / §10.4):
  * the search box keeps KEYBOARD focus, but the transcript viewport stays
  * interactive — wheel, PageUp/PageDown, scrollbar, background disclosure and
- * selection — while the editor stays locked behind the modal.
+ * selection — while the editor stays locked behind the modal. The plan-review
+ * reading step (FR7) is the same mounted contract with the Question owning the
+ * seat: the same one-shot reveal/scroll primitives, the same disclosure
+ * owners, and the same "never submit from the reading viewport" rule.
  * @module @xmoon76/dsh-pi-tui/transcript-search-interaction.test
  */
 
@@ -10,7 +13,8 @@ import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
-import { TuiApp } from '../../src/tui-app.ts'
+import { TuiApp, type TuiAppOptions } from '../../src/tui-app.ts'
+import { createClientToolPresenter } from '../../src/tui/transcript/client-tool-presenter.ts'
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import type { TranscriptMessage, TranscriptSearchMatch } from '../../src/transcript.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -749,5 +753,1167 @@ test('interaction: background selection copies while an in-box drag never select
   await vt.waitForRender()
   assert.equal(copied.length, before, 'an in-box drag must never copy the transcript underneath')
   assert.equal(app.isSearching(), true, 'the in-box drag never closes the box')
+  app.stop()
+})
+
+// ── The plan-review one-shot inspection over the SAME mounted viewport ────
+
+const PLAN_MD = '# Upgrade 0.5.7\n## Scope\n- goal dock\n- plan review\n## Execution\nship it'
+
+function planTranscript(callId?: string): TranscriptMessage[] {
+  return [
+    { kind: 'user', turn: 0, text: 'plan the upgrade' },
+    { kind: 'assistant', turn: 0, text: 'Here is my plan.' },
+    {
+      kind: 'tool', turn: 1, name: 'exit_plan_mode', ...(callId === undefined ? {} : { callId }),
+      args: JSON.stringify({ plan: PLAN_MD }), result: '', status: 'running',
+    },
+    ...Array.from({ length: 10 }, (_, i) => ({
+      kind: 'user' as const, turn: 2 + i, text: `filler turn ${i} ${'x'.repeat(60)}`,
+    })),
+  ]
+}
+
+function planView(vt: VirtualTerminal): string {
+  return stripTerminalSequences(vt.getViewport().join('\n'))
+}
+
+interface PlanScene {
+  vt: VirtualTerminal
+  app: TuiApp
+  settle: Promise<{ id: string; selected: string[]; custom?: string }[]>
+  cancelled: () => number
+}
+
+/** The OFFICIAL Direct `presentCall` shape for exit_plan_mode (what
+ * toolPresenterFrom forwards from the host registry). */
+const planDirectPresenter = {
+  call: (name: string, argsRaw: string) => {
+    if (name !== 'exit_plan_mode') return undefined
+    const plan = (JSON.parse(argsRaw) as { plan?: string }).plan ?? ''
+    const heading = /^#{1,6}\s+(.+?)\s*$/m.exec(plan)?.[1] ?? 'Plan'
+    return { card: 'generic' as const, title: heading, kind: 'other' as const, content: [{ type: 'text' as const, text: plan }] }
+  },
+  result: () => undefined,
+}
+
+const SESSION = 'session-plan-review'
+
+function planScene(
+  messages: TranscriptMessage[],
+  width = 100,
+  height = 24,
+  options: TuiAppOptions = {},
+  /** The official Question's session identity; `null` means "unknown" (an
+   * explicit `undefined` argument would re-trigger the default). */
+  reviewSessionId: string | null = SESSION,
+  withDetail = false,
+): PlanScene {
+  const vt = new VirtualTerminal(width, height)
+  let cancelledCount = 0
+  let app!: TuiApp
+  app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, options)
+  app.start()
+  startedApps.add(app)
+  // The production identity facts: the live session id on the welcome card and
+  // the official Question's own session id in the caller-owned status.
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  // `withDetail` keeps the question's detail body (needed by the tests that
+  // assert the in-flow review text). The settle-path tests pass false: their
+  // ↓-arithmetic targets the THREE-row list [View plan, Keep…, Approve] and
+  // their plan BODY evidence comes from the transcript card, not the detail.
+  const settle = app.askQuestions([{
+    id: 'plan-review',
+    question: 'Approve this plan and leave plan mode?',
+    header: 'Plan review',
+    ...(withDetail ? { detail: PLAN_MD } : {}),
+    options: [
+      { label: 'Approve', description: 'Leave plan mode.' },
+      { label: 'Keep planning', description: 'Stay in plan mode.' },
+    ],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, reviewSessionId === null ? {} : { reviewSessionId }, false)
+  return { vt, app, settle, cancelled: () => cancelledCount }
+}
+
+test('View plan reveals the called plan card body in the planTranscript and the answer still settles', async () => {
+  // The REAL Direct presenter seam: the plan body comes from the official
+  // generic call planView, not from a test-only synthetic card.
+  const { vt, app, settle } = planScene(planTranscript('call-plan-1'), 100, 24, { present: planDirectPresenter })
+  await vt.waitForRender()
+  // Park the viewport at the bottom so the reveal scroll is observable.
+  app.scrollToBottom({ disableFollow: true })
+  await vt.waitForRender()
+  const parked = app.fullscreenScrollForTest()?.scrollTop ?? 0
+  assert.ok(!planView(vt).includes('## Scope'), 'precondition: the plan body row is out of planView before the reveal')
+  // Enter on the default View row triggers the inspection + reading step.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const reading = planView(vt)
+  assert.ok(reading.includes('Reading the submitted plan'), `reading step must render:\n${reading}`)
+  const after = app.fullscreenScrollForTest()?.scrollTop ?? -1
+  assert.ok(after < parked, `the reveal must scroll up to the plan card (parked=${parked}, after=${after})`)
+  assert.ok(planView(vt).includes('## Scope'), `the revealed card shows the plan body, not just its header:\n${planView(vt)}`)
+  // Esc returns to the decision list; the question is still answerable.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  const decision = planView(vt)
+  assert.ok(decision.includes('View plan'), `Esc returns to the decision list:\n${decision}`)
+  // ↓↓ to Approve, Enter — the official settle path.
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\r')
+  const answers = await settle
+  assert.deepEqual(answers, [{ id: 'plan-review', selected: ['Approve'] }])
+  app.stop()
+})
+
+test('the Remote client presenter path also reveals the full plan body (no Host registry)', async () => {
+  // The Remote branch has no Host tool registry: createClientToolPresenter
+  // derives the generic card from the logged arguments instead.
+  const remote = createClientToolPresenter()
+  const { vt, app, settle } = planScene(planTranscript('call-plan-1'), 100, 24, { present: remote })
+  await vt.waitForRender()
+  app.scrollToBottom({ disableFollow: true })
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('## Scope'), `the Remote-derived card must show the plan body:\n${planView(vt)}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\r')
+  const answers = await settle
+  assert.deepEqual(answers, [{ id: 'plan-review', selected: ['Approve'] }])
+  app.stop()
+})
+
+test('a missing plan card (no logged call) degrades View to the question-detail fallback', async () => {
+  // No callId on the card: the inspection cannot prove the target.
+  const { vt, app, settle } = planScene(planTranscript(), 100, 24, {}, undefined, true)
+  await vt.waitForRender()
+  vt.sendInput('\r') // Enter on View
+  await vt.waitForRender()
+  const fallback = planView(vt)
+  assert.ok(fallback.includes('Full review text'), `the fallback page renders:\n${fallback}`)
+  assert.ok(fallback.includes('# Upgrade 0.5.7'), `the fallback shows the plan body:\n${fallback}`)
+  // Esc back, then Keep planning with feedback — the settle still works.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // View plan -> Keep planning…
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('w')
+  vt.sendInput('o')
+  vt.sendInput('r')
+  vt.sendInput('k')
+  vt.sendInput('\r')
+  const answers = await settle
+  assert.deepEqual(answers, [{ id: 'plan-review', selected: ['Keep planning'], custom: 'work' }])
+  app.stop()
+})
+
+test('a long plan fallback pages to the very tail (no 256-row silent cut)', async () => {
+  // 400 plan lines: far beyond the generic page cap. The fallback must reach
+  // the LAST line by paging, and must never claim the tail is visible early.
+  const lines = Array.from({ length: 400 }, (_, i) => `step line ${i} unique-marker-${i}`)
+  const longPlan = `# Long Plan\n${lines.join('\n')}`
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setFullscreen(true)
+  // No logged call for this question: View CANNOT locate a card.
+  app.setTranscript(planTranscript())
+  const settle = app.askQuestions([{
+    id: 'plan-review',
+    question: 'Approve this plan and leave plan mode?',
+    header: 'Plan review',
+    detail: longPlan,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  vt.sendInput('\r') // View -> fallback (no provable target)
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('Full review text'), `the fallback must render:\n${planView(vt)}`)
+  assert.ok(!planView(vt).includes('unique-marker-399'), 'precondition: the tail starts hidden')
+  // Page down until the LAST line is visible (bounded: a silent cap fails
+  // loudly instead of hanging).
+  for (let page = 0; page < 60 && !planView(vt).includes('unique-marker-399'); page += 1) {
+    vt.sendInput('\x1b[6~') // PageDown
+    await vt.waitForRender()
+  }
+  assert.ok(planView(vt).includes('unique-marker-399'), `the fallback tail must be reachable:\n${planView(vt)}`)
+  // Paging never settles the question: Esc back, then the official dismiss.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('settling the plan question releases the temporary reveal and forced sub-call', async () => {
+  const root: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 1, name: 'run_code', callId: 'call-root',
+    args: '{}', result: '', status: 'running',
+    subCalls: [{
+      kind: 'tool', turn: 1, name: 'exit_plan_mode', subCallId: 'call-plan-1',
+      parentCallId: 'call-root', rootCallId: 'call-root',
+      args: JSON.stringify({ plan: PLAN_MD }), result: '', status: 'running',
+    }],
+  }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 0, text: 'plan via run_code' },
+    root,
+  ]
+  const { vt, app, settle } = planScene(messages)
+  await vt.waitForRender()
+  // Enter View (inspection + reading), then Esc back, then Esc dismiss — the
+  // question settles and the reveal must be gone.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('Reading the submitted plan'))
+  vt.sendInput('\x1b') // reading → decision
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // decision → official dismiss
+  await settle.then(() => {}, () => {})
+  await vt.waitForRender()
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined,
+    'the settled plan question must leave no search presentation behind')
+  const internals = app as unknown as { planInspection?: unknown; subCallExpanded: Set<string> }
+  assert.equal(internals.planInspection, undefined,
+    'the one-shot plan inspection presentation must be released on settle')
+  assert.equal(internals.subCallExpanded.has('call-plan-1'), false,
+    'the plan inspection never mints a durable sub-call expansion')
+  app.stop()
+})
+
+test('an identity mismatch fails closed to the detail fallback (no reveal, no scroll)', async () => {
+  const { vt, app, settle } = planScene(planTranscript('call-plan-1'), 100, 24, { present: planDirectPresenter }, 'session-other', true)
+  await vt.waitForRender()
+  app.scrollToBottom({ disableFollow: true })
+  await vt.waitForRender()
+  const parked = app.fullscreenScrollForTest()?.scrollTop ?? -1
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('Full review text'), `the mismatch degrades to the fallback:\n${planView(vt)}`)
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
+    'a failed locate commits no inspection presentation')
+  assert.equal(app.fullscreenScrollForTest()?.scrollTop, parked,
+    'a failed locate never moves the planTranscript viewport')
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined,
+    'a failed locate creates no search presentation')
+  vt.sendInput('\x1b') // back to the decision list
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // official dismiss
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('an unknown Question session identity fails closed (no callId-only locate)', async () => {
+  const { vt, app, settle } = planScene(planTranscript('call-plan-1'), 100, 24, { present: planDirectPresenter }, null, true)
+  await vt.waitForRender()
+  app.scrollToBottom({ disableFollow: true })
+  await vt.waitForRender()
+  const parked = app.fullscreenScrollForTest()?.scrollTop ?? -1
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('Full review text'), `an unknown identity degrades to the fallback:\n${planView(vt)}`)
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
+    'an unproven identity commits no inspection presentation')
+  assert.equal(app.fullscreenScrollForTest()?.scrollTop, parked,
+    'an unproven identity never moves the planTranscript viewport')
+  vt.sendInput('\x1b') // back to the decision list
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // official dismiss
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('the inspection matches a nested PTC sub-call by its subCallId and shows the plan body', async () => {
+  // Build a PTC root whose nested sub-call is the exit_plan_mode card.
+  const root: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 1, name: 'run_code', callId: 'call-root',
+    args: '{}', result: '', status: 'running',
+    subCalls: [{
+      kind: 'tool', turn: 1, name: 'exit_plan_mode', subCallId: 'call-plan-1',
+      parentCallId: 'call-root', rootCallId: 'call-root',
+      args: JSON.stringify({ plan: PLAN_MD }), result: '', status: 'running',
+    }],
+  }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 0, text: 'plan via run_code' },
+    root,
+    ...Array.from({ length: 10 }, (_, i) => ({
+      kind: 'user' as const, turn: 2 + i, text: `filler ${i}`,
+    })),
+  ]
+  const { vt, app, settle } = planScene(messages, 100, 24, { present: planDirectPresenter })
+  await vt.waitForRender()
+  app.scrollToBottom({ disableFollow: true })
+  await vt.waitForRender()
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  const reading = planView(vt)
+  assert.ok(reading.includes('Reading the submitted plan'), `the nested sub-call locates:\n${reading}`)
+  // The RUNNING nested call's plan body comes from the presenter's generic
+  // planView of the call arguments (never from a result that does not exist yet).
+  assert.ok(reading.includes('## Scope'), `the nested card must show the plan body:\n${reading}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\r')
+  const answers = await settle
+  assert.deepEqual(answers, [{ id: 'plan-review', selected: ['Approve'] }])
+  app.stop()
+})
+
+test('Focus collapsed Thought: View opens the owner Thought and locates the card', async () => {
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 0, text: 'plan the upgrade' },
+    { kind: 'thinking', turn: 1, text: 'planning the upgrade carefully' },
+    {
+      kind: 'tool', turn: 1, name: 'exit_plan_mode', callId: 'call-plan-1',
+      args: JSON.stringify({ plan: PLAN_MD }), result: '', status: 'running',
+    },
+    ...Array.from({ length: 8 }, (_, i) => ({
+      kind: 'user' as const, turn: 2 + i, text: `filler turn ${i} ${'x'.repeat(60)}`,
+    })),
+  ]
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setFocusMode(true)
+  app.setFullscreen(true)
+  const activities = new Map([[1, { turn: 1, completed: false, think: { text: 'planning the upgrade carefully', running: true } }]])
+  app.setTranscript(messages, activities as never)
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: PLAN_MD,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  assert.ok(!planView(vt).includes('## Scope'), 'precondition: the collapsed Thought hides the plan card')
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('Reading the submitted plan'), `the Focus reveal must locate the card:\n${planView(vt)}`)
+  assert.ok(planView(vt).includes('## Scope'), `the plan body must be materialized inside the opened Thought:\n${planView(vt)}`)
+  // A REAL header click on the (temporarily opened) Thought must COLLAPSE the
+  // temporary reveal, never write a manual expansion.
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  assert.ok(!planView(vt).includes('## Scope'), `the Thought click collapsed the temporary reveal:\n${planView(vt)}`)
+  assert.equal(app.focusExpandedTurnsForTest().has(1), false,
+    'the user collapse never writes a manual Focus expansion')
+  // Back to the decision list, then a NEW View re-opens the Thought and card.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('## Scope'), `a new View re-opens the Focus card:\n${planView(vt)}`)
+  // The Ctrl+O Collapse All path (the modal inspection allowlist) is the SAME
+  // explicit-collapse owner: it must revoke the plan lease and hide the card.
+  ;(app as unknown as { collapseAllFullscreenFocusRoots(): void }).collapseAllFullscreenFocusRoots()
+  await vt.waitForRender()
+  assert.ok(!planView(vt).includes('## Scope'), `Collapse All revokes the plan lease:\n${planView(vt)}`)
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
+    'Collapse All revoked the one-shot lease')
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'Collapse All wrote no manual expansion')
+  // A new View re-opens it again.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('## Scope'), `a new View re-opens after Collapse All:\n${planView(vt)}`)
+  vt.sendInput('\x1b') // back to the decision list
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // official dismiss
+  await settle.then(() => {}, () => {})
+  assert.equal(app.focusExpandedTurnsForTest().size, 0,
+    'the inspection never writes a manual Focus expansion')
+  app.stop()
+})
+
+test('a REAL user collapse during reading wins (both disclosure branches); a NEW View re-opens', async () => {
+  const messages = planTranscript('call-plan-1')
+  const card = messages.find(
+    (m): m is Extract<TranscriptMessage, { kind: 'tool' }> => m.kind === 'tool' && m.name === 'exit_plan_mode',
+  )!
+  const { vt, app, settle } = planScene(messages, 100, 24, { present: planDirectPresenter })
+  await vt.waitForRender()
+  const toggle = (): void => {
+    ;(app as unknown as { toggleMessageExpanded(message: TranscriptMessage): void }).toggleMessageExpanded(card)
+  }
+  // Branch 1: the user OPENS the card before View (a durable `true` override),
+  // then View, then the SAME disclosure route collapses it during reading.
+  toggle()
+  await vt.waitForRender()
+  assert.equal((app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride.get(card), true,
+    'the user opened the card before View (durable disclosure owner)')
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('Reading the submitted plan'), `the located reading step:\n${planView(vt)}`)
+  toggle() // first click during reading must collapse, not be re-opened by the lease
+  await vt.waitForRender()
+  assert.ok(!planView(vt).includes('## Scope'), `the first real collapse click wins over the plan lease:\n${planView(vt)}`)
+  assert.ok(planView(vt).includes('Reading the submitted plan'), 'the reading step itself survives the collapse')
+  // Esc back, then a NEW explicit View re-opens the card.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('## Scope'), `a new View re-opens the card:\n${planView(vt)}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('a PTC child collapsed during reading stays folded; a new View re-opens it', async () => {
+  const root: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 1, name: 'run_code', callId: 'call-root',
+    args: '{}', result: '', status: 'running',
+    subCalls: [{
+      kind: 'tool', turn: 1, name: 'exit_plan_mode', subCallId: 'call-plan-1',
+      parentCallId: 'call-root', rootCallId: 'call-root',
+      args: JSON.stringify({ plan: PLAN_MD }), result: '', status: 'running',
+    }],
+  }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 0, text: 'plan via run_code' },
+    root,
+  ]
+  const { vt, app, settle } = planScene(messages, 100, 24, { present: planDirectPresenter })
+  // The user MANUALLY expands the child BEFORE View: the durable branch of the
+  // disclosure toggle must also revoke the lease when it collapses the child.
+  ;(app as unknown as { toggleSubCallExpanded(subCallId: string): void }).toggleSubCallExpanded('call-plan-1')
+  await vt.waitForRender()
+  assert.equal((app as unknown as { subCallExpanded: Set<string> }).subCallExpanded.has('call-plan-1'), true,
+    'precondition: the child is manually expanded before View')
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('## Scope'), `precondition: the nested body is visible:\n${planView(vt)}`)
+  // The same disclosure route collapses it during reading.
+  ;(app as unknown as { toggleSubCallExpanded(subCallId: string): void }).toggleSubCallExpanded('call-plan-1')
+  await vt.waitForRender()
+  assert.ok(!planView(vt).includes('## Scope'), `an explicit child collapse during reading wins:\n${planView(vt)}`)
+  assert.equal((app as unknown as { subCallExpanded: Set<string> }).subCallExpanded.has('call-plan-1'), false,
+    'the durable manual expansion is removed by the collapse')
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
+    'an explicit child collapse revokes the one-shot lease for the rest of the reading step')
+  // A new explicit View re-opens it.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('## Scope'), `a new View re-opens the nested card:\n${planView(vt)}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('a QUEUED plan-review question mounts with the live View capability (FIFO handover)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setFullscreen(true)
+  app.setTranscript(planTranscript('call-plan-1'))
+  await vt.waitForRender()
+  // A normal question owns the seat first; the plan review is queued behind it.
+  const first = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick one',
+    options: [{ label: 'A' }, { label: 'B' }],
+  }])
+  await vt.waitForRender()
+  const plan = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: PLAN_MD,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  // Settle the first question: select A, then submit on the review page.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  const firstAnswers = await first
+  assert.deepEqual(firstAnswers, [{ id: 'q1', selected: ['A'] }])
+  await vt.waitForRender()
+  // The handed-over plan review must render the FULL decision list (View first).
+  const handed = planView(vt)
+  assert.ok(handed.includes('View plan'), `a queued plan review must offer View plan:\n${handed}`)
+  const rows = stripTerminalSequences(vt.getViewport().join('\n')).split('\n')
+  const viewRow = rows.findIndex(row => row.includes('> View plan'))
+  assert.ok(viewRow >= 0, `View plan holds the default cursor after the handover:\n${handed}`)
+  // And it really locates the card.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('Reading the submitted plan'), `the handed-over flow reads:\n${planView(vt)}`)
+  assert.ok(planView(vt).includes('## Scope'), `the handed-over flow locates the body:\n${planView(vt)}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  // The frozen three-row layout: [View plan, Keep…, Approve]; two moves reach
+  // Approve from the View-plan default.
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\r')
+  const planAnswers = await plan
+  assert.deepEqual(planAnswers, [{ id: 'plan-review', selected: ['Approve'] }])
+  app.stop()
+})
+
+test('a long PTC plan line wraps and its tail is reachable by scrolling (80 columns)', async () => {
+  // One LONG paragraph line: a per-line truncation would permanently lose the
+  // tail, so the only readable proof is the unique marker at its end.
+  const longLine = `${'scope item '.repeat(18)}tail-marker-xyz`
+  const longPlan = `# Long Plan\n${longLine}`
+  const root: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 1, name: 'run_code', callId: 'call-root',
+    args: '{}', result: '', status: 'running',
+    subCalls: [{
+      kind: 'tool', turn: 1, name: 'exit_plan_mode', subCallId: 'call-plan-1',
+      parentCallId: 'call-root', rootCallId: 'call-root',
+      args: JSON.stringify({ plan: longPlan }), result: '', status: 'running',
+    }],
+  }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 0, text: 'plan via run_code' },
+    root,
+  ]
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: longPlan,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('Reading the submitted plan'), `the nested card locates:\n${planView(vt)}`)
+  // The wrapped tail starts below the viewport; the reading step's own page
+  // keys scroll the planTranscript until the marker becomes readable.
+  for (let page = 0; page < 12 && !planView(vt).includes('tail-marker-xyz'); page += 1) {
+    vt.sendInput('\x1b[6~') // PageDown (reading step → planTranscript viewport)
+    await vt.waitForRender()
+  }
+  assert.ok(planView(vt).includes('tail-marker-xyz'), `the wrapped tail must be readable at 80 columns:\n${planView(vt)}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('a PTC target located below many earlier siblings scrolls to the CHILD row, not the root top', async () => {
+  // 40 collapsed sibling sub-calls render one header row each before the
+  // target: measuring only the ROOT card's top would leave the plan body far
+  // below the viewport while still claiming "located".
+  const filler = Array.from({ length: 40 }, (_, i) => ({
+    kind: 'tool' as const, turn: 1, name: 'read', subCallId: `filler-${i}`,
+    parentCallId: 'call-root', rootCallId: 'call-root',
+    args: JSON.stringify({ path: `src/f${i}.ts` }), result: '', status: 'ok' as const,
+  }))
+  const root: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 1, name: 'run_code', callId: 'call-root',
+    args: '{}', result: '', status: 'running',
+    subCalls: [
+      ...filler,
+      {
+        kind: 'tool', turn: 1, name: 'exit_plan_mode', subCallId: 'call-plan-1',
+        parentCallId: 'call-root', rootCallId: 'call-root',
+        args: JSON.stringify({ plan: PLAN_MD }), result: '', status: 'running',
+      },
+    ],
+  }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 0, text: 'plan via run_code with many siblings' },
+    root,
+  ]
+  const { vt, app, settle } = planScene(messages, 100, 24, { present: planDirectPresenter })
+  await vt.waitForRender()
+  assert.ok(!planView(vt).includes('## Scope'), 'precondition: the target body is out of planView')
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('Reading the submitted plan'), `the reading step renders:\n${planView(vt)}`)
+  assert.ok(planView(vt).includes('## Scope'), `the ONE locate lands on the child row (not the root top):\n${planView(vt)}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('Compact Work sibling: the plan reveal opens the Work span and a real header click collapses it', async () => {
+  const messages = planTranscript('call-plan-1')
+  const card = messages.find(
+    (m): m is Extract<TranscriptMessage, { kind: 'tool' }> => m.kind === 'tool' && m.name === 'exit_plan_mode',
+  )!
+  const { vt, app, settle } = planScene(messages, 100, 24, { present: planDirectPresenter })
+  app.setDisplayPreset('compact')
+  await vt.waitForRender()
+  assert.ok(!planView(vt).includes('## Scope'), `precondition: the collapsed Work span hides the card:\n${planView(vt)}`)
+  vt.sendInput('\r') // View
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('## Scope'), `the plan reveal opens the Work span:\n${planView(vt)}`)
+  // A REAL Work header click collapses the temporary reveal.
+  const owner = (app as unknown as {
+    canonicalStructureIndex(): { workByMember: Map<TranscriptMessage, { owner: TranscriptMessage }> }
+  }).canonicalStructureIndex().workByMember.get(card)?.owner
+  assert.ok(owner !== undefined, 'fixture: the card belongs to a Work span')
+  app.toggleWorkSpan(owner)
+  await vt.waitForRender()
+  assert.ok(!planView(vt).includes('## Scope'), `the Work header click collapsed the reveal:\n${planView(vt)}`)
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
+    'the Work collapse revoked the plan lease')
+  // A new View re-opens the Work span and the card.
+  vt.sendInput('\x1b') // back to the decision list
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('## Scope'), `a new View re-opens the Compact card:\n${planView(vt)}`)
+  // The Ctrl+O BULK sibling (the real modal-safe planTranscript disclosure) must
+  // revoke the plan lease in the SAME transaction.
+  vt.sendInput('\x0f') // Ctrl+O → collapse all open Work spans
+  await vt.waitForRender()
+  assert.ok(!planView(vt).includes('## Scope'), `the Ctrl+O bulk collapse revokes the plan lease:\n${planView(vt)}`)
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
+    'the bulk collapse revoked the one-shot lease')
+  // A new View re-opens it again.
+  vt.sendInput('\x1b') // back to the decision list
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('## Scope'), `a new View re-opens after the bulk collapse:\n${planView(vt)}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+// ── Independent temporary requests: a parked Search + the plan inspection ──
+
+const SEARCH_PLAN = '# Search Plan\n## Scope\n- union of reveals\n## Execution\nship it'
+
+/** A Compact transcript whose turn-1 PTC child is a search target and whose
+ * turn-2 native card is the plan review target: two independent temporary
+ * requests that must not shadow each other. */
+function searchPlanFixture(): { messages: TranscriptMessage[]; root: Extract<TranscriptMessage, { kind: 'tool' }>; planCard: Extract<TranscriptMessage, { kind: 'tool' }> } {
+  const root: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 1, name: 'run_code', callId: 'call-root',
+    args: '{}', result: '', status: 'running',
+    subCalls: [{
+      kind: 'tool', turn: 1, name: 'read', subCallId: 'search-child',
+      parentCallId: 'call-root', rootCallId: 'call-root',
+      args: JSON.stringify({ path: 'src/a.ts' }), result: 'needle body line', status: 'ok',
+    }],
+  }
+  const planCard: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 2, name: 'exit_plan_mode', callId: 'call-plan-1',
+    args: JSON.stringify({ plan: SEARCH_PLAN }), result: '', status: 'running',
+  }
+  return {
+    root,
+    planCard,
+    messages: [
+      { kind: 'user', turn: 0, text: 'search then plan' },
+      root,
+      { kind: 'user', turn: 1, text: 'process done' },
+      planCard,
+      { kind: 'user', turn: 3, text: 'tail' },
+    ],
+  }
+}
+
+function searchTargetFor(root: Extract<TranscriptMessage, { kind: 'tool' }>): Parameters<TuiApp['setTranscriptSearchPresentation']>[0] {
+  return {
+    matchMessages: new Set([root]),
+    target: {
+      query: 'needle',
+      message: root,
+      match: {
+        id: 0, turn: 1, occurrence: 0,
+        source: { kind: 'subcall-field', subCallIds: ['search-child'], field: 'name' },
+        sourceOccurrence: 0,
+      },
+    },
+    grantReveal: true,
+  }
+}
+
+test('a parked Search keeps its own collapsed child across a plan View/reading lease', async () => {
+  const { messages, root } = searchPlanFixture()
+  const vt = new VirtualTerminal(100, 26)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setDisplayPreset('compact')
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  await vt.waitForRender()
+  app.setTranscriptSearchPresentation(searchTargetFor(root))
+  await vt.waitForRender()
+  const body = (): string => vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(body().includes('needle body line'), `precondition: the search reveal opens the child:\n${body()}`)
+  // The user explicitly collapses the search child.
+  ;(app as unknown as { toggleSubCallExpanded(subCallId: string): void }).toggleSubCallExpanded('search-child')
+  await vt.waitForRender()
+  assert.ok(!body().includes('needle body line'), `precondition: the explicit collapse holds:\n${body()}`)
+  const internals = app as unknown as { searchSuppressedSubCalls: Set<string> }
+  assert.equal(internals.searchSuppressedSubCalls.has('search-child'), true, 'the search request records the collapse')
+  // A plan review arrives (the search stays suspended behind it) and the user
+  // enters reading, then returns.
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: SEARCH_PLAN,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  vt.sendInput('\r') // View plan
+  await vt.waitForRender()
+  assert.ok(body().includes('## Scope'), `the plan lease opens its own card:\n${body()}`)
+  assert.ok(!body().includes('needle body line'), `the plan lease never re-opens the search-collapsed child:\n${body()}`)
+  assert.equal(internals.searchSuppressedSubCalls.has('search-child'), true,
+    'the plan lease never writes/clears the search request\'s suppression record')
+  vt.sendInput('\x1b') // Esc back to the decision list (release the plan lease)
+  await vt.waitForRender()
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined, 'the plan lease is released')
+  assert.equal(internals.searchSuppressedSubCalls.has('search-child'), true,
+    'the search request keeps its own collapse after the plan lease ends')
+  assert.ok(!body().includes('needle body line'), `the search child stays collapsed for the search request:\n${body()}`)
+  vt.sendInput('\x1b') // official dismiss
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('the plan lease and the search reveal COMPOSE (union) and release independently', async () => {
+  const { messages, root } = searchPlanFixture()
+  const vt = new VirtualTerminal(100, 26)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setDisplayPreset('compact')
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  await vt.waitForRender()
+  const body = (): string => vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(!body().includes('needle body line'), 'precondition: the collapsed Work spans hide both cards')
+  app.setTranscriptSearchPresentation(searchTargetFor(root))
+  await vt.waitForRender()
+  assert.ok(body().includes('needle body line'), `precondition: the search reveal opens its span/child:\n${body()}`)
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: SEARCH_PLAN,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  vt.sendInput('\r') // View plan
+  await vt.waitForRender()
+  assert.ok(body().includes('## Scope'), `the plan lease opens its own card:\n${body()}`)
+  assert.ok(body().includes('needle body line'),
+    `the plan lease must not SHADOW the search reveal (union of both requests):\n${body()}`)
+  vt.sendInput('\x1b') // Esc back: release the plan lease only
+  await vt.waitForRender()
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined)
+  assert.ok(body().includes('needle body line'), `the search reveal survives the plan release:\n${body()}`)
+  assert.ok(!body().includes('## Scope'), `the plan-leased span collapses again:\n${body()}`)
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('Regular WITH a provable card keeps the frozen ordinary layout (guidance + Keep default)', async () => {
+  // Section 3.4's ordinary Regular UI: the plan is the tool card already
+  // painted above in terminal history; the decision list names it and offers
+  // exactly Keep planning… / Approve plan with Keep as the default. The
+  // in-flow review row is the CARD-UNPROVABLE exception only.
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setTranscript(planTranscript('call-plan-1'))
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: PLAN_MD,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  const frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(frame.includes('Read the plan above in terminal history.'),
+    `the Regular ordinary guidance is missing:\n${frame}`)
+  assert.ok(!frame.includes('View review text'), `no exception row with a provable card:\n${frame}`)
+  assert.ok(!frame.includes('View plan'), `Regular offers no View plan:\n${frame}`)
+  const rows = frame.split('\n').filter(line => />?\s*(View plan|View review text|Keep planning…|Approve plan)\s*│?\s*$/.test(line))
+  assert.equal(rows.length, 2, `exactly two decision rows:\n${frame}`)
+  assert.ok(rows[0]!.includes('> Keep planning…'), `Keep is the default:\n${frame}`)
+  assert.ok(!rows[1]!.includes('>'), `Approve is never defaulted:\n${frame}`)
+  // Fullscreen restores the frozen three rows (View plan first).
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const fullscreenFrame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(fullscreenFrame.includes('View plan'), `Fullscreen offers the real View:\n${fullscreenFrame}`)
+  assert.ok(!fullscreenFrame.includes('View review text'), `no exception row in the frozen Fullscreen layout:\n${fullscreenFrame}`)
+  vt.sendInput('\x1b') // official dismiss
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('the reading step jumps to the transcript start/end with Home/End (never in the feedback input)', async () => {
+  const { vt, app, settle } = planScene(planTranscript('call-plan-1'), 100, 24, { present: planDirectPresenter })
+  await vt.waitForRender()
+  const scroll = (): { scrollTop: number; maxScrollTop: number } => {
+    const state = app.fullscreenScrollForTest()
+    assert.ok(state !== undefined)
+    return { scrollTop: state.scrollTop, maxScrollTop: state.maxScrollTop }
+  }
+  vt.sendInput('\r') // View → reading
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('Reading the submitted plan'))
+  // PageDown a few times, then End → the transcript end; Home → the start.
+  for (let i = 0; i < 3; i += 1) vt.sendInput('\x1b[6~')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[F') // End
+  await vt.waitForRender()
+  assert.equal(scroll().scrollTop, scroll().maxScrollTop, 'End must reach the transcript end')
+  vt.sendInput('\x1b[H') // Home
+  await vt.waitForRender()
+  assert.equal(scroll().scrollTop, 0, 'Home must reach the transcript start')
+  // The feedback input owns Home/End as TEXT-CURSOR keys: the transcript must
+  // not move while editing the revision text.
+  vt.sendInput('\x1b') // back to the decision list
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // Keep planning…
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(planView(vt).includes('What should be changed?'), 'the feedback input is active')
+  vt.sendInput('o')
+  vt.sendInput('k')
+  await vt.waitForRender()
+  const parked = scroll().scrollTop
+  vt.sendInput('\x1b[H')
+  vt.sendInput('\x1b[F')
+  await vt.waitForRender()
+  assert.equal(scroll().scrollTop, parked, 'Home/End inside the feedback edit never move the transcript')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('Regular WITHOUT a logged tool card reads the full plan in-flow and can still answer', async () => {
+  // The official plan-review may arrive with NO logged exit_plan_mode card
+  // (the plan exists only in question.detail). Regular has no transcript
+  // seek, so the decision list must keep the complete text readable through
+  // the question's OWN body — never an unreadable approve target.
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  // NO card: the transcript has no exit_plan_mode row at all.
+  app.setTranscript([{ kind: 'user', turn: 0, text: 'plan without a logged call' }])
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: PLAN_MD,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  let frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(frame.includes('View review text'), `the in-flow reading row is missing:\n${frame}`)
+  assert.ok(!frame.includes('View plan'), `Regular offers no View plan:\n${frame}`)
+  assert.ok(!frame.includes('Read the plan above in terminal history.'),
+    `the scrollback line must not replace the in-flow row when detail exists:\n${frame}`)
+  // Open the full text; verify the plan body head and (paging) the tail. The
+  // default cursor IS `View review text` (row 0 without the Fullscreen View).
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(frame.includes('Full review text'), `the detail fallback opens:\n${frame}`)
+  assert.ok(frame.includes('# Upgrade 0.5.7'), `the plan head renders:\n${frame}`)
+  for (let page = 0; page < 8 && !frame.includes('ship it'); page += 1) {
+    vt.sendInput('\x1b[6~')
+    await vt.waitForRender()
+    frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  }
+  assert.ok(frame.includes('ship it'), `the plan tail pages in:\n${frame}`)
+  // Esc back to the decision list; the question is STILL answerable — approve
+  // through the official answer (↓ to Approve since View review text is row 0).
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // View review text -> Keep planning…
+  vt.sendInput('\x1b[B') // Keep planning… -> Approve plan
+  vt.sendInput('\r')
+  const answers = await settle
+  assert.deepEqual(answers, [{ id: 'plan-review', selected: ['Approve'] }],
+    'the answer still settles through the official path after in-flow reading')
+  app.stop()
+})
+
+test('Fullscreen with a provable card keeps the frozen three-row layout', async () => {
+  // The official detail body does NOT add a fourth row in the normal
+  // Fullscreen layout: `View review text` is the exception entry (no live
+  // inspection), and a FAILED locate degrades View plan to the detail page.
+  const { vt, app, settle } = planScene(planTranscript('call-plan-1'), 100, 24, { present: planDirectPresenter }, undefined, true)
+  await vt.waitForRender()
+  const frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  const rows = frame.split('\n')
+  const decisionRows = rows.filter(line => />?\s*(View plan|View review text|Keep planning…|Approve plan)\s*│?\s*$/.test(line))
+  assert.equal(decisionRows.length, 3, `exactly the frozen three decision rows:\n${frame}`)
+  assert.ok(decisionRows[0]!.includes('> View plan'), `View plan is the default (first) row:\n${frame}`)
+  assert.ok(!frame.includes('View review text'), `the exception row stays out of the normal Fullscreen layout:\n${frame}`)
+  assert.ok(!frame.includes('Read the plan above in terminal history.'), `no Regular line in Fullscreen:\n${frame}`)
+  vt.sendInput('\x1b') // the decision list's official dismiss
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('a FAILED Fullscreen locate degrades View plan to the question detail page (the 3.5 exception)', async () => {
+  // A detail-bearing official request whose card CANNOT be proven (a call id
+  // with no logged card): View plan enters the detail fallback, not a fake
+  // located reading state — the full plan stays readable in the exception.
+  const { vt, app, settle } = planScene(planTranscript(), 100, 24, { present: planDirectPresenter }, undefined, true)
+  await vt.waitForRender()
+  vt.sendInput('\r') // View plan on the three-row layout
+  await vt.waitForRender()
+  const fallback = planView(vt)
+  assert.ok(fallback.includes('Full review text'), `the failed locate degrades to the detail page:\n${fallback}`)
+  assert.ok(fallback.includes('# Upgrade 0.5.7'), `the detail page carries the complete plan:\n${fallback}`)
+  assert.ok(!fallback.includes('Reading the submitted plan'), `never a claimed-located state:\n${fallback}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('a question WITHOUT detail keeps the scrollback guidance and no review row (Regular)', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setTranscript([{ kind: 'user', turn: 0, text: 'detail-less shape' }])
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?',
+    header: 'Plan review',
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  const frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(frame.includes('Read the plan above in terminal history.'),
+    `the honest scrollback guidance returns when no detail exists:\n${frame}`)
+  assert.ok(!frame.includes('View review text'), `no dead review row without a body:\n${frame}`)
+  assert.ok(!frame.includes('View plan'), `no View plan in Regular:\n${frame}`)
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('collapsing the SEARCH-owned span leaves the Plan lease and body intact', async () => {
+  // F1 regression: the union may decide VISIBILITY, but an explicit collapse
+  // revokes only the request that owns THAT container. Search owns span S; the
+  // plan lease owns a different span P. Collapsing S must not cancel the plan
+  // reading lease.
+  const { messages, root } = searchPlanFixture()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setDisplayPreset('compact')
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  await vt.waitForRender()
+  app.setTranscriptSearchPresentation(searchTargetFor(root))
+  await vt.waitForRender()
+  const body = (): string => vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: SEARCH_PLAN,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  vt.sendInput('\r') // View plan -> lease opens span P
+  await vt.waitForRender()
+  assert.ok(body().includes('## Scope'), `precondition: the plan body is leased open:\n${body()}`)
+  assert.ok(body().includes('needle body line'), `precondition: the search reveal is open:\n${body()}`)
+  // Collapse the SEARCH-owned span S.
+  const ownerS = (app as unknown as {
+    canonicalStructureIndex(): { workByMember: Map<TranscriptMessage, { owner: TranscriptMessage }> }
+  }).canonicalStructureIndex().workByMember.get(root)?.owner
+  assert.ok(ownerS !== undefined, 'fixture: the search card belongs to a Work span')
+  app.toggleWorkSpan(ownerS)
+  await vt.waitForRender()
+  assert.ok(!body().includes('needle body line'), `the search-owned span collapses:\n${body()}`)
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection !== undefined, true,
+    'collapsing the Search span must NOT revoke the plan lease')
+  assert.ok(body().includes('## Scope'), `the plan body stays readable:\n${body()}`)
+  vt.sendInput('\x1b') // leave reading, then dismiss
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('collapsing the PLAN-owned span leaves the Search request and body intact', async () => {
+  // The symmetric direction: Plan owns span P, Search owns span S. Collapsing
+  // P revokes only the plan lease; the search navigation keeps its grant.
+  const { messages, root } = searchPlanFixture()
+  const planCard = messages.find(
+    (m): m is Extract<TranscriptMessage, { kind: 'tool' }> => m.kind === 'tool' && m.name === 'exit_plan_mode',
+  )!
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setDisplayPreset('compact')
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  await vt.waitForRender()
+  app.setTranscriptSearchPresentation(searchTargetFor(root))
+  await vt.waitForRender()
+  const body = (): string => vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: SEARCH_PLAN,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(body().includes('## Scope') && body().includes('needle body line'))
+  const ownerP = (app as unknown as {
+    canonicalStructureIndex(): { workByMember: Map<TranscriptMessage, { owner: TranscriptMessage }> }
+  }).canonicalStructureIndex().workByMember.get(planCard)?.owner
+  assert.ok(ownerP !== undefined, 'fixture: the plan card belongs to a Work span')
+  app.toggleWorkSpan(ownerP)
+  await vt.waitForRender()
+  assert.ok(!body().includes('## Scope'), `the plan-owned span collapses:\n${body()}`)
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
+    'the plan lease is revoked by collapsing its own span')
+  assert.equal(body().includes('needle body line'), true,
+    `collapsing the Plan span must NOT suppress the search request:\n${body()}`)
+  assert.notEqual(app.transcriptSearchPresentationForTest(), undefined,
+    'the search presentation survives the plan collapse')
+  vt.sendInput('\x1b') // reading -> decision (the plan lease is gone already)
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('collapsing the PLAN card itself leaves an unrelated Search request intact', async () => {
+  const { messages, root } = searchPlanFixture()
+  const planCard = messages.find(
+    (m): m is Extract<TranscriptMessage, { kind: 'tool' }> => m.kind === 'tool' && m.name === 'exit_plan_mode',
+  )!
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setDisplayPreset('compact')
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  await vt.waitForRender()
+  app.setTranscriptSearchPresentation(searchTargetFor(root))
+  await vt.waitForRender()
+  const body = (): string => vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: SEARCH_PLAN,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(body().includes('## Scope') && body().includes('needle body line'))
+  ;(app as unknown as { toggleMessageExpanded(message: TranscriptMessage): void }).toggleMessageExpanded(planCard)
+  await vt.waitForRender()
+  assert.ok(!body().includes('## Scope'), `the plan card collapses:\n${body()}`)
+  assert.equal((app as unknown as { planInspection?: unknown }).planInspection, undefined,
+    'the plan lease is revoked by the card collapse')
+  assert.equal(body().includes('needle body line'), true,
+    `the unrelated search request is untouched:\n${body()}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('Regular treats a card from ANOTHER Session as unprovable (keeps the question detail entry)', async () => {
+  // RFL-015: a same-callId card in the CURRENT display session is NOT the plan
+  // of a Question that belongs to another Session. The card-presence probe
+  // must apply the SAME identity admission as the inspection and keep the
+  // question's own detail readable in-flow.
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: 'display-session', version: 'test' })
+  // The displayed transcript carries a card with the SAME callId...
+  app.setTranscript(planTranscript('same-id'))
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: PLAN_MD,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'same-id' },
+  }], undefined, { reviewSessionId: 'other-session' }, false)
+  await vt.waitForRender()
+  const frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(frame.includes('View review text'),
+    `a mismatched-Session card must keep the question detail entry:\n${frame}`)
+  assert.ok(!frame.includes('Read the plan above in terminal history.'),
+    `the unrelated Session's card must not be claimed as "the plan above":\n${frame}`)
+  vt.sendInput('\x1b') // official dismiss
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('Regular treats an UNKNOWN Question Session as unprovable (keeps the question detail entry)', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setTranscript(planTranscript('call-plan-1'))
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: PLAN_MD,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, {}, false) // no reviewSessionId: identity cannot be proven
+  await vt.waitForRender()
+  const frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(frame.includes('View review text'),
+    `an unknown Question identity must keep the question detail entry:\n${frame}`)
+  assert.ok(!frame.includes('Read the plan above in terminal history.'),
+    `an unprovable identity must not claim the scrollback card:\n${frame}`)
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
   app.stop()
 })

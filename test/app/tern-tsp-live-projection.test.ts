@@ -1026,7 +1026,7 @@ function mountPresentationHarness(options: {
         return window
       },
       running: () => false,
-      plan: () => false,
+      plan: () => ({ active: false, pending: false }),
       facts: () => ({}),
       captureTransportToken: () => liveTransportToken,
       isTransportTokenCurrent: (_sessionId, token) => Object.is(token, liveTransportToken),
