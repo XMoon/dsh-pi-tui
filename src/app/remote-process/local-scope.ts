@@ -17,6 +17,7 @@
 
 import { createHash } from 'node:crypto'
 import { readProcessStarttime } from '../../runtime/native-process/identity.ts'
+import { runSyncDisposalStepsWithPrimary } from '../../runtime/process/disposal.ts'
 import { closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { Buffer } from 'node:buffer'
@@ -255,13 +256,20 @@ class DarwinKernelSeat implements ProcessSeat {
     }
   }
 
-  async close(): Promise<void> {
+  /**
+   * Release the held descriptor synchronously. Idempotent: the FD is cleared
+   * FIRST, so a throwing close can never leave a stale descriptor for a second
+   * close, and an unpublished seat's rollback can run without a promise.
+   */
+  releaseSync(): void {
     const fd = this.fd
     if (fd === undefined) return
-    // Clear first: a throwing close must not leave a stale fd that a second
-    // close would misuse, and close() stays idempotent.
     this.fd = undefined
     closeSync(fd)
+  }
+
+  async close(): Promise<void> {
+    this.releaseSync()
   }
 }
 
@@ -298,9 +306,11 @@ export async function bindDarwinKernelSeat(scopeDir: string, scopeId: string, ki
   try {
     seat.assertCurrent()
   } catch (error) {
-    // A failed post-open proof must release the claim it just took.
-    void seat.close()
-    throw error
+    // A failed post-open proof must release the claim it just took. This is a
+    // PRIMARY-failure rollback, so it runs synchronously through the owning
+    // disposal primitive: the proof failure is never replaced by a release
+    // failure, and no fire-and-forget promise is discarded.
+    runSyncDisposalStepsWithPrimary('release unproven Darwin seat', error, [() => seat.releaseSync()])
   }
   return seat
 }
