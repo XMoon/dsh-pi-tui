@@ -1086,7 +1086,12 @@ export async function runAuthenticatedLifecycle(context) {
     assert(alive(hostReady.pid), 'T17 forced bootstrap failure killed the Host')
     trace('t17-forced-bootstrap', { phase: 'after-context', cleanup: 'completed', hostAlive: true })
 
-    // T07: unsafe private files/directories fail before any Host spawn.
+    // T07: NEW private files are 0600 / a NEW scope is 0700 and a final-path
+    // symlink fails closed. An EXISTING user-chosen owner/mode is no longer an
+    // admission gate (D0-03): such a Client must authenticate the same Host.
+    assert(modeOf(scopeDir) === 0o700, 'T07 the Host-created scope directory is not 0700')
+    assert(modeOf(registryPath) === 0o600, 'T07 the Host-created registry is not 0600')
+    assert(modeOf(launchPath) === 0o600, 'T07 the Host-created launch material is not 0600')
     const expectClientFailure = async (label, expectedCode, mutate, restore, timeoutMs = 60_000) => {
       mutate()
       let failure
@@ -1107,10 +1112,30 @@ export async function runAuthenticatedLifecycle(context) {
       assert(alive(hostReady.pid), `${label}: Host died`)
       return failure
     }
+    const expectClientAccepted = async (label, mutate, restore, assertUnchanged) => {
+      mutate()
+      const client = new EntryProcess('client', entries.client, base)
+      try {
+        const outcome = await waitForOutcome(client, label)
+        assert(outcome.m4a0 === 'ready' && outcome.transport === 'connected',
+          `${label}: an existing user mode must not refuse this Client`)
+        assertClientHostFacts(outcome.host, hostReady.localHost, label)
+        assertUnchanged()
+        const exit = await client.shutdown()
+        assert(exit.code === 0, `${label}: exit was ${JSON.stringify(exit)}`)
+        assertUnchanged()
+      } finally {
+        restore()
+        if (!client.exited) client.kill('SIGKILL')
+      }
+      assert(alive(hostReady.pid), `${label}: Host died`)
+    }
     const registrySaved = saveFile(registryPath)
-    await expectClientFailure('T07 registry mode', 'LOCAL_FILE_UNSAFE', () => {
+    await expectClientAccepted('T07 existing registry mode', () => {
       chmodSync(registryPath, 0o644)
-    }, () => restoreFile(registryPath, registrySaved))
+    }, () => restoreFile(registryPath, registrySaved), () => {
+      assert(modeOf(registryPath) === 0o644, 'T07 an existing registry mode must not be rewritten by the Client')
+    })
     const decoyPath = join(scopeDir, 'decoy.json')
     writeRawPrivate(decoyPath, registry)
     await expectClientFailure('T07 registry symlink', 'LOCAL_FILE_UNSAFE', () => {
@@ -1119,14 +1144,32 @@ export async function runAuthenticatedLifecycle(context) {
     }, () => restoreFile(registryPath, registrySaved))
     unlinkSync(decoyPath)
     const scopeMode = modeOf(scopeDir)
-    await expectClientFailure('T07 scope directory mode', 'SCOPE_DIRECTORY_UNSAFE', () => {
+    await expectClientAccepted('T07 existing scope directory mode', () => {
       chmodSync(scopeDir, 0o755)
-    }, () => chmodSync(scopeDir, scopeMode))
+    }, () => chmodSync(scopeDir, scopeMode), () => {
+      assert(modeOf(scopeDir) === 0o755, 'T07 an existing scope directory mode must not be rewritten')
+    })
     const launchSaved = saveFile(launchPath)
-    await expectClientFailure('T07 launch mode', 'LOCAL_FILE_UNSAFE', () => {
+    await expectClientAccepted('T07 existing launch mode', () => {
       chmodSync(launchPath, 0o644)
+    }, () => restoreFile(launchPath, launchSaved), () => {
+      assert(modeOf(launchPath) === 0o644, 'T07 an existing launch mode must not be rewritten')
+    })
+    const launchDecoy = join(scopeDir, 'launch-decoy.json')
+    writeRawPrivate(launchDecoy, launch)
+    await expectClientFailure('T07 launch symlink', 'LOCAL_FILE_UNSAFE', () => {
+      unlinkSync(launchPath)
+      symlinkSync(launchDecoy, launchPath)
     }, () => restoreFile(launchPath, launchSaved))
-    trace('rejections', { registryMode: 'LOCAL_FILE_UNSAFE', registrySymlink: 'LOCAL_FILE_UNSAFE', scopeMode: 'SCOPE_DIRECTORY_UNSAFE', launchMode: 'LOCAL_FILE_UNSAFE' })
+    unlinkSync(launchDecoy)
+    trace('existing-user-modes-accepted-and-final-symlinks-refused', {
+      registryMode: 'accepted-existing-0644',
+      registrySymlink: 'LOCAL_FILE_UNSAFE',
+      scopeMode: 'accepted-existing-0755',
+      launchMode: 'accepted-existing-0644',
+      launchSymlink: 'LOCAL_FILE_UNSAFE',
+      newFiles: '0600/0700',
+    })
 
     // T14: a forged registry/launch pair cannot fabricate a Host; the real
     // authenticated identity wins and reports HOST_IDENTITY_MISMATCH.

@@ -1,12 +1,14 @@
 /**
- * M6-2B managed Host manager contracts.
+ * Host process lifecycle contracts.
  *
  * These are L1-L3 unit tests for the ONE Host-process management boundary: the
- * three-state user-manager classifier, the profile unit name/content encoder
- * (including the real `systemd-analyze` parser check), the atomic owner-checked
- * unit install, and the managed-start orchestration (strict-absence process
- * fallback, error propagation and the available-manager unit path). A real
- * systemd user-manager L6 run lives in the split-process smoke, not here.
+ * profile unit name/content encoder (including the real `systemd-analyze`
+ * parser check), the atomic no-overwrite unit install, the explicit
+ * `installProfileHostUnit` flow (manager UnitPath gate, idempotent install,
+ * foreign/build conflict) and the public start orchestration (no unit means an
+ * immediate detached Host with NO systemctl call; an installed loaded unit
+ * starts through systemd without a fallback). A real systemd user-manager L6
+ * run lives in the split-process smoke, not here.
  *
  * @module @xmoon76/dsh-pi-tui/m6-2b-managed-host.test
  */
@@ -16,30 +18,30 @@ import { spawn, execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createRequire } from 'node:module'
 import test, { type TestContext } from 'node:test'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { LocalScopeError, scopeFromInstalledProfile, type LocalScope } from '../../src/app/remote-process/local-scope.ts'
 import {
   buildUnitName,
-  classifyUserManagerProbe,
   encodeUnitPath,
   encodeUnitValue,
   ensureOwnedUnitDir,
+  installProfileHostUnit,
   installProfileUnit,
   inspectOwnedProfileUnit,
   inspectTrustedDshAnchor,
   inspectTrustedExecutable,
-  probeUserManager,
   profileIdentityDigest,
   profileUnitSlug,
   renderUnitContent,
+  spawnHostCandidate,
   startManagedHostCandidate,
+  startPublicHostCandidate,
   stopOwnedProfileUnit,
   uninstallOwnedProfileUnit,
   type SystemctlResult,
   type UnitFacts,
-  type UserManagerProbe,
-  type UserManagerProbeFacts,
 } from '../../src/app/remote-process/local-host-manager.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -49,107 +51,10 @@ function exited(code: number, stdout = '', stderr = ''): SystemctlResult {
   return { kind: 'exited', code, stdout, stderr }
 }
 
-function probeFacts(overrides: Partial<UserManagerProbeFacts> = {}): UserManagerProbeFacts {
-  return {
-    systemctl: exited(1, '', 'Failed to connect to bus: No such file or directory'),
-    managerPrivatePresent: false,
-    userBusPresent: false,
-    systemdUserServiceState: 'inactive',
-    ...overrides,
-  }
-}
-
 function isCode(error: unknown, code: string): boolean {
   return error instanceof LocalScopeError && error.code === code
 }
 
-// ── The three-state classifier ──────────────────────────────────────────────
-
-test('a successful show-environment request classifies the user manager as available', () => {
-  assert.deepEqual(classifyUserManagerProbe(probeFacts({ systemctl: exited(0, 'HOME=/home/u\n') })), { kind: 'available' })
-})
-
-test('an explicit no-user-bus with absent endpoints and an inactive user service is a strict absence', () => {
-  assert.deepEqual(classifyUserManagerProbe(probeFacts()), { kind: 'absent' })
-  const notFound = probeFacts({ systemctl: exited(1, '', 'Failed to connect to bus: No such file or directory') })
-  assert.deepEqual(classifyUserManagerProbe(notFound), { kind: 'absent' })
-})
-
-test('a present but refusing manager is an error, never an absence', () => {
-  const result = classifyUserManagerProbe(probeFacts({
-    systemctl: exited(1, '', 'Failed to connect to bus: Connection refused'),
-    userBusPresent: true,
-  }))
-  assert.equal(result.kind, 'error')
-})
-
-test('a no-bus error is an error when a live manager endpoint still exists', () => {
-  assert.equal(classifyUserManagerProbe(probeFacts({ managerPrivatePresent: true })).kind, 'error')
-  assert.equal(classifyUserManagerProbe(probeFacts({ userBusPresent: true })).kind, 'error')
-})
-
-test('a no-bus error is an error when the system manager reports an active user service', () => {
-  assert.equal(classifyUserManagerProbe(probeFacts({ systemdUserServiceState: 'active' })).kind, 'error')
-})
-
-test('a no-bus error is an error when the user service state cannot be confirmed', () => {
-  assert.equal(classifyUserManagerProbe(probeFacts({ systemdUserServiceState: 'unknown' })).kind, 'error')
-})
-
-test('a probe timeout or output overflow is a stable error, not an absence', () => {
-  assert.equal(classifyUserManagerProbe(probeFacts({ systemctl: { kind: 'timeout' } })).kind, 'error')
-  assert.equal(classifyUserManagerProbe(probeFacts({ systemctl: { kind: 'output-overflow' } })).kind, 'error')
-})
-
-test('a permission-denied or generic non-zero failure is an error, never an absence', () => {
-  assert.equal(classifyUserManagerProbe(probeFacts({ systemctl: exited(1, '', 'Access denied') })).kind, 'error')
-  assert.equal(classifyUserManagerProbe(probeFacts({ systemctl: exited(1, '', 'Failed: something else') })).kind, 'error')
-})
-
-test('a missing systemctl executable is absent only when the channel is corroborated absent', () => {
-  const spawnError: SystemctlResult = { kind: 'spawn-error', error: Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) }
-  assert.deepEqual(classifyUserManagerProbe(probeFacts({ systemctl: spawnError })), { kind: 'absent' })
-  assert.equal(classifyUserManagerProbe(probeFacts({ systemctl: spawnError, userBusPresent: true })).kind, 'error')
-})
-
-test('a probe error reason never leaks an absolute private path', () => {
-  const result = classifyUserManagerProbe(probeFacts({
-    systemctl: exited(1, '', '/home/secret/private: permission denied'),
-    systemdUserServiceState: 'unknown',
-  }))
-  assert.equal(result.kind, 'error')
-  assert.doesNotMatch((result as { reason: string }).reason, /\/home\/secret/u)
-})
-
-test('a missing systemctl binary with no live endpoint is an absent manager even without a system state', () => {
-  const enoent: SystemctlResult = { kind: 'spawn-error', error: Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) }
-  assert.deepEqual(classifyUserManagerProbe(probeFacts({ systemctl: enoent, systemdUserServiceState: 'unknown' })), { kind: 'absent' })
-  assert.equal(classifyUserManagerProbe(probeFacts({ systemctl: enoent, systemdUserServiceState: 'unknown', userBusPresent: true })).kind, 'error')
-})
-
-test('systemd not being the init system with no live endpoint is a definitive absence', () => {
-  const init = exited(1, '', 'System has not been booted with systemd as init system (PID 1). Can\'t operate.')
-  assert.deepEqual(classifyUserManagerProbe(probeFacts({ systemctl: init, systemdUserServiceState: 'unknown' })), { kind: 'absent' })
-})
-
-test('a user-scope-bus refusal or permission error is never treated as absence', () => {
-  assert.equal(classifyUserManagerProbe(probeFacts({ systemctl: exited(1, '', 'Failed to connect to user scope bus: Permission denied') })).kind, 'error')
-  assert.equal(classifyUserManagerProbe(probeFacts({ systemctl: exited(1, '', 'Failed to connect to user scope bus: Connection refused') })).kind, 'error')
-})
-
-test('the two-step probe classifies a genuinely absent (no systemctl) host as absent', { skip: process.platform !== 'linux' ? 'the user manager probe is the Linux systemd contract' : false }, async () => {
-  const enoent: SystemctlResult = { kind: 'spawn-error', error: Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) }
-  const result = await probeUserManager({ systemctl: async () => enoent, pathExists: () => false })
-  assert.deepEqual(result, { kind: 'absent' })
-})
-
-test('the two-step probe reports available on a successful show-environment', { skip: process.platform !== 'linux' ? 'the user manager probe is the Linux systemd contract' : false }, async () => {
-  const result = await probeUserManager({
-    systemctl: async args => (args.includes('show-environment') ? exited(0, 'HOME=/home/u\n') : exited(1)),
-    pathExists: () => true,
-  })
-  assert.deepEqual(result, { kind: 'available' })
-})
 
 // ── Unit naming ──────────────────────────────────────────────────────────────
 
@@ -268,7 +173,7 @@ test('the real systemd parser accepts the rendered unit with space, percent, dol
   }
 })
 
-// ── Installed-fact trust and directory permission ────────────────────────────
+// ── Installed-fact trust and directory policy ────────────────────────────────
 
 test('the node interpreter is trusted by executability, not by uid ownership', t => {
   const uid = process.getuid?.()
@@ -295,8 +200,8 @@ test('the node interpreter is trusted by executability, not by uid ownership', t
   assert.throws(() => inspectTrustedExecutable(dir, 'node executable'), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
 })
 
-test('the DSH install anchor is trusted by identity/version/permissions, not by uid ownership', t => {
-  // A root-owned readable regular non-writable file is accepted (no uid rule).
+test('the DSH install anchor is trusted by identity/version, not by uid or writability', t => {
+  // A root-owned readable regular file is accepted (no uid rule).
   const rootOwned = ['/usr/bin/systemctl', '/bin/sh', '/usr/bin/env'].find(probe => {
     try {
       const real = realpathSync(probe)
@@ -311,37 +216,38 @@ test('the DSH install anchor is trusted by identity/version/permissions, not by 
   const good = join(dir, 'anchor.json')
   writeFileSync(good, JSON.stringify({ name: '@deepseek-ai/dsh', version: DSH_VERSION }), { mode: 0o644 })
   assert.doesNotThrow(() => inspectTrustedDshAnchor(good))
+  // The user's existing mode is not a product policy; identity/version is.
   const writable = join(dir, 'writable.json')
   writeFileSync(writable, '{}')
   chmodSync(writable, 0o666)
-  assert.throws(() => inspectTrustedDshAnchor(writable), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+  assert.doesNotThrow(() => inspectTrustedDshAnchor(writable))
+  // A directory or missing anchor is still a hard failure.
   assert.throws(() => inspectTrustedDshAnchor(dir), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
   assert.throws(() => inspectTrustedDshAnchor(join(dir, 'missing.json')), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
 })
 
-test('a DSH anchor that is not the @deepseek-ai/dsh package is refused before any unit is written', async t => {
-  const fx = managedFixture(t)
-  const fakeName = join(dirname(fx.anchor), 'fake.json')
-  writeFileSync(fakeName, `${JSON.stringify({ name: '@evil/dsh', version: DSH_VERSION })}\n`, { mode: 0o644 })
-  const unitDir = testLifecycle(t).tempDir('m62b-fakename-')
-  await assert.rejects(
-    startManagedHostCandidate(
-      { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: fakeName, profile: 'pi-tui' },
-      { probe: async (): Promise<UserManagerProbe> => ({ kind: 'available' }), unitDir: () => unitDir, systemctl: async () => exited(0) },
-    ),
-    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
-  )
-  assert.deepEqual(readdirSync(unitDir), [])
-})
+test('the user unit directory chain accepts existing 0755/0775 dirs and symlinks without chmodding', t => {
+  const life = testLifecycle(t)
+  const good = life.tempDir('m62b-home-good-')
+  assert.doesNotThrow(() => ensureOwnedUnitDir(good))
+  assert.equal(lstatSync(join(good, '.config')).mode & 0o777, 0o700, 'a missing component must be created 0700')
 
-test('a group/other-writable unit directory is refused while a 0700 chain is accepted', t => {
-  const uid = process.getuid?.() as number
-  const good = testLifecycle(t).tempDir('m62b-home-good-')
-  assert.doesNotThrow(() => ensureOwnedUnitDir(good, uid))
-  const bad = testLifecycle(t).tempDir('m62b-home-bad-')
-  mkdirSync(join(bad, '.config'), { mode: 0o700 })
-  chmodSync(join(bad, '.config'), 0o770)
-  assert.throws(() => ensureOwnedUnitDir(bad, uid), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+  const existing = life.tempDir('m62b-home-existing-')
+  mkdirSync(join(existing, '.config'), { mode: 0o755 })
+  mkdirSync(join(existing, '.config', 'systemd'), { mode: 0o775 })
+  const resolved = ensureOwnedUnitDir(existing)
+  assert.equal(resolved, join(existing, '.config', 'systemd', 'user'))
+  assert.equal(lstatSync(join(existing, '.config')).mode & 0o777, 0o755, 'existing modes are never rewritten')
+
+  const linked = life.tempDir('m62b-home-linked-')
+  const realConfig = life.tempDir('m62b-real-config-')
+  symlinkSync(realConfig, join(linked, '.config'))
+  assert.equal(ensureOwnedUnitDir(linked), join(linked, '.config', 'systemd', 'user'))
+  assert.equal(existsSync(join(realConfig, 'systemd', 'user')), true)
+
+  const broken = life.tempDir('m62b-home-broken-')
+  writeFileSync(join(broken, '.config'), 'not a directory')
+  assert.throws(() => ensureOwnedUnitDir(broken), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
 })
 
 // ── Atomic owner-checked installation ───────────────────────────────────────
@@ -416,7 +322,7 @@ test('concurrent identical installs converge to exactly one creator and one inta
   assert.equal(readFileSync(join(dir, name), 'utf8'), content, 'the winning unit must be byte-identical to the rendered content')
 })
 
-// ── Managed-start orchestration ──────────────────────────────────────────────
+// ── Explicit install and public start orchestration ─────────────────────────
 
 interface ManagedFixture {
   readonly scope: LocalScope
@@ -445,173 +351,703 @@ function managedFixture(t: TestContext): ManagedFixture {
   return { scope, entry: join(packageRoot, 'dist', 'local-host.mjs'), anchor, markerPath }
 }
 
-/** A fake `systemctl` that emulates one acceptable managed-host start. */
-function fakeSystemctl(finalPath: string) {
-  let loaded = false
-  const calls: string[] = []
+/**
+ * A fake `systemctl` for the explicit install/start flows. It answers the real
+ * `UnitPath` query, the unit `show` query and `daemon-reload`, and records every
+ * invocation so a test can prove which systemd calls were (not) made.
+ */
+function fakeManager(options: {
+  readonly unitPath?: string
+  readonly finalPath: string
+  readonly loaded?: boolean
+  readonly activeState?: string
+  readonly mainPid?: number
+  readonly fragmentPath?: string
+  readonly reloadResult?: SystemctlResult
+  /** The reload succeeds but the manager never loads the unit (search path miss). */
+  readonly staysUnloaded?: boolean
+  readonly startResult?: SystemctlResult
+  readonly unitPathResult?: SystemctlResult
+}) {
+  const calls: string[][] = []
+  let loaded = options.loaded ?? false
   const run = async (args: readonly string[]): Promise<SystemctlResult> => {
-    calls.push(args.join(' '))
+    calls.push([...args])
+    if (args.includes('UnitPath')) {
+      return options.unitPathResult ?? exited(0, options.unitPath ?? '')
+    }
     if (args.includes('daemon-reload')) {
-      loaded = true
+      if (options.reloadResult !== undefined) return options.reloadResult
+      // `staysUnloaded` models a manager whose real search path does not
+      // include the target directory: the reload succeeds but `show` keeps
+      // answering not-found.
+      if (!options.staysUnloaded) loaded = true
       return exited(0)
     }
+    if (args.includes('start')) return options.startResult ?? exited(0)
+    if (args.includes('stop')) return exited(0)
     if (args.includes('show')) {
-      const body = loaded
-        ? `LoadState=loaded\nActiveState=inactive\nFragmentPath=${finalPath}\nDropInPaths=\n`
-        : 'LoadState=not-found\nActiveState=inactive\nFragmentPath=\nDropInPaths=\n'
-      return exited(0, body)
+      const fragment = options.fragmentPath ?? options.finalPath
+      return exited(0, [
+        `LoadState=${loaded ? 'loaded' : 'not-found'}`,
+        `ActiveState=${options.activeState ?? 'inactive'}`,
+        `FragmentPath=${loaded ? fragment : ''}`,
+        'DropInPaths=',
+        `MainPID=${String(options.mainPid ?? 0)}`,
+        'UnitFileState=disabled',
+        '',
+      ].join('\n'))
     }
     return exited(0)
   }
   return { run, calls, get loaded() { return loaded } }
 }
 
-test('a probe error propagates as HOST_MANAGER_ERROR and never falls back', async t => {
+function writeUnit(fx: ManagedFixture, dir: string, content?: string): { readonly path: string; readonly content: string } {
+  const text = content ?? renderUnitContent({
+    dshHome: fx.scope.dshHome,
+    profileRealpath: fx.scope.profileRealpath,
+    profile: 'pi-tui',
+    scopeId: fx.scope.scopeId,
+    buildId: fx.scope.buildId,
+    nodePath: process.execPath,
+    hostEntryPath: fx.entry,
+    dshAnchor: fx.anchor,
+  })
+  const path = join(dir, buildUnitName('pi-tui', fx.scope.scopeId))
+  writeFileSync(path, text, { mode: 0o600 })
+  return { path, content: text }
+}
+
+function hostOptions(fx: ManagedFixture, overrides: { hostEntryPath?: string; dshAnchor?: string } = {}) {
+  return {
+    scope: fx.scope,
+    hostEntryPath: overrides.hostEntryPath ?? fx.entry,
+    dshAnchor: overrides.dshAnchor ?? fx.anchor,
+    profile: 'pi-tui',
+  }
+}
+
+test('install accepts a reachable manager that omits the still-empty target directory from UnitPath', async t => {
   const fx = managedFixture(t)
-  await assert.rejects(
-    startManagedHostCandidate(
-      { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: fx.anchor, profile: 'pi-tui' },
-      { probe: async (): Promise<UserManagerProbe> => ({ kind: 'error', reason: 'boom' }) },
-    ),
-    error => isCode(error, 'HOST_MANAGER_ERROR'),
-  )
+  const root = testLifecycle(t).tempDir('m62b-install-empty-unitpath-')
+  const unitDir = join(root, '.config', 'systemd', 'user')
+  const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
+  // systemd omits still-empty directories from `show -p UnitPath --value`, so an
+  // empty/default-only UnitPath must NOT block a clean account's first install.
+  const systemctl = fakeManager({ finalPath: join(unitDir, unitName), unitPath: '/usr/lib/systemd/user /etc/systemd/user' })
+  const result = await installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: systemctl.run })
+  assert.equal(result.created, true)
+  assert.equal(result.reloaded, true)
+  assert.equal(existsSync(unitDir), true)
+  assert.equal(existsSync(join(unitDir, unitName)), true)
+  assert.equal(systemctl.calls.filter(args => args.includes('daemon-reload')).length, 1)
 })
 
-test('a strict absence falls back to the detached process spawn and creates no unit', async t => {
+test('install refuses an unusable user manager instead of writing or falling back', async t => {
   const fx = managedFixture(t)
-  const emptyUnitDir = testLifecycle(t).tempDir('m62b-should-stay-empty-')
-  const observation = await startManagedHostCandidate(
-    { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: fx.anchor, profile: 'pi-tui' },
-    {
-      probe: async (): Promise<UserManagerProbe> => ({ kind: 'absent' }),
-      unitDir: () => emptyUnitDir,
-      systemctl: async () => exited(0),
-    },
+  const unitDir = testLifecycle(t).tempDir('m62b-install-nomanager-')
+  const systemctl = fakeManager({
+    finalPath: join(unitDir, buildUnitName('pi-tui', fx.scope.scopeId)),
+    unitPathResult: exited(1, '', 'Failed to connect to bus: No such file or directory'),
+  })
+  await assert.rejects(
+    installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: systemctl.run }),
+    error => isCode(error, 'HOST_MANAGER_ERROR'),
   )
+  assert.deepEqual(readdirSync(unitDir), [])
+})
+
+test('install queries the real manager BEFORE creating a missing user unit directory', async t => {
+  const fx = managedFixture(t)
+  const root = testLifecycle(t).tempDir('m62b-install-order-')
+  const unitDir = join(root, 'nested', 'user')
+  const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
+  const base = fakeManager({ finalPath: join(unitDir, unitName), unitPath: unitDir })
+  let existedAtQuery: boolean | undefined
+  const failingManager = async (args: readonly string[]): Promise<SystemctlResult> => {
+    if (args.includes('UnitPath')) {
+      existedAtQuery = existsSync(unitDir)
+      return exited(1, '', 'manager unavailable')
+    }
+    return await base.run(args)
+  }
+  await assert.rejects(
+    installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: failingManager }),
+    error => isCode(error, 'HOST_MANAGER_ERROR'),
+  )
+  assert.equal(existedAtQuery, false, 'the manager gate must run before any directory write')
+  assert.equal(existsSync(unitDir), false, 'an unusable manager must not create the user unit directory')
+
+  let existedAtQuery2: boolean | undefined
+  const workingManager = async (args: readonly string[]): Promise<SystemctlResult> => {
+    if (args.includes('UnitPath')) {
+      existedAtQuery2 = existsSync(unitDir)
+      return exited(0, unitDir)
+    }
+    return await base.run(args)
+  }
+  const result = await installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: workingManager })
+  assert.equal(existedAtQuery2, false, 'the gate still runs before creation')
+  assert.equal(result.created, true)
+  assert.equal(existsSync(unitDir), true)
+})
+
+test('install creates one unit, reloads once and never starts or enables it', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-install-fresh-')
+  const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
+  const finalPath = join(unitDir, unitName)
+  const systemctl = fakeManager({ finalPath, unitPath: unitDir })
+  const result = await installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: systemctl.run })
+  assert.equal(result.created, true)
+  assert.equal(result.reloaded, true)
+  assert.equal(result.unitName, unitName)
+  assert.equal(result.unitPath, finalPath)
+  assert.match(readFileSync(finalPath, 'utf8'), new RegExp(`^X-DshPiTuiScopeId=${fx.scope.scopeId}$`, 'mu'))
+  const flattened = systemctl.calls.map(args => args.join(' '))
+  assert.equal(flattened.filter(call => call.includes('daemon-reload')).length, 1, 'a fresh unit needs exactly one reload')
+  assert.equal(flattened.some(call => /\bstart\b/u.test(call)), false, 'install must never start the unit')
+  assert.equal(flattened.some(call => /\benable\b/u.test(call)), false, 'install must never enable the unit')
+})
+
+test('install reloads a freshly created unit even when the manager still reports a cached loaded definition', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-install-stale-cache-')
+  const finalPath = join(unitDir, buildUnitName('pi-tui', fx.scope.scopeId))
+  // systemd may still cache a previously removed unit at the SAME FragmentPath.
+  // The file does not exist yet, but `show` already reports it loaded.
+  const systemctl = fakeManager({ finalPath, unitPath: unitDir, loaded: true })
+  const result = await installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: systemctl.run })
+  assert.equal(result.created, true)
+  assert.equal(result.reloaded, true, 'a fresh unit must force one daemon-reload even when LoadState=loaded is cached')
+  assert.equal(systemctl.calls.filter(args => args.includes('daemon-reload')).length, 1)
+})
+
+test('repeat install is fully idempotent once the manager has loaded the unit', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-install-repeat-')
+  const finalPath = join(unitDir, buildUnitName('pi-tui', fx.scope.scopeId))
+  const systemctl = fakeManager({ finalPath, unitPath: unitDir })
+  const first = await installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: systemctl.run })
+  assert.equal(first.created, true)
+  const second = await installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: systemctl.run })
+  assert.equal(second.created, false)
+  assert.equal(second.reloaded, false, 'an already loaded unit is not reloaded again')
+  assert.equal(systemctl.calls.filter(args => args.includes('daemon-reload')).length, 1)
+})
+
+test('a freshly created unit reloads before verifying a cached different FragmentPath', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-install-old-fragment-')
+  const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
+  const finalPath = join(unitDir, unitName)
+  let reloaded = false
+  const calls: string[][] = []
+  const run = async (args: readonly string[]): Promise<SystemctlResult> => {
+    calls.push([...args])
+    if (args.includes('UnitPath')) return exited(0, unitDir)
+    if (args.includes('daemon-reload')) { reloaded = true; return exited(0) }
+    if (args.includes('show')) {
+      return exited(0, [
+        'LoadState=loaded',
+        'ActiveState=inactive',
+        `FragmentPath=${reloaded ? finalPath : join(unitDir, 'stale.service')}`,
+        'DropInPaths=',
+        'MainPID=0',
+        'UnitFileState=disabled',
+        '',
+      ].join('\n'))
+    }
+    return exited(0)
+  }
+  const result = await installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: run })
+  assert.equal(result.created, true)
+  assert.equal(result.reloaded, true, 'a fresh unit must reload before checking the cached FragmentPath')
+  assert.equal(calls.filter(args => args.includes('daemon-reload')).length, 1)
+})
+
+test('install refuses to shadow a manager-loaded foreign unit of the same name before any write', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-install-shadow-')
+  const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
+  const foreignSource = join(unitDir, 'foreign-source.service')
+  writeFileSync(foreignSource, '[Unit]\nDescription=foreign loaded service\n', { mode: 0o644 })
+  let reloaded = false
+  const run = async (args: readonly string[]): Promise<SystemctlResult> => {
+    if (args.includes('daemon-reload')) { reloaded = true; return exited(0) }
+    if (args.includes('show')) {
+      return exited(0, [
+        'LoadState=loaded',
+        'ActiveState=active',
+        `FragmentPath=${foreignSource}`,
+        'DropInPaths=',
+        'MainPID=4242',
+        'UnitFileState=enabled',
+        '',
+      ].join('\n'))
+    }
+    return exited(0)
+  }
+  await assert.rejects(
+    installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: run }),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT') && /shadow a foreign service/u.test(String(error)),
+  )
+  assert.equal(existsSync(join(unitDir, unitName)), false, 'a shadowing install must write no unit file')
+  assert.equal(reloaded, false, 'a shadowing install must issue no reload')
+  assert.equal(readFileSync(foreignSource, 'utf8').startsWith('[Unit]'), true, 'the foreign loaded definition must be untouched')
+})
+
+test('a running foreign unit whose source file is gone is not shadowed', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-install-active-gone-')
+  const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
+  const finalPath = join(unitDir, unitName)
+  let reloads = 0
+  const run = async (args: readonly string[]): Promise<SystemctlResult> => {
+    if (args.includes('daemon-reload')) { reloads += 1; return exited(0) }
+    if (args.includes('show')) {
+      return exited(0, [
+        'LoadState=loaded',
+        'ActiveState=active',
+        `FragmentPath=${join(unitDir, 'gone.service')}`,
+        'DropInPaths=',
+        'MainPID=4242',
+        'UnitFileState=enabled',
+        '',
+      ].join('\n'))
+    }
+    return exited(0)
+  }
+  await assert.rejects(
+    installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: run }),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT') && /possibly running foreign service/u.test(String(error)),
+  )
+  assert.equal(reloads, 0, 'a running foreign unit must not be reloaded')
+  assert.equal(existsSync(finalPath), false, 'a running foreign unit must not be shadowed')
+})
+
+test('a not-found unit still reported active is not treated as unused', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-install-notfound-active-')
+  const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
+  const finalPath = join(unitDir, unitName)
+  let reloads = 0
+  const run = async (args: readonly string[]): Promise<SystemctlResult> => {
+    if (args.includes('daemon-reload')) { reloads += 1; return exited(0) }
+    if (args.includes('show')) {
+      return exited(0, [
+        'LoadState=not-found',
+        'ActiveState=active',
+        'FragmentPath=',
+        'DropInPaths=',
+        'MainPID=4242',
+        'UnitFileState=',
+        '',
+      ].join('\n'))
+    }
+    return exited(0)
+  }
+  await assert.rejects(
+    installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: run }),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT') && /not loaded/u.test(String(error)),
+  )
+  assert.equal(reloads, 0, 'an active not-found name must not be reloaded')
+  assert.equal(existsSync(finalPath), false, 'an active not-found name must not be shadowed')
+})
+
+test('install still recovers when the manager only caches a removed same-name unit', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-install-stale-only-')
+  const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
+  const finalPath = join(unitDir, unitName)
+  // The cached FragmentPath no longer exists: only a stale cache, safe to
+  // replace. A successful reload then points the name at our fresh file.
+  const gone = join(unitDir, 'gone.service')
+  let reloadedFromStale = false
+  const run = async (args: readonly string[]): Promise<SystemctlResult> => {
+    if (args.includes('daemon-reload')) { reloadedFromStale = true; return exited(0) }
+    if (args.includes('show')) {
+      return exited(0, [
+        `LoadState=${reloadedFromStale ? 'loaded' : 'loaded'}`,
+        'ActiveState=inactive',
+        `FragmentPath=${reloadedFromStale ? finalPath : gone}`,
+        'DropInPaths=',
+        'MainPID=0',
+        'UnitFileState=disabled',
+        '',
+      ].join('\n'))
+    }
+    return exited(0)
+  }
+  const result = await installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: run })
+  assert.equal(result.created, true)
+  assert.equal(result.reloaded, true)
+  assert.equal(existsSync(finalPath), true)
+})
+
+test('a failed reload of a fresh unit is rolled back so a retry reloads again', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-install-retry-')
+  const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
+  const finalPath = join(unitDir, unitName)
+  const failing = fakeManager({ finalPath, unitPath: unitDir, reloadResult: exited(1, '', 'reload failed') })
+  await assert.rejects(
+    installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: failing.run }),
+    error => isCode(error, 'HOST_MANAGER_START_FAILED'),
+  )
+  assert.equal(failing.calls.filter(args => args.includes('daemon-reload')).length, 1)
+  assert.equal(existsSync(finalPath), false, 'a failed fresh install must roll its unit file back')
+
+  const stale = fakeManager({ finalPath, unitPath: unitDir, loaded: true })
+  const retry = await installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: stale.run })
+  assert.equal(retry.created, true, 'the retry must create the unit again')
+  assert.equal(retry.reloaded, true, 'the retry must reload instead of trusting the stale cached LoadState')
+  assert.equal(stale.calls.filter(args => args.includes('daemon-reload')).length, 1)
+})
+
+test('install preserves an existing same-identity customized unit and never rewrites it', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-install-existing-')
+  const path = join(unitDir, buildUnitName('pi-tui', fx.scope.scopeId))
+  const customized = renderUnitContent({
+    dshHome: fx.scope.dshHome,
+    profileRealpath: fx.scope.profileRealpath,
+    profile: 'pi-tui',
+    scopeId: fx.scope.scopeId,
+    buildId: fx.scope.buildId,
+    nodePath: process.execPath,
+    hostEntryPath: fx.entry,
+    dshAnchor: fx.anchor,
+  }).replace('Restart=on-failure', 'Restart=no').replace(/^ExecStart=.*$/mu, 'ExecStart=/bin/false')
+  writeFileSync(path, customized, { mode: 0o644 })
+  chmodSync(path, 0o644)
+  const systemctl = fakeManager({ finalPath: path, unitPath: unitDir, loaded: true })
+  const result = await installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: systemctl.run })
+  assert.equal(result.created, false)
+  assert.equal(result.reloaded, false)
+  assert.equal(readFileSync(path, 'utf8'), customized, 'user runtime directives must stay byte-for-byte intact')
+})
+
+test('install explicitly reloads an existing but not-loaded unit and verifies FragmentPath', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-install-notloaded-')
+  const unit = writeUnit(fx, unitDir)
+  const systemctl = fakeManager({ finalPath: unit.path, unitPath: unitDir, loaded: false })
+  const result = await installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: systemctl.run })
+  assert.equal(result.created, false)
+  assert.equal(result.reloaded, true)
+  assert.equal(systemctl.calls.filter(args => args.includes('daemon-reload')).length, 1)
+})
+
+test('install refuses a foreign unit, another build and a wrong DSH anchor without overwriting', async t => {
+  const fx = managedFixture(t)
+  const foreignDir = testLifecycle(t).tempDir('m62b-install-foreign-')
+  const foreign = writeUnit(fx, foreignDir, renderUnitContent({
+    dshHome: fx.scope.dshHome, profileRealpath: fx.scope.profileRealpath, profile: 'pi-tui', scopeId: fx.scope.scopeId,
+    buildId: fx.scope.buildId, nodePath: process.execPath, hostEntryPath: fx.entry, dshAnchor: fx.anchor,
+  }).replace('X-DshPiTuiOwner=local-host-manager-v1', 'X-DshPiTuiOwner=someone-else'))
+  await assert.rejects(
+    installProfileHostUnit(hostOptions(fx), {
+      unitDir: () => foreignDir,
+      systemctl: fakeManager({ finalPath: foreign.path, unitPath: foreignDir }).run,
+    }),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
+  )
+  assert.equal(readFileSync(foreign.path, 'utf8'), foreign.content)
+
+  const oldBuildDir = testLifecycle(t).tempDir('m62b-install-oldbuild-')
+  const oldBuild = writeUnit(fx, oldBuildDir, renderUnitContent({
+    dshHome: fx.scope.dshHome, profileRealpath: fx.scope.profileRealpath, profile: 'pi-tui', scopeId: fx.scope.scopeId,
+    buildId: 'c'.repeat(64), nodePath: process.execPath, hostEntryPath: fx.entry, dshAnchor: fx.anchor,
+  }))
+  await assert.rejects(
+    installProfileHostUnit(hostOptions(fx), {
+      unitDir: () => oldBuildDir,
+      systemctl: fakeManager({ finalPath: oldBuild.path, unitPath: oldBuildDir, loaded: true }).run,
+    }),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
+  )
+  assert.equal(readFileSync(oldBuild.path, 'utf8'), oldBuild.content)
+
+  const wrongDir = testLifecycle(t).tempDir('m62b-install-wronganchor-')
+  const wrongAnchor = join(dirname(fx.anchor), 'wrong.json')
+  writeFileSync(wrongAnchor, `${JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.1-rc.4' })}\n`, { mode: 0o644 })
+  await assert.rejects(
+    installProfileHostUnit(hostOptions(fx, { dshAnchor: wrongAnchor }), {
+      unitDir: () => wrongDir,
+      systemctl: fakeManager({ finalPath: join(wrongDir, buildUnitName('pi-tui', fx.scope.scopeId)), unitPath: wrongDir }).run,
+    }),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
+  )
+  assert.deepEqual(readdirSync(wrongDir), [])
+})
+
+test('a reachable manager that never loads the fresh unit rolls the file back and leaves the basic daemon free', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-install-neverloaded-')
+  const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
+  const finalPath = join(unitDir, unitName)
+  // Reload succeeds but the manager's real search path does not include the
+  // target directory: show keeps answering not-found.
+  const neverLoaded = fakeManager({ finalPath, unitPath: unitDir, loaded: false, staysUnloaded: true })
+  await assert.rejects(
+    installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: neverLoaded.run }),
+    error => isCode(error, 'HOST_MANAGER_START_FAILED'),
+  )
+  assert.equal(existsSync(finalPath), false, 'an unloadable fresh install must not leave a poisoned unit file')
+  // The profile is back to the no-unit state, so the public start must use the
+  // basic detached Host without touching the manager.
+  const startCalls: string[][] = []
+  const startSystemctl = async (args: readonly string[]): Promise<SystemctlResult> => { startCalls.push([...args]); return exited(1, '', 'no manager needed') }
+  const observation = await startPublicHostCandidate(hostOptions(fx), { unitDir: () => unitDir, systemctl: startSystemctl })
+  assert.equal(observation(), undefined)
+  const deadline = Date.now() + 10_000
+  while (!existsSync(fx.markerPath) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(existsSync(fx.markerPath), true, 'the basic daemon must cold start after a failed install')
+  assert.deepEqual(startCalls, [], 'the recovered basic start must not query the manager at all')
+})
+
+test('a post-reload FragmentPath mismatch rolls the fresh file back after a real reload', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-install-wrong-fragment-')
+  const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
+  const finalPath = join(unitDir, unitName)
+  const elsewhere = join(unitDir, 'elsewhere.service')
+  writeFileSync(elsewhere, '[Unit]\n', { mode: 0o644 })
+  let reloaded = false
+  const calls: string[][] = []
+  const run = async (args: readonly string[]): Promise<SystemctlResult> => {
+    calls.push([...args])
+    if (args.includes('daemon-reload')) { reloaded = true; return exited(0) }
+    if (args.includes('show')) {
+      return exited(0, [
+        `LoadState=${reloaded ? 'loaded' : 'not-found'}`,
+        'ActiveState=inactive',
+        `FragmentPath=${reloaded ? elsewhere : ''}`,
+        'DropInPaths=',
+        'MainPID=0',
+        'UnitFileState=disabled',
+        '',
+      ].join('\n'))
+    }
+    return exited(0)
+  }
+  await assert.rejects(
+    installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: run }),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
+  )
+  assert.equal(reloaded, true, 'the install must actually reload before the adoption check')
+  assert.equal(existsSync(finalPath), false, 'a non-adopted fresh unit must be rolled back')
+  assert.equal(readFileSync(elsewhere, 'utf8'), '[Unit]\n', 'the manager-loaded definition is never modified')
+})
+
+test('an unresolvable loaded source other than a missing file stays refused', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-install-eloop-')
+  const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
+  const finalPath = join(unitDir, unitName)
+  const looping = join(unitDir, 'loop.service')
+  symlinkSync(looping, looping)
+  // Discriminability precondition: the loaded source must FAIL realpath with a
+  // non-ENOENT code, or this regression would be satisfied by the plain
+  // foreign-file refusal instead of the errno boundary.
+  assert.throws(
+    () => realpathSync(looping),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === 'ELOOP',
+  )
+  let reloads = 0
+  const run = async (args: readonly string[]): Promise<SystemctlResult> => {
+    if (args.includes('daemon-reload')) { reloads += 1; return exited(0) }
+    if (args.includes('show')) {
+      return exited(0, [
+        'LoadState=loaded',
+        'ActiveState=active',
+        `FragmentPath=${looping}`,
+        'DropInPaths=',
+        'MainPID=4242',
+        'UnitFileState=enabled',
+        '',
+      ].join('\n'))
+    }
+    return exited(0)
+  }
+  await assert.rejects(
+    installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: run }),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT') && /cannot be verified/u.test(String(error)),
+  )
+  assert.equal(reloads, 0, 'an unverifiable loaded source must not be reloaded')
+  assert.equal(existsSync(finalPath), false, 'no unit file may be written')
+})
+
+test('a post-reload query failure rolls the fresh file back instead of leaving it', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-install-queryfail-')
+  const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
+  const finalPath = join(unitDir, unitName)
+  let reloaded = false
+  const run = async (args: readonly string[]): Promise<SystemctlResult> => {
+    if (args.includes('daemon-reload')) { reloaded = true; return exited(0) }
+    if (args.includes('show')) {
+      if (!reloaded) return exited(0, 'LoadState=not-found\nActiveState=inactive\nFragmentPath=\nDropInPaths=\nMainPID=0\nUnitFileState=disabled\n')
+      // After the reload the manager's own query fails (bus/timeout class).
+      return exited(1, '', 'Failed to connect to bus')
+    }
+    return exited(0)
+  }
+  await assert.rejects(
+    installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: run }),
+    error => isCode(error, 'HOST_MANAGER_START_FAILED'),
+  )
+  assert.equal(reloaded, true, 'the reload must have been committed before the failed verification')
+  assert.equal(existsSync(finalPath), false, 'an unverifiable fresh unit must be rolled back')
+})
+
+test('install reports a failed daemon-reload instead of claiming the unit is loaded', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-install-reloadfail-')
+  const finalPath = join(unitDir, buildUnitName('pi-tui', fx.scope.scopeId))
+  const systemctl = fakeManager({ finalPath, unitPath: unitDir, reloadResult: exited(1, '', 'reload failed') })
+  await assert.rejects(
+    installProfileHostUnit(hostOptions(fx), { unitDir: () => unitDir, systemctl: systemctl.run }),
+    error => isCode(error, 'HOST_MANAGER_START_FAILED'),
+  )
+  assert.equal(existsSync(finalPath), false, 'the failed fresh install must remove its unverified unit file')
+})
+
+test('a public start with no installed unit spawns detached without any systemctl call', async t => {
+  const fx = managedFixture(t)
+  const emptyUnitDir = testLifecycle(t).tempDir('m62b-no-unit-')
+  const systemctl = fakeManager({ finalPath: join(emptyUnitDir, 'unused.service'), unitPath: emptyUnitDir, unitPathResult: exited(1, '', 'no manager') })
+  const observation = await startPublicHostCandidate(hostOptions(fx), { unitDir: () => emptyUnitDir, systemctl: systemctl.run })
   assert.equal(observation(), undefined)
   const deadline = Date.now() + 10_000
   while (!existsSync(fx.markerPath) && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 50))
   }
-  assert.equal(existsSync(fx.markerPath), true, 'the detached fallback must have spawned the Host entry')
-  assert.deepEqual(readdirSync(emptyUnitDir), [], 'an absence must not install any unit')
+  assert.equal(existsSync(fx.markerPath), true, 'the basic daemon must be spawned as a detached Host')
+  assert.deepEqual(systemctl.calls, [], 'no installed unit means NO user-manager access at all')
+  assert.deepEqual(readdirSync(emptyUnitDir), [], 'a public start must never create a unit')
 })
 
-test('an absence with a missing Host entry surfaces the process-start failure, not a unit', async t => {
+test('a public start with an installed unit starts it once through systemd and never rewrites it', async t => {
   const fx = managedFixture(t)
-  await assert.rejects(
-    startManagedHostCandidate(
-      { scope: fx.scope, hostEntryPath: join(dirname(fx.entry), 'missing-host.mjs'), dshAnchor: fx.anchor, profile: 'pi-tui' },
-      { probe: async (): Promise<UserManagerProbe> => ({ kind: 'absent' }), unitDir: () => testLifecycle(t).tempDir('m62b-x-'), systemctl: async () => exited(0) },
-    ),
-    error => isCode(error, 'HOST_START_FAILED'),
-  )
-})
-
-test('an available manager installs, verifies FragmentPath/LoadState and starts the unit once', async t => {
-  const fx = managedFixture(t)
-  const unitDir = testLifecycle(t).tempDir('m62b-avail-')
-  const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
-  const finalPath = join(unitDir, unitName)
-  const fake = fakeSystemctl(finalPath)
-  const observation = await startManagedHostCandidate(
-    { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: fx.anchor, profile: 'pi-tui' },
-    {
-      probe: async (): Promise<UserManagerProbe> => ({ kind: 'available' }),
-      unitDir: () => unitDir,
-      systemctl: fake.run,
-    },
-  )
+  const unitDir = testLifecycle(t).tempDir('m62b-start-unit-')
+  const unit = writeUnit(fx, unitDir)
+  const systemctl = fakeManager({ finalPath: unit.path, unitPath: unitDir, loaded: true })
+  const observation = await startPublicHostCandidate(hostOptions(fx), { unitDir: () => unitDir, systemctl: systemctl.run })
   assert.equal(observation(), undefined)
-  assert.equal(existsSync(finalPath), true, 'the managed path must have installed the unit file')
-  assert.match(readFileSync(finalPath, 'utf8'), new RegExp(`^X-DshPiTuiScopeId=${fx.scope.scopeId}$`, 'mu'))
-  assert.ok(fake.calls.some(call => call.includes('daemon-reload')), 'a new unit install must reload the manager')
-  assert.ok(fake.calls.some(call => call.includes('start')), 'the managed path must start the unit')
+  assert.equal(readFileSync(unit.path, 'utf8'), unit.content, 'a loaded unit is never rewritten by start')
+  const flattened = systemctl.calls.map(args => args.join(' '))
+  assert.equal(flattened.filter(call => /\bstart\b/u.test(call)).length, 1)
+  assert.equal(flattened.some(call => call.includes('daemon-reload')), false, 'a loaded unit is not reloaded by start')
 })
 
-test('a manager reporting a different FragmentPath is a unit conflict', async t => {
+test('a public start with a different FragmentPath refuses to start and never falls back', async t => {
   const fx = managedFixture(t)
-  const unitDir = testLifecycle(t).tempDir('m62b-conflict-')
-  const otherFile = fx.anchor
-  const systemctl = async (args: readonly string[]): Promise<SystemctlResult> => {
-    if (args.includes('daemon-reload')) return exited(0)
-    if (args.includes('show')) return exited(0, `LoadState=loaded\nActiveState=inactive\nFragmentPath=${otherFile}\nDropInPaths=\n`)
-    return exited(0)
-  }
+  const unitDir = testLifecycle(t).tempDir('m62b-start-fragment-')
+  const unit = writeUnit(fx, unitDir)
+  const systemctl = fakeManager({ finalPath: unit.path, unitPath: unitDir, loaded: true, fragmentPath: fx.anchor })
   await assert.rejects(
-    startManagedHostCandidate(
-      { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: fx.anchor, profile: 'pi-tui' },
-      { probe: async (): Promise<UserManagerProbe> => ({ kind: 'available' }), unitDir: () => unitDir, systemctl },
-    ),
+    startPublicHostCandidate(hostOptions(fx), { unitDir: () => unitDir, systemctl: systemctl.run }),
     error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
   )
+  assert.equal(systemctl.calls.some(args => args.includes('start')), false, 'a conflicting unit is never started')
 })
 
-test('a loaded user drop-in preserves unit identity and starts through systemd', async t => {
+test('a public start with a broken manager or an unloaded unit never falls back to a process', async t => {
   const fx = managedFixture(t)
-  const unitDir = testLifecycle(t).tempDir('m62b-dropin-')
-  const finalPath = join(unitDir, buildUnitName('pi-tui', fx.scope.scopeId))
-  const fake = fakeSystemctl(finalPath)
-  const withDropIn = async (args: readonly string[]): Promise<SystemctlResult> => {
-    if (args.includes('show')) {
-      // The manager owns drop-in interpretation; the fragment still identifies our unit.
-      return exited(0, `LoadState=loaded\nActiveState=inactive\nFragmentPath=${finalPath}\nDropInPaths=/etc/systemd/user/${buildUnitName('pi-tui', fx.scope.scopeId)}.d/override.conf\n`)
+  const brokenDir = testLifecycle(t).tempDir('m62b-start-broken-')
+  const brokenUnit = writeUnit(fx, brokenDir)
+  const broken = fakeManager({ finalPath: brokenUnit.path, unitPath: brokenDir, loaded: true })
+  const brokenRun = async (args: readonly string[]): Promise<SystemctlResult> => {
+    if (args.includes('show')) return exited(1, '', 'Failed to connect to bus: Permission denied')
+    return await broken.run(args)
+  }
+  await assert.rejects(
+    startPublicHostCandidate(hostOptions(fx), { unitDir: () => brokenDir, systemctl: brokenRun }),
+    error => isCode(error, 'HOST_MANAGER_START_FAILED'),
+  )
+  assert.equal(existsSync(fx.markerPath), false, 'a manager failure must never spawn a detached Host')
+
+  const unloadedDir = testLifecycle(t).tempDir('m62b-start-unloaded-')
+  const unloadedUnit = writeUnit(fx, unloadedDir)
+  const unloaded = fakeManager({ finalPath: unloadedUnit.path, unitPath: unloadedDir, loaded: false })
+  await assert.rejects(
+    startPublicHostCandidate(hostOptions(fx), { unitDir: () => unloadedDir, systemctl: unloaded.run }),
+    error => isCode(error, 'HOST_MANAGER_START_FAILED'),
+  )
+  assert.equal(existsSync(fx.markerPath), false)
+})
+
+test('a public start refuses an installed unit from another build', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-start-oldbuild-')
+  const unit = writeUnit(fx, unitDir, renderUnitContent({
+    dshHome: fx.scope.dshHome, profileRealpath: fx.scope.profileRealpath, profile: 'pi-tui', scopeId: fx.scope.scopeId,
+    buildId: 'c'.repeat(64), nodePath: process.execPath, hostEntryPath: fx.entry, dshAnchor: fx.anchor,
+  }))
+  const systemctl = fakeManager({ finalPath: unit.path, unitPath: unitDir, loaded: true })
+  await assert.rejects(
+    startPublicHostCandidate(hostOptions(fx), { unitDir: () => unitDir, systemctl: systemctl.run }),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
+  )
+  assert.equal(systemctl.calls.some(args => args.includes('start')), false)
+})
+
+test('a detached Host entry under an external dist symlink locates its package root', async t => {
+  const root = testLifecycle(t).tempDir('m62b-host-symlink-')
+  const home = join(root, 'dsh-home')
+  const profileDir = join(root, 'profiles', 'pi-tui')
+  const packageRoot = join(root, 'package')
+  const sharedDist = join(root, 'shared-dist')
+  mkdirSync(home, { recursive: true, mode: 0o700 })
+  mkdirSync(profileDir, { recursive: true, mode: 0o700 })
+  mkdirSync(packageRoot, { recursive: true })
+  mkdirSync(sharedDist, { recursive: true })
+  writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.7' })}\n`)
+  const proofPath = join(root, 'proof.json')
+  const helperUrl = pathToFileURL(join(ROOT, 'src', 'app', 'remote-process', 'local-scope.ts')).href
+  writeFileSync(join(sharedDist, 'local-host.mjs'), [
+    `import { installedPackageRootFromEntry } from ${JSON.stringify(helperUrl)}`,
+    `import { pathToFileURL } from 'node:url'`,
+    `import { writeFileSync } from 'node:fs'`,
+    `writeFileSync(process.env.SPLIT_PROCESS_HOST_PROOF, JSON.stringify({ argv: process.argv[1], root: installedPackageRootFromEntry(pathToFileURL(process.argv[1]).href) }))`,
+    '',
+  ].join('\n'))
+  symlinkSync(sharedDist, join(packageRoot, 'dist'))
+  const anchor = join(root, 'dsh', 'package.json')
+  mkdirSync(join(root, 'dsh'), { recursive: true })
+  writeFileSync(anchor, `${JSON.stringify({ name: '@deepseek-ai/dsh', version: DSH_VERSION })}\n`, { mode: 0o644 })
+  const scope = scopeFromInstalledProfile({ dshHome: home, profileDir, packageRoot, dshVersion: DSH_VERSION })
+
+  const previousNodeOptions = process.env.NODE_OPTIONS
+  const previousProof = process.env.SPLIT_PROCESS_HOST_PROOF
+  const tsxLoader = pathToFileURL(createRequire(import.meta.url).resolve('tsx/esm')).href
+  process.env.NODE_OPTIONS = [previousNodeOptions, '--import', tsxLoader].filter(Boolean).join(' ')
+  process.env.SPLIT_PROCESS_HOST_PROOF = proofPath
+  try {
+    const observation = spawnHostCandidate({
+      scope,
+      hostEntryPath: join(packageRoot, 'dist', 'local-host.mjs'),
+      dshAnchor: anchor,
+      profile: 'pi-tui',
+    })
+    assert.equal(observation(), undefined)
+    const deadline = Date.now() + 15_000
+    while (!existsSync(proofPath) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50))
     }
-    return fake.run(args)
+  } finally {
+    if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS
+    else process.env.NODE_OPTIONS = previousNodeOptions
+    if (previousProof === undefined) delete process.env.SPLIT_PROCESS_HOST_PROOF
+    else process.env.SPLIT_PROCESS_HOST_PROOF = previousProof
   }
-  await startManagedHostCandidate(
-    { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: fx.anchor, profile: 'pi-tui' },
-    { probe: async (): Promise<UserManagerProbe> => ({ kind: 'available' }), unitDir: () => unitDir, systemctl: withDropIn },
-  )
-  assert.ok(fake.calls.some(call => call.includes('start')))
-})
-
-test('a failed daemon-reload or start is HOST_MANAGER_START_FAILED, never a fallback', async t => {
-  const fx = managedFixture(t)
-  const reloadDir = testLifecycle(t).tempDir('m62b-reload-')
-  const reloadFinal = join(reloadDir, buildUnitName('pi-tui', fx.scope.scopeId))
-  const reloadFails = async (args: readonly string[]): Promise<SystemctlResult> => {
-    if (args.includes('daemon-reload')) return exited(1, '', 'reload failed')
-    if (args.includes('show')) return exited(0, `LoadState=loaded\nActiveState=inactive\nFragmentPath=${reloadFinal}\n`)
-    return exited(0)
-  }
-  await assert.rejects(
-    startManagedHostCandidate(
-      { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: fx.anchor, profile: 'pi-tui' },
-      { probe: async (): Promise<UserManagerProbe> => ({ kind: 'available' }), unitDir: () => reloadDir, systemctl: reloadFails },
-    ),
-    error => isCode(error, 'HOST_MANAGER_START_FAILED'),
-  )
-  const startDir = testLifecycle(t).tempDir('m62b-startfail-')
-  const startFinal = join(startDir, buildUnitName('pi-tui', fx.scope.scopeId))
-  const startFails = async (args: readonly string[]): Promise<SystemctlResult> => {
-    if (args.includes('daemon-reload')) return exited(0)
-    if (args.includes('show')) return exited(0, `LoadState=loaded\nActiveState=inactive\nFragmentPath=${startFinal}\n`)
-    if (args.includes('start')) return exited(1, '', 'start failed')
-    return exited(0)
-  }
-  await assert.rejects(
-    startManagedHostCandidate(
-      { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: fx.anchor, profile: 'pi-tui' },
-      { probe: async (): Promise<UserManagerProbe> => ({ kind: 'available' }), unitDir: () => startDir, systemctl: startFails },
-    ),
-    error => isCode(error, 'HOST_MANAGER_START_FAILED'),
-  )
-})
-
-test('a DSH anchor pinned to a different runtime is refused before any unit is written', async t => {
-  const fx = managedFixture(t)
-  const wrongAnchor = join(dirname(fx.anchor), 'wrong.json')
-  writeFileSync(wrongAnchor, `${JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.1-rc.4' })}\n`, { mode: 0o644 })
-  const unitDir = testLifecycle(t).tempDir('m62b-wronganchor-')
-  await assert.rejects(
-    startManagedHostCandidate(
-      { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: wrongAnchor, profile: 'pi-tui' },
-      { probe: async (): Promise<UserManagerProbe> => ({ kind: 'available' }), unitDir: () => unitDir, systemctl: async () => exited(0) },
-    ),
-    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
-  )
-  assert.deepEqual(readdirSync(unitDir), [])
+  assert.equal(existsSync(proofPath), true, 'the detached Host probe never wrote its proof')
+  const proof = JSON.parse(readFileSync(proofPath, 'utf8')) as { readonly argv: string; readonly root: string }
+  assert.equal(proof.argv, join(packageRoot, 'dist', 'local-host.mjs'), 'the Host must run the NAMED symlinked entry')
+  assert.equal(realpathSync(proof.root), realpathSync(packageRoot), 'the Host must locate THIS package root')
 })
 
 test('macOS public-managed start uses the detached fallback without a user manager', { skip: process.platform !== 'darwin' ? 'the real Darwin detached fallback requires macOS' : false }, async t => {
@@ -629,7 +1065,7 @@ test('macOS public-managed start uses the detached fallback without a user manag
   assert.equal(existsSync(fx.markerPath), true, 'the real Darwin public-managed path must spawn the Host entry')
 })
 
-// ── M6-2C shared helper: read-only unit inspection and narrow actions ───────
+// ── Shared read-only unit inspection and narrow actions ─────────────────────
 
 interface ControlUnitFixture extends ManagedFixture {
   readonly unitDir: string
@@ -671,14 +1107,14 @@ function managerState(path: string, activeState: string, mainPid: number) {
 test('inspectOwnedProfileUnit reports none for an empty unit directory without creating anything', t => {
   const fx = controlledUnitFixture(t)
   const emptyDir = testLifecycle(t).tempDir('m62b-empty-units-')
-  const result = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, emptyDir)
+  const result = inspectOwnedProfileUnit(fx.scope, 'pi-tui', emptyDir)
   assert.deepEqual(result, { kind: 'none' })
   assert.equal(existsSync(emptyDir), true)
 })
 
 test('inspectOwnedProfileUnit accepts the exact owned definition and reports its install build', t => {
   const fx = controlledUnitFixture(t)
-  const result = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir)
+  const result = inspectOwnedProfileUnit(fx.scope, 'pi-tui', fx.unitDir)
   assert.equal(result.kind, 'owned')
   if (result.kind === 'owned') {
     assert.equal(result.unitName, buildUnitName('pi-tui', fx.scope.scopeId))
@@ -688,7 +1124,6 @@ test('inspectOwnedProfileUnit accepts the exact owned definition and reports its
 })
 
 test('unit inspection refuses foreign, wrong-scope, wrong-Profile, invalid and duplicate metadata', t => {
-  const uid = process.getuid?.() ?? 1000
   const fx = controlledUnitFixture(t)
   for (const content of [
     fx.content.replace('X-DshPiTuiOwner=local-host-manager-v1', 'X-DshPiTuiOwner=other'),
@@ -698,42 +1133,32 @@ test('unit inspection refuses foreign, wrong-scope, wrong-Profile, invalid and d
     `${fx.content}X-DshPiTuiOwner=local-host-manager-v1\n`,
   ]) {
     writeFileSync(fx.unitPath, content, { mode: 0o600 })
-    assert.throws(() => inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+    assert.throws(() => inspectOwnedProfileUnit(fx.scope, 'pi-tui', fx.unitDir), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
   }
 })
 
-test('user runtime directives, 0644 units and linked configuration retain Profile identity', async t => {
+test('user runtime directives, 0644 units and linked configuration retain Profile identity', t => {
   const fx = controlledUnitFixture(t)
-  const uid = process.getuid?.() ?? 1000
   const content = fx.content.replace('Restart=on-failure', 'Restart=no').replace(/^ExecStart=.*$/mu, 'ExecStart=/bin/false')
     + 'ExecStartPre=/usr/bin/true\nExecStop=/usr/bin/true\nEnvironment="MY_CUSTOM_FLAG=1"\nRestartSec=5\n'
   writeFileSync(fx.unitPath, content, { mode: 0o600 })
   chmodSync(fx.unitPath, 0o644)
-  const observed = inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir)
+  const observed = inspectOwnedProfileUnit(fx.scope, 'pi-tui', fx.unitDir)
   assert.equal(observed.kind, 'owned')
   const source = join(fx.unitDir, 'source.service')
   renameSync(fx.unitPath, source)
   symlinkSync(source, fx.unitPath)
-  const linked = inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir)
+  const linked = inspectOwnedProfileUnit(fx.scope, 'pi-tui', fx.unitDir)
   if (linked.kind !== 'owned') return assert.fail('expected linked owned unit')
   assert.equal(linked.resolvedPath, realpathSync(source))
-  await startManagedHostCandidate(
-    { scope: fx.scope, hostEntryPath: fx.entry, dshAnchor: fx.anchor, profile: 'pi-tui' },
-    { probe: async () => ({ kind: 'available' }), unitDir: () => fx.unitDir, systemctl: async (args, runtimeDir) => {
-      assert.equal(args.includes('daemon-reload'), false, 'loaded customized services are not implicitly reloaded')
-      return await managerState(source, 'inactive', 0).run(args)
-    } },
-  )
-  assert.equal(readFileSync(source, 'utf8'), content)
-  uninstallOwnedProfileUnit(linked, fx.scope, 'pi-tui', uid)
+  uninstallOwnedProfileUnit(linked, fx.scope, 'pi-tui')
   assert.equal(existsSync(fx.unitPath), false)
   assert.equal(readFileSync(source, 'utf8'), content, 'uninstall removes only the link, never its configuration source')
 })
 
 test('a named unit changed after inspection is refused before stop or unlink', async t => {
   const fx = controlledUnitFixture(t)
-  const uid = process.getuid?.() ?? 1000
-  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', fx.unitDir)
   if (unit.kind !== 'owned') return assert.fail('expected owned unit')
   const replacement = `${fx.unitPath}.replacement`
   writeFileSync(replacement, fx.content, { mode: 0o644 })
@@ -741,31 +1166,30 @@ test('a named unit changed after inspection is refused before stop or unlink', a
   const manager = managerState(fx.unitPath, 'active', 4242)
   await assert.rejects(() => stopOwnedProfileUnit(unit, undefined, manager.run), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
   assert.equal(manager.calls.some(args => args.includes('stop')), false)
-  assert.throws(() => uninstallOwnedProfileUnit(unit, fx.scope, 'pi-tui', uid), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+  assert.throws(() => uninstallOwnedProfileUnit(unit, fx.scope, 'pi-tui'), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
   assert.equal(existsSync(fx.unitPath), true)
 })
 
 test('dangling/non-file links fail identity inspection, and a retargeted link cannot be uninstalled', t => {
   const fx = controlledUnitFixture(t)
-  const uid = process.getuid?.() ?? 1000
   const source = join(fx.unitDir, 'source.service')
   renameSync(fx.unitPath, source)
   symlinkSync(source, fx.unitPath)
-  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', fx.unitDir)
   if (unit.kind !== 'owned') return assert.fail('expected linked unit')
   unlinkSync(fx.unitPath)
   symlinkSync(fx.unitDir, fx.unitPath)
-  assert.throws(() => inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
-  assert.throws(() => uninstallOwnedProfileUnit(unit, fx.scope, 'pi-tui', uid), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+  assert.throws(() => inspectOwnedProfileUnit(fx.scope, 'pi-tui', fx.unitDir), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+  assert.throws(() => uninstallOwnedProfileUnit(unit, fx.scope, 'pi-tui'), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
   unlinkSync(fx.unitPath)
   symlinkSync(join(fx.unitDir, 'missing.service'), fx.unitPath)
-  assert.throws(() => inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
+  assert.throws(() => inspectOwnedProfileUnit(fx.scope, 'pi-tui', fx.unitDir), error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'))
   assert.equal(readFileSync(source, 'utf8'), fx.content)
 })
 
 test('stopOwnedProfileUnit is a no-op for an inactive unit and never issues stop', async t => {
   const fx = controlledUnitFixture(t)
-  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', fx.unitDir)
   assert.equal(unit.kind, 'owned')
   if (unit.kind !== 'owned') return
   const fake = managerState(fx.unitPath, 'inactive', 0)
@@ -776,7 +1200,7 @@ test('stopOwnedProfileUnit is a no-op for an inactive unit and never issues stop
 
 test('stopOwnedProfileUnit stops an active unit and returns its original MainPID', async t => {
   const fx = controlledUnitFixture(t)
-  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', fx.unitDir)
   if (unit.kind !== 'owned') return assert.fail('expected an owned unit')
   let active = 'active'
   let mainPid = 4242
@@ -798,7 +1222,7 @@ test('stopOwnedProfileUnit stops an active unit and returns its original MainPID
 
 test('an activating unit with no MainPID still goes through systemctl stop', async t => {
   const fx = controlledUnitFixture(t)
-  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', fx.unitDir)
   if (unit.kind !== 'owned') return assert.fail('expected an owned unit')
   let state = { active: 'activating', mainPid: 0 }
   const calls: string[][] = []
@@ -808,7 +1232,7 @@ test('an activating unit with no MainPID still goes through systemctl stop', asy
       state = { active: 'inactive', mainPid: 0 }
       return exited(0)
     }
-    return exited(0, [`LoadState=loaded`, `ActiveState=${state.active}`, `FragmentPath=${fx.unitPath}`, 'DropInPaths=', `MainPID=${String(state.mainPid)}`, 'UnitFileState=disabled', ''].join('\n'))
+    return exited(0, [`LoadState=loaded`, `ActiveState=${state.active}`, `FragmentPath=${fx.unitPath}`, 'DropInPaths=', `MainPID=${String(state.mainPid)}`, `UnitFileState=disabled`, ''].join('\n'))
   }
   const result = await stopOwnedProfileUnit(unit, undefined, run)
   assert.equal(result.stopped, true, 'an activating unit must be stopped through the manager, not treated as already inactive')
@@ -818,7 +1242,7 @@ test('an activating unit with no MainPID still goes through systemctl stop', asy
 
 test('an unrecognized unit state is refused instead of claimed as stopped', async t => {
   const fx = controlledUnitFixture(t)
-  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', fx.unitDir)
   if (unit.kind !== 'owned') return assert.fail('expected an owned unit')
   const calls: string[][] = []
   const run = async (args: readonly string[]): Promise<SystemctlResult> => {
@@ -834,18 +1258,17 @@ test('an unrecognized unit state is refused instead of claimed as stopped', asyn
 
 test('a stop that never leaves the active state is HOST_STOP_TIMEOUT, never success', async t => {
   const fx = controlledUnitFixture(t)
-  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', process.getuid?.() ?? 1000, fx.unitDir)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', fx.unitDir)
   if (unit.kind !== 'owned') return assert.fail('expected an owned unit')
   const fake = managerState(fx.unitPath, 'active', 4242)
   await assert.rejects(() => stopOwnedProfileUnit(unit, undefined, fake.run, 50), error => isCode(error, 'HOST_STOP_TIMEOUT'))
 })
 
 test('uninstallOwnedProfileUnit removes only the verified profile unit file', t => {
-  const uid = process.getuid?.() ?? 1000
   const fx = controlledUnitFixture(t)
-  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', uid, fx.unitDir)
+  const unit = inspectOwnedProfileUnit(fx.scope, 'pi-tui', fx.unitDir)
   if (unit.kind !== 'owned') return assert.fail('expected an owned unit')
-  uninstallOwnedProfileUnit(unit, fx.scope, 'pi-tui', uid)
+  uninstallOwnedProfileUnit(unit, fx.scope, 'pi-tui')
   assert.equal(existsSync(fx.unitPath), false)
   assert.equal(existsSync(join(fx.scope.dir, 'instance.json')), false)
 })

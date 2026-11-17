@@ -18,7 +18,7 @@
 import { createHash } from 'node:crypto'
 import { readKernelProcess, readProcessStarttime } from '../../runtime/native-process/identity.ts'
 import { runSyncDisposalStepsWithPrimary } from '../../runtime/process/disposal.ts'
-import { closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
+import { closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { userInfo } from 'node:os'
 import { Buffer } from 'node:buffer'
@@ -357,6 +357,25 @@ function canonicalOwnedDirectory(path: string, uid: number, label: string): stri
 }
 
 /**
+ * Resolve an official caller-given directory (DSH home, profile directory) and
+ * prove it is accessible and a directory. The user's install layout (owner,
+ * mode, legal directory symlink) is not judged here; the path itself comes from
+ * the official profile resolution, never from a guess.
+ */
+function canonicalDirectory(path: string, label: string): string {
+  let real: string
+  try {
+    real = realpathSync(path)
+  } catch (error) {
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${label} is not a readable directory`, error)
+  }
+  if (!statSync(real).isDirectory()) {
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${label} is not a directory`)
+  }
+  return real
+}
+
+/**
  * Create and prove one directory component WITHOUT following a pre-existing
  * symlink. Each component is lstat-checked before its child is created. A
  * `privateMode` component must have no group/other access at all (0700); an
@@ -403,11 +422,50 @@ function ensureOwnedDirectory(path: string, uid: number, privateMode: boolean): 
   }
 }
 
-function ensureScopeDirectory(dshHome: string, scopeId: string, uid: number): string {
+/**
+ * Create and prove the private run chain. On Linux a component missing from the
+ * user's existing layout is created 0700 and an existing component is accepted
+ * as a real directory or a resolvable directory symlink regardless of
+ * owner/mode (D0 keeps the user's install layout); it is never chmodded. On
+ * Darwin the stricter owned chain is required. Only an inaccessible path, a
+ * non-directory, or a real filesystem failure is refused. A concurrent first
+ * start may win the mkdir with EEXIST; that normal kernel-seat race re-reads
+ * the winner.
+ */
+function ensureScopeDirectory(dshHome: string, scopeId: string, uid?: number): string {
   const runRoot = join(dshHome, RUN_ROOT_NAME)
   const scopeRoot = join(runRoot, SCOPE_ROOT_NAME)
   const dir = join(scopeRoot, scopeId)
-  for (const path of [runRoot, scopeRoot, dir]) ensureOwnedDirectory(path, uid, true)
+  if (process.platform === 'darwin') {
+    const owner = uid ?? assertDarwin()
+    for (const path of [runRoot, scopeRoot, dir]) ensureOwnedDirectory(path, owner, true)
+    return dir
+  }
+  for (const path of [runRoot, scopeRoot, dir]) {
+    let real: string
+    try {
+      real = realpathSync(path)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${path} is not accessible`, error)
+      }
+      try {
+        mkdirSync(path, { mode: 0o700 })
+      } catch (mkdirError) {
+        if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${path} could not be created safely`, mkdirError)
+        }
+      }
+      try {
+        real = realpathSync(path)
+      } catch (realpathError) {
+        throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${path} is not accessible after creation`, realpathError)
+      }
+    }
+    if (!statSync(real).isDirectory()) {
+      throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${path} is not a directory`)
+    }
+  }
   return dir
 }
 
@@ -452,19 +510,49 @@ function resolveDarwinAccountHome(uid: number): string {
   return canonicalOwnedDirectory(home, uid, 'Darwin account home')
 }
 
-/** Resolve the installed package root from this built entry's own URL. */
+/**
+ * Resolve the installed package root from one built entry's own URL.
+ *
+ * The walk uses the INVOKED (lexical) entry path, never its realpath: a legal
+ * shared-store or symlinked `dist` still has its named entry under
+ * `<packageRoot>/dist/`, so walking the lexical parents finds the package
+ * manifest even when the real target lives elsewhere. The nearest
+ * `package.json` is the package boundary; it must be this product. A first
+ * manifest of another package is a hard failure (never walk past it).
+ */
 export function installedPackageRootFromEntry(entryUrl: string): string {
-  const root = realpathSync(dirname(dirname(fileURLToPath(entryUrl))))
-  let manifest: unknown
+  let current: string
   try {
-    manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+    current = dirname(fileURLToPath(entryUrl))
   } catch (error) {
-    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', 'local scope: this entry is not running from an installed package root', error)
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', 'local scope: this entry is not a readable installed file', error)
   }
-  if (manifest === null || typeof manifest !== 'object' || (manifest as { readonly name?: unknown }).name !== '@xmoon76/dsh-pi-tui') {
-    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', 'local scope: this entry is not running from an installed @xmoon76/dsh-pi-tui package')
+  for (let depth = 0; depth < 64; depth += 1) {
+    let text: string | undefined
+    try {
+      text = readFileSync(join(current, 'package.json'), 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', 'local scope: a package manifest above this entry is not readable', error)
+      }
+    }
+    if (text !== undefined) {
+      let manifest: unknown
+      try {
+        manifest = JSON.parse(text)
+      } catch (error) {
+        throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', 'local scope: the nearest package manifest is not valid JSON', error)
+      }
+      if (manifest !== null && typeof manifest === 'object' && (manifest as { readonly name?: unknown }).name === '@xmoon76/dsh-pi-tui') {
+        return current
+      }
+      throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', 'local scope: the nearest package manifest is not @xmoon76/dsh-pi-tui')
+    }
+    const parent = dirname(current)
+    if (parent === current) break
+    current = parent
   }
-  return root
+  throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', 'local scope: this entry is not running from an installed @xmoon76/dsh-pi-tui package')
 }
 
 /** Read the installed DSH version from the launcher's package anchor. */
@@ -500,24 +588,65 @@ function readBundleVersion(packageRoot: string): string {
   return record.version
 }
 
-/** Every regular `.mjs` file below `dist`, sorted by UTF-8 bytes. */
+/**
+ * Every `.mjs` file below `dist`, sorted by UTF-8 bytes.
+ *
+ * A normal npm install may materialize the package through a shared store, so a
+ * `dist` directory or an individual `.mjs` entry may be a symlink. The walk
+ * follows a resolvable symlink to its real regular file (or real directory),
+ * keeps the relative path exactly as installed, and refuses a dangling target, a
+ * non-file target or a directory cycle. It never skips a `.mjs` that a symlink
+ * exposes, because that would produce a false build identity.
+ */
 function listInstalledDistFiles(packageRoot: string): readonly string[] {
   const distDir = join(packageRoot, 'dist')
   const files: string[] = []
+  const ancestors = new Set<string>()
   const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name)
-      if (entry.isSymbolicLink()) {
-        throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: installed payload contains a symlink: ${path}`)
+    let realDir: string
+    try {
+      realDir = realpathSync(dir)
+    } catch (error) {
+      throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: installed payload directory is not readable: ${dir}`, error)
+    }
+    if (!statSync(realDir).isDirectory()) {
+      throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: installed payload contains a non-directory: ${dir}`)
+    }
+    if (ancestors.has(realDir)) {
+      throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: installed payload contains a directory symlink cycle: ${dir}`)
+    }
+    ancestors.add(realDir)
+    try {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name)
+        if (entry.isSymbolicLink()) {
+          let target: string
+          try {
+            target = realpathSync(path)
+          } catch (error) {
+            throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: installed payload contains an unresolvable symlink: ${path}`, error)
+          }
+          if (statSync(target).isDirectory()) {
+            walk(path)
+            continue
+          }
+          if (!statSync(target).isFile()) {
+            throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: installed payload contains a non-file symlink target: ${path}`)
+          }
+          if (entry.name.endsWith('.mjs')) files.push(relative(packageRoot, path).split(sep).join('/'))
+          continue
+        }
+        if (entry.isDirectory()) {
+          walk(path)
+          continue
+        }
+        if (!entry.isFile()) {
+          throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: installed payload contains a non-file: ${path}`)
+        }
+        if (entry.name.endsWith('.mjs')) files.push(relative(packageRoot, path).split(sep).join('/'))
       }
-      if (entry.isDirectory()) {
-        walk(path)
-        continue
-      }
-      if (!entry.isFile()) {
-        throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: installed payload contains a non-file: ${path}`)
-      }
-      if (entry.name.endsWith('.mjs')) files.push(relative(packageRoot, path).split(sep).join('/'))
+    } finally {
+      ancestors.delete(realDir)
     }
   }
   walk(distDir)
@@ -567,8 +696,12 @@ export function computeBuildId(packageRoot: string, dshVersion: string): string 
  */
 export function inspectInstalledProfileScope(facts: InstalledProfileFacts): LocalScope {
   const uid = assertSupportedPosixScopePlatform()
-  const dshHome = canonicalOwnedDirectory(facts.dshHome, uid, 'DSH home')
-  const profileRealpath = canonicalOwnedDirectory(facts.profileDir, uid, 'profile directory')
+  const dshHome = process.platform === 'darwin'
+    ? canonicalOwnedDirectory(facts.dshHome, uid, 'DSH home')
+    : canonicalDirectory(facts.dshHome, 'DSH home')
+  const profileRealpath = process.platform === 'darwin'
+    ? canonicalOwnedDirectory(facts.profileDir, uid, 'profile directory')
+    : canonicalDirectory(facts.profileDir, 'profile directory')
   const bundleVersion = readBundleVersion(facts.packageRoot)
   // Fixed hash domain: the scope id names one canonical profile + uid pair for
   // the local protocol family. It is not a package-build compatibility key. The

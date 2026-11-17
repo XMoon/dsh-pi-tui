@@ -11,8 +11,10 @@
 import assert from 'node:assert/strict'
 import test, { type TestContext } from 'node:test'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { lstatSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import {
   DaemonControlRunner,
   DaemonCoordinator,
@@ -24,6 +26,8 @@ import {
 } from '../../src/app/remote-process/daemon-launcher.ts'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -66,19 +70,59 @@ test('buildChildEnvironment strips SPLIT_PROCESS_* and role markers, sets the fo
   assert.equal(env.DSH_PI_TUI_PRESET, 'keep-me', 'the preset env is preserved')
 })
 
-test('resolveClientEntry requires a real regular dist/local-client.mjs', (t: TestContext) => {
+test('resolveClientEntry keeps the named dist entry for legal shared-store and symlinked layouts', (t: TestContext) => {
   const life = testLifecycle(t)
   const root = life.tempDir('m62a-pkg-')
   mkdirSync(join(root, 'dist'), { recursive: true })
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.4' }))
   const entry = join(root, 'dist', 'local-client.mjs')
-  writeFileSync(entry, '')
+  writeFileSync(entry, 'export {}\n')
   assert.equal(resolveClientEntry(root), entry)
   assert.throws(() => resolveClientEntry(join(root, 'nope')), /missing/u)
 
-  const linked = life.tempDir('m62a-link-')
-  mkdirSync(join(linked, 'dist'), { recursive: true })
-  symlinkSync(entry, join(linked, 'dist', 'local-client.mjs'))
-  assert.throws(() => resolveClientEntry(linked), /regular file/u)
+  // A symlinked entry file inside this package keeps the NAMED entry path so the
+  // spawned Client can locate this package root from its invoked path.
+  const shared = join(root, 'dist', 'shared-client.mjs')
+  writeFileSync(shared, 'export {}\n')
+  unlinkSync(entry)
+  symlinkSync(shared, entry)
+  assert.equal(resolveClientEntry(root), entry)
+
+  // A shared build directory outside the package is a legal installed layout:
+  // the named entry under <root>/dist still resolves <root>/package.json.
+  const externalRoot = life.tempDir('m62a-external-root-')
+  writeFileSync(join(externalRoot, 'package.json'), JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.4' }))
+  const externalDist = life.tempDir('m62a-shared-dist-')
+  writeFileSync(join(externalDist, 'local-client.mjs'), 'export {}\n')
+  symlinkSync(externalDist, join(externalRoot, 'dist'))
+  assert.equal(resolveClientEntry(externalRoot), join(externalRoot, 'dist', 'local-client.mjs'))
+
+  // A directory that merely carries the entry NAME is not a regular file.
+  const directory = life.tempDir('m62a-dir-')
+  mkdirSync(join(directory, 'dist', 'local-client.mjs'), { recursive: true })
+  assert.throws(() => resolveClientEntry(directory), /regular file/u)
+})
+
+test('a real child process locates the package root from a symlinked dist invoked path', (t: TestContext) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('m62a-child-root-')
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.4' }))
+  const externalDist = life.tempDir('m62a-child-dist-')
+  const helperUrl = pathToFileURL(join(ROOT, 'src', 'app', 'remote-process', 'local-scope.ts')).href
+  writeFileSync(join(externalDist, 'probe.mjs'), [
+    `import { installedPackageRootFromEntry } from ${JSON.stringify(helperUrl)}`,
+    `import { fileURLToPath, pathToFileURL } from 'node:url'`,
+    `process.stdout.write(installedPackageRootFromEntry(pathToFileURL(process.argv[1]).href))`,
+    '',
+  ].join('\n'))
+  symlinkSync(externalDist, join(root, 'dist'))
+  const result = spawnSync(process.execPath, ['--import', 'tsx/esm', join(root, 'dist', 'probe.mjs')], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    timeout: 60_000,
+  })
+  assert.equal(result.status, 0, `the probe failed: ${result.stderr}`)
+  assert.equal(result.stdout, realpathSync(root), 'the invoked symlinked entry must locate THIS package root')
 })
 
 // ── the single child lifecycle ───────────────────────────────────────────

@@ -1,9 +1,12 @@
 /**
  * M6-2B managed-host real-OS qualification case.
  *
- * These three selectable cases drive the PUBLIC `dsh --profile pi-tui` daemon
- * path (never an internal entry harness) against an isolated, packed install and
- * inspect the REAL systemd user manager. They are strictly environment-gated:
+ * These selectable cases drive the PUBLIC `dsh --profile pi-tui` daemon and
+ * `daemon ...` command paths (never an internal entry harness) against an
+ * isolated, packed install and inspect the REAL systemd user manager. The basic
+ * independent-process cases need no manager at all; the systemd cases FIRST run
+ * the real `daemon install` and only then a public cold start. They are strictly
+ * environment-gated:
  * a run only qualifies itself when it executes as a dedicated isolated test user
  * whose account home IS the isolated home (`SPLIT_PROCESS_MANAGED_HOST_ISOLATED_HOME`)
  * and whose `systemctl --user` channel is genuinely reachable. Everywhere else
@@ -129,7 +132,7 @@ function showUnit(unit, runtimeDir, run = systemctl) {
  * `instance.json` identity.
  */
 const artifactBuildCache = new Map()
-function installedArtifactBuildId(installation) {
+export function installedArtifactBuildId(installation) {
   try {
     const root = realpathSync(installation.profilePackage)
     if (artifactBuildCache.has(root)) return artifactBuildCache.get(root)
@@ -334,6 +337,70 @@ function shellQuote(value) {
   return `'${String(value).replace(/'/gu, "'\\''")}'`
 }
 
+/** Run ONE public `dsh --profile pi-tui ...` command without a TTY. */
+function runPublicDsh(installation, args, extraEnv = {}) {
+  const [executable, ...prefix] = installation.dshInvocation
+  const result = spawnSync(executable, [...prefix, '--profile', 'pi-tui', ...args], {
+    cwd: installation.profileDir,
+    env: { ...installation.env, ...extraEnv },
+    encoding: 'utf8',
+    timeout: 120_000,
+    shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
+}
+
+/** The fixed user unit facts for ONE installation. */
+export function unitFactsFor(installation) {
+  const uid = process.getuid()
+  const scopeId = profileScopeId(uid, installation.profileDir)
+  return {
+    scopeId,
+    unit: unitName('pi-tui', scopeId),
+    unitPath: join(realpathSync(userInfo().homedir), '.config', 'systemd', 'user', unitName('pi-tui', scopeId)),
+  }
+}
+
+/**
+ * The explicit install step every systemd case starts with: the real
+ * `daemon install` must create/verify ONE loaded but INACTIVE unit and must not
+ * start or enable a Host. A second install is idempotent.
+ */
+function installVerifiedUnit(installation, runtimeDir) {
+  const facts = unitFactsFor(installation)
+  assert(!existsSync(facts.unitPath), 'the systemd case must begin with no installed unit')
+  assert(hostPids(installation.dshHome).length === 0, 'the systemd case must begin with no Host')
+  const installed = runPublicDsh(installation, ['daemon', 'install'])
+  assert(installed.status === 0, `daemon install failed: ${installed.stderr.slice(-800)}`)
+  assert(existsSync(facts.unitPath), 'daemon install did not create the profile unit')
+  const props = showUnit(facts.unit, runtimeDir)
+  assert(props.LoadState === 'loaded', `install did not make the manager load the unit (LoadState=${String(props.LoadState)})`)
+  assert(props.ActiveState === 'inactive', `install must not start the unit (ActiveState=${String(props.ActiveState)})`)
+  assert(props.UnitFileState !== 'enabled', 'install must not enable the unit')
+  assert(Number(props.MainPID ?? '0') === 0, 'install must not start a Host')
+  assert(hostPids(installation.dshHome).length === 0, 'install must not start a Host process')
+  const repeat = runPublicDsh(installation, ['daemon', 'install'])
+  assert(repeat.status === 0, `a repeat daemon install must be idempotent: ${repeat.stderr.slice(-500)}`)
+  const repeatProps = showUnit(facts.unit, runtimeDir)
+  assert(repeatProps.ActiveState === 'inactive' && Number(repeatProps.MainPID ?? '0') === 0,
+    'a repeat install must not start the unit or a Host')
+  return facts
+}
+
+/** Parse the last stable key=value status block a management command printed. */
+function statusOf(stdout) {
+  const lines = stdout.split('\n')
+  const start = lines.findLastIndex(line => line.startsWith('profile='))
+  const fields = {}
+  if (start < 0) return fields
+  for (const line of lines.slice(start)) {
+    const at = line.indexOf('=')
+    if (at > 0 && !line.includes(' ')) fields[line.slice(0, at)] = line.slice(at + 1)
+  }
+  return fields
+}
+
 /** One real PUBLIC `dsh --profile pi-tui` PTY drive (mirrors the m6-2a scene launcher). */
 class PublicDshScreen {
   constructor(installation, backend) {
@@ -390,16 +457,17 @@ export async function runManagedHostSystemd({ installation, trace, dshHome }) {
   const runtimeDir = existsSync(`/run/user/${String(uid)}`) ? `/run/user/${String(uid)}` : undefined
   const probe = systemctl(['--user', '--no-pager', '--no-ask-password', 'show-environment'], runtimeDir)
   if (probe.status !== 0) return { status: 'NOT_VERIFIED', reason: `NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: systemctl --user show-environment exited ${String(probe.status)}` }
-  const scopeId = profileScopeId(uid, installation.profileDir)
-  const unit = unitName('pi-tui', scopeId)
-  const expectedFragment = join(realpathSync(userInfo().homedir), '.config', 'systemd', 'user', unit)
-  const screen = new PublicDshScreen(installation, 'daemon')
+  const { scopeId, unit, unitPath } = unitFactsFor(installation)
+  const expectedFragment = unitPath
   // Captured while the Host is alive: its registry is gone once stopped, but the
   // cleanup still needs the published install build to prove unit ownership.
   let unitBuildId
   let result
   let failure
+  let screen
   try {
+    installVerifiedUnit(installation, runtimeDir)
+    screen = new PublicDshScreen(installation, 'daemon')
     await waitForCounts(dshHome, counts => counts.host >= 1 && counts.client >= 1, 'one Host + one Client', 90_000)
     await screen.waitForAny(['type a message', '╭'], 'the managed Client', 120_000)
     const props = showUnit(unit, runtimeDir)
@@ -452,7 +520,7 @@ export async function runManagedHostSystemd({ installation, trace, dshHome }) {
   } catch (error) {
     failure = error
   } finally {
-    await screen.dispose()
+    if (screen !== undefined) await screen.dispose()
     // Stop through the manager + remove the owned unit BEFORE the kill backstop.
     // The cleanup result feeds the scenario verdict: a this-run unit that could
     // not be stopped/removed is a real failure, not a PASS.
@@ -469,10 +537,9 @@ export async function runManagedHostSystemd({ installation, trace, dshHome }) {
 }
 
 /**
- * B10: TWO public Clients COLD-start with no Host yet. They must race the full
- * readLocalRecord -> probe -> install unit -> daemon-reload -> start -> readiness
- * chain and converge to ONE Host and ONE unit, with both Clients authenticated to
- * that single Host (unit MainPID equals the published Host PID).
+ * The basic-daemon positive: with NO installed unit, two public Clients
+ * cold-start, converge on exactly ONE independent Host, authenticate to it, and
+ * never create a unit or depend on the user manager.
  */
 export async function runManagedHostConcurrentColdStart({ installation, trace, dshHome }) {
   const gate = isolatedGate()
@@ -480,11 +547,14 @@ export async function runManagedHostConcurrentColdStart({ installation, trace, d
   const uid = process.getuid()
   const runtimeDir = existsSync(`/run/user/${String(uid)}`) ? `/run/user/${String(uid)}` : undefined
   const probe = systemctl(['--user', '--no-pager', '--no-ask-password', 'show-environment'], runtimeDir)
-  if (probe.status !== 0) return { status: 'NOT_VERIFIED', reason: `NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: systemctl --user show-environment exited ${String(probe.status)}` }
-  const scopeId = profileScopeId(uid, installation.profileDir)
-  const unit = unitName('pi-tui', scopeId)
-  const expectedFragment = join(realpathSync(userInfo().homedir), '.config', 'systemd', 'user', unit)
+  if (probe.status !== 0) {
+    // P01 is specifically "systemd usable but no unit installed": without a
+    // reachable manager this case cannot prove that condition.
+    return { status: 'NOT_VERIFIED', reason: `NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: systemctl --user show-environment exited ${String(probe.status)}` }
+  }
+  const { scopeId, unitPath } = unitFactsFor(installation)
   assert(hostPids(dshHome).length === 0, 'the concurrent cold-start scene must begin with no Host')
+  assert(!existsSync(unitPath), 'the basic-daemon scene must begin with no installed unit')
   // Launch BOTH clients before either has ensured a Host, so they race the full
   // production start chain (not a warm reuse of an already-Ready Host).
   const a = new PublicDshScreen(installation, 'daemon')
@@ -496,15 +566,17 @@ export async function runManagedHostConcurrentColdStart({ installation, trace, d
     await a.waitForAny(['type a message', '╭'], 'cold Client A', 120_000)
     await b.waitForAny(['type a message', '╭'], 'cold Client B', 120_000)
     assert(hostPids(dshHome).length === 1, 'two cold Clients converged to more than one Host')
-    const props = showUnit(unit, runtimeDir)
-    assert(props.LoadState !== undefined && props.LoadState !== 'not-found', 'the converged unit is not loaded')
-    assert(props.FragmentPath !== undefined && realpathSync(props.FragmentPath) === realpathSync(expectedFragment), 'the converged unit FragmentPath is not the installed unit')
-    assert(props.ActiveState === 'active', 'the converged unit is not active')
+    assert(!existsSync(unitPath), 'a public cold start with no installed unit must never create a unit')
     const identity = readInstance(dshHome, scopeId)
     assert(identity !== undefined && identity.scopeId === scopeId, 'the converged Host published no scope identity')
-    assert(Number(props.MainPID) === identity.hostPid, 'the unit MainPID is not the authenticated Host PID')
-    trace('managed-host-concurrent-cold-start', { hosts: 1, clients: 2 })
-    result = { status: 'PASS', scope: 'REAL_SYSTEMD_USER_L6', concurrentColdStart: true, oneHost: true, oneUnit: true, bothAuthenticated: true }
+    assert(hostPids(dshHome).includes(identity.hostPid), 'the converged registry PID is not the live Host')
+    const status = runPublicDsh(installation, ['daemon', 'status'])
+    const fields = statusOf(status.stdout)
+    assert(status.status === 0, `the basic-daemon status must succeed: ${status.stderr.slice(-500)}`)
+    assert(fields.manager === 'process' && fields['user-manager'] === 'not-checked' && fields.unit === 'none',
+      `the basic-daemon status must report manager=process/user-manager=not-checked/unit=none: ${status.stdout}`)
+    trace('managed-host-basic-daemon', { hosts: 1, clients: 2, unit: 'none' })
+    result = { status: 'PASS', scope: 'REAL_BASIC_DAEMON_L6', concurrentColdStart: true, oneHost: true, noUnitCreated: true, managerProcess: true }
   } catch (error) {
     failure = error
   } finally {
@@ -514,10 +586,7 @@ export async function runManagedHostConcurrentColdStart({ installation, trace, d
     await b.exitWithin(60_000)
     await a.dispose()
     await b.dispose()
-    const cleanup = stopAndRemoveManagedUnit(installation, trace)
-    const outcomeError = cleanupOutcomeError(cleanup)
-    if (outcomeError !== undefined && failure === undefined) failure = new SplitSmokeAssertionError(outcomeError)
-    if (cleanup.removed === true || cleanup.reason === 'absent') killIsolatedProcesses(dshHome)
+    killIsolatedProcesses(dshHome)
   }
   if (failure !== undefined) throw failure
   return result
@@ -545,15 +614,16 @@ export async function runManagedHostAuthFailureNegative({ installation, trace, d
   const runtimeDir = existsSync(`/run/user/${String(uid)}`) ? `/run/user/${String(uid)}` : undefined
   const probe = systemctl(['--user', '--no-pager', '--no-ask-password', 'show-environment'], runtimeDir)
   if (probe.status !== 0) return { status: 'NOT_VERIFIED', reason: `NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: systemctl --user show-environment exited ${String(probe.status)}` }
-  const scopeId = profileScopeId(uid, installation.profileDir)
-  const unit = unitName('pi-tui', scopeId)
-  const expectedFragment = join(realpathSync(userInfo().homedir), '.config', 'systemd', 'user', unit)
+  const { scopeId, unit, unitPath } = unitFactsFor(installation)
+  const expectedFragment = unitPath
   const launchPath = join(dshHome, 'run', 'dsh-pi-tui', scopeId, 'launch.json')
-  const screen = new PublicDshScreen(installation, 'daemon')
+  let screen
   let result
   let failure
   let launchBefore
   try {
+    installVerifiedUnit(installation, runtimeDir)
+    screen = new PublicDshScreen(installation, 'daemon')
     await waitForCounts(dshHome, counts => counts.host >= 1 && counts.client >= 1, 'one Host + one Client', 90_000)
     await screen.waitForAny(['type a message', '╭'], 'the managed Client', 120_000)
     const identity = readInstance(dshHome, scopeId)
@@ -584,9 +654,11 @@ export async function runManagedHostAuthFailureNegative({ installation, trace, d
     failure = error
   } finally {
     if (launchBefore !== undefined) { try { writeFileSync(launchPath, launchBefore, { mode: 0o600 }) } catch { /* best effort */ } }
-    try { screen.send('/exit\r') } catch { /* gone */ }
-    await screen.exitWithin(60_000)
-    await screen.dispose()
+    if (screen !== undefined) {
+      try { screen.send('/exit\r') } catch { /* gone */ }
+      await screen.exitWithin(60_000)
+      await screen.dispose()
+    }
     const cleanup = stopAndRemoveManagedUnit(installation, trace)
     const outcomeError = cleanupOutcomeError(cleanup)
     if (outcomeError !== undefined && failure === undefined) failure = new SplitSmokeAssertionError(outcomeError)
@@ -607,13 +679,14 @@ export async function runManagedHostCrashRestart({ installation, trace, dshHome 
   const runtimeDir = existsSync(`/run/user/${String(uid)}`) ? `/run/user/${String(uid)}` : undefined
   const probe = systemctl(['--user', '--no-pager', '--no-ask-password', 'show-environment'], runtimeDir)
   if (probe.status !== 0) return { status: 'NOT_VERIFIED', reason: `NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: systemctl --user show-environment exited ${String(probe.status)}` }
-  const scopeId = profileScopeId(uid, installation.profileDir)
-  const unit = unitName('pi-tui', scopeId)
-  const expectedFragment = join(realpathSync(userInfo().homedir), '.config', 'systemd', 'user', unit)
-  const screen = new PublicDshScreen(installation, 'daemon')
+  const { scopeId, unit, unitPath } = unitFactsFor(installation)
+  const expectedFragment = unitPath
+  let screen
   let result
   let failure
   try {
+    installVerifiedUnit(installation, runtimeDir)
+    screen = new PublicDshScreen(installation, 'daemon')
     await waitForCounts(dshHome, counts => counts.host >= 1 && counts.client >= 1, 'one Host + one Client', 90_000)
     await screen.waitForAny(['type a message', '╭'], 'the managed Client', 120_000)
     const before = readInstance(dshHome, scopeId)
@@ -646,9 +719,11 @@ export async function runManagedHostCrashRestart({ installation, trace, dshHome 
   } catch (error) {
     failure = error
   } finally {
-    try { screen.send('/exit\r') } catch { /* gone */ }
-    await screen.exitWithin(60_000)
-    await screen.dispose()
+    if (screen !== undefined) {
+      try { screen.send('/exit\r') } catch { /* gone */ }
+      await screen.exitWithin(60_000)
+      await screen.dispose()
+    }
     const cleanup = stopAndRemoveManagedUnit(installation, trace)
     const outcomeError = cleanupOutcomeError(cleanup)
     if (outcomeError !== undefined && failure === undefined) failure = new SplitSmokeAssertionError(outcomeError)
@@ -673,17 +748,19 @@ export async function runManagedHostTwoProfileIsolation({ installation, trace, d
   assert(typeof tarball === 'string' && typeof targetDshVersion === 'string' && typeof workDir === 'string', 'the two-profile case needs the lane tarball/workDir facts')
   // Provision a SECOND real Profile installation (its own DSH home/profile path).
   const second = createSplitSmokeProfile({ tarball, targetDshVersion, workDir: join(workDir, 'profile-b') })
-  const scopeA = profileScopeId(uid, installation.profileDir)
-  const scopeB = profileScopeId(uid, second.profileDir)
-  const unitA = unitName('pi-tui', scopeA)
-  const unitB = unitName('pi-tui', scopeB)
+  const { scopeId: scopeA, unit: unitA } = unitFactsFor(installation)
+  const { scopeId: scopeB, unit: unitB } = unitFactsFor(second)
   assert(scopeA !== scopeB, 'the two profiles resolved to the same scope')
   assert(unitA !== unitB, 'the two profiles resolved to the same unit name')
-  const a = new PublicDshScreen(installation, 'daemon')
-  const b = new PublicDshScreen(second, 'daemon')
+  let a
+  let b
   let result
   let failure
   try {
+    installVerifiedUnit(installation, runtimeDir)
+    installVerifiedUnit(second, runtimeDir)
+    a = new PublicDshScreen(installation, 'daemon')
+    b = new PublicDshScreen(second, 'daemon')
     await waitForCounts(installation.dshHome, counts => counts.host >= 1 && counts.client >= 1, 'profile A Host/Client', 120_000)
     await waitForCounts(second.dshHome, counts => counts.host >= 1 && counts.client >= 1, 'profile B Host/Client', 120_000)
     await a.waitForAny(['type a message', '╭'], 'profile A Client', 120_000)
@@ -704,12 +781,16 @@ export async function runManagedHostTwoProfileIsolation({ installation, trace, d
   } catch (error) {
     failure = error
   } finally {
-    try { a.send('/exit\r') } catch { /* gone */ }
-    try { b.send('/exit\r') } catch { /* gone */ }
-    await a.exitWithin(60_000)
-    await b.exitWithin(60_000)
-    await a.dispose()
-    await b.dispose()
+    if (a !== undefined) {
+      try { a.send('/exit\r') } catch { /* gone */ }
+      await a.exitWithin(60_000)
+      await a.dispose()
+    }
+    if (b !== undefined) {
+      try { b.send('/exit\r') } catch { /* gone */ }
+      await b.exitWithin(60_000)
+      await b.dispose()
+    }
     const cleanupA = stopAndRemoveManagedUnit(installation, trace)
     const cleanupB = stopAndRemoveManagedUnit(second, trace)
     const outcomeError = cleanupOutcomeError(cleanupA) ?? cleanupOutcomeError(cleanupB)
@@ -721,32 +802,31 @@ export async function runManagedHostTwoProfileIsolation({ installation, trace, d
   return result
 }
 
-/** The strict-absence fallback: no user manager, a real detached Host, a private 0600 log, Host survives Client exit. */
+/** The basic daemon: a real independent Host, private 0600 log, survives Client exit, creates no unit. */
 export async function runManagedHostFallback({ installation, trace, dshHome }) {
   const gate = isolatedGate()
   if (!gate.qualified) return { status: 'NOT_VERIFIED', reason: gate.reason }
-  const uid = process.getuid()
-  const probe = systemctl(['--user', '--no-pager', '--no-ask-password', 'show-environment'], existsSync(`/run/user/${String(uid)}`) ? `/run/user/${String(uid)}` : undefined)
-  if (probe.status === 0) return { status: 'NOT_VERIFIED', reason: 'NOT_AN_ABSENT_MANAGER_ENV: a live user manager is reachable; use the systemd case' }
-  const scopeId = profileScopeId(uid, installation.profileDir)
+  const { scopeId, unitPath } = unitFactsFor(installation)
   const scopeDir = join(dshHome, 'run', 'dsh-pi-tui', scopeId)
+  assert(!existsSync(unitPath), 'the basic-daemon case must begin with no installed unit')
   const screen = new PublicDshScreen(installation, 'daemon')
   try {
-    await waitForCounts(dshHome, counts => counts.host >= 1 && counts.client >= 1, 'one fallback Host + one Client', 90_000)
-    await screen.waitForAny(['type a message', '╭'], 'the fallback Client', 120_000)
+    await waitForCounts(dshHome, counts => counts.host >= 1 && counts.client >= 1, 'one independent Host + one Client', 90_000)
+    await screen.waitForAny(['type a message', '╭'], 'the independent Client', 120_000)
     const hostLog = join(scopeDir, 'host.log')
-    assert(existsSync(hostLog), 'the fallback Host did not write its host.log')
+    assert(existsSync(hostLog), 'the independent Host did not write its host.log')
     const hostLogPrivate = (statSync(hostLog).mode & 0o777) === 0o600
-    assert(hostLogPrivate, 'the fallback host.log must be 0600')
+    assert(hostLogPrivate, 'the independent host.log must be 0600')
+    assert(!existsSync(unitPath), 'the basic daemon must never install a unit')
     const identity = readInstance(dshHome, scopeId)
-    assert(identity !== undefined && identity.scopeId === scopeId, 'the fallback Host published no scope identity')
+    assert(identity !== undefined && identity.scopeId === scopeId, 'the independent Host published no scope identity')
     screen.send('/exit\r')
     const exit = await screen.exitWithin(60_000)
-    assert(exit.code === 0, `the fallback Client /exit did not exit 0: ${JSON.stringify(exit)}`)
+    assert(exit.code === 0, `the independent Client /exit did not exit 0: ${JSON.stringify(exit)}`)
     await sleep(500)
-    assert(hostPids(dshHome).length >= 1, 'the fallback Host died when the Client exited')
-    trace('managed-host-fallback', { scopeId })
-    return { status: 'PASS', scope: 'REAL_ABSENT_MANAGER_FALLBACK_L6', usesDetachedSpawn: true, hostLogPrivate, hostSurvivesClientExit: true }
+    assert(hostPids(dshHome).length >= 1, 'the independent Host died when the Client exited')
+    trace('managed-host-basic-daemon-process', { scopeId })
+    return { status: 'PASS', scope: 'REAL_BASIC_DAEMON_L6', usesDetachedSpawn: true, hostLogPrivate, hostSurvivesClientExit: true, noUnitCreated: true }
   } finally {
     await screen.dispose()
     stopAndRemoveManagedUnit(installation, trace)
@@ -754,28 +834,53 @@ export async function runManagedHostFallback({ installation, trace, dshHome }) {
   }
 }
 
-/** The manager-error fail-closed: a broken manager yields HOST_MANAGER_ERROR, no fallback, no Host. */
+/**
+ * The manager-error fail-closed: an INSTALLED profile unit + a genuinely broken
+ * user manager must make public start/status/install fail closed and never fall
+ * back to an independent Host. The operator pre-provisions the unit with the
+ * real `daemon install` while the manager is usable, then breaks the bus; the
+ * broken bus itself cannot run install, so a missing unit is NOT_VERIFIED rather
+ * than a fabricated pass.
+ */
 export async function runManagedHostManagerError({ installation, trace, dshHome }) {
   const gate = isolatedGate()
   if (!gate.qualified) return { status: 'NOT_VERIFIED', reason: gate.reason }
-  // A real broken-manager environment is created by the operator through
-  // SPLIT_PROCESS_MANAGED_HOST_FORCE_MANAGER_ERROR=1 together with a genuinely
-  // failing user bus; without that explicit injection this case stays unverified
-  // rather than misreporting a healthy manager as an error.
   if (process.env.SPLIT_PROCESS_MANAGED_HOST_FORCE_MANAGER_ERROR !== '1') {
     return { status: 'NOT_VERIFIED', reason: 'NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: set SPLIT_PROCESS_MANAGED_HOST_FORCE_MANAGER_ERROR=1 in a genuinely failing user-bus environment' }
   }
+  const { scopeId, unitPath } = unitFactsFor(installation)
+  if (!existsSync(unitPath)) {
+    return { status: 'NOT_VERIFIED', reason: 'NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: provision the profile unit with daemon install while the manager is usable, then run this case with a genuinely broken user bus' }
+  }
+  const content = readFileSync(unitPath, 'utf8')
+  const artifactBuild = installedArtifactBuildId(installation)
+  const foreign = unitBelongsToRun(content, { scopeId, publishedBuildId: artifactBuild })
+  if (foreign !== null) {
+    return { status: 'NOT_VERIFIED', reason: `NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: the pre-provisioned unit is not this candidate build (${foreign})` }
+  }
+  const runtimeDir = existsSync(`/run/user/${String(process.getuid())}`) ? `/run/user/${String(process.getuid())}` : undefined
+  const probe = systemctl(['--user', '--no-pager', '--no-ask-password', 'show-environment'], runtimeDir)
+  if (probe.status === 0) return { status: 'NOT_VERIFIED', reason: 'NOT_A_BROKEN_MANAGER_ENV: the user manager is reachable; use the systemd case' }
   const screen = new PublicDshScreen(installation, 'daemon')
   try {
     const exit = await screen.exitWithin(90_000)
     assert(exit.code !== 0 && exit.code !== 'timeout', `the managed Client must exit non-zero on a manager error, saw ${JSON.stringify(exit)}`)
-    assert(/HOST_MANAGER_ERROR/u.test(screen.records.raw), 'the manager error was not reported to the Client')
+    assert(/HOST_MANAGER_(?:ERROR|START_FAILED|UNIT_CONFLICT)/u.test(screen.records.raw), 'the manager error was not reported to the Client')
     assert(hostPids(dshHome).length === 0, 'a manager error must not start a Host (no fallback)')
+    const started = runPublicDsh(installation, ['daemon', 'start'])
+    assert(started.status !== 0 && /MANAGER_OR_OS_FAILURE|HOST_MANAGER/u.test(`${started.stdout}${started.stderr}`),
+      'daemon start must report the manager failure with an installed unit')
+    const installed = runPublicDsh(installation, ['daemon', 'install'])
+    assert(installed.status !== 0 && /MANAGER_OR_OS_FAILURE|HOST_MANAGER/u.test(`${installed.stdout}${installed.stderr}`),
+      'daemon install must fail closed on a broken manager')
+    assert(hostPids(dshHome).length === 0, 'no management command may start a fallback Host')
     trace('managed-host-manager-error', { exitCode: exit.code })
     return { status: 'PASS', scope: 'REAL_MANAGER_ERROR_L6', failClosed: true, noFallbackHost: true }
   } finally {
     await screen.dispose()
-    stopAndRemoveManagedUnit(installation, trace)
+    // The manager is deliberately broken, so no manager stop/reload is possible.
+    // Remove exactly the pre-provisioned unit this case verified above.
+    try { unlinkSync(unitPath) } catch { /* already gone */ }
     killIsolatedProcesses(dshHome)
   }
 }

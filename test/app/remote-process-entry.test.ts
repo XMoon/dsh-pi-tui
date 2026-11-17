@@ -13,10 +13,11 @@
 
 import assert from 'node:assert/strict'
 import test, { type TestContext } from 'node:test'
-import { mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createRequire } from 'node:module'
 import { Context } from '@deepseek-ai/cordis'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
 import { startLocalClient, type LocalClientStatus } from '../../src/app/remote-process/client-bootstrap.ts'
@@ -449,6 +450,7 @@ test('a surface startup protocol refusal states the code, preserved Host and dae
   }
 })
 
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const REEXEC_HOST_INSTANCE = '00000000-0000-4000-8000-000000000000'
 
 const CONNECTED_STATUS: LocalClientStatus = {
@@ -532,13 +534,35 @@ test('the reexec target must be a real package pinned to the same DSH runtime', 
   rmSync(join(missingEntry, 'dist', 'local-client.mjs'))
   assert.throws(() => inspectClientReexecTarget(missingEntry, '0.2.1-rc.4'), /has no Client entry/u)
 
+  // A shared npm store / legal package-entry symlink is a normal install: the
+  // NAMED entry path is kept so the replacement Client locates this package
+  // root from its invoked path.
   const symlinkedEntry = join(root, 'symlinked-entry')
   writePackage(symlinkedEntry)
-  const outside = join(root, 'outside-entry.mjs')
-  writeFileSync(outside, 'export {}\n')
+  const sharedEntry = join(symlinkedEntry, 'dist', 'shared-client.mjs')
+  writeFileSync(sharedEntry, 'export {}\n')
   rmSync(join(symlinkedEntry, 'dist', 'local-client.mjs'))
-  symlinkSync(outside, join(symlinkedEntry, 'dist', 'local-client.mjs'))
-  assert.throws(() => inspectClientReexecTarget(symlinkedEntry, '0.2.1-rc.4'), /regular file owned by this process user/u)
+  symlinkSync(sharedEntry, join(symlinkedEntry, 'dist', 'local-client.mjs'))
+  assert.equal(inspectClientReexecTarget(symlinkedEntry, '0.2.1-rc.4').entry, join(realpathSync(symlinkedEntry), 'dist', 'local-client.mjs'))
+
+  // A symlinked `dist` to a shared directory outside the package is legal too:
+  // the named <root>/dist entry still resolves <root>/package.json.
+  const externalEntry = join(root, 'external-entry')
+  writePackage(externalEntry)
+  const sharedDist = join(root, 'shared-dist')
+  mkdirSync(sharedDist, { recursive: true })
+  rmSync(join(externalEntry, 'dist'), { recursive: true })
+  writeFileSync(join(sharedDist, 'local-client.mjs'), 'export {}\n')
+  writeFileSync(join(sharedDist, 'index.mjs'), 'export const value = 1\n')
+  symlinkSync(sharedDist, join(externalEntry, 'dist'))
+  assert.equal(inspectClientReexecTarget(externalEntry, '0.2.1-rc.4').entry, join(realpathSync(externalEntry), 'dist', 'local-client.mjs'))
+
+  // A directory carrying the entry name is still refused.
+  const directoryEntry = join(root, 'directory-entry')
+  writePackage(directoryEntry)
+  rmSync(join(directoryEntry, 'dist', 'local-client.mjs'))
+  mkdirSync(join(directoryEntry, 'dist', 'local-client.mjs'), { recursive: true })
+  assert.throws(() => inspectClientReexecTarget(directoryEntry, '0.2.1-rc.4'), /regular file/u)
 
   assert.throws(() => inspectClientReexecTarget('relative/package', '0.2.1-rc.4'), /must be absolute/u)
 
@@ -546,6 +570,61 @@ test('the reexec target must be a real package pinned to the same DSH runtime', 
   // candidate cannot pass the preflight with a stale build identity.
   writeFileSync(join(packageRoot, 'dist', 'index.mjs'), 'export const value = 2\n')
   assert.notEqual(inspectClientReexecTarget(packageRoot, '0.2.1-rc.4').buildId, target.buildId)
+})
+
+test('the real reexec spawn runs a Client from an external dist symlink that locates this package root', async t => {
+  const root = testLifecycle(t).tempDir('dsh-pr3-reexec-symlink-')
+  const packageRoot = join(root, 'package')
+  writePackage(packageRoot)
+  const sharedDist = join(root, 'shared-dist')
+  renameSync(join(packageRoot, 'dist'), sharedDist)
+  symlinkSync(sharedDist, join(packageRoot, 'dist'))
+  const proofPath = join(root, 'proof.json')
+  const helperUrl = pathToFileURL(join(ROOT, 'src', 'app', 'remote-process', 'local-scope.ts')).href
+  writeFileSync(join(sharedDist, 'local-client.mjs'), [
+    `import { installedPackageRootFromEntry } from ${JSON.stringify(helperUrl)}`,
+    `import { pathToFileURL } from 'node:url'`,
+    `import { writeFileSync } from 'node:fs'`,
+    `writeFileSync(process.env.SPLIT_PROCESS_REEXEC_PROOF, JSON.stringify({ argv: process.argv[1], root: installedPackageRootFromEntry(pathToFileURL(process.argv[1]).href) }))`,
+    '',
+  ].join('\n'))
+  const target = inspectClientReexecTarget(packageRoot, '0.2.1-rc.4')
+  assert.equal(target.entry, join(realpathSync(packageRoot), 'dist', 'local-client.mjs'))
+
+  const previousNodeOptions = process.env.NODE_OPTIONS
+  const previousProof = process.env.SPLIT_PROCESS_REEXEC_PROOF
+  const tsxLoader = pathToFileURL(createRequire(import.meta.url).resolve('tsx/esm')).href
+  process.env.NODE_OPTIONS = [previousNodeOptions, '--import', tsxLoader].filter(Boolean).join(' ')
+  process.env.SPLIT_PROCESS_REEXEC_PROOF = proofPath
+  try {
+    const code = await finishClientEntryShutdown({
+      seat: { assertCurrent: () => {}, close: async () => {} },
+      reexec: {
+        intent: {
+          expectedInstanceId: REEXEC_HOST_INSTANCE,
+          dshAnchor: join(root, 'dsh', 'package.json'),
+          profile: 'pi-tui',
+          dshVersion: '0.2.1-rc.4',
+          targetPackageRoot: target.packageRoot,
+          targetEntry: target.entry,
+          targetBuildId: target.buildId,
+          targetBundleVersion: target.bundleVersion,
+        },
+        teardownSucceeded: true,
+      },
+      emit: () => {},
+      stderr: () => {},
+    })
+    assert.equal(code, 0, 'the replacement Client probe must exit 0')
+  } finally {
+    if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS
+    else process.env.NODE_OPTIONS = previousNodeOptions
+    if (previousProof === undefined) delete process.env.SPLIT_PROCESS_REEXEC_PROOF
+    else process.env.SPLIT_PROCESS_REEXEC_PROOF = previousProof
+  }
+  const proof = JSON.parse(readFileSync(proofPath, 'utf8')) as { readonly argv: string; readonly root: string }
+  assert.equal(proof.argv, target.entry, 'the child must run the NAMED symlinked entry')
+  assert.equal(realpathSync(proof.root), realpathSync(packageRoot), 'the child must locate THIS package root')
 })
 
 test('the default reexec target resolves through the active official profile', t => {

@@ -1,21 +1,26 @@
 /**
- * Profile-aware managed Host lifecycle (M6-2B).
+ * Profile-aware Host lifecycle: the basic detached process and the explicit
+ * systemd user-service install.
  *
- * This is the ONE module allowed to own the local Host OS supervision boundary:
- * it probes whether the current user's systemd user manager can safely control
- * a unit, renders and atomically installs ONE profile-scoped unit, and drives
- * `systemctl --user` with a fixed, non-PATH executable. It never imports
- * `app/bootstrap.ts`, Cordis, the Web or a Session service, and it creates no
- * manager store, daemon or public API: the Host's official 0700 scope directory,
- * abstract kernel seat, authenticated identity and `runProfile` shutdown owner
- * are all unchanged. A `systemctl start` here only means the manager accepted a
- * request; readiness is still proven later by the existing authenticated Host
- * handshake in `local-discovery.ts`.
+ * The basic Linux daemon is an independent Host process. A public cold start
+ * inspects whether THIS profile has an installed unit first: no unit means
+ * `spawnHostCandidate()` immediately, with no user-manager probe at all; an
+ * installed, manager-loaded unit means one fixed `systemctl --user start`.
+ * `installProfileHostUnit()` is the ONLY path that writes a unit, installs it
+ * atomically, asks the real user manager to load it and verifies the manager's
+ * `FragmentPath`/`LoadState`; it never starts, stops, enables or restarts
+ * anything.
  *
- * The three-state probe answers exactly one question — "can this user manager be
- * used safely right now?" — never "is a Host alive?". Only a strictly
- * corroborated absence falls back to the existing detached process spawn; every
- * other failure is the stable `HOST_MANAGER_ERROR` and never degrades.
+ * `systemctl`/`journalctl` are invoked through the system PATH with fixed
+ * argument arrays. A missing command can only affect the explicit service-
+ * managed branch; the detached Host never depends on it.
+ *
+ * This module never imports `app/bootstrap.ts`, Cordis, the Web or a Session
+ * service, and it creates no manager store, daemon or public API: the Host's
+ * official 0700 scope directory, abstract kernel seat, authenticated identity
+ * and `runProfile` shutdown owner are all unchanged. A `systemctl start` here
+ * only means the manager accepted a request; readiness is still proven later by
+ * the existing authenticated Host handshake in `local-discovery.ts`.
  *
  * @module app/remote-process/local-host-manager
  */
@@ -25,6 +30,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import {
   closeSync,
   constants,
+  existsSync,
   fchmodSync,
   fsyncSync,
   linkSync,
@@ -33,15 +39,17 @@ import {
   openSync,
   readFileSync,
   realpathSync,
+  statSync,
   unlinkSync,
   writeSync,
 } from 'node:fs'
 import { userInfo } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
-import { LocalScopeError, type LocalScope } from './local-scope.ts'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { installedPackageRootFromEntry, LocalScopeError, type LocalScope } from './local-scope.ts'
 
-/** The fixed OS executable this module controls the user manager through. */
-const SYSTEMCTL = '/usr/bin/systemctl'
+/** The system manager executable resolved through PATH (distribution-agnostic). */
+const SYSTEMCTL = 'systemctl'
 /** Hard bound on one `systemctl` invocation. */
 const SYSTEMCTL_TIMEOUT_MS = 5_000
 /** Hard cap on captured stdout/stderr bytes per invocation. */
@@ -61,23 +69,6 @@ export type SystemctlResult =
   | { readonly kind: 'timeout' }
   | { readonly kind: 'spawn-error'; readonly error: NodeJS.ErrnoException }
   | { readonly kind: 'output-overflow' }
-
-/** Whether the current user manager can be used safely right now (never Host readiness). */
-export type UserManagerProbe =
-  | { readonly kind: 'available' }
-  | { readonly kind: 'absent' }
-  | { readonly kind: 'error'; readonly reason: string }
-
-/** The facts one pure classification decision is derived from. */
-export interface UserManagerProbeFacts {
-  readonly systemctl: SystemctlResult
-  /** `/run/user/<uid>/systemd/private` exists (a live user-manager endpoint). */
-  readonly managerPrivatePresent: boolean
-  /** `/run/user/<uid>/bus` exists (the user bus socket). */
-  readonly userBusPresent: boolean
-  /** `user@<uid>.service` state as the SYSTEM manager reports it. */
-  readonly systemdUserServiceState: 'active' | 'inactive' | 'unknown'
-}
 
 /** The installed facts a managed Host start needs; the same shape the process fallback reads. */
 export interface HostStartOptions {
@@ -104,90 +95,6 @@ export interface UnitFacts {
 
 /** The readiness request returned by a managed start; it is never readiness itself. */
 export type HostStartObservation = () => Error | undefined
-
-/** Replace absolute paths so a probe reason never leaks a private path. */
-function sanitizeReason(text: string): string {
-  const line = text.split(/\r?\n/u).map(part => part.trim()).find(part => part !== '') ?? ''
-  return line.replace(/\/[^\s"']+/gu, '<path>').slice(0, 200)
-}
-
-function probeError(reason: string): UserManagerProbe {
-  return { kind: 'error', reason }
-}
-
-/**
- * A DEFINITIVE statement that this host has no systemd at all (systemctl exists
- * but systemd is not PID 1). With no live manager endpoint this proves absence
- * without needing a system-manager query.
- */
-function isNoSystemdInit(text: string): boolean {
-  return /System has not been booted with systemd as init system/iu.test(text)
-}
-
-/**
- * An explicit "there is no user bus/manager for this uid" failure. The message
- * must name the missing bus/medium explicitly — a generic connect refusal
- * (permission denied, connection refused, timeout) is NOT absence and is
- * rejected by `isUnusableManagerError` first.
- */
-function isExplicitNoUserBus(text: string): boolean {
-  return /No medium found/iu.test(text)
-    || /Failed to connect to bus: No such file or directory/iu.test(text)
-    || /Failed to connect to bus: No medium/iu.test(text)
-    || /Failed to connect to (?:the )?user scope bus: No such file or directory/iu.test(text)
-    || /Failed to connect to (?:the )?user scope bus: No medium/iu.test(text)
-}
-
-/** A manager channel that exists but cannot be used: always a hard error. */
-function isUnusableManagerError(text: string): boolean {
-  return /Permission denied/iu.test(text)
-    || /Access denied/iu.test(text)
-    || /Connection refused/iu.test(text)
-    || /Connection timed out/iu.test(text)
-    || /Protocol error/iu.test(text)
-    || /Too many levels of symbolic links/iu.test(text)
-    || /Transport endpoint is not connected/iu.test(text)
-}
-
-/**
- * The pure three-state classifier. It answers only "can the user manager be
- * used safely", from the observed probe outcome plus the corroborating kernel
- * endpoint facts. A present-but-unusable manager is a stable `error`; only a
- * corroborated absence falls back. Absence is proven in two independent ways:
- * (a) the fixed `systemctl` binary is missing (ENOENT) or systemd is not the
- * init system — a definitive "no systemd" statement — with no live endpoint;
- * (b) an explicit no-user-bus failure with no live endpoint and a system
- * manager that reports `user@<uid>.service` as `inactive`/`not-found`. Any
- * unconfirmed or contradictory state is `error`.
- */
-export function classifyUserManagerProbe(facts: UserManagerProbeFacts): UserManagerProbe {
-  const { systemctl } = facts
-  if (systemctl.kind === 'timeout') return probeError('the user manager probe timed out')
-  if (systemctl.kind === 'output-overflow') return probeError('the user manager probe output exceeded the limit')
-  const endpointsPresent = facts.managerPrivatePresent || facts.userBusPresent
-  const corroborateAbsence = (definitive: boolean): UserManagerProbe => {
-    if (endpointsPresent) return probeError('the user manager endpoint exists but is not usable')
-    if (facts.systemdUserServiceState === 'active') return probeError('the system manager reports a live user service')
-    if (definitive) return { kind: 'absent' }
-    if (facts.systemdUserServiceState === 'inactive') return { kind: 'absent' }
-    return probeError('cannot confirm the user manager is absent; treating it as unavailable')
-  }
-  if (systemctl.kind === 'spawn-error') {
-    // The fixed systemctl cannot run. Only a MISSING binary (ENOENT) can prove a
-    // no-systemd host; any other spawn failure (EACCES, ...) stays a hard error.
-    if (systemctl.error.code === 'ENOENT') return corroborateAbsence(true)
-    return probeError('the fixed systemctl executable could not be spawned')
-  }
-  if (systemctl.code === 0) return { kind: 'available' }
-  const combined = `${systemctl.stderr}\n${systemctl.stdout}`
-  if (isUnusableManagerError(combined)) {
-    return probeError(`systemctl --user cannot be used: ${sanitizeReason(combined)}`)
-  }
-  if (isNoSystemdInit(combined)) return corroborateAbsence(true)
-  if (isExplicitNoUserBus(combined)) return corroborateAbsence(false)
-  const detail = sanitizeReason(combined)
-  return probeError(`systemctl --user failed: ${detail === '' ? 'non-zero exit' : detail}`)
-}
 
 /** The user runtime directory to hand to a child `systemctl`. */
 export function selectRuntimeDir(uid: number): string | undefined {
@@ -262,61 +169,6 @@ export function runSystemctl(args: readonly string[], runtimeDir: string | undef
       }
       settle({ kind: 'exited', code: code ?? 1, stdout, stderr })
     })
-  })
-}
-
-function pathExists(path: string): boolean {
-  try {
-    lstatSync(path)
-    return true
-  } catch {
-    return false
-  }
-}
-
-/** Map the system manager's `user@<uid>.service` state onto the classify input. */
-function parseUserServiceState(result: SystemctlResult): 'active' | 'inactive' | 'unknown' {
-  if (result.kind !== 'exited' || result.code !== 0) return 'unknown'
-  const match = /^ActiveState=(\S+)$/mu.exec(result.stdout)
-  if (match === null) return 'unknown'
-  switch (match[1]) {
-    case 'active':
-    case 'activating':
-    case 'deactivating':
-    case 'reloading':
-    case 'failed':
-      return 'active'
-    case 'inactive':
-    case 'not-found':
-      return 'inactive'
-    default:
-      return 'unknown'
-  }
-}
-
-/** Gather the real probe facts and classify the user manager three-state. */
-export async function probeUserManager(
-  deps: { readonly systemctl?: SystemctlRunner; readonly pathExists?: (path: string) => boolean } = {},
-): Promise<UserManagerProbe> {
-  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
-  if (process.platform !== 'linux' || uid === undefined) {
-    throw new LocalScopeError('B1_PLATFORM_UNSUPPORTED', 'managed Host: the user manager probe requires Linux')
-  }
-  const run = deps.systemctl ?? runSystemctl
-  const exists = deps.pathExists ?? pathExists
-  const runtimeDir = selectRuntimeDir(uid)
-  const systemctl = await run(['--user', '--no-pager', '--no-ask-password', 'show-environment'], runtimeDir)
-  // A real request to the user manager already succeeded: nothing else is needed.
-  if (systemctl.kind === 'exited' && systemctl.code === 0) return { kind: 'available' }
-  const serviceState = await run(
-    ['--system', '--no-pager', '--no-ask-password', 'show', '-p', 'ActiveState', `user@${String(uid)}.service`],
-    undefined,
-  )
-  return classifyUserManagerProbe({
-    systemctl,
-    managerPrivatePresent: exists(`/run/user/${String(uid)}/systemd/private`),
-    userBusPresent: exists(`/run/user/${String(uid)}/bus`),
-    systemdUserServiceState: parseUserServiceState(serviceState),
   })
 }
 
@@ -436,8 +288,29 @@ export function renderUnitContent(facts: UnitFacts): string {
   return lines.join('\n')
 }
 
-/** A validated installed fact (regular file, no symlink, owned by this uid). */
-function inspectOwnedRegular(path: string, label: string, uid: number): string {
+/**
+ * Prove one built entry can locate its own installed product package root from
+ * its REAL module URL. The preflight accepts a shared-store/dist symlink only
+ * when the spawned process will be able to do the same.
+ */
+function assertEntrySelfLocation(
+  entryPath: string,
+  code: 'HOST_MANAGER_UNIT_CONFLICT' | 'HOST_START_FAILED',
+  label: string,
+): void {
+  try {
+    installedPackageRootFromEntry(pathToFileURL(entryPath).href)
+  } catch (error) {
+    throw new LocalScopeError(code, `managed Host: the ${label} cannot locate its installed package root`, error)
+  }
+}
+
+/**
+ * A validated installed fact: a canonical regular file. The user's install
+ * layout (shared npm store, root-owned system package, legal entry symlink) is
+ * not judged; only the real target file type is.
+ */
+function inspectOwnedRegular(path: string, label: string): string {
   let real: string
   try {
     real = realpathSync(path)
@@ -445,8 +318,8 @@ function inspectOwnedRegular(path: string, label: string, uid: number): string {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the ${label} is not readable`, error)
   }
   const info = lstatSync(real)
-  if (info.isSymbolicLink() || !info.isFile() || info.uid !== uid) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the ${label} must be a regular file owned by uid ${String(uid)}`)
+  if (!info.isFile()) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the ${label} must be a regular file`)
   }
   return real
 }
@@ -455,8 +328,7 @@ function inspectOwnedRegular(path: string, label: string, uid: number): string {
  * Validate a trusted EXECUTABLE the unit will run (the Node interpreter). Its
  * trust is "an absolute, canonical, executable regular file", NOT "owned by this
  * uid": a system Node such as `/usr/bin/node` is normally root-owned yet a
- * normal user may run it. Only the product-private Host entry is held to the
- * uid-ownership rule; the official DSH anchor has its own trust rule below.
+ * normal user may run it.
  */
 export function inspectTrustedExecutable(path: string, label: string): string {
   let real: string
@@ -474,10 +346,11 @@ export function inspectTrustedExecutable(path: string, label: string): string {
 
 /**
  * Validate the official DSH install anchor (`@deepseek-ai/dsh/package.json`).
- * Its trust is "a readable, canonical, non-group/other-writable regular file
- * declaring the exact `@deepseek-ai/dsh` package and the pinned runtime version"
- * — NOT uid ownership: a normal user may run against a root-owned, system-wide
- * DSH install. The caller checks the package identity and exact version pin.
+ * Its trust is "a readable, canonical regular file declaring the exact
+ * `@deepseek-ai/dsh` package and the pinned runtime version" — NOT uid,
+ * mode or install layout: a normal user may run against a root-owned,
+ * system-wide DSH install or a symlinked package store. The caller checks the
+ * package identity and exact version pin.
  */
 export function inspectTrustedDshAnchor(path: string): string {
   let real: string
@@ -487,26 +360,24 @@ export function inspectTrustedDshAnchor(path: string): string {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the DSH anchor is not readable', error)
   }
   const info = lstatSync(real)
-  if (info.isSymbolicLink() || !info.isFile()) {
+  if (!info.isFile()) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the DSH anchor must be a regular file')
-  }
-  if ((info.mode & 0o022) !== 0) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the DSH anchor must not be group/other writable')
   }
   return real
 }
 
 /** Collect and validate the exact installed facts one unit is rendered from. */
-function collectUnitFacts(options: HostStartOptions, uid: number): UnitFacts {
-  // The Node interpreter is a system executable: trust absolute + executable,
-  // never uid ownership (a root-owned /usr/bin/node must work for a normal user).
+function collectUnitFacts(options: HostStartOptions): UnitFacts {
+  // The Node interpreter is a system executable: trust absolute + executable.
   const nodePath = inspectTrustedExecutable(process.execPath, 'node executable')
-  // The Host entry and DSH anchor are product-private files installed under the
-  // user's own profile, so they keep the strict uid-ownership rule.
-  const hostEntryPath = inspectOwnedRegular(options.hostEntryPath, 'Host entry', uid)
-  // The DSH anchor is the OFFICIAL install anchor (may be a root-owned system
-  // install), so it is trusted by package identity + pinned version + safe
-  // permissions, not by uid ownership.
+  // The Host entry and DSH anchor are installed package files. A legal package
+  // entry may be a symlink (shared npm store) or root-owned (system install), so
+  // only the canonical regular target and the package identity are trusted.
+  if (!isAbsolute(options.hostEntryPath)) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the Host entry path must be absolute')
+  }
+  inspectOwnedRegular(options.hostEntryPath, 'Host entry')
+  assertEntrySelfLocation(options.hostEntryPath, 'HOST_MANAGER_UNIT_CONFLICT', 'Host entry')
   const dshAnchor = inspectTrustedDshAnchor(options.dshAnchor)
   let manifest: unknown
   try {
@@ -527,25 +398,27 @@ function collectUnitFacts(options: HostStartOptions, uid: number): UnitFacts {
     scopeId: options.scope.scopeId,
     buildId: options.scope.buildId,
     nodePath,
-    hostEntryPath,
+    // Keep the INVOKED named entry (<root>/dist/local-host.mjs) so the Host can
+    // locate its package root through a legal dist/entry symlink.
+    hostEntryPath: options.hostEntryPath,
     dshAnchor,
   }
 }
 
-/** Walk one owned directory chain, creating missing 0700 components and refusing symlinks. */
 /**
- * Walk one owned directory chain, creating missing 0700 components, refusing
- * symlinks, foreign owners, AND any existing component that group/other can
- * write. A writable parent lets another local user delete and replace the unit
- * file after we validate it, so the write bit is part of the ownership check.
+ * Walk the user unit directory chain below the account home, creating missing
+ * components 0700. Existing user components are used as-is: an existing real
+ * directory or a resolvable directory symlink is accepted regardless of owner or
+ * mode, and nothing is chmodded. Only "not accessible", "not a directory" and a
+ * real filesystem failure are refused.
  */
-export function ensureOwnedUnitDir(home: string, uid: number): string {
+export function ensureOwnedUnitDir(home: string): string {
   let current = home
   for (const component of USER_UNIT_SUBDIR) {
     const next = join(current, component)
-    let info
+    let real: string
     try {
-      info = lstatSync(next)
+      real = realpathSync(next)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the unit directory ${component} is not accessible`, error)
@@ -557,71 +430,62 @@ export function ensureOwnedUnitDir(home: string, uid: number): string {
           throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the unit directory ${component} could not be created`, mkdirError)
         }
       }
-      info = lstatSync(next)
+      try {
+        real = realpathSync(next)
+      } catch (realpathError) {
+        throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the unit directory ${component} is not accessible`, realpathError)
+      }
     }
-    if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== uid) {
-      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the unit directory ${component} must be a real directory owned by uid ${String(uid)}`)
-    }
-    if ((info.mode & 0o022) !== 0) {
-      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the unit directory ${component} must not be group/other writable`)
+    if (!statSync(real).isDirectory()) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the unit directory ${component} is not a directory`)
     }
     current = next
   }
   return current
 }
 
-/** Resolve the real user unit directory under the account home (never a Client HOME). */
-export function resolveUserUnitDir(uid: number): string {
+/** The canonical account home (never a Client HOME). */
+function accountHome(): string {
   let home: string
   try {
     home = realpathSync(userInfo().homedir)
   } catch (error) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the account home is not readable', error)
   }
-  const info = lstatSync(home)
-  if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== uid) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the account home must be a real directory owned by uid ${String(uid)}`)
+  if (!statSync(home).isDirectory()) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the account home is not a directory')
   }
-  if ((info.mode & 0o022) !== 0) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the account home must not be group/other writable')
-  }
-  return ensureOwnedUnitDir(home, uid)
-}
-
-function canonicalPath(path: string): string {
-  try { return realpathSync(path) } catch { return resolve(path) }
-}
-
-/** Parse a `systemctl --user show-environment` body into a KEY->value map. */
-/**
- * Parse the RUNNING user manager's authoritative unit search path, as returned
- * by `systemctl --user show -p UnitPath --value`. systemd joins the entries with
- * single spaces, so a path containing spaces is additionally recognized by the
- * caller's raw boundary match.
- */
-export function parseManagerUnitPath(value: string): string[] {
-  return value.trim().split(/\s+/u).filter(entry => entry !== '')
+  return home
 }
 
 /**
- * Why the fixed plan install directory is NOT in the RUNNING manager's actual
- * unit search path (stable reason), or `null` when it is. The authority is the
- * manager's `UnitPath` property — never the environment block it exports to
- * child processes, which can change (`set-environment`) without changing the
- * real search path. The caller MUST fail closed BEFORE writing when this returns
- * a reason or when UnitPath cannot be queried.
+ * The fixed `<account-home>/.config/systemd/user` target WITHOUT creating it.
+ * The manager UnitPath gate must run before ANY user-directory write; the
+ * account-home spelling is kept (not realpathed) so the manager's own default
+ * search path compares exactly even when the tail does not exist yet.
  */
-export function userUnitPathUnsupportedReason(unitPathValue: string, targetDir: string): string | null {
-  const raw = unitPathValue.trim()
-  if (raw === '') return 'the manager reported an empty unit search path'
-  const target = canonicalPath(targetDir)
-  for (const entry of parseManagerUnitPath(raw)) {
-    if (canonicalPath(entry) === target) return null
+function userUnitDirPath(): string {
+  return join(userInfo().homedir, ...USER_UNIT_SUBDIR)
+}
+
+/**
+ * Prove the RUNNING user manager is genuinely reachable BEFORE any unit write.
+ * The manager's `UnitPath` is deliberately not used as a pre-write admission
+ * gate: systemd omits still-empty directories from that property, so a clean
+ * account's first install could never reach the mkdir. Manager reachability is
+ * proven by a real bounded request; the POST-write `daemon-reload` plus the
+ * real `LoadState`/`FragmentPath` verification decide whether the manager
+ * loaded this exact file. A manager failure is a hard error and never falls
+ * back to a detached process.
+ */
+async function assertUserManagerAvailable(
+  runtimeDir: string | undefined,
+  systemctl: SystemctlRunner,
+): Promise<void> {
+  const result = await systemctl(['--user', '--no-pager', '--no-ask-password', 'show', '-p', 'UnitPath', '--value'], runtimeDir)
+  if (result.kind !== 'exited' || result.code !== 0) {
+    throw new LocalScopeError('HOST_MANAGER_ERROR', 'managed Host: the user manager is not reachable')
   }
-  // A target path that itself contains spaces is joined ambiguously by systemd;
-  // accept an exact boundary-delimited occurrence of the canonical target.
-  if (raw === target || raw.startsWith(`${target} `) || raw.endsWith(` ${target}`) || raw.includes(` ${target} `)) return null
-  return 'the fixed user unit directory is not in the manager UnitPath'
 }
 
 /** The result of one atomic unit installation. */
@@ -692,7 +556,7 @@ export type SystemctlRunner = (args: readonly string[], runtimeDir: string | und
 
 /** Narrow test seam for the start orchestration; production omits it. */
 export interface HostManagerDeps {
-  readonly probe?: () => Promise<UserManagerProbe>
+  /** Explicit unit directory seam for structural tests; production uses the account home. */
   readonly unitDir?: (uid: number) => string
   readonly systemctl?: SystemctlRunner
 }
@@ -813,39 +677,33 @@ const UNIT_STOP_POLL_MS = 100
 
 /**
  * Resolve the fixed user unit directory WITHOUT creating it. The management
- * queries must be side-effect free, so this mirrors `resolveUserUnitDir`'s
- * account-home/owner/writability checks but returns `undefined` when any
- * component of `<home>/.config/systemd/user` is missing.
+ * queries must be side-effect free, so this returns `undefined` when any
+ * component of `<home>/.config/systemd/user` is missing. Existing user
+ * components are not judged by owner/mode, and a resolvable directory symlink
+ * is followed exactly like the account's own layout.
  */
-export function inspectExistingUserUnitDir(uid: number): string | undefined {
+export function inspectExistingUserUnitDir(): string | undefined {
   let home: string
   try {
     home = realpathSync(userInfo().homedir)
   } catch (error) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the account home is not readable', error)
   }
-  const homeInfo = lstatSync(home)
-  if (homeInfo.isSymbolicLink() || !homeInfo.isDirectory() || homeInfo.uid !== uid) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the account home must be a real directory owned by uid ${String(uid)}`)
-  }
-  if ((homeInfo.mode & 0o022) !== 0) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the account home must not be group/other writable')
+  if (!statSync(home).isDirectory()) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the account home is not a directory')
   }
   let current = home
   for (const component of USER_UNIT_SUBDIR) {
     const next = join(current, component)
-    let info
+    let real: string
     try {
-      info = lstatSync(next)
+      real = realpathSync(next)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
       throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the unit directory ${component} is not accessible`, error)
     }
-    if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== uid) {
-      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the unit directory ${component} must be a real directory owned by uid ${String(uid)}`)
-    }
-    if ((info.mode & 0o022) !== 0) {
-      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the unit directory ${component} must not be group/other writable`)
+    if (!statSync(real).isDirectory()) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the unit directory ${component} is not a directory`)
     }
     current = next
   }
@@ -862,7 +720,7 @@ function readUnitMetadata(lines: readonly string[], key: string): string {
 }
 
 /** Read the named user unit and its regular canonical target without mutation. */
-function readUnitFileIdentity(filePath: string, uid: number): {
+function readUnitFileIdentity(filePath: string): {
   readonly content: string
   readonly resolvedPath: string
   readonly pathDevice: number
@@ -872,9 +730,6 @@ function readUnitFileIdentity(filePath: string, uid: number): {
 } {
   try {
     const pathInfo = lstatSync(filePath)
-    if (pathInfo.uid !== uid) {
-      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit path is not owned by this uid')
-    }
     const resolvedPath = realpathSync(filePath)
     const target = lstatSync(resolvedPath)
     if (!target.isFile()) {
@@ -914,8 +769,8 @@ function inspectUnitIdentity(content: string, scope: LocalScope): string {
 }
 
 /** Compare this operation's observation, never the generated default template. */
-function assertUnitFileIdentity(unit: OwnedProfileUnit, uid: number): void {
-  const current = readUnitFileIdentity(unit.filePath, uid)
+function assertUnitFileIdentity(unit: OwnedProfileUnit): void {
+  const current = readUnitFileIdentity(unit.filePath)
   if (current.pathDevice !== unit.pathDevice || current.pathInode !== unit.pathInode
     || current.resolvedPath !== unit.resolvedPath
     || current.device !== unit.device || current.inode !== unit.inode
@@ -925,8 +780,8 @@ function assertUnitFileIdentity(unit: OwnedProfileUnit, uid: number): void {
 }
 
 /** Inspect the exact Profile unit path, following a user-created configuration link. */
-export function inspectOwnedProfileUnit(scope: LocalScope, profile: string, uid: number, unitDir?: string): OwnedProfileUnitInspection {
-  const dir = unitDir ?? inspectExistingUserUnitDir(uid)
+export function inspectOwnedProfileUnit(scope: LocalScope, profile: string, unitDir?: string): OwnedProfileUnitInspection {
+  const dir = unitDir ?? inspectExistingUserUnitDir()
   if (dir === undefined) return { kind: 'none' }
   const unitName = buildUnitName(profile, scope.scopeId)
   const filePath = join(dir, unitName)
@@ -936,7 +791,7 @@ export function inspectOwnedProfileUnit(scope: LocalScope, profile: string, uid:
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'none' }
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit path is not accessible', error)
   }
-  const file = readUnitFileIdentity(filePath, uid)
+  const file = readUnitFileIdentity(filePath)
   return { kind: 'owned', unitName, unitDir: dir, filePath,
     installBuild: inspectUnitIdentity(file.content, scope), ...file }
 }
@@ -991,9 +846,7 @@ export async function stopOwnedProfileUnit(
     && before.activeState !== 'deactivating' && before.activeState !== 'reloading') {
     throw new LocalScopeError('HOST_MANAGER_START_FAILED', `managed Host: the unit is in an unrecognized state (${before.activeState})`)
   }
-  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
-  if (uid === undefined) throw new LocalScopeError('B1_PLATFORM_UNSUPPORTED', 'managed Host: the user id is unavailable')
-  assertUnitFileIdentity(unit, uid)
+  assertUnitFileIdentity(unit)
   const stop = await systemctl(['--user', '--no-pager', '--no-ask-password', 'stop', unit.unitName], runtimeDir)
   if (stop.kind !== 'exited' || stop.code !== 0) {
     throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: systemctl could not stop the unit')
@@ -1020,17 +873,17 @@ export async function stopOwnedProfileUnit(
   }
 }
 
-/** Remove ONE verified owned profile unit file. There is no Host kill here: a
- * strict-absence fallback Host is not unit-supervised and is never stopped by
- * uninstall. The caller owns the `daemon-reload` that follows.
+/** Remove ONE verified owned profile unit file. There is no Host kill here: an
+ * independent Host is not unit-supervised and is never stopped by uninstall. The
+ * caller owns the `daemon-reload` that follows.
  */
-export function uninstallOwnedProfileUnit(unit: OwnedProfileUnit, scope: LocalScope, profile: string, uid: number): void {
-  const current = inspectOwnedProfileUnit(scope, profile, uid, unit.unitDir)
+export function uninstallOwnedProfileUnit(unit: OwnedProfileUnit, scope: LocalScope, profile: string): void {
+  const current = inspectOwnedProfileUnit(scope, profile, unit.unitDir)
   if (current.kind !== 'owned' || current.filePath !== unit.filePath
     || current.device !== unit.device || current.inode !== unit.inode) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit file changed during the transition')
   }
-  assertUnitFileIdentity(unit, uid)
+  assertUnitFileIdentity(unit)
   try {
     unlinkSync(unit.filePath)
   } catch (error) {
@@ -1040,75 +893,277 @@ export function uninstallOwnedProfileUnit(unit: OwnedProfileUnit, scope: LocalSc
 }
 
 /**
- * Start ONE managed Host candidate for the public daemon path. The user manager
- * is probed first: a strict absence uses the exact process fallback; any error
- * or unit conflict is thrown and NEVER degrades. On the manager path the unit is
- * atomically installed, verified through the real `FragmentPath`/`LoadState`,
- * then `systemctl start` merely submits the request — the caller still proves
- * Host readiness through the authenticated handshake.
+ * Prove the manager does not already run THIS unit name from another source
+ * before a fresh high-priority unit file may shadow it. A loaded definition
+ * with a different FragmentPath is either a foreign service (must be refused,
+ * never redefined) or an obsolete cache of a removed file. Only the latter is
+ * recoverable: the manager must report the previous file as gone for the
+ * refusal to lift. The unit name embeds the profile slug and scope prefix, so
+ * an unrelated same-named service is an ownership conflict by construction.
  */
-export async function startManagedHostCandidate(
+async function assertFreshUnitNameIsNotShadowed(
+  unitName: string,
+  unitDir: string,
+  runtimeDir: string | undefined,
+  systemctl: SystemctlRunner,
+): Promise<void> {
+  const finalPath = join(unitDir, unitName)
+  const state = await showUnit(unitName, runtimeDir, systemctl)
+  const mainPid = Number(state.mainPid)
+  const definitelyInactive = state.activeState === 'inactive' && Number.isFinite(mainPid) && mainPid === 0
+  if (state.loadState === '') {
+    // An unreadable/unknown load state is not proof that the name is unused.
+    throw new LocalScopeError(
+      'HOST_MANAGER_UNIT_CONFLICT',
+      'managed Host: the manager did not report a load state for this unit name; refusing to shadow a possibly live unit',
+    )
+  }
+  if (state.loadState === 'not-found') {
+    // `LoadState` and `ActiveState` are independent: a name that is
+    // not-found but still active/transitioning must not be treated as unused.
+    if (definitelyInactive) return
+    throw new LocalScopeError(
+      'HOST_MANAGER_UNIT_CONFLICT',
+      `managed Host: the manager reports this unit name as ${state.activeState === '' ? 'unknown' : state.activeState} while it is not loaded; refusing to shadow a possibly live unit`,
+    )
+  }
+  // The fresh target file does not exist yet, so only the LOADED source decides:
+  // a resolvable FragmentPath names a real foreign file this install would
+  // shadow, while an unresolvable one is only an obsolete cache of a removed
+  // file and may be reloaded away — but ONLY when the manager proves the unit
+  // itself is inactive with no MainPID. A running/transitioning unit keeps its
+  // old source even if that file was deleted, and must not be redefined.
+  let fragmentReal: string | undefined
+  try {
+    fragmentReal = realpathSync(state.fragmentPath)
+  } catch (error) {
+    // ONLY a definitively missing file (ENOENT) can prove an obsolete cache.
+    // An inaccessible/looping/busy path (EACCES, EIO, ELOOP, ...) may still be
+    // a live foreign unit this install would shadow, so it stays refused.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new LocalScopeError(
+        'HOST_MANAGER_UNIT_CONFLICT',
+        'managed Host: the loaded source of this unit name cannot be verified; refusing to shadow a possibly live unit',
+        error,
+      )
+    }
+    fragmentReal = undefined
+  }
+  if (fragmentReal === undefined) {
+    if (definitelyInactive) return
+    throw new LocalScopeError(
+      'HOST_MANAGER_UNIT_CONFLICT',
+      `managed Host: the loaded source is gone but the unit is ${state.activeState === '' ? 'in unknown state' : state.activeState}; refusing to shadow a possibly running foreign service`,
+    )
+  }
+  // The manager runs this name from another EXISTING file: a foreign service
+  // that a fresh high-priority file would shadow. Refuse before any write.
+  throw new LocalScopeError(
+    'HOST_MANAGER_UNIT_CONFLICT',
+    'managed Host: the user manager already runs this unit name from another unit file; refusing to shadow a foreign service',
+  )
+}
+
+/** The installed facts and manager verification of one explicit install. */
+export interface ProfileHostUnitInstall {
+  readonly unitName: string
+  readonly unitPath: string
+  /** True when THIS call created the unit file. */
+  readonly created: boolean
+  /** True when this call issued the one `daemon-reload` that loaded the unit. */
+  readonly reloaded: boolean
+}
+
+/** The Linux uid this Host-supervision operation needs. */
+function requireLinuxUid(): number {
+  if (process.platform !== 'linux' || typeof process.getuid !== 'function') {
+    throw new LocalScopeError('B1_PLATFORM_UNSUPPORTED', 'managed Host: this operation requires Linux')
+  }
+  return process.getuid()
+}
+
+/**
+ * Install the ONE explicit systemd user unit for this profile. This is the only
+ * path that writes a unit: it proves the user manager is reachable before any
+ * write (an empty target directory is legitimately absent from `UnitPath`),
+ * installs the rendered file atomically (never overwriting user content),
+ * re-verifies the same-profile metadata/build identity and reloads/verifies the
+ * manager's real `LoadState`/`FragmentPath`. It never starts, stops,
+ * enables or restarts a unit and never creates a Client/Host.
+ */
+export async function installProfileHostUnit(
   options: HostStartOptions,
   deps: HostManagerDeps = {},
-): Promise<HostStartObservation> {
-  // macOS has no systemd user manager and launchd supervision is PR-3. A real
-  // public-managed start therefore uses the EXISTING detached process fallback
-  // directly, without probing or installing any user service. `deps.probe` is
-  // the test-only injection seam; an injected probe keeps exercising the
-  // Linux manager orchestration on any host and is not a production request.
-  if (process.platform === 'darwin' && deps.probe === undefined) {
-    return spawnHostCandidate(options)
-  }
-  const probe = await (deps.probe ?? probeUserManager)()
-  if (probe.kind === 'error') {
-    throw new LocalScopeError('HOST_MANAGER_ERROR', `managed Host: ${probe.reason}`)
-  }
-  if (probe.kind === 'absent') {
-    return spawnHostCandidate(options)
-  }
-  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
-  if (uid === undefined) throw new LocalScopeError('B1_PLATFORM_UNSUPPORTED', 'managed Host: the user id is unavailable')
+): Promise<ProfileHostUnitInstall> {
+  const uid = requireLinuxUid()
   const systemctl = deps.systemctl ?? runSystemctl
   const runtimeDir = selectRuntimeDir(uid)
-  const unitDir = (deps.unitDir ?? resolveUserUnitDir)(uid)
-  // The fixed plan path (<account-home>/.config/systemd/user) must be in the
-  // RUNNING manager's actual UnitPath. The manager's exported environment block
-  // is NOT that authority (set-environment can change it without changing the
-  // real search path), so query UnitPath and fail closed BEFORE writing when it
-  // cannot be read or does not contain the target. Test seams (deps) bypass this
-  // real-manager query.
-  if (deps.probe === undefined && deps.unitDir === undefined) {
-    const unitPathResult = await systemctl(['--user', '--no-pager', '--no-ask-password', 'show', '-p', 'UnitPath', '--value'], runtimeDir)
-    if (unitPathResult.kind !== 'exited' || unitPathResult.code !== 0) {
-      throw new LocalScopeError('HOST_MANAGER_ERROR', 'managed Host: the user manager unit search path could not be queried')
-    }
-    const unsupported = userUnitPathUnsupportedReason(unitPathResult.stdout, unitDir)
-    if (unsupported !== null) {
-      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `managed Host: the fixed user unit directory is not loadable by the manager (${unsupported})`)
+  const unitDir = deps.unitDir !== undefined ? deps.unitDir(uid) : userUnitDirPath()
+  // The manager gate runs BEFORE any user-directory write. Only a usable
+  // manager whose UnitPath covers the target may lead to creating missing
+  // components below the account home.
+  await assertUserManagerAvailable(runtimeDir, systemctl)
+  if (deps.unitDir === undefined) {
+    ensureOwnedUnitDir(accountHome())
+  } else {
+    try {
+      mkdirSync(unitDir, { recursive: true, mode: 0o700 })
+    } catch (error) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit directory is not accessible', error)
     }
   }
   const unitName = buildUnitName(options.profile, options.scope.scopeId)
-  let unit = inspectOwnedProfileUnit(options.scope, options.profile, uid, unitDir)
+  const content = renderUnitContent(collectUnitFacts(options))
+  let unit = inspectOwnedProfileUnit(options.scope, options.profile, unitDir)
   let created = false
   if (unit.kind === 'none') {
-    const facts = collectUnitFacts(options, uid)
-    created = installProfileUnit({ unitDir, unitName, content: renderUnitContent(facts) }).created
-    unit = inspectOwnedProfileUnit(options.scope, options.profile, uid, unitDir)
+    // A fresh file may otherwise SHADOW a same-named unit the manager already
+    // runs from a lower-priority path; refuse that before any write/reload.
+    await assertFreshUnitNameIsNotShadowed(unitName, unitDir, runtimeDir, systemctl)
+    created = installProfileUnit({ unitDir, unitName, content }).created
+    unit = inspectOwnedProfileUnit(options.scope, options.profile, unitDir)
   }
-  if (unit.kind !== 'owned' || unit.installBuild !== options.scope.buildId) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit belongs to another installed build or could not be confirmed')
+  if (unit.kind !== 'owned') {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the installed unit could not be confirmed')
   }
-  let state = await showUnit(unitName, runtimeDir, systemctl)
-  if (created || state.loadState === 'not-found') {
+  if (unit.installBuild !== options.scope.buildId) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the installed unit belongs to another installed build')
+  }
+  let reloaded = false
+  if (created) {
+    // A FRESH unit file must be reloaded BEFORE any manager attribution check:
+    // systemd can still cache an older definition (same or different
+    // FragmentPath) and LoadState=loaded would otherwise let `start` dispatch
+    // a stale ExecStart. Only the post-reload LoadState/FragmentPath owns the
+    // decision. A failed reload rolls the file we just created back so a retry
+    // is a fresh install again (it can never silently reuse the cached unit).
     const reload = await systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload'], runtimeDir)
     if (reload.kind !== 'exited' || reload.code !== 0) {
-      throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: systemctl daemon-reload failed after the unit install')
+      const reloadFailure = new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: systemctl daemon-reload failed after the unit install')
+      const rollbackFailure = rollbackFreshUnit(unit)
+      if (rollbackFailure !== undefined) {
+        throw new LocalScopeError(
+          'HOST_MANAGER_START_FAILED',
+          'managed Host: daemon-reload failed after the unit install and the freshly created unit could not be rolled back',
+          new AggregateError([reloadFailure, rollbackFailure]),
+        )
+      }
+      throw reloadFailure
     }
-    state = await waitForUnitLoaded(unitName, runtimeDir, systemctl)
+    reloaded = true
+    let state: Awaited<ReturnType<typeof waitForUnitLoaded>>
+    try {
+      state = await waitForUnitLoaded(unitName, runtimeDir, systemctl)
+    } catch (error) {
+      // The post-reload verification itself failed (timeout/spawn/nonzero):
+      // the committed state of this fresh file is unknown. Treat it exactly
+      // like the other unverified outcomes and roll this install's file back;
+      // an unreadable manager must not leave a poisoned unit behind.
+      const rollbackFailure = rollbackFreshUnit(unit)
+      if (rollbackFailure !== undefined) {
+        throw new LocalScopeError(
+          'HOST_MANAGER_START_FAILED',
+          'managed Host: the freshly installed unit could not be verified and could not be rolled back',
+          new AggregateError([error instanceof Error ? error : new Error(String(error)), rollbackFailure]),
+        )
+      }
+      throw error instanceof LocalScopeError
+        ? error
+        : new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: the freshly installed unit could not be verified after the reload', error)
+    }
+    if (state.loadState === 'not-found') {
+      // A reload the manager accepted but did not load leaves the fresh file
+      // owned-but-unloadable: every later start would refuse instead of using
+      // the basic daemon. Roll this install's own file back so the profile
+      // returns to the no-unit state (a foreign file is never touched).
+      const rollbackFailure = rollbackFreshUnit(unit)
+      if (rollbackFailure !== undefined) {
+        throw new LocalScopeError(
+          'HOST_MANAGER_START_FAILED',
+          'managed Host: the freshly installed unit is not loaded by the manager and could not be rolled back',
+          rollbackFailure,
+        )
+      }
+      throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: the freshly installed unit is not loadable by this user manager (its unit search path does not include the target directory)')
+    }
+    try {
+      assertUnitOwned(state, unit.resolvedPath)
+    } catch (error) {
+      // The manager loaded the name but not from our file: the fresh file is
+      // unverified, so remove exactly what this install created. The loaded
+      // definition itself is the manager's/foreign service's and is never
+      // modified here; a retry re-runs the fresh-install checks.
+      const rollbackFailure = rollbackFreshUnit(unit)
+      if (rollbackFailure !== undefined) {
+        throw new LocalScopeError(
+          'HOST_MANAGER_UNIT_CONFLICT',
+          'managed Host: the freshly installed unit was not adopted by the manager and could not be rolled back',
+          new AggregateError([error instanceof Error ? error : new Error(String(error)), rollbackFailure]),
+        )
+      }
+      throw error instanceof LocalScopeError ? error : new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the freshly installed unit was not adopted by the manager', error)
+    }
+  } else {
+    const loaded = await queryOwnedProfileUnit(unit, runtimeDir, systemctl)
+    if (loaded.loadState === 'not-found') {
+      const reload = await systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload'], runtimeDir)
+      if (reload.kind !== 'exited' || reload.code !== 0) {
+        throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: systemctl daemon-reload failed after the unit install')
+      }
+      reloaded = true
+      const state = await waitForUnitLoaded(unitName, runtimeDir, systemctl)
+      if (state.loadState === 'not-found') {
+        throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: the installed unit is not loaded by the manager')
+      }
+      assertUnitOwned(state, unit.resolvedPath)
+    }
   }
-  assertUnitOwned(state, unit.resolvedPath)
-  assertUnitFileIdentity(unit, uid)
-  const start = await systemctl(['--user', '--no-pager', '--no-ask-password', 'start', unitName], runtimeDir)
+  assertUnitFileIdentity(unit)
+  return { unitName, unitPath: unit.filePath, created, reloaded }
+}
+
+/**
+ * Remove only the unit file THIS install just created, after a failed load
+ * request. A changed identity is left alone (the user won the race).
+ */
+function rollbackFreshUnit(unit: OwnedProfileUnit): Error | undefined {
+  try {
+    assertUnitFileIdentity(unit)
+    unlinkSync(unit.filePath)
+    return undefined
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error))
+  }
+}
+
+/**
+ * Start the public daemon Host candidate. The ONE decision input is the
+ * installed unit fact: no unit means the basic detached Host immediately, with
+ * no user-manager probe and no systemctl call; an installed unit must be loaded
+ * by the real manager with a matching FragmentPath and this installed build,
+ * and is then started through exactly one `systemctl --user start`. A manager
+ * failure or unit conflict is thrown and NEVER degrades to a detached process.
+ */
+export async function startPublicHostCandidate(
+  options: HostStartOptions,
+  deps: HostManagerDeps = {},
+): Promise<HostStartObservation> {
+  const uid = requireLinuxUid()
+  const unitDir = deps.unitDir !== undefined ? deps.unitDir(uid) : inspectExistingUserUnitDir()
+  if (unitDir === undefined) return spawnHostCandidate(options)
+  const unit = inspectOwnedProfileUnit(options.scope, options.profile, unitDir)
+  if (unit.kind === 'none') return spawnHostCandidate(options)
+  if (unit.installBuild !== options.scope.buildId) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the installed unit belongs to another installed build')
+  }
+  const systemctl = deps.systemctl ?? runSystemctl
+  const runtimeDir = selectRuntimeDir(uid)
+  const state = await queryOwnedProfileUnit(unit, runtimeDir, systemctl)
+  if (state.loadState === 'not-found') {
+    throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: the installed unit is not loaded by the manager')
+  }
+  assertUnitFileIdentity(unit)
+  const start = await systemctl(['--user', '--no-pager', '--no-ask-password', 'start', unit.unitName], runtimeDir)
   if (start.kind !== 'exited' || start.code !== 0) {
     throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: systemctl could not start the unit')
   }
@@ -1116,28 +1171,48 @@ export async function startManagedHostCandidate(
 }
 
 /**
- * Start one Host candidate as a detached OS process. This is the EXACT
- * pre-existing fallback moved here unchanged: a private 0600 `host.log`, the
- * validated Node/Host entry, `cwd` the canonical profile, detach/unref, and the
- * role/extra-patch markers cleared. It is used for the strict `absent` manager
- * probe and for the legacy internal qualification/peer/manual paths; it has no
- * periodic auto-restart (that is systemd-only) and never claims one.
+ * Compatibility entry for the managed public-start policy. macOS has no systemd
+ * user manager and launchd supervision is out of scope, so the real Darwin path
+ * keeps using the existing detached fallback without probing or installing any
+ * user service. On Linux it follows the D0 public policy: the installed-unit
+ * fact decides between the basic detached daemon and the verified systemd unit;
+ * an explicit `daemon install` is the only install path.
+ */
+export async function startManagedHostCandidate(
+  options: HostStartOptions,
+  deps: HostManagerDeps = {},
+): Promise<HostStartObservation> {
+  if (process.platform === 'darwin') return spawnHostCandidate(options)
+  return startPublicHostCandidate(options, deps)
+}
+
+/**
+ * Start one Host candidate as a detached OS process: the default basic daemon
+ * whenever no profile unit is installed, and the internal qualification/peer/
+ * manual path. It opens/creates the scope `host.log` (a NEW file is 0600; an
+ * existing user-owned log is appended to as-is and never chmodded), validates
+ * the installed Node/Host entry by its canonical regular-file target, runs with
+ * the canonical profile as cwd, detaches/unrefs and never claims a periodic
+ * auto-restart (that is systemd-only).
  */
 export function spawnHostCandidate(options: HostStartOptions): HostStartObservation {
-  let info
+  if (!isAbsolute(options.hostEntryPath)) {
+    throw new LocalScopeError('HOST_START_FAILED', 'managed Host: the installed Host entry path must be absolute')
+  }
+  let realEntry: string
   try {
-    info = lstatSync(options.hostEntryPath)
+    realEntry = realpathSync(options.hostEntryPath)
   } catch (error) {
     throw new LocalScopeError('HOST_START_FAILED', 'managed Host: the installed Host entry is not readable', error)
   }
-  if (info.isSymbolicLink() || !info.isFile() || info.uid !== process.getuid?.()) {
-    throw new LocalScopeError('HOST_START_FAILED', 'managed Host: the installed Host entry must be a regular file owned by this uid')
+  if (!lstatSync(realEntry).isFile()) {
+    throw new LocalScopeError('HOST_START_FAILED', 'managed Host: the installed Host entry must be a regular file')
   }
+  assertEntrySelfLocation(options.hostEntryPath, 'HOST_START_FAILED', 'installed Host entry')
   const logPath = join(options.scope.dir, 'host.log')
   let fd: number | undefined
   try {
     fd = openSync(logPath, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW, 0o600)
-    fchmodSync(fd, 0o600)
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       SPLIT_PROCESS_DSH_ANCHOR: options.dshAnchor,

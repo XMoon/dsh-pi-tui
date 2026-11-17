@@ -303,7 +303,7 @@ test('the run directory is 0700 and registry/launch files are 0600', t => {
   }
 })
 
-test('an unsafe registry/launch permission is rejected', t => {
+test('existing registry/launch modes are not part of the read policy while new writes stay private', t => {
   const value = fixture(t)
   try {
     const scope = scopeFor(value)
@@ -314,22 +314,22 @@ test('an unsafe registry/launch permission is rejected', t => {
       instanceId: record.instanceId,
       connectUrl: `${record.origin}/connect?token=fixture-token`,
     })
+    // A user-chosen mode on an EXISTING managed file is not a product policy:
+    // the records stay readable while the real JSON/schema/instance checks run.
     chmodSync(join(scope.dir, 'instance.json'), 0o644)
-    assert.throws(
-      () => readLocalRecord(scope),
-      (error: unknown) => error instanceof LocalScopeError && error.code === 'LOCAL_FILE_UNSAFE',
-    )
     chmodSync(join(scope.dir, 'launch.json'), 0o644)
-    assert.throws(
-      () => readLaunchMaterial(scope, record),
-      (error: unknown) => error instanceof LocalScopeError && error.code === 'LOCAL_FILE_UNSAFE',
-    )
+    assert.deepEqual(readLocalRecord(scope), record)
+    assert.equal(readLaunchMaterial(scope, record).instanceId, record.instanceId)
+    // A NEW write still creates a private 0600 file at the private 0700 scope.
+    writeLocalRecord(scope, record)
+    assert.equal(lstatSync(join(scope.dir, 'instance.json')).mode & 0o777, 0o600)
+    assert.equal(lstatSync(join(scope.dir, 'launch.json')).mode & 0o777, 0o644, 'an existing user mode is never chmodded')
   } finally {
     cleanup(value.root)
   }
 })
 
-test('a symlinked registry or scope directory is rejected without changing permissions', t => {
+test('a final registry symlink is rejected while a symlinked run chain is accepted', t => {
   const value = fixture(t)
   try {
     const scope = scopeFor(value)
@@ -340,6 +340,7 @@ test('a symlinked registry or scope directory is rejected without changing permi
     const registry = join(scope.dir, 'instance.json')
     rmSync(registry)
     symlinkSync(target, registry)
+    // The internal managed file never follows its FINAL symlink.
     assert.throws(
       () => readLocalRecord(scope),
       (error: unknown) => error instanceof LocalScopeError && error.code === 'LOCAL_FILE_UNSAFE',
@@ -350,11 +351,11 @@ test('a symlinked registry or scope directory is rejected without changing permi
       const outside = join(symlinked.root, 'outside-run')
       mkdirSync(outside, { recursive: true, mode: 0o700 })
       symlinkSync(outside, join(symlinked.home, 'run'))
-      assert.throws(
-        () => scopeFor(symlinked),
-        (error: unknown) => error instanceof LocalScopeError && error.code === 'SCOPE_DIRECTORY_UNSAFE',
-      )
-      assert.deepEqual(readdirSync(outside), [], 'the rejected symlinked run directory must not be written through')
+      // A legal symlink in the user's existing layout is followed; the private
+      // scope directory is created through it.
+      const linkedScope = scopeFor(symlinked)
+      assert.equal(existsSync(join(outside, 'dsh-pi-tui', linkedScope.scopeId)), true)
+      assert.equal(lstatSync(linkedScope.dir).mode & 0o777, 0o700)
     } finally {
       cleanup(symlinked.root)
     }
@@ -395,6 +396,57 @@ test('the installed-build fingerprint changes with payload, bundle version and D
     const bundleChanged = computeBuildId(value.packageRoot, '0.2.1-rc.4')
     assert.notEqual(bundleChanged, fileAdded)
     assert.notEqual(computeBuildId(value.packageRoot, '0.2.1-rc.5'), bundleChanged)
+  } finally {
+    cleanup(value.root)
+  }
+})
+
+test('the installed-build fingerprint follows shared-store dist and .mjs symlinks', t => {
+  const value = fixture(t)
+  try {
+    const plain = computeBuildId(value.packageRoot, '0.2.1-rc.4')
+    const dist = join(value.packageRoot, 'dist')
+    const realDist = join(value.root, 'dist-real')
+    rmSync(dist, { recursive: true })
+    mkdirSync(realDist, { recursive: true })
+    writeFileSync(join(realDist, 'index.mjs'), 'export const value = 1\n')
+    symlinkSync(realDist, dist)
+    assert.equal(computeBuildId(value.packageRoot, '0.2.1-rc.4'), plain, 'an identical dist symlink keeps the same build identity')
+
+    // A symlinked .mjs contributes the SAME relative path + actual target bytes.
+    const shared = join(value.root, 'shared-module.mjs')
+    writeFileSync(shared, 'export const shared = 1\n')
+    symlinkSync(shared, join(dist, 'shared.mjs'))
+    const withLink = computeBuildId(value.packageRoot, '0.2.1-rc.4')
+    const twin = fixture(t)
+    try {
+      writeFileSync(join(twin.packageRoot, 'dist', 'shared.mjs'), 'export const shared = 1\n')
+      assert.equal(withLink, computeBuildId(twin.packageRoot, '0.2.1-rc.4'), 'a symlink and a regular file with the same bytes must fingerprint identically')
+    } finally {
+      cleanup(twin.root)
+    }
+    writeFileSync(shared, 'export const shared = 2\n')
+    assert.notEqual(computeBuildId(value.packageRoot, '0.2.1-rc.4'), withLink, 'the target bytes are part of the build identity')
+  } finally {
+    cleanup(value.root)
+  }
+})
+
+test('the installed-build fingerprint refuses dangling and cyclic symlinks instead of skipping them', t => {
+  const value = fixture(t)
+  try {
+    const dist = join(value.packageRoot, 'dist')
+    symlinkSync(join(value.root, 'missing-target.mjs'), join(dist, 'dangling.mjs'))
+    assert.throws(
+      () => computeBuildId(value.packageRoot, '0.2.1-rc.4'),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'SCOPE_DIRECTORY_UNSAFE',
+    )
+    rmSync(join(dist, 'dangling.mjs'))
+    symlinkSync(dist, join(dist, 'loop'))
+    assert.throws(
+      () => computeBuildId(value.packageRoot, '0.2.1-rc.4'),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'SCOPE_DIRECTORY_UNSAFE',
+    )
   } finally {
     cleanup(value.root)
   }
@@ -516,27 +568,54 @@ test('registry token injection, wrong origin and a launch naming another instanc
   }
 })
 
-test('an existing group/other-accessible run chain is rejected without creating a child', t => {
+test('an existing 0755/0775 run chain is accepted without chmodding and new components are 0700', t => {
   const value = fixture(t)
   try {
     const runRoot = join(value.home, 'run')
-    mkdirSync(runRoot, { mode: 0o700 })
+    mkdirSync(runRoot, { mode: 0o755 })
     chmodSync(runRoot, 0o755)
-    assert.throws(
-      () => scopeFor(value),
-      (error: unknown) => error instanceof LocalScopeError && error.code === 'SCOPE_DIRECTORY_UNSAFE',
-    )
-    assert.equal(existsSync(join(runRoot, 'dsh-pi-tui')), false, 'a permissive run directory must not receive B1 children')
+    const scope = scopeFor(value)
+    assert.equal(lstatSync(runRoot).mode & 0o777, 0o755, 'existing user directory modes are never rewritten')
+    assert.equal(lstatSync(join(runRoot, 'dsh-pi-tui')).mode & 0o777, 0o700, 'a new scope root is private')
+    assert.equal(lstatSync(scope.dir).mode & 0o777, 0o700, 'a new scope directory is private')
 
-    chmodSync(runRoot, 0o700)
-    const scopeRoot = join(runRoot, 'dsh-pi-tui')
-    mkdirSync(scopeRoot, { mode: 0o700 })
-    chmodSync(scopeRoot, 0o755)
-    assert.throws(
-      () => scopeFor(value),
-      (error: unknown) => error instanceof LocalScopeError && error.code === 'SCOPE_DIRECTORY_UNSAFE',
-    )
-    assert.equal(readdirSync(scopeRoot).length, 0, 'a permissive scope root must not receive B1 children')
+    const second = fixture(t)
+    try {
+      const secondRun = join(second.home, 'run')
+      mkdirSync(secondRun, { mode: 0o775 })
+      chmodSync(secondRun, 0o775)
+      const scopeRoot = join(secondRun, 'dsh-pi-tui')
+      mkdirSync(scopeRoot, { mode: 0o775 })
+      chmodSync(scopeRoot, 0o775)
+      const value2 = scopeFor(second)
+      assert.equal(lstatSync(scopeRoot).mode & 0o777, 0o775)
+      assert.equal(lstatSync(value2.dir).mode & 0o777, 0o700)
+    } finally {
+      cleanup(second.root)
+    }
+  } finally {
+    cleanup(value.root)
+  }
+})
+
+test('an official DSH home outside the current uid is accepted for read-only inspection', t => {
+  const rootInfo = lstatSync('/tmp')
+  if (rootInfo.uid === process.getuid?.()) {
+    t.skip('no root-owned system directory is available')
+    return
+  }
+  const value = fixture(t)
+  try {
+    // The read-only inspection judges accessibility/type, not ownership: a
+    // root-owned official DSH home (a system install layout) is a legal input.
+    const inspected = inspectInstalledProfileScope({
+      dshHome: '/tmp',
+      profileDir: value.profile,
+      packageRoot: value.packageRoot,
+      dshVersion: '0.2.1-rc.4',
+    })
+    assert.equal(inspected.dshHome, realpathSync('/tmp'))
+    assert.equal(existsSync(join(inspected.dir)), false, 'read-only inspection must create nothing')
   } finally {
     cleanup(value.root)
   }

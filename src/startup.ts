@@ -334,7 +334,7 @@ export type PublicBackend = 'direct' | 'daemon'
 const BACKEND_ENV = 'DSH_PI_TUI_BACKEND'
 
 /** The public daemon management verbs (M6-2C). */
-export type DaemonControlVerb = 'status' | 'start' | 'stop' | 'restart' | 'logs' | 'uninstall'
+export type DaemonControlVerb = 'status' | 'start' | 'stop' | 'restart' | 'logs' | 'install' | 'uninstall'
 
 /** One immutable daemon management intent parsed by the nested CLI grammar. */
 export interface DaemonControlIntent {
@@ -533,7 +533,7 @@ function tuiCommand(ctx: Context): Command {
   // never changes backend selection and never opens the TUI/Client.
   const daemon = withUsageExitCode(program.command('daemon').description('Manage the local daemon Host for this profile.'))
   daemon.action(() => {
-    daemon.error('error: a daemon command is required (status, start, stop, restart, logs or uninstall)')
+    daemon.error('error: a daemon command is required (status, start, stop, restart, logs, install or uninstall)')
   })
   const addControlVerb = (
     name: DaemonControlVerb,
@@ -565,10 +565,11 @@ function tuiCommand(ctx: Context): Command {
   addControlVerb('start', 'start the profile Host and wait until it is authenticated')
   addControlVerb('stop', 'stop this profile Host through its verified supervision owner')
   addControlVerb('restart', 'stop the profile Host, confirm its exit, then start a new instance')
-  addControlVerb('logs', 'show the managed unit journal or the strict-absence Host log', command => {
+  addControlVerb('logs', 'show the current Host log source journal or the scope host.log', command => {
     command.option('--lines <count>', 'number of log lines to show (1-1000, default 100)')
   })
-  addControlVerb('uninstall', 'stop and remove only this profile managed unit')
+  addControlVerb('install', 'install this profile systemd user unit without starting it')
+  addControlVerb('uninstall', 'remove only this profile managed unit')
   daemon.addHelpText('after', `
 Examples:
   dsh --profile pi-tui daemon status
@@ -576,6 +577,7 @@ Examples:
   dsh --profile pi-tui daemon stop
   dsh --profile pi-tui daemon restart
   dsh --profile pi-tui daemon logs --lines 200
+  dsh --profile pi-tui daemon install
   dsh --profile pi-tui daemon uninstall
 `)
 
