@@ -1,9 +1,11 @@
 /**
  * Local submit acknowledgement (plan D): the TUI's own, immediate
- * "Submitting…" / "Queued…" feedback between the editor clearing and the
- * FIRST authoritative DSH event. The submission pipeline has a real
- * no-feedback window (session create, image admission, the host pre-step
- * before `user/message`); this local state covers it — a lightweight
+ * "Submitting…" / "Queued…" feedback between the submit gesture and the
+ * FIRST authoritative DSH event. (Since PR2 an ordinary prompt's draft stays
+ * in the held composer until Host acceptance clears it; this row remains the
+ * separate status-only signal for that window.) The submission pipeline has
+ * a real no-feedback window (session create, image admission, the host
+ * pre-step before `user/message`); this local state covers it — a lightweight
  * status only, never a synthetic transcript row.
  *
  * State machine:
@@ -58,11 +60,6 @@ export interface SubmitAckState {
 /** Fresh idle state (epoch starts at 0; the first accept mints epoch 1). */
 export function freshSubmitAckState(): SubmitAckState {
   return { epoch: 0, detail: undefined, acceptedAt: undefined }
-}
-
-/** Whether a pending state is alive (the working row shows its label). */
-export function submitAckPending(state: SubmitAckState): boolean {
-  return state.detail !== undefined
 }
 
 /**

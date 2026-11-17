@@ -1,7 +1,7 @@
 /**
  * Client-local pending-submission ledger (D2.1 follow-up): the presentation
- * half of the official Client's `pendingSubmissions`. Between the editor
- * clearing and the Host inbox acceptance (or the durable `user/message`), a
+ * half of the official Client's `pendingSubmissions`. Between the submit
+ * gesture and the Host inbox acceptance (or the durable `user/message`), a
  * submission has no authoritative representation anywhere; this ledger holds a
  * lightweight, insertion-ordered echo per human submission so the accepted
  * content is never visually silent — most visibly on a running steer during a
@@ -232,13 +232,6 @@ export class PendingSubmissions {
       return this.observeInboxSplice(subject, input.event.seq, input.event.data)
     }
     return this.retireClaimed(subject, input.event.seq)
-  }
-
-  /** Drop echoes that do not belong to the current session/generation. */
-  clearForSubject(sessionId: string | undefined, generation: number): void {
-    this.records = this.records.filter(
-      record => record.sessionId === sessionId && record.generation === generation,
-    )
   }
 
   /** Drop every echo (session switch / surface teardown). */
