@@ -38,8 +38,7 @@
 
 import { spawn } from 'node:child_process'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { run } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -47,6 +46,7 @@ import { fileURLToPath } from 'node:url'
 import { resolveLane } from './test-discovery.mjs'
 import { LANES } from './test-lanes.mjs'
 import { groupStillAlive, stopOwnedGroup } from './lib/owned-process-group.mjs'
+import { createTestTempRoot } from './lib/test-temp-root.mjs'
 
 const ROOT = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), '..'))
 const TEST_ROOT = join(ROOT, 'test')
@@ -227,10 +227,9 @@ function main() {
   }
   // No discovered file path is passed through argv. The child resolves the
   // lane inside its own process and calls node:test.run({ files, shard }).
-  // realpath immediately: on macOS `os.tmpdir()` returns the `/var`
-  // alias of `/private/var`, and every path the child observes (TMPDIR, cwd,
-  // markers) must describe the SAME directory object, not two spellings of it.
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-pi-tui-test-run-')))
+  // Keep the runner's temp root outside the checkout, even when its ambient
+  // TMPDIR is checkout-local. The chosen path is canonical on macOS too.
+  const root = createTestTempRoot(ROOT)
   const keep = process.env.DSH_TEST_KEEP_TMP === '1'
   const spawnArgs = [fileURLToPath(import.meta.url), '--lane-child', laneName, ...args]
 

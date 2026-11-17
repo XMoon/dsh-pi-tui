@@ -42,12 +42,13 @@
  * Set DSH_TEST_KEEP_TMP=1 to keep (and print) the run root for debugging.
  */
 import { spawn } from 'node:child_process'
-import { existsSync, globSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, globSync, realpathSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { groupStillAlive, stopOwnedGroup } from './lib/owned-process-group.mjs'
+import { createTestTempRoot } from './lib/test-temp-root.mjs'
 
+const ROOT = realpathSync(fileURLToPath(new URL('../', import.meta.url)))
 const usage = 'usage: node scripts/run-with-temp-root.mjs <command> [args...]'
 
 const GLOB_METACHARACTERS = /[*?[\]{}]/u
@@ -116,10 +117,9 @@ function main() {
     process.exit(2)
   }
 
-  // realpath immediately: on macOS `os.tmpdir()` returns the `/var`
-  // alias of `/private/var`, and every path the child observes (TMPDIR, cwd,
-  // markers) must describe the SAME directory object, not two spellings of it.
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-pi-tui-test-run-')))
+  // Keep the runner's temp root outside the checkout, even when its ambient
+  // TMPDIR is checkout-local. The chosen path is canonical on macOS too.
+  const root = createTestTempRoot(ROOT)
   const keep = process.env.DSH_TEST_KEEP_TMP === '1'
   // POSIX only: the direct child leads its own process group, which is what a
   // forwarded signal can address as a TREE. Windows has no group id, so it
