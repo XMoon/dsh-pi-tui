@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs'
 import { getEventListeners } from 'node:events'
 import { join } from 'node:path'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { FooterCommandRunner, KILL_GRACE_MS } from '../../src/tui/footer/command-runner.ts'
+import { FooterCommandRunner, KILL_GRACE_MS, type LeaderIdentity } from '../../src/tui/footer/command-runner.ts'
 import type { FooterCommandConfig } from '../../src/domain/footer/command-config.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { emptyStatusSnapshot } from '../../src/domain/status/types.ts'
@@ -52,6 +52,45 @@ function runOnce(config: FooterCommandConfig, script: string): Promise<string[] 
     runner.requestRefresh()
   })
 }
+
+/** Whether `pid` currently exists (kill(pid, 0) does not throw ESRCH). */
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Bounded poll for a pid marker the child writes before it traps TERM. */
+async function waitForPid(file: string, deadlineMs = 3000): Promise<number> {
+  const deadline = Date.now() + deadlineMs
+  while (Date.now() < deadline) {
+    try {
+      const pid = Number.parseInt(readFileSync(file, 'utf8').trim(), 10)
+      if (pid > 0) return pid
+    } catch {
+      // Not written yet.
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error(`pid marker ${file} was not written`)
+}
+
+/** Wait until the pid is gone, or report that it survived the deadline. */
+async function waitForDeath(pid: number, deadlineMs: number): Promise<boolean> {
+  const deadline = Date.now() + deadlineMs
+  while (Date.now() < deadline) {
+    if (!processExists(pid)) return true
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  return !processExists(pid)
+}
+
+/** The escalation grace plus a margin: after this the runner has either sent
+ * SIGKILL or refused and reported the unproven group. */
+const ESCALATION_WINDOW_MS = KILL_GRACE_MS + 1500
 
 test('success: the sanitized rows reach the output sink', async () => {
   // Generous timeout: the test proves OUTPUT semantics, never the
@@ -166,15 +205,18 @@ test('a NUL byte in the command degrades to the fallback — requestRefresh neve
   }
 })
 
-test('a TERM-resistant child is HARD-killed after the grace period (no detached orphan)', async (t) => {
-  // The child traps TERM and would run forever: a plain SIGTERM (the old
-  // killChild) leaves it running as a detached orphan — the runner must
-  // escalate to SIGKILL within KILL_GRACE_MS. The child records its own
-  // pid (the detached group leader) so the test can PROVE the process is
-  // actually gone — this assertion fails against the old implementation.
+test('a TERM-resistant child is only SIGKILLed on evidence of ownership (never a bare pgid)', async (t) => {
+  // The child traps TERM and would run forever. The escalation is authorized
+  // ONLY by a re-verified kernel identity: Linux reads the leader's
+  // starttime+ppid; a platform without a verifiable identity (`/proc` is
+  // absent on macOS before the native reader) must NOT send SIGKILL to the
+  // numeric pgid — it reports the unproven group instead of claiming a clean
+  // teardown. The child records its own pid (the detached group leader) so the
+  // test can PROVE which outcome actually happened.
   const life = testLifecycle(t)
   const dir = life.tempDir('footer-kill-')
   const marker = join(dir, 'child.pid')
+  const notifications: string[] = []
   const rows = await new Promise<string[] | undefined>((resolve) => {
     const runner = new FooterCommandRunner({
       config: {
@@ -189,37 +231,29 @@ test('a TERM-resistant child is HARD-killed after the grace period (no detached 
         runner.dispose()
         resolve(out)
       },
+      onNotifyOnce: (message) => { notifications.push(message) },
       signal: new AbortController().signal,
     })
     runner.requestRefresh()
   })
   assert.equal(rows, undefined, 'the timeout must fall back to the native surface')
-  // Read the child pid (bounded poll — the spawn is async).
-  let pid = -1
-  const readDeadline = Date.now() + 3000
-  while (pid < 0 && Date.now() < readDeadline) {
-    try {
-      pid = Number.parseInt(readFileSync(marker, 'utf8').trim(), 10)
-    } catch {
-      // Not written yet.
-    }
-    if (pid < 0) await new Promise(resolve => setTimeout(resolve, 10))
+  const pid = await waitForPid(marker)
+  if (process.platform === 'linux') {
+    // Linux has the kernel identity: the re-verified leader authorizes the
+    // group escalation and the TERM-resistant child actually dies.
+    assert.ok(await waitForDeath(pid, ESCALATION_WINDOW_MS),
+      `the TERM-resistant child must be hard-killed on Linux (pid ${pid} still alive)`)
+    return
   }
-  assert.ok(pid > 0, 'the child must have written its pid')
-  // The process must be ACTUALLY dead within the grace + a margin:
-  // kill(pid, 0) throws ESRCH once the process is reaped. A TERM-only
-  // kill would leave it alive forever (it traps TERM).
-  const deadDeadline = Date.now() + KILL_GRACE_MS + 3000
-  let dead = false
-  while (!dead && Date.now() < deadDeadline) {
-    try {
-      process.kill(pid, 0)
-      await new Promise(resolve => setTimeout(resolve, 20))
-    } catch {
-      dead = true
-    }
-  }
-  assert.ok(dead, `the TERM-resistant child must be hard-killed (no orphan), pid ${pid} still alive`)
+  // No verifiable identity on this platform: the escalation is refused, the
+  // survivor is reported, and no group signal was sent.
+  await new Promise(resolve => setTimeout(resolve, ESCALATION_WINDOW_MS))
+  assert.ok(processExists(pid), `no SIGKILL may be sent without ownership proof (pid ${pid})`)
+  assert.ok(notifications.some(message => message.includes('could not be proven')),
+    `the unproven group must be reported once: ${JSON.stringify(notifications)}`)
+  // Test-owned cleanup of the process this test deliberately left running.
+  try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+  await waitForDeath(pid, 3000)
 })
 
 test('repeated TERM-resistant children are each hard-killed (the termination ledger cleans up between cycles)', async (t) => {
@@ -273,35 +307,40 @@ test('repeated TERM-resistant children are each hard-killed (the termination led
   await runCycle()
   const firstPid = pid
   await runCycle()
-  // Both children must actually be dead (a fresh kill(pid, 0) proves the
-  // second cycle's escalation ran; the first pid proves the ledger never
-  // suppressed a later kill).
-  const deadDeadline = Date.now() + KILL_GRACE_MS + 3000
-  for (const victim of [firstPid, pid]) {
-    let dead = false
-    while (!dead && Date.now() < deadDeadline) {
-      try {
-        process.kill(victim, 0)
-        await new Promise(resolve => setTimeout(resolve, 20))
-      } catch {
-        dead = true
-      }
+  // The TERM-resistant leader is alive at escalation time, so Linux re-verifies
+  // its identity and hard-kills it. A platform WITHOUT a kernel identity reader
+  // (macOS, until the shared native-process reader lands) must refuse the
+  // escalation and report it; the test then owns the cleanup of both children.
+  // Either way the ledger must not suppress the SECOND cycle's escalation.
+  if (process.platform === 'linux') {
+    for (const victim of [firstPid, pid]) {
+      assert.ok(await waitForDeath(victim, KILL_GRACE_MS + 3000),
+        `cycle child pid ${victim} must be hard-killed (no orphan, no ledger leak)`)
     }
-    assert.ok(dead, `cycle child pid ${victim} must be hard-killed (no orphan, no ledger leak)`)
+    return
+  }
+  await new Promise(resolve => setTimeout(resolve, ESCALATION_WINDOW_MS))
+  for (const victim of [firstPid, pid]) {
+    assert.ok(processExists(victim),
+      `without identity proof the escalation must be refused (pid ${victim})`)
+    try { process.kill(victim, 'SIGKILL') } catch { /* already gone */ }
+    assert.ok(await waitForDeath(victim, 3000), `test-owned cleanup must stop pid ${victim}`)
   }
 })
 
-test('a TERM-resistant DESCENDANT is hard-killed even when the group LEADER exits on TERM (group-scoped escalation)', async (t) => {
-  // The review's P1b scenario: the command starts a BACKGROUND descendant
-  // that traps TERM and redirects its stdio; the OUTER shell (the group
-  // leader) receives TERM and exits NORMALLY — Node's 'close' fires — but
-  // the descendant keeps the process group alive. A leader-bound
-  // escalation would be cancelled by that close and leak the descendant;
-  // the escalation must probe the WHOLE GROUP.
+test('a TERM-resistant DESCENDANT survives the leader exit: without a member witness the group is never SIGKILLed', async (t) => {
+  // The command starts a BACKGROUND descendant that traps TERM; the OUTER shell
+  // (the group leader) receives TERM and exits NORMALLY. The leader is then
+  // reaped, so its numeric pid/pgid proves nothing, and this runner has not
+  // captured a member witness yet: the group MUST NOT receive SIGKILL. The
+  // survivor is reported as an unproven group (NOT_QUIESCED), never as a clean
+  // teardown. The witness-backed escalation is restored by the shared
+  // native-process identity reader in a later commit.
   const life = testLifecycle(t)
   const dir = life.tempDir('footer-desc-')
   const leaderMarker = join(dir, 'leader.pid')
   const descendantMarker = join(dir, 'descendant.pid')
+  const notifications: string[] = []
   const rows = await new Promise<string[] | undefined>((resolve) => {
     const runner = new FooterCommandRunner({
       config: {
@@ -316,44 +355,145 @@ test('a TERM-resistant DESCENDANT is hard-killed even when the group LEADER exit
         runner.dispose()
         resolve(out)
       },
+      onNotifyOnce: (message) => { notifications.push(message) },
       signal: new AbortController().signal,
     })
     runner.requestRefresh()
   })
   assert.equal(rows, undefined, 'the timeout must fall back')
-  const readPid = async (file: string): Promise<number> => {
-    const deadline = Date.now() + 3000
-    let pid = -1
-    while (pid < 0 && Date.now() < deadline) {
-      try {
-        pid = Number.parseInt(readFileSync(file, 'utf8').trim(), 10)
-      } catch {
-        // Not written yet.
-      }
-      if (pid < 0) await new Promise(resolve => setTimeout(resolve, 10))
-    }
-    assert.ok(pid > 0, `pid marker ${file} must be written`)
-    return pid
-  }
-  const leader = await readPid(leaderMarker)
-  const descendant = await readPid(descendantMarker)
-  // BOTH must actually be dead: the leader on TERM, the TERM-resistant
-  // descendant via the group-scoped SIGKILL at the grace. With the old
-  // leader-bound escalation the descendant survives forever and this
-  // assertion fails.
-  const deadDeadline = Date.now() + KILL_GRACE_MS + 3000
+  const leader = await waitForPid(leaderMarker)
+  const descendant = await waitForPid(descendantMarker)
+  await new Promise(resolve => setTimeout(resolve, ESCALATION_WINDOW_MS))
+  assert.ok(notifications.some(message => message.includes('could not be proven')),
+    `the unproven group must be reported once: ${JSON.stringify(notifications)}`)
+  assert.ok(processExists(descendant),
+    `a TERM-resistant descendant must never be SIGKILLed without a member witness: leader=${leader} descendant=${descendant}`)
+  // Test-owned cleanup of the processes this test deliberately left running.
   for (const victim of [leader, descendant]) {
-    let dead = false
-    while (!dead && Date.now() < deadDeadline) {
-      try {
-        process.kill(victim, 0)
-        await new Promise(resolve => setTimeout(resolve, 20))
-      } catch {
-        dead = true
-      }
-    }
-    assert.ok(dead, `pid ${victim} must be dead (no descendant orphan): leader=${leader} descendant=${descendant}`)
+    try { process.kill(victim, 'SIGKILL') } catch { /* already gone */ }
   }
+  for (const victim of [leader, descendant]) {
+    assert.ok(await waitForDeath(victim, 3000), `test-owned cleanup must stop pid ${victim}`)
+  }
+})
+
+test('a reused pgid (different starttime) is never escalated', async (t) => {
+  // The identity captured at TERM time is OUR leader; the read at escalation
+  // time proves a DIFFERENT process now occupies the numeric pgid. A real pid
+  // reuse cannot be manufactured deterministically, so the reader is injected;
+  // the survivor is the real TERM-resistant process the escalation must leave
+  // alone. `kill(-pgid, SIGKILL)` would end it immediately.
+  const life = testLifecycle(t)
+  const dir = life.tempDir('footer-reused-')
+  const marker = join(dir, 'child.pid')
+  const notifications: string[] = []
+  const reads: Array<LeaderIdentity | undefined> = [
+    { starttime: 'ours', ppid: process.pid },
+    { starttime: 'theirs', ppid: process.pid },
+  ]
+  let readIndex = 0
+  const rows = await new Promise<string[] | undefined>((resolve) => {
+    const runner = new FooterCommandRunner({
+      config: { ...CONFIG, timeoutMs: 150, command: `trap "" TERM; echo $$ > ${marker}; while :; do sleep 1; done` },
+      snapshot: () => emptyStatusSnapshot(),
+      width: () => 100,
+      height: () => 30,
+      readLeaderIdentity: () => reads[Math.min(readIndex++, reads.length - 1)],
+      onOutput: (out) => {
+        runner.dispose()
+        resolve(out)
+      },
+      onNotifyOnce: (message) => { notifications.push(message) },
+      signal: new AbortController().signal,
+    })
+    runner.requestRefresh()
+  })
+  assert.equal(rows, undefined, 'the timeout must fall back')
+  const pid = await waitForPid(marker)
+  await new Promise(resolve => setTimeout(resolve, ESCALATION_WINDOW_MS))
+  assert.ok(processExists(pid), `a reused pgid must never receive SIGKILL (pid ${pid})`)
+  assert.ok(notifications.some(message => message.includes('could not be proven')),
+    `the reused pgid refusal must be reported: ${JSON.stringify(notifications)}`)
+  try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+  await waitForDeath(pid, 3000)
+})
+
+test('a same-starttime stranger with a different parent is never escalated', async (t) => {
+  // Jiffy-granularity starttime collisions are theoretically possible: the
+  // leader must ALSO carry this runner's own ppid while it exists. A stranger
+  // with the same starttime but another parent is not our group.
+  const life = testLifecycle(t)
+  const dir = life.tempDir('footer-ppid-')
+  const marker = join(dir, 'child.pid')
+  const notifications: string[] = []
+  const reads: Array<LeaderIdentity | undefined> = [
+    { starttime: 'same', ppid: process.pid },
+    { starttime: 'same', ppid: process.pid + 1 },
+  ]
+  let readIndex = 0
+  const rows = await new Promise<string[] | undefined>((resolve) => {
+    const runner = new FooterCommandRunner({
+      config: { ...CONFIG, timeoutMs: 150, command: `trap "" TERM; echo $$ > ${marker}; while :; do sleep 1; done` },
+      snapshot: () => emptyStatusSnapshot(),
+      width: () => 100,
+      height: () => 30,
+      readLeaderIdentity: () => reads[Math.min(readIndex++, reads.length - 1)],
+      onOutput: (out) => {
+        runner.dispose()
+        resolve(out)
+      },
+      onNotifyOnce: (message) => { notifications.push(message) },
+      signal: new AbortController().signal,
+    })
+    runner.requestRefresh()
+  })
+  assert.equal(rows, undefined, 'the timeout must fall back')
+  const pid = await waitForPid(marker)
+  await new Promise(resolve => setTimeout(resolve, ESCALATION_WINDOW_MS))
+  assert.ok(processExists(pid), `a different-parent process must never receive SIGKILL (pid ${pid})`)
+  assert.ok(notifications.some(message => message.includes('could not be proven')),
+    `the different-parent refusal must be reported: ${JSON.stringify(notifications)}`)
+  try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+  await waitForDeath(pid, 3000)
+})
+
+test('an identity that becomes unreadable at escalation time is never escalated', async (t) => {
+  // The leader proof existed at TERM time and is gone at escalation time: the
+  // numeric pgid proves nothing and no witness exists, so SIGKILL is refused
+  // and the unproven group is reported.
+  const life = testLifecycle(t)
+  const dir = life.tempDir('footer-lost-')
+  const marker = join(dir, 'child.pid')
+  const notifications: string[] = []
+  const reads: Array<LeaderIdentity | undefined> = [
+    { starttime: 'ours', ppid: process.pid },
+    undefined,
+  ]
+  let readIndex = 0
+  const rows = await new Promise<string[] | undefined>((resolve) => {
+    const runner = new FooterCommandRunner({
+      config: { ...CONFIG, timeoutMs: 150, command: `trap "" TERM; echo $$ > ${marker}; while :; do sleep 1; done` },
+      snapshot: () => emptyStatusSnapshot(),
+      width: () => 100,
+      height: () => 30,
+      readLeaderIdentity: () => reads[Math.min(readIndex++, reads.length - 1)],
+      onOutput: (out) => {
+        runner.dispose()
+        resolve(out)
+      },
+      onNotifyOnce: (message) => { notifications.push(message) },
+      signal: new AbortController().signal,
+    })
+    runner.requestRefresh()
+  })
+  assert.equal(rows, undefined, 'the timeout must fall back')
+  const pid = await waitForPid(marker)
+  await new Promise(resolve => setTimeout(resolve, ESCALATION_WINDOW_MS))
+  assert.ok(processExists(pid), `a lost identity must never authorize SIGKILL (pid ${pid})`)
+  assert.ok(notifications.some(message => message.includes('could not be proven')),
+    `the lost-identity refusal must be reported: ${JSON.stringify(notifications)}`)
+  try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+  await waitForDeath(pid, 3000)
 })
 
 test('huge stdout is capped at 16 KiB', async () => {
