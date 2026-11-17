@@ -77,6 +77,8 @@ test('the TypeScript bridge agrees with an independent C libproc reader', { skip
   const compiled = spawnSync('cc', ['-O0', '-o', binary, DUMP_SOURCE], { encoding: 'utf8' })
   assert.equal(compiled.status, 0, `the independent C reader must compile:\n${compiled.stderr ?? ''}`)
 
+  // The CHILD's keepalive window (in its program string, not a test wait):
+  // the observation reason is bounded by this deadline.
   const child = startDetached(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'])
   try {
     const childPid = pidOf(child)

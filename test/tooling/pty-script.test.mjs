@@ -87,6 +87,8 @@ test('a real script(1) child sees a TTY on stdin and stdout', { skip: POSIX_ONLY
 test('keyboard bytes reach the child through the real PTY', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
   // Raw mode stops the PTY line discipline from translating the bytes. The
   // child waits for ESC (1b) and A (41) and reports the raw hex it received.
+  // The CHILD's failure deadline (inside its program string, not a test
+  // wait): without the bytes the observation must end, bounded at 8s.
   const script = `node -e 'process.stdout.write("TTY:" + String(process.stdin.isTTY) + " "); process.stdin.setRawMode(true); let seen = ""; process.stdin.on("data", c => { seen += c.toString("hex"); if (seen.includes("1b41")) { process.stdout.write("GOT:" + seen); process.exit(0) } }); setTimeout(() => process.exit(9), 8000)'`
   const { exit, output } = spawnPty(t, script, { inputBytes: Buffer.from([0x1b, 0x41]) })
   const result = await exit
@@ -101,6 +103,8 @@ test('a non-zero child exit propagates through script(1)', { skip: POSIX_ONLY, t
 })
 
 test('script(1) settles when the command ends (no leftover wrapper)', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
+  // The GRANDCHILD's settle window (its program string, not a test wait);
+  // the wrapper-close observation is bounded by the command's own exit.
   const { child, exit } = spawnPty(t, `node -e 'const c = require("node:child_process").spawn(process.execPath, ["-e", "setTimeout(() => {}, 100)"]); c.on("exit", () => process.exit(0))'`)
   const result = await exit
   assert.equal(result.code, 0)
