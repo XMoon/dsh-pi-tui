@@ -559,6 +559,15 @@ ordering. The ordering window is a transient same-process fact owned by the
 proving turn — never a cached "Host is compacting" state, and never a release of
 the writer barrier, the accepted-write lifetime or a command outcome.
 
+The exception decides only which NEW submissions may reach the Host during a
+maintenance. Occurrence-level management of a message the Host has already
+accepted — recall-all (Alt+↑), edit and delete through the Queue Manager — stays
+a direct Host Inbox mutation under the ordinary writer admission: it is never
+re-ordered by the submit FIFO, never blocked by the exception's window, and it
+keeps the existing occurrence identity and settlement classification. An
+occurrence the Agent has already consumed is no longer pending and cannot be
+managed as if it were.
+
 A TUI-owned SESSIONLESS command (`/preset`, `/model`, `/settings`, ...) is
 routed by `liveAgent()`: with a live Agent it executes through the Session's
 command service, without one it executes locally and creates no Session. While
