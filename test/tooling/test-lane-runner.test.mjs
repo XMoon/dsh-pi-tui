@@ -142,6 +142,14 @@ function copyLaneRunnerSources(scripts) {
   }
   writeFileSync(join(scripts, 'lib', 'owned-process-group.mjs'),
     readFileSync(join(ROOT, 'scripts', 'lib', 'owned-process-group.mjs')))
+  // The runner imports the shared kernel-identity seam for process-group
+  // teardown, so a fixture repository must carry those modules too — otherwise
+  // the fixture runner dies at import and no readiness line ever appears.
+  const nativeProcess = join(scripts, '..', 'src', 'runtime', 'native-process')
+  mkdirSync(nativeProcess, { recursive: true })
+  for (const name of ['identity.ts', 'darwin.ts']) {
+    writeFileSync(join(nativeProcess, name), readFileSync(join(ROOT, 'src', 'runtime', 'native-process', name)))
+  }
 }
 
 const WINDOWS_COMMAND_LINE_LIMIT = 32_767

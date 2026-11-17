@@ -12,7 +12,8 @@ import { readFileSync } from 'node:fs'
 import { getEventListeners } from 'node:events'
 import { join } from 'node:path'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { FooterCommandRunner, KILL_GRACE_MS, type LeaderIdentity } from '../../src/tui/footer/command-runner.ts'
+import { FooterCommandRunner, KILL_GRACE_MS, type KernelIdentitySource } from '../../src/tui/footer/command-runner.ts'
+import { listKernelGroupMembers, readKernelProcess, sameKernelProcess, type KernelObservation } from '../../src/runtime/native-process/identity.ts'
 import type { FooterCommandConfig } from '../../src/domain/footer/command-config.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { emptyStatusSnapshot } from '../../src/domain/status/types.ts'
@@ -91,6 +92,32 @@ async function waitForDeath(pid: number, deadlineMs: number): Promise<boolean> {
 /** The escalation grace plus a margin: after this the runner has either sent
  * SIGKILL or refused and reported the unproven group. */
 const ESCALATION_WINDOW_MS = KILL_GRACE_MS + 1500
+
+/** One scripted leader observation for injected-identity cases. */
+function leaderObservation(pid: number, startTicks: string, ppid = process.pid): KernelObservation {
+  return {
+    kind: 'alive',
+    identity: { platform: 'linux', pid, startTicks, ppid, pgid: pid, sid: pid, state: 'S' },
+  }
+}
+
+/**
+ * The injectable kernel-identity seam with a scripted leader observation and a
+ * scripted member scan; the production `same` comparison is kept, so the tests
+ * exercise the real classifier while simulating a reused pid, a different
+ * parent, an unreadable identity or a lost witness.
+ */
+function scriptedIdentity(
+  read: (pid: number, call: number) => KernelObservation,
+  listGroupMembers: (pgid: number) => KernelObservation[] | { readonly kind: 'unknown'; readonly code: string } = () => [],
+): KernelIdentitySource {
+  let calls = 0
+  return { read: (pid: number) => read(pid, calls++), listGroupMembers, same: sameKernelProcess }
+}
+
+/** Real kernel identity when this platform supports it; used by the tests that
+ * only script the LEADER read and leave members to the real seam. */
+const REAL_IDENTITY: KernelIdentitySource = { read: readKernelProcess, listGroupMembers: listKernelGroupMembers, same: sameKernelProcess }
 
 test('success: the sanitized rows reach the output sink', async () => {
   // Generous timeout: the test proves OUTPUT semantics, never the
@@ -205,14 +232,12 @@ test('a NUL byte in the command degrades to the fallback — requestRefresh neve
   }
 })
 
-test('a TERM-resistant child is only SIGKILLed on evidence of ownership (never a bare pgid)', async (t) => {
-  // The child traps TERM and would run forever. The escalation is authorized
-  // ONLY by a re-verified kernel identity: Linux reads the leader's
-  // starttime+ppid; a platform without a verifiable identity (`/proc` is
-  // absent on macOS before the native reader) must NOT send SIGKILL to the
-  // numeric pgid — it reports the unproven group instead of claiming a clean
-  // teardown. The child records its own pid (the detached group leader) so the
-  // test can PROVE which outcome actually happened.
+test('a TERM-resistant child is SIGKILLed only after its kernel identity is re-verified', async (t) => {
+  // The child traps TERM and would run forever. The escalation is authorized by
+  // the leader's re-verified kernel identity (Linux /proc starttime+ppid, Darwin
+  // libproc boot/unique-id/starttime) — never by the bare numeric pgid. The
+  // child records its own pid (the detached group leader) so the test can PROVE
+  // the hard kill actually happened.
   const life = testLifecycle(t)
   const dir = life.tempDir('footer-kill-')
   const marker = join(dir, 'child.pid')
@@ -227,6 +252,7 @@ test('a TERM-resistant child is only SIGKILLed on evidence of ownership (never a
       snapshot: () => emptyStatusSnapshot(),
       width: () => 100,
       height: () => 30,
+      kernelIdentity: REAL_IDENTITY,
       onOutput: (out) => {
         runner.dispose()
         resolve(out)
@@ -238,22 +264,11 @@ test('a TERM-resistant child is only SIGKILLed on evidence of ownership (never a
   })
   assert.equal(rows, undefined, 'the timeout must fall back to the native surface')
   const pid = await waitForPid(marker)
-  if (process.platform === 'linux') {
-    // Linux has the kernel identity: the re-verified leader authorizes the
-    // group escalation and the TERM-resistant child actually dies.
-    assert.ok(await waitForDeath(pid, ESCALATION_WINDOW_MS),
-      `the TERM-resistant child must be hard-killed on Linux (pid ${pid} still alive)`)
-    return
-  }
-  // No verifiable identity on this platform: the escalation is refused, the
-  // survivor is reported, and no group signal was sent.
-  await new Promise(resolve => setTimeout(resolve, ESCALATION_WINDOW_MS))
-  assert.ok(processExists(pid), `no SIGKILL may be sent without ownership proof (pid ${pid})`)
-  assert.ok(notifications.some(message => message.includes('could not be proven')),
-    `the unproven group must be reported once: ${JSON.stringify(notifications)}`)
-  // Test-owned cleanup of the process this test deliberately left running.
-  try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
-  await waitForDeath(pid, 3000)
+  life.defer(() => { try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ } })
+  assert.ok(await waitForDeath(pid, ESCALATION_WINDOW_MS),
+    `the TERM-resistant child must be hard-killed after identity re-verification (pid ${pid} still alive)`)
+  assert.ok(notifications.every(message => !message.includes('could not be proven')),
+    `a verified group must not be reported as unproven: ${JSON.stringify(notifications)}`)
 })
 
 test('repeated TERM-resistant children are each hard-killed (the termination ledger cleans up between cycles)', async (t) => {
@@ -307,35 +322,22 @@ test('repeated TERM-resistant children are each hard-killed (the termination led
   await runCycle()
   const firstPid = pid
   await runCycle()
-  // The TERM-resistant leader is alive at escalation time, so Linux re-verifies
-  // its identity and hard-kills it. A platform WITHOUT a kernel identity reader
-  // (macOS, until the shared native-process reader lands) must refuse the
-  // escalation and report it; the test then owns the cleanup of both children.
-  // Either way the ledger must not suppress the SECOND cycle's escalation.
-  if (process.platform === 'linux') {
-    for (const victim of [firstPid, pid]) {
-      assert.ok(await waitForDeath(victim, KILL_GRACE_MS + 3000),
-        `cycle child pid ${victim} must be hard-killed (no orphan, no ledger leak)`)
-    }
-    return
-  }
-  await new Promise(resolve => setTimeout(resolve, ESCALATION_WINDOW_MS))
+  // The TERM-resistant leader is alive at escalation time, so its identity is
+  // re-verified and it is hard-killed. The ledger must not suppress the SECOND
+  // cycle's escalation.
   for (const victim of [firstPid, pid]) {
-    assert.ok(processExists(victim),
-      `without identity proof the escalation must be refused (pid ${victim})`)
-    try { process.kill(victim, 'SIGKILL') } catch { /* already gone */ }
-    assert.ok(await waitForDeath(victim, 3000), `test-owned cleanup must stop pid ${victim}`)
+    life.defer(() => { try { process.kill(victim, 'SIGKILL') } catch { /* already gone */ } })
+    assert.ok(await waitForDeath(victim, KILL_GRACE_MS + 3000),
+      `cycle child pid ${victim} must be hard-killed (no orphan, no ledger leak)`)
   }
 })
 
-test('a TERM-resistant DESCENDANT survives the leader exit: without a member witness the group is never SIGKILLed', async (t) => {
+test('a TERM-resistant DESCENDANT is hard-killed via the witness captured while the leader was verifiable', async (t) => {
   // The command starts a BACKGROUND descendant that traps TERM; the OUTER shell
   // (the group leader) receives TERM and exits NORMALLY. The leader is then
-  // reaped, so its numeric pid/pgid proves nothing, and this runner has not
-  // captured a member witness yet: the group MUST NOT receive SIGKILL. The
-  // survivor is reported as an unproven group (NOT_QUIESCED), never as a clean
-  // teardown. The witness-backed escalation is restored by the shared
-  // native-process identity reader in a later commit.
+  // reaped, so its numeric pid/pgid proves nothing; the escalation is authorized
+  // by the member witness captured at TERM time, which must still be the same
+  // kernel process inside the same group+session.
   const life = testLifecycle(t)
   const dir = life.tempDir('footer-desc-')
   const leaderMarker = join(dir, 'leader.pid')
@@ -363,42 +365,34 @@ test('a TERM-resistant DESCENDANT survives the leader exit: without a member wit
   assert.equal(rows, undefined, 'the timeout must fall back')
   const leader = await waitForPid(leaderMarker)
   const descendant = await waitForPid(descendantMarker)
-  await new Promise(resolve => setTimeout(resolve, ESCALATION_WINDOW_MS))
-  assert.ok(notifications.some(message => message.includes('could not be proven')),
-    `the unproven group must be reported once: ${JSON.stringify(notifications)}`)
-  assert.ok(processExists(descendant),
-    `a TERM-resistant descendant must never be SIGKILLed without a member witness: leader=${leader} descendant=${descendant}`)
-  // Test-owned cleanup of the processes this test deliberately left running.
   for (const victim of [leader, descendant]) {
-    try { process.kill(victim, 'SIGKILL') } catch { /* already gone */ }
+    life.defer(() => { try { process.kill(victim, 'SIGKILL') } catch { /* already gone */ } })
+    assert.ok(await waitForDeath(victim, ESCALATION_WINDOW_MS),
+      `the witness must authorize the hard kill of pid ${victim} (leader=${leader}, descendant=${descendant})`)
   }
-  for (const victim of [leader, descendant]) {
-    assert.ok(await waitForDeath(victim, 3000), `test-owned cleanup must stop pid ${victim}`)
-  }
+  assert.ok(notifications.every(message => !message.includes('could not be proven')),
+    `a witness-proven group must not be reported as unproven: ${JSON.stringify(notifications)}`)
 })
 
 test('a reused pgid (different starttime) is never escalated', async (t) => {
   // The identity captured at TERM time is OUR leader; the read at escalation
-  // time proves a DIFFERENT process now occupies the numeric pgid. A real pid
-  // reuse cannot be manufactured deterministically, so the reader is injected;
-  // the survivor is the real TERM-resistant process the escalation must leave
-  // alone. `kill(-pgid, SIGKILL)` would end it immediately.
+  // time proves a DIFFERENT process now occupies the numeric pgid, and the
+  // member scan yields no witness. A real pid reuse cannot be manufactured
+  // deterministically, so the seam is scripted; the survivor is the real
+  // TERM-resistant process the escalation must leave alone. A group SIGKILL
+  // would end it immediately.
   const life = testLifecycle(t)
   const dir = life.tempDir('footer-reused-')
   const marker = join(dir, 'child.pid')
   const notifications: string[] = []
-  const reads: Array<LeaderIdentity | undefined> = [
-    { starttime: 'ours', ppid: process.pid },
-    { starttime: 'theirs', ppid: process.pid },
-  ]
-  let readIndex = 0
+  const identity = scriptedIdentity((pid, call) => (call === 0 ? leaderObservation(pid, 'ours') : leaderObservation(pid, 'theirs')))
   const rows = await new Promise<string[] | undefined>((resolve) => {
     const runner = new FooterCommandRunner({
       config: { ...CONFIG, timeoutMs: 150, command: `trap "" TERM; echo $$ > ${marker}; while :; do sleep 1; done` },
       snapshot: () => emptyStatusSnapshot(),
       width: () => 100,
       height: () => 30,
-      readLeaderIdentity: () => reads[Math.min(readIndex++, reads.length - 1)],
+      kernelIdentity: identity,
       onOutput: (out) => {
         runner.dispose()
         resolve(out)
@@ -410,6 +404,7 @@ test('a reused pgid (different starttime) is never escalated', async (t) => {
   })
   assert.equal(rows, undefined, 'the timeout must fall back')
   const pid = await waitForPid(marker)
+  life.defer(() => { try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ } })
   await new Promise(resolve => setTimeout(resolve, ESCALATION_WINDOW_MS))
   assert.ok(processExists(pid), `a reused pgid must never receive SIGKILL (pid ${pid})`)
   assert.ok(notifications.some(message => message.includes('could not be proven')),
@@ -420,24 +415,22 @@ test('a reused pgid (different starttime) is never escalated', async (t) => {
 
 test('a same-starttime stranger with a different parent is never escalated', async (t) => {
   // Jiffy-granularity starttime collisions are theoretically possible: the
-  // leader must ALSO carry this runner's own ppid while it exists. A stranger
-  // with the same starttime but another parent is not our group.
+  // current occupant must ALSO still carry this runner's own ppid while it
+  // exists. A stranger with the same starttime but another parent is not ours.
   const life = testLifecycle(t)
   const dir = life.tempDir('footer-ppid-')
   const marker = join(dir, 'child.pid')
   const notifications: string[] = []
-  const reads: Array<LeaderIdentity | undefined> = [
-    { starttime: 'same', ppid: process.pid },
-    { starttime: 'same', ppid: process.pid + 1 },
-  ]
-  let readIndex = 0
+  const identity = scriptedIdentity((pid, call) => (call === 0
+    ? leaderObservation(pid, 'same')
+    : leaderObservation(pid, 'same', process.pid + 1)))
   const rows = await new Promise<string[] | undefined>((resolve) => {
     const runner = new FooterCommandRunner({
       config: { ...CONFIG, timeoutMs: 150, command: `trap "" TERM; echo $$ > ${marker}; while :; do sleep 1; done` },
       snapshot: () => emptyStatusSnapshot(),
       width: () => 100,
       height: () => 30,
-      readLeaderIdentity: () => reads[Math.min(readIndex++, reads.length - 1)],
+      kernelIdentity: identity,
       onOutput: (out) => {
         runner.dispose()
         resolve(out)
@@ -449,6 +442,7 @@ test('a same-starttime stranger with a different parent is never escalated', asy
   })
   assert.equal(rows, undefined, 'the timeout must fall back')
   const pid = await waitForPid(marker)
+  life.defer(() => { try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ } })
   await new Promise(resolve => setTimeout(resolve, ESCALATION_WINDOW_MS))
   assert.ok(processExists(pid), `a different-parent process must never receive SIGKILL (pid ${pid})`)
   assert.ok(notifications.some(message => message.includes('could not be proven')),
@@ -458,25 +452,23 @@ test('a same-starttime stranger with a different parent is never escalated', asy
 })
 
 test('an identity that becomes unreadable at escalation time is never escalated', async (t) => {
-  // The leader proof existed at TERM time and is gone at escalation time: the
-  // numeric pgid proves nothing and no witness exists, so SIGKILL is refused
-  // and the unproven group is reported.
+  // The leader proof existed at TERM time and is unknown at escalation time:
+  // the numeric pgid proves nothing and no witness survives, so SIGKILL is
+  // refused and the unproven group is reported.
   const life = testLifecycle(t)
   const dir = life.tempDir('footer-lost-')
   const marker = join(dir, 'child.pid')
   const notifications: string[] = []
-  const reads: Array<LeaderIdentity | undefined> = [
-    { starttime: 'ours', ppid: process.pid },
-    undefined,
-  ]
-  let readIndex = 0
+  const identity = scriptedIdentity((pid, call) => (call === 0
+    ? leaderObservation(pid, 'ours')
+    : { kind: 'unknown', code: 'READ_FAILED' }))
   const rows = await new Promise<string[] | undefined>((resolve) => {
     const runner = new FooterCommandRunner({
       config: { ...CONFIG, timeoutMs: 150, command: `trap "" TERM; echo $$ > ${marker}; while :; do sleep 1; done` },
       snapshot: () => emptyStatusSnapshot(),
       width: () => 100,
       height: () => 30,
-      readLeaderIdentity: () => reads[Math.min(readIndex++, reads.length - 1)],
+      kernelIdentity: identity,
       onOutput: (out) => {
         runner.dispose()
         resolve(out)
@@ -488,6 +480,7 @@ test('an identity that becomes unreadable at escalation time is never escalated'
   })
   assert.equal(rows, undefined, 'the timeout must fall back')
   const pid = await waitForPid(marker)
+  life.defer(() => { try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ } })
   await new Promise(resolve => setTimeout(resolve, ESCALATION_WINDOW_MS))
   assert.ok(processExists(pid), `a lost identity must never authorize SIGKILL (pid ${pid})`)
   assert.ok(notifications.some(message => message.includes('could not be proven')),

@@ -42,7 +42,7 @@
  * Set DSH_TEST_KEEP_TMP=1 to keep (and print) the run root for debugging.
  */
 import { spawn } from 'node:child_process'
-import { existsSync, globSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, globSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -116,7 +116,10 @@ function main() {
     process.exit(2)
   }
 
-  const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-test-run-'))
+  // realpath immediately: on macOS `os.tmpdir()` returns the `/var`
+  // alias of `/private/var`, and every path the child observes (TMPDIR, cwd,
+  // markers) must describe the SAME directory object, not two spellings of it.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-pi-tui-test-run-')))
   const keep = process.env.DSH_TEST_KEEP_TMP === '1'
   // POSIX only: the direct child leads its own process group, which is what a
   // forwarded signal can address as a TREE. Windows has no group id, so it
@@ -238,6 +241,22 @@ function main() {
   process.on('SIGHUP', () => onSignal('SIGHUP'))
 }
 
-if (process.argv[1] !== undefined && resolve(process.argv[1]) === SCRIPT_PATH) {
+/**
+ * Whether THIS file was started as the process entry. Both spellings are
+ * canonicalized first: on macOS `os.tmpdir()` is a `/var` alias of
+ * `/private/var`, so a copied runner invoked through the alias would otherwise
+ * compare unequal to its own real module path and silently do nothing.
+ */
+function isMainModule(scriptPath) {
+  if (process.argv[1] === undefined) return false
+  try {
+    return realpathSync(resolve(process.argv[1])) === realpathSync(scriptPath)
+  } catch {
+    // An argv path that cannot be resolved is not this module.
+    return false
+  }
+}
+
+if (isMainModule(SCRIPT_PATH)) {
   main()
 }

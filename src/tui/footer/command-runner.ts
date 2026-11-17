@@ -9,13 +9,19 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
-import { readFileSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import { truncateToWidth } from '@xmoon76/pi-tui'
 import { sanitizeCommandOutput } from './ansi-sanitize.ts'
 import { buildCommandInput } from '../../domain/footer/command-protocol.ts'
 import type { StatusSnapshot } from '../../domain/status/types.ts'
 import { MAX_COMMAND_TIMEOUT_MS, type FooterCommandConfig } from '../../domain/footer/command-config.ts'
+import {
+  listKernelGroupMembers,
+  readKernelProcess,
+  sameKernelProcess,
+  type KernelObservation,
+  type KernelProcessIdentity,
+} from '../../runtime/native-process/identity.ts'
 
 
 /** The runner's options. */
@@ -33,22 +39,21 @@ export interface FooterCommandRunnerOptions {
    * failure only makes THAT item unavailable — the whole-footer wording
    * names the native fallback). Defaults to the whole-footer wording. */
   readonly failureMessage?: string
-  /** The kernel process-identity reader used to authorize a process-group
-   * escalation. Defaults to the `/proc` reader; a platform without a
-   * verifiable identity (or a failed read) leaves the group unproven and the
-   * runner must never SIGKILL it. Injectable so the fail-closed branches
-   * (missing identity, a reused pid, a different parent) are provable without
-   * manufacturing real pid reuse. */
-  readonly readLeaderIdentity?: (pid: number) => LeaderIdentity | undefined
+  /** The shared kernel-identity seam used to authorize a process-group
+   * escalation. Defaults to the production native-process reader; a platform
+   * without a verifiable identity (or a failed read) leaves the group unproven
+   * and the runner must never SIGKILL it. Injectable so the fail-closed
+   * branches (missing identity, a reused pid, a different parent, a lost
+   * witness) are provable without manufacturing real pid reuse. */
+  readonly kernelIdentity?: KernelIdentitySource
   readonly signal: AbortSignal
 }
 
-/** A kernel-verified process identity of the spawned group leader. */
-export interface LeaderIdentity {
-  /** The leader's `/proc` starttime (field 22). */
-  readonly starttime: string
-  /** The leader's parent pid (field 4): it must still be this process. */
-  readonly ppid: number
+/** The kernel-identity seam (`runtime/native-process/identity.ts`). */
+export interface KernelIdentitySource {
+  readonly read: (pid: number) => KernelObservation
+  readonly listGroupMembers: (pgid: number) => KernelObservation[] | { readonly kind: 'unknown'; readonly code: string }
+  readonly same: (expected: KernelProcessIdentity, observed: KernelObservation) => 'same' | 'different' | 'gone' | 'unknown'
 }
 
 /** The stdout cap (plan §17.9). */
@@ -58,21 +63,36 @@ export const MAX_COMMAND_OUTPUT_BYTES = 16 * 1024
  * orphan — the escalation is the hard kill that actually reclaims it. */
 export const KILL_GRACE_MS = 500
 
-/** The production identity reader: one consistent `/proc/<pid>/stat` read
- * supplies BOTH factors. A platform without `/proc` (macOS) reads nothing,
- * which means "no evidence" — never "safe to escalate". */
-function readLeaderIdentity(pid: number): LeaderIdentity | undefined {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-    const afterComm = stat.slice(stat.lastIndexOf(')') + 2).trim()
-    const fields = afterComm.split(' ')
-    const ppid = Number.parseInt(fields[1]!, 10)
-    const starttime = fields[19]
-    if (!Number.isFinite(ppid) || starttime === undefined || !/^\d+$/u.test(starttime)) return undefined
-    return { starttime, ppid }
-  } catch {
-    return undefined
-  }
+/** The production kernel-identity source: the shared native-process seam, so
+ * the footer never carries a second `/proc`/libproc implementation. */
+const DEFAULT_KERNEL_IDENTITY: KernelIdentitySource = Object.freeze({
+  read: readKernelProcess,
+  listGroupMembers: listKernelGroupMembers,
+  same: sameKernelProcess,
+})
+
+/**
+ * Capture ownership witnesses for the group `pgid` while its leader is
+ * verifiable. A witness is any verified member other than the leader; the
+ * reader already requires membership in BOTH the process group and the
+ * session this runner created. An unverifiable scan yields no witness.
+ */
+function captureWitnesses(identity: KernelIdentitySource, pgid: number): KernelProcessIdentity[] | undefined {
+  const listed = identity.listGroupMembers(pgid)
+  if (!Array.isArray(listed)) return undefined
+  return listed.flatMap(observation => observation.kind === 'alive' && observation.identity.pid !== pgid
+    ? [observation.identity]
+    : [])
+}
+
+/** Whether one captured witness is still the SAME kernel process inside the
+ * same group and session. */
+function witnessStillOwns(identity: KernelIdentitySource, witness: KernelProcessIdentity, pgid: number): boolean {
+  const current = identity.read(witness.pid)
+  return current.kind === 'alive'
+    && current.identity.pgid === pgid
+    && current.identity.sid === pgid
+    && identity.same(witness, current) === 'same'
 }
 
 /** The footer command runner. */
@@ -326,25 +346,18 @@ export class FooterCommandRunner {
    * The FIRST TERM is authorized by the owner's live ChildProcess handle (its
    * pid slot cannot be reused while it is unreaped) or by a just-read leader
    * identity that still carries this runner's ppid. The SIGKILL escalation is
-   * authorized ONLY when the leader's identity can be re-verified at escalation
-   * time (same starttime, same ppid — live or unreaped zombie). A platform
-   * without a verifiable identity (macOS `/proc` is absent) or a failed read
-   * leaves the group UNPROVEN: no group SIGKILL is sent, a one-shot diagnostic
-   * reports it, and the runner never claims the group was reclaimed. */
+   * authorized ONLY by the leader being re-verified as the SAME kernel process
+   * at escalation time, or by a member witness captured while the leader was
+   * verifiable that is still the same process in the same group+session. A
+   * missing identity (or a failed read) leaves the group UNPROVEN: no group
+   * SIGKILL is sent, a one-shot diagnostic reports it, and the runner never
+   * claims the group was reclaimed. */
   private killChild(): void {
     const child = this.child
     if (child === undefined || this.terminating.has(child)) return
     this.terminating.add(child)
     const pgid = child.pid
-    const readIdentity = this.options.readLeaderIdentity ?? readLeaderIdentity
-    // The leader proof captured WHILE it is alive: the escalation later proves
-    // the numeric pgid still identifies OUR group leader (a reused pid carries
-    // a different starttime; a stranger carries a different parent).
-    const leader = pgid === undefined ? undefined : readIdentity(pgid)
-    const leaderOwned = leader !== undefined && leader.ppid === process.pid
-    // Node has not reaped this child (exitCode/signalCode stay null until the
-    // handle observes the exit), so its pid slot is still allocated.
-    const leaderUnreaped = child.exitCode === null && child.signalCode === null
+    const identity = this.options.kernelIdentity ?? DEFAULT_KERNEL_IDENTITY
     /** Whether ANY member of the captured process group still exists. */
     const groupAlive = (): boolean => {
       if (pgid === undefined) return false
@@ -371,29 +384,41 @@ export class FooterCommandRunner {
         // Already gone.
       }
     }
-    // The first TERM never needs a verifiable-identity re-check: the handle (or
-    // a just-verified leader identity) still owns the numeric group id. Without
-    // either, the group is unproven and NOTHING may be sent to it.
-    if (leaderUnreaped || leaderOwned) {
+    if (pgid === undefined) {
+      // The child never spawned, so it has no group to address.
       signalGroup('SIGTERM')
-    } else if (groupAlive()) {
-      this.reportUnprovenGroup()
-      return
-    } else {
       return
     }
+    // Node has not reaped this child (exitCode/signalCode stay null until the
+    // handle observes the exit), so its pid slot is still allocated.
+    const leaderUnreaped = child.exitCode === null && child.signalCode === null
+    const observed = identity.read(pgid)
+    const leader = leaderUnreaped && observed.kind === 'alive' && observed.identity.ppid === process.pid
+      ? observed.identity
+      : undefined
+    if (!leaderUnreaped && leader === undefined) {
+      // The leader is gone and no identity was captured while it was ours: the
+      // numeric pgid proves nothing and NOTHING may be sent to it.
+      if (groupAlive()) this.reportUnprovenGroup()
+      return
+    }
+    // Captured while the leader is still verifiable: a survivor can prove the
+    // numeric group id still names THIS group after the leader is reaped.
+    const witnesses = leader === undefined ? undefined : captureWitnesses(identity, pgid)
+    signalGroup('SIGTERM')
     const escalation = setTimeout(() => {
-      if (pgid === undefined) return
       // The GROUP probe, never a leader check: the leader may already have
       // closed while a TERM-resistant descendant still runs.
       if (!groupAlive()) return
-      const current = readIdentity(pgid)
-      const stillOwned = leaderOwned && current !== undefined
-        && current.starttime === leader.starttime
-        && current.ppid === process.pid
-      if (!stillOwned) {
-        // The leader is reaped or replaced and no member witness was captured:
-        // the numeric pgid may now name a stranger's group. Fail closed.
+      const current = identity.read(pgid)
+      const leaderStillOwns = leader !== undefined
+        && current.kind === 'alive'
+        && current.identity.ppid === process.pid
+        && identity.same(leader, current) === 'same'
+      const witnessStillOwnsGroup = witnesses?.some(witness => witnessStillOwns(identity, witness, pgid)) ?? false
+      if (!leaderStillOwns && !witnessStillOwnsGroup) {
+        // The leader is reaped or replaced and no witness survived: the numeric
+        // pgid may now name a stranger's group. Fail closed.
         this.reportUnprovenGroup()
         return
       }
