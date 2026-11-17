@@ -15,6 +15,8 @@ import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
+  bindDarwinKernelSeat,
+  darwinHostProfileSeatDir,
   inspectInstalledProfileScope,
   LOCAL_PROTOCOL,
   LocalScopeError,
@@ -34,7 +36,12 @@ import {
   type DaemonControlDeps,
   type DaemonControlProfile,
 } from '../../src/app/remote-process/local-daemon-control.ts'
-import type { LinuxLocalInstanceRecord } from '../../src/app/remote-process/local-discovery.ts'
+import type {
+  DarwinLocalInstanceRecord,
+  LinuxLocalInstanceRecord,
+  LocalInstanceRecord,
+} from '../../src/app/remote-process/local-discovery.ts'
+import type { DarwinKernelProcessIdentity, KernelObservation } from '../../src/runtime/native-process/identity.ts'
 
 const DSH_VERSION = '0.2.2-rc.3'
 const UUID = '11111111-1111-4111-8111-111111111111'
@@ -48,6 +55,9 @@ interface Fixture {
   readonly scope: LocalScope
   readonly unitDir: string
   readonly unitName: string
+  /** Test account home for the Darwin admin seat (production resolves the OS
+   *  account home, never `$HOME`/`DSH_HOME`). */
+  readonly accountHome: string
 }
 
 function fixture(t: TestContext): Fixture {
@@ -56,10 +66,12 @@ function fixture(t: TestContext): Fixture {
   const profileDir = join(root, 'profiles', 'pi-tui')
   const packageRoot = join(root, 'package')
   const anchor = join(root, 'dsh', 'package.json')
+  const accountHome = join(root, 'account-home')
   mkdirSync(home, { recursive: true, mode: 0o700 })
   mkdirSync(profileDir, { recursive: true, mode: 0o700 })
   mkdirSync(join(packageRoot, 'dist'), { recursive: true, mode: 0o700 })
   mkdirSync(join(root, 'dsh'), { recursive: true, mode: 0o700 })
+  mkdirSync(accountHome, { recursive: true, mode: 0o700 })
   writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.7' })}\n`)
   writeFileSync(join(packageRoot, 'dist', 'index.mjs'), 'export const value = 1\n')
   writeFileSync(join(packageRoot, 'dist', 'local-host.mjs'), 'process.exit(0)\n')
@@ -75,7 +87,7 @@ function fixture(t: TestContext): Fixture {
   const scope = inspectInstalledProfileScope({ dshHome: home, profileDir, packageRoot, dshVersion: DSH_VERSION })
   const unitDir = join(root, 'user-units')
   mkdirSync(unitDir, { recursive: true, mode: 0o700 })
-  return { profile, scope, unitDir, unitName: buildUnitName(profile.name, scope.scopeId) }
+  return { profile, scope, unitDir, unitName: buildUnitName(profile.name, scope.scopeId), accountHome }
 }
 
 function recordOf(scope: LocalScope, overrides: Partial<LinuxLocalInstanceRecord> = {}): LinuxLocalInstanceRecord {
@@ -91,6 +103,44 @@ function recordOf(scope: LocalScope, overrides: Partial<LinuxLocalInstanceRecord
     bundleVersion: scope.bundleVersion,
     dshVersion: scope.dshVersion,
     buildId: scope.buildId,
+    ...overrides,
+  }
+}
+
+/** One structurally valid Darwin kernel identity for a synthetic Host PID. */
+function darwinIdentityOf(pid: number, overrides: Partial<DarwinKernelProcessIdentity> = {}): DarwinKernelProcessIdentity {
+  return {
+    platform: 'darwin',
+    pid,
+    bootUUID: '11111111-1111-4111-8111-111111111111',
+    uniqueId: '9001',
+    parentUniqueId: '1',
+    processUUID: '22222222222222222222222222222222',
+    startSec: '1700000000',
+    startUsec: '123456',
+    ppid: 1,
+    pgid: pid,
+    sid: pid,
+    uid: process.getuid?.() ?? 501,
+    state: 2,
+    ...overrides,
+  }
+}
+
+function darwinRecordOf(scope: LocalScope, overrides: Partial<DarwinLocalInstanceRecord> = {}): DarwinLocalInstanceRecord {
+  const hostPid = overrides.hostPid ?? 4242
+  return {
+    schema: 2,
+    scopeId: scope.scopeId,
+    profileRealpath: scope.profileRealpath,
+    instanceId: UUID,
+    hostPid,
+    origin: 'http://127.0.0.1:4517',
+    protocol: LOCAL_PROTOCOL,
+    bundleVersion: scope.bundleVersion,
+    dshVersion: scope.dshVersion,
+    buildId: scope.buildId,
+    hostKernelIdentity: darwinIdentityOf(hostPid),
     ...overrides,
   }
 }
@@ -170,6 +220,18 @@ function depsOf(fx: Fixture, overrides: Partial<DaemonControlDeps> = {}): Daemon
   }
 }
 
+function darwinDepsOf(fx: Fixture, overrides: Partial<DaemonControlDeps> = {}): DaemonControlDeps {
+  return {
+    platform: 'darwin',
+    uid: process.getuid?.() ?? 1000,
+    unitDir: fx.unitDir,
+    darwinAccountHome: fx.accountHome,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+    ...overrides,
+  }
+}
+
 function assertCode(result: { code: number; stdout: string; stderr: string }, code: number, pattern?: RegExp): void {
   assert.equal(result.code, code, `expected exit ${String(code)}, got ${String(result.code)}; stderr=${result.stderr}`)
   if (pattern !== undefined) assert.match(`${result.stdout}${result.stderr}`, pattern)
@@ -220,7 +282,7 @@ test('status treats a unit file the manager has not loaded as an installed but u
   assert.equal(existsSync(unit.path), true)
 })
 
-test('status reports an authenticated Host under a deactivating unit as uncertain, never success', async t => {
+test('status reports an authenticated Host under a deactivating unit as uncertain, never success', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
   const unit = writeOwnedUnit(fx)
   const record = recordOf(fx.scope)
@@ -795,8 +857,270 @@ test('a user-linked unit with Profile metadata is followed for status', async t 
 
 test('an unsupported platform exits 3 before touching the filesystem', async t => {
   const fx = fixture(t)
-  const result = await runDaemonControl({ verb: 'status' }, fx.profile, { platform: 'darwin' })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, { platform: 'win32' })
   assertCode(result, 3, /UNSUPPORTED_PLATFORM/u)
+  assert.equal(existsSync(fx.scope.dir), false, 'an unsupported platform must not create the scope')
+})
+
+// ── darwin (macOS): process-only management ─────────────────────────────────
+
+test('darwin status with no Host reports the fixed no-unit facts without touching the filesystem', async t => {
+  const fx = fixture(t)
+  const systemctlCalls: string[][] = []
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, darwinDepsOf(fx, {
+    systemctl: async args => { systemctlCalls.push([...args]); return exited(0) },
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^manager=unmanaged$/mu)
+  assert.match(result.stdout, /^user-manager=not-checked$/mu)
+  assert.match(result.stdout, /^host=stopped$/mu)
+  assert.match(result.stdout, /^unit=none$/mu)
+  assert.match(result.stdout, /^unit-state=not-found$/mu)
+  assert.match(result.stdout, /^compatibility=none$/mu)
+  assert.deepEqual(systemctlCalls, [], 'macOS never probes a systemd user manager')
+  assert.equal(existsSync(fx.scope.dir), false, 'status must never create the scope run directory')
+  assert.equal(existsSync(join(fx.accountHome, '.dsh-pi-tui')), false, 'status must never create the Darwin seat chain')
+})
+
+test('darwin status never inspects an installed systemd unit file', async t => {
+  const fx = fixture(t)
+  writeOwnedUnit(fx)
+  const systemctlCalls: string[][] = []
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, darwinDepsOf(fx, {
+    systemctl: async args => { systemctlCalls.push([...args]); return exited(0) },
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^unit=none$/mu)
+  assert.match(result.stdout, /^unit-state=not-found$/mu)
+  assert.match(result.stdout, /^manager=unmanaged$/mu)
+  assert.deepEqual(systemctlCalls, [], 'a Linux unit file is not a macOS unit fact')
+})
+
+test('darwin status reports an authenticated Host as process-supervised with no unit facts', async t => {
+  const fx = fixture(t)
+  const record = darwinRecordOf(fx.scope)
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, darwinDepsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.match(result.stdout, /^manager=process$/mu)
+  assert.match(result.stdout, /^user-manager=not-checked$/mu)
+  assert.match(result.stdout, /^unit=none$/mu)
+  assert.match(result.stdout, /^compatibility=compatible$/mu)
+  assert.match(result.stdout, /^pid=4242$/mu)
+  assert.match(result.stdout, /^instance=11111111$/mu)
+})
+
+test('darwin logs reads the scope host.log and never a unit journal', async t => {
+  const fx = fixture(t)
+  let journalReads = 0
+  const result = await runDaemonControl({ verb: 'logs', lines: 20 }, fx.profile, darwinDepsOf(fx, {
+    journal: async () => { journalReads += 1; return { code: 0, stdout: 'unit journal\n', stderr: '' } },
+    hostLogTail: async (path, lines) => {
+      assert.equal(path, join(fx.scope.dir, 'host.log'))
+      assert.equal(lines, 20)
+      return 'token=SECRET host line\n'
+    },
+  }))
+  assertCode(result, 0)
+  assert.equal(journalReads, 0, 'macOS has no systemd journal source')
+  assert.doesNotMatch(result.stdout, /SECRET/u)
+  assert.match(result.stdout, /host line/u)
+})
+
+test('darwin install and uninstall are unsupported before any unit, seat or scope write', async t => {
+  const fx = fixture(t)
+  for (const verb of ['install', 'uninstall'] as const) {
+    const result = await runDaemonControl({ verb }, fx.profile, darwinDepsOf(fx))
+    assertCode(result, 3, /UNSUPPORTED_PLATFORM/u)
+  }
+  assert.equal(existsSync(join(fx.unitDir, fx.unitName)), false, 'macOS must not write a unit')
+  assert.equal(existsSync(fx.scope.dir), false, 'an unsupported verb must not create the scope')
+  assert.equal(existsSync(join(fx.accountHome, '.dsh-pi-tui')), false, 'an unsupported verb must not take the admin seat')
+})
+
+test('darwin stop signals the kernel-verified Host exactly once and waits for its identity to go', { skip: process.platform !== 'darwin' }, async t => {
+  const fx = fixture(t)
+  const record = darwinRecordOf(fx.scope)
+  let alive = true
+  let kernelReads = 0
+  const signals: Array<[number, NodeJS.Signals]> = []
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, darwinDepsOf(fx, {
+    readRecord: () => (alive ? record : undefined),
+    inspectProcess: () => (alive ? 'alive' : 'dead'),
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    readKernel: () => {
+      if (!alive) return { kind: 'gone' }
+      kernelReads += 1
+      return { kind: 'alive', identity: record.hostKernelIdentity }
+    },
+    kill: (pid, signal) => { signals.push([pid, signal]); alive = false },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.deepEqual(signals, [[record.hostPid, 'SIGTERM']], 'exactly one SIGTERM to the verified Host')
+  assert.match(result.stdout, /^host=stopped$/mu)
+  assert.ok(kernelReads >= 2, 'the kernel identity is re-read after the handshake AND immediately before the signal')
+})
+
+test('darwin stop refuses a kernel identity that changed before the signal with zero signal', { skip: process.platform !== 'darwin' }, async t => {
+  const fx = fixture(t)
+  const record = darwinRecordOf(fx.scope)
+  let reads = 0
+  let signals = 0
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, darwinDepsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    readKernel: (): KernelObservation => {
+      reads += 1
+      // First read satisfies the handshake; the immediate pre-signal read sees
+      // a reused PID.
+      return reads === 1
+        ? { kind: 'alive', identity: record.hostKernelIdentity }
+        : { kind: 'alive', identity: darwinIdentityOf(record.hostPid, { uniqueId: '9002' }) }
+    },
+    kill: () => { signals += 1 },
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(signals, 0, 'a changed identity is never signalled')
+})
+
+test('darwin stop refuses an unreadable kernel identity with zero signal', { skip: process.platform !== 'darwin' }, async t => {
+  const fx = fixture(t)
+  const record = darwinRecordOf(fx.scope)
+  let signals = 0
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, darwinDepsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    readKernel: () => ({ kind: 'unknown', code: 'NATIVE_UNAVAILABLE' }),
+    kill: () => { signals += 1 },
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(signals, 0, 'an unreadable identity is not a kill permit')
+})
+
+test('darwin stop reports a committed-but-unconfirmed stop without a second signal', { skip: process.platform !== 'darwin' }, async t => {
+  const fx = fixture(t)
+  const record = darwinRecordOf(fx.scope)
+  let now = 0
+  const signals: NodeJS.Signals[] = []
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, darwinDepsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    readKernel: () => ({ kind: 'alive', identity: record.hostKernelIdentity }),
+    kill: (_pid, signal) => { signals.push(signal) },
+    stopTimeoutMs: 100,
+    sleep: async () => { now += 50 },
+    now: () => now,
+  }))
+  assertCode(result, 5, /TRANSITION_UNCERTAIN/u)
+  assert.match(result.stderr, /Host stop may already be committed; final verification failed/u)
+  assert.deepEqual(signals, ['SIGTERM'], 'the timeout never sends a second signal or SIGKILL')
+})
+
+test('darwin start cold-starts through the shared public ensure and a warm start reuses the same instance', { skip: process.platform !== 'darwin' }, async t => {
+  const fx = fixture(t)
+  let current: LocalInstanceRecord | undefined
+  let ensured = 0
+  const result = await runDaemonControl({ verb: 'start' }, fx.profile, darwinDepsOf(fx, {
+    readRecord: () => current,
+    inspectProcess: () => (current === undefined ? 'dead' : 'alive'),
+    authenticate: async record => ({ record, cookie: 'c', identity: record }),
+    ensureHost: async options => {
+      ensured += 1
+      assert.equal(options.hostStartPolicy, 'public')
+      current = darwinRecordOf(fx.scope)
+      return { record: current, cookie: 'c', identity: current }
+    },
+  }))
+  assertCode(result, 0)
+  assert.equal(ensured, 1)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.match(result.stdout, /^manager=process$/mu)
+  assert.match(result.stdout, /^unit=none$/mu)
+  assert.match(result.stdout, /^instance=11111111$/mu)
+  const warm = await runDaemonControl({ verb: 'start' }, fx.profile, darwinDepsOf(fx, {
+    readRecord: () => current,
+    inspectProcess: () => 'alive',
+    authenticate: async record => ({ record, cookie: 'c', identity: record }),
+    ensureHost: async () => { ensured += 1; throw new Error('a warm start must reuse the authenticated Host') },
+  }))
+  assertCode(warm, 0)
+  assert.equal(ensured, 1, 'a warm start must not spawn a second Host')
+  assert.match(warm.stdout, /^instance=11111111$/mu)
+})
+
+test('darwin restart proves the old kernel identity gone and returns a new instance', { skip: process.platform !== 'darwin' }, async t => {
+  const fx = fixture(t)
+  const oldRecord = darwinRecordOf(fx.scope)
+  const newRecord = darwinRecordOf(fx.scope, {
+    instanceId: '44444444-4444-4444-8444-444444444444',
+    hostPid: 6464,
+  })
+  let current: LocalInstanceRecord | undefined = oldRecord
+  let stopped = false
+  let ensured = 0
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, darwinDepsOf(fx, {
+    readRecord: () => current,
+    inspectProcess: record => {
+      if (record.instanceId === oldRecord.instanceId) return stopped ? 'dead' : 'alive'
+      return ensured > 0 ? 'alive' : 'dead'
+    },
+    authenticate: async record => ({ record, cookie: 'c', identity: record }),
+    readKernel: pid => {
+      if (pid === oldRecord.hostPid) return stopped ? { kind: 'gone' } : { kind: 'alive', identity: oldRecord.hostKernelIdentity }
+      if (pid === newRecord.hostPid) return { kind: 'alive', identity: newRecord.hostKernelIdentity }
+      return { kind: 'gone' }
+    },
+    kill: path => {
+      assert.equal(path, oldRecord.hostPid)
+      stopped = true
+    },
+    ensureHost: async () => {
+      ensured += 1
+      current = newRecord
+      return { record: newRecord, cookie: 'c', identity: newRecord }
+    },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.equal(ensured, 1)
+  assert.match(result.stdout, /^previous=11111111$/mu)
+  assert.match(result.stdout, /^instance=44444444$/mu)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.equal(stopped, true)
+})
+
+test('darwin mutating verbs take the admin seat and another profile keeps its own seat', { skip: process.platform !== 'darwin' }, async t => {
+  const fx = fixture(t)
+  const dir = darwinHostProfileSeatDir(fx.scope.scopeId, fx.accountHome)
+  const seat = await bindDarwinKernelSeat(dir, fx.scope.scopeId, 'admin', 'DAEMON_CONTROL_BUSY')
+  t.after(async () => { await seat.close() })
+  const busy = await runDaemonControl({ verb: 'start' }, fx.profile, darwinDepsOf(fx))
+  assertCode(busy, 5, /DAEMON_CONTROL_BUSY/u)
+
+  // A different Profile owns a different scope and therefore a different admin
+  // seat file: the held seat above must not block it.
+  const other = fixture(t)
+  let current: LocalInstanceRecord | undefined
+  const independent = await runDaemonControl({ verb: 'start' }, other.profile, darwinDepsOf(other, {
+    readRecord: () => current,
+    inspectProcess: () => (current === undefined ? 'dead' : 'alive'),
+    authenticate: async record => ({ record, cookie: 'c', identity: record }),
+    ensureHost: async () => {
+      current = darwinRecordOf(other.scope)
+      return { record: current, cookie: 'c', identity: current }
+    },
+  }))
+  assertCode(independent, 0)
 })
 
 // ── stop: explicit supervision only ─────────────────────────────────────────
