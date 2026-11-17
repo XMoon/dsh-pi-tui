@@ -1051,19 +1051,26 @@ export function assertNoSourceLeak(tarball, options = {}) {
   }
   // Payload extraction is for REGULAR FILES only: a symlink or hardlink is
   // validated through its linkpath above, never followed by `tar -xOf`.
-  const allEntries = members.filter(member => member.type === 'File').map(member => member.path)
+  //
+  // CLASSIFY by the canonical extraction target (`./package/a`, `package//a`
+  // and `package/./a` are the same member), but EXTRACT by the raw member
+  // spelling — `tar -xOf` selects a member by its stored name. Duplicates are
+  // already refused above, so one canonical path names exactly one member.
+  const files = members
+    .filter(member => member.type === 'File')
+    .map(member => ({ path: member.path, canonical: canonicalArchivePath(member.path.replaceAll('\\', '/')) }))
   // Documentation may legitimately mention an absolute path as prose. Scan
   // executable and metadata payloads for leaked build roots, while leaving
   // README/license text to the dependency and archive-path checks above.
-  const entries = allEntries.filter(entry => {
-    if (!entry.startsWith('package/') || entry.endsWith('/')) return false
+  const entries = files.filter(({ canonical }) => {
+    if (!canonical.startsWith('package/') || canonical === '') return false
     // README and license files are documentation, not executable payloads;
     // extensionless files under lib/dist are still commonly loaders/scripts.
-    if (/(?:^|\/)(?:README|LICENSE)(?:\.[^/]*)?$/iu.test(entry)) return false
-    return /\.(?:[cm]?js|[cm]?ts|json|map|ya?ml|sh|ps1|css|html)$/iu.test(entry)
-      || /(?:^|\/)(?:lib|dist)\/[^/]+$/u.test(entry)
+    if (/(?:^|\/)(?:README|LICENSE)(?:\.[^/]*)?$/iu.test(canonical)) return false
+    return /\.(?:[cm]?js|[cm]?ts|json|map|ya?ml|sh|ps1|css|html)$/iu.test(canonical)
+      || /(?:^|\/)(?:lib|dist)\/[^/]+$/u.test(canonical)
   })
-  for (const entry of entries) {
+  for (const { path: entry } of entries) {
     const bytes = runTarBuffer(['-xOf', tarball, entry])
     const byteMatch = textForbidden.find(token => bytes.includes(Buffer.from(token)))
     const binary = bytes.includes(0)
