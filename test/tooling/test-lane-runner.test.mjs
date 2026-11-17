@@ -142,6 +142,8 @@ function copyLaneRunnerSources(scripts) {
   }
   writeFileSync(join(scripts, 'lib', 'owned-process-group.mjs'),
     readFileSync(join(ROOT, 'scripts', 'lib', 'owned-process-group.mjs')))
+  writeFileSync(join(scripts, 'lib', 'test-temp-root.mjs'),
+    readFileSync(join(ROOT, 'scripts', 'lib', 'test-temp-root.mjs')))
   // The runner imports the shared kernel-identity seam for process-group
   // teardown, so a fixture repository must carry those modules too — otherwise
   // the fixture runner dies at import and no readiness line ever appears.
@@ -158,6 +160,45 @@ function copyLaneRunnerSources(scripts) {
   mkdirSync(join(fixtureRoot, 'node_modules'), { recursive: true })
   symlinkSync(join(ROOT, 'node_modules', 'koffi'), join(fixtureRoot, 'node_modules', 'koffi'), 'dir')
 }
+
+
+test('a checkout-local TMPDIR leaves the lane worker in an external owned root', (t) => {
+  const life = testLifecycle(t)
+  const fixture = life.tempDir('dsh-lane-external-tmp-')
+  const scripts = join(fixture, 'scripts')
+  copyLaneRunnerSources(scripts)
+  writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
+  probe: { description: 'external temp root probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
+}\n`)
+  const probe = join(fixture, 'test', 'probe')
+  mkdirSync(probe, { recursive: true })
+  writeFileSync(join(probe, 'temp-root.test.mjs'), `
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { writeFileSync } from 'node:fs'
+
+test('worker uses one owned temp root for all temp variables', () => {
+  assert.equal(process.env.TMPDIR, process.env.TMP)
+  assert.equal(process.env.TMPDIR, process.env.TEMP)
+  writeFileSync(process.env.PROBE_MARKER, process.env.TMPDIR)
+})
+`)
+  const localTmp = join(fixture, 'temp')
+  mkdirSync(localTmp)
+  const marker = join(fixture, 'temp-root.txt')
+  const result = spawnSync(process.execPath, [join(scripts, 'run-test-lane.mjs'), 'probe'], {
+    cwd: fixture,
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: { ...process.env, TMPDIR: localTmp, TMP: localTmp, TEMP: localTmp,
+      PROBE_MARKER: marker, NODE_TEST_CONTEXT: undefined },
+  })
+  assert.equal(result.status, 0, result.stderr ?? result.error?.message)
+  const childTmp = readFileSync(marker, 'utf8')
+  assert.equal(childTmp.startsWith(fixture + '/'), false,
+    'the worker cannot inherit a temp root inside its own checkout')
+  assert.equal(existsSync(childTmp), false, 'the lane runner removes its external root after a successful run')
+})
 
 const WINDOWS_COMMAND_LINE_LIMIT = 32_767
 
