@@ -94,6 +94,18 @@ retirement and requests `appExit` (see
   keeps `/queue` and the effective `app.queue.open` key. TSP admits pointer
   clicks only from native nodes of the CURRENT frame with the exact occurrence
   id.
+- Pointer currentness in the Fullscreen Queue surface is last-painted and
+  gesture-scoped: the Browser list wheel only navigates; an effective wheel,
+  keyboard input or a changed painted row retires an unfinished action-bar
+  press (and the shared `SearchablePicker` retires an item press on an
+  effective wheel), so a release on the old cell never acts on the newly
+  selected occurrence. In Edit, a click on a body row this frame ACTUALLY
+  paints positions the draft cursor through the fork Editor's own visual-row
+  mapping but never saves or writes the Host; chrome, blanks, notices and
+  clipped-away rows are not cursor targets. Every clickable action must be
+  painted completely: over-wide bars shorten whole segments first and drop
+  whole low-priority segments, a bar too narrow for the whole `Esc` paints no
+  token, and deletion still requires its own confirmation.
 - `Alt+Up` refuses the WHOLE recall when ANY queued occurrence carries a durable
   generic FILE: no draft is staged and no occurrence is removed (both Direct and
   Remote). The notification names `/queue` as the way to remove the file-bearing
