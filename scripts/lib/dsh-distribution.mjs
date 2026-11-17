@@ -10,7 +10,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { t as tarList } from 'tar'
+import { createRequire } from 'node:module'
 import {
   existsSync,
   lstatSync,
@@ -918,6 +918,16 @@ function scanDependencySpecs(value, location, forbidden) {
  * @returns {Array<{path: string, type: string, linkpath: string}>} every member header.
  */
 function listArchiveMembers(tarball) {
+  // node-tar is a DEV dependency and this module is also imported by
+  // pre-install CI context resolution (a bare checkout has no node_modules).
+  // Resolve it at CALL time, when an archive is actually listed, never at
+  // module load.
+  let tarList
+  try {
+    ({ t: tarList } = createRequire(import.meta.url)('tar'))
+  } catch (error) {
+    fail(`the tar package is required to list ${tarball}: ${error instanceof Error ? error.message : String(error)}`)
+  }
   /** @type {Array<{path: string, type: string, linkpath: string}>} */
   const members = []
   try {
