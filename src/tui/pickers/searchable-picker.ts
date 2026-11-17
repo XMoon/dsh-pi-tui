@@ -854,6 +854,18 @@ export class SearchablePicker implements Component, Focusable {
     return undefined
   }
 
+  /**
+   * Host-driven gesture boundary (mouse parity): retire the item press when
+   * another input — keyboard navigation, a wheel outside this picker's item
+   * rows or a new gesture on the owning surface — invalidates it. The next
+   * synthesized click may no longer activate the previously pressed item.
+   * Candidate selection, Enter/Esc handling and onSelect ordering are
+   * unchanged.
+   */
+  clearMousePress(): void {
+    this.mousePressedValue = undefined
+  }
+
   /** Re-derive the filtered list from the current query and clamp selection.
    * `preserveSelection` keeps the currently selected row (by value) when it
    * survives the filter — used by setItems, where the query did not change

@@ -269,6 +269,29 @@ test('a picker row press followed by a wheel cannot activate the old item', asyn
   assert.equal(h.controller.view().mode, 'browse', 'the stale picker click must not open Edit')
   assert.deepEqual(h.writes, [])
 
+  // A keyboard navigation between press and release is the same gesture
+  // boundary: the delegated picker press must be retired as well.
+  const keyboardRow = h.cell('first queued message')
+  press(h.vt, keyboardRow)
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  assert.equal(h.controller.view().selectedId, 'occ-b')
+  release(h.vt, keyboardRow)
+  await h.vt.waitForRender()
+  assert.equal(h.controller.view().mode, 'browse', 'keyboard navigation must retire the picker press')
+
+  // A wheel over the Queue's own action bar never reaches the picker; the
+  // Queue owner still retires the delegated item press.
+  const chromeRow = h.cell('first queued message')
+  press(h.vt, chromeRow)
+  await h.vt.waitForRender()
+  wheelDown(h.vt, h.cell('Delete [D]'))
+  await h.vt.waitForRender()
+  release(h.vt, chromeRow)
+  await h.vt.waitForRender()
+  assert.equal(h.controller.view().mode, 'browse', 'a wheel outside the picker rows must retire its press')
+
   // A fresh press/release on the old row is a new gesture and activates it.
   press(h.vt, h.cell('first queued message'))
   release(h.vt, h.cell('first queued message'))
@@ -278,7 +301,7 @@ test('a picker row press followed by a wheel cannot activate the old item', asyn
   assert.equal(h.controller.view().draft, 'first queued message')
 })
 
-test('resize, a vanished occurrence and a retired Session owner all refuse the old click', async () => {
+test('a resize round-trip refuses the old bar and confirm gestures, including the writer', async () => {
   const h = await startQueueHarness({
     items: [
       item('occ-a', 'first queued message'),
@@ -286,39 +309,68 @@ test('resize, a vanished occurrence and a retired Session owner all refuse the o
     ],
   })
   await h.open()
-  const selected = h.controller.view().selectedId
-  assert.equal(selected, 'occ-a')
+  assert.equal(h.controller.view().selectedId, 'occ-a')
 
-  // A real resize between press and release: the old cell is no longer the
-  // same painted bar (the frame's last-paint fence and the panel grant both
-  // reject it), and a FRESH press on the new bar still works.
-  const oldCell = h.cell('Delete [D]')
-  press(h.vt, oldCell)
+  // Browse: 100×30 → 44×20 → 100×30, then release the ORIGINAL cell.
+  const oldBar = h.cell('Delete [D]')
+  press(h.vt, oldBar)
   await h.vt.waitForRender()
   h.vt.resize(44, 20)
   await h.vt.waitForRender()
-  release(h.vt, oldCell)
+  h.vt.resize(100, 30)
   await h.vt.waitForRender()
-  assert.equal(h.controller.view().mode, 'browse', 'a resized frame must not complete the old press')
+  release(h.vt, oldBar)
+  await h.vt.waitForRender()
+  assert.equal(h.controller.view().mode, 'browse', 'the restored frame must not revive the old bar press')
   assert.deepEqual(h.writes, [])
-  const fresh = h.cell('Delete [D]')
-  press(h.vt, fresh)
-  release(h.vt, fresh)
+
+  // A fresh press on the restored bar still works.
+  press(h.vt, h.cell('Delete [D]'))
+  release(h.vt, h.cell('Delete [D]'))
   await h.vt.waitForRender()
-  assert.equal(h.controller.view().mode, 'confirm-delete', 'a fresh press after resize is still valid')
-  press(h.vt, h.cell('Esc cancel'))
-  release(h.vt, h.cell('Esc cancel'))
+  assert.equal(h.controller.view().mode, 'confirm-delete')
+  assert.equal(h.controller.view().selectedId, 'occ-a')
+
+  // Confirm: the same round-trip must not write the old remove.
+  const oldConfirm = h.cell('Enter confirm')
+  press(h.vt, oldConfirm)
   await h.vt.waitForRender()
+  h.vt.resize(44, 20)
+  await h.vt.waitForRender()
+  h.vt.resize(100, 30)
+  await h.vt.waitForRender()
+  release(h.vt, oldConfirm)
+  await h.drain()
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, [], 'a restored confirm frame must not reach the writer')
+  assert.equal(h.controller.view().mode, 'confirm-delete')
+
+  // The explicitly fresh confirmation performs exactly one remove.
+  press(h.vt, h.cell('Enter confirm'))
+  release(h.vt, h.cell('Enter confirm'))
+  await h.drain()
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, [{ kind: 'remove', id: 'occ-a' }])
   assert.equal(h.controller.view().mode, 'browse')
+})
+
+test('a vanished occurrence and a retired Session owner refuse the old click', async () => {
+  const h = await startQueueHarness({
+    items: [
+      item('occ-a', 'first queued message'),
+      item('occ-b', 'second queued message'),
+    ],
+  })
+  await h.open()
+  assert.equal(h.controller.view().selectedId, 'occ-a')
 
   // The pressed occurrence disappears from the Host projection before the
   // click: the authoritative selection moves, and the old target must not
   // become the new first row.
-  const pressedRow = h.controller.view().selectedId
   const bar = h.cell('Delete [D]')
   press(h.vt, bar)
   await h.vt.waitForRender()
-  const index = h.items.findIndex(candidate => candidate.id === pressedRow)
+  const index = h.items.findIndex(candidate => candidate.id === 'occ-a')
   assert.ok(index >= 0)
   h.items.splice(index, 1)
   release(h.vt, bar)
@@ -327,7 +379,10 @@ test('resize, a vanished occurrence and a retired Session owner all refuse the o
   assert.equal(h.controller.view().mode, 'browse', 'the old click must not delete the replacement')
   assert.deepEqual(h.writes, [])
 
-  // The captured Session owner is retired between press and release.
+  // Republish the current selection so the next press is a real last-painted
+  // gesture for B, then retire the captured Session owner before the release.
+  h.controller.select('occ-b')
+  await h.vt.waitForRender()
   const retiredBar = h.cell('Delete [D]')
   press(h.vt, retiredBar)
   await h.vt.waitForRender()

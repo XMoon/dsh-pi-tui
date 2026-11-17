@@ -168,6 +168,7 @@ type PanelPress =
       readonly end: number
       readonly width: number
       readonly height: number
+      readonly geometryRevision: number
     }
   | {
       readonly kind: 'editor-line'
@@ -176,6 +177,7 @@ type PanelPress =
       readonly row: number
       readonly width: number
       readonly height: number
+      readonly geometryRevision: number
     }
 
 export class QueuePanel implements Component, Focusable {
@@ -196,6 +198,10 @@ export class QueuePanel implements Component, Focusable {
   private paintedSelectedId: string | undefined
   /** The row count the fork Editor last painted (its own hit contract). */
   private editorRenderedHeight = 0
+  /** Monotonic painted-geometry identity: a width or row-grant change retires
+   * every unfinished gesture permanently, even when a later change restores
+   * the same cells before the release. */
+  private geometryRevision = 0
   private pickerSignature = ''
   private focusedFlag = false
 
@@ -237,7 +243,9 @@ export class QueuePanel implements Component, Focusable {
 
   /** The host's row grant (the frame's `maxHeight − 2`). */
   setMaxRows(rows: number): void {
-    this.maxRows = Math.max(1, Math.floor(rows))
+    const next = Math.max(1, Math.floor(rows))
+    if (next !== this.maxRows) this.geometryRevision += 1
+    this.maxRows = next
     this.picker.setMaxRows(Math.max(1, this.maxRows - 2))
   }
 
@@ -249,10 +257,12 @@ export class QueuePanel implements Component, Focusable {
   }
 
   handleInput(data: string): void {
-    // Any keyboard input is a fresh gesture boundary: a bar press recorded
-    // before it must never complete on a later synthesized click, even when
-    // the key only moves the selection (or is consumed without a repaint).
+    // Any keyboard input is a fresh gesture boundary for BOTH the root bar and
+    // the delegated picker: a press recorded before it must never complete on
+    // a later synthesized click, even when the key only moves the selection
+    // (or is consumed without a repaint).
     this.pressed = undefined
+    this.picker.clearMousePress()
     const view = this.controller.view()
     switch (view.mode) {
       case 'closed':
@@ -323,12 +333,19 @@ export class QueuePanel implements Component, Focusable {
     // identity intact for the click to validate and activate.
     if (event.type === 'release') return undefined
     // Gesture boundaries come BEFORE every geometry/missing-hit guard: an
-    // effective wheel or a new left press retires the unfinished bar press
-    // even when it lands on inert chrome or a stale frame, and a synthesized
-    // click consumes the snapshotted press exactly once. A zero-delta wheel
-    // is not a navigation and keeps the existing gesture untouched.
-    if (event.type === 'wheel' && (event.wheelDelta ?? 0) !== 0) this.pressed = undefined
-    if (event.type === 'press' && event.button === 'left') this.pressed = undefined
+    // effective wheel or a new left press retires the unfinished root press
+    // AND the delegated picker's item press, even when the event lands on
+    // inert chrome or a stale frame, and a synthesized click consumes the
+    // snapshotted press exactly once. A zero-delta wheel is not a navigation
+    // and keeps the existing gesture untouched.
+    if (event.type === 'wheel' && (event.wheelDelta ?? 0) !== 0) {
+      this.pressed = undefined
+      this.picker.clearMousePress()
+    }
+    if (event.type === 'press' && event.button === 'left') {
+      this.pressed = undefined
+      this.picker.clearMousePress()
+    }
     const clicked = event.type === 'click' ? this.pressed : undefined
     if (event.type === 'click') this.pressed = undefined
     if (event.type !== 'press' && event.type !== 'click' && event.type !== 'wheel') return undefined
@@ -360,11 +377,13 @@ export class QueuePanel implements Component, Focusable {
           row: event.y,
           width: event.width,
           height: event.height,
+          geometryRevision: this.geometryRevision,
         }
         return { handled: true }
       }
       const pressed = clicked
       if (pressed === undefined || pressed.kind !== 'editor-line') return undefined
+      if (pressed.geometryRevision !== this.geometryRevision) return undefined
       if (pressed.width !== event.width || pressed.height !== event.height || pressed.row !== event.y) return undefined
       if (pressed.editorY !== hit.editorY || pressed.occurrenceId !== hit.occurrenceId) return undefined
       const view = this.controller.view()
@@ -404,11 +423,13 @@ export class QueuePanel implements Component, Focusable {
         end: segment.end,
         width: event.width,
         height: event.height,
+        geometryRevision: this.geometryRevision,
       }
       return { handled: true }
     }
     const pressed = clicked
     if (pressed === undefined || pressed.kind !== 'action') return undefined
+    if (pressed.geometryRevision !== this.geometryRevision) return undefined
     if (pressed.width !== event.width || pressed.height !== event.height || pressed.row !== event.y) return undefined
     const segment = hit.ranges.find(range =>
       range.id === pressed.actionId && range.start === pressed.start && range.end === pressed.end)
@@ -423,6 +444,7 @@ export class QueuePanel implements Component, Focusable {
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.floor(width))
+    if (safeWidth !== this.lastRenderWidth) this.geometryRevision += 1
     this.lastRenderWidth = safeWidth
     this.hits = []
     const view = this.controller.view()

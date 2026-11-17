@@ -466,6 +466,100 @@ test('narrow action bars publish only complete spans and never a partial token',
   assert.equal(tiny.controller.view().mode, 'closed', 'the keyboard Esc route is never degraded')
 })
 
+test('a delegated picker press is retired by keyboard navigation and by a wheel outside its rows', () => {
+  const h = harness([
+    item('occ-a', [{ type: 'text', text: 'queued alpha' }]),
+    item('occ-b', [{ type: 'text', text: 'queued bravo' }]),
+  ])
+  const width = 84
+  const lines = h.panel.render(width)
+  const firstRow = lines.findIndex(line => plain(line).includes('queued alpha'))
+  assert.ok(firstRow >= 0)
+  const barIndex = lines.length - 1
+
+  // A keyboard selection move between press and release retires the item press.
+  h.panel.handleMouse(mouse(firstRow, 5, width, 'press'))
+  h.panel.handleInput('\x1b[B')
+  assert.equal(h.controller.view().selectedId, 'occ-b')
+  h.panel.render(width)
+  h.panel.handleMouse(mouse(firstRow, 5, width, 'release'))
+  h.panel.handleMouse(mouse(firstRow, 5, width, 'click'))
+  assert.equal(h.controller.view().mode, 'browse', 'keyboard input must retire the delegated picker press')
+
+  // A wheel over the action bar is received by the Queue panel but never by
+  // the picker; the Queue owner still retires the old item press.
+  const fresh = h.panel.render(width)
+  const aRow = fresh.findIndex(line => plain(line).includes('queued alpha'))
+  h.panel.handleMouse(mouse(aRow, 5, width, 'press'))
+  h.panel.handleMouse(mouse(barIndex, 5, width, 'wheel', 1))
+  h.panel.render(width)
+  h.panel.handleMouse(mouse(aRow, 5, width, 'release'))
+  h.panel.handleMouse(mouse(aRow, 5, width, 'click'))
+  assert.equal(h.controller.view().mode, 'browse', 'a chrome wheel must retire the delegated picker press')
+
+  // The ordinary fresh picker press/click still activates.
+  const current = h.panel.render(width)
+  const oldRow = current.findIndex(line => plain(line).includes('queued alpha'))
+  h.panel.handleMouse(mouse(oldRow, 5, width, 'press'))
+  h.panel.handleMouse(mouse(oldRow, 5, width, 'release'))
+  h.panel.handleMouse(mouse(oldRow, 5, width, 'click'))
+  assert.equal(h.controller.view().mode, 'edit', 'a fresh picker press/click still opens Edit')
+  assert.equal(h.controller.view().selectedId, 'occ-a')
+})
+
+test('a width round-trip retires the bar press even when the final cells match', () => {
+  const h = harness([item('occ-1', [{ type: 'text', text: 'hello' }])])
+  const width = 84
+  const { barIndex, x } = barCells(h.panel, width, 'Delete [D]')
+  h.panel.handleMouse(mouse(barIndex, x, width, 'press'))
+  // A real resize repaints at the narrow grant and then restores it.
+  h.panel.setMaxRows(18)
+  h.panel.render(40)
+  h.panel.setMaxRows(26)
+  h.panel.render(width)
+  h.panel.handleMouse(mouse(barIndex, x, width, 'release'))
+  h.panel.handleMouse(mouse(barIndex, x, width, 'click'))
+  assert.equal(h.controller.view().mode, 'browse', 'the restored geometry must not revive the old bar press')
+  assert.deepEqual(h.writes, [])
+
+  // A fresh press at the restored frame is still valid.
+  const fresh = barCells(h.panel, width, 'Delete [D]')
+  h.panel.handleMouse(mouse(fresh.barIndex, fresh.x, width, 'press'))
+  h.panel.handleMouse(mouse(fresh.barIndex, fresh.x, width, 'release'))
+  h.panel.handleMouse(mouse(fresh.barIndex, fresh.x, width, 'click'))
+  assert.equal(h.controller.view().mode, 'confirm-delete')
+})
+
+test('a confirm-bar width round-trip cannot write the old remove', async () => {
+  const h = harness([item('occ-1', [{ type: 'text', text: 'hello' }])])
+  const width = 84
+  const deleteBar = barCells(h.panel, width, 'Delete [D]')
+  h.panel.handleMouse(mouse(deleteBar.barIndex, deleteBar.x, width, 'press'))
+  h.panel.handleMouse(mouse(deleteBar.barIndex, deleteBar.x, width, 'release'))
+  h.panel.handleMouse(mouse(deleteBar.barIndex, deleteBar.x, width, 'click'))
+  assert.equal(h.controller.view().mode, 'confirm-delete')
+
+  const confirmBar = barCells(h.panel, width, 'Enter confirm')
+  h.panel.handleMouse(mouse(confirmBar.barIndex, confirmBar.x, width, 'press'))
+  h.panel.setMaxRows(18)
+  h.panel.render(40)
+  h.panel.setMaxRows(26)
+  h.panel.render(width)
+  h.panel.handleMouse(mouse(confirmBar.barIndex, confirmBar.x, width, 'release'))
+  h.panel.handleMouse(mouse(confirmBar.barIndex, confirmBar.x, width, 'click'))
+  await h.drain()
+  assert.deepEqual(h.writes, [], 'the old confirmation gesture must not reach the writer')
+  assert.equal(h.controller.view().mode, 'confirm-delete')
+
+  // The explicit fresh confirmation still performs exactly one remove.
+  const fresh = barCells(h.panel, width, 'Enter confirm')
+  h.panel.handleMouse(mouse(fresh.barIndex, fresh.x, width, 'press'))
+  h.panel.handleMouse(mouse(fresh.barIndex, fresh.x, width, 'release'))
+  h.panel.handleMouse(mouse(fresh.barIndex, fresh.x, width, 'click'))
+  await h.drain()
+  assert.deepEqual(h.writes, [{ id: 'occ-1', kind: 'remove' }])
+})
+
 /** Open Edit through the painted bar and return the first Edit frame. */
 function openEdit(h: Harness, width = 84): string[] {
   const lines = h.panel.render(width)
@@ -590,6 +684,31 @@ test('only the painted tail of a scrolled editor is clickable; header and blanks
   h.panel.handleInput('X')
   const expected = Array.from({ length: 10 }, (_, index) => index === 8 ? 'lXine8' : `line${index}`).join('\n')
   assert.equal(h.controller.view().draft, expected, 'the hidden-window offset is translated through the editor contract')
+})
+
+test('an editor click is retired by a width round-trip even when the final row maps the same', () => {
+  const h = harness([item('occ-1', [{ type: 'text', text: 'abc\ndef' }])])
+  const width = 84
+  const lines = openEdit(h, width)
+  const target = editorCell(lines, 'abc', 1)
+  h.panel.handleMouse(mouse(target.row, target.x, width, 'press'))
+  h.panel.setMaxRows(18)
+  h.panel.render(60)
+  h.panel.setMaxRows(26)
+  const restored = h.panel.render(width)
+  h.panel.handleMouse(mouse(target.row, target.x, width, 'release'))
+  h.panel.handleMouse(mouse(target.row, target.x, width, 'click'))
+  // The rejected click leaves the cursor at its pre-click (end) position.
+  h.panel.handleInput('X')
+  assert.equal(h.controller.view().draft, 'abc\ndefX', 'the restored frame must not revive the editor click')
+
+  // A fresh click on the restored frame still positions the cursor.
+  const fresh = editorCell(restored, 'abc', 1)
+  h.panel.handleMouse(mouse(fresh.row, fresh.x, width, 'press'))
+  h.panel.handleMouse(mouse(fresh.row, fresh.x, width, 'release'))
+  h.panel.handleMouse(mouse(fresh.row, fresh.x, width, 'click'))
+  h.panel.handleInput('Y')
+  assert.equal(h.controller.view().draft, 'aYbc\ndefX', 'a fresh editor click remains valid')
 })
 
 test('pending, a stale grant and Cancel retire the editor click', async () => {

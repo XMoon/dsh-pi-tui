@@ -729,6 +729,21 @@ test('a zero-delta wheel changes nothing and keeps the pressed item (mouse parit
   assert.deepEqual(activated, ['a'], 'the unchanged press completes normally')
 })
 
+test('the owning surface can retire the pressed item at a foreign gesture boundary (mouse parity)', () => {
+  const activated: string[] = []
+  const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
+  picker.onSelect = (item) => { activated.push(item.value) }
+  picker.render(80)
+  picker.handleMouse(mouse('press', 5, 2, 80, 10))
+  picker.clearMousePress()
+  picker.handleMouse(mouse('click', 5, 2, 80, 10))
+  assert.deepEqual(activated, [], 'the retired press must not activate the old item')
+  // A fresh press/click remains the ordinary activation contract.
+  picker.handleMouse(mouse('press', 5, 2, 80, 10))
+  picker.handleMouse(mouse('click', 5, 2, 80, 10))
+  assert.deepEqual(activated, ['a'], 'a later fresh press/click still activates once')
+})
+
 test('search Input click repositions the search cursor (mouse parity)', () => {
   const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
   picker.render(80)
