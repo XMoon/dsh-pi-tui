@@ -6117,6 +6117,37 @@ test('PR2/R5-1: a deferred restore parked by a stop window is replayed at the re
   }
 })
 
+test('PR2/R5-1: the restart replays a parked restore after a rejected stopped settlement', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let replays = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onDeferredDraftRestore: () => { replays += 1 },
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    const baseline = replays // the initial start also asks (an empty queue is a no-op)
+    app.setDraft('B rejected while stopped')
+    app.holdSubmission('attempt-r5-rej')
+    app.stop()
+    app.settleSubmission('attempt-r5-rej', 'not-accepted')
+    app.start()
+    await vt.waitForRender()
+    assert.equal(replays, baseline + 1,
+      'the re-presentation asked the owner to replay even without a deferred accepted clear')
+    assert.equal(app.getDraft(), 'B rejected while stopped', 'the retained draft stayed')
+    // A second stop/start cycle asks exactly once more (the owner is idempotent).
+    app.stop()
+    app.start()
+    await vt.waitForRender()
+    assert.equal(replays, baseline + 2, 'each re-presentation asks exactly once')
+  } finally {
+    app.stop()
+  }
+})
+
 test('PR2/F5: a rejection while stopped unlocks the composer on start()', async () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })

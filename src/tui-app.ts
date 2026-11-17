@@ -5894,12 +5894,14 @@ export class TuiApp {
       }
       this.clearSubmittedDraft()
       this.resetEditorMode()
-      // R5-1: a restore obligation that could not be written while the
-      // surface was stopped is replayed now, in order, on the writable
-      // composer (after the accepted clear — the restored text is NEW live
-      // content, not part of the accepted document).
-      this.events.onDeferredDraftRestore?.()
     }
+    // R5-1/RFL016: replay a parked restore obligation on EVERY
+    // re-presentation — a rejected or indeterminate settlement also parks
+    // text while stopped, and a re-presentation with no deferred accepted
+    // clear at all must still replay. Runs AFTER any deferred accepted clear,
+    // so the restored text is NEW live content, never part of the accepted
+    // document.
+    this.events.onDeferredDraftRestore?.()
     const firstStart = !this.processTuiSlotClaimed
     if (firstStart) {
       claimProcessTuiSlot(`tui-${Date.now().toString(36)}`)

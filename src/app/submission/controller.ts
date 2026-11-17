@@ -931,6 +931,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    * still the live document — every restore of THAT text is a no-op
    * ('merged-verbatim'), because merging would duplicate it.
    */
+  /** R5-1/RFL017: the outcome a parked stale restore reports while the
+   *  renderer is stopped (the notice follows the merge the replay will do —
+   *  never a fabricated 'dropped'). */
+  const mergedStaleOutcomeFor = (value: string): 'merged-verbatim' | 'merged' =>
+    deps.app().getDraft() === '' ? 'merged-verbatim' : 'merged'
+
   const restoreStaleDraft = (
     value: string,
     capturedSubject: SessionSubject | undefined,
@@ -966,6 +972,14 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // never rewrite the live hold's record.
       deferredDraftRestores.push({ text: value, subject: capturedSubject })
       return 'merged-verbatim'
+    }
+    // R5-1/RFL017: a renderer that would refuse the write (a stopped surface)
+    // must not consume the stale obligation either — park it (with the
+    // CAPTURED subject) for the replay when the surface presents again. The
+    // reported outcome stays the merge the writable renderer will produce.
+    if (deps.app().draftWriteAccepted?.() === false) {
+      deferredDraftRestores.push({ text: value, subject: capturedSubject })
+      return mergedStaleOutcomeFor(value)
     }
     const merged = mergeDraft(deps.app().getDraft(), value)
     deps.app().setEditorText(merged)

@@ -1100,6 +1100,56 @@ test('PR2/RFL014: a LATE stale restore after owner replacement is dropped even b
   assert.equal(h.composer.text, '', 'the replaced owner’s late restore was dropped, not replayed')
 })
 
+test('PR2/RFL016: a rejected/unknown settlement while stopped also replays at the restart', async () => {
+  for (const outcome of ['rejected', 'unknown'] as const) {
+    const h = mountAttempt()
+    h.setCommandBehavior('legacy-command-pending')
+    assert.equal(h.controller.beginComposerSubmission('/deploy now', 'enter'), 'legacy')
+    h.controller.submit('/deploy now', 'enter')
+    await attemptTick()
+    h.composer.text = 'B original'
+    h.holdNextWriter()
+    assert.equal(h.controller.beginComposerSubmission('B original', 'enter'), 'held')
+    await attemptTick()
+    h.resolveCommand({
+      kind: 'committed',
+      matched: true,
+      execution: { commandId: 'cmd-a', result: { kind: 'error' } },
+    })
+    await attemptTick()
+    h.setRendererStopped(true)
+    if (outcome === 'rejected') {
+      h.respond({ kind: 'rejected', error: { code: 'session/agent-busy', message: 'busy' } }, false)
+    } else {
+      h.respond({ kind: 'indeterminate', error: { code: 'session/transport-lost', message: 'lost' } }, false)
+    }
+    h.releaseHeldWriter()
+    await attemptTick()
+    assert.equal(h.controller.composerHoldActive(), false, `${outcome}: B settled logically`)
+    assert.equal(h.composer.text, 'B original', `${outcome}: nothing was written while stopped`)
+    h.setRendererStopped(false)
+    h.controller.replayDeferredDraftRestores()
+    await attemptTick()
+    assert.equal(h.composer.text, 'B original\n\n/deploy now',
+      `${outcome}: the parked restore is replayed when the renderer presents`)
+  }
+})
+
+test('PR2/RFL017: a stale restore on a stopped renderer with no live hold parks instead of vanishing', async () => {
+  const h = mountAttempt()
+  // No attempt holds the composer; the renderer is stopped.
+  h.composer.text = 'existing live text'
+  h.setRendererStopped(true)
+  const outcome = h.controller.restoreStaleDraftIntoEditor('/failed input', { owner: 's1' }, 'old-request')
+  assert.equal(h.composer.text, 'existing live text', 'the stopped renderer wrote nothing')
+  assert.equal(outcome, 'merged', 'the reported outcome follows the merge the replay will do')
+  h.setRendererStopped(false)
+  h.controller.replayDeferredDraftRestores()
+  await attemptTick()
+  assert.equal(h.composer.text, 'existing live text\n\n/failed input',
+    'the parked stale restore is replayed when the renderer presents')
+})
+
 test('PR2/R5-1: a deferred restore parked by a stopped renderer is replayed once it presents', async () => {
   const h = mountAttempt()
   h.setCommandBehavior('legacy-command-pending')
