@@ -16,7 +16,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { readProcessStarttime } from '../../runtime/native-process/identity.ts'
+import { readKernelProcess, readProcessStarttime } from '../../runtime/native-process/identity.ts'
 import { runSyncDisposalStepsWithPrimary } from '../../runtime/process/disposal.ts'
 import { closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { createServer } from 'node:net'
@@ -326,6 +326,20 @@ function assertLinux(): number {
   return process.getuid()
 }
 
+/** The profile scope itself is OS-neutral POSIX state: the canonical official
+ *  DSH home/profile directory object plus the current UID. Linux and Darwin
+ *  both derive the same hash domain and private 0700 run directory; only the
+ *  kernel CLAIM below differs per platform. */
+function assertSupportedPosixScopePlatform(): number {
+  if ((process.platform !== 'linux' && process.platform !== 'darwin') || typeof process.getuid !== 'function') {
+    throw new LocalScopeError(
+      'B1_PLATFORM_UNSUPPORTED',
+      `local scope: the local split backend requires Linux or macOS (this is ${process.platform})`,
+    )
+  }
+  return process.getuid()
+}
+
 /** Read a real directory and reject a non-directory or a different owner. */
 function canonicalOwnedDirectory(path: string, uid: number, label: string): string {
   let real: string
@@ -501,7 +515,7 @@ export function computeBuildId(packageRoot: string, dshVersion: string): string 
  * the exact same computation with the one directory-creation step.
  */
 export function inspectInstalledProfileScope(facts: InstalledProfileFacts): LocalScope {
-  const uid = assertLinux()
+  const uid = assertSupportedPosixScopePlatform()
   const dshHome = canonicalOwnedDirectory(facts.dshHome, uid, 'DSH home')
   const profileRealpath = canonicalOwnedDirectory(facts.profileDir, uid, 'profile directory')
   const bundleVersion = readBundleVersion(facts.packageRoot)
@@ -534,7 +548,7 @@ export function inspectInstalledProfileScope(facts: InstalledProfileFacts): Loca
  */
 export function scopeFromInstalledProfile(facts: InstalledProfileFacts): LocalScope {
   const inspected = inspectInstalledProfileScope(facts)
-  const uid = assertLinux()
+  const uid = assertSupportedPosixScopePlatform()
   const dir = ensureScopeDirectory(inspected.dshHome, inspected.scopeId, uid)
   return Object.freeze({ ...inspected, dir })
 }
@@ -567,6 +581,23 @@ export function readLinuxStarttime(pid: number = process.pid): string {
     )
   }
   return value
+}
+
+/**
+ * A qualification-only process-start diagnostic for the CURRENT process. It is
+ * never an identity authority: Linux keeps its original `/proc` starttime
+ * string, Darwin uses the exact boot-session/unique/start tuple so the value is
+ * stable and ABI-safe, and an unverifiable read yields `undefined`.
+ */
+export function readProcessStartDiagnostic(pid: number = process.pid): string | undefined {
+  if (process.platform === 'linux') return readProcessStarttime(pid)
+  if (process.platform === 'darwin') {
+    const observed = readKernelProcess(pid)
+    if (observed.kind !== 'alive' || observed.identity.platform !== 'darwin') return undefined
+    const identity = observed.identity
+    return `${identity.bootUUID}:${identity.uniqueId}:${identity.startSec}.${identity.startUsec}`
+  }
+  return undefined
 }
 
 /** The stable conflict classification each seat purpose reports. */
@@ -653,6 +684,34 @@ export function bindProcessSeat(
 ): Promise<ProcessSeat> {
   assertLinux()
   return bindKernelSeat({ claim: 'linux-abstract', name }, conflictCode)
+}
+
+/**
+ * Claim the profile-scoped kernel seat for one Host or qualification-Client
+ * purpose. Linux keeps its original abstract-socket binder; Darwin claims the
+ * per-purpose `O_EXLOCK` file seat in the same private scope directory. This is
+ * the ONLY seat dispatch the Host and the qualification Client use.
+ * `bindProcessSeat` remains the Linux abstract binder for the separate
+ * daemon-control purpose (PR-3 owns a Darwin admin seat).
+ */
+export function bindProfileKernelSeat(
+  scope: LocalScope,
+  kind: 'host' | 'qualification-client',
+  conflictCode: ProcessSeatConflictCode,
+): Promise<ProcessSeat> {
+  if (process.platform === 'linux') {
+    return bindKernelSeat(
+      { claim: 'linux-abstract', name: kind === 'host' ? scope.hostSocketName : scope.clientSeatSocketName },
+      conflictCode,
+    )
+  }
+  if (process.platform === 'darwin') {
+    return bindKernelSeat({ claim: 'darwin-file', dir: scope.dir, scopeId: scope.scopeId, kind }, conflictCode)
+  }
+  throw new LocalScopeError(
+    'B1_PLATFORM_UNSUPPORTED',
+    `local scope: no profile kernel seat is implemented for ${process.platform}`,
+  )
 }
 
 /**

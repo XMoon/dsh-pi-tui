@@ -463,6 +463,7 @@ const CONNECTED_STATUS: LocalClientStatus = {
   extensionService: { present: true },
   startupFacts: {},
   host: {
+    schema: 1,
     scopeId: 'a'.repeat(64),
     instanceId: REEXEC_HOST_INSTANCE,
     hostPid: 77,

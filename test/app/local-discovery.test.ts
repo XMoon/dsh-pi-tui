@@ -23,12 +23,14 @@ import type { AddressInfo } from 'node:net'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
   bindProcessSeat,
+  bindProfileKernelSeat,
   computeBuildId,
   inspectInstalledProfileScope,
   LocalScopeError,
   LOCAL_PROTOCOL,
   parseProcessStat,
   parseProcessStatStarttime,
+  processSeatPath,
   readLinuxStarttime,
   removeOwnedScratch,
   readProcessStarttime,
@@ -44,18 +46,24 @@ import {
   listKernelGroupMembers,
   readKernelProcess,
   sameKernelProcess,
+  type DarwinKernelProcessIdentity,
+  type KernelObservation,
   type KernelProcessIdentity,
 } from '../../src/runtime/native-process/identity.ts'
 import {
   assertClientHostCompatible,
   assertHostPublicationIdentity,
+  assertRecordedHostKernelIdentityCurrent,
   authenticateLocalHost,
   ensureLocalHost,
   inspectHostProcess,
   readLaunchMaterial,
   readLocalRecord,
+  sameLocalInstanceRecord,
   writeLaunchMaterial,
   writeLocalRecord,
+  type DarwinLocalInstanceRecord,
+  type LinuxLocalInstanceRecord,
   type LocalInstanceRecord,
 } from '../../src/app/remote-process/local-discovery.ts'
 
@@ -91,7 +99,8 @@ function scopeFor(value: Fixture, dshVersion = '0.2.1-rc.4'): LocalScope {
   })
 }
 
-function recordFor(scope: LocalScope, overrides: Partial<LocalInstanceRecord> = {}): LocalInstanceRecord {
+/** The frozen Linux schema fixture (Linux-only tests). */
+function linuxRecordFor(scope: LocalScope, overrides: Partial<LinuxLocalInstanceRecord> = {}): LinuxLocalInstanceRecord {
   return {
     schema: 1,
     scopeId: scope.scopeId,
@@ -105,6 +114,65 @@ function recordFor(scope: LocalScope, overrides: Partial<LocalInstanceRecord> = 
     dshVersion: scope.dshVersion,
     buildId: scope.buildId,
     ...overrides,
+  }
+}
+
+/** The exact Darwin identity of this process, or a well-formed synthetic
+ *  identity for a deliberately absent pid (so the liveness branch is real). */
+function darwinIdentityFor(pid: number): DarwinKernelProcessIdentity {
+  if (pid === process.pid) {
+    const self = readKernelProcess(pid)
+    if (self.kind === 'alive' && self.identity.platform === 'darwin') return self.identity
+  }
+  return {
+    platform: 'darwin',
+    pid,
+    bootUUID: 'B24345D0-493C-461C-AB45-C3E6F55A40B5',
+    uniqueId: '328530',
+    parentUniqueId: '328529',
+    processUUID: '0270d61394183ae9a1b1634739e39157',
+    startSec: '1794876639',
+    startUsec: '168170',
+    ppid: 1,
+    pgid: pid,
+    sid: pid,
+    uid: process.getuid?.() ?? 501,
+    state: 2,
+  }
+}
+
+/** One published record in the CURRENT platform's schema. */
+function recordFor(scope: LocalScope, overrides: Record<string, unknown> = {}): LocalInstanceRecord {
+  const {
+    schema: _schema,
+    hostStarttime: hostStarttimeOverride,
+    hostKernelIdentity: kernelOverride,
+    ...sharedOverrides
+  } = overrides
+  const shared = {
+    scopeId: scope.scopeId,
+    profileRealpath: scope.profileRealpath,
+    instanceId: randomUUID(),
+    hostPid: process.pid,
+    origin: 'http://127.0.0.1:41001',
+    protocol: LOCAL_PROTOCOL as typeof LOCAL_PROTOCOL,
+    bundleVersion: scope.bundleVersion,
+    dshVersion: scope.dshVersion,
+    buildId: scope.buildId,
+    ...sharedOverrides,
+  }
+  if (process.platform === 'linux') {
+    return {
+      schema: 1,
+      ...shared,
+      hostStarttime: typeof hostStarttimeOverride === 'string' ? hostStarttimeOverride : readLinuxStarttime(),
+    }
+  }
+  return {
+    schema: 2,
+    ...shared,
+    hostKernelIdentity: (kernelOverride as DarwinKernelProcessIdentity | undefined)
+      ?? darwinIdentityFor(shared.hostPid as number),
   }
 }
 
@@ -293,11 +361,11 @@ test('a symlinked registry or scope directory is rejected without changing permi
   }
 })
 
-test('Linux process starttime identifies the live Host and rejects PID reuse', t => {
+test('Linux process starttime identifies the live Host and rejects PID reuse', { skip: process.platform !== 'linux' ? 'Linux /proc starttime is the frozen Linux-only contract' : false }, t => {
   const value = fixture(t)
   try {
     const scope = scopeFor(value)
-    const live = recordFor(scope, { hostPid: process.pid, hostStarttime: readLinuxStarttime() })
+    const live = linuxRecordFor(scope, { hostPid: process.pid, hostStarttime: readLinuxStarttime() })
     assert.equal(readLinuxStarttime(process.pid), readProcessStarttime(process.pid))
     assert.equal(inspectHostProcess(live), 'alive')
     assert.equal(inspectHostProcess({ ...live, hostStarttime: `${live.hostStarttime}0` }), 'dead')
@@ -562,11 +630,11 @@ test('readKernelProcess returns the current platform identity and a definitive a
   assert.deepEqual(members, [])
 })
 
-test('a definite missing PID is dead, while unreadable or malformed proc data is unavailable', t => {
+test('a definite missing PID is dead, while unreadable or malformed proc data is unavailable', { skip: process.platform !== 'linux' ? 'Linux /proc classification requires Linux' : false }, t => {
   const value = fixture(t)
   try {
     const scope = scopeFor(value)
-    const record = recordFor(scope)
+    const record = linuxRecordFor(scope)
     const procRoot = join(value.root, 'fake-proc')
     mkdirSync(procRoot, { recursive: true, mode: 0o700 })
     assert.equal(inspectHostProcess(record, procRoot), 'dead', 'a missing proc entry is a definite dead PID')
@@ -605,7 +673,7 @@ test('a definite missing PID is dead, while unreadable or malformed proc data is
   }
 })
 
-test('a real unreaped child zombie is dead and the kernel Host seat is claimable', async t => {
+test('a real unreaped child zombie is dead and the kernel Host seat is claimable', { skip: process.platform !== 'linux' ? 'Linux /proc zombie and abstract-seat contract requires Linux' : false }, async t => {
   const value = fixture(t)
   try {
     const scope = scopeFor(value)
@@ -640,7 +708,7 @@ test('a real unreaped child zombie is dead and the kernel Host seat is claimable
       assert.equal(zombie?.state, 'Z', 'the killed child never became an OS zombie')
       assert.equal(zombie.starttime, before.starttime, 'the zombie starttime changed')
       assert.equal(
-        inspectHostProcess(recordFor(scope, { hostPid: pid, hostStarttime: before.starttime })),
+        inspectHostProcess(linuxRecordFor(scope, { hostPid: pid, hostStarttime: before.starttime })),
         'dead',
         'the real zombie was classified alive',
       )
@@ -682,7 +750,7 @@ test('concurrent first scope creation converges without an unsafe-directory refu
     const moduleUrl = pathToFileURL(join(ROOT, 'src', 'app', 'remote-process', 'local-scope.ts')).href
     const childPath = join(value.root, 'concurrent-scope.mts')
     writeFileSync(childPath, [
-      `import { scopeFromInstalledProfile, bindProcessSeat } from ${JSON.stringify(moduleUrl)}`,
+      `import { scopeFromInstalledProfile, bindProfileKernelSeat } from ${JSON.stringify(moduleUrl)}`,
       `const facts = ${JSON.stringify({
         dshHome: value.home,
         profileDir: value.profile,
@@ -692,7 +760,7 @@ test('concurrent first scope creation converges without an unsafe-directory refu
       'try {',
       '  const scope = scopeFromInstalledProfile(facts)',
       '  try {',
-      '    const seat = await bindProcessSeat(scope.hostSocketName, \'HOST_ALREADY_OWNED\')',
+      '    const seat = await bindProfileKernelSeat(scope, \'host\', \'HOST_ALREADY_OWNED\')',
       '    console.log(JSON.stringify({ result: \'won\' }))',
       '    // reason: hold the winning kernel seat for a bounded window so every concurrent contender reaches its seat attempt.',
       '    await new Promise(resolve => setTimeout(resolve, 1000))',
@@ -740,7 +808,7 @@ test('concurrent first scope creation converges without an unsafe-directory refu
   }
 })
 
-test('the kernel seat is exclusive and becomes reusable after close', async () => {
+test('the kernel seat is exclusive and becomes reusable after close', { skip: process.platform !== 'linux' ? 'Linux abstract seats require Linux; the macOS file seat has its own dispatch test' : false }, async () => {
   const name = `\0dsh-m4-b1-test-${String(process.pid)}-${randomUUID()}`
   const first = await bindProcessSeat(name, 'HOST_ALREADY_OWNED')
   try {
@@ -969,7 +1037,7 @@ test('expected-instance handoff attaches only the exact authenticated Host and n
     assert.equal(connectRequests, 2, 'a missing expected Host must not authenticate another candidate')
 
     // Negative: a dead expected Host is a refusal, never an automatic spawn.
-    const dead = recordFor(scope, { origin, hostPid: 999_999_999, hostStarttime: '1' })
+    const dead = recordFor(scope, { origin, hostPid: 999_999_999 })
     writeHost(dead)
     await assert.rejects(
       ensureLocalHost({ ...options, expectedInstanceId: dead.instanceId }),
@@ -1012,5 +1080,159 @@ test('expected-instance handoff attaches only the exact authenticated Host and n
     )
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+})
+
+test('macOS publishes and re-proves the complete schema 2 kernel identity', { skip: process.platform !== 'darwin' ? 'Darwin libproc identity requires macOS' : false }, t => {
+  const value = fixture(t)
+  try {
+    const scope = scopeFor(value)
+    const record = recordFor(scope)
+    assert.equal(record.schema, 2)
+    if (record.schema !== 2) return
+    assert.equal(record.hostKernelIdentity.pid, record.hostPid)
+    assert.equal(record.hostKernelIdentity.platform, 'darwin')
+    writeLocalRecord(scope, record)
+    writeLaunchMaterial(scope, record, {
+      schema: 1,
+      instanceId: record.instanceId,
+      connectUrl: `${record.origin}/connect?token=fixture-token`,
+    })
+    assert.deepEqual(readLocalRecord(scope), record)
+    assert.equal(inspectHostProcess(record), 'alive')
+    assert.doesNotThrow(() => assertRecordedHostKernelIdentityCurrent(record))
+
+    // PID reuse / another live process is a STALE CANDIDATE, never a kill permit.
+    const reused = { ...record, hostKernelIdentity: { ...record.hostKernelIdentity, uniqueId: '1' } }
+    assert.equal(inspectHostProcess(reused), 'dead')
+    assert.throws(
+      () => assertRecordedHostKernelIdentityCurrent(reused),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_IDENTITY_MISMATCH',
+    )
+    assert.equal(inspectHostProcess(recordFor(scope, { hostPid: 999_999_999 })), 'dead')
+
+    // An UNVERIFIABLE kernel read is a hard failure, never "dead" or "alive".
+    const unknown: KernelObservation = { kind: 'unknown', code: 'ACCESS_DENIED' }
+    assert.throws(
+      () => inspectHostProcess(record, '/proc', () => unknown),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'PROCESS_STARTTIME_UNAVAILABLE',
+    )
+    assert.throws(
+      () => assertRecordedHostKernelIdentityCurrent(record, () => unknown),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'PROCESS_STARTTIME_UNAVAILABLE',
+    )
+
+    // Strict parsing: an identity pid mismatch, an extra identity key and an
+    // unknown schema are refused before any liveness decision.
+    const registryPath = join(scope.dir, 'instance.json')
+    const mismatchedPid: DarwinLocalInstanceRecord = {
+      ...record,
+      hostKernelIdentity: { ...record.hostKernelIdentity, pid: record.hostPid + 1 },
+    }
+    writeFileSync(registryPath, `${JSON.stringify(mismatchedPid)}\n`, { mode: 0o600 })
+    assert.throws(
+      () => readLocalRecord(scope),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'LOCAL_FILE_UNSAFE',
+    )
+    writeFileSync(registryPath, `${JSON.stringify({
+      ...record,
+      hostKernelIdentity: { ...record.hostKernelIdentity, surprise: 'x' },
+    })}\n`, { mode: 0o600 })
+    assert.throws(
+      () => readLocalRecord(scope),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'LOCAL_FILE_UNSAFE',
+    )
+    writeFileSync(registryPath, `${JSON.stringify({ ...record, schema: 3 })}\n`, { mode: 0o600 })
+    assert.throws(
+      () => readLocalRecord(scope),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'LOCAL_FILE_UNSAFE',
+    )
+
+    // A Linux schema 1 record is not a macOS publication: publishing,
+    // authenticating or classifying it fails closed with the protocol refusal.
+    const linuxRecord: LinuxLocalInstanceRecord = {
+      schema: 1,
+      scopeId: scope.scopeId,
+      profileRealpath: scope.profileRealpath,
+      instanceId: randomUUID(),
+      hostPid: process.pid,
+      hostStarttime: '12345',
+      origin: 'http://127.0.0.1:41001',
+      protocol: LOCAL_PROTOCOL,
+      bundleVersion: scope.bundleVersion,
+      dshVersion: scope.dshVersion,
+      buildId: scope.buildId,
+    }
+    assert.throws(
+      () => writeLocalRecord(scope, linuxRecord),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_PROTOCOL_INCOMPATIBLE',
+    )
+    assert.throws(
+      () => inspectHostProcess(linuxRecord),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_PROTOCOL_INCOMPATIBLE',
+    )
+    assert.throws(
+      () => assertRecordedHostKernelIdentityCurrent(linuxRecord),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_PROTOCOL_INCOMPATIBLE',
+    )
+    assert.equal(sameLocalInstanceRecord(record, { ...record }), true)
+    assert.equal(sameLocalInstanceRecord(record, reused), false)
+  } finally {
+    cleanup(value.root)
+  }
+})
+
+test('macOS dispatches one exclusive kernel seat per profile scope', { skip: process.platform !== 'darwin' ? 'Darwin file seats require macOS' : false }, async t => {
+  const first = fixture(t)
+  const second = fixture(t)
+  try {
+    const scopeA = scopeFor(first)
+    const scopeB = scopeFor(second)
+    assert.notEqual(scopeA.scopeId, scopeB.scopeId, 'independent profiles must not share a scope')
+    const host = await bindProfileKernelSeat(scopeA, 'host', 'HOST_ALREADY_OWNED')
+    try {
+      host.assertCurrent()
+      await assert.rejects(
+        bindProfileKernelSeat(scopeA, 'host', 'HOST_ALREADY_OWNED'),
+        (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_ALREADY_OWNED',
+      )
+      // The qualification-only Client purpose owns its OWN seat and never
+      // conflicts with the Host singleton.
+      const qualification = await bindProfileKernelSeat(scopeA, 'qualification-client', 'CLIENT_ALREADY_ACTIVE')
+      try {
+        await assert.rejects(
+          bindProfileKernelSeat(scopeA, 'qualification-client', 'CLIENT_ALREADY_ACTIVE'),
+          (error: unknown) => error instanceof LocalScopeError && error.code === 'CLIENT_ALREADY_ACTIVE',
+        )
+      } finally {
+        await qualification.close()
+      }
+      // Profile B is a different seat object and wins independently.
+      const otherHost = await bindProfileKernelSeat(scopeB, 'host', 'HOST_ALREADY_OWNED')
+      await otherHost.close()
+      // Replacing the claimed path's inode behind the held descriptor is not
+      // ownership: Ready must stop instead of publishing.
+      const seatPath = processSeatPath(scopeA.dir, scopeA.scopeId, 'host')
+      rmSync(seatPath)
+      writeFileSync(seatPath, '', { mode: 0o600 })
+      assert.throws(
+        () => host.assertCurrent(),
+        (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_IDENTITY_MISMATCH',
+      )
+    } finally {
+      await host.close()
+    }
+    // An existing over-permissive seat file is refused BEFORE the open, not
+    // silently repaired.
+    const tamperedScope = scopeFor(fixture(t))
+    const tamperedPath = processSeatPath(tamperedScope.dir, tamperedScope.scopeId, 'host')
+    writeFileSync(tamperedPath, '', { mode: 0o644 })
+    await assert.rejects(
+      bindProfileKernelSeat(tamperedScope, 'host', 'HOST_ALREADY_OWNED'),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'SCOPE_DIRECTORY_UNSAFE',
+    )
+  } finally {
+    cleanup(first.root)
+    cleanup(second.root)
   }
 })

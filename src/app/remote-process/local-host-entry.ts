@@ -37,12 +37,11 @@ import { attachEntryControl, createEntryDiag, writeEntryRecord } from './entry-c
 import { HostActivityObserver } from './host-activity.ts'
 import { PI_TUI_WEB_ACCESS_ROWS } from '../host/features/web-roster.ts'
 import {
-  bindProcessSeat,
+  bindProfileKernelSeat,
   installedPackageRootFromEntry,
   LocalScopeError,
   LOCAL_PROTOCOL,
   readInstalledDshVersion,
-  readLinuxStarttime,
   removeOwnedScratch,
   scopeFromInstalledProfile,
   type LocalScope,
@@ -53,7 +52,13 @@ import {
   PI_TUI_WEB_ACCESS_NAMESPACE,
   type PiTuiWebAccessStatus,
 } from '../../runtime/remote/pi-tui-web-access-contract.ts'
-import { cleanupOwnedFiles, type LocalInstanceRecord } from './local-discovery.ts'
+import {
+  assertRecordedHostKernelIdentityCurrent,
+  cleanupOwnedFiles,
+  readHostProcessIdentity,
+  type HostProcessIdentity,
+  type LocalInstanceRecord,
+} from './local-discovery.ts'
 import {
   LocalAcpError,
   parseAcpMaxConnections,
@@ -1027,7 +1032,8 @@ interface PublishedLocalHost {
 async function publishLocalHost(
   context: import('@deepseek-ai/cordis').Context,
   scope: LocalScope,
-  processStarttime: string,
+  hostIdentity: HostProcessIdentity,
+  seat: ProcessSeat,
 ): Promise<PublishedLocalHost> {
   const connection = context.get('connection') as unknown as HostConnectionService | undefined
   if (connection === undefined || typeof connection.authenticatedUrl !== 'function' || typeof connection.fetch?.register !== 'function') {
@@ -1047,19 +1053,20 @@ async function publishLocalHost(
   await waitForRefusal(`${origin}/connect`)
 
   const instanceId = randomUUID()
-  const identity: LocalInstanceRecord = {
-    schema: 1,
+  const shared = {
     scopeId: scope.scopeId,
     profileRealpath: scope.profileRealpath,
     instanceId,
     hostPid: process.pid,
-    hostStarttime: processStarttime,
     origin,
     protocol: LOCAL_PROTOCOL,
     bundleVersion: scope.bundleVersion,
     dshVersion: scope.dshVersion,
     buildId: scope.buildId,
-  }
+  } as const
+  const identity: LocalInstanceRecord = hostIdentity.schema === 1
+    ? { schema: 1, ...shared, hostStarttime: hostIdentity.hostStarttime }
+    : { schema: 2, ...shared, hostKernelIdentity: hostIdentity.hostKernelIdentity }
   const connectUrl = connection.authenticatedUrl(`${origin}/connect`)
   const connectProbe = new URL(connectUrl)
   if (
@@ -1089,6 +1096,12 @@ async function publishLocalHost(
     // Admission runs before the exact route; this proves the route sits behind
     // the official Connection owner rather than a bare webserver handler.
     await waitForRefusal(`${origin}/api/pi-tui.local-host`)
+    // The READY commit re-proves BOTH authorities immediately before the
+    // registry becomes discoverable: the kernel process identity is still the
+    // one this Host captured, and the singleton seat is still held. A replaced
+    // seat/inode or a changed kernel identity must stop instead of publishing.
+    seat.assertCurrent()
+    assertRecordedHostKernelIdentityCurrent(identity)
     writeLocalRecord(scope, identity)
     // Qualification barrier: hold the process after the registry commit and
     // before the caller can report Ready, so a launcher can deliver a signal in
@@ -1163,7 +1176,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
 
   let seat: ProcessSeat
   try {
-    seat = await bindProcessSeat(scope.hostSocketName, 'HOST_ALREADY_OWNED')
+    seat = await bindProfileKernelSeat(scope, 'host', 'HOST_ALREADY_OWNED')
   } catch (error) {
     if (error instanceof LocalScopeError && error.code === 'HOST_ALREADY_OWNED') {
       // A live Host already owns this profile scope. This candidate never
@@ -1196,7 +1209,8 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
     }
     const overlayPath = join(scratchDir, 'host-only.patch.yml')
     writeFileSync(overlayPath, HOST_ONLY_PATCH, { mode: 0o600 })
-    const processStartIdentity = readLinuxStarttime()
+    const hostProcessIdentity = readHostProcessIdentity()
+    const processStartIdentity = hostProcessIdentity.schema === 1 ? hostProcessIdentity.hostStarttime : undefined
     if (process.env.SPLIT_PROCESS_HOST_FORCE_BOOT_FAILURE === 'before-profile') {
       throw new Error('local host entry: qualification forced pre-profile failure')
     }
@@ -1425,7 +1439,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         return
       }
 
-      const publishedHost = await publishLocalHost(handle.ctx, scope, processStartIdentity)
+      const publishedHost = await publishLocalHost(handle.ctx, scope, hostProcessIdentity, seat)
       published = publishedHost
       registration = publishedHost
       // The exit backstop removes only this instance's files; SIGKILL leaves

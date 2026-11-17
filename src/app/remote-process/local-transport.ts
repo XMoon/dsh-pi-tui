@@ -20,13 +20,14 @@ import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 import {
   LocalScopeError,
-  readProcessStarttime,
   type LocalScope,
 } from './local-scope.ts'
 import {
+  assertRecordedHostKernelIdentityCurrent,
   connectForCookie,
   readLaunchMaterial,
   readLocalRecord,
+  sameLocalInstanceRecord,
   type LocalInstanceRecord,
   type VerifiedLocalHost,
 } from './local-discovery.ts'
@@ -455,29 +456,10 @@ function assertIdentityStillCurrent(scope: LocalScope, expected: LocalInstanceRe
   if (current === undefined) {
     throw new LocalScopeError('HOST_IDENTITY_MISMATCH', 'local transport: the Host registry disappeared before connected')
   }
-  for (const key of [
-    'scopeId',
-    'profileRealpath',
-    'instanceId',
-    'hostPid',
-    'hostStarttime',
-    'origin',
-    'protocol',
-    'bundleVersion',
-    'dshVersion',
-    'buildId',
-  ] as const) {
-    if (current[key] !== expected[key]) {
-      throw new LocalScopeError('HOST_IDENTITY_MISMATCH', `local transport: the Host identity changed at ${key} before connected`)
-    }
+  if (!sameLocalInstanceRecord(current, expected)) {
+    throw new LocalScopeError('HOST_IDENTITY_MISMATCH', 'local transport: the Host identity changed before connected')
   }
-  const liveStarttime = readProcessStarttime(expected.hostPid)
-  if (liveStarttime === undefined) {
-    throw new LocalScopeError('PROCESS_STARTTIME_UNAVAILABLE', 'local transport: the Host process starttime is unavailable')
-  }
-  if (liveStarttime !== expected.hostStarttime) {
-    throw new LocalScopeError('HOST_IDENTITY_MISMATCH', 'local transport: the Host PID is no longer the authenticated process')
-  }
+  assertRecordedHostKernelIdentityCurrent(expected)
 }
 
 /** Wait for a set of sockets to close, bounded so disposal cannot park forever. */

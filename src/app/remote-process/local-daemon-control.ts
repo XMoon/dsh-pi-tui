@@ -601,7 +601,7 @@ async function waitForHostStopped(
     const targetPid = record?.hostPid ?? mainPid
     const observed = targetPid === 0 ? undefined : readStarttime(targetPid)
     const starttimeGone = targetPid === 0 || observed === undefined
-      || (record !== undefined && observed !== record.hostStarttime)
+      || (record !== undefined && (record.schema !== 1 || observed !== record.hostStarttime))
     const recordGone = record === undefined || inspectHostProcess(record) === 'dead'
     if (starttimeGone && recordGone) return
     if (now() >= deadline) {
@@ -710,7 +710,7 @@ async function stopFromSnapshot(
       const readStarttime = deps.readStarttime ?? ((pid: number) => {
         try { return readLinuxStarttime(pid) } catch { return undefined }
       })
-      if (readStarttime(record.hostPid) !== record.hostStarttime) {
+      if (record.schema !== 1 || readStarttime(record.hostPid) !== record.hostStarttime) {
         throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the Host process start identity changed before the signal')
       }
       assertNotAborted(deps.signal)

@@ -39,11 +39,14 @@ import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseProcessStatStarttime } from './local-scope.ts'
 
-/** The authenticated Host identity facts the Client already verified. */
+/** The authenticated Host identity facts the Client already verified. The
+ *  Linux starttime and the Darwin kernel identity are mutually exclusive; the
+ *  platform-specific branch reads only its own field. */
 export interface AuthenticatedHostIdentity {
   readonly instanceId: string
   readonly hostPid: number
-  readonly hostStarttime: string
+  readonly hostStarttime?: string
+  readonly hostKernelIdentity?: import('../../runtime/native-process/identity.ts').DarwinKernelProcessIdentity
 }
 
 /**
@@ -114,7 +117,7 @@ export function classifyLaunchWorkspace(
   if (platform !== 'linux') {
     return { kind: 'unverified', reason: 'the Host/Client directory equivalence check is only available on Linux' }
   }
-  if (identity.hostPid < 1 || identity.hostStarttime === '') {
+  if (identity.hostPid < 1 || identity.hostStarttime === undefined || identity.hostStarttime === '') {
     return { kind: 'unverified', reason: 'the authenticated Host identity is incomplete' }
   }
   const observedStarttime = readStarttime(identity.hostPid, procRoot)
