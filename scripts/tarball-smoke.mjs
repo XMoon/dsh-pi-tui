@@ -37,8 +37,10 @@
  */
 
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -69,6 +71,25 @@ import { pnpmExecutable } from './lib/process.mjs'
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 /** The dsh-pi-tui package root (the workspace checkout). */
 const PACKAGE_ROOT = join(SCRIPT_DIR, '..')
+
+/**
+ * The exact pinned Darwin prebuilds (upstream earendil-works/pi v1.5.0 @
+ * f9a26365), identified by their Git blob IDs. The values are deliberately
+ * repeated instead of imported from the copier: the pack verifier must fail
+ * if the build step ever copies a different file.
+ */
+const DARWIN_PREBUILDS = [
+  { arch: 'arm64', size: 52_024, gitBlob: '3294b6bffd36eaab70d61134e9955992f31f9a8f' },
+  { arch: 'x64', size: 22_784, gitBlob: '014383575508654d9f898ee25631b88db8d9740c' },
+]
+
+function darwinPrebuildPath(arch) {
+  return `dist/native/darwin/prebuilds/darwin-${arch}/darwin-platform.node`
+}
+
+function gitBlobSha(bytes) {
+  return createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')
+}
 
 const failures = []
 const checks = []
@@ -368,6 +389,29 @@ function main() {
       `exports=${Object.keys(pkg.exports ?? {}).join(',')}`)
     check('cordis.patch.yml included', has('cordis.patch.yml'))
     check('no duplicated official preset root', !files.some(name => name.startsWith('config/agent-presets/')))
+
+    // Pinned Darwin native prebuilds: the only `.node` payload the package may
+    // ship. The bytes are compared to the pinned upstream Git blob ID, and the
+    // tree must not gain any other file or symlink.
+    const expectedNative = DARWIN_PREBUILDS.map((entry) => darwinPrebuildPath(entry.arch))
+    const nativeFiles = files.filter(name => name.startsWith('dist/native/'))
+    const unexpectedNative = nativeFiles.filter(name => !expectedNative.includes(name))
+    const nativeSymlinks = nativeFiles.filter(name => lstatSync(join(extracted, name)).isSymbolicLink())
+    check('dist/native holds exactly the two pinned Darwin prebuilds',
+      unexpectedNative.length === 0 && nativeSymlinks.length === 0,
+      [...unexpectedNative, ...nativeSymlinks.map(name => `${name} (symlink)`)].join(', '))
+    for (const expected of DARWIN_PREBUILDS) {
+      const prebuild = darwinPrebuildPath(expected.arch)
+      check(`pinned Darwin ${expected.arch} prebuild ships: ${prebuild}`, has(prebuild))
+      if (!has(prebuild)) continue
+      const info = lstatSync(join(extracted, prebuild))
+      check(`pinned Darwin ${expected.arch} prebuild is a regular file`,
+        info.isFile() && !info.isSymbolicLink(), `file=${info.isFile()} symlink=${info.isSymbolicLink()}`)
+      const bytes = readFileSync(join(extracted, prebuild))
+      check(`pinned Darwin ${expected.arch} prebuild bytes match the upstream Git blob`,
+        bytes.length === expected.size && gitBlobSha(bytes) === expected.gitBlob,
+        `${bytes.length} bytes, git blob ${gitBlobSha(bytes)}`)
+    }
     // The generated preset mirror MUST ship: upstream bundle-patch loading
     // downgrades a missing patch file to a stderr "skipping profile bundle"
     // line, so a stripped mirror would silently drop the whole preset roster
@@ -565,6 +609,43 @@ function main() {
       if (installSucceeded) {
         const installed = join(probeDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')
         check('installed package contains dist', existsSync(join(installed, 'dist', 'index.mjs')))
+        for (const expected of DARWIN_PREBUILDS) {
+          const installedNative = join(installed, darwinPrebuildPath(expected.arch))
+          const sourceNative = join(PACKAGE_ROOT, 'packages', 'pi-tui', 'native', 'darwin', 'prebuilds',
+            `darwin-${expected.arch}`, 'darwin-platform.node')
+          let identical = false
+          if (existsSync(installedNative) && existsSync(sourceNative)) {
+            const packed = readFileSync(installedNative)
+            identical = packed.equals(readFileSync(sourceNative))
+              && packed.length === expected.size
+              && gitBlobSha(packed) === expected.gitBlob
+          }
+          check(`installed Darwin ${expected.arch} prebuild is byte-identical to the pinned source asset`, identical)
+        }
+        if (process.platform === 'darwin' && DARWIN_PREBUILDS.some((entry) => entry.arch === process.arch)) {
+          const prebuild = join(installed, darwinPrebuildPath(process.arch))
+          const helperScript = `
+import { createRequire } from 'node:module'
+const require = createRequire(${JSON.stringify(join(probeDir, 'probe.mjs'))})
+const helper = require(${JSON.stringify(prebuild)})
+for (const key of ['isModifierPressed', 'getText', 'setText', 'getImage', 'getFilePaths']) {
+  if (typeof helper[key] !== 'function') throw new Error('missing native export: ' + key)
+}
+const text = await helper.getText()
+if (text !== null && typeof text !== 'string') throw new Error('getText returned ' + typeof text)
+const image = await helper.getImage()
+if (image !== null && !(image instanceof Uint8Array)) throw new Error('getImage returned ' + typeof image)
+const files = await helper.getFilePaths()
+if (files !== null && (!Array.isArray(files) || files.some((file) => typeof file !== 'string'))) throw new Error('getFilePaths returned ' + typeof files)
+if (typeof helper.isModifierPressed('shift') !== 'boolean') throw new Error('isModifierPressed returned a non-boolean')
+console.log(JSON.stringify({ text, imageBytes: image === null ? null : image.length, files }))
+`
+          const helperRun = run(process.execPath, ['--input-type=module', '-e', helperScript], { cwd: probeDir })
+          check('installed Darwin native helper loads and exposes the real API',
+            helperRun.status === 0, helperRun.status === 0 ? '' : resultDetail(helperRun))
+        } else {
+          checks.push(`skip native helper load — this runner is ${process.platform}/${process.arch}`)
+        }
         const importRun = run(process.execPath, ['--input-type=module', '-e',
           "Promise.all([import('@xmoon76/dsh-pi-tui'), import('@xmoon76/dsh-pi-tui/startup'),"
             + "import('@xmoon76/dsh-pi-tui/extensions'), import('@xmoon76/dsh-pi-tui/builtins'),"
@@ -606,6 +687,20 @@ function main() {
         ], { cwd: probeDir })
         check('all exports entries import', importRun.status === 0 && importRun.stdout.includes('imports-ok'),
           importRun.status === 0 ? '' : importRun.stderr.slice(0, 200))
+        // The native helper is lazy: merely importing the package must not
+        // dlopen the Darwin addon, and on a non-Darwin runner the shipped
+        // Mach-O files must never be loaded.
+        const nativeLoadRun = run(process.execPath, ['--input-type=module', '-e',
+          "const loaded = []; const original = process.dlopen;"
+            + "process.dlopen = function (module, filename) { loaded.push(String(filename)); return original.apply(this, arguments) };"
+            + "await import('@xmoon76/dsh-pi-tui'); await import('@xmoon76/dsh-pi-tui/startup');"
+            + "const darwin = loaded.filter((file) => file.includes('/native/darwin/'));"
+            + "if (darwin.length > 0) { console.error('loaded Darwin addon(s) on import: ' + darwin.join(', ')); process.exit(1) }"
+            + "console.log('no-darwin-native-on-import')",
+        ], { cwd: probeDir })
+        check('importing the installed package loads no Darwin prebuild', nativeLoadRun.status === 0
+          && nativeLoadRun.stdout.includes('no-darwin-native-on-import'),
+          nativeLoadRun.status === 0 ? '' : resultDetail(nativeLoadRun))
         const forkRun = run(process.execPath, ['--input-type=module', '-e',
           // Resolve only: the module must not be installed at all. Any other
           // failure (a broken package.json, a resolver error) is NOT the
