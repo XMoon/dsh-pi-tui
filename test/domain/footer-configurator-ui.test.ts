@@ -2381,7 +2381,6 @@ test('the wheel is inert in text editors, the delete prompt and while a save is 
   assert.equal(saving.vt.getViewport().join('\n'), savingFrame, 'wheel is inert while a save is in flight')
   assert.equal(saves, 1, 'wheel never starts a second save')
   resolveSave()
-  await settle()
   saving.app.stop()
 })
 
