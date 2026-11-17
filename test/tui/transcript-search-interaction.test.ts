@@ -1866,3 +1866,54 @@ test('collapsing the PLAN card itself leaves an unrelated Search request intact'
   await settle.then(() => {}, () => {})
   app.stop()
 })
+
+test('Regular treats a card from ANOTHER Session as unprovable (keeps the question detail entry)', async () => {
+  // RFL-015: a same-callId card in the CURRENT display session is NOT the plan
+  // of a Question that belongs to another Session. The card-presence probe
+  // must apply the SAME identity admission as the inspection and keep the
+  // question's own detail readable in-flow.
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: 'display-session', version: 'test' })
+  // The displayed transcript carries a card with the SAME callId...
+  app.setTranscript(planTranscript('same-id'))
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: PLAN_MD,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'same-id' },
+  }], undefined, { reviewSessionId: 'other-session' }, false)
+  await vt.waitForRender()
+  const frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(frame.includes('View review text'),
+    `a mismatched-Session card must keep the question detail entry:\n${frame}`)
+  assert.ok(!frame.includes('Read the plan above in terminal history.'),
+    `the unrelated Session's card must not be claimed as "the plan above":\n${frame}`)
+  vt.sendInput('\x1b') // official dismiss
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('Regular treats an UNKNOWN Question Session as unprovable (keeps the question detail entry)', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setTranscript(planTranscript('call-plan-1'))
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: PLAN_MD,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, {}, false) // no reviewSessionId: identity cannot be proven
+  await vt.waitForRender()
+  const frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(frame.includes('View review text'),
+    `an unknown Question identity must keep the question detail entry:\n${frame}`)
+  assert.ok(!frame.includes('Read the plan above in terminal history.'),
+    `an unprovable identity must not claim the scrollback card:\n${frame}`)
+  vt.sendInput('\x1b')
+  await settle.then(() => {}, () => {})
+  app.stop()
+})

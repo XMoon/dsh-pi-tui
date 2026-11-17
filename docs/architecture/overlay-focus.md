@@ -193,9 +193,13 @@ compact decision component in the same editor seat:
   layout (see below). `View review text` is the §3.5 EXCEPTION entry, present
   only where the transcript inspection cannot be executed at all (Regular has
   no app-owned seek) AND the official card is NOT provably present in the
-  mounted transcript — the presence probe is the SAME local `intent.callId`
-  identity lookup the inspection uses, read-only, no Host service and no
-  second Reader. With a provable card Regular keeps its frozen ordinary layout
+  mounted transcript — the presence probe shares the inspection's READ-ONLY
+  admission (the flow is still the live seat owner, the official Question's
+  Session provably equals the current display subject, then the local
+  `intent.callId` lookup); a mismatched or unknown Session is never provable,
+  is never claimed as "the plan above", and keeps the question's own detail
+  entry. No Host service and no second Reader. With a provable card Regular
+  keeps its frozen ordinary layout
   (the `Read the plan above in terminal history.` line plus Keep/Approve, Keep
   default); only the card-unprovable exception replaces that line with
   `View review text` (the complete in-flow text, never a claimed-located

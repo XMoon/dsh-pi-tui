@@ -29318,6 +29318,24 @@ export class TuiApp {
    * identity is not a proven locate (fail closed to the detail fallback).
    */
   /**
+   * The read-only admission BOTH the Fullscreen inspection and the Regular
+   * card-presence probe share: the flow is still the live seat owner AND the
+   * official Question's Session is provably the CURRENT display subject. An
+   * unknown identity on either side fails closed — a card in some other
+   * Session is never "the plan above", and the question's own detail stays the
+   * reading entry in the exception.
+   */
+  private planReviewTargetAdmitted(state: QuestionState, reviewSessionId: string | undefined): boolean {
+    if (this.activeQuestions !== state) return false
+    const displaySubject = this.statusStore.snapshot().view.subject
+    const displaySessionId = displaySubject.kind === 'main'
+      ? this.mainSessionIdText
+      : this.displaySubjectPresentation?.sessionId
+    if (reviewSessionId === undefined || displaySessionId === undefined) return false
+    return reviewSessionId === displaySessionId
+  }
+
+  /**
    * Locate one OFFICIAL plan tool card in the CURRENT mounted transcript by
    * the official `intent.callId` (a native `tool.callId`, or a nested PTC
    * `subCallId` — the sub-call renders INSIDE its root card, so the reveal
@@ -29354,17 +29372,10 @@ export class TuiApp {
     const question = state.flow.planReviewQuestionForHost()
     const callId = question?.intent?.callId
     if (question === undefined || callId === undefined || callId === '') return false
-    // Currentness: the flow must still be the live seat owner.
-    if (this.activeQuestions !== state) return false
-    // Currentness: the official Question's Session must PROVE it is the
-    // current display subject. An unknown identity on either side fails
-    // closed — the detail fallback is the honest degradation.
-    const displaySubject = this.statusStore.snapshot().view.subject
-    const displaySessionId = displaySubject.kind === 'main'
-      ? this.mainSessionIdText
-      : this.displaySubjectPresentation?.sessionId
-    if (reviewSessionId === undefined || displaySessionId === undefined) return false
-    if (reviewSessionId !== displaySessionId) return false
+    // Currentness + identity admission: the flow must still be the live seat
+    // owner AND the official Question's Session must prove it is the current
+    // display subject (the SAME admission the card-presence probe uses).
+    if (!this.planReviewTargetAdmitted(state, reviewSessionId)) return false
     // A locate without a fullscreen viewport has nothing to address.
     const scroll = this.fullscreenScroll
     if (scroll === undefined) return false
@@ -29580,13 +29591,17 @@ export class TuiApp {
     state.flow.setPlanInspection({
       canInspect: () => this.fullscreen !== undefined,
       inspect: () => this.inspectPlanReview(state, state.status?.reviewSessionId),
-      // Local card-presence probe (the SAME official callId identity lookup,
-      // read-only): a provable card in the mounted transcript IS the "plan
-      // above in terminal history" that Regular's frozen ordinary layout
-      // names; no card ⇒ the question's own full-text exception entry.
+      // Local card-presence probe: the SAME read-only Session/currentness
+      // admission as the inspection, then the official callId identity lookup.
+      // A provable card in the mounted transcript IS the "plan above in
+      // terminal history" that Regular's frozen ordinary layout names; an
+      // identity mismatch/unknown or no card ⇒ the question's own full-text
+      // exception entry (never an unrelated Session's card).
       cardPresent: () => {
         const callId = state.flow.planReviewQuestionForHost()?.intent?.callId
-        return callId !== undefined && callId !== '' && this.locatePlanCard(callId) !== undefined
+        if (callId === undefined || callId === '') return false
+        if (!this.planReviewTargetAdmitted(state, state.status?.reviewSessionId)) return false
+        return this.locatePlanCard(callId) !== undefined
       },
     })
     state.flow.onPlanReadingScroll = (direction, page) => {
