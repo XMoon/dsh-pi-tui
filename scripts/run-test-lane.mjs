@@ -194,6 +194,10 @@ async function runLaneChild(laneName, args) {
     }, null, 2)}\n`)
   }
 
+  // Load the reporter BEFORE starting any worker: its module initialization
+  // removes DSH_TEST_JSONL from the inherited environment so nested test runs
+  // cannot write into this run's case inventory.
+  const { default: reporter } = await import('./test-case-reporter.mjs')
   const events = run(options)
   // The run() API does not set the host process' failure exit code as the
   // CLI does; a failing test must still fail the lane and its CI job.
@@ -202,7 +206,6 @@ async function runLaneChild(laneName, args) {
     console.error('[run-test-lane] test runner failed:', error)
     process.exitCode = 1
   })
-  const { default: reporter } = await import('./test-case-reporter.mjs')
   await reporter(events, {})
 }
 
