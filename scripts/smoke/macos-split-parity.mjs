@@ -253,23 +253,78 @@ function runDaemonCommand(installation, args) {
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
 }
 
-/** Start one management command without waiting: two of these race the admin seat. */
-function spawnDaemonCommand(installation, args) {
-  const invocation = daemonInvocation(installation, args)
-  const child = spawn(invocation[0], invocation.slice(1), {
-    cwd: installation.profileDir,
-    env: daemonEnvironment(installation),
+/**
+ * Start one bounded child process. The result settles only after the OS has
+ * reaped the child: the deadline sends SIGKILL and the promise rejects on
+ * `exit`/`close`, so a hung management command can never block the smoke's
+ * cleanup/evidence path or leave an owned subprocess behind.
+ */
+function startBoundedProcess(label, file, args, options) {
+  const child = spawn(file, args, {
+    cwd: options.cwd,
+    env: options.env,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-  const result = new Promise((resolve, reject) => {
-    let stdout = ''
-    let stderr = ''
-    child.stdout.on('data', chunk => { stdout += chunk })
-    child.stderr.on('data', chunk => { stderr += chunk })
-    child.once('error', reject)
-    child.once('close', status => resolve({ status, stdout, stderr }))
+  let stdout = ''
+  let stderr = ''
+  let settled = false
+  let timedOut = false
+  let settle
+  const result = new Promise((resolve, reject) => { settle = { resolve, reject } })
+  const finish = (fn, value) => {
+    if (settled) return
+    settled = true
+    clearTimeout(timer)
+    fn(value)
+  }
+  const rejectTimedOut = () => {
+    // The child is already reaped at this point; drop any stream that a
+    // surviving grandchild might still hold so the evidence path can run.
+    child.stdout?.destroy()
+    child.stderr?.destroy()
+    finish(settle.reject, new SplitSmokeAssertionError(
+      `${label}: did not exit within ${String(options.timeoutMs)}ms and was killed (pid ${String(child.pid)})`,
+    ))
+  }
+  const timer = setTimeout(() => {
+    timedOut = true
+    // SIGKILL cannot be ignored; `close`/`exit` below proves the reap.
+    try { child.kill('SIGKILL') } catch { /* already gone */ }
+  }, options.timeoutMs)
+  child.stdout?.on('data', chunk => { stdout += chunk })
+  child.stderr?.on('data', chunk => { stderr += chunk })
+  child.once('error', error => {
+    finish(settle.reject, new SplitSmokeAssertionError(`${label}: could not run: ${error.message}`))
   })
-  return { child, result }
+  child.once('exit', () => { if (timedOut) rejectTimedOut() })
+  child.once('close', (status, signal) => {
+    if (timedOut) {
+      rejectTimedOut()
+      return
+    }
+    finish(settle.resolve, { status, signal, stdout, stderr, pid: child.pid })
+  })
+  return {
+    child,
+    result,
+    /** Kill an owned child that is still running and await its reaping. */
+    async dispose() {
+      if (!settled) {
+        try { child.kill('SIGKILL') } catch { /* already gone */ }
+      }
+      return result.then(() => undefined, () => undefined)
+    },
+  }
+}
+
+/** Start one management command without waiting: two of these race the admin seat. */
+function startDaemonCommand(installation, args) {
+  const invocation = daemonInvocation(installation, args)
+  return startBoundedProcess(`daemon ${args.join(' ')}`, invocation[0], invocation.slice(1), {
+    timeoutMs: TIMEOUTS.daemon,
+    cwd: installation.profileDir,
+    env: daemonEnvironment(installation),
+  })
 }
 
 /** Parse the fixed `key=value` status block without trusting line order. */
@@ -861,9 +916,30 @@ async function runScene({ installation, workRoot, report }) {
   // any Host/unit mutation.
   const preRaceStop = runDaemonCommand(installation, ['stop'])
   assert(preRaceStop.status === 0, `P05: pre-race stop failed (${String(preRaceStop.status)})`)
-  const raceOne = spawnDaemonCommand(installation, ['start'])
-  const raceTwo = spawnDaemonCommand(installation, ['start'])
-  const raceOutcomes = await Promise.all([raceOne.result, raceTwo.result])
+  // Negative control for the bounded race helper itself: a child that never
+  // exits must be reaped by the deadline, not merely abandoned by a race.
+  const hung = startBoundedProcess('P05 reaping control', process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    timeoutMs: 500,
+    cwd: workRoot,
+    env: daemonEnvironment(installation),
+  })
+  const hungPid = hung.child.pid
+  const hungFailure = await hung.result.then(() => undefined, error => error)
+  assert(hungFailure instanceof Error && /did not exit within 500ms/u.test(hungFailure.message),
+    `P05: a never-exiting child must fail at its deadline, saw ${String(hungFailure)}`)
+  assert(hungPid !== undefined && !alive(hungPid),
+    `P05: the timed-out child pid ${String(hungPid)} was not reaped`)
+  report.rows.push({ id: 'P05-REAP', status: 'PASS', timeoutMs: 500, reapedPid: hungPid })
+  const raceOne = startDaemonCommand(installation, ['start'])
+  const raceTwo = startDaemonCommand(installation, ['start'])
+  let raceOutcomes
+  try {
+    raceOutcomes = await Promise.all([raceOne.result, raceTwo.result])
+  } finally {
+    // Every owned race child is either already settled or is killed and
+    // awaited here, so a failure still reaches the normal cleanup/evidence path.
+    await Promise.all([raceOne.dispose(), raceTwo.dispose()])
+  }
   const winners = raceOutcomes.filter(outcome => outcome.status === 0)
   const busyLosers = raceOutcomes.filter(outcome => outcome.status === 5 && /DAEMON_CONTROL_BUSY/u.test(outcome.stderr))
   assert(winners.length === 1 && busyLosers.length === 1,
