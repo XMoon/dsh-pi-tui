@@ -360,7 +360,10 @@ test('a real crashed child releases the LOADER lane for a successor real render'
   const crashed = settled('crash-digest')
   loader.load('crash-digest', SVG_SOURCE, 128)
   await crashed
-  assert.equal(loader.get('crash-digest', 128).state, 'error', 'the crash is a terminal error state')
+  const crashedState = loader.get('crash-digest', 128)
+  assert.equal(crashedState.state, 'error', 'the crash is a terminal error state')
+  assert.match(crashedState.state === 'error' ? crashedState.error.message : '', /SVG rasterizer exited \(3\)/u,
+    'the failure is the real child exit, not a timeout')
   const recovered = settled('successor-digest')
   loader.load('successor-digest', SVG_SOURCE, 128)
   await recovered
@@ -391,7 +394,10 @@ test('a real child stdout overflow releases the LOADER lane for a successor real
   const overflowed = settled('overflow-digest')
   loader.load('overflow-digest', SVG_SOURCE, 128)
   await overflowed
-  assert.equal(loader.get('overflow-digest', 128).state, 'error', 'the overflow is a terminal error state')
+  const overflowedState = loader.get('overflow-digest', 128)
+  assert.equal(overflowedState.state, 'error', 'the overflow is a terminal error state')
+  assert.match(overflowedState.state === 'error' ? overflowedState.error.message : '',
+    /SVG rasterizer produced too much output/u, 'the failure is the overflow guard, not a timeout')
   const recovered = settled('after-overflow-digest')
   loader.load('after-overflow-digest', SVG_SOURCE, 128)
   await recovered
