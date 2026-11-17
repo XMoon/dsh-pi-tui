@@ -240,48 +240,72 @@ test('the real Settings root delegates the wheel to the Footer body and the fixe
 })
 
 test('wheel -> painted item edit -> explicit Save once; a failed save keeps the draft editable', async () => {
-  const h = mountFooter({ columns: 100, rows: 40, entry: 'row' })
+  // Pointer-only positive journey: wheel reveals a hidden item, click that
+  // painted item, click its visible Hide-in-TSP option, click the Root Esc span
+  // twice back to the Row Selector, then click Save changes.
+  const h = mountFooter({ columns: 100, rows: 40, items: 32, entry: 'row' })
   await h.paint()
-  // Normal Appearance row entry mounts the SAME real page.
   assert.ok(h.view().includes('Configure footer layout…'), `the Appearance row is painted:\n${h.view()}`)
-  h.vt.sendInput('\r')
+  h.vt.sendInput('\r') // the selected Appearance row -> the real Footer page
   await h.paint()
   assert.ok(h.view().includes('Footer layout'), `the normal entry mounts the Footer page:\n${h.view()}`)
   assert.equal(h.page()!.state().mode, 'rows')
-  h.vt.sendInput('\r') // Row Selector → the long Edit Row body
+  h.vt.sendInput('\r') // Row Selector -> the long Edit Row body
   await h.paint()
   assert.equal(h.page()!.state().mode, 'row')
+  assert.ok(!h.view().includes('scroll-31'), `the last item is NOT painted before the wheel:\n${h.view()}`)
 
-  // REAL wheel first: scroll the body, then click a painted item → its editor.
-  const scrolled = h.view()
-  for (let step = 0; step < 4; step += 1) wheel(h.vt, rowOf(scrolled, 'scroll-10'), 'down')
+  // REAL wheel first: the last item becomes visible, then click THAT item.
+  const targetRow = rowOf(h.view(), 'scroll-10')
+  for (let step = 0; step < 3; step += 1) wheel(h.vt, targetRow, 'down')
   await h.paint()
-  const itemRow = rowOf(h.view(), 'scroll-10')
+  assert.ok(h.view().includes('scroll-31'), `the wheel revealed the last body item:\n${h.view()}`)
+  const itemRow = rowOf(h.view(), 'scroll-31')
   h.vt.sendInput(`\x1b[<0;6;${itemRow + 1}M`)
   await h.paint()
   h.vt.sendInput(`\x1b[<0;6;${itemRow + 1}m`)
   await h.paint()
-  assert.equal(h.page()!.state().mode, 'item', 'the wheel-scrolled painted item opens its editor')
-  assert.equal(h.page()!.state().cursor, 10)
-  h.vt.sendInput('\x1b') // item → row
-  await h.paint()
-  assert.equal(h.page()!.state().mode, 'row')
+  assert.equal(h.page()!.state().mode, 'item', 'the wheel-revealed painted item opens its editor')
+  assert.equal(h.page()!.state().cursor, 31)
 
-  // Dirty the draft through the real keyboard path, then save explicitly.
-  const itemsBefore = h.page()!.state().layout.rows[0]!.left.length
-  h.vt.sendInput(' ') // remove the current item
+  // Click a VISIBLE item option: Hide in TSP toggles the draft (pointer only).
+  const hideRow = rowOf(h.view(), 'Hide in TSP')
+  h.vt.sendInput(`\x1b[<0;6;${hideRow + 1}M`)
   await h.paint()
-  h.vt.sendInput('\x1b') // row → selector
+  h.vt.sendInput(`\x1b[<0;6;${hideRow + 1}m`)
   await h.paint()
-  assert.equal(h.page()!.state().mode, 'rows')
+  assert.equal(h.page()!.state().mode, 'item')
+  assert.equal(h.page()!.state().layout.rows[0]!.left[31]!.hideInTsp, true,
+    'the painted Hide-in-TSP click applied the option')
   assert.ok(h.page()!.isDirty())
+
+  // Click the Root-owned Esc span (the ONE physical last row) back to the Row
+  // Selector: item -> row, row -> rows.
+  const clickRootEscape = async (): Promise<void> => {
+    const rows = h.vt.getViewport()
+    const bar = rows[rows.length - 1]!
+    const needle = bar.includes('Back [Esc]') ? 'Back [Esc]' : bar.includes('Close [Esc]') ? 'Close [Esc]' : 'Esc'
+    const index = bar.indexOf(needle)
+    assert.ok(index >= 0, `the Root bar paints its Esc span:\n${bar}`)
+    const x = index + 1 // 0-based cell inside the painted span
+    h.vt.sendInput(`\x1b[<0;${x + 1};${rows.length}M`)
+    await h.paint()
+    h.vt.sendInput(`\x1b[<0;${x + 1};${rows.length}m`)
+    await h.paint()
+  }
+  await clickRootEscape()
+  assert.equal(h.page()!.state().mode, 'row')
+  await clickRootEscape()
+  assert.equal(h.page()!.state().mode, 'rows', 'the Root Esc span runs the page ladder back to the selector')
+
+  // Explicit painted Save row: ONE save, the edited draft, page closes.
   let saveRow = rowOf(h.view(), 'Save changes')
   h.vt.sendInput(`\x1b[<0;6;${saveRow + 1}M`)
   await h.paint()
   h.vt.sendInput(`\x1b[<0;6;${saveRow + 1}m`)
   await h.paint()
   assert.equal(h.saves.length, 1, 'the explicit painted Save click runs the ONE save path once')
-  assert.equal(h.saves[0]!.layout.rows[0]!.left.length, itemsBefore - 1, 'the saved layout is the edited draft')
+  assert.equal(h.saves[0]!.layout.rows[0]!.left[31]!.hideInTsp, true, 'the saved draft carries the clicked option')
   assert.ok(h.panel()!.isDisposed(), 'a successful save closes the page')
   h.close()
   h.app.dispose()
@@ -309,10 +333,24 @@ test('wheel -> painted item edit -> explicit Save once; a failed save keeps the 
   assert.equal(retry.page()!.state().saving, false)
   assert.ok(retry.page()!.isDirty(), 'the failed save keeps the draft dirty')
   assert.equal(retry.panel()!.isDisposed(), false, 'the failed save keeps the editor open')
+  // The failed draft is still really editable: an observable remove, then save.
+  const itemsAfterFailure = retry.page()!.state().layout.rows[0]!.left.length
+  retry.vt.sendInput('\r') // rows -> the selected row
+  await retry.paint()
+  assert.equal(retry.page()!.state().mode, 'row')
+  retry.vt.sendInput(' ')
+  await retry.paint()
+  assert.equal(retry.page()!.state().layout.rows[0]!.left.length, itemsAfterFailure - 1,
+    'the rejected draft stays editable')
+  retry.vt.sendInput('\x1b')
+  await retry.paint()
+  assert.equal(retry.page()!.state().mode, 'rows')
   retry.saveError.value = undefined
   retry.vt.sendInput('s') // retry through the ONE save path
   await retry.paint()
   assert.equal(retry.saves.length, 2, 'the retry reaches the ONE save sink exactly once more')
+  assert.equal(retry.saves[1]!.layout.rows[0]!.left.length, itemsAfterFailure - 1,
+    'the retry persists the post-failure edit')
   assert.ok(retry.panel()!.isDisposed(), 'the successful retry closes the page')
   retry.close()
   retry.app.dispose()
