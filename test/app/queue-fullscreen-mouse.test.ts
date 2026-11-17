@@ -292,6 +292,18 @@ test('a picker row press followed by a wheel cannot activate the old item', asyn
   await h.vt.waitForRender()
   assert.equal(h.controller.view().mode, 'browse', 'a wheel outside the picker rows must retire its press')
 
+  // A geometry round-trip also retires the delegated picker press.
+  const resizeRow = h.cell('first queued message')
+  press(h.vt, resizeRow)
+  await h.vt.waitForRender()
+  h.vt.resize(44, 20)
+  await h.vt.waitForRender()
+  h.vt.resize(100, 30)
+  await h.vt.waitForRender()
+  release(h.vt, resizeRow)
+  await h.vt.waitForRender()
+  assert.equal(h.controller.view().mode, 'browse', 'a restored geometry must not revive the picker press')
+
   // A fresh press/release on the old row is a new gesture and activates it.
   press(h.vt, h.cell('first queued message'))
   release(h.vt, h.cell('first queued message'))
@@ -343,6 +355,22 @@ test('a resize round-trip refuses the old bar and confirm gestures, including th
   await h.drain()
   await h.vt.waitForRender()
   assert.deepEqual(h.writes, [], 'a restored confirm frame must not reach the writer')
+  assert.equal(h.controller.view().mode, 'confirm-delete')
+
+  // The same frame identity also has to cover a terminal-only resize: at
+  // 120×40 the overlay keeps the same 88-column/28-row content, so the child
+  // width/grant alone cannot detect the change.
+  const wideConfirm = h.cell('Enter confirm')
+  press(h.vt, wideConfirm)
+  await h.vt.waitForRender()
+  h.vt.resize(120, 40)
+  await h.vt.waitForRender()
+  h.vt.resize(100, 30)
+  await h.vt.waitForRender()
+  release(h.vt, wideConfirm)
+  await h.drain()
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, [], 'a terminal-only resize must not revive the confirm press')
   assert.equal(h.controller.view().mode, 'confirm-delete')
 
   // The explicitly fresh confirmation performs exactly one remove.

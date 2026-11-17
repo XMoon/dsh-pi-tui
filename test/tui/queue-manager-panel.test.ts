@@ -507,6 +507,32 @@ test('a delegated picker press is retired by keyboard navigation and by a wheel 
   assert.equal(h.controller.view().selectedId, 'occ-a')
 })
 
+test('a geometry round-trip retires a delegated picker press', () => {
+  const h = harness([
+    item('occ-a', [{ type: 'text', text: 'queued alpha' }]),
+    item('occ-b', [{ type: 'text', text: 'queued bravo' }]),
+  ])
+  const width = 84
+  const row = h.panel.render(width).findIndex(line => plain(line).includes('queued alpha'))
+  assert.ok(row >= 0)
+  h.panel.handleMouse(mouse(row, 5, width, 'press'))
+  h.panel.setMaxRows(18)
+  h.panel.render(40)
+  h.panel.setMaxRows(26)
+  h.panel.render(width)
+  h.panel.handleMouse(mouse(row, 5, width, 'release'))
+  h.panel.handleMouse(mouse(row, 5, width, 'click'))
+  assert.equal(h.controller.view().mode, 'browse', 'the restored geometry must not revive the picker press')
+
+  // The fresh press after the geometry change is still a valid gesture.
+  const freshRow = h.panel.render(width).findIndex(line => plain(line).includes('queued alpha'))
+  h.panel.handleMouse(mouse(freshRow, 5, width, 'press'))
+  h.panel.handleMouse(mouse(freshRow, 5, width, 'release'))
+  h.panel.handleMouse(mouse(freshRow, 5, width, 'click'))
+  assert.equal(h.controller.view().mode, 'edit')
+  assert.equal(h.controller.view().selectedId, 'occ-a')
+})
+
 test('a width round-trip retires the bar press even when the final cells match', () => {
   const h = harness([item('occ-1', [{ type: 'text', text: 'hello' }])])
   const width = 84

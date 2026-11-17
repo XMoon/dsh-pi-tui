@@ -198,10 +198,15 @@ export class QueuePanel implements Component, Focusable {
   private paintedSelectedId: string | undefined
   /** The row count the fork Editor last painted (its own hit contract). */
   private editorRenderedHeight = 0
-  /** Monotonic painted-geometry identity: a width or row-grant change retires
-   * every unfinished gesture permanently, even when a later change restores
-   * the same cells before the release. */
+  /** Monotonic painted-geometry identity: a terminal/screen, content-width or
+   * row-grant change retires every unfinished gesture permanently, even when a
+   * later change restores the same cells before the release. */
   private geometryRevision = 0
+  /** The screen + terminal/content geometry of the last paint, compared by
+   * identity: the frame's child width/grant alone can stay unchanged across a
+   * terminal resize (100×30 → 120×40 keeps the 88-column overlay). */
+  private paintedScreen: TUI | undefined
+  private paintedGeometryKey = ''
   private pickerSignature = ''
   private focusedFlag = false
 
@@ -243,9 +248,7 @@ export class QueuePanel implements Component, Focusable {
 
   /** The host's row grant (the frame's `maxHeight − 2`). */
   setMaxRows(rows: number): void {
-    const next = Math.max(1, Math.floor(rows))
-    if (next !== this.maxRows) this.geometryRevision += 1
-    this.maxRows = next
+    this.maxRows = Math.max(1, Math.floor(rows))
     this.picker.setMaxRows(Math.max(1, this.maxRows - 2))
   }
 
@@ -444,7 +447,19 @@ export class QueuePanel implements Component, Focusable {
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.floor(width))
-    if (safeWidth !== this.lastRenderWidth) this.geometryRevision += 1
+    // The painted geometry identity includes the live screen and the terminal
+    // size, not only the frame's child width/grant: a 100×30 → 120×40 resize
+    // keeps the same 88-column overlay content, yet it is a real frame change
+    // that must retire an unfinished gesture (and its delegated picker press).
+    const screen = this.screen()
+    const geometryKey = `${screen.terminal.columns}:${screen.terminal.rows}:${safeWidth}:${this.maxRows}`
+    if (screen !== this.paintedScreen || geometryKey !== this.paintedGeometryKey) {
+      this.paintedScreen = screen
+      this.paintedGeometryKey = geometryKey
+      this.geometryRevision += 1
+      this.pressed = undefined
+      this.picker.clearMousePress()
+    }
     this.lastRenderWidth = safeWidth
     this.hits = []
     const view = this.controller.view()
