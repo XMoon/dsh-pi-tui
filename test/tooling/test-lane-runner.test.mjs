@@ -281,6 +281,7 @@ test('the lane runner actually applies concurrency to real test workers', (t) =>
   for (let index = 0; index < 4; index += 1) {
     writeFileSync(join(probe, `hold-${index}.test.mjs`),
       `import test from 'node:test'
+// reason: the 400ms hold is the measured concurrency window, not a settlement delay.
 test('hold ${index}', async () => { await new Promise(resolve => setTimeout(resolve, 400)) })
 `)
   }
