@@ -168,7 +168,7 @@ export interface SessionRuntimeDeps {
    *  preflight calls it BEFORE the Host `workspace.create` and again before the
    *  returned id is adopted; `undefined` means there is no auto proposal, so a
    *  one-shot `auto` intent fails closed. */
-  readonly autoWorkspaceRevalidate?: () => Promise<boolean>
+  readonly autoWorkspaceRevalidate?: (signal?: AbortSignal) => Promise<boolean>
   /** Legacy structural caller input; production composition supplies workspaceNextIntent. */
   initialWorkspaceIntent?(): WorkspaceSelectionIntent
   /** The runner lifecycle abort signal (the quiesces observe it). */
@@ -1783,7 +1783,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   /** The Client-local AUTO evidence, re-observed now. A missing revalidation
    *  hook fails closed: an automatic proposal never rides an assumed proof. */
   const autoWorkspaceEvidenceCurrent = async (): Promise<boolean> =>
-    deps.autoWorkspaceRevalidate === undefined ? false : await deps.autoWorkspaceRevalidate()
+    deps.autoWorkspaceRevalidate === undefined ? false : await deps.autoWorkspaceRevalidate(deps.lifecycleSignal)
 
   /** After an async AUTO evidence re-observation the captured target must
    *  still be the CURRENT create intent and no Session owner may have
@@ -1795,53 +1795,69 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     }
   }
 
-  const preflightWorkspace = async (): Promise<void> => {
-    if (deps.workspaceNextIntent === undefined) return
-    if (creating !== undefined || core.owner() !== undefined) return
-    if (workspacePreflight !== undefined) return await workspacePreflight
+  /**
+   * Start or join the ONE sessionless preflight. The single-flight promise is
+   * published SYNCHRONOUSLY, before the first `await` (the auto proof): a
+   * concurrent `awaitWorkspacePreflight()` or first-session create must observe
+   * the in-flight work instead of silently starting a second Host resolution.
+   */
+  const preflightWorkspace = (): Promise<void> => {
+    if (deps.workspaceNextIntent === undefined) return Promise.resolve()
+    if (creating !== undefined || core.owner() !== undefined) return Promise.resolve()
+    if (workspacePreflight !== undefined) return workspacePreflight
     const owner = intentOwner()
     const snapshot = owner.snapshot()
     // Unselected is a real state: ZERO Host call (no registry read, no
     // workspace.create, no Session.create). The Welcome/Browser owns the next
     // user decision.
-    if (snapshot.status === 'unselected' || snapshot.intent === undefined) return
-    if (snapshot.status === 'confirmed' || snapshot.intent.kind !== 'host-path') return
-    // The automatic Client launch-cwd candidate is re-proved BEFORE the Host
-    // sees it; a revoked proof releases the candidate and stays unselected.
-    if (snapshot.provenance === 'auto' && !(await autoWorkspaceEvidenceCurrent())) {
-      owner.resetToLaunchCwd()
-      deps.diag.warn('first session automatic workspace candidate was revoked', {})
-      return
-    }
-    // The evidence re-observation is async: only the SAME intent revision may
-    // start a Host resolution afterwards, and a runner that was torn down
-    // while it waited owns nothing.
-    if (deps.lifecycleSignal.aborted) return
-    if (core.owner() !== undefined || owner.snapshot().revision !== snapshot.revision) return
-    const token = owner.beginPathVerification()
-    workspacePreflight = (async () => {
+    if (snapshot.status === 'unselected' || snapshot.intent === undefined) return Promise.resolve()
+    if (snapshot.status === 'confirmed' || snapshot.intent.kind !== 'host-path') return Promise.resolve()
+    const preflight = (async (): Promise<void> => {
       try {
-        const resolved = await deps.lifecycle.resolveWorkspace(token.intent, deps.lifecycleSignal)
-        if (!token.isCurrent()) return
-        // The Host may have accepted the proposal, but the LOCAL equivalence
-        // proof is what authorizes ADOPTING it: a Host restart/mount-view change
-        // during the create revokes the automatic candidate. The Host-side
-        // registration (if any) stays with the official registry.
+        // The automatic Client launch-cwd candidate is re-proved BEFORE the
+        // Host sees it; a revoked proof releases the candidate and stays
+        // unselected — but ONLY while this operation still owns the captured
+        // intent. A newer manual/launch choice or a Session owner that appeared
+        // during the await must never be cleared by this late result.
         if (snapshot.provenance === 'auto' && !(await autoWorkspaceEvidenceCurrent())) {
+          if (deps.lifecycleSignal.aborted) return
+          if (core.owner() !== undefined || owner.snapshot().revision !== snapshot.revision) return
           owner.resetToLaunchCwd()
-          deps.diag.warn('first session automatic workspace candidate changed during resolution', {})
+          deps.diag.warn('first session automatic workspace candidate was revoked', {})
           return
         }
-        if (!token.isCurrent() || deps.lifecycleSignal.aborted) return
-        owner.commitVerifiedPath(token, resolved.workspaceId, resolved.path)
-      } catch (error) {
-        if (!token.isCurrent()) return
-        const message = safeErrorMessage(error)
-        owner.rejectPathVerification(token, message)
-        deps.diag.warn('first session workspace preflight failed', { error: message })
+        if (deps.lifecycleSignal.aborted) return
+        if (core.owner() !== undefined || owner.snapshot().revision !== snapshot.revision) return
+        const token = owner.beginPathVerification()
+        try {
+          const resolved = await deps.lifecycle.resolveWorkspace(token.intent, deps.lifecycleSignal)
+          if (!token.isCurrent()) return
+          // The Host may have accepted the proposal, but the LOCAL equivalence
+          // proof is what authorizes ADOPTING it: a Host restart/mount-view change
+          // during the create revokes the automatic candidate. The Host-side
+          // registration (if any) stays with the official registry.
+          if (snapshot.provenance === 'auto' && !(await autoWorkspaceEvidenceCurrent())) {
+            if (!token.isCurrent() || deps.lifecycleSignal.aborted) return
+            owner.resetToLaunchCwd()
+            deps.diag.warn('first session automatic workspace candidate changed during resolution', {})
+            return
+          }
+          if (!token.isCurrent() || deps.lifecycleSignal.aborted) return
+          owner.commitVerifiedPath(token, resolved.workspaceId, resolved.path)
+        } catch (error) {
+          if (!token.isCurrent()) return
+          const message = safeErrorMessage(error)
+          owner.rejectPathVerification(token, message)
+          deps.diag.warn('first session workspace preflight failed', { error: message })
+        }
+      } finally {
+        // The single-flight slot is exclusively this operation's until it
+        // settles: no later preflight can start while it is occupied.
+        workspacePreflight = undefined
       }
-    })().finally(() => { workspacePreflight = undefined })
-    return workspacePreflight
+    })()
+    workspacePreflight = preflight
+    return preflight
   }
 
   const awaitWorkspacePreflight = (): Promise<void> => workspacePreflight ?? Promise.resolve()
@@ -1875,6 +1891,11 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       // revokes the proof. The Host-side registration stays with the official
       // registry; the surface returns to unselected.
       if (workspaceIntent.provenance === 'auto' && !(await autoWorkspaceEvidenceCurrent())) {
+        // The proof is async. A newer manual/launch intent or a Session owner
+        // that appeared during the await owns the CURRENT state; a late false
+        // result must neither clear it nor turn the Client launch path into a
+        // 'launch' proposal (resetToLaunchCwd uses the CURRENT provenance).
+        assertAutoIntentStillCurrent(workspaceIntent)
         intentOwner().resetToLaunchCwd()
         const message = 'The verified local workspace changed before the first session — choose a Host workspace'
         deps.surface.promptWorkspaceSelection?.()
@@ -1956,6 +1977,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // automatic candidate's local proof is re-observed one final time. A
         // revoked candidate releases the target and creates NOTHING.
         if (workspaceIntent.provenance === 'auto' && !(await autoWorkspaceEvidenceCurrent())) {
+          // Same ownership rule as the consumption gate: this late result may
+          // only reset the intent it actually captured.
+          assertAutoIntentStillCurrent(workspaceIntent)
           intentOwner().resetToLaunchCwd()
           throw new WorkspaceSelectionError(
             'refused',

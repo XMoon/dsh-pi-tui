@@ -106,7 +106,7 @@ function lifecycle(options: {
 function bind(input: {
   readonly launchCwd: string | undefined
   readonly provenance?: 'launch' | 'auto' | 'manual'
-  readonly autoWorkspaceRevalidate?: () => boolean
+  readonly autoWorkspaceRevalidate?: (signal?: AbortSignal) => Promise<boolean>
   readonly host?: HostTape
   readonly sampled?: SampledSurface
   readonly resolve?: (intent: { readonly kind: string; readonly path?: string }) => Promise<ResolvedWorkspaceSelection>
@@ -151,7 +151,7 @@ test('an UNSELECTED preflight dispatches ZERO Host calls', async () => {
 })
 
 test('an AUTO proposal whose local evidence is revoked before the Host call resolves nothing', async () => {
-  const { runtime, owner, host, sampled } = bind({ launchCwd: '/client/cwd', provenance: 'auto', autoWorkspaceRevalidate: () => false })
+  const { runtime, owner, host, sampled } = bind({ launchCwd: '/client/cwd', provenance: 'auto', autoWorkspaceRevalidate: async () => false })
   await runtime.preflightWorkspace()
   assert.deepEqual(host.resolves, [], 'the revoked auto candidate never reaches the Host')
   assert.equal(owner.snapshot().status, 'unselected')
@@ -164,7 +164,7 @@ test('an AUTO proposal verified at admission but revoked before adoption leaves 
   const { runtime, owner, host } = bind({
     launchCwd: '/client/cwd',
     provenance: 'auto',
-    autoWorkspaceRevalidate: () => current,
+    autoWorkspaceRevalidate: async () => current,
     resolve: async () => {
       // The mount view changed while the Host was creating/validating.
       current = false
@@ -180,7 +180,7 @@ test('an AUTO proposal verified at admission but revoked before adoption leaves 
 })
 
 test('an AUTO proposal keeps its provenance through the verified adoption', async () => {
-  const { runtime, owner } = bind({ launchCwd: '/client/cwd', provenance: 'auto', autoWorkspaceRevalidate: () => true })
+  const { runtime, owner } = bind({ launchCwd: '/client/cwd', provenance: 'auto', autoWorkspaceRevalidate: async () => true })
   await runtime.preflightWorkspace()
   assert.equal(owner.snapshot().status, 'confirmed')
   assert.equal(owner.snapshot().provenance, 'auto')
@@ -237,7 +237,7 @@ test('review P2: a preflight-confirmed AUTO candidate is re-proved at the consum
   const { runtime, owner, host } = bind({
     launchCwd: '/client/cwd',
     provenance: 'auto',
-    autoWorkspaceRevalidate: () => current,
+    autoWorkspaceRevalidate: async () => current,
     resolve: async () => ({ workspaceId: 'workspace-auto', path: '/host/cwd' }),
   })
   // The mount preflight confirms the automatic candidate LONG before the user
@@ -286,7 +286,7 @@ test('review EXT-P2 (final window): a mount-view change during the LAST default-
   const { runtime, owner, host } = bind({
     launchCwd: '/client/cwd',
     provenance: 'auto',
-    autoWorkspaceRevalidate: () => current,
+    autoWorkspaceRevalidate: async () => current,
     resolve: async () => ({ workspaceId: 'workspace-auto', path: '/host/cwd' }),
     awaitPendingDefaultWrite: async () => {
       entered()
@@ -308,4 +308,101 @@ test('review EXT-P2 (final window): a mount-view change during the LAST default-
   assert.deepEqual(host.creates, [],
     'the final gate must cancel the Host Session create when the proof expires during the last wait')
   assert.equal(owner.snapshot().status, 'unselected')
+})
+
+test('a late revoked AUTO proof never clears a manual target chosen while the admission proof awaited', async () => {
+  let release!: (value: boolean) => void
+  const proof = new Promise<boolean>(resolve => { release = resolve })
+  const { runtime, owner, host } = bind({
+    launchCwd: '/client/cwd',
+    provenance: 'auto',
+    autoWorkspaceRevalidate: () => proof,
+  })
+  const pending = runtime.preflightWorkspace()
+  await Promise.resolve()
+  owner.setResolvedWorkspace('workspace-manual', '/host/manual')
+  release(false)
+  await pending
+  assert.deepEqual(owner.capture()?.intent, { kind: 'workspace-id', workspaceId: 'workspace-manual' },
+    'the newer manual target survives the late auto revocation')
+  assert.equal(owner.snapshot().provenance, 'manual', 'the manual provenance is not degraded to launch')
+  assert.deepEqual(host.resolves, [], 'the revoked auto candidate never reaches the Host')
+})
+
+test('awaitWorkspacePreflight joins the in-flight auto proof instead of resolving early', async () => {
+  let release!: (value: boolean) => void
+  const proof = new Promise<boolean>(resolve => { release = resolve })
+  const { runtime, owner, host } = bind({
+    launchCwd: '/client/cwd',
+    provenance: 'auto',
+    autoWorkspaceRevalidate: () => proof,
+    resolve: async () => ({ workspaceId: 'workspace-auto', path: '/host/cwd' }),
+  })
+  const pending = runtime.preflightWorkspace()
+  let joined = false
+  const waiting = runtime.awaitWorkspacePreflight().then(() => { joined = true })
+  await Promise.resolve()
+  assert.equal(joined, false,
+    'awaitWorkspacePreflight must observe the in-flight proof, not a resolved placeholder')
+  release(true)
+  await pending
+  await waiting
+  assert.equal(joined, true)
+  assert.deepEqual(host.resolves, [{ kind: 'host-path', path: '/client/cwd' }],
+    'exactly ONE official path resolution is dispatched')
+  assert.equal(owner.snapshot().status, 'confirmed')
+})
+
+test('ensureSession shares the in-flight preflight and never dispatches a second path resolution', async () => {
+  let release!: (value: boolean) => void
+  const proof = new Promise<boolean>(resolve => { release = resolve })
+  const { runtime, host } = bind({
+    launchCwd: '/client/cwd',
+    provenance: 'auto',
+    autoWorkspaceRevalidate: () => proof,
+    resolve: async () => ({ workspaceId: 'workspace-auto', path: '/host/cwd' }),
+  })
+  const pending = runtime.preflightWorkspace()
+  const session = runtime.ensureSession().catch(() => undefined)
+  await Promise.resolve()
+  release(true)
+  await pending
+  await session
+  assert.deepEqual(host.resolves.map(intent => intent.kind), ['host-path', 'workspace-id'],
+    'the create waits for the preflight and then adopts the confirmed id — no duplicate path resolution')
+  assert.equal(host.resolves.filter(intent => intent.kind === 'host-path').length, 1)
+})
+
+test('a late revoked AUTO proof during the first-create consumption gate supersedes without clearing the newer manual target', async () => {
+  let release!: (value: boolean) => void
+  let entered!: () => void
+  const enteredProof = new Promise<void>(resolve => { entered = resolve })
+  const lateProof = new Promise<boolean>(resolve => { release = resolve })
+  let calls = 0
+  const { runtime, owner, host } = bind({
+    launchCwd: '/client/cwd',
+    provenance: 'auto',
+    autoWorkspaceRevalidate: () => {
+      calls += 1
+      // The preflight proves BEFORE the Host call and again before adoption;
+      // the first-create consumption boundary is the THIRD observation.
+      if (calls <= 2) return Promise.resolve(true)
+      entered()
+      return lateProof
+    },
+    resolve: async () => ({ workspaceId: 'workspace-auto', path: '/host/cwd' }),
+  })
+  await runtime.preflightWorkspace()
+  assert.equal(owner.snapshot().status, 'confirmed')
+  const pending = runtime.ensureSession()
+  await enteredProof
+  owner.setResolvedWorkspace('workspace-manual', '/host/manual')
+  release(false)
+  await assert.rejects(pending, (error: unknown) =>
+    error instanceof WorkspaceSelectionError && error.kind === 'superseded')
+  assert.deepEqual(owner.capture()?.intent, { kind: 'workspace-id', workspaceId: 'workspace-manual' },
+    'the consumption gate must not reset a newer manual target')
+  assert.deepEqual(host.resolves, [{ kind: 'host-path', path: '/client/cwd' }],
+    'no second Host path resolution after the superseded proof')
+  assert.deepEqual(host.creates, [], 'no Session create after the superseded proof')
 })

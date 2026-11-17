@@ -25,6 +25,7 @@ import {
   bindProcessSeat,
   bindProfileKernelSeat,
   computeBuildId,
+  darwinHostProfileSeatDir,
   inspectInstalledProfileScope,
   LocalScopeError,
   LOCAL_PROTOCOL,
@@ -55,6 +56,7 @@ import {
   assertHostPublicationIdentity,
   assertRecordedHostKernelIdentityCurrent,
   authenticateLocalHost,
+  buildHostInstanceRecord,
   ensureLocalHost,
   inspectHostProcess,
   readLaunchMaterial,
@@ -748,6 +750,8 @@ test('concurrent first scope creation converges without an unsafe-directory refu
   const value = fixture(t)
   try {
     const moduleUrl = pathToFileURL(join(ROOT, 'src', 'app', 'remote-process', 'local-scope.ts')).href
+    const accountHome = join(value.root, 'account-home')
+    mkdirSync(accountHome, { mode: 0o700 })
     const childPath = join(value.root, 'concurrent-scope.mts')
     writeFileSync(childPath, [
       `import { scopeFromInstalledProfile, bindProfileKernelSeat } from ${JSON.stringify(moduleUrl)}`,
@@ -760,7 +764,7 @@ test('concurrent first scope creation converges without an unsafe-directory refu
       'try {',
       '  const scope = scopeFromInstalledProfile(facts)',
       '  try {',
-      '    const seat = await bindProfileKernelSeat(scope, \'host\', \'HOST_ALREADY_OWNED\')',
+      '    const seat = await bindProfileKernelSeat(scope, \'host\', \'HOST_ALREADY_OWNED\', { accountHome: process.env.TEST_ACCOUNT_HOME })',
       '    console.log(JSON.stringify({ result: \'won\' }))',
       '    // reason: hold the winning kernel seat for a bounded window so every concurrent contender reaches its seat attempt.',
       '    await new Promise(resolve => setTimeout(resolve, 1000))',
@@ -776,7 +780,7 @@ test('concurrent first scope creation converges without an unsafe-directory refu
     const children = Array.from({ length: 8 }, () => spawn(
       process.execPath,
       ['--import', 'tsx/esm', childPath],
-      { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] },
+      { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, TEST_ACCOUNT_HOME: accountHome } },
     ))
     const results = await Promise.all(children.map(child => new Promise<{ result: string }>((resolveChild, rejectChild) => {
       let stdout = ''
@@ -1158,7 +1162,7 @@ test('macOS publishes and re-proves the complete schema 2 kernel identity', { sk
       hostPid: process.pid,
       hostStarttime: '12345',
       origin: 'http://127.0.0.1:41001',
-      protocol: LOCAL_PROTOCOL,
+      protocol: LOCAL_PROTOCOL as typeof LOCAL_PROTOCOL,
       bundleVersion: scope.bundleVersion,
       dshVersion: scope.dshVersion,
       buildId: scope.buildId,
@@ -1188,12 +1192,14 @@ test('macOS dispatches one exclusive kernel seat per profile scope', { skip: pro
   try {
     const scopeA = scopeFor(first)
     const scopeB = scopeFor(second)
+    const accountHome = join(first.root, 'account-home')
+    mkdirSync(accountHome, { mode: 0o700 })
     assert.notEqual(scopeA.scopeId, scopeB.scopeId, 'independent profiles must not share a scope')
-    const host = await bindProfileKernelSeat(scopeA, 'host', 'HOST_ALREADY_OWNED')
+    const host = await bindProfileKernelSeat(scopeA, 'host', 'HOST_ALREADY_OWNED', { accountHome })
     try {
       host.assertCurrent()
       await assert.rejects(
-        bindProfileKernelSeat(scopeA, 'host', 'HOST_ALREADY_OWNED'),
+        bindProfileKernelSeat(scopeA, 'host', 'HOST_ALREADY_OWNED', { accountHome }),
         (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_ALREADY_OWNED',
       )
       // The qualification-only Client purpose owns its OWN seat and never
@@ -1208,11 +1214,11 @@ test('macOS dispatches one exclusive kernel seat per profile scope', { skip: pro
         await qualification.close()
       }
       // Profile B is a different seat object and wins independently.
-      const otherHost = await bindProfileKernelSeat(scopeB, 'host', 'HOST_ALREADY_OWNED')
+      const otherHost = await bindProfileKernelSeat(scopeB, 'host', 'HOST_ALREADY_OWNED', { accountHome })
       await otherHost.close()
       // Replacing the claimed path's inode behind the held descriptor is not
       // ownership: Ready must stop instead of publishing.
-      const seatPath = processSeatPath(scopeA.dir, scopeA.scopeId, 'host')
+      const seatPath = processSeatPath(darwinHostProfileSeatDir(scopeA.scopeId, accountHome), scopeA.scopeId, 'host')
       rmSync(seatPath)
       writeFileSync(seatPath, '', { mode: 0o600 })
       assert.throws(
@@ -1225,14 +1231,249 @@ test('macOS dispatches one exclusive kernel seat per profile scope', { skip: pro
     // An existing over-permissive seat file is refused BEFORE the open, not
     // silently repaired.
     const tamperedScope = scopeFor(fixture(t))
-    const tamperedPath = processSeatPath(tamperedScope.dir, tamperedScope.scopeId, 'host')
+    const tamperedPath = processSeatPath(darwinHostProfileSeatDir(tamperedScope.scopeId, accountHome), tamperedScope.scopeId, 'host')
     writeFileSync(tamperedPath, '', { mode: 0o644 })
     await assert.rejects(
-      bindProfileKernelSeat(tamperedScope, 'host', 'HOST_ALREADY_OWNED'),
+      bindProfileKernelSeat(tamperedScope, 'host', 'HOST_ALREADY_OWNED', { accountHome }),
       (error: unknown) => error instanceof LocalScopeError && error.code === 'SCOPE_DIRECTORY_UNSAFE',
     )
   } finally {
     cleanup(first.root)
     cleanup(second.root)
+  }
+})
+
+test('the schema 1 publication builder keeps the frozen key order', t => {
+  const value = fixture(t)
+  try {
+    const scope = scopeFor(value)
+    const fields = {
+      scopeId: scope.scopeId,
+      profileRealpath: scope.profileRealpath,
+      instanceId: randomUUID(),
+      hostPid: process.pid,
+      origin: 'http://127.0.0.1:41001',
+      protocol: LOCAL_PROTOCOL as typeof LOCAL_PROTOCOL,
+      bundleVersion: scope.bundleVersion,
+      dshVersion: scope.dshVersion,
+      buildId: scope.buildId,
+    }
+    const expected = [
+      'schema',
+      'scopeId',
+      'profileRealpath',
+      'instanceId',
+      'hostPid',
+      'hostStarttime',
+      'origin',
+      'protocol',
+      'bundleVersion',
+      'dshVersion',
+      'buildId',
+    ]
+    const echo = buildHostInstanceRecord(fields, { schema: 1, hostStarttime: '12345' })
+    assert.deepEqual(Object.keys(JSON.parse(JSON.stringify(echo))), expected, 'the authenticated echo order is canonical')
+  } finally {
+    cleanup(value.root)
+  }
+})
+
+test('the schema 1 registry persists the frozen key order', { skip: process.platform !== 'linux' ? 'Linux schema 1 is the frozen Linux-only bytes contract' : false }, t => {
+  const value = fixture(t)
+  try {
+    const scope = scopeFor(value)
+    const echo = buildHostInstanceRecord({
+      scopeId: scope.scopeId,
+      profileRealpath: scope.profileRealpath,
+      instanceId: randomUUID(),
+      hostPid: process.pid,
+      origin: 'http://127.0.0.1:41001',
+      protocol: LOCAL_PROTOCOL as typeof LOCAL_PROTOCOL,
+      bundleVersion: scope.bundleVersion,
+      dshVersion: scope.dshVersion,
+      buildId: scope.buildId,
+    }, { schema: 1, hostStarttime: '12345' })
+    writeLocalRecord(scope, echo)
+    const registryKeys = Object.keys(JSON.parse(readFileSync(join(scope.dir, 'instance.json'), 'utf8')))
+    assert.deepEqual(registryKeys, [
+      'schema',
+      'scopeId',
+      'profileRealpath',
+      'instanceId',
+      'hostPid',
+      'hostStarttime',
+      'origin',
+      'protocol',
+      'bundleVersion',
+      'dshVersion',
+      'buildId',
+    ], 'the persisted registry order is the frozen schema 1 order')
+  } finally {
+    cleanup(value.root)
+  }
+})
+
+test('the schema 2 publication keeps the canonical Darwin key order', { skip: process.platform !== 'darwin' ? 'Darwin schema 2 requires the real libproc identity' : false }, t => {
+  const value = fixture(t)
+  try {
+    const scope = scopeFor(value)
+    const liveIdentity = recordFor(scope)
+    assert.equal(liveIdentity.schema, 2)
+    if (liveIdentity.schema !== 2) return
+    const expected = [
+      'schema',
+      'scopeId',
+      'profileRealpath',
+      'instanceId',
+      'hostPid',
+      'hostKernelIdentity',
+      'origin',
+      'protocol',
+      'bundleVersion',
+      'dshVersion',
+      'buildId',
+    ]
+    const record = buildHostInstanceRecord({
+      scopeId: scope.scopeId,
+      profileRealpath: scope.profileRealpath,
+      instanceId: randomUUID(),
+      hostPid: process.pid,
+      origin: 'http://127.0.0.1:41001',
+      protocol: LOCAL_PROTOCOL as typeof LOCAL_PROTOCOL,
+      bundleVersion: scope.bundleVersion,
+      dshVersion: scope.dshVersion,
+      buildId: scope.buildId,
+    }, { schema: 2, hostKernelIdentity: liveIdentity.hostKernelIdentity })
+    assert.deepEqual(Object.keys(JSON.parse(JSON.stringify(record))), expected)
+    writeLocalRecord(scope, record)
+    const registryKeys = Object.keys(JSON.parse(readFileSync(join(scope.dir, 'instance.json'), 'utf8')))
+    assert.deepEqual(registryKeys, expected)
+  } finally {
+    cleanup(value.root)
+  }
+})
+
+test('two DSH homes aliasing one canonical profile share ONE global Darwin Host seat', { skip: process.platform !== 'darwin' ? 'Darwin file seats require macOS' : false }, async t => {
+  const root = testLifecycle(t).tempDir('dsh-cross-home-')
+  const packageRoot = join(root, 'package')
+  mkdirSync(join(packageRoot, 'dist'), { recursive: true, mode: 0o700 })
+  writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.7' })}\n`)
+  writeFileSync(join(packageRoot, 'dist', 'index.mjs'), 'export const value = 1\n')
+  const profile = join(root, 'shared-profile')
+  mkdirSync(profile, { recursive: true, mode: 0o700 })
+  const accountHome = join(root, 'account-home')
+  mkdirSync(accountHome, { mode: 0o700 })
+  const homeA = join(root, 'home-a')
+  mkdirSync(join(homeA, 'profiles'), { recursive: true, mode: 0o700 })
+  symlinkSync(profile, join(homeA, 'profiles', 'pi-tui'))
+  const homeB = join(root, 'home-b')
+  mkdirSync(join(homeB, 'profiles'), { recursive: true, mode: 0o700 })
+  symlinkSync(profile, join(homeB, 'profiles', 'pi-tui'))
+  const first = scopeFromInstalledProfile({
+    dshHome: homeA,
+    profileDir: join(homeA, 'profiles', 'pi-tui'),
+    packageRoot,
+    dshVersion: '0.2.2-rc.3',
+  })
+  const second = scopeFromInstalledProfile({
+    dshHome: homeB,
+    profileDir: join(homeB, 'profiles', 'pi-tui'),
+    packageRoot,
+    dshVersion: '0.2.2-rc.3',
+  })
+  assert.equal(first.scopeId, second.scopeId, 'one canonical profile is one scope')
+  assert.notEqual(first.dir, second.dir, 'the per-DSH-home registry directories stay distinct')
+  const host = await bindProfileKernelSeat(first, 'host', 'HOST_ALREADY_OWNED', { accountHome })
+  try {
+    await assert.rejects(
+      bindProfileKernelSeat(second, 'host', 'HOST_ALREADY_OWNED', { accountHome }),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_ALREADY_OWNED',
+      'the second DSH home must never start a second Host for the same canonical profile',
+    )
+    assert.equal(darwinHostProfileSeatDir(first.scopeId, accountHome), darwinHostProfileSeatDir(second.scopeId, accountHome),
+      'the Host seat is keyed only by the canonical-profile scope id')
+  } finally {
+    await host.close()
+  }
+  const afterRelease = await bindProfileKernelSeat(second, 'host', 'HOST_ALREADY_OWNED', { accountHome })
+  await afterRelease.close()
+})
+
+test('the global Darwin Host seat refuses unsafe account-home chains', { skip: process.platform !== 'darwin' ? 'Darwin file seats require macOS' : false }, async t => {
+  const value = fixture(t)
+  try {
+    const scope = scopeFor(value)
+    // A pre-existing user-owned 0755 account directory (the real machine has
+    // `~/.dsh-pi-tui/themes`) is a safe read-only parent; only group/other
+    // WRITE would let another account replace the private chain.
+    const readableRoot = join(value.root, 'readable-home')
+    mkdirSync(readableRoot, { mode: 0o700 })
+    mkdirSync(join(readableRoot, '.dsh-pi-tui'), { mode: 0o755 })
+    const readableSeat = await bindProfileKernelSeat(scope, 'host', 'HOST_ALREADY_OWNED', { accountHome: readableRoot })
+    await readableSeat.close()
+    const writableRoot = join(value.root, 'writable-home')
+    mkdirSync(writableRoot, { mode: 0o700 })
+    mkdirSync(join(writableRoot, '.dsh-pi-tui'), { mode: 0o700 })
+    chmodSync(join(writableRoot, '.dsh-pi-tui'), 0o777)
+    await assert.rejects(
+      bindProfileKernelSeat(scope, 'host', 'HOST_ALREADY_OWNED', { accountHome: writableRoot }),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'SCOPE_DIRECTORY_UNSAFE',
+    )
+    const linkedRoot = join(value.root, 'linked-home')
+    mkdirSync(linkedRoot, { mode: 0o700 })
+    const target = join(value.root, 'outside-seat-root')
+    mkdirSync(target, { mode: 0o700 })
+    symlinkSync(target, join(linkedRoot, '.dsh-pi-tui'))
+    await assert.rejects(
+      bindProfileKernelSeat(scope, 'host', 'HOST_ALREADY_OWNED', { accountHome: linkedRoot }),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'SCOPE_DIRECTORY_UNSAFE',
+    )
+  } finally {
+    cleanup(value.root)
+  }
+})
+
+test('a SIGKILLed global Darwin Host-seat holder releases the kernel claim', { skip: process.platform !== 'darwin' ? 'Darwin file seats require macOS' : false, timeout: 60_000 }, async t => {
+  const value = fixture(t)
+  const accountHome = join(value.root, 'account-home')
+  mkdirSync(accountHome, { mode: 0o700 })
+  const scope = scopeFor(value)
+  const moduleUrl = pathToFileURL(join(ROOT, 'src', 'app', 'remote-process', 'local-scope.ts')).href
+  const worker = join(value.root, 'global-seat-worker.mjs')
+  writeFileSync(worker, [
+    `import { bindProfileKernelSeat } from ${JSON.stringify(moduleUrl)}`,
+    'const [accountHome, scopeId] = process.argv.slice(2)',
+    "const seat = await bindProfileKernelSeat({ scopeId }, 'host', 'HOST_ALREADY_OWNED', { accountHome })",
+    'void seat',
+    "console.log('held')",
+    'setInterval(() => {}, 1000)',
+    '',
+  ].join('\n'))
+  const child = spawn(process.execPath, ['--import', 'tsx/esm', worker, accountHome, scope.scopeId], {
+    cwd: ROOT,
+    stdio: ['ignore', 'pipe', 'inherit'],
+  })
+  try {
+    await new Promise<void>((resolveChild, rejectChild) => {
+      // reason: bounded external-child startup window; the holder must boot and report its held seat before SIGKILL recovery.
+      const timer = setTimeout(() => rejectChild(new Error('the global seat holder did not report held')), 15_000)
+      child.stdout.setEncoding('utf8')
+      child.stdout.once('data', chunk => {
+        clearTimeout(timer)
+        if (String(chunk).includes('held')) resolveChild()
+        else rejectChild(new Error(`unexpected seat worker output: ${String(chunk)}`))
+      })
+      child.once('exit', code => {
+        clearTimeout(timer)
+        rejectChild(new Error(`the global seat holder exited before holding the seat: ${String(code)}`))
+      })
+    })
+    assert.equal(child.kill('SIGKILL'), true)
+    await new Promise<void>(resolveChild => { child.once('exit', () => resolveChild()) })
+    const next = await bindProfileKernelSeat(scope, 'host', 'HOST_ALREADY_OWNED', { accountHome })
+    await next.close()
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    cleanup(value.root)
   }
 })

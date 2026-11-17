@@ -402,3 +402,85 @@ test('macOS revalidate revokes on a renamed launch path, generation rollover or 
   mkdirSync(work)
   assert.equal(await verdict.revalidate(), false, 'a recreated launch path revokes the proof')
 })
+
+test('macOS rejects a Host object response whose launch path changed while the response was in flight', DARWIN_ONLY, async t => {
+  const root = testLifecycle(t).tempDir('dsh-f5b-equivalence-')
+  const work = join(root, 'project')
+  mkdirSync(work)
+  const record = darwinIdentity()
+  const launchObject = launchObjectOf(work)
+  let entered!: () => void
+  const enteredResponse = new Promise<void>(resolve => { entered = resolve })
+  let release!: () => void
+  const responseGate = new Promise<void>(resolve => { release = resolve })
+  const transport: LaunchWorkspaceTransport = {
+    status: () => ({ transport: 'connected', generationId: 7 }),
+    async authenticatedFetch(): Promise<Response> {
+      entered()
+      await responseGate
+      // The Host observed the OLD object before the rename; this late response
+      // is exactly the stale observation the Client must refuse.
+      return Response.json(
+        { schema: 1, instanceId: record.instanceId, device: launchObject.device, inode: launchObject.inode },
+        { headers: { 'cache-control': 'no-store' } },
+      )
+    },
+  }
+  const pending = classifyLaunchWorkspace(record, work, {
+    launchObject,
+    transport,
+    scope: scopeOf(record),
+    readRecord: () => record,
+    readKernel: () => ({ kind: 'alive', identity: record.hostKernelIdentity }),
+  })
+  await enteredResponse
+  renameSync(work, `${work}.old`)
+  mkdirSync(work)
+  release()
+  const verdict = await pending
+  assert.equal(verdict.kind, 'unverified', JSON.stringify(verdict))
+  assert.match(verdict.kind === 'unverified' ? verdict.reason : '', /changed while the Host object was observed/u)
+})
+
+test('macOS revalidate rejects a late Host observation after the launch path was recreated', DARWIN_ONLY, async t => {
+  const root = testLifecycle(t).tempDir('dsh-f5b-equivalence-')
+  const work = join(root, 'project')
+  mkdirSync(work)
+  const record = darwinIdentity()
+  const launchObject = launchObjectOf(work)
+  let defer = false
+  let entered!: () => void
+  let enteredResponse = new Promise<void>(resolve => { entered = resolve })
+  let release!: () => void
+  let responseGate = new Promise<void>(resolve => { release = resolve })
+  const oldObjectResponse = (): Response => Response.json(
+    { schema: 1, instanceId: record.instanceId, device: launchObject.device, inode: launchObject.inode },
+    { headers: { 'cache-control': 'no-store' } },
+  )
+  const transport: LaunchWorkspaceTransport = {
+    status: () => ({ transport: 'connected', generationId: 7 }),
+    async authenticatedFetch(): Promise<Response> {
+      if (!defer) return oldObjectResponse()
+      entered()
+      await responseGate
+      return oldObjectResponse()
+    },
+  }
+  const verdict = await classifyLaunchWorkspace(record, work, {
+    launchObject,
+    transport,
+    scope: scopeOf(record),
+    readRecord: () => record,
+    readKernel: () => ({ kind: 'alive', identity: record.hostKernelIdentity }),
+  })
+  assert.equal(verdict.kind, 'verified')
+  if (verdict.kind !== 'verified') return
+  defer = true
+  const pending = verdict.revalidate()
+  await enteredResponse
+  renameSync(work, `${work}.old`)
+  mkdirSync(work)
+  release()
+  assert.equal(await pending, false,
+    'a Host observation that names the pre-rename object is stale once the launch path was recreated')
+})

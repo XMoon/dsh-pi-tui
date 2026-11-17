@@ -58,6 +58,7 @@ import {
 } from './local-workspace-object.ts'
 import {
   assertRecordedHostKernelIdentityCurrent,
+  buildHostInstanceRecord,
   cleanupOwnedFiles,
   readHostProcessIdentity,
   type HostProcessIdentity,
@@ -1082,9 +1083,9 @@ async function publishLocalHost(
     dshVersion: scope.dshVersion,
     buildId: scope.buildId,
   } as const
-  const identity: LocalInstanceRecord = hostIdentity.schema === 1
-    ? { schema: 1, ...shared, hostStarttime: hostIdentity.hostStarttime }
-    : { schema: 2, ...shared, hostKernelIdentity: hostIdentity.hostKernelIdentity }
+  // The authenticated echo and the registry share ONE canonical builder so
+  // Linux schema 1 keeps its frozen key order.
+  const identity: LocalInstanceRecord = buildHostInstanceRecord(shared, hostIdentity)
   const connectUrl = connection.authenticatedUrl(`${origin}/connect`)
   const connectProbe = new URL(connectUrl)
   if (

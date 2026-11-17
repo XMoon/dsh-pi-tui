@@ -58,8 +58,9 @@ export type LaunchWorkspaceVerdict =
       readonly hostPid: number
       readonly device: string
       readonly inode: string
-      /** Re-check the exact same evidence now. `false` = not eligible. */
-      revalidate(): Promise<boolean>
+      /** Re-check the exact same evidence now. `false` = not eligible. A
+       *  cancelled lifecycle signal is also `false`, never an assumed proof. */
+      revalidate(signal?: AbortSignal): Promise<boolean>
     }
   | { readonly kind: 'unverified'; readonly reason: string }
 
@@ -89,6 +90,9 @@ export interface LaunchWorkspaceOptions {
   readonly scope?: LocalScope
   readonly readRecord?: (scope: LocalScope) => LocalInstanceRecord | undefined
   readonly readKernel?: (pid: number) => KernelObservation
+  /** The caller's cancellation lifetime. The classifier never blocks past this
+   *  signal or the route's own bounded response window. */
+  readonly signal?: AbortSignal
 }
 
 /** The Linux `starttime` of one PID, read through the shared official parser
@@ -265,25 +269,43 @@ async function classifyDarwinLaunchWorkspace(
       reason: 'the launch path no longer names the directory the Client started in (renamed or recreated)',
     }
   }
+  if (Boolean(options.signal?.aborted)) {
+    return { kind: 'unverified', reason: 'the Host workspace object observation was aborted' }
+  }
   const hostObject = await observeHostWorkspaceObject(
     (input, init) => transport.authenticatedFetch(input, init),
     identity.origin,
     identity.instanceId,
     launchCwd,
+    options.signal,
   )
+  if (Boolean(options.signal?.aborted)) {
+    return { kind: 'unverified', reason: 'the Host workspace object observation was aborted' }
+  }
   if (hostObject.kind !== 'observed') {
     return { kind: 'unverified', reason: hostObject.reason }
   }
   if (hostObject.device !== client.device || hostObject.inode !== client.inode) {
     return { kind: 'unverified', reason: 'the Client and Host see different directory objects at the launch path' }
   }
+  // The Host response was awaited. Re-stat the Client launch path AFTER it:
+  // the Host may have observed the OLD inode while a rename+recreate landed
+  // before the response arrived; comparing only pre-await Client facts would
+  // accept that stale observation.
+  const clientAfter = statDirectoryObject(launchCwd)
+  if (clientAfter === undefined
+    || clientAfter.device !== launchObject.device
+    || clientAfter.inode !== launchObject.inode) {
+    return { kind: 'unverified', reason: 'the launch path changed while the Host object was observed' }
+  }
   if (!recordIsCurrent(identity, readKernel, readRecord, scope)
     || transport.status().generationId !== capturedGeneration) {
     return { kind: 'unverified', reason: 'the Host identity or Connection generation changed during the observation' }
   }
 
-  const revalidate = async (): Promise<boolean> => {
+  const revalidate = async (signal?: AbortSignal): Promise<boolean> => {
     try {
+      if (Boolean(signal?.aborted)) return false
       const now = transport.status()
       if (now.transport !== 'connected' || now.generationId !== capturedGeneration) return false
       if (!recordIsCurrent(identity, readKernel, readRecord, scope)) return false
@@ -293,15 +315,24 @@ async function classifyDarwinLaunchWorkspace(
       if (clientNow === undefined
         || clientNow.device !== launchObject.device
         || clientNow.inode !== launchObject.inode) return false
+      if (Boolean(signal?.aborted)) return false
       const observed = await observeHostWorkspaceObject(
         (input, init) => transport.authenticatedFetch(input, init),
         identity.origin,
         identity.instanceId,
         launchCwd,
+        signal,
       )
+      if (Boolean(signal?.aborted)) return false
       if (observed.kind !== 'observed'
         || observed.device !== launchObject.device
         || observed.inode !== launchObject.inode) return false
+      // The response is late: the launch path must STILL be the captured object
+      // after the await, otherwise this was a stale Host observation.
+      const clientAfter = statDirectoryObject(launchCwd)
+      if (clientAfter === undefined
+        || clientAfter.device !== launchObject.device
+        || clientAfter.inode !== launchObject.inode) return false
       if (transport.status().generationId !== capturedGeneration) return false
       return recordIsCurrent(identity, readKernel, readRecord, scope)
     } catch {

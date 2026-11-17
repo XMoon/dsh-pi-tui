@@ -1005,8 +1005,14 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             // id long ago and the mount view may have changed since. The
             // surface returns to unselected; an explicit choice is unaffected.
             if (nextIntentCapture.provenance === 'auto' && await runner.validateAutoWorkspace?.() !== true) {
-              workspaceNextIntent.resetToLaunchCwd()
-              return done({ kind: 'error', text: 'The verified local workspace changed — choose a Host workspace' })
+              // The late false result may only reset the intent it captured.
+              // A newer manual/launch choice that appeared during the await
+              // owns the current state and must never be cleared here.
+              if (nextIntentCapture.isCurrent()) {
+                workspaceNextIntent.resetToLaunchCwd()
+                return done({ kind: 'error', text: 'The verified local workspace changed — choose a Host workspace' })
+              }
+              return done({ kind: 'error', text: 'workspace selection changed before fresh session creation' })
             }
             if (!nextIntentCapture.isCurrent()) {
               return done({ kind: 'error', text: 'workspace selection changed before fresh session creation' })
@@ -1106,6 +1112,9 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
                 // subject to it (explicit Folder New owns its own WorkspaceId).
                 if (targetFromNextIntent && nextIntentCapture?.provenance === 'auto'
                   && await runner.validateAutoWorkspace?.() !== true) {
+                  if (!nextIntentCapture.isCurrent()) {
+                    throw new WorkspaceSelectionError('superseded', 'workspace selection changed before fresh session creation')
+                  }
                   workspaceNextIntent.resetToLaunchCwd()
                   throw new WorkspaceSelectionError(
                     'refused',

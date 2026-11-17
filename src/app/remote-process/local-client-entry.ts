@@ -1407,6 +1407,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   try {
     const host = await ensureLocalHost({
       scope,
+      signal: startupAbort.signal,
       hostEntryPath: join(packageRoot, 'dist', 'local-host.mjs'),
       dshAnchor: options.dshAnchor,
       profile: options.profile,
@@ -1998,8 +1999,12 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       const launchWorkspace: LaunchWorkspaceVerdict = await classifyLaunchWorkspace(host.identity, CLIENT_LAUNCH_CWD, {
         ...(CLIENT_LAUNCH_OBJECT === undefined ? {} : { launchObject: CLIENT_LAUNCH_OBJECT }),
         scope,
+        signal: startupAbort.signal,
         ...(transport === undefined ? {} : { transport }),
       })
+      // The Workspace observation is a new network await. A stop/HMR that
+      // aborted the startup while it ran must not mount this revision's runner.
+      startupAbort.signal.throwIfAborted()
       let runnerFiber: Fiber | undefined
       try {
         runnerFiber = clientContext.plugin(pluginContext => {

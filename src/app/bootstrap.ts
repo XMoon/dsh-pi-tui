@@ -309,7 +309,7 @@ export function applyRunnerWithRuntime(
   // The auto evidence must be re-observed at the first create boundary: a
   // Host restart / mount-view change between the mount and the create revokes
   // the automatic candidate instead of adopting a stale proof.
-  const autoWorkspaceRevalidate: (() => Promise<boolean>) | undefined = remoteLaunch?.provenance === 'auto' && launchWorkspace?.kind === 'verified'
+  const autoWorkspaceRevalidate: ((signal?: AbortSignal) => Promise<boolean>) | undefined = remoteLaunch?.provenance === 'auto' && launchWorkspace?.kind === 'verified'
     ? launchWorkspace.revalidate
     : undefined
   /** The one automatic Workspace-Browser opening of this mounted surface. */
@@ -1294,16 +1294,18 @@ export function applyRunnerWithRuntime(
       const capturedRevision = workspace.revision
       const autoProvenance = workspace.provenance === 'auto'
       const autoProofCurrent = async (): Promise<boolean> =>
-        !autoProvenance || (autoWorkspaceRevalidate !== undefined && await autoWorkspaceRevalidate() === true)
+        !autoProvenance || (autoWorkspaceRevalidate !== undefined && await autoWorkspaceRevalidate(lifecycleController.signal) === true)
       const launchProofNotice = (): { readonly kind: 'stop'; readonly notice: { readonly text: string; readonly kind: 'info' } } => ({
         kind: 'stop',
         notice: { text: 'Cannot continue: the verified local workspace changed — choose a Host workspace', kind: 'info' },
       })
-      if (!(await autoProofCurrent())) return launchProofNotice()
-      // The proof is async: the launch may have been aborted or a newer
-      // Workspace revision may have replaced the captured one while it ran.
+      const proofCurrent = await autoProofCurrent()
+      // The proof is async: abort or a newer Workspace revision always wins
+      // over a late result, including a late false that would otherwise publish
+      // a stale "choose a workspace" notice against a replaced launch.
       if (lifecycleController.signal.aborted) return 'aborted'
       if (!workspaceIntentStillCurrent(capturedRevision, workspaceId)) return { kind: 'superseded' }
+      if (!proofCurrent) return launchProofNotice()
       // ONE official membership baseline, released exactly once. A stream that
       // ends/fails before its baseline, or a baseline without the confirmed
       // WorkspaceId, is NOT an empty membership.
@@ -1379,12 +1381,13 @@ export function applyRunnerWithRuntime(
           diag.warn('startup continue target superseded', { workspace: workspaceId })
           return { kind: 'superseded' }
         }
-        if (!(await autoProofCurrent())) return launchProofNotice()
+        const proofCurrent = await autoProofCurrent()
         if (lifecycleController.signal.aborted) return 'aborted'
         if (!workspaceIntentStillCurrent(capturedRevision, workspaceId)) {
           diag.warn('startup continue target superseded after the workspace proof', { workspace: workspaceId })
           return { kind: 'superseded' }
         }
+        if (!proofCurrent) return launchProofNotice()
         const continuedSessionId = chooseContinueSession(rows, membership.sessionIds)
         if (continuedSessionId === undefined) {
           return {

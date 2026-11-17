@@ -221,9 +221,10 @@ processes from ONE installed npm package. The Host lifetime is independent of
 Client attachment and may continue with zero active Clients. The local
 Host/Client link is supported on Linux and macOS. The kernel admission
 authority is platform-owned: Linux uses abstract AF_UNIX sockets for the Host
-Singleton and the qualification-only Client seat; macOS uses one
-`O_EXLOCK`-held file per purpose inside the same private 0700 scope directory,
-re-proved by inode and directory identity before Ready. A real `surface` Client
+Singleton and the qualification-only Client seat; macOS uses `O_EXLOCK`-held
+seat files, re-proved by inode and directory identity before Ready. The macOS
+Host seat lives under the OS account home, while the qualification-only Client
+seat stays in the private scope directory. A real `surface` Client
 automatically discovers or starts the local Host, then completes the internal
 `/connect` Cookie exchange and authenticated identity verification. No manual
 connect command, address or token input is required. Any other platform fails
@@ -233,8 +234,10 @@ the kernel seat where one is required.
 
 - **Scope.** The official `resolveDshHome()` / `resolveProfileDir()` results
   canonicalized through `realpath` plus the current UID decide the scope. The
-  private run directory is `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/`, created and
-  proved 0700. `scopeId` is sha256 over the fixed domain
+  per-DSH-home run directory is `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/`, created
+  and proved 0700; it holds the registry, scratch state and the
+  qualification-only Client seat. The Darwin Host seat uses the account-home
+  root described below. `scopeId` is sha256 over the fixed domain
   `dsh-pi-tui/local-scope/1`, the decimal UID and the canonical profile path;
   that domain is part of the published scope algorithm and evolves separately
   from the wire protocol below. The same canonical profile directory shares one
@@ -243,7 +246,22 @@ the kernel seat where one is required.
 - **Single Host seat, qualification-only Client seat.** The Host holds one
   platform kernel claim from before the profile Context exists until process
   termination: one abstract socket on Linux, one `O_EXLOCK` file descriptor on
-  macOS. A second Host candidate loses the claim and exits without building a
+  macOS. On macOS the Host seat file is
+  `<real account home>/.dsh-pi-tui/run/<scopeId>/seat-host-<scopeId>.lock`
+  (file mode 0600; the `run` and per-scope directories are created and proved
+  0700). The account home is the real `os.userInfo().homedir` for the effective
+  UID — never `$HOME`, `DSH_HOME` or `$TMPDIR`. A pre-existing account-level
+  `~/.dsh-pi-tui` may be readable (0755), but it must remain owned by the UID
+  and not group/other-writable; only its owner can create the private `run`
+  chain below it. The qualification-only Client seat remains in
+  `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/`. Because the Host seat is keyed only by
+  the canonical-profile `scopeId`, two different DSH homes whose profile links
+  resolve to the same canonical profile directory compete for the SAME Host
+  seat: the second Host candidate loses the claim and cannot start. Registry,
+  Cookie material and Session state stay under each DSH home; there is no
+  cross-DSH-home Host discovery, and a Client in the second home is refused
+  rather than silently attaching to a Host it did not authenticate. A second
+  Host candidate loses the claim and exits without building a
   Context, webserver, Agent or Session. Only the frozen `qualification` Client
   binds the second, qualification-only claim for its lifetime; a second
   qualification Client fails `CLIENT_ALREADY_ACTIVE` before spawning or touching

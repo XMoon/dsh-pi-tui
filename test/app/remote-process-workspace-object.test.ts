@@ -146,3 +146,41 @@ test('the Client observation accepts only the exact positive response', async ()
   const unreachable = await observeHostWorkspaceObject(async () => { throw new Error('connection lost') }, ORIGIN, INSTANCE, '/tmp/workspace')
   assert.equal(unreachable.kind, 'unverified')
 })
+
+test('a cancelled observation aborts the in-flight request instead of waiting for the route timeout', async () => {
+  const controller = new AbortController()
+  let entered!: () => void
+  const enteredRequest = new Promise<void>(resolve => { entered = resolve })
+  const pending = observeHostWorkspaceObject(
+    async (_input, init) => {
+      entered()
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => { reject(init.signal?.reason) }, { once: true })
+      })
+    },
+    ORIGIN,
+    INSTANCE,
+    '/tmp/workspace',
+    controller.signal,
+  )
+  await enteredRequest
+  controller.abort(new Error('startup stopped'))
+  const verdict = await pending
+  assert.equal(verdict.kind, 'unverified')
+  assert.match(verdict.kind === 'unverified' ? verdict.reason : '', /aborted/u)
+})
+
+test('an already-cancelled signal never dispatches the observation request', async () => {
+  const controller = new AbortController()
+  controller.abort(new Error('already stopped'))
+  let calls = 0
+  const verdict = await observeHostWorkspaceObject(
+    async () => { calls += 1; return Response.json({}) },
+    ORIGIN,
+    INSTANCE,
+    '/tmp/workspace',
+    controller.signal,
+  )
+  assert.equal(calls, 0)
+  assert.equal(verdict.kind, 'unverified')
+})

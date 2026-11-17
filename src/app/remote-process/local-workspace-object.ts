@@ -28,6 +28,9 @@ export const MAX_WORKSPACE_OBJECT_REQUEST_BYTES = 8 * 1024
 export const MAX_WORKSPACE_OBJECT_PATH_BYTES = 4096
 /** Hard response-body bound the Client accepts. */
 export const MAX_WORKSPACE_OBJECT_RESPONSE_BYTES = 1024
+/** Bound on one loopback observation after any caller cancellation has been
+ *  combined with it. The route is local; a stalled response is never evidence. */
+export const WORKSPACE_OBJECT_TIMEOUT_MS = 10_000
 
 /** One directory object as exact decimal strings (never JS `number`). */
 export interface WorkspaceDirectoryObject {
@@ -172,16 +175,29 @@ export async function observeHostWorkspaceObject(
   origin: string,
   instanceId: string,
   path: string,
+  signal?: AbortSignal,
 ): Promise<{ readonly kind: 'observed'; readonly device: string; readonly inode: string } | { readonly kind: 'unverified'; readonly reason: string }> {
+  const requestSignal = signal === undefined
+    ? AbortSignal.timeout(WORKSPACE_OBJECT_TIMEOUT_MS)
+    : AbortSignal.any([signal, AbortSignal.timeout(WORKSPACE_OBJECT_TIMEOUT_MS)])
+  if (Boolean(signal?.aborted)) {
+    return { kind: 'unverified', reason: 'the Host workspace object observation was aborted' }
+  }
   let response: Response
   try {
     response = await fetchAuthenticated(`${origin}${LOCAL_WORKSPACE_OBJECT_ROUTE}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ instanceId, path }),
+      signal: requestSignal,
     })
   } catch {
-    return { kind: 'unverified', reason: 'the Host workspace object route is unreachable' }
+    return {
+      kind: 'unverified',
+      reason: Boolean(signal?.aborted)
+        ? 'the Host workspace object observation was aborted'
+        : 'the Host workspace object route is unreachable',
+    }
   }
   if (response.status !== 200) {
     await response.body?.cancel()

@@ -518,7 +518,7 @@ export async function installLocalTransport(
   }
   const isTerminalRefreshFailure = (error: unknown): boolean =>
     !(error instanceof LocalScopeError && error.code === 'HOST_UNRESPONSIVE')
-  const refreshCookie = async (): Promise<void> => {
+  const refreshCookie = async (signal?: AbortSignal): Promise<void> => {
     if (process.env.SPLIT_PROCESS_CLIENT_FORCE_REFRESH_UNRESPONSIVE_ONCE === '1' && !forcedRetryableRefresh) {
       // Qualification-only probe: a transient refresh failure must remain an
       // ordinary carrier loss for the official same-Host retry, not a fatal.
@@ -529,7 +529,7 @@ export async function installLocalTransport(
       refreshPromise = (async () => {
         try {
           const launch = readLaunchMaterial(scope, host.identity)
-          cookie = await connectForCookie(host.identity, launch)
+          cookie = await connectForCookie(host.identity, launch, signal)
         } catch (error) {
           // Identity/auth/file/build failures are terminal. A transient
           // transport-level HOST_UNRESPONSIVE remains an ordinary carrier loss
@@ -691,7 +691,7 @@ export async function installLocalTransport(
         // A later peer always needs the refreshed Cookie (the Host releases the
         // old peer when its mux socket closed); the archive call is a one-shot
         // user action, never a hot-loop path.
-        await refreshCookie()
+        await refreshCookie(init?.signal ?? undefined)
         if (disposed) throw new Error('local transport: the authenticated fetch is unavailable after disposal')
         if (fatalError !== undefined) throw fatalError
         return await fetchAuthenticated(input, init)

@@ -46,10 +46,12 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 
 import { inspectSplitCandidate, createSplitSmokeProfile } from '../lib/split-smoke-profile.mjs'
 import { SplitSmokeAssertionError } from '../lib/split-smoke-diagnostics.mjs'
@@ -134,11 +136,23 @@ function sendKeys(session, data, label) {
 }
 
 async function waitPainted(session, label) {
-  return await waitFor(() => {
-    if (!tmuxSessionExists(session)) throw new SplitSmokeAssertionError(`${label}: the tmux session exited before painting`)
-    const frame = tmuxCapture(session, `${label} capture`)
-    return /[╭╮╰╯│─]/u.test(frame) ? frame : undefined
-  }, label, TIMEOUTS.paint)
+  let lastFrame = ''
+  try {
+    return await waitFor(() => {
+      if (!tmuxSessionExists(session)) throw new SplitSmokeAssertionError(`${label}: the tmux session exited before painting`)
+      lastFrame = tmuxCapture(session, `${label} capture`)
+      const dead = tmux(['display-message', '-p', '-t', session, '#{pane_dead}'], `${label} pane state`, { allowMissing: true })
+      if (dead.status === 0 && dead.stdout.trim() === '1') {
+        throw new SplitSmokeAssertionError(`${label}: the pane exited before painting; last frame: ${lastFrame.replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(-1600)}`)
+      }
+      return /[╭╮╰╯│─]/u.test(lastFrame) ? lastFrame : undefined
+    }, label, TIMEOUTS.paint)
+  } catch (error) {
+    if (error instanceof SplitSmokeAssertionError && lastFrame !== '') {
+      throw new SplitSmokeAssertionError(`${error.message}; last frame: ${lastFrame.replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(-1600)}`)
+    }
+    throw error
+  }
 }
 
 async function waitFrameText(session, needle, label, timeoutMs = TIMEOUTS.mount) {
@@ -187,13 +201,13 @@ function ensureProfileStubLlm(profileDir, surfaceLlm) {
   writeFileSync(patchPath, `${noEmpty.replace(/\s*$/u, '')}\n${rows}`, { mode: 0o600 })
 }
 
-function startSession({ name, cwd, installation, backend, args = [] }) {
+function startSession({ name, cwd, installation, backend, args = [], dshHome = installation.dshHome }) {
   const { dshInvocation, env } = installation
   const command = [
     'env',
     '-u',
     'NO_COLOR',
-    `DSH_HOME=${installation.dshHome}`,
+    `DSH_HOME=${dshHome}`,
     ...(backend === undefined ? [] : [`DSH_PI_TUI_BACKEND=${backend}`]),
     ...Object.entries(env)
       .filter(([key]) => key !== 'DSH_HOME' && key !== 'DSH_PI_TUI_BACKEND' && key !== 'NO_COLOR')
@@ -359,16 +373,46 @@ async function runScene({ installation, workRoot, report }) {
     return startSession({ ...options, name })
   }
 
-  // ── A01/A14: cold public daemon Client A ────────────────────────────────
+  // ── A01/A02: two SIMULTANEOUS cold public daemon Clients ─────────────────
+  // Both start before any Host registry exists, so both race the Host seat
+  // from a genuinely cold state. Exactly one Host may survive and both Clients
+  // must converge on its instance.
   const a = start({ name: 'a', cwd: projectA, installation, backend: 'daemon' })
-  await waitPainted(a, 'A01 daemon Client A')
+  const b = start({ name: 'b', cwd: projectB, installation, backend: 'daemon' })
+  await Promise.all([
+    waitPainted(a, 'A01 daemon Client A'),
+    waitPainted(b, 'A02 daemon Client B'),
+  ])
+  await Promise.all([
+    waitComposer(a, 'A01 Client A composer'),
+    waitComposer(b, 'A02 Client B composer'),
+  ])
   const registryA = await waitRegistry(dshHome, 'A01 Host registry')
+  report.globalSeatDir = join(homedir(), '.dsh-pi-tui', 'run', registryA.record.scopeId)
   assert(registryA.record.schema === 2, `A01: the macOS Host must publish schema 2, saw ${String(registryA.record.schema)}`)
   assert(typeof registryA.record.hostKernelIdentity?.uniqueId === 'string', 'A01: the Host registry has no Darwin kernel identity')
   const clientA = await waitClientOfSession(a, workRoot, 'A01 Client A')
+  const clientB = await waitClientOfSession(b, workRoot, 'A02 Client B')
   assert(alive(registryA.record.hostPid), 'A01: the published Host PID is not alive')
   assert(clientA.pid !== registryA.record.hostPid, 'A01: the Client PID equals the Host PID')
+  assert(clientA.pid !== clientB.pid, 'A02: the two Clients report the same OS PID')
+  await waitFor(() => {
+    const liveHosts = ownedRoles(workRoot).hosts.filter(row => alive(row.pid))
+    return liveHosts.length === 1 ? liveHosts : undefined
+  }, 'A02 exactly one live Host after the simultaneous cold race', TIMEOUTS.process)
+  await waitFor(() => {
+    const registry = readRegistry(dshHome)
+    return registry !== undefined && registry.record.instanceId === registryA.record.instanceId ? registry : undefined
+  }, 'A02 both cold Clients attach to the SAME Host instance', TIMEOUTS.process)
   report.rows.push({ id: 'A01', status: 'PASS', hostPid: registryA.record.hostPid, clientPid: clientA.pid })
+  report.rows.push({
+    id: 'A02',
+    status: 'PASS',
+    simultaneousCold: true,
+    hostPid: registryA.record.hostPid,
+    clientAPid: clientA.pid,
+    clientBPid: clientB.pid,
+  })
   report.identity = {
     instanceId: registryA.record.instanceId,
     hostPid: registryA.record.hostPid,
@@ -376,6 +420,61 @@ async function runScene({ installation, workRoot, report }) {
     clientAPid: clientA.pid,
   }
 
+  // ── RFL-005: a second DSH home aliasing the SAME canonical profile cannot
+  // start a second Host. The Host seat is under the real account home, keyed
+  // only by the canonical-profile scope id; the second home has its own
+  // registry directory (and therefore no cross-home discovery) but no seat.
+  const foreignHome = join(workRoot, 'foreign-dsh-home')
+  mkdirSync(join(foreignHome, 'profiles'), { recursive: true, mode: 0o700 })
+  symlinkSync(profileDir, join(foreignHome, 'profiles', 'pi-tui'))
+  const foreign = start({
+    name: 'rfl005-alias',
+    cwd: projectA,
+    installation,
+    backend: 'daemon',
+    dshHome: foreignHome,
+  })
+  const foreignClient = await waitClientOfSession(foreign, workRoot, 'RFL-005 foreign-home Client')
+  // The foreign Client attempts its own Host candidate. That candidate loses
+  // the account-home seat, so no registry ever appears in this home and the
+  // Client's ordinary wait must end in a refusal, not attach across homes.
+  let lastForeignFrame = ''
+  try {
+    await waitFor(() => {
+      if (!tmuxSessionExists(foreign)) return true
+      lastForeignFrame = tmuxCapture(foreign, 'RFL-005 foreign-home capture')
+      if (lastForeignFrame.includes('type a message')) {
+        throw new SplitSmokeAssertionError('RFL-005: the foreign home ATTACHED to a Host instead of being refused')
+      }
+      return undefined
+    }, 'RFL-005 foreign-home Client is refused instead of attaching', 90_000)
+  } catch (error) {
+    const foreignRegistry = readRegistry(foreignHome)
+    const liveHosts = ownedRoles(workRoot).hosts.filter(row => alive(row.pid)).map(row => row.pid)
+    throw new SplitSmokeAssertionError(`${error instanceof Error ? error.message : String(error)}; foreign frame: ${lastForeignFrame.replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(-1200)}; foreign registry: ${JSON.stringify(foreignRegistry?.record ?? null)}; live hosts: ${JSON.stringify(liveHosts)}; foreign pid alive: ${String(alive(foreignClient.pid))}`)
+  }
+  assert(readRegistry(foreignHome) === undefined,
+    'RFL-005: the second DSH home published a Host registry')
+  const liveHostsAfterAlias = ownedRoles(workRoot).hosts.filter(row => alive(row.pid))
+  assert(liveHostsAfterAlias.length === 1,
+    `RFL-005: expected exactly one live Host after the second-home launch, saw ${String(liveHostsAfterAlias.length)}`)
+  assert(alive(registryA.record.hostPid), 'RFL-005: the first Host died when the second home launched')
+  const globalSeatDir = join(homedir(), '.dsh-pi-tui', 'run', registryA.record.scopeId)
+  const globalSeatFile = join(globalSeatDir, `seat-host-${registryA.record.scopeId}.lock`)
+  assert(existsSync(globalSeatFile), 'RFL-005: the live Host seat is not under the real account home')
+  assert((statSync(globalSeatDir).mode & 0o077) === 0, 'RFL-005: the global Host seat directory must be private 0700')
+  assert((statSync(globalSeatFile).mode & 0o777) === 0o600, 'RFL-005: the global Host seat file must be 0600')
+  assert(!existsSync(join(dshHome, 'run', 'dsh-pi-tui', registryA.record.scopeId, `seat-host-${registryA.record.scopeId}.lock`)),
+    'RFL-005: the Host seat must not live under its own DSH_HOME')
+  report.rfl005 = {
+    secondHome: foreignHome,
+    secondHomeClientPid: foreignClient.pid,
+    secondHomeRegistry: false,
+    liveHosts: liveHostsAfterAlias.length,
+    seatRoot: 'account-home',
+    seatFileMode: '0600',
+    seatDirectoryMode: '0700',
+  }
   // A real accepted turn over the offline Host LLM route, then the durable
   // Session sink (the official Host writer) proves the auto Workspace create.
   await waitComposer(a, 'A14')
@@ -395,20 +494,26 @@ async function runScene({ installation, workRoot, report }) {
   })
   report.session = { sessionId: session.sessionId, headerCwd: header.cwd, durableLogCount: hostSessionLogCount(dshHome) }
 
-  // ── A02/A04: a second cold Client converges on the SAME Host ────────────
-  const b = start({ name: 'b', cwd: projectB, installation, backend: 'daemon' })
-  await waitPainted(b, 'A02 daemon Client B')
-  const clientB = await waitClientOfSession(b, workRoot, 'A02 Client B')
-  await waitFor(() => {
-    const registry = readRegistry(dshHome)
-    return registry !== undefined && registry.record.instanceId === registryA.record.instanceId ? registry : undefined
-  }, 'A02 the registry still names the first Host instance', TIMEOUTS.process)
-  assert(clientB.pid !== clientA.pid, 'A02: the two Clients report the same OS PID')
-  assert(alive(registryA.record.hostPid), 'A02: the Host died when the second Client attached')
-  const rolesAfterB = ownedRoles(workRoot)
-  assert(rolesAfterB.hosts.filter(row => alive(row.pid)).length === 1,
-    `A02: expected exactly one live Host, saw ${String(rolesAfterB.hosts.length)}`)
-  report.rows.push({ id: 'A02', status: 'PASS', hostPid: registryA.record.hostPid, clientAPid: clientA.pid, clientBPid: clientB.pid })
+  // ── A13: Client B owns its OWN launch workspace and Session ──────────────
+  // A and B share one Host, but each Client's workspace proof is its own launch
+  // object. B's prompt must create a distinct Session whose durable cwd is
+  // projectB, while A's Session stays on projectA.
+  await waitComposer(b, 'A13 Client B composer')
+  sendKeys(b, 'hello from client b', 'A13 Client B prompt')
+  await waitFrameText(b, 'stub answer', 'A13 Client B Host turn answer', TIMEOUTS.turn)
+  const sessionB = await waitSessionWithText(dshHome, 'hello from client b', 'A13 durable Session B')
+  const headerB = hostSessionHeader(dshHome, sessionB.sessionId)
+  assert(headerB !== undefined, 'A13: Client B durable Session has no header')
+  assert(sessionB.sessionId !== session.sessionId, 'A13: both Clients created the SAME Session')
+  assert(realpathSync(headerB.cwd) === realpathSync(projectB),
+    `A13: Client B Session cwd ${JSON.stringify(headerB.cwd)} is not its launch directory ${JSON.stringify(projectB)}`)
+  report.rows.push({
+    id: 'A13',
+    status: 'PASS',
+    clientBPid: clientB.pid,
+    sessionId: sessionB.sessionId,
+    headerCwd: headerB.cwd,
+  })
 
   // ── A06/A09: a third Client opens the SAME durable Session ──────────────
   const c = start({ name: 'c', cwd: projectA, installation, backend: 'daemon', args: ['--session', session.sessionId] })
@@ -416,9 +521,87 @@ async function runScene({ installation, workRoot, report }) {
   await waitFrameText(c, 'hello macos pr2 scene', 'A06 resumed Session transcript', TIMEOUTS.mount)
   const clientC = await waitClientOfSession(c, workRoot, 'A06 Client C')
   assert(clientC.pid !== clientA.pid && clientC.pid !== clientB.pid, 'A06: the resume Client reused another Client PID')
+  // ONE submitted prompt through the OFFICIAL Host writer must produce exactly
+  // ONE durable user message for this Session, even though two live Clients
+  // hold a surface on it.
+  const writerText = 'single writer authority check'
+  sendKeys(c, writerText, 'A06 single-writer prompt')
+  // The resumed transcript already contains an older "stub answer"; wait for
+  // THIS prompt rather than reusing that old frame text, then make sure the
+  // Enter reached the composer before observing the durable writer result.
+  await waitFrameText(c, writerText, 'A06 prompt reached the resumed composer', TIMEOUTS.mount)
+  sendKey(c, 'Enter', 'A06 submit resumed prompt')
+  await waitSessionWithText(dshHome, writerText, 'A06 durable user message from the resumed Client')
+  const durableAfterC = hostSessionEvents(dshHome, session.sessionId)
+  assert(durableAfterC !== undefined, 'A06: the resumed Session log is not readable')
+  const writerMessages = durableAfterC.filter(event =>
+    event.type === 'user/message' && JSON.stringify(event).includes(writerText))
+  assert(writerMessages.length === 1,
+    `A06: one submitted prompt must produce ONE durable user message, saw ${String(writerMessages.length)}`)
   sendKeys(c, '/exit', 'A06 exit C')
   await waitFor(() => (!tmuxSessionExists(c) ? true : undefined), 'A06 Client C exits', TIMEOUTS.exit)
-  report.rows.push({ id: 'A06', status: 'PASS', resumedSessionId: session.sessionId, clientCPid: clientC.pid })
+  report.rows.push({
+    id: 'A06',
+    status: 'PASS',
+    resumedSessionId: session.sessionId,
+    clientCPid: clientC.pid,
+    singleWriterUserMessages: writerMessages.length,
+  })
+
+  // ── A09: public `-c` and unique short-id lookup both resolve the Session ──
+  const continued = start({ name: 'a09-continue', cwd: projectA, installation, backend: 'daemon', args: ['-c'] })
+  await waitPainted(continued, 'A09 continue Client')
+  await waitFrameText(continued, 'single writer authority check', 'A09 -c resumed the confirmed workspace Session', TIMEOUTS.mount)
+  const continueClient = await waitClientOfSession(continued, workRoot, 'A09 continue Client')
+  sendKeys(continued, '/exit', 'A09 exit continue Client')
+  await waitFor(() => (!tmuxSessionExists(continued) ? true : undefined), 'A09 continue Client exits', TIMEOUTS.exit)
+  const shortPrefix = session.sessionId.slice(0, 12)
+  const lookup = start({ name: 'a09-lookup', cwd: projectA, installation, backend: 'daemon', args: ['--session', shortPrefix] })
+  await waitPainted(lookup, 'A09 lookup Client')
+  await waitFrameText(lookup, 'hello macos pr2 scene', 'A09 unique short-id lookup resumed the Session', TIMEOUTS.mount)
+  const lookupClient = await waitClientOfSession(lookup, workRoot, 'A09 lookup Client')
+  sendKeys(lookup, '/exit', 'A09 exit lookup Client')
+  await waitFor(() => (!tmuxSessionExists(lookup) ? true : undefined), 'A09 lookup Client exits', TIMEOUTS.exit)
+  report.rows.push({
+    id: 'A09',
+    status: 'PASS',
+    continueClientPid: continueClient.pid,
+    lookupClientPid: lookupClient.pid,
+    shortPrefix,
+    sessionId: session.sessionId,
+  })
+
+  // ── B03: SIGTERM cancels an in-flight authenticated startup wait ─────────
+  // Freeze the Host so a fresh Client's official /connect cannot complete; the
+  // Client must observe its startup signal and exit promptly, not sit on the
+  // request until its route/transport timeout.
+  assert(alive(registryA.record.hostPid), 'B03: the Host is not alive before the cancellation probe')
+  process.kill(registryA.record.hostPid, 'SIGSTOP')
+  let b03ClientPid
+  let b03Session
+  try {
+    b03Session = start({ name: 'b03-sigterm', cwd: projectA, installation, backend: 'daemon' })
+    b03ClientPid = (await waitClientOfSession(b03Session, workRoot, 'B03 Client')).pid
+    // Let the Client reach its authenticated Host wait (the Host is frozen).
+    await sleep(1_000)
+    assert(alive(b03ClientPid), 'B03: the Client exited before the cancellation probe')
+    const startedAt = Date.now()
+    process.kill(b03ClientPid, 'SIGTERM')
+    await waitFor(() => (!alive(b03ClientPid) ? true : undefined),
+      'B03 Client stops while its Host startup wait is in flight', 5_000)
+    const exitMs = Date.now() - startedAt
+    assert(exitMs < 5_000, `B03: SIGTERM took ${String(exitMs)}ms; the in-flight startup wait was not cancelled`)
+    report.rows.push({ id: 'B03', status: 'PASS', phase: 'authenticated-startup-wait', exitMs })
+  } finally {
+    process.kill(registryA.record.hostPid, 'SIGCONT')
+    if (b03Session !== undefined && tmuxSessionExists(b03Session)) {
+      tmux(['kill-session', '-t', b03Session], 'B03 remove cancelled Client session', { allowMissing: true })
+    }
+  }
+  await waitFor(() => (alive(registryA.record.hostPid) ? true : undefined),
+    'B03 Host resumes after the cancellation probe', TIMEOUTS.process)
+  assert(readRegistry(dshHome)?.record.instanceId === registryA.record.instanceId,
+    'B03: the Host identity changed during the cancellation probe')
 
   // ── A20: the workspace-object route refuses an unauthenticated request ──
   const origin = registryA.record.origin
@@ -563,6 +746,18 @@ async function cleanup({ workRoot, installation, hostPid, report }) {
     report.notQuiesced = { survivors: survivors.map(target => target.pid), workRoot }
     errors.push(`NOT_QUIESCED: ${String(survivors.length)} owned process(es) survived cleanup`)
     return errors
+  }
+  // The Host seat under the real account home is the smoke's own scope; after
+  // every owned process is gone it is safe to remove this run's directory.
+  if (typeof report.globalSeatDir === 'string') {
+    const seatDir = report.globalSeatDir
+    if (dirname(seatDir) !== join(homedir(), '.dsh-pi-tui', 'run')) {
+      errors.push(`refusing to remove an unexpected global seat directory: ${seatDir}`)
+    } else {
+      try { rmSync(seatDir, { recursive: true, force: true }) } catch (error) {
+        errors.push(`global seat directory removal failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
   }
   // 3. Remove the private work root only after every owned process is gone.
   if (!KEEP) {

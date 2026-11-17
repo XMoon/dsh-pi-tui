@@ -57,7 +57,7 @@ const REGISTRY_POLL_INTERVAL_MS = 250
 const AUTH_REQUEST_TIMEOUT_MS = 10_000
 
 /** The platform-independent published Host facts. */
-interface LocalInstanceSharedFields {
+export interface HostInstanceSharedFields {
   readonly scopeId: string
   readonly profileRealpath: string
   readonly instanceId: string
@@ -68,6 +68,9 @@ interface LocalInstanceSharedFields {
   readonly dshVersion: string
   readonly buildId: string
 }
+
+/** {@link LocalInstanceSharedFields} under its historical internal name. */
+type LocalInstanceSharedFields = HostInstanceSharedFields
 
 /**
  * The frozen Linux registry schema. The JSON keys, their order and the
@@ -129,6 +132,9 @@ export interface EnsureLocalHostOptions {
    * stays byte-for-byte unchanged when it is absent.
    */
   readonly expectedInstanceId?: string
+  /** The caller's startup/lifecycle cancellation. A cancelled ensure never
+   *  commits an authentication result and never signals a Host. */
+  readonly signal?: AbortSignal
   /**
    * How a cold Client with no reusable Host asks for the Host to be started.
    * `undefined` is the historical detached process spawn (internal
@@ -240,6 +246,46 @@ function assertLoopbackOrigin(origin: string): void {
     || url.origin !== origin
   ) {
     throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: origin must be one canonical http://127.0.0.1:<port>`)
+  }
+}
+
+/**
+ * Build one Host publication record in the canonical serialization order. The
+ * authenticated identity echo and `writeLocalRecord` must share this ONE
+ * insertion order: Linux schema 1 is a frozen bytes contract, so
+ * `hostStarttime` stays between `hostPid` and `origin`.
+ */
+export function buildHostInstanceRecord(
+  shared: HostInstanceSharedFields,
+  hostIdentity: HostProcessIdentity,
+): LocalInstanceRecord {
+  if (hostIdentity.schema === 1) {
+    return {
+      schema: 1,
+      scopeId: shared.scopeId,
+      profileRealpath: shared.profileRealpath,
+      instanceId: shared.instanceId,
+      hostPid: shared.hostPid,
+      hostStarttime: hostIdentity.hostStarttime,
+      origin: shared.origin,
+      protocol: shared.protocol,
+      bundleVersion: shared.bundleVersion,
+      dshVersion: shared.dshVersion,
+      buildId: shared.buildId,
+    }
+  }
+  return {
+    schema: 2,
+    scopeId: shared.scopeId,
+    profileRealpath: shared.profileRealpath,
+    instanceId: shared.instanceId,
+    hostPid: shared.hostPid,
+    hostKernelIdentity: hostIdentity.hostKernelIdentity,
+    origin: shared.origin,
+    protocol: shared.protocol,
+    bundleVersion: shared.bundleVersion,
+    dshVersion: shared.dshVersion,
+    buildId: shared.buildId,
   }
 }
 
@@ -357,15 +403,38 @@ function parseRecord(value: unknown, scope: RecordScope): LocalInstanceRecord {
     if (!DECIMAL.test(hostStarttime)) {
       throw new LocalScopeError('LOCAL_FILE_UNSAFE', 'local discovery: registry.hostStarttime must be numeric')
     }
-    return { schema: 1, ...shared, hostStarttime }
+    // The schema 1 insertion order is the frozen Linux serialization order:
+    // `hostStarttime` stays between `hostPid` and `origin`. Never spread a
+    // shared object here, because that would move it last in the JSON bytes.
+    return {
+      schema: 1,
+      scopeId: shared.scopeId,
+      profileRealpath: shared.profileRealpath,
+      instanceId: shared.instanceId,
+      hostPid: shared.hostPid,
+      hostStarttime,
+      origin: shared.origin,
+      protocol: shared.protocol,
+      bundleVersion: shared.bundleVersion,
+      dshVersion: shared.dshVersion,
+      buildId: shared.buildId,
+    }
   }
   if (schema === 2) {
     const record = assertExactObject(value, DARWIN_RECORD_KEYS, 'registry')
     const shared = parseSharedRecord(record, scope)
     return {
       schema: 2,
-      ...shared,
+      scopeId: shared.scopeId,
+      profileRealpath: shared.profileRealpath,
+      instanceId: shared.instanceId,
+      hostPid: shared.hostPid,
       hostKernelIdentity: parseDarwinKernelIdentity(record.hostKernelIdentity, shared.hostPid),
+      origin: shared.origin,
+      protocol: shared.protocol,
+      bundleVersion: shared.bundleVersion,
+      dshVersion: shared.dshVersion,
+      buildId: shared.buildId,
     }
   }
   throw new LocalScopeError('LOCAL_FILE_UNSAFE', 'local discovery: registry.schema must be 1 or 2')
@@ -616,8 +685,12 @@ async function discard(response: Response): Promise<void> {
 type LocalRequestInit = RequestInit & { readonly cache?: 'no-store' }
 
 /** Fetch with the bounded auth timeout; network failure is HOST_UNRESPONSIVE. */
-async function authFetch(url: string | URL, init: LocalRequestInit): Promise<Response> {
-  const request: LocalRequestInit = { ...init, signal: AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS) }
+async function authFetch(url: string | URL, init: LocalRequestInit, signal?: AbortSignal): Promise<Response> {
+  const timeout = AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS)
+  const request: LocalRequestInit = {
+    ...init,
+    signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
+  }
   try {
     return await fetch(url, request)
   } catch (error) {
@@ -629,10 +702,11 @@ async function authFetch(url: string | URL, init: LocalRequestInit): Promise<Res
 export async function connectForCookie(
   record: LocalInstanceRecord,
   launch: LocalLaunchMaterial,
+  signal?: AbortSignal,
 ): Promise<string> {
   const url = new URL(launch.connectUrl)
   url.searchParams.set('interactions', 'answer')
-  const response = await authFetch(url, { method: 'GET', redirect: 'manual', cache: 'no-store' })
+  const response = await authFetch(url, { method: 'GET', redirect: 'manual', cache: 'no-store' }, signal)
   if (response.status !== 302) {
     await discard(response)
     throw new LocalScopeError('HOST_AUTH_FAILED', `local discovery: /connect rejected this Client with HTTP ${String(response.status)}`)
@@ -668,13 +742,14 @@ export async function connectForCookie(
 export async function readAuthenticatedIdentity(
   record: LocalInstanceRecord,
   cookie: string,
+  signal?: AbortSignal,
 ): Promise<LocalInstanceRecord> {
   const response = await authFetch(`${record.origin}/api/pi-tui.local-host`, {
     method: 'GET',
     headers: { cookie },
     redirect: 'manual',
     cache: 'no-store',
-  })
+  }, signal)
   if (response.status === 401 || response.status === 403) {
     await discard(response)
     throw new LocalScopeError('HOST_AUTH_FAILED', 'local discovery: the identity route rejected the signed cookie')
@@ -763,10 +838,12 @@ export function readHostProcessIdentity(pid: number = process.pid): HostProcessI
 export async function authenticateLocalHost(
   record: LocalInstanceRecord,
   scope: LocalScope,
+  signal?: AbortSignal,
 ): Promise<VerifiedLocalHost> {
   const launch = readLaunchMaterial(scope, record)
-  const cookie = await connectForCookie(record, launch)
-  const identity = await readAuthenticatedIdentity(record, cookie)
+  const cookie = await connectForCookie(record, launch, signal)
+  const identity = await readAuthenticatedIdentity(record, cookie, signal)
+  signal?.throwIfAborted()
   assertRecordedHostKernelIdentityCurrent(identity)
   return { record, cookie, identity }
 }
@@ -801,12 +878,12 @@ export async function ensureLocalHost(options: EnsureLocalHostOptions): Promise<
       )
     }
     assertClientHostCompatible(record, scope)
-    return await authenticateLocalHost(record, scope)
+    return await authenticateLocalHost(record, scope, options.signal)
   }
   const existing = readLocalRecord(scope)
   if (existing !== undefined && inspectHostProcess(existing) === 'alive') {
     assertClientHostCompatible(existing, scope)
-    return await authenticateLocalHost(existing, scope)
+    return await authenticateLocalHost(existing, scope, options.signal)
   }
 
   const spawnFailure = options.hostStartPolicy === 'public-managed'
@@ -814,6 +891,7 @@ export async function ensureLocalHost(options: EnsureLocalHostOptions): Promise<
     : spawnHostCandidate(options)
   const deadline = Date.now() + REGISTRY_WAIT_TIMEOUT_MS
   while (Date.now() < deadline) {
+    options.signal?.throwIfAborted()
     const failure = spawnFailure()
     if (failure !== undefined) {
       throw new LocalScopeError('HOST_START_FAILED', 'local discovery: the Host candidate failed to start', failure)
@@ -821,7 +899,7 @@ export async function ensureLocalHost(options: EnsureLocalHostOptions): Promise<
     const candidate = readLocalRecord(scope)
     if (candidate !== undefined && inspectHostProcess(candidate) === 'alive') {
       assertClientHostCompatible(candidate, scope)
-      return await authenticateLocalHost(candidate, scope)
+      return await authenticateLocalHost(candidate, scope, options.signal)
     }
     await delay(REGISTRY_POLL_INTERVAL_MS)
   }
