@@ -45,6 +45,7 @@ Darwin kernel process identity requires macOS
 # product lane; the Linux runner sees the platform boundary skip, and the
 # Linux schema 1/abstract-seat side runs for real here.
 Darwin libproc identity requires macOS
+the macOS classifier requires the real libproc identity
 Darwin file seats require macOS
 Darwin schema 2 requires the real libproc identity
 the real Darwin detached fallback requires macOS
