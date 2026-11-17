@@ -15,7 +15,7 @@
 
 import assert from 'node:assert/strict'
 import test, { afterEach } from 'node:test'
-import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth, type TuiMouseEvent } from '@xmoon76/pi-tui'
 import { TuiApp, type SessionWorkspaceHandle } from '../../src/tui-app.ts'
 import type { SessionWorkspacePanelHost, SessionWorkspacePanelOptions } from '../../src/tui/panels/session-workspace-panel.ts'
 import { SessionWorkspacePanel } from '../../src/tui/panels/session-workspace-panel.ts'
@@ -851,6 +851,13 @@ function eligibility(sessionId: string, kind: 'question' | 'approval' = 'questio
   return { sessionId, kind, live: true }
 }
 
+/** Publish the accepted EMPTY Activity sample of the current roster revision.
+ *  The wheel tests target the painted body rows, so the transient "Reading
+ *  session activity…" row must not sit above them. */
+function settleActivity(h: Harness): void {
+  h.handle.setActivityFacts({ listRevision: 1, facts: [], answerEligibility: [] })
+}
+
 /** The painted panel frame of the LAST render, in panel-relative 0-based rows.
  *  Read from the real physical viewport: calling `render()` again would paint a
  *  newer frame than the one the user (and the mouse gesture) acted on. */
@@ -878,6 +885,22 @@ async function clickCell(h: Harness, x: number, y: number): Promise<void> {
   await h.paint()
   h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
   await h.paint()
+}
+
+/** One real SGR wheel notch at the SAME 0-based panel cell. `up` is the fork's
+ *  negative direction (the ArrowUp sign); `alt` adds the SGR Alt bit so the
+ *  fork itself applies the accelerated line count. */
+async function wheelCell(h: Harness, x: number, y: number, direction: 'up' | 'down', alt = false): Promise<void> {
+  const button = (direction === 'up' ? 64 : 65) + (alt ? 8 : 0)
+  h.vt.sendInput(`\x1b[<${button};${x + 1};${y + 1}M`)
+  await h.paint()
+}
+
+/** The first physical body row of the LAST painted panel frame. */
+function bodyTopRow(h: Harness): number {
+  const separator = panelFrame(h).findIndex(line => line.startsWith('─'))
+  assert.ok(separator >= 0, `the frame paints its body separator:\n${h.view()}`)
+  return separator + 1
 }
 
 /** The right-hand wide Preview column, anchored on its own Host text. */
@@ -4202,4 +4225,627 @@ test('H06: without an official Workspace baseline the roster stays flat and fabr
   assert.ok(!degraded.includes('▸'), 'a lost Workspace stream keeps the flat fallback')
   assert.ok(degraded.includes('workspace follow failed'))
   assert.ok(degraded.includes('H06 0'))
+})
+
+// ── F2: Session Workspace wheel (Browse / Search Results / pinned Peek) ──
+
+test('F2/W01+W08: Browse wheel moves the typed selection by the fork delta, in the keyboard sign, and clamps', async () => {
+  const history = Array.from({ length: 11 }, (_, index) => row(`session-wheel-browse-${index}`, 900 - index, { title: `Wheel row ${index}` }))
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Current session' }), ...history] }))
+  settleActivity(h)
+  await h.paint()
+  const top = bodyTopRow(h)
+  assert.ok(/^> .*Current session/m.test(h.view()), `the Browser opens on the typed current row:\n${h.view()}`)
+
+  await wheelCell(h, 5, top + 1, 'down')
+  assert.ok(/^> .*Wheel row 0/m.test(h.view()), `a wheel-down notch is the next keyboard Down:\n${h.view()}`)
+  await wheelCell(h, 5, top, 'up')
+  assert.ok(/^> .*Current session/m.test(h.view()), `a wheel-up notch is the previous keyboard Up:\n${h.view()}`)
+
+  // The fork already turned one Alt notch into five lines; the panel must not
+  // multiply the Wheel Lines setting again.
+  await wheelCell(h, 5, top, 'down', true)
+  assert.ok(/^> .*Wheel row 4/m.test(h.view()), `Alt+wheel uses the fork's accelerated delta exactly once:\n${h.view()}`)
+  await wheelCell(h, 5, top, 'up', true)
+  assert.ok(/^> .*Current session/m.test(h.view()), 'Alt+wheel-up returns by the same five-line delta')
+
+  // A boundary wheel is a real navigation intent, but never walks past the
+  // painted typed rows.
+  await wheelCell(h, 5, top, 'up')
+  assert.ok(/^> .*Current session/m.test(h.view()), 'the first row clamps the wheel')
+  for (let step = 0; step < 14; step += 1) await wheelCell(h, 5, top, 'down')
+  assert.ok(/^> .*Wheel row 10/m.test(h.view()), `the last row clamps the wheel:\n${h.view()}`)
+  await wheelCell(h, 5, top + 1, 'down')
+  assert.ok(/^> .*Wheel row 10/m.test(h.view()), 'no wheel notch walks past the last typed row')
+
+  assert.deepEqual(h.queries, [], 'the wheel never changes the Host query')
+  assert.deepEqual(h.resumes, [], 'the wheel never resumes or opens a Session')
+  assert.equal(h.closes, 0, 'the wheel never closes the Browser')
+})
+
+test('F2/W02: a 44x20 long list keeps the wheel-selected typed row painted and never expands a Folder', async () => {
+  const sessions = Array.from({ length: 39 }, (_, index) => row(`session-wheel-short-${index}`, 900 - index, { title: `Short ${index}` }))
+  const h = harness({ columns: 44, rows: 20 })
+  h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Current session' }), ...sessions] }))
+  settleActivity(h)
+  await h.paint()
+  const top = bodyTopRow(h)
+  for (let step = 0; step < 25; step += 1) await wheelCell(h, 3, top, 'down')
+  const view = h.view()
+  assert.ok(/^> .*Short 24/m.test(view), `the wheel walks past the first painted page and keeps the typed row:\n${view}`)
+  assert.ok(!view.includes('Short 0'), `the viewport really scrolled off the first page:\n${view}`)
+  assert.ok(view.includes('Sessions · 40'), 'the logical roster is unchanged by the wheel')
+  assert.deepEqual(h.resumes, [], 'the wheel never emits a Resume')
+  h.dispose()
+
+  // A Folder is never expanded by the wheel: the cursor moves, the presentation
+  // does not open another group.
+  const tree = harness({ columns: 100, rows: 24 })
+  tree.handle.setSnapshot(snapshot({ rows: [
+    row(CURRENT, 3_000, { title: 'Current session' }),
+    row(OTHER, 2_000, { title: 'Other session' }),
+    row(THIRD, 1_000, { title: 'Third session' }),
+  ] }))
+  tree.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-alpha', path: '/ws/alpha', title: 'Alpha', sessionIds: [CURRENT] },
+    { workspaceId: 'ws-beta', path: '/ws/beta', title: 'Beta', sessionIds: [OTHER] },
+    { workspaceId: 'ws-gamma', path: '/ws/gamma', title: 'Gamma', sessionIds: [THIRD] },
+  ] })
+  settleActivity(tree)
+  await tree.paint()
+  const treeTop = bodyTopRow(tree)
+  await wheelCell(tree, 5, treeTop, 'down')
+  assert.ok(/^> .*Beta/m.test(tree.view()), `the wheel selects the next typed Folder:\n${tree.view()}`)
+  assert.ok(!tree.view().includes('Other session'), 'a wheel selection never expands the Folder')
+  await wheelCell(tree, 5, treeTop, 'down')
+  assert.ok(/^> .*Gamma/m.test(tree.view()), `the next notch selects the next Folder:\n${tree.view()}`)
+  assert.ok(!tree.view().includes('Third session'), 'the wheel never reveals or expands unopened history')
+  assert.ok(!tree.view().includes('Show more sessions'), 'the wheel never triggers Show more')
+  await wheelCell(tree, 5, treeTop, 'up')
+  await wheelCell(tree, 5, treeTop, 'up')
+  assert.ok(/^> .*Current session/m.test(tree.view()), 'wheel-up returns to the same typed Session')
+  assert.deepEqual(tree.resumes, [])
+  assert.equal(tree.closes, 0)
+  tree.dispose()
+
+  // A painted Show more row is a typed selection target: the wheel selects it
+  // but never runs its explicit reveal or grows this open's watermark.
+  const more = harness({ columns: 100, rows: 24 })
+  const moreHistory = Array.from({ length: 30 }, (_, index) => row(`session-wheel-more-${index}`, 900 - index, { title: `More ${index}` }))
+  more.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Current session' }), ...moreHistory] }))
+  more.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-more', path: '/ws', title: 'More', sessionIds: [CURRENT, ...moreHistory.map(item => item.id)] },
+  ] })
+  settleActivity(more)
+  await more.paint()
+  const moreRow = lineIndexOf(panelFrame(more), 'Show more sessions')
+  const remaining = Number(/· (\d+) remaining/.exec(panelFrame(more)[moreRow]!)?.[1])
+  const visibleMore = panelFrame(more).filter(line => /More \d+/.test(line)).length
+  for (let step = 0; step < 20; step += 1) await wheelCell(more, 5, moreRow, 'down')
+  assert.ok(/^> .*Show more sessions/m.test(more.view()), `the wheel selects the painted Show more row:\n${more.view()}`)
+  const afterMore = panelFrame(more)[lineIndexOf(panelFrame(more), 'Show more sessions')]!
+  assert.equal(Number(/· (\d+) remaining/.exec(afterMore)?.[1]), remaining,
+    'a wheel over Show more never invokes the reveal or changes the watermark')
+  assert.equal(panelFrame(more).filter(line => /More \d+/.test(line)).length, visibleMore,
+    'the wheel reveals no hidden history')
+  more.vt.sendInput('\r')
+  await more.paint()
+  const revealed = panelFrame(more)[lineIndexOf(panelFrame(more), 'Show more sessions')]!
+  assert.equal(Number(/· (\d+) remaining/.exec(revealed)?.[1]), remaining - 5,
+    `Enter still reveals the next five history rows:\n${more.view()}`)
+  more.dispose()
+})
+
+test('F2/W03: the wide left list takes the wheel while the right Preview and the column gap stay inert', async () => {
+  const h = harness({ columns: 120, rows: 40 })
+  h.handle.setSnapshot(snapshot({ rows: [
+    row(CURRENT, 3_000, { title: 'Current session' }),
+    row(OTHER, 2_000, { title: 'Other session' }),
+    row(THIRD, 1_000, { title: 'Third session' }),
+  ] }))
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-alpha', path: '/ws/alpha', title: 'Alpha', sessionIds: [CURRENT, OTHER] },
+    { workspaceId: 'ws-beta', path: '/ws/beta', title: 'Beta', sessionIds: [THIRD] },
+  ] })
+  settleActivity(h)
+  await h.paint()
+  assert.ok(h.view().includes('Space for read-only details'), 'the wide frame paints its read-only right Preview')
+  const top = bodyTopRow(h)
+  await wheelCell(h, 5, top, 'down')
+  assert.ok(/^> .*Other session/m.test(h.view()), `the left column wheel moves the tree selection:\n${h.view()}`)
+  const selected = h.view()
+  // The wide frame is 120 cells: left 0..65, a two-cell gap 66..67, right 68+.
+  await wheelCell(h, 80, top + 1, 'down')
+  assert.equal(h.view(), selected, 'the right read-only Preview is not a wheel sink')
+  await wheelCell(h, 66, top + 1, 'down')
+  assert.equal(h.view(), selected, 'the two-cell column gap is inert')
+  await wheelCell(h, 80, top, 'up')
+  assert.equal(h.view(), selected, 'the wide Preview never scrolls or re-selects the tree')
+  assert.deepEqual(h.resumes, [])
+  assert.equal(h.closes, 0)
+})
+
+test('F2/W04+W05: Search Results wheel takes focus, moves only the selection, clamps and re-anchors', async () => {
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot())
+  settleActivity(h)
+  await h.paint()
+  h.vt.sendInput('\x1b[B') // select the pre-search Browse row
+  await h.paint()
+  h.vt.sendInput('/')
+  await h.paint()
+  h.handle.setSnapshot(snapshot({
+    query: 'needle',
+    searchState: 'ready',
+    searchResults: [
+      { row: row(OTHER, 2_000, { title: 'Other session' }), source: 'Both', snippet: 'needle a' },
+      { row: row(THIRD, 1_000, { title: 'Third session' }), source: 'Content', snippet: 'needle b' },
+    ],
+  }), 'needle')
+  await h.paint()
+  assert.ok(h.view().includes('Search: needle'), 'the seeded global search paints before the wheel')
+  assert.deepEqual(h.queries, [], 'the one-shot seed is not a user query generation')
+
+  const top = bodyTopRow(h)
+  const inputFrame = h.view()
+  // The Search Input row itself is not a scroll sink.
+  await wheelCell(h, 5, top, 'down')
+  assert.equal(h.view(), inputFrame, 'the global Search Input is never a wheel sink')
+  const firstResult = lineIndexOf(panelFrame(h), 'Other session')
+  await wheelCell(h, 5, firstResult, 'down')
+  assert.ok(/^> .*Third session/m.test(h.view()), `the Results wheel moves its own selection:\n${h.view()}`)
+  assert.ok(h.view().includes('Search: needle'), 'the query text is untouched by the wheel')
+  assert.deepEqual(h.queries, [], 'the wheel never issues a Host query')
+
+  // Clamp inside the painted result viewport in both directions.
+  for (let step = 0; step < 4; step += 1) await wheelCell(h, 5, firstResult, 'down')
+  assert.ok(/^> .*Third session/m.test(h.view()), 'the last result clamps the wheel')
+  for (let step = 0; step < 4; step += 1) await wheelCell(h, 5, firstResult, 'up')
+  assert.ok(/^> .*Other session/m.test(h.view()), 'the first result clamps the wheel')
+  // Walk back onto the result the refresh below will remove.
+  await wheelCell(h, 5, firstResult, 'down')
+  assert.ok(/^> .*Third session/m.test(h.view()), `the wheel returns to the second result:\n${h.view()}`)
+
+  // Esc returns to the editor without leaving the global search.
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.ok(h.view().includes('Search: needle') && h.view().includes('Search all workspaces'),
+    `the first Esc returns to the same Search editor:\n${h.view()}`)
+
+  // A refreshed result page re-anchors on a CURRENT result: a removed result
+  // can never be resurrected by the wheel.
+  h.handle.setSnapshot(snapshot({
+    query: 'needle',
+    searchState: 'ready',
+    searchResults: [
+      { row: row(CURRENT, 3_000, { title: 'Current session' }), source: 'Content', snippet: 'needle c' },
+      { row: row(OTHER, 2_000, { title: 'Other session' }), source: 'Content', snippet: 'needle a' },
+    ],
+  }))
+  await h.paint()
+  assert.ok(/^> .*Current session/m.test(h.view()), `a refreshed result page re-anchors the selection:\n${h.view()}`)
+  await wheelCell(h, 5, lineIndexOf(panelFrame(h), 'Current session'), 'down')
+  assert.ok(/^> .*Other session/m.test(h.view()), 'the wheel only walks the CURRENT painted results')
+  assert.ok(!h.view().includes('Third session'), 'a removed result is never repainted by the wheel')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(h.resumes, [OTHER], 'the second Enter still resumes only the painted result')
+
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.ok(/^> .*Other session/m.test(h.view()), `Esc restores the pre-search Browse selection:\n${h.view()}`)
+  assert.ok(!h.view().includes('Search all workspaces'), 'the second Esc leaves the global search')
+})
+
+test('F2/W05: a result page longer than the viewport scrolls with the wheel selection', async () => {
+  const results = Array.from({ length: 24 }, (_, index) => ({
+    row: row(`session-wheel-result-${index}`, 1_000 - index, { title: `Result ${index}` }),
+    source: 'Content' as const,
+    snippet: `needle ${index}`,
+  }))
+  const h = harness({ columns: 100, rows: 24, initialMode: 'search' })
+  h.handle.setSnapshot(snapshot({ query: 'needle', searchState: 'ready', searchResults: results }), 'needle')
+  settleActivity(h)
+  await h.paint()
+  assert.ok(h.view().includes('Search: needle'), `the Search editor keeps its seeded query:\n${h.view()}`)
+  const firstResult = lineIndexOf(panelFrame(h), 'Result 0')
+  for (let step = 0; step < 20; step += 1) await wheelCell(h, 5, firstResult, 'down')
+  const view = h.view()
+  assert.ok(/^> .*Result 20/m.test(view), `the result viewport follows the wheel selection:\n${view}`)
+  assert.ok(!view.includes('Result 0 ') && !view.includes('Result 2 '), `the first result page scrolled away:\n${view}`)
+  assert.ok(view.includes('Result 3'), 'the rebased result page starts at the real painted row')
+  assert.ok(h.view().includes('Search: needle'), 'scrolling the results never edits the query')
+  assert.deepEqual(h.queries, [], 'the wheel never issues a Host query')
+  assert.deepEqual(h.resumes, [], 'the wheel never resumes a result')
+  for (let step = 0; step < 20; step += 1) await wheelCell(h, 5, firstResult, 'up')
+  assert.ok(/^> .*Result 0/m.test(h.view()), `the wheel returns to the first painted result:\n${h.view()}`)
+  assert.ok(h.view().includes('Result 17') && !h.view().includes('Result 18'),
+    'the result viewport rebases back to the first page')
+})
+
+test('F2/W06+W07: Peek wheel scrolls only the pinned detail and the left column stays inert', async () => {
+  const h = harness({ columns: 120, rows: 12 })
+  h.handle.setSnapshot(snapshot())
+  settleActivity(h)
+  await h.paint()
+  h.vt.sendInput('\x1b[B') // the pinned target is OTHER
+  await h.paint()
+  h.vt.sendInput(' ')
+  await h.paint()
+  const top = bodyTopRow(h)
+  assert.ok(h.view().includes('Peek · other-se'), `the wide Peek pins its own Session id:\n${h.view()}`)
+  assert.equal(h.view().split('\n').filter(line => line.includes('Back [Esc]')).length, 1,
+    'the Peek paints no local exit row: only the ONE global bar leaves it')
+
+  await wheelCell(h, 80, top + 1, 'down')
+  const scrolled = h.view()
+  assert.ok(!scrolled.includes('Peek · other-se'), `the right pane wheel scrolls the pinned detail:\n${scrolled}`)
+  assert.ok(scrolled.includes('Title:') && scrolled.includes('Session ID:'), 'the next real detail rows are painted')
+  assert.deepEqual(h.resumes, [], 'scrolling a Peek never resumes or activates anything')
+
+  // While the LEFT pane still paints the Browse tree beside the Peek, its
+  // wheel is inert: no selection move and no Peek scroll.
+  const beforeLeft = h.view()
+  await wheelCell(h, 5, top, 'down')
+  assert.equal(h.view(), beforeLeft, 'the left column never scrolls the pinned Peek or moves Browse')
+
+  await wheelCell(h, 80, top, 'up')
+  assert.ok(h.view().includes('Peek · other-se'), 'wheel-up returns to the top of the same pinned detail')
+
+  // Closing the Peek restores the ordinary read-only Preview, which is not a
+  // scroll sink either.
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  const browse = h.view()
+  assert.ok(browse.includes('Space for read-only details'), 'Esc restores the ordinary right Preview')
+  await wheelCell(h, 80, top + 1, 'down')
+  assert.equal(h.view(), browse, 'the ordinary Preview never scrolls the closed Peek')
+  assert.ok(/^> .*Other session/m.test(h.view()), 'the typed Browse selection survives the Peek round trip')
+  h.dispose()
+
+  // A narrow 80x9 Peek owns the whole body and scrolls its real detail rows.
+  const narrow = harness({ columns: 80, rows: 9 })
+  narrow.handle.setSnapshot(snapshot())
+  settleActivity(narrow)
+  await narrow.paint()
+  narrow.vt.sendInput('\x1b[B')
+  await narrow.paint()
+  narrow.vt.sendInput(' ')
+  await narrow.paint()
+  const narrowTop = bodyTopRow(narrow)
+  assert.ok(narrow.view().includes('Peek · other-se'))
+  await wheelCell(narrow, 5, narrowTop, 'down')
+  assert.ok(!narrow.view().includes('Peek · other-se'), `the narrow wheel scrolls its real body:\n${narrow.view()}`)
+  assert.ok(narrow.view().includes('Title: Other session'), 'the scrolled narrow rows are real detail rows')
+  for (let step = 0; step < 8; step += 1) await wheelCell(narrow, 5, narrowTop, 'down')
+  assert.ok(narrow.view().includes('Source:'), 'the short Peek clamps at its own last content row')
+  assert.deepEqual(narrow.resumes, [], 'a narrow Peek wheel never activates a Session')
+
+  // The ONE global Back click leaves the Peek without closing the Browser; the
+  // typed selection and anchor survive.
+  await clickBarAction(narrow, 'Back [Esc]')
+  assert.equal(narrow.closes, 0, 'the painted Back closes only the Peek')
+  assert.ok(/^> .*Other session/m.test(narrow.view()), `Esc/Back returns to the same typed selection:\n${narrow.view()}`)
+  narrow.vt.sendInput('\x1b')
+  await narrow.paint()
+  assert.equal(narrow.closes, 1, 'the root Esc still closes the Browser')
+})
+
+test('F2/W09: a boundary wheel retires a painted bar press while an inert wheel keeps it legal', async () => {
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot())
+  settleActivity(h)
+  await h.paint()
+  h.vt.sendInput('\x1b[B') // select the LAST typed row (OTHER)
+  await h.paint()
+  const top = bodyTopRow(h)
+  const frame = panelFrame(h)
+  const bar = frame[frame.length - 1]!
+  const x = bar.indexOf('Open [Enter]') + 1
+  const y = frame.length - 1
+  assert.ok(x > 0 && bar.includes('Open [Enter]'), `the painted bar offers the explicit Open:\n${bar}`)
+
+  // PRESS the painted Open, then wheel at the LAST row: the selection cannot
+  // move, so the frame stays byte-identical; only the wheel retirement may drop
+  // the old press.
+  h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
+  await h.paint()
+  const pressedFrame = panelFrame(h).join('\n')
+  await wheelCell(h, 5, top + 1, 'down')
+  assert.equal(panelFrame(h).join('\n'), pressedFrame, 'the boundary wheel repaints the same frame')
+  h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
+  await h.paint()
+  assert.deepEqual(h.resumes, [], 'a boundary wheel is a real intent: the old press cannot open a Session')
+  assert.equal(h.closes, 0)
+
+  // An inert wheel (header) is consumed but keeps a legal bar press intact.
+  // A DIFFERENT verb avoids the terminal's same-word double-click selection.
+  const peekX = bar.indexOf('Peek [Space]') + 1
+  assert.ok(peekX > 0 && bar.includes('Peek [Space]'), `the painted bar offers its own Peek:\n${bar}`)
+  h.vt.sendInput(`\x1b[<0;${peekX + 1};${y + 1}M`)
+  await h.paint()
+  await wheelCell(h, 5, 0, 'down')
+  h.vt.sendInput(`\x1b[<0;${peekX + 1};${y + 1}m`)
+  await h.paint()
+  assert.ok(h.view().includes('Peek · other-se'), 'an inert wheel never cancels a legal bar gesture')
+  assert.deepEqual(h.resumes, [], 'the kept bar press runs its own Peek verb, not a resume')
+})
+
+test('F2/W10+W11: inert cells consume the wheel without navigating and the chooser never chooses', async () => {
+  // A status row squeezed above the list is not a scroll sink; the list below
+  // it still navigates.
+  const status = harness({ columns: 100, rows: 24 })
+  status.handle.setSnapshot(snapshot())
+  status.handle.workspaceUnavailable('membership unavailable')
+  await status.paint()
+  const statusRow = bodyTopRow(status)
+  assert.ok(panelFrame(status)[statusRow]!.includes('membership unavailable'), `the status row paints above the list:\n${status.view()}`)
+  const statusFrame = status.view()
+  await wheelCell(status, 5, statusRow, 'down')
+  assert.equal(status.view(), statusFrame, 'a status row is not a wheel sink')
+  await wheelCell(status, 5, lineIndexOf(panelFrame(status), 'Other session'), 'down')
+  assert.ok(/^> .*Other session/m.test(status.view()), 'the real list body below the status rows still navigates')
+  status.dispose()
+
+  // The inline Host-directory editor owns the body: its input and suggestion
+  // area are inert and a wheel never verifies/registers a Host path.
+  const submitted: string[] = []
+  const editor = harness({
+    currentSessionId: null,
+    initialBrowseScope: 'all',
+    initialDirectoryChooser: true,
+    initialDirectoryEntry: true,
+    initialDirectoryPath: '/launch/failed',
+    onAddDirectory: (path) => { submitted.push(path) },
+  })
+  await editor.paint()
+  assert.ok(editor.view().includes('Host directory:'), `the inline Host editor paints its input:\n${editor.view()}`)
+  const editorFrame = editor.view()
+  const inputRow = lineIndexOf(panelFrame(editor), 'Host directory:')
+  await wheelCell(editor, 5, inputRow, 'down')
+  await wheelCell(editor, 5, inputRow, 'up')
+  assert.equal(editor.view(), editorFrame, 'the inline Host editor is never a wheel sink')
+  assert.deepEqual(submitted, [], 'a wheel never verifies or registers a Host directory')
+  assert.equal(editor.closes, 0)
+  editor.dispose()
+
+  // The Sessionless Choose workspace Browser: a wheel only moves the typed
+  // Folder selection; choosing still needs the explicit Enter/click.
+  const used: Array<[string, string]> = []
+  const chooser = harness({
+    columns: 100,
+    rows: 24,
+    currentSessionId: null,
+    initialDirectoryChooser: true,
+    onUseDirectory: (workspaceId, canonicalPath) => { used.push([workspaceId, canonicalPath]) },
+    onAddDirectory: () => {},
+    onNewSession: () => {},
+  })
+  chooser.handle.setSnapshot(snapshot({ rows: [row(OTHER, 2_000, { title: 'Other session' })] }))
+  chooser.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-alpha', path: '/ws/alpha', title: 'Alpha', sessionIds: [OTHER] },
+    { workspaceId: 'ws-beta', path: '/ws/beta', title: 'Beta', sessionIds: [] },
+  ] })
+  settleActivity(chooser)
+  await chooser.paint()
+  const chooserTop = bodyTopRow(chooser)
+  assert.ok(chooser.view().includes('Choose workspace'))
+  await wheelCell(chooser, 5, chooserTop, 'down')
+  assert.ok(/^> .*Beta/m.test(chooser.view()), `the chooser wheel selects the next typed Folder:\n${chooser.view()}`)
+  assert.deepEqual(used, [], 'a wheel never chooses a Workspace')
+  assert.equal(chooser.closes, 0)
+  assert.ok(!chooser.view().includes('Other session'), 'the chooser wheel never expands or creates a Session')
+  chooser.vt.sendInput('\r')
+  await chooser.paint()
+  assert.deepEqual(used, [['ws-beta', '/ws/beta']], 'Enter is still the explicit choose')
+  assert.equal(chooser.closes, 1, 'the chooser returns only through its explicit choose')
+})
+
+test('F2/W12: an async Activity refresh keeps the wheel-selected Session and a vanished Peek target exits', async () => {
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' }), row(THIRD, 1_000, { title: 'Third session' })] }))
+  settleActivity(h)
+  await h.paint()
+  const top = bodyTopRow(h)
+  await wheelCell(h, 5, top, 'down')
+  assert.ok(/^> .*Other session/m.test(h.view()), 'the wheel selects Other')
+  h.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      fact(OTHER, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      questionFact(THIRD),
+    ],
+    answerEligibility: [eligibility(THIRD)],
+  })
+  await h.paint()
+  assert.ok(/^> .*Other session/m.test(h.view()), 'an async Activity reorder keeps the same typed Session id')
+  assert.deepEqual(h.queries, [], 'the wheel itself issues no Host query')
+
+  h.vt.sendInput(' ')
+  await h.paint()
+  assert.ok(h.view().includes('Peek · other-se'), 'the wheel-selected Session opens its own Peek')
+  h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(THIRD, 1_000, { title: 'Third session' })] }))
+  await h.paint()
+  assert.ok(!h.view().includes('Peek · other-se'), `the Peek exits when its pinned Session leaves the roster:\n${h.view()}`)
+  assert.ok(h.view().includes('Sessions · 2') && h.view().includes('Up/Down move'), 'the list stays usable after the Peek exits')
+  await wheelCell(h, 5, bodyTopRow(h), 'up')
+  assert.ok(/^> .*Third session/m.test(h.view()), `the wheel walks the new painted rows, never the removed target:\n${h.view()}`)
+  assert.deepEqual(h.resumes, [])
+  assert.equal(h.closes, 0)
+})
+
+test('F2/W13: a zero delta or a stale grant is consumed without acting; only a painted wheel navigates', async () => {
+  let renders = 0
+  let closes = 0
+  let rows = 24
+  let columns = 100
+  const host: SessionWorkspacePanelHost = {
+    rows: () => rows,
+    columns: () => columns,
+    requestRender: () => { renders += 1 },
+    notice: () => undefined,
+    onQueryChange: () => {},
+    onResume: () => {},
+    onClose: () => { closes += 1 },
+  }
+  const panel = new SessionWorkspacePanel(host, { initialMode: 'browse', initialBrowseScope: 'all', currentSessionId: CURRENT })
+  panel.setSnapshot(snapshot())
+  panel.setActivityFacts({ listRevision: 1, facts: [], answerEligibility: [] })
+  panel.render(columns)
+  renders = 0
+  const event = (overrides: Partial<TuiMouseEvent>): TuiMouseEvent => ({
+    type: 'wheel',
+    button: 'none',
+    x: 5,
+    y: 2,
+    screenX: 5,
+    screenY: 2,
+    width: columns,
+    height: rows,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    wheelDelta: 1,
+    ...overrides,
+  })
+  // Primary clicks stay on the fork's onCellPress/onCellClick pair.
+  assert.equal(panel.handleMouse(event({ type: 'press', button: 'left' })), undefined,
+    'a non-wheel event is left to the original click path')
+  // A zero delta is consumed but never reverses a press or navigates.
+  assert.deepEqual(panel.handleMouse(event({ wheelDelta: 0 })), { handled: true, render: false })
+  assert.equal(renders, 0, 'a zero-delta wheel never requests a repaint')
+  // A wheel with no painted scroll pane is consumed, not leaked to the background.
+  assert.deepEqual(panel.handleMouse(event({ y: 0 })), { handled: true, render: false })
+  assert.equal(renders, 0, 'an inert wheel never requests a repaint')
+  // The event grant must be the root box this frame was painted for.
+  assert.deepEqual(panel.handleMouse(event({ height: 20 })), { handled: true, render: false })
+  assert.equal(renders, 0, 'a grant mismatch never acts on the old hit map')
+  // A resize that has not repainted yet is inert.
+  rows = 20
+  assert.deepEqual(panel.handleMouse(event({ height: 20 })), { handled: true, render: false })
+  assert.equal(renders, 0, 'a pre-repaint resize never replays an old cell')
+  rows = 24
+  // A zero-delta wheel keeps a legal press alive: its release still acts.
+  const bar = stripTerminalSequences(panel.render(columns).at(-1) ?? '')
+  const barX = bar.indexOf('Return [Enter]') + 1
+  assert.ok(barX > 0, `the fake frame paints its Return verb:\n${bar}`)
+  panel.onCellPress(barX, rows - 1)
+  assert.deepEqual(panel.handleMouse(event({ wheelDelta: 0 })), { handled: true, render: false })
+  assert.equal(renders, 0, 'the zero-delta wheel never requests a repaint')
+  panel.onCellClick(barX, rows - 1)
+  assert.equal(closes, 1, 'a zero-delta wheel never cancels the legal press')
+  // The painted frame still navigates through the existing move method once.
+  assert.deepEqual(panel.handleMouse(event({})), { handled: true, render: false })
+  assert.equal(renders, 1, 'a valid wheel runs exactly one existing navigation request')
+  panel.dispose()
+})
+
+test('F2/W13: a pre-repaint resize never replays an old wheel cell, and the repainted frame works', async () => {
+  const extra = Array.from({ length: 6 }, (_, index) => row(`session-wheel-resize-${index}`, 900 - index, { title: `Resize ${index}` }))
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Current session' }), ...extra] }))
+  settleActivity(h)
+  await h.paint()
+  const top = bodyTopRow(h)
+  // Resize and wheel WITHOUT a frame between the two inputs: the event still
+  // names the old painted layout, so it must not act on it.
+  h.vt.resize(80, 10)
+  h.vt.sendInput(`\x1b[<65;6;${top + 1}M`)
+  await h.paint()
+  assert.ok(/^> .*Current session/m.test(h.view()), `the pre-repaint wheel is inert:\n${h.view()}`)
+  // The resized frame is a fresh grant and the same cells navigate normally.
+  const resizedTop = bodyTopRow(h)
+  await wheelCell(h, 3, resizedTop, 'down')
+  assert.ok(/^> .*Resize 0/m.test(h.view()), `the repainted frame accepts the wheel:\n${h.view()}`)
+  assert.deepEqual(h.resumes, [])
+  assert.equal(h.closes, 0)
+})
+
+test('F2/W13: wheel hit zones follow the 110/112 column threshold and tiny frames', async () => {
+  const sessions = Array.from({ length: 8 }, (_, index) => row(`session-wheel-threshold-${index}`, 900 - index, { title: `Threshold ${index}` }))
+  const h = harness({ columns: 120, rows: 40 })
+  h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Current session' }), ...sessions] }))
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-threshold', path: '/ws', title: 'Threshold', sessionIds: [CURRENT, ...sessions.map(item => item.id)] },
+  ] })
+  settleActivity(h)
+  await h.paint()
+  await wheelCell(h, 5, bodyTopRow(h), 'down')
+  assert.ok(/^> .*Threshold 0/m.test(h.view()), `the wide left column navigates:\n${h.view()}`)
+  // 110x12 is BELOW the 112 threshold: one full-width body scrolls.
+  h.vt.resize(110, 12)
+  await h.paint()
+  await wheelCell(h, 60, bodyTopRow(h), 'down')
+  assert.ok(/^> .*Threshold 1/m.test(h.view()), `110x12 is one column and its whole body navigates:\n${h.view()}`)
+  // 112x12 crosses the threshold: only the left column navigates.
+  h.vt.resize(112, 12)
+  await h.paint()
+  await wheelCell(h, 5, bodyTopRow(h), 'down')
+  assert.ok(/^> .*Threshold 2/m.test(h.view()), `112x12 splits and its left column navigates:\n${h.view()}`)
+  const splitFrame = h.view()
+  await wheelCell(h, 100, bodyTopRow(h), 'down')
+  assert.equal(h.view(), splitFrame, 'the right Preview is inert at the exact two-column threshold')
+  // Shrink -> grow: the left column is live again, but the old press is not.
+  h.vt.resize(120, 40)
+  await h.paint()
+  await wheelCell(h, 5, bodyTopRow(h), 'down')
+  assert.ok(/^> .*Threshold 3/m.test(h.view()), `the grown round trip keeps the left column live:\n${h.view()}`)
+  const frame = panelFrame(h)
+  const bar = frame[frame.length - 1]!
+  const x = bar.indexOf('Peek [Space]') + 1
+  const y = frame.length - 1
+  assert.ok(x > 0 && bar.includes('Peek [Space]'), `the wide bar paints its Peek:\n${bar}`)
+  h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
+  await h.paint()
+  h.vt.resize(80, 10)
+  await h.paint()
+  h.vt.resize(120, 40)
+  await h.paint()
+  h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
+  await h.paint()
+  assert.ok(!h.view().includes('Peek ·'), 'a shrink/grow repaint never revives the old bar press')
+  await clickBarAction(h, 'Open [Enter]')
+  assert.deepEqual(h.resumes, ['session-wheel-threshold-3'], 'a fresh press on the repainted bar still acts')
+  h.dispose()
+
+  // Tiny frames: only a body row that was really painted may navigate. The
+  // hidden selection is revealed by growing the SAME open afterwards, so an
+  // erroneous navigation cannot hide behind a header/bar-only viewport.
+  const one = harness({ columns: 80, rows: 1 })
+  one.handle.setSnapshot(snapshot())
+  settleActivity(one)
+  await one.paint()
+  await wheelCell(one, 5, 0, 'down')
+  one.vt.resize(80, 24)
+  await one.paint()
+  assert.ok(/^> .*Current session/m.test(one.view()), `the one-row header never moved the hidden selection:\n${one.view()}`)
+  one.dispose()
+
+  const two = harness({ columns: 80, rows: 2 })
+  two.handle.setSnapshot(snapshot())
+  settleActivity(two)
+  await two.paint()
+  await wheelCell(two, 5, 1, 'down')
+  two.vt.resize(80, 24)
+  await two.paint()
+  assert.ok(/^> .*Current session/m.test(two.view()), `a two-row frame paints no body and never moves the selection:\n${two.view()}`)
+  two.dispose()
+
+  const three = harness({ columns: 80, rows: 3 })
+  three.handle.setSnapshot(snapshot())
+  settleActivity(three)
+  await three.paint()
+  await wheelCell(three, 5, 1, 'down')
+  assert.ok(/^> .*Other session/m.test(three.view()), `the ONE painted 3-row body row really navigates:\n${three.view()}`)
+  const threeFrame = three.view()
+  // wheel-UP on the bar row: a wrongly painted bar zone would move the
+  // selection back to Current and visibly change this frame.
+  await wheelCell(three, 5, 2, 'up')
+  assert.equal(three.view(), threeFrame, 'the tiny action bar row is not a wheel sink')
+  assert.ok(/^> .*Other session/m.test(three.view()), 'the bar wheel never moved the selection')
+  three.dispose()
 })

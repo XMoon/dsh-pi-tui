@@ -37,6 +37,8 @@ import {
   truncateToWidth,
   visibleWidth,
   type Component,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
 import type {
   SessionBrowserAnswerEligibility,
@@ -367,15 +369,25 @@ function foldWorkspaceFrame(projection: WorkspaceProjection, frame: WorkspaceFac
  *  an EXISTING panel method; the bar never grows a second navigation state. */
 type SessionBarAction = 'close' | 'open' | 'peek' | 'results' | 'verify' | 'cancel' | 'activate-row'
 
+/** A wheel-only viewport row. It carries no id/action and is never a click
+ *  target; the panel routes it to the EXISTING selection or scroll method of
+ *  its pane. */
+type WheelZoneKind = 'wheel-browse' | 'wheel-results' | 'wheel-peek'
+
 /** One painted mouse target of the LAST frame. `xEnd` is inclusive and every
  *  range is the REAL painted cell range: a truncated/omitted target has none. */
 interface HitRegion {
-  readonly kind: 'tree-row' | 'folder-toggle' | 'result' | 'search' | 'search-hint' | 'bar-action' | 'directory-input' | 'directory-suggestion'
+  readonly kind: 'tree-row' | 'folder-toggle' | 'result' | 'search' | 'search-hint' | 'bar-action' | 'directory-input' | 'directory-suggestion' | WheelZoneKind
   readonly id?: string
   readonly action?: SessionBarAction
   readonly xStart: number
   readonly xEnd: number
   readonly line: number
+}
+
+/** Whether one painted region is a wheel-only viewport row (never a click). */
+function isWheelZone(kind: HitRegion['kind']): kind is WheelZoneKind {
+  return kind === 'wheel-browse' || kind === 'wheel-results' || kind === 'wheel-peek'
 }
 
 /** One pane render: the painted lines plus the regions in pane coordinates. */
@@ -494,8 +506,15 @@ export class SessionWorkspacePanel implements Component {
       readonly columns: number
     }
     | undefined
-  /** The last frame this panel really painted, in panel-relative coordinates. */
-  private hitFrame: { readonly revision: number; readonly regions: readonly HitRegion[] } = { revision: 0, regions: [] }
+  /** The last frame this panel really painted, in panel-relative coordinates.
+   *  The paint-time root grant is recorded beside the regions so a wheel that
+   *  arrives at a terminal size this frame never covered is rejected. */
+  private hitFrame: {
+    readonly revision: number
+    readonly regions: readonly HitRegion[]
+    readonly rows: number
+    readonly columns: number
+  } = { revision: 0, regions: [], rows: 0, columns: 0 }
   /** Identifies the CONTENT of the last painted frame. The fork repaints the
    *  screen on the press half of a click, so a render counter would invalidate
    *  every genuine click; this revision advances only when the painted frame
@@ -512,7 +531,12 @@ export class SessionWorkspacePanel implements Component {
       this.lastFrameSignature = signature
       this.frameRevision += 1
     }
-    this.hitFrame = { revision: this.frameRevision, regions }
+    this.hitFrame = {
+      revision: this.frameRevision,
+      regions,
+      rows: this.host.rows(),
+      columns: this.host.columns(),
+    }
     return frame
   }
   /** The ONE view of the frame being painted (built once per render). */
@@ -1447,7 +1471,9 @@ export class SessionWorkspacePanel implements Component {
   onCellPress(x: number, y: number): void {
     if (this.disposed) return
     const region = this.regionAt(x, y)
-    this.pressed = region === undefined
+    // A wheel-only viewport row is inert for the click path: a press on its
+    // blank cells behaves like the previously unpainted background (no press).
+    this.pressed = region === undefined || isWheelZone(region.kind)
       ? undefined
       : {
         revision: this.hitFrame.revision,
@@ -1503,6 +1529,57 @@ export class SessionWorkspacePanel implements Component {
       || region.xEnd !== pressed.xEnd
       || region.line !== pressed.line) return
     this.activateRegion(region)
+  }
+
+  /** The ONE wheel-only target the LAST painted frame published under this
+   *  cell. A click region that shares the cell is never a wheel source. */
+  private wheelZoneAt(x: number, y: number): HitRegion | undefined {
+    for (const region of this.hitFrame.regions) {
+      if (region.line !== y || !isWheelZone(region.kind)) continue
+      if (x >= region.xStart && x <= region.xEnd) return region
+    }
+    return undefined
+  }
+
+  /** Consume every wheel that reaches this leased screen and route only a
+   *  valid last-painted pane row onto the pane's EXISTING selection/scroll
+   *  method. Primary clicks keep their own `onCellPress`/`onCellClick` pair. */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (this.disposed || event.type !== 'wheel') return undefined
+    // Every wheel belongs to this leased surface: it is never left to the
+    // background Transcript's `routeWheel`, even when it hits no scroll pane.
+    const consumed: TuiMouseEventResult = { handled: true, render: false }
+    const frame = this.hitFrame
+    // Act only on the frame the user really sees: a resize that has not
+    // repainted yet, or an event grant that is not this frame's root box,
+    // leaves the old hit map inert.
+    if (this.host.rows() !== frame.rows
+      || this.host.columns() !== frame.columns
+      || event.height !== frame.rows
+      || event.width !== frame.columns) return consumed
+    const delta = event.wheelDelta ?? 0
+    if (delta === 0) return consumed
+    const zone = this.wheelZoneAt(event.x, event.y)
+    if (zone === undefined) return consumed
+    switch (zone.kind) {
+      case 'wheel-browse':
+        if (this.focus !== 'list' || this.searchMode || this.directoryEntryActive) return consumed
+        this.pressed = undefined
+        this.moveBrowseSelection(delta)
+        return consumed
+      case 'wheel-results':
+        if (!this.searchMode || this.directoryEntryActive
+          || (this.focus !== 'search' && this.focus !== 'search-results')) return consumed
+        this.pressed = undefined
+        this.focus = 'search-results'
+        this.moveSelection(delta)
+        return consumed
+      case 'wheel-peek':
+        if (this.focus !== 'peek' || this.peek === undefined) return consumed
+        this.pressed = undefined
+        this.scrollPeek(delta)
+        return consumed
+    }
   }
 
   private activateRegion(region: HitRegion): void {
@@ -1864,6 +1941,18 @@ export class SessionWorkspacePanel implements Component {
     if (!finalRows.some(row => row.id === this.selectedBrowseRowId)) this.ensureSelection()
   }
 
+  /** The wheel-only rows of ONE pane viewport. They are appended to the SAME
+   *  hit map AFTER every click target, so the click priority of a painted row,
+   *  result, bar or editor target is unchanged. */
+  private wheelZoneRegions(kind: WheelZoneKind, from: number, to: number, width: number): HitRegion[] {
+    const regions: HitRegion[] = []
+    const xEnd = Math.max(0, width - 1)
+    for (let line = from; line < to; line += 1) {
+      regions.push({ kind, xStart: 0, xEnd, line })
+    }
+    return regions
+  }
+
   private renderListPane(width: number, budget: number, chrome: boolean): PaneRender {
     const view = this.frameView()
     // The ONE automatic watermark growth happens HERE, on the ORDINARY Browse
@@ -1883,6 +1972,9 @@ export class SessionWorkspacePanel implements Component {
     // input off a short frame.
     if (chrome && !this.directoryEntryActive) lines.push(...this.renderStatusLines(width))
     if (lines.length >= budget) return { lines: lines.slice(0, budget), regions }
+    // The real list viewport starts after the painted status rows: only these
+    // body rows (painted items and their trailing blank) accept the wheel.
+    const listTop = lines.length
     const editorActive = this.directoryEntryActive
     const addIndex = rows.findIndex(row => row.kind === 'addDirectory')
     if (editorActive) {
@@ -1927,6 +2019,12 @@ export class SessionWorkspacePanel implements Component {
     this.treeScrollOffset = offset
     this.treeScrollAnchorId = visibleRows[0]?.id ?? this.treeScrollAnchorId
     this.lastPaintedListRows = Math.max(1, painted)
+    // The inline Host-directory editor owns the body while it is open: its
+    // rows are never a wheel sink. Otherwise the WHOLE painted list viewport
+    // (painted item rows and its trailing blank) is the wheel target.
+    if (!editorActive && rows.length > 0) {
+      regions.push(...this.wheelZoneRegions('wheel-browse', listTop, budget, width))
+    }
     return { lines: lines.slice(0, budget), regions }
   }
 
@@ -2126,6 +2224,9 @@ export class SessionWorkspacePanel implements Component {
     this.lastPaintedListRows = Math.max(1, rowBudget)
     const rows = this.snapshot.searchResults
     if (rows.length === 0) return { lines: lines.slice(0, budget), regions }
+    // The wheel viewport is the real RESULT list: the Search Input and status
+    // rows are above it and are never a wheel sink.
+    const resultsTop = lines.length
     const selectedIndex = Math.max(0, rows.findIndex(result => result.row.id === this.selectedSearchSessionId))
     this.resultScroll = rebaseOffset(this.resultScroll, selectedIndex, rows.length, rowBudget)
     const visible = rows.slice(this.resultScroll, this.resultScroll + rowBudget)
@@ -2135,6 +2236,7 @@ export class SessionWorkspacePanel implements Component {
       this.lastPaintedResultIds.push(result.row.id)
       lines.push(this.searchRowLine(result, result.row.id === this.selectedSearchSessionId, width))
     }
+    regions.push(...this.wheelZoneRegions('wheel-results', resultsTop, budget, width))
     return { lines: lines.slice(0, budget), regions }
   }
 
@@ -2273,7 +2375,12 @@ export class SessionWorkspacePanel implements Component {
     // The page keys use the REAL painted row count: a short Peek never pages
     // past its own content and a full one never skips a row.
     this.lastPaintedListRows = Math.max(1, lines.length)
-    return { lines: lines.slice(0, budget), regions: [] }
+    // Only the ACTUAL pinned-body rows accept the wheel; padding/status/bar
+    // cells stay inert.
+    return {
+      lines: lines.slice(0, budget),
+      regions: this.wheelZoneRegions('wheel-peek', 0, lines.length, width),
+    }
   }
 
   private peekLines(
