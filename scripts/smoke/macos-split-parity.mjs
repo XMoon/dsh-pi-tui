@@ -19,6 +19,10 @@
  *       created and the surface stays unselected.
  *   A20 the workspace-object route refuses an unauthenticated request.
  *   no-TTY the public daemon selector fails closed before any Host side effect.
+ *   P01/P02/P03/P04/P05/P06/P07/P09 the public macOS daemon management
+ *       lifecycle: read-only no-Host status/logs, warm reuse, verified stop,
+ *       cold start, admin-seat race, restart into a new instance and the
+ *       unsupported (no launchd) install/uninstall verbs.
  *
  * Every wait is a bounded condition wait on a real fact (published registry,
  * painted tmux frame, durable zstd Session log, process table). The tmux server
@@ -35,7 +39,7 @@
  * @module smoke/macos-split-parity
  */
 
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   existsSync,
@@ -69,6 +73,7 @@ const TIMEOUTS = {
   turn: 120_000,
   exit: 45_000,
   negativeWindow: 30_000,
+  daemon: 120_000,
 }
 
 function assert(condition, message) {
@@ -222,6 +227,61 @@ function startSession({ name, cwd, installation, backend, args = [], dshHome = i
   return name
 }
 
+// ── public daemon management commands (real CLI processes) ──────────────────
+
+/** The public `dsh --profile pi-tui daemon ...` invocation for this profile. */
+function daemonInvocation(installation, args) {
+  const { dshInvocation } = installation
+  return [dshInvocation[0], ...dshInvocation.slice(1), '--profile', 'pi-tui', 'daemon', ...args]
+}
+
+function daemonEnvironment(installation) {
+  return { ...installation.env, NO_COLOR: '1' }
+}
+
+/** Run one management command to completion and keep its real exit/stdout/stderr. */
+function runDaemonCommand(installation, args) {
+  const result = spawnSync(daemonInvocation(installation, args)[0], daemonInvocation(installation, args).slice(1), {
+    cwd: installation.profileDir,
+    env: daemonEnvironment(installation),
+    encoding: 'utf8',
+    timeout: TIMEOUTS.daemon,
+  })
+  if (result.error !== undefined) {
+    throw new SplitSmokeAssertionError(`daemon ${args.join(' ')}: could not run: ${result.error.message}`)
+  }
+  return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
+}
+
+/** Start one management command without waiting: two of these race the admin seat. */
+function spawnDaemonCommand(installation, args) {
+  const invocation = daemonInvocation(installation, args)
+  const child = spawn(invocation[0], invocation.slice(1), {
+    cwd: installation.profileDir,
+    env: daemonEnvironment(installation),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const result = new Promise((resolve, reject) => {
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', chunk => { stdout += chunk })
+    child.stderr.on('data', chunk => { stderr += chunk })
+    child.once('error', reject)
+    child.once('close', status => resolve({ status, stdout, stderr }))
+  })
+  return { child, result }
+}
+
+/** Parse the fixed `key=value` status block without trusting line order. */
+function statusFields(text) {
+  const fields = {}
+  for (const line of text.split('\n')) {
+    const match = /^([a-z-]+)=(.*)$/u.exec(line)
+    if (match !== null) fields[match[1]] = match[2]
+  }
+  return fields
+}
+
 // ── process table (macOS `ps`, no /proc) ────────────────────────────────────
 
 function processTable() {
@@ -372,6 +432,40 @@ async function runScene({ installation, workRoot, report }) {
     sessions.add(name)
     return startSession({ ...options, name })
   }
+
+  // ── P01/P06-NOLOG/P07: no-Host management is read-only and macOS-specific ─
+  // This runs BEFORE any Host or Client exists, so "no Host" is a real cold
+  // state. The account-home seat root is the real OS account home (never
+  // `$HOME`), so the negative control snapshots its entries instead of
+  // guessing a scope id before the Host publishes one.
+  const accountRunRoot = join(homedir(), '.dsh-pi-tui', 'run')
+  const accountSeatsBefore = existsSync(accountRunRoot) ? readdirSync(accountRunRoot).sort() : []
+  assert(scopeDir(dshHome) === undefined, 'P01: the isolated DSH home must start without a profile run scope')
+  const noHostStatus = runDaemonCommand(installation, ['status'])
+  const noHost = statusFields(noHostStatus.stdout)
+  assert(noHostStatus.status === 0,
+    `P01: daemon status with no Host exited ${String(noHostStatus.status)}: ${(noHostStatus.stderr).slice(-800)}`)
+  assert(noHost.manager === 'unmanaged' && noHost['user-manager'] === 'not-checked'
+    && noHost.host === 'stopped' && noHost.unit === 'none' && noHost['unit-state'] === 'not-found',
+    `P01: unexpected no-Host status ${JSON.stringify(noHost)}`)
+  assert(scopeDir(dshHome) === undefined, 'P01: status must not create the profile run scope')
+  const noLogs = runDaemonCommand(installation, ['logs', '--lines', '20'])
+  assert(noLogs.status === 4 && /LOG_SOURCE_UNAVAILABLE/u.test(noLogs.stderr),
+    `P06-NOLOG: missing host.log must be LOG_SOURCE_UNAVAILABLE/4, saw ${String(noLogs.status)}: ${noLogs.stderr.slice(-800)}`)
+  for (const verb of ['install', 'uninstall']) {
+    const unsupported = runDaemonCommand(installation, [verb])
+    assert(unsupported.status === 3 && /UNSUPPORTED_PLATFORM/u.test(unsupported.stderr),
+      `P07: daemon ${verb} must be UNSUPPORTED_PLATFORM/3 on macOS, saw ${String(unsupported.status)}: ${unsupported.stderr.slice(-800)}`)
+  }
+  assert(scopeDir(dshHome) === undefined, 'P07: unsupported unit verbs must not create the profile run scope')
+  const accountSeatsAfter = existsSync(accountRunRoot) ? readdirSync(accountRunRoot).sort() : []
+  assert(accountSeatsAfter.join('\0') === accountSeatsBefore.join('\0'),
+    `P01/P07: read-only or unsupported commands created an account-home seat directory: ${JSON.stringify({ before: accountSeatsBefore, after: accountSeatsAfter })}`)
+  report.rows.push(
+    { id: 'P01', status: 'PASS', noHost, readOnlyScope: true, managerQueries: 0 },
+    { id: 'P06-NOLOG', status: 'PASS', exitCode: noLogs.status, code: 'LOG_SOURCE_UNAVAILABLE' },
+    { id: 'P07-NOHOST', status: 'PASS', verbs: ['install', 'uninstall'], exitCode: 3, launchdPlist: false },
+  )
 
   // ── A01/A02: two SIMULTANEOUS cold public daemon Clients ─────────────────
   // Both start before any Host registry exists, so both race the Host seat
@@ -707,7 +801,106 @@ async function runScene({ installation, workRoot, report }) {
   await waitFor(() => (!alive(clientB.pid) ? true : undefined), 'A05 Client B process is gone', TIMEOUTS.process)
   assert(alive(registryA.record.hostPid), 'A05: the Host exited when its last Client exited')
   report.rows.push({ id: 'A05-B', status: 'PASS', hostSurvivedLastClient: true })
-  return { hostPid: registryA.record.hostPid }
+
+  // ── P02/P03/P04/P05/P06/P09: the public macOS management lifecycle ───────
+  // A05/A05-B already proved that Client exit does NOT stop the Host; every
+  // stop below is an explicit management command, and the final cleanup
+  // SIGTERM is the smoke's own reclaim rather than a management result.
+  const original = registryA.record
+  const readyStatus = runDaemonCommand(installation, ['status'])
+  const ready = statusFields(readyStatus.stdout)
+  assert(readyStatus.status === 0, `P02 status: exited ${String(readyStatus.status)}: ${readyStatus.stderr.slice(-800)}`)
+  assert(ready.host === 'ready' && ready.manager === 'process' && ready.unit === 'none'
+    && ready['user-manager'] === 'not-checked' && ready.pid === String(original.hostPid),
+  `P02: unexpected ready status ${JSON.stringify(ready)}`)
+  assert(ready.instance === original.instanceId.slice(0, 8), 'P02: status reported a different instance')
+  const warm = runDaemonCommand(installation, ['start'])
+  const warmFields = statusFields(warm.stdout)
+  assert(warm.status === 0, `P02 warm start: exited ${String(warm.status)}: ${warm.stderr.slice(-800)}`)
+  assert(warmFields.instance === original.instanceId.slice(0, 8),
+    `P02: warm start changed the instance (${String(original.instanceId.slice(0, 8))} -> ${String(warmFields.instance)})`)
+  assert(readRegistry(dshHome)?.record.instanceId === original.instanceId,
+    'P02: warm start published a different Host instance')
+  const daemonLogs = runDaemonCommand(installation, ['logs', '--lines', '20'])
+  assert(daemonLogs.status === 0, `P06: daemon logs exited ${String(daemonLogs.status)}: ${daemonLogs.stderr.slice(-800)}`)
+  assert(daemonLogs.stdout.trim() !== '', 'P06: daemon logs returned no Host log output')
+  assert(!/connectUrl=\S|token=\S/iu.test(daemonLogs.stdout), 'P06: log output leaked unsanitized token material')
+  report.rows.push(
+    { id: 'P02-WARM', status: 'PASS', hostPid: original.hostPid, instance: original.instanceId, reused: true },
+    { id: 'P06', status: 'PASS', source: 'scope/host.log', lines: 20, sanitized: true },
+  )
+
+  const stopped = runDaemonCommand(installation, ['stop'])
+  assert(stopped.status === 0, `P03 stop: exited ${String(stopped.status)}: ${stopped.stderr.slice(-800)}`)
+  assert(/^host=stopped$/mu.test(stopped.stdout), 'P03: stop did not report a stopped Host')
+  assert(!alive(original.hostPid), 'P03: the original Host process identity is still alive after stop')
+  const registryAfterStop = readRegistry(dshHome)
+  assert(registryAfterStop === undefined || registryAfterStop.record.instanceId !== original.instanceId,
+    'P03: the stopped Host registry still claims the original instance')
+  const stoppedAgain = runDaemonCommand(installation, ['stop'])
+  assert(stoppedAgain.status === 0 && /^host=stopped$/mu.test(stoppedAgain.stdout),
+    `P03: a second stop is not an idempotent success (${String(stoppedAgain.status)})`)
+  report.rows.push(
+    { id: 'P03', status: 'PASS', oldHostPid: original.hostPid, oldIdentityGone: true, idempotentStop: true },
+    { id: 'P09', status: 'PASS', clientDetachKeptHost: true, managementStopStoppedHost: true },
+  )
+
+  const cold = runDaemonCommand(installation, ['start'])
+  const coldFields = statusFields(cold.stdout)
+  assert(cold.status === 0, `P02 cold start: exited ${String(cold.status)}: ${cold.stderr.slice(-800)}`)
+  assert(coldFields.host === 'ready' && coldFields.instance !== original.instanceId.slice(0, 8),
+    'P02: a cold start did not publish a new authenticated instance')
+  const coldRegistry = readRegistry(dshHome)
+  assert(coldRegistry !== undefined, 'P02: the cold-started Host published no registry')
+  assert(coldRegistry.record.instanceId !== original.instanceId, 'P02: the cold start reused the stopped instance')
+  assert(alive(coldRegistry.record.hostPid), 'P02: the cold-started Host PID is not alive')
+  report.rows.push({ id: 'P02-COLD', status: 'PASS', hostPid: coldRegistry.record.hostPid, instance: coldRegistry.record.instanceId })
+
+  // P05: from a cold state two REAL management processes race the Darwin admin
+  // seat; the winner cold-starts the Host while the loser must be BUSY before
+  // any Host/unit mutation.
+  const preRaceStop = runDaemonCommand(installation, ['stop'])
+  assert(preRaceStop.status === 0, `P05: pre-race stop failed (${String(preRaceStop.status)})`)
+  const raceOne = spawnDaemonCommand(installation, ['start'])
+  const raceTwo = spawnDaemonCommand(installation, ['start'])
+  const raceOutcomes = await Promise.all([raceOne.result, raceTwo.result])
+  const winners = raceOutcomes.filter(outcome => outcome.status === 0)
+  const busyLosers = raceOutcomes.filter(outcome => outcome.status === 5 && /DAEMON_CONTROL_BUSY/u.test(outcome.stderr))
+  assert(winners.length === 1 && busyLosers.length === 1,
+    `P05: expected one winner and one DAEMON_CONTROL_BUSY, saw ${JSON.stringify(raceOutcomes.map(outcome => ({ status: outcome.status, stderr: outcome.stderr.slice(-400) })))}`)
+  const raceRegistry = readRegistry(dshHome)
+  assert(raceRegistry !== undefined && alive(raceRegistry.record.hostPid), 'P05: the winning start published no live Host')
+  const liveHostsAfterRace = ownedRoles(workRoot).hosts.filter(row => alive(row.pid))
+  assert(liveHostsAfterRace.length === 1, `P05: the seat race produced ${String(liveHostsAfterRace.length)} Hosts`)
+  report.rows.push({ id: 'P05', status: 'PASS', winnerExit: 0, loserExit: 5, loserCode: 'DAEMON_CONTROL_BUSY', hostCount: liveHostsAfterRace.length })
+
+  const restarted = runDaemonCommand(installation, ['restart'])
+  const restartFields = statusFields(restarted.stdout)
+  assert(restarted.status === 0, `P04 restart: exited ${String(restarted.status)}: ${restarted.stderr.slice(-800)}`)
+  assert(/^previous=/mu.test(restarted.stdout), 'P04: restart did not report the previous instance')
+  assert(restartFields.host === 'ready', 'P04: the restarted Host is not ready')
+  const restartRegistry = readRegistry(dshHome)
+  assert(restartRegistry !== undefined, 'P04: restart published no registry')
+  assert(restartRegistry.record.instanceId !== raceRegistry.record.instanceId, 'P04: restart reused the previous instance')
+  assert(!alive(raceRegistry.record.hostPid), 'P04: the previous Host process is still alive')
+  assert(alive(restartRegistry.record.hostPid), 'P04: the restarted Host PID is not alive')
+  report.rows.push({ id: 'P04', status: 'PASS', oldInstance: raceRegistry.record.instanceId, newInstance: restartRegistry.record.instanceId })
+
+  // P07: unit verbs stay unsupported on a LIVE profile and never disturb it.
+  for (const verb of ['install', 'uninstall']) {
+    const unsupported = runDaemonCommand(installation, [verb])
+    assert(unsupported.status === 3 && /UNSUPPORTED_PLATFORM/u.test(unsupported.stderr),
+      `P07: daemon ${verb} beside a live Host must be UNSUPPORTED_PLATFORM/3, saw ${String(unsupported.status)}`)
+  }
+  assert(alive(restartRegistry.record.hostPid), 'P07: an unsupported unit verb disturbed the live Host')
+  assert(readRegistry(dshHome)?.record.instanceId === restartRegistry.record.instanceId,
+    'P07: an unsupported unit verb changed the live Host instance')
+  const isolatedLaunchAgents = join(installation.home, 'Library', 'LaunchAgents')
+  assert(!existsSync(isolatedLaunchAgents) || readdirSync(isolatedLaunchAgents).length === 0,
+    'P07: a macOS unit verb wrote a launchd plist')
+  report.rows.push({ id: 'P07-LIVE', status: 'PASS', exitCode: 3, hostUnchanged: true, launchdPlists: 0 })
+
+  return { hostPid: restartRegistry.record.hostPid }
 }
 
 // ── cleanup ────────────────────────────────────────────────────────────────
