@@ -382,10 +382,23 @@ test('wheel never submits the dirty-exit guard; the explicit Keep/Discard clicks
   assert.deepEqual(h.saves, [], 'wheel never saves on the guard')
   assert.equal(h.cancels(), 0, 'wheel never discards on the guard')
 
-  // The existing keyboard Keep path is unchanged (Esc on the guard).
-  h.vt.sendInput('\x1b')
+  // The painted Keep Editing row is the pointer-only exit: it must commit the
+  // SAME model transition as the keyboard, exactly once.
+  const keepView = h.view()
+  h.vt.sendInput(`\x1b[<0;6;${rowOf(keepView, 'Keep Editing') + 1}M`)
   await h.paint()
-  assert.equal(h.page()!.state().mode, 'rows', 'Esc/Keep Editing returns to the selector')
+  h.vt.sendInput(`\x1b[<0;6;${rowOf(keepView, 'Keep Editing') + 1}m`)
+  await h.paint()
+  assert.equal(h.page()!.state().mode, 'rows', 'clicking Keep Editing returns to the dirty selector')
+  assert.ok(h.page()!.isDirty(), 'Keep Editing keeps the draft dirty')
+  assert.deepEqual(h.saves, [])
+  assert.equal(h.cancels(), 0)
+  // The keyboard Keep path still works and does not run a second transition.
+  h.vt.sendInput('\x1b') // dirty selector → guard
+  await h.paint()
+  h.vt.sendInput('\x1b') // keyboard Keep
+  await h.paint()
+  assert.equal(h.page()!.state().mode, 'rows', 'Esc/Keep Editing still returns to the selector')
   assert.deepEqual(h.saves, [])
   assert.equal(h.cancels(), 0)
   h.vt.sendInput('\x1b') // dirty → guard again

@@ -480,8 +480,19 @@ export class FooterConfiguratorPanel implements Component {
       // Explicit close-without-write: no persistence of layout or
       // definitions (PR E §7.2 Discard & Exit).
       this.onCancel()
+      return
     }
-    // 'keep': the model already returned to the Row Selector.
+    // 'keep': the keyboard Enter path has already called
+    // `exitConfirmAction()` (which returns the mode to the selector). A
+    // MOUSE click reaches this method directly, so it must run the SAME
+    // model transition exactly once — never a second one.
+    if (this.model.state().mode === 'exit-confirm') {
+      // On the guard, Esc IS Keep Editing; the model's own cancel owns that
+      // transition. (The keyboard Enter path already left the guard through
+      // exitConfirmAction, so this never runs a second transition.)
+      this.model.cancel()
+      this.requestRender()
+    }
   }
 
   invalidate(): void {
@@ -789,6 +800,15 @@ export class FooterConfiguratorPanel implements Component {
     // Space is text in an editor/query, and an activation/remove elsewhere.
     if (!textMode && matchesKey(data, 'space')) return true
     if (state.mode === 'rows') return matchesKey(data, 's')
+    if (state.mode === 'row-move') {
+      // ←/→ still change the hidden item's ZONE (a persisted draft mutation);
+      // only the explicit ↑/↓ reorder is the keyboard contract.
+      return matchesKey(data, 'left') || matchesKey(data, 'right')
+    }
+    if (state.mode === 'item') {
+      // ←/→ cycle the hidden menu row's format/tone value in the model draft.
+      return matchesKey(data, 'left') || matchesKey(data, 'right')
+    }
     if (state.mode !== 'row') return false
     return matchesKey(data, 'a')
       || matchesKey(data, 'm')
@@ -1625,7 +1645,13 @@ export class FooterConfiguratorPanel implements Component {
         if (matches.length === 0) hits.push({ kind: 'inert' })
         hits.push({ kind: 'select', target: createIndex })
         hits.push({ kind: 'select', target: createIndex + 1 })
-        return { lines, cursor: Math.min(state.pickerIndex, createIndex + 1), hits }
+        // With zero matches the inert `(no matching items)` placeholder is
+        // body line 0; the SELECTED create action is line 1/2. The painted
+        // cursor must name the real selected row, never the placeholder.
+        const cursor = matches.length === 0
+          ? 1 + Math.min(state.pickerIndex, 1)
+          : Math.min(state.pickerIndex, createIndex + 1)
+        return { lines, cursor, hits }
       }
     }
   }

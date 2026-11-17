@@ -2660,3 +2660,128 @@ test('a real wheel retires a pressed Save/Discard action; zero delta keeps it an
   assert.equal(cancels, 1, 'a zero-delta wheel leaves the painted Discard press legal')
   exitApp.app.stop()
 })
+
+
+test('a hidden wheel cursor consumes the first mutating Left/Right before it changes the draft', async () => {
+  // row-move: ←/→ changes the hidden item's ZONE (a persisted mutation).
+  const moveApp = startApp(44, 20)
+  const { model: moveModel } = longRowPage(moveApp.vt, moveApp.app, { count: 20 })
+  await moveApp.vt.waitForRender()
+  moveApp.vt.sendInput('\r')
+  await moveApp.vt.waitForRender()
+  moveApp.vt.sendInput('m')
+  await moveApp.vt.waitForRender()
+  assert.equal(moveModel.state().mode, 'row-move')
+  for (let step = 0; step < 8; step += 1) mouseWheel(moveApp.vt, 1, 'down')
+  await moveApp.vt.waitForRender()
+  assert.ok(!moveApp.vt.getViewport().some(line => line.includes('›')),
+    `the Move Mode cursor is hidden:\n${moveApp.vt.getViewport().join('\n')}`)
+  const zonesBefore = {
+    left: moveModel.state().layout.rows[0]!.left.map(ref => ref.id),
+    right: moveModel.state().layout.rows[0]!.right.map(ref => ref.id),
+  }
+  moveApp.vt.sendInput('\x1b[C')
+  await moveApp.vt.waitForRender()
+  assert.deepEqual(moveModel.state().layout.rows[0]!.left.map(ref => ref.id), zonesBefore.left,
+    'the first Right only restores the hidden Move Mode cursor')
+  assert.deepEqual(moveModel.state().layout.rows[0]!.right.map(ref => ref.id), zonesBefore.right)
+  assert.equal(moveModel.isDirty(), false)
+  assert.ok(moveApp.vt.getViewport().some(line => line.includes('◆')), 'the restored frame paints the Move Mode cursor')
+  moveApp.vt.sendInput('\r') // no-op safe key
+  moveApp.vt.sendInput('\x1b[C') // second explicit Right: the real zone change
+  await moveApp.vt.waitForRender()
+  assert.equal(moveModel.state().layout.rows[0]!.left.length, zonesBefore.left.length - 1,
+    'the second explicit Right executes the original model zone change')
+  assert.equal(moveModel.state().layout.rows[0]!.right.length, zonesBefore.right.length + 1)
+  assert.equal(moveModel.isDirty(), true)
+  moveApp.app.stop()
+
+  // item: ←/→ cycles the hidden menu row's format/tone value in the draft.
+  const itemApp = startApp(44, 4)
+  const { model: itemModel } = longRowPage(itemApp.vt, itemApp.app, { count: 1 })
+  await itemApp.vt.waitForRender()
+  itemApp.vt.sendInput('\r')
+  await itemApp.vt.waitForRender()
+  itemApp.vt.sendInput('\r') // item editor
+  await itemApp.vt.waitForRender()
+  itemApp.vt.sendInput('\x1b[B') // custom-tone
+  itemApp.vt.sendInput('\x1b[B') // tone: ←/→ cycles the persisted value
+  await itemApp.vt.waitForRender()
+  assert.equal(itemModel.state().mode, 'item')
+  assert.equal(itemModel.state().itemCursor, 2)
+  for (let step = 0; step < 3; step += 1) mouseWheel(itemApp.vt, 0, 'down')
+  await itemApp.vt.waitForRender()
+  assert.ok(!itemApp.vt.getViewport().some(line => line.includes('›')),
+    `the item-menu cursor is hidden:\n${itemApp.vt.getViewport().join('\n')}`)
+  const ref = itemModel.state().layout.rows[0]!.left[0]!
+  assert.equal(ref.tone, undefined)
+  itemApp.vt.sendInput('\x1b[C')
+  await itemApp.vt.waitForRender()
+  assert.equal(itemModel.state().layout.rows[0]!.left[0]!.tone, undefined,
+    'the first Right only restores the hidden item cursor')
+  assert.equal(itemModel.isDirty(), false)
+  assert.ok(itemApp.vt.getViewport().some(line => line.includes('›')), 'the restored frame paints the cursor')
+  itemApp.vt.sendInput('\x1b[C') // second explicit Right: the real tone cycle
+  await itemApp.vt.waitForRender()
+  assert.equal(itemModel.state().layout.rows[0]!.left[0]!.tone, 'primary',
+    'the second explicit Right executes the original model tone cycle')
+  assert.equal(itemModel.isDirty(), true)
+  itemApp.app.stop()
+})
+
+test('the empty Add search cursor names the selected Create row, never the inert placeholder', async () => {
+  // 44x3: only the placeholder fits; the REAL selected create row must drive
+  // cursor-follow (before this fix the placeholder carried the cursor and the
+  // first Enter could activate a hidden Create option).
+  const tiny = startApp(44, 3)
+  const { model: tinyModel } = longRowPage(tiny.vt, tiny.app, { count: 1 })
+  await tiny.vt.waitForRender()
+  tiny.vt.sendInput('\r') // Row 1
+  await tiny.vt.waitForRender()
+  tiny.vt.sendInput('a')
+  await tiny.vt.waitForRender()
+  tiny.vt.sendInput('zzzz') // no matches: only Create rows remain
+  await tiny.vt.waitForRender()
+  assert.equal(tinyModel.state().mode, 'add')
+  assert.ok(tinyModel.addMatches().length === 0)
+  const noMatchView = tiny.vt.getViewport().join('\n')
+  assert.ok(noMatchView.includes('+ Create Custom Text'),
+    `cursor-follow reveals the real selected Create row at 44x3:\n${noMatchView}`)
+  assert.ok(noMatchView.split('\n').some(line => line.includes('›') && line.includes('+ Create Custom Text')),
+    `the marker is on the selected Create row, never the placeholder:\n${noMatchView}`)
+  // Wheel up reveals the inert placeholder; the selected Create row is now
+  // hidden, so the first Enter only restores it.
+  mouseWheel(tiny.vt, 1, 'up')
+  await tiny.vt.waitForRender()
+  assert.ok(tiny.vt.getViewport().join('\n').includes('(no matching items)'))
+  tiny.vt.sendInput('\r')
+  await tiny.vt.waitForRender()
+  assert.equal(tinyModel.state().mode, 'add', 'the first Enter never activates the hidden Create row')
+  assert.ok(tiny.vt.getViewport().join('\n').split('\n')
+    .some(line => line.includes('›') && line.includes('+ Create Custom Text')),
+  'the restored frame paints the real selected Create row')
+  tiny.vt.sendInput('\r')
+  await tiny.vt.waitForRender()
+  assert.equal(tinyModel.state().mode, 'create-name', 'the second explicit Enter creates')
+  tiny.app.stop()
+
+  // 44x4: the placeholder and the selected Create row are both painted; the
+  // first Enter is a genuinely visible selection.
+  const small = startApp(44, 4)
+  const { model: smallModel } = longRowPage(small.vt, small.app, { count: 1 })
+  await small.vt.waitForRender()
+  small.vt.sendInput('\r')
+  await small.vt.waitForRender()
+  small.vt.sendInput('a')
+  await small.vt.waitForRender()
+  small.vt.sendInput('zzzz')
+  await small.vt.waitForRender()
+  const smallView = small.vt.getViewport().join('\n')
+  assert.ok(smallView.includes('(no matching items)') && smallView.includes('+ Create Custom Text'),
+    `both rows fit at 44x4:\n${smallView}`)
+  assert.ok(smallView.split('\n').some(line => line.includes('›') && line.includes('+ Create Custom Text')))
+  small.vt.sendInput('\r')
+  await small.vt.waitForRender()
+  assert.equal(smallModel.state().mode, 'create-name', 'the visible selected Create action runs on the first Enter')
+  small.app.stop()
+})
