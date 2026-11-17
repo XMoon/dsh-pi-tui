@@ -919,9 +919,16 @@ export async function runPtySessionWriteRecovery(context) {
     trace('t34', { preDispatch: 'not dispatched', hostWrites: 0, draft: 'restored' })
 
     // T35: the Host receives and commits ONE prompt, but the response ACK is
-    // dropped after the write. The Client must report the write as
-    // indeterminate (never committed), never replay it, and the NEXT Client
-    // must reconcile from the Host's durable log.
+    // dropped after the write. The Client observes a real post-dispatch
+    // transport failure; whether the official acceptance reaches the Composer
+    // FIRST is an independent race (a lost RPC ACK is not proof that the Host
+    // failed to accept). The case therefore proves four separate facts:
+    //   1. the fault injection really hit THIS Client's `session/prompt`,
+    //   2. the Host durable log carries `ackdrop` exactly once,
+    //   3. the Composer/ACK terminal matches the branch that actually happened
+    //      (accepted: draft cleared, no retry copy; unaccepted: draft kept with
+    //      the uncertainty notice), with no `Submitting…`/`Queued…` left behind,
+    //   4. the NEXT Client reconciles that durable log without replaying it.
     const c4 = new SurfaceEntryProcess(entries.client, {
       ...base,
       workDir,
@@ -936,7 +943,15 @@ export async function runPtySessionWriteRecovery(context) {
     assert(c4Ready.sessionOpen === true && c4Ready.openSessionId === sessionA,
       'T35 the ACK-drop Client did not open the retained Session')
     c4.send('ackdrop\r')
-    await c4.waitForScreen('indeterminate', 'T35 indeterminate notice', 120_000)
+    // The injection witness fires only after the REAL `session/prompt` request
+    // reached the Host and its response body was discarded: without it, a
+    // silently broken injection could leave this case green on durable facts
+    // alone. It is NOT acceptance, an RPC outcome or a UI fact.
+    await c4.waitFor(
+      record => record.m4b2s === 'qualification' && record.op === 'prompt-ack-dropped',
+      'T35 prompt ACK-drop injection witness',
+      60_000,
+    )
     const committedAckdrop = async (expected) => {
       const deadline = Date.now() + 60_000
       while (Date.now() < deadline) {
@@ -952,6 +967,49 @@ export async function runPtySessionWriteRecovery(context) {
     const hostCommits = await committedAckdrop(1)
     assert(hostCommits === 1,
       `T35 expected exactly ONE Host-committed ackdrop message, got ${String(hostCommits)}`)
+    // The Composer/ACK terminal of THIS gesture, read from the real painted
+    // frame. Both outcomes are VALID but each is checked with its associated
+    // draft/notice identity — a bare "the label is absent" would also pass on a
+    // frame that never painted anything.
+    const settleDeadline = Date.now() + 60_000
+    let disposition
+    while (Date.now() < settleDeadline) {
+      const viewport = await c4.viewport()
+      const frame = viewport.join('\n')
+      const composer = c4.composerOf(viewport)
+      const pendingAck = frame.includes('Submitting…') || frame.includes('Queued…')
+      if (composer !== undefined && !composer.includes('ackdrop')) {
+        // The official acceptance won the race: the committed draft is gone and
+        // no retry copy may reappear. Wait for the gesture's generic ACK to
+        // clear before declaring the terminal state settled.
+        if (pendingAck) { await sleep(50); continue }
+        disposition = 'accepted'
+        break
+      }
+      if (composer !== undefined && composer.includes('ackdrop')) {
+        // The real unknown was observed first: the draft stays editable and the
+        // gesture MUST have painted its uncertainty notice.
+        if (!frame.includes('indeterminate') || pendingAck) { await sleep(50); continue }
+        const occurrences = composer.split('ackdrop').length - 1
+        assert(occurrences === 1,
+          `T35 the retained draft appears ${String(occurrences)} times after the unknown write`)
+        disposition = 'unknown'
+        break
+      }
+      await sleep(50)
+    }
+    assert(disposition !== undefined,
+      'T35 the ACK-dropped gesture never reached a settled Composer/ACK state')
+    const settledFrame = (await c4.viewport()).join('\n')
+    assert(!settledFrame.includes('Submitting…') && !settledFrame.includes('Queued…'),
+      `T35 left a pending motion row after the ${disposition} disposition`)
+    if (disposition === 'accepted') {
+      assert(!settledFrame.includes('indeterminate'),
+        'T35 an accepted prompt painted the retry/uncertainty notice anyway')
+    } else {
+      assert(settledFrame.includes('indeterminate'),
+        'T35 the unaccepted unknown discarded its uncertainty notice')
+    }
     c4.signalBusiness('SIGTERM')
     const c4Exit = await c4.waitForExit(60_000)
     assert(c4Exit.code === 0, `T35 ACK-drop Client exit was ${JSON.stringify(c4Exit)}`)
@@ -977,7 +1035,14 @@ export async function runPtySessionWriteRecovery(context) {
     assert(c5Exit.code === 0, `T35 reconciliation Client exit was ${JSON.stringify(c5Exit)}`)
     await c5.dispose()
     assert(alive(surfaceHostPid), 'T35 the Host died on the ACK-drop flow')
-    trace('t35', { hostCommits: 1, indeterminate: 'painted', replayed: false, reconcile: 'Host log' })
+    trace('t35', {
+      ackDropped: 'prompt-ack-dropped',
+      hostCommits: 1,
+      composerDisposition: disposition,
+      ackSettled: true,
+      replayed: false,
+      reconcile: 'Host log',
+    })
 
     // T29 resume + T33 SIGKILL survival: a NEW Client reads the committed
     // Session; killing it leaves the same Host instance alive; a THIRD Client
