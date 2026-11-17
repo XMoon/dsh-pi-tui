@@ -535,7 +535,7 @@ review judgement:
 | 6 — Discoverability (the rule itself) | the discovery rule finds the root level and every nested level, never finds the infrastructure directories, never double-discovers, and fails closed on an empty lane | `test/tooling/test-discovery.test.mjs` |
 | 5 — Deterministic async | a file outside the recorded floor cannot introduce an unreasoned fixed wait, and a floor file's wait count cannot grow | `test/tooling/new-test-policy.test.mjs` |
 | 6 — Discoverability (placement) | a new Domain, Integration or Tooling test lands in the right lane and reaches the right verification entry point | `test/tooling/new-test-policy.test.mjs` |
-| 6 — Discoverability (execution) | the lane runner passes the file list relative to the repository root, so the command line fits the Windows limit, and the child runs with the repository root as its working directory | `test/tooling/test-lane-runner.test.mjs` |
+| 6 — Discoverability (execution) | the lane runner resolves the file list in its child and passes it in memory to Node's native test API, never on the process command line; Node still owns sharding, and the child runs from the repository root | `test/tooling/test-lane-runner.test.mjs` |
 | 1 — Ownership First (the read side) | every production file a test reads by path EXISTS: a renamed or moved production module can never leave a source lock silently pointing at a different file | `pnpm gate:production-reads` |
 
 The remaining rules (1, 2, 3 and 4) are review judgements, and they
