@@ -18,12 +18,12 @@ import { homedir } from 'node:os'
 import { spawn } from 'node:child_process'
 import type { PathQueryEnvironment } from '../../domain/file-completion/query.ts'
 import {
+  createFinderRecordStream,
   escapeFinderRegex,
-  MAX_FINDER_RESULTS,
-  normalizeFinderRecords,
   type LocalDirectoryEntry,
   type LocalDiscoveryDriver,
 } from '../../domain/file-completion/discovery-policy.ts'
+import { createBoundedFinderCandidateCollector } from '../../domain/file-completion/ranking.ts'
 import type { PathCandidate } from '../../domain/file-completion/types.ts'
 
 /**
@@ -91,8 +91,15 @@ function entryIsDirectory(
 }
 
 /** Run the CLIENT finder for one query. Returns NULL on finder FAILURE
- * (non-zero exit, spawn error — NOT a valid empty result: the neutral policy
- * then runs the bounded fallback), `[]` on a genuine no-match or an abort. */
+ * (non-zero exit, spawn error, truncated output, over-bound record — NOT a
+ * valid empty result: the neutral policy then runs the bounded fallback), `[]`
+ * on a genuine no-match or an abort.
+ *
+ * The finder runs UNBOUNDED by any argv result cap: every match it produces
+ * competes in the neutral two-top-50 collector (all types + directories only)
+ * as it streams out of the process, so a highly relevant late match is never
+ * lost to an early-output cutoff. Only the bounded union leaves this function —
+ * neither the whole stdout nor the whole record list is retained. */
 function runClientFinder(
   fdPath: string,
   baseDir: string,
@@ -101,7 +108,6 @@ function runClientFinder(
 ): Promise<readonly PathCandidate[] | null> {
   const args = [
     '--base-directory', baseDir,
-    '--max-results', String(MAX_FINDER_RESULTS),
     // The finder's DEFAULT is smart-case (case-insensitive for a lowercase
     // query, case-SENSITIVE when the query contains uppercase) — but the
     // shared ranking contract is case-INSENSITIVE (scorePathCandidate
@@ -144,7 +150,22 @@ function runClientFinder(
       resolve(null)
       return
     }
-    let stdout = ''
+    const collector = createBoundedFinderCandidateCollector(term)
+    const records = createFinderRecordStream((record) => {
+      let isDirectory = record.directoryHint
+      if (!isDirectory) {
+        // The finder's default print format does not guarantee a trailing
+        // `/` for directories: classify the fact against the Client fs
+        // (statSync follows symlinks, so a symlink dir still completes with
+        // the directory kind).
+        try {
+          isDirectory = statSync(join(baseDir, record.path)).isDirectory()
+        } catch {
+          isDirectory = false
+        }
+      }
+      collector.offer({ path: record.path, kind: isDirectory ? 'directory' : 'file' })
+    })
     let settled = false
     const settle = (results: readonly PathCandidate[] | null): void => {
       if (settled) return
@@ -161,7 +182,17 @@ function runClientFinder(
     }
     signal.addEventListener('abort', onAbort, { once: true })
     child.stdout.setEncoding('utf-8')
-    child.stdout.on('data', (chunk: string) => { stdout += chunk })
+    child.stdout.on('data', (chunk: string) => {
+      // A settled request (abort or an earlier failure) never consumes later
+      // stdout: no partial candidate may publish after its request ended.
+      if (settled) return
+      if (!records.push(chunk)) {
+        // An over-bound unterminated record is an external-process failure:
+        // discard the partial collector so the neutral fallback answers.
+        if (child.exitCode === null) child.kill('SIGKILL')
+        settle(null)
+      }
+    })
     child.on('error', () => settle(null))
     child.on('close', (code) => {
       if (signal.aborted) {
@@ -175,23 +206,11 @@ function runClientFinder(
         settle(null)
         return
       }
-      const results: PathCandidate[] = []
-      for (const record of normalizeFinderRecords(stdout)) {
-        let isDirectory = record.directoryHint
-        if (!isDirectory) {
-          // The finder's default print format does not guarantee a trailing
-          // `/` for directories: classify the fact against the Client fs
-          // (statSync follows symlinks, so a symlink dir still completes with
-          // the directory kind).
-          try {
-            isDirectory = statSync(join(baseDir, record.path)).isDirectory()
-          } catch {
-            isDirectory = false
-          }
-        }
-        results.push({ path: record.path, kind: isDirectory ? 'directory' : 'file' })
+      if (!records.finish()) {
+        settle(null)
+        return
       }
-      settle(results)
+      settle(collector.finish())
     })
   })
 }

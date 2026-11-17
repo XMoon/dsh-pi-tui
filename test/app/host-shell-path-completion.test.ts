@@ -88,3 +88,25 @@ test('Remote Host Bash path completion fails closed for Windows Host facts in th
   })
   assert.equal(calls, 0, 'an unsupported Windows path shell never enters the POSIX discovery driver')
 })
+
+test('Host Bash path completion keeps its 50-candidate bound over a larger Host match set', async t => {
+  const life = testLifecycle(t)
+  const hostWorkspace = life.tempDir('f1-host-shell-limit-')
+  // 80 Host-computed matches, all scoring on the same basename-prefix tier.
+  const driver: LocalDiscoveryDriver = {
+    async listDirectory() { return [] },
+    async find() {
+      return Array.from({ length: 80 }, (_value, index) => ({
+        path: `host-${String(index).padStart(3, '0')}.ts`,
+        kind: 'file' as const,
+      }))
+    },
+  }
+  const bridge = createHostShellPathCompletionBridge({ driver })
+  const outcome = await bridge.complete(hostWorkspace, 'host', new AbortController().signal)
+  assert.equal(outcome.kind, 'ok')
+  if (outcome.kind === 'ok') {
+    assert.equal(outcome.candidates.length, 50, 'the Host Bash presentation stays bounded at 50')
+    assert.equal(outcome.candidates[0], 'host-000.ts', 'the shared ranking order still leads the list')
+  }
+})

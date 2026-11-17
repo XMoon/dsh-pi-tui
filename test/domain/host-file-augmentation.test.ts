@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, basename } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
@@ -44,6 +44,8 @@ function harness(
     /** The official Session directory owner (S2/PR-B). Omitted = the
      *  minimal composition whose scope read stays the header cwd. */
     readonly effectiveCwd?: string
+    /** A pinned Host finder (`null` = the deterministic bounded fallback). */
+    readonly fdPath?: string | null
   } = {},
 ) {
   const workspaceCwd = options.workspaceCwd ?? life.tempDir('dsh-hfa-ws-')
@@ -62,7 +64,7 @@ function harness(
   }
   const officialDefined = options.officialAbsent === true ? undefined : official
   const driverCalls: string[] = []
-  const driver = new DirectHostDiscoveryDriver(null)
+  const driver = new DirectHostDiscoveryDriver(options.fdPath ?? null)
   const originalFind = driver.find
   const originalList = driver.listDirectory
   driver.find = async (baseDir: string, term: string, signal: AbortSignal) => {
@@ -92,6 +94,32 @@ function harness(
 function okItems(result: HostFileListResult): readonly { path: string; kind: string }[] {
   assert.equal(result.kind, 'ok')
   return result.kind === 'ok' ? result.items : []
+}
+
+/** A scripted fake Host finder: it records its argv and honours fd's own
+ * `--max-results` bound, so an early-output cutoff in the production argument
+ * list is observable as BEHAVIOUR rather than only as text. */
+function scriptedFinder(
+  life: TestLifecycle,
+  records: readonly string[],
+): { path: string; argsFile: string } {
+  const dir = life.tempDir('dsh-hfa-fd-scripted-')
+  const recordFile = join(dir, 'records.bin')
+  writeFileSync(recordFile, records.map(record => `${record}\0`).join(''))
+  const path = join(dir, 'fd')
+  const argsFile = join(dir, 'args.txt')
+  writeFileSync(path, `#!/usr/bin/env node
+const fs = require('node:fs')
+const args = process.argv.slice(2)
+fs.writeFileSync(${JSON.stringify(argsFile)}, args.join('\\n'))
+const maxIndex = args.indexOf('--max-results')
+const max = maxIndex === -1 ? Infinity : Number(args[maxIndex + 1])
+const records = fs.readFileSync(${JSON.stringify(recordFile)}, 'utf8').split('\\u0000')
+if (records.at(-1) === '') records.pop()
+process.stdout.write(records.slice(0, max).map(record => record + '\\u0000').join(''))
+`)
+  chmodSync(path, 0o755)
+  return { path, argsFile }
 }
 
 test('a BARE query delegates the official authority exactly once and never enters the Host scanner', async (t) => {
@@ -375,8 +403,36 @@ test('the HOME shorthand scores the scope-relative candidate, never the absolute
     `a real home-scope match still completes: ${JSON.stringify(paths)}`)
 })
 
-test('the HOME shorthand uses the Host home and returns ABSOLUTE paths, never `~/...`', async (t) => {
+test('a late home-scope directory survives 100 earlier finder records and stays ABSOLUTE', async (t) => {
   const life = testLifecycle(t)
+  const home = life.tempDir('dsh-hfa-home-late-')
+  mkdirSync(join(home, 'nested', 'dsh-target'), { recursive: true })
+  // 120 weaker file matches (basename prefix, score 80) stream out first; the
+  // high-score directory (80 + 10) is emitted LAST, beyond the retired
+  // 100-record finder cap. It is NESTED so the neutral root direct-child merge
+  // cannot re-add it independently of the finder record.
+  const records = Array.from({ length: 120 }, (_value, index) =>
+    `dsh-filler-${String(index).padStart(3, '0')}.txt`)
+  records.push('nested/dsh-target/')
+  const finder = scriptedFinder(life, records)
+  const h = harness(life, {}, { homeDir: home, fdPath: finder.path })
+  const paths = okItems(await listPiTuiHostFileReferences(h.agent, '~/dsh', abort, h.deps))
+    .map(item => item.path)
+  const args = readFileSync(finder.argsFile, 'utf8').split(/\r?\n/)
+  assert.ok(!args.includes('--max-results'),
+    `the Host finder must not truncate before ranking: ${JSON.stringify(args)}`)
+  assert.ok(paths.includes(join(home, 'nested', 'dsh-target')),
+    `the late home-scope directory materializes as an absolute Host path: ${JSON.stringify(paths)}`)
+  // The same finder must NOT fabricate matches from the absolute home prefix:
+  // scoring stays on the scope-relative candidate.
+  assert.deepEqual(
+    okItems(await listPiTuiHostFileReferences(h.agent, `~/${basename(home)}`, abort, h.deps)),
+    [],
+    'the absolute HOME prefix never satisfies the scoring tier',
+  )
+})
+
+test('the HOME shorthand uses the Host home and returns ABSOLUTE paths, never `~/...`', async (t) => {  const life = testLifecycle(t)
   const home = life.tempDir('dsh-hfa-home-')
   mkdirSync(join(home, 'Downloads'))
   writeFileSync(join(home, 'Downloads', 'loads.txt'), 'x')

@@ -28,12 +28,12 @@ import { homedir } from 'node:os'
 import { spawn } from 'node:child_process'
 import type { PathQueryEnvironment } from '../../../domain/file-completion/query.ts'
 import {
+  createFinderRecordStream,
   escapeFinderRegex,
-  MAX_FINDER_RESULTS,
-  normalizeFinderRecords,
   type LocalDirectoryEntry,
   type LocalDiscoveryDriver,
 } from '../../../domain/file-completion/discovery-policy.ts'
+import { createBoundedFinderCandidateCollector } from '../../../domain/file-completion/ranking.ts'
 import type { PathCandidate } from '../../../domain/file-completion/types.ts'
 
 /**
@@ -111,8 +111,12 @@ function entryIsDirectory(
 }
 
 /** Run the Direct Host finder for one scoped query. Returns NULL on finder
- * FAILURE (the neutral policy then runs the bounded fallback), `[]` on a
- * genuine no-match or an abort. */
+ * FAILURE (non-zero exit, spawn error, truncated output, over-bound record —
+ * the neutral policy then runs the bounded fallback), `[]` on a genuine
+ * no-match or an abort.
+ *
+ * Like the Client adapter, the Host finder runs without an argv result cap and
+ * streams every match into the same neutral two-top-50 collector. */
 function runHostFinder(
   fdPath: string,
   baseDir: string,
@@ -121,7 +125,6 @@ function runHostFinder(
 ): Promise<readonly PathCandidate[] | null> {
   const args = [
     '--base-directory', baseDir,
-    '--max-results', String(MAX_FINDER_RESULTS),
     '-i',
     '--full-path',
     '--print0',
@@ -146,7 +149,18 @@ function runHostFinder(
       resolve(null)
       return
     }
-    let stdout = ''
+    const collector = createBoundedFinderCandidateCollector(term)
+    const records = createFinderRecordStream((record) => {
+      let isDirectory = record.directoryHint
+      if (!isDirectory) {
+        try {
+          isDirectory = statSync(hostJoin(baseDir, record.path)).isDirectory()
+        } catch {
+          isDirectory = false
+        }
+      }
+      collector.offer({ path: record.path, kind: isDirectory ? 'directory' : 'file' })
+    })
     let settled = false
     const settle = (results: readonly PathCandidate[] | null): void => {
       if (settled) return
@@ -160,7 +174,13 @@ function runHostFinder(
     }
     signal.addEventListener('abort', onAbort, { once: true })
     child.stdout.setEncoding('utf-8')
-    child.stdout.on('data', (chunk: string) => { stdout += chunk })
+    child.stdout.on('data', (chunk: string) => {
+      if (settled) return
+      if (!records.push(chunk)) {
+        if (child.exitCode === null) child.kill('SIGKILL')
+        settle(null)
+      }
+    })
     child.on('error', () => settle(null))
     child.on('close', (code) => {
       if (signal.aborted) {
@@ -171,19 +191,11 @@ function runHostFinder(
         settle(null)
         return
       }
-      const results: PathCandidate[] = []
-      for (const record of normalizeFinderRecords(stdout)) {
-        let isDirectory = record.directoryHint
-        if (!isDirectory) {
-          try {
-            isDirectory = statSync(hostJoin(baseDir, record.path)).isDirectory()
-          } catch {
-            isDirectory = false
-          }
-        }
-        results.push({ path: record.path, kind: isDirectory ? 'directory' : 'file' })
+      if (!records.finish()) {
+        settle(null)
+        return
       }
-      settle(results)
+      settle(collector.finish())
     })
   })
 }

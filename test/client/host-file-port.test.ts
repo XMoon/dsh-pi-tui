@@ -14,7 +14,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { DirectHostFilePort, resolveFdPath } from '../../src/runtime/direct/host-file-direct.ts'
@@ -432,6 +432,32 @@ function fakeFd(life: TestLifecycle, body: string): string {
   return script
 }
 
+/** A scripted fake `fd` over a records file: it records its argv and honours
+ * fd's own `--max-results` bound, so an early-output cutoff in the production
+ * argument list is observable as BEHAVIOUR, not only as text. */
+function scriptedFd(
+  life: TestLifecycle,
+  records: readonly string[],
+): { path: string; argsFile: string } {
+  const dir = life.tempDir('dsh-scriptedfd-')
+  const recordFile = join(dir, 'records.bin')
+  writeFileSync(recordFile, records.map(record => `${record}\0`).join(''))
+  const argsFile = join(dir, 'args.txt')
+  const path = join(dir, 'fd')
+  writeFileSync(path, `#!/usr/bin/env node
+const fs = require('node:fs')
+const args = process.argv.slice(2)
+fs.writeFileSync(${JSON.stringify(argsFile)}, args.join('\\n'))
+const maxIndex = args.indexOf('--max-results')
+const max = maxIndex === -1 ? Infinity : Number(args[maxIndex + 1])
+const records = fs.readFileSync(${JSON.stringify(recordFile)}, 'utf8').split('\\u0000')
+if (records.at(-1) === '') records.pop()
+process.stdout.write(records.slice(0, max).map(record => record + '\\u0000').join(''))
+`)
+  chmodSync(path, 0o755)
+  return { path, argsFile }
+}
+
 // ── session-vs-workspace routing (source -> route -> sink) ────────────────
 
 /** The two facts one discovery driver answers with (the spy target shape). */
@@ -566,6 +592,37 @@ test('an EXPLICIT session path scope routes to the Host scanner ONLY — the off
   } finally {
     restoreDirect()
   }
+})
+
+test('an explicit Host @ scope keeps a late high-score directory and never caps the finder argv', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-hostfile-late-')
+  mkdirSync(join(root, 'de', 'nested', 'x-deep'), { recursive: true })
+  writeFileSync(join(root, 'de', 'deep-nested.ts'), 'x')
+  // 120 weaker file matches stream out first (basename prefix, score 80); the
+  // high-score directory (80 + 10) is emitted LAST, beyond the retired
+  // 100-record finder cap. It is NESTED so the neutral root direct-child merge
+  // cannot re-add it independently of the finder record.
+  const records = Array.from({ length: 120 }, (_value, index) =>
+    `x-filler-${String(index).padStart(3, '0')}.txt`)
+  records.push('nested/x-deep/')
+  const finder = scriptedFd(life, records)
+  const live = { session: { header: { cwd: root } } }
+  // No Host context: the EXPLICIT scoped route never consults the official
+  // provider, so the scoped finder is the only source here.
+  const port = new DirectHostFilePort(
+    (sessionId) => sessionId === 'session-live' ? live : undefined,
+    finder.path,
+  )
+  const items = okItems(await port.listReferences(
+    { kind: 'session', sessionId: 'session-live' },
+    'de/x',
+  ))
+  const args = readFileSync(finder.argsFile, 'utf8').split(/\r?\n/)
+  assert.ok(!args.includes('--max-results'),
+    `the Host finder must not truncate before ranking: ${JSON.stringify(args)}`)
+  assert.ok(items.some(item => item.path === 'de/nested/x-deep' && item.kind === 'directory'),
+    `the late Host-directory match must survive the union: ${JSON.stringify(items)}`)
 })
 
 test('the explicit session scope reaches excluded, symlinked and absolute Host directories through the port', async (t) => {

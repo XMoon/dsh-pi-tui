@@ -56,6 +56,19 @@ test('the session scope sends the EXACT session id and the OFFICIAL query form',
   assert.deepEqual(calls, [{ sessionId: 'child-7', query: 'src/a', signal: undefined }])
 })
 
+test('the Host-ranked candidate list crosses verbatim — the Client never re-bounds or re-ranks it', async () => {
+  // 80 Host-computed candidates: more than the local presentation cap. The
+  // Client port is a transport mapper, so it must NOT apply a second ranking,
+  // reorder, drop or 50-item cap to the Host authority's answer.
+  const hostItems = Array.from({ length: 80 }, (_value, index) => ({
+    path: `src/host-${String(index).padStart(3, '0')}.ts`,
+    kind: 'file' as const,
+  }))
+  const { port } = harness({ result: { ok: true, value: { kind: 'ok', items: hostItems } } })
+  assert.deepEqual(await port.listReferences({ kind: 'session', sessionId: 's' }, 'host'),
+    { kind: 'ok', items: hostItems })
+})
+
 test('an authoritative Host empty answer stays ok([]) — not unavailable', async () => {
   const { port } = harness({ result: { ok: true, value: { kind: 'ok', items: [] } } })
   assert.deepEqual(await port.listReferences({ kind: 'session', sessionId: 's' }, 'none'),

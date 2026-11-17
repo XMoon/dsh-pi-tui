@@ -490,12 +490,12 @@ test('fd discovery uses full-path matching, NUL records and preserves filename w
   const root = life.tempDir('dsh-conv-fd-output-')
   mkdirSync(join(root, 'src'))
   writeFileSync(join(root, 'src', 'deep-nested.png'), 'x')
-  writeFileSync(join(root, ' leading file.txt'), 'x')
+  writeFileSync(join(root, ' leading nested file.txt'), 'x')
   const argsFile = join(root, 'fd-args.txt')
   const fakeFd = join(root, 'fd')
   writeFileSync(fakeFd, `#!/bin/sh
 printf '%s\\n' "$@" > ${JSON.stringify(argsFile)}
-printf '%s\\0' './src/deep-nested.png' './ leading file.txt'
+printf '%s\\0' './src/deep-nested.png' './ leading nested file.txt'
 `)
   chmodSync(fakeFd, 0o755)
   // The Direct Host finder remains the SESSION explicit route's engine; cover
@@ -504,7 +504,8 @@ printf '%s\\0' './src/deep-nested.png' './ leading file.txt'
   const nested = await driver.find(root, 'nested', abort)
   assert.ok(nested !== null, 'full-path fd matching must find nested files')
   assert.ok(nested.some(item => item.path === 'src/deep-nested.png'))
-  assert.ok(nested.some(item => item.path === ' leading file.txt'), 'NUL output with spaces must survive')
+  assert.ok(nested.some(item => item.path === ' leading nested file.txt'),
+    'NUL output with spaces must survive')
   const args = readFileSync(argsFile, 'utf8').split(/\r?\n/)
   assert.ok(args.includes('--full-path'), 'fd must match the full relative path')
   assert.ok(args.includes('--print0'), 'fd must emit NUL-delimited records')
@@ -670,6 +671,60 @@ test('review finding 3: an indented /image command still classifies its argument
   const result = await provider.getSuggestions(['  /image file'], 0, 14, { signal: abort })
   assert.ok(result !== null, `an indented /image must complete its argument:\n${JSON.stringify(result)}`)
   assert.ok(result.items.some(item => item.value === 'file-one.txt'), `indented value missing:\n${JSON.stringify(result.items)}`)
+})
+
+/** A scripted fake CLIENT finder: records its argv and honours fd's own
+ * `--max-results` bound, so an early-output cutoff in the production argument
+ * list is observable as BEHAVIOUR rather than only as text. */
+function scriptedClientFinder(
+  life: TestLifecycle,
+  records: readonly string[],
+): { path: string; argsFile: string } {
+  const dir = life.tempDir('dsh-conv-fd-scripted-')
+  const recordFile = join(dir, 'records.bin')
+  writeFileSync(recordFile, records.map(record => `${record}\0`).join(''))
+  const path = join(dir, 'fd')
+  const argsFile = join(dir, 'args.txt')
+  writeFileSync(path, `#!/usr/bin/env node
+const fs = require('node:fs')
+const args = process.argv.slice(2)
+fs.writeFileSync(${JSON.stringify(argsFile)}, args.join('\\n'))
+const maxIndex = args.indexOf('--max-results')
+const max = maxIndex === -1 ? Infinity : Number(args[maxIndex + 1])
+const records = fs.readFileSync(${JSON.stringify(recordFile)}, 'utf8').split('\\u0000')
+if (records.at(-1) === '') records.pop()
+process.stdout.write(records.slice(0, max).map(record => record + '\\u0000').join(''))
+`)
+  chmodSync(path, 0o755)
+  return { path, argsFile }
+}
+
+test('a /image argument surfaces a high-score directory emitted after 100 finder records', async (t) => {
+  const life = testLifecycle(t)
+  const root = outsideCwdFixture(life).workspace
+  mkdirSync(join(root, 'nested', 'dsh-target'), { recursive: true })
+  // 120 weaker file matches stream out first (basename prefix, score 80); the
+  // high-score directory (80 + 10) is emitted LAST, beyond the retired
+  // 100-record finder cap. It is NESTED so the neutral root direct-child merge
+  // cannot re-add it independently of the finder record.
+  const records = Array.from({ length: 120 }, (_value, index) =>
+    `dsh-filler-${String(index).padStart(3, '0')}.txt`)
+  records.push('nested/dsh-target/')
+  const finder = scriptedClientFinder(life, records)
+  const provider = new MentionProvider(
+    [{ name: 'image', description: 'Attach', getArgumentCompletions: () => null }],
+    root,
+    new DirectHostFilePort(() => undefined, null),
+    undefined,
+    undefined,
+    finder.path,
+  )
+  const result = await provider.getSuggestions(['/image dsh'], 0, 10, { signal: abort })
+  assert.ok(result !== null, `/image dsh must suggest:\n${JSON.stringify(result)}`)
+  const args = readFileSync(finder.argsFile, 'utf8').split(/\r?\n/)
+  assert.ok(!args.includes('--max-results'), `the Client finder must not be capped: ${JSON.stringify(args)}`)
+  assert.ok(result.items.some(item => item.value === 'nested/dsh-target/'),
+    `the late high-score directory must complete: ${JSON.stringify(result.items)}`)
 })
 
 test('review finding (round 4): a regex-special filename still completes (fd literal match)', async (t) => {
