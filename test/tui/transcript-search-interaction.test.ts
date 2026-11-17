@@ -903,8 +903,7 @@ test('a missing plan card (no logged call) degrades View to the question-detail 
   // Esc back, then Keep planning with feedback — the settle still works.
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  vt.sendInput('\x1b[B') // View review text
-  vt.sendInput('\x1b[B') // Keep planning…
+  vt.sendInput('\x1b[B') // View plan -> Keep planning…
   vt.sendInput('\r')
   await vt.waitForRender()
   vt.sendInput('w')
@@ -1266,9 +1265,8 @@ test('a QUEUED plan-review question mounts with the live View capability (FIFO h
   assert.ok(planView(vt).includes('## Scope'), `the handed-over flow locates the body:\n${planView(vt)}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  // Rows with a detail body: [View plan, View review text, Keep…, Approve];
-  // three moves reach Approve from the View-plan default.
-  vt.sendInput('\x1b[B')
+  // The frozen three-row layout: [View plan, Keep…, Approve]; two moves reach
+  // Approve from the View-plan default.
   vt.sendInput('\x1b[B')
   vt.sendInput('\x1b[B')
   vt.sendInput('\r')
@@ -1566,12 +1564,13 @@ test('Regular mode keeps the plan readable and never offers an unusable View pla
   assert.ok(!frame.includes('View plan'), `Regular must not offer an unusable View plan:\n${frame}`)
   assert.ok(frame.includes('Keep planning…') && frame.includes('Approve plan'),
     `the decision rows are intact:\n${frame}`)
-  // The Fullscreen capability adds the REAL View plan on top.
+  // The Fullscreen capability restores the frozen three-row layout: the
+  // exception row disappears (a failed locate degrades View plan instead).
   app.setFullscreen(true)
   await vt.waitForRender()
   const fullscreenFrame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
   assert.ok(fullscreenFrame.includes('View plan'), `Fullscreen offers the real View:\n${fullscreenFrame}`)
-  assert.ok(fullscreenFrame.includes('View review text'), `the detail entry stays available:\n${fullscreenFrame}`)
+  assert.ok(!fullscreenFrame.includes('View review text'), `the exception row leaves the normal Fullscreen layout:\n${fullscreenFrame}`)
   vt.sendInput('\x1b') // official dismiss
   await settle.then(() => {}, () => {})
   app.stop()
@@ -1669,18 +1668,39 @@ test('Regular WITHOUT a logged tool card reads the full plan in-flow and can sti
   app.stop()
 })
 
-test('Fullscreen WITH a provable card offers View plan FIRST and View review text SECOND', async () => {
+test('Fullscreen with a provable card keeps the frozen three-row layout', async () => {
+  // The official detail body does NOT add a fourth row in the normal
+  // Fullscreen layout: `View review text` is the exception entry (no live
+  // inspection), and a FAILED locate degrades View plan to the detail page.
   const { vt, app, settle } = planScene(planTranscript('call-plan-1'), 100, 24, { present: planDirectPresenter }, undefined, true)
   await vt.waitForRender()
   const frame = vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
-  const viewRow = frame.split('\n').findIndex(line => line.includes('View plan'))
-  const reviewRow = frame.split('\n').findIndex(line => line.includes('View review text'))
-  assert.ok(viewRow >= 0 && reviewRow >= 0, `both reading rows exist:\n${frame}`)
-  assert.ok(viewRow < reviewRow, `View plan stays the preferred (first) entry:\n${frame}`)
-  // The default cursor is View plan, and the review row is also reachable.
-  assert.ok(frame.split('\n')[viewRow]!.includes('>'), 'View plan keeps the default cursor')
-  assert.ok(!frame.split('\n')[reviewRow]!.includes('>'), 'View review text is not the default')
+  const rows = frame.split('\n')
+  const decisionRows = rows.filter(line => />?\s*(View plan|View review text|Keep planning…|Approve plan)\s*│?\s*$/.test(line))
+  assert.equal(decisionRows.length, 3, `exactly the frozen three decision rows:\n${frame}`)
+  assert.ok(decisionRows[0]!.includes('> View plan'), `View plan is the default (first) row:\n${frame}`)
+  assert.ok(!frame.includes('View review text'), `the exception row stays out of the normal Fullscreen layout:\n${frame}`)
+  assert.ok(!frame.includes('Read the plan above in terminal history.'), `no Regular line in Fullscreen:\n${frame}`)
   vt.sendInput('\x1b') // the decision list's official dismiss
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
+test('a FAILED Fullscreen locate degrades View plan to the question detail page (the 3.5 exception)', async () => {
+  // A detail-bearing official request whose card CANNOT be proven (a call id
+  // with no logged card): View plan enters the detail fallback, not a fake
+  // located reading state — the full plan stays readable in the exception.
+  const { vt, app, settle } = planScene(planTranscript(), 100, 24, { present: planDirectPresenter }, undefined, true)
+  await vt.waitForRender()
+  vt.sendInput('\r') // View plan on the three-row layout
+  await vt.waitForRender()
+  const fallback = planView(vt)
+  assert.ok(fallback.includes('Full review text'), `the failed locate degrades to the detail page:\n${fallback}`)
+  assert.ok(fallback.includes('# Upgrade 0.5.7'), `the detail page carries the complete plan:\n${fallback}`)
+  assert.ok(!fallback.includes('Reading the submitted plan'), `never a claimed-located state:\n${fallback}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
   await settle.then(() => {}, () => {})
   app.stop()
 })

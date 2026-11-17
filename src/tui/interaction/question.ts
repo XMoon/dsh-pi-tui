@@ -575,13 +575,15 @@ export class QuestionFlow implements Component, Focusable {
     if (this.planReview === undefined) return []
     const rows: { action: 'view' | 'review' | 'keep' | 'approve'; label: string }[] = []
     if (this.planInspection?.canInspect() === true) rows.push({ action: 'view', label: 'View plan' })
-    // The OFFICIAL question detail is the reading entry of LAST resort: a
-    // Regular surface (no app-owned seek) and a Fullscreen locate that cannot
-    // prove a card both keep the complete plan readable through the question's
-    // OWN text — the user is never asked to approve an unreadable plan
-    // (§3.5's official exception; no second Reader is created).
+    // 3.5's EXCEPTION, not a fourth normal row: the official question detail
+    // is the reading entry ONLY where the transcript inspection cannot be
+    // executed at all (Regular has no app-owned seek). In Fullscreen with the
+    // live capability the frozen three-row layout stands and a FAILED locate
+    // already degrades View plan to this same detail page.
     const detail = this.planReview.question.detail
-    if (detail !== undefined && detail.trim() !== '') rows.push({ action: 'review', label: 'View review text' })
+    if (this.planInspection?.canInspect() !== true && detail !== undefined && detail.trim() !== '') {
+      rows.push({ action: 'review', label: 'View review text' })
+    }
     // The official request may offer several non-approve options; the frozen
     // decision UI is ONE Keep row, so the FIRST non-approve option (the
     // official option order) is the keep-planning class and the label this
@@ -954,7 +956,7 @@ export class QuestionFlow implements Component, Focusable {
     if (gesture.hitKind === 'inert') return
     const hit = this.hitMap.get(row)
     if (hit !== gesture.hit) return
-    const hitKind = hit === OTHER_ROW ? 'other' : hit === MARKER_ROW ? 'marker' : 'option'
+    const hitKind = hit === OTHER_ROW || hit === PLAN_FEEDBACK_ROW ? 'other' : hit === MARKER_ROW ? 'marker' : 'option'
     if (hitKind !== gesture.hitKind) return
     this.clickRow(row, x)
   }

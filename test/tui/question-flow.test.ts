@@ -3035,7 +3035,7 @@ test('a plan request with several non-approve options still renders exactly thre
   flow.setPlanInspection(planInspectionSeam(() => true))
   const lines = planStripLines(flow)
   const joined = lines.join('\n')
-  const decisionRows = lines.filter(line => /^(>| ) (View plan|Keep planning…|Approve plan)$/.test(line))
+  const decisionRows = lines.filter(line => /^(>| ) (View plan|View review text|Keep planning…|Approve plan)$/.test(line))
   assert.equal(decisionRows.length, 3, `exactly three decision rows:\n${joined}`)
   assert.ok(joined.includes('Keep planning…'), `the FIRST non-approve option is the keep class:\n${joined}`)
   assert.ok(!joined.includes('Ask something else'), `extra non-approve options never add rows:\n${joined}`)
@@ -3142,4 +3142,34 @@ test('the plan step identity in a mouse gesture is discriminative (non-keyboard 
   // The pressed feedback-Back must NOT be reinterpreted as the reading Back.
   assert.ok(flow.isPlanReading(), 'the stale release left the reading step untouched')
   assert.equal(readingEnded, 0, 'the stale release never ended the reading lease')
+})
+
+test('Fullscreen pointer: clicking the feedback input row MOVES the text cursor', () => {
+  const flow = planMakeFlow([planQuestionNoDetail()])
+  flow.setMaxRows(24)
+  flow.setMouseActionsEnabled(true)
+  flow.setPlanInspection(planInspectionSeam(() => true))
+  flow.handleInput('\x1b[B') // Keep planning…
+  flow.handleInput('\r')
+  const lines = planStripLines(flow)
+  assert.ok(lines.join('\n').includes('What should be changed?'), 'the feedback step is active')
+  // Type enough text that a mid-row click has a distinguishable column.
+  for (const ch of 'revise the plan') flow.handleInput(ch)
+  const inputRow = planStripLines(flow).findIndex(line => line.trimStart().startsWith('>'))
+  assert.ok(inputRow >= 0, 'the feedback input row is painted')
+  const typed = planStripLines(flow)[inputRow]!.trimStart().slice(2)
+  const clickCol = 6 // inside the typed text, not at its end
+  const input = (flow as unknown as { planFeedbackInput: { getValue(): string; setCursor(index: number): void; render(w: number): string[] } }).planFeedbackInput
+  const cursorBefore = input.getValue().length // typing leaves the cursor at the end
+  const gesture = flow.beginMousePress(inputRow, clickCol)
+  assert.ok(gesture !== undefined, 'the press on the input row captures its target')
+  flow.completeMouseClick(gesture, inputRow, clickCol)
+  // The authoritative observable: after the click, typing INSERTS at the click
+  // column instead of appending at the end (the cursor really moved).
+  flow.handleInput('X')
+  const valueAfter = input.getValue()
+  const expectedMidInsert = `${'revise the plan'.slice(0, Math.max(0, clickCol - 2))}X`
+  assert.ok(valueAfter.startsWith(expectedMidInsert),
+    `the click must move the text cursor (typing after the click inserts mid-text): got "${valueAfter}"`)
+  assert.ok(cursorBefore > 0, 'precondition: text was typed before the click')
 })

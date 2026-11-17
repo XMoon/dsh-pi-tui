@@ -187,19 +187,19 @@ options, and which offers at least one other option — nothing else, never a
 header or label match) replaces the generic Q1→Review→Submit pages with ONE
 compact decision component in the same editor seat:
 
-- Decision rows are ALWAYS the fixed order `View plan → View review text →
-  Keep planning… → <official approve label> plan`, each present only when its
-  entry is real: `View plan` only while the host's live read-only inspection is
-  executable (Fullscreen); `View review text` whenever the official question
-  carries its own detail body — the reading entry of LAST resort that keeps the
-  complete plan readable on Regular (no app-owned seek) and on a Fullscreen
-  locate that cannot prove a card, without ever claiming a located transcript
-  (§3.5's official exception; no second Reader). Any further official
-  non-approve options never add rows: the FIRST non-approve option in the
-  official order is the keep-planning class and the label this branch answers
-  with. The default cursor is the FIRST available reading row (View plan, else
-  View review text, else Keep) — never Approve. Answer values are always the
-  OFFICIAL option labels.
+- Decision rows keep the frozen order `View plan → Keep planning… →
+  <official approve label> plan` in the normal Fullscreen layout (a
+  detail-bearing request does NOT add a row there). `View review text` is the
+  §3.5 EXCEPTION entry, present only where the transcript inspection cannot be
+  executed at all (Regular has no app-owned seek) and the official question
+  carries its own detail body: it reads the complete text in-flow without ever
+  claiming a located transcript and without a second Reader. On Fullscreen a
+  FAILED locate degrades `View plan` to that same detail page. Any further
+  official non-approve options never add rows: the FIRST non-approve option in
+  the official order is the keep-planning class and the label this branch
+  answers with. The default cursor is the FIRST available reading row (View
+  plan, else View review text, else Keep) — never Approve. Answer values are
+  always the OFFICIAL option labels.
 - `View plan` triggers the host's one-shot read-only inspection: it requires a
   PROVEN identity first — the official Question's own Session (the
   presentation-only `reviewSessionId` the surface controller forwards) and the
@@ -232,9 +232,12 @@ compact decision component in the same editor seat:
 - The plan inspection and the transcript SEARCH navigation are INDEPENDENT
   temporary requests. They may both be alive at once (a search parked behind
   the review), the effective reveal path is the UNION of both requests' hiding
-  ancestors (one never shadows the other), and each request owns its own PTC
-  child-collapse record: a plan View/reading/release never writes or clears a
-  search suppression, and vice versa.
+  ancestors (one never shadows the other), and their explicit-collapse records
+  stay separate: the SEARCH navigation owns the PTC child-suppression record,
+  while the plan inspection keeps NO suppression of its own — an explicit
+  collapse of a plan-opened child revokes the whole one-shot lease. A plan
+  View/reading/release never writes or clears a search suppression, and vice
+  versa.
 - Regular/Main has no app-owned seek: it offers no `View plan` and never
   claims a located reading state. The question's own detail keeps the full text
   readable in-flow through `View review text`; when even that body is absent
