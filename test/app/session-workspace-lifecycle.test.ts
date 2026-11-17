@@ -298,7 +298,7 @@ function harness(options: {
    *  the review-P1 identity-rule case). */
   readonly hostFile?: TuiCommandRunner['hostFile']
   /** F5-B review EXT-P2: the create-side AUTO evidence check (`/new`). */
-  readonly validateAutoWorkspace?: () => boolean
+  readonly validateAutoWorkspace?: () => Promise<boolean>
   /** F5-B review EXT-P2: the FINAL default-write wait before a create. */
   readonly awaitPendingDefaultWrite?: (signal: AbortSignal) => Promise<void>
 }): Harness {
@@ -2772,7 +2772,7 @@ test('review EXT-P2 (/new): the final pre-dispatch gate cancels a sessionless /n
   const creates: unknown[] = []
   const h = harness({
     workspaceNextIntent: owner,
-    validateAutoWorkspace: () => current,
+    validateAutoWorkspace: async () => current,
     awaitPendingDefaultWrite: async () => {
       entered()
       await hold
@@ -2816,7 +2816,7 @@ test('review EXT-P1 (manual precedence): a Folder New into a VALID Workspace suc
     workspaceNextIntent: owner,
     // The AUTO candidate's local proof has expired; an explicit manual choice
     // must NOT inherit this veto.
-    validateAutoWorkspace: () => false,
+    validateAutoWorkspace: async () => false,
     agents: {
       resolveWorkspace: (async (intent: unknown) => {
         resolutions.push(intent)

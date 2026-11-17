@@ -81,10 +81,12 @@ const CLIENT_LAUNCH_CWD = process.cwd()
  *  mistaken for the launch directory (external review EXT-P1). An unreadable
  *  capture stays `undefined`; the classifier then falls back to its own real
  *  `stat('.')` object and still fails closed. */
-const CLIENT_LAUNCH_OBJECT = ((): { device: number; inode: number } | undefined => {
+const CLIENT_LAUNCH_OBJECT = ((): { device: string; inode: string } | undefined => {
   try {
-    const stat = statSync('.')
-    return stat.isDirectory() ? { device: stat.dev, inode: stat.ino } : undefined
+    // Exact bigint device/inode: a 64-bit inode must never be truncated by JS
+    // number precision before it becomes part of the proof.
+    const stat = statSync('.', { bigint: true })
+    return stat.isDirectory() ? { device: stat.dev.toString(), inode: stat.ino.toString() } : undefined
   } catch {
     return undefined
   }
@@ -1993,8 +1995,10 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       // Host still signs the WorkspaceId). Every unreadable/uncertain fact is
       // `unverified`, so the surface stays unselected until the user picks a
       // Host Workspace through the existing Browser.
-      const launchWorkspace: LaunchWorkspaceVerdict = classifyLaunchWorkspace(host.identity, CLIENT_LAUNCH_CWD, {
+      const launchWorkspace: LaunchWorkspaceVerdict = await classifyLaunchWorkspace(host.identity, CLIENT_LAUNCH_CWD, {
         ...(CLIENT_LAUNCH_OBJECT === undefined ? {} : { launchObject: CLIENT_LAUNCH_OBJECT }),
+        scope,
+        ...(transport === undefined ? {} : { transport }),
       })
       let runnerFiber: Fiber | undefined
       try {
