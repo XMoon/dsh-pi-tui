@@ -1445,9 +1445,15 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
       }
     },
     restore: (t) => {
-      // This gesture's own attempt is the current owner here; no foreign
-      // origin to pin (the subject is captured inside the async flow).
-      if (!steerRestored) deps.restoreSubmissionDraft(t, steerRequestId)
+      // R6-1A/RFL018: this outer restore fires on a THROW after the flow's
+      // awaits (e.g. the pre-dispatch ensureSession), so the owner may have
+      // been replaced meanwhile. It is the STALE-restore class and goes
+      // through the same policy authority with the gesture's OWN captured
+      // subject — a plain origin-less restore would queue the receiver's
+      // current owner and could reseed a successor's composer.
+      if (!steerRestored) {
+        deps.restoreStaleDraftIntoEditor(t, submittedSubject, steerRequestId)
+      }
     },
   }, text), {
     diag: deps.diag,

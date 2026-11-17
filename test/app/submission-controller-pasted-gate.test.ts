@@ -1233,3 +1233,30 @@ test('PR2/R6-1B: a RETAINING renderer keeps a replaced owner’s parked restore 
   assert.equal(same.composer.text, 'visible draft\n\n/same owner stale',
     'a same-owner invalidation is not a replacement — its restore is preserved')
 })
+
+test('PR2/RFL018: an old steer’s pre-dispatch failure cannot reseed a successor’s composer', async () => {
+  const h = mountAttempt()
+  h.setRetainsStaleDraftRestore(false) // TSP: drops stale drafts at a switch
+  h.setAgentRunning(true)
+  // A: the steer gesture opens its hold, then gates inside ensureSession.
+  h.holdNextEnsureSession()
+  assert.equal(h.controller.beginComposerSubmission('old steer A', 'steer'), 'held')
+  await attemptTick()
+  // The owner is replaced and the old hold retired; the successor's ordinary
+  // prompt opens its own hold behind the FIFO.
+  h.setOwnerReplaced(true)
+  h.controller.clearPending()
+  h.composer.text = 'successor B'
+  h.holdNextWriter()
+  assert.equal(h.controller.beginComposerSubmission('successor B', 'enter'), 'held')
+  await attemptTick()
+  // A's preparation now rejects: the outer restore is the STALE class and must
+  // drop A on a switch-dropping renderer (its own subject is replaced).
+  h.rejectHeldEnsureSession(new Error('steer preparation failed'))
+  await attemptTick()
+  assert.equal(h.composer.text, 'successor B', 'A never touches the successor')
+  h.respond({ kind: 'committed', value: undefined }, true)
+  h.releaseHeldWriter()
+  await attemptTick()
+  assert.equal(h.composer.text, '', 'the old steer A is dropped, not replayed after B’s acceptance')
+})
