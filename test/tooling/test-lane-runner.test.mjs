@@ -8,8 +8,8 @@
 
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join, resolve, win32 } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
@@ -191,12 +191,13 @@ test('worker uses one owned temp root for all temp variables', () => {
     encoding: 'utf8',
     timeout: 30_000,
     env: { ...process.env, TMPDIR: localTmp, TMP: localTmp, TEMP: localTmp,
-      PROBE_MARKER: marker, NODE_TEST_CONTEXT: undefined },
+      PROBE_MARKER: marker, NODE_TEST_CONTEXT: undefined, DSH_TEST_KEEP_TMP: undefined },
   })
   assert.equal(result.status, 0, result.stderr ?? result.error?.message)
   const childTmp = readFileSync(marker, 'utf8')
-  assert.equal(childTmp.startsWith(fixture + '/'), false,
-    'the worker cannot inherit a temp root inside its own checkout')
+  const rel = relative(realpathSync(fixture), childTmp)
+  assert.ok(rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel),
+    `the worker cannot inherit a temp root inside its own checkout: ${childTmp}`)
   assert.equal(existsSync(childTmp), false, 'the lane runner removes its external root after a successful run')
 })
 
