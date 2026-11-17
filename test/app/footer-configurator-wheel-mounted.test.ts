@@ -406,3 +406,56 @@ test('a pre-repaint resize never replays the old cell; the repainted frame and a
   next.app.dispose()
   started.delete(next.app)
 })
+
+
+test('the hidden-cursor fence stays armed through synchronous keys before cursor-follow paints', async () => {
+  const h = mountFooter({ columns: 100, rows: 40, items: 32 })
+  await h.handle.whenInitialSpecialistSettled()
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  const itemsBefore = h.page()!.state().layout.rows[0]!.left.length
+
+  const hide = async (): Promise<void> => {
+    const view = h.view()
+    const bodyRow = rowOf(view, 'scroll-10')
+    for (let step = 0; step < 6; step += 1) wheel(h.vt, bodyRow, 'down')
+    await h.paint()
+    assert.equal(h.page()!.state().cursor, 0)
+    assert.ok(!h.view().includes('›'),
+      `the model cursor is outside the painted body:\n${h.view()}`)
+  }
+
+  // Two dangerous keys in the SAME input tick: the first requests the
+  // cursor-follow frame, the second must not slip through before it paints.
+  await hide()
+  h.vt.sendInput(' ')
+  h.vt.sendInput(' ')
+  await h.paint()
+  assert.equal(h.page()!.state().mode, 'row')
+  assert.equal(h.page()!.state().layout.rows[0]!.left.length, itemsBefore,
+    'a synchronous second Space never removes an unseen item')
+  assert.ok(h.view().includes('› scroll-00'), 'the restored frame paints the same selection')
+
+  // A no-op key then a dangerous key in the same tick: the fence is still
+  // armed on the last PAINTED frame.
+  await hide()
+  const itemsAfter = h.page()!.state().layout.rows[0]!.left.length
+  h.vt.sendInput('x')
+  h.vt.sendInput(' ')
+  await h.paint()
+  assert.equal(h.page()!.state().layout.rows[0]!.left.length, itemsAfter,
+    'a no-op key never disarms the hidden-cursor fence')
+  assert.ok(h.view().includes('› scroll-00'), 'the cursor-follow frame still restores the selection')
+
+  // Two Enters in the same tick cannot open the hidden item editor either.
+  await hide()
+  h.vt.sendInput('\r')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.equal(h.page()!.state().mode, 'row', 'synchronous Enters never activate the hidden selection')
+  assert.ok(h.view().includes('› scroll-00'), 'the visible selection is restored before the next action')
+  h.close()
+  h.app.dispose()
+  started.delete(h.app)
+})

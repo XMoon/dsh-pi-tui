@@ -254,10 +254,14 @@ export class FooterConfiguratorPanel implements Component {
       // dangerous activation is consumed below so it cannot edit/remove/save
       // an unseen selection; navigation and text keys still run normally.
       const wheelWindow = this.wheelWindow
-      const manualWheel = this.wheelOverride !== undefined
-        && wheelWindow !== undefined
+      // The LAST PAINTED frame is the authority. The fence stays armed while
+      // that frame still shows the model cursor outside the body viewport —
+      // even after an earlier key cleared the manual offset but before the
+      // cursor-follow frame has painted (e.g. a second key in the same input
+      // tick). It turns off only when a frame really paints the cursor.
+      const cursorHidden = wheelWindow !== undefined
         && wheelWindow.mode === state.mode
-      const cursorHidden = manualWheel && wheelWindow !== undefined && !wheelWindow.cursorPainted
+        && !wheelWindow.cursorPainted
       this.wheelOverride = undefined
       // A save in flight freezes INPUT (PR E §10): the draft captured for
       // the pending write must stay the draft on screen, duplicate
@@ -300,9 +304,12 @@ export class FooterConfiguratorPanel implements Component {
         return
       }
       // A hidden model selection must become visible before any dangerous
-      // activation runs. This consumes only the FIRST such key and asks for the
-      // cursor-follow repaint; the user's next explicit key follows the normal
-      // model path. Esc and the Row Selector `←` back alias were handled above.
+      // activation runs. While the last painted frame still hides it, EVERY
+      // such key is consumed (not only the first of a gesture: a second key
+      // may arrive in the same input tick before the cursor-follow frame
+      // paints) and one repaint is requested. Once that frame shows the
+      // cursor, the next explicit key follows the normal model path. Esc and
+      // the Row Selector `←` back alias were handled above.
       if (cursorHidden && this.hiddenSelectionAction(data, state, textMode)) {
         this.requestRender()
         return

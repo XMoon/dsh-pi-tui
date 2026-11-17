@@ -1321,9 +1321,11 @@ specialist-page contract below).
   so the model selection, `row-move` order, Add query/cursor and every drafted
   value stay untouched; the pinned Add search/description, the preview, the
   help and the ONE Action Bar are fixed and inert. A manual offset may hide the
-  model cursor: the first Enter/Space/A/M/F/S/zone/reorder key then only
-  restores cursor-follow and is consumed, while Up/Down navigation, typing,
-  Esc and the Row Selector `←` keep their paths. Inline text editors, the
+  model cursor: while the painted frame still hides it, every
+  Enter/Space/A/M/F/S/zone/reorder key only restores cursor-follow and is
+  consumed (a second such key arriving before the restored frame paints is
+  consumed too), while Up/Down navigation, typing, Esc and the Row Selector
+  `←` keep their paths. Inline text editors, the
   delete prompt and a saving page are wheel-inert; a nonzero wheel retires an
   old body press while a zero notch never cancels one. A pending Keybinding
   mutation owns the page until its result is
