@@ -27,6 +27,7 @@ import {
   MouseRegion,
   ScrollView,
   type Component,
+  type ScrollViewScrollToOptions,
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
@@ -92,12 +93,54 @@ class JobCommandBody implements Component {
 /**
  * The Command reading page of ONE Job workspace instance.
  */
+/** The Command viewport: the fork ScrollView plus the ONE viewport-move
+ *  notification the panel uses to retire a pressed chrome gesture on any
+ *  effective scroll (see JobOutputScrollView.onViewportMoved). */
+class CommandScrollView extends ScrollView {
+  onViewportMoved: (() => void) | undefined
+
+  private notifyIfMoved(before: number): void {
+    if (this.scrollTop !== before) this.onViewportMoved?.()
+  }
+
+  override scrollBy(lines: number): number {
+    const before = this.scrollTop
+    const remaining = super.scrollBy(lines)
+    this.notifyIfMoved(before)
+    return remaining
+  }
+
+  override scrollTo(scrollTop: number, options: ScrollViewScrollToOptions = {}): void {
+    const before = this.scrollTop
+    super.scrollTo(scrollTop, options)
+    this.notifyIfMoved(before)
+  }
+
+  override scrollToStart(): void {
+    const before = this.scrollTop
+    super.scrollToStart()
+    this.notifyIfMoved(before)
+  }
+
+  override scrollToEnd(): void {
+    const before = this.scrollTop
+    super.scrollToEnd()
+    this.notifyIfMoved(before)
+  }
+
+  override updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void {
+    const before = this.scrollTop
+    super.updateLayout(contentHeight, viewportHeight, requestRender)
+    this.notifyIfMoved(before)
+  }
+}
+
 export class JobCommandReader {
   private readonly document = new JobCommandDocument()
   private readonly searchModel: JobOutputSearch
   private readonly body: JobCommandBody
   private readonly mouseRegion: MouseRegion
-  private readonly scrollView: ScrollView
+  private readonly scrollView: CommandScrollView
   private readonly intents: JobCommandReaderIntents
   /** The gesture anchor/focus points. They SURVIVE a release so the copied
    *  range stays highlighted; a new press, a source change, a resize, a view
@@ -124,12 +167,17 @@ export class JobCommandReader {
     this.searchModel = new JobOutputSearch(this.document, intents.searchRowVisible, 'Find Command: ')
     // The Command viewport never follows: `Home`/`End`, the wheel and the
     // scrollbar move THIS view, and the Output's own follow intent is untouched.
-    this.scrollView = new ScrollView(this.mouseRegion, { follow: 'none', primary: true, scrollbar: 'auto' })
+    this.scrollView = new CommandScrollView(this.mouseRegion, { follow: 'none', primary: true, scrollbar: 'auto' })
   }
 
   /** The mounted Command viewport (the ONE primary ScrollView of this view). */
   get scroll(): ScrollView {
     return this.scrollView
+  }
+
+  /** Notify the panel whenever THIS page's viewport actually moved. */
+  setViewportMovedCallback(callback: () => void): void {
+    this.scrollView.onViewportMoved = callback
   }
 
   /** The Command-local Find model (its OWN query, epoch and reveal). */
