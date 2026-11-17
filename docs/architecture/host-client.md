@@ -234,10 +234,13 @@ the kernel seat where one is required.
 
 - **Scope.** The official `resolveDshHome()` / `resolveProfileDir()` results
   canonicalized through `realpath` plus the current UID decide the scope. The
-  per-DSH-home run directory is `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/`, created
-  and proved 0700; it holds the registry, scratch state and the
-  qualification-only Client seat. The Darwin Host seat uses the account-home
-  root described below. `scopeId` is sha256 over the fixed domain
+  private run directory is `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/`: on Linux,
+  components THIS product creates are 0700, while an existing user layout (an
+  existing 0755/0775 directory, legal directory symlink or another owner) is
+  used as-is and never chmodded or rejected by a UID/mode gate. On macOS the
+  per-DSH-home run directory is created and proved 0700; the Darwin Host seat
+  uses the account-home root described below. `scopeId` is sha256 over the
+  fixed domain
   `dsh-pi-tui/local-scope/1`, the decimal UID and the canonical profile path;
   that domain is part of the published scope algorithm and evolves separately
   from the wire protocol below. The same canonical profile directory shares one
@@ -273,14 +276,15 @@ the kernel seat where one is required.
   concurrently and share its exact PID/starttime/`instanceId`. Kernel release on
   process death is the only stale-seat recovery.
 - **Identity is authenticated, never registry-only.** The registry
-  (`instance.json`, 0600) is an unauthenticated hint containing the scope,
-  canonical profile path, `instanceId`, Host PID, loopback origin, protocol
-  `dsh-pi-tui/local/1`, installed bundle/DSH versions and the installed-build
-  fingerprint. Its identity material is versioned by schema: Linux schema 1
-  carries the `/proc/<pid>/stat` starttime, while macOS schema 2 carries the
-  complete PR-1 Darwin kernel identity (boot session, unique process id, process
-  UUID and start timestamp as exact decimal strings). Readiness requires the
-  official `dsh-client-connection` `/connect` launch-token exchange (signed
+  (`instance.json`; a newly written file is 0600) is an unauthenticated hint
+  containing the scope, canonical profile path, `instanceId`, Host PID,
+  loopback origin, protocol `dsh-pi-tui/local/1`, installed bundle/DSH versions
+  and the installed-build fingerprint. Its identity material is versioned by
+  schema: Linux schema 1 carries the `/proc/<pid>/stat` starttime, while macOS
+  schema 2 carries the complete PR-1 Darwin kernel identity (boot session,
+  unique process id, process UUID and start timestamp as exact decimal
+  strings). Readiness requires the official `dsh-client-connection` `/connect`
+  launch-token exchange (signed
   Cookie) and the owner-only authenticated identity Fetch route
   `/api/pi-tui.local-host`, with every identity field strictly equal to the
   registry and the live kernel identity re-read as the SAME process. An
@@ -304,11 +308,14 @@ the kernel seat where one is required.
   Session, Workspace registration, file content, write, shutdown, approval or
   version-switch operation.
 - **Secret boundary.** The launch token lives only in the Host process and its
-  0600 `launch.json` (atomic same-directory rename); the Client keeps its own
-  Cookie in memory only. Neither token, Cookie nor `connectUrl` may appear in
-  the registry, stdout/stderr, logs, argv or environment. The registry and
-  launch files are 0600, the run directory 0700, and unsafe ownership, modes or
-  symlinks fail closed.
+  `launch.json` (a new file is written 0600 with an atomic same-directory
+  rename); the Client keeps its own Cookie in memory only. Neither token,
+  Cookie nor `connectUrl` may appear in the registry, stdout/stderr, logs, argv
+  or environment. New registry/launch files are 0600 and a new run directory is
+  0700; an existing user-chosen owner or mode is not a read policy and is never
+  rewritten. The managed internal files still fail closed on a final-path
+  symlink (`O_NOFOLLOW`), a non-regular file, an oversized record, a malformed
+  schema, a registry/launch mismatch and any unauthenticated Host identity.
 - **Lifecycle.** A Client exit, crash or HUP disposes only its own Client
   subtree, official transport and Client root; a `qualification` Client also
   releases its qualification-only Client seat, while a `surface` Client holds
@@ -416,69 +423,93 @@ the kernel seat where one is required.
 
 ### Profile-scoped Host process manager
 
-A public daemon cold start that finds no reusable authenticated Host asks the
-profile-scoped Host process manager to bring one up. The manager decides only the
-Host's OS supervision; it never changes the Host business services, the
-authenticated carrier, the Session/Writer authority or readiness.
+The basic daemon is an independent Host process. A public `daemon` cold start
+that finds no reusable authenticated Host brings one up without requiring any
+system service manager; the profile-scoped manager facts decide only OS
+supervision, never the Host business services, the authenticated carrier, the
+Session/Writer authority or readiness.
 
 - **Manager vs. authentication authority.** The manager answers "how is the Host
   OS process supervised", never "is a Host ready". When a live Host is already
   reusable it is authenticated and reused before any manager work; the manager
-  never replaces, adopts, kills or migrates a live Host (including a legacy
-  detached one, a compatible different build, or one without a product unit).
-  Readiness remains the official `/connect` Cookie + authenticated identity echo
-  + `/proc` starttime handshake. A manager `ActiveState=active` or a
-  `systemctl start` returning 0 is only a submitted request, never `Ready`.
-- **Three-state availability, fail-closed.** Manager usability is a real request
-  to the user manager (`systemctl --user show-environment`), classified as
-  `available`, `absent` or `error`. A non-zero reply, a timeout, a broken bus, a
-  permission failure, or an endpoint that exists but cannot be used is a stable
-  `HOST_MANAGER_ERROR`; it never degrades. Fallback is used only on a strictly
-  corroborated `absent`, proven two independent ways with no live
-  `/run/user/<uid>/systemd/private` or user bus socket: (a) a definitive
-  no-systemd statement — the fixed `systemctl` binary is missing, or systemd is
-  not the init system — or (b) an explicit no-user-bus failure with a system
-  manager that reports `user@<uid>.service` as `inactive`/`not-found`. A
-  connect refusal, permission error, timeout or any unconfirmable/contradictory
-  state is `error`, never `absent`.
+  never replaces, adopts, kills or migrates a live Host (including a compatible
+  different build or one without a product unit). Readiness remains the official
+  `/connect` Cookie + authenticated identity echo + `/proc` starttime handshake.
+  A manager `ActiveState=active` or a `systemctl start` returning 0 is only a
+  submitted request, never `Ready`.
+- **The installed unit is the ONLY manager-IO admission.** A public cold start
+  first authenticates and reuses a live Host. Only when it must start one does it
+  inspect whether THIS Profile has an installed unit: no unit (or no user unit
+  directory) means an immediate detached Host spawn with no user-manager probe
+  and no `systemctl` invocation at all, so a missing, broken or absent user
+  manager cannot affect the basic daemon. An installed unit must be loaded by the
+  real manager with this Profile's metadata, installed build and canonical
+  `FragmentPath`; it is then started through exactly one
+  `systemctl --user start <verified-name>`. A manager error, an unloaded unit or
+  a conflicting `FragmentPath` is a hard `HOST_MANAGER_START_FAILED` /
+  `HOST_MANAGER_UNIT_CONFLICT` and never degrades to a detached process.
 - **Public vs. internal start boundary.** Only the real public surface launch —
   a strictly-decoded public Client launch envelope with no internal exact-id
-  handoff — requests a managed start. Internal qualification/peer/manual surface
-  launches and the Client reexec handoff keep the exact historic detached
-  process path and install no user unit.
+  handoff — requests the public start (`hostStartPolicy: 'public'`). Internal
+  qualification/peer/manual surface launches and the Client reexec handoff keep
+  the exact historic detached process path and never consider a user unit.
 - **User-owned unit identity.** The systemd user unit belongs to the user. Its
   identity is the exact profile unit name
   (`dsh-pi-tui@<slug>-<scope prefix>.service`), the
   `X-DshPiTuiOwner`, `X-DshPiTuiScopeId`, `X-DshPiTuiProfileIdentity` and
   `X-DshPiTuiInstallBuild` metadata, and the running manager's canonical
   `FragmentPath` matching the canonical target of that profile unit path. The
-  target must be a readable regular file; an existing legal 0644 unit and a
-  user-created symlink to such a target are supported. Runtime directives —
-  including `ExecStart`, `WorkingDirectory`, `Environment`, `Restart`,
-  `ExecStartPre`, `ExecStop` and drop-ins — belong to the user and systemd and
-  are not unit identity requirements. Host authentication and `MainPID` still
-  prove readiness and supervision separately.
-- **Initial installation and reuse.** A missing unit is created atomically as
-  0600 under the account home's user-unit directory, with no overwrite. The
-  running manager's `UnitPath` must include that directory before installation.
-  The initial definition uses validated installation facts and minimal official
+  target must be a readable regular file; an existing legal unit and a
+  user-created symlink to such a target are supported. The user's installer
+  layout is not judged: an existing unit/account directory may be 0755/0775, a
+  legal directory symlink, a shared package store or a root-owned system install.
+  Runtime directives — including `ExecStart`, `WorkingDirectory`, `Environment`,
+  `Restart`, `ExecStartPre`, `ExecStop` and drop-ins — belong to the user and
+  systemd and are not unit identity requirements. Host authentication and
+  `MainPID` still prove readiness and supervision separately.
+- **Explicit installation and reuse.** `daemon install` is the ONLY path that
+  writes a unit. It requires a genuinely reachable systemd user manager, proven
+  by a real bounded `systemctl --user` request BEFORE any write. The target is
+  the fixed `<account-home>/.config/systemd/user`; it is NOT required to appear
+  in the pre-write `UnitPath`, because systemd omits a still-empty directory
+  from that property. A FRESH unit name is also checked against the LIVE manager
+  first: when the manager already runs this exact unit name from another
+  existing file (a foreign service), the install refuses before any write or
+  reload. Only a cached `FragmentPath` that is definitively missing (ENOENT —
+  an obsolete cache of a removed file) may be reloaded away; an inaccessible or
+  otherwise unresolvable loaded source stays refused. Any post-write failure (a rejected
+  reload, a unit the manager still reports `not-found`, a post-reload state
+  query that itself fails, or a `FragmentPath` that does not adopt the fresh
+  file) removes exactly the file this install
+  created, so a failed install never leaves a poisoned unit that blocks the
+  basic daemon. The post-write `daemon-reload` plus the manager's real
+  `LoadState`/`FragmentPath` are the load authority. The initial definition is
+  created atomically as 0600 with
+  no-overwrite, uses validated installation facts and minimal official
   environment anchors, carries no token, Cookie, secret, one-shot backend
-  selector or qualification injection, and is not enabled automatically. An
-  existing unit with matching identity is reused without restoring runtime
-  defaults. `daemon-reload` is needed only for initial installation or a verified
-  unit not yet loaded by the manager; a loaded matching unit is not reloaded on
-  every start. A foreign identity, different install build or mismatched
-  canonical `FragmentPath` is `HOST_MANAGER_UNIT_CONFLICT` and is never
-  overwritten; cross-build replacement belongs to an explicit upgrade flow.
-- **Fallback and stop ownership.** The only fallback is the strict-absence
-  detached process spawn with its private 0600 `host.log`, no periodic
-  auto-restart (only the manager restarts a supervised Host). Host stop remains
-  the Host's own `runProfile` shutdown owner; the manager only sends the OS
-  signal, and a Client exit/crash never stops the Host.
+  selector or qualification injection, and is never enabled, started, stopped or
+  restarted. A same-identity unit is reused without restoring runtime defaults
+  and without being rewritten. A FRESHLY created unit always gets exactly one
+  `daemon-reload` BEFORE any cached `LoadState`/`FragmentPath` check (even when
+  the manager still caches an older definition at the same path), so a later
+  `start` can never dispatch a stale `ExecStart`; if that reload fails, the
+  freshly created file is removed so a retry is a fresh install rather than a
+  silent reuse of the cached unit. An existing loaded same-identity unit is not
+  reloaded on reinstall, while an existing verified unit the manager has not
+  loaded gets that one reload before `FragmentPath` verification. A foreign identity,
+  different install build or mismatched canonical
+  `FragmentPath` is `HOST_MANAGER_UNIT_CONFLICT` and is never overwritten;
+  cross-build replacement belongs to an explicit upgrade flow. Installing a unit
+  beside a running independent Host does not migrate it: the Host keeps running
+  and is still `manager=process`.
+- **Stop/log ownership.** An independent Host writes its private `host.log` and
+  has no periodic auto-restart (only the manager restarts a supervised Host).
+  Host stop remains the Host's own `runProfile` shutdown owner; the manager only
+  sends the OS signal, and a Client exit/crash never stops the Host.
 
 ### Daemon management commands
 
-`dsh --profile pi-tui daemon status|start|stop|restart|logs|uninstall` is the ONE
+`dsh --profile pi-tui daemon status|start|stop|restart|logs|install|uninstall` is the ONE
 public management grammar. It is nested under the existing command, needs no
 interactive TTY, and operates on the official `profileContext` Profile alone: the
 `DSH_PI_TUI_BACKEND` environment value, the persisted `tui-startup.backend` value
@@ -509,20 +540,24 @@ stdout/stderr.
   run the official authenticated `/connect` handshake. Its stable `key=value`
   block carries `profile`, `manager`, `user-manager`, `host`, `unit`,
   `unit-state` and `compatibility` (plus a bounded `pid`/`instance` while one
-  is live). `manager`
-  names the VERIFIED supervision attribution (`systemd` for a verified loaded
-  profile unit under a LIVE manager, `process` for an authenticated
-  strict-absence Host, otherwise
-  `unmanaged`); it never means "systemctl exists" — a unit FILE on disk without
-  a live manager proves nothing. `ActiveState=active` or a
-  registry PID is not readiness: a supervised but unauthenticated Host is
-  `starting`/`unresponsive`, and an unreadable/contradictory state is `unknown`.
+  is live). With no installed unit the command issues NO manager query and
+  reports `user-manager=not-checked`; `user-manager=available|error` only
+  describes the real `systemctl show` of an installed unit, and no absence is
+  inferred or reported as `absent`. `manager` names the VERIFIED supervision
+  attribution: `systemd` only when the loaded unit's `MainPID` equals the
+  authenticated Host PID, `process` for a verified independent Host (even when a
+  user bus exists), otherwise `unmanaged`; it never means "systemctl exists".
+  `unit` is the installed-unit fact and is independent of `manager`.
+  `ActiveState=active` or a registry PID is not readiness: a supervised but
+  unauthenticated Host is `starting`/`unresponsive`, and an
+  unreadable/contradictory state is `unknown`.
   A manager-reported `activating` unit is a Host that may still come up: it is
   reported `starting` (never `stopped`) even before any `MainPID` exists, while
   any other unconfirmed transition (`deactivating`, `reloading`, an unrecognized
-  `ActiveState`) is `unknown` with a nonzero exit — including when the Host's
-  own handshake still answers, because the supervisor may retire it before any
-  caller acts on that answer. An `active`/`activating` unit whose `MainPID` is
+  `ActiveState`) beside a live Host keeps the authenticated `host=ready` truth,
+  reports `manager=unmanaged` (neither independent-process nor systemd
+  supervision is proven), and exits nonzero (the supervisor may retire it
+  before any caller acts). An `active`/`activating` unit whose `MainPID` is
   NOT the authenticated Host's PID is an ownership refusal, and an ended unit
   (`inactive`/`failed`) beside a live Host supervises nothing. `MainPID=0` alone
   never proves a Host is stopped.
@@ -536,19 +571,22 @@ stdout/stderr.
   the same combination nonzero, because its question — "is everything
   confirmed?" — includes the supervisor). Otherwise it creates only the needed
   0700 scope run directory and asks the existing
-  `ensureLocalHost({hostStartPolicy:'public-managed'})` to bring one up, then
+  `ensureLocalHost({hostStartPolicy:'public'})` to bring one up, then
   waits for authenticated readiness. A manager error never degrades to the
   process fallback; a different installed build or unknown unit is a conflict;
   a live unauthenticated/incompatible Host is never replaced or killed.
-- **stop needs proven supervision.** A verified owned profile unit is stopped
-  only through `systemctl --user stop <verified-name>`, followed by a bounded
-  wait for the original MainPID to exit. With a strictly absent user manager, an
-  authenticated live fallback Host is stopped only by one SIGTERM to the
-  verified original PID after re-checking the kernel starttime and the product
-  Host entry command identity; no process group and no `pkill`. A live Host with
-  no provable ownership, a foreign or wrong-scope unit, a stale
-  PID or an identity mismatch is refused instead of being signalled. A timeout
-  is exit 5 and never escalates to SIGKILL or claims `stopped`.
+- **stop needs proven supervision.** A loaded `active`/`activating` profile unit
+  whose `MainPID` is the authenticated Host is stopped only through
+  `systemctl --user stop <verified-name>`, followed by a bounded wait for the
+  original MainPID to exit. An independent authenticated Host — no unit, a unit
+  reported `inactive`/`failed`, or an installed but unloaded unit — is stopped
+  only by one SIGTERM to the verified original PID after re-authentication,
+  re-checking the kernel starttime and the product Host entry command identity;
+  this routing does not depend on whether the machine happens to have systemd.
+  No process group and no `pkill`. A live Host beside an active unit with a
+  different `MainPID`, a unit in flux, a foreign or wrong-scope unit, or an
+  unreadable manager is refused instead of being signalled. A timeout is exit 5
+  and never escalates to SIGKILL or claims `stopped`.
 - **Authentication or compatibility failure is reported, not auto-recovered.**
   A live Host that fails the Cookie/identity/starttime handshake is
   `unresponsive`; one whose protocol or DSH runtime differs is `incompatible`.
@@ -558,8 +596,8 @@ stdout/stderr.
   the manager is available and the unit's `MainPID` is the live Host PID the
   command is about to stop (or there is no live registry Host): readiness and
   compatibility are Host verdicts, not the unit-ownership verdict. Foreign
-  identity, wrong scope, wrong `FragmentPath`, a mismatched `MainPID` and a
-  strict-absence Host without a fresh authenticated identity remain refusals.
+  identity, wrong scope, wrong `FragmentPath`, a mismatched `MainPID` and an
+  independent Host without a fresh authenticated identity remain refusals.
   A restart still stops the old instance and proves a new authenticated Ready
   instance; a failed recovery reports the real failure. An ordinary surface
   startup failure prints the controlled code, states that the Host was not
@@ -576,12 +614,18 @@ stdout/stderr.
   whose install build differs from THIS installation is refused (exit 3) and
   left untouched: cross-build unit replacement belongs to the explicit upgrade
   flow, not to a management command — the unit metadata alone cannot prove a
-  historical build's compatibility. `uninstall` stops the verified unit, unlinks
-  only this Profile's unit path, and reloads. For a symlink this leaves its source
-  target intact; drop-in files are also retained. It never removes the Profile,
-  `DSH_HOME`, Sessions, credentials, `launch.json` or another Profile's unit, and
-  it never kills a strict-absence fallback Host. A reload failure is
-  reported as a failure, never as a completed uninstall. A cold `start` never
+  historical build's compatibility. An `install` only writes and verifies this
+  Profile's unit; it never starts, stops, enables or migrates anything, so a
+  running independent Host keeps its instance and stays `manager=process`.
+  `uninstall` is idempotent when no unit is installed; it stops only a running
+  verified unit whose `MainPID` is the live Host (or a unit with no live Host),
+  unlinks only this Profile's verified unit path, and reloads. An
+  `inactive`/unloaded unit is unlink-only and leaves an independent running Host
+  untouched; that successful result claims no interrupted Session. For a symlink
+  the unlink leaves its source target intact; drop-in files are also retained. It
+  never removes the Profile, `DSH_HOME`, Sessions, credentials, `launch.json` or
+  another Profile's unit, and it never kills an independent Host. A reload
+  failure is reported as a failure, never as a completed uninstall. A cold `start` never
   silently upgrades a different build. A mutating verb's exit 0 requires the
   post-transition snapshot to contain NO blocking failure AND the expected
   outcome: `start`/`restart` need an authenticated Ready Host (plus a new
@@ -590,36 +634,43 @@ stdout/stderr.
   observation never outranks a supervision/ownership failure, and an uninstall
   whose OS actions committed but whose confirmation failed reports the failure
   (no reinstall, no rollback).
-- **logs use one proven source.** An owned profile unit reads the fixed
-  `/usr/bin/journalctl --user-unit <verified-name> --no-pager -o cat` with a
-  bounded line count; only a strictly absent user manager may tail the private
-  0600 `host.log` in this profile scope. There is no arbitrary path/command
-  input, no journal fallback to an unrelated file and no business side effect;
-  missing/unreadable output is exit 4. Output is bounded and best-effort
+- **logs use one proven source.** A loaded profile unit that actually governs
+  the current Host (or governs a stopped/starting profile) reads
+  `journalctl --user-unit <verified-name> --no-pager -o cat` with a bounded
+  line count. An independent Host, or a profile with no loaded unit, reads the
+  scope `host.log` (new files 0600; an existing user mode is readable, the final
+  path is never followed as a symlink, and the tail is byte-capped). The source
+  follows the SAME verified attribution as `status`: a live Host beside a running
+  unit whose `MainPID` differs, a unit in flux, or an unreadable manager is an
+  explicit exit-4 log-source failure and never a guessed file. There is no
+  arbitrary path/command input and no business side effect; missing/unreadable
+  output is exit 4. Output is bounded and best-effort
   sanitized (ANSI/control sequences, token/cookie/Authorization and
   connect/launch URL material); the user-facing notice states that the
   sanitization cannot promise every secret shape in free-form user text.
 - **Mutating verbs serialize per Profile, not globally.** `start`, `stop`,
-  `restart` and `uninstall` hold one short-lived profile-scoped Linux abstract
+  `restart`, `install` and `uninstall` hold one short-lived profile-scoped Linux abstract
   admin seat (`\0dsh-pi-tui-admin-<scope prefix>`); the kernel releases it when
   the command exits, so there is no lock file or persistent state. A second
   concurrent mutating command for the same Profile gets `DAEMON_CONTROL_BUSY`
   and exit 5 before any Host/unit mutation; another Profile is unaffected. A
   normal Client cold start keeps its existing Host kernel-singleton semantics and
   takes no admin seat.
-- **Running-work boundary.** `stop`/`restart`/`uninstall` are explicit user Host
-  control. They can interrupt a running Session, accepted Turn, tool or pending
-  Interaction; the official Host `runProfile` shutdown remains the only shutdown
-  owner and the management command never answers, cancels, replays or rolls back
-  a pending business result. The CLI prints a stable line that current work may
-  be interrupted and that unsettled writes are not replayed automatically.
+- **Running-work boundary.** `stop`/`restart` are explicit user Host control and
+  can interrupt a running Session, accepted Turn, tool or pending Interaction;
+  `uninstall` prints the same warning only when it actually stopped a running
+  unit, and `install` never prints it. The official Host `runProfile` shutdown
+  remains the only shutdown owner and the management command never answers,
+  cancels, replays or rolls back a pending business result. The CLI prints a
+  stable line that current work may be interrupted and that unsettled writes are
+  not replayed automatically.
 
 
 ### Host-owned local ACP v1 front door (Unix socket)
 
 Alongside the authenticated loopback carrier, the one Host process can open ONE
 bounded ACP v1 front door over a pathname Unix domain socket inside its own
-0700 profile scope: `<scope.dir>/acp.sock`. It is a Host-owned ingress owned by
+private profile scope: `<scope.dir>/acp.sock`. It is a Host-owned ingress owned by
 the same Host entry that already holds the kernel Host seat and the Ready
 commit; it is never a package export, a second Host, a second Agent/Session
 owner, a TCP/HTTP endpoint, or an ACP byte stream on the Host's stdout (the
@@ -640,8 +691,10 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
   never rewrites the preference. Different canonical Host profiles keep their own
   scope and socket; the path is never derived from the Client cwd, `$PWD` or a
   guessed profile hash.
-- **Unix socket only, 0700/0600.** The scope directory stays 0700; the socket
-  inode is owned by the current UID and forced to 0600 before Ready. There is
+- **Unix socket only, private new files.** A scope directory THIS product
+  creates is 0700; an existing user-chosen scope mode is neither rewritten nor
+  used as an admission gate. The socket inode is owned by the current UID and
+  forced to 0600 before Ready. There is
   no TCP/HTTP `/acp` port and no ACP JSON on the Host stdout. The bind uses a
   Linux `/proc/self/fd/<dirfd>/acp.sock` short path so a long logical
   `DSH_HOME`/scope pathname still works; the public/logical path stays

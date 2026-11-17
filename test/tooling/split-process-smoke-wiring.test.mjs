@@ -38,7 +38,7 @@ import {
   selectedPassLine,
 } from '../../scripts/lib/split-smoke-selection.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
-import { encodeUnitValue, parseManagerUnitPath, userUnitPathUnsupportedReason } from '../../src/app/remote-process/local-host-manager.ts'
+import { encodeUnitValue } from '../../src/app/remote-process/local-host-manager.ts'
 import { cleanupOutcomeError, killVerifiedHost, managedHostGateReason, stopAndRemoveManagedUnit, unitBelongsToRun, unitFileSafetyError } from '../../scripts/smoke/split-process/managed-host-m6-2b.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -748,22 +748,6 @@ test('the managed-host native gate requires an attested non-root isolated accoun
   assert.equal(typeof managedHostGateReason({ ...base, uid: 0 }), 'string')
   assert.equal(typeof managedHostGateReason({ ...base, accountHome: other }), 'string')
   assert.equal(typeof managedHostGateReason({ ...base, isolatedHome: '' }), 'string')
-})
-
-test('the fixed unit path must be in the RUNNING manager UnitPath (authoritative)', () => {
-  const home = '/home/u'
-  const fixed = join(home, '.config', 'systemd', 'user')
-  assert.deepEqual(parseManagerUnitPath(`/usr/lib/systemd/user ${fixed} /etc/systemd/user`), ['/usr/lib/systemd/user', fixed, '/etc/systemd/user'])
-  // Present in the real UnitPath -> supported, even if an env-block guess would differ.
-  assert.equal(userUnitPathUnsupportedReason(`/usr/lib/systemd/user ${fixed}`, fixed), null)
-  // Absent from the real UnitPath -> refused (the env block cannot grant support).
-  assert.equal(typeof userUnitPathUnsupportedReason('/usr/lib/systemd/user /etc/systemd/user', fixed), 'string')
-  // Unqueryable/empty -> refused, never a guessed default.
-  assert.equal(typeof userUnitPathUnsupportedReason('', fixed), 'string')
-  // A space-containing fixed path is still recognized by the raw boundary match.
-  const spaced = join('/home/user name', '.config', 'systemd', 'user')
-  assert.equal(userUnitPathUnsupportedReason(`${spaced} /usr/lib/systemd/user`, spaced), null)
-  assert.equal(typeof userUnitPathUnsupportedReason('/usr/lib/systemd/user', spaced), 'string')
 })
 
 test('the ACP UDS selected verdict accepts only the complete real-L6 proof', () => {

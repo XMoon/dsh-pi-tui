@@ -19,7 +19,7 @@ import { join } from 'node:path'
 
 import xterm from '@xterm/headless'
 import { findIsolatedProcesses, killIsolatedProcesses } from '../../lib/split-smoke-processes.mjs'
-import { cleanupOutcomeError, stopAndRemoveManagedUnit } from './managed-host-m6-2b.mjs'
+import { cleanupOutcomeError, stopAndRemoveManagedUnit, unitFactsFor } from './managed-host-m6-2b.mjs'
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { hostSessionHeader, hostSessionEvents, hostAssistantHasText } from '../../lib/split-smoke-sessions.mjs'
 
@@ -191,18 +191,41 @@ async function waitForPaint(output, label, timeoutMs) {
 
 /** The cleanup: stop any owned managed unit, reap the CLI group, kill any isolated Host/Client. */
 async function reap(child, installation) {
-  // A daemon Client cold start may have created a managed unit (systemd
-  // `Restart=on-failure`); stop it through the manager BEFORE killing the Host so
-  // it cannot be resurrected, and remove the owned unit so the next scene starts
-  // from a truly Host-free state. No-op when no owned unit exists (e.g. CI's
-  // no-user-manager fallback). A this-run unit that fails to clean up must fail
-  // the scene instead of leaving a supervised Host behind.
+  // A public daemon cold start no longer installs a unit (systemd is explicit via
+  // `daemon install`), so this is normally a no-op. If a unit was installed by an
+  // earlier explicit step, stop it through the manager BEFORE killing the Host so
+  // `Restart=on-failure` cannot resurrect it, and remove that owned unit so the
+  // next scene starts from a truly Host-free state. A this-run unit that fails to
+  // clean up must fail the scene instead of leaving a supervised Host behind.
   const cleanup = stopAndRemoveManagedUnit(installation)
   try { process.kill(-child.pid, 'SIGTERM') } catch { /* already gone */ }
   await sleep(200)
   if (cleanup.removed === true || cleanup.reason === 'absent') killIsolatedProcesses(installation.dshHome)
   const outcomeError = cleanupOutcomeError(cleanup)
   if (outcomeError !== undefined) throw new SplitSmokeAssertionError(outcomeError)
+}
+
+/** Run ONE public daemon management command without a TTY. */
+function runDaemonStatus(installation) {
+  const [executable, ...prefix] = installation.dshInvocation
+  const result = spawnSync(executable, [...prefix, '--profile', 'pi-tui', 'daemon', 'status'], {
+    cwd: installation.profileDir,
+    env: installation.env,
+    encoding: 'utf8',
+    timeout: 120_000,
+    shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const lines = (result.stdout ?? '').split('\n')
+  const start = lines.findLastIndex(line => line.startsWith('profile='))
+  const fields = {}
+  if (start >= 0) {
+    for (const line of lines.slice(start)) {
+      const at = line.indexOf('=')
+      if (at > 0 && !line.includes(' ')) fields[line.slice(0, at)] = line.slice(at + 1)
+    }
+  }
+  return { status: result.status, stderr: result.stderr ?? '', fields }
 }
 
 export async function runPublicDaemonEntry({ installation, trace }) {
@@ -230,7 +253,18 @@ export async function runPublicDaemonEntry({ installation, trace }) {
     assert(counts.host === 1, `public-entry daemon: expected exactly one Host, saw ${counts.host}`)
     assert(counts.client === 1, `public-entry daemon: expected exactly one Client, saw ${counts.client}`)
     await waitForPaint(positive.output, 'the daemon Client', 120_000)
-    trace('m6-2a-public-daemon-mounted', { host: counts.host, client: counts.client })
+    assert(!existsSync(unitFactsFor(installation).unitPath),
+      'a public daemon cold start with no installed unit must not create a systemd unit')
+    // P01 on a real host: while the public TUI runs with no installed unit, the
+    // read-only status must report the authenticated independent Host and must
+    // NOT query the user manager at all.
+    const status = runDaemonStatus(installation)
+    assert(status.status === 0, `daemon status beside the public daemon failed: ${status.stderr.slice(-500)}`)
+    assert(status.fields.host === 'ready', `daemon status did not report the authenticated Host: ${JSON.stringify(status.fields)}`)
+    assert(status.fields.manager === 'process', `daemon status did not attribute the independent Host to process: ${JSON.stringify(status.fields)}`)
+    assert(status.fields['user-manager'] === 'not-checked', `daemon status queried the user manager without an installed unit: ${JSON.stringify(status.fields)}`)
+    assert(status.fields.unit === 'none', `daemon status invented an installed unit: ${JSON.stringify(status.fields)}`)
+    trace('m6-2a-public-daemon-mounted', { host: counts.host, client: counts.client, manager: status.fields.manager, userManager: status.fields['user-manager'] })
     // Exit the real TUI through the ordinary /exit key path.
     positive.child.stdin.write('/exit\r')
     const exit = await Promise.race([positive.exit, sleep(60_000).then(() => ({ code: 'timeout', signal: null }))])

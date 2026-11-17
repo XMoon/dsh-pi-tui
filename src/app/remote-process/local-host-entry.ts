@@ -1210,7 +1210,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
   const scope = scopeFromInstalledProfile({
     dshHome,
     profileDir: dsh.resolveProfileDir(options.profile, dshHome),
-    packageRoot: installedPackageRootFromEntry(import.meta.url),
+    packageRoot: installedPackageRootFromEntry(process.argv[1] === undefined ? import.meta.url : pathToFileURL(process.argv[1]).href),
     dshVersion: readInstalledDshVersion(options.dshAnchor),
   })
   scratchOwner.scopeDir = scope.dir

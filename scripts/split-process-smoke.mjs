@@ -11,7 +11,7 @@
  *   T02 authenticated loopback HTTP + one real WebSocket `$events` generation
  *   T03/T04/T06 unauthenticated, wrong-token, wrong-identity refusals
  *   T05 one mux socket per authenticated peer; old Peer is dead after release
- *   T07 private-file permissions/symlinks fail closed
+ *   T07 new private files are 0600/0700, final-path symlinks fail closed, existing user modes are accepted
  *   T08 sixteen concurrent Host launches produce exactly one Host
  *   T09 two REAL Surface Clients (distinct PTYs/PIDs) admit to the SAME Host
  *   T09Q two qualification Clients race the ONE qualification-only Client seat

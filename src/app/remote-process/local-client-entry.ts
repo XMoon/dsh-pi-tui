@@ -397,12 +397,7 @@ export function inspectClientReexecTarget(packageRoot: string, dshVersion: strin
   } catch (error) {
     throw new Error('local client reexec: the target package root is not readable', { cause: error })
   }
-  const rootInfo = lstatSync(root)
-  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
-  if (!rootInfo.isDirectory()) throw new Error('local client reexec: the target package root is not a directory')
-  if (uid !== undefined && rootInfo.uid !== uid) {
-    throw new Error('local client reexec: the target package root is not owned by this process user')
-  }
+  if (!lstatSync(root).isDirectory()) throw new Error('local client reexec: the target package root is not a directory')
   let manifest: unknown
   try {
     manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as unknown
@@ -419,15 +414,27 @@ export function inspectClientReexecTarget(packageRoot: string, dshVersion: strin
   if (!isRecord(devDependencies) || devDependencies[DSH_PIN_PACKAGE] !== dshVersion) {
     throw new Error('local client reexec: the target package is pinned to a different DSH runtime')
   }
+  // The named entry keeps `<root>/dist/local-client.mjs` as the INVOKED path;
+  // the replacement Client locates its package root from that path, so a legal
+  // dist/entry symlink still resolves this exact package root.
   const entry = join(root, 'dist', 'local-client.mjs')
-  let entryInfo
+  let realEntry: string
   try {
-    entryInfo = lstatSync(entry)
+    realEntry = realpathSync(entry)
   } catch (error) {
     throw new Error('local client reexec: the target package has no Client entry', { cause: error })
   }
-  if (entryInfo.isSymbolicLink() || !entryInfo.isFile() || (uid !== undefined && entryInfo.uid !== uid)) {
-    throw new Error('local client reexec: the target Client entry must be a regular file owned by this process user')
+  if (!lstatSync(realEntry).isFile()) {
+    throw new Error('local client reexec: the target Client entry must resolve to a regular file')
+  }
+  let entryRoot: string
+  try {
+    entryRoot = installedPackageRootFromEntry(pathToFileURL(entry).href)
+  } catch (error) {
+    throw new Error('local client reexec: the target Client entry cannot locate its installed package root', { cause: error })
+  }
+  if (entryRoot !== root) {
+    throw new Error('local client reexec: the target Client entry resolves a different installed package root')
   }
   return {
     packageRoot: root,
@@ -1163,7 +1170,8 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   }
   const hostModules = await loadOfficialClientHost(options.dshAnchor)
   const dshHome = hostModules.resolveDshHome()
-  const packageRoot = installedPackageRootFromEntry(import.meta.url)
+  const invokedEntry = process.argv[1]
+  const packageRoot = installedPackageRootFromEntry(invokedEntry === undefined ? import.meta.url : pathToFileURL(invokedEntry).href)
   const profileDir = hostModules.resolveProfileDir(options.profile, dshHome)
   const scope = scopeFromInstalledProfile({
     dshHome,
@@ -1417,7 +1425,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       // qualification/peer/manual surface and the reexec expectation keep the
       // historical process path and never install a user unit.
       ...(options.mode === 'surface' && launchEnvelope !== undefined && expectedHostInstanceId === undefined
-        ? { hostStartPolicy: 'public-managed' as const }
+        ? { hostStartPolicy: 'public' as const }
         : {}),
     })
     startupAbort.signal.throwIfAborted()

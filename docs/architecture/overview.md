@@ -212,9 +212,10 @@ duplicates it (see [`../tsp/overview.md`](../tsp/overview.md)).
 ## Direct and Remote
 
 Direct is the current production/default provider. Remote is the internal,
-Linux-only split-process backend with no public selector: a real Host process
-plus zero or more real Client processes, each composing its own Context (the
-Host lifetime is independent of Client attachment). Both implement the same
+Linux-only split-process backend selected by the public `daemon` backend
+(`direct` remains the default): a real Host process plus zero or more real
+Client processes, each composing its own Context (the Host lifetime is
+independent of Client attachment). Both implement the same
 transport-neutral semantic contracts defined by `src/runtime/**`; the contract
 is never derived from the Direct implementation shape. Each Remote Client
 composes through ONE sanctioned lazy edge

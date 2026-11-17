@@ -19,8 +19,10 @@
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { constants as osConstants } from 'node:os'
-import { constants, closeSync, existsSync, fchmodSync, fstatSync, lstatSync, openSync, realpathSync, statSync, writeSync } from 'node:fs'
+import { constants, closeSync, existsSync, fchmodSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, statSync, writeSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
+import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { installedPackageRootFromEntry, readInstalledDshVersion } from './local-scope.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
@@ -56,26 +58,66 @@ export function encodeLaunchEnvelope(startup: TuiDaemonClientStartup): string {
 }
 
 /**
- * Resolve the installed Client entry from THIS package root and prove it is a
- * real regular file owned by this process user. A missing/non-regular/symlinked
- * entry is a hard failure — never a fallback to a source tree or `tsx`.
+ * Resolve the installed Client entry from THIS package root and prove its real
+ * target is a regular file. A shared npm package, a root-owned system install
+ * and a legal entry symlink are normal installs; only a missing or non-regular
+ * target is a hard failure — never a fallback to a source tree or `tsx`.
  */
 export function resolveClientEntry(packageRoot: string): string {
+  // The NAMED entry path is what the Client child receives; it locates its
+  // package root from that invoked path, so a legal dist/entry symlink still
+  // resolves THIS package root.
   const entry = join(packageRoot, 'dist', 'local-client.mjs')
-  let info
+  let real: string
   try {
-    info = lstatSync(entry)
+    real = realpathSync(entry)
   } catch (error) {
     throw new Error(`pi-tui daemon launcher: the Client entry ${entry} is missing`, { cause: error })
   }
-  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
-  if (info.isSymbolicLink() || !info.isFile()) {
-    throw new Error(`pi-tui daemon launcher: the Client entry ${entry} must be a regular file`)
+  if (!lstatSync(real).isFile()) {
+    throw new Error(`pi-tui daemon launcher: the Client entry ${entry} must resolve to a regular file`)
   }
-  if (uid !== undefined && info.uid !== uid) {
-    throw new Error(`pi-tui daemon launcher: the Client entry ${entry} is not owned by this process user`)
+  let expectedRoot: string
+  try {
+    expectedRoot = realpathSync(packageRoot)
+  } catch (error) {
+    throw new Error(`pi-tui daemon launcher: the package root ${packageRoot} is not readable`, { cause: error })
+  }
+  let entryRoot: string
+  try {
+    entryRoot = installedPackageRootFromEntry(pathToFileURL(entry).href)
+  } catch (error) {
+    throw new Error(`pi-tui daemon launcher: the Client entry ${entry} cannot locate its installed package root`, { cause: error })
+  }
+  if (entryRoot !== expectedRoot) {
+    throw new Error(`pi-tui daemon launcher: the Client entry ${entry} resolves a different installed package root`)
   }
   return entry
+}
+
+/**
+ * Resolve this installed bundle's package root through the OFFICIAL profile
+ * resolution. The launcher module itself may be reached through a symlinked
+ * `dist`, so its own module URL is not a reliable package-root locator.
+ */
+function resolveProfilePackageRoot(profileDir: string): string {
+  let manifestPath: string
+  try {
+    manifestPath = createRequire(join(profileDir, 'package.json')).resolve('@xmoon76/dsh-pi-tui/package.json')
+  } catch (error) {
+    throw new Error('pi-tui daemon launcher: the official profile does not resolve the installed @xmoon76/dsh-pi-tui', { cause: error })
+  }
+  const root = realpathSync(dirname(manifestPath))
+  let manifest: unknown
+  try {
+    manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+  } catch (error) {
+    throw new Error('pi-tui daemon launcher: the installed package manifest is not readable', { cause: error })
+  }
+  if (manifest === null || typeof manifest !== 'object' || (manifest as { readonly name?: unknown }).name !== '@xmoon76/dsh-pi-tui') {
+    throw new Error('pi-tui daemon launcher: the official profile resolves a different package')
+  }
+  return root
 }
 
 /**
@@ -416,7 +458,7 @@ export function apply(ctx: Context): void {
     return
   }
 
-  const packageRoot = installedPackageRootFromEntry(import.meta.url)
+  const packageRoot = resolveProfilePackageRoot(profileContext.dir)
   const entry = resolveClientEntry(packageRoot)
   const env = buildChildEnvironment(profileContext, encodeLaunchEnvelope(startup))
   // The daemon supervisor paints nothing: keep its diagnostics off the terminal.
@@ -480,7 +522,7 @@ function applyManagement(
   profileContext: ProfileContextLike,
   appExit: (code: number) => void,
 ): void {
-  const packageRoot = installedPackageRootFromEntry(import.meta.url)
+  const packageRoot = resolveProfilePackageRoot(profileContext.dir)
   const profile = {
     name: profileContext.name,
     dir: profileContext.dir,

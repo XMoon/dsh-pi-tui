@@ -137,13 +137,13 @@ export interface EnsureLocalHostOptions {
   readonly signal?: AbortSignal
   /**
    * How a cold Client with no reusable Host asks for the Host to be started.
-   * `undefined` is the historical detached process spawn (internal
-   * qualification/peer/manual paths). `public-managed` is the M6-2B public
-   * daemon path: the profile-scoped systemd user manager when safely available,
-   * the strict-absence process fallback otherwise. It never changes the wire,
-   * business or readiness semantics.
+   * `undefined` is the internal detached process spawn (qualification/peer/
+   * manual/reexec paths). `public` is the public daemon path: an installed,
+   * manager-loaded profile unit is started through systemd; with no installed
+   * unit the basic detached Host starts immediately and the user manager is
+   * never probed. It never changes the wire, business or readiness semantics.
    */
-  readonly hostStartPolicy?: 'public-managed'
+  readonly hostStartPolicy?: 'public' | 'public-managed'
 }
 
 /** Exact Linux registry keys; unknown fields are rejected, not ignored. */
@@ -515,9 +515,11 @@ export function assertHostPublicationIdentity(record: LocalInstanceRecord, scope
 }
 
 /**
- * Read one private scope file with `O_NOFOLLOW`, an owner/mode check and a hard
- * byte cap. Returns `undefined` for a missing file; every unsafe or malformed
- * file is a hard failure.
+ * Read one managed scope file with `O_NOFOLLOW`, a regular-file/type check and a
+ * hard byte cap. The user's existing owner/mode is NOT a read policy; the
+ * content still must pass the strict JSON/schema/instance checks. Returns
+ * `undefined` for a missing file; every unreadable or malformed file is a hard
+ * failure.
  */
 function readPrivateJsonFile(path: string, maxBytes: number, label: string): unknown | undefined {
   let fd: number
@@ -529,8 +531,8 @@ function readPrivateJsonFile(path: string, maxBytes: number, label: string): unk
   }
   try {
     const info = fstatSync(fd)
-    if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600) {
-      throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${label} must be a 0600 regular file owned by this uid`)
+    if (!info.isFile()) {
+      throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${label} must be a regular file`)
     }
     if (info.size > maxBytes) {
       throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${label} exceeds ${String(maxBytes)} bytes`)
@@ -886,7 +888,11 @@ export async function ensureLocalHost(options: EnsureLocalHostOptions): Promise<
     return await authenticateLocalHost(existing, scope, options.signal)
   }
 
-  const spawnFailure = options.hostStartPolicy === 'public-managed'
+  // Both public policies go through the cross-platform entry: macOS has no
+  // systemd user manager and detached-spawns there, while Linux delegates to
+  // the D0 installed-unit decision. A direct startPublicHostCandidate call here
+  // would reject Darwin before any Host could be spawned.
+  const spawnFailure = options.hostStartPolicy === 'public' || options.hostStartPolicy === 'public-managed'
     ? await startManagedHostCandidate(options)
     : spawnHostCandidate(options)
   const deadline = Date.now() + REGISTRY_WAIT_TIMEOUT_MS
