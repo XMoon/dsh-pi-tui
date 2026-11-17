@@ -309,7 +309,7 @@ export function applyRunnerWithRuntime(
   // The auto evidence must be re-observed at the first create boundary: a
   // Host restart / mount-view change between the mount and the create revokes
   // the automatic candidate instead of adopting a stale proof.
-  const autoWorkspaceRevalidate = remoteLaunch?.provenance === 'auto' && launchWorkspace?.kind === 'verified'
+  const autoWorkspaceRevalidate: ((signal?: AbortSignal) => Promise<boolean>) | undefined = remoteLaunch?.provenance === 'auto' && launchWorkspace?.kind === 'verified'
     ? launchWorkspace.revalidate
     : undefined
   /** The one automatic Workspace-Browser opening of this mounted surface. */
@@ -1254,6 +1254,16 @@ export function applyRunnerWithRuntime(
       diag.dispose()
       settleSurfaceCancelled('session launch resolution')
     }
+    /** The async Workspace proof must not let a newer launch intent inherit
+     *  its result: revision, status and WorkspaceId all have to still name the
+     *  launch this resolution captured. */
+    const workspaceIntentStillCurrent = (revision: number, workspaceId: string): boolean => {
+      const after = workspaceNextIntent.snapshot()
+      return after.revision === revision
+        && after.status === 'confirmed'
+        && after.intent?.kind === 'workspace-id'
+        && after.intent.workspaceId === workspaceId
+    }
     /**
      * Resolve `-c` against the official authorities: the confirmed Host
      * WorkspaceId (the existing preflight), the official membership baseline
@@ -1283,13 +1293,19 @@ export function applyRunnerWithRuntime(
       const workspaceId = workspace.intent.workspaceId
       const capturedRevision = workspace.revision
       const autoProvenance = workspace.provenance === 'auto'
-      const autoProofCurrent = (): boolean => !autoProvenance || autoWorkspaceRevalidate?.() === true
-      if (!autoProofCurrent()) {
-        return {
-          kind: 'stop',
-          notice: { text: 'Cannot continue: the verified local workspace changed — choose a Host workspace', kind: 'info' },
-        }
-      }
+      const autoProofCurrent = async (): Promise<boolean> =>
+        !autoProvenance || (autoWorkspaceRevalidate !== undefined && await autoWorkspaceRevalidate(lifecycleController.signal) === true)
+      const launchProofNotice = (): { readonly kind: 'stop'; readonly notice: { readonly text: string; readonly kind: 'info' } } => ({
+        kind: 'stop',
+        notice: { text: 'Cannot continue: the verified local workspace changed — choose a Host workspace', kind: 'info' },
+      })
+      const proofCurrent = await autoProofCurrent()
+      // The proof is async: abort or a newer Workspace revision always wins
+      // over a late result, including a late false that would otherwise publish
+      // a stale "choose a workspace" notice against a replaced launch.
+      if (lifecycleController.signal.aborted) return 'aborted'
+      if (!workspaceIntentStillCurrent(capturedRevision, workspaceId)) return { kind: 'superseded' }
+      if (!proofCurrent) return launchProofNotice()
       // ONE official membership baseline, released exactly once. A stream that
       // ends/fails before its baseline, or a baseline without the confirmed
       // WorkspaceId, is NOT an empty membership.
@@ -1365,12 +1381,13 @@ export function applyRunnerWithRuntime(
           diag.warn('startup continue target superseded', { workspace: workspaceId })
           return { kind: 'superseded' }
         }
-        if (!autoProofCurrent()) {
-          return {
-            kind: 'stop',
-            notice: { text: 'Cannot continue: the verified local workspace changed — choose a Host workspace', kind: 'info' },
-          }
+        const proofCurrent = await autoProofCurrent()
+        if (lifecycleController.signal.aborted) return 'aborted'
+        if (!workspaceIntentStillCurrent(capturedRevision, workspaceId)) {
+          diag.warn('startup continue target superseded after the workspace proof', { workspace: workspaceId })
+          return { kind: 'superseded' }
         }
+        if (!proofCurrent) return launchProofNotice()
         const continuedSessionId = chooseContinueSession(rows, membership.sessionIds)
         if (continuedSessionId === undefined) {
           return {

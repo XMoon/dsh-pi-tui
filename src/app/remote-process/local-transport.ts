@@ -20,13 +20,14 @@ import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 import {
   LocalScopeError,
-  readProcessStarttime,
   type LocalScope,
 } from './local-scope.ts'
 import {
+  assertRecordedHostKernelIdentityCurrent,
   connectForCookie,
   readLaunchMaterial,
   readLocalRecord,
+  sameLocalInstanceRecord,
   type LocalInstanceRecord,
   type VerifiedLocalHost,
 } from './local-discovery.ts'
@@ -455,29 +456,10 @@ function assertIdentityStillCurrent(scope: LocalScope, expected: LocalInstanceRe
   if (current === undefined) {
     throw new LocalScopeError('HOST_IDENTITY_MISMATCH', 'local transport: the Host registry disappeared before connected')
   }
-  for (const key of [
-    'scopeId',
-    'profileRealpath',
-    'instanceId',
-    'hostPid',
-    'hostStarttime',
-    'origin',
-    'protocol',
-    'bundleVersion',
-    'dshVersion',
-    'buildId',
-  ] as const) {
-    if (current[key] !== expected[key]) {
-      throw new LocalScopeError('HOST_IDENTITY_MISMATCH', `local transport: the Host identity changed at ${key} before connected`)
-    }
+  if (!sameLocalInstanceRecord(current, expected)) {
+    throw new LocalScopeError('HOST_IDENTITY_MISMATCH', 'local transport: the Host identity changed before connected')
   }
-  const liveStarttime = readProcessStarttime(expected.hostPid)
-  if (liveStarttime === undefined) {
-    throw new LocalScopeError('PROCESS_STARTTIME_UNAVAILABLE', 'local transport: the Host process starttime is unavailable')
-  }
-  if (liveStarttime !== expected.hostStarttime) {
-    throw new LocalScopeError('HOST_IDENTITY_MISMATCH', 'local transport: the Host PID is no longer the authenticated process')
-  }
+  assertRecordedHostKernelIdentityCurrent(expected)
 }
 
 /** Wait for a set of sockets to close, bounded so disposal cannot park forever. */
@@ -536,7 +518,7 @@ export async function installLocalTransport(
   }
   const isTerminalRefreshFailure = (error: unknown): boolean =>
     !(error instanceof LocalScopeError && error.code === 'HOST_UNRESPONSIVE')
-  const refreshCookie = async (): Promise<void> => {
+  const refreshCookie = async (signal?: AbortSignal): Promise<void> => {
     if (process.env.SPLIT_PROCESS_CLIENT_FORCE_REFRESH_UNRESPONSIVE_ONCE === '1' && !forcedRetryableRefresh) {
       // Qualification-only probe: a transient refresh failure must remain an
       // ordinary carrier loss for the official same-Host retry, not a fatal.
@@ -547,7 +529,7 @@ export async function installLocalTransport(
       refreshPromise = (async () => {
         try {
           const launch = readLaunchMaterial(scope, host.identity)
-          cookie = await connectForCookie(host.identity, launch)
+          cookie = await connectForCookie(host.identity, launch, signal)
         } catch (error) {
           // Identity/auth/file/build failures are terminal. A transient
           // transport-level HOST_UNRESPONSIVE remains an ordinary carrier loss
@@ -709,7 +691,7 @@ export async function installLocalTransport(
         // A later peer always needs the refreshed Cookie (the Host releases the
         // old peer when its mux socket closed); the archive call is a one-shot
         // user action, never a hot-loop path.
-        await refreshCookie()
+        await refreshCookie(init?.signal ?? undefined)
         if (disposed) throw new Error('local transport: the authenticated fetch is unavailable after disposal')
         if (fatalError !== undefined) throw fatalError
         return await fetchAuthenticated(input, init)

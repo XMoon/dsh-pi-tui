@@ -74,18 +74,24 @@ export interface LocalClientStartupFacts {
   readonly sessionLaunch?: CliSessionLaunchIntent
 }
 
-/** The authenticated Host facts projected into Client status. */
-export interface LocalClientHostFacts {
+/** The authenticated Host facts projected into Client status. The schema
+ *  discriminates the ONE kernel identity material; no field is borrowed from
+ *  the other platform's representation. */
+interface LocalClientHostFactsShared {
+  readonly schema: 1 | 2
   readonly scopeId: string
   readonly instanceId: string
   readonly hostPid: number
-  readonly hostStarttime: string
   readonly origin: string
   readonly protocol: string
   readonly bundleVersion: string
   readonly dshVersion: string
   readonly buildId: string
 }
+
+export type LocalClientHostFacts =
+  | (LocalClientHostFactsShared & { readonly schema: 1; readonly hostStarttime: string })
+  | (LocalClientHostFactsShared & { readonly schema: 2; readonly hostKernelIdentity: import('../../runtime/native-process/identity.ts').DarwinKernelProcessIdentity })
 
 /** A status snapshot built from the official Connection at call time. */
 export interface LocalClientStatus {
@@ -249,17 +255,20 @@ export interface LocalClientHandle {
 
 /** Project the authenticated record without the profile path. */
 function hostFacts(record: LocalInstanceRecord): LocalClientHostFacts {
-  return {
+  const shared = {
+    schema: record.schema,
     scopeId: record.scopeId,
     instanceId: record.instanceId,
     hostPid: record.hostPid,
-    hostStarttime: record.hostStarttime,
     origin: record.origin,
     protocol: record.protocol,
     bundleVersion: record.bundleVersion,
     dshVersion: record.dshVersion,
     buildId: record.buildId,
   }
+  return record.schema === 1
+    ? { ...shared, schema: 1, hostStarttime: record.hostStarttime }
+    : { ...shared, schema: 2, hostKernelIdentity: record.hostKernelIdentity }
 }
 
 /** The exact Host startup facts object (never the Host-only readiness seam). */

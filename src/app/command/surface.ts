@@ -335,7 +335,7 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     readonly cwd?: string
     ensureSession(): Promise<void>
     awaitWorkspacePreflight?(): Promise<void>
-    validateAutoWorkspace?(): boolean
+    validateAutoWorkspace?(): Promise<boolean>
     withWriter: CommandSessionRuntime['withWriter']
     switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
     switchSessionOutcome?(sessionId: string, expectedScope?: SessionScope): Promise<import('../session/runtime.ts').SessionSwitchOutcome>

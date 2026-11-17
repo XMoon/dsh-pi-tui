@@ -163,16 +163,15 @@ interface Pr3Fixture {
  * classifier's evidence is validated by its own unit contract and the packed
  * OS lane; this fixture only needs a legal sessionless Workspace target. */
 function launchProof(cwd: string): LaunchWorkspaceVerdict {
-  const evidence = statSync(cwd)
+  const evidence = statSync(cwd, { bigint: true })
   return {
     kind: 'verified',
     launchCwd: cwd,
     instanceId: 'in-process-fixture-host',
     hostPid: process.pid,
-    hostStarttime: 'fixture',
-    device: evidence.dev,
-    inode: evidence.ino,
-    revalidate: () => true,
+    device: evidence.dev.toString(),
+    inode: evidence.ino.toString(),
+    revalidate: async () => true,
   }
 }
 

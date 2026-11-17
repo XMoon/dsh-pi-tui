@@ -38,13 +38,13 @@ import { mergeCause } from '../remote/dispose-cause.ts'
 import type { CliSessionLaunchIntent } from '../../startup.ts'
 import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryControlRequest, type EntryRecordSink } from './entry-control.ts'
 import {
-  bindProcessSeat,
+  bindProfileKernelSeat,
   NO_PROCESS_SEAT,
   computeBuildId,
   installedPackageRootFromEntry,
   LocalScopeError,
   readInstalledDshVersion,
-  readLinuxStarttime,
+  readProcessStartDiagnostic,
   scopeFromInstalledProfile,
   type ProcessSeat,
 } from './local-scope.ts'
@@ -81,10 +81,12 @@ const CLIENT_LAUNCH_CWD = process.cwd()
  *  mistaken for the launch directory (external review EXT-P1). An unreadable
  *  capture stays `undefined`; the classifier then falls back to its own real
  *  `stat('.')` object and still fails closed. */
-const CLIENT_LAUNCH_OBJECT = ((): { device: number; inode: number } | undefined => {
+const CLIENT_LAUNCH_OBJECT = ((): { device: string; inode: string } | undefined => {
   try {
-    const stat = statSync('.')
-    return stat.isDirectory() ? { device: stat.dev, inode: stat.ino } : undefined
+    // Exact bigint device/inode: a 64-bit inode must never be truncated by JS
+    // number precision before it becomes part of the proof.
+    const stat = statSync('.', { bigint: true })
+    return stat.isDirectory() ? { device: stat.dev.toString(), inode: stat.ino.toString() } : undefined
   } catch {
     return undefined
   }
@@ -141,20 +143,25 @@ export interface LocalClientEntryOptions {
   readonly presetId?: string
 }
 
-/** Project the authenticated record without the profile path or cookie. */
+/** Project the authenticated record without the profile path or cookie. The
+ *  schema-specific identity is projected explicitly; no field is read from the
+ *  other schema's shape. */
 function hostRecordForTrace(host: VerifiedLocalHost): Record<string, unknown> {
   const record = host.identity
-  return {
+  const shared = {
+    schema: record.schema,
     scopeId: record.scopeId,
     instanceId: record.instanceId,
     hostPid: record.hostPid,
-    hostStarttime: record.hostStarttime,
     origin: record.origin,
     protocol: record.protocol,
     bundleVersion: record.bundleVersion,
     dshVersion: record.dshVersion,
     buildId: record.buildId,
   }
+  return record.schema === 1
+    ? { ...shared, hostStarttime: record.hostStarttime }
+    : { ...shared, hostKernelIdentity: record.hostKernelIdentity }
 }
 
 /**
@@ -1164,7 +1171,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     packageRoot,
     dshVersion: readInstalledDshVersion(options.dshAnchor),
   })
-  const processStartIdentity = readLinuxStarttime()
+  const processStartIdentity = readProcessStartDiagnostic()
   // Surface mode separates the terminal (owned by PiTui) from the structured
   // telemetry channel (a private 0600 JSONL file). Qualification keeps the
   // frozen JSONL control channel on stdin/stdout.
@@ -1183,7 +1190,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   // `surface` (and the answering `peer`) is an independent Client that reaches
   // the same authenticated Host without a profile-global seat.
   const seat: ProcessSeat = options.mode === 'qualification'
-    ? await bindProcessSeat(scope.clientSeatSocketName, 'CLIENT_ALREADY_ACTIVE')
+    ? await bindProfileKernelSeat(scope, 'qualification-client', 'CLIENT_ALREADY_ACTIVE')
     : NO_PROCESS_SEAT
   let context: import('@deepseek-ai/cordis').Context | undefined
   let loaderFiber: Fiber | undefined
@@ -1400,6 +1407,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   try {
     const host = await ensureLocalHost({
       scope,
+      signal: startupAbort.signal,
       hostEntryPath: join(packageRoot, 'dist', 'local-host.mjs'),
       dshAnchor: options.dshAnchor,
       profile: options.profile,
@@ -1988,9 +1996,15 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       // Host still signs the WorkspaceId). Every unreadable/uncertain fact is
       // `unverified`, so the surface stays unselected until the user picks a
       // Host Workspace through the existing Browser.
-      const launchWorkspace: LaunchWorkspaceVerdict = classifyLaunchWorkspace(host.identity, CLIENT_LAUNCH_CWD, {
+      const launchWorkspace: LaunchWorkspaceVerdict = await classifyLaunchWorkspace(host.identity, CLIENT_LAUNCH_CWD, {
         ...(CLIENT_LAUNCH_OBJECT === undefined ? {} : { launchObject: CLIENT_LAUNCH_OBJECT }),
+        scope,
+        signal: startupAbort.signal,
+        ...(transport === undefined ? {} : { transport }),
       })
+      // The Workspace observation is a new network await. A stop/HMR that
+      // aborted the startup while it ran must not mount this revision's runner.
+      startupAbort.signal.throwIfAborted()
       let runnerFiber: Fiber | undefined
       try {
         runnerFiber = clientContext.plugin(pluginContext => {

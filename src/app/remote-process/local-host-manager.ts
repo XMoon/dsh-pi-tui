@@ -1051,6 +1051,14 @@ export async function startManagedHostCandidate(
   options: HostStartOptions,
   deps: HostManagerDeps = {},
 ): Promise<HostStartObservation> {
+  // macOS has no systemd user manager and launchd supervision is PR-3. A real
+  // public-managed start therefore uses the EXISTING detached process fallback
+  // directly, without probing or installing any user service. `deps.probe` is
+  // the test-only injection seam; an injected probe keeps exercising the
+  // Linux manager orchestration on any host and is not a production request.
+  if (process.platform === 'darwin' && deps.probe === undefined) {
+    return spawnHostCandidate(options)
+  }
   const probe = await (deps.probe ?? probeUserManager)()
   if (probe.kind === 'error') {
     throw new LocalScopeError('HOST_MANAGER_ERROR', `managed Host: ${probe.reason}`)

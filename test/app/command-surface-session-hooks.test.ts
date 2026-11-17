@@ -34,7 +34,7 @@ type SurfaceDeps = CommandSurfaceDeps<ModelSelectionValue, never>
  * meaningful, and every unused capability is an empty cast rather than a fake
  * with invented behaviour. The one real fact under test is the `session` hook.
  */
-function composeSurface(session: { readonly validateAutoWorkspace?: () => boolean }) {
+function composeSurface(session: { readonly validateAutoWorkspace?: () => Promise<boolean> }) {
   const app = new TuiApp(new VirtualTerminal(80, 24), { onSubmit: () => {}, onExit: () => {} })
   const ctx = new Context()
   const scopeFacts = sessionScopeFacts(() => undefined, () => 0)
@@ -147,19 +147,19 @@ function composeSurface(session: { readonly validateAutoWorkspace?: () => boolea
   return surface
 }
 
-test('the command facade forwards the session create-boundary AUTO Workspace validator', () => {
-  const surface = composeSurface({ validateAutoWorkspace: () => true })
-  assert.equal(surface.runner().validateAutoWorkspace?.(), true,
+test('the command facade forwards the session create-boundary AUTO Workspace validator', async () => {
+  const surface = composeSurface({ validateAutoWorkspace: async () => true })
+  assert.equal(await surface.runner().validateAutoWorkspace?.(), true,
     'the facade must forward the session AUTO Workspace validator; a dropped member refuses a confirmed Remote sessionless /new')
 })
 
-test('the forwarded AUTO Workspace validator reads the live proof at call time', () => {
+test('the forwarded AUTO Workspace validator reads the live proof at call time', async () => {
   let current = true
-  const surface = composeSurface({ validateAutoWorkspace: () => current })
+  const surface = composeSurface({ validateAutoWorkspace: async () => current })
   const forwarded = surface.runner().validateAutoWorkspace
-  assert.equal(forwarded?.(), true, 'the live proof is current at the first call')
+  assert.equal(await forwarded?.(), true, 'the live proof is current at the first call')
   current = false
-  assert.equal(forwarded?.(), false,
+  assert.equal(await forwarded?.(), false,
     'a later call must observe the revoked proof instead of a captured value')
 })
 

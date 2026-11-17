@@ -186,9 +186,19 @@ test('an illegal Profile value is still overridden by a valid ENV', (t) => {
   })
 })
 
-test('daemon on a non-Linux platform fails closed with the platform reason', (t) => {
-  withEnv('daemon', () => {
+test('Profile daemon on macOS with a TTY resolves to Daemon', (t) => {
+  withEnv(undefined, () => {
     withDaemonPlatform('darwin', true, () => {
+      const { ctx } = mount(t, [], configOf('daemon'))
+      assert.equal(ctx.get(TUI_STARTUP_SERVICE), undefined, 'Daemon never provides the Direct service')
+      assert.ok(ctx.get(TUI_DAEMON_STARTUP_SERVICE) !== undefined, 'macOS daemon provides tuiDaemonStartup')
+    })
+  })
+})
+
+test('daemon on an unsupported platform fails closed with the platform reason', (t) => {
+  withEnv('daemon', () => {
+    withDaemonPlatform('win32', true, () => {
       const { ctx, exitCodes } = mount(t, [])
       assert.equal(ctx.get(TUI_DAEMON_STARTUP_SERVICE), undefined)
       assert.deepEqual(exitCodes, [1])

@@ -403,14 +403,15 @@ interface BackendDecisionError {
 }
 
 /** Resolve the daemon platform/tty prerequisite, or undefined when satisfiable.
- *  Daemon is a local-Linux foreground process that owns a real interactive TTY;
- *  an unsupported OS or a non-interactive launch must fail closed with a reason. */
+ *  Daemon is a local Linux/macOS foreground process that owns a real
+ *  interactive TTY; any other OS or a non-interactive launch must fail closed
+ *  with a reason. The Host process itself is not launched here. */
 function daemonPrerequisiteError(): BackendDecisionError | undefined {
-  if (process.platform !== 'linux') {
+  if (process.platform !== 'linux' && process.platform !== 'darwin') {
     return {
       kind: 'error',
       code: 'unsupported-platform',
-      message: `the daemon backend is only supported on Linux (this is ${process.platform}); use DSH_PI_TUI_BACKEND=direct or unset it`,
+      message: `the daemon backend is only supported on Linux and macOS (this is ${process.platform}); use DSH_PI_TUI_BACKEND=direct or unset it`,
     }
   }
   if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {

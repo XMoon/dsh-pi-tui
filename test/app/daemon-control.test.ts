@@ -35,7 +35,7 @@ import {
   type DaemonControlDeps,
   type DaemonControlProfile,
 } from '../../src/app/remote-process/local-daemon-control.ts'
-import type { LocalInstanceRecord } from '../../src/app/remote-process/local-discovery.ts'
+import type { LinuxLocalInstanceRecord } from '../../src/app/remote-process/local-discovery.ts'
 
 const DSH_VERSION = '0.2.2-rc.3'
 const UUID = '11111111-1111-4111-8111-111111111111'
@@ -79,7 +79,7 @@ function fixture(t: TestContext): Fixture {
   return { profile, scope, unitDir, unitName: buildUnitName(profile.name, scope.scopeId) }
 }
 
-function recordOf(scope: LocalScope, overrides: Partial<LocalInstanceRecord> = {}): LocalInstanceRecord {
+function recordOf(scope: LocalScope, overrides: Partial<LinuxLocalInstanceRecord> = {}): LinuxLocalInstanceRecord {
   return {
     schema: 1,
     scopeId: scope.scopeId,

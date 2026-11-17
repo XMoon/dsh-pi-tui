@@ -16,10 +16,11 @@
  */
 
 import { createHash } from 'node:crypto'
-import { readProcessStarttime } from '../../runtime/native-process/identity.ts'
+import { readKernelProcess, readProcessStarttime } from '../../runtime/native-process/identity.ts'
 import { runSyncDisposalStepsWithPrimary } from '../../runtime/process/disposal.ts'
 import { closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { createServer } from 'node:net'
+import { userInfo } from 'node:os'
 import { Buffer } from 'node:buffer'
 import { basename, dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -326,6 +327,20 @@ function assertLinux(): number {
   return process.getuid()
 }
 
+/** The profile scope itself is OS-neutral POSIX state: the canonical official
+ *  DSH home/profile directory object plus the current UID. Linux and Darwin
+ *  both derive the same hash domain and private 0700 run directory; only the
+ *  kernel CLAIM below differs per platform. */
+function assertSupportedPosixScopePlatform(): number {
+  if ((process.platform !== 'linux' && process.platform !== 'darwin') || typeof process.getuid !== 'function') {
+    throw new LocalScopeError(
+      'B1_PLATFORM_UNSUPPORTED',
+      `local scope: the local split backend requires Linux or macOS (this is ${process.platform})`,
+    )
+  }
+  return process.getuid()
+}
+
 /** Read a real directory and reject a non-directory or a different owner. */
 function canonicalOwnedDirectory(path: string, uid: number, label: string): string {
   let real: string
@@ -342,49 +357,99 @@ function canonicalOwnedDirectory(path: string, uid: number, label: string): stri
 }
 
 /**
- * Create and prove the private run chain WITHOUT following a pre-existing
- * symlink. Each component is lstat-checked before its child is created; the
- * final run/scope/instance directories must be real directories owned by the
- * current UID with no group/other access.
+ * Create and prove one directory component WITHOUT following a pre-existing
+ * symlink. Each component is lstat-checked before its child is created. A
+ * `privateMode` component must have no group/other access at all (0700); an
+ * inherited account-level parent may be readable but never group/other
+ * writable, because only its owner may create the private chain below it.
  */
+function ensureOwnedDirectory(path: string, uid: number, privateMode: boolean): void {
+  let info
+  try {
+    info = lstatSync(path)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${path} is not accessible`, error)
+    }
+    // The parent was already proved (or is the canonical base directory); a
+    // non-recursive mkdir cannot traverse a symlink for this component. A
+    // concurrent first start may win the mkdir with EEXIST; that is not an
+    // unsafe path, so re-read and validate the winner's directory instead of
+    // turning a normal kernel-seat race into SCOPE_DIRECTORY_UNSAFE.
+    try {
+      mkdirSync(path, { mode: 0o700 })
+    } catch (mkdirError) {
+      if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${path} could not be created safely`, mkdirError)
+      }
+    }
+    try {
+      info = lstatSync(path)
+    } catch (lstatError) {
+      throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${path} is not accessible after creation`, lstatError)
+    }
+  }
+  if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== uid) {
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${path} must be a real directory owned by uid ${String(uid)}`)
+  }
+  const forbiddenMode = privateMode ? 0o077 : 0o022
+  if ((info.mode & forbiddenMode) !== 0) {
+    throw new LocalScopeError(
+      'SCOPE_DIRECTORY_UNSAFE',
+      privateMode
+        ? `local scope: ${path} must not be readable or writable by group/other`
+        : `local scope: ${path} must not be writable by group/other`,
+    )
+  }
+}
+
 function ensureScopeDirectory(dshHome: string, scopeId: string, uid: number): string {
   const runRoot = join(dshHome, RUN_ROOT_NAME)
   const scopeRoot = join(runRoot, SCOPE_ROOT_NAME)
   const dir = join(scopeRoot, scopeId)
-  for (const path of [runRoot, scopeRoot, dir]) {
-    let info
-    try {
-      info = lstatSync(path)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${path} is not accessible`, error)
-      }
-      // The parent was already proved (or is the canonical DSH home); a
-      // non-recursive mkdir cannot traverse a symlink for this component. A
-      // concurrent first start may win the mkdir with EEXIST; that is not an
-      // unsafe path, so re-read and validate the winner's directory instead of
-      // turning a normal kernel-seat race into SCOPE_DIRECTORY_UNSAFE.
-      try {
-        mkdirSync(path, { mode: 0o700 })
-      } catch (mkdirError) {
-        if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') {
-          throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${path} could not be created safely`, mkdirError)
-        }
-      }
-      try {
-        info = lstatSync(path)
-      } catch (lstatError) {
-        throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${path} is not accessible after creation`, lstatError)
-      }
-    }
-    if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== uid) {
-      throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${path} must be a real directory owned by uid ${String(uid)}`)
-    }
-    if ((info.mode & 0o077) !== 0) {
-      throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${path} must not be readable or writable by group/other`)
-    }
-  }
+  for (const path of [runRoot, scopeRoot, dir]) ensureOwnedDirectory(path, uid, true)
   return dir
+}
+
+/**
+ * The per-UID Darwin Host seat directory. The local Host singleton must not
+ * depend on which DSH_HOME resolved the profile, so the Host seat lives under
+ * the OS ACCOUNT home (`os.userInfo().homedir`, never `$HOME`/`DSH_HOME`/
+ * `$TMPDIR`), keyed only by the scope id. The qualification-only Client seat
+ * remains in the per-DSH-home scope directory.
+ */
+export function darwinHostProfileSeatDir(scopeId: string, accountHome?: string): string {
+  const uid = assertDarwin()
+  const home = accountHome === undefined
+    ? resolveDarwinAccountHome(uid)
+    : canonicalOwnedDirectory(accountHome, uid, 'Darwin test account home')
+  // `~/.dsh-pi-tui` may already exist as the user's 0755 theme/config
+  // directory. It is safe as the account-level parent as long as it is a real
+  // uid-owned directory that group/other cannot WRITE; the `run` chain and the
+  // per-scope seat directory below it are created strictly 0700.
+  const root = join(home, '.dsh-pi-tui')
+  ensureOwnedDirectory(root, uid, false)
+  const run = join(root, RUN_ROOT_NAME)
+  ensureOwnedDirectory(run, uid, true)
+  const dir = join(run, scopeId)
+  ensureOwnedDirectory(dir, uid, true)
+  return dir
+}
+
+/** Resolve the REAL account home for the effective UID. */
+function resolveDarwinAccountHome(uid: number): string {
+  let home: string
+  try {
+    const info = userInfo()
+    if (info.uid !== uid) {
+      throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', 'local scope: the OS account uid does not match this process uid')
+    }
+    home = info.homedir
+  } catch (error) {
+    if (error instanceof LocalScopeError) throw error
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', 'local scope: the OS account home is unavailable', error)
+  }
+  return canonicalOwnedDirectory(home, uid, 'Darwin account home')
 }
 
 /** Resolve the installed package root from this built entry's own URL. */
@@ -501,7 +566,7 @@ export function computeBuildId(packageRoot: string, dshVersion: string): string 
  * the exact same computation with the one directory-creation step.
  */
 export function inspectInstalledProfileScope(facts: InstalledProfileFacts): LocalScope {
-  const uid = assertLinux()
+  const uid = assertSupportedPosixScopePlatform()
   const dshHome = canonicalOwnedDirectory(facts.dshHome, uid, 'DSH home')
   const profileRealpath = canonicalOwnedDirectory(facts.profileDir, uid, 'profile directory')
   const bundleVersion = readBundleVersion(facts.packageRoot)
@@ -534,7 +599,7 @@ export function inspectInstalledProfileScope(facts: InstalledProfileFacts): Loca
  */
 export function scopeFromInstalledProfile(facts: InstalledProfileFacts): LocalScope {
   const inspected = inspectInstalledProfileScope(facts)
-  const uid = assertLinux()
+  const uid = assertSupportedPosixScopePlatform()
   const dir = ensureScopeDirectory(inspected.dshHome, inspected.scopeId, uid)
   return Object.freeze({ ...inspected, dir })
 }
@@ -567,6 +632,23 @@ export function readLinuxStarttime(pid: number = process.pid): string {
     )
   }
   return value
+}
+
+/**
+ * A qualification-only process-start diagnostic for the CURRENT process. It is
+ * never an identity authority: Linux keeps its original `/proc` starttime
+ * string, Darwin uses the exact boot-session/unique/start tuple so the value is
+ * stable and ABI-safe, and an unverifiable read yields `undefined`.
+ */
+export function readProcessStartDiagnostic(pid: number = process.pid): string | undefined {
+  if (process.platform === 'linux') return readProcessStarttime(pid)
+  if (process.platform === 'darwin') {
+    const observed = readKernelProcess(pid)
+    if (observed.kind !== 'alive' || observed.identity.platform !== 'darwin') return undefined
+    const identity = observed.identity
+    return `${identity.bootUUID}:${identity.uniqueId}:${identity.startSec}.${identity.startUsec}`
+  }
+  return undefined
 }
 
 /** The stable conflict classification each seat purpose reports. */
@@ -653,6 +735,43 @@ export function bindProcessSeat(
 ): Promise<ProcessSeat> {
   assertLinux()
   return bindKernelSeat({ claim: 'linux-abstract', name }, conflictCode)
+}
+
+/**
+ * Claim the profile-scoped kernel seat for one Host or qualification-Client
+ * purpose. Linux keeps its original abstract-socket binder; Darwin claims the
+ * per-purpose `O_EXLOCK` file seat in the same private scope directory. This is
+ * the ONLY seat dispatch the Host and the qualification Client use.
+ * `bindProcessSeat` remains the Linux abstract binder for the separate
+ * daemon-control purpose (PR-3 owns a Darwin admin seat).
+ */
+export interface ProfileKernelSeatOptions {
+  /** Test-only account home; production resolves `os.userInfo().homedir`. */
+  readonly accountHome?: string
+}
+
+export async function bindProfileKernelSeat(
+  scope: LocalScope,
+  kind: 'host' | 'qualification-client',
+  conflictCode: ProcessSeatConflictCode,
+  options: ProfileKernelSeatOptions = {},
+): Promise<ProcessSeat> {
+  if (process.platform === 'linux') {
+    return bindKernelSeat(
+      { claim: 'linux-abstract', name: kind === 'host' ? scope.hostSocketName : scope.clientSeatSocketName },
+      conflictCode,
+    )
+  }
+  if (process.platform === 'darwin') {
+    const dir = kind === 'host'
+      ? darwinHostProfileSeatDir(scope.scopeId, options.accountHome)
+      : scope.dir
+    return bindKernelSeat({ claim: 'darwin-file', dir, scopeId: scope.scopeId, kind }, conflictCode)
+  }
+  throw new LocalScopeError(
+    'B1_PLATFORM_UNSUPPORTED',
+    `local scope: no profile kernel seat is implemented for ${process.platform}`,
+  )
 }
 
 /**

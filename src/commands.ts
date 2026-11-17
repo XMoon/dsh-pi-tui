@@ -344,7 +344,7 @@ export interface TuiCommandRunner {  ctx: Context
   awaitWorkspacePreflight?(): Promise<void>
   /** Whether the Client-local AUTO launch-cwd evidence is current RIGHT NOW
    *  (absent on Direct/launch surfaces, whose proposal needs no Client proof). */
-  validateAutoWorkspace?(): boolean
+  validateAutoWorkspace?(): Promise<boolean>
   /**
    * TUI-facing live selection facade (footer + /model). It follows the
    * current Agent; with deferred start it holds only the sessionless
