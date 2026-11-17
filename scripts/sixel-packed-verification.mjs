@@ -38,6 +38,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { seedProfileBuildPolicy } from './lib/dsh-profile-build-policy.mjs'
+
 import { decodeSixel, pixelAt } from '../test/support/sixel-oracle.ts'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -133,6 +135,9 @@ async function main() {
     check('the shipped bundle references the codec at least once', Number(bundleSource) > 0, `sixelEncode occurrences: ${bundleSource}`)
 
     // 3. Load it through the real loader: an isolated profile, then the CLI.
+    // pnpm 12 fails an UNDECIDED dependency build script; this isolated
+    // profile records the repository's explicit prebuilt-binary decision first.
+    seedProfileBuildPolicy(home, 'i8-2a-packed')
     const profile = spawnSync(dsh, ['plugin', '--profile', 'i8-2a-packed', 'add', packed], {
       cwd: root,
       encoding: 'utf8',

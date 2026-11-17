@@ -15,7 +15,17 @@ DSH=$(command -v dsh) || {
   exit 1
 }
 PROFILE=pi-tui-dev
-mkdir -p "$DSH_HOME"
+mkdir -p "$DSH_HOME/profiles/$PROFILE"
+# pnpm 12 fails an UNDECIDED dependency build script; record the repository's
+# explicit prebuilt-binary decision (see pnpm-workspace.yaml allowBuilds).
+cat > "$DSH_HOME/profiles/$PROFILE/pnpm-workspace.yaml" <<'YAML'
+packages:
+  - .
+nodeLinker: hoisted
+autoInstallPeers: false
+allowBuilds:
+  koffi: false
+YAML
 
 # Create a disposable profile linked to this worktree; no real profile or
 # persistent runtime state is read or changed.

@@ -14,6 +14,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
+import { seedProfileBuildPolicy } from './lib/dsh-profile-build-policy.mjs'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -127,6 +128,9 @@ function runDsh(invocation, args, harnessDir, env) {
 }
 
 function installCandidate(invocation, tarball, harnessDir, env) {
+  // pnpm 12 fails an UNDECIDED dependency build script; this isolated profile
+  // records the repository's explicit prebuilt-binary decision first.
+  if (typeof env.DSH_HOME === 'string' && env.DSH_HOME !== '') seedProfileBuildPolicy(env.DSH_HOME, 'pi-tui')
   const result = runDsh(invocation, ['plugin', '--profile', 'pi-tui', 'add', tarball], harnessDir, env)
   if (result.status !== 0) throw new Error(`candidate plugin install failed:\n${outputOf(result)}`)
 }

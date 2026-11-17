@@ -14,7 +14,7 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import { currentPtyScriptArgv } from '../../lib/pty-script.mjs'
-import { readFileSync, readdirSync, writeFileSync, existsSync, unlinkSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, existsSync, unlinkSync, openSync } from 'node:fs'
 import { join } from 'node:path'
 
 import xterm from '@xterm/headless'
@@ -143,6 +143,20 @@ async function waitForProcesses(dshHome, predicate, label, timeoutMs) {
   throw new SplitSmokeAssertionError(`public-entry daemon: ${label} did not settle before the deadline`)
 }
 
+/**
+ * The stdin `script(1)` itself reads from.
+ *
+ * Darwin's BSD `script(1)` aborts with `tcgetattr/ioctl: Operation not supported
+ * on socket` when its own stdin is a socketpair — exactly what a Node
+ * `stdio: 'pipe'` child receives. `/dev/null` is accepted, and the Darwin
+ * public-entry path never types into the TUI: the daemon backend is rejected by
+ * the real product's platform guard before a frame exists. Linux keeps the live
+ * pipe because its GNU `script(1)` accepts it and the TUI path is interactive.
+ */
+function ptyStdin() {
+  return process.platform === 'linux' ? 'pipe' : openSync('/dev/null', 'r')
+}
+
 /** Spawn the real `dsh` CLI under a PTY with one backend selection. */
 function spawnDsh(dshInvocation, profileDir, env, backend) {
   const command = `${shellQuote(dshInvocation[0])} ${shellQuote(dshInvocation[1])} --profile pi-tui`
@@ -150,7 +164,7 @@ function spawnDsh(dshInvocation, profileDir, env, backend) {
   const child = spawn(pty.program, pty.args, {
     cwd: profileDir,
     env: { ...env, DSH_PI_TUI_BACKEND: backend, COLUMNS: '100', LINES: '30' },
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: [ptyStdin(), 'pipe', 'pipe'],
     detached: true,
   })
   const output = { raw: '' }
@@ -283,7 +297,9 @@ class RealDshScreen {
     this.child = spawn(pty.program, pty.args, {
       cwd: profileDir,
       env: { ...env, ...(backend === undefined ? {} : { DSH_PI_TUI_BACKEND: backend }), ...extraEnv, COLUMNS: '100', LINES: '30' },
-      stdio: ['pipe', 'pipe', 'pipe'],
+      // Same BSD limit as spawnDsh; this screen's interactive path is
+      // Linux-only (the macOS daemon guard fires before any frame).
+      stdio: [ptyStdin(), 'pipe', 'pipe'],
       detached: true,
     })
     this.child.stdout.setEncoding('utf8')
