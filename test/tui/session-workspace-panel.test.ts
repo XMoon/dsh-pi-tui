@@ -4812,23 +4812,27 @@ test('F2/W13: wheel hit zones follow the 110/112 column threshold and tiny frame
   assert.deepEqual(h.resumes, ['session-wheel-threshold-3'], 'a fresh press on the repainted bar still acts')
   h.dispose()
 
-  // Tiny frames: only a body row that was really painted may navigate.
+  // Tiny frames: only a body row that was really painted may navigate. The
+  // hidden selection is revealed by growing the SAME open afterwards, so an
+  // erroneous navigation cannot hide behind a header/bar-only viewport.
   const one = harness({ columns: 80, rows: 1 })
   one.handle.setSnapshot(snapshot())
   settleActivity(one)
   await one.paint()
-  const oneFrame = one.view()
   await wheelCell(one, 5, 0, 'down')
-  assert.equal(one.view(), oneFrame, 'the one-row header is never a wheel sink')
+  one.vt.resize(80, 24)
+  await one.paint()
+  assert.ok(/^> .*Current session/m.test(one.view()), `the one-row header never moved the hidden selection:\n${one.view()}`)
   one.dispose()
 
   const two = harness({ columns: 80, rows: 2 })
   two.handle.setSnapshot(snapshot())
   settleActivity(two)
   await two.paint()
-  const twoFrame = two.view()
   await wheelCell(two, 5, 1, 'down')
-  assert.equal(two.view(), twoFrame, 'a two-row frame paints no body to scroll')
+  two.vt.resize(80, 24)
+  await two.paint()
+  assert.ok(/^> .*Current session/m.test(two.view()), `a two-row frame paints no body and never moves the selection:\n${two.view()}`)
   two.dispose()
 
   const three = harness({ columns: 80, rows: 3 })
@@ -4838,7 +4842,10 @@ test('F2/W13: wheel hit zones follow the 110/112 column threshold and tiny frame
   await wheelCell(three, 5, 1, 'down')
   assert.ok(/^> .*Other session/m.test(three.view()), `the ONE painted 3-row body row really navigates:\n${three.view()}`)
   const threeFrame = three.view()
-  await wheelCell(three, 5, 2, 'down')
+  // wheel-UP on the bar row: a wrongly painted bar zone would move the
+  // selection back to Current and visibly change this frame.
+  await wheelCell(three, 5, 2, 'up')
   assert.equal(three.view(), threeFrame, 'the tiny action bar row is not a wheel sink')
+  assert.ok(/^> .*Other session/m.test(three.view()), 'the bar wheel never moved the selection')
   three.dispose()
 })
