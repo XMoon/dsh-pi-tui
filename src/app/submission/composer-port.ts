@@ -36,6 +36,14 @@ export interface SubmissionComposerPort {
   setEditorText(text: string): void
   /** Insert text at the editor cursor (`TuiApp.insertIntoEditor`). */
   insertIntoEditor(text: string): void
+  /**
+   * PR2/R5-1: whether the renderer would ACCEPT a draft write RIGHT NOW. A
+   * stopped/disposed surface (or a held composer) refuses writes, and a
+   * caller that must not lose its restore obligation can wait for the
+   * renderer instead of having a void setter silently consume it. ABSENT
+   * keeps the pre-existing fire-and-forget write semantics.
+   */
+  readonly draftWriteAccepted?: () => boolean
   /** One transient user-facing notice (`TuiApp.notify`). */
   notify(message: string, kind?: 'info' | 'error'): void
   /** Show/clear the local submit-ack row (`TuiApp.setSubmitPending`). */

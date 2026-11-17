@@ -6265,10 +6265,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         admitted: historySeatAdmitted,
         requestRender: () => render(),
         setFocus: () => applyFocus(true),
+        // PR2/R5-2: the write admission is decided in the seat (BEFORE it
+        // retires), so a refused Restore keeps the live card on screen.
+        composerWritable: () => !composerHeld(),
         restoreToComposer: (raw) => {
-          // PR2/F1: the History card may stay browsable, but its Restore is a
-          // composer WRITE — a live submission attempt owns the document.
-          if (composerHeld()) return
           composer.setEditorText(raw)
         },
         copyRaw: (raw, live) => { issueHistoryCopy(raw, live) },

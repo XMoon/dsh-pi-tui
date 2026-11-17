@@ -1048,6 +1048,7 @@ test('holdsSeat covers a Modal park but releases on retire and on a dead capture
     requestRender: () => {},
     setFocus: () => {},
     restoreToComposer: () => {},
+    composerWritable: () => true,
     copyRaw: () => {},
     reveal: () => {},
     scroll: () => {},
@@ -1190,6 +1191,7 @@ test('a fatal owner that itself throws is stated, never left as an unhandled rej
     },
     setFocus: () => {},
     restoreToComposer: () => {},
+    composerWritable: () => true,
     copyRaw: () => {},
     reveal: () => {},
     scroll: () => {},
@@ -1235,6 +1237,7 @@ test('a retirement the settlement performs owns the frame it asks for too', asyn
     },
     setFocus: () => {},
     restoreToComposer: () => {},
+    composerWritable: () => true,
     copyRaw: () => {},
     reveal: () => {},
     scroll: () => {},
@@ -1274,6 +1277,7 @@ test('the seat routes a frame commit that throws in its OWN settlement to the fa
     requestRender: () => { renders += 1; if (renders > 1) throw new Error('simulated ViewError on the settled frame') },
     setFocus: () => {},
     restoreToComposer: () => {},
+    composerWritable: () => true,
     copyRaw: () => {},
     reveal: () => {},
     scroll: () => {},
@@ -1317,6 +1321,7 @@ test('a read that answers after its captured scope died is refused by the settle
     requestRender: () => {},
     setFocus: () => {},
     restoreToComposer: () => {},
+    composerWritable: () => true,
     copyRaw: () => {},
     reveal: () => {},
     scroll: () => {},
@@ -1578,7 +1583,13 @@ test('PR2/F1: a held submission refuses the History Restore but keeps the card b
   h.key(ENTER) // the explicit Restore
   await h.observeAbsence()
   assert.deepEqual(h.composer(), before, 'a held composer never takes the History Restore write')
-  assert.equal(h.cardPainted(), true, 'the card stays browsable (the refusal is the WRITE, not the seat)')
+  assert.equal(h.cardPainted(), true, 'the card stays painted')
+  // R5-2: the card must stay LIVE, not just painted — the seat still owns the
+  // keys, so a navigation key moves the selection and Esc closes the card.
+  h.key(DOWN)
+  await h.painted(() => h.selected().length === 1 && h.selected()[0] !== before.text, 'the held card still navigates')
+  h.key(ESCAPE)
+  await h.painted(() => !h.cardPainted(), 'Esc still closes the live held card')
   h.renderer.composer.settleSubmission?.('attempt-history', 'not-accepted')
   h.pane.key(CTRL_R)
   await h.painted(() => h.cardPainted(), 'the card reopens after the release')

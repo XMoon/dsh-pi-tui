@@ -1292,6 +1292,13 @@ export interface TuiAppEventsBase {
    *  exactly that occurrence; absent when no scope occurrence was recorded. */
   onSubmit: (text: string, request: ComposerSubmitRequest, scopeToken?: number) => void
   /**
+   * PR2/R5-1: the surface presents again after a stop() window that had
+   * parked a draft-restore obligation (a legacy command's failed line whose
+   * replay was refused while stopped). The submission owner replays it now,
+   * on the writable composer.
+   */
+  onDeferredDraftRestore?: () => void
+  /**
    * PR2: the SYNCHRONOUS submit admission of the live composer. The renderer
    * calls it BEFORE any draft/undo mutation and honors the verdict:
    * `'held'` means the application already started the submission and the
@@ -5887,6 +5894,11 @@ export class TuiApp {
       }
       this.clearSubmittedDraft()
       this.resetEditorMode()
+      // R5-1: a restore obligation that could not be written while the
+      // surface was stopped is replayed now, in order, on the writable
+      // composer (after the accepted clear — the restored text is NEW live
+      // content, not part of the accepted document).
+      this.events.onDeferredDraftRestore?.()
     }
     const firstStart = !this.processTuiSlotClaimed
     if (firstStart) {
@@ -24741,6 +24753,12 @@ export class TuiApp {
    * the fork's submit gesture is disabled so no path (including a mouse
    * autocomplete submit) reaches `onMaySubmit`.
    */
+  /** PR2/R5-1: the composer-port write probe — {@link draftWriteAdmitted}
+   *  minus the hold (a settlement's own flush runs AFTER releasing it). */
+  draftWriteAccepted(): boolean {
+    return !this.disposed && !this.surfaceStopped
+  }
+
   holdSubmission(attemptId: string): void {
     if (this.disposed || this.surfaceStopped || this.submissionHold !== undefined) return
     const text = this.getDraft()

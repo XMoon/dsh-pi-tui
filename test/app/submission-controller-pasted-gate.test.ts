@@ -188,6 +188,8 @@ class AttemptComposer implements SubmissionComposerPort {
   insertIntoEditor(text: string): void { if (!this.held) this.text += text }
   notify(message: string, kind: 'info' | 'error' = 'info'): void { this.notices.push({ message, kind }) }
   setSubmitPending(): void {}
+  stopped = false
+  draftWriteAccepted(): boolean { return !this.stopped }
   holdSubmission(attemptId: string): void {
     this.calls.push({ kind: 'hold', attemptId })
     this.held = true
@@ -195,7 +197,9 @@ class AttemptComposer implements SubmissionComposerPort {
   settleSubmission(attemptId: string, result: 'accepted' | 'not-accepted' | 'unknown'): void {
     this.calls.push({ kind: 'settle', attemptId, result })
     this.held = false
-    if (result === 'accepted') this.text = ''
+    // A STOPPED renderer withholds the accepted clear (the real TuiApp defers
+    // it to the restart); the release itself is still logical.
+    if (result === 'accepted' && !this.stopped) this.text = ''
   }
 }
 
@@ -229,6 +233,8 @@ interface AttemptMount {
   setOwnerReplaced(replaced: boolean): void
   /** The renderer's stale-draft retention policy (TSP drops at a switch). */
   setRetainsStaleDraftRestore(retains: boolean): void
+  /** Simulate the renderer's stopped window (every write refused). */
+  setRendererStopped(stopped: boolean): void
   /** Hold the NEXT writer call and settle it later (the FIFO window). */
   holdNextWriter(): void
   releaseHeldWriter(): void
@@ -259,6 +265,7 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
   let scopeCurrent = true
   let ownerReplaced = false
   let retainsStaleDraftRestore = true
+  let rendererStopped = false
   let releaseWriter: (() => void) | undefined
   let heldWriter = false
   let heldEnsure: { resolve: () => void; reject: (error: unknown) => void } | undefined
@@ -471,6 +478,7 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
     setScopeCurrent: (current) => { scopeCurrent = current; },
     setOwnerReplaced: (replaced) => { ownerReplaced = replaced; },
     setRetainsStaleDraftRestore: (retains) => { retainsStaleDraftRestore = retains; },
+    setRendererStopped: (stopped) => { rendererStopped = stopped; composer.stopped = stopped },
     holdNextWriter: () => { heldWriter = true; },
     releaseHeldWriter: () => { heldWriter = false; releaseWriter?.() },
     holdNextEnsureSession: () => {
@@ -1090,4 +1098,42 @@ test('PR2/RFL014: a LATE stale restore after owner replacement is dropped even b
   h.releaseHeldWriter()
   await attemptTick()
   assert.equal(h.composer.text, '', 'the replaced owner’s late restore was dropped, not replayed')
+})
+
+test('PR2/R5-1: a deferred restore parked by a stopped renderer is replayed once it presents', async () => {
+  const h = mountAttempt()
+  h.setCommandBehavior('legacy-command-pending')
+  // A: the legacy command fails while B holds the composer — A is deferred.
+  assert.equal(h.controller.beginComposerSubmission('/deploy now', 'enter'), 'legacy')
+  h.controller.submit('/deploy now', 'enter')
+  await attemptTick()
+  h.composer.text = 'B behind the stop'
+  h.holdNextWriter()
+  assert.equal(h.controller.beginComposerSubmission('B behind the stop', 'enter'), 'held')
+  await attemptTick()
+  h.resolveCommand({
+    kind: 'committed',
+    matched: true,
+    execution: { commandId: 'cmd-a', result: { kind: 'error' } },
+  })
+  await attemptTick()
+  assert.equal(h.composer.text, 'B behind the stop', 'A is deferred behind the live hold')
+  // The renderer goes STOPPED before B's settlement: the flush must NOT
+  // consume A's obligation behind a refused write.
+  h.setRendererStopped(true)
+  h.respond({ kind: 'committed', value: undefined }, true)
+  h.releaseHeldWriter()
+  await attemptTick()
+  assert.equal(h.controller.composerHoldActive(), false, 'B settled logically')
+  assert.equal(h.composer.text, 'B behind the stop',
+    'nothing was written while the renderer was stopped (the obligation survived)')
+  // The renderer presents again: the owner replays the parked restore once.
+  h.setRendererStopped(false)
+  h.controller.replayDeferredDraftRestores()
+  await attemptTick()
+  assert.equal(h.composer.text, 'B behind the stop\n\n/deploy now',
+    'the parked restore is replayed exactly once when the renderer presents')
+  h.controller.replayDeferredDraftRestores()
+  await attemptTick()
+  assert.equal(h.composer.text, 'B behind the stop\n\n/deploy now', 'the replay is never duplicated')
 })

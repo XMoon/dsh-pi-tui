@@ -6087,6 +6087,36 @@ test('PR2/F5: a settlement while stopped completes the hold; start() leaves no s
   }
 })
 
+test('PR2/R5-1: a deferred restore parked by a stop window is replayed at the restart', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => { submitted.push(text) },
+    onExit: () => {},
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('B across the stop')
+    app.holdSubmission('attempt-r5')
+    // The settlement arrives while the surface is STOPPED: the logical release
+    // runs (the hold clears), but the parked deferred restore cannot be
+    // written yet.
+    app.stop()
+    app.settleSubmission('attempt-r5', 'accepted')
+    app.start()
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), '', 'the deferred accepted clear completed at the restart')
+    // The renderer asked the owner to replay any parked obligation: nothing
+    // was lost, nothing was duplicated, and the composer is editable.
+    vt.sendInput('fresh input')
+    await vt.waitForRender()
+    assert.ok(app.getDraft().includes('fresh input'), 'the restarted composer is writable')
+  } finally {
+    app.stop()
+  }
+})
+
 test('PR2/F5: a rejection while stopped unlocks the composer on start()', async () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })

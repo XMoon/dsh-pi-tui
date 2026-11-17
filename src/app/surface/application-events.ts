@@ -461,6 +461,9 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
     // chord, or the explicit queue action) rides along — the boundary resolves
     // its delivery mode.
     onSubmit: (text, request, scopeToken) => deps.submission.submit(text, request, scopeToken),
+    // PR2/R5-1: the surface presents again after a stop() window that parked a
+    // draft-restore obligation — the owner replays it on the writable composer.
+    onDeferredDraftRestore: () => deps.submission.replayDeferredDraftRestores(),
     // PR2: the renderer's synchronous submit admission — ONE classification
     // shared with the dispatch. `'held'` proves the attempt was registered
     // and its delivery started; the renderer must not clear/submit itself.

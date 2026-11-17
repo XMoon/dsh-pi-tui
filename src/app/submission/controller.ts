@@ -361,6 +361,10 @@ export interface SubmissionController {
    *  left intact (or replaced only by the acceptance boundary) and another
    *  attempt's restore is replayed when that hold settles. */
   restoreSubmissionDraft(text: string, ownerRequestId?: string): void
+  /** PR2/R5-1: replay a draft-restore obligation that could not be written
+   *  while the renderer was stopped (called by the renderer once it presents
+   *  again; a no-op when nothing is queued or a hold is live). */
+  replayDeferredDraftRestores(): void
   /** PR2/RFL015: the owner-aware STALE restore (the shared two-fact stale
    *  policy + the same exact-owner fence; never rewrites a foreign hold). */
   restoreStaleDraftIntoEditor(
@@ -593,6 +597,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   const deferredDraftRestores: Array<{ readonly text: string; readonly subject: SessionSubject | undefined }> = []
   const flushDeferredDraftRestores = (): void => {
     if (deferredDraftRestores.length === 0 || composerHoldActive()) return
+    // R5-1: the splice happens only for entries the renderer can actually
+    // accept. A stopped surface refuses every write (the settlement was
+    // LOGICAL-only there), so the obligation stays queued and is replayed
+    // when the surface presents again — never silently consumed.
+    if (deps.app().draftWriteAccepted?.() === false) return
     const pending = deferredDraftRestores.splice(0)
     for (const entry of pending) {
       // RFL014: a restore captured for a REPLACED owner never lands in the new
@@ -624,6 +633,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       }
       // ANOTHER attempt owns the editor: never mutate it (its renderer would
       // refuse the write) and never rewrite that hold's record.
+      deferredDraftRestores.push({ text: draft, subject: deps.ownership.captureSubject() })
+      return
+    }
+    // R5-1: a renderer that would refuse the write (a stopped surface) must
+    // not consume the obligation either — park it for the replay when the
+    // surface presents again.
+    if (deps.app().draftWriteAccepted?.() === false) {
       deferredDraftRestores.push({ text: draft, subject: deps.ownership.captureSubject() })
       return
     }
@@ -2970,6 +2986,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     ownsComposerHold: (requestId: string) => composerHoldActive()
       && composerHold?.submissionRequestId === requestId,
     restoreSubmissionDraft,
+    replayDeferredDraftRestores: flushDeferredDraftRestores,
     restoreStaleDraftIntoEditor: (text, capturedSubject, ownerRequestId) =>
       restoreStaleDraft(text, capturedSubject as SessionSubject | undefined, ownerRequestId),
     dequeue,
